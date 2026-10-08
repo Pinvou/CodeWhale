@@ -10,8 +10,11 @@ import { promisify } from "node:util";
 
 import {
   ENROLLMENT_NAMESPACE,
+  ENROLLMENT_REGISTRY_SCHEMA,
+  ENROLLMENT_REGISTRY_VERSION,
   EnrollmentRegistry,
   loadEnrollmentRegistryConfig,
+  validateEnrollmentRegistrySnapshot,
 } from "../enrollment-registry.js";
 import {
   RELAY_CONTROLLER_STATE_SCHEMA,
@@ -21,6 +24,7 @@ import {
 const HMAC_KEY = "test-only-hmac-key-material-32-bytes-minimum";
 const FIRST_CREDENTIAL = "endpoint-credential-one-at-least-32-bytes";
 const SECOND_CREDENTIAL = "endpoint-credential-two-at-least-32-bytes";
+const THIRD_CREDENTIAL = "endpoint-credential-three-at-least-32-bytes";
 const execFileAsync = promisify(execFile);
 const TEST_RESOURCES = new WeakMap();
 
@@ -109,6 +113,31 @@ async function rejectsCode(promise, code) {
   await assert.rejects(promise, (error) => error?.code === code);
 }
 
+test("identifier contract: registry preserves wire colon and released Web endpoint identities", async (t) => {
+  const { registry } = await openRegistry(t);
+  for (const endpointId of ["endpoint:0001", "_old", "-old"]) {
+    await registry.enroll({ endpointId, credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL });
+    assert.equal((await registry.authorizeWebRegistration({ endpointId, accessToken: FIRST_CREDENTIAL })).endpoint_id, endpointId);
+    assert.equal((await registry.authorizeDesktopRegistration({ endpointId, accessToken: FIRST_CREDENTIAL,
+      desktopSecret: SECOND_CREDENTIAL })).endpoint_id, endpointId);
+    if (endpointId.startsWith("_") || endpointId.startsWith("-")) {
+      await rejectsCode(registry.authorizePairingRegistration({ endpointId, desktopSecret: SECOND_CREDENTIAL }), "endpoint_id_invalid");
+    }
+  }
+  await rejectsCode(registry.enroll({ endpointId: "endpoint~invalid", credential: FIRST_CREDENTIAL }), "endpoint_id_invalid");
+});
+
+test("identifier contract: administrative request IDs accept colon and keep exact replay identity", async (t) => {
+  const { registry } = await openRegistry(t, { env: { PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted" } });
+  const request = { requestId: "migration:request:0001", operations: [{ operation: "allowlist",
+    endpoint_id: "legacy-endpoint", credential: FIRST_CREDENTIAL }] };
+  const first = await registry.executeMigrationRequest(request);
+  const snapshot = registry.exportSnapshot();
+  assert.deepEqual(await registry.executeMigrationRequest(request), first);
+  assert.deepEqual(registry.exportSnapshot(), snapshot);
+  await rejectsCode(registry.executeMigrationRequest({ ...request, requestId: "migration~request~0001" }), "migration_request_id_invalid");
+});
+
 function lockPath(statePath) {
   return `${statePath}.lock`;
 }
@@ -125,7 +154,7 @@ function lockRecord({ pid = process.pid, identity = `test-process:${pid}`, owner
 
 test("official registry enrolls explicitly and authorizes both registration paths", async (t) => {
   const { statePath, registry } = await openRegistry(t, { clock: () => Date.UTC(2026, 8, 16, 1, 2, 3) });
-  const enrolled = await registry.enroll({ endpointId: "endpoint-0001", credential: FIRST_CREDENTIAL });
+  const enrolled = await registry.enroll({ endpointId: "endpoint-0001", credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL });
   assert.deepEqual(enrolled, {
     endpoint_id: "endpoint-0001",
     status: "active",
@@ -134,21 +163,19 @@ test("official registry enrolls explicitly and authorizes both registration path
     rotated_at: null,
     revoked_at: null,
   });
-  assert.equal((await registry.authorizeRegistration({
+  assert.equal((await registry.authorizeWebRegistration({
     endpointId: "endpoint-0001",
-    credential: FIRST_CREDENTIAL,
-    purpose: "web_v2_reregister",
-  })).purpose, "web_v2_reregister");
-  assert.equal((await registry.authorizeRegistration({
+    accessToken: FIRST_CREDENTIAL,
+  })).status, "active");
+  assert.equal((await registry.authorizePairingRegistration({
     endpointId: "endpoint-0001",
-    credential: FIRST_CREDENTIAL,
-    purpose: "desktop_pairing_register",
-  })).purpose, "desktop_pairing_register");
+    desktopSecret: SECOND_CREDENTIAL,
+  })).status, "active");
 
   const persisted = await fs.readFile(statePath, "utf8");
   assert.doesNotMatch(persisted, /endpoint-credential-one/u);
   assert.doesNotMatch(persisted, new RegExp(FIRST_CREDENTIAL, "u"));
-  assert.match(persisted, /hmac-sha256-v1/u);
+  assert.match(persisted, /hmac-sha256-role-v1/u);
 });
 
 test("production modes reject anonymous registration and development TOFU", async (t) => {
@@ -156,10 +183,9 @@ test("production modes reject anonymous registration and development TOFU", asyn
     const { registry } = await openRegistry(t, {
       env: environment({ NODE_ENV: "production", PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: deployment }),
     });
-    await rejectsCode(registry.authorizeRegistration({
+    await rejectsCode(registry.authorizePairingRegistration({
       endpointId: `missing-${deployment}`,
-      credential: FIRST_CREDENTIAL,
-      purpose: "desktop_pairing_register",
+      desktopSecret: FIRST_CREDENTIAL,
     }), "enrollment_required");
   }
   assert.throws(() => loadEnrollmentRegistryConfig(environment({
@@ -173,6 +199,98 @@ test("production modes reject anonymous registration and development TOFU", asyn
   })), (error) => error?.code === "development_tofu_forbidden");
 });
 
+test("role digests, dual registration and Web-only readiness cannot be confused", async (t) => {
+  const { registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "roles", credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL });
+  await registry.authorizeDesktopRegistration({ endpointId: "roles", accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL });
+  for (const credentials of [
+    { accessToken: SECOND_CREDENTIAL, desktopSecret: FIRST_CREDENTIAL },
+    { accessToken: FIRST_CREDENTIAL, desktopSecret: FIRST_CREDENTIAL },
+    { accessToken: SECOND_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL },
+  ]) await rejectsCode(registry.authorizeDesktopRegistration({ endpointId: "roles", ...credentials }), "invalid_enrollment_credential");
+  await registry.enroll({ endpointId: "same-plaintext", credential: FIRST_CREDENTIAL, desktopCredential: FIRST_CREDENTIAL });
+  const entry = registry.exportSnapshot().registry.entries.find((row) => row.endpoint_id === "same-plaintext");
+  assert.notEqual(entry.access_credential.digest_hex, entry.desktop_credential.digest_hex);
+  await registry.enroll({ endpointId: "web-only", credential: FIRST_CREDENTIAL });
+  assert.equal(registry.getControllerReadiness("web-only").desktop_ready, false);
+  await registry.authorizeWebRegistration({ endpointId: "web-only", accessToken: FIRST_CREDENTIAL });
+  await rejectsCode(registry.authorizeDesktopRegistration({ endpointId: "web-only", accessToken: FIRST_CREDENTIAL,
+    desktopSecret: FIRST_CREDENTIAL }), "desktop_credential_required");
+  const malformed = structuredClone(registry.exportSnapshot().registry);
+  malformed.entries[0].access_credential.algorithm = "hmac-sha256-v1";
+  assert.throws(() => validateEnrollmentRegistrySnapshot(malformed), { code: "credential_digest_malformed" });
+});
+
+test("desktop backfill is explicit, revision-bound and cannot overwrite; rotations stay role-local", async (t) => {
+  const { registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "backfill", credential: FIRST_CREDENTIAL });
+  const accessDigest = registry.exportSnapshot().registry.entries[0].access_credential;
+  const operation = { operation: "set_desktop_credential", endpoint_id: "backfill",
+    desktop_credential: SECOND_CREDENTIAL, expected_revision: "1" };
+  await rejectsCode(registry.executeMigrationRequest({ requestId: "backfill-stale-0001", operations: [{ ...operation, expected_revision: "0" }] }), "endpoint_revision_conflict");
+  await registry.executeMigrationRequest({ requestId: "backfill-valid-0001", operations: [operation] });
+  const beforeReplay = registry.exportSnapshot();
+  await registry.executeMigrationRequest({ requestId: "backfill-valid-0001", operations: [operation] });
+  assert.deepEqual(registry.exportSnapshot(), beforeReplay);
+  assert.deepEqual(registry.exportSnapshot().registry.entries[0].access_credential, accessDigest);
+  await rejectsCode(registry.executeMigrationRequest({ requestId: "backfill-overwrite-0001",
+    operations: [{ ...operation, expected_revision: "2", desktop_credential: THIRD_CREDENTIAL }] }), "desktop_credential_already_set");
+  await registry.rotateAccessCredential({ endpointId: "backfill", currentCredential: FIRST_CREDENTIAL,
+    newCredential: THIRD_CREDENTIAL, expectedEndpointRevision: "2" });
+  await registry.authorizePairingRegistration({ endpointId: "backfill", desktopSecret: SECOND_CREDENTIAL });
+  await registry.rotateDesktopCredential({ endpointId: "backfill", currentCredential: SECOND_CREDENTIAL,
+    newCredential: FIRST_CREDENTIAL, expectedEndpointRevision: "3" });
+  await registry.authorizeDesktopRegistration({ endpointId: "backfill", accessToken: THIRD_CREDENTIAL, desktopSecret: FIRST_CREDENTIAL });
+  await rejectsCode(registry.authorizePairingRegistration({ endpointId: "backfill", desktopSecret: SECOND_CREDENTIAL }), "invalid_enrollment_credential");
+});
+
+test("authorization hot path reads only live revisions and invalidates after changes and close", async (t) => {
+  const { registry, store } = await openRegistry(t);
+  await registry.enroll({ endpointId: "cached", credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL });
+  let reads = 0;
+  const read = store.readNamespace.bind(store);
+  store.readNamespace = (...args) => { reads += 1; return read(...args); };
+  await registry.authorizeWebRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL });
+  assert.equal(reads, 1);
+  for (let index = 0; index < 30; index += 1) {
+    await registry.authorizeDesktopRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL });
+    await rejectsCode(registry.authorizeWebRegistration({ endpointId: "unknown", accessToken: FIRST_CREDENTIAL }), "enrollment_required");
+  }
+  assert.equal(reads, 1, "anonymous requests do not clone a warm registry");
+  await store.compareAndSwap("unrelated", "0", { value: true });
+  await registry.authorizeWebRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL });
+  assert.equal(reads, 1);
+  const original = registry.exportSnapshot().registry;
+  await registry.rotateAccessCredential({ endpointId: "cached", currentCredential: FIRST_CREDENTIAL,
+    newCredential: THIRD_CREDENTIAL, expectedEndpointRevision: "1" });
+  await rejectsCode(registry.authorizeWebRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL }), "invalid_enrollment_credential");
+  await registry.importSnapshot({ snapshot: original, expectedNamespaceRevision: registry.exportSnapshot().namespace_revision });
+  await registry.authorizeDesktopRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL });
+  await registry.revoke({ endpointId: "cached", expectedEndpointRevision: "1" });
+  await rejectsCode(registry.authorizeWebRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL }), "endpoint_revoked");
+  await store.close();
+  await rejectsCode(registry.authorizeWebRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL }), "enrollment_registry_unavailable");
+});
+
+test("a warm authorization cache fails closed after persistence degradation", async (t) => {
+  const statePath = await temporaryState(t);
+  let failWrites = false;
+  const injectedFs = { ...fs, async open(target, flags, mode) {
+    if (failWrites && flags === "wx" && String(target).endsWith(".tmp")) {
+      throw Object.assign(new Error("injected persistence failure"), { code: "EIO" });
+    }
+    return fs.open(target, flags, mode);
+  } };
+  const store = await openStateStore(statePath, { fs: injectedFs });
+  resourcesFor(t).stores.push(store);
+  const registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  await registry.enroll({ endpointId: "warm-degraded", credential: FIRST_CREDENTIAL });
+  await registry.authorizeWebRegistration({ endpointId: "warm-degraded", accessToken: FIRST_CREDENTIAL });
+  failWrites = true;
+  await rejectsCode(store.compareAndSwap("unrelated", "0", { value: true }), "relay_state_persist_failed");
+  await rejectsCode(registry.authorizeWebRegistration({ endpointId: "warm-degraded", accessToken: FIRST_CREDENTIAL }), "enrollment_registry_unavailable");
+});
+
 test("manual development enrollment never claims TOFU admission", async (t) => {
   for (const tofu of ["false", "true"]) {
     const { registry, store } = await openRegistry(t, {
@@ -183,29 +301,27 @@ test("manual development enrollment never claims TOFU admission", async (t) => {
     });
     await registry.enroll({ endpointId: "manual-development", credential: FIRST_CREDENTIAL });
     assert.equal(store.readNamespace(ENROLLMENT_NAMESPACE).value.entries[0].audit.source, "development");
-    await registry.rotateCredential({ endpointId: "manual-development", currentCredential: FIRST_CREDENTIAL,
+    await registry.rotateAccessCredential({ endpointId: "manual-development", currentCredential: FIRST_CREDENTIAL,
       newCredential: SECOND_CREDENTIAL, expectedEndpointRevision: "1" });
     await registry.revoke({ endpointId: "manual-development", expectedEndpointRevision: "2" });
     assert.equal(store.readNamespace(ENROLLMENT_NAMESPACE).value.entries[0].audit.source, "development");
   }
 });
 
-test("public enrollment bounds and idempotence reject without mutating state", async (t) => {
+test("public enrollment bounds and repeated enrollment reject without mutating state", async (t) => {
   let now = 0;
   const { registry, store, statePath } = await openRegistry(t, { clock: () => now });
-  const enrolled = await registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) });
+  await registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) });
   const before = store.readNamespace(ENROLLMENT_NAMESPACE);
   const primary = await fs.readFile(statePath);
-  for (const endpointId of ["", "_bad", "a".repeat(129), "a/b", "端点"]) {
+  for (const endpointId of ["", ".bad", "a".repeat(129), "a/b", "a~bad", "端点"]) {
     await rejectsCode(registry.enroll({ endpointId, credential: FIRST_CREDENTIAL }), "endpoint_id_invalid");
   }
   for (const credential of [null, "x".repeat(31), "x".repeat(4097), "x".repeat(32) + "\ud800"]) {
     await rejectsCode(registry.enroll({ endpointId: "new-bounds", credential }), "enrollment_credential_invalid");
   }
-  await rejectsCode(registry.authorizeRegistration({ endpointId: "bounds", credential: "x".repeat(32),
-    purpose: "unknown" }), "registration_purpose_invalid");
   await rejectsCode(registry.enroll({ endpointId: "bounds", credential: SECOND_CREDENTIAL }), "endpoint_already_enrolled");
-  assert.deepEqual(await registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) }), enrolled);
+  await rejectsCode(registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) }), "endpoint_already_enrolled");
   for (now of [-1, NaN, 0.5, 8_640_000_000_000_001]) {
     await rejectsCode(registry.enroll({ endpointId: "clock-bounds", credential: FIRST_CREDENTIAL }), "enrollment_clock_invalid");
   }
@@ -252,8 +368,9 @@ test("registry write retains typed validation and capacity failures", async (t) 
   let writes = 0;
   const boundedStore = {
     getPathPolicy: () => store.getPathPolicy(),
+    readNamespaceRevision: () => ({ namespace_revision: "1", store_revision: "1" }),
     readNamespace: () => ({ namespace_revision: "1", value: {
-      schema: "pinvou-endpoint-enrollment-registry", version: 1, entries,
+      ...registry.exportSnapshot().registry, entries,
     } }),
     compareAndSwap: async () => { writes += 1; throw new Error("must not write"); },
   };
@@ -287,6 +404,23 @@ test("unsupported lock versions are never stolen even with future fields or a de
   }
 });
 
+test("development dual-role automatic admission alone records TOFU source", async (t) => {
+  const { registry } = await openRegistry(t, { env: environment({
+    PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
+    PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "true",
+  }) });
+  await registry.authorizeDesktopRegistration({ endpointId: "automatic-dual", accessToken: FIRST_CREDENTIAL,
+    desktopSecret: SECOND_CREDENTIAL });
+  const entry = registry.exportSnapshot().registry.entries[0];
+  assert.equal(entry.audit.source, "development_tofu");
+  assert.ok(entry.access_credential);
+  assert.ok(entry.desktop_credential);
+  await registry.executeMigrationRequest({ requestId: "manual-source-0001", operations: [{ operation: "allowlist",
+    endpoint_id: "manual-migration", credential: FIRST_CREDENTIAL }] });
+  assert.equal(registry.exportSnapshot().registry.entries.find((row) => row.endpoint_id === "manual-migration").audit.source,
+    "development");
+});
+
 test("explicit non-production mode can opt into temporary TOFU", async (t) => {
   const { registry, store } = await openRegistry(t, {
     env: environment({
@@ -295,10 +429,10 @@ test("explicit non-production mode can opt into temporary TOFU", async (t) => {
       PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "true",
     }),
   });
-  const authorized = await registry.authorizeRegistration({
+  const authorized = await registry.authorizeDesktopRegistration({
     endpointId: "development-endpoint",
-    credential: FIRST_CREDENTIAL,
-    purpose: "desktop_pairing_register",
+    accessToken: FIRST_CREDENTIAL,
+    desktopSecret: SECOND_CREDENTIAL,
   });
   assert.equal(authorized.status, "active");
   const stored = store.readNamespace(ENROLLMENT_NAMESPACE).value;
@@ -321,10 +455,10 @@ test("development TOFU exhausts bounded CAS retries without authorizing or persi
     error.code = "namespace_revision_conflict";
     throw error;
   };
-  await rejectsCode(registry.authorizeRegistration({
+  await rejectsCode(registry.authorizeDesktopRegistration({
     endpointId: "development-conflict",
-    credential: FIRST_CREDENTIAL,
-    purpose: "desktop_pairing_register",
+    accessToken: FIRST_CREDENTIAL,
+    desktopSecret: SECOND_CREDENTIAL,
   }), "enrollment_revision_conflict");
   assert.equal(attempts, 4);
   assert.equal(registry.getStatus("development-conflict"), null);
@@ -337,7 +471,7 @@ test("credential rotation invalidates old credential and revocation is terminal"
   const { registry, store, statePath } = await openRegistry(t, { clock: () => now });
   await registry.enroll({ endpointId: "endpoint-rotate", credential: FIRST_CREDENTIAL });
   now += 1000;
-  const rotated = await registry.rotateCredential({
+  const rotated = await registry.rotateAccessCredential({
     endpointId: "endpoint-rotate",
     currentCredential: FIRST_CREDENTIAL,
     newCredential: SECOND_CREDENTIAL,
@@ -345,15 +479,13 @@ test("credential rotation invalidates old credential and revocation is terminal"
   });
   assert.equal(rotated.revision, "2");
   assert.equal(rotated.rotated_at, "2026-09-16T01:00:01.000Z");
-  await rejectsCode(registry.authorizeRegistration({
+  await rejectsCode(registry.authorizeWebRegistration({
     endpointId: "endpoint-rotate",
-    credential: FIRST_CREDENTIAL,
-    purpose: "web_v2_reregister",
+    accessToken: FIRST_CREDENTIAL,
   }), "invalid_enrollment_credential");
-  await registry.authorizeRegistration({
+  await registry.authorizeWebRegistration({
     endpointId: "endpoint-rotate",
-    credential: SECOND_CREDENTIAL,
-    purpose: "web_v2_reregister",
+    accessToken: SECOND_CREDENTIAL,
   });
   now += 1000;
   const revoked = await registry.revoke({ endpointId: "endpoint-rotate", expectedEndpointRevision: "2" });
@@ -371,10 +503,9 @@ test("credential rotation invalidates old credential and revocation is terminal"
   await rejectsCode(registry.revoke({
     endpointId: "endpoint-rotate", expectedEndpointRevision: "not-a-revision",
   }), "expected_endpoint_revision_invalid");
-  await rejectsCode(registry.authorizeRegistration({
+  await rejectsCode(registry.authorizePairingRegistration({
     endpointId: "endpoint-rotate",
-    credential: SECOND_CREDENTIAL,
-    purpose: "desktop_pairing_register",
+    desktopSecret: SECOND_CREDENTIAL,
   }), "endpoint_revoked");
   await rejectsCode(registry.enroll({
     endpointId: "endpoint-rotate",
@@ -398,10 +529,9 @@ test("a registry opened without the persisted digest key fails closed", async (t
       PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "replacement-hmac-key-material-at-least-32-bytes",
     }),
   });
-  await rejectsCode(registry.authorizeRegistration({
+  await rejectsCode(registry.authorizeWebRegistration({
     endpointId: "endpoint-keyring",
-    credential: FIRST_CREDENTIAL,
-    purpose: "web_v2_reregister",
+    accessToken: FIRST_CREDENTIAL,
   }), "credential_key_unavailable");
 });
 
@@ -409,7 +539,9 @@ test("HMAC replacement requires fresh endpoint IDs, while key rollback alone pre
   for (const keyId of ["replacement-key", "test-key-1"]) {
     await t.test(keyId, async () => {
       const { statePath, store, registry: original } = await openRegistry(t);
-      await original.enroll({ endpointId: "endpoint-old-key", credential: FIRST_CREDENTIAL });
+      await original.enroll({
+        endpointId: "endpoint-old-key", credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL,
+      });
       const primary = await fs.readFile(statePath);
       const backup = await fs.readFile(`${statePath}.bak`);
       const replacement = EnrollmentRegistry.open({
@@ -419,28 +551,33 @@ test("HMAC replacement requires fresh endpoint IDs, while key rollback alone pre
           PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "replacement-hmac-key-material-at-least-32-bytes",
         }),
       });
-      await rejectsCode(replacement.authorizeRegistration({
-        endpointId: "endpoint-old-key", credential: FIRST_CREDENTIAL, purpose: "web_v2_reregister",
+      await rejectsCode(replacement.authorizeWebRegistration({
+        endpointId: "endpoint-old-key", accessToken: FIRST_CREDENTIAL,
+      }), keyId === "test-key-1" ? "invalid_enrollment_credential" : "credential_key_unavailable");
+      await rejectsCode(replacement.authorizeDesktopRegistration({
+        endpointId: "endpoint-old-key", accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL,
       }), keyId === "test-key-1" ? "invalid_enrollment_credential" : "credential_key_unavailable");
       await rejectsCode(replacement.enroll({
         endpointId: "endpoint-old-key", credential: SECOND_CREDENTIAL,
       }), "endpoint_already_enrolled");
-      await rejectsCode(replacement.rotateCredential({
+      await rejectsCode(replacement.rotateAccessCredential({
         endpointId: "endpoint-old-key", currentCredential: FIRST_CREDENTIAL,
         newCredential: SECOND_CREDENTIAL, expectedEndpointRevision: "1",
       }), keyId === "test-key-1" ? "invalid_enrollment_credential" : "credential_key_unavailable");
       assert.deepEqual(await fs.readFile(statePath), primary);
       assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
-      assert.equal((await original.authorizeRegistration({
-        endpointId: "endpoint-old-key", credential: FIRST_CREDENTIAL, purpose: "web_v2_reregister",
+      assert.equal((await original.authorizeWebRegistration({
+        endpointId: "endpoint-old-key", accessToken: FIRST_CREDENTIAL,
       })).status, "active");
       await replacement.revoke({ endpointId: "endpoint-old-key", expectedEndpointRevision: "1" });
       await rejectsCode(replacement.enroll({
         endpointId: "endpoint-old-key", credential: SECOND_CREDENTIAL,
       }), "endpoint_revoked");
-      await replacement.enroll({ endpointId: "endpoint-new-key", credential: SECOND_CREDENTIAL });
-      assert.equal((await replacement.authorizeRegistration({
-        endpointId: "endpoint-new-key", credential: SECOND_CREDENTIAL, purpose: "desktop_pairing_register",
+      await replacement.enroll({
+        endpointId: "endpoint-new-key", credential: SECOND_CREDENTIAL, desktopCredential: FIRST_CREDENTIAL,
+      });
+      assert.equal((await replacement.authorizeDesktopRegistration({
+        endpointId: "endpoint-new-key", accessToken: SECOND_CREDENTIAL, desktopSecret: FIRST_CREDENTIAL,
       })).status, "active");
     });
   }
@@ -450,7 +587,7 @@ test("endpoint and namespace revisions reject stale concurrent mutations", async
   const { registry } = await openRegistry(t);
   await registry.enroll({ endpointId: "endpoint-cas", credential: FIRST_CREDENTIAL });
   const results = await Promise.allSettled([
-    registry.rotateCredential({
+    registry.rotateAccessCredential({
       endpointId: "endpoint-cas",
       currentCredential: FIRST_CREDENTIAL,
       newCredential: SECOND_CREDENTIAL,
@@ -474,10 +611,9 @@ test("restart reloads committed registry and valid backup restores a corrupted p
 
   store = await openStateStore(statePath);
   registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
-  await registry.authorizeRegistration({
+  await registry.authorizeWebRegistration({
     endpointId: "endpoint-restart",
-    credential: FIRST_CREDENTIAL,
-    purpose: "web_v2_reregister",
+    accessToken: FIRST_CREDENTIAL,
   });
   await store.close();
 
@@ -485,10 +621,9 @@ test("restart reloads committed registry and valid backup restores a corrupted p
   store = await openStateStore(statePath);
   resourcesFor(t).stores.push(store);
   registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
-  await registry.authorizeRegistration({
+  await registry.authorizeWebRegistration({
     endpointId: "endpoint-restart",
-    credential: FIRST_CREDENTIAL,
-    purpose: "desktop_pairing_register",
+    accessToken: FIRST_CREDENTIAL,
   });
   assert.doesNotMatch(await fs.readFile(statePath, "utf8"), /corrupt/u);
 });
@@ -1592,9 +1727,327 @@ test("persisted registry contains only digest and minimal non-secret audit field
   await registry.enroll({ endpointId: "endpoint-audit", credential: FIRST_CREDENTIAL });
   const value = store.readNamespace(ENROLLMENT_NAMESPACE).value;
   assert.deepEqual(Object.keys(value.entries[0]).sort(), [
-    "audit", "credential", "endpoint_id", "enrolled_at", "revision", "revoked_at", "rotated_at", "status",
+    "access_credential", "audit", "desktop_credential", "endpoint_id", "enrolled_at", "revision", "revoked_at", "rotated_at", "status",
   ]);
   assert.deepEqual(Object.keys(value.entries[0].audit).sort(), ["last_action", "source"]);
-  assert.equal(value.entries[0].credential.digest_hex.length, 64);
-  assert.notEqual(value.entries[0].credential.digest_hex, FIRST_CREDENTIAL);
+  assert.equal(value.entries[0].access_credential.digest_hex.length, 64);
+  assert.notEqual(value.entries[0].access_credential.digest_hex, FIRST_CREDENTIAL);
+});
+
+test("atomic batch validates everything before one namespace CAS", async (t) => {
+  const { statePath, store } = await openRegistry(t);
+  let writes = 0;
+  const countingStore = {
+    getPathPolicy: () => store.getPathPolicy(),
+    readNamespace: (name) => store.readNamespace(name),
+    readNamespaceRevision: (name) => store.readNamespaceRevision(name),
+    compareAndSwap: async (...args) => {
+      writes += 1;
+      return store.compareAndSwap(...args);
+    },
+  };
+  const registry = EnrollmentRegistry.open({ stateStore: countingStore, config: configForState(statePath) });
+  const initial = registry.exportSnapshot();
+  const applied = await registry.applyAtomicBatch({
+    expectedNamespaceRevision: initial.namespace_revision,
+    operations: [
+      { operation: "allowlist", endpoint_id: "batch-a", credential: FIRST_CREDENTIAL },
+      { operation: "allowlist", endpoint_id: "batch-b", credential: SECOND_CREDENTIAL },
+    ],
+  });
+  assert.equal(writes, 1);
+  assert.deepEqual(applied.results.map((result) => result.action), ["allowlisted", "allowlisted"]);
+  assert.equal(registry.getStatus("batch-a").status, "active");
+  assert.equal(registry.getStatus("batch-b").status, "active");
+
+  const beforeFailure = registry.exportSnapshot();
+  await rejectsCode(registry.applyAtomicBatch({
+    expectedNamespaceRevision: beforeFailure.namespace_revision,
+    operations: [
+      { operation: "re_enroll", endpoint_id: "batch-a", current_credential: FIRST_CREDENTIAL,
+        new_credential: THIRD_CREDENTIAL, expected_revision: "1" },
+      { operation: "re_enroll", endpoint_id: "batch-b", current_credential: THIRD_CREDENTIAL,
+        new_credential: FIRST_CREDENTIAL, expected_revision: "1" },
+    ],
+  }), "invalid_enrollment_credential");
+  assert.equal(writes, 1, "a failed preflight must not persist a partial first operation");
+  assert.equal(registry.getStatus("batch-a").revision, "1");
+
+  const beforeRotation = registry.exportSnapshot();
+  const rotated = await registry.applyAtomicBatch({
+    expectedNamespaceRevision: beforeRotation.namespace_revision,
+    operations: [
+      { operation: "re_enroll", endpoint_id: "batch-a", current_credential: FIRST_CREDENTIAL,
+        new_credential: THIRD_CREDENTIAL, expected_revision: "1" },
+      { operation: "re_enroll", endpoint_id: "batch-b", current_credential: SECOND_CREDENTIAL,
+        new_credential: FIRST_CREDENTIAL, expected_revision: "1" },
+    ],
+  });
+  assert.equal(writes, 2);
+  assert.deepEqual(rotated.results.map((result) => result.action), ["re_enrolled", "re_enrolled"]);
+});
+
+test("registry and migration ledgers use locale-independent identifier ordering", async (t) => {
+  const { registry } = await openRegistry(t);
+  const first = registry.exportSnapshot();
+  await registry.applyAtomicBatch({
+    expectedNamespaceRevision: first.namespace_revision,
+    operations: [
+      { operation: "allowlist", endpoint_id: "a", credential: FIRST_CREDENTIAL },
+      { operation: "allowlist", endpoint_id: "B", credential: SECOND_CREDENTIAL },
+      { operation: "allowlist", endpoint_id: "0", credential: THIRD_CREDENTIAL },
+      { operation: "allowlist", endpoint_id: "A._:-", credential: `${FIRST_CREDENTIAL}-mixed` },
+    ],
+  });
+  assert.deepEqual(
+    registry.exportSnapshot().registry.entries.map((entry) => entry.endpoint_id),
+    ["0", "A._:-", "B", "a"],
+  );
+
+  await registry.executeMigrationRequest({
+    requestId: "request-a_mixed-0001",
+    operations: [{ operation: "allowlist", endpoint_id: "ledger-a", credential: FIRST_CREDENTIAL }],
+  });
+  await registry.executeMigrationRequest({
+    requestId: "Request-B.mixed-0001",
+    operations: [{ operation: "allowlist", endpoint_id: "ledger-B", credential: SECOND_CREDENTIAL }],
+  });
+  assert.deepEqual(
+    registry.exportSnapshot().registry.migration_requests.map((request) => request.request_id),
+    ["Request-B.mixed-0001", "request-a_mixed-0001"],
+  );
+});
+
+test("public snapshot validation and import are strict, versioned, and one-CAS", async (t) => {
+  const { statePath, store, registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "snapshot-b", credential: FIRST_CREDENTIAL });
+  await registry.enroll({ endpointId: "snapshot-c", credential: SECOND_CREDENTIAL });
+  const exported = registry.exportSnapshot();
+  assert.equal(exported.registry.version, ENROLLMENT_REGISTRY_VERSION);
+  assert.equal(Object.isFrozen(exported.registry), true);
+  assert.deepEqual(validateEnrollmentRegistrySnapshot(exported.registry), exported.registry);
+
+  const unsorted = structuredClone(exported.registry);
+  unsorted.entries.reverse();
+  assert.throws(() => validateEnrollmentRegistrySnapshot(unsorted),
+    (error) => error?.code === "enrollment_registry_malformed");
+  const unknown = structuredClone(exported.registry);
+  unknown.extra = true;
+  assert.throws(() => validateEnrollmentRegistrySnapshot(unknown),
+    (error) => error?.code === "enrollment_registry_malformed");
+  for (const mutate of [
+    (snapshot) => { snapshot.entries[0].revision = "01"; },
+    (snapshot) => { snapshot.entries[0].status = "unknown"; },
+    (snapshot) => { snapshot.entries[0].access_credential.digest_hex = "bad"; },
+    (snapshot) => { snapshot.entries[0].enrolled_at = "yesterday"; },
+    (snapshot) => { snapshot.entries[0].enrolled_at = "2023-02-29T00:00:00.000Z"; },
+    (snapshot) => { snapshot.entries[0].enrolled_at = "2024-02-30T00:00:00.000Z"; },
+    (snapshot) => { snapshot.entries[0].enrolled_at = "2024-04-31T00:00:00.000Z"; },
+  ]) {
+    const malformed = structuredClone(exported.registry);
+    mutate(malformed);
+    assert.throws(() => validateEnrollmentRegistrySnapshot(malformed));
+  }
+
+  const legacy = {
+    schema: ENROLLMENT_REGISTRY_SCHEMA,
+    version: 1,
+    entries: structuredClone(exported.registry.entries),
+  };
+  assert.throws(() => validateEnrollmentRegistrySnapshot(legacy), { code: "enrollment_registry_unsupported" });
+  assert.throws(() => validateEnrollmentRegistrySnapshot({ ...legacy, version: 2, migration_requests: [] }),
+    { code: "enrollment_registry_unsupported" });
+
+  let writes = 0;
+  const countingStore = {
+    getPathPolicy: () => store.getPathPolicy(),
+    readNamespace: (name) => store.readNamespace(name),
+    readNamespaceRevision: (name) => store.readNamespaceRevision(name),
+    compareAndSwap: async (...args) => {
+      writes += 1;
+      return store.compareAndSwap(...args);
+    },
+  };
+  const importing = EnrollmentRegistry.open({ stateStore: countingStore, config: configForState(statePath) });
+  const replacement = {
+    schema: ENROLLMENT_REGISTRY_SCHEMA,
+    version: ENROLLMENT_REGISTRY_VERSION,
+    entries: structuredClone(exported.registry.entries.slice(1)),
+    migration_requests: [],
+  };
+  const imported = await importing.importSnapshot({
+    snapshot: replacement,
+    expectedNamespaceRevision: importing.exportSnapshot().namespace_revision,
+  });
+  assert.equal(writes, 1);
+  assert.equal(imported.registry.version, ENROLLMENT_REGISTRY_VERSION);
+  assert.equal(imported.registry.entries.length, 1);
+  assert.equal(importing.getStatus("snapshot-b"), null);
+
+  const beforeRestore = importing.exportSnapshot();
+  const restored = await importing.applyAtomicBatch({
+    expectedNamespaceRevision: beforeRestore.namespace_revision,
+    operations: [{ operation: "restore", snapshot: exported.registry }],
+  });
+  assert.equal(writes, 2);
+  assert.equal(restored.restored_entry_count, 2);
+  assert.equal(importing.getStatus("snapshot-b").status, "active");
+});
+
+test("unreleased registry formats fail closed without lazy upgrades", async (t) => {
+  const { statePath, store, registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "legacy-registry-a", credential: FIRST_CREDENTIAL });
+  const current = store.readNamespace(ENROLLMENT_NAMESPACE);
+  await store.compareAndSwap(ENROLLMENT_NAMESPACE, current.namespace_revision, {
+    schema: ENROLLMENT_REGISTRY_SCHEMA,
+    version: 1,
+    entries: current.value.entries,
+  });
+  assert.throws(() => EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) }),
+    { code: "enrollment_registry_unsupported" });
+  assert.equal(store.readNamespace(ENROLLMENT_NAMESPACE).value.version, 1, "read-only open must not rewrite state");
+  await assert.rejects(registry.authorizeWebRegistration({ endpointId: "legacy-registry-a", accessToken: FIRST_CREDENTIAL }),
+    { code: "enrollment_registry_unsupported" });
+});
+
+test("migration ledger survives a crash after pending and seals a secret-free terminal outcome", async (t) => {
+  const { statePath, store, registry } = await openRegistry(t);
+  const input = {
+    requestId: "migration-request-0001",
+    operations: [{ operation: "allowlist", endpoint_id: "ledger-a", credential: FIRST_CREDENTIAL }],
+  };
+  const pending = await registry.beginMigrationRequest(input);
+  assert.equal(pending.status, "pending");
+  const persistedPending = store.readNamespace(ENROLLMENT_NAMESPACE).value;
+  assert.equal(persistedPending.version, ENROLLMENT_REGISTRY_VERSION);
+  assert.equal(persistedPending.migration_requests[0].status, "pending");
+  assert.doesNotMatch(JSON.stringify(persistedPending), new RegExp(FIRST_CREDENTIAL, "u"));
+
+  const restarted = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  const completed = await restarted.completeMigrationRequest(input);
+  assert.equal(completed.status, "succeeded");
+  assert.equal(completed.outcome.results[0].endpoint_id, "ledger-a");
+  const replay = await restarted.executeMigrationRequest(input);
+  assert.deepEqual(replay, completed);
+  assert.equal(restarted.getStatus("ledger-a").revision, "1");
+  assert.doesNotMatch(
+    JSON.stringify(store.readNamespace(ENROLLMENT_NAMESPACE).value),
+    new RegExp(FIRST_CREDENTIAL, "u"),
+  );
+
+  await rejectsCode(restarted.executeMigrationRequest({
+    ...input,
+    operations: [{ operation: "allowlist", endpoint_id: "ledger-a", credential: SECOND_CREDENTIAL }],
+  }), "migration_request_conflict");
+});
+
+test("snapshot imports preserve pending and terminal migration request monotonicity", async (t) => {
+  const { registry } = await openRegistry(t);
+  const oldSnapshot = registry.exportSnapshot().registry;
+  const terminalInput = {
+    requestId: "migration-preserved-terminal-0001",
+    operations: [{ operation: "allowlist", endpoint_id: "preserved-terminal", credential: FIRST_CREDENTIAL }],
+  };
+  const terminal = await registry.executeMigrationRequest(terminalInput);
+  assert.equal(terminal.status, "succeeded");
+  const pendingInput = {
+    requestId: "migration-preserved-pending-0001",
+    operations: [{ operation: "allowlist", endpoint_id: "preserved-pending", credential: SECOND_CREDENTIAL }],
+  };
+  await registry.beginMigrationRequest(pendingInput);
+
+  const beforeImport = registry.exportSnapshot();
+  await registry.importSnapshot({
+    snapshot: oldSnapshot,
+    expectedNamespaceRevision: beforeImport.namespace_revision,
+  });
+  assert.equal(registry.getMigrationRequest(terminalInput.requestId).status, "succeeded");
+  assert.equal(registry.getMigrationRequest(pendingInput.requestId).status, "pending");
+  assert.deepEqual(await registry.executeMigrationRequest(terminalInput), terminal);
+  await rejectsCode(registry.executeMigrationRequest({
+    requestId: terminalInput.requestId,
+    operations: [{ operation: "allowlist", endpoint_id: "different-endpoint", credential: THIRD_CREDENTIAL }],
+  }), "migration_request_conflict");
+  const completedPending = await registry.completeMigrationRequest(pendingInput);
+  assert.equal(completedPending.status, "succeeded");
+});
+
+test("concurrent handlers converge on one request and one endpoint mutation", async (t) => {
+  const { statePath, store } = await openRegistry(t);
+  const left = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  const right = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  const input = {
+    requestId: "migration-concurrent-0001",
+    operations: [{ operation: "allowlist", endpoint_id: "ledger-concurrent", credential: FIRST_CREDENTIAL }],
+  };
+  const [leftResult, rightResult] = await Promise.all([
+    left.executeMigrationRequest(input),
+    right.executeMigrationRequest(input),
+  ]);
+  assert.deepEqual(leftResult, rightResult);
+  assert.equal(leftResult.status, "succeeded");
+  assert.equal(left.getStatus("ledger-concurrent").revision, "1");
+  const snapshot = left.exportSnapshot().registry;
+  assert.equal(snapshot.entries.filter((entry) => entry.endpoint_id === "ledger-concurrent").length, 1);
+  assert.equal(snapshot.migration_requests.filter((request) => request.request_id === input.requestId).length, 1);
+});
+
+test("post-commit response loss is recovered for pending and terminal writes", async (t) => {
+  const { statePath, store } = await openRegistry(t);
+  let commitsBeforeThrow = 1;
+  const lossyStore = {
+    getPathPolicy: () => store.getPathPolicy(),
+    readNamespace: (name) => store.readNamespace(name),
+    readNamespaceRevision: (name) => store.readNamespaceRevision(name),
+    async compareAndSwap(...args) {
+      const committed = await store.compareAndSwap(...args);
+      if (commitsBeforeThrow > 0) {
+        commitsBeforeThrow -= 1;
+        throw Object.assign(new Error("simulated response loss"), { code: "EPIPE" });
+      }
+      return committed;
+    },
+  };
+  const input = {
+    requestId: "migration-response-loss-1",
+    operations: [{ operation: "allowlist", endpoint_id: "loss-a", credential: FIRST_CREDENTIAL }],
+  };
+  const lossyRegistry = EnrollmentRegistry.open({ stateStore: lossyStore, config: configForState(statePath) });
+  await rejectsCode(lossyRegistry.beginMigrationRequest(input), "enrollment_registry_unavailable");
+  const recovered = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  assert.equal(recovered.getMigrationRequest(input.requestId).status, "pending");
+
+  commitsBeforeThrow = 1;
+  await rejectsCode(lossyRegistry.completeMigrationRequest(input), "enrollment_registry_unavailable");
+  const terminal = recovered.getMigrationRequest(input.requestId);
+  assert.equal(terminal.status, "succeeded");
+  assert.deepEqual(await recovered.executeMigrationRequest(input), terminal);
+  assert.equal(recovered.getStatus("loss-a").revision, "1");
+});
+
+test("deterministic migration failure is terminal and schema corruption fails closed", async (t) => {
+  const { statePath, store, registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "failure-a", credential: FIRST_CREDENTIAL });
+  const failing = {
+    requestId: "migration-failure-0001",
+    operations: [{
+      operation: "re_enroll",
+      endpoint_id: "failure-a",
+      current_credential: SECOND_CREDENTIAL,
+      new_credential: THIRD_CREDENTIAL,
+      expected_revision: "1",
+    }],
+  };
+  await rejectsCode(registry.executeMigrationRequest(failing), "invalid_enrollment_credential");
+  assert.equal(registry.getMigrationRequest(failing.requestId).status, "failed");
+  await rejectsCode(registry.executeMigrationRequest(failing), "invalid_enrollment_credential");
+
+  const snapshot = registry.exportSnapshot();
+  const malformed = structuredClone(snapshot.registry);
+  malformed.migration_requests[0].parameters.digest_hex = "bad";
+  await store.compareAndSwap(ENROLLMENT_NAMESPACE, snapshot.namespace_revision, malformed);
+  assert.throws(() => EnrollmentRegistry.open({
+    stateStore: store,
+    config: configForState(statePath),
+  }), (error) => error?.code === "migration_request_malformed");
 });

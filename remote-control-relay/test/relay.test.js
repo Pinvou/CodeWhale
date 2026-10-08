@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { after, before, test } from "node:test";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -7,6 +8,14 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import {
+  buildPairingTranscriptPreimage,
+  buildSealedCodeAad,
+  parseSealedCodeV1,
+  receiptCommitmentHex,
+} from "../protocol-controller.js";
+
+const X25519_SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
 
 function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -132,9 +141,9 @@ function waitForClose(ws, timeoutMs = 3000) {
   });
 }
 
-async function registerDesktop(endpointId, accessToken, desktopSecret, url = wsUrl) {
+async function registerDesktop(endpointId, accessToken, desktopSecret, url = wsUrl, timeoutMs = 3000) {
   const ws = await openSocket(url);
-  const registered = nextMessage(ws, "desktop_endpoint_registered");
+  const registered = nextMessage(ws, "desktop_endpoint_registered", timeoutMs);
   ws.send(JSON.stringify({
     v: 2,
     type: "desktop_endpoint_register",
@@ -181,11 +190,12 @@ async function stopRelay(child) {
   await waitForExit(child);
 }
 
-async function spawnRelay(env = {}) {
+async function spawnRelay(env = {}, { preload, ipc = false } = {}) {
   const isolatedPort = await getFreePort();
   const statePath = env.PINVOU_REMOTE_STATE_PATH
     || join(testRoot, `relay-state-${isolatedPort}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
-  const child = spawn(process.execPath, [join(relayDir, "server.js")], {
+  const args = preload ? ["--import", preload, join(relayDir, "server.js")] : [join(relayDir, "server.js")];
+  const child = spawn(process.execPath, args, {
     cwd: relayDir,
     env: {
       ...process.env,
@@ -196,9 +206,10 @@ async function spawnRelay(env = {}) {
       PINVOU_REMOTE_STATE_PATH: statePath,
       ...env,
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
   });
-  await waitForOutput(child, /pinvou remote relay listening/);
+  await waitForOutput(child, /pinvou remote relay listening/,
+    env.PINVOU_DESKTOP_CONTROLLER_ENABLED === "1" ? 60_000 : 5000);
   return {
     child,
     port: isolatedPort,
@@ -206,6 +217,195 @@ async function spawnRelay(env = {}) {
     wsUrl: `ws://127.0.0.1:${isolatedPort}/pinvou3/remote/ws`,
     statePath,
   };
+}
+
+function controllerEnvironment(name, overrides = {}) {
+  const signing = crypto.generateKeyPairSync("ed25519");
+  return {
+    NODE_ENV: "development",
+    PINVOU_DESKTOP_CONTROLLER_ENABLED: "1",
+    PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
+    PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "1",
+    PINVOU_REMOTE_CONTROLLER_STATE_PATH: join(testRoot, `controller-${name}-${Date.now()}`, "state.json"),
+    PINVOU_REMOTE_STATE_PATH: join(testRoot, `legacy-${name}-${Date.now()}.json`),
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID: "enrollment-regression-key",
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "enrollment-regression-material-at-least-32-bytes",
+    PINVOU_REMOTE_PAIRING_HMAC_KEY_ID: "pairing-regression-key",
+    PINVOU_REMOTE_PAIRING_HMAC_KEY: "pairing-regression-independent-material-at-least-32-bytes",
+    PINVOU_REMOTE_RELAY_SIGNING_KEY_ID: "signing-regression-key",
+    PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64: signing.privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
+    ...overrides,
+  };
+}
+
+test("identifier contract: real Relay accepts colon signing IDs and preserves legacy leading-ID Web v2", { timeout: 90_000 }, async (t) => {
+  const isolated = await spawnRelay(controllerEnvironment("identifier-contract", {
+    PINVOU_REMOTE_RELAY_SIGNING_KEY_ID: "relay:signing:0001",
+  }));
+  t.after(() => stopRelay(isolated.child));
+  for (const endpointId of ["_old", "-old"]) {
+    const accessToken = `legacy-access-${endpointId}-credential-0000000000000001`;
+    const desktopSecret = `legacy-desktop-${endpointId}-credential-000000000000001`;
+    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl);
+    t.after(() => closeSocket(desktop.ws));
+    const web = await joinWeb(endpointId, accessToken, {}, isolated.wsUrl);
+    t.after(() => closeSocket(web.ws));
+    assert.equal(web.joined.endpoint_id, endpointId);
+    assert.equal(web.joined.desktop_connected, true);
+  }
+});
+
+function waitForRegistrationProbe(child, type, endpointId) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.off("message", onMessage);
+      reject(new Error(`timeout waiting for registration probe ${type}`));
+    }, 15_000);
+    const onMessage = (message) => {
+      if (message?.type !== type || (endpointId && message.endpointId !== endpointId)) return;
+      clearTimeout(timer);
+      child.off("message", onMessage);
+      resolve(message);
+    };
+    child.on("message", onMessage);
+  });
+}
+
+test("desktop authorization cannot attach one socket to two endpoints", async () => {
+  const isolated = await spawnRelay(controllerEnvironment("concurrent-registration"), {
+    preload: new URL("./fixtures/desktop-registration-barrier.js", import.meta.url).href, ipc: true,
+  });
+  let ws;
+  try {
+    ws = await openSocket(isolated.wsUrl);
+    const ids = ["endpoint-concurrent-first", "endpoint-concurrent-second"];
+    const ready = ids.map((id) => waitForRegistrationProbe(isolated.child, "authorization-ready", id));
+    for (const endpoint_id of ids) {
+      ws.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id,
+        access_token: "concurrent-registration-access-00000001",
+        desktop_secret: "concurrent-registration-secret-00000001" }));
+    }
+    await Promise.all(ready);
+    const finished = ids.map((id) => waitForRegistrationProbe(isolated.child, "authorization-finished", id));
+    const registered = [];
+    const errors = [];
+    ws.on("message", (data) => {
+      const message = JSON.parse(String(data));
+      if (message.type === "desktop_endpoint_registered") registered.push(message);
+      if (message.type === "error") errors.push(message);
+    });
+    const responses = Promise.all([
+      nextMessage(ws, "desktop_endpoint_registered", 15_000),
+      nextMessage(ws, "error", 15_000),
+    ]);
+    isolated.child.send({ type: "release-registration" });
+    await Promise.all([...finished, responses]);
+    const health = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
+    assert.equal(health.endpoint_count, 1, "a second pending authorization must not create an endpoint");
+    assert.equal(registered.length, 1);
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].code, "bad_desktop_endpoint_register");
+  } finally {
+    closeSocket(ws);
+    await stopRelay(isolated.child);
+  }
+});
+
+test("desktop authorization cannot attach a socket closed while authentication awaits", async () => {
+  const isolated = await spawnRelay(controllerEnvironment("closed-registration"), {
+    preload: new URL("./fixtures/desktop-registration-barrier.js", import.meta.url).href, ipc: true,
+  });
+  let ws;
+  try {
+    ws = await openSocket(isolated.wsUrl);
+    const endpointId = "endpoint-closed-authorization";
+    const ready = waitForRegistrationProbe(isolated.child, "authorization-ready", endpointId);
+    ws.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: endpointId,
+      access_token: "closed-registration-access-00000000001",
+      desktop_secret: "closed-registration-secret-00000000001" }));
+    await ready;
+    const closed = waitForRegistrationProbe(isolated.child, "socket-closed");
+    ws.close();
+    await closed;
+    const finished = waitForRegistrationProbe(isolated.child, "authorization-finished", endpointId);
+    isolated.child.send({ type: "release-registration" });
+    await finished;
+    const health = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
+    assert.equal(health.endpoint_count, 0, "late authorization must not create an orphan endpoint");
+    assert.equal(health.ws_connection_count, 0);
+  } finally {
+    closeSocket(ws);
+    await stopRelay(isolated.child);
+  }
+});
+
+function nextMessageOneOf(ws, types, timeoutMs = 3000) {
+  const accepted = new Set(types);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.off("message", onMessage);
+      reject(new Error(`timeout waiting for ${[...accepted].join(" or ")}`));
+    }, timeoutMs);
+    const onMessage = (data) => {
+      const message = JSON.parse(String(data));
+      if (!accepted.has(message.type)) return;
+      clearTimeout(timer);
+      ws.off("message", onMessage);
+      resolve(message);
+    };
+    ws.on("message", onMessage);
+  });
+}
+
+function rawX25519Public(key) {
+  return key.export({ type: "spki", format: "der" }).subarray(-32);
+}
+
+function lengthPrefixed(value) {
+  const bytes = Buffer.from(value, "utf8");
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(bytes.length);
+  return Buffer.concat([length, bytes]);
+}
+
+function openPairingCode(privateKey, registered) {
+  const binding = {
+    registration_request_id: registered.registration_request_id,
+    pairing_id: registered.pairing_id,
+    remote_control_generation: registered.remote_control_generation,
+    relay_epoch: registered.relay_epoch,
+    expires_at_ms: registered.expires_at_ms,
+  };
+  const parsed = parseSealedCodeV1(registered.sealed_code_b64);
+  const relayPublic = crypto.createPublicKey({
+    key: Buffer.concat([X25519_SPKI_PREFIX, parsed.relay_ephemeral_public_key]),
+    format: "der",
+    type: "spki",
+  });
+  const shared = crypto.diffieHellman({ privateKey, publicKey: relayPublic });
+  const info = Buffer.concat([
+    Buffer.from("pinvou-code-wrap-key-v1", "ascii"),
+    ...[
+      binding.registration_request_id,
+      binding.pairing_id,
+      binding.remote_control_generation,
+      binding.relay_epoch,
+      binding.expires_at_ms,
+    ].map(lengthPrefixed),
+  ]);
+  const key = Buffer.from(crypto.hkdfSync(
+    "sha256", shared, Buffer.from("pinvou-code-wrap-salt-v1", "ascii"), info, 32,
+  ));
+  try {
+    const encrypted = parsed.ciphertext_and_tag;
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, parsed.nonce);
+    decipher.setAAD(buildSealedCodeAad(binding), { plaintextLength: 7 });
+    decipher.setAuthTag(encrypted.subarray(-16));
+    return Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()]).toString("ascii");
+  } finally {
+    shared.fill(0);
+    key.fill(0);
+  }
 }
 
 before(async () => {
@@ -1033,6 +1233,377 @@ test("proxy allowlist keeps local health checks available", async () => {
     const response = await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`);
     assert.equal(response.status, 200);
   } finally {
+    await stopRelay(isolated.child);
+  }
+});
+
+test("trusted proxy malformed sources never crash the enabled controller or bypass its peer limit", async () => {
+  const isolated = await spawnRelay(controllerEnvironment("xff", {
+    PINVOU_REMOTE_TRUSTED_PROXY_IPS: "127.0.0.1", WS_CONNECT_LIMIT: "3", WS_CONNECT_WINDOW_MS: "60000",
+  }));
+  const sockets = [];
+  try {
+    for (const forwarded of ["x".repeat(200), "198.51.100.5, invalid", "x".repeat(4097)]) {
+      const socket = await openSocket(isolated.wsUrl, { headers: { "x-forwarded-for": forwarded } });
+      sockets.push(socket);
+    }
+    assert.equal(await rejectedUpgrade(isolated.wsUrl, { headers: { "x-forwarded-for": "another-invalid" } }), 429);
+    const ipv4 = await openSocket(isolated.wsUrl, { headers: { "x-forwarded-for": "invalid, 198.51.100.5" } });
+    const ipv6 = await openSocket(isolated.wsUrl, { headers: { "x-forwarded-for": "2001:db8::1" } });
+    sockets.push(ipv4, ipv6);
+    const response = nextMessage(ipv6, "error");
+    ipv6.send(JSON.stringify({ v: 2, type: "not_authenticated" }));
+    assert.equal((await response).code, "authentication_required");
+    assert.equal(isolated.child.exitCode, null);
+    assert.equal((await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).status, 200);
+  } finally {
+    sockets.forEach(closeSocket);
+    await stopRelay(isolated.child);
+  }
+});
+
+test("expired Web endpoint releases its exact interaction slot before deletion", async () => {
+  const isolated = await spawnRelay(controllerEnvironment("expired-slot", { ENDPOINT_OFFLINE_TTL_MS: "1000" }));
+  const sockets = [];
+  try {
+    const endpointId = "endpoint-expired-slot";
+    const accessToken = "expired-slot-access-token-at-least-32";
+    const desktopSecret = "expired-slot-desktop-secret-at-least-32";
+    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl, 15000);
+    const web = await joinWeb(endpointId, accessToken, {}, isolated.wsUrl);
+    sockets.push(desktop.ws, web.ws);
+    desktop.ws.terminate();
+    await waitForClose(desktop.ws);
+    // The real heartbeat performs TTL expiry; wait on the observable Web close,
+    // not a timing assumption or direct call into the cleanup implementation.
+    await waitForClose(web.ws, 10000);
+    const reconnect = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl, 15000);
+    sockets.push(reconnect.ws);
+    const codeWrap = crypto.generateKeyPairSync("x25519");
+    const handshakeB = crypto.generateKeyPairSync("x25519");
+    const registered = nextMessageOneOf(reconnect.ws, ["desktop_pairing_registered", "error"], 15000);
+    reconnect.ws.send(JSON.stringify({ v: 1, type: "desktop_pairing_register",
+      request_id: "request-expired-register", registration_request_id: "expired-register-0001",
+      endpoint_id: endpointId, remote_control_generation: "expired-generation-0001",
+      code_wrap_public_key_b64: rawX25519Public(codeWrap.publicKey).toString("base64"),
+      handshake_public_key_b64: rawX25519Public(handshakeB.publicKey).toString("base64"), key_algorithm: "x25519",
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"] }));
+    const registration = await registered;
+    assert.equal(registration.type, "desktop_pairing_registered", registration.code);
+    const controller = await openSocket(isolated.wsUrl);
+    sockets.push(controller);
+    const reserved = nextMessageOneOf(controller, ["controller_pairing_reserved", "error"], 10000);
+    const handshakeA = crypto.generateKeyPairSync("x25519");
+    controller.send(JSON.stringify({ v: 1, type: "controller_pairing_claim",
+      request_id: "request-expired-claim", claim_request_id: "expired-claim-0001",
+      pairing_code: openPairingCode(codeWrap.privateKey, registration),
+      handshake_public_key_b64: rawX25519Public(handshakeA.publicKey).toString("base64"), key_algorithm: "x25519",
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"] }));
+    const claimed = await reserved;
+    assert.equal(claimed.type, "controller_pairing_reserved", claimed.code);
+  } finally {
+    sockets.forEach(closeSocket);
+    await stopRelay(isolated.child);
+  }
+});
+
+test("official controller fails startup until trusted live claim wiring exists", async () => {
+  const isolatedPort = await getFreePort();
+  const child = spawn(process.execPath, [join(relayDir, "server.js")], {
+    cwd: relayDir, env: { ...process.env, PORT: String(isolatedPort), ...controllerEnvironment("official-disabled", {
+      NODE_ENV: "production", PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "official", PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "0",
+    }) }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+  });
+  let output = "";
+  let errors = "";
+  child.stdout.on("data", (chunk) => { output += String(chunk); });
+  child.stderr.on("data", (chunk) => { errors += String(chunk); });
+  try {
+    await waitForExit(child, 10000);
+    assert.notEqual(child.exitCode, 0);
+    assert.match(errors, /official_controller_claim_dispatcher_unavailable/u);
+    assert.doesNotMatch(output, /pinvou remote relay listening/u);
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test("invalid or partially invalid proxy IP configuration fails startup instead of opening the allowlist", async () => {
+  for (const variable of ["PINVOU_REMOTE_ALLOWED_PROXY_IPS", "PINVOU_REMOTE_TRUSTED_PROXY_IPS"]) {
+    for (const value of ["not-an-ip", "127.0.0.1,not-an-ip"]) {
+      const child = spawn(process.execPath, [join(relayDir, "server.js")], {
+        cwd: relayDir, env: { ...process.env, PORT: String(await getFreePort()),
+          PINVOU_REMOTE_STATE_PATH: join(testRoot, `proxy-invalid-${variable}-${Date.now()}.json`), [variable]: value },
+        stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+      });
+      let output = "";
+      let errors = "";
+      child.stdout.on("data", (chunk) => { output += String(chunk); });
+      child.stderr.on("data", (chunk) => { errors += String(chunk); });
+      try {
+        await waitForExit(child, 10000);
+        assert.notEqual(child.exitCode, 0);
+        assert.match(errors, /proxy_ip_configuration_invalid/u);
+        assert.doesNotMatch(output, /pinvou remote relay listening/u);
+      } finally { await stopRelay(child); }
+    }
+  }
+});
+
+test("real Relay heartbeat retries failed reservation invalidation and releases the slot", async () => {
+  const statePath = join(testRoot, `controller-timeout-${Date.now()}.json`);
+  const controllerStatePath = join(testRoot, `controller-timeout-state-${Date.now()}`, "state.json");
+  const signing = crypto.generateKeyPairSync("ed25519");
+  const isolated = await spawnRelay({
+    NODE_ENV: "development",
+    PINVOU_DESKTOP_CONTROLLER_ENABLED: "1",
+    PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
+    PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "1",
+    PINVOU_REMOTE_CONTROLLER_STATE_PATH: controllerStatePath,
+    PINVOU_REMOTE_STATE_PATH: statePath,
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID: "enrollment-key-timeout-1",
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "enrollment-key-material-at-least-32-bytes",
+    PINVOU_REMOTE_PAIRING_HMAC_KEY_ID: "pairing-key-timeout-1",
+    PINVOU_REMOTE_PAIRING_HMAC_KEY: "pairing-key-material-independent-at-least-32-bytes",
+    PINVOU_REMOTE_RELAY_SIGNING_KEY_ID: "relay-signing-key-timeout-1",
+    PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64: signing.privateKey.export({
+      type: "pkcs8", format: "der",
+    }).toString("base64"),
+  }, { preload: new URL("./fixtures/reservation-invalidation-failure.js", import.meta.url).href });
+  const sockets = [];
+  let failureTrace = "";
+  isolated.child.stdout.on("data", (chunk) => { failureTrace += String(chunk); });
+  try {
+    const endpointId = "endpoint-controller-timeout";
+    const accessToken = "controller-timeout-access-token-00000001";
+    const desktopSecret = "controller-timeout-desktop-secret-000001";
+    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl, 15_000);
+    sockets.push(desktop.ws);
+
+    const codeWrap = crypto.generateKeyPairSync("x25519");
+    const handshakeB = crypto.generateKeyPairSync("x25519");
+    const registeredPromise = nextMessageOneOf(
+      desktop.ws, ["desktop_pairing_registered", "error"], 15_000,
+    );
+    desktop.ws.send(JSON.stringify({
+      v: 1,
+      type: "desktop_pairing_register",
+      request_id: "request-register-timeout",
+      registration_request_id: "registration-timeout-0001",
+      endpoint_id: endpointId,
+      remote_control_generation: "generation-timeout-0001",
+      code_wrap_public_key_b64: rawX25519Public(codeWrap.publicKey).toString("base64"),
+      handshake_public_key_b64: rawX25519Public(handshakeB.publicKey).toString("base64"),
+      key_algorithm: "x25519",
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"],
+    }));
+    const registered = await registeredPromise;
+    if (registered.type === "error") throw new Error(`pairing registration failed: ${registered.code}`);
+    const pairingCode = openPairingCode(codeWrap.privateKey, registered);
+
+    const controller = await openSocket(isolated.wsUrl);
+    sockets.push(controller);
+    const reservedA = nextMessage(controller, "controller_pairing_reserved", 10_000);
+    const reservedB = nextMessage(desktop.ws, "controller_pairing_reserved", 10_000);
+    const invalidated = nextMessage(desktop.ws, "error", 40_000);
+    const handshakeA = crypto.generateKeyPairSync("x25519");
+    controller.send(JSON.stringify({
+      v: 1,
+      type: "controller_pairing_claim",
+      request_id: "request-claim-timeout",
+      claim_request_id: "claim-timeout-0001",
+      pairing_code: pairingCode,
+      handshake_public_key_b64: rawX25519Public(handshakeA.publicKey).toString("base64"),
+      key_algorithm: "x25519",
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"],
+    }));
+    await Promise.all([reservedA, reservedB]);
+    assert.equal((await invalidated).code, "pairing_code_invalid");
+    assert.match(failureTrace, /reservation-invalidation-probe: failed/u);
+    assert.match(failureTrace, /reservation-invalidation-probe: retried/u);
+
+    const web = await joinWeb(endpointId, accessToken, {}, isolated.wsUrl);
+    sockets.push(web.ws);
+    assert.equal(web.joined.lease_id.length > 0, true);
+  } finally {
+    sockets.forEach(closeSocket);
+    await stopRelay(isolated.child);
+  }
+});
+
+test("controller v1 completes a real three-party encrypted handshake beside legacy Web v2", async () => {
+  const statePath = join(testRoot, `controller-legacy-${Date.now()}.json`);
+  const controllerStatePath = join(testRoot, `controller-state-${Date.now()}`, "state.json");
+  const signing = crypto.generateKeyPairSync("ed25519");
+  const isolated = await spawnRelay({
+    NODE_ENV: "development",
+    PINVOU_DESKTOP_CONTROLLER_ENABLED: "1",
+    PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
+    PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "1",
+    PINVOU_REMOTE_CONTROLLER_STATE_PATH: controllerStatePath,
+    PINVOU_REMOTE_STATE_PATH: statePath,
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID: "enrollment-key-test-1",
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "enrollment-key-material-at-least-32-bytes",
+    PINVOU_REMOTE_PAIRING_HMAC_KEY_ID: "pairing-key-test-1",
+    PINVOU_REMOTE_PAIRING_HMAC_KEY: "pairing-key-material-independent-at-least-32-bytes",
+    PINVOU_REMOTE_RELAY_SIGNING_KEY_ID: "relay-signing-key-test-1",
+    PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64: signing.privateKey.export({
+      type: "pkcs8", format: "der",
+    }).toString("base64"),
+  });
+  const sockets = [];
+  try {
+    const endpointId = "endpoint-controller-e2e";
+    const accessToken = "controller-access-token-0000000000000001";
+    const desktopSecret = "controller-desktop-secret-000000000001";
+    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl, 15_000);
+    sockets.push(desktop.ws);
+
+    const codeWrap = crypto.generateKeyPairSync("x25519");
+    const handshakeB = crypto.generateKeyPairSync("x25519");
+    const registeredPromise = nextMessageOneOf(
+      desktop.ws, ["desktop_pairing_registered", "error"], 15_000,
+    );
+    desktop.ws.send(JSON.stringify({
+      v: 1,
+      type: "desktop_pairing_register",
+      request_id: "request-register-e2e",
+      registration_request_id: "registration-e2e-0001",
+      endpoint_id: endpointId,
+      remote_control_generation: "generation-e2e-0001",
+      code_wrap_public_key_b64: rawX25519Public(codeWrap.publicKey).toString("base64"),
+      handshake_public_key_b64: rawX25519Public(handshakeB.publicKey).toString("base64"),
+      key_algorithm: "x25519",
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"],
+    }));
+    const registered = await registeredPromise;
+    if (registered.type === "error") throw new Error(`pairing registration failed: ${registered.code}`);
+    const pairingCode = openPairingCode(codeWrap.privateKey, registered);
+    assert.match(pairingCode, /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{7}$/u);
+
+    const controller = await openSocket(isolated.wsUrl);
+    sockets.push(controller);
+    const reservedA = nextMessage(controller, "controller_pairing_reserved", 10_000);
+    const reservedB = nextMessage(desktop.ws, "controller_pairing_reserved", 10_000);
+    const handshakeA = crypto.generateKeyPairSync("x25519");
+    controller.send(JSON.stringify({
+      v: 1,
+      type: "controller_pairing_claim",
+      request_id: "request-claim-e2e",
+      claim_request_id: "claim-e2e-0001",
+      pairing_code: pairingCode,
+      handshake_public_key_b64: rawX25519Public(handshakeA.publicKey).toString("base64"),
+      key_algorithm: "x25519",
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"],
+    }));
+    const [reserved, controlledReserved] = await Promise.all([reservedA, reservedB]);
+    assert.equal(controlledReserved.transcript_hash, reserved.transcript_hash);
+    assert.equal(crypto.verify(
+      null,
+      buildPairingTranscriptPreimage(reserved.transcript),
+      signing.publicKey,
+      Buffer.from(reserved.relay_signature_b64, "base64"),
+    ), true);
+
+    const common = {
+      v: 1,
+      pairing_id: reserved.pairing_id,
+      reservation_id: reserved.reservation_id,
+      remote_control_generation: reserved.remote_control_generation,
+      relay_epoch: reserved.relay_epoch,
+      transcript_hash: reserved.transcript_hash,
+    };
+    const secretA = crypto.randomBytes(32);
+    const secretB = crypto.randomBytes(32);
+    const bindingA = {
+      relay_epoch: reserved.relay_epoch,
+      pairing_id: reserved.pairing_id,
+      reservation_id: reserved.reservation_id,
+      transcript_hash: reserved.transcript_hash,
+      sender_role: "A",
+    };
+    const bindingB = { ...bindingA, sender_role: "B" };
+
+    let forwarded = nextMessage(desktop.ws, "finished_receipt_commit");
+    let confirmed = nextMessage(controller, "finished_receipt_commit");
+    controller.send(JSON.stringify({
+      ...common,
+      type: "finished_receipt_commit",
+      request_id: "request-commit-A",
+      sender_role: "A",
+      commitment: receiptCommitmentHex(bindingA, secretA),
+    }));
+    assert.equal((await forwarded).sender_role, "A");
+    assert.equal((await confirmed).sender_role, "A");
+    forwarded = nextMessage(controller, "finished_receipt_commit");
+    confirmed = nextMessage(desktop.ws, "finished_receipt_commit");
+    desktop.ws.send(JSON.stringify({
+      ...common,
+      type: "finished_receipt_commit",
+      request_id: "request-commit-B",
+      sender_role: "B",
+      commitment: receiptCommitmentHex(bindingB, secretB),
+    }));
+    assert.equal((await forwarded).sender_role, "B");
+    assert.equal((await confirmed).sender_role, "B");
+
+    forwarded = nextMessage(desktop.ws, "encrypted_handshake_finished");
+    controller.send(JSON.stringify({
+      ...common,
+      type: "encrypted_handshake_finished",
+      request_id: "request-finished-A",
+      sender_role: "A",
+      ciphertext_b64: "AQID",
+      ciphertext_bytes: "3",
+    }));
+    await forwarded;
+    forwarded = nextMessage(controller, "encrypted_handshake_finished");
+    desktop.ws.send(JSON.stringify({
+      ...common,
+      type: "encrypted_handshake_finished",
+      request_id: "request-finished-B",
+      sender_role: "B",
+      ciphertext_b64: "BAUG",
+      ciphertext_bytes: "3",
+    }));
+    await forwarded;
+
+    desktop.ws.send(JSON.stringify({
+      ...common,
+      type: "finished_receipt_ack",
+      request_id: "request-receipt-A",
+      sender_role: "A",
+      receiver_role: "B",
+      receipt_secret_b64: secretA.toString("base64"),
+    }));
+    const joinedA = nextMessage(controller, "controller_joined", 10_000);
+    const joinedB = nextMessage(desktop.ws, "controller_joined", 10_000);
+    controller.send(JSON.stringify({
+      ...common,
+      type: "finished_receipt_ack",
+      request_id: "request-receipt-B",
+      sender_role: "B",
+      receiver_role: "A",
+      receipt_secret_b64: secretB.toString("base64"),
+    }));
+    const [controllerJoined, desktopJoined] = await Promise.all([joinedA, joinedB]);
+    assert.equal(controllerJoined.controller_lease_id, desktopJoined.controller_lease_id);
+    assert.notEqual(controllerJoined.resume_token_b64, desktopJoined.resume_token_b64);
+
+    const web = await openSocket(isolated.wsUrl);
+    sockets.push(web);
+    const conflict = nextMessage(web, "error");
+    web.send(JSON.stringify({
+      v: 2,
+      type: "web_client_join",
+      endpoint_id: endpointId,
+      access_token: accessToken,
+      stream_epoch: null,
+      after_seq: 0,
+    }));
+    assert.equal((await conflict).code, "endpoint_not_found");
+  } finally {
+    sockets.forEach(closeSocket);
     await stopRelay(isolated.child);
   }
 });

@@ -1,10 +1,20 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import { isIP } from "node:net";
 import { chmod, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, extname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { createTelemetryService } from "./telemetry-service.js";
+import { ControllerLeaseManager } from "./controller-lease.js";
+import { ControllerReservationManager, EndpointInteractionSlots } from "./controller-reservation.js";
+import { ControllerRouter } from "./controller-router.js";
+import { EnrollmentRegistry, loadEnrollmentRegistryConfig } from "./enrollment-registry.js";
+import { PairingRegistrationHandler } from "./pairing-registration-handler.js";
+import { PairingStore } from "./pairing-store.js";
+import { CONTROLLER_MESSAGE_TYPES } from "./protocol-controller.js";
+import { RelayStateStore } from "./relay-state-store.js";
+import { isControllerIdentifier, isLegacyWebEndpointIdentifier } from "./identifier-contract.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIB = 1024 * 1024;
@@ -121,6 +131,8 @@ const TRUSTED_PROXY_IPS = parseIpSet(
   process.env.PINVOU_REMOTE_TRUSTED_PROXY_IPS
     || process.env.PINVOU_REMOTE_ALLOWED_PROXY_IPS,
 );
+const DESKTOP_CONTROLLER_ENABLED = process.env.PINVOU_DESKTOP_CONTROLLER_ENABLED === "1";
+const CONTROLLER_TYPES = new Set(CONTROLLER_MESSAGE_TYPES);
 
 const WEB_TO_DESKTOP_TYPES = new Set([
   "rpc_request",
@@ -160,8 +172,99 @@ const endpointCreationBuckets = new Map();
 const wsConnectionBuckets = new Map();
 const telemetry = createTelemetryService();
 let relayStateMutation = Promise.resolve();
+let controllerStateStore = null;
 
 await loadRelayState();
+const controllerRuntime = DESKTOP_CONTROLLER_ENABLED ? await createControllerRuntime() : null;
+
+async function createControllerRuntime() {
+  const config = loadEnrollmentRegistryConfig(process.env);
+  // Official proof issuance and the live claim dispatcher are not installed in
+  // this wave. Never advertise an enabled production controller without them.
+  if (config.deployment === "official") throw new Error("official_controller_claim_dispatcher_unavailable");
+  controllerStateStore = await RelayStateStore.open({
+    statePath: config.controller_state_path,
+    legacyStatePath: config.legacy_web_state_path,
+  });
+  try {
+    const registry = EnrollmentRegistry.open({ stateStore: controllerStateStore, config });
+    const digestKeyId = process.env.PINVOU_REMOTE_PAIRING_HMAC_KEY_ID || "";
+    const digestKey = process.env.PINVOU_REMOTE_PAIRING_HMAC_KEY || "";
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(digestKeyId)
+      || Buffer.byteLength(digestKey, "utf8") < 32 || Buffer.byteLength(digestKey, "utf8") > 4096) {
+      throw new Error("pairing_digest_key_invalid");
+    }
+    const signingKeyId = process.env.PINVOU_REMOTE_RELAY_SIGNING_KEY_ID || "";
+    if (!isControllerIdentifier(signingKeyId)) {
+      throw new Error("relay_signing_key_id_invalid");
+    }
+    const signingKeyB64 = process.env.PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64 || "";
+    const signingKeyDer = Buffer.from(signingKeyB64, "base64");
+    if (signingKeyDer.length === 0 || signingKeyDer.toString("base64") !== signingKeyB64) {
+      throw new Error("relay_signing_key_invalid");
+    }
+    const signingKey = crypto.createPrivateKey({ key: signingKeyDer, format: "der", type: "pkcs8" });
+    if (signingKey.asymmetricKeyType !== "ed25519") throw new Error("relay_signing_key_invalid");
+    const pairingStore = await PairingStore.open({
+      stateStore: controllerStateStore,
+      digestKeyring: {
+        activeKeyId: digestKeyId,
+        keys: [{ keyId: digestKeyId, key: digestKey }],
+      },
+    });
+    await pairingStore.invalidateForRelayRestart();
+    const relayEpoch = `relay-${crypto.randomBytes(18).toString("base64url")}`;
+    const notifyReplacementCode = async ({ endpoint_id }) => {
+      const endpoint = endpoints.get(endpoint_id);
+      send(endpoint?.desktop, {
+        v: 1,
+        type: "error",
+        request_id: `request-${crypto.randomBytes(12).toString("base64url")}`,
+        code: "pairing_code_invalid",
+        message: "连接码无效或已失效",
+      });
+    };
+    const slots = new EndpointInteractionSlots();
+    const reservations = new ControllerReservationManager({
+      pairingStore,
+      interactionSlots: slots,
+      onPairingInvalidated: notifyReplacementCode,
+    });
+    const registration = new PairingRegistrationHandler({
+      pairingStore,
+      relayEpoch,
+      authorizeEndpoint: async ({ endpointId, context }) => {
+        if (context?.endpointId !== endpointId || typeof context?.credential !== "string") {
+          throw new Error("pairing_endpoint_unauthorized");
+        }
+        await registry.authorizePairingRegistration({
+          endpointId,
+          desktopSecret: context.credential,
+        });
+      },
+    });
+    let router;
+    const leases = new ControllerLeaseManager({
+      pairingStore,
+      reservationManager: reservations,
+      relayEpoch,
+      signingKeyId,
+      signTranscript: (preimage) => crypto.sign(null, preimage, signingKey),
+      resolveControlledEndpoint: (endpointId) => router?.resolveControlledEndpoint(endpointId),
+      onLeaseTerminated: notifyReplacementCode,
+    });
+    router = new ControllerRouter({
+      pairingRegistrationHandler: registration,
+      leaseManager: leases,
+      send,
+    });
+    return Object.freeze({ pairingStore, registry, relayEpoch, reservations, leases, router });
+  } catch (error) {
+    await controllerStateStore.close().catch(() => {});
+    controllerStateStore = null;
+    throw error;
+  }
+}
 
 function send(ws, value) {
   if (!ws || ws.readyState !== ws.OPEN || ws.policyClosing) return false;
@@ -202,15 +305,21 @@ function boundedInteger(raw, fallback, min, max) {
 }
 
 function normalizeIp(value) {
+  if (typeof value !== "string" || value.length > 128) return "";
   const ip = String(value || "").trim();
-  return ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+  if (!isIP(ip)) return "";
+  return ip.startsWith("::ffff:") && isIP(ip.slice(7)) === 4 ? ip.slice(7) : ip;
 }
 
 function parseIpSet(value) {
-  return new Set(String(value || "")
-    .split(",")
-    .map(normalizeIp)
-    .filter(Boolean));
+  const result = new Set();
+  for (const item of String(value || "").split(",")) {
+    if (!item.trim()) continue;
+    const ip = normalizeIp(item);
+    if (!ip) throw new Error("proxy_ip_configuration_invalid");
+    result.add(ip);
+  }
+  return result;
 }
 
 function parseOriginSet(value) {
@@ -260,11 +369,13 @@ function sourceAllowed(req) {
 function clientIp(req) {
   const peer = peerIp(req);
   if (!TRUSTED_PROXY_IPS.has(peer)) return peer || "unknown";
-  const forwarded = String(req.headers["x-forwarded-for"] || "")
-    .split(",")
-    .map(normalizeIp)
-    .filter(Boolean);
-  return forwarded.at(-1) || normalizeIp(req.headers["x-real-ip"]) || peer || "unknown";
+  const header = req.headers["x-forwarded-for"];
+  // Only the rightmost proxy-appended address is authoritative. Never skip a
+  // malformed final item and fall back to an attacker-controlled earlier item.
+  if (typeof header === "string" && header.length <= 4096) {
+    return normalizeIp(header.split(",").at(-1)) || peer || "unknown";
+  }
+  return (header === undefined ? normalizeIp(req.headers["x-real-ip"]) : "") || peer || "unknown";
 }
 
 function consumeRateLimit(buckets, ip, limit, windowMs, now = Date.now()) {
@@ -399,10 +510,7 @@ function hasLegacyTokenAlias(message) {
 }
 
 function validEndpointId(value) {
-  return typeof value === "string"
-    && value.length >= 4
-    && value.length <= 128
-    && /^[A-Za-z0-9_-]+$/.test(value);
+  return isLegacyWebEndpointIdentifier(value);
 }
 
 function relayStateContents(entries) {
@@ -569,6 +677,7 @@ function notifyDesktopOfWeb(endpoint) {
 
 function revokeEndpoint(endpoint, reason = "revoked", requester = null) {
   if (!endpoint || endpoints.get(endpoint.endpoint_id) !== endpoint) return;
+  controllerRuntime?.reservations.releaseWeb({ endpointId: endpoint.endpoint_id, leaseId: endpoint.lease_id });
   endpoints.delete(endpoint.endpoint_id);
   audit(endpoint, "endpoint_revoked", { reason });
   send(requester, {
@@ -600,6 +709,7 @@ function revokeEndpoint(endpoint, reason = "revoked", requester = null) {
 
 function expireEndpoint(endpoint, reason = "desktop_offline_ttl_expired") {
   if (!endpoint || endpoint.revoking || endpoints.get(endpoint.endpoint_id) !== endpoint) return;
+  controllerRuntime?.reservations.releaseWeb({ endpointId: endpoint.endpoint_id, leaseId: endpoint.lease_id });
   endpoints.delete(endpoint.endpoint_id);
   audit(endpoint, "endpoint_expired", { reason });
   send(endpoint.web, {
@@ -771,12 +881,33 @@ server.on("upgrade", (req, socket, head) => {
   });
 });
 
-function registerDesktop(ws, msg) {
+async function registerDesktop(ws, msg) {
   const endpointId = msg.endpoint_id;
   const accessToken = boundedCredential(msg.access_token);
   const desktopSecret = boundedCredential(msg.desktop_secret);
   if (ws.role !== "unknown" || msg.v !== 2 || !validEndpointId(endpointId)
     || !accessToken || !desktopSecret) {
+    rejectSocket(ws, "bad_desktop_endpoint_register", "bad desktop endpoint registration");
+    return;
+  }
+
+  if (controllerRuntime) {
+    try {
+      await controllerRuntime.registry.authorizeDesktopRegistration({
+        endpointId,
+        accessToken,
+        desktopSecret,
+      });
+    } catch (error) {
+      rejectSocket(ws, error?.code || "enrollment_required", "desktop endpoint enrollment required");
+      return;
+    }
+  }
+
+  // Authentication may yield: another registration can claim this socket, or
+  // its close handler can run, before the validated credentials return.
+  if (!socketOpen(ws)) return;
+  if (ws.role !== "unknown") {
     rejectSocket(ws, "bad_desktop_endpoint_register", "bad desktop endpoint registration");
     return;
   }
@@ -833,6 +964,13 @@ function registerDesktop(ws, msg) {
   endpoint.desktop = ws;
   endpoint.desktop_offline_since = null;
   authenticateSocket(ws, "desktop", endpointId);
+  if (controllerRuntime) {
+    controllerRuntime.router.authenticateControlled({
+      socketIdentity: ws.controllerSocketIdentity,
+      endpointId,
+      authenticatedContext: Object.freeze({ endpointId, credential: desktopSecret }),
+    });
+  }
   audit(endpoint, "desktop_endpoint_registered", { connected_at: new Date().toISOString() });
   send(ws, {
     v: 2,
@@ -867,6 +1005,14 @@ function joinWebClient(ws, msg) {
   }
 
   const leaseId = randomLeaseId();
+  if (controllerRuntime) {
+    try {
+      controllerRuntime.reservations.acquireWeb({ endpointId, leaseId });
+    } catch {
+      rejectSocket(ws, "endpoint_not_found", "endpoint not found");
+      return;
+    }
+  }
   const previousWeb = socketOpen(endpoint.web) ? endpoint.web : null;
   if (previousWeb) {
     send(previousWeb, {
@@ -1010,9 +1156,21 @@ wss.on("connection", (ws, req) => {
   ws.isAlive = true;
   ws.policyClosing = false;
   ws.revokePending = false;
+  ws.controllerAuthenticated = false;
+  ws.controllerSocketIdentity = `socket-${crypto.randomBytes(18).toString("base64url")}`;
+  try {
+    controllerRuntime?.router.addSocket({
+      socketIdentity: ws.controllerSocketIdentity,
+      source: ws.clientIp,
+      socket: ws,
+    });
+  } catch {
+    rejectSocket(ws, "connection_initialization_failed", "websocket initialization failed");
+    return;
+  }
   ws.ingressBucket = { started_at: Date.now(), messages: 0, bytes: 0 };
   ws.authTimer = setTimeout(() => {
-    if (ws.role === "unknown") {
+    if (ws.role === "unknown" && !ws.controllerAuthenticated) {
       rejectSocket(ws, "authentication_timeout", "websocket authentication timeout");
     }
   }, WS_AUTH_TIMEOUT_MS);
@@ -1040,6 +1198,19 @@ wss.on("connection", (ws, req) => {
       send(ws, { v: 2, type: "error", code: "bad_message", message: "bad message" });
       return;
     }
+    if (msg.v === 1 && controllerRuntime && CONTROLLER_TYPES.has(msg.type)) {
+      void controllerRuntime.router.handle({
+        socketIdentity: ws.controllerSocketIdentity,
+        message: msg,
+      }).then(() => {
+        if (msg.type === "controller_pairing_claim") {
+          ws.controllerAuthenticated = true;
+          clearTimeout(ws.authTimer);
+          ws.authTimer = null;
+        }
+      }).catch(() => {});
+      return;
+    }
     if (msg.v !== 2) {
       rejectSocket(
         ws,
@@ -1058,7 +1229,9 @@ wss.on("connection", (ws, req) => {
     }
 
     if (msg.type === "desktop_endpoint_register") {
-      registerDesktop(ws, msg);
+      void registerDesktop(ws, msg).catch(() => {
+        rejectSocket(ws, "desktop_registration_failed", "desktop endpoint registration failed");
+      });
       return;
     }
     if (msg.type === "web_client_join") {
@@ -1082,12 +1255,16 @@ wss.on("connection", (ws, req) => {
   ws.on("close", () => {
     clearTimeout(ws.authTimer);
     ws.authTimer = null;
+    if (controllerRuntime) {
+      void controllerRuntime.router.removeSocket(ws.controllerSocketIdentity).catch(() => {});
+    }
     const endpoint = endpoints.get(ws.endpointId);
     if (!endpoint) return;
     if (ws.role === "web" && endpoint.web === ws) {
       const leaseId = endpoint.lease_id;
       endpoint.web = null;
       endpoint.lease_id = null;
+      controllerRuntime?.reservations.releaseWeb({ endpointId: endpoint.endpoint_id, leaseId });
       audit(endpoint, "web_client_disconnected", { disconnected_at: new Date().toISOString() });
       send(endpoint.desktop, {
         v: 2,
@@ -1107,6 +1284,9 @@ wss.on("connection", (ws, req) => {
 
 const heartbeatTimer = setInterval(() => {
   pruneExpiredEndpoints();
+  if (controllerRuntime) void controllerRuntime.reservations.expire().catch(() => {});
+  if (controllerRuntime) void controllerRuntime.leases.expire().catch(() => {});
+  if (controllerRuntime) void controllerRuntime.router.expire().catch(() => {});
   const endpointBucketExpiry = Date.now() - ENDPOINT_CREATE_WINDOW_MS;
   for (const [ip, bucket] of endpointCreationBuckets) {
     if (bucket.started_at <= endpointBucketExpiry) endpointCreationBuckets.delete(ip);
@@ -1129,7 +1309,7 @@ heartbeatTimer.unref();
 server.listen(PORT, HOST, () => {
   console.log(
     `pinvou remote relay listening on http://${HOST}:${PORT}`
-    + ` (protocol=v2, max_endpoints=${MAX_ENDPOINTS}`
+    + ` (protocol=${controllerRuntime ? "v2+controller-v1" : "v2"}, max_endpoints=${MAX_ENDPOINTS}`
     + `, max_ws_connections=${MAX_WS_CONNECTIONS}`
     + `, ws_connect_limit=${WS_CONNECT_LIMIT}/${WS_CONNECT_WINDOW_MS}ms`
     + `, ws_auth_timeout=${WS_AUTH_TIMEOUT_MS}ms`
@@ -1141,3 +1321,19 @@ server.listen(PORT, HOST, () => {
     + `, max_payload=${MAX_PAYLOAD_BYTES})`,
   );
 });
+
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  clearInterval(heartbeatTimer);
+  for (const ws of wss.clients) {
+    try { ws.terminate(); } catch {}
+  }
+  try { server.close(); } catch {}
+  await controllerStateStore?.close().catch(() => {});
+  process.exit(0);
+}
+
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
