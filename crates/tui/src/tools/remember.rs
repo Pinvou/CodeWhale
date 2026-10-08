@@ -17,6 +17,18 @@ use serde_json::{Value, json};
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, required_str,
 };
+use crate::native_memory::SensitiveNoteRefusal;
+
+/// Map a native store failure to a tool error. A sensitive-content refusal
+/// is input the model can fix, so its stable reason string is surfaced as
+/// invalid input instead of a generic execution failure.
+fn write_error(error: anyhow::Error, failure: &str) -> ToolError {
+    if error.downcast_ref::<SensitiveNoteRefusal>().is_some() {
+        ToolError::invalid_input(error.to_string())
+    } else {
+        ToolError::execution_failed(format!("{failure}: {error}"))
+    }
+}
 
 /// Tool that appends one bullet to the user memory file.
 pub struct RememberTool;
@@ -33,7 +45,10 @@ impl ToolSpec for RememberTool {
          or a fact about themselves or their workflow that you should not \
          have to relearn next time. Keep notes terse (one sentence). Don't \
          store secrets, transient tasks, or reasoning scratch — those belong \
-         in a checklist or in the conversation.\n\n\
+         in a checklist or in the conversation. The no-secrets rule is \
+         enforced: a note that looks like it carries a credential, token, \
+         password, phone, or ID number is refused, so state the durable \
+         fact without the sensitive values in the first place.\n\n\
          Memory you only add to decays: corrections pile up behind the notes \
          they contradict, and what gets injected next session drifts toward \
          noise. So also maintain it. When something you were told before \
@@ -181,17 +196,11 @@ impl ToolSpec for RememberTool {
                 let evidence = required_str(&input, "evidence")?;
                 store
                     .revise(scope, workspace_id.as_deref(), replaces, &note, evidence)
-                    .map_err(|error| {
-                        ToolError::execution_failed(format!("failed to revise memory: {error}"))
-                    })?
+                    .map_err(|error| write_error(error, "failed to revise memory"))?
             } else {
                 store
                     .remember(scope, workspace_id.as_deref(), &note)
-                    .map_err(|error| {
-                        ToolError::execution_failed(format!(
-                            "failed to write native memory: {error}"
-                        ))
-                    })?
+                    .map_err(|error| write_error(error, "failed to write native memory"))?
             };
             let verb = if action == "revise" {
                 "revised"
@@ -444,5 +453,86 @@ mod tests {
         let tool = RememberTool;
         let err = tool.execute(json!({}), &ctx).await.unwrap_err();
         assert!(err.to_string().to_lowercase().contains("note"), "{err}");
+    }
+
+    /// The store refuses sensitive-looking notes fail-closed; the tool surfaces
+    /// that as invalid input carrying the stable refusal reason, not as a
+    /// generic execution failure, and writes nothing.
+    #[tokio::test]
+    async fn sensitive_notes_are_refused_with_a_stable_reason() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("memory");
+        let mut ctx = ToolContext::new(tmp.path());
+        ctx.memory_path = Some(root.join("global/MEMORY.md"));
+
+        let err = RememberTool
+            .execute(
+                json!({"note": "aws key AKIAIOSFODNN7EXAMPLE belongs to the ci account"}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.starts_with("Failed to validate input"),
+            "a refusal is fixable input, not an execution failure: {message}"
+        );
+        assert!(
+            message.contains("memory note refused"),
+            "refusal must carry the stable reason: {message}"
+        );
+        assert!(
+            message.contains("never store secrets"),
+            "refusal must be model-actionable: {message}"
+        );
+        assert!(
+            !root.join("global/MEMORY.md").exists(),
+            "a refused note must not be written"
+        );
+
+        let result = RememberTool
+            .execute(json!({"note": "Use 4-space indentation"}), &ctx)
+            .await
+            .expect("the store must stay usable after a refusal");
+        assert!(result.success);
+    }
+
+    /// The revise branch is mapped through the same helper: a sensitive
+    /// replacement surfaces as invalid input with the stable reason, and the
+    /// stored note is left untouched.
+    #[tokio::test]
+    async fn revise_refusal_surfaces_as_invalid_input_too() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("memory");
+        let mut ctx = ToolContext::new(tmp.path());
+        ctx.memory_path = Some(root.join("global/MEMORY.md"));
+
+        RememberTool
+            .execute(json!({"note": "Deploys run on Fridays"}), &ctx)
+            .await
+            .expect("append");
+        let err = RememberTool
+            .execute(
+                json!({
+                    "action": "revise",
+                    "replaces": "Deploys run on Fridays",
+                    "note": "deploy password is hunter2",
+                    "evidence": "schedule changed"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.starts_with("Failed to validate input")
+                && message.contains("memory note refused"),
+            "a refused replacement is invalid input: {message}"
+        );
+
+        let store = crate::native_memory::NativeMemoryStore::new(&root);
+        let hits = store.search("Deploys", 10).expect("search");
+        assert_eq!(hits.len(), 1, "the stored note must be untouched");
+        assert_eq!(hits[0].text, "Deploys run on Fridays");
     }
 }
