@@ -1987,7 +1987,7 @@ pub fn run() {
             // state with user-stop semantics. Process exit destroys remaining WebViews,
             // and shutdown_on_exit always removes coordination files.
             // 退出收割:同步执行——Exit 后进程即将结束,这是最后的清理窗口。
-            // 重启(app.restart())跳过本事件,调用点在 restart 前主动调同一辅助函数。
+            // 重启调用点先完成异步清理；若运行时随后派发 Exit，本段清理保持幂等。
             startup::mark("exit:cleanup:start");
             tauri::async_runtime::block_on(harvest_child_processes(app));
             startup::mark("exit:cleanup:done");
@@ -1999,8 +1999,8 @@ pub fn run() {
         }
         _ => {}
     });
-    // Defensive fallback for platforms where the event loop returns without an
-    // observable Exit callback. Rewriting the same clean state is idempotent.
+    // Defensive fallback if a future runtime/platform lets the event loop return
+    // without an observable Exit callback. Current desktop event loops do not return.
     startup::mark_lifecycle_clean_exit("event_loop_returned");
     startup::mark("process:exit");
 }

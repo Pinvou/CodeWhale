@@ -17,7 +17,7 @@ const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024;
 static STARTED_AT: OnceLock<Instant> = OnceLock::new();
 static LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 static RUN_ID: OnceLock<String> = OnceLock::new();
-static LIFECYCLE_RECEIPT: OnceLock<Mutex<Option<LifecycleReceipt>>> = OnceLock::new();
+static LIFECYCLE_RUNTIME: OnceLock<Mutex<Option<LifecycleRuntime>>> = OnceLock::new();
 
 const LIFECYCLE_SCHEMA_VERSION: u32 = 1;
 
@@ -27,6 +27,16 @@ enum LifecycleState {
     Starting,
     Ready,
     CleanExit,
+}
+
+impl LifecycleState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::CleanExit => "clean_exit",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -39,6 +49,34 @@ struct LifecycleReceipt {
     updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_reason: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum PreviousLifecycle {
+    Missing,
+    Clean { pid: u32 },
+    Unclean { pid: u32, state: LifecycleState },
+    Invalid,
+}
+
+struct LifecycleRuntime {
+    path: std::path::PathBuf,
+    receipt: LifecycleReceipt,
+    persistence_enabled: bool,
+}
+
+struct LifecycleBegin {
+    runtime: LifecycleRuntime,
+    previous: PreviousLifecycle,
+    previous_error: Option<String>,
+    quarantined_path: Option<std::path::PathBuf>,
+    write_error: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum LifecycleTransition {
+    Applied,
+    AlreadyClean,
 }
 
 struct RotationInfo {
@@ -158,81 +196,201 @@ fn persist_lifecycle_receipt(path: &Path, receipt: &LifecycleReceipt) -> Result<
         .map_err(|error| format!("write {}: {error}", path.display()))
 }
 
-/// Starts the durable host lifecycle only after Tauri has built the app. This
-/// placement lets the single-instance plugin reject a secondary process before
-/// it can overwrite the primary process's receipt.
-pub fn begin_lifecycle() {
-    let path = lifecycle_receipt_path();
-    match load_lifecycle_receipt(&path) {
-        Ok(Some(previous)) if previous.state != LifecycleState::CleanExit => {
-            mark_with_detail(
-                "rust",
-                "lifecycle:previous_unclean",
-                &format!("pid={} state={:?}", previous.pid, previous.state),
-            );
+fn begin_lifecycle_at(
+    path: std::path::PathBuf,
+    run_id: String,
+    pid: u32,
+    now: String,
+) -> LifecycleBegin {
+    let mut previous_error = None;
+    let mut quarantined_path = None;
+    let (previous, persistence_enabled) = match load_lifecycle_receipt(&path) {
+        Ok(Some(receipt)) if receipt.state == LifecycleState::CleanExit => {
+            (PreviousLifecycle::Clean { pid: receipt.pid }, true)
         }
-        Ok(Some(previous)) => mark_with_detail(
-            "rust",
-            "lifecycle:previous_clean",
-            &format!("pid={}", previous.pid),
+        Ok(Some(receipt)) => (
+            PreviousLifecycle::Unclean {
+                pid: receipt.pid,
+                state: receipt.state,
+            },
+            true,
         ),
-        Ok(None) => mark("lifecycle:previous_missing"),
-        Err(error) => mark_with_detail("rust", "lifecycle:previous_invalid", &error),
-    }
+        Ok(None) => (PreviousLifecycle::Missing, true),
+        Err(error) => {
+            previous_error = Some(error);
+            match crate::platform::filesystem::quarantine_corrupt_file(&path) {
+                Ok(quarantined) => {
+                    quarantined_path = Some(quarantined);
+                    (PreviousLifecycle::Invalid, true)
+                }
+                Err(quarantine_error) => {
+                    previous_error = Some(format!(
+                        "{}; preserve invalid receipt: {quarantine_error}",
+                        previous_error.as_deref().unwrap_or("invalid receipt")
+                    ));
+                    // Do not overwrite evidence that could not be preserved.
+                    (PreviousLifecycle::Invalid, false)
+                }
+            }
+        }
+    };
 
-    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let receipt = LifecycleReceipt {
         schema_version: LIFECYCLE_SCHEMA_VERSION,
-        run_id: RUN_ID
-            .get()
-            .cloned()
-            .unwrap_or_else(|| format!("unknown-{}", std::process::id())),
-        pid: std::process::id(),
+        run_id,
+        pid,
         state: LifecycleState::Starting,
         started_at: now.clone(),
         updated_at: now,
         exit_reason: None,
     };
-    if let Err(error) = persist_lifecycle_receipt(&path, &receipt) {
+    let write_error = if persistence_enabled {
+        persist_lifecycle_receipt(&path, &receipt).err()
+    } else {
+        Some("write skipped to preserve invalid receipt".to_string())
+    };
+    LifecycleBegin {
+        runtime: LifecycleRuntime {
+            path,
+            receipt,
+            persistence_enabled,
+        },
+        previous,
+        previous_error,
+        quarantined_path,
+        write_error,
+    }
+}
+
+fn transition_lifecycle_at(
+    runtime: &mut LifecycleRuntime,
+    state: LifecycleState,
+    exit_reason: Option<&str>,
+    now: String,
+) -> Result<LifecycleTransition, String> {
+    if runtime.receipt.state == LifecycleState::CleanExit {
+        return Ok(LifecycleTransition::AlreadyClean);
+    }
+    if !runtime.persistence_enabled {
+        return Err("lifecycle persistence disabled to preserve invalid receipt".to_string());
+    }
+    let mut next = runtime.receipt.clone();
+    next.state = state;
+    next.updated_at = now;
+    next.exit_reason = exit_reason.map(str::to_string);
+    persist_lifecycle_receipt(&runtime.path, &next)?;
+    runtime.receipt = next;
+    Ok(LifecycleTransition::Applied)
+}
+
+/// Starts the durable host lifecycle only after Tauri has built the app. For
+/// sequential launches, this placement lets the single-instance plugin reject
+/// a secondary process before it can overwrite the primary process's receipt.
+pub fn begin_lifecycle() {
+    let path = lifecycle_receipt_path();
+    let result = begin_lifecycle_at(
+        path,
+        RUN_ID
+            .get()
+            .cloned()
+            .unwrap_or_else(|| format!("unknown-{}", std::process::id())),
+        std::process::id(),
+        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    );
+    match &result.previous {
+        PreviousLifecycle::Unclean { pid, state } => mark_with_detail(
+            "rust",
+            "lifecycle:previous_unclean",
+            &format!("pid={pid} state={}", state.as_str()),
+        ),
+        PreviousLifecycle::Clean { pid } => {
+            mark_with_detail("rust", "lifecycle:previous_clean", &format!("pid={pid}"))
+        }
+        PreviousLifecycle::Missing => mark("lifecycle:previous_missing"),
+        PreviousLifecycle::Invalid => mark_with_detail(
+            "rust",
+            "lifecycle:previous_invalid",
+            result
+                .previous_error
+                .as_deref()
+                .unwrap_or("invalid receipt"),
+        ),
+    }
+    if let Some(quarantined) = result.quarantined_path.as_ref() {
+        mark_with_detail(
+            "rust",
+            "lifecycle:previous_quarantined",
+            &format!("path={}", quarantined.display()),
+        );
+    }
+    if let Some(error) = result.write_error.as_deref() {
         mark_with_detail("rust", "lifecycle:write_error", &error);
     } else {
         mark("lifecycle:starting");
     }
-    let slot = LIFECYCLE_RECEIPT.get_or_init(|| Mutex::new(None));
+    let slot = LIFECYCLE_RUNTIME.get_or_init(|| Mutex::new(None));
     if let Ok(mut current) = slot.lock() {
-        *current = Some(receipt);
+        *current = Some(result.runtime);
     }
 }
 
-fn transition_lifecycle(state: LifecycleState, exit_reason: Option<&str>) {
-    let Some(slot) = LIFECYCLE_RECEIPT.get() else {
-        return;
+fn transition_lifecycle(
+    state: LifecycleState,
+    exit_reason: Option<&str>,
+) -> Option<LifecycleTransition> {
+    let Some(slot) = LIFECYCLE_RUNTIME.get() else {
+        mark_with_detail(
+            "rust",
+            "lifecycle:transition_skipped",
+            "reason=not_initialized",
+        );
+        return None;
     };
     let Ok(mut current) = slot.lock() else {
         mark("lifecycle:lock_poisoned");
-        return;
+        return None;
     };
-    let Some(receipt) = current.as_mut() else {
-        return;
+    let Some(runtime) = current.as_mut() else {
+        mark_with_detail("rust", "lifecycle:transition_skipped", "reason=no_runtime");
+        return None;
     };
-    receipt.state = state;
-    receipt.updated_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    receipt.exit_reason = exit_reason.map(str::to_string);
-    if let Err(error) = persist_lifecycle_receipt(&lifecycle_receipt_path(), receipt) {
-        mark_with_detail("rust", "lifecycle:write_error", &error);
+    match transition_lifecycle_at(
+        runtime,
+        state,
+        exit_reason,
+        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    ) {
+        Ok(outcome) => Some(outcome),
+        Err(error) => {
+            mark_with_detail("rust", "lifecycle:write_error", &error);
+            None
+        }
     }
 }
 
 pub fn mark_lifecycle_ready() {
-    transition_lifecycle(LifecycleState::Ready, None);
-    mark("lifecycle:ready");
+    match transition_lifecycle(LifecycleState::Ready, None) {
+        Some(LifecycleTransition::Applied) => mark("lifecycle:ready"),
+        Some(LifecycleTransition::AlreadyClean) => {
+            mark_with_detail("rust", "lifecycle:ready_skipped", "reason=already_clean")
+        }
+        None => {}
+    }
 }
 
 pub fn mark_lifecycle_clean_exit(reason: &str) {
-    transition_lifecycle(LifecycleState::CleanExit, Some(reason));
-    mark_with_detail("rust", "lifecycle:clean_exit", &format!("reason={reason}"));
+    match transition_lifecycle(LifecycleState::CleanExit, Some(reason)) {
+        Some(LifecycleTransition::Applied) => {
+            mark_with_detail("rust", "lifecycle:clean_exit", &format!("reason={reason}"));
+        }
+        Some(LifecycleTransition::AlreadyClean) => mark_with_detail(
+            "rust",
+            "lifecycle:clean_exit_preserved",
+            &format!("ignored_reason={reason}"),
+        ),
+        None => {}
+    }
 }
-
 
 /// Open the startup log under the current `PINVOU3_HOME` and stamp
 /// `process:start`. Safe to call again: a re-init re-points the sink at the
@@ -325,8 +483,9 @@ pub fn report_frontend_startup(entries: Vec<FrontendStartupEntry>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        LIFECYCLE_SCHEMA_VERSION, LifecycleReceipt, LifecycleState, MAX_LOG_BYTES, clean_field,
-        load_lifecycle_receipt, persist_lifecycle_receipt, rotate_if_oversized,
+        LIFECYCLE_SCHEMA_VERSION, LifecycleReceipt, LifecycleState, LifecycleTransition,
+        MAX_LOG_BYTES, PreviousLifecycle, begin_lifecycle_at, clean_field, load_lifecycle_receipt,
+        persist_lifecycle_receipt, rotate_if_oversized, transition_lifecycle_at,
     };
 
     #[test]
@@ -360,56 +519,145 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_receipt_distinguishes_unclean_and_clean_runs() {
+    fn lifecycle_begin_classifies_previous_state_and_starts_current_run() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("logs/app-lifecycle.json");
-        let mut receipt = LifecycleReceipt {
-            schema_version: LIFECYCLE_SCHEMA_VERSION,
-            run_id: "run-1".to_string(),
-            pid: 42,
-            state: LifecycleState::Starting,
-            started_at: "2026-09-30T01:00:00.000Z".to_string(),
-            updated_at: "2026-09-30T01:00:00.000Z".to_string(),
-            exit_reason: None,
-        };
+        let cases = [
+            ("missing", None, PreviousLifecycle::Missing),
+            (
+                "starting",
+                Some((LifecycleState::Starting, None)),
+                PreviousLifecycle::Unclean {
+                    pid: 42,
+                    state: LifecycleState::Starting,
+                },
+            ),
+            (
+                "ready",
+                Some((LifecycleState::Ready, None)),
+                PreviousLifecycle::Unclean {
+                    pid: 42,
+                    state: LifecycleState::Ready,
+                },
+            ),
+            (
+                "clean",
+                Some((LifecycleState::CleanExit, Some("exit_event"))),
+                PreviousLifecycle::Clean { pid: 42 },
+            ),
+        ];
 
-        persist_lifecycle_receipt(&path, &receipt).unwrap();
+        for (name, prior, expected) in cases {
+            let path = root.path().join(name).join("app-lifecycle.json");
+            if let Some((state, exit_reason)) = prior {
+                persist_lifecycle_receipt(
+                    &path,
+                    &LifecycleReceipt {
+                        schema_version: LIFECYCLE_SCHEMA_VERSION,
+                        run_id: "previous-run".to_string(),
+                        pid: 42,
+                        state,
+                        started_at: "2026-09-30T01:00:00.000Z".to_string(),
+                        updated_at: "2026-09-30T01:10:00.000Z".to_string(),
+                        exit_reason: exit_reason.map(str::to_string),
+                    },
+                )
+                .unwrap();
+            }
+
+            let result = begin_lifecycle_at(
+                path.clone(),
+                "current-run".to_string(),
+                84,
+                "2026-10-01T01:00:00.000Z".to_string(),
+            );
+            assert_eq!(result.previous, expected, "case {name}");
+            assert!(result.write_error.is_none(), "case {name}");
+            let current = load_lifecycle_receipt(&path).unwrap().unwrap();
+            assert_eq!(current.run_id, "current-run", "case {name}");
+            assert_eq!(current.pid, 84, "case {name}");
+            assert_eq!(current.state, LifecycleState::Starting, "case {name}");
+        }
+    }
+
+    #[test]
+    fn lifecycle_transitions_to_ready_then_preserves_first_clean_exit_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("app-lifecycle.json");
+        let mut runtime = begin_lifecycle_at(
+            path.clone(),
+            "current-run".to_string(),
+            84,
+            "2026-10-01T01:00:00.000Z".to_string(),
+        )
+        .runtime;
+
         assert_eq!(
-            load_lifecycle_receipt(&path).unwrap().unwrap().state,
-            LifecycleState::Starting
+            transition_lifecycle_at(
+                &mut runtime,
+                LifecycleState::Ready,
+                None,
+                "2026-10-01T01:00:01.000Z".to_string(),
+            )
+            .unwrap(),
+            LifecycleTransition::Applied
         );
-
-        receipt.state = LifecycleState::Ready;
-        receipt.updated_at = "2026-09-30T01:00:01.000Z".to_string();
-        persist_lifecycle_receipt(&path, &receipt).unwrap();
         assert_eq!(
             load_lifecycle_receipt(&path).unwrap().unwrap().state,
             LifecycleState::Ready
         );
 
-        receipt.state = LifecycleState::CleanExit;
-        receipt.updated_at = "2026-09-30T01:10:00.000Z".to_string();
-        receipt.exit_reason = Some("exit_event".to_string());
-        persist_lifecycle_receipt(&path, &receipt).unwrap();
-        assert_eq!(load_lifecycle_receipt(&path).unwrap(), Some(receipt));
+        assert_eq!(
+            transition_lifecycle_at(
+                &mut runtime,
+                LifecycleState::CleanExit,
+                Some("restart"),
+                "2026-10-01T01:00:02.000Z".to_string(),
+            )
+            .unwrap(),
+            LifecycleTransition::Applied
+        );
+        assert_eq!(
+            transition_lifecycle_at(
+                &mut runtime,
+                LifecycleState::CleanExit,
+                Some("exit_event"),
+                "2026-10-01T01:00:03.000Z".to_string(),
+            )
+            .unwrap(),
+            LifecycleTransition::AlreadyClean
+        );
+        let receipt = load_lifecycle_receipt(&path).unwrap().unwrap();
+        assert_eq!(receipt.state, LifecycleState::CleanExit);
+        assert_eq!(receipt.exit_reason.as_deref(), Some("restart"));
+        assert_eq!(receipt.updated_at, "2026-10-01T01:00:02.000Z");
     }
 
     #[test]
-    fn invalid_lifecycle_receipt_is_reported_instead_of_treated_as_clean() {
+    fn invalid_lifecycle_receipt_is_quarantined_before_current_run_starts() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("app-lifecycle.json");
         std::fs::write(&path, b"{truncated").unwrap();
 
-        assert!(load_lifecycle_receipt(&path).is_err());
+        let result = begin_lifecycle_at(
+            path.clone(),
+            "current-run".to_string(),
+            84,
+            "2026-10-01T01:00:00.000Z".to_string(),
+        );
+        assert_eq!(result.previous, PreviousLifecycle::Invalid);
+        let quarantine = result.quarantined_path.unwrap();
+        assert_eq!(std::fs::read(quarantine).unwrap(), b"{truncated");
+        assert_eq!(
+            load_lifecycle_receipt(&path).unwrap().unwrap().state,
+            LifecycleState::Starting
+        );
     }
 
     #[test]
-    fn unknown_lifecycle_schema_is_not_trusted_as_a_clean_exit() {
+    fn unknown_lifecycle_schema_is_quarantined_before_current_run_starts() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("app-lifecycle.json");
-        std::fs::write(
-            &path,
-            br#"{
+        let future_receipt = br#"{
                 "schema_version": 2,
                 "run_id": "future-run",
                 "pid": 42,
@@ -417,10 +665,21 @@ mod tests {
                 "started_at": "2026-09-30T01:00:00.000Z",
                 "updated_at": "2026-09-30T01:10:00.000Z",
                 "exit_reason": "exit_event"
-            }"#,
-        )
-        .unwrap();
+            }"#;
+        std::fs::write(&path, future_receipt).unwrap();
 
-        assert!(load_lifecycle_receipt(&path).is_err());
+        let result = begin_lifecycle_at(
+            path.clone(),
+            "current-run".to_string(),
+            84,
+            "2026-10-01T01:00:00.000Z".to_string(),
+        );
+        assert_eq!(result.previous, PreviousLifecycle::Invalid);
+        let quarantine = result.quarantined_path.unwrap();
+        assert_eq!(std::fs::read(quarantine).unwrap(), future_receipt);
+        assert_eq!(
+            load_lifecycle_receipt(&path).unwrap().unwrap().state,
+            LifecycleState::Starting
+        );
     }
 }
