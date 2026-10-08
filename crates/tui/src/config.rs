@@ -2962,8 +2962,11 @@ pub struct Config {
     /// Host-only, route-scoped opt-in to logical model-call idempotency.
     /// Never persisted or accepted from provider configuration files.
     /// Network, engine, compaction, subagent and matching vision retries reuse
-    /// a key only for the same logical request. Single-dispatch auxiliary calls
-    /// (translation, FIM, speech and native search) start separate calls.
+    /// a key only for the same logical request. Translation, FIM, speech
+    /// synthesis and native-search POSTs each start a new call whose transport
+    /// retries share its key; successive agentic-search rounds use new keys.
+    /// Model listing does not mint logical-call keys; native-search GETs
+    /// neither mint nor inherit them. Explicit static headers are unchanged.
     #[serde(skip)]
     pub request_idempotency_header: Option<String>,
     /// Optional user-facing tab/window title shown as `[title] …` in front of

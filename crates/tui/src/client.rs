@@ -2447,6 +2447,7 @@ impl DeepSeekClient {
         let _permit = self.acquire_provider_request_permit().await;
         let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
         let max_tokens = self.effective_max_output_tokens(&model);
+        let call = self.for_operation(uuid::Uuid::new_v4());
         if self.wire_format != WireFormat::ChatCompletions {
             // Non-Chat dialects reuse the prepared-request seam so translation
             // cannot drift from production shaping. Translation is still an
@@ -2459,8 +2460,8 @@ impl DeepSeekClient {
                 false,
             )?;
             let response = match prepared.dialect {
-                WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await?,
-                WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await?,
+                WireDialect::OpenAiResponses => call.handle_responses_message(&prepared).await?,
+                WireDialect::AnthropicMessages => call.handle_anthropic_message(&prepared).await?,
                 WireDialect::ChatCompletions => unreachable!(),
             };
             return translation_text_from_response(&response);
@@ -2494,7 +2495,7 @@ impl DeepSeekClient {
             Some("off"),
         );
 
-        let response = self.send_json_with_retry(&url, &body).await?;
+        let response = call.send_json_with_retry(&url, &body).await?;
 
         let value: serde_json::Value = response.json().await?;
         let translated = value["choices"][0]["message"]["content"]
@@ -2855,7 +2856,8 @@ impl DeepSeekClient {
         let body = build_speech_synthesis_body(&model, &text, instruction, audio);
 
         let url = api_url(&self.base_url, "chat/completions");
-        let response = self.send_json_with_retry(&url, &body).await?;
+        let call = self.for_operation(uuid::Uuid::new_v4());
+        let response = call.send_json_with_retry(&url, &body).await?;
         let status = response.status();
         if !status.is_success() {
             let raw_error_text = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
@@ -3289,6 +3291,14 @@ impl DeepSeekClient {
 }
 
 impl DeepSeekClient {
+    // A request-local clone owns exactly one outbound logical call. Do not
+    // reuse it for an auxiliary request with a different body.
+    fn for_operation(&self, operation_id: uuid::Uuid) -> Self {
+        let mut client = self.clone();
+        client.operation_id = Some(operation_id);
+        client
+    }
+
     pub(super) fn with_operation_header(
         &self,
         builder: reqwest::RequestBuilder,
@@ -3456,18 +3466,18 @@ impl LlmClient for DeepSeekClient {
         request: MessageRequest,
         operation_id: uuid::Uuid,
     ) -> Result<MessageResponse> {
-        let mut client = self.clone();
-        client.operation_id = Some(operation_id);
-        client.perform_message(request).await
+        self.for_operation(operation_id)
+            .perform_message(request)
+            .await
     }
     async fn create_message_stream_for_operation(
         &self,
         request: MessageRequest,
         operation_id: uuid::Uuid,
     ) -> Result<crate::llm_client::StreamEventBox> {
-        let mut client = self.clone();
-        client.operation_id = Some(operation_id);
-        client.perform_message_stream(request).await
+        self.for_operation(operation_id)
+            .perform_message_stream(request)
+            .await
     }
     fn stream_operation_identity(&self, request: &MessageRequest) -> Result<String> {
         if self.request_idempotency_header.is_none() {
@@ -4235,7 +4245,8 @@ impl DeepSeekClient {
             "suffix": suffix,
             "max_tokens": max_tokens,
         });
-        let response = self.send_json_with_retry(&url, &body).await?;
+        let call = self.for_operation(uuid::Uuid::new_v4());
+        let response = call.send_json_with_retry(&url, &body).await?;
         let status = response.status();
         if !status.is_success() {
             let raw_error_text = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
