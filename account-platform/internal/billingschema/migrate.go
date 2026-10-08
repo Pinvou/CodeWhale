@@ -87,7 +87,7 @@ func Up(ctx context.Context, connection *pgx.Conn, input []migrations.Migration)
 	if err != nil {
 		return err
 	}
-	return migrations.UpWithHooks(ctx, connection, ordered, migrations.UpHooks{BeforeApply: protectLegacyRefundMigration})
+	return migrations.UpWithHooks(ctx, connection, ordered, migrations.UpHooks{BeforeApply: prepareBillingMigration, AfterApply: finishBillingMigration, ApplySQL: applyBillingMigration, LedgerRole: "billing_schema_owner"})
 }
 
 // The original target migration cannot preserve a pending partial refund's

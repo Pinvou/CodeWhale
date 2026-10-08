@@ -109,6 +109,9 @@ func (p *PaymentCoordinator) CloseOrder(ctx context.Context, orderID, requesterI
 	if err != nil {
 		return PaymentOrder{}, err
 	}
+	if p.Capabilities().ProviderID != order.ProviderID || p.Capabilities().Version != order.ProviderVersion {
+		return PaymentOrder{}, ErrConflict
+	}
 	if order.CloseStatus == "PROVIDER_CLOSED" || order.CloseStatus == "EXPIRED" || order.CloseStatus == "LOCALLY_CLOSED_EXTERNAL_PENDING" {
 		_ = tx.Commit(ctx)
 		maskClosedPaymentInstructions(&order)
@@ -207,22 +210,71 @@ func (p *PaymentCoordinator) CreateRefund(ctx context.Context, orderID, requeste
 }
 
 func (p *PaymentCoordinator) ProcessRefund(ctx context.Context, refundID uuid.UUID) error {
-	if !p.Capabilities().RefundSupported || !p.Capabilities().RefundIdempotencySupported {
-		return payment.ErrUnsupported
-	}
+	_, err := p.processRefund(ctx, refundID, false)
+	return err
+}
+
+func (p *PaymentCoordinator) processRefund(ctx context.Context, refundID uuid.UUID, reconcile bool) (Refund, error) {
 	if refundID == uuid.Nil {
-		return ErrConflict
+		return Refund{}, ErrConflict
 	}
 	refund, err := getRefundByID(ctx, p.repository.pool, refundID, false)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
+		return Refund{}, ErrNotFound
 	}
-	if err != nil || refund.Status != "REQUESTED" {
-		return err
+	if err != nil || refund.Status != "REQUESTED" && !(reconcile && refund.Status == "MANUAL_REVIEW") {
+		return refund, err
 	}
-	merchantOrderNo, err := refundMerchantOrder(ctx, p.repository.pool, refund.PaymentOrderID)
+	if !p.Capabilities().RefundSupported || !p.Capabilities().RefundIdempotencySupported {
+		return refund, payment.ErrUnsupported
+	}
+	// Persist the possible-dispatch boundary before taking the financial gate.
+	// The stable merchant refund number is the provider's idempotency key.
+	claimed, err := p.repository.pool.Exec(ctx, `UPDATE refunds SET dispatch_state='IN_PROGRESS',dispatch_started_at=COALESCE(dispatch_started_at,$2),dispatch_lease_until=$2+interval '2 minutes' WHERE id=$1 AND status IN ('REQUESTED','MANUAL_REVIEW') AND (dispatch_lease_until IS NULL OR dispatch_lease_until<$2)`, refundID, p.now())
 	if err != nil {
-		return err
+		return refund, err
+	}
+	if claimed.RowsAffected() != 1 {
+		return refund, ErrConflict
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	tx, err := p.repository.pool.Begin(ctx)
+	if err != nil {
+		return refund, err
+	}
+	defer tx.Rollback(context.Background())
+	order, err := getPaymentOrderByID(ctx, tx, refund.PaymentOrderID, true)
+	if err != nil {
+		return refund, err
+	}
+	if p.Capabilities().ProviderID != order.ProviderID || p.Capabilities().Version != order.ProviderVersion {
+		return refund, ErrConflict
+	}
+	refund, err = getRefundByID(ctx, tx, refundID, true)
+	if err != nil {
+		return refund, err
+	}
+	if refund.Status != "REQUESTED" && !(reconcile && refund.Status == "MANUAL_REVIEW") {
+		return refund, ErrConflict
+	}
+	var blocked bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chargeback_cases WHERE entitlement_package_id=$1 AND status<>'DISMISSED') OR EXISTS(SELECT 1 FROM forced_refund_cases WHERE entitlement_package_id=$1 AND resolution_code IS DISTINCT FROM 'DISMISS') OR EXISTS(SELECT 1 FROM receivables WHERE wallet_id=$2 AND outstanding_microcredits>0)`, refund.EntitlementPackageID, order.WalletID).Scan(&blocked)
+	if err != nil {
+		return refund, err
+	}
+	if blocked {
+		if _, err := tx.Exec(ctx, `UPDATE refunds SET dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=NULL WHERE id=$1`, refundID); err != nil {
+			return refund, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return refund, err
+		}
+		return refund, ErrConflict
+	}
+	merchantOrderNo, err := refundMerchantOrder(ctx, tx, refund.PaymentOrderID)
+	if err != nil {
+		return refund, err
 	}
 	providerRefund, providerErr := providerCall(ctx, p, "REFUND", "default", true, ProviderCallScope{OrderID: refund.PaymentOrderID, SubjectID: refund.RequesterID}, func() (ProviderRefund, error) {
 		return p.provider.Refund(ctx, merchantOrderNo, refund.MerchantRefundNo, refund.AmountFen)
@@ -231,10 +283,32 @@ func (p *PaymentCoordinator) ProcessRefund(ctx context.Context, refundID uuid.UU
 		// JetStream may redeliver this event. The stable merchant refund number
 		// makes that safe only because the selected Provider explicitly declared
 		// refund idempotency support.
-		return ErrPaymentProvider
+		if _, err := tx.Exec(ctx, `UPDATE refunds SET dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=NULL WHERE id=$1`, refundID); err != nil {
+			return refund, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return refund, err
+		}
+		return refund, ErrPaymentProvider
 	}
-	_, _, err = p.finishRefund(ctx, refund, providerRefund, false)
-	return err
+	if reconcile {
+		// The trusted idempotent provider result, not the human's declaration,
+		// must prove the terminal outcome before re-entering local settlement.
+		if providerRefund.MerchantRefundNo != refund.MerchantRefundNo || providerRefund.AmountFen != refund.AmountFen || providerRefund.Status != "SUCCESS" && providerRefund.Status != "FAILED" || providerRefund.Status == "SUCCESS" && strings.TrimSpace(providerRefund.ChannelRefundID) == "" {
+			if _, err := tx.Exec(ctx, `UPDATE refunds SET dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=NULL WHERE id=$1`, refundID); err != nil {
+				return refund, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return refund, err
+			}
+			return refund, ErrConflict
+		}
+		if _, err := tx.Exec(ctx, `UPDATE refunds SET status='REQUESTED' WHERE id=$1 AND status='MANUAL_REVIEW'`, refundID); err != nil {
+			return refund, err
+		}
+	}
+	result, _, err := p.finishRefundTransaction(ctx, tx, refund, providerRefund, false)
+	return result, err
 }
 
 func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, requesterID, transactionID, packageID uuid.UUID, idempotencyKey, requestHash, reason string) (Refund, bool, error) {
@@ -290,7 +364,7 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 	}
 	var abnormal bool
 	if err := tx.QueryRow(ctx, `SELECT
-		EXISTS(SELECT 1 FROM chargeback_cases WHERE payment_transaction_id=$1 AND status='CONFIRMED')
+		EXISTS(SELECT 1 FROM chargeback_cases WHERE payment_transaction_id=$1 AND status<>'DISMISSED')
 		OR EXISTS(SELECT 1 FROM forced_refund_cases WHERE payment_transaction_id=$1 AND status='REVIEW_REQUIRED')
 		OR EXISTS(SELECT 1 FROM refunds WHERE payment_transaction_id=$1 AND entitlement_package_id=$3 AND status IN ('REQUESTED','SUCCEEDED','MANUAL_REVIEW'))
 		OR EXISTS(SELECT 1 FROM receivables WHERE payment_order_id=$2 AND outstanding_microcredits>0)
@@ -399,6 +473,10 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 		return Refund{}, created, err
 	}
 	defer tx.Rollback(ctx)
+	return p.finishRefundTransaction(ctx, tx, requested, provider, created)
+}
+
+func (p *PaymentCoordinator) finishRefundTransaction(ctx context.Context, tx pgx.Tx, requested Refund, provider ProviderRefund, created bool) (Refund, bool, error) {
 	initial, err := getRefundByID(ctx, tx, requested.ID, false)
 	if err != nil {
 		return Refund{}, created, err
@@ -423,7 +501,7 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 	now := p.now()
 	if provider.MerchantRefundNo != refund.MerchantRefundNo || provider.AmountFen != refund.AmountFen || (provider.Status == "SUCCESS" && strings.TrimSpace(provider.ChannelRefundID) == "") {
 		failure := "payment provider returned conflicting refund evidence"
-		if _, err = tx.Exec(ctx, `UPDATE refunds SET status='MANUAL_REVIEW',failure_reason=$2,channel_refund_id=NULLIF($3,''),intent_version=intent_version+1,updated_at=$4 WHERE id=$1`, refund.ID, failure, provider.ChannelRefundID, now); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE refunds SET dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=NULL,status='MANUAL_REVIEW',failure_reason=$2,channel_refund_id=NULLIF($3,''),intent_version=intent_version+1,updated_at=$4 WHERE id=$1`, refund.ID, failure, provider.ChannelRefundID, now); err != nil {
 			return Refund{}, created, err
 		}
 		if err = events.AppendOutbox(ctx, tx, "billing.refund.review-required.v1", refund.ID, 2, map[string]any{"refund_id": refund.ID, "payment_transaction_id": refund.PaymentTransactionID, "entitlement_package_id": refund.EntitlementPackageID, "failure_reason": failure}); err != nil {
@@ -445,7 +523,7 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 		failure := "payment provider rejected the refund"
 		err = restoreRefundEntitlements(ctx, tx, refund.ID, refund.EntitlementPackageID, now)
 		if err == nil {
-			_, err = tx.Exec(ctx, `UPDATE refunds SET status='FAILED',failure_reason=$2,intent_version=intent_version+1,updated_at=$3 WHERE id=$1`, refund.ID, failure, now)
+			_, err = tx.Exec(ctx, `UPDATE refunds SET dispatch_state='COMPLETED',dispatch_lease_until=NULL,status='FAILED',failure_reason=$2,intent_version=intent_version+1,updated_at=$3 WHERE id=$1`, refund.ID, failure, now)
 		}
 		if err == nil {
 			err = events.AppendOutbox(ctx, tx, "billing.refund.failed.v1", refund.ID, 2, map[string]any{"refund_id": refund.ID, "payment_transaction_id": refund.PaymentTransactionID, "entitlement_package_id": refund.EntitlementPackageID, "failure_reason": failure})
@@ -484,7 +562,7 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 		return Refund{}, created, err
 	}
 	if len(components) == 0 || total != refund.CreditMicrocredits || wallet.PostedMicrocredits < total {
-		_, updateErr := tx.Exec(ctx, `UPDATE refunds SET status='MANUAL_REVIEW',failure_reason='local refundable balance changed after provider refund',channel_refund_id=$2,intent_version=intent_version+1,updated_at=$3 WHERE id=$1`, refund.ID, provider.ChannelRefundID, now)
+		_, updateErr := tx.Exec(ctx, `UPDATE refunds SET dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=NULL,status='MANUAL_REVIEW',failure_reason='local refundable balance changed after provider refund',channel_refund_id=$2,intent_version=intent_version+1,updated_at=$3 WHERE id=$1`, refund.ID, provider.ChannelRefundID, now)
 		if updateErr != nil {
 			return Refund{}, created, updateErr
 		}
@@ -552,7 +630,7 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 		}
 	}
 	if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE refunds SET status='SUCCEEDED',channel_refund_id=$2,intent_version=intent_version+1,updated_at=$3 WHERE id=$1`, refund.ID, provider.ChannelRefundID, now)
+		_, err = tx.Exec(ctx, `UPDATE refunds SET dispatch_state='COMPLETED',dispatch_lease_until=NULL,status='SUCCEEDED',channel_refund_id=$2,intent_version=intent_version+1,updated_at=$3 WHERE id=$1`, refund.ID, provider.ChannelRefundID, now)
 	}
 	if err == nil {
 		err = events.AppendOutbox(ctx, tx, "billing.refund.succeeded.v1", refund.ID, 2, map[string]any{"refund_id": refund.ID, "payment_order_id": refund.PaymentOrderID, "payment_transaction_id": refund.PaymentTransactionID, "entitlement_package_id": refund.EntitlementPackageID, "amount_fen": refund.AmountFen, "base_microcredits": refund.BaseMicrocredits, "bonus_microcredits": refund.BonusMicrocredits})

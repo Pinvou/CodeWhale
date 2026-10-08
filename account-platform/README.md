@@ -27,3 +27,5 @@ PR Check 对账号平台路径改动在 Draft、Ready 和 Merge Queue 均执行 
 `account-service` 启动时核查并补齐当前供应商映射；注册和手机号修改也使用同一持久任务。配置了供应商适配器时，客户同步 worker 按 ACTIVE 用户、供应商/适配器、映射版本和当前有效租约确认或重试。停用期间同代迟到结果不写 READY，任务保留为 RETRY，启用后重新调用供应商；旧代和 DETACHED 结果不能恢复任务。完成与重试在取得映射及任务锁后核对领取次数和数据库时间，过期或已重领的 worker 不得写映射或证据。尚未交付不可逆注销时，原 015 的任务生命周期版本为 1，代码不依赖未来 `users.subject_lifecycle_version` 列；注销功能首次交付时须同时恢复其用户生命周期栅栏，不能直接沿用本阶段投影。
 
 实际 public-schema 回归覆盖 Bootstrap、Account 侧钱包确认、GetMe、启动映射补齐和 Claim/Retry/Complete，以及停用/启用恢复、旧映射代次、DETACHED、任务过期重领和有数据的晚装迁移。该验证不等同 Billing HTTP、实际供应商或完整 E2E 验收。
+
+Billing 的本地与部署初始化、升级角色前置见 [数据库运行说明](deploy/postgres/README.md)。迁移必须由独立 migrator 执行，服务启动不创建 owner 或扩大权限。

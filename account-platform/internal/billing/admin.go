@@ -715,9 +715,14 @@ func (s *Service) adminResolvePaymentAnomaly(w http.ResponseWriter, r *http.Requ
 		writeAdminFinancialJSON(w, http.StatusOK, prepared)
 		return
 	}
+	// The immutable command has been accepted. Preserve its key and facts on
+	// every incomplete outcome, including a provider's still-pending result.
+	writeUnknown := func() {
+		api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNKNOWN", "the accepted command is incomplete; retry with the same idempotency key and facts", httpserver.RequestID(r.Context()))
+	}
 	detail, err := repository.PaymentAnomalyDetail(r.Context(), caseID)
 	if err != nil {
-		s.writeError(w, r, err)
+		writeUnknown()
 		return
 	}
 	financialStatus := "NONE"
@@ -742,7 +747,7 @@ func (s *Service) adminResolvePaymentAnomaly(w http.ResponseWriter, r *http.Requ
 		if detail.Case.PaymentOrderID == nil || s.payments == nil || (detail.Case.AnomalyType != "DUPLICATE_PAYMENT" && detail.Case.AnomalyType != "LATE_PAYMENT_CONFLICT") {
 			err = ErrConflict
 		} else {
-			_, err = s.payments.RepairReviewedOrder(r.Context(), *detail.Case.PaymentOrderID, adminActor(adminPrincipal(r)), body.Reason)
+			_, err = s.payments.repairReviewedOrder(r.Context(), *detail.Case.PaymentOrderID, adminActor(adminPrincipal(r)), body.Reason, caseID, idempotencyKey)
 			financialStatus = "APPLIED"
 		}
 	case "CONFIRM_PROVIDER_FAILED":
@@ -756,6 +761,17 @@ func (s *Service) adminResolvePaymentAnomaly(w http.ResponseWriter, r *http.Requ
 				return
 			}
 		}
+	case "RECONCILE_REFUND":
+		if detail.Case.AnomalyType != "REFUND_FAILURE" || detail.Case.RefundID == nil || s.payments == nil {
+			err = ErrConflict
+		} else {
+			var refund Refund
+			refund, err = s.payments.processRefund(r.Context(), *detail.Case.RefundID, true)
+			if err == nil && refund.Status != "SUCCEEDED" && refund.Status != "FAILED" {
+				err = ErrConflict
+			}
+			financialStatus = "APPLIED"
+		}
 	case "DISMISS":
 		if detail.Case.AnomalyType == "DUPLICATE_PAYMENT" || detail.Case.AnomalyType == "LATE_PAYMENT_CONFLICT" || detail.Case.AnomalyType == "ILLEGAL_TRANSITION" {
 			err = ErrConflict
@@ -768,12 +784,12 @@ func (s *Service) adminResolvePaymentAnomaly(w http.ResponseWriter, r *http.Requ
 		err = ErrConflict
 	}
 	if err != nil {
-		s.writeError(w, r, err)
+		writeUnknown()
 		return
 	}
 	item, err := repository.ResolvePaymentAnomaly(r.Context(), caseID, adminActor(adminPrincipal(r)), idempotencyKey, resolution, body.Reason, financialStatus)
 	if err != nil {
-		s.writeError(w, r, err)
+		writeUnknown()
 		return
 	}
 	writeAdminFinancialJSON(w, http.StatusOK, item)

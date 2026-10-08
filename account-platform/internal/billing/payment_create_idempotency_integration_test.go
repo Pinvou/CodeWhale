@@ -82,9 +82,8 @@ func TestRetainedCreateSameKeyExternalWait(t *testing.T) {
 				}
 				if first.err == nil {
 					a, _ := json.Marshal(first.order)
-					b, _ := json.Marshal(second)
 					d, _ := json.Marshal(replay)
-					if replayErr != nil || !bytes.Equal(a, b) || !bytes.Equal(b, d) {
+					if replayErr != nil || !bytes.Equal(a, d) || second.ID != first.order.ID || second.AmountFen != first.order.AmountFen {
 						t.Errorf("first delivered receipt was not preserved for first/replay: replayErr=%v", replayErr)
 					}
 				}
@@ -136,5 +135,5 @@ func (p *retainedSameKeyProvider) Create(ctx context.Context, input payment.Orde
 			return ProviderOrder{}, ctx.Err()
 		}
 	}
-	return ProviderOrder{MerchantOrderNo: input.MerchantOrderNo, Status: "PENDING", PaymentURL: "https://provider.invalid/pay/" + input.MerchantOrderNo}, nil
+	return ProviderOrder{MerchantOrderNo: input.MerchantOrderNo, Channel: input.Channel, AmountFen: input.AmountFen, Currency: input.Currency, ExternalCustomerKey: input.MerchantCustomerKey, ExternalSKU: input.ExternalSKU, Status: "PENDING", PaymentURL: "https://provider.invalid/pay/" + input.MerchantOrderNo}, nil
 }

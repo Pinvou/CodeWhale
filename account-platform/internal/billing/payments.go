@@ -372,14 +372,10 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		if order.RequesterID != requesterID || order.WalletID != walletID || order.ProductID != productID || order.Channel != channel {
 			return PaymentOrder{}, false, ErrConflict
 		}
-		responseBody, err := json.Marshal(order)
-		if err != nil {
+		if err = tx.Commit(ctx); err != nil {
 			return PaymentOrder{}, false, err
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES('payment.create',$1,$2,200,$3,$4,$5)`, idempotencyKey, requestHash, responseBody, p.now(), p.now().Add(24*time.Hour)); err != nil {
-			return PaymentOrder{}, false, err
-		}
-		return order, false, tx.Commit(ctx)
+		return p.dispatchCreatedOrder(ctx, order, idempotencyKey, requestHash, false)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return PaymentOrder{}, false, err
@@ -409,11 +405,20 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 			}
 			existing.ProviderPayableUntil, existing.LateReviewBoundaryAt, existing.FinalArchiveEligibleAt = providerPayableUntil, lateReviewBoundaryAt, finalArchiveEligibleAt
 		}
-		responseBody, _ := json.Marshal(existing)
-		if _, err := tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES('payment.create',$1,$2,200,$3,$4,$5)`, idempotencyKey, requestHash, responseBody, now, now.Add(24*time.Hour)); err != nil {
+		existing, err = getPaymentOrderByID(ctx, tx, existing.ID, false)
+		if err != nil {
 			return PaymentOrder{}, false, err
 		}
-		return existing, false, tx.Commit(ctx)
+		bindingBody, _ := json.Marshal(struct {
+			OrderID uuid.UUID `json:"order_id"`
+		}{existing.ID})
+		if _, err := tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES('payment.create.binding',$1,$2,200,$3,$4,$5)`, idempotencyKey, requestHash, bindingBody, now, now.Add(24*time.Hour)); err != nil {
+			return PaymentOrder{}, false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return PaymentOrder{}, false, err
+		}
+		return p.dispatchCreatedOrder(ctx, existing, idempotencyKey, requestHash, false)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return PaymentOrder{}, false, err
@@ -488,12 +493,48 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, err
 	}
 
-	providerOrder, providerErr := providerCall(ctx, p, "ORDER_CREATE", order.Channel, true, providerCallScope(order), func() (payment.ProviderOrder, error) {
-		return p.provider.Create(ctx, payment.Order{MerchantOrderNo: order.MerchantOrderNo, MerchantCustomerKey: requesterID.String(), Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Mobile: order.Mobile, ExternalSKU: order.ProviderSKU}, p.callbackURL)
-	})
+	return p.dispatchCreatedOrder(ctx, order, idempotencyKey, requestHash, true)
+}
+
+// Only a durable NOT_STARTED -> IN_PROGRESS transition may issue Create.
+// A crash after that transition is ambiguous: recover by querying the stable
+// merchant order number, never by assuming the provider did not receive it.
+func (p *PaymentCoordinator) dispatchCreatedOrder(ctx context.Context, order PaymentOrder, idempotencyKey, requestHash string, newlyCreated bool) (PaymentOrder, bool, error) {
+	if p.Capabilities().ProviderID != order.ProviderID || p.Capabilities().Version != order.ProviderVersion {
+		return order, false, ErrConflict
+	}
+	claimed, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET provider_call_status='IN_PROGRESS',updated_at=$2 WHERE id=$1 AND provider_call_status='NOT_STARTED' AND status IN ('CREATED','PENDING') AND close_status='OPEN'`, order.ID, p.now())
+	if err != nil {
+		return PaymentOrder{}, false, err
+	}
+	var providerOrder ProviderOrder
+	var providerErr error
+	if claimed.RowsAffected() == 1 {
+		providerOrder, providerErr = providerCall(ctx, p, "ORDER_CREATE", order.Channel, true, providerCallScope(order), func() (payment.ProviderOrder, error) {
+			return p.provider.Create(ctx, payment.Order{MerchantOrderNo: order.MerchantOrderNo, MerchantCustomerKey: order.RequesterID.String(), Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Mobile: order.Mobile, ExternalSKU: order.ProviderSKU}, p.callbackURL)
+		})
+	} else {
+		if !p.Capabilities().OrderQuerySupported {
+			return order, false, nil
+		}
+		providerOrder, providerErr = providerCall(ctx, p, "ORDER_QUERY", order.Channel, false, providerCallScope(order), func() (ProviderOrder, error) {
+			return p.provider.Get(ctx, order.MerchantOrderNo)
+		})
+	}
 	if providerErr != nil {
+		if claimed.RowsAffected() == 0 {
+			// Another dispatcher may still be in the external call. Preserve the
+			// pending identity without freezing an incomplete success receipt.
+			return order, false, nil
+		}
 		_, _ = p.repository.pool.Exec(ctx, `UPDATE payment_orders SET provider_call_status='RESULT_UNKNOWN',updated_at=$2 WHERE id=$1 AND provider_call_status IN ('NOT_STARTED','IN_PROGRESS')`, order.ID, p.now())
 		return PaymentOrder{}, false, providerErr
+	}
+	if !providerMatchesOrder(providerOrder, order) {
+		if claimed.RowsAffected() == 0 {
+			return order, false, nil
+		}
+		return PaymentOrder{}, false, ErrConflict
 	}
 	resultTx, err := p.repository.pool.Begin(ctx)
 	if err != nil {
@@ -501,6 +542,10 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	}
 	defer resultTx.Rollback(ctx)
 	if err := lockTransactionKey(ctx, resultTx, "payment.create", idempotencyKey); err != nil {
+		return PaymentOrder{}, false, err
+	}
+	order, err = getPaymentOrderByID(ctx, resultTx, order.ID, true)
+	if err != nil {
 		return PaymentOrder{}, false, err
 	}
 	// A successful payment may arrive before the external create call returns.
@@ -518,13 +563,27 @@ SET status=CASE WHEN status IN ('CREATED','PENDING') THEN 'PENDING' ELSE status 
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
+	if providerOrder.Status == "SUCCESS" {
+		order, _, err = p.mergeSuccessfulPaymentWithinTransaction(ctx, resultTx, order, "QUERY", providerEvidenceKey("QUERY", providerOrder), nil, providerOrder, false, p.now())
+	} else if providerOrder.Status != "PENDING" && providerOrder.Status != "CREATED" {
+		err = p.mergeProviderObservationWithinTransaction(ctx, resultTx, order, "QUERY", providerEvidenceKey("QUERY", providerOrder), nil, providerOrder, p.now())
+		if err == nil {
+			order, err = getPaymentOrderByID(ctx, resultTx, order.ID, false)
+		}
+	}
+	if err != nil {
+		return PaymentOrder{}, false, err
+	}
 	responseBody, _ := json.Marshal(order)
+	now := p.now()
 	receipt, err := resultTx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES ('payment.create',$1,$2,201,$3,$4,$5) ON CONFLICT(scope,idempotency_key) DO NOTHING`, idempotencyKey, requestHash, responseBody, now, now.Add(24*time.Hour))
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
-	created := true
+	created := newlyCreated
 	if receipt.RowsAffected() == 0 {
+		var existingHash string
+		var existingBody []byte
 		if err := resultTx.QueryRow(ctx, `SELECT request_hash,response_body FROM idempotency_records WHERE scope='payment.create' AND idempotency_key=$1 FOR UPDATE`, idempotencyKey).Scan(&existingHash, &existingBody); err != nil {
 			return PaymentOrder{}, false, err
 		}
@@ -655,17 +714,23 @@ func (p *PaymentCoordinator) persistNotification(ctx context.Context, channel st
 	}
 	defer tx.Rollback(ctx)
 	digest := sha256.Sum256(body)
-	command, err := tx.Exec(ctx, `INSERT INTO payment_notifications(notification_id,channel,request_hash,payload,received_at,result) VALUES ($1,$2,$3,$4,$5,'RECEIVED') ON CONFLICT DO NOTHING`, notification.NotificationID, channel, hex.EncodeToString(digest[:]), body, p.now())
+	command, err := tx.Exec(ctx, `INSERT INTO payment_notifications(notification_id,channel,request_hash,payload,received_at,result,provider_id,provider_version) VALUES ($1,$2,$3,$4,$5,'RECEIVED',$6,$7) ON CONFLICT DO NOTHING`, notification.NotificationID, channel, hex.EncodeToString(digest[:]), body, p.now(), p.Capabilities().ProviderID, p.Capabilities().Version)
 	if err != nil {
 		return uuid.Nil, false, err
 	}
 	if command.RowsAffected() == 0 {
 		var existingBody []byte
-		if err := tx.QueryRow(ctx, `SELECT payload FROM payment_notifications WHERE notification_id=$1`, notification.NotificationID).Scan(&existingBody); err != nil {
+		var sourceID, sourceVersion *string
+		var existingResult string
+		if err := tx.QueryRow(ctx, `SELECT payload,provider_id,provider_version,result FROM payment_notifications WHERE notification_id=$1`, notification.NotificationID).Scan(&existingBody, &sourceID, &sourceVersion, &existingResult); err != nil {
 			return uuid.Nil, false, err
 		}
 		var previous paymentNotification
 		if json.Unmarshal(existingBody, &previous) != nil || !sameNotificationPaymentFacts(previous, notification) {
+			return uuid.Nil, false, ErrForbiddenPayment
+		}
+		legacyTerminal := sourceID == nil && sourceVersion == nil && (existingResult == "PROCESSED" || existingResult == "REJECTED" || existingResult == "MANUAL_REVIEW")
+		if !legacyTerminal && (sourceID == nil || sourceVersion == nil || *sourceID != p.Capabilities().ProviderID || *sourceVersion != p.Capabilities().Version) {
 			return uuid.Nil, false, ErrForbiddenPayment
 		}
 		return notification.NotificationID, false, tx.Commit(ctx)
@@ -701,7 +766,8 @@ func (p *PaymentCoordinator) ProcessPersistedNotification(ctx context.Context, n
 	defer tx.Rollback(ctx)
 	var channel, result string
 	var body []byte
-	if err := tx.QueryRow(ctx, `SELECT channel,payload,result FROM payment_notifications WHERE notification_id=$1 FOR UPDATE`, notificationID).Scan(&channel, &body, &result); err != nil {
+	var sourceID, sourceVersion *string
+	if err := tx.QueryRow(ctx, `SELECT channel,payload,result,provider_id,provider_version FROM payment_notifications WHERE notification_id=$1 FOR UPDATE`, notificationID).Scan(&channel, &body, &result, &sourceID, &sourceVersion); err != nil {
 		return err
 	}
 	if result != "RECEIVED" {
@@ -714,6 +780,22 @@ func (p *PaymentCoordinator) ProcessPersistedNotification(ctx context.Context, n
 	order, err := getPaymentOrderForUpdate(ctx, tx, notification.MerchantOrderNo)
 	if err != nil {
 		return err
+	}
+	if sourceID == nil || sourceVersion == nil || *sourceID != order.ProviderID || *sourceVersion != order.ProviderVersion || p.Capabilities().ProviderID != order.ProviderID || p.Capabilities().Version != order.ProviderVersion {
+		// Verifier provenance is persisted outside the payload. An authenticated
+		// message from another adapter (or a legacy message with no provenance)
+		// is evidence for human review, never evidence to credit this wallet.
+		now := p.now()
+		if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, "PAYMENT_FACT_CONFLICT", "P1", "payment-notification:"+notificationID.String()+":provider-binding", paymentAnomalyReference{PaymentOrderID: &order.ID}, map[string]any{"notification_id": notificationID, "reason": "UNVERIFIED_PROVIDER_BINDING"}, now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET attention_summary='REVIEW_REQUIRED',status=CASE WHEN status IN ('CREATED','PENDING','EXPIRED') THEN 'MANUAL_REVIEW' ELSE status END,fulfillment_status=CASE WHEN fulfillment_status='PENDING' THEN 'MANUAL_REVIEW' ELSE fulfillment_status END,summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, order.ID, now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE payment_notifications SET result='MANUAL_REVIEW',processed_at=$2,next_attempt_at=NULL,last_error_code='UNVERIFIED_PROVIDER_BINDING' WHERE notification_id=$1`, notificationID, now); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
 	if notification.MerchantID != p.merchantID || notification.Channel != channel {
 		return ErrForbiddenPayment
@@ -916,9 +998,11 @@ func productComponentAmounts(total, basePoints, bonusPoints int64) (int64, int64
 }
 
 func getPaymentOrderForUpdate(ctx context.Context, tx pgx.Tx, merchant string) (PaymentOrder, error) {
-	var o PaymentOrder
-	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,close_status,COALESCE(payment_url,''),COALESCE(qr_data,''),primary_provider_transaction_id,expires_at,paid_at,COALESCE(provider_sku,''),provider_id,provider_version FROM payment_orders WHERE merchant_order_no=$1 FOR UPDATE`, merchant).Scan(&o.ID, &o.MerchantOrderNo, &o.RequesterID, &o.BeneficiaryOrganizationID, &o.WalletID, &o.ProductID, &o.Channel, &o.AmountFen, &o.Currency, &o.CreditMicrocredits, &o.Status, &o.FulfillmentStatus, &o.CloseStatus, &o.PaymentURL, &o.QRData, &o.PrimaryProviderTransactionID, &o.ExpiresAt, &o.PaidAt, &o.ProviderSKU, &o.ProviderID, &o.ProviderVersion)
-	return o, err
+	var id uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM payment_orders WHERE merchant_order_no=$1`, merchant).Scan(&id); err != nil {
+		return PaymentOrder{}, err
+	}
+	return getPaymentOrderByID(ctx, tx, id, true)
 }
 
 func paymentSignature(secret, body []byte) string {

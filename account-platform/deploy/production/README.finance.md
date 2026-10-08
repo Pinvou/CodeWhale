@@ -27,3 +27,7 @@ F01 TLS edge 只新增两个精确 POST 回调入口 `/api/v1/payment-callback/t
 ## 验证限制
 
 本地真实 PostgreSQL、TLS NATS 与受控 HTTP 用例仅证明命中的迁移、金融状态和资源协议。生产 Linux 容器、外部 Mall/Keycloak、密钥投递与现场发布尚需部署环境验收；完整 E2E 依用户决定延期。编译、静态配置检查或模拟支付成功不能替代真实支付渠道和正式发布验收。
+
+## Billing 数据库权限前置
+
+启动 Compose 迁移作业前，数据库管理员须按 [Billing 数据库运行说明](../postgres/README.md) 在独立 Billing 数据库执行角色初始化。`billing-migrate` 私有环境文件使用 `billing_migrator` 的 DSN 和 `MIGRATION_ROLE=billing_service`；Billing 与 relay 只使用 runtime `billing_service` 连接，不得共用管理员或迁移凭据。已有部署同样先预配 owner 和单向成员关系，再提供备份回执执行前向硬化。Compose 不包含管理员数据库密码，不自动运行角色初始化；缺少角色会明确拒绝迁移。
