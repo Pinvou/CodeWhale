@@ -70,7 +70,7 @@ use crate::features::assistant::runtime_model::{
 };
 use crate::features::assistant::turn_shell_tasks::{SessionShellManagers, SessionTurnShellTasks};
 use crate::features::sessions::{ScheduledRunProfile, SessionStore, transcript_revision};
-use crate::platform::prefs::{SavedModel, UserPrefs};
+use crate::platform::prefs::{ModelSelectionRef, SavedModel, UserPrefs};
 
 /// Engine idle-reclaim threshold: an engine is an in-process task (not a
 /// subprocess), but each occupies a channel, a toolset, and a hydrated
@@ -315,6 +315,36 @@ impl SessionTurnLifecycles {
 
     fn remove(&self, session_id: &str) {
         self.states.lock().remove(session_id);
+    }
+}
+
+// This handle owns no EnginePool/provider reference. Dropping the pool makes
+// proxy admissions unavailable instead of keeping the session registry alive.
+struct RuntimeTurnLifecycleAuthority {
+    states: std::sync::Weak<SyncMutex<HashMap<String, Arc<TurnLifecycle>>>>,
+}
+
+impl crate::features::assistant::runtime_model::RuntimeTurnAuthority
+    for RuntimeTurnLifecycleAuthority
+{
+    fn current_generation(&self, session_id: &str) -> Option<u64> {
+        let states = self.states.upgrade()?;
+        let lifecycle = { states.lock().get(session_id).cloned() }?;
+        lifecycle.current_runtime_turn_generation()
+    }
+    fn with_generation(
+        &self,
+        session_id: &str,
+        generation: u64,
+        callback: &mut dyn FnMut(),
+    ) -> bool {
+        let Some(states) = self.states.upgrade() else {
+            return false;
+        };
+        let Some(lifecycle) = ({ states.lock().get(session_id).cloned() }) else {
+            return false;
+        };
+        lifecycle.with_current_turn_generation(generation, callback)
     }
 }
 
@@ -1596,6 +1626,10 @@ impl EnginePool {
         runtime_model_provider: Arc<dyn RuntimeModelProvider>,
     ) -> Result<Self> {
         let bridge = Pinvou3Bridge::boot()?;
+        let turn_lifecycles = SessionTurnLifecycles::default();
+        runtime_model_provider.bind_turn_authority(Arc::new(RuntimeTurnLifecycleAuthority {
+            states: Arc::downgrade(&turn_lifecycles.states),
+        }))?;
         Ok(Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
             runtime_model_locks: SessionTurnLocks::default(),
@@ -1604,7 +1638,7 @@ impl EnginePool {
             #[cfg(any(feature = "benchmark-hooks", test))]
             eval_model_snapshots: EvalModelSnapshots::default(),
             turn_locks: SessionTurnLocks::default(),
-            turn_lifecycles: SessionTurnLifecycles::default(),
+            turn_lifecycles,
             shell_managers: SessionShellManagers::default(),
             turn_shell_tasks: SessionTurnShellTasks::default(),
             app,
@@ -1909,6 +1943,15 @@ impl EnginePool {
         let pins_scheduled_model = scheduled_profile.is_some()
             && (scheduled_unattended || interactive_model_override.is_none());
         bridge.session_model = resolve_runtime_model_override(explicit_model_override, || {
+            // Explicit evaluation snapshots already select a model and must not
+            // depend on the interactive default. Only normal resolution needs it.
+            if scheduled_profile.is_none()
+                && interactive_model_override.is_none()
+                && bridge.prefs.model_selection_schema_version >= 1
+                && bridge.prefs.advanced.default_model_ref.is_none()
+            {
+                bail!("model_selection_required: choose a model before sending");
+            }
             resolve_spawn_model(
                 &bridge.prefs.advanced.saved_models,
                 scheduled_profile.as_ref(),
@@ -2984,6 +3027,16 @@ impl EnginePool {
         Ok(())
     }
 
+    pub async fn switch_session_model_ref(
+        &self,
+        session_id: &str,
+        model_ref: Option<ModelSelectionRef>,
+    ) -> Result<()> {
+        self.store.set_session_model_ref(session_id, model_ref)?;
+        self.evict(session_id).await;
+        Ok(())
+    }
+
     // ── High-level routing (called by commands.rs) ──────────────────────
 
     /// Atomically switch the multi-agent resource policy: first occupy the
@@ -3221,8 +3274,11 @@ impl EnginePool {
             format!("Session '{session_id}' was deleted before the eval turn could start")
         })?;
         reservation.ensure_active()?;
-        self.get_or_spawn(session_id)
-            .await?
+        let engine = self.get_or_spawn(session_id).await?;
+        self.runtime_model_provider
+            .begin_logical_turn(session_id)
+            .await?;
+        engine
             .send_reserved_eval_message(content, policy, reservation)
             .await
     }
@@ -3295,6 +3351,9 @@ impl EnginePool {
             .map(crate::features::personas::equip_anchor);
         let persona_conversational = active_card.as_ref().is_some_and(|c| c.conversational_only);
         let engine = self.get_or_spawn(session_id).await?;
+        self.runtime_model_provider
+            .begin_logical_turn(session_id)
+            .await?;
         forward_forced_turn_restrict(
             session_id,
             persona_conversational,
@@ -3434,6 +3493,9 @@ impl EnginePool {
                     cancel_requested: true,
                 });
             }
+            self.runtime_model_provider
+                .begin_logical_turn(session_id)
+                .await?;
             engine.send_scheduled_message(content, &profile).await?;
             wait_for_scheduled_terminal(
                 &mut turn_events,
@@ -3821,6 +3883,9 @@ impl EnginePool {
         // and are unchanged. Folding the merge into the dispatch seam keeps
         // the wiring itself pinned by an executing test (round-31 M9-rust).
         let engine = self.get_or_spawn(session_id).await?;
+        self.runtime_model_provider
+            .begin_logical_turn(session_id)
+            .await?;
         forward_edit_resend_with_reminder(session_id, new_message, |message| {
             engine.edit_last_turn_reserved(message, reservation)
         })
@@ -3977,7 +4042,16 @@ fn default_model_for_new_session_from(
     prefs: &UserPrefs,
     bridge: &Pinvou3Bridge,
 ) -> (String, Option<String>) {
-    match prefs.active_model() {
+    if prefs.model_selection_schema_version >= 1 && prefs.advanced.default_model_ref.is_none() {
+        return (String::new(), None);
+    }
+    let selected = prefs
+        .advanced
+        .default_model_ref
+        .as_ref()
+        .and_then(|selection| prefs.resolve_model_ref(selection))
+        .or_else(|| prefs.active_model().cloned());
+    match selected {
         Some(model) => (model.model.clone(), Some(model.id.clone())),
         None => (bridge.model(), None),
     }
@@ -4257,7 +4331,7 @@ mod scheduled_model_tests {
             change_identity: false,
         };
         for selected in [
-            SavedModel::builtin_llmapi(),
+            SavedModel::builtin_account_platform(),
             model("custom-draft", "custom-wire"),
         ] {
             let expected_id = selected.id.clone();
@@ -4278,9 +4352,12 @@ mod scheduled_model_tests {
                 change_identity,
             };
             assert!(
-                super::prepare_draft_runtime_model(&provider, SavedModel::builtin_llmapi())
-                    .await
-                    .is_err()
+                super::prepare_draft_runtime_model(
+                    &provider,
+                    SavedModel::builtin_account_platform(),
+                )
+                .await
+                .is_err()
             );
             assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         }
@@ -8742,5 +8819,31 @@ mod probed_facts_wiring_tests {
         );
         assert_eq!(bridge.probed_context_tokens, Some(262_144));
         assert_eq!(bridge.probed_output_tokens, Some(4_096));
+    }
+}
+
+#[cfg(test)]
+mod runtime_turn_authority_tests {
+    use super::{RuntimeTurnLifecycleAuthority, SessionTurnLifecycles};
+    use crate::features::assistant::runtime_model::RuntimeTurnAuthority;
+    use std::sync::Arc;
+    #[test]
+    fn authority_reads_real_reservation_and_cannot_extend_pool_registry_lifetime() {
+        let lifecycles = SessionTurnLifecycles::default();
+        let authority = RuntimeTurnLifecycleAuthority {
+            states: Arc::downgrade(&lifecycles.states),
+        };
+        assert_eq!(authority.current_generation("absent"), None);
+        assert!(!authority.with_generation("absent", 1, &mut || panic!("absent")));
+        let lifecycle = lifecycles.for_session("session");
+        let reservation = lifecycle.reserve().unwrap();
+        let generation = authority.current_generation("session").unwrap();
+        let mut calls = 0;
+        assert!(authority.with_generation("session", generation, &mut || calls += 1));
+        assert_eq!(calls, 1);
+        drop(lifecycles);
+        assert_eq!(authority.current_generation("session"), None);
+        assert!(!authority.with_generation("session", generation, &mut || panic!("expired owner")));
+        drop(reservation);
     }
 }

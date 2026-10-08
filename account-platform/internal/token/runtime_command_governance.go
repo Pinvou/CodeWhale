@@ -86,6 +86,8 @@ func (r *PostgresRepository) ExecuteRuntimeTokenCommand(ctx context.Context, inp
 	switch canonical.CommandType {
 	case "TOKEN_ROUTE_PROVISIONING_REPAIR":
 		_, after, redacted, err = r.executeGovernedProvisioningRepairTx(ctx, tx, reference, input.ActorUserID, canonical.Reason, command)
+	case "TOKEN_USAGE_RECONCILIATION_RETRY":
+		_, after, redacted, err = r.executeGovernedUsageReconciliationTx(ctx, tx, reference, input.ActorUserID, canonical.Reason, command)
 	default:
 		err = ErrTokenCommandInvalid
 	}
@@ -122,6 +124,8 @@ func lockRuntimeCommandResource(ctx context.Context, tx pgx.Tx, commandType stri
 	switch commandType {
 	case "TOKEN_ROUTE_PROVISIONING_REPAIR":
 		err = tx.QueryRow(ctx, `SELECT id FROM route_provisionings WHERE id=$1 FOR UPDATE`, resourceID).Scan(&locked)
+	case "TOKEN_USAGE_RECONCILIATION_RETRY":
+		err = tx.QueryRow(ctx, `SELECT id FROM usage_requests WHERE id=$1 FOR UPDATE`, resourceID).Scan(&locked)
 	default:
 		return ErrTokenCommandInvalid
 	}
@@ -258,4 +262,55 @@ func runtimeCommandDigest(reference uuid.UUID, evidence []string) string {
 
 func envelopeRuntimeEvidence(command runtimeGovernedCommand) []string {
 	return []string{command.ResourceID.String(), command.ExpectedVersion.Format(time.RFC3339Nano), strconv.FormatInt(command.TargetGeneration, 10), strconv.FormatInt(command.EvidenceHighWatermark, 10), "replay_model_request=false"}
+}
+
+func (r *PostgresRepository) executeGovernedUsageReconciliationTx(ctx context.Context, tx pgx.Tx, reference, actor uuid.UUID, reason string, command runtimeGovernedCommand) (json.RawMessage, json.RawMessage, json.RawMessage, error) {
+	var status string
+	var highWater int64
+	var updatedAt time.Time
+	var debitProhibited bool
+	if err := tx.QueryRow(ctx, `SELECT u.status,u.last_persisted_sequence,u.updated_at,EXISTS(SELECT 1 FROM usage_platform_loss_reviews loss WHERE loss.usage_request_id=u.id AND loss.customer_debit_prohibited) FROM usage_requests u WHERE u.id=$1 FOR UPDATE`, command.ResourceID).Scan(&status, &highWater, &updatedAt, &debitProhibited); errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, nil, ErrNotFound
+	} else if err != nil {
+		return nil, nil, nil, err
+	}
+	keyDigest := runtimeCommandDigest(reference, nil)
+	var storedUsage uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT usage_request_id FROM usage_reconciliation_commands WHERE actor_user_id=$1 AND idempotency_key_digest=$2`, actor, keyDigest).Scan(&storedUsage); err == nil {
+		if storedUsage != command.ResourceID {
+			return nil, nil, nil, ErrTokenCommandResultMismatch
+		}
+		result := runtimeUsageResult(command.ResourceID, "QUEUED", command.EvidenceHighWatermark)
+		return result, result, result, nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, nil, err
+	}
+	if !updatedAt.Equal(command.ExpectedVersion) || highWater != command.EvidenceHighWatermark || status != "SETTLEMENT_PENDING" && status != "REVIEW" || debitProhibited {
+		return nil, nil, nil, ErrCatalogVersionConflict
+	}
+	before := runtimeUsageResult(command.ResourceID, status, highWater)
+	var now time.Time
+	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
+		return nil, nil, nil, err
+	}
+	requestFingerprint := runtimeCommandDigest(reference, envelopeRuntimeEvidence(command))
+	if _, err := tx.Exec(ctx, `INSERT INTO usage_reconciliation_commands(id,usage_request_id,actor_user_id,idempotency_key_digest,request_fingerprint,reason,created_at) VALUES($1,$2,$3,$4,$5,'AUDIT_ONLY',$6)`, uuid.Must(uuid.NewV7()), command.ResourceID, actor, keyDigest, requestFingerprint, now); err != nil {
+		return nil, nil, nil, err
+	}
+	result, err := tx.Exec(ctx, `UPDATE usage_requests SET reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error='MANUAL_RECONCILIATION_REQUESTED',reconciliation_stopped_at=NULL,updated_at=$2 WHERE id=$1 AND updated_at=$3 AND last_persisted_sequence=$4 AND status IN ('SETTLEMENT_PENDING','REVIEW') AND NOT EXISTS(SELECT 1 FROM usage_platform_loss_reviews loss WHERE loss.usage_request_id=usage_requests.id AND loss.customer_debit_prohibited)`, command.ResourceID, now, command.ExpectedVersion, command.EvidenceHighWatermark)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if result.RowsAffected() != 1 {
+		return nil, nil, nil, ErrCatalogVersionConflict
+	}
+	if err = recordTokenAudit(ctx, tx, actor, "USAGE_RECONCILIATION_GOVERNED", "USAGE_REQUEST", command.ResourceID, `jsonb_build_object('reason',$6,'command_reference',$7,'replay_model_request',false)`, reason, reference); err != nil {
+		return nil, nil, nil, err
+	}
+	after := runtimeUsageResult(command.ResourceID, "QUEUED", highWater)
+	return before, after, after, nil
+}
+func runtimeUsageResult(id uuid.UUID, status string, evidenceHighWatermark int64) json.RawMessage {
+	result, _ := json.Marshal(map[string]any{"usage_request_id": id, "status": status, "evidence_high_watermark": evidenceHighWatermark, "replay_model_request": false})
+	return result
 }

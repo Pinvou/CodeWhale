@@ -94,12 +94,19 @@ func TestPersonalHandlerRejectsInvalidBodiesWithoutMutation(t *testing.T) {
 	if w.Code != http.StatusBadRequest || repo.statusCalls != 2 {
 		t.Fatal("direct deletion became a status mutation")
 	}
+	// Commerce mapping was delivered with F02. It remains protected rather
+	// than being advertised as an absent future route.
+	for _, path := range []string{"/v1/me/commerce-customer-mapping", "/admin/v1/approval-requests"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("installed route lacked bearer protection: %s status=%d", path, response.Code)
+		}
+	}
 	for _, item := range []struct{ method, path string }{
 		{http.MethodDelete, "/admin/v1/users/" + id},
 		{http.MethodPost, "/v1/me/account-closure-requests"},
 		{http.MethodGet, "/v1/me/organizations"},
-		{http.MethodGet, "/v1/me/commerce-customer-mapping"},
-		{http.MethodGet, "/admin/v1/approval-requests"},
 		{http.MethodGet, "/admin/v1/registration-bonus-policy"},
 	} {
 		w := httptest.NewRecorder()

@@ -7,7 +7,9 @@
       "internal.token.approval-effect.read",
       "internal.token.approval-result.read",
       "internal.token.approval-snapshot.read",
-      "internal.token.approval-proof.read"
+      "internal.token.approval-proof.read",
+      "internal.token.client-readiness.read",
+      "internal.token.client-readiness.attest"
     ]
   },
   {

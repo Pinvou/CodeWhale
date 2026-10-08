@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 
 use super::SessionStore;
+use crate::platform::prefs::ModelSelectionRef;
 use anyhow::{Context, Result};
 use chrono::Utc;
 
@@ -215,10 +216,15 @@ where
 }
 
 /// Id-level mutation of `_session_models.json` (the per-session model
-/// override map): upserts when `model_id` is `Some`, removes when `None`.
-pub(crate) fn apply_session_model_mutation(id: &str, model_id: Option<&str>) -> Result<()> {
-    mutate_json_map_file(SESSION_MODELS_FILE, |entries| match model_id {
-        Some(mid) => entries.insert(id.to_string(), mid.to_string()).as_deref() != Some(mid),
+/// override map): upserts when `model_ref` is `Some`, removes when `None`.
+pub(crate) fn apply_session_model_ref_mutation(
+    id: &str,
+    model_ref: Option<&ModelSelectionRef>,
+) -> Result<()> {
+    mutate_json_map_file(SESSION_MODELS_FILE, |entries| match model_ref {
+        Some(selection) => {
+            entries.insert(id.to_string(), selection.clone()).as_ref() != Some(selection)
+        }
         None => entries.remove(id).is_some(),
     })
     .context("persist per-session model bindings")
@@ -232,7 +238,7 @@ pub(crate) fn apply_session_model_mutation(id: &str, model_id: Option<&str>) -> 
 /// with `set_session_model_id`'s own RMW and the later write lands over the
 /// earlier one's change.
 pub(crate) fn remove_session_models_locked(ids: &[&str]) -> Result<()> {
-    mutate_json_map_file::<String, _>(SESSION_MODELS_FILE, |entries| {
+    mutate_json_map_file::<ModelSelectionRef, _>(SESSION_MODELS_FILE, |entries| {
         let mut changed = false;
         for id in ids {
             changed |= entries.remove(*id).is_some();
@@ -356,10 +362,28 @@ fn quarantine_corrupt_sidecar(file: &std::path::Path, label: &str) -> anyhow::Er
 
 impl SessionStore {
     pub fn session_model_id(&self, id: &str) -> Option<String> {
-        self.session_model_override(id).or_else(|| {
+        self.session_model_ref(id)
+            .map(|selection| selection.runtime_saved_model_id().to_string())
+    }
+
+    /// 只读取用户在对话输入栏里选择的模型，不包含定时运行创建时的模型回退。
+    pub fn session_model_override(&self, id: &str) -> Option<String> {
+        self.session_model_ref_override(id)
+            .map(|selection| selection.runtime_saved_model_id().to_string())
+    }
+
+    /// Source-aware selection shown by the composer. Scheduled sessions fall
+    /// back to the immutable local model captured by their run profile.
+    pub fn session_model_ref(&self, id: &str) -> Option<ModelSelectionRef> {
+        self.session_model_ref_override(id).or_else(|| {
             self.scheduled_profile(id)
                 .and_then(|profile| profile.model_id)
+                .map(ModelSelectionRef::local)
         })
+    }
+
+    pub fn session_model_ref_override(&self, id: &str) -> Option<ModelSelectionRef> {
+        self.session_models.read().get(id).cloned()
     }
 
     /// `session_model_id` resolved against the durable `_session_models.json`
@@ -374,10 +398,10 @@ impl SessionStore {
     /// or read failure falls to the cache (a stale answer still beats
     /// inventing an absence), while an absent file is authoritative because
     /// the save path removes the file exactly when the map empties.
-    pub fn durable_session_model_id(&self, id: &str) -> Option<String> {
+    pub fn durable_session_model_ref(&self, id: &str) -> Option<ModelSelectionRef> {
         let file = crate::platform::paths::sessions_root().join(SESSION_MODELS_FILE);
         let durable = match std::fs::read_to_string(&file) {
-            Ok(content) => serde_json::from_str::<HashMap<String, String>>(&content)
+            Ok(content) => serde_json::from_str::<HashMap<String, ModelSelectionRef>>(&content)
                 .ok()
                 .and_then(|entries| entries.get(id).cloned()),
             // Absent is authoritative — the mutation path removes the file
@@ -388,14 +412,27 @@ impl SessionStore {
         durable.or_else(|| {
             self.scheduled_profile(id)
                 .and_then(|profile| profile.model_id)
+                .map(ModelSelectionRef::local)
         })
     }
 
-    pub fn session_model_override(&self, id: &str) -> Option<String> {
-        self.session_models.read().get(id).cloned()
+    pub fn durable_session_model_id(&self, id: &str) -> Option<String> {
+        self.durable_session_model_ref(id)
+            .map(|selection| selection.runtime_saved_model_id().to_string())
     }
 
+    /// 设/清该 session 的模型 id 并落盘。`None` = 清除(回退全局默认)。
     pub fn set_session_model_id(&self, id: &str, model_id: Option<String>) -> Result<()> {
+        self.set_session_model_ref(id, model_id.map(ModelSelectionRef::local))
+    }
+
+    /// Set/clear a typed session selection transactionally. `None` restores
+    /// the global default for ordinary sessions.
+    pub fn set_session_model_ref(
+        &self,
+        id: &str,
+        model_ref: Option<ModelSelectionRef>,
+    ) -> Result<()> {
         // Same io-mutex contract as the pin/hidden sidecars: the cache write
         // guard serializes this method against itself, but the retention
         // purge's batch removal RMWs the same file without this method's
@@ -404,7 +441,8 @@ impl SessionStore {
         let _io = self.session_models_io.lock();
         // The cache write guard is scoped to the switch, not held across the
         // durable RMW below (which reads the file, serializes, fsyncs and
-        // renames). `session_model_override` is read on the chat send path, so
+        // renames). `session_model_ref_override` is read on the chat send
+        // path, so
         // holding it across an fsync parks every send behind disk latency —
         // and it buys nothing: `session_models_io`, already held, is what
         // serializes this method against itself and against the purge.
@@ -412,9 +450,9 @@ impl SessionStore {
         let (previous, desired) = {
             let mut models = self.session_models.write();
             let previous = models.get(id).cloned();
-            match model_id {
-                Some(mid) => {
-                    models.insert(id.to_string(), mid);
+            match model_ref {
+                Some(selection) => {
+                    models.insert(id.to_string(), selection);
                 }
                 None => {
                     models.remove(id);
@@ -422,7 +460,7 @@ impl SessionStore {
             }
             (previous, models.get(id).cloned())
         };
-        if let Err(error) = apply_session_model_mutation(id, desired.as_deref()) {
+        if let Err(error) = apply_session_model_ref_mutation(id, desired.as_ref()) {
             let mut models = self.session_models.write();
             match previous {
                 Some(previous) => {
@@ -437,12 +475,12 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Whole-map save of the per-session model overrides. Only boot fixtures
-    /// and tests should reach for this — production mutations go through
-    /// [`Self::set_session_model_id`] / [`apply_session_model_mutation`] so
-    /// entries persisted by another process after this one booted survive.
-    #[cfg(test)]
-    pub(crate) fn persist_session_models(models: &HashMap<String, String>) -> Result<()> {
+    /// Whole-map save of the per-session model overrides. Boot-time format
+    /// migrations and tests use this path; interactive and retention
+    /// mutations use the id-level helpers so concurrent entries survive.
+    pub(crate) fn persist_session_models(
+        models: &HashMap<String, ModelSelectionRef>,
+    ) -> Result<()> {
         let file = crate::platform::paths::sessions_root().join(SESSION_MODELS_FILE);
         if models.is_empty() {
             return match std::fs::remove_file(&file) {
@@ -457,15 +495,16 @@ impl SessionStore {
             .with_context(|| format!("persist per-session model bindings to {}", file.display()))
     }
 
-    /// Test-only: whole-map rewrite without the io mutex — see
-    /// [`Self::save_pinned_sessions`].
-    #[cfg(test)]
+    /// Persist the boot-time migration under the same file mutex as the
+    /// interactive and retention read-modify-write paths.
     pub fn save_session_models(&self) {
+        let _io = self.session_models_io.lock();
         if let Err(error) = Self::persist_session_models(&self.session_models.read()) {
             eprintln!("[sessions] save_session_models failed: {error:#}");
         }
     }
 
+    /// 启动时从磁盘恢复 per-session 模型绑定。
     pub fn load_session_models(&self) {
         let file = crate::platform::paths::sessions_root().join(SESSION_MODELS_FILE);
         if !file.exists() {
@@ -475,13 +514,38 @@ impl SessionStore {
             Ok(c) => c,
             Err(_) => return,
         };
-        match serde_json::from_str::<HashMap<String, String>>(&content) {
-            Ok(map) => {
+        match serde_json::from_str::<HashMap<String, ModelSelectionRef>>(&content) {
+            Ok(mut map) => {
+                let legacy_wire_format = serde_json::from_str::<serde_json::Value>(&content)
+                    .ok()
+                    .and_then(|value| value.as_object().cloned())
+                    .is_some_and(|values| values.values().any(serde_json::Value::is_string));
+                let mut dropped_ambiguous_platform_ref = false;
+                for (session_id, selection) in &mut map {
+                    if let ModelSelectionRef::AccountPlatform { model_id } = selection {
+                        if model_id.trim().is_empty() {
+                            if let Ok(session) = self.load(session_id) {
+                                *model_id = session.metadata.model.trim().to_string();
+                            }
+                            if model_id.is_empty() {
+                                dropped_ambiguous_platform_ref = true;
+                            }
+                        }
+                    }
+                }
+                map.retain(|_, selection| {
+                    !matches!(selection, ModelSelectionRef::AccountPlatform { model_id } if model_id.is_empty())
+                });
                 *self.session_models.write() = map;
+                if legacy_wire_format || dropped_ambiguous_platform_ref {
+                    self.save_session_models();
+                }
             }
             Err(e) => eprintln!("[sessions] load_session_models failed: {e}"),
         }
     }
+
+    // ===================== 历史对话置顶 =====================
 
     pub fn is_pinned(&self, id: &str) -> bool {
         self.pinned_sessions.read().contains_key(id)

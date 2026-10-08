@@ -5,3 +5,8 @@ export const tokenManagementCopy = {"zh":{"modelToken":{"rateLimited":"请求过
 Object.assign(tokenManagementCopy.zh, { title: "模型与 Token 管理" });
 Object.assign(tokenManagementCopy.en, { title: "Model and token management" });
 Object.assign(tokenManagementCopy.ja, { title: "モデルとトークンの管理" });
+
+// Usage detail uses the shared source in all supported interface languages.
+Object.assign(tokenManagementCopy.zh.modelToken, { deliveryStatus: "交付状态" });
+Object.assign(tokenManagementCopy.en.modelToken, { deliveryStatus: "Delivery status" });
+Object.assign(tokenManagementCopy.ja.modelToken, { deliveryStatus: "配信状態" });

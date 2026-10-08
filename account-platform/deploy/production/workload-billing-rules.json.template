@@ -26,7 +26,9 @@
       "internal.billing.pricing.read",
       "internal.billing.pricing.bind",
       "internal.billing.hold.reserve",
-      "internal.billing.hold.release"
+      "internal.billing.hold.release",
+      "internal.billing.hold.extend",
+      "internal.billing.hold.commit"
     ]
   }
 ]

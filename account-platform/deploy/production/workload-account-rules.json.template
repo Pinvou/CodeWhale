@@ -6,7 +6,8 @@
       "internal.authorization.check",
       "internal.authorization.delegate",
       "internal.token-owner-authority.read",
-      "internal.token-owner-candidates.read"
+      "internal.token-owner-candidates.read",
+      "internal.client-compatibility.read"
     ]
   },
   {

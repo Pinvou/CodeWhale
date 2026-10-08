@@ -67,6 +67,18 @@ export class AccountPlatformDesktopClient {
     return this.call(() => this.transport.openPortal({ language: LANG_TO_TAG[language] || 'zh-Hans' }), signal);
   }
 
+  selectCatalogModel(modelId, signal) {
+    return this.call(() => this.transport.selectCatalogModel({ modelId }), signal);
+  }
+  selectSessionCatalogModel(sessionId, modelId, signal) {
+    return this.call(() => this.transport.selectSessionCatalogModel({ sessionId, modelId }), signal);
+  }
+  modelCatalog(signal) {
+    return this.call(() => this.transport.modelCatalog(), signal);
+  }
+  branchReplacementSession(input, signal) {
+    return this.call(() => this.transport.branchReplacementSession(input), signal);
+  }
   login(account, password, signal) {
     return this.call(() => this.transport.login({ account, password }), signal);
   }
@@ -240,5 +252,25 @@ export class AccountPlatformDesktopClient {
   async completeProfileChange(requestId, code = '', signal) {
     const result = await this.request('account', `/v1/me/profile-change-requests/${encodeURIComponent(requestId)}/actions/complete`, { method: 'POST', body: { code }, signal });
     return requireProfileChange(result, requestId);
+  }
+
+  models(signal) {
+    return this.request('token', '/v1/models', { signal });
+  }
+  async usageHistory(cursor = '', signal) {
+    const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
+    if (cursor && !cursor.startsWith('turn-v1.')) {
+      return this.request('token', `/v1/me/usage-requests?limit=20${next}`, { signal });
+    }
+    try {
+      return await this.request('token', `/v1/me/usage-turns?limit=20${next}`, { signal });
+    } catch (error) {
+      const fallback = !cursor && (error?.status === 404 || ['USAGE_HISTORY_PROJECTION_BUILDING', 'USAGE_HISTORY_PROJECTION_UNAVAILABLE'].includes(error?.code));
+      if (!fallback) throw error;
+      return this.request('token', '/v1/me/usage-requests?limit=20', { signal });
+    }
+  }
+  cancelUsage(usageRequestId, key) {
+    return this.request('token', `/v1/usage-requests/${encodeURIComponent(usageRequestId)}/cancel`, { method: 'POST', idempotencyKey: key, body: {} });
   }
 }

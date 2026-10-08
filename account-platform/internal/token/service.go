@@ -23,6 +23,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/resilience"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 
@@ -124,19 +125,27 @@ func (r *HTTPWalletResolver) Ensure(ctx context.Context, ownerType string, owner
 // Personal finance exposes only the completed payment, wallet and entitlement
 // routes. Model calls and organization operations have separate owners.
 type Service struct {
-	contexts               ContextResolver
-	wallets                WalletResolver
-	billing                BillingClient
-	commerceCustomers      CommerceCustomerResolver
-	authorizer             *authorization.Client
-	managementVerify       identity.VerifyFunc
-	managementEnabled      bool
-	managementServiceToken string
-	repository             Repository
-	upstream               ManagementCatalogAdapter
-	cancellationStore      managementCancellationStore
-	cancellationBilling    cancellationBillingClient
-	cancellationAdapter    interface {
+	executionUpstream        UpstreamClient
+	executionBilling         ModelExecutionBillingClient
+	clientReadiness          *ClientReadinessService
+	maximumInputTokens       int64
+	defaultMaxOutputTokens   int64
+	maximumOutputTokens      int64
+	breaker                  *resilience.Breaker
+	personalExecutionEnabled bool
+	contexts                 ContextResolver
+	wallets                  WalletResolver
+	billing                  BillingClient
+	commerceCustomers        CommerceCustomerResolver
+	authorizer               *authorization.Client
+	managementVerify         identity.VerifyFunc
+	managementEnabled        bool
+	managementServiceToken   string
+	repository               Repository
+	upstream                 ManagementCatalogAdapter
+	cancellationStore        managementCancellationStore
+	cancellationBilling      cancellationBillingClient
+	cancellationAdapter      interface {
 		CancelCapability() ProviderCancelCapability
 	}
 	activeUpstreamCancels       sync.Map
@@ -194,6 +203,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.POST("/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
 	protected.POST("/recharge/orders/:order_id/payment-claims", httpserver.AdaptFunc(s.addLatePaymentClaim))
 	protected.GET("/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
+	s.registerPersonalExecutionRoutes(router, protected)
 	s.registerManagementRoutes(router, protected)
 	return TokenCredentialDeadlineMiddleware(router)
 }
@@ -208,6 +218,21 @@ func (s *Service) activeWallet(ctx context.Context, resolved AuthorizationContex
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the token request could not be completed"
 	switch {
+	case errors.Is(err, ErrRateLimited):
+		retryAfter := 1
+		var limited *RateLimitError
+		if errors.As(err, &limited) {
+			retryAfter = max(1, int(limited.RetryAfter.Seconds()+0.999))
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		api.WriteJSON(w, http.StatusTooManyRequests, api.Error{Code: "MODEL_RATE_LIMITED", Message: "the model request exceeds a rate or concurrency limit", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"retry_after_seconds": retryAfter}})
+		return
+	case errors.Is(err, ErrNotFound):
+		status, code, message = http.StatusNotFound, "TOKEN_ACCOUNT_NOT_FOUND", "the token account was not found"
+	case errors.Is(err, ErrNoEligibleRoute):
+		status, code, message = http.StatusUnprocessableEntity, "TOKEN_ROUTE_UNAVAILABLE", "no eligible token route is available"
+	case errors.Is(err, ErrIdempotencyConflict):
+		status, code, message = http.StatusConflict, "IDEMPOTENCY_CONFLICT", "the idempotency key was already used with different input"
 	case errors.Is(err, ErrForbidden):
 		status, code, message = http.StatusForbidden, "TOKEN_FORBIDDEN", "the token action is not permitted"
 	case errors.Is(err, ErrAccountProvisioning):

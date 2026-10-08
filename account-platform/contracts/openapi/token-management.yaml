@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Token management current contract",
-    "version": "F04",
-    "description": "Current management-only API. Ordinary chat/usage and signed client GO are absent. This finite document covers every installed management method/path and authority; selected write and receipt DTOs are specified, other read projections are explicitly partial. Platform GET routes also register authenticated HEAD with the same authority."
+    "version": "F05",
+    "description": "Current management API. Personal invocation/usage and signed readiness are specified separately in token-invocation.yaml. This finite document covers every installed management method/path and authority; selected write and receipt DTOs are specified, other read projections are explicitly partial. Platform GET routes also register authenticated HEAD with the same authority."
   },
   "paths": {
     "/admin/v1/commands/{command_reference}": {
@@ -3488,6 +3488,381 @@
           }
         }
       }
+    },
+    "/admin/v1/usage-requests": {
+      "get": {
+        "operationId": "token_adminUsageRequests",
+        "x-go-handler": "adminUsageRequests",
+        "x-service": "token",
+        "x-permission": "platform.usage.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "execution_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "settlement_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "token_account_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "organization_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "started_from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "started_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.usage.read"
+          ]
+        },
+        "x-governance-gates": []
+      }
+    },
+    "/admin/v1/usage-requests/{usage_request_id}": {
+      "get": {
+        "operationId": "token_adminUsageRequest",
+        "x-go-handler": "adminUsageRequest",
+        "x-service": "token",
+        "x-permission": "platform.usage.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "usage_request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.usage.read"
+          ]
+        },
+        "x-governance-gates": []
+      }
+    },
+    "/admin/v1/usage-requests/{usage_request_id}/evidence": {
+      "get": {
+        "operationId": "token_adminUsageEvidence",
+        "x-go-handler": "adminUsageEvidence",
+        "x-service": "token",
+        "x-permission": "platform.usage.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "usage_request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "evidence_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.usage.read"
+          ]
+        },
+        "x-governance-gates": []
+      }
+    },
+    "/admin/v1/reconciliation-cases": {
+      "get": {
+        "operationId": "token_adminReconciliationCases",
+        "x-go-handler": "adminReconciliationCases",
+        "x-service": "token",
+        "x-permission": "platform.usage.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "severity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "case_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "owner_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sla_overdue",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.usage.read"
+          ]
+        },
+        "x-governance-gates": []
+      }
+    },
+    "/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness": {
+      "get": {
+        "operationId": "token_adminUsageReconciliationCommandReadiness",
+        "x-go-handler": "adminUsageReconciliationCommandReadiness",
+        "x-service": "token",
+        "x-permission": "platform.usage.reconcile.retry",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.usage.reconcile.retry"
+          ]
+        },
+        "x-governance-gates": []
+      }
     }
   },
   "components": {
@@ -3551,7 +3926,8 @@
               "TOKEN_PROTOCOL_PUBLISH",
               "TOKEN_ROUTE_DELETE",
               "TOKEN_ROUTE_PROVISIONING_REPAIR",
-              "TOKEN_ROUTE_UPSERT"
+              "TOKEN_ROUTE_UPSERT",
+              "TOKEN_USAGE_RECONCILIATION_RETRY"
             ]
           },
           "reason": {
@@ -3742,7 +4118,8 @@
               "TOKEN_PROTOCOL_PUBLISH",
               "TOKEN_ROUTE_DELETE",
               "TOKEN_ROUTE_PROVISIONING_REPAIR",
-              "TOKEN_ROUTE_UPSERT"
+              "TOKEN_ROUTE_UPSERT",
+              "TOKEN_USAGE_RECONCILIATION_RETRY"
             ]
           },
           "target_resource_type": {
@@ -5114,5 +5491,20 @@
         "additionalProperties": false
       }
     }
+  },
+  "x-installed-runtime-usage-command": {
+    "command_type": "TOKEN_USAGE_RECONCILIATION_RETRY",
+    "policy_version": 2,
+    "snapshot_schema_version": 2,
+    "mode": "AUDIT_ONLY",
+    "permission": "platform.usage.reconcile.retry",
+    "command_required": [
+      "usage_request_id",
+      "expected_usage_version",
+      "evidence_high_watermark",
+      "replay_model_request"
+    ],
+    "replay_model_request": false,
+    "receipt": "Generic current /admin/v1/commands result; immutable key/fingerprint binding. Does not call provider or acquire approval consumer."
   }
 }

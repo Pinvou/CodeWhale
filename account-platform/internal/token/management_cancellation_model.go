@@ -9,6 +9,7 @@ import (
 type DispatchEnvelope struct {
 	BaseURL                             string          `json:"base_url"`
 	Provider                            string          `json:"provider"`
+	AdapterVersion                      string          `json:"adapter_version"`
 	Credential                          []byte          `json:"credential"`
 	RequestBody                         json.RawMessage `json:"request_body"`
 	Price                               PriceVersion    `json:"price"`

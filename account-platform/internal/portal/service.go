@@ -735,7 +735,7 @@ func tokenPathAllowed(method, resource string) bool {
 	}
 	if method == http.MethodGet {
 		switch resource {
-		case "/v1/me/balance", "/v1/recharge/products", "/v1/payment-capabilities", "/v1/recharge/orders", "/v1/recharge/orders/recent", "/v1/me/entitlement-packages":
+		case "/v1/me/balance", "/v1/recharge/products", "/v1/payment-capabilities", "/v1/recharge/orders", "/v1/recharge/orders/recent", "/v1/me/entitlement-packages", "/v1/models", "/v1/me/usage-requests", "/v1/me/usage-turns":
 			return true
 		}
 	}
@@ -743,6 +743,9 @@ func tokenPathAllowed(method, resource string) bool {
 		return true
 	}
 	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")
+	if method == http.MethodPost && len(parts) == 4 && parts[0] == "v1" && parts[1] == "usage-requests" && pathUUID(parts[2]) && parts[3] == "cancel" {
+		return true
+	}
 	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "recharge" || parts[2] != "orders" || !pathUUID(parts[3]) {
 		return false
 	}

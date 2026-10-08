@@ -36,6 +36,7 @@ var governancePolicyCommands = []string{
 	"TOKEN_CREDENTIAL_REVOKE",
 	"TOKEN_CREDENTIAL_VALIDATE",
 	"TOKEN_ROUTE_PROVISIONING_REPAIR",
+	"TOKEN_USAGE_RECONCILIATION_RETRY",
 }
 
 func governancePolicies() ([]Policy, error) {

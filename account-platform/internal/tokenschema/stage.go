@@ -1,5 +1,5 @@
-// Package tokenschema pins the installed management storage and excludes all
-// later client admission, organization lifecycle and public usage projections.
+// Package tokenschema pins the installed personal execution and management storage.
+// Organization lifecycle, event replay and privacy stages remain excluded.
 package tokenschema
 
 import (
@@ -16,6 +16,9 @@ import (
 type identity struct{ name, checksum, downChecksum string }
 
 var installed = map[int64]identity{
+	16: {name: "client_readiness", checksum: "c87acabfbc2f0048d50c8d58af1b5a9ecf2ce0cbe9789df90c92192e60a692c5", downChecksum: "d9aeecb29706b1e11db1962815e738de870c1356fb153abe1ee7577a0f85bbe1"},
+	17: {name: "usage_admission_indexes", checksum: "fcd9960bf027d6daa6be4c02b109a520398a9515b142f73abd6b9ef5007d09dd", downChecksum: "b61e971e2c5fcff420de457c3da870331ec721abd321f11ae6971de6790108ce"},
+	34: {name: "usage_history_groups", checksum: "8f25256da33ce045b00f5f96471dee1169f92047a82fefa42d5485add44a4948", downChecksum: "7ffd599821fb4aa220ca06ef305af84527cbd5b3f27a9fbc9dbadf803f6099c0"},
 	1:  {name: "foundation", checksum: "8d9b0e0a9a025079fb0c3549b19fde8d15bba429199756c1fb3696427d5b6530", downChecksum: "694f148cedb118328e90ee64d56d747f98819e13455eb4ab13f1f49ad644b4a9"},
 	2:  {name: "token_domain", checksum: "ab5175d41e0627cc5d7a8227ccc055b93ec4cc4be09ed857dcdd7455dfaa1fb1", downChecksum: "53ec51ea986293088294a20c181bb04d339f65d279df2dfeb198a7b0fa25a528"},
 	3:  {name: "token_management_audit", checksum: "0c785bf4c2f92f34e283e392b9a552ea34d2f7857975727d2416f5c3b6b4bf3c", downChecksum: "f58dde2cd385347dff75d09b9c479e17dd483cbdfe5cfb414e08213b80116ce2"},

@@ -141,6 +141,7 @@ func main() {
 	if err != nil {
 		log.Fatal("BILLING_TEST_ADMISSION_TTL_INVALID")
 	}
+	go observability.RunBackground(ctx, "personal-hold-expiry", billing.NewPersonalHoldExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "package-expiry", billing.NewPackageExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "product-admission-expiry", billing.NewProductAdmissionExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "product-admission-verification", billing.NewProductAdmissionVerificationWorker(repository, payments.Capabilities(), 5*time.Second, admissionTTL).Run)

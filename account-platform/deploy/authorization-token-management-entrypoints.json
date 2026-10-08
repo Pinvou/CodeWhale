@@ -1,5 +1,5 @@
 {
-  "version": "F04",
+  "version": "F05",
   "description": "Installed entrypoint inventory, not a runtime ACL issuer. Dynamic handler authorization and repository authority checks are preserved; this file does not grant permissions.",
   "routes": [
     {
@@ -61,6 +61,18 @@
       "gates": [
         "KNOWN_GOVERNANCE"
       ]
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness",
+      "handler": "adminUsageReconciliationCommandReadiness",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.usage.reconcile.retry"
+        ]
+      },
+      "gates": []
     },
     {
       "method": "get",
@@ -315,6 +327,18 @@
     },
     {
       "method": "get",
+      "path": "/admin/v1/reconciliation-cases",
+      "handler": "adminReconciliationCases",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.usage.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
       "path": "/admin/v1/resource-audit",
       "handler": "adminResourceAudit",
       "authority": {
@@ -423,6 +447,42 @@
         "kind": "bearer",
         "all": [
           "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/usage-requests",
+      "handler": "adminUsageRequests",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.usage.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/usage-requests/{usage_request_id}",
+      "handler": "adminUsageRequest",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.usage.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/usage-requests/{usage_request_id}/evidence",
+      "handler": "adminUsageEvidence",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.usage.read"
         ]
       },
       "gates": []
@@ -1053,6 +1113,23 @@
         "request_fingerprint"
       ],
       "family": "ROUTE",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_USAGE_RECONCILIATION_RETRY",
+      "permissions": [
+        "platform.usage.reconcile.retry"
+      ],
+      "recentAuth": false,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "usage_request_id",
+        "expected_usage_version",
+        "evidence_high_watermark",
+        "precheck_fingerprint",
+        "request_fingerprint"
+      ],
+      "family": "RUNTIME",
       "transport": "COMMAND"
     }
   ],

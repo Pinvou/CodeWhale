@@ -101,3 +101,4 @@ export { financeCopy } from './finance-i18n.js';
 export { reconciliationCopy } from './reconciliation-i18n.js';
 
 export { tokenManagementCopy } from './token-management-i18n.js';
+export { modelUsageCopy } from './model-usage-i18n.js';

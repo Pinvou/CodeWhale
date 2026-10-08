@@ -17,6 +17,10 @@
       resetPassword: function (input) { return invoke("account_platform_reset_password", { input: input }); },
       logout: function () { return invoke("account_platform_logout"); },
       request: function (request) { return invoke("account_platform_request", { request: request }); },
+      modelCatalog: function () { return invoke("account_platform_model_catalog"); },
+      selectCatalogModel: function (input) { return invoke("account_platform_select_catalog_model", { input: input }); },
+      selectSessionCatalogModel: function (input) { return invoke("account_platform_select_session_model", { input: input }); },
+      branchReplacementSession: function (input) { return invoke("account_platform_branch_replacement_session", { input: input }); },
     };
   };
 })(window);

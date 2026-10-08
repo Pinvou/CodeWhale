@@ -5,7 +5,10 @@
 //! is never persisted. A successful session stores only its renewable refresh
 //! token in the system credential store so the next launch can sign in again.
 
+pub(crate) mod client_migration;
+mod model_proxy;
 mod platform;
+pub(crate) mod runtime_model;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -936,6 +939,97 @@ impl AccountPlatformState {
         Ok(self.status().await)
     }
 
+    /// Only the current authenticated desktop identity supplies a model token.
+    /// A concurrent login cannot turn an old model preparation into a new user.
+    pub(crate) async fn chat_runtime_authorization(
+        &self,
+    ) -> Result<ChatRuntimeAuthorization, String> {
+        let config = AccountPlatformConfig::current()?;
+        let gateway = config.token_gateway_url.as_ref().ok_or_else(|| {
+            format!(
+                "account_platform_configuration_missing: {TOKEN_GATEWAY_CONFIG_FIELD} is required"
+            )
+        })?;
+        let mut token = self.access_token(&config, None).await?;
+        let generation = self.token_generation(&token).await?;
+        let cached = self
+            .session
+            .lock()
+            .await
+            .as_ref()
+            .filter(|session| session.generation == generation && session.access_token == token)
+            .and_then(|session| session.account_user_id.clone());
+        let user_id = match cached {
+            Some(id) => id,
+            None => {
+                let prepared = prepare_request(
+                    &config,
+                    ApiRequest {
+                        area: "account".to_string(),
+                        resource: "/v1/account/bootstrap".to_string(),
+                        method: "POST".to_string(),
+                        body: Some(serde_json::json!({})),
+                        idempotency_key: None,
+                    },
+                )?;
+                let mut response = self.send(&prepared, &token).await?;
+                if response.status() == StatusCode::UNAUTHORIZED {
+                    token = self
+                        .access_token_in_session(&config, Some(&token), Some(generation))
+                        .await?;
+                    response = self.send(&prepared, &token).await?;
+                }
+                let response = response_to_api(response).await?;
+                self.require_generation(generation).await?;
+                if response.status == 401 {
+                    return Err("authentication_required: sign in to Pinvou first".to_string());
+                }
+                if !(200..300).contains(&response.status) {
+                    return Err(
+                        "account_platform_unavailable: account bootstrap is unavailable"
+                            .to_string(),
+                    );
+                }
+                let id = bootstrap_user_id(&response.body)?;
+                self.remember_account_identity(&token, id.clone()).await?;
+                id
+            }
+        };
+        let current = self.session.lock().await;
+        if !current.as_ref().is_some_and(|session| {
+            session.generation == generation
+                && session.access_token == token
+                && session.account_user_id.as_deref() == Some(user_id.as_str())
+        }) {
+            return Err("authentication_required: account session changed".to_string());
+        }
+        Ok(ChatRuntimeAuthorization {
+            base_url: token_gateway_openai_base(gateway),
+            access_token: token,
+            revision: format!("oidc-user-{user_id}-session-{generation}"),
+        })
+    }
+
+    pub(crate) async fn chat_catalog_for_authorization(
+        &self,
+        authorization: ChatRuntimeAuthorization,
+    ) -> Result<(ApiResponse, ChatRuntimeAuthorization), String> {
+        let catalog = self
+            .request(ApiRequest {
+                area: "token".to_string(),
+                resource: "/v1/models".to_string(),
+                method: "GET".to_string(),
+                body: None,
+                idempotency_key: None,
+            })
+            .await?;
+        let current = self.chat_runtime_authorization().await?;
+        if current.revision != authorization.revision {
+            return Err("authentication_required: account session changed".to_string());
+        }
+        Ok((catalog, current))
+    }
+
     pub async fn request(&self, input: ApiRequest) -> Result<ApiResponse, String> {
         let config = AccountPlatformConfig::current()?;
         let prepared = prepare_request(&config, input)?;
@@ -1480,6 +1574,22 @@ fn random_urlsafe(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(value)
 }
 
+/// Sensitive runtime authorization is deliberately not serializable or Debug.
+pub(crate) struct ChatRuntimeAuthorization {
+    pub(crate) base_url: String,
+    pub(crate) access_token: String,
+    pub(crate) revision: String,
+}
+
+fn token_gateway_openai_base(base: &Url) -> String {
+    let trimmed = base.as_str().trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
+    }
+}
+
 fn mainland_username(value: &str) -> &str {
     value
         .strip_prefix("+86")
@@ -1538,14 +1648,17 @@ fn prepare_request(
     if method == Method::GET && input.body.is_some() {
         return Err("account_platform_request_invalid: GET body is not allowed".to_string());
     }
-    let creates_order =
-        input.area == "token" && method == Method::POST && parsed.path() == "/v1/recharge/orders";
+    let requires_key = input.area == "token"
+        && method == Method::POST
+        && (parsed.path() == "/v1/recharge/orders"
+            || parsed.path().starts_with("/v1/usage-requests/")
+                && parsed.path().ends_with("/cancel"));
     match &input.idempotency_key {
         Some(key)
-            if creates_order
+            if requires_key
                 && (16..=128).contains(&key.len())
                 && key.bytes().all(|c| c.is_ascii_graphic()) => {}
-        None if !creates_order => {}
+        None if !requires_key => {}
         _ => {
             return Err(
                 "account_platform_request_denied: invalid idempotency key for route".to_string(),
@@ -1577,6 +1690,10 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         if path == "/v1/me/balance" {
             return *method == Method::GET && matches!(query, None | Some("consistency=strong"));
         }
+        if *method == Method::GET && matches!(path, "/v1/me/usage-requests" | "/v1/me/usage-turns")
+        {
+            return usage_history_query_allowed(query);
+        }
         if query.is_some() {
             return false;
         }
@@ -1584,6 +1701,7 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
             && matches!(
                 path,
                 "/v1/recharge/products"
+                    | "/v1/models"
                     | "/v1/payment-capabilities"
                     | "/v1/recharge/orders"
                     | "/v1/recharge/orders/recent"
@@ -1597,6 +1715,10 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         }
         let parts: Vec<_> = path.split('/').collect();
         return match parts.as_slice() {
+            ["", "v1", "usage-requests", id, "cancel"] if *method == Method::POST => {
+                uuid::Uuid::parse_str(id)
+                    .is_ok_and(|value| !value.is_nil() && value.to_string() == *id)
+            }
             ["", "v1", "recharge", "orders", id] if *method == Method::GET => {
                 uuid::Uuid::parse_str(id)
                     .is_ok_and(|value| !value.is_nil() && value.to_string() == *id)
@@ -1655,6 +1777,42 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
     }
 }
 
+fn usage_history_query_allowed(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return true;
+    };
+    let mut limit_seen = false;
+    let mut cursor_seen = false;
+    for part in query.split('&') {
+        let Some((name, value)) = part.split_once('=') else {
+            return false;
+        };
+        match name {
+            "limit" if !limit_seen => {
+                limit_seen = value
+                    .parse::<u8>()
+                    .ok()
+                    .is_some_and(|limit| (1..=100).contains(&limit));
+                if !limit_seen {
+                    return false;
+                }
+            }
+            "cursor" if !cursor_seen => {
+                cursor_seen = !value.is_empty()
+                    && value.len() <= 264
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    });
+                if !cursor_seen {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    limit_seen || cursor_seen
+}
+
 async fn bounded_response_bytes(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
     if response
         .content_length()
@@ -1682,7 +1840,9 @@ async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, Str
         || response
             .url()
             .path()
-            .ends_with("/v1/me/entitlement-packages");
+            .ends_with("/v1/me/entitlement-packages")
+        || response.url().path().ends_with("/v1/me/usage-requests")
+        || response.url().path().ends_with("/v1/me/usage-turns");
     let status = response.status().as_u16();
     let context_version = response
         .headers()
@@ -2082,6 +2242,13 @@ mod tests {
             ("account", "POST", "/v1/auth/captcha/challenges"),
             ("token", "GET", "/v1/me/balance?consistency=strong"),
             ("token", "GET", "/v1/recharge/products"),
+            ("token", "GET", "/v1/models"),
+            ("token", "GET", "/v1/me/usage-requests"),
+            (
+                "token",
+                "GET",
+                "/v1/me/usage-turns?limit=20&cursor=turn-v1.YWJj",
+            ),
         ] {
             assert!(
                 prepare_request(
@@ -2100,10 +2267,10 @@ mod tests {
         for path in [
             "https://evil.example/v1/me/balance",
             "/v1/me/balance?consistency=eventual",
-            "/v1/models",
+            "/v1/models?future=true",
             "/v1/recharge/products?future=true",
             "/v1/chat/completions",
-            "/v1/me/usage-requests",
+            "/v1/me/usage-requests?limit=0",
             "/metrics",
         ] {
             assert!(
@@ -2741,6 +2908,393 @@ mod tests {
         assert!(
             pending.is_some_and(|p| p.operation_id == "22222222-2222-4222-8222-222222222222"),
             "old terminal registration query deleted newly persisted recovery credential"
+        );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn model_authorization_cannot_switch_login_identity() {
+        let _env = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _snapshot = AccountEnvSnapshot::take();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        independent_env_config(&url);
+        unsafe {
+            std::env::set_var(TOKEN_GATEWAY_URL_ENV, url.as_str());
+        }
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let thread = thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let a = independent_read_request(&mut first);
+            assert!(
+                a.to_ascii_lowercase()
+                    .contains("authorization: bearer public-access-a")
+            );
+            first_tx.send(()).unwrap();
+            let (mut login, _) = listener.accept().unwrap();
+            let b = independent_read_request(&mut login);
+            assert!(b.contains("grant_type=password"));
+            independent_write_response(
+                &mut login,
+                200,
+                r#"{"access_token":"public-access-b","refresh_token":"public-refresh-b","expires_in":300}"#,
+            );
+            continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            independent_write_response(&mut first, 401, r#"{"code":"UNAUTHENTICATED"}"#);
+            drop(first);
+            listener.set_nonblocking(true).unwrap();
+            let end = Instant::now() + Duration::from_millis(650);
+            let mut replayed_as_b = 0;
+            while Instant::now() < end {
+                match listener.accept() {
+                    Ok((mut s, _)) => {
+                        let req = independent_read_request(&mut s);
+                        if req
+                            .to_ascii_lowercase()
+                            .contains("authorization: bearer public-access-b")
+                        {
+                            replayed_as_b += 1
+                        }
+                        independent_write_response(&mut s, 200, r#"{"status":"PENDING"}"#);
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(e) => panic!("controlled listener error: {e}"),
+                }
+            }
+            replayed_as_b
+        });
+        let state = Arc::new(portal_test_state(
+            MemoryCredentialStore::with_refresh_token("public-refresh-a"),
+            Some(portal_runtime_session(
+                "public-access-a",
+                "public-refresh-a",
+            )),
+        ));
+        state.session_generation.store(1, Ordering::Relaxed);
+        let request_state = state.clone();
+        let request = tokio::spawn(async move { request_state.chat_runtime_authorization().await });
+        first_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        state
+            .login(LoginCredentials {
+                account: "public-user-b".into(),
+                password: "PUBLIC_SYNTHETIC_PASSWORD_B".into(),
+            })
+            .await
+            .unwrap();
+        continue_tx.send(()).unwrap();
+        let result = request.await.unwrap();
+        let replayed_as_b = thread.join().unwrap();
+        assert!(
+            result.is_err(),
+            "old logical request was acknowledged after different-user login"
+        );
+        assert_eq!(
+            replayed_as_b, 0,
+            "old logical request replayed with new login bearer"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn model_authorization_bootstraps_and_reuses_current_identity() {
+        let _env = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _snapshot = AccountEnvSnapshot::take();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        independent_env_config(&url);
+        unsafe {
+            std::env::set_var(TOKEN_GATEWAY_URL_ENV, url.as_str());
+        }
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let req = independent_read_request(&mut stream);
+            assert!(req.starts_with("POST /v1/account/bootstrap "));
+            assert!(
+                req.to_ascii_lowercase()
+                    .contains("authorization: bearer public-access-a")
+            );
+            assert!(
+                req.to_ascii_lowercase()
+                    .contains("x-device-id: fixture-device")
+            );
+            independent_write_response(
+                &mut stream,
+                200,
+                r#"{"user_id":"11111111-1111-4111-8111-111111111111"}"#,
+            );
+        });
+        let state = portal_test_state(
+            Arc::new(MemoryCredentialStore::default()),
+            Some(portal_runtime_session(
+                "public-access-a",
+                "public-refresh-a",
+            )),
+        );
+        state.session_generation.store(1, Ordering::Relaxed);
+        let first = state.chat_runtime_authorization().await.unwrap();
+        server.join().unwrap();
+        let second = state.chat_runtime_authorization().await.unwrap();
+        assert_eq!(first.access_token, "public-access-a");
+        assert_eq!(first.revision, second.revision);
+        assert!(
+            first
+                .revision
+                .contains("11111111-1111-4111-8111-111111111111-session-1")
+        );
+        assert!(first.base_url.ends_with("/v1"));
+    }
+
+    #[test]
+    fn model_and_usage_allowlist_keeps_requests_finite() {
+        for query in [
+            None,
+            Some("limit=20"),
+            Some("cursor=turn-v1.YWJj"),
+            Some("limit=100&cursor=a.b-c_d"),
+        ] {
+            assert!(route_allowed(
+                "token",
+                &Method::GET,
+                "/v1/me/usage-turns",
+                query
+            ));
+        }
+        for query in [
+            Some(""),
+            Some("limit=0"),
+            Some("limit=101"),
+            Some("limit=20&limit=10"),
+            Some("cursor="),
+            Some("cursor=../../private"),
+            Some("extra=1"),
+        ] {
+            assert!(!route_allowed(
+                "token",
+                &Method::GET,
+                "/v1/me/usage-turns",
+                query
+            ));
+        }
+        let id = "11111111-1111-4111-8111-111111111111";
+        let request = || ApiRequest {
+            area: "token".into(),
+            resource: format!("/v1/usage-requests/{id}/cancel"),
+            method: "POST".into(),
+            body: Some(serde_json::json!({})),
+            idempotency_key: Some("cancel-operation-0001".into()),
+        };
+        assert!(prepare_request(&config(), request()).is_ok());
+        let mut absent = request();
+        absent.idempotency_key = None;
+        assert!(prepare_request(&config(), absent).is_err());
+        let mut wrong = request();
+        wrong.resource = "/v1/usage-requests/not-a-uuid/cancel".into();
+        assert!(prepare_request(&config(), wrong).is_err());
+        assert!(!route_allowed(
+            "token",
+            &Method::POST,
+            "/v1/chat/completions",
+            None
+        ));
+        assert!(!route_allowed(
+            "token",
+            &Method::GET,
+            "/admin/v1/usage-requests",
+            None
+        ));
+        assert!(!route_allowed(
+            "token",
+            &Method::GET,
+            "/v1/organizations/11111111-1111-4111-8111-111111111111/model-policy",
+            None
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn usage_response_preserves_exact_int64_text() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!(
+            "http://{}/v1/me/usage-turns",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            independent_read_request(&mut stream);
+            independent_write_response(
+                &mut stream,
+                200,
+                r#"{"items":[{"total_microcredits":9223372036854775807}]}"#,
+            );
+        });
+        let response = response_to_api(reqwest::Client::new().get(url).send().await.unwrap())
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            response.body_text.as_deref(),
+            Some(r#"{"items":[{"total_microcredits":9223372036854775807}]}"#)
+        );
+    }
+    async fn independent_catalog_fixture(
+        mode: &str,
+    ) -> Result<(ApiResponse, ChatRuntimeAuthorization), String> {
+        let _env = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _snapshot = AccountEnvSnapshot::take();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        independent_env_config(&url);
+        unsafe {
+            std::env::set_var(TOKEN_GATEWAY_URL_ENV, url.as_str());
+        }
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let mode_owned = mode.to_string();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            let mut catalog_calls = 0;
+            let mut token_calls = 0;
+            let mut bootstrap_calls = 0;
+            while !server_stop.load(Ordering::Acquire) && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let req = independent_read_request(&mut stream);
+                        if req.starts_with("POST / ") {
+                            token_calls += 1;
+                            let token = if mode_owned == "changed" {
+                                "public-access-b"
+                            } else {
+                                "public-access-refreshed"
+                            };
+                            independent_write_response(
+                                &mut stream,
+                                200,
+                                &format!(
+                                    r#"{{"access_token":"{token}","refresh_token":"public-refresh-current","expires_in":3600}}"#
+                                ),
+                            );
+                        } else if req.starts_with("POST /v1/account/bootstrap ") {
+                            bootstrap_calls += 1;
+                            assert!(
+                                req.to_ascii_lowercase()
+                                    .contains("authorization: bearer public-access-b")
+                            );
+                            independent_write_response(
+                                &mut stream,
+                                200,
+                                r#"{"user_id":"22222222-2222-4222-8222-222222222222"}"#,
+                            );
+                        } else if req.starts_with("GET /v1/models ") {
+                            catalog_calls += 1;
+                            let lower = req.to_ascii_lowercase();
+                            if mode_owned == "changed" {
+                                assert!(lower.contains("authorization: bearer public-access-b"));
+                            }
+                            if mode_owned == "refresh" && catalog_calls == 1 {
+                                assert!(lower.contains("authorization: bearer public-access-a"));
+                                independent_write_response(&mut stream, 401, "{}");
+                            } else {
+                                let expected = if mode_owned == "refresh" {
+                                    "public-access-refreshed"
+                                } else if mode_owned == "changed" {
+                                    "public-access-b"
+                                } else {
+                                    "public-access-a"
+                                };
+                                assert!(
+                                    lower.contains(&format!("authorization: bearer {expected}"))
+                                );
+                                independent_write_response(
+                                    &mut stream,
+                                    200,
+                                    r#"{"data":[],"catalog_version":1}"#,
+                                );
+                            }
+                        } else {
+                            panic!("unexpected controlled route");
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2))
+                    }
+                    Err(_) => panic!("controlled listener failed"),
+                }
+            }
+            (catalog_calls, token_calls, bootstrap_calls)
+        });
+        let state = portal_test_state(
+            Arc::new(MemoryCredentialStore::default()),
+            Some(portal_runtime_session(
+                "public-access-a",
+                "public-refresh-a",
+            )),
+        );
+        state.session_generation.store(1, Ordering::Relaxed);
+        state.session.lock().await.as_mut().unwrap().account_user_id =
+            Some("11111111-1111-4111-8111-111111111111".to_string());
+        let original = state.chat_runtime_authorization().await.unwrap();
+        if mode == "changed" {
+            state
+                .login(LoginCredentials {
+                    account: "public-user-b".into(),
+                    password: "public-fixture-password".into(),
+                })
+                .await
+                .unwrap();
+        }
+        let result = state.chat_catalog_for_authorization(original).await;
+        stop.store(true, Ordering::Release);
+        let (catalog, token, bootstrap) = server.join().unwrap();
+        assert_eq!(catalog, if mode == "refresh" { 2 } else { 1 });
+        assert_eq!(token, if mode == "unchanged" { 0 } else { 1 });
+        assert_eq!(
+            bootstrap,
+            if mode == "changed" && result.is_err() {
+                1
+            } else {
+                0
+            }
+        );
+        result
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn independent_catalog_session_changed_rejects_combination() {
+        let result = independent_catalog_fixture("changed").await;
+        assert!(
+            matches!(result, Err(ref e) if e == "authentication_required: account session changed"),
+            "cross-generation catalog must be rejected"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn independent_catalog_session_refresh_uses_current_token() {
+        let (catalog, auth) = independent_catalog_fixture("refresh").await.unwrap();
+        assert_eq!(catalog.status, 200);
+        assert_eq!(auth.access_token, "public-access-refreshed");
+        assert_eq!(
+            auth.revision,
+            "oidc-user-11111111-1111-4111-8111-111111111111-session-1"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn independent_catalog_session_unchanged_remains_valid() {
+        let (catalog, auth) = independent_catalog_fixture("unchanged").await.unwrap();
+        assert_eq!(catalog.status, 200);
+        assert_eq!(auth.access_token, "public-access-a");
+        assert_eq!(
+            auth.revision,
+            "oidc-user-11111111-1111-4111-8111-111111111111-session-1"
         );
     }
 }

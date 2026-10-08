@@ -138,7 +138,7 @@ func TestManagementPublicMigrationInstallation(t *testing.T) {
 		t.Fatal(err)
 	}
 	verification, err := migrations.VerifyApplied(ctx, connection, loaded)
-	if err != nil || verification.AppliedCount != 28 {
+	if err != nil || verification.AppliedCount != 31 {
 		t.Fatalf("public migration verification: %+v err=%v", verification, err)
 	}
 	var runtimeCanCreate bool

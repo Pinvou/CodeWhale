@@ -9,15 +9,15 @@ func (s *Service) proxyAdminToken(w http.ResponseWriter, r *http.Request) {
 	s.proxy(w, r, s.config.TokenGatewayURL, "/"+r.PathValue("resource"), tokenAdminPathAllowed)
 }
 
-// Each path is an installed management operation. Ordinary model dispatch and
-// usage reconciliation admission are exposed by their own complete feature.
+// Each path is an installed management operation, including current usage
+// observations. Ordinary model dispatch is not forwarded through this proxy.
 func tokenAdminPathAllowed(method, resource string) bool {
 	if method == http.MethodHead {
 		method = http.MethodGet
 	}
 	if method == http.MethodGet {
 		switch resource {
-		case "/admin/v1/token-resources/readiness", "/admin/v1/models", "/admin/v1/protocols", "/admin/v1/formulas", "/admin/v1/token-accounts", "/admin/v1/provisionings", "/admin/v1/owner-candidates", "/admin/v1/resource-audit", "/admin/v1/model-catalog/impact/rollback", "/admin/v1/commands/by-idempotency-key", "/admin/v1/commands/recovery-queue":
+		case "/admin/v1/token-resources/readiness", "/admin/v1/models", "/admin/v1/protocols", "/admin/v1/formulas", "/admin/v1/token-accounts", "/admin/v1/provisionings", "/admin/v1/owner-candidates", "/admin/v1/resource-audit", "/admin/v1/model-catalog/impact/rollback", "/admin/v1/commands/by-idempotency-key", "/admin/v1/commands/recovery-queue", "/admin/v1/usage-requests", "/admin/v1/reconciliation-cases", "/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness":
 			return true
 		}
 	}
@@ -35,6 +35,8 @@ func tokenAdminPathAllowed(method, resource string) bool {
 		return false
 	}
 	switch parts[2] {
+	case "usage-requests":
+		return method == http.MethodGet && (len(parts) == 4 || len(parts) == 5 && parts[4] == "evidence")
 	case "models":
 		return method == http.MethodGet && (len(parts) == 4 || len(parts) == 5 && (parts[4] == "versions" || parts[4] == "lifecycle-plans") || len(parts) == 6 && parts[4] == "lifecycle-plans" && pathUUID(parts[5]) || len(parts) == 6 && parts[4] == "impact" && parts[5] == "lifecycle") || method == http.MethodPost && (len(parts) == 5 && parts[4] == "lifecycle-plans" || len(parts) == 7 && parts[4] == "lifecycle-plans" && pathUUID(parts[5]) && parts[6] == "cancel")
 	case "token-accounts":

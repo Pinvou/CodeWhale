@@ -19,3 +19,26 @@
 
 .ap-password-input > [data-password-reveal-output] { position: absolute; inset: 0; z-index: 0; display: flex; align-items: center; padding: 8px 42px 8px 8px; pointer-events: none; overflow: hidden; white-space: pre; font-family: monospace; }
 .ap-password-input > [data-password-reveal-output][hidden] { display: none; }
+
+.ap-usage-list { display: grid; gap: 12px; }
+.ap-usage-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 24px;
+  padding: 20px 24px; border: 1px solid rgba(0, 0, 0, .08); border-radius: 16px; background: var(--ap-card);
+}
+.ap-usage-row > div { display: grid; gap: 6px; }
+.ap-usage-row > div:last-child { justify-items: end; }
+.ap-usage-row strong { font-size: 15px; font-weight: 550; overflow-wrap: anywhere; }
+.ap-usage-row small { color: var(--ap-tertiary); font-size: 12px; }
+.ap-usage-tokens { color: var(--ap-secondary) !important; font-variant-numeric: tabular-nums; }
+.ap-usage-amount { color: rgba(8, 8, 11, .86); font-size: 16px !important; }
+.ap-usage-pagination { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 8px; }
+.ap-usage-pagination button { min-width: 96px; }
+.ap-usage-pagination button:disabled { cursor: default; }
+.ap-usage-pagination span { min-width: 72px; color: var(--ap-secondary); text-align: center; font-variant-numeric: tabular-nums; }
+.ap-usage-status-released { color: var(--ap-secondary); background: var(--ap-component); }
+.ap-usage-status-settlement-pending, .ap-usage-status-manual-review { color: #9a6500; background: #fff4d6; }
+
+@media (max-width: 720px) {
+ .ap-usage-row { align-items: start; grid-template-columns: 1fr; }
+ .ap-usage-row > div:last-child { justify-items: start; }
+}

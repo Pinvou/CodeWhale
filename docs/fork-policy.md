@@ -1,6 +1,7 @@
 # Pinvou 对 CodeWhale 底座的 fork 维护策略
 
 > 最后更新：2026-10-02（r3 收口后过渡期：不可变 tag `pinvou-v0.9.12-r3` 仍钉在其收口 `61cb769be`，登记头随 CodeWhale#80 前进至 `44921cf02`，gitlink=维护分支头并领先 tag；`verify-public-submodule.sh` 以 `TRANSITION_BASELINE` 断言过渡期钉点）
+> A04 本地登记（2026-10-05）：gitlink 普通追加至 `8b5a863908bf4178a8c5876c11c5884919119615`，唯一父提交为公开维护头 `44921cf028f12ffed33beb4760621a8598de48fc`；该补丁尚未推送，公开维护分支与不可变 tag 不变。下述公开分支一致性和发布门禁要求保持，须在外部写入获授权、补丁公开可达并对齐维护头后验证；本地 fast guard 通过不代表公开门禁通过。
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
 
 ## 0. 当前基线

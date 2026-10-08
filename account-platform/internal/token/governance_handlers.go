@@ -29,24 +29,25 @@ var tokenGovernanceHandlers map[string]tokenGovernanceHandler
 
 func init() {
 	tokenGovernanceHandlers = map[string]tokenGovernanceHandler{
-		"TOKEN_PROTOCOL_DRAFT_CREATE":     {"PROTOCOL_FORMULA", "COMMAND", (*Service).adminCreateTokenCommandBody},
-		"TOKEN_PROTOCOL_PUBLISH":          {"PROTOCOL_FORMULA", "COMMAND", (*Service).adminCreateTokenCommandBody},
-		"TOKEN_FORMULA_DRAFT_CREATE":      {"PROTOCOL_FORMULA", "COMMAND", (*Service).adminCreateTokenCommandBody},
-		"TOKEN_FORMULA_PUBLISH":           {"PROTOCOL_FORMULA", "COMMAND", (*Service).adminCreateTokenCommandBody},
-		"TOKEN_MODEL_DRAFT_SAVE":          {"MODEL_ACCOUNT", "COMMAND", (*Service).adminCreateTokenCommandBody},
-		"TOKEN_MODEL_PUBLISH":             {"MODEL_ACCOUNT", "COMMAND", (*Service).adminCreateTokenCommandBody},
-		"TOKEN_MODEL_LIFECYCLE_CHANGE":    {"LIFECYCLE", "APPROVED", approvedHandler("TOKEN_MODEL_LIFECYCLE_CHANGE")},
-		"TOKEN_MODEL_CATALOG_SYNC":        {"CATALOG_SYNC", "COMMAND", (*Service).adminCreateTokenCommandBody},
-		"TOKEN_MODEL_CATALOG_ROLLBACK":    {"CATALOG_ROLLBACK", "APPROVED", approvedHandler("TOKEN_MODEL_CATALOG_ROLLBACK")},
-		"TOKEN_ACCOUNT_CREATE":            {"MODEL_ACCOUNT", "COMMAND", (*Service).adminCreateTokenCommandBody},
-		"TOKEN_ACCOUNT_STATUS_CHANGE":     {"MODEL_ACCOUNT", "COMMAND", (*Service).adminCreateTokenCommandBody},
-		"TOKEN_ROUTE_UPSERT":              {"ROUTE", "COMMAND", (*Service).adminCreateTokenCommandBody},
-		"TOKEN_ROUTE_DELETE":              {"ROUTE", "COMMAND", (*Service).adminCreateTokenCommandBody},
-		"TOKEN_CREDENTIAL_ENROLL":         {"CREDENTIAL_ENROLL", "ISOLATED", isolatedHandler("ENROLL")},
-		"TOKEN_CREDENTIAL_ROTATE":         {"CREDENTIAL_ROTATE", "ISOLATED", isolatedHandler("ROTATE")},
-		"TOKEN_CREDENTIAL_REVOKE":         {"CREDENTIAL_REVOKE", "APPROVED", approvedHandler("TOKEN_CREDENTIAL_REVOKE")},
-		"TOKEN_CREDENTIAL_VALIDATE":       {"CREDENTIAL_VALIDATE", "COMMAND", (*Service).adminCreateTokenCommandBody},
-		"TOKEN_ROUTE_PROVISIONING_REPAIR": {"RUNTIME", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_USAGE_RECONCILIATION_RETRY": {"RUNTIME", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_PROTOCOL_DRAFT_CREATE":      {"PROTOCOL_FORMULA", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_PROTOCOL_PUBLISH":           {"PROTOCOL_FORMULA", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_FORMULA_DRAFT_CREATE":       {"PROTOCOL_FORMULA", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_FORMULA_PUBLISH":            {"PROTOCOL_FORMULA", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_MODEL_DRAFT_SAVE":           {"MODEL_ACCOUNT", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_MODEL_PUBLISH":              {"MODEL_ACCOUNT", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_MODEL_LIFECYCLE_CHANGE":     {"LIFECYCLE", "APPROVED", approvedHandler("TOKEN_MODEL_LIFECYCLE_CHANGE")},
+		"TOKEN_MODEL_CATALOG_SYNC":         {"CATALOG_SYNC", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_MODEL_CATALOG_ROLLBACK":     {"CATALOG_ROLLBACK", "APPROVED", approvedHandler("TOKEN_MODEL_CATALOG_ROLLBACK")},
+		"TOKEN_ACCOUNT_CREATE":             {"MODEL_ACCOUNT", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_ACCOUNT_STATUS_CHANGE":      {"MODEL_ACCOUNT", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_ROUTE_UPSERT":               {"ROUTE", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_ROUTE_DELETE":               {"ROUTE", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_CREDENTIAL_ENROLL":          {"CREDENTIAL_ENROLL", "ISOLATED", isolatedHandler("ENROLL")},
+		"TOKEN_CREDENTIAL_ROTATE":          {"CREDENTIAL_ROTATE", "ISOLATED", isolatedHandler("ROTATE")},
+		"TOKEN_CREDENTIAL_REVOKE":          {"CREDENTIAL_REVOKE", "APPROVED", approvedHandler("TOKEN_CREDENTIAL_REVOKE")},
+		"TOKEN_CREDENTIAL_VALIDATE":        {"CREDENTIAL_VALIDATE", "COMMAND", (*Service).adminCreateTokenCommandBody},
+		"TOKEN_ROUTE_PROVISIONING_REPAIR":  {"RUNTIME", "COMMAND", (*Service).adminCreateTokenCommandBody},
 	}
 }
 
@@ -74,9 +75,8 @@ type TokenCommandHandlerDescriptor struct {
 }
 
 func TokenCommandHandlerManifest() ([]TokenCommandHandlerDescriptor, error) {
-	// F04 installs the complete management set. Usage reconciliation is first
-	// installed with the ordinary execution producer in F05.
-	if len(tokenGovernanceHandlers) != 18 || len(tokenGovernanceHandlers) != len(tokenCommandSpecs) {
+	// F05 installs the complete management set and the actual AuditOnly usage retry.
+	if len(tokenGovernanceHandlers) != 19 || len(tokenGovernanceHandlers) != len(tokenCommandSpecs) {
 		return nil, fmt.Errorf("Token command handler set is incomplete")
 	}
 	result := make([]TokenCommandHandlerDescriptor, 0, len(tokenGovernanceHandlers))

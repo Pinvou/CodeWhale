@@ -655,7 +655,7 @@ func (s *Service) recheckRecoveryOperator(ctx context.Context, operator tokenAcc
 }
 
 func (s *Service) adminTokenCommandByIdempotencyKey(w http.ResponseWriter, r *http.Request) {
-	if isRouteGovernedCommand(r.URL.Query().Get("command_type")) {
+	if isRouteGovernedCommand(r.URL.Query().Get("command_type")) || r.URL.Query().Get("command_type") == "TOKEN_USAGE_RECONCILIATION_RETRY" {
 		s.adminRouteCommandByIdempotencyKey(w, r)
 		return
 	}

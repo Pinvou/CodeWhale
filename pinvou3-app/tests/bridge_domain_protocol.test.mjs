@@ -86,8 +86,8 @@ const protocolSources = {
 };
 
 const expectedProtocolHashes = {
-  // F01's personal-account domain delegates exactly twelve Native commands.
-  accountPlatform: 'eb8b68ee5e1e9414423b7a51eaad1e36e97ef09116edf0ad93b766625282a1ea',
+  // F05 retains all twelve personal commands and adds four typed-model Native commands.
+  accountPlatform: '3b053054ae162417977e71dc8910611e0655e6c1d3538689b67e3f659a858865',
   // Aux-chat domain debut (community #433 backflow): three commands —
   // get_or_create_aux_session / discard_aux_session / reset_aux_session —
   // plus the desktop send dispatch chat(restrictTools:true); buffer loading
@@ -173,7 +173,7 @@ const expectedProtocolHashes = {
   // display-equality gate — listener body-internal edits only, no new invoke
   // or listen entries (capture-text refresh). Recomputed for per-frame stream
   // notification coalescing; event names and invoke shapes remain unchanged.
-  chat: 'cad6c1cb471c97240673b9706fc6d799c81e64224f4fbaf56f5f44b3698cdc1e',
+  chat: '0938816c42c74d4019fb99fa1e8e8c20ec75fe815f5d64a89bb0357444275a33',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -194,12 +194,12 @@ const expectedProtocolHashes = {
   // and burst-coalesces the history refresh (round-20 R3); same two commands,
   // no new invoke or listen entries (the extractor scans raw source, so
   // body/comment text is part of the digest).
-  sessions: 'ffa253ca04a11fc8e93863e2f9b844376fd75b6d0cc815fe299144578f20f7e0',
+  sessions: '0450181a37d4bdf6a7b3724735b8e00417869c0f9f685361464082a465754fcc',
   // Recomputed for the builtin feature toggle hook: settings.js gains the
   // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
   // session-mention feature gate reads the list; the setter is the contract
   // hook for the builtin plugin page).
-  settings: 'b8a388fdf028c539a3e8cc86030dcf7ca0c575a223d142821875db5969c3e3d0',
+  settings: '8032bdf8f4563e77e6be5551302e31f62497dfac23f57976290b758c766adf86',
   updater: 'd603bbac5c51f3b53bf19272fbafd9c430786fd5e35a9b8da9aa67f4c2334e5f',
   // Official's bridge/voice.js is untouched by this backflow, so the hash
   // stays at the Official base value (the community value differs only via

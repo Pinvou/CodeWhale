@@ -105,6 +105,8 @@ type PostgresRepository struct {
 }
 
 type Repository interface {
+	UsageStore
+	ListUsageForContext(context.Context, AuthorizationContext, int, *UsageHistoryCursor) ([]UserUsageRecord, error)
 	CreateAccount(context.Context, CreateAccountRequest) (TokenAccount, error)
 	SetAccountStatus(context.Context, uuid.UUID, string, uuid.UUID, string) (TokenAccount, error)
 	UpsertRoute(context.Context, uuid.UUID, string, string, int, string, string, uuid.UUID) (RoutingPolicy, error)

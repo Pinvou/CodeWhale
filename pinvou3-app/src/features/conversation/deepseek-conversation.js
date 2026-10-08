@@ -127,6 +127,23 @@ function timelineUsage(usage) {
 export function timelineUserError(event, options = {}) {
   const existing = event && (event.user_error || event.userError);
   if (existing && typeof existing === 'object') return existing;
+  const notice = event && event.billing_notice;
+  if (notice && notice.schema_version === 1 && notice.code === 'WALLET_INSUFFICIENT' && notice.context_type === 'PERSONAL') {
+    const contextType = notice.context_type || '';
+    const organizationId = String(notice.organization_id || '').trim();
+    const action = notice.action === 'OPEN_RECHARGE' ? 'OPEN_RECHARGE' : '';
+    return {
+      kind: 'wallet_insufficient',
+      severity: notice.turn_outcome === 'COMPLETED' ? 'warning' : 'error',
+      stage: notice.stage || '',
+      turnOutcome: notice.turn_outcome || '',
+      settlementStatus: notice.settlement_status || '',
+      action,
+      contextType,
+      organizationId,
+      errorCode: notice.code,
+    };
+  }
   const error = event && event.error;
   const helper = globalThis.PinvouModelServiceErrors;
   if (!error || !helper || typeof helper.build !== 'function') return null;

@@ -228,6 +228,7 @@ func addTokenGovernancePolicies(result map[string]Policy) {
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
 	}
 	audit("TOKEN_CREDENTIAL_VALIDATE", 2, "platform.tokens.credentials.validate", 2, "token_account_id", "expected_account_version", "credential_id", "credential_version", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_USAGE_RECONCILIATION_RETRY", 2, "platform.usage.reconcile.retry", 2, "usage_request_id", "expected_usage_version", "evidence_high_watermark", "precheck_fingerprint", "request_fingerprint")
 	audit("TOKEN_ROUTE_PROVISIONING_REPAIR", 2, "platform.tokens.manage", 2, "provisioning_id", "expected_provisioning_version", "target_generation", "precheck_fingerprint", "request_fingerprint")
 }
 

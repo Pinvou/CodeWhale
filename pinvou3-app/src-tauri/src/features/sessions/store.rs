@@ -23,7 +23,9 @@ use deepseek_tui::session_manager::{
 };
 use parking_lot::{Mutex, RwLock};
 
+use super::ReplacementBranchLineage;
 use crate::platform::paths;
+use crate::platform::prefs::{BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, ModelSelectionRef};
 
 use super::scheduled::ChatEngineState;
 use super::transcript::{looks_like_truncating_overwrite, transcript_revision};
@@ -614,10 +616,20 @@ impl SessionStore {
     /// fail-closed: an invalid id or an unreadable path is never interpreted as
     /// a committed deletion.
     pub(crate) fn delete_session_record(&self, id: &str) -> (bool, std::io::Result<()>) {
-        let result = self.invoke_session_manager_delete(id);
+        let mut result = self.invoke_session_manager_delete(id);
         let committed = result.is_ok() || self.durable_session_record_is_absent(id);
         if committed {
             self.notify_session_deleted(id);
+            // Lineage belongs to the deleted record, including partial cleanup failures.
+            let lineage = self
+                .manager
+                .sessions_dir()
+                .join(format!("{id}.account-platform-branch.json"));
+            if let Err(error) = std::fs::remove_file(lineage) {
+                if error.kind() != ErrorKind::NotFound && result.is_ok() {
+                    result = Err(error);
+                }
+            }
         }
         (committed, result)
     }
@@ -928,7 +940,12 @@ impl SessionStore {
         // appears created successfully yet falls back to another model after
         // restart.
         if let Some(mid) = model_id {
-            self.set_session_model_id(&id, Some(mid))?;
+            let selection = if mid == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID {
+                ModelSelectionRef::account_platform(model.clone())
+            } else {
+                ModelSelectionRef::local(mid)
+            };
+            self.set_session_model_ref(&id, Some(selection))?;
         }
         if let Err(error) = self.save(&session) {
             let rollback = self.delete(&id);
@@ -940,6 +957,73 @@ impl SessionStore {
             });
         }
         Ok(session)
+    }
+
+    /// Creates an explicit, traceable branch when a historical platform model
+    /// can no longer continue. The source transcript is never rewritten.
+    pub fn create_replacement_branch(
+        &self,
+        source_id: &str,
+        source_message_count: usize,
+        source_turn_id: String,
+        replacement_model_ref: String,
+    ) -> Result<(SavedSession, ReplacementBranchLineage)> {
+        validate_session_id(source_id)?;
+        let source = self
+            .manager
+            .load_session_snapshot(source_id)
+            .with_context(|| format!("load source session {source_id}"))?;
+        let source_message_count = if source_message_count == 0 {
+            source.messages.len()
+        } else {
+            source_message_count
+        };
+        anyhow::ensure!(
+            source_message_count > 0 && source_message_count <= source.messages.len(),
+            "source turn is outside the committed transcript"
+        );
+        let id = generate_session_id();
+        let mut branch = create_saved_session_with_id_and_mode(
+            id.clone(),
+            &source.messages[..source_message_count],
+            &replacement_model_ref,
+            &source.metadata.workspace,
+            0,
+            None,
+            None,
+        );
+        branch.metadata.title = format!("{} · 替代模型分支", source.metadata.title);
+        branch.metadata.parent_session_id = Some(source_id.to_string());
+        branch.metadata.forked_from_message_count = Some(source_message_count);
+        self.set_session_model_ref(
+            &id,
+            Some(ModelSelectionRef::account_platform(
+                replacement_model_ref.clone(),
+            )),
+        )?;
+        if let Err(error) = self.save(&branch) {
+            let _ = self.delete(&id);
+            return Err(error);
+        }
+        let lineage = ReplacementBranchLineage {
+            source_conversation_id: source_id.to_string(),
+            source_turn_id,
+            original_model_ref: source.metadata.model,
+            replacement_model_ref,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let lineage_path = self
+            .manager
+            .sessions_dir()
+            .join(format!("{id}.account-platform-branch.json"));
+        let payload = serde_json::to_vec_pretty(&lineage)?;
+        if let Err(error) = deepseek_tui::utils::write_atomic(&lineage_path, &payload) {
+            let _ = self.delete(&id);
+            return Err(anyhow::anyhow!(
+                "persist replacement branch lineage: {error}"
+            ));
+        }
+        Ok((branch, lineage))
     }
 
     /// The aux session id of a main session, derived as `aux-{parent_id}`
@@ -1055,8 +1139,8 @@ impl SessionStore {
             }
             Err(_) => {}
         }
-        if let Some(model_id) = self.session_model_override(parent_id) {
-            self.set_session_model_id(&id, Some(model_id))?;
+        if let Some(selection) = self.session_model_ref_override(parent_id) {
+            self.set_session_model_ref(&id, Some(selection))?;
         }
         if let Err(error) = self.save(&session) {
             let rollback = self.delete(&id);
@@ -1313,7 +1397,12 @@ impl SessionStore {
         // three per-language sentinels to the current UI language.
         session.metadata.title = NEW_CHAT_TITLE.to_string();
         if let Some(model_id) = model_id {
-            self.set_session_model_id(&id, Some(model_id))?;
+            let selection = if model_id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID {
+                ModelSelectionRef::account_platform(model.clone())
+            } else {
+                ModelSelectionRef::local(model_id)
+            };
+            self.set_session_model_ref(&id, Some(selection))?;
         }
         if let Err(error) = self.save(&session) {
             let rollback = self.delete(&id);

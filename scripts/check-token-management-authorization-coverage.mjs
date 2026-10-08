@@ -9,6 +9,20 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const quoted = (text) => [...text.matchAll(/"([^"\n]+)"/g)].map((m) => m[1]);
 const sorted = (values) => [...values].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 const fail = (message) => { throw new Error(message); };
+// F05 delivers complete personal execution and its retry governance together.
+// This phase boundary is explicit; runtime database intersections cannot enable
+// a later wave or conceal a missing management command.
+const expectedTokenCommands = [
+  'TOKEN_PROTOCOL_DRAFT_CREATE', 'TOKEN_PROTOCOL_PUBLISH',
+  'TOKEN_FORMULA_DRAFT_CREATE', 'TOKEN_FORMULA_PUBLISH',
+  'TOKEN_MODEL_DRAFT_SAVE', 'TOKEN_MODEL_PUBLISH', 'TOKEN_MODEL_LIFECYCLE_CHANGE',
+  'TOKEN_MODEL_CATALOG_SYNC', 'TOKEN_MODEL_CATALOG_ROLLBACK',
+  'TOKEN_ACCOUNT_CREATE', 'TOKEN_ACCOUNT_STATUS_CHANGE',
+  'TOKEN_ROUTE_UPSERT', 'TOKEN_ROUTE_DELETE',
+  'TOKEN_CREDENTIAL_ENROLL', 'TOKEN_CREDENTIAL_ROTATE', 'TOKEN_CREDENTIAL_REVOKE',
+  'TOKEN_CREDENTIAL_VALIDATE', 'TOKEN_ROUTE_PROVISIONING_REPAIR',
+  'TOKEN_USAGE_RECONCILIATION_RETRY',
+];
 
 export function managementRoutes(source) {
   const prefixes = { internal: '/internal/v1', protected: '', admin: '/admin/v1', adminV2: '/admin/v2' };
@@ -57,7 +71,7 @@ export function commandSpecs(source, handlers) {
     if (!handler) fail('command missing actual handler');
     return { command: m[1], permissions: quoted(m[2]), recentAuth: m[3] === 'true', approvalRequired: m[4] === 'true', requiredFacts: quoted(m[5]), family: handler[1], transport: handler[2] };
   });
-  if (commands.length !== 18 || commands.some((c) => c.command === 'TOKEN_USAGE_RECONCILIATION_RETRY')) fail('F04 requires exactly the management 18 command set');
+  assert.deepEqual(commands.map((c) => c.command).sort(), [...expectedTokenCommands].sort(), 'F05 requires the complete management and usage retry command set');
   return sorted(commands);
 }
 

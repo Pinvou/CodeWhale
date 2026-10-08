@@ -133,7 +133,7 @@ func retainedManagementTokenRepository(t *testing.T) (*PostgresRepository, conte
 		t.Fatal(err)
 	}
 	verification, err := migrations.VerifyApplied(ctx, connection, loaded)
-	if err != nil || verification.AppliedCount != 28 {
+	if err != nil || verification.AppliedCount != 31 {
 		t.Fatalf("public migration verification: %+v err=%v", verification, err)
 	}
 	migrations.Unlock(ctx, connection)

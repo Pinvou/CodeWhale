@@ -5,7 +5,6 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { isLlmApiAccountVisible } from '../src/shared/model-options.js';
 import { desktopBridgeApi, desktopOnlyBridgeDomains, expectedWebBridgeApi } from './bridge_domain_contract.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -24,6 +23,10 @@ const methods = [
   ['loginSms', 'account_platform_login_sms', [{ mobile: '13800000000', challenge_id: id, code: '000000' }], { input: { mobile: '13800000000', challenge_id: id, code: '000000' } }],
   ['resetPassword', 'account_platform_reset_password', [{ mobile: '13800000000', challenge_id: id, code: '000000', password_handle: 'PUBLIC_SYNTHETIC_HANDLE' }], { input: { mobile: '13800000000', challenge_id: id, code: '000000', password_handle: 'PUBLIC_SYNTHETIC_HANDLE' } }],
   ['logout', 'account_platform_logout', [], undefined],
+  ['modelCatalog', 'account_platform_model_catalog', [], undefined],
+  ['selectCatalogModel', 'account_platform_select_catalog_model', [{ modelId: id }], { input: { modelId: id } }],
+  ['selectSessionCatalogModel', 'account_platform_select_session_model', [{ sessionId: 'public-session', modelId: id }], { input: { sessionId: 'public-session', modelId: id } }],
+  ['branchReplacementSession', 'account_platform_branch_replacement_session', [{ sourceSessionId: 'public-session', replacementModelId: id }], { input: { sourceSessionId: 'public-session', replacementModelId: id } }],
   ['request', 'account_platform_request', [{ service: 'account', method: 'GET', path: '/v1/me' }], { request: { service: 'account', method: 'GET', path: '/v1/me' } }],
 ];
 function productionFeature(invoke) {
@@ -43,21 +46,19 @@ for (const [method, command, args, expected] of methods) {
     await assert.rejects(failing[method](...args), error => error === originalError);
   });
 }
-test('personal bridge is finite and desktop-only without replacing legacy LLMap', () => {
+test('personal/model bridge stays finite and desktop-only after mature LLMap retirement', () => {
   const feature = productionFeature(async () => null);
   assert.deepEqual(Object.keys(feature).sort(), desktopBridgeApi.accountPlatform.toSorted());
   assert.equal(desktopOnlyBridgeDomains.includes('accountPlatform'), true);
   assert.equal(expectedWebBridgeApi().accountPlatform, undefined);
-  assert.ok(desktopBridgeApi.llmapi.includes('getLlmApiModels'));
+  assert.equal(desktopBridgeApi.llmapi, undefined);
   const main = read('src/app/main.jsx');
-  assert.match(main, /\{llmAccountVisible && \(/);
-  assert.match(main, /isLlmApiAccountVisible\(/);
-  assert.match(main, /getLlmApiStatus/);
-  assert.equal(isLlmApiAccountVisible({ enabled: true, backend_user_state: 'exists', provisioning_status: 'ready' }), true);
-  assert.equal(isLlmApiAccountVisible({ enabled: false, backend_user_state: 'exists' }), false);
-  assert.equal(isLlmApiAccountVisible({ stale: true, backend_user_state: 'exists', auto_login_failed: true }), true);
-  assert.equal(isLlmApiAccountVisible({ stale: true, backend_user_state: 'exists', auto_login_failed: false }), false);
+  assert.doesNotMatch(main, /getLlmApiStatus|isLlmApiAccountVisible|llmAccountVisible/);
+  assert.match(main, /shouldShowModelAccessGate/);
+  assert.match(main, /openSettingsSection\('model'\)/);
+  assert.match(read('src/platform/tauri/bridge.js'), /switchModelRef:\s*settingsFeature\.switchModelRef/);
 });
+
 test('actual host visibility expression requires semantic platform support and installed Native bridge', () => {
   const main = read('src/app/main.jsx');
   const expressions = [...main.matchAll(/const personalAccountAvailable = ([^;]+);/g)];

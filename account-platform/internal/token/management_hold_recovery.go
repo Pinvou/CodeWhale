@@ -6,20 +6,24 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/google/uuid"
 	"net/http"
 )
 
 type frozenUsageSnapshot struct {
-	WalletOwnerType   string          `json:"wallet_owner_type"`
-	ProviderID        string          `json:"provider_id"`
-	AdapterVersion    string          `json:"adapter_version"`
-	UpstreamModelRef  string          `json:"upstream_model_ref"`
-	ContextType       string          `json:"context_type"`
-	MembershipVersion int64           `json:"membership_version"`
-	MemberVersion     int64           `json:"member_version"`
-	MaximumOutput     int64           `json:"maximum_output_tokens"`
-	Stream            bool            `json:"stream"`
-	PricingSnapshot   json.RawMessage `json:"pricing_snapshot"`
+	OrganizationID                      *uuid.UUID      `json:"organization_id,omitempty"`
+	OrganizationMembershipVersion       *int64          `json:"organization_membership_version,omitempty"`
+	CanPurchaseOrganizationEntitlements bool            `json:"can_purchase_organization_entitlements,omitempty"`
+	WalletOwnerType                     string          `json:"wallet_owner_type"`
+	ProviderID                          string          `json:"provider_id"`
+	AdapterVersion                      string          `json:"adapter_version"`
+	UpstreamModelRef                    string          `json:"upstream_model_ref"`
+	ContextType                         string          `json:"context_type"`
+	MembershipVersion                   int64           `json:"membership_version"`
+	MemberVersion                       int64           `json:"member_version"`
+	MaximumOutput                       int64           `json:"maximum_output_tokens"`
+	Stream                              bool            `json:"stream"`
+	PricingSnapshot                     json.RawMessage `json:"pricing_snapshot"`
 }
 
 func (s *Service) ensureUsageHold(ctx context.Context, usage UsageRequest, envelope DispatchEnvelope) (BillingHold, error) {
