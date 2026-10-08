@@ -3309,15 +3309,20 @@ fn log_thinking_mode_violations(body: &Value) {
 
 fn requires_reasoning_content(model: &str) -> bool {
     let lower = model.to_lowercase();
-    // V4-family direct model IDs.
+    // V4-family direct model IDs (the version spelling `deepseek-v4.1-flash`
+    // lands here via the `deepseek-v4` substring).
     lower.contains("deepseek-v4")
-        // Public DeepSeek API aliases routed server-side to the V4 family.
-        // `deepseek-chat` resolves to `deepseek-v4-flash` and `deepseek-reasoner`
-        // resolves to `deepseek-v4-pro`; both have thinking mode enabled by
-        // default, so any assistant message carrying tool_calls must replay
-        // `reasoning_content` on subsequent turns or the API returns 400.
+        // Public API aliases. The quick-start's current model name is
+        // `deepseek-flash` (MODEL VERSION DeepSeek-V4.1-Flash);
+        // `deepseek-chat` / `deepseek-reasoner` were fully retired after
+        // 2026-07-24 but stay gated for as long as a route still accepts
+        // them. The family runs with thinking enabled by default, and
+        // DeepSeek documents that when a request carries `tools`, the
+        // `reasoning_content` of all previous assistant turns must be
+        // passed back fully or the API returns 400. Re-checked 2026-10-08.
         || lower.starts_with("deepseek-chat")
         || lower.starts_with("deepseek-reasoner")
+        || lower.starts_with("deepseek-flash")
         || has_deepseek_r_series_marker(&lower)
 }
 
@@ -4871,9 +4876,13 @@ mod alias_thinking_detection_tests {
         // Documented public aliases.
         assert!(requires_reasoning_content("deepseek-chat"));
         assert!(requires_reasoning_content("deepseek-reasoner"));
+        // The quick-start's current model name (MODEL VERSION
+        // DeepSeek-V4.1-Flash).
+        assert!(requires_reasoning_content("deepseek-flash"));
         // Case-insensitive: users sometimes copy/paste with capitalisation.
         assert!(requires_reasoning_content("DeepSeek-Chat"));
         assert!(requires_reasoning_content("DEEPSEEK-REASONER"));
+        assert!(requires_reasoning_content("DeepSeek-Flash"));
     }
 
     #[test]
@@ -4902,6 +4911,30 @@ mod alias_thinking_detection_tests {
         // server-side, so they must continue to require reasoning_content.
         assert!(requires_reasoning_content("deepseek-chat:free"));
         assert!(requires_reasoning_content("deepseek-reasoner-2025-05"));
+        assert!(requires_reasoning_content("deepseek-flash:free"));
+    }
+
+    #[test]
+    fn deepseek_flash_replays_and_streams_reasoning_like_the_family() {
+        // The quick-start's current model name must behave like the retired
+        // aliases end to end: replay policy on, stream classification on,
+        // and the standard separate-field reasoning stream.
+        let base = crate::config::DEFAULT_DEEPSEEK_BASE_URL;
+        assert!(should_replay_reasoning_content_for_provider_on_route(
+            ApiProvider::Deepseek,
+            base,
+            "deepseek-flash",
+            None,
+        ));
+        assert!(is_reasoning_model_for_stream_on_route(
+            ApiProvider::Deepseek,
+            base,
+            "deepseek-flash",
+        ));
+        assert_eq!(
+            reasoning_stream_style_for_route(ApiProvider::Deepseek, base, "deepseek-flash", None,),
+            ReasoningStreamStyle::SeparateField
+        );
     }
 
     #[test]
