@@ -68,7 +68,29 @@ func (p *PaymentCoordinator) runReconciliationPipeline(ctx context.Context, chan
 	}
 	var run ReconciliationRun
 	if mode != "MANUAL_API" {
-		err = scanReconciliationRun(tx.QueryRow(ctx, reconciliationRunSelect+` WHERE provider_id=$1 AND provider_version=$2 AND channel=$3 AND business_date=$4 AND source_mode=$5 AND input_digest=$6`, caps.ProviderID, caps.Version, channel, date, mode, digest), &run)
+		err = scanReconciliationRun(tx.QueryRow(ctx, reconciliationRunSelect+` WHERE provider_id=$1 AND provider_version=$2 AND channel=$3 AND business_date=$4 AND source_mode=$5 AND input_digest=$6 ORDER BY started_at DESC,id DESC LIMIT 1`, caps.ProviderID, caps.Version, channel, date, mode, digest), &run)
+		if err == nil {
+			if mode == "SCHEDULED_API" && run.Status == "COMPLETED" {
+				facts, e := p.auditedReconciliationFacts(ctx, tx, run, rows)
+				if e != nil {
+					return run, e
+				}
+				currentDigest, _, e := p.reconciliationObservationDigest(ctx, tx, run, rows, facts)
+				if e != nil {
+					return run, e
+				}
+				var savedDigest string
+				e = tx.QueryRow(ctx, `SELECT facts_digest FROM reconciliation_observations WHERE id=(SELECT active_observation_id FROM reconciliation_runs WHERE id=$1)`, run.ID).Scan(&savedDigest)
+				if e != nil && !errors.Is(e, pgx.ErrNoRows) {
+					return run, e
+				}
+				// Historical completed runs predate immutable observations. Keep
+				// their receipt intact and create a new verifiable observation.
+				if errors.Is(e, pgx.ErrNoRows) || currentDigest != savedDigest {
+					err = pgx.ErrNoRows
+				}
+			}
+		}
 		if err == nil {
 			if err := tx.Commit(ctx); err != nil {
 				return run, err
@@ -147,10 +169,6 @@ func (p *PaymentCoordinator) resumeReconciliationRun(ctx context.Context, id uui
 	if run.Status == "COMPLETED" {
 		return run, nil
 	}
-	caps := p.Capabilities()
-	if run.ProviderID != caps.ProviderID || run.ProviderVersion != caps.Version || !caps.SupportsChannel(run.Channel) {
-		return run, &reconciliationPendingError{id, ErrConflict}
-	}
 	// Session lock serializes only this batch; no financial transaction is open.
 	lease, err := p.repository.pool.Acquire(ctx)
 	if err != nil {
@@ -172,6 +190,18 @@ func (p *PaymentCoordinator) resumeReconciliationRun(ctx context.Context, id uui
 			lease.Conn().Close(release)
 		}
 	}()
+	// The first read precedes admission. A worker may have completed this run
+	// while this connection was being acquired; completed receipts are frozen.
+	if err := scanReconciliationRun(lease.QueryRow(ctx, reconciliationRunSelect+` WHERE id=$1`, id), &run); err != nil {
+		return run, err
+	}
+	if run.Status == "COMPLETED" {
+		return run, nil
+	}
+	caps := p.Capabilities()
+	if run.ProviderID != caps.ProviderID || run.ProviderVersion != caps.Version || !caps.SupportsChannel(run.Channel) {
+		return run, &reconciliationPendingError{id, ErrConflict}
+	}
 	defer func() {
 		if resultErr != nil {
 			failed, done := context.WithTimeout(context.Background(), 3*time.Second)
@@ -180,8 +210,12 @@ func (p *PaymentCoordinator) resumeReconciliationRun(ctx context.Context, id uui
 			resultErr = &reconciliationPendingError{id, resultErr}
 		}
 	}()
-	if _, err := p.repository.pool.Exec(ctx, `UPDATE reconciliation_runs SET status='RUNNING',completed_at=NULL,error_message=NULL WHERE id=$1 AND status<>'COMPLETED'`, id); err != nil {
+	admitted, err := lease.Exec(ctx, `UPDATE reconciliation_runs SET status='RUNNING',completed_at=NULL,error_message=NULL WHERE id=$1 AND status<>'COMPLETED'`, id)
+	if err != nil {
 		return run, err
+	}
+	if admitted.RowsAffected() != 1 {
+		return run, ErrConflict
 	}
 	providerRows, err := p.reconciliationProviderRows(ctx, p.repository.pool, id)
 	if err != nil {
@@ -554,6 +588,83 @@ func reconciliationFactsDigest(facts []ReconciliationInternalFact) string {
 	sum := sha256.Sum256(raw)
 	return fmt.Sprintf("%x", sum)
 }
+
+// Include existing order bindings even before a transaction has been credited.
+// Provider-only missing facts must be reobserved when their internal order arrives.
+func (p *PaymentCoordinator) reconciliationObservationDigest(ctx context.Context, q reconciliationQuerier, run ReconciliationRun, rows []ProviderBillEntry, facts []ReconciliationInternalFact) (string, []byte, error) {
+	names := make([]string, 0, len(rows))
+	for _, row := range rows {
+		names = append(names, row.MerchantOrderNo)
+	}
+	var bindings []byte
+	result, err := q.Query(ctx, `SELECT COALESCE(jsonb_agg(jsonb_build_array(id,merchant_order_no,wallet_id,provider_id,provider_version,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,primary_provider_transaction_id,requester_id,product_id,product_snapshot->'base_points',product_snapshot->'bonus_points',payer_user_id) ORDER BY merchant_order_no),'[]'::jsonb) FROM payment_orders WHERE merchant_order_no=ANY($1::text[])`, names)
+	if err != nil {
+		return "", nil, err
+	}
+	defer result.Close()
+	if !result.Next() {
+		return "", nil, result.Err()
+	}
+	if err := result.Scan(&bindings); err != nil {
+		return "", nil, err
+	}
+	raw, _ := json.Marshal([]any{reconciliationFactsDigest(facts), json.RawMessage(bindings)})
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("%x", sum), bindings, nil
+}
+
+// Provider-only discrepancies still have an immutable financial order binding.
+// Ignore acceptance cannot silently extend to a newly arrived or changed source.
+func bindProviderOnlyReconciliationDifferences(differences []ReconciliationDifference, raw []byte, run ReconciliationRun) error {
+	var bindings [][]json.RawMessage
+	if err := json.Unmarshal(raw, &bindings); err != nil {
+		return err
+	}
+	byMerchant := map[string][]json.RawMessage{}
+	for _, binding := range bindings {
+		if len(binding) != 17 {
+			return ErrConflict
+		}
+		var merchant, provider, version, channel string
+		if json.Unmarshal(binding[1], &merchant) != nil || json.Unmarshal(binding[3], &provider) != nil || json.Unmarshal(binding[4], &version) != nil || json.Unmarshal(binding[5], &channel) != nil {
+			return ErrConflict
+		}
+		if provider == run.ProviderID && version == run.ProviderVersion && channel == run.Channel {
+			byMerchant[merchant] = binding
+		}
+	}
+	for index := range differences {
+		difference := &differences[index]
+		if difference.PaymentOrderID != nil {
+			continue
+		}
+		binding, ok := byMerchant[difference.MerchantOrderNo]
+		if !ok {
+			continue
+		}
+		var id uuid.UUID
+		if err := json.Unmarshal(binding[0], &id); err != nil {
+			return err
+		}
+		stable := map[string]json.RawMessage{}
+		keys := []string{"id", "merchant_order_no", "wallet_id", "provider_id", "provider_version", "channel", "amount_fen", "currency", "credit_microcredits", "", "", "primary_provider_transaction_id", "requester_id", "product_id", "base_points", "bonus_points", "payer_user_id"}
+		for index, key := range keys {
+			if key != "" {
+				stable[key] = binding[index]
+			}
+		}
+		evidence, err := json.Marshal(map[string]any{"order_binding": stable})
+		if err != nil {
+			return err
+		}
+		hash := sha256.Sum256(evidence)
+		difference.PaymentOrderID = &id
+		difference.InternalSnapshot = evidence
+		difference.IntegrityDigest = fmt.Sprintf("%x", hash)
+	}
+	return nil
+}
+
 func (p *PaymentCoordinator) auditedReconciliationFacts(ctx context.Context, q reconciliationQuerier, run ReconciliationRun, providerRows []ProviderBillEntry) ([]ReconciliationInternalFact, error) {
 	date, err := time.Parse("2006-01-02", run.BusinessDate)
 	if err != nil {
@@ -573,6 +684,7 @@ func (p *PaymentCoordinator) finalizeReconciliationObservation(ctx context.Conte
 	var observationID uuid.UUID
 	var facts []ReconciliationInternalFact
 	var factsDigest string
+	var sourceBindings []byte
 	// This snapshot transaction copies audit evidence, never locks financial rows.
 	err := reconciliationRetry(ctx, func() error {
 		tx, err := p.repository.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -584,11 +696,14 @@ func (p *PaymentCoordinator) finalizeReconciliationObservation(ctx context.Conte
 		if err != nil {
 			return err
 		}
-		factsDigest = reconciliationFactsDigest(facts)
+		factsDigest, sourceBindings, err = p.reconciliationObservationDigest(ctx, tx, run, providerRows, facts)
+		if err != nil {
+			return err
+		}
 		err = tx.QueryRow(ctx, `SELECT id FROM reconciliation_observations WHERE run_id=$1 AND facts_digest=$2`, run.ID, factsDigest).Scan(&observationID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			observationID = uuid.Must(uuid.NewV7())
-			if _, err := tx.Exec(ctx, `INSERT INTO reconciliation_observations(id,run_id,facts_digest,created_at) VALUES($1,$2,$3,$4)`, observationID, run.ID, factsDigest, p.now()); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO reconciliation_observations(id,run_id,facts_digest,created_at,source_bindings) VALUES($1,$2,$3,$4,$5)`, observationID, run.ID, factsDigest, p.now(), sourceBindings); err != nil {
 				return err
 			}
 			values := make([][]any, 0, len(facts))
@@ -610,6 +725,9 @@ func (p *PaymentCoordinator) finalizeReconciliationObservation(ctx context.Conte
 		return err
 	}
 	differences := CompareFourWayReconciliation(providerRows, facts)
+	if err := bindProviderOnlyReconciliationDifferences(differences, sourceBindings, run); err != nil {
+		return err
+	}
 	unique := make([]ReconciliationDifference, 0, len(differences))
 	seen := map[string]bool{}
 	for _, difference := range differences {
@@ -676,7 +794,11 @@ func (p *PaymentCoordinator) finalizeReconciliationObservation(ctx context.Conte
 		if err != nil {
 			return err
 		}
-		if reconciliationFactsDigest(current) != factsDigest {
+		currentDigest, _, err := p.reconciliationObservationDigest(ctx, tx, run, providerRows, current)
+		if err != nil {
+			return err
+		}
+		if currentDigest != factsDigest {
 			return ErrConflict
 		}
 		var completedCases int

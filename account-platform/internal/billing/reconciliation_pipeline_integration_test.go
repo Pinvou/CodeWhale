@@ -2,9 +2,13 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -386,5 +390,238 @@ func TestF03InternalMissingReferencesHaveDistinctStableIdentity(t *testing.T) {
 	third.InternalAmountFen++
 	if reconciliationDifferenceDigest(run, first) == reconciliationDifferenceDigest(run, third) {
 		t.Fatal("changed internal refund amount collapsed")
+	}
+}
+
+func TestF03ScheduledUnchangedBillObservesLateInternalFacts(t *testing.T) {
+	r, ctx := retainedFinanceRepository(t)
+	provider := &reconciliationFixtureProvider{}
+	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	if err != nil || same.ID != first.ID {
+		t.Fatal("unchanged duplicated", same, err)
+	}
+	_, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, true)
+	second, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	if err != nil || second.ID == first.ID {
+		t.Fatal("late facts cached", second, err)
+	}
+	cases, err := r.AdminReconciliationCases(ctx, second.ID, 10)
+	if err != nil || len(cases) != 1 || cases[0].MerchantOrderNo != order.MerchantOrderNo || cases[0].CaseType != "INTERNAL_PAID_PROVIDER_MISSING" {
+		t.Fatal(cases, err)
+	}
+	same, err = c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	if err != nil || same.ID != second.ID {
+		t.Fatal("changed observation not stable", same, err)
+	}
+	frozen, err := c.resumeReconciliationRun(ctx, first.ID)
+	if err != nil || frozen.ID != first.ID || frozen.CaseCount != 0 || frozen.CompletedAt == nil || !frozen.CompletedAt.Equal(*first.CompletedAt) {
+		t.Fatal("old receipt changed", frozen, err)
+	}
+	var runs int
+	if err = r.pool.QueryRow(ctx, `SELECT count(*) FROM reconciliation_runs`).Scan(&runs); err != nil || runs != 2 {
+		t.Fatal(runs, err)
+	}
+}
+
+// Pause the second worker after its first status read, immediately before lease
+// admission. The first worker completes while that stale read is outstanding.
+type reconciliationAcquireBarrier struct {
+	count   atomic.Int32
+	reached chan struct{}
+	release chan struct{}
+}
+
+func (b *reconciliationAcquireBarrier) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	return ctx
+}
+func (b *reconciliationAcquireBarrier) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
+}
+func (b *reconciliationAcquireBarrier) TraceAcquireStart(ctx context.Context, _ *pgxpool.Pool, _ pgxpool.TraceAcquireStartData) context.Context {
+	if b.count.Add(1) == 2 {
+		close(b.reached)
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+		}
+	}
+	return ctx
+}
+func (b *reconciliationAcquireBarrier) TraceAcquireEnd(context.Context, *pgxpool.Pool, pgxpool.TraceAcquireEndData) {
+}
+func TestF03ResumeAdmissionRechecksCompletedReceipt(t *testing.T) {
+	r, ctx := retainedFinanceRepository(t)
+	provider := &reconciliationFixtureProvider{}
+	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Isolated incomplete fixture; the original immutable observation is preserved.
+	if _, err = r.pool.Exec(ctx, `UPDATE reconciliation_runs SET status='FAILED',completed_at=NULL WHERE id=$1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	barrier := &reconciliationAcquireBarrier{reached: make(chan struct{}), release: make(chan struct{})}
+	config := r.pool.Config()
+	config.ConnConfig.Tracer = barrier
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	other := *r
+	other.pool = pool
+	second, err := NewPaymentCoordinatorWithProvider(&other, provider, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type outcome struct {
+		run ReconciliationRun
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() { run, e := second.resumeReconciliationRun(ctx, first.ID); done <- outcome{run, e} }()
+	select {
+	case <-barrier.reached:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	completed, err := c.resumeReconciliationRun(ctx, first.ID)
+	close(barrier.release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := <-done
+	if result.err != nil || result.run.CompletedAt == nil || !result.run.CompletedAt.Equal(*completed.CompletedAt) {
+		t.Fatal("stale worker redid completion", result, completed)
+	}
+	// Query and session admission plus the post-lock terminal read only: no row
+	// progress, audit or observation write is allowed for the second worker.
+	if barrier.count.Load() != 2 {
+		t.Fatal("completed worker performed further pooled work", barrier.count.Load())
+	}
+}
+
+func TestF03ScheduledProviderOnlyFactsObserveNewOrderBinding(t *testing.T) {
+	r, ctx := retainedFinanceRepository(t)
+	row := ProviderBillEntry{EntryType: "REFUND", ProviderReferenceID: uuid.NewString(), MerchantOrderNo: "late-binding-" + uuid.NewString(), Channel: "ALIPAY", AmountFen: 100, Currency: "CNY", Status: "SUCCESS", PaidAt: r.now()}
+	provider := &reconciliationFixtureProvider{rows: []ProviderBillEntry{row}}
+	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := c.RunScheduledReconciliation(ctx, row.Channel, r.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCases, err := r.AdminReconciliationCases(ctx, first.ID, 10)
+	if err != nil || len(oldCases) != 1 {
+		t.Fatal(oldCases, err)
+	}
+	actor := uuid.New()
+	if _, err = r.UpdateReconciliationCase(ctx, oldCases[0].ID, ReconciliationCaseCommand{Action: "CLAIM", ActorID: actor, Reason: "controlled missing source claim", IdempotencyKey: uuid.NewString()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = r.UpdateReconciliationCase(ctx, oldCases[0].ID, ReconciliationCaseCommand{Action: "IGNORE", ActorID: actor, ReviewResult: "controlled exact source accepted", Reason: "controlled accept exact missing source", IdempotencyKey: uuid.NewString()}); err != nil {
+		t.Fatal(err)
+	}
+	_, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, false)
+	if _, err = r.pool.Exec(ctx, `UPDATE payment_orders SET merchant_order_no=$2 WHERE id=$1`, order.ID, row.MerchantOrderNo); err != nil {
+		t.Fatal(err)
+	}
+	second, err := c.RunScheduledReconciliation(ctx, row.Channel, r.now())
+	if err != nil || second.ID == first.ID {
+		t.Fatal("uncredited binding omitted from observation", second, err)
+	}
+	newCases, err := r.AdminReconciliationCases(ctx, second.ID, 10)
+	if err != nil || len(newCases) != 1 || newCases[0].ID == oldCases[0].ID || newCases[0].Status != "OPEN" || newCases[0].PaymentOrderID == nil || *newCases[0].PaymentOrderID != order.ID || len(newCases[0].InternalSnapshot) == 0 {
+		t.Fatal("ignore extended to new binding", newCases, err)
+	}
+	oldCases, err = r.AdminReconciliationCases(ctx, first.ID, 10)
+	if err != nil || oldCases[0].Status != "IGNORED" {
+		t.Fatal("old acceptance overwritten", oldCases, err)
+	}
+	same, err := c.RunScheduledReconciliation(ctx, row.Channel, r.now())
+	if err != nil || same.ID != second.ID {
+		t.Fatal("same binding duplicated", same, err)
+	}
+	if provider.queryCount != 0 {
+		t.Fatal("refund reconciliation unexpectedly mutated funds", provider.queryCount)
+	}
+}
+
+func TestF03ScheduledLegacyReceiptWithoutObservationIsPreserved(t *testing.T) {
+	r, ctx := retainedFinanceRepository(t)
+	c, err := NewPaymentCoordinatorWithProvider(r, &reconciliationFixtureProvider{}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = r.pool.Exec(ctx, `UPDATE reconciliation_runs SET active_observation_id=NULL WHERE id=$1`, legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	observed, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	if err != nil || observed.ID == legacy.ID {
+		t.Fatal("legacy cached without verifiable observation", observed, err)
+	}
+	same, err := c.RunScheduledReconciliation(ctx, "ALIPAY", r.now())
+	if err != nil || same.ID != observed.ID {
+		t.Fatal("new observation duplicated", same, err)
+	}
+	saved, err := c.resumeReconciliationRun(ctx, legacy.ID)
+	if err != nil || saved.CompletedAt == nil || !saved.CompletedAt.Equal(*legacy.CompletedAt) || saved.CaseCount != legacy.CaseCount {
+		t.Fatal("historical receipt rewritten", saved, err)
+	}
+}
+
+func TestF03ProviderOnlyBindingEvidencePreservesInt64AndStableIdentity(t *testing.T) {
+	id := uuid.New()
+	merchant := "controlled-exact-binding"
+	binding := []any{id, merchant, uuid.New(), "controlled", "v1", "ALIPAY", json.Number("9007199254740993"), "CNY", json.Number("9223372036854775807"), "PENDING", "PENDING", nil, uuid.New(), "controlled-product", json.Number("9007199254740993"), 0, uuid.New()}
+	run := ReconciliationRun{ProviderID: "controlled", ProviderVersion: "v1", Channel: "ALIPAY"}
+	makeDifference := func() ReconciliationDifference {
+		raw, err := json.Marshal([]any{binding})
+		if err != nil {
+			t.Fatal(err)
+		}
+		differences := []ReconciliationDifference{{MerchantOrderNo: merchant}}
+		if err = bindProviderOnlyReconciliationDifferences(differences, raw, run); err != nil {
+			t.Fatal(err)
+		}
+		return differences[0]
+	}
+	first := makeDifference()
+	var snapshot struct {
+		Binding map[string]json.RawMessage `json:"order_binding"`
+	}
+	if err := json.Unmarshal(first.InternalSnapshot, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot.Binding["amount_fen"]) != "9007199254740993" || string(snapshot.Binding["credit_microcredits"]) != "9223372036854775807" {
+		t.Fatal("int64 rounded", snapshot)
+	}
+	binding[9] = "MANUAL_REVIEW"
+	binding[10] = "MANUAL_REVIEW"
+	second := makeDifference()
+	if second.IntegrityDigest != first.IntegrityDigest {
+		t.Fatal("status manufactured new financial acceptance")
+	}
+	binding[8] = json.Number("9223372036854775806")
+	third := makeDifference()
+	if third.IntegrityDigest == first.IntegrityDigest {
+		t.Fatal("changed credit reused financial acceptance")
 	}
 }

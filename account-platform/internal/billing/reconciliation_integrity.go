@@ -124,6 +124,9 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
 }
 
 func auditReconciliationFact(f *ReconciliationInternalFact, request reconciliationAuditRequest, payload reconciliationAuditRecord) {
+	if f.EntryType != "PAYMENT" {
+		payload["source"] = f.RefundSnapshot
+	}
 	journals := auditRecords(payload["journals"])
 	f.LedgerPresent = len(journals) > 0
 	f.LedgerValid = false
@@ -257,9 +260,20 @@ func auditReconciliationFact(f *ReconciliationInternalFact, request reconciliati
 		}
 		if strings.HasPrefix(request.References[0], "refund:") {
 			total = auditInteger(source, "credit_microcredits")
-			if total == nil {
+			if total == nil || total.Cmp(credit) != 0 || !bytesEqualJSONInteger(source["amount_fen"], transaction["amount_fen"]) {
 				return
 			}
+			for kind, key := range map[string]string{"BASE": "base_microcredits", "BONUS": "bonus_microcredits"} {
+				expected := kindAmounts[kind]
+				if expected == nil {
+					expected = new(big.Int)
+				}
+				actual := auditInteger(source, key)
+				if actual == nil || actual.Cmp(expected) != 0 {
+					return
+				}
+			}
+			originals := lotAmounts
 			lotAmounts = map[string]*big.Int{}
 			for _, reservation := range auditRecords(payload["reservations"]) {
 				n := new(big.Int)
@@ -271,7 +285,7 @@ func auditReconciliationFact(f *ReconciliationInternalFact, request reconciliati
 					n.Add(n, v)
 				}
 				lot := auditString(reservation, "credit_lot_id")
-				if lotKinds[lot] == "" || auditString(reservation, "package_id") != auditString(packages[0], "id") {
+				if lotKinds[lot] == "" || auditString(reservation, "package_id") != auditString(packages[0], "id") || originals[lot] == nil || n.Cmp(originals[lot]) != 0 || lotAmounts[lot] != nil {
 					return
 				}
 				lotAmounts[lot] = n
@@ -282,6 +296,9 @@ func auditReconciliationFact(f *ReconciliationInternalFact, request reconciliati
 			}
 		} else {
 			journalType = "FORCED_REFUND"
+			if auditString(source, "wallet_id") != wallet {
+				return
+			}
 			if f.EntryType == "CHARGEBACK" {
 				journalType = "CHARGEBACK"
 				clearing = chargebackClearingAccount.String()
@@ -294,10 +311,13 @@ func auditReconciliationFact(f *ReconciliationInternalFact, request reconciliati
 			walletExpected.Add(base, bonus)
 			for _, r := range auditRecords(payload["receivables"]) {
 				n := auditInteger(r, "original_microcredits")
-				if n == nil || auditString(r, "wallet_id") != wallet || auditString(r, "payment_order_id") != request.Order || auditString(r, "payment_transaction_id") != request.Transaction || auditString(r, "entitlement_package_id") != auditString(packages[0], "id") {
+				if n == nil || n.Sign() <= 0 || auditString(r, "id") != auditString(source, "receivable_id") || auditString(r, "source_type") != journalType || auditString(r, "source_reference") != request.References[0] || auditString(r, "wallet_id") != wallet || auditString(r, "payment_order_id") != request.Order || auditString(r, "payment_transaction_id") != request.Transaction || auditString(r, "entitlement_package_id") != auditString(packages[0], "id") {
 					return
 				}
 				receivableExpected.Add(receivableExpected, n)
+			}
+			if (receivableExpected.Sign() > 0) != (auditString(source, "receivable_id") != "") {
+				return
 			}
 			originalBase, originalBonus := kindAmounts["BASE"], kindAmounts["BONUS"]
 			if originalBase == nil {
@@ -306,7 +326,25 @@ func auditReconciliationFact(f *ReconciliationInternalFact, request reconciliati
 			if originalBonus == nil {
 				originalBonus = new(big.Int)
 			}
-			if base.Sign() < 0 || bonus.Sign() < 0 || new(big.Int).Add(base, receivableExpected).Cmp(originalBase) > 0 || bonus.Cmp(originalBonus) > 0 {
+			targetBase, targetBonus := new(big.Int).Set(originalBase), new(big.Int).Set(originalBonus)
+			if f.EntryType != "CHARGEBACK" {
+				amount, transactionAmount := auditInteger(source, "amount_fen"), auditInteger(transaction, "amount_fen")
+				if amount == nil || transactionAmount == nil || !amount.IsInt64() || !transactionAmount.IsInt64() || amount.Sign() <= 0 || amount.Cmp(transactionAmount) > 0 || !originalBase.IsInt64() || !originalBonus.IsInt64() {
+					return
+				}
+				baseAmount, err := proportionalCeiling(originalBase.Int64(), amount.Int64(), transactionAmount.Int64())
+				if err != nil {
+					return
+				}
+				bonusAmount, err := proportionalCeiling(originalBonus.Int64(), amount.Int64(), transactionAmount.Int64())
+				if err != nil {
+					return
+				}
+				targetBase.SetInt64(baseAmount)
+				targetBonus.SetInt64(bonusAmount)
+			}
+			// BASE shortfall is an actual receivable; consumed BONUS is never debt.
+			if base.Sign() < 0 || bonus.Sign() < 0 || new(big.Int).Add(base, receivableExpected).Cmp(targetBase) != 0 || bonus.Cmp(targetBonus) > 0 {
 				return
 			}
 			total.Add(walletExpected, receivableExpected)
@@ -412,7 +450,7 @@ func bytesEqualJSONInteger(a, b json.RawMessage) bool {
 // review versions and clock changes cannot manufacture another incident.
 func reconciliationIntegrityDigest(payload reconciliationAuditRecord) string {
 	selected := []string{}
-	for section, keys := range map[string][]string{"order": {"id", "wallet_id", "requester_id", "beneficiary_organization_id", "amount_fen", "currency", "credit_microcredits", "product_snapshot"}, "transaction": {"id", "payment_order_id", "amount_fen", "currency"}} {
+	for section, keys := range map[string][]string{"order": {"id", "wallet_id", "requester_id", "beneficiary_organization_id", "amount_fen", "currency", "credit_microcredits", "product_snapshot"}, "transaction": {"id", "payment_order_id", "amount_fen", "currency"}, "source": {"id", "payment_order_id", "payment_transaction_id", "entitlement_package_id", "wallet_id", "amount_fen", "credit_microcredits", "base_microcredits", "bonus_microcredits", "revoked_base_microcredits", "revoked_bonus_microcredits", "provider_refund_id", "provider_chargeback_id", "merchant_refund_no", "channel_refund_id", "receivable_id"}} {
 		var record reconciliationAuditRecord
 		_ = json.Unmarshal(payload[section], &record)
 		entry := map[string]json.RawMessage{}
@@ -428,7 +466,7 @@ func reconciliationIntegrityDigest(payload reconciliationAuditRecord) string {
 		"packages":     {"id", "user_id", "source_type", "wallet_id", "payment_order_id", "source_payment_transaction_id", "amount_fen", "points_total"},
 		"components":   {"id", "package_id", "component_type", "credit_lot_id", "original_microcredits"},
 		"allocations":  {"receivable_id", "wallet_id", "source_type", "source_reference", "amount_microcredits", "journal_entry_id", "receivable_wallet_id"},
-		"receivables":  {"id", "wallet_id", "source_reference", "original_microcredits"},
+		"receivables":  {"id", "wallet_id", "source_type", "source_reference", "original_microcredits", "payment_order_id", "payment_transaction_id", "entitlement_package_id"},
 		"reservations": {"refund_id", "component_id", "package_id", "component_type", "credit_lot_id", "available_microcredits", "active_grant_microcredits", "suspended_grant_microcredits"},
 	}
 	for section, keys := range fields {
