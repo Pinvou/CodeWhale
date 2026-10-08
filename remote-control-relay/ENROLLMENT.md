@@ -413,6 +413,10 @@ rollback traffic ready; a bare public v2 listener is never permitted. The check
 does not stop, restart or otherwise manage deployment services. Coverage must have a
 positive integer total, all entries migrated, no unmigrated entries and exactly
 100 percent coverage; an empty inventory is not evidence of safe rollback.
+The rollback checker, migration CLI and gateway preflight compare canonical
+filesystem entry paths, so invoking them through a directory symlink or Windows
+junction still executes the checks. Importing them as libraries does not execute
+the CLI. This does not relax private inventory/state-path or permission checks.
 The gateway holds the controller-state writer lock. During rollback, stop the
 controller dispatcher before opening that gateway; two independent processes
 must not open the same store as concurrent writers.
