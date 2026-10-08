@@ -734,17 +734,43 @@ async function routedFixture(options = {}) {
     livenessHooks: value.liveness, resumeHooks: value.hooks,
   });
   const committed = await createLease(value);
-  for (const role of ["A", "B"]) router.addSocket({ socketIdentity: `new-socket-${role}`, source: "198.51.100.2", socket: `new-socket-${role}` });
-  router.authenticateControlled({ socketIdentity: "new-socket-B", endpointId: "endpoint-0001", authenticatedContext: { endpointId: "endpoint-0001" } });
+  const socketIdentities = options.socketIdentities ?? { A: "new-socket-A", B: "new-socket-B" };
+  for (const role of ["A", "B"]) router.addSocket({ socketIdentity: socketIdentities[role], source: "198.51.100.2", socket: socketIdentities[role] });
+  router.authenticateControlled({ socketIdentity: socketIdentities.B, endpointId: "endpoint-0001", authenticatedContext: { endpointId: "endpoint-0001" } });
   await detached(value, committed);
-  return { ...value, value, router, committed };
+  return { ...value, value, router, committed, socketIdentities };
 }
 
 async function routedProvisional(value) {
-  const { router, committed } = value;
-  await router.handle({ socketIdentity: "new-socket-A", message: prepare("A", committed.lease, committed.messages.A.resume_token_b64, "request-prepare-A", ZERO_NONCE) });
-  return router.handle({ socketIdentity: "new-socket-B", message: prepare("B", committed.lease, committed.messages.B.resume_token_b64, "request-prepare-B", "AQEBAQEBAQEBAQEBAQEBAQ==") });
+  const { router, committed, socketIdentities } = value;
+  await router.handle({ socketIdentity: socketIdentities.A, message: prepare("A", committed.lease, committed.messages.A.resume_token_b64, "request-prepare-A", ZERO_NONCE) });
+  return router.handle({ socketIdentity: socketIdentities.B, message: prepare("B", committed.lease, committed.messages.B.resume_token_b64, "request-prepare-B", "AQEBAQEBAQEBAQEBAQEBAQ==") });
 }
+
+test("A05 identifier propagation accepts actual colon resume peer updates through final rotation", async () => {
+  const value = await routedFixture({ socketIdentities: { A: "new:socket:A", B: "new:socket:B" } });
+  const result = await routedProvisional(value);
+  for (const { role, message } of recoverySteps(value.committed.lease, result.deliveries[0].message.activation_id)) {
+    await value.router.handle({ socketIdentity: value.socketIdentities[role], message });
+  }
+  const current = value.manager.lease(value.committed.lease.controller_lease_id);
+  assert.deepEqual(current.sockets, value.socketIdentities);
+  assert.equal(value.hooks.phase(current.controller_lease_id), "connected");
+  assert.equal(value.hooks.isBusinessAllowed(current.controller_lease_id), true);
+});
+
+test("A05 identifier propagation rejects tilde peer updates and terminates only the exact real lease", async () => {
+  const value = await routedFixture();
+  const original = value.hooks.handle.bind(value.hooks);
+  value.hooks.handle = async (input) => {
+    const result = await original(input);
+    return { ...result, peer_updates: result.peer_updates?.map((update) => ({ ...update, socket_identity: "new~socket" })) };
+  };
+  await assert.rejects(routedProvisional(value), { code: "controller_peer_updates_invalid" });
+  assert.equal(value.manager.lease(value.committed.lease.controller_lease_id), null);
+  assert.equal(value.hooks.phase(value.committed.lease.controller_lease_id), null);
+  assert.equal(value.liveness.resumeDeadline(value.committed.lease), null);
+});
 
 test("each accepted resume delivery failure releases the authoritative lease and all peer links", async () => {
   const failures = [

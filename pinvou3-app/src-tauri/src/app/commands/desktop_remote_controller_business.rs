@@ -844,6 +844,7 @@ impl DesktopControlledBusiness {
                 commit_effective_permission_allow(&authority, request_id, &outcome)?;
                 Ok((
                     RemotePermissionOwner {
+                        task_sequence: record.sequence,
                         session_id,
                         task_id: task_id.to_owned(),
                         lease: lease.clone(),
@@ -872,7 +873,8 @@ impl DesktopControlledBusiness {
                     .state::<Arc<RemoteTaskLedger>>()
                     .record(&owner.task_id)
                     .map_err(|error| error.code.to_owned())?;
-                if record.session_id != owner.session_id
+                if record.sequence != owner.task_sequence
+                    || record.session_id != owner.session_id
                     || record.lease != TaskLeaseBinding::from_context(lease)
                     || !matches!(
                         record.state,

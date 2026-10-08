@@ -58,7 +58,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::features::assistant::engine::{
     AppEngine, EngineTurnSignal, TranscriptOperation, TurnIdentity, TurnLifecycle, TurnReservation,
-    dispatch_turn_bound_cancel,
+    dispatch_remote_turn_cancel, dispatch_turn_bound_cancel,
 };
 #[cfg(any(feature = "benchmark-hooks", test))]
 use crate::features::assistant::eval::{EvalModelSelection, EvalSuiteModelSnapshot, ModelIdentity};
@@ -1359,7 +1359,7 @@ where
                         steer_mode,
                         |identity| cancel_current(&engine, identity),
                     );
-                    if armed {
+                    if armed && requested_generation.is_none() {
                         // The cascade cancel must finish enqueueing before
                         // the turn gate is released (reviewer point 4): the
                         // next turn's SendMessage needs the same turn_lock,
@@ -3793,6 +3793,25 @@ impl EnginePool {
         restrict_tools_for_turn: bool,
     ) -> Result<()> {
         let reservation = self.reserve_turn(session_id)?;
+        self.send_admitted_user_message(
+            session_id,
+            content,
+            mode,
+            restrict_tools_for_turn,
+            reservation,
+        )
+        .await
+    }
+
+    /// Same plain-turn preparation, with a reservation retained by the remote owner.
+    pub(crate) async fn send_admitted_user_message(
+        &self,
+        session_id: &str,
+        content: String,
+        mode: AppMode,
+        restrict_tools_for_turn: bool,
+        reservation: TurnReservation,
+    ) -> Result<()> {
         let display_message = user_display_message(content.clone());
         let expert_snapshot = (self.store.mode_state(session_id).multi_agent
             && self.swarm_mode_available(session_id))
@@ -4422,8 +4441,12 @@ impl EnginePool {
                 // N's leftover subagents is the stop contract and N+1's
                 // just-spawned subagents are indistinguishable app-side; see
                 // the fork registration docs.
-                dispatch_turn_bound_cancel(engine, identity.as_ref(), steer_mode);
-                let _ = engine.handle.try_send(Op::CancelSubAgents);
+                if requested_generation.is_some() {
+                    dispatch_remote_turn_cancel(engine, identity.as_ref(), steer_mode);
+                } else {
+                    dispatch_turn_bound_cancel(engine, identity.as_ref(), steer_mode);
+                    let _ = engine.handle.try_send(Op::CancelSubAgents);
+                }
             },
             // cascade_cancel: awaited in phase two while holding turn_lock,
             // guaranteeing the enqueue completes before the turn gate is
@@ -5219,12 +5242,12 @@ mod scheduled_model_tests {
         TranscriptOperation, TurnIdentity, bounded_join_while_holding_turn_gate,
         bounded_shutdown_sends, cancel_turn_with_gates, default_model_for_new_session_from,
         delete_chat_session_with_aux_cascade, delete_chat_session_with_gate,
-        delete_scheduled_run_with_gate, delete_then_forget, dispatch_turn_bound_cancel,
-        entry_is_fresh, evict_if_idle_with_gates, forward_edit_resend_with_reminder,
-        forward_forced_turn_restrict, generation_matches, identity_for_active_model,
-        identity_for_saved_model, merge_aux_zero_tool_reminder, prepare_selected_runtime_model,
-        quiesce_engine_before_reclaim, rebind_evict_with_gates, rebind_evictable,
-        reset_aux_session_delete_with_gate, resolve_eval_model_selection_from,
+        delete_scheduled_run_with_gate, delete_then_forget, dispatch_remote_turn_cancel,
+        dispatch_turn_bound_cancel, entry_is_fresh, evict_if_idle_with_gates,
+        forward_edit_resend_with_reminder, forward_forced_turn_restrict, generation_matches,
+        identity_for_active_model, identity_for_saved_model, merge_aux_zero_tool_reminder,
+        prepare_selected_runtime_model, quiesce_engine_before_reclaim, rebind_evict_with_gates,
+        rebind_evictable, reset_aux_session_delete_with_gate, resolve_eval_model_selection_from,
         resolve_runtime_model_override, resolve_scheduled_model, resolve_spawn_model,
         retry_shutdown_sends, scheduled_profile_after_turn_gate, should_still_reap_after_snapshot,
         turn_restrict_tools, user_display_message, validate_prepared_runtime_route,
@@ -9099,6 +9122,141 @@ mod scheduled_model_tests {
             dispositions_before_replay,
             "a dropped replay publishes no disposition"
         );
+    }
+
+    #[tokio::test]
+    async fn remote_stale_generation_never_claims_or_cascades_into_replacement() {
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "remote-stale-generation";
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some("old-submission".into())));
+        let old = lifecycle.current_turn_generation().unwrap();
+        assert!(lifecycle.finish_once(|| {}).is_some());
+        let replacement = lifecycle.reserve().unwrap();
+        let result = cancel_turn_with_gates(
+            &locks,
+            &lifecycles,
+            &shell_tasks,
+            sid,
+            Some(old),
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            || async { Some(()) },
+            |_, _| panic!("new turn cancellation"),
+            |_: &()| async { panic!("session-wide cascade") },
+            |_, _| panic!("new reservation claim"),
+        )
+        .await;
+        assert_eq!(result, (Some(old), false));
+        assert!(replacement.ensure_active().is_ok());
+    }
+
+    #[tokio::test]
+    async fn remote_generation_is_rechecked_after_engine_lookup_await() {
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "remote-lookup-generation";
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some("old-submission".into())));
+        let old = lifecycle.current_turn_generation().unwrap();
+        let lookups = AtomicU64::new(0);
+        let result = cancel_turn_with_gates(
+            &locks,
+            &lifecycles,
+            &shell_tasks,
+            sid,
+            Some(old),
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            || async {
+                if lookups.fetch_add(1, Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                    assert!(lifecycle.finish_once(|| {}).is_some());
+                    assert!(lifecycle.on_submitted(Some("new-submission".into())));
+                }
+                Some(())
+            },
+            |_, _| panic!("new turn cancellation after await"),
+            |_: &()| async { panic!("session-wide cascade") },
+            |_, _| panic!("new turn claim"),
+        )
+        .await;
+        assert_eq!(result, (Some(old), false));
+        assert_ne!(lifecycle.current_turn_generation(), Some(old));
+    }
+
+    #[tokio::test]
+    async fn remote_delayed_forwarder_does_not_latch_disposition_or_cascade() {
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "remote-delayed-forwarder";
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        let old = lifecycle.current_turn_generation().unwrap();
+        let engine = FakeTurnSlotEngine::installed_on("autonomous-new-turn");
+        cancel_turn_with_gates(
+            &locks,
+            &lifecycles,
+            &shell_tasks,
+            sid,
+            Some(old),
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            || async { Some(engine.clone()) },
+            |engine, identity| {
+                dispatch_remote_turn_cancel(
+                    engine.as_ref(),
+                    identity.as_ref(),
+                    deepseek_tui::core::engine::CancelMode::StopDropInbox,
+                )
+            },
+            |_: &Arc<FakeTurnSlotEngine>| async { panic!("session-wide cascade") },
+            |_, _| false,
+        )
+        .await;
+        assert!(engine.fired_turns().is_empty());
+        assert_eq!(engine.disposition_count(), 0);
+        assert!(
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_bound_turn_cancels_only_the_named_slot() {
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "remote-bound-turn";
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        lifecycle.on_started("owned-turn".into());
+        let old = lifecycle.current_turn_generation().unwrap();
+        let engine = FakeTurnSlotEngine::installed_on("owned-turn");
+        cancel_turn_with_gates(
+            &locks,
+            &lifecycles,
+            &shell_tasks,
+            sid,
+            Some(old),
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            || async { Some(engine.clone()) },
+            |engine, identity| {
+                dispatch_remote_turn_cancel(
+                    engine.as_ref(),
+                    identity.as_ref(),
+                    deepseek_tui::core::engine::CancelMode::StopDropInbox,
+                )
+            },
+            |_: &Arc<FakeTurnSlotEngine>| async { panic!("session-wide cascade") },
+            |_, _| false,
+        )
+        .await;
+        let fired = engine.fired_turns();
+        assert!(!fired.is_empty());
+        assert!(fired.iter().all(|turn| turn == "owned-turn"));
     }
 
     #[tokio::test]

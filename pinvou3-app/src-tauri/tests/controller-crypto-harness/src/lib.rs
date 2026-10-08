@@ -39,6 +39,12 @@ mod transfer;
 #[cfg(test)]
 mod state;
 
+// Actual ACP instance fence and callback identity helpers; this is not a
+// provider/child-process/EventBridge integration test.
+#[cfg(test)]
+#[path = "../../../src/features/codex_acp/lifecycle.rs"]
+mod acp_lifecycle;
+
 #[cfg(test)]
 #[path = "../../../src/features/remote_control/controller/test_support.rs"]
 mod test_support;

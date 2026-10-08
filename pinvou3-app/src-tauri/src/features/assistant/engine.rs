@@ -523,6 +523,19 @@ pub(crate) fn dispatch_turn_bound_cancel<E: TurnBoundCancelOps + ?Sized>(
     }
 }
 
+/// A remote deadline is not the user's session-wide Stop action. Never latch
+/// a disposition on an unobserved/replaced slot, or cancel unrelated children.
+/// The foundation settles the exact cancelled turn's owned child mailbox.
+pub(crate) fn dispatch_remote_turn_cancel<E: TurnBoundCancelOps + ?Sized>(
+    engine: &E,
+    identity: Option<&TurnIdentity>,
+    mode: deepseek_tui::core::engine::CancelMode,
+) {
+    if let TurnBoundCancelAction::BoundTurn(turn_id) = turn_bound_cancel_action(identity) {
+        engine.cancel_bound_turn(&turn_id, mode);
+    }
+}
+
 /// Session-scoped turn state shared by the command path and the event
 /// forwarder. Every terminal path competes here, so the frontend receives
 /// exactly one `chat:done` for a submitted turn.

@@ -499,6 +499,7 @@ mod tests {
         save_disabled_bundles_for, set_project_skills_enabled,
     };
     use crate::platform::test_support::with_temp_home;
+    use std::sync::Arc;
 
     fn write_skill(root: &Path, name: &str, content: &str) {
         let dir = root.join(name);
@@ -1071,6 +1072,112 @@ mod tests {
             );
             assert!(shared.is_dir());
             assert!(empty.path().is_dir());
+        });
+    }
+
+    #[test]
+    fn unicode_remote_selection_reaches_real_chat_and_acp_skill_consumers() {
+        use crate::features::remote_control::controller::capabilities::{
+            CapabilityDescriptor, CapabilitySnapshotManager, CapabilitySource, opaque_skill_id,
+        };
+        use crate::features::remote_control::controller::controlled::ControlledWorkspaceInfo;
+        use crate::features::remote_control::controller::protocol::LeaseContext;
+        with_temp_home("pinvou3-unicode-remote-skills", || {
+            let name = "我的技能";
+            write_skill(&paths::bundle_skills_dir(), name, "中文正文：仅选中技能");
+            std::fs::write(
+                paths::bundle_skills_dir()
+                    .join(name)
+                    .join(".installed-from"),
+                "upload:skill.zip",
+            )
+            .unwrap();
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
+            save_disabled_bundles_for(ConnectorScope::Code, &[]).unwrap();
+            let lease = LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            };
+            let descriptors = vec![CapabilityDescriptor {
+                id: name.into(),
+                display_name: "中文技能".into(),
+            }];
+            let capabilities = CapabilitySnapshotManager::default();
+            capabilities
+                .build(
+                    lease.clone(),
+                    CapabilitySource {
+                        code_agent_ready: true,
+                        tools: vec![],
+                        plain_skills: descriptors.clone(),
+                        code_skills: descriptors,
+                        workspaces: vec![ControlledWorkspaceInfo {
+                            workspace_id: "workspace-1".into(),
+                            display_name: "Project".into(),
+                            code_allowed: true,
+                        }],
+                    },
+                    1_000,
+                )
+                .unwrap();
+            let ids = vec![opaque_skill_id(name)];
+            let chat_names = capabilities
+                .skills_for_task("1", &lease, "chat", &ids, 2_000)
+                .unwrap();
+            let code_names = capabilities
+                .skills_for_task("1", &lease, "code", &ids, 2_000)
+                .unwrap();
+            // Refresh and expiry invalidate further admission, not the exact
+            // selection already captured for these admitted turns.
+            capabilities
+                .build(lease.clone(), CapabilitySource::default(), 40_000)
+                .unwrap();
+            assert!(
+                capabilities
+                    .skills_for_task("1", &lease, "chat", &ids, 50_000)
+                    .is_err()
+            );
+            let skills = materialize_plain_remote_turn_skills(
+                "remote-unicode-skills",
+                &chat_names,
+                Arc::new(RemoteTurnOwner::default()),
+            )
+            .unwrap();
+            assert!(
+                std::fs::read_to_string(skills.path().join(name).join("SKILL.md"))
+                    .unwrap()
+                    .contains("中文正文")
+            );
+            let prompt = remote_turn_skill_prompt(ConnectorScope::Code, None, &code_names).unwrap();
+            assert!(prompt.contains("中文正文"));
+            assert!(
+                !prompt.contains(&ids[0]),
+                "opaque wire IDs are not filesystem identities"
+            );
+            save_disabled_bundles_for(ConnectorScope::Code, &[name.into()]).unwrap();
+            assert_eq!(
+                remote_turn_skill_prompt(ConnectorScope::Code, None, &code_names).unwrap_err(),
+                "task_skill_not_authorized"
+            );
+            save_disabled_bundles_for(ConnectorScope::Plain, &[name.into()]).unwrap();
+            assert_eq!(
+                materialize_plain_remote_turn_skills(
+                    "remote-unicode-disabled",
+                    &chat_names,
+                    Arc::new(RemoteTurnOwner::default()),
+                )
+                .unwrap_err(),
+                "task_skill_not_authorized"
+            );
+            save_disabled_bundles_for(ConnectorScope::Code, &[]).unwrap();
+            std::fs::remove_dir_all(paths::bundle_skills_dir().join(name)).unwrap();
+            assert_eq!(
+                remote_turn_skill_prompt(ConnectorScope::Code, None, &code_names).unwrap_err(),
+                "task_skill_not_authorized"
+            );
         });
     }
 

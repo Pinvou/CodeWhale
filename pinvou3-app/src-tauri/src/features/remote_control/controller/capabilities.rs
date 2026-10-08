@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, HashSet};
 use parking_lot::{Condvar, Mutex};
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::controlled::ControlledWorkspaceInfo;
 use super::protocol::LeaseContext;
@@ -96,9 +97,43 @@ pub(crate) struct CapabilitySnapshot {
 
 #[derive(Default)]
 pub(crate) struct CapabilitySnapshotManager {
-    current: Mutex<Option<CapabilitySnapshot>>,
-    revision: Mutex<u64>,
+    state: Mutex<CapabilityState>,
     admission_gate: CapabilityAdmissionGate,
+}
+
+#[derive(Default)]
+struct CapabilityState {
+    revision: u64,
+    current: Option<PublishedSnapshot>,
+}
+
+struct PublishedSnapshot {
+    snapshot: CapabilitySnapshot,
+    // B-only directory identities, never serialized or supplied by A.
+    skills: BTreeMap<String, SkillBinding>,
+}
+
+struct SkillBinding {
+    name: String,
+    display_name: String,
+    modes: HashSet<&'static str>,
+}
+
+/// Stable identity over exact UTF-8 directory names, not the editable title.
+/// Scope and live enablement are checked separately on B. No path or Skill body
+/// is encoded in this ID, and Unicode names are deliberately not normalized.
+pub(crate) fn opaque_skill_id(name: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"pinvou.remote-control.skill-id.v1\0");
+    hash.update((name.len() as u64).to_be_bytes());
+    hash.update(name.as_bytes());
+    let mut id = String::from("skill-");
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in hash.finalize() {
+        id.push(HEX[(byte >> 4) as usize] as char);
+        id.push(HEX[(byte & 15) as usize] as char);
+    }
+    id
 }
 
 #[derive(Default)]
@@ -195,8 +230,6 @@ impl CapabilitySnapshotManager {
         now_b: u64,
     ) -> Result<CapabilitySnapshot> {
         validate_descriptors("tool", &source.tools)?;
-        validate_descriptors("skill", &source.plain_skills)?;
-        validate_descriptors("skill", &source.code_skills)?;
         if source.workspaces.len() > MAX_DESCRIPTORS {
             return Err(CapabilityError::new("capability_workspace_capacity"));
         }
@@ -216,35 +249,30 @@ impl CapabilitySnapshotManager {
             .cloned()
             .collect();
         let code_mode_allowed = source.code_agent_ready && !code_workspaces.is_empty();
-        let mut skills = BTreeMap::<String, (String, Vec<String>)>::new();
-        for skill in source.plain_skills {
-            skills.insert(skill.id, (skill.display_name, vec!["chat".to_owned()]));
-        }
+        let mut bindings = BTreeMap::new();
+        project_skills(&mut bindings, &source.plain_skills, "chat")?;
         if code_mode_allowed {
-            for skill in source.code_skills {
-                let entry = skills
-                    .entry(skill.id)
-                    .or_insert_with(|| (skill.display_name.clone(), Vec::new()));
-                if entry.0 != skill.display_name {
-                    return Err(CapabilityError::new("capability_skill_display_conflict"));
-                }
-                entry.1.push("code".to_owned());
-            }
+            project_skills(&mut bindings, &source.code_skills, "code")?;
+        } else {
+            // Even hidden code-source input must satisfy the local boundary.
+            project_skills(&mut BTreeMap::new(), &source.code_skills, "code")?;
         }
-        if skills.len() > MAX_DESCRIPTORS {
+        if bindings.len() > MAX_DESCRIPTORS {
             return Err(CapabilityError::new("capability_descriptor_capacity"));
         }
-
-        // Snapshot publication is serialized with final ledger admission by a
-        // consistency token rather than a mutex held across ledger persistence.
+        // Publish the snapshot and its private map only after active ledger admission ends.
         let _refresh = self.admission_gate.begin_refresh()?;
-        let mut revision = self.revision.lock();
-        *revision = revision
-            .checked_add(1)
-            .ok_or_else(|| CapabilityError::new("capability_revision_exhausted"))?;
         let expires_at_ms = now_b
             .checked_add(SNAPSHOT_TTL_MS)
             .ok_or_else(|| CapabilityError::new("capability_expiry_overflow"))?;
+        // Revision, wire projection and private bindings are published together.
+        // A separate map or revision lock could pair an old snapshot with a new
+        // mapping during concurrent refresh.
+        let mut state = self.state.lock();
+        let revision = state
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| CapabilityError::new("capability_revision_exhausted"))?;
         let snapshot = CapabilitySnapshot {
             connection_id: context.connection_id,
             controller_lease_id: context.controller_lease_id,
@@ -266,12 +294,16 @@ impl CapabilitySnapshotManager {
                     display_name: tool.display_name,
                 })
                 .collect(),
-            skills: skills
-                .into_iter()
-                .map(|(skill_id, (display_name, scopes))| RemoteCapabilitySkill {
-                    skill_id,
-                    display_name,
-                    scopes,
+            skills: bindings
+                .iter()
+                .map(|(id, skill)| RemoteCapabilitySkill {
+                    skill_id: id.clone(),
+                    display_name: skill.display_name.clone(),
+                    scopes: ["chat", "code"]
+                        .into_iter()
+                        .filter(|mode| skill.modes.contains(mode))
+                        .map(str::to_owned)
+                        .collect(),
                 })
                 .collect(),
             workspaces: code_workspaces
@@ -283,7 +315,11 @@ impl CapabilitySnapshotManager {
                 })
                 .collect(),
         };
-        *self.current.lock() = Some(snapshot.clone());
+        state.revision = revision;
+        state.current = Some(PublishedSnapshot {
+            snapshot: snapshot.clone(),
+            skills: bindings,
+        });
         Ok(snapshot)
     }
 
@@ -293,39 +329,62 @@ impl CapabilitySnapshotManager {
         context: &LeaseContext,
         now_b: u64,
     ) -> Result<CapabilitySnapshot> {
-        let snapshot = self.current_for_context(context, now_b)?;
-        if snapshot.capability_revision != revision {
-            return Err(CapabilityError::new("capability_snapshot_stale"));
-        }
-        Ok(snapshot)
+        let state = self.state.lock();
+        Ok(validated_snapshot(&state, revision, context, now_b)?
+            .snapshot
+            .clone())
     }
 
-    /// Return the current unexpired snapshot for the exact lease. This is used
-    /// when A has not observed a revision yet (known revision 0), for example
-    /// after a response was lost. Reusing it avoids repeating expensive ACP and
-    /// marketplace discovery for duplicate requests.
+    /// Reuse an unexpired snapshot for the exact lease without discovering or
+    /// advancing a new revision. The private mapping is published atomically.
     pub(crate) fn current_for_context(
         &self,
         context: &LeaseContext,
         now_b: u64,
     ) -> Result<CapabilitySnapshot> {
-        let snapshot = self
+        let state = self.state.lock();
+        let revision = state
             .current
-            .lock()
-            .clone()
-            .ok_or_else(|| CapabilityError::new("capability_snapshot_missing"))?;
-        if snapshot.connection_id != context.connection_id
-            || snapshot.controller_lease_id != context.controller_lease_id
-            || snapshot.lease_epoch != context.lease_epoch
-            || snapshot.relay_epoch != context.relay_epoch
-            || snapshot.remote_control_generation != context.remote_control_generation
-        {
-            return Err(CapabilityError::new("capability_snapshot_stale"));
+            .as_ref()
+            .ok_or_else(|| CapabilityError::new("capability_snapshot_missing"))?
+            .snapshot
+            .capability_revision
+            .as_str();
+        Ok(validated_snapshot(&state, revision, context, now_b)?
+            .snapshot
+            .clone())
+    }
+
+    /// Resolve A's opaque selection to B's original names under the exact
+    /// snapshot/lease/mode. The command/runtime must recheck live enablement;
+    /// this mapping is a bounded admission hint, never a permission grant.
+    pub(crate) fn skills_for_task(
+        &self,
+        revision: &str,
+        context: &LeaseContext,
+        mode: &str,
+        ids: &[String],
+        now_b: u64,
+    ) -> Result<Vec<String>> {
+        let state = self.state.lock();
+        let published = validated_snapshot(&state, revision, context, now_b)?;
+        if ids.len() > 32 || !published.snapshot.modes.iter().any(|value| value == mode) {
+            return Err(CapabilityError::new("task_skill_invalid"));
         }
-        if now_b >= snapshot.expires_at_ms.parse::<u64>().unwrap_or(0) {
-            return Err(CapabilityError::new("capability_snapshot_expired"));
-        }
-        Ok(snapshot)
+        let mut seen = HashSet::new();
+        ids.iter()
+            .map(|id| {
+                if !seen.insert(id.as_str()) {
+                    return Err(CapabilityError::new("task_skill_invalid"));
+                }
+                published
+                    .skills
+                    .get(id)
+                    .filter(|binding| binding.modes.contains(mode))
+                    .map(|binding| binding.name.clone())
+                    .ok_or_else(|| CapabilityError::new("task_skill_invalid"))
+            })
+            .collect()
     }
 
     /// 冻结 wire 形状的 `capability_snapshot`（B → A）。字段名与 PROTOCOL.md 的
@@ -511,6 +570,71 @@ impl CapabilitySnapshotManager {
     }
 }
 
+fn validated_snapshot<'a>(
+    state: &'a CapabilityState,
+    revision: &str,
+    context: &LeaseContext,
+    now_b: u64,
+) -> Result<&'a PublishedSnapshot> {
+    let published = state
+        .current
+        .as_ref()
+        .ok_or_else(|| CapabilityError::new("capability_snapshot_missing"))?;
+    let snapshot = &published.snapshot;
+    if snapshot.capability_revision != revision
+        || snapshot.connection_id != context.connection_id
+        || snapshot.controller_lease_id != context.controller_lease_id
+        || snapshot.lease_epoch != context.lease_epoch
+        || snapshot.relay_epoch != context.relay_epoch
+        || snapshot.remote_control_generation != context.remote_control_generation
+    {
+        return Err(CapabilityError::new("capability_snapshot_stale"));
+    }
+    if now_b >= snapshot.expires_at_ms.parse::<u64>().unwrap_or(0) {
+        return Err(CapabilityError::new("capability_snapshot_expired"));
+    }
+    Ok(published)
+}
+
+fn project_skills(
+    bindings: &mut BTreeMap<String, SkillBinding>,
+    values: &[CapabilityDescriptor],
+    mode: &'static str,
+) -> Result<()> {
+    if values.len() > MAX_DESCRIPTORS {
+        return Err(CapabilityError::new("capability_descriptor_capacity"));
+    }
+    let mut names = HashSet::new();
+    for value in values {
+        // The source is a local directory name, NOT a wire identifier.
+        if value.id.is_empty()
+            || value.id.len() > 1024
+            || matches!(value.id.as_str(), "." | "..")
+            || value
+                .id
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
+        {
+            return Err(CapabilityError::new("capability_skill_name_invalid"));
+        }
+        validate_display(&value.display_name)?;
+        if !names.insert(value.id.as_str()) {
+            return Err(CapabilityError::new("capability_descriptor_duplicate"));
+        }
+        let id = opaque_skill_id(&value.id);
+        let binding = bindings.entry(id).or_insert_with(|| SkillBinding {
+            name: value.id.clone(),
+            display_name: value.display_name.clone(),
+            modes: HashSet::new(),
+        });
+        if binding.name != value.id || binding.display_name != value.display_name {
+            return Err(CapabilityError::new("capability_skill_identity_conflict"));
+        }
+        binding.modes.insert(mode);
+    }
+    Ok(())
+}
+
 fn validate_descriptors(kind: &'static str, values: &[CapabilityDescriptor]) -> Result<()> {
     if values.len() > MAX_DESCRIPTORS {
         return Err(CapabilityError::new("capability_descriptor_capacity"));
@@ -623,6 +747,186 @@ mod tests {
     }
 
     #[test]
+    fn unicode_skill_directory_does_not_disable_the_entire_snapshot() {
+        let manager = CapabilitySnapshotManager::default();
+        let mut source = fixture_source();
+        source.plain_skills = vec![CapabilityDescriptor {
+            id: "我的技能".into(),
+            display_name: "中文技能".into(),
+        }];
+        let snapshot = manager
+            .build(context("generation-0001"), source.clone(), 1_000)
+            .unwrap();
+        let skill = snapshot
+            .skills
+            .iter()
+            .find(|skill| skill.display_name == "中文技能")
+            .unwrap();
+        assert!(skill.skill_id.is_ascii());
+        assert_ne!(skill.skill_id, "我的技能");
+        assert!(snapshot.modes.iter().any(|mode| mode == "chat"));
+        let refreshed = manager
+            .build(context("generation-0001"), source, 2_000)
+            .unwrap();
+        assert_eq!(
+            skill.skill_id,
+            refreshed
+                .skills
+                .iter()
+                .find(|skill| skill.display_name == "中文技能")
+                .unwrap()
+                .skill_id
+        );
+        assert!(
+            !serde_json::to_string(&snapshot)
+                .unwrap()
+                .contains("我的技能")
+        );
+    }
+
+    #[test]
+    fn skill_mapping_is_exact_revision_lease_and_mode_bound() {
+        let manager = CapabilitySnapshotManager::default();
+        let lease = context("generation-0001");
+        let mut source = fixture_source();
+        source.plain_skills[0].id = "我的技能".into();
+        manager.build(lease.clone(), source.clone(), 1_000).unwrap();
+        let id = opaque_skill_id("我的技能");
+        assert_eq!(
+            manager
+                .skills_for_task("1", &lease, "chat", std::slice::from_ref(&id), 2_000)
+                .unwrap(),
+            vec!["我的技能"]
+        );
+        for (mode, ids) in [
+            ("code", vec![id.clone()]),
+            ("chat", vec![opaque_skill_id("不存在")]),
+            ("chat", vec!["我的技能".into()]),
+            ("chat", vec![id.clone(), id.clone()]),
+        ] {
+            assert_eq!(
+                manager
+                    .skills_for_task("1", &lease, mode, &ids, 2_000)
+                    .unwrap_err()
+                    .code,
+                "task_skill_invalid"
+            );
+        }
+        assert_eq!(
+            manager
+                .skills_for_task(
+                    "1",
+                    &context("new-generation"),
+                    "chat",
+                    std::slice::from_ref(&id),
+                    2_000
+                )
+                .unwrap_err()
+                .code,
+            "capability_snapshot_stale"
+        );
+        assert_eq!(
+            manager
+                .skills_for_task("1", &lease, "chat", std::slice::from_ref(&id), 31_000)
+                .unwrap_err()
+                .code,
+            "capability_snapshot_expired"
+        );
+        source.plain_skills[0].display_name = "新标题".into();
+        manager.build(lease.clone(), source, 3_000).unwrap();
+        assert_eq!(
+            manager
+                .skills_for_task("1", &lease, "chat", std::slice::from_ref(&id), 3_001)
+                .unwrap_err()
+                .code,
+            "capability_snapshot_stale"
+        );
+        assert_eq!(
+            manager
+                .skills_for_task("2", &lease, "chat", std::slice::from_ref(&id), 3_001)
+                .unwrap(),
+            vec!["我的技能"]
+        );
+        assert_ne!(opaque_skill_id("é"), opaque_skill_id("e\u{301}"));
+    }
+
+    #[test]
+    fn skill_projection_bounds_and_validates_local_names_without_relaxing_wire_ids() {
+        let manager = CapabilitySnapshotManager::default();
+        for name in ["", ".", "..", "../技能", "folder\\技能", "技能\n"] {
+            let mut source = fixture_source();
+            source.plain_skills[0].id = name.into();
+            assert_eq!(
+                manager
+                    .build(context("generation-0001"), source, 1_000)
+                    .unwrap_err()
+                    .code,
+                "capability_skill_name_invalid"
+            );
+        }
+        let mut source = fixture_source();
+        source.plain_skills.push(source.plain_skills[0].clone());
+        assert_eq!(
+            manager
+                .build(context("generation-0001"), source, 1_000)
+                .unwrap_err()
+                .code,
+            "capability_descriptor_duplicate"
+        );
+        let mut source = fixture_source();
+        source.plain_skills = (0..MAX_DESCRIPTORS)
+            .map(|index| CapabilityDescriptor {
+                id: format!("技能-{index}"),
+                display_name: format!("技能 {index}"),
+            })
+            .collect();
+        assert_eq!(
+            manager
+                .build(context("generation-0001"), source, 1_000)
+                .unwrap_err()
+                .code,
+            "capability_descriptor_capacity"
+        );
+    }
+
+    #[test]
+    fn concurrent_refresh_cannot_publish_older_revision_or_mismatched_mapping() {
+        let manager = std::sync::Arc::new(CapabilitySnapshotManager::default());
+        let revisions: Vec<_> = (0..16)
+            .map(|index| {
+                let manager = manager.clone();
+                std::thread::spawn(move || {
+                    let mut source = fixture_source();
+                    source.plain_skills[0].id = format!("技能-{index}");
+                    let snapshot = manager
+                        .build(context("generation-0001"), source, 1_000)
+                        .unwrap();
+                    (snapshot.capability_revision.parse::<u64>().unwrap(), index)
+                })
+            })
+            .collect();
+        let (revision, index) = revisions
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .max()
+            .unwrap();
+        let name = format!("技能-{index}");
+        assert_eq!(revision, 16);
+        assert_eq!(
+            manager
+                .skills_for_task(
+                    &revision.to_string(),
+                    &context("generation-0001"),
+                    "chat",
+                    &[opaque_skill_id(&name)],
+                    2_000
+                )
+                .unwrap(),
+            vec![name]
+        );
+    }
+
+    #[test]
     fn snapshot_hides_code_mode_and_workspace_without_preauthorization() {
         let manager = CapabilitySnapshotManager::default();
         let mut source = fixture_source();
@@ -707,13 +1011,13 @@ mod tests {
             .build(context("generation-0001"), source, 1_000)
             .unwrap();
         assert_eq!(snapshot.skills.len(), 1);
-        assert_eq!(snapshot.skills[0].skill_id, "skill-shared");
+        assert_eq!(snapshot.skills[0].skill_id, opaque_skill_id("skill-shared"));
         assert_eq!(snapshot.skills[0].scopes, vec!["chat", "code"]);
         manager
             .validate_skills_for_mode(
                 &context("generation-0001"),
                 "chat",
-                &["skill-shared".into()],
+                &[opaque_skill_id("skill-shared")],
                 2_000,
             )
             .unwrap();
@@ -721,7 +1025,7 @@ mod tests {
             .validate_skills_for_mode(
                 &context("generation-0001"),
                 "code",
-                &["skill-shared".into()],
+                &[opaque_skill_id("skill-shared")],
                 2_000,
             )
             .unwrap();
@@ -738,7 +1042,7 @@ mod tests {
                 "1",
                 &context("generation-0001"),
                 "chat",
-                &["skill-plain".into()],
+                &[opaque_skill_id("skill-plain")],
                 None,
                 30_999,
             )
@@ -749,7 +1053,7 @@ mod tests {
                     "1",
                     &context("generation-0001"),
                     "chat",
-                    &["skill-code".into()],
+                    &[opaque_skill_id("skill-code")],
                     None,
                     2_000,
                 )
@@ -802,7 +1106,7 @@ mod tests {
                     "2",
                     &context("generation-0001"),
                     "chat",
-                    &["skill-plain".into()],
+                    &[opaque_skill_id("skill-plain")],
                     None,
                     2_001,
                 )
@@ -823,7 +1127,7 @@ mod tests {
                 "1",
                 &context("generation-0001"),
                 "code",
-                &["skill-code".into()],
+                &[opaque_skill_id("skill-code")],
                 Some("workspace-0001"),
                 2_000,
             )
@@ -834,7 +1138,7 @@ mod tests {
                     "1",
                     &context("generation-0001"),
                     "code",
-                    &["skill-plain".into()],
+                    &[opaque_skill_id("skill-plain")],
                     Some("workspace-0001"),
                     2_000,
                 )
@@ -848,7 +1152,7 @@ mod tests {
                     "1",
                     &context("generation-0001"),
                     "code",
-                    &["skill-code".into()],
+                    &[opaque_skill_id("skill-code")],
                     Some("workspace-other"),
                     2_000,
                 )
@@ -893,7 +1197,7 @@ mod tests {
                 "1",
                 &context("generation-0001"),
                 "chat",
-                &["skill-plain".into()],
+                &[opaque_skill_id("skill-plain")],
                 None,
                 2_000,
             )

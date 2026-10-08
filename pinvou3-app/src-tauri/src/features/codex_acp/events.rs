@@ -3,7 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::{
@@ -691,6 +691,7 @@ pub struct EventBridge {
     seq: Arc<AtomicU64>,
     turn_serial: Arc<AtomicU64>,
     current_turn: Arc<RwLock<Option<String>>>,
+    retirement: Arc<super::lifecycle::RuntimeRetirementGate>,
     event_order: Arc<Mutex<()>>,
     web_delivery: OrderedWebDelivery,
     tools: Arc<Mutex<HashMap<String, ToolCall>>>,
@@ -764,6 +765,7 @@ impl EventBridge {
             seq: Arc::new(AtomicU64::new(last_seq)),
             turn_serial: Arc::new(AtomicU64::new(0)),
             current_turn: Arc::new(RwLock::new(None)),
+            retirement: Arc::new(super::lifecycle::RuntimeRetirementGate::default()),
             event_order: Arc::new(Mutex::new(())),
             web_delivery: OrderedWebDelivery::new(last_seq),
             tools: Arc::new(Mutex::new(HashMap::new())),
@@ -786,6 +788,83 @@ impl EventBridge {
         self.current_turn.read().clone()
     }
 
+    pub(super) fn with_active_runtime<T>(&self, action: impl FnOnce() -> T) -> Option<T> {
+        self.retirement.with_active(action)
+    }
+
+    /// A successful terminal claimant and closure must share the admission
+    /// fence: releasing busy first must not admit a successor on this Arc.
+    pub(super) fn close_runtime_if(&self, claim: impl FnOnce() -> bool) -> bool {
+        self.retirement.close_if(claim)
+    }
+
+    pub(super) fn settle_runtime_turn(
+        &self,
+        busy: &AtomicBool,
+        claim: impl FnOnce() -> bool,
+        close_timing: impl FnOnce(),
+    ) -> bool {
+        self.retirement.settle_turn(busy, claim, close_timing)
+    }
+
+    /// Pool-owned reclamation has no successor on this registered instance.
+    /// Seal before any async cleanup, even if that cleanup is later dropped.
+    pub(super) fn reclaim_runtime(&self, claimed: impl FnOnce(Option<String>)) {
+        self.retirement.close_if(|| {
+            claimed(self.current_turn.write().take());
+            self.tools.lock().clear();
+            true
+        });
+    }
+
+    /// Claim and seal only the captured turn. No terminal publication here:
+    /// the pool must first serialize finalization with replacement creation.
+    pub(super) fn retire_current_turn(&self, turn_id: &str, claimed: impl FnOnce()) -> bool {
+        self.retirement.close_if(|| {
+            if !super::stall::claim_current_turn(&self.current_turn, turn_id) {
+                return false;
+            }
+            claimed();
+            self.tools.lock().clear();
+            true
+        })
+    }
+
+    /// Called once under the pool lock, before a replacement bridge can seed
+    /// its sequence. Ordinary late events cannot use this private bypass.
+    pub(super) fn finish_retired_turn(&self, turn_id: &str, reason: &str) {
+        self.emit_active(
+            Some(turn_id.to_owned()),
+            "turn_completed",
+            json!({"status":"Interrupted", "error":null, "recoveryReason":reason}),
+        );
+        crate::features::behavior_telemetry::finish_task(
+            &self.app,
+            &self.pinvou_session_id,
+            turn_id,
+            "interrupted",
+            Some(crate::features::behavior_telemetry::error_category(Some(
+                reason,
+            ))),
+        );
+        self.flush_journal();
+    }
+
+    /// Hold the same identity lock used by begin/finish across a synchronous
+    /// turn-bound side effect. No await or bridge re-entry is allowed in action.
+    pub(super) fn with_current_turn<T>(
+        &self,
+        turn_id: &str,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let current = self.current_turn.read();
+        if current.as_deref() == Some(turn_id) {
+            Some(action())
+        } else {
+            None
+        }
+    }
+
     /// Record inbound Agent activity (notifications or permission/elicitation requests).
     pub fn note_agent_activity(&self) {
         super::stall::mark_activity(&self.activity);
@@ -796,6 +875,19 @@ impl EventBridge {
     /// Prompt response and watchdog settlement are independent paths. The late
     /// path must yield or the same turn would get two terminal events.
     pub fn finish_turn_once(
+        &self,
+        turn_id: &str,
+        status: &str,
+        error: Option<&str>,
+        recovery_reason: Option<&str>,
+    ) -> bool {
+        self.with_active_runtime(|| {
+            self.finish_active_turn_once(turn_id, status, error, recovery_reason)
+        })
+        .unwrap_or(false)
+    }
+
+    fn finish_active_turn_once(
         &self,
         turn_id: &str,
         status: &str,
@@ -829,9 +921,21 @@ impl EventBridge {
     }
 
     pub fn begin_turn(&self, content: &str, attachments: &[CodexDisplayAttachment]) -> String {
+        self.begin_turn_bound(content, attachments, |_| {})
+    }
+
+    /// Bind a private remote observer before publishing this exact turn's
+    /// first event. A session-level first-event race cannot choose its owner.
+    pub(super) fn begin_turn_bound(
+        &self,
+        content: &str,
+        attachments: &[CodexDisplayAttachment],
+        bind: impl FnOnce(&str),
+    ) -> String {
         let serial = self.turn_serial.fetch_add(1, Ordering::AcqRel) + 1;
         let turn_id = format!("turn-{}-{serial}", Utc::now().timestamp_millis());
         *self.current_turn.write() = Some(turn_id.clone());
+        bind(&turn_id);
         self.emit_with_turn(
             Some(turn_id.clone()),
             "user_message",
@@ -854,14 +958,16 @@ impl EventBridge {
     }
 
     pub fn track_model_used(&self, turn_id: &str, provider: &str, model: &str) {
-        crate::features::behavior_telemetry::track_model_used_keys(
-            &self.app,
-            &self.pinvou_session_id,
-            turn_id,
-            provider,
-            model,
-            "session_default",
-        );
+        self.with_active_runtime(|| {
+            crate::features::behavior_telemetry::track_model_used_keys(
+                &self.app,
+                &self.pinvou_session_id,
+                turn_id,
+                provider,
+                model,
+                "session_default",
+            )
+        });
     }
 
     /// Settle timeline turns that started but never finished as interrupted.
@@ -907,6 +1013,10 @@ impl EventBridge {
     }
 
     pub fn handle(&self, notification: SessionNotification) {
+        self.with_active_runtime(|| self.handle_active(notification));
+    }
+
+    fn handle_active(&self, notification: SessionNotification) {
         // Every inbound session update proves the agent is alive for the silence watchdog.
         self.note_agent_activity();
         let meta = serde_json::to_value(notification.meta).unwrap_or(Value::Null);
@@ -1034,11 +1144,23 @@ impl EventBridge {
         }
     }
 
-    pub fn emit(&self, event_type: &str, data: Value) -> AcpEventEnvelope {
-        self.emit_with_turn(self.current_turn.read().clone(), event_type, data)
+    pub fn emit(&self, event_type: &str, data: Value) -> Option<AcpEventEnvelope> {
+        // Drop the identity read guard before entering the retirement fence;
+        // retirement takes that fence before claiming the identity write lock.
+        let turn_id = self.current_turn_id();
+        self.emit_with_turn(turn_id, event_type, data)
     }
 
     fn emit_with_turn(
+        &self,
+        turn_id: Option<String>,
+        event_type: &str,
+        data: Value,
+    ) -> Option<AcpEventEnvelope> {
+        self.with_active_runtime(|| self.emit_active(turn_id, event_type, data))
+    }
+
+    fn emit_active(
         &self,
         turn_id: Option<String>,
         event_type: &str,

@@ -5,8 +5,8 @@ import {
 } from "./protocol-controller.js";
 import { ControllerLivenessHooks } from "./controller-liveness.js";
 import { ControllerResumeHooks } from "./controller-resume.js";
+import { isControllerIdentifier, isEnrollmentEndpointIdentifier } from "./identifier-contract.js";
 
-const ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
 const HANDSHAKE_TYPES = new Set([
   "finished_receipt_commit", "encrypted_handshake_finished", "finished_receipt_ack",
 ]);
@@ -60,7 +60,12 @@ function fail(code, cause) {
 }
 
 function id(value, label) {
-  if (typeof value !== "string" || !ID.test(value)) fail(`${label}_invalid`);
+  if (!isControllerIdentifier(value)) fail(`${label}_invalid`);
+  return value;
+}
+
+function endpointIdentifier(value) {
+  if (!isEnrollmentEndpointIdentifier(value)) fail("endpoint_id_invalid");
   return value;
 }
 
@@ -158,7 +163,7 @@ export class ControllerRouter {
 
   authenticateControlled({ socketIdentity, endpointId, authenticatedContext } = {}) {
     socketIdentity = id(socketIdentity, "socket_identity");
-    endpointId = id(endpointId, "endpoint_id");
+    endpointId = endpointIdentifier(endpointId);
     const peer = this.#peers.get(socketIdentity);
     if (!peer || (peer.role !== "unknown" && peer.role !== "B")) fail("controller_socket_invalid");
     const previous = this.#controlled.get(endpointId);
@@ -177,7 +182,7 @@ export class ControllerRouter {
   }
 
   resolveControlledEndpoint(endpointId) {
-    endpointId = id(endpointId, "endpoint_id");
+    endpointId = endpointIdentifier(endpointId);
     const socketIdentity = this.#controlled.get(endpointId);
     const peer = socketIdentity ? this.#peers.get(socketIdentity) : null;
     return peer?.role === "B" ? Object.freeze({ socketIdentity }) : null;
@@ -187,7 +192,7 @@ export class ControllerRouter {
     socketIdentity = id(socketIdentity, "socket_identity");
     const peer = this.#peers.get(socketIdentity);
     if (!peer) fail("controller_socket_invalid");
-    const requestId = typeof message?.request_id === "string" && ID.test(message.request_id)
+    const requestId = isControllerIdentifier(message?.request_id)
       ? message.request_id : "request-invalid";
     let deliveryReservationId = null;
     let createdLease = null;
@@ -407,7 +412,7 @@ export class ControllerRouter {
     for (const update of updates) {
       if (!update || !new Set(["A", "B"]).has(update.role)
         || update.controller_lease_id !== lease.controller_lease_id
-        || typeof update.socket_identity !== "string" || !ID.test(update.socket_identity)) {
+        || !isControllerIdentifier(update.socket_identity)) {
         fail("controller_peer_updates_invalid");
       }
       const peer = this.#peers.get(update.socket_identity);
