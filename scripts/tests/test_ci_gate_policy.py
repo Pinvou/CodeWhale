@@ -2887,10 +2887,10 @@ class CiGatePolicyTests(unittest.TestCase):
         # Only split at 2-space-indented `key:` lines (job/trigger boundaries),
         # not at deeper indentation.
         setup_step = "- name: Set up zram and swap"
-        # rust-lint 例外:该 job 在 Swatinem/rust-cache 恢复阶段与扩容后的
-        # 内存配置组合曾稳定杀死 runner(2026-09-12 前后 5/5 复现;后定性为
-        # 时间窗环境事故,但 fmt/clippy 非内存密集,保守维持豁免)。
-        excluded_jobs = {"rust-lint"}
+        # rust-lint 曾豁免(Swatinem/rust-cache 恢复与扩容组合曾稳定杀死
+        # runner,2026-09-12 前后 5/5 复现;后定性为时间窗环境事故)。自
+        # rust-lint 承接 benchmark-hooks all-targets 编译门禁起,其内存压力
+        # 与 rust-test 同级,2026-10 起一并强制,不再豁免。
         blocks = re.split(
             r"\n  (?=[A-Za-z0-9_-]+:\s*$)", self.pr_workflow, flags=re.MULTILINE
         )
@@ -2898,7 +2898,6 @@ class CiGatePolicyTests(unittest.TestCase):
             block
             for block in blocks
             if re.search(r"^    runs-on: ubuntu", block, flags=re.MULTILINE)
-            and block.strip().split(":", maxsplit=1)[0] not in excluded_jobs
         ]
         self.assertGreaterEqual(len(linux_jobs), 10)
         for job in linux_jobs:
