@@ -6,11 +6,13 @@ import { RechargeProductWorkspace } from '../../src/features/account-platform/Re
 import { AccountPlatformBffClient } from '../../src/features/account-platform/bff-client.js';
 import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
 import { financeCopy } from '../../src/shared/i18n.js';
+import { parseFinanceJSON } from '../../src/features/account-platform/finance-contract.js';
 const root = createRoot(document.querySelector('#root'));
 const id = '11111111-1111-4111-8111-111111111111';
 const other = '22222222-2222-4222-8222-222222222222';
 const json = (value, status = 200) => new Response(status === 204 ? null : JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 const control = { id, other, user: id, calls: [], kind: 'personal', language: 'en', unknownCreate: false, unknownRefund: false, wrongRefund: false, plan: false, delayedCreate: false, approvalStatus: 'DRAFT', approvalVersion: 1, approvalCommand: 'WALLET_ADJUSTMENT', approval202: false, approvalCreated: false, publishOnly: false };
+Object.assign(control, { financeRecovery: false, expiredCursor: false, replacementRequester: id, replacementWallet: id, unknownAdjustment: false });
 const personal = new AccountPlatformBffClient();
 const admin = new AdminPlatformClient(); admin.csrfToken = 'CONTROL_SYNTHETIC_CSRF';
 const order = () => ({ order_id: id, amount_fen: '9007199254740993', status: 'PAID', fulfillment_status: 'CREDITED', attention_summary: 'NORMAL' });
@@ -21,6 +23,21 @@ const recoveryControl = () => ({ provider_id: 'controlled', provider_control_ver
 const approval = () => ({ approval_request_id: id, command_type: control.approvalCommand, status: control.approvalStatus, version: control.approvalVersion, target: control.approvalCommand === 'WALLET_ADJUSTMENT' ? { resource_type: 'MANUAL_ADJUSTMENT', resource_id: id } : control.approvalCommand === 'PAYMENT_PROVIDER_RESUME' ? { resource_type: 'PAYMENT_PROVIDER', resource_id: 'controlled' } : { resource_type: 'PAYMENT_PRODUCT', resource_id: 'personal-base' }, detail_availability: 'AVAILABLE', requester: { user_id: id }, allowed_actions: control.approvalStatus === 'DRAFT' ? ['EDIT', 'SUBMIT'] : control.approvalStatus === 'SUBMITTED' ? ['WITHDRAW', 'APPROVE', 'REJECT'] : [], action_control_version: 1, command: { adjustment_id: id, wallet_id: id, amount_microcredits: '9007199254740993' }, execution: { attempt_status: 'PENDING', error_class: null, next_retry_at: null, execution_deadline: '2099-01-01T00:00:00Z' } });
 globalThis.fetch = async (url, options = {}) => {
   const method = options.method || 'GET'; control.calls.push({ url, method, body: options.body, key: options.headers?.['Idempotency-Key'] });
+  if (control.financeRecovery) {
+    if (url.includes('/payment-orders?')) { const cursor = new URL(url, location.origin).searchParams.get('cursor'); return control.expiredCursor && cursor ? json({ code: 'PAGINATION_CURSOR_EXPIRED' }, 410) : json({ items: [order()], next_cursor: cursor ? '' : 'controlled-next', snapshot_as_of: '2099-01-01T00:00:00Z' }); }
+    if (url.includes('/late-payment-reviews?')) { const cursor = new URL(url, location.origin).searchParams.get('cursor'); return control.expiredCursor && cursor ? json({ code: 'PAGINATION_CURSOR_EXPIRED' }, 410) : json({ items: [late()], next_cursor: cursor ? '' : 'controlled-review-next', snapshot_as_of: '2099-01-01T00:00:00Z' }); }
+    if (url.includes('/wallets?')) return json({ items: [{ wallet_id: id, posted_microcredits: '1000000', available_microcredits: '1000000', status: 'ACTIVE', financial_status: 'NORMAL' }] });
+    if (url.includes('/adjustments?')) return control.changedAdjustment ? json({ items: [] }) : json({ items: [{ adjustment_id: id, wallet_id: id, status: 'PENDING_APPROVAL', amount_microcredits: '9007199254740993', requested_by: id, reason: 'Controlled original adjustment reason', request_idempotency_key: 'controlled-adjustment-key', version: 1 }] });
+    if (url.endsWith('/adjustments') && method === 'POST') {
+      const input = parseFinanceJSON(options.body); control.newAdjustment = { ...input, adjustment_id: other, requested_by: id, status: 'PENDING_APPROVAL', request_idempotency_key: input.idempotency_key, version: 1 };
+      return control.unknownAdjustment ? json({ code: 'UPSTREAM_UNAVAILABLE' }, 503) : json(control.newAdjustment, 201);
+    }
+    if (url.includes('/api/admin/approvals/requests?')) { const target = new URL(url, location.origin).searchParams.get('target'); return json({ items: target === other || !control.approvalCreated ? [] : [approval()], next_cursor: '', has_more: control.incompleteApprovalHistory === true }); }
+    if (url.endsWith(`/api/admin/approvals/requests/${id}`) && method === 'GET' && !control.newApproval) return json({ ...approval(), requester: { user_id: control.replacementRequester }, command: { adjustment_id: id, wallet_id: control.replacementWallet, amount_microcredits: '9007199254740993' } });
+    if (url.endsWith('/api/admin/approvals/requests') && method === 'POST') { control.newApproval = parseFinanceJSON(options.body); control.approvalCreated = true; control.approvalStatus = 'DRAFT'; control.approvalVersion = 1; return json({ approval_request_id: other }, 201); }
+    if (url.endsWith(`/api/admin/approvals/requests/${other}`)) return json({ ...approval(), approval_request_id: other, target: { resource_type: 'MANUAL_ADJUSTMENT', resource_id: control.newApproval.target_resource_id }, command: control.newApproval.normalized_command });
+    if (url.includes(`/api/admin/approvals/requests/${other}/actions/`)) { control.approvalStatus = 'SUBMITTED'; control.approvalVersion++; return json(null, 204); }
+  }
   if (url.includes('/recharge/products')) return json({ items: [{ product_id: 'personal-base', display_name_en: 'Controlled product', display_name_zh_cn: '受控商品', display_name_ja: 'テスト商品', amount_fen: '100', channels: ['ALIPAY'] }] });
   if (url.includes('/payment-capabilities')) return json({});
   if (url.endsWith('/v1/me/entitlement-packages')) return json({ items: [pkg()] });
