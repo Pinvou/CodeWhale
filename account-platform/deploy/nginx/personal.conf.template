@@ -89,6 +89,12 @@ http {
             rewrite ^/token/(.*)$ /$1 break;
             proxy_pass http://$token_origin;
         }
+        # Large imports still pass through Portal session/CSRF and Billing RBAC.
+        location = /api/admin/billing/admin/v1/reconciliation-imports {
+            limit_except POST { deny all; }
+            client_max_body_size 64m;
+            proxy_pass http://$portal_origin;
+        }
         location / { proxy_pass http://$portal_origin; }
     }
 }

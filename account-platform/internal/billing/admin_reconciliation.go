@@ -10,6 +10,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -38,13 +39,15 @@ type AdminReconciliationCase struct {
 }
 
 type ReconciliationCaseCommand struct {
-	Action         string
-	OwnerID        *uuid.UUID
-	RepairAction   string
-	ReviewResult   string
-	Reason         string
-	IdempotencyKey string
-	ActorID        uuid.UUID
+	Action                  string
+	OwnerID                 *uuid.UUID
+	RepairAction            string
+	ReviewResult            string
+	Reason                  string
+	IdempotencyKey          string
+	ActorID                 uuid.UUID
+	verificationRunID       uuid.UUID
+	verificationCaseVersion int64
 }
 
 func (s *Service) adminImportReconciliation(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +60,7 @@ func (s *Service) adminImportReconciliation(w http.ResponseWriter, r *http.Reque
 		api.WriteError(w, http.StatusServiceUnavailable, "PAYMENT_UNAVAILABLE", "payment operations are unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	if api.DecodeJSON(w, r, &body) != nil {
+	if decodeReconciliationJSON(w, r, &body, reconciliationImportMaxBody) != nil {
 		return
 	}
 	businessDate, err := time.Parse("2006-01-02", body.BusinessDate)
@@ -65,9 +68,11 @@ func (s *Service) adminImportReconciliation(w http.ResponseWriter, r *http.Reque
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "business_date must use YYYY-MM-DD", httpserver.RequestID(r.Context()))
 		return
 	}
-	run, err := s.payments.ImportProviderBill(r.Context(), adminActor(adminPrincipal(r)), body.Channel, businessDate, body.Items)
+	operationCtx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	run, err := s.payments.ImportProviderBill(operationCtx, adminActor(adminPrincipal(r)), body.Channel, businessDate, body.Items)
 	if err != nil {
-		s.writeError(w, r, err)
+		s.writeReconciliationError(w, r, err)
 		return
 	}
 	api.WriteJSON(w, http.StatusCreated, run)
@@ -96,7 +101,7 @@ func (s *Service) adminRunReconciliation(w http.ResponseWriter, r *http.Request)
 		api.WriteError(w, http.StatusServiceUnavailable, "PAYMENT_UNAVAILABLE", "payment operations are unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	if err := api.DecodeJSON(w, r, &body); err != nil {
+	if err := decodeReconciliationJSON(w, r, &body, 1<<20); err != nil {
 		return
 	}
 	date, err := time.Parse("2006-01-02", body.BusinessDate)
@@ -104,9 +109,11 @@ func (s *Service) adminRunReconciliation(w http.ResponseWriter, r *http.Request)
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "valid channel and business date are required", httpserver.RequestID(r.Context()))
 		return
 	}
-	run, err := s.payments.RunAdminReconciliation(r.Context(), adminActor(adminPrincipal(r)), body.Channel, date)
+	operationCtx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	run, err := s.payments.RunAdminReconciliation(operationCtx, adminActor(adminPrincipal(r)), body.Channel, date)
 	if err != nil {
-		s.writeError(w, r, err)
+		s.writeReconciliationError(w, r, err)
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, run)
@@ -157,23 +164,34 @@ func (s *Service) adminUpdateReconciliationCase(w http.ResponseWriter, r *http.R
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "valid reconciliation case is required", httpserver.RequestID(r.Context()))
 		return
 	}
-	if api.DecodeJSON(w, r, &body) != nil {
+	if decodeReconciliationJSON(w, r, &body, 1<<20) != nil {
 		return
 	}
 	if len(idempotencyKey) < 8 || len(idempotencyKey) > 120 || len([]rune(strings.TrimSpace(body.Reason))) < 10 {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "valid reconciliation command, reason, and idempotency key are required", httpserver.RequestID(r.Context()))
 		return
 	}
-	item, err := repository.UpdateReconciliationCase(r.Context(), caseID, ReconciliationCaseCommand{Action: body.Action, OwnerID: body.OwnerID, RepairAction: body.RepairAction, ReviewResult: body.ReviewResult, Reason: body.Reason, IdempotencyKey: idempotencyKey, ActorID: adminActor(adminPrincipal(r))})
+	command := ReconciliationCaseCommand{Action: body.Action, OwnerID: body.OwnerID, RepairAction: body.RepairAction, ReviewResult: body.ReviewResult, Reason: body.Reason, IdempotencyKey: idempotencyKey, ActorID: adminActor(adminPrincipal(r))}
+	if strings.EqualFold(strings.TrimSpace(body.Action), "RESOLVE") {
+		if s.payments == nil {
+			s.writeReconciliationError(w, r, ErrConflict)
+			return
+		}
+		if err := s.payments.prepareReconciliationResolution(r.Context(), caseID, &command); err != nil {
+			s.writeReconciliationError(w, r, err)
+			return
+		}
+	}
+	item, err := repository.UpdateReconciliationCase(r.Context(), caseID, command)
 	if err != nil {
-		s.writeError(w, r, err)
+		s.writeReconciliationError(w, r, err)
 		return
 	}
 	writeAdminFinancialJSON(w, http.StatusOK, item)
 }
 
 func (r *PostgresRepository) AdminReconciliationRuns(ctx context.Context, limit int) ([]ReconciliationRun, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,provider_id,provider_version,channel,business_date,source_mode,requested_by,input_digest,status,provider_row_count,case_count,started_at,COALESCE(completed_at,started_at) FROM reconciliation_runs ORDER BY started_at DESC,id LIMIT $1`, limit)
+	rows, err := r.pool.Query(ctx, `SELECT id,provider_id,provider_version,channel,business_date,source_mode,requested_by,input_digest,status,provider_row_count,case_count,started_at,completed_at FROM reconciliation_runs ORDER BY started_at DESC,id LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +210,9 @@ func (r *PostgresRepository) AdminReconciliationRuns(ctx context.Context, limit 
 }
 
 func (r *PostgresRepository) AdminReconciliationCases(ctx context.Context, runID uuid.UUID, limit int) ([]AdminReconciliationCase, error) {
-	rows, err := r.pool.Query(ctx, reconciliationCaseSelect+` WHERE reconciliation_run_id=$1 ORDER BY created_at,id LIMIT $2`, runID, limit)
+	rows, err := r.pool.Query(ctx, reconciliationCaseSelect+` WHERE EXISTS(SELECT 1 FROM reconciliation_runs run WHERE run.id=$1 AND (
+ (run.active_observation_id IS NOT NULL AND EXISTS(SELECT 1 FROM reconciliation_observation_progress observation WHERE observation.observation_id=run.active_observation_id AND observation.case_id=reconciliation_cases.id)) OR
+ (run.active_observation_id IS NULL AND EXISTS(SELECT 1 FROM reconciliation_case_runs link WHERE link.case_id=reconciliation_cases.id AND link.run_id=run.id)))) ORDER BY created_at,id LIMIT $2`, runID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -287,6 +307,11 @@ func (r *PostgresRepository) UpdateReconciliationCase(ctx context.Context, caseI
 		if command.ReviewResult == "" || item.OwnerID == nil || *item.OwnerID != command.ActorID || (item.Status != "OPEN" && item.Status != "IN_REVIEW") {
 			return AdminReconciliationCase{}, ErrConflict
 		}
+		if command.Action == "RESOLVE" {
+			if err := r.validateReconciliationResolution(ctx, tx, item, command); err != nil {
+				return AdminReconciliationCase{}, err
+			}
+		}
 		item.ReviewResult, item.Resolution = &command.ReviewResult, &command.Reason
 		item.Status = map[bool]string{true: "RESOLVED", false: "IGNORED"}[command.Action == "RESOLVE"]
 		item.ResolvedAt = &now
@@ -336,7 +361,7 @@ func (r *PostgresRepository) AdminReconciliationRunsByIDs(ctx context.Context, i
 	if len(ids) == 0 {
 		return items, nil
 	}
-	rows, err := r.pool.Query(ctx, `SELECT id,provider_id,provider_version,channel,business_date,source_mode,requested_by,input_digest,status,provider_row_count,case_count,started_at,COALESCE(completed_at,started_at) FROM reconciliation_runs WHERE id=ANY($1) ORDER BY array_position($1::uuid[],id)`, ids)
+	rows, err := r.pool.Query(ctx, `SELECT id,provider_id,provider_version,channel,business_date,source_mode,requested_by,input_digest,status,provider_row_count,case_count,started_at,completed_at FROM reconciliation_runs WHERE id=ANY($1) ORDER BY array_position($1::uuid[],id)`, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -371,4 +396,38 @@ func (r *PostgresRepository) AdminReconciliationCasesByIDs(ctx context.Context, 
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+const reconciliationImportMaxBody int64 = 64 << 20
+
+func decodeReconciliationJSON(w http.ResponseWriter, r *http.Request, target any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(target)
+	if err == nil {
+		var trailing any
+		err = decoder.Decode(&trailing)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+	}
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		api.WriteError(w, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "request body exceeds the route budget", httpserver.RequestID(r.Context()))
+	} else {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON request body", httpserver.RequestID(r.Context()))
+	}
+	return err
+}
+func (s *Service) writeReconciliationError(w http.ResponseWriter, r *http.Request, err error) {
+	var pending *reconciliationPendingError
+	if errors.As(err, &pending) {
+		api.WriteJSON(w, http.StatusServiceUnavailable, api.Error{Code: "COMMAND_RESULT_UNKNOWN", Message: "reconciliation is persisted; refresh the batch before retrying", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"reconciliation_run_id": pending.RunID}})
+		return
+	}
+	s.writeError(w, r, err)
 }

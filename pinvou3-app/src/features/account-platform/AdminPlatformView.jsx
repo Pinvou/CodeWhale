@@ -116,7 +116,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     ['settings', 'platform.sms-config.read', copy.settings.title],
     ['finance', 'platform.billing.wallets.read', financeCopy[language].finance],
     ['products', 'platform.products.read', financeCopy[language].productAdmin],
-    ['reconciliation', 'platform.usage.read', reconciliationCopy[language].title],
+    ['reconciliation', 'platform.billing.reconciliation.read', reconciliationCopy[language].title],
   ].filter(([, permission]) => permissions.includes(permission));
   const visibleSection = pages.some(([key]) => key === section) ? section : pages[0]?.[0];
   const logout = async () => {

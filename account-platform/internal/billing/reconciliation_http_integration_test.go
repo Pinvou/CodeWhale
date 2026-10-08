@@ -92,7 +92,7 @@ func TestF03AdminReconciliationExactWire(t *testing.T) {
 	if first.Code != 200 || !strings.Contains(first.Body.String(), `"amount_fen":"9007199254740993"`) {
 		t.Fatal("command response lost exact money", first.Code)
 	}
-	if _, err = r.UpdateReconciliationCase(ctx, items[0].ID, ReconciliationCaseCommand{Action: "RESOLVE", ActorID: actor, IdempotencyKey: uuid.NewString(), Reason: "controlled final review reason", ReviewResult: "confirmed actual difference"}); err != nil {
+	if _, err = r.UpdateReconciliationCase(ctx, items[0].ID, ReconciliationCaseCommand{Action: "IGNORE", ActorID: actor, IdempotencyKey: uuid.NewString(), Reason: "controlled final review reason", ReviewResult: "confirmed actual difference"}); err != nil {
 		t.Fatal(err)
 	}
 	replay := call(s.adminUpdateReconciliationCase, path, commandBody, items[0].ID.String(), actor)
@@ -114,5 +114,59 @@ func TestF03AdminReconciliationExactWire(t *testing.T) {
 		if writeErr != nil || closeErr != nil {
 			t.Fatal("private fixture output failed")
 		}
+	}
+}
+
+func TestF03ImportHTTPPendingReceiptResumesSameDurableRun(t *testing.T) {
+	r, ctx := retainedFinanceRepository(t)
+	_, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, false)
+	now := r.now()
+	ref := uuid.NewString()
+	actor := uuid.New()
+	row := ProviderBillEntry{EntryType: "PAYMENT", ProviderReferenceID: ref, ChannelTransactionID: ref, MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Status: "SUCCESS", PaidAt: now}
+	provider := &recoveryBillProvider{reconciliationFixtureProvider: reconciliationFixtureProvider{rows: []ProviderBillEntry{row}}, failing: map[string]bool{order.MerchantOrderNo: true}, orders: map[string]ProviderOrder{order.MerchantOrderNo: {MerchantOrderNo: order.MerchantOrderNo, Status: "SUCCESS", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, ChannelTransactionID: &ref, PaidAt: &now, ExternalCustomerKey: order.RequesterID.String()}}}
+	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(r).WithPayments(c)
+	raw, _ := json.Marshal(map[string]any{"channel": order.Channel, "business_date": normalizedReconciliationBusinessDate(now).Format("2006-01-02"), "items": []ProviderBillEntry{row}})
+	call := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/admin/v1/reconciliation-imports", strings.NewReader(string(raw)))
+		request.Header.Set("Authorization", "Bearer controlled-human")
+		out := httptest.NewRecorder()
+		identity.Middleware(func(context.Context, string) (identity.Principal, error) {
+			return identity.Principal{Issuer: "controlled", Subject: actor.String()}, nil
+		}, http.HandlerFunc(service.adminImportReconciliation)).ServeHTTP(out, request)
+		return out
+	}
+	pending := call()
+	var errorReceipt struct {
+		Code    string `json:"code"`
+		Details struct {
+			RunID uuid.UUID `json:"reconciliation_run_id"`
+		} `json:"details"`
+	}
+	if err := json.Unmarshal(pending.Body.Bytes(), &errorReceipt); err != nil || pending.Code != 503 || errorReceipt.Code != "COMMAND_RESULT_UNKNOWN" || errorReceipt.Details.RunID == uuid.Nil {
+		t.Fatal("pending response lost durable identity", pending.Code, pending.Body.String(), err)
+	}
+	var completedAt *time.Time
+	if err := r.pool.QueryRow(ctx, `SELECT completed_at FROM reconciliation_runs WHERE id=$1`, errorReceipt.Details.RunID).Scan(&completedAt); err != nil || completedAt != nil {
+		t.Fatal("pending completion timestamp is fabricated", completedAt, err)
+	}
+	provider.failing[order.MerchantOrderNo] = false
+	success := call()
+	var run ReconciliationRun
+	if err := json.Unmarshal(success.Body.Bytes(), &run); err != nil || success.Code != 201 || run.ID != errorReceipt.Details.RunID || run.Status != "COMPLETED" || run.CompletedAt == nil {
+		t.Fatal("same file did not recover stable success receipt", success.Code, success.Body.String(), err)
+	}
+	calls := provider.calls[order.MerchantOrderNo]
+	replay := call()
+	if replay.Code != 201 || replay.Body.String() != success.Body.String() || provider.calls[order.MerchantOrderNo] != calls {
+		t.Fatal("completed import receipt not stable")
+	}
+	wallet, err := r.GetWallet(ctx, order.WalletID)
+	if err != nil || wallet.PostedMicrocredits != 1000000 {
+		t.Fatal("HTTP recovery monetary effect incorrect", err)
 	}
 }

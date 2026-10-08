@@ -1,9 +1,20 @@
 package portal
 
 import (
+	"context"
+	"encoding/json"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"io"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/google/uuid"
 )
+
+// Only the authenticated import endpoint accepts the large bounded bill body.
+const reconciliationImportBodyLimit int64 = 64 << 20
 
 func currentBillingApprovalCommand(command string) bool {
 	return command == "WALLET_ADJUSTMENT" || command == "PAYMENT_PROVIDER_RESUME" || command == "PAYMENT_PRODUCT_RESUME"
@@ -62,4 +73,63 @@ func billingAdminPathAllowed(method, resource string) bool {
 		}
 	}
 	return len(parts) == 7 && parts[2] == "recharge-products" && parts[4] == "admission-verifications" && pathUUID(parts[5]) && method == http.MethodPost && (parts[6] == "retry" || parts[6] == "revoke")
+}
+
+// Preflight the sole large upload against current Account facts before reading
+// its body. Billing repeats authorization at its own boundary after forwarding.
+func (s *Service) allowReconciliationImport(w http.ResponseWriter, r *http.Request, session Session) bool {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	target := *s.config.AccountURL
+	target.Path = strings.TrimRight(target.Path, "/") + "/v1/me"
+	target.RawQuery = ""
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return reconciliationPreflightUnavailable(w, r)
+	}
+	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
+	request.Header.Set("Accept", "application/json")
+	response, err := s.client.Do(request)
+	if err != nil {
+		return reconciliationPreflightUnavailable(w, r)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized {
+		api.WriteError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "login is required", httpserver.RequestID(r.Context()))
+		return false
+	}
+	if response.StatusCode == http.StatusForbidden {
+		api.WriteError(w, http.StatusForbidden, "PERMISSION_DENIED", "financial reconciliation permission is required", httpserver.RequestID(r.Context()))
+		return false
+	}
+	if response.StatusCode != http.StatusOK {
+		return reconciliationPreflightUnavailable(w, r)
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil || len(raw) > 1<<20 {
+		return reconciliationPreflightUnavailable(w, r)
+	}
+	var current struct {
+		UserID              uuid.UUID `json:"user_id"`
+		Status              string    `json:"status"`
+		PlatformPermissions []string  `json:"platform_permissions"`
+	}
+	if json.Unmarshal(raw, &current) != nil || current.UserID == uuid.Nil || current.Status == "" || current.PlatformPermissions == nil {
+		return reconciliationPreflightUnavailable(w, r)
+	}
+	if current.Status != "ACTIVE" {
+		api.WriteError(w, http.StatusForbidden, "PERMISSION_DENIED", "active account is required", httpserver.RequestID(r.Context()))
+		return false
+	}
+	for _, permission := range current.PlatformPermissions {
+		if permission == "platform.billing.reconciliation.run" {
+			return true
+		}
+	}
+	api.WriteError(w, http.StatusForbidden, "PERMISSION_DENIED", "financial reconciliation permission is required", httpserver.RequestID(r.Context()))
+	return false
+}
+func reconciliationPreflightUnavailable(w http.ResponseWriter, r *http.Request) bool {
+	api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "financial reconciliation authorization is temporarily unavailable", httpserver.RequestID(r.Context()))
+	return false
 }
