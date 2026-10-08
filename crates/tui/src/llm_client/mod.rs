@@ -91,8 +91,10 @@ pub trait LlmClient: Send + Sync {
         self.create_message_stream(request)
     }
 
-    /// Compare outbound facts, never a session or prompt alone. Concrete
-    /// transports override this with their prepared wire body and endpoint.
+    /// Conservative fallback identity over the full caller request, including
+    /// local metadata. It may split retries whose normalized wire bodies match.
+    /// Transports that opt into real idempotency headers must override this
+    /// with their prepared wire body, endpoint and route identity.
     fn stream_operation_identity(&self, request: &MessageRequest) -> Result<String> {
         Ok(crate::hashing::sha256_hex(&serde_json::to_vec(&(
             self.provider_name(),

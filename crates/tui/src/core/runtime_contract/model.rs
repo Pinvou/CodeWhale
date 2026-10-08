@@ -66,6 +66,9 @@ pub trait ModelClient: Send + Sync {
     ) -> Result<StreamEventBox> {
         self.create_message_stream(request).await
     }
+    /// Conservative caller-request identity, including local metadata. Clients
+    /// that send idempotency headers must override it with normalized outbound
+    /// facts so harmless caller-local changes do not split transport retries.
     fn stream_operation_identity(&self, request: &MessageRequest) -> Result<String> {
         Ok(crate::hashing::sha256_hex(&serde_json::to_vec(&(
             self.provider_name(),

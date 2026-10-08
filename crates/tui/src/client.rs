@@ -282,6 +282,7 @@ pub struct DeepSeekClient {
     /// resolution as the Codex bearer token.
     pub(super) codex_account_id: Option<String>,
     wire_format: WireFormat,
+    auth_disabled: bool,
     retry: RetryPolicy,
     /// Auxiliary inspection calls use the normal bounded retry schedule but
     /// never publish retry/rate-limit state into process-global UI cells.
@@ -591,6 +592,7 @@ impl Clone for DeepSeekClient {
             route_limits: self.route_limits,
             codex_account_id: self.codex_account_id.clone(),
             wire_format: self.wire_format,
+            auth_disabled: self.auth_disabled,
             retry: self.retry.clone(),
             isolated_request_state: self.isolated_request_state,
             remote_control_inference_participant: self.remote_control_inference_participant,
@@ -1370,6 +1372,7 @@ impl DeepSeekClient {
             route_limits,
             codex_account_id,
             wire_format,
+            auth_disabled,
             retry,
             isolated_request_state: false,
             remote_control_inference_participant: !config.runtime_chat_isolated
@@ -3309,6 +3312,11 @@ impl DeepSeekClient {
     }
     pub(crate) fn idempotency_matches_route(&self, base_url: &str, api_key: &str) -> bool {
         self.request_idempotency_header.is_some()
+            && self.wire_format == WireFormat::ChatCompletions
+            && !self.auth_disabled
+            && !(self.api_provider == ApiProvider::XiaomiMimo
+                && (xiaomi_mimo_base_url_uses_token_plan(&self.base_url)
+                    || xiaomi_mimo_api_key_uses_token_plan(&self.api_key)))
             && self.base_url.trim_end_matches('/') == base_url.trim_end_matches('/')
             && self.api_key == api_key
     }

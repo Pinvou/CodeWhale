@@ -153,6 +153,38 @@ async fn forkguard_model_operation_inner_and_outer_stream_retries() {
 }
 
 #[tokio::test]
+async fn forkguard_model_operation_completed_identical_round_gets_new_id() {
+    let receipts = run_operation_fixture(vec![
+        Some(vec![
+            canned::message_start("reasoning-only"),
+            crate::models::StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: crate::models::ContentBlockStart::Thinking {
+                    thinking: String::new(),
+                },
+            },
+            canned::thinking_delta(0, "reasoning with no final channel"),
+            canned::block_stop(0),
+            canned::message_delta("stop", None),
+            canned::message_stop(),
+        ]),
+        Some(canned::simple_text_turn("done")),
+    ])
+    .await;
+    assert_eq!(receipts.len(), 2);
+    assert!(receipts.iter().all(|receipt| receipt.0.is_some()));
+    assert_eq!(
+        serde_json::to_vec(&receipts[0].1).unwrap(),
+        serde_json::to_vec(&receipts[1].1).unwrap(),
+        "the completed reasoning-only round retries without changing the body"
+    );
+    assert_ne!(
+        receipts[0].0, receipts[1].0,
+        "a completed round ends its call"
+    );
+}
+
+#[tokio::test]
 async fn forkguard_model_operation_tool_followup_gets_new_id() {
     let receipts = run_operation_fixture(vec![
         Some(canned::tool_call_turn(

@@ -94,6 +94,86 @@ async fn forkguard_model_operation_http_retry_and_new_calls() {
 }
 
 #[tokio::test]
+async fn forkguard_model_operation_compaction_outer_retry_keeps_id() {
+    let server = MockServer::start().await;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .respond_with(move |_: &wiremock::Request| {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(503)
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({"choices":[{"message":{
+                    "role":"assistant", "content":"Primary request: migrate the session store. Current work: preserve existing sessions. Pending tasks: finish migration tests."
+                }}]}))
+            }
+        })
+        .mount(&server)
+        .await;
+    let mut client = DeepSeekClient::new(&config(&server.uri(), Some("idempotency-key"))).unwrap();
+    client.retry.enabled = false; // The compaction loop must own the 503 retry.
+    client.isolated_request_state = true;
+    let prepared =
+        crate::compaction::PreparedCompactionEnvelope::new(crate::compaction::CompactionConfig {
+            model: "deepseek-v4-pro".into(),
+            cache_summary: false,
+            ..Default::default()
+        });
+    for _ in 0..2 {
+        crate::compaction::compact_messages_safe(&client, &request().messages, None, &prepared)
+            .await
+            .unwrap();
+    }
+    let receipts = server.received_requests().await.unwrap();
+    assert_eq!(receipts.len(), 3);
+    assert!(receipts.windows(2).all(|pair| pair[0].body == pair[1].body));
+    let ids: Vec<_> = receipts
+        .iter()
+        .map(|receipt| {
+            receipt
+                .headers
+                .get("idempotency-key")
+                .unwrap()
+                .to_str()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(ids[0], ids[1], "outer transient retry is the same call");
+    assert_ne!(
+        ids[1], ids[2],
+        "a separate identical compaction is a new call"
+    );
+}
+
+#[test]
+fn forkguard_model_operation_scoping_preserves_only_resolved_identity() {
+    let mut enabled: Config = serde_json::from_value(json!({
+        "provider":"alpha",
+        "providers": {
+            "alpha":{"kind":"openai-compatible", "base_url":"https://owned.example/v1", "model":"test-model"},
+            "beta":{"kind":"openai-compatible", "base_url":"https://owned.example/v1", "model":"test-model"}
+        }
+    })).unwrap();
+    enabled.request_idempotency_header = Some("idempotency-key".into());
+    for target in ["alpha", "beta"] {
+        let identity = enabled.resolve_provider_identity(target).unwrap();
+        let mut scoped = enabled.clone();
+        scoped.scope_to_provider_identity(&identity);
+        assert_eq!(
+            scoped.request_idempotency_header.is_some(),
+            target == "alpha"
+        );
+        assert_eq!(scoped.provider.as_deref(), Some(target));
+    }
+    let deepseek = enabled.resolve_provider_identity("deepseek").unwrap();
+    enabled.provider = Some("removed-provider".into());
+    enabled.scope_to_provider_identity(&deepseek);
+    assert!(
+        enabled.request_idempotency_header.is_none(),
+        "an unresolved source must fail closed even when api_provider falls back to Deepseek"
+    );
+}
+
+#[tokio::test]
 async fn forkguard_model_operation_opt_in_and_wire_identity() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

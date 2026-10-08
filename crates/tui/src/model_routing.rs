@@ -982,12 +982,12 @@ async fn auto_route_inventory_recommendation(
     allow_response_cache: bool,
 ) -> Result<Option<InventoryAutoRouteRecommendation>> {
     let mut router_config = config.clone();
-    if config.api_provider() != inventory.router_provider {
-        router_config.request_idempotency_header = None;
-    }
     // The classifier runs on the inventory's router route: the explicit
     // [auto.router] route when configured, else the DeepSeek flash default.
-    router_config.provider = Some(inventory.router_provider.as_str().to_string());
+    let router_identity = config
+        .resolve_provider_identity(inventory.router_provider.as_str())
+        .map_err(anyhow::Error::msg)?;
+    router_config.scope_to_provider_identity(&router_identity);
     router_config.default_text_model = Some(inventory.router_model.clone());
 
     let client = DeepSeekClient::new(&router_config)?;
@@ -1219,6 +1219,74 @@ fn truncate_for_auto_router(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn forkguard_model_operation_classifier_distinguishes_custom_identities() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices":[{"message":{"role":"assistant","content":"{}"}}]
+            })))
+            .mount(&server)
+            .await;
+        let mut config: Config = serde_json::from_value(serde_json::json!({
+            "provider":"alpha",
+            "providers": {
+                "alpha":{"kind":"openai-compatible", "base_url":server.uri(), "model":"test-model", "api_key":"owned-test-key"},
+                "custom":{"kind":"openai-compatible", "base_url":server.uri(), "model":"test-model", "api_key":"owned-test-key"}
+            }
+        })).unwrap();
+        config.request_idempotency_header = Some("idempotency-key".into());
+        let inventory = ModelInventory {
+            active_provider: ApiProvider::Custom,
+            router_provider: ApiProvider::Custom,
+            router_model: "test-model".into(),
+            router_thinking: None,
+            router_timeout_secs: 4,
+            router_configured: true,
+            router_available: true,
+            cross_provider_auto: false,
+            candidates: Vec::new(),
+        };
+        auto_route_inventory_recommendation(
+            &config,
+            &inventory,
+            "classify request",
+            "",
+            "agent",
+            "auto",
+            "off",
+            false,
+        )
+        .await
+        .unwrap();
+        let receipts = server.received_requests().await.unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert!(
+            !receipts[0].headers.contains_key("idempotency-key"),
+            "equal Custom enums do not imply equal named routes"
+        );
+        config.provider = Some("custom".into());
+        auto_route_inventory_recommendation(
+            &config,
+            &inventory,
+            "classify request",
+            "",
+            "agent",
+            "auto",
+            "off",
+            false,
+        )
+        .await
+        .unwrap();
+        let receipts = server.received_requests().await.unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert!(
+            receipts[1].headers.contains_key("idempotency-key"),
+            "the same exact classifier route retains the opt-in"
+        );
+    }
 
     #[test]
     fn auto_model_reasoning_keeps_model_and_thinking_choices_independent() {

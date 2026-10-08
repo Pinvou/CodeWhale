@@ -824,6 +824,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forkguard_model_operation_vision_rejects_incompatible_transport() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vision_response_body()))
+            .mount(&server)
+            .await;
+        let workspace = tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("tiny.png"),
+            create_test_png(2, 2, [1, 2, 3, 255]),
+        )
+        .unwrap();
+        let context = ToolContext::new(workspace.path());
+        for (provider, model, key, auth_mode) in [
+            (
+                crate::config::ApiProvider::Anthropic,
+                "claude-sonnet-4-6",
+                "owned-test-key",
+                None,
+            ),
+            (
+                crate::config::ApiProvider::Deepseek,
+                "deepseek-v4-pro",
+                "",
+                Some("none"),
+            ),
+            (
+                crate::config::ApiProvider::XiaomiMimo,
+                "mimo-v2.5",
+                "tp-owned-test-key",
+                None,
+            ),
+        ] {
+            let provider_table = if provider == crate::config::ApiProvider::XiaomiMimo {
+                "xiaomi_mimo"
+            } else {
+                provider.as_str()
+            };
+            let mut config: crate::config::Config = serde_json::from_value(json!({
+                "provider": provider.as_str(),
+                "providers": {
+                    (provider_table): {
+                        "api_key": key, "base_url": server.uri(), "model": model,
+                        "auth_mode": auth_mode
+                    }
+                }
+            }))
+            .unwrap();
+            config.request_idempotency_header = Some("idempotency-key".into());
+            config.http_headers = Some(std::collections::HashMap::from([(
+                "X-Pinvou-Context-Id".into(),
+                "owned-context".into(),
+            )]));
+            let route = DeepSeekClient::new(&config).unwrap();
+            assert!(!route.idempotency_matches_route(&server.uri(), key));
+            let tool = ImageAnalyzeTool::new_with_route_client(
+                VisionModelConfig {
+                    model: "test-vision-model".into(),
+                    api_key: Some(key.into()),
+                    base_url: Some(server.uri()),
+                },
+                Some(route),
+            );
+            let result = tool
+                .execute(json!({"image_path":"tiny.png"}), &context)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_str(&result.content).unwrap();
+            assert_eq!(body["analysis"], "a red square");
+        }
+        let receipts = server.received_requests().await.unwrap();
+        assert_eq!(receipts.len(), 3);
+        for receipt in &receipts {
+            assert!(receipt.url.path().ends_with("/chat/completions"));
+            for header in [
+                "idempotency-key",
+                "x-api-key",
+                "api-key",
+                "anthropic-version",
+                "x-pinvou-context-id",
+            ] {
+                assert!(
+                    !receipt.headers.contains_key(header),
+                    "incompatible parent header {header}"
+                );
+            }
+            assert!(
+                receipt
+                    .headers
+                    .get("authorization")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("Bearer")
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn forkguard_model_operation_vision_http_retry_keeps_id() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};

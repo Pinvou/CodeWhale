@@ -2961,6 +2961,9 @@ pub struct Config {
     pub http_headers: Option<HashMap<String, String>>,
     /// Host-only, route-scoped opt-in to logical model-call idempotency.
     /// Never persisted or accepted from provider configuration files.
+    /// Network, engine, compaction, subagent and matching vision retries reuse
+    /// a key only for the same logical request. Single-dispatch auxiliary calls
+    /// (translation, FIM, speech and native search) start separate calls.
     #[serde(skip)]
     pub request_idempotency_header: Option<String>,
     /// Optional user-facing tab/window title shown as `[title] …` in front of
@@ -5508,7 +5511,20 @@ impl Config {
     /// otherwise capture the table. Removing it from the scoped clone keeps
     /// the root endpoint authoritative without mutating the live registry.
     pub(crate) fn scope_to_provider_identity(&mut self, identity: &ProviderIdentity) {
-        if self.provider_identity_for(self.api_provider()) != identity.key {
+        if self.request_idempotency_header.is_some()
+            && !self
+                .provider
+                .as_deref()
+                .filter(|name| !name.trim().is_empty() && ApiProvider::parse(name).is_none())
+                .map_or_else(
+                    || self.active_provider_identity(self.api_provider()),
+                    |name| self.resolve_provider_identity(name),
+                )
+                .is_ok_and(|source| source == *identity)
+        {
+            crate::logging::warn(
+                "Clearing host-only request idempotency: the source provider identity is unresolved or differs from the scoped route",
+            );
             self.request_idempotency_header = None;
         }
         self.migrated_legacy_ollama_cloud_route = identity.migrated_legacy_ollama_cloud_route;
