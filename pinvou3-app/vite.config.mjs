@@ -441,6 +441,7 @@ export const lazyChunkContracts = {
   savedPersonaConfirmDialog: ['features/personas/SavedPersonaConfirmDialog.jsx', 'SavedPersonaConfirmDialog'],
   apiKeyGateDialog: ['features/settings/ApiKeyGateDialog.jsx', 'ApiKeyGateDialog'],
   archiveConfirmDialog: ['features/sessions/ArchiveConfirmDialog.jsx', 'ArchiveConfirmDialog'],
+  toolWelcome: ['features/tools/ToolWelcomeCard.jsx', 'ToolWelcomeCard'],
 };
 
 export function assertLazyChunks(bundle, contracts = lazyChunkContracts) {
@@ -501,7 +502,10 @@ function enforceLazyChunks() {
 // measured): web 505,451 B → 514,164 B (+8,713 B, same feature riding the
 // main merge); desktop 503,063 B → 511,810 B. 516_000 keeps ~1.8 kB web
 // headroom; the next entry feature again needs a deliberate bump.
-export const MAIN_ENTRY_BUDGET_BYTES = 516_000;
+// 2026-10-08 516_000 → 486_000: tool marketplace metadata and its post-install
+// welcome card moved out of the startup graph. Measured desktop 481,359 B and
+// web 483,649 B; 486_000 keeps ~2.3 kB headroom over the larger web entry.
+export const MAIN_ENTRY_BUDGET_BYTES = 486_000;
 
 export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BYTES) {
   const mainEntry = Object.values(bundle).find(output => (
