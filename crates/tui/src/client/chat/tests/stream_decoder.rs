@@ -1656,6 +1656,61 @@ fn openrouter_details_without_index_key_by_array_position() {
 }
 
 #[test]
+fn openrouter_details_fragments_concatenate_per_index() {
+    // OpenRouter's documented streaming contract: each detail chunk is sent
+    // as it becomes available and the complete sequence is built by
+    // concatenating chunks in order. Two non-cumulative fragments for one
+    // index must join ("al" + "pha" = "alpha") — a last-wins store would
+    // replay only "pha", truncating a sequence the API requires unmodified.
+    // A trailing signature-only fragment (Anthropic-style) fills the entry's
+    // signature instead of being dropped.
+    let chunks = vec![
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "al" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "pha" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "", "signature": "SIG-tail" }
+                    ]
+                }
+            }]
+        }),
+    ];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    let snapshots = details_delta_payloads(&events);
+    let last = snapshots.last().expect("final snapshot");
+    assert_eq!(last.len(), 1, "one entry across all fragments");
+    assert_eq!(
+        last[0]["text"], "alpha",
+        "non-cumulative fragments must concatenate in arrival order"
+    );
+    assert_eq!(
+        last[0]["signature"], "SIG-tail",
+        "a trailing signature must fill the entry"
+    );
+}
+
+#[test]
 fn non_openrouter_routes_never_emit_details_deltas() {
     let chunks = vec![serde_json::json!({
         "choices": [{

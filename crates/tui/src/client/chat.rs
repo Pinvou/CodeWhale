@@ -3787,14 +3787,67 @@ fn replayable_reasoning_details(details: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Merge one streamed fragment into its stored entry, per OpenRouter's
+/// documented incremental contract ("each reasoning detail chunk is sent as
+/// it becomes available"; "the complete reasoning sequence is built by
+/// concatenating all chunks in order"). Fragment text continues the stored
+/// text — last-wins would truncate a replayed sequence the API requires
+/// unmodified. A fragment that instead extends the stored text as a prefix
+/// is a cumulative re-send and replaces it, matching the plaintext
+/// `reasoning` path's prefix handling. Any other field the fragment carries
+/// that the entry still lacks (a signature trailing the text, an id, a
+/// format) is filled in.
+fn merge_reasoning_detail_entry(stored: &mut Value, fragment: &Value) -> bool {
+    let mut changed = false;
+    if let Some(incoming) = fragment.get("text").and_then(Value::as_str)
+        && !incoming.is_empty()
+    {
+        let current = stored.get("text").and_then(Value::as_str).unwrap_or("");
+        if incoming.starts_with(current) {
+            if incoming.len() != current.len() {
+                stored["text"] = Value::String(incoming.to_string());
+                changed = true;
+            }
+        } else {
+            let mut merged = String::with_capacity(current.len() + incoming.len());
+            merged.push_str(current);
+            merged.push_str(incoming);
+            stored["text"] = Value::String(merged);
+            changed = true;
+        }
+    }
+    if let (Some(fields), Some(incoming_fields)) = (stored.as_object_mut(), fragment.as_object()) {
+        for (field, value) in incoming_fields {
+            if field == "text" {
+                continue;
+            }
+            let lacks = match fields.get(field) {
+                None | Some(Value::Null) => true,
+                Some(Value::String(text)) => text.is_empty(),
+                _ => false,
+            };
+            if lacks {
+                fields.insert(field.clone(), value.clone());
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 /// Accumulates OpenRouter `reasoning_details` entries across stream chunks.
-/// OpenRouter repeats the growing array on successive chunks (the same
-/// cumulative-snapshot shape MiniMax uses), so entries are keyed by `index`
-/// when present, else by their position in the incoming array — stable under
-/// the cumulative-snapshot protocol, where a `type` key would collide (two
-/// same-type entries in one array would merge and lose one) and a running
-/// position counter would re-key every reappearance of an entry. The last
-/// version of each key wins.
+/// OpenRouter's documented streaming contract is incremental — "each
+/// reasoning detail chunk is sent as it becomes available", "the complete
+/// reasoning sequence is built by concatenating all chunks in order" — so a
+/// fragment for a known key (the entry's `index`, or its position in the
+/// incoming array when the entry carries none; a `type` key would collide
+/// two same-type entries into one) is merged into the stored entry rather
+/// than replacing it. Fragment text continues the stored text unless it
+/// extends that text as a prefix, which is treated as a cumulative re-send
+/// from a gateway that repeats the growing array (the same dual handling as
+/// the plaintext `reasoning` path), and fields the fragment carries that the
+/// entry still lacks — a signature trailing the text, an id, a format — are
+/// filled in.
 #[derive(Default)]
 pub(super) struct ReasoningDetailsBuffer {
     order: Vec<String>,
@@ -3816,17 +3869,19 @@ impl ReasoningDetailsBuffer {
                 .unwrap_or_else(|| format!("_arr{position}"));
             if !self.order.contains(&key) {
                 self.order.push(key.clone());
+                self.entries.insert(key, entry);
+                changed = true;
+            } else if merge_reasoning_detail_entry(
+                self.entries.get_mut(&key).expect("key is present in order"),
+                &entry,
+            ) {
                 changed = true;
             }
-            if self.entries.get(&key) != Some(&entry) {
-                changed = true;
-            }
-            self.entries.insert(key, entry);
         }
         changed
     }
 
-    /// Entries in first-seen order, most complete version of each.
+    /// Entries in first-seen order, merged to their most complete version.
     fn snapshot(&self) -> Vec<Value> {
         self.order
             .iter()
