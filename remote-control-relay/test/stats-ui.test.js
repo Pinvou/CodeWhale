@@ -9,6 +9,84 @@ import { JSDOM } from "jsdom";
 const testDir = fileURLToPath(new URL(".", import.meta.url));
 const statsHtml = readFileSync(join(testDir, "..", "web", "stats.html"), "utf8");
 
+for (const failedPath of ["/behavior/overview", "/behavior/models", "/commercial/overview"]) {
+  test(`behavior dashboard isolates ${failedPath} failures and recovers on refresh`, async () => {
+    let fail = true;
+    let successCount = 42;
+    const dom = new JSDOM(statsHtml, {
+      runScripts: "dangerously",
+      url: "https://www.pinvou.com/pinvou3/stats",
+      beforeParse(window) {
+        window.fetch = async url => {
+          const path = String(url);
+          if (fail && path.includes(failedPath)) return { ok: false, status: 400 };
+          const value = path.endsWith("/session") ? { role: "behavior_analyst" }
+            : path.includes("/behavior/overview") ? {
+              range: "30", data_status: "ready", metrics: { task_success_count: successCount },
+            } : { range: "30", rows: [{ tool_key: "working-tool", model_key: "working-model" }] };
+          return { ok: true, status: 200, json: async () => value };
+        };
+        window.setInterval = () => 1;
+        window.clearInterval = () => {};
+      },
+    });
+    try {
+      const wait = () => new Promise(resolve => dom.window.setTimeout(resolve, 20));
+      await wait();
+      const { document } = dom.window;
+      const banner = document.querySelector("#behaviorLoadStatus");
+      assert.equal(banner.classList.contains("hidden"), false);
+      assert.match(banner.textContent, /加载失败/);
+      assert.match(document.querySelector("#toolCallRows").textContent, /working-tool/);
+      if (failedPath === "/behavior/overview") {
+        assert.equal(document.querySelector("#taskSuccess").textContent, "—");
+        assert.match(document.querySelector("#activationFunnelRows").textContent, /加载失败/);
+        assert.match(document.querySelector("#modelRows").textContent, /working-model/);
+      } else {
+        assert.equal(document.querySelector("#taskSuccess").textContent, "42");
+      }
+      document.querySelector("#refreshButton").click();
+      await wait();
+      assert.match(document.querySelector("#refreshButton").textContent, /部分失败/);
+      fail = false;
+      document.querySelector("#refreshButton").click();
+      await wait();
+      assert.equal(banner.classList.contains("hidden"), true);
+      assert.equal(document.querySelector("#taskSuccess").textContent, "42");
+      assert.match(document.querySelector("#modelRows").textContent, /working-model/);
+      fail = true;
+      successCount = 99;
+      document.querySelector("#refreshButton").click();
+      await wait();
+      assert.equal(banner.classList.contains("hidden"), false);
+      assert.match(document.querySelector("#modelRows").textContent, /working-model/);
+      assert.equal(document.querySelector("#taskSuccess").textContent, failedPath === "/behavior/overview" ? "42" : "99");
+    } finally {
+      dom.window.close();
+    }
+  });
+}
+
+test("a behavior API authentication failure returns to login", async () => {
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously",
+    url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async url => String(url).endsWith("/session")
+        ? { ok: true, status: 200, json: async () => ({ role: "behavior_analyst" }) }
+        : { ok: false, status: 401 };
+      window.setInterval = () => 1;
+      window.clearInterval = () => {};
+    },
+  });
+  try {
+    await new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    assert.equal(dom.window.document.querySelector("#loginLayer").classList.contains("hidden"), false);
+  } finally {
+    dom.window.close();
+  }
+});
+
 test("device details expose sortable conversation counts without encoding damage", () => {
   assert.match(statsHtml, /<span>今日对话次数<\/span>/);
   assert.match(statsHtml, /id="todayTurns"/);

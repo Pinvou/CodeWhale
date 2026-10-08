@@ -22,6 +22,36 @@ import {
 
 const at = (value) => Date.parse(`${value}+08:00`);
 
+test("behavior overview handles event counts above the function argument limit", () => {
+  const now = at("2026-10-08T17:00:00");
+  const devices = [{ device_id: "large_install", hardware_source: "installation_id" }];
+  const events = Array.from({ length: 200_000 }, (_, index) => ({
+    device_id: "large_install",
+    event_name: "scene_impression",
+    occurred_at: now - 10_000,
+    received_at: index === 123 ? now - 1 : now - 5_000,
+  }));
+  events[456].received_at = 0;
+  events[456].occurred_at = now;
+  const report = buildBehaviorOverview(devices, [], events, "30", now);
+  assert.equal(report.latest_event_received_at, now);
+  assert.equal(report.data_status, "ready");
+  assert.equal(report.range, "30");
+  assert.equal(buildBehaviorOverview(devices, [], [], "30", now).latest_event_received_at, null);
+});
+
+test("event capacity accepts the deployed ten million limit without changing the default", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-telemetry-capacity-"));
+  try {
+    const pepper = "test-device-pepper-at-least-24-chars";
+    assert.equal(new TelemetryStore(dataDir, pepper).maxEvents, 100_000);
+    assert.equal(new TelemetryStore(dataDir, pepper, { maxEvents: 10_000_000 }).maxEvents, 10_000_000);
+    assert.equal(new TelemetryStore(dataDir, pepper, { maxEvents: 20_000_000 }).maxEvents, 10_000_000);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("device details use the latest observed behavior version regardless of event order", () => {
   const now = at("2026-09-10T12:00:00");
   const devices = [{
