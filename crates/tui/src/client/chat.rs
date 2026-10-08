@@ -643,7 +643,11 @@ fn is_exact_google_chat_route(provider: ApiProvider, base_url: &str) -> bool {
 fn google_model_requires_thought_signatures(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
     if model.starts_with("gemini-3") {
-        return true;
+        // Image-output variants don't enforce signatures (Google:
+        // "Gemini 3 Pro Image doesn't return a 400 error if a thought
+        // signature isn't returned"), so failing them closed would block
+        // valid unsigned turns.
+        return !model.contains("image");
     }
     if model.starts_with("gemini-2.5-pro") {
         return true;
@@ -8041,6 +8045,40 @@ mod google_thought_signature_tests {
             false,
         )
         .expect("flash-lite replay must not require a signature");
+    }
+
+    #[test]
+    fn google_image_variants_do_not_fail_closed_on_missing_signatures() {
+        // Google: "Gemini 3 Pro Image doesn't return a 400 error if a
+        // thought signature isn't returned", so demanding signatures there
+        // would block valid unsigned turns with a local diagnostic. Pinned
+        // on the live GA ids (`gemini-3-pro-image` "Nano Banana Pro" and the
+        // `gemini-3.1-flash-lite-image` line), not the shut-down `-preview`
+        // spelling.
+        for model in ["gemini-3-pro-image", "gemini-3.1-flash-lite-image"] {
+            let mut request = google_request_with_signed_tool(None);
+            request.model = model.to_string();
+            build_chat_wire_body(
+                &request,
+                ApiProvider::Google,
+                DEFAULT_GOOGLE_BASE_URL,
+                false,
+            )
+            .unwrap_or_else(|error| panic!("{model} must not require a signature: {error}"));
+        }
+
+        // Text Gemini 3 models keep the fail-closed contract.
+        let request = google_request_with_signed_tool(None);
+        assert!(
+            build_chat_wire_body(
+                &request,
+                ApiProvider::Google,
+                DEFAULT_GOOGLE_BASE_URL,
+                false
+            )
+            .is_err(),
+            "text Gemini 3 replay must still require a signature"
+        );
     }
 
     #[test]
