@@ -2367,8 +2367,9 @@ export function CodexAcpView({
     nativeVoice.cancelVoice();
   }
   function handleNativeVoiceClose() {
-    // Dismiss without ending the unsent operation (an in-flight recording
-    // still cancels); closeVoice would abandon it.
+    // 保留未发送的操作与转写草稿（进行中的录音仍会被取消）。本仓 hook 的
+    // closeVoice 与 dismissVoice 同为 bridge.voice.dismissVoiceInput，这里
+    // 沿用上游的 dismissVoice 拼写以减少后续回流冲突。
     nativeVoice.dismissVoice();
   }
 

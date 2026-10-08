@@ -328,7 +328,7 @@ for (const navigation of ['none', 'session', 'new-draft', 'after-rollback']) {
     const toggleGate = new Promise(resolve => { finishToggle = resolve; });
     Object.assign(ctx, {
       voice: () => h.api, sessionStates: buffers, ensureSessionInFlight: null,
-      ensureSessionDraftOutcome: null, sessionSwitchRequestToken: 0, pendingTaskDraftRecovery: null,
+      ensureSessionDraftOutcome: null, sessionSwitchRequestToken: 0, pendingTaskDraftRecovery: { buffer: null },
       freshBuffer: () => ({ composerDraft: '', messages: [], chatItems: [] }),
       getBuffer: sid => buffers[sid], saveWorkingSetTo() {},
       loadWorkingSetFrom: buffer => Object.assign(h.state, buffer),
@@ -387,12 +387,24 @@ for (const navigation of ['none', 'session', 'new-draft', 'after-rollback']) {
       assert.equal(h.api.getVoiceOperationId(null, 'chat'), null);
     } else {
       assert.equal(owner.rollbackFromDraftEpoch, undefined, 'real navigation cannot authorize migration');
-      assert.equal(operation.draftEpoch, 4);
-      assert.equal(h.state.composerDraft, 'unrelated input');
-      assert.equal(h.state.composerPrefill.text, '');
-      h.state.activeSessionId = null;
-      h.state.draftEpoch = 5;
-      assert.equal(h.api.getVoiceOperationId(null, 'chat'), null, 'new draft remains isolated');
+      if (navigation === 'new-draft') {
+        // enterDraft bumped the epoch: the restore lands in the live draft
+        // (any-epoch branch) and the voice association follows the restored
+        // text instead of being silently dropped.
+        assert.equal(operation.draftEpoch, 5);
+        assert.equal(h.state.composerDraft, 'unrelated input');
+        assert.equal(h.state.composerPrefill.text, 'voice task');
+        assert.equal(h.state.composerPrefill.append, true);
+        assert.equal(h.api.getVoiceOperationId(null, 'chat'), operation.operationId,
+          'the association follows the restored text into the live draft');
+      } else {
+        assert.equal(operation.draftEpoch, 4);
+        assert.equal(h.state.composerDraft, 'unrelated input');
+        assert.equal(h.state.composerPrefill.text, '');
+        h.state.activeSessionId = null;
+        h.state.draftEpoch = 5;
+        assert.equal(h.api.getVoiceOperationId(null, 'chat'), null, 'new draft remains isolated');
+      }
     }
   });
 }
@@ -426,7 +438,7 @@ for (const lane of ['desktop', 'web']) {
           sessionStates: buffers, voice: () => h.api, IS_WEB: lane === 'web', canInvoke: () => false,
           useCallback: fn => fn, useEffect: fn => fn(), activeSessionId: origin,
           activeSessionIdRef: { current: origin }, draftEpoch: 4, draftEpochRef: { current: 4 }, inputTextRef: { current: '' },
-          pendingTaskDraftRecovery: null, sessionSwitchRequestToken: 0,
+          pendingTaskDraftRecovery: { buffer: null }, sessionSwitchRequestToken: 0,
           findPersonalWorkbenchTemplateDraft: () => null, personalWorkbenchTemplateIdRef: { current: null },
           pendingModeScopeMigrationRef: { current: null }, pinvouModeStateRef: { current: null },
           hasReadyAttachment: false, visualPosterSceneActive: false, documentWritingSceneActive: preparing,
@@ -565,4 +577,120 @@ for (const lane of ['desktop', 'web']) {
       });
     }
   }
+}
+
+// ── Scoped task-draft restore + departed-draft rebind (real bridge code):
+// retention/consumption/settlement pins aligned with the upstream restore
+// restructure (any-epoch draft branch, unconditional retain merge) ──
+
+function restoreHarness(source, lane, stateOverrides, boundSessionId = null) {
+  const state = { activeSessionId: null, draftEpoch: 4, composerDraft: '', ...stateOverrides };
+  const sandbox = { console, Math, Date, Promise, Object, Array, JSON, String, Number, Boolean };
+  vm.createContext(sandbox);
+  sandbox.state = state;
+  const calls = { complete: [], steer: [], restore: [], prefill: [], rebind: [] };
+  sandbox.completeVoiceSubmission = (operationId, sessionId, accepted) => calls.complete.push({ operationId, sessionId, accepted });
+  sandbox.rebindVoiceOperationToDraft = (operationId, toEpoch) => calls.rebind.push({ operationId, toEpoch });
+  sandbox.voiceOperationSessionId = () => boundSessionId;
+  sandbox.voice = () => ({
+    rebindVoiceDraftAfterRollback: () => false,
+    completeVoiceSubmission: (operationId, sessionId, accepted) => calls.complete.push({ operationId, sessionId, accepted }),
+    voiceOperationSessionId: () => boundSessionId,
+    rebindVoiceOperationToDraft: (operationId, toEpoch) => calls.rebind.push({ operationId, toEpoch }),
+  });
+  if (lane === 'desktop') sandbox.restoreSteerText = (sid, text) => calls.steer.push({ sid, text });
+  else sandbox.restoreComposerText = (sid, text) => calls.restore.push({ sid, text });
+  sandbox.prefillComposer = (text, append) => calls.prefill.push({ text, append });
+  const declStart = source.indexOf('  const pendingTaskDraftRecovery = { buffer: null };');
+  assert.ok(declStart >= 0, `${lane} bridge must keep the retained recovery slot declaration`);
+  vm.runInContext(
+    source.slice(declStart, source.indexOf('  function getComposerDraft(', declStart))
+    + '\n' + bridgeFunction(source, 'getComposerDraft')
+    + '\n' + bridgeFunction(source, 'restoreTaskDraft')
+    + '\nthis.getComposerDraft = getComposerDraft;\nthis.restoreTaskDraft = restoreTaskDraft;',
+    sandbox,
+  );
+  return { sandbox, state, calls };
+}
+
+for (const [lane, source] of Object.entries(sources)) {
+  // The restore block lives in the desktop chat bridge and the web bridge;
+  // sources[lane] (voice.js) only carries the operation lifecycle slice.
+  const restoreSource = lane === 'desktop' ? read('src/platform/tauri/bridge/chat.js') : source;
+
+  test(`${lane}: restore: a rejected send with an active session retains once, settles unparked, and consumes on draft return`, () => {
+    const { sandbox, state, calls } = restoreHarness(restoreSource, lane, { activeSessionId: 'session-b', draftEpoch: 5 });
+    const owner = { sessionId: null, draftEpoch: 4, operationId: 'voiceop-restore', restored: false };
+    assert.equal(sandbox.restoreTaskDraft('dictated text', owner), true);
+    assert.deepEqual(calls.prefill, [], 'the text must never land in the unrelated active composer');
+    assert.deepEqual(calls.complete, [{ operationId: 'voiceop-restore', sessionId: null, accepted: false }], 'the restore settles the parked submission');
+    // Returning to the draft allocates a NEW epoch (enterDraft increments
+    // unconditionally) — the retained text must still be consumed exactly once.
+    state.activeSessionId = null;
+    state.draftEpoch = 7;
+    assert.equal(sandbox.getComposerDraft(), 'dictated text');
+    assert.equal(state.composerDraft, 'dictated text', 'the retained text lands in the composer draft');
+    assert.deepEqual(calls.rebind, [{ operationId: 'voiceop-restore', toEpoch: 7 }], 'the voice association follows the text into the new epoch');
+    state.composerDraft = '';
+    assert.equal(sandbox.getComposerDraft(), '', 'the retained draft is consumed once');
+    assert.equal(sandbox.restoreTaskDraft('again', owner), false, 'the restore is once-only');
+  });
+
+  test(`${lane}: restore: back in the draft it prefills directly regardless of the epoch`, () => {
+    const { sandbox, calls } = restoreHarness(restoreSource, lane, { activeSessionId: null, draftEpoch: 9 });
+    const owner = { sessionId: null, draftEpoch: 4, operationId: 'voiceop-prefill', restored: false };
+    assert.equal(sandbox.restoreTaskDraft('dictated text', owner), true);
+    assert.deepEqual(calls.prefill, [{ text: 'dictated text', append: true }]);
+    assert.deepEqual(calls.complete, [{ operationId: 'voiceop-prefill', sessionId: null, accepted: false }]);
+    // The text is visibly back in the live draft: the operation must follow it
+    // to the new epoch, or a manual retry is orphaned in the dead epoch.
+    assert.deepEqual(calls.rebind, [{ operationId: 'voiceop-prefill', toEpoch: 9 }]);
+  });
+
+  test(`${lane}: restore: stranded drafts merge unconditionally across epochs, newest operation wins`, () => {
+    const { sandbox, state, calls } = restoreHarness(restoreSource, lane, { activeSessionId: 'session-b', draftEpoch: 5 });
+    const first = { sessionId: null, draftEpoch: 4, operationId: 'voiceop-first', restored: false };
+    assert.equal(sandbox.restoreTaskDraft('first strand', first), true);
+    // The epoch moved on between the two strands: the merge must keep the
+    // earlier text (an epoch-keyed merge would silently replace it).
+    const second = { sessionId: null, draftEpoch: 7, operationId: 'voiceop-second', restored: false };
+    assert.equal(sandbox.restoreTaskDraft('second strand', second), true);
+    state.activeSessionId = null;
+    state.draftEpoch = 9;
+    assert.equal(sandbox.getComposerDraft(), 'first strand\nsecond strand');
+    assert.deepEqual(calls.rebind, [{ operationId: 'voiceop-second', toEpoch: 9 }], 'the newest operation wins');
+    state.composerDraft = '';
+    assert.equal(sandbox.getComposerDraft(), '', 'consume-once after the merged hand-back');
+  });
+
+  test(`${lane}: a draft-return rebind re-adopts the restored operation, and only that shape`, () => {
+    const h = harness(source);
+    const operation = h.operation('voiceop-departed');
+    h.state.draftEpoch = 9;
+    assert.equal(h.api.getVoiceOperationId(null, 'chat'), null, 'the dead recording-time epoch cannot adopt');
+    assert.equal(h.api.rebindVoiceOperationToDraft(operation.operationId, 9), true);
+    assert.equal(operation.draftEpoch, 9);
+    assert.equal(h.api.getVoiceOperationId(null, 'chat'), operation.operationId, 'the restored text manual retry keeps its provenance');
+    // Refusals: a terminal operation, a session-bound operation, a non-chat operation.
+    h.api.trackVoiceTerminal('voice_cancelled', operation);
+    assert.equal(h.api.rebindVoiceOperationToDraft(operation.operationId, 9), false, 'terminal operations never rebind');
+    const bound = h.operation('voiceop-bound', 'chat', 'session-a');
+    assert.equal(h.api.rebindVoiceOperationToDraft(bound.operationId, 9), false, 'session-bound operations never rebind');
+    const acp = h.operation('voiceop-acp', 'acp', null);
+    assert.equal(h.api.rebindVoiceOperationToDraft(acp.operationId, 9), false, 'non-chat operations never rebind');
+  });
+
+  test(`${lane}: dismissing the finished notice keeps the operation until the next recording`, () => {
+    const h = harness(source);
+    const operation = h.operation('voiceop-dismissed');
+    h.state.voiceInput = { status: 'idle', operationId: operation.operationId };
+    h.api.dismissVoiceInput();
+    assert.equal(operation.telemetryTerminal, false, 'dismissing must not end the unsent operation');
+    assert.equal(operation.dismissed, true, 'the dismissal is marked so the next start can sweep it');
+    assert.equal(h.api.getVoiceOperationId(null, 'chat'), operation.operationId, 'a dismissed operation stays adoptable by a manual send');
+    const next = { operationId: 'voiceop-next', ownerKind: 'chat', sessionId: null, telemetrySessionId: 'draft-session',
+      startedAt: Date.now(), voiceResultReady: true, telemetryTerminal: false };
+    h.api.rememberVoiceOperation(next);
+    assert.equal(h.api.getVoiceOperationId(null, 'chat'), 'voiceop-next', 'the next recording start sweeps the never-sent dismissal');
+  });
 }
