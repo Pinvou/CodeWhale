@@ -1718,12 +1718,89 @@ impl Provider for Custom {
     fn wire_policy(&self) -> WirePolicy {
         // Static default remains Chat Completions for backward compatibility.
         // Per-config `wire = "responses" | "anthropic" | "chat"` overrides are
-        // honored in `crates/tui/src/client.rs::provider_wire_format_for_config`
-        // and `crates/tui/src/config.rs::provider_capability`, which read
-        // `ProviderConfig::wire` for the `Custom` catalog identity. This keeps
+        // parsed by [`wire_dialect_override`] here in the config crate and
+        // honored by every consumer that reads `ProviderConfig::wire` for the
+        // `Custom` catalog identity (the tui wire-format/capability readers
+        // and the route resolver's `RouteRequest::wire_override`). This keeps
         // the `Provider` trait `Fixed` while giving custom endpoints the same
         // three-way switch (`responses` / `anthropic` / `chat`) as built-ins.
         WirePolicy::Fixed(WireFormat::ChatCompletions)
+    }
+}
+
+/// Whether a per-config `wire` dialect string names the Anthropic Messages
+/// endpoint. Canonical parse shared by the tui wire-format/capability readers,
+/// the route resolver, the app-server pass-through, and the built-in
+/// dual-wire base-URL resolvers, so one alias list cannot drift from another.
+#[must_use]
+pub fn wire_dialect_prefers_anthropic(wire: Option<&str>) -> bool {
+    let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let normalized = raw.to_ascii_lowercase().replace(['_', ' '], "-");
+    matches!(
+        normalized.as_str(),
+        "anthropic"
+            | "anthropic-messages"
+            | "messages"
+            | "claude"
+            | "anthropic-compatible"
+            | "anthropic-compat"
+    )
+}
+
+/// Whether a per-config `wire` dialect string names the OpenAI Responses
+/// endpoint. See [`wire_dialect_prefers_anthropic`] for the sharing contract.
+#[must_use]
+pub fn wire_dialect_prefers_responses(wire: Option<&str>) -> bool {
+    let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let normalized = raw.to_ascii_lowercase().replace(['_', ' '], "-");
+    matches!(
+        normalized.as_str(),
+        "responses"
+            | "responses-api"
+            | "openai-responses"
+            | "openai-responses-api"
+            | "response"
+            | "response-api"
+            | "openai-responses-compat"
+            | "responses-compat"
+    )
+}
+
+/// The wire override a per-config `wire` dialect asks for: `Some(Responses)` /
+/// `Some(AnthropicMessages)` when the string names that endpoint, `None` for
+/// `chat` / absent / unrecognized values (the static descriptor policy
+/// applies). The resolver honors the override only for `ProviderKind::Custom`,
+/// and every other consumer gates the same way, so the warning below can only
+/// fire for a custom table — `table` names it in the log, since several
+/// tables can coexist and the typo must be locatable. A non-empty
+/// unrecognized value is most likely a typo of the one string that switches
+/// the endpoint's protocol, so it is logged before degrading to the default
+/// policy — the parse stays total and forward-compatible.
+#[must_use]
+pub fn wire_dialect_override(table: &str, wire: Option<&str>) -> Option<WireFormat> {
+    if wire_dialect_prefers_responses(wire) {
+        Some(WireFormat::Responses)
+    } else if wire_dialect_prefers_anthropic(wire) {
+        Some(WireFormat::AnthropicMessages)
+    } else {
+        if let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) {
+            let normalized = raw.to_ascii_lowercase().replace(['_', ' '], "-");
+            if !matches!(
+                normalized.as_str(),
+                "chat" | "chat-completions" | "openai" | "openai-chat" | "openai-chat-completions"
+            ) {
+                tracing::warn!(
+                    table = %table,
+                    dialect = %raw,
+                    "unrecognized custom-provider wire dialect; using the default Chat Completions policy"
+                );
+            }
+        }
+        None
     }
 }
 
@@ -1899,6 +1976,136 @@ pub fn provider_for_kind(kind: ProviderKind) -> &'static dyn Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_tracing::CapturedEvents;
+
+    const TEST_TABLE: &str = "pinvou_responses";
+
+    #[test]
+    fn wire_dialect_override_parses_the_canonical_alias_sets() {
+        // The exact alias sets are the cross-crate contract: the tui route
+        // layer, the app-server pass-through, the ambient client, and the
+        // route receipt all resolve dialects through these two lists.
+        for dialect in [
+            "responses",
+            "responses-api",
+            "openai-responses",
+            "openai-responses-api",
+            "response",
+            "response-api",
+            "openai-responses-compat",
+            "responses-compat",
+        ] {
+            assert_eq!(
+                wire_dialect_override(TEST_TABLE, Some(dialect)),
+                Some(WireFormat::Responses),
+                "{dialect} must parse as the Responses dialect"
+            );
+        }
+        for dialect in [
+            "anthropic",
+            "anthropic-messages",
+            "messages",
+            "claude",
+            "anthropic-compatible",
+            "anthropic-compat",
+        ] {
+            assert_eq!(
+                wire_dialect_override(TEST_TABLE, Some(dialect)),
+                Some(WireFormat::AnthropicMessages),
+                "{dialect} must parse as the Anthropic Messages dialect"
+            );
+        }
+    }
+
+    #[test]
+    fn wire_dialect_override_normalizes_case_whitespace_and_separators() {
+        assert_eq!(
+            wire_dialect_override(TEST_TABLE, Some("  Responses ")),
+            Some(WireFormat::Responses)
+        );
+        assert_eq!(
+            wire_dialect_override(TEST_TABLE, Some("OPENAI_RESPONSES")),
+            Some(WireFormat::Responses)
+        );
+        assert_eq!(
+            wire_dialect_override(TEST_TABLE, Some("Anthropic Messages")),
+            Some(WireFormat::AnthropicMessages)
+        );
+        assert_eq!(
+            wire_dialect_override(TEST_TABLE, Some("anthropic-messages")),
+            Some(WireFormat::AnthropicMessages)
+        );
+        assert_eq!(
+            wire_dialect_override(TEST_TABLE, Some("CLAUDE")),
+            Some(WireFormat::AnthropicMessages)
+        );
+    }
+
+    #[test]
+    fn wire_dialect_override_defaults_chat_and_degrades_unknowns() {
+        assert_eq!(wire_dialect_override(TEST_TABLE, None), None);
+        assert_eq!(wire_dialect_override(TEST_TABLE, Some("")), None);
+        assert_eq!(wire_dialect_override(TEST_TABLE, Some("   ")), None);
+
+        // Recognized explicit-chat spellings degrade silently to the static
+        // policy — they are deliberate, not typos.
+        for dialect in [
+            "chat",
+            "chat-completions",
+            "openai",
+            "openai-chat",
+            "openai-chat-completions",
+        ] {
+            assert_eq!(
+                wire_dialect_override(TEST_TABLE, Some(dialect)),
+                None,
+                "{dialect} must stay a silent no-preference value"
+            );
+        }
+
+        // A typo of the one string that switches the endpoint's protocol
+        // degrades to the default Chat policy (the tui route layer pins the
+        // same contract at the runtime candidate).
+        assert_eq!(wire_dialect_override(TEST_TABLE, Some("respones")), None);
+        assert!(!wire_dialect_prefers_responses(Some("respones")));
+        assert!(!wire_dialect_prefers_anthropic(Some("respones")));
+    }
+
+    #[test]
+    fn unrecognized_dialect_warns_once_and_names_the_table() {
+        // The degrade contract above pins the return value; this pins the
+        // diagnostic itself — exactly the unrecognized non-empty dialect
+        // warns, and the warning names the table so the typo is locatable
+        // among several named tables.
+        let captured = CapturedEvents::default();
+        tracing::subscriber::with_default(captured.clone(), || {
+            assert_eq!(
+                wire_dialect_override(TEST_TABLE, Some("respones")),
+                None,
+                "typo still degrades to the default policy"
+            );
+            assert_eq!(
+                wire_dialect_override(TEST_TABLE, Some("responses")),
+                Some(WireFormat::Responses),
+                "the recognized dialect still parses (silently)"
+            );
+            assert_eq!(wire_dialect_override(TEST_TABLE, None), None);
+            assert_eq!(wire_dialect_override(TEST_TABLE, Some("   ")), None);
+        });
+        let events = captured.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "only the unrecognized non-empty dialect warns: {events:?}"
+        );
+        assert_eq!(events[0].field("table"), Some(TEST_TABLE));
+        assert_eq!(events[0].field("dialect"), Some("respones"));
+        assert!(
+            events[0].message.contains("unrecognized"),
+            "warning must describe the degrade: {:?}",
+            events[0].message
+        );
+    }
 
     #[test]
     fn credential_help_covers_every_provider_without_guessing_non_key_urls() {

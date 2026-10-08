@@ -8,6 +8,8 @@
 //! (`client/chat.rs`) to avoid protocol hacks.
 
 use anyhow::{Context, Result};
+use codewhale_config::provider::WireFormat;
+use codewhale_config::provider_base_url_is_official;
 use serde_json::{Value, json};
 
 use crate::config::ApiProvider;
@@ -33,7 +35,41 @@ pub(super) const CODEX_RESPONSES_PATH: &str = "/codex/responses";
 /// Build the Responses API request body from a `MessageRequest`.
 #[cfg(test)]
 pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
-    build_responses_body_for_provider(request, ApiProvider::OpenaiCodex)
+    build_responses_body_for_provider(
+        request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+        "fp-codex-endpoint",
+        // The catalog Codex endpoint — the only URL fingerprint-less legacy
+        // states may replay onto (see the gate in
+        // `convert_messages_to_responses_input`).
+        "https://chatgpt.com/backend-api",
+    )
+}
+
+/// Whether a Responses route's request body carries
+/// `include: ["reasoning.encrypted_content"]`: every Responses-wire provider
+/// except DeepSeek (stateless, plain `reasoning_text`, no `include`) and
+/// Concentrate (documented fields only). The capture gate in
+/// `handle_responses_stream` derives from this same predicate, so include and
+/// capture cover the same route set by construction.
+fn responses_route_sends_encrypted_reasoning_include(provider: ApiProvider) -> bool {
+    !matches!(
+        provider,
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::Concentrate
+    )
+}
+
+/// Whether a captured provider tag names endpoint-scoped Custom identity: the
+/// legacy root table (`custom`) or a named table (`custom/<name>`), exactly
+/// the tags `DeepSeekClient::reasoning_provider_tag` mints for Custom. These
+/// are the tags whose endpoint can change while the tag stays put, so they
+/// are the fingerprint-less (pre-fingerprint) states that always fail closed.
+/// Built-in tags take the narrower rule at the replay gate: a fingerprint-less
+/// state may only ride the provider's official endpoint — without a
+/// fingerprint it is the one origin this gate still vouches for.
+fn is_custom_reasoning_tag(tag: &str) -> bool {
+    tag == "custom" || tag.starts_with("custom/")
 }
 
 /// Build a provider-aware Responses API request body.
@@ -42,9 +78,30 @@ pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
 /// and exposes plain reasoning text rather than OpenAI encrypted summaries.
 /// Keep those exact-route differences here instead of leaking them into the
 /// provider-neutral message model.
+///
+/// `reasoning_provider_tag` is the tag the caller's capture side mints into
+/// [`OpaqueReasoningState`] (see `DeepSeekClient::reasoning_provider_tag`);
+/// the replay gate below only reattaches reasoning items whose state carries
+/// that exact tag, so encrypted reasoning minted by one endpoint — a named
+/// Custom table — is never replayed to another. `reasoning_endpoint_fingerprint`
+/// is the same client's endpoint fingerprint (see
+/// `DeepSeekClient::reasoning_endpoint_fingerprint`): the tag pins the table
+/// name, not the URL behind it, so a state captured before the table's
+/// `base_url` was edited stops replaying. States minted before fingerprints
+/// existed carry no proof of origin: Custom endpoints can move under a
+/// stable tag, so those fail closed, and built-in tags keep replaying only
+/// while `current_base_url` is still the provider's official endpoint — a
+/// client re-pointed by config has no way to prove where an old state was
+/// captured, so it fails closed too.
+///
+/// `current_base_url` is the endpoint this request is about to be POSTed to
+/// (the client's frozen base URL); it decides that legacy arm.
 pub(super) fn build_responses_body_for_provider(
     request: &MessageRequest,
     provider: ApiProvider,
+    reasoning_provider_tag: &str,
+    reasoning_endpoint_fingerprint: &str,
+    current_base_url: &str,
 ) -> Value {
     let is_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN);
     // Concentrate documents `model`, `input`, `stream`, `max_output_tokens`,
@@ -91,7 +148,13 @@ pub(super) fn build_responses_body_for_provider(
         .unwrap_or_else(|| "You are a helpful assistant.".to_string());
 
     // Convert messages to Responses input items.
-    let mut input = convert_messages_to_responses_input(request, provider);
+    let mut input = convert_messages_to_responses_input(
+        request,
+        provider,
+        reasoning_provider_tag,
+        reasoning_endpoint_fingerprint,
+        current_base_url,
+    );
     if is_concentrate {
         input.insert(
             0,
@@ -136,9 +199,12 @@ pub(super) fn build_responses_body_for_provider(
         };
     }
 
-    // OpenAI Codex can replay encrypted reasoning. DeepSeek exposes plain
-    // `reasoning_text` and does not support `include`.
-    if !is_deepseek && !is_concentrate {
+    // Every Responses route that receives this builder can replay encrypted
+    // reasoning. The include predicate is the same one the capture gate in
+    // `handle_responses_stream` derives from, so include and capture cover
+    // the same route set by construction — a future Responses-wire provider
+    // cannot silently start sending `include` without capturing.
+    if responses_route_sends_encrypted_reasoning_include(provider) {
         body["include"] = json!(["reasoning.encrypted_content"]);
     }
 
@@ -162,8 +228,22 @@ impl DeepSeekClient {
         // remapping — rather than borrowing the request that no longer exists
         // at this layer.
         let wire_model = prepared.wire_model.clone();
-        let reasoning_origin = (self.api_provider == ApiProvider::OpenaiCodex)
-            .then(|| (self.api_provider.as_str().to_string(), wire_model.clone()));
+        // Encrypted-reasoning capture applies to every Responses route whose
+        // request carries `include: ["reasoning.encrypted_content"]` — the
+        // same predicate the body builder uses to send the include — and
+        // replays by the endpoint-scoped provider tag from
+        // `reasoning_provider_tag` plus the endpoint fingerprint from
+        // `reasoning_endpoint_fingerprint`. The transport-wire half keeps
+        // Chat-wire Custom tables (and any other dialect) excluded.
+        let reasoning_origin = (self.wire_format == WireFormat::Responses
+            && responses_route_sends_encrypted_reasoning_include(self.api_provider))
+        .then(|| {
+            (
+                self.reasoning_provider_tag(),
+                self.reasoning_endpoint_fingerprint(),
+                wire_model.clone(),
+            )
+        });
 
         // The bearer Authorization header is already installed as a default
         // header on both the dual and the HTTP/1.1 twin client (resolved from
@@ -485,7 +565,7 @@ impl DeepSeekClient {
                             }
                             "response.output_item.done" => {
                                 if let Some(idx) = current_block_index {
-                                    if let (Some((provider, model)), Some(item)) =
+                                    if let (Some((provider, endpoint, model)), Some(item)) =
                                         (reasoning_origin.as_ref(), event.get("item"))
                                         && item.get("type").and_then(Value::as_str)
                                             == Some("reasoning")
@@ -506,6 +586,7 @@ impl DeepSeekClient {
                                                         .and_then(Value::as_str)
                                                         .map(str::to_string),
                                                     encrypted_content: encrypted_content.to_string(),
+                                                    endpoint: Some(endpoint.clone()),
                                                 },
                                             },
                                         });
@@ -711,11 +792,33 @@ pub(super) fn responses_tool_output(content: &str, content_blocks: Option<&[Valu
 }
 
 /// Convert Codewhale messages to Responses API input items.
+///
+/// `reasoning_provider_tag` scopes opaque-reasoning replay to the endpoint
+/// that minted the state; see [`build_responses_body_for_provider`].
 pub(super) fn convert_messages_to_responses_input(
     request: &MessageRequest,
     provider: ApiProvider,
+    reasoning_provider_tag: &str,
+    reasoning_endpoint_fingerprint: &str,
+    current_base_url: &str,
 ) -> Vec<Value> {
     let is_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN);
+    // Fingerprint-less (pre-fingerprint) states carry no proof of which
+    // endpoint minted them, so they may only replay where the endpoint cannot
+    // have moved: a built-in on its official endpoint family. Custom is
+    // excluded by its tag at the gate below (and
+    // `provider_base_url_is_official` rejects it outright), and a built-in
+    // re-pointed by config or env loses the credit — it has no way to prove
+    // an old state came from the new URL.
+    let fingerprintless_replay_official = provider
+        .kind()
+        .is_some_and(|kind| provider_base_url_is_official(kind, current_base_url));
+    // Replay rides the same predicate that sends the `include`: a provider
+    // whose body omits `include: ["reasoning.encrypted_content"]` (DeepSeek's
+    // plain `reasoning_text`, Concentrate's documented-fields contract) must
+    // never receive an encrypted replay item either, so the replay gate
+    // cannot drift from the include gate.
+    let replays_encrypted_reasoning = responses_route_sends_encrypted_reasoning_include(provider);
     let mut items = Vec::new();
 
     for msg in &request.messages {
@@ -808,9 +911,33 @@ pub(super) fn convert_messages_to_responses_input(
                             thinking, state, ..
                         } => {
                             if let Some(state) = state {
-                                if state.provider == provider.as_str()
+                                // Endpoint-scoped replay: the tag must match
+                                // the endpoint this request is bound to
+                                // (provider slug, plus the table identity for
+                                // Custom), alongside api shape, exact model,
+                                // and the endpoint fingerprint — a table whose
+                                // base_url was edited stops replaying the
+                                // previous endpoint's blobs. Legacy states
+                                // minted before fingerprints existed carry no
+                                // proof of which endpoint produced them:
+                                // Custom endpoints can move under a stable
+                                // tag, so those fail closed, and a built-in
+                                // keeps replaying only while the client still
+                                // points at the provider's official endpoint
+                                // (`fingerprintless_replay_official` above) —
+                                // a re-pointed client gets no such credit.
+                                let endpoint_matches = match &state.endpoint {
+                                    None => {
+                                        !is_custom_reasoning_tag(&state.provider)
+                                            && fingerprintless_replay_official
+                                    }
+                                    Some(captured) => captured == reasoning_endpoint_fingerprint,
+                                };
+                                if replays_encrypted_reasoning
+                                    && state.provider == reasoning_provider_tag
                                     && state.api == "openai-responses"
                                     && state.model == request.model
+                                    && endpoint_matches
                                 {
                                     let mut item = json!({
                                         "type": "reasoning",
