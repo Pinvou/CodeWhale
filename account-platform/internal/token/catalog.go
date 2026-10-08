@@ -845,12 +845,8 @@ func (r *PostgresRepository) syncCatalogTx(ctx context.Context, tx pgx.Tx, provi
 				missingSince = &value
 			}
 			mutation := mutationFromCatalog(item, false, missingSince, confirmations)
-			if confirmations >= 2 && item.LifecycleStatus == "PUBLISHED" {
-				mutation.lifecycle = "DEPRECATED"
-				mutation.deprecationEffectiveAt = &now
-				mutation.newSessionCutoffAt = &now
-				mutation.continuationCutoffAt = &now
-			}
+			// Adapter absence is an observation, not lifecycle approval. Keep the
+			// source unavailable without changing approved lifecycle or cutoffs.
 			mutations = append(mutations, mutation)
 		}
 		if err := rows.Err(); err != nil {
@@ -881,8 +877,8 @@ func (r *PostgresRepository) syncCatalogTx(ctx context.Context, tx pgx.Tx, provi
 			return 0, false, err
 		}
 		action := "MODEL_SOURCE_SYNCHRONIZED"
-		if mutation.lifecycle == "DEPRECATED" {
-			action = "MODEL_SOURCE_MISSING_DEPRECATED"
+		if !mutation.sourceAvailable {
+			action = "MODEL_SOURCE_MISSING_OBSERVED"
 		}
 		if err := appendCatalogAudit(ctx, tx, actor, action, &mutation.modelID, nil, &mutation.lifecycle, version, "adapter catalog synchronization", map[string]any{"source_available": mutation.sourceAvailable, "missing_confirmations": mutation.missingConfirmations}); err != nil {
 			return 0, false, err

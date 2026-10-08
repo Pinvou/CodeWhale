@@ -133,7 +133,7 @@ func retainedManagementTokenRepository(t *testing.T) (*PostgresRepository, conte
 		t.Fatal(err)
 	}
 	verification, err := migrations.VerifyApplied(ctx, connection, loaded)
-	if err != nil || verification.AppliedCount != 29 {
+	if err != nil || verification.AppliedCount != 30 {
 		t.Fatalf("public migration verification: %+v err=%v", verification, err)
 	}
 	migrations.Unlock(ctx, connection)
@@ -607,16 +607,24 @@ func TestManagementCancellationHoldRecoveryRequiresRecordedProof(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			usageID := retainedCancellationUsage(t, repository, ctx, uuid.New(), uuid.New(), nil, "HOLD_RESERVING")
+			// Persist dispatch before requesting cancellation/review, matching
+			// the new database gate rather than injecting a post-cancel intent.
+			if test.intent {
+				if _, e := repository.pool.Exec(ctx, `UPDATE usage_requests SET cancel_status='NOT_REQUESTED' WHERE id=$1`, usageID); e != nil {
+					t.Fatal(e)
+				}
+				if _, e := repository.pool.Exec(ctx, `INSERT INTO usage_dispatch_intents(usage_request_id,upstream_idempotency_key,created_at) VALUES($1,'controlled-persisted-intent',clock_timestamp())`, usageID); e != nil {
+					t.Fatal(e)
+				}
+				if _, e := repository.pool.Exec(ctx, `UPDATE usage_requests SET cancel_status='CANCEL_REQUESTED' WHERE id=$1`, usageID); e != nil {
+					t.Fatal(e)
+				}
+			}
 			if err := repository.MarkReview(ctx, usageID, test.reason, map[string]any{"provider_success_inferred": false}); err != nil {
 				t.Fatal(err)
 			}
 			if test.evidence != "" {
 				if _, err := repository.pool.Exec(ctx, `INSERT INTO usage_cancellation_evidence(id,usage_request_id,evidence_type,adapter_version,sanitized_evidence,occurred_at) VALUES($1,$2,$3,'controlled',jsonb_build_object('pre_dispatch',$4::boolean),now())`, uuid.New(), usageID, test.evidence, test.preDispatch); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if test.intent {
-				if _, err := repository.pool.Exec(ctx, `INSERT INTO usage_dispatch_intents(usage_request_id,upstream_idempotency_key,created_at) VALUES($1,'controlled-persisted-intent',now())`, usageID); err != nil {
 					t.Fatal(err)
 				}
 			}

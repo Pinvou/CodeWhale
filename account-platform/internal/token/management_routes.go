@@ -15,6 +15,7 @@ func (s *Service) registerManagementRoutes(router *httpserver.Router, personal *
 	protected.Use(identity.GinMiddleware(s.managementVerify))
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.managementServiceToken))
+	internal.POST("/holds/expiry-proof", serviceauth.Require("internal.token.hold-expiry.prove"), httpserver.AdaptFunc(s.expiredHoldProof))
 	internal.GET("/token-governance/activation", serviceauth.Require("internal.authorization.check"), httpserver.AdaptFunc(s.internalTokenGovernanceActivation))
 	internal.GET("/approval-effects/:approval_request_id", serviceauth.Require("internal.token.approval-effect.read"), httpserver.AdaptFunc(s.approvalEffectObservation))
 	internal.POST("/commands/model-lifecycle/execute", serviceauth.Require("internal.token.model-lifecycle.execute"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.executeApprovedModelLifecycle))

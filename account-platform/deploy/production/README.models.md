@@ -28,6 +28,35 @@ CREDENTIAL_PORTAL_PUBLIC_URL 只能为已允许的独立 credentials HTTPS origi
 
 Gateway 私有 env file 除其 receiver rules 外须提供 Token DATABASE_URL、独立分页/管理代理 HMAC、实际 default provider/adapter/base URL/API key/models 配置；credential Portal 的 DSN、receiver rules、workload JWT 和 KMS token 分别独立。TOKEN_PROVIDER_ALLOWED_HOSTS 是准确的受控供应商 DNS allowlist，TOKEN_PROVIDER_CA_FILE 用完整可验证 CA；发现或验密不接受截断、多 JSON、缺失目录事实。默认供应商凭据只放受控私有 env file，不进入 Compose 公共模板或日志。
 
+## 来源缺失与过期预约
+
+来源缺失只更新来源观察并使模型不可用，不自动改写生命周期或新建、续用截止时间。再次发现不会撤销已批准的人工弃用；弃用继续使用既有审批计划和执行路径。
+
+Billing 每分钟检查过期预约，先以短事务持久化绑定原预约身份的恢复记录，再调用 Token，财务行锁不跨服务调用。仅在 Token 对绑定的 usage、hold、wallet 和金额核验成功，并在真实派发行锁下持久取消、阻断未来派发后，复用既有取消释放闭环；Billing 重新读取本地 RELEASED 状态才记完成。释放后进程中断仍由已持久化记录按原身份继续确认，不重复派发。缺失 canonical 证据、已派发、超时或未知结果均保留资金，在独立恢复记录登记 MANUAL_REVIEW，不凭过期时间或未安装普通调用 producer 推断未派发。
+
+本层要求 `TOKEN_HOLD_EXPIRY_URL` 为已验证的私有 HTTPS Token 根地址，并由 `WORKLOAD_IDENTITY_CA_FILE` 验证其证书与主机名；不得填入现有明文容器地址或公开 Portal 地址。模板不自行安装 TLS 入口，部署方须先准备可信内部入口并从 Billing 验证可达。请求使用 Billing 的投影 workload 身份，不跟随重定向；Token receiver 仅授予准确 Billing subject 的 `internal.token.hold-expiry.prove`，且另核对 service 身份。此前没有配置该端点的波次仍登记人工复核，不自动释放。Billing 的前向 900009 和 Token 的前向 900002 迁移必须先成功，不能修改已有迁移校验和或猜测旧记录的派发事实。Token 派发意图插入与取消在同一 usage 行锁下互斥；后续普通调用也受此数据库守卫约束。已过期预约不得通过延长到期时间重新取得派发期限；未来续租入口必须遵守该约束。
+
+人工复核由授权数据库运维人员在 Billing 库使用只读连接查询；本轮未新增 Hold 管理页面，不以原有页面的计数代替该恢复队列：
+
+```sql
+BEGIN READ ONLY;
+SELECT h.id AS hold_id, h.usage_request_id, h.wallet_id,
+       h.max_microcredits, h.expires_at, h.status AS financial_status,
+       r.state AS recovery_state, r.proof, r.next_attempt_at, r.updated_at
+FROM usage_hold_expiry_recovery r
+JOIN usage_holds h ON h.id = r.hold_id
+WHERE r.state = 'MANUAL_REVIEW'
+ORDER BY r.next_attempt_at, h.id
+LIMIT 100;
+SELECT e.hold_id, e.decision, e.proof, e.occurred_at
+FROM usage_hold_expiry_evidence e
+ORDER BY e.occurred_at DESC, e.id DESC
+LIMIT 100;
+COMMIT;
+```
+
+按原 hold/usage 追踪证明与恢复回执，不直接改数据库状态、删除证据或调整余额。仍需核实真实派发事实的记录继续保留资金；已有可信取消证明的丢回执恢复由 worker 按原身份重试闭环，不能重新发起模型调用。
+
 ## NewAPI 受控 TLS
 
 首次使用 NewAPI 发现或验密时，按 [NewAPI 受控 TLS 入口](README.newapi.md) 投放 `newapi.yaml.template` 的同 Pod Deployment、仅 8443 Service 和最小 CIDR NetworkPolicy，使用同源码 `SERVICE=newapi-tls` 镜像及当前 infrastructure PKI 的 `newapi/server.crt`、`server.key`/combined CA。共享 Compose backend 的 HTTP 容器不能替代该隔离；普通外部 HTTPS origin 沿现 allowlist/CA 合同继续支持。

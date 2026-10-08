@@ -44,6 +44,7 @@ test('credential metadata, safety and actionable local diagnostics exist indepen
   for (const language of ['zh', 'en', 'ja']) {
     const copy = tokenManagementCopy[language].modelToken;
     assert.ok(copy.credentialMetadata); assert.ok(copy.credentialSafety);
+    assert.ok(copy.sourceMissingPolicy);
     for (const code of codes) assert.ok(copy.commandErrors[code], `${language}:${code}`);
   }
 });

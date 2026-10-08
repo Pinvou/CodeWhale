@@ -16,10 +16,11 @@ import (
 )
 
 func TestManagementPublicMigrationInstallation(t *testing.T) {
-	t.Run("fresh", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false) })
-	t.Run("legacy-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, true) })
+	t.Run("fresh", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, false) })
+	t.Run("legacy-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, true, false) })
+	t.Run("installed-29-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, true) })
 }
-func testManagementPublicMigrationInstallation(t *testing.T, legacy bool) {
+func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool) {
 	dsn := os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("PINVOU_TEST_TOKEN_DATABASE_URL is not configured")
@@ -140,6 +141,22 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if old29 {
+		previous := []migrations.Migration{}
+		for _, m := range loaded {
+			if m.Version != 900002 {
+				previous = append(previous, m)
+			}
+		}
+		if err = migrations.UpWithHooks(ctx, connection, previous, migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); err != nil {
+			t.Fatal("installed 29 fixture", err)
+		}
+		migrations.Unlock(ctx, connection)
+		verified, e := migrations.VerifyApplied(ctx, connection, previous)
+		if e != nil || verified.AppliedCount != 29 {
+			t.Fatal("installed 29 fixture verification", verified, e)
+		}
+	}
 	if legacy {
 		operatorConfig := config.Copy()
 		operatorConfig.User = admin.Config().User
@@ -188,7 +205,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool) {
 		t.Fatal(err)
 	}
 	verification, err := migrations.VerifyApplied(ctx, connection, loaded)
-	if err != nil || verification.AppliedCount != 29 {
+	if err != nil || verification.AppliedCount != 30 {
 		t.Fatalf("public migration verification: %+v err=%v", verification, err)
 	}
 	var runtimeCanCreate bool
@@ -256,7 +273,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool) {
 		defer runtime.Close(context.Background())
 		assertTokenRuntimeStorage(t, ctx, runtime)
 		verified, e := migrations.VerifyApplied(ctx, runtime, loaded)
-		if e != nil || verified.AppliedCount != 29 {
+		if e != nil || verified.AppliedCount != 30 {
 			t.Fatal("independent runtime migration verification", verified, e)
 		}
 		var unguarded int

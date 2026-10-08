@@ -36,10 +36,11 @@ globalThis.fetch = async (target,options={}) => {
  if(path.endsWith(`/api/admin/approvals/requests/${id}`)){if(method==='PUT'){control.approvalVersion++;return json(null,204);}return json(approval());}
  if(path.endsWith(`/api/admin/approvals/requests/${id}/actions/submit`)){control.approvalStatus='SUBMITTED';control.approvalVersion++;return json(null,204);}
  if(method==='GET'){
+  if(path.endsWith(`/models/${id}`))return json({model:control.models[0],draft:null,protocol:{},formula:null,as_of:'2026-10-08T00:00:00Z'});
   if(path.endsWith('/pricing'))return json({items:control.prices,current_space_etag:'9007199254740993',has_more:false});
   if(path.endsWith('/metering-units'))return json({items:control.units});
   if(path.endsWith('/protocols'))return json({protocols:[],formulas:[formula]});
-  if(path.endsWith('/models'))return json({items:[],limit:50,has_more:false,next_cursor:null,as_of:'2099-01-01T00:00:00Z'});
+  if(path.endsWith('/models'))return json({items:control.models||[],limit:50,has_more:false,next_cursor:null,as_of:'2099-01-01T00:00:00Z'});
   if(path.endsWith('/formulas'))return json({items:[formula],limit:50,has_more:false,next_cursor:null});
  }
  const input=parseFinanceJSON(options.body||'{}');const key=options.headers?.['Idempotency-Key'];
@@ -69,4 +70,4 @@ function render(){
  const permissions=['platform.pricing.read','platform.models.read','platform.models.lifecycle.request',...(control.canManage?['platform.pricing.manage']:[])];
  root.render(control.surface==='command'?<ControlledCommand copy={shared.modelToken}/>:control.surface==='credentials'?<AdminTokenAccountDetailWorkspace accountID={id} client={credentialClient} copy={shared.modelToken} permissions={[]} routeVersion={0} onRouteChange={()=>{}} onQueryChange={()=>{}} cursorHistory={{current:{}}} actionsEnabled={false}/>:control.surface==='pricing'?<PricingLifecycleWorkspace key={`${control.owner}:${client.financeSessionEpoch}`} {...{client,copy,permissions}} owner={control.owner}/>:<AdminManagementWorkspace key={`${control.owner}:${client.financeSessionEpoch}`} {...{client,copy,permissions}} owner={control.owner} language={control.language} credentialOrigin="https://credentials-uat.pinvou.com"/>);
 }
-control.expiredEntryLabel=()=>tokenManagementCopy[control.language].modelToken.commandErrors.CREDENTIAL_REQUEST_DEADLINE_EXCEEDED;control.credentialProbeLabel=()=>tokenManagementCopy[control.language].modelToken.commandErrors.CREDENTIAL_PROBE_OUTCOME_UNKNOWN;control.render=render;control.labels=()=>tokenManagementCopy[control.language].pricingLifecycle;control.price=price;window.f04=control;render();
+control.sourceMissingPolicyLabel=()=>tokenManagementCopy[control.language].modelToken.sourceMissingPolicy;control.modelStatusLabels=()=>tokenManagementCopy[control.language].modelToken.enumLabels;control.expiredEntryLabel=()=>tokenManagementCopy[control.language].modelToken.commandErrors.CREDENTIAL_REQUEST_DEADLINE_EXCEEDED;control.credentialProbeLabel=()=>tokenManagementCopy[control.language].modelToken.commandErrors.CREDENTIAL_PROBE_OUTCOME_UNKNOWN;control.render=render;control.labels=()=>tokenManagementCopy[control.language].pricingLifecycle;control.price=price;window.f04=control;render();

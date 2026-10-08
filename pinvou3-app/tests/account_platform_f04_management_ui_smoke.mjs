@@ -89,6 +89,15 @@ try{
   assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.path.endsWith('/commands')&&c.method==='POST').length),1);
   await page.$eval('.adm-high-risk-dialog header button',button=>button.click());await page.waitForFunction(()=>window.f04.closed===true);
  });
+ for(const language of ['zh','en','ja']) await caseRun(`${language}: missing source and published lifecycle remain distinct`,async()=>{
+  await fresh();await page.evaluate(language=>{window.f04.language=language;window.f04.models=[{model_id:window.f04.id,display_name:'Controlled missing source',lifecycle_status:'PUBLISHED',protocol_code:'CONTROLLED',protocol_version:1,context_length:4096,source_available:false,catalog_version:1}];window.f04.surface='management';window.f04.render();},language);
+  await page.waitForFunction(()=>document.body.textContent.includes('Controlled missing source'));
+  assert.ok(await page.evaluate(()=>document.querySelector('.adm-source-missing-policy').textContent===window.f04.sourceMissingPolicyLabel()));
+  assert.ok(await page.evaluate(()=>{const row=[...document.querySelectorAll('tr')].find(el=>el.textContent.includes('Controlled missing source'));const labels=window.f04.modelStatusLabels();return row.textContent.includes(labels.PUBLISHED)&&row.textContent.includes(labels.UNAVAILABLE)&&!row.textContent.includes(labels.DEPRECATED);}));
+  await page.$eval('.adm-name-link',button=>button.click());await page.waitForSelector('#model-overview-heading');
+  assert.ok(await page.$eval('.adm-model-detail .adm-source-missing-policy',el=>el.textContent===window.f04.sourceMissingPolicyLabel()));
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);
+ });
  console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 }catch(error){console.error(`FAIL after ${passed} PASS: ${error.stack}`);if(page)console.error(JSON.stringify(await page.evaluate(()=>({text:document.body.textContent.slice(0,1200),paths:window.f04?.calls.map(c=>c.path)})).catch(()=>({}))));process.exitCode=1;}
 finally{if(browser)await browser.close();if(vite)await vite.close();if(fs.existsSync(profile)){assert.equal(fs.realpathSync(profile),ownedProfile);assert.equal(path.dirname(ownedProfile),fs.realpathSync(os.tmpdir()));assert.ok(path.basename(ownedProfile).startsWith('pinvou-f04-management-'));fs.rmSync(ownedProfile,{recursive:true});}}
