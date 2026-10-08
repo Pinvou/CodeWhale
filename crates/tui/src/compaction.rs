@@ -382,9 +382,20 @@ pub(crate) fn estimate_tokens_for_message(message: &Message, include_thinking: b
                 bytes / 4
             }
             ContentBlock::Thinking { .. } => 0,
-            ContentBlock::ToolUse { input, .. } => serde_json::to_string(input)
-                .map(|s| s.len() / 4)
-                .unwrap_or(100),
+            ContentBlock::ToolUse {
+                input,
+                thought_signature,
+                ..
+            } => {
+                let input_tokens = serde_json::to_string(input)
+                    .map(|s| s.len() / 4)
+                    .unwrap_or(100);
+                // Google's thought_signature rides every replayed tool call
+                // on the exact Google route, so it is replay-shaped input
+                // like the thinking payloads above.
+                let signature_tokens = thought_signature.as_deref().map_or(0, str::len) / 4;
+                input_tokens + signature_tokens
+            }
             ContentBlock::ToolResult {
                 content,
                 content_blocks,
@@ -2860,6 +2871,31 @@ mod tests {
             estimate_tokens_for_message(&msg, false),
             0,
             "opted-out estimates must not count thinking bytes"
+        );
+    }
+
+    #[test]
+    fn estimate_tokens_counts_google_thought_signatures_on_tool_calls() {
+        // The thought_signature replays verbatim on every tool call of the
+        // exact Google route, so it is replay-shaped input like the thinking
+        // payloads above and must not score zero.
+        let signature = "s".repeat(400);
+        let tool_use = |thought_signature: Option<String>| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({}),
+                caller: None,
+                thought_signature,
+            }],
+        };
+        let with_signature = estimate_tokens_for_message(&tool_use(Some(signature.clone())), true);
+        let bare = estimate_tokens_for_message(&tool_use(None), true);
+        assert_eq!(
+            with_signature - bare,
+            signature.len() / 4,
+            "signature bytes must count toward the tool-call estimate"
         );
     }
 

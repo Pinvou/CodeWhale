@@ -864,17 +864,32 @@ pub fn estimate_message_chars(messages: &[Message]) -> usize {
         for block in &msg.content {
             match block {
                 ContentBlock::Text { text, .. } => total += text.len(),
-                // Signature-only (`display: "omitted"`) and redacted blocks
-                // still ride the wire on replay, so their bytes count even
-                // when the readable text is empty.
+                // Every payload a thinking block can carry rides the wire
+                // under at least one provider's replay contract (Anthropic
+                // signature/redacted payload, Responses encrypted state,
+                // OpenRouter reasoning_details), so all of it counts even
+                // when the readable text is empty — a signature-only
+                // (`display: "omitted"`) block is exactly that shape.
                 ContentBlock::Thinking {
                     thinking,
+                    signature,
+                    state,
                     redacted_data,
-                    ..
+                    reasoning_details,
                 } => {
                     total += thinking.len();
+                    total += signature.as_deref().map_or(0, str::len);
                     if let Some(data) = redacted_data {
                         total += data.len();
+                    }
+                    if let Some(state) = state {
+                        total += state.encrypted_content.len();
+                    }
+                    if let Some(details) = reasoning_details {
+                        total += details
+                            .iter()
+                            .map(|entry| entry.to_string().len())
+                            .sum::<usize>();
                     }
                 }
                 ContentBlock::ToolUse { input, .. } => {
@@ -923,6 +938,29 @@ mod tests {
     #[test]
     fn redacted_identifier_for_log_marks_empty_values() {
         assert_eq!(redacted_identifier_for_log(""), "<redacted:empty>");
+    }
+
+    #[test]
+    fn estimate_message_chars_counts_signature_only_thinking_blocks() {
+        use super::estimate_message_chars;
+        use crate::models::{ContentBlock, Message, Role};
+        // A signature-only (`display: "omitted"`) block rides the wire with
+        // empty readable text; its signature bytes must still count, exactly
+        // as the compaction estimator counts them.
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: Some("SIG-BYTES".to_string()),
+                state: None,
+                redacted_data: None,
+                reasoning_details: None,
+            }],
+        };
+        assert!(
+            estimate_message_chars(std::slice::from_ref(&message)) >= "SIG-BYTES".len(),
+            "signature-only blocks must not score zero"
+        );
     }
 
     #[test]
