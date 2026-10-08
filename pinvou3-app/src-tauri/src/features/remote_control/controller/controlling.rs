@@ -192,6 +192,15 @@ pub(crate) struct ControllingDeviceManager {
     inner: Mutex<Inner>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ResumeStep<'a> {
+    Provisional { activation_id: &'a str },
+    Confirmed { activation_id: &'a str },
+    ActivationPending { activation_id: &'a str },
+    LivenessConfirmed { activation_id: &'a str },
+    ReadyAcknowledged { activation_id: &'a str },
+}
+
 impl ControllingDeviceManager {
     pub(crate) fn is_supported(&self) -> bool {
         super::super::platform::desktop_control_supported()
@@ -322,6 +331,9 @@ impl ControllingDeviceManager {
     pub(crate) fn complete_resumed(
         &self,
         operation: ControllerOperation,
+        activation_id: &str,
+        resume_request_id: &str,
+        now_a: u64,
         liveness_epoch_a: impl Into<String>,
         resume_token: [u8; 32],
         transport_key_fingerprint: [u8; 32],
@@ -336,7 +348,30 @@ impl ControllingDeviceManager {
             return Err(ControllingStateError::new("lease_unavailable"));
         };
         let liveness_epoch_a = liveness_epoch_a.into();
-        if new_deadline_b == 0 || validate_liveness_epoch(&liveness_epoch_a).is_err() {
+        let accepted = new_deadline_b > 0
+            && validate_liveness_epoch(&liveness_epoch_a).is_ok()
+            && inner.resume_gate.as_mut().is_some_and(|gate| {
+                gate.accept_resumed(
+                    activation_id,
+                    liveness_epoch_a.clone(),
+                    resume_token,
+                    transport_key_fingerprint,
+                    now_a,
+                    None,
+                )
+                .is_ok()
+            });
+        let installed = accepted
+            && inner.transport.as_ref().is_some_and(|transport| {
+                transport
+                    .restore_authenticated_lease_after_resume(
+                        &lease.context,
+                        activation_id,
+                        resume_request_id,
+                    )
+                    .is_ok()
+            });
+        if !installed {
             clear_live_context(&mut inner);
             inner.phase = ControllingStatusKind::Error;
             inner.error_code = Some("endpoint_offline");
@@ -352,8 +387,61 @@ impl ControllingDeviceManager {
         if let Some(lease) = inner.lease.as_mut() {
             lease.liveness_epoch_a = liveness_epoch_a;
             lease.resume_deadline_b = new_deadline_b;
+            lease.resume_token = resume_token;
+            lease.transport_key_fingerprint = transport_key_fingerprint;
         }
         inner.phase = ControllingStatusKind::Connected;
+        Ok(status_locked(&inner))
+    }
+
+    pub(crate) fn begin_resume(&self, operation: ControllerOperation, now_a: u64) -> Result<()> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if inner.phase != ControllingStatusKind::Reconnecting {
+            return Err(ControllingStateError::new("controller_phase_invalid"));
+        }
+        if !inner
+            .resume_gate
+            .as_mut()
+            .is_some_and(|gate| gate.prepare(now_a, None).is_ok())
+        {
+            return fail_resume(&mut inner);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn advance_resume(
+        &self,
+        operation: ControllerOperation,
+        step: ResumeStep<'_>,
+        now_a: u64,
+    ) -> Result<ControllingStatus> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if inner.phase != ControllingStatusKind::Reconnecting {
+            return Err(ControllingStateError::new("controller_phase_invalid"));
+        }
+        let advanced = inner.resume_gate.as_mut().is_some_and(|gate| {
+            match step {
+                ResumeStep::Provisional { activation_id } => {
+                    gate.accept_provisional(activation_id, now_a, None)
+                }
+                ResumeStep::Confirmed { activation_id } => gate.confirm(activation_id, now_a, None),
+                ResumeStep::ActivationPending { activation_id } => {
+                    gate.accept_activation_pending(activation_id, now_a, None)
+                }
+                ResumeStep::LivenessConfirmed { activation_id } => {
+                    gate.accept_post_activation_liveness_confirmed(activation_id, now_a, None)
+                }
+                ResumeStep::ReadyAcknowledged { activation_id } => {
+                    gate.acknowledge_ready(activation_id, now_a, None)
+                }
+            }
+            .is_ok()
+        });
+        if !advanced {
+            return fail_resume(&mut inner);
+        }
         Ok(status_locked(&inner))
     }
 
@@ -518,6 +606,13 @@ fn clear_live_context(inner: &mut Inner) {
     inner.resume_gate = None;
 }
 
+fn fail_resume<T>(inner: &mut Inner) -> Result<T> {
+    clear_live_context(inner);
+    inner.phase = ControllingStatusKind::Error;
+    inner.error_code = Some("endpoint_offline");
+    Err(ControllingStateError::new("controller_resume_failed"))
+}
+
 fn status_locked(inner: &Inner) -> ControllingStatus {
     ControllingStatus {
         status: inner.phase,
@@ -644,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_disconnect_and_resume_do_not_expose_the_old_token() {
+    fn unauthenticated_final_cannot_skip_resume_steps() {
         let manager = ControllingDeviceManager::default();
         let operation = manager.connect("234-4567").unwrap();
         manager.complete_reserved(operation.clone()).unwrap();
@@ -657,14 +752,24 @@ mod tests {
                 .status,
             ControllingStatusKind::Reconnecting
         );
-        let resumed = manager
-            .complete_resumed(operation, "live:a-2", [3; 32], [4; 32], 60_000)
-            .unwrap();
-        assert_eq!(resumed.status, ControllingStatusKind::Connected);
         assert_eq!(
-            manager.live_lease().unwrap().controller_lease_id,
-            "lease-0001"
+            manager
+                .complete_resumed(
+                    operation,
+                    "activation-0001",
+                    "request-resume-0001",
+                    7_000,
+                    "live:a-2",
+                    [3; 32],
+                    [4; 32],
+                    60_000
+                )
+                .unwrap_err()
+                .code,
+            "controller_resume_failed"
         );
+        assert_eq!(manager.status().status, ControllingStatusKind::Error);
+        assert!(manager.live_lease().is_err());
     }
 
     #[test]
@@ -682,9 +787,55 @@ mod tests {
                 .complete_connected(operation.clone(), lease())
                 .unwrap();
             manager.mark_transport_disconnected(5_000, Some(30_000));
+            manager.begin_resume(operation.clone(), 6_000).unwrap();
+            for (now, step) in [
+                (
+                    6_100,
+                    ResumeStep::Provisional {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    6_200,
+                    ResumeStep::Confirmed {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    6_300,
+                    ResumeStep::ActivationPending {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    6_400,
+                    ResumeStep::LivenessConfirmed {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    6_500,
+                    ResumeStep::ReadyAcknowledged {
+                        activation_id: "activation-0001",
+                    },
+                ),
+            ] {
+                manager
+                    .advance_resume(operation.clone(), step, now)
+                    .unwrap();
+            }
             assert_eq!(
                 manager
-                    .complete_resumed(operation, epoch, [3; 32], [4; 32], deadline)
+                    .complete_resumed(
+                        operation,
+                        "activation-0001",
+                        "request-resume-0001",
+                        7_000,
+                        epoch,
+                        [3; 32],
+                        [4; 32],
+                        deadline
+                    )
                     .unwrap_err()
                     .code,
                 "controller_resume_failed"

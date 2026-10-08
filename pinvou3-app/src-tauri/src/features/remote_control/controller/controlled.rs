@@ -230,6 +230,26 @@ pub(crate) struct ControlledDeviceManager {
     cleanup_sinks: Mutex<Vec<Arc<dyn ControlledCleanupSink>>>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ControlledResumeStep<'a> {
+    Provisional {
+        activation_id: &'a str,
+    },
+    Confirmed {
+        activation_id: &'a str,
+    },
+    ActivationAcknowledged {
+        activation_id: &'a str,
+    },
+    PostActivationLiveness {
+        activation_id: &'a str,
+        liveness_epoch_b: &'a str,
+    },
+    ReadyAcknowledged {
+        activation_id: &'a str,
+    },
+}
+
 impl Default for Inner {
     fn default() -> Self {
         Self {
@@ -584,9 +604,90 @@ impl ControlledDeviceManager {
         Ok(self.status())
     }
 
+    pub(crate) fn begin_resume(&self, operation: ControlledOperation, now_b: u64) -> Result<()> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if inner.phase != ControlledStatusKind::Reconnecting {
+            return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
+        }
+        let deadline = inner
+            .watchdog
+            .as_ref()
+            .and_then(|watchdog| watchdog.deadline_b());
+        let prepared = inner
+            .resume_gate
+            .as_mut()
+            .is_some_and(|gate| gate.prepare(now_b, deadline).is_ok());
+        if !prepared {
+            let generation = inner.generation.clone().unwrap_or_default();
+            clear_sensitive(&mut inner, u64::MAX, true);
+            inner.device_name = None;
+            inner.phase = ControlledStatusKind::Error;
+            inner.error_code = Some("endpoint_offline");
+            drop(inner);
+            self.notify_cleanup(&generation);
+            return Err(ControlledStateError::new("desktop_remote_resume_failed"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn advance_resume(
+        &self,
+        operation: ControlledOperation,
+        step: ControlledResumeStep<'_>,
+        now_b: u64,
+    ) -> Result<ControlledStatus> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if inner.phase != ControlledStatusKind::Reconnecting {
+            return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
+        }
+        let deadline = inner
+            .watchdog
+            .as_ref()
+            .and_then(|watchdog| watchdog.deadline_b());
+        let advanced = inner.resume_gate.as_mut().is_some_and(|gate| {
+            match step {
+                ControlledResumeStep::Provisional { activation_id } => {
+                    gate.accept_provisional(activation_id, now_b, deadline)
+                }
+                ControlledResumeStep::Confirmed { activation_id } => {
+                    gate.confirm(activation_id, now_b, deadline)
+                }
+                ControlledResumeStep::ActivationAcknowledged { activation_id } => {
+                    gate.acknowledge_activation(activation_id, now_b, deadline)
+                }
+                ControlledResumeStep::PostActivationLiveness {
+                    activation_id,
+                    liveness_epoch_b,
+                } => gate
+                    .send_post_activation_liveness(activation_id, liveness_epoch_b, now_b, deadline)
+                    .map(|_| ()),
+                ControlledResumeStep::ReadyAcknowledged { activation_id } => {
+                    gate.acknowledge_ready(activation_id, now_b, deadline)
+                }
+            }
+            .is_ok()
+        });
+        if !advanced {
+            let generation = inner.generation.clone().unwrap_or_default();
+            clear_sensitive(&mut inner, u64::MAX, true);
+            inner.device_name = None;
+            inner.phase = ControlledStatusKind::Error;
+            inner.error_code = Some("endpoint_offline");
+            drop(inner);
+            self.notify_cleanup(&generation);
+            return Err(ControlledStateError::new("desktop_remote_resume_failed"));
+        }
+        inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
+        Ok(status_locked(&inner))
+    }
+
     pub(crate) fn complete_resumed(
         &self,
         operation: ControlledOperation,
+        activation_id: &str,
+        resume_request_id: &str,
         liveness_epoch_a: impl Into<String>,
         resume_token: [u8; 32],
         transport_key_fingerprint: [u8; 32],
@@ -604,7 +705,34 @@ impl ControlledDeviceManager {
         let epoch = liveness_epoch_a.into();
         let next_watchdog =
             ControllerLivenessWatchdog::authenticated_cycle(epoch.clone(), now_b).ok();
-        if relay_resume_deadline_ms == 0 || next_watchdog.is_none() {
+        let deadline = inner
+            .watchdog
+            .as_ref()
+            .and_then(|watchdog| watchdog.deadline_b());
+        let accepted = relay_resume_deadline_ms > 0
+            && next_watchdog.is_some()
+            && inner.resume_gate.as_mut().is_some_and(|gate| {
+                gate.accept_resumed(
+                    activation_id,
+                    epoch.clone(),
+                    resume_token,
+                    transport_key_fingerprint,
+                    now_b,
+                    deadline,
+                )
+                .is_ok()
+            });
+        let installed = accepted
+            && inner.transport.as_ref().is_some_and(|transport| {
+                transport
+                    .restore_authenticated_lease_after_resume(
+                        &context,
+                        activation_id,
+                        resume_request_id,
+                    )
+                    .is_ok()
+            });
+        if !installed {
             let generation = inner.generation.clone().unwrap_or_default();
             clear_sensitive(&mut inner, u64::MAX, true);
             inner.device_name = None;
@@ -1317,6 +1445,86 @@ mod tests {
     }
 
     #[test]
+    fn controlled_final_without_transport_fails_closed_even_after_valid_gate() {
+        for case in ["valid", "expired", "activation", "token", "key", "no-ready"] {
+            let cleanup = Arc::new(CleanupCounter::default());
+            let manager = ControlledDeviceManager::default();
+            manager.register_cleanup_sink(cleanup.clone());
+            let operation = manager.start(None, Vec::new()).unwrap();
+            register(&manager, &operation);
+            manager.mark_claimed(operation.clone()).unwrap();
+            manager
+                .complete_connected(operation.clone(), lease(&operation.generation))
+                .unwrap();
+            manager.mark_transport_disconnected(5_000);
+            manager.begin_resume(operation.clone(), 6_000).unwrap();
+            for (now, step) in [
+                (
+                    7_000,
+                    ControlledResumeStep::Provisional {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    8_000,
+                    ControlledResumeStep::Confirmed {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    9_000,
+                    ControlledResumeStep::ActivationAcknowledged {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    10_000,
+                    ControlledResumeStep::PostActivationLiveness {
+                        activation_id: "activation-0001",
+                        liveness_epoch_b: "live-b-2",
+                    },
+                ),
+                (
+                    11_000,
+                    ControlledResumeStep::ReadyAcknowledged {
+                        activation_id: "activation-0001",
+                    },
+                ),
+            ] {
+                if case == "no-ready" && now == 11_000 {
+                    continue;
+                }
+                manager
+                    .advance_resume(operation.clone(), step, now)
+                    .unwrap();
+            }
+            let result = manager.complete_resumed(
+                operation.clone(),
+                if case == "activation" {
+                    "activation-wrong"
+                } else {
+                    "activation-0001"
+                },
+                "request-resume-0001",
+                "live-a-2",
+                if case == "token" { [1; 32] } else { [3; 32] },
+                if case == "key" { [2; 32] } else { [4; 32] },
+                if case == "expired" { 33_000 } else { 12_000 },
+                60_000,
+            );
+            assert_eq!(
+                result.unwrap_err().code,
+                "desktop_remote_resume_failed",
+                "{case}"
+            );
+            assert_eq!(manager.status().status, ControlledStatusKind::Error);
+            assert!(manager.inner.lock().watchdog.is_none());
+            assert!(manager.inner.lock().lease_context.is_none());
+            assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
     fn invalid_resumed_cycle_metadata_cleans_generation_and_notifies_once() {
         for (deadline, epoch, now) in [
             (0, "live-a-2", 7_000),
@@ -1335,9 +1543,56 @@ mod tests {
                 .complete_connected(operation.clone(), lease(&operation.generation))
                 .unwrap();
             manager.mark_transport_disconnected(5_000);
+            manager.begin_resume(operation.clone(), 6_000).unwrap();
+            for (now, step) in [
+                (
+                    6_100,
+                    ControlledResumeStep::Provisional {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    6_200,
+                    ControlledResumeStep::Confirmed {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    6_300,
+                    ControlledResumeStep::ActivationAcknowledged {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    6_400,
+                    ControlledResumeStep::PostActivationLiveness {
+                        activation_id: "activation-0001",
+                        liveness_epoch_b: "live-b-2",
+                    },
+                ),
+                (
+                    6_500,
+                    ControlledResumeStep::ReadyAcknowledged {
+                        activation_id: "activation-0001",
+                    },
+                ),
+            ] {
+                manager
+                    .advance_resume(operation.clone(), step, now)
+                    .unwrap();
+            }
             assert_eq!(
                 manager
-                    .complete_resumed(operation, epoch, [3; 32], [4; 32], now, deadline)
+                    .complete_resumed(
+                        operation,
+                        "activation-0001",
+                        "request-resume-0001",
+                        epoch,
+                        [3; 32],
+                        [4; 32],
+                        now,
+                        deadline
+                    )
                     .unwrap_err()
                     .code,
                 "desktop_remote_resume_failed"

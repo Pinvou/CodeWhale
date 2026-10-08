@@ -6,7 +6,6 @@
 //! the B task owner. DEV-20 owns final handler registration.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
@@ -19,6 +18,7 @@ use crate::features::codex_acp::AcpPool;
 use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::marketplace::ConnectorScope;
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
+pub(crate) use crate::features::remote_control::controller::clock::monotonic_millis;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::protocol::{
     LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
@@ -41,13 +41,6 @@ const NEGOTIATED_CAPABILITIES: &[&str] = &[
     "resume_v1",
     "task_v1",
 ];
-
-fn monotonic_millis() -> u64 {
-    use std::sync::OnceLock;
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
 
 /// Creates B-authoritative sessions for remote tasks. Only the local session
 /// identity, title and mode lane are persisted; nothing about A crosses this
