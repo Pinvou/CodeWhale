@@ -741,16 +741,22 @@
     if (streamRenderTimers[sid]) return; // a trailing edge is already pending: this delta only accumulates text
     streamRenderTimers[sid] = setTimeout(function () {
       delete streamRenderTimers[sid];
-      let rendered = false;
-      // The timer fires at an event-loop idle point, so it must re-enter the
-      // session's working set before rendering; a terminated stream
-      // (currentStreamId reset) means a terminal path already flushed
-      // synchronously — skip.
-      runSyncOnSession(sid, function () {
-        if (!context.currentStreamId || !context.currentStreamText) return;
-        rendered = renderStreamItemHtml();
-      });
-      if (rendered) notify(); // background sessions are suppressed inside runSyncOnSession; notify once more
+      var rendered = false;
+      // A throwing subscriber must not escape as an unhandled timer error
+      // (same rationale as the coalesced publish guard above).
+      try {
+        // The timer fires at an event-loop idle point, so it must re-enter the
+        // session's working set before rendering; a terminated stream
+        // (currentStreamId reset) means a terminal path already flushed
+        // synchronously — skip.
+        runSyncOnSession(sid, function () {
+          if (!context.currentStreamId || !context.currentStreamText) return;
+          rendered = renderStreamItemHtml();
+        });
+        if (rendered) notify(); // background sessions are suppressed inside runSyncOnSession; notify once more
+      } catch (error) {
+        console.error("[chat] scheduled stream render failed", error);
+      }
     }, STREAM_RENDER_THROTTLE_MS);
   }
 

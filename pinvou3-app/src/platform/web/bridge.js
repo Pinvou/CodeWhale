@@ -6698,11 +6698,17 @@
     streamRenderTimers[sid] = setTimeout(function () {
       delete streamRenderTimers[sid];
       var rendered = false;
-      runSyncOnSession(sid, function () {
-        if (!currentStreamId || !currentStreamText) return;
-        rendered = renderStreamItemHtml();
-      });
-      if (rendered) notify();
+      // A throwing subscriber must not escape as an unhandled timer error
+      // (mirrors the tauri lane's scheduled-render guard).
+      try {
+        runSyncOnSession(sid, function () {
+          if (!currentStreamId || !currentStreamText) return;
+          rendered = renderStreamItemHtml();
+        });
+        if (rendered) notify();
+      } catch (error) {
+        console.error("[chat] scheduled stream render failed", error);
+      }
     }, STREAM_RENDER_THROTTLE_MS);
   }
   function cancelStreamTimers(sid) {
@@ -7330,30 +7336,10 @@
     else if (phase === "cancel") addSystemItem(bt("compactCancel") + auto + (msg ? ": " + msg : ""), { compactId, compactPhase: "cancel" });
   }); });
 
-  // Foundation sub-agent tool-gate decisions have no approval card. Keep the
-  // final allow/deny outcome visible in the web timeline for auditability.
-  listen("chat:tool_gate_decision", function (e) { onSessionEvent(e, function () {
-    const p = e.payload || {};
-    const decision = String(p.decision || "unavailable");
-    const decisionLabel = decision === "allowed"
-      ? bt("toolGateAllowed")
-      : decision === "denied"
-        ? bt("toolGateDenied")
-        : bt("toolGateUnavailable");
-    let text = bt("toolGateDecision") + ": " + (p.tool_name ? String(p.tool_name) + " — " : "") + decisionLabel;
-    if (p.agent_id) text += " · " + bt("toolGateAgent") + " " + String(p.agent_id);
-    if (p.risk) text += " · " + bt("toolGateRisk") + " " + String(p.risk);
-    if (p.reason) text += " · " + String(p.reason);
-    addSystemItem(text, {
-      toolGateDecision: true,
-      toolId: String(p.tool_id || ""),
-      toolName: String(p.tool_name || ""),
-      agentId: String(p.agent_id || ""),
-      decision,
-      reason: String(p.reason || ""),
-      risk: String(p.risk || ""),
-    });
-  }); });
+  // chat:tool_gate_decision 是 Web lane 的 never-emitted 事件（不在
+  // access-policy allowed_events / RUST_FORWARDED_EVENTS），其监听器已随
+  // dead-code sweep 移除；桌面 timeline 的 tool-gate 审计投影仍由 Tauri lane
+  // 承担。
 
   // ── request_user_input：渲染选择卡片（不进 messages.json）─────────
   // payload: { id: tool_call_id, questions: [{header, id, question, options:[{label, description}]}] }
