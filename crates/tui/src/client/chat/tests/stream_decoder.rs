@@ -1555,18 +1555,17 @@ fn details_delta_payloads(events: &[StreamEvent]) -> Vec<Vec<Value>> {
 }
 
 #[test]
-fn openrouter_details_snapshots_merge_last_wins_in_first_seen_order() {
-    // OpenRouter repeats the growing array on each chunk: entry 0's text
-    // completes and entry 1 appears. The stored snapshot must hold the most
-    // complete version of each entry in first-seen order.
+fn openrouter_details_entries_grow_in_first_seen_order() {
+    // A second entry appearing mid-stream must join the snapshot after the
+    // first-seen one, and both entries' fragments must concatenate — the
+    // snapshot grows with the stream instead of being replaced by it.
     let chunks = vec![
         serde_json::json!({
             "choices": [{
                 "index": 0,
                 "delta": {
-                    "reasoning": "al",
                     "reasoning_details": [
-                        { "type": "reasoning.text", "index": 0, "text": "al" }
+                        { "type": "reasoning.text", "index": 0, "text": "ab" }
                     ]
                 }
             }]
@@ -1576,7 +1575,7 @@ fn openrouter_details_snapshots_merge_last_wins_in_first_seen_order() {
                 "index": 0,
                 "delta": {
                     "reasoning_details": [
-                        { "type": "reasoning.text", "index": 0, "text": "alpha" },
+                        { "type": "reasoning.text", "index": 0, "text": "cd" },
                         { "type": "reasoning.encrypted", "index": 1, "data": "blob" }
                     ]
                 }
@@ -1589,7 +1588,7 @@ fn openrouter_details_snapshots_merge_last_wins_in_first_seen_order() {
     assert_eq!(snapshots[0].len(), 1);
     let last = snapshots.last().expect("final snapshot");
     assert_eq!(last.len(), 2, "entry count grows with the array");
-    assert_eq!(last[0]["text"], "alpha", "last version of entry 0 wins");
+    assert_eq!(last[0]["text"], "abcd", "fragments concatenate in order");
     assert_eq!(last[0]["type"], "reasoning.text", "first-seen order kept");
     assert_eq!(last[1]["type"], "reasoning.encrypted");
 }
@@ -1616,9 +1615,9 @@ fn openrouter_details_placeholder_entries_never_enter_the_snapshot() {
 #[test]
 fn openrouter_details_without_index_key_by_array_position() {
     // Entries without an `index` are keyed by their position in the
-    // incoming cumulative array. A `type` key would merge two same-type
-    // entries into one (losing the other), and a running counter would
-    // re-key every reappearance of an entry and grow the snapshot.
+    // incoming array. A `type` key would merge two same-type entries into
+    // one (losing the other), and a running counter would re-key every
+    // reappearance of an entry and grow the snapshot.
     let chunks = vec![
         serde_json::json!({
             "choices": [{
@@ -1636,8 +1635,8 @@ fn openrouter_details_without_index_key_by_array_position() {
                 "index": 0,
                 "delta": {
                     "reasoning_details": [
-                        { "type": "reasoning.text", "text": "one" },
-                        { "type": "reasoning.text", "text": "two!" }
+                        { "type": "reasoning.text", "text": "th" },
+                        { "type": "reasoning.text", "text": "!" }
                     ]
                 }
             }]
@@ -1648,10 +1647,45 @@ fn openrouter_details_without_index_key_by_array_position() {
     assert_eq!(snapshots.len(), 2, "one snapshot per absorbing chunk");
     let last = snapshots.last().expect("final snapshot");
     assert_eq!(last.len(), 2, "both index-less entries survive");
-    assert_eq!(last[0]["text"], "one");
+    assert_eq!(last[0]["text"], "oneth", "each position concatenates");
+    assert_eq!(last[1]["text"], "two!", "each position concatenates");
+}
+
+#[test]
+fn openrouter_details_identical_fragments_concatenate() {
+    // The minimal content-sniffing trap: two consecutive fragments with the
+    // same content ("a", "a") must store "aa". Treating a fragment that
+    // equals (or extends) the stored text as a duplicate cumulative re-send
+    // would silently drop repeated tokens from a replayed sequence the API
+    // requires unmodified.
+    let chunks = vec![
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "a" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "a" }
+                    ]
+                }
+            }]
+        }),
+    ];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    let snapshots = details_delta_payloads(&events);
+    let last = snapshots.last().expect("final snapshot");
     assert_eq!(
-        last[1]["text"], "two!",
-        "last version of the second entry wins"
+        last[0]["text"], "aa",
+        "identical consecutive fragments must concatenate, not dedupe"
     );
 }
 

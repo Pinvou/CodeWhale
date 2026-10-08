@@ -3799,10 +3799,15 @@ fn replayable_reasoning_details(details: &[Value]) -> Vec<Value> {
 /// documented incremental contract ("each reasoning detail chunk is sent as
 /// it becomes available"; "the complete reasoning sequence is built by
 /// concatenating all chunks in order"). Fragment text continues the stored
-/// text — last-wins would truncate a replayed sequence the API requires
-/// unmodified. A fragment that instead extends the stored text as a prefix
-/// is a cumulative re-send and replaces it, matching the plaintext
-/// `reasoning` path's prefix handling. Any other field the fragment carries
+/// text unconditionally — last-wins would truncate a replayed sequence the
+/// API requires unmodified, and so would sniffing a fragment that happens
+/// to equal or extend the stored text as a "cumulative re-send": repeated
+/// tokens are ordinary reasoning output, and content guessing cannot tell
+/// the shapes apart. This buffer runs on the OpenRouter route only, where
+/// the documented assembly rule is concatenation; cumulative
+/// `reasoning_details` producers (e.g. MiniMax's reasoning_split stream)
+/// never reach it — capture is OpenRouter-only, and their display path
+/// keeps its own prefix handling. Any other field the fragment carries
 /// that the entry still lacks (a signature trailing the text, an id, a
 /// format) is filled in.
 fn merge_reasoning_detail_entry(stored: &mut Value, fragment: &Value) -> bool {
@@ -3811,18 +3816,11 @@ fn merge_reasoning_detail_entry(stored: &mut Value, fragment: &Value) -> bool {
         && !incoming.is_empty()
     {
         let current = stored.get("text").and_then(Value::as_str).unwrap_or("");
-        if incoming.starts_with(current) {
-            if incoming.len() != current.len() {
-                stored["text"] = Value::String(incoming.to_string());
-                changed = true;
-            }
-        } else {
-            let mut merged = String::with_capacity(current.len() + incoming.len());
-            merged.push_str(current);
-            merged.push_str(incoming);
-            stored["text"] = Value::String(merged);
-            changed = true;
-        }
+        let mut merged = String::with_capacity(current.len() + incoming.len());
+        merged.push_str(current);
+        merged.push_str(incoming);
+        stored["text"] = Value::String(merged);
+        changed = true;
     }
     if let (Some(fields), Some(incoming_fields)) = (stored.as_object_mut(), fragment.as_object()) {
         for (field, value) in incoming_fields {
@@ -3849,13 +3847,15 @@ fn merge_reasoning_detail_entry(stored: &mut Value, fragment: &Value) -> bool {
 /// reasoning sequence is built by concatenating all chunks in order" — so a
 /// fragment for a known key (the entry's `index`, or its position in the
 /// incoming array when the entry carries none; a `type` key would collide
-/// two same-type entries into one) is merged into the stored entry rather
-/// than replacing it. Fragment text continues the stored text unless it
-/// extends that text as a prefix, which is treated as a cumulative re-send
-/// from a gateway that repeats the growing array (the same dual handling as
-/// the plaintext `reasoning` path), and fields the fragment carries that the
-/// entry still lacks — a signature trailing the text, an id, a format — are
-/// filled in.
+/// two same-type entries into one) is concatenated onto the stored entry
+/// rather than replacing it. The concatenation is unconditional: a fragment
+/// that happens to repeat or extend the stored text is still a fragment,
+/// and guessing "cumulative re-send" from content would silently drop
+/// legitimate increments. Capture runs on the OpenRouter route only, so
+/// cumulative producers like MiniMax's reasoning_split stream never reach
+/// this buffer (their display path keeps its own prefix handling), and
+/// fields the fragment carries that the entry still lacks — a signature
+/// trailing the text, an id, a format — are filled in.
 #[derive(Default)]
 pub(super) struct ReasoningDetailsBuffer {
     order: Vec<String>,
@@ -3889,7 +3889,8 @@ impl ReasoningDetailsBuffer {
         changed
     }
 
-    /// Entries in first-seen order, merged to their most complete version.
+    /// Entries in first-seen order, fragment texts concatenated in arrival
+    /// order.
     fn snapshot(&self) -> Vec<Value> {
         self.order
             .iter()

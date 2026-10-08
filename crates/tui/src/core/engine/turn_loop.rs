@@ -5730,9 +5730,10 @@ impl Engine {
                         current_thinking_state = Some(state);
                     }
                     Delta::ReasoningDetailsDelta { details } => {
-                        // OpenRouter repeats the growing details array on
-                        // successive chunks; the last snapshot is the most
-                        // complete version and replaces any earlier one.
+                        // Each decoder event carries the complete
+                        // accumulated snapshot (every entry, fragment text
+                        // concatenated in arrival order), so the latest
+                        // event supersedes the previous one wholesale.
                         current_thinking_details = Some(details);
                     }
                     Delta::ToolThoughtSignatureDelta { signature } => {
