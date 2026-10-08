@@ -1,4 +1,5 @@
 import React from 'react';
+import '../../src/features/account-platform/admin-token-management.css';
 import { createRoot } from 'react-dom/client';
 import { PricingLifecycleWorkspace } from '../../src/features/account-platform/PricingLifecycleWorkspace.jsx';
 import { AdminManagementWorkspace } from '../../src/features/account-platform/AdminManagementWorkspace.jsx';

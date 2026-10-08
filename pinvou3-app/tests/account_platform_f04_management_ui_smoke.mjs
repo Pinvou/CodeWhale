@@ -52,6 +52,22 @@ try{
   await page.type('article textarea','Controlled reason edit');await page.evaluate(()=>{const button=[...document.querySelectorAll('article button')].find(b=>b.textContent.includes('submit')&&!b.disabled);if(!button)throw new Error('Missing draft edit');button.click();});await page.waitForFunction(()=>window.f04.approvalStatus==='SUBMITTED');
   assert.ok(await page.evaluate(()=>{const edit=window.f04.calls.find(c=>c.method==='PUT');const body=edit&&JSON.parse(edit.body);const submit=window.f04.calls.find(c=>c.path.endsWith('/actions/submit'));return edit.body.includes('"lifecycle_plan_version":9007199254740993')&&body.normalized_command.effective_at==='2099-01-01T00:00:00+08:00'&&body.normalized_command.existing_session_cutoff_at==='2099-01-02T00:00:00+08:00'&&body.normalized_command.lifecycle_plan_id===window.f04.id&&JSON.parse(submit.body).expected_version===2;}));
  });
+ for (const language of ['zh', 'en', 'ja']) await caseRun(`${language}: named pricing tables retain keyboard horizontal scrolling`, async () => {
+  await fresh(); await page.setViewport({ width: 640, height: 800 });
+  await page.evaluate(language => { window.f04.language = language; window.f04.render(); }, language);
+  for (const [index, label] of [[0, 'priceVersions'], [1, 'meteringUnits']]) {
+   const wrapper = (await page.$$('.adm-pricing-workspace > .adm-finance-subpanel > .adm-table-wrap'))[index];
+   assert.ok(wrapper, `Missing pricing scroll region ${index}`);
+   assert.ok(await wrapper.evaluate((element, label) => element.getAttribute('role') === 'region' && element.getAttribute('aria-label') === window.f04.labels()[label] && element.tabIndex === 0, label));
+   // Force overflow using viewport constraints, leaving production table CSS
+   // and native keyboard scrolling intact. No synthetic scroll event/write.
+   await wrapper.evaluate(element => { element.style.maxWidth = '300px'; element.querySelector('table').style.minWidth = '900px'; });
+   await wrapper.focus();
+   assert.ok(await wrapper.evaluate(element => document.activeElement === element && element.scrollWidth > element.clientWidth && getComputedStyle(element).overflowX === 'auto'));
+   await page.keyboard.press('ArrowRight');
+   await page.waitForFunction(index => [...document.querySelectorAll('.adm-pricing-workspace > .adm-finance-subpanel > .adm-table-wrap')][index].scrollLeft > 0, {}, index);
+  }
+ });
  console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 }catch(error){console.error(`FAIL after ${passed} PASS: ${error.stack}`);if(page)console.error(JSON.stringify(await page.evaluate(()=>({text:document.body.textContent.slice(0,1200),paths:window.f04?.calls.map(c=>c.path)})).catch(()=>({}))));process.exitCode=1;}
 finally{if(browser)await browser.close();if(vite)await vite.close();if(fs.existsSync(profile)){assert.equal(fs.realpathSync(profile),ownedProfile);assert.equal(path.dirname(ownedProfile),fs.realpathSync(os.tmpdir()));assert.ok(path.basename(ownedProfile).startsWith('pinvou-f04-management-'));fs.rmSync(ownedProfile,{recursive:true});}}
