@@ -596,14 +596,21 @@ progress at step boundaries, not mid-tool, so a silent build or MCP call must
 not be cleaned up mid-run), so neither a configured long model request nor a
 long in-flight tool is cancelled before its own timeout can fire.
 
-These floors only keep the heartbeat from firing early; they do not outrank
-the wall clocks above them. Every sub-agent runs under its own wall time
-(`default_wall_time_secs`, 1800 seconds by default), and inside a durable task
-the task's `wall_time` (default 30 minutes, measured from task start, and
-running while a prompt waits on a human) bounds the whole run. A maximal
-1800-second tool started late in a child or a task can therefore still be
-interrupted by either deadline; raising `execute_timeout` above the remaining
-wall time has no effect.
+Inside a durable task these budgets are additionally bounded by the task's
+`wall_time` (default 30 minutes, measured from task start): the wall clock
+pauses while a pending approval or user-input prompt waits on a human (with a
+24-hour fail-safe cap that bounds each open window and the windows summed
+across the whole task), but it otherwise wins over an in-flight sub-agent, so
+a maximal 1800-second tool started late in a task can still be interrupted by
+the task deadline. Raising `execute_timeout` or the tool budget above the
+remaining task wall has no effect inside a task. The pause applies only where
+a host can actually deliver the decision: the runtime API serves task threads
+with HTTP `decide_approval`/`submit_user_input`, so its tasks pause; the
+TUI's private task runtime has no such channel, so there a prompt is not
+treated as a human-paced wait at all and the wall clock keeps running.
+While parked, the task keeps holding its worker slot (two workers by
+default), so several simultaneously parked tasks can stall the durable-task
+queue until their answers arrive or the fail-safe cap fires.
 
 ## Lifecycle
 
