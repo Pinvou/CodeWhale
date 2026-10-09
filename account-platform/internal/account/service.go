@@ -147,6 +147,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusNotFound, "NOT_FOUND", "the requested account resource was not found"
 	case errors.Is(err, ErrForbidden):
 		status, code, message = http.StatusForbidden, "ACCOUNT_FORBIDDEN", "the account action is not permitted"
+	case errors.Is(err, ErrAccountClosing):
+		status, code, message = http.StatusForbidden, "ACCOUNT_CLOSING", "account closure is in progress"
 	case errors.Is(err, ErrConflict):
 		status, code, message = http.StatusConflict, "ACCOUNT_CONFLICT", "the account resource changed or conflicts with existing data"
 	case errors.Is(err, ErrLastActiveSuperAdmin):

@@ -36,6 +36,15 @@
 F00最终状态：1cf612b394dca746375daa8262f2c0ccf766fba3已通过run37877556881全部适用检查及required-gate（job113653143161）。JensenChen28对该head复核确认代码问题关闭，原COMMENT仅等待门禁；现已补充成功结果并继续申请原审核者批准。非阻塞Issue1618仍开放。按用户流程普通merge传播至相邻F01，不改主线或受保护底座分支。
 
 ## F01 / PR #1528
+### F01 2026-10-09 最新审核重新核实（处理中）
+
+F00 精确 head 1cf612b3 全部适用 CI 及 required-gate 成功后，普通 merge ff5745d2 传播至 F01；保留原 F01 542d03fd 与 F00 全部历史，不重放或重写提交。
+
+最新意见核实：Portal 在 registration/precheck 与 captcha/challenges 未转发经过可信 peer 计算的来源，导致 Account 持久化来源桶共用 Portal IP；过期且已绑定短信的未验证 PENDING 资料变更无法替换；组合授权查询先判断默认 false 会吞没基础设施错误。以上正在实现与真实 PostgreSQL 回归，尚未宣称独立通过或推送。另已有 ErrAccountClosing 接口缺业务映射，但完整 F01 users CHECK 不允许 CLOSING，当前数据库路径不可达；保留 typed 接口 403 映射并以受控边界回归，不修改 DDL 或伪称真实 CLOSING 数据。
+
+新增非阻塞意见登记 [#1624](https://github.com/Pinvou/pinvou3/issues/1624)，与已完成 #1560 区分。生产 Portal/Identity 已有进程级 IP 限流；残余是高成本操作的独立准入、持久容量与可信来源策略，不是完全无保护。公开密码 precheck 是正常注册 bootstrap，不能盲目新增内部认证。删除用户函数没有公开路由，未证实漏洞。
+
+前端小项：密码或短信登录方式被禁用的具体错误新增简中/英文/日文文案；管理员 Retry-After 复用严格且有界的共享解析，保留响应正文优先。相关 Node 测试 37 项通过、零跳过；状态枚举展示仍由 #1624 跟踪。Portal 生产嵌入静态包同步重建成功，真实浏览器 20 项通过、零失败/跳过，UI lint 和架构守卫通过。Account 完整迁移、真实 runtime actor 专项作者 17 场景通过、零跳过；根代理作为非作者实际独立重跑通过（包5.639s）。Portal 来源准入/captcha 专项使用089+009隔离 schema，全 Portal 含真实PG作者通过（9.064s），不冒充完整身份开户验收。原手机登录夹具明确 APP_ENV=test 并清 issuer/CA，保留生产认证 fail-closed。最终主模块全量 Go test 退出0、vet退出0；前次仅旧 SMS 登录夹具缺显式测试环境导致401已保留日志并修正，未改认证实现。Account 五文件非作者静态复核通过，Portal/前端非作者最终复核通过：独立来源专项3个目标真实 PG 退出0、零跳过（包8.000s），全 Portal 另通过但既有 Redis 条件跳过未计验收；最终 Node 37 项全部通过零跳过。独立审核发现同码也用于 SMS 后已修改三语言覆盖密码及短信，并以真实 loginSms 拒绝回归、再重建生产静态包；3个HTML共15个资源引用均存在且包含最终文案/严格解析。签名后绑定精确 head，再推送/申请重审并等待新 head CI，未据旧 head 绿灯向F02提前传播。
 
 F00修复通过普通merge引入：96899c70及6077d33fc。F00当前head16184c38d的required-gate已通过，外部重审已申请、尚待回复。两份原审核逐项核实：钱包ACK测试fixture零租约确实造成16项失败；Rust handoff ticket字符边界、未认证入口限流、全类审计DELETE保护、登录错误/冷却信息、生产Keycloak硬化、NGINX动态DNS、Account可信来源及LEASED索引缺口均真实存在。
 

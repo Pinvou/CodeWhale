@@ -1,21 +1,14 @@
 import { requireSession } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
+import { responseRetryAfter } from './auth-error.js';
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
   error.code = payload?.code || 'REQUEST_FAILED';
   error.status = response.status;
   error.details = payload?.details || null;
   error.requestID = payload?.request_id || '';
-  const retryAfter = String(response.headers.get('Retry-After') || '').trim();
-  const retryAfterNumber = Number.parseInt(retryAfter, 10);
-  const retryAfterDate = Number.isNaN(retryAfterNumber) ? Date.parse(retryAfter) : Number.NaN;
-  const retryAfterSeconds = Number.isNaN(retryAfterNumber)
-    ? Math.ceil((retryAfterDate - Date.now()) / 1000)
-    : retryAfterNumber;
-  error.retryAfterSeconds = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-    ? Math.min(retryAfterSeconds, 86_400)
-    : 0;
+  error.retryAfterSeconds = responseRetryAfter(payload, response.headers.get('Retry-After'));
   return error;
 }
 function abortRequestError() {
