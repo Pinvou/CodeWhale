@@ -52,6 +52,7 @@ pub struct PlatformCapabilities {
     pub account_platform_supported: bool,
     pub os: &'static str,
     pub show_megacube_site: bool,
+    pub megacube_device: bool,
     pub show_super_permission_settings: bool,
     pub uses_bundled_dependency_installer: bool,
     pub uses_homebrew_dependency_installer: bool,
@@ -92,6 +93,7 @@ impl PlatformCapabilities {
             ),
             os: capabilities.os,
             show_megacube_site: capabilities.show_megacube_site,
+            megacube_device: capabilities.megacube_device,
             show_super_permission_settings: capabilities.show_super_permission_settings,
             uses_bundled_dependency_installer: capabilities.uses_bundled_dependency_installer,
             uses_homebrew_dependency_installer: capabilities.uses_homebrew_dependency_installer,
@@ -169,6 +171,11 @@ mod platform_capability_tests {
     fn semantic_capabilities_match_the_compiled_target() {
         let capabilities = PlatformCapabilities::current();
         let expected = crate::platform::capabilities::current();
+        assert_eq!(
+            capabilities.show_megacube_site,
+            expected.show_megacube_site
+        );
+        assert_eq!(capabilities.megacube_device, expected.megacube_device);
         assert_eq!(
             capabilities.uses_bundled_dependency_installer,
             expected.uses_bundled_dependency_installer

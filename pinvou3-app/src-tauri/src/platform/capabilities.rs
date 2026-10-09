@@ -2,6 +2,9 @@
 pub(crate) struct DesktopCapabilities {
     pub(crate) os: &'static str,
     pub(crate) show_megacube_site: bool,
+    /// 运行时探测到的 MegaCube 一体机（DMI 产品名含 "megacube"，如 "LinSeer MegaCube"）。
+    /// 「设备管理」等 MegaCube 专属界面据此开启，与静态的 show_megacube_site（官网入口）区分。
+    pub(crate) megacube_device: bool,
     pub(crate) show_super_permission_settings: bool,
     pub(crate) uses_bundled_dependency_installer: bool,
     pub(crate) uses_homebrew_dependency_installer: bool,
@@ -56,6 +59,7 @@ pub(crate) fn current() -> DesktopCapabilities {
     DesktopCapabilities {
         os: std::env::consts::OS,
         show_megacube_site: cfg!(target_os = "linux"),
+        megacube_device: is_megacube_device(),
         show_super_permission_settings: cfg!(target_os = "linux"),
         uses_bundled_dependency_installer: cfg!(target_os = "windows"),
         // macOS 用 Homebrew 安装依赖(对称 Windows 的 uses_bundled_dependency_installer),
@@ -218,6 +222,30 @@ pub(crate) fn global_shortcut_session_is_ambiguous(
         && session_env(env, "WAYLAND_DISPLAY").is_some()
 }
 
+/// 运行时探测当前设备是否为 MegaCube 一体机（DMI 产品名含 "megacube"）。
+/// 结果按进程缓存；环境变量 `PINVOU3_MEGACUBE_DEVICE=1` 可强制为 true，
+/// 供开发与自动化测试在非 MegaCube 硬件上预览「设备管理」。
+pub(crate) fn is_megacube_device() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if std::env::var("PINVOU3_MEGACUBE_DEVICE").as_deref() == Ok("1") {
+            return true;
+        }
+        if std::env::consts::OS != "linux" {
+            return false;
+        }
+        ["product_name", "product_family", "board_name"]
+            .into_iter()
+            .any(|field| dmi_field_contains_megacube(field))
+    })
+}
+
+fn dmi_field_contains_megacube(field: &str) -> bool {
+    std::fs::read_to_string(format!("/sys/class/dmi/id/{field}"))
+        .map(|value| value.to_ascii_lowercase().contains("megacube"))
+        .unwrap_or(false)
+}
+
 pub(crate) const fn is_windows() -> bool {
     cfg!(target_os = "windows")
 }
@@ -273,6 +301,16 @@ mod tests {
             capabilities.paste_image_clipboard_read,
             cfg!(target_os = "linux")
         );
+        assert_eq!(capabilities.megacube_device, is_megacube_device());
+    }
+
+    #[test]
+    fn megacube_device_detection_never_reports_non_linux_hosts() {
+        // 探测逻辑只在 Linux 主机上读取 DMI 字段;其余平台无论文件系统如何都返回 false。
+        if std::env::consts::OS == "linux" {
+            return;
+        }
+        assert!(!is_megacube_device());
     }
 
     #[test]
