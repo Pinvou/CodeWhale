@@ -557,6 +557,13 @@ impl Pinvou3Bundle {
         crate::features::marketplace::retirement::retired_tool_residue_present_for_test()
     }
 
+    /// 内置「设备管家」技能（MegaCube 设备管理排查，设计 §7）。编译期内嵌，
+    /// 解包到 `bundle/skills/device-doctor/SKILL.md`；目录名与 frontmatter 均为
+    /// 安全命令名 `device-doctor`，中文触发词由 description 承载。
+    const DEVICE_DOCTOR_SKILL_MD: &str = include_str!(
+        "../../../../resources/common/bundle/builtin-skills/device-doctor/SKILL.md"
+    );
+
     /// 当前构建内嵌释放到 `bundle/skills/` 的内置技能目录集合——与
     /// [`Self::write_builtin_skills`] 的释放面保持一致。自愈对账
     /// （`self_heal_skills` 第 4 步）以此为「本构建内嵌什么」的判定基准：
@@ -567,7 +574,7 @@ impl Pinvou3Bundle {
     /// `write_builtin_skills_releases_exactly_the_listed_dirs` — a builtin
     /// skill added to `write_builtin_skills` without extending this constant
     /// would be written and self-heal-deleted in the same run.
-    pub(crate) const BUILTIN_RELEASED_SKILL_DIRS: &[&str] = &["visual-design"];
+    pub(crate) const BUILTIN_RELEASED_SKILL_DIRS: &[&str] = &["visual-design", "device-doctor"];
 
     /// IT 内部 CLI 连接器的运行时目录名（[`Self::write_connector_cli_bins`] 的
     /// 释放面）。无 SKILL.md、无归属记录，自愈对账（`self_heal_skills` 第 4 步
@@ -590,10 +597,12 @@ impl Pinvou3Bundle {
     /// 后 catalogue 与 `load_skill` 都只扫描此目录，不再写 `~/.agents/skills`。
     /// 每次启动防御性写出(immutable 内置资源);内容一致则跳过写——这些资源不进
     /// BUNDLE_VERSION 的 hash,升级改内容但 VERSION 不变时靠逐文件比对兜住。
-    /// 当前:视觉设计。
+    /// 当前:视觉设计、设备管家(device-doctor,MegaCube 设备管理)。
     pub(super) fn write_builtin_skills(&self) -> std::io::Result<()> {
         let dir = self.skills_dir.join("visual-design");
         self.write_if_changed(&dir.join("SKILL.md"), VISUAL_DESIGN_SKILL_MD)?;
+        let dir = self.skills_dir.join("device-doctor");
+        self.write_if_changed(&dir.join("SKILL.md"), Self::DEVICE_DOCTOR_SKILL_MD)?;
         Ok(())
     }
 
