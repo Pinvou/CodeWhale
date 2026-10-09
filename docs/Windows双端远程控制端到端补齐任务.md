@@ -89,7 +89,7 @@
 | `serve()` 暂只保活通道 | 预期 | 握手与加密业务帧派发分别在 E2E-02 / E2E-04 安装到该服务循环；当前对未知消息只做丢弃，绝不转发到 legacy WebUI 事件流。 |
 | A 端 `device_display_name` 用有界占位 `remote-device` | 保守默认，登记 | 冻结协议 v1 的 `controller_joined` 不携带被控设备显示名（已核对 PROTOCOL.md 与 fixture）；首版用占位，真实来源需协议扩展或 E2E-03 的能力快照补充。 |
 | B 端 `controller_device_name` 留空 | 保守默认，登记 | 同上：`controller_pairing_register` / `controller_joined` 都不含主控设备名；留空让 E2E-07 的 UI 用 i18n 兜底文案（`deviceUnknown`）显示，不为数据层硬编码单语名称。RC-B-006「展示主控设备名称」需协议扩展后才能真正满足。 |
-| A 端不在 WebSocket 层声明 controller 子协议 | 历史限制，已修复 | **已被后续波次修复**：当前客户端通过 `relay_client::controller_websocket_request` 声明 `pinvou-desktop-controller-v1`，Relay 通过 `server.js` 的 `handleProtocols` 显式协商；以下保留当时决策。PROTOCOL.md:598 要求 controller-v1 客户端选择 `pinvou-desktop-controller-v1`，但当时 Relay（server.js:846 `noServer: true`，无 `handleProtocols`）不回投该头部，而客户端库（tungstenite 0.30 `handshake/client.rs:272`）在请求了子协议却未收到时必须失败关闭 —— 声明子协议会让 A 端完全无法连接。当时决定待 Relay 侧补齐子协议协商后再接入；当时 Relay 以 `v=1 + controller_*` 类型路由 controller lane（server.js:1182）。 |
+| A 端不在 WebSocket 层声明 controller 子协议 | 历史限制，已修复 | **已被后续波次修复**：当前客户端通过 `relay_client::controller_websocket_request` 声明 `pinvou-desktop-controller-v1`，Relay 通过 `server.js` 的 `handleProtocols` 显式协商；以下保留当时决策。PROTOCOL.md:597–599 要求 controller-v1 客户端选择 `pinvou-desktop-controller-v1`，但当时 Relay（server.js:846 `noServer: true`，无 `handleProtocols`）不回投该头部，而客户端库（tungstenite 0.30 `handshake/client.rs:272`）在请求了子协议却未收到时必须失败关闭 —— 声明子协议会让 A 端完全无法连接。当时决定待 Relay 侧补齐子协议协商后再接入；当时 Relay 以 `v=1 + controller_*` 类型路由 controller lane（server.js:1182）。 |
 | A 端不发送 `controller_capabilities` 首帧 | 保守默认，登记 | 同上：router 没有该类型的 handler（`controller-router.js` 只有 register/claim/handshake/disconnect 与 liveness/resume hooks），发送会收到 `controller_message_unsupported` 并打断握手；E2E-01 的 B 端同样未发送。Relay 补齐后两侧一并接入。 |
 | 握手期间 transport 断线 | 预期 | A 端把断线统一映射为 `endpoint_offline` 并失败关闭；transport 在断线时会作废已排队帧（`transport_epoch` 递增），因此不会用旧 claim 重连，重新 claim 属 E2E-06 的恢复链路。 |
 | 连接完成后断线只投影 `reconnecting` | 预期 | `serve_controlling_lane` 在断线时调用 `mark_transport_disconnected()` 保证界面不再声称 connected；自动 resume / liveness 属 E2E-06。 |
@@ -161,8 +161,10 @@
 
 | 提交 | 内容 |
 |---|---|
-| `debf3aa1c` | A 端远程会话与任务请求构造：`controlling_session.rs`（会话意图 + 三个冻结 payload builder + 输入摘要 + 失败门）、7 个 `desktop_remote_controller_session_*` 命令、`ControllerLease` 记录协商能力与 `live_runtime_context`、A/B 两侧补 `task_v1` 能力声明、前端状态与 bridge 接线、node 契约测试 |
+| `debf3aa1c` | A 端远程会话与任务请求构造：`controlling_session.rs`（会话意图 + 三个冻结 payload builder + 输入摘要 + 失败门）、7 个会话/能力/任务意图命令（历史名称见下）、`ControllerLease` 记录协商能力与 `live_runtime_context`、A/B 两侧补 `task_v1` 能力声明、前端状态与 bridge 接线、node 契约测试 |
 | `8858dfe48` | 审核修复：会话重开复用 `sessionRef`（幂等）、wire 快照映射进 UI 能力域（`capabilitySnapshotForUi`），并锁定「UI 路径不出现协议字段名」 |
+
+上述 7 条命令是 `debf3aa1c` 阶段的历史 IPC 名称：`desktop_remote_controller_session_open`、`desktop_remote_controller_session_state`、`desktop_remote_controller_session_close`、`desktop_remote_controller_capability_request`、`desktop_remote_controller_apply_capability_snapshot`、`desktop_remote_controller_task_intent`、`desktop_remote_controller_task_cancel_intent`；仅前三条属于 `session_*`。当前命令面已更名并收敛，实际注册列表以 `pinvou3-app/src-tauri/src/lib.rs` 为准；旧名称不作为调用当前 head 的依据。
 
 ### 6.2 审核要点
 
@@ -192,6 +194,8 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 | `88832f0f3` | E2E-05 第 1 步：A 端解密 `journal_event`（明文字段与事件本体逐项一致才接受）经 `ControllingJournalSink` 落库到 A 独立历史并广播 `desktop-remote-controller-journal`；能力声明补 `snapshot_journal_v1` |
 
 验证基线：`cargo test remote_control::` 295 通过 / 0 失败；architecture-guard 通过。
+
+历史口径注记：第 3 节 E2E-04 摘要的 298 与本节的 295 存在计数差异，本文件没有两次完整输出及精确采样提交，原因尚未核实；不把“期间传入其他测试”的猜测当作事实。两项原记录保留，均不作为当前验收证据；非阻塞 P3 由 Issue #1673 跟踪可追溯口径。
 
 ### 7.2 审核要点（E2E-04 轮次 1）
 
@@ -288,6 +292,8 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 3. **`ControllerStatusKind::Refreshing` 的 UI 文案**：B 面板把它映射为 `statusStopping`，需要独立词条或明确复用策略。
 
 ## 11. E2E-08 待做清单（集成回归与发布审核）
+
+本节测试数量与待做项是该历史轮次的快照，不是当前提交的验收结果；当前覆盖率以对应提交的实际测试输出与 CI 为准。
 
 - 已执行证据（本轮）：Relay 契约套件 `node --test test/controller-protocol|controller-handshake|controller-reservation|controller-liveness|controller-resume|controller-router` 58 通过 / 0 失败，`test/relay.test.js` 25 通过 / 0 失败；Rust `cargo test remote_control::` 312 通过 / 0 失败；前端 6 个契约文件 36 通过 / 0 失败、`npm run build:ui` 通过、`npm run lint:ui|lint:node` 0 error；`python scripts/architecture-guard.py` 通过；敏感信息扫描（`sk-*` / `vault://` / `Bearer`）在新增的 controller 与前端文件中零命中。
 - 双端集成测试：在现有同进程双端用例（task_submit/task_status、journal_event、快照、心跳证据）基础上补一条完整旅程（连接 → 能力快照 → 普通文本任务 → 正文回传 → 显式断开），并断言旧 lease/generation 帧在各阶段都被丢弃。

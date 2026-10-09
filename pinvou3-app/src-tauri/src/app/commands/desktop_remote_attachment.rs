@@ -1,5 +1,6 @@
 //! Upload host composition: session root injection and shared lifecycle owner.
 // architecture-guard: allow-target-cfg -- Windows-only regression verifies mandatory sharing leases during real file ingestion; production OS selection remains in platform::filesystem.
+use crate::features::remote_control::controller::clock::monotonic_millis;
 use crate::features::remote_control::controller::task::{
     RemoteTaskRecord, RemoteTaskService, RemoteTaskTransferScope,
 };
@@ -86,10 +87,22 @@ impl RemoteTaskTransferScope for DesktopRemoteTransferScope {
     }
 }
 
-fn monotonic_millis() -> u64 {
-    use std::{sync::OnceLock, time::Instant};
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reaper_uses_the_controller_clock_not_a_second_origin() {
+        assert_eq!(
+            monotonic_millis as fn() -> u64 as usize,
+            crate::features::remote_control::controller::clock::monotonic_millis as fn() -> u64
+                as usize
+        );
+        let before = crate::features::remote_control::controller::clock::monotonic_millis();
+        let reaper_now = monotonic_millis();
+        let after = crate::features::remote_control::controller::clock::monotonic_millis();
+        assert!(before <= reaper_now && reaper_now <= after);
+    }
 }
 
 #[cfg(all(test, windows))]

@@ -42,17 +42,91 @@ test("Rust B heartbeat contract keeps an older-than-30s lease resumable without 
   await value.hooks.handle({
     message: rustFrame, socket_identity: "socket-B", role: "B", lease,
   });
-  value.now = 31_000;
-  assert.equal(value.hooks.resumeDeadline(lease), null, "B alone cannot extend A's cutoff");
+  assert.equal(value.hooks.resumeDeadline(lease), 30_000, "B alone cannot extend A's cutoff");
   await value.hooks.handle({
     message: heartbeat("A", 1), socket_identity: "socket-A", role: "A", lease,
   });
+  value.now = 31_000;
   assert.equal(value.hooks.resumeDeadline(lease), 59_000, "both roles keep the established lease eligible");
   await assert.rejects(() => value.hooks.handle({
     message: rustFrame, socket_identity: "socket-B", role: "B", lease,
   }), /controller_liveness_sequence_replay/u);
   value.now = 59_000;
   assert.equal(value.hooks.resumeDeadline(lease), null, "deadline remains finite");
+});
+
+test("late authenticated heartbeat cannot revive expired evidence before the cleanup tick", async () => {
+  for (const lateRole of ["A", "B"]) {
+    for (const at of [30_000, 31_000]) {
+      const value = await started();
+      const freshRole = lateRole === "A" ? "B" : "A";
+      value.now = 29_000;
+      await value.hooks.handle({
+        message: heartbeat(freshRole, 1), socket_identity: `socket-${freshRole}`, role: freshRole, lease,
+      });
+      value.now = at;
+      assert.equal(value.hooks.resumeDeadline(lease), null);
+      await assert.rejects(value.hooks.handle({
+        message: heartbeat(lateRole, 1), socket_identity: `socket-${lateRole}`, role: lateRole, lease,
+      }), { code: "controller_liveness_expired" });
+      assert.equal(value.hooks.resumeDeadline(lease), null);
+      await assert.rejects(value.hooks.handle({
+        message: heartbeat(lateRole, 2), socket_identity: `socket-${lateRole}`, role: lateRole, lease,
+      }), { code: "controller_liveness_state_not_found" });
+    }
+  }
+});
+
+test("expiry rejects challenges, blind forwards and proof requests before producing deliveries", async () => {
+  for (const [role, message] of [
+    ["B", challenge()], ["A", encryptedLiveness()], ["A", peerRequest()],
+    ["B", { ...challenge(), type: "controller_liveness_attestation_request_a" }],
+  ]) {
+    const value = await started();
+    value.now = 30_000;
+    await assert.rejects(value.hooks.handle({
+      message, role, socket_identity: `socket-${role}`, lease,
+    }), { code: "controller_liveness_expired" });
+    assert.equal(value.hooks.resumeDeadline(lease), null);
+  }
+});
+
+test("expiry revokes before awaited cleanup and preserves a replacement lease state", async () => {
+  let now = 0;
+  let finish;
+  let captured;
+  const hooks = new ControllerLivenessHooks({ clock: () => now, leaseManager: {
+    terminateLease: async (input) => {
+      captured = input;
+      await new Promise((resolve) => { finish = resolve; });
+    },
+  } });
+  await hooks.onLeaseCreated(lease);
+  now = 30_000;
+  const late = hooks.handle({ message: heartbeat("A", 1), role: "A", socket_identity: "socket-A", lease });
+  assert.equal(captured.expectedLease, lease);
+  assert.equal(captured.reason, "controller_liveness_expired");
+  await assert.rejects(hooks.handle({ message: heartbeat("B", 1), role: "B", socket_identity: "socket-B", lease }),
+    { code: "controller_liveness_state_not_found" });
+  const replacement = { ...lease, liveness_epoch_a: "new-live-a", liveness_epoch_b: "new-live-b" };
+  await hooks.onLeaseCreated(replacement);
+  finish();
+  await assert.rejects(late, { code: "controller_liveness_expired" });
+  assert.equal(hooks.resumeDeadline(replacement), 60_000);
+});
+
+test("cleanup failure never leaves expired evidence available for renewal", async () => {
+  let now = 0;
+  const hooks = new ControllerLivenessHooks({ clock: () => now, leaseManager: {
+    terminateLease: async () => { throw new Error("cleanup unavailable"); },
+  } });
+  await hooks.onLeaseCreated(lease);
+  now = 30_000;
+  await assert.rejects(hooks.handle({ message: heartbeat("A", 1), role: "A", socket_identity: "socket-A", lease }),
+    /cleanup unavailable/u);
+  assert.equal(hooks.resumeDeadline(lease), null);
+  await assert.rejects(hooks.handle({ message: heartbeat("B", 1), role: "B", socket_identity: "socket-B", lease }),
+    { code: "controller_liveness_state_not_found" });
 });
 
 function challenge(requestId = "request-0001") {
@@ -141,11 +215,14 @@ test("B proof history is bounded, pruned and resets only with a new authenticate
     assert.equal(result.deliveries[0].message.heartbeat_sequence_b, "1");
   }
   await assert.rejects(() => value.hooks.handle({message: peerRequest("challenge-over-capacity"), role: "A", socket_identity: "socket-A", lease}), /controller_liveness_challenge_capacity/u);
-  value.now = 30_001;
+  value.now = 29_000;
+  await value.hooks.handle({ message: heartbeat("A", 1), socket_identity: "socket-A", role: "A", lease });
   await value.hooks.handle({ message: heartbeat("B", 2), socket_identity: "socket-B", role: "B", lease });
+  value.now = 30_001;
+  await value.hooks.handle({ message: heartbeat("B", 3), socket_identity: "socket-B", role: "B", lease });
   const later = await value.hooks.handle({message: peerRequest("challenge-fresh"), role: "A", socket_identity: "socket-A", lease});
   assert.equal(later.deliveries[0].message.attestation_sequence, "65");
-  assert.equal(later.deliveries[0].message.heartbeat_sequence_b, "2");
+  assert.equal(later.deliveries[0].message.heartbeat_sequence_b, "3");
   const rotated = {...lease, liveness_epoch_b: "live-b-2", sockets: {A: "socket-new-A", B: "socket-new-B"}};
   await value.hooks.onLeaseCreated(rotated);
   await assert.rejects(() => value.hooks.handle({message: heartbeat("B", 3), role: "B", socket_identity: "socket-B", lease: rotated}), /controller_socket_invalid/u);
@@ -325,9 +402,12 @@ test("long-lived attestation survives more than 64 cycles without forgetting rec
 test("expired pending challenges cannot be attested even without a heartbeat cleanup tick", async () => {
   const value = await started();
   await value.hooks.handle({ message: challenge(), socket_identity: "socket-B", role: "B", lease });
+  value.now = 29_000;
+  await value.hooks.handle({ message: heartbeat("A", 1), socket_identity: "socket-A", role: "A", lease });
+  await value.hooks.handle({ message: heartbeat("B", 1), socket_identity: "socket-B", role: "B", lease });
   value.now = 30_001;
   await value.hooks.handle({
-    message: heartbeat("A", 1), socket_identity: "socket-A", role: "A", lease,
+    message: heartbeat("A", 2), socket_identity: "socket-A", role: "A", lease,
   });
   await assert.rejects(() => value.hooks.handle({
     message: { ...challenge("request-expired"), type: "controller_liveness_attestation_request_a" },

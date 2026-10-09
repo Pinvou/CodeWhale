@@ -170,9 +170,12 @@ test('same-claim terminal null lease clears live state and fences late events', 
         lease: phase === 'connected' ? fixtures.controllerConnected.lease : null };
       let state = logic.applyControllerStatus(logic.createState(), initial);
       if (phase === 'connected') {
-        state = logic.applyCapabilities(state, { ...fixtures.controllerConnected.lease, capabilityRevision: '1' });
         state = logic.applyRemoteProxyBinding(state, { ...fixtures.controllerConnected.lease,
-          localSessionId: 'remote-local', remoteSessionRef: 'remote-ref', sessionId: 'b-session' });
+          localSessionId: 'remote-local', remoteSessionRef: 'remote-ref', sessionId: 'b-session', mode: 'chat' });
+        state = logic.applyCapabilities(state, { ...fixtures.controllerConnected.lease,
+          remoteSessionRef: 'remote-ref', capabilityRevision: '1', modes: ['chat'] });
+        assert.ok(state.remoteCapabilities, 'terminal clearing must start from accepted capabilities');
+        assert.equal(state.remoteCapabilities.capabilityRevision, 1);
       }
       state = logic.applyControllerStatus(state, { ...fixtures.controllerError, status: terminal, lease: null });
       assert.equal(state.controllerConnection.status, terminal);
@@ -263,16 +266,28 @@ test('B old terminal and registering events cannot replace a refreshed generatio
 });
 
 test('same-epoch full lease tuple and capabilities cannot be substituted', () => {
-  const state = logic.applyControllerStatus(logic.createState(), fixtures.controllerConnected);
+  let state = logic.applyControllerStatus(logic.createState(), fixtures.controllerConnected);
+  state = logic.applyRemoteProxyBinding(state, { ...fixtures.controllerConnected.lease,
+    localSessionId: 'remote-local', remoteSessionRef: 'remote-ref', sessionId: 'b-session', mode: 'chat' });
+  state = logic.applyCapabilities(state, { ...fixtures.controllerConnected.lease,
+    remoteSessionRef: 'remote-ref', capabilityRevision: '1', modes: ['chat'] });
+  assert.ok(state.remoteCapabilities, 'lease substitution must start from accepted capabilities');
+  assert.equal(state.remoteCapabilities.capabilityRevision, 1);
   for (const key of ['controllerLeaseId', 'relayEpoch', 'remoteControlGeneration']) {
     assert.equal(logic.applyControllerStatus(state, { ...fixtures.controllerConnected, lease: { ...fixtures.controllerConnected.lease, [key]: 'foreign' } }), state);
-    assert.equal(logic.applyCapabilities(state, { ...fixtures.controllerConnected.lease, capabilityRevision: '1', [key]: 'foreign' }), state);
+    assert.equal(logic.applyCapabilities(state, { ...fixtures.controllerConnected.lease,
+      remoteSessionRef: 'remote-ref', capabilityRevision: '2', [key]: 'foreign' }), state);
   }
 });
 
 test('reconnect preserves durable task history and binding without exposing direct A task events', () => {
   let state = logic.applyControllerStatus(logic.createState(), fixtures.controllerConnected);
-  state = logic.applyCapabilities(state, { ...fixtures.controllerConnected.lease, capabilityRevision: '1' });
+  state = logic.applyRemoteProxyBinding(state, { ...fixtures.controllerConnected.lease,
+    localSessionId: 'remote-existing', remoteSessionRef: 'remote-ref', sessionId: 'b-session', mode: 'chat' });
+  state = logic.applyCapabilities(state, { ...fixtures.controllerConnected.lease,
+    remoteSessionRef: 'remote-ref', capabilityRevision: '1', modes: ['chat'] });
+  assert.ok(state.remoteCapabilities, 'reconnect preservation must start from accepted capabilities');
+  assert.equal(state.remoteCapabilities.capabilityRevision, 1);
   state = logic.projectRemoteProxyRead(state, {
     localSessionId: 'remote-existing', pendingUnknownCount: 0, unattemptedPending: [],
     entries: [{ journalEpoch: 'journal-1', sequence: 1, eventId: 'event-1',
