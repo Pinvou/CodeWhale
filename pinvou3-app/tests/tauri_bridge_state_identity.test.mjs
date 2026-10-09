@@ -116,8 +116,96 @@ assert.ok(Object.isFrozen(combinedSnapshots[2]), 'the rebuilt combined snapshot 
 assert.equal(combinedSnapshots[2].settings, combinedSnapshots[1].settings,
   'the unchanged settings slice must keep its identity inside the rebuilt combined snapshot');
 
+// 精确领域失效还必须跳过未变化领域的结构遍历，而不只是最终返回同一引用。
+// model 原始对象上的 getter 是确定性的遍历探针：models publication 会读取它；
+// 后续 monitor-only publication 仍调用 models 订阅回调，但应直接命中 models
+// slice 缓存，不能再次读取源对象。
+let modelProbeReads = 0;
+const modelWithTraversalProbe = { id: 'm2', name: 'Model Two' };
+Object.defineProperty(modelWithTraversalProbe, 'traversal_probe', {
+  enumerable: true,
+  get() {
+    modelProbeReads += 1;
+    return 'stable';
+  },
+});
+invokeResponse = async command => command === 'list_models'
+  ? { models: [modelWithTraversalProbe], active_model_id: 'm2' }
+  : {};
+await api.models.loadModels();
+assert.ok(modelProbeReads > 0, 'the models publication must materialize the models slice');
+// Drain unrelated fire-and-forget work started by earlier model APIs before
+// taking the traversal baseline for the monitor-only publication.
+for (let attempt = 0; attempt < 5; attempt += 1) {
+  await new Promise(resolve => setTimeout(resolve, 0));
+}
+const readsAfterModelsPublication = modelProbeReads;
+const combinedSnapshotBeforeMonitor = combinedSnapshots.at(-1);
+const combinedCallbackCountBeforeMonitor = combinedSnapshots.length;
+
+const monitorSnapshot = {
+  app: null,
+  cpu: null,
+  gpu: null,
+  ram: null,
+  self_perf: null,
+  vllm: null,
+};
+invokeResponse = async command => command === 'get_monitor_snapshot' ? monitorSnapshot : {};
+const monitorSnapshots = [];
+const unsubscribeMonitor = api.state.subscribe('monitor', snapshot => {
+  monitorSnapshots.push(snapshot);
+});
+api.monitor.startMonitorPolling();
+for (let attempt = 0; attempt < 20
+  && !monitorSnapshots.some(snapshot => snapshot.monitor?._fmt); attempt += 1) {
+  await new Promise(resolve => setTimeout(resolve, 0));
+}
+assert.ok(monitorSnapshots.some(snapshot => snapshot.monitor?._fmt),
+  'monitor polling must publish its first snapshot');
+assert.equal(combinedSnapshots.length, combinedCallbackCountBeforeMonitor + 1,
+  'precise invalidation must preserve the every-publication callback contract');
+assert.equal(combinedSnapshots.at(-1), combinedSnapshotBeforeMonitor,
+  'monitor-only publication must preserve the unrelated models snapshot identity');
+assert.equal(modelProbeReads, readsAfterModelsPublication,
+  'monitor-only publication must not traverse the unchanged models source');
+
+// Monitor owns the displayed snapshot, but a newly discovered context window
+// also updates chat.tokens.max. The precise publication must invalidate both
+// domains so the token progress denominator cannot become stale.
+const chatSnapshots = [];
+const unsubscribeChat = api.state.subscribe('chat', snapshot => {
+  chatSnapshots.push(snapshot);
+});
+const monitorWithContextLimit = {
+  ...monitorSnapshot,
+  vllm: {
+    configured_model: 'model-two',
+    health_status: 'verified',
+    max_model_len: 77777,
+    metrics_applicable: false,
+    model: 'model-two',
+    status: 'ready',
+    target_kind: 'local',
+  },
+};
+invokeResponse = async command => command === 'get_monitor_snapshot' ? monitorWithContextLimit : {};
+api.monitor.startMonitorPolling();
+for (let attempt = 0; attempt < 20
+  && !chatSnapshots.some(snapshot => snapshot.tokens?.max === 77777); attempt += 1) {
+  await new Promise(resolve => setTimeout(resolve, 0));
+}
+assert.ok(chatSnapshots.some(snapshot => snapshot.tokens?.max === 77777),
+  'monitor context discovery must invalidate the chat token slice');
+
+unsubscribeChat();
+unsubscribeMonitor();
+const combinedCountBeforeUnsubscribe = combinedSnapshots.length;
+const settingsCountBeforeUnsubscribe = settingsSnapshots.length;
 unsubscribeCombined();
 unsubscribeSettings();
 api.chat.prefillComposer('draft-3');
-assert.equal(combinedSnapshots.length, 3, 'unsubscribe must stop subscribeMany deliveries');
-assert.equal(settingsSnapshots.length, 3, 'unsubscribe must stop subscribe deliveries');
+assert.equal(combinedSnapshots.length, combinedCountBeforeUnsubscribe,
+  'unsubscribe must stop subscribeMany deliveries');
+assert.equal(settingsSnapshots.length, settingsCountBeforeUnsubscribe,
+  'unsubscribe must stop subscribe deliveries');
