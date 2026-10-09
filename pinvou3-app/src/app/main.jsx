@@ -4754,14 +4754,18 @@ const NAV_PREFETCH = {
                 </div>
                 <div className="min-h-0 flex-1">
                   {browserActive ? (
-                    <LazyBrowserView
-                      key={browserViewSessionId}
-                      theme={activeTheme}
-                      t={t}
-                      sessionId={browserViewSessionId}
-                      nativeSurfaceSuspended={browserSurfaceSuspended}
-                      ownershipSlot={browserOwnershipSlot}
-                    />
+                    <ViewErrorBoundary t={t}>
+                      <Suspense fallback={null}>
+                        <LazyBrowserView
+                          key={browserViewSessionId}
+                          theme={activeTheme}
+                          t={t}
+                          sessionId={browserViewSessionId}
+                          nativeSurfaceSuspended={browserSurfaceSuspended}
+                          ownershipSlot={browserOwnershipSlot}
+                        />
+                      </Suspense>
+                    </ViewErrorBoundary>
                   ) : (
                     <div
                       className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-[13px]"

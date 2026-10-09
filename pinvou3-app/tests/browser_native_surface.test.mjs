@@ -324,8 +324,15 @@ test('task switches discard stale status and mount a fresh BrowserView instance'
   assert.match(browserView, /st\?\.sessionId !== requestedSessionId/);
   assert.match(main, /lazy\(\(\) => VIEW_LOADERS\.browser\(\)/);
   assert.doesNotMatch(main, /import \{[^}]*BrowserView[^}]*\} from '\.\.\/features\/browser\/BrowserView\.jsx'/);
+  const allBrowserViews = main.match(/<LazyBrowserView\b/g) || [];
   const keyedBrowserViews = main.match(/<LazyBrowserView\s+[\s\S]{0,100}?key=\{browserViewSessionId\}/g) || [];
+  assert.equal(allBrowserViews.length, 2, 'only the compact and dock BrowserView mounts may exist');
   assert.equal(keyedBrowserViews.length, 2, 'compact and dock BrowserView instances must both be keyed by session');
+  assert.match(
+    main,
+    /\{browserActive \? \(\s*<ViewErrorBoundary t=\{t\}>\s*<Suspense fallback=\{null\}>\s*<LazyBrowserView/,
+    'dock BrowserView must isolate lazy chunk loading and failures from the app root',
+  );
 });
 
 test('user takeover is visible, recovers after idle, and supports immediate handoff', () => {
