@@ -493,6 +493,7 @@
   function switchActiveTo(id, opts) {
     // 离开草稿（无论物化还是切去既有会话），未消费的开关寄存意图作废。
     state.pendingDraftMultiAgent = false;
+    state.pendingDraftModelRef = null;
     // Set the new active before touching the old buffer: the LRU
     // eviction triggered by touch relies on activeSessionId as the
     // backstop protecting the target session; touching the old one first
@@ -564,6 +565,12 @@
     state.scheduledTaskPendingGuide = null; // 换了对话,未发送的定时任务引导词作废
     // 新草稿从关闭状态开始：寄存意图作废，开关行显示同步复位。
     state.pendingDraftMultiAgent = false;
+    state.pendingDraftModelRef = null;
+    state.currentSessionModelId = null;
+    state.currentSessionModelRef = null;
+    if (state.modeState && state.modeState.multiAgent) {
+      state.modeState = { mode: state.modeState.mode || "yolo", multiAgent: false };
+    }
     // The staged explicit mode of a bound draft is registered intent too and is
     // invalidated together with the draft.
     state.pendingDraftMode = null;
@@ -770,6 +777,8 @@
         // 草稿期开的多智能体开关此刻才落后端（开关本身不物化会话）。先取后
         // 清：switchActiveTo 会把寄存意图当作已消费。
         var pendingMultiAgent = state.pendingDraftMultiAgent === true;
+        var pendingModelRef = state.pendingDraftModelRef;
+        state.pendingDraftModelRef = null;
         state.pendingDraftMultiAgent = false;
         // The bound draft's staged explicit mode is read-then-cleared the
         // same way (an explicit switch during the await is user intent too).
@@ -784,6 +793,50 @@
         // 跟随迁移；这不是用户主动切换到另一个已有会话。
         state.composerDraft = composerDraft;
         sessionStates[meta.id].composerDraft = composerDraft;
+        if (pendingModelRef) {
+          try {
+            if (pendingModelRef.source === "ACCOUNT_PLATFORM") {
+              await invoke("account_platform_select_session_model", {
+                input: { sessionId: meta.id, modelId: pendingModelRef.model_id },
+              });
+            } else if (pendingModelRef.source === "LOCAL_CONFIG") {
+              await invoke("set_session_model", {
+                sessionId: meta.id,
+                modelId: pendingModelRef.saved_model_id,
+              });
+            } else {
+              throw new Error("unsupported model selection source");
+            }
+            if (state.activeSessionId === meta.id && navToken === sessionSwitchRequestToken) {
+              state.currentSessionModelRef = pendingModelRef;
+            }
+          } catch (modelError) {
+            try {
+              await invoke("delete_session", { id: meta.id });
+            } catch (cleanupError) {
+              // 空会话残留可手动删除，不掩盖模型选择失败。
+            }
+            draftOutcome.createdSessionId = null;
+            if (state.activeSessionId !== meta.id || navToken !== sessionSwitchRequestToken) return null;
+            var rollbackComposerDraft = state.composerDraft || "";
+            enterDraft();
+            state.composerDraft = rollbackComposerDraft;
+            state.pendingDraftModelRef = pendingModelRef;
+            state.pendingDraftMultiAgent = pendingMultiAgent;
+            draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
+            state.draftWorkspacePath = boundWorkspace;
+            state.pendingDraftMode = stagedDraftMode || null;
+            state.modeState = {
+              mode: stagedDraftMode || currentDraftModeState().mode,
+              multiAgent: pendingMultiAgent,
+            };
+            addSystemItem(bt("newChatFailed"));
+            await refreshHistoryList();
+            notify();
+            return null;
+          }
+        }
+        if (state.activeSessionId !== meta.id || navToken !== sessionSwitchRequestToken) return null;
         if (pendingMultiAgent) {
           try {
             await invoke("set_multi_agent_mode", { sessionId: meta.id, enabled: true });
@@ -803,6 +856,7 @@
             var rollbackComposerDraft = state.composerDraft || "";
             enterDraft();
             state.composerDraft = rollbackComposerDraft;
+            state.pendingDraftModelRef = pendingModelRef;
             // This rollback is still the same logical draft, not user navigation.
             draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
             // Restore the registered intent captured before the failure: the

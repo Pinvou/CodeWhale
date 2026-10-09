@@ -30,3 +30,14 @@ pinvou3-app/src-tauri/src/features/model_store/data/test-store/** text eol=lf
 # test_ci_gate_policy.py 等):core.autocrlf=true 的 Windows checkout 转成 CRLF 后
 # 正则失配、守卫空转,与上方钩子/Shell 脚本同理钉 LF。
 .github/workflows/*.yml text eol=lf
+
+# Keep account-platform text byte-identical on Windows and Unix hosts.
+account-platform/** text=auto eol=lf
+# These retained migrations already include a final blank line. Preserve their
+# installed checksum bytes; exempt only blank-at-eof, never other whitespace.
+account-platform/migrations/account/000050_admin_approval_control.down.sql whitespace=-blank-at-eof
+account-platform/migrations/billing/900002_payment_anomaly_resolution_intents.up.sql whitespace=-blank-at-eof
+# Portal HTML is a tracked build input; keep generated HTML identical across hosts.
+pinvou3-app/src/account.html text eol=lf
+pinvou3-app/src/admin.html text eol=lf
+pinvou3-app/src/portal-session-handoff.html text eol=lf

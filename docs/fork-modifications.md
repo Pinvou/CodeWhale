@@ -29,17 +29,20 @@
 - All shell-specific guidance now lives in named constants, including cmd, fish, and the shared fallback. A before/after comparison across 14 shell cases confirmed identical output after constant extraction.
 - Following the 40-call curl ablation, remove the tool-level curl alias reminder only. Preserve the other PowerShell guidance and application instructions used in that experiment; both arms achieved 19/20 correct executions with no shell mismatch errors.
 
-## 0. 当前状态（2026-10-02 · r3 收口后过渡期：tag `pinvou-v0.9.12-r3` 仍钉在其收口 `61cb769be`，登记头随 #80 前进至 `44921cf02`；r1 基线之上 35 个登记提交，过渡期语义由 Community PR #453/#482 接入）
+## 0. 当前状态（2026-10-05 · A04 本地补丁：登记头 `8b5a86390` 在公开维护头 `44921cf02` 上普通追加 1 个提交；r1 基线之上 36 个登记提交，公开推送与可达性门禁尚待完成）
+
+持续审核 CI 使用 `verify-public-submodule.sh --registered-snapshot` 核验本树登记 pin 的公开维护历史，不随维护分支日常前进自动升级底座。独立匿名临时仓库须证明固定标签祖先关系、pin 为维护头祖先和提交对象类型；未合入维护历史的公开候选仍拒绝。默认发布校验保留实时维护头相等要求，rN 闭合后任何模式均保留三方相等；该检查模式不改变本树登记 head、提交数、指纹或底座行为。
 
 | 项 | 当前值 |
 |---|---|
 | 上游基线 | tag `v0.9.12`，commit `dcd4c200f72f0c1ffd60d8e7f6850313db879fc5` |
-| 维护分支 | `pinvou3-clean` = `44921cf028f12ffed33beb4760621a8598de48fc`（r1 基线 `1fafee7e2` 之上 35 个 squash 合入：#41/#47/#49 与 2026-09-10/11 遗留 PR 清理批次 #31/#37/#38/#39/#43/#48/#50/#51/#52/#53、2026-09-17 批次 #56/#58/#59/#60/#61、2026-09-18 批次 #62/#57/#55、2026-09-20 批次 #66、2026-09-21 批次 #64/#67、2026-09-22/23 批次 #63/#65/#68/#69/#70/#71/#72/#73、收口追加 #77/#76（替换原 #74）与 2026-10-02 批次 #80） |
-| 发布状态 | r3 已收口（2026-09-23）：不可变 tag `pinvou-v0.9.12-r3` 切在合并头 `61cb769be`；2026-10-02 起 #80 使登记头领先 tag，进入过渡期，`scripts/verify-public-submodule.sh` 以 `TRANSITION_BASELINE` 断言 tag 仍钉在 `61cb769be` 且 gitlink = 维护分支头并领先 tag。r2 tag `pinvou-v0.9.12-r2` 仍钉在其收口 `6f780290f`（24 个提交）作为回退点；历史上父仓 gitlink 由 Official PR #1037 首次对齐，其后 #1141/#1209 与各批次 gitlink 对齐 PR 随批次前移，本次由 gitlink bump PR 随 CodeWhale#80 对齐。r3 tag 曾短暂钉在 `ba2a07768f`，在父仓引用前因 #77 Windows 编译修复重切至 `61cb769be`（同日完成，未被任何父仓提交引用） |
+| 登记维护快照 | `pinvou3-clean` 历史中的 `44921cf028f12ffed33beb4760621a8598de48fc`，不表示当前远端头（r1 基线 `1fafee7e2` 之上 35 个 squash 合入：#41/#47/#49 与 2026-09-10/11 遗留 PR 清理批次 #31/#37/#38/#39/#43/#48/#50/#51/#52/#53、2026-09-17 批次 #56/#58/#59/#60/#61、2026-09-18 批次 #62/#57/#55、2026-09-20 批次 #66、2026-09-21 批次 #64/#67、2026-09-22/23 批次 #63/#65/#68/#69/#70/#71/#72/#73、收口追加 #77/#76（替换原 #74）与 2026-10-02 批次 #80） |
+| 发布状态 | r3 已收口（2026-09-23）：不可变 tag `pinvou-v0.9.12-r3` 切在合并头 `61cb769be`；2026-10-02 起 #80 使登记头领先 tag，进入过渡期。2026-10-09 CI 显式使用 `--registered-snapshot` 验证精确登记 gitlink 的匿名公开可达性、固定 tag → pin → 维护分支祖先链，维护分支前进不升级冻结运行时；默认发布检查仍要求 gitlink = 维护分支头，rN 收口恢复三方严格相等。r2 tag `pinvou-v0.9.12-r2` 仍钉在其收口 `6f780290f`（24 个提交）作为回退点；历史上父仓 gitlink 由 Official PR #1037 首次对齐，其后 #1141/#1209 与各批次 gitlink 对齐 PR 随批次前移，本次由 gitlink bump PR 随 CodeWhale#80 对齐。r3 tag 曾短暂钉在 `ba2a07768f`，在父仓引用前因 #77 Windows 编译修复重切至 `61cb769be`（同日完成，未被任何父仓提交引用） |
+| 本地登记头 | `8b5a863908bf4178a8c5876c11c5884919119615`，唯一父提交为 `44921cf028f12ffed33beb4760621a8598de48fc`；A04 模型逻辑调用幂等补丁经独立源码、暂存及固定提交审核，普通追加，未推送。公开维护分支和不可变 tag 不变；`verify-public-submodule.sh` 的公开可达性门禁尚未通过，不能由本地 `fork-guard.sh --fast` 代替 |
 | 升级前回退点 | 公开不可变 tag `pinvou-v0.9.5-r13` → `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 `backup/pre-v0.9.12-sync` 仅作便利引用 |
-| 历史组织 | 上游之上 50 个带 DCO sign-off 的提交，归属 4 个长期主题（T1–T4）+ 3 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理、T8 roster 宿主 profiles 呈现，即 Pinvou/CodeWhale#65 提交主题里的 T7，按 #365 先例在父仓登记时重编号）+ 1 个已合入维护分支的主题（T7 压缩检查点角色兼容）；r1 之后 35 个提交全部经 PR squash 合入并过必需门禁。T8 主题经 Pinvou/CodeWhale#65 落位：原以五个提交随父仓蜂群二期 PR 走保持提交合入以保全钉定 SHA，实际经 squash 合入（`c5fadb86d`）——登记随之改为钉定公开维护分支头（现 `44921cf02`），不再钉定合入前的波次 SHA（详见第 13 节教训登记） |
-| drift | `231 files, +29286/-5364`，净增 23922 行（实测于 `44921cf02` vs 上游 `dcd4c200f`）；r3 收口点 `61cb769be` 为 `229 files, +29272/-5352`（净增 23920），r2 为 `190 files, +19135/-2628`（净增 16507），旧 r13 为 `110 files, +10895/-1195` |
-| 守护 | 141 条独立 CodeWhale `forkguard_*` 行为名（guard 下限 64）+ 父仓指纹与行为测试 |
+| 历史组织 | 上游之上 51 个带 DCO sign-off 的提交，归属 4 个长期主题（T1–T4）+ 3 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理、T8 roster 宿主 profiles 呈现，即 Pinvou/CodeWhale#65 提交主题里的 T7，按 #365 先例在父仓登记时重编号）+ 1 个已合入维护分支的主题（T7 压缩检查点角色兼容）；r1 之后原有 35 个提交经 PR squash 合入并过必需门禁；本次第 36 个为保留原历史的本地普通签署提交，尚未外部发布。T8 主题经 Pinvou/CodeWhale#65 落位：原以五个提交随父仓蜂群二期 PR 走保持提交合入以保全钉定 SHA，实际经 squash 合入（`c5fadb86d`）——登记随之改为钉定公开维护分支头（现 `44921cf02`），不再钉定合入前的波次 SHA（详见第 13 节教训登记） |
+| drift | 当前 `237 files, +37917/-13114`，净增 24803 行（`git diff --no-renames --shortstat dcd4c200f 8b5a86390`）；本补丁相对唯一父提交仅 `15 files, +941/-60`，净增 881 行，累计统计与本波增量分开。原公开头 `44921cf02` 为 `231 files, +29286/-5364`，净增 23922 行；r3 收口点 `61cb769be` 为 `229 files, +29272/-5352`（净增 23920），r2 为 `190 files, +19135/-2628`（净增 16507），旧 r13 为 `110 files, +10895/-1195` |
+| 守护 | 149 条独立 CodeWhale `forkguard_*` 行为名（guard 下限 64）+ 父仓指纹与行为测试 |
 | 父仓适配 | v0.9.12 EngineConfig、Agent/Plan 模式、逐轮 reasoning/安全、ExtraTools、owner 事件隔离、Automation v3/v4 数据兼容、rusqlite 0.40.2、Shell 任务来源对账；消费方 PR #396（execpolicy）、#408（轮次取消）、#444（蜂群）、#468（computer-use）、#472（一键导出）依赖本批底座能力 |
 
 ### 轮次绑定取消：宿主 stop 按轮身份分派（父仓适配，本 PR）
@@ -138,6 +141,10 @@
 ### 保留内容
 
 - 对宿主公开 `AppMode`、`ApprovalMode`、Automation、Task、route 和 worker ledger API。当前兼容 facade 还包含 18 个 `pub mod`，父仓全部 Rust 源码中有 61 个文件、340 处直接引用；这些模块作为不稳定下游兼容桥刻意不进入生成 API 文档。这是已登记的收窄债务，不在本次热修中做破坏性改名。
+- A04 本地固定补丁 `8b5a86390`：模型逻辑调用幂等属于 T1 的执行期边界。宿主仅在账户 Gateway 路由的 `Config.request_idempotency_header` 显式启用 `Idempotency-Key`；字段不接受配置文件输入，普通模型保持原 HTTP 行为。`ModelClient` 与 `LlmClient` 的 operation-aware 默认方法兼容既有实现，具体 transport 按每个逻辑调用发送随机 UUID，而不是按 session、prompt 或静态 header 生成键。HTTP 重试、HTTP/1.1 后备及引擎内外层相同发送事实的流恢复复用该 ID；实际 prepared wire body、endpoint 或 provider 改变，或完整模型响应已经被接受后再继续推理、执行工具后跟进，均形成新模型调用和新 ID。新用户提交相同 prompt 也产生新 ID。Gateway 仍拒绝同键不同付款事实，不放宽其 fingerprint。此标识仅在 transport 生命周期内，不写入模型消息、session 历史、日志或 pinned prompt，KV-cache 前缀不变。回退是清除宿主 opt-in；原 `44921cf02` 历史完整保留为唯一父提交，独立固定提交审核通过后父仓登记 gitlink；尚未推送，不声称公开可达性通过。当前结果式回归名为 `forkguard_model_operation_http_retry_and_new_calls`、`forkguard_model_operation_opt_in_and_wire_identity`、`forkguard_model_operation_inner_and_outer_stream_retries`、`forkguard_model_operation_tool_followup_gets_new_id`；真实账户业务验收由父仓执行，loopback transport 与受控 Engine 回归不冒称模型或银行验收。通用接口可上游化，账户产品路由选择仍留在父仓。
+- A04 调用幂等的额外生产边界由 `forkguard_model_operation_http1_stream_keeps_id`、`forkguard_model_operation_child_retries_keep_id`、`forkguard_model_operation_vision_http_retry_keeps_id` 覆盖：子代理每个模型 round 的 timeout/transient 外层重试复用调用 ID，`image_analyze` 的独立 HTTP 重试从冻结路由 opt-in 传递同一调用 ID。不同工具调用或后继模型 round 仍分别生成新 ID；这些 loopback HTTP 回归不包含真实模型验收。
+- `forkguard_model_operation_preserved_partial_changes_call` 经真实引擎流恢复验证：交互模式已保留部分 assistant 输出并改变后续请求正文时，后续发送必须采用新的调用 ID。未产生内容且发送事实未变的恢复仍复用原 ID；不通过放宽 Gateway 指纹掩盖正文变化。
+- 显式启用调用幂等的路由绕过进程内非流式 response cache，避免同正文缓存跳过新调用或付款上下文的 Gateway 派发；普通模型保留既有确定性请求缓存。相同 HTTP 回归以 `temperature=0` 验证账户每次新调用实际发出不同 ID，同时普通路由的重复确定性请求仍命中本地缓存。
 - `resolve_runtime_route_with_limits` 保留 wire model、context/output 上限与 embedding alias。
 - `EngineConfig.session_id` 在 Engine spawn 前绑定，所有子智能体/工作流事件带 owner session 并由宿主按 owner 过滤。
 - `EngineHandle::steer` 返回 opaque id；`withdraw_steer` 区分已撤回与非 pending；中断、停止、压缩、换会话和 Engine drop 都使每个 id 恰好进入 committed/dropped 终态。
@@ -335,3 +342,7 @@
 - 发布过程中只为精确 head 的受保护分支更新临时移除无法在该维护分支触发的 required status contexts，完成快进后立即恢复原保护配置；未关闭 force-push 防护，也未重写已发布 tag。
 - 教训登记（2026-09-23）：#65 原计划随父仓蜂群二期 PR 保持提交落位合入（不 squash），实际经 squash 合入——曾钉定的波次头 `4767c2816` 自公共 refs 悬空、fast-gate 可达性校验红，蜂群二期分支当日重钉到维护分支头恢复 gitlink=公开分支头相等。后续底座合入一律在合入后立即把 gitlink 重钉到公开分支头，不得钉定合入前的波次 SHA；r3 收口已恢复三方相等，公开可达性继续以 `scripts/verify-public-submodule.sh` 验证。
 - 后续发布仍不得降低公开校验或把本地 object 当成发布成功。
+
+### F05 成熟调用身份的宿主承接
+
+本功能沿用已固定 `8b5a863908bf4178a8c5876c11c5884919119615` 的逐调用身份，不新增底座协议。账户运行时凭据向真实 `DtConfig.request_idempotency_header` 传递 `Idempotency-Key`；本地模型代理读取并原样转发底座的单次调用 ID，缺失或重复字段拒绝，不能按用户轮次和正文生成替代身份。同一用户轮次的不同模型调用各有身份，轮次统计的 `X-Pinvou-Logical-Turn-ID` 仍是独立分组字段。普通自配模型不启用该标记。该底座历史证据继承不等于新宿主或真实供应商验收通过。

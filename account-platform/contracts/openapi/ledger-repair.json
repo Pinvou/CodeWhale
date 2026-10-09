@@ -1,0 +1,353 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ledger attribution repair owner precheck",
+    "version": "1"
+  },
+  "paths": {
+    "/admin/v2/approval-command-prechecks": {
+      "post": {
+        "operationId": "accountLedgerPrecheck",
+        "description": "current Account actor + platform.billing.repairs.request; read-only closed unique-key JSON; 65536-byte bound and existing 2-second transport deadline. No claim, approval or effect.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Closed owner frozen projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrecheckProjection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid closed facts"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Authority refused"
+          },
+          "503": {
+            "description": "Owner unavailable; INACTIVE permits read-only precheck preparation"
+          },
+          "422": {
+            "description": "Closed owner projection unavailable for selected facts"
+          },
+          "504": {
+            "description": "Existing read-only precheck deadline expired"
+          }
+        }
+      }
+    },
+    "/internal/v1/approval-command-prechecks": {
+      "post": {
+        "operationId": "billingLedgerPrecheck",
+        "description": "Account workload + internal.billing.approval-proof.read; read-only closed unique-key JSON; 65536-byte bound and existing 2-second transport deadline. No claim, approval or effect.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Closed owner frozen projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrecheckProjection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid closed facts"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Authority refused"
+          },
+          "503": {
+            "description": "Owner unavailable; INACTIVE permits read-only precheck preparation"
+          },
+          "422": {
+            "description": "Closed owner projection unavailable for selected facts"
+          },
+          "504": {
+            "description": "Existing read-only precheck deadline expired"
+          }
+        }
+      }
+    },
+    "/api/admin/account/admin/v2/approval-command-prechecks": {
+      "post": {
+        "operationId": "portalLedgerPrecheck",
+        "description": "current OIDC session + CSRF, forwards Account actor only; read-only closed unique-key JSON; 65536-byte bound and existing 2-second transport deadline. No claim, approval or effect.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Closed owner frozen projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrecheckProjection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid closed facts"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Authority refused"
+          },
+          "503": {
+            "description": "Owner unavailable; INACTIVE permits read-only precheck preparation"
+          },
+          "422": {
+            "description": "Closed owner projection unavailable for selected facts"
+          },
+          "504": {
+            "description": "Existing read-only precheck deadline expired"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PrecheckRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_type",
+          "target_resource_id",
+          "target_journal_entry_id",
+          "wrong_ledger_account_id",
+          "correct_ledger_account_id",
+          "amount_microcredits",
+          "reason_code"
+        ],
+        "properties": {
+          "command_type": {
+            "const": "LEDGER_REPAIR"
+          },
+          "target_resource_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target_journal_entry_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wrong_ledger_account_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "correct_ledger_account_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "amount_microcredits": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "reason_code": {
+            "type": "string",
+            "const": "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT"
+          }
+        }
+      },
+      "NormalizedCommand": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_posting_id",
+          "target_journal_entry_id",
+          "wrong_ledger_account_id",
+          "correct_ledger_account_id",
+          "amount_microcredits",
+          "reason_code"
+        ],
+        "properties": {
+          "target_posting_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target_journal_entry_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wrong_ledger_account_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "correct_ledger_account_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "amount_microcredits": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "reason_code": {
+            "type": "string",
+            "const": "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT"
+          }
+        }
+      },
+      "CriticalResourceVersions": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_journal_entry_id",
+          "target_posting_id",
+          "posting_set_digest",
+          "entry_type",
+          "policy_version"
+        ],
+        "properties": {
+          "target_journal_entry_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target_posting_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "posting_set_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "entry_type": {
+            "type": "string",
+            "enum": [
+              "RECHARGE",
+              "USAGE",
+              "ADJUSTMENT",
+              "REFUND",
+              "EXPIRY",
+              "CHARGEBACK",
+              "REPAIR_CREDIT",
+              "FORCED_REFUND"
+            ]
+          },
+          "policy_version": {
+            "const": 1
+          }
+        }
+      },
+      "FinancialSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "amount_microcredits",
+          "wrong_ledger_account_id",
+          "correct_ledger_account_id",
+          "wrong_account_type",
+          "correct_account_type",
+          "wallet_id"
+        ],
+        "properties": {
+          "amount_microcredits": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "wrong_ledger_account_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "correct_ledger_account_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wrong_account_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "correct_account_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "wallet_id": {
+            "type": "null"
+          }
+        }
+      },
+      "PrecheckProjection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_type",
+          "policy_version",
+          "snapshot_schema_version",
+          "target_resource_type",
+          "target_resource_id",
+          "normalized_command",
+          "critical_resource_versions",
+          "financial_snapshot"
+        ],
+        "properties": {
+          "command_type": {
+            "const": "LEDGER_REPAIR"
+          },
+          "policy_version": {
+            "const": 1
+          },
+          "snapshot_schema_version": {
+            "const": 1
+          },
+          "target_resource_type": {
+            "const": "LEDGER_POSTING"
+          },
+          "target_resource_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "normalized_command": {
+            "$ref": "#/components/schemas/NormalizedCommand"
+          },
+          "critical_resource_versions": {
+            "$ref": "#/components/schemas/CriticalResourceVersions"
+          },
+          "financial_snapshot": {
+            "$ref": "#/components/schemas/FinancialSnapshot"
+          }
+        }
+      }
+    }
+  }
+}

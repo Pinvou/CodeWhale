@@ -1,0 +1,430 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Current ordinary organization member unit assignments",
+    "version": "F06",
+    "description": "Finite new PUT contract and optional unit_ids additions to existing AdminAdd/Invitation inputs. Omission preserves their prior behavior, explicit [] means unscoped. No role scope is inferred from attachment scope."
+  },
+  "paths": {
+    "/v1/organizations/{organization_id}/members/{user_id}/units": {
+      "put": {
+        "operationId": "account_replaceMemberUnits",
+        "x-service": "account",
+        "x-go-handler": "replaceMemberUnits",
+        "x-permission": "org.members.manage",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "description": "Subject/session identity and current ALL old/new unit authority required. Current membership CAS and actor/org/target/facts-bound immutable receipt. Exact replay returns current member projection without another mutation. Unknown lifecycle ACK is 503; retry the same key/body, never infer effect from response absence.",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Canonical nonzero UUID."
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Canonical nonzero UUID."
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Explicit durable key, 8..120 visible characters. Required unless the same contract key is supplied in idempotency_key. Preserve it on unknown ACK.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 120
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "unit_ids",
+                  "expected_version"
+                ],
+                "properties": {
+                  "unit_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid",
+                      "description": "Canonical nonzero UUID."
+                    },
+                    "description": "Explicit ordinary member attachment units; [] means unscoped. Distinct from role unit_admin_unit_ids."
+                  },
+                  "expected_version": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 1
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 120
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current owned membership after committed mutation or verified replay; Cache-Control: no-store. Replayed may reflect a later current version/scope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "organization_id",
+                    "member",
+                    "replayed"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "organization_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "description": "Canonical nonzero UUID."
+                    },
+                    "member": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "required": [
+                        "user_id",
+                        "membership_id",
+                        "status",
+                        "version",
+                        "roles",
+                        "unit_ids"
+                      ],
+                      "properties": {
+                        "user_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "description": "Canonical nonzero UUID."
+                        },
+                        "membership_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "description": "Canonical nonzero UUID."
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "ACTIVE",
+                            "DISABLED",
+                            "REVOKED"
+                          ]
+                        },
+                        "version": {
+                          "type": "integer",
+                          "format": "int64",
+                          "minimum": 1
+                        },
+                        "roles": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "unit_ids": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Canonical nonzero UUID."
+                          }
+                        },
+                        "unit_admin_unit_ids": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Canonical nonzero UUID."
+                          }
+                        },
+                        "display_name": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      }
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed/missing explicit fields or key."
+          },
+          "401": {
+            "description": "Authentication required."
+          },
+          "403": {
+            "description": "Current authority does not cover the entire original/new scope."
+          },
+          "409": {
+            "description": "Membership CAS or idempotency facts conflict."
+          },
+          "503": {
+            "description": "Unavailable or locally committed member projection ACK unknown; retry identical invocation."
+          },
+          "default": {
+            "description": "Existing stable error contract; no success inference."
+          }
+        }
+      }
+    },
+    "/admin/v1/organizations/{organization_id}/members/{user_id}/units": {
+      "put": {
+        "operationId": "account_adminReplaceMemberUnits",
+        "x-service": "account",
+        "x-go-handler": "adminReplaceMemberUnits",
+        "x-permission": "platform.organizations.members.manage",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "description": "Subject/session identity and current ALL old/new unit authority required. Current membership CAS and actor/org/target/facts-bound immutable receipt. Exact replay returns current member projection without another mutation. Unknown lifecycle ACK is 503; retry the same key/body, never infer effect from response absence.",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Canonical nonzero UUID."
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Canonical nonzero UUID."
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Explicit durable key, 8..120 visible characters. Required unless the same contract key is supplied in idempotency_key. Preserve it on unknown ACK.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 120
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "unit_ids",
+                  "expected_version"
+                ],
+                "properties": {
+                  "unit_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid",
+                      "description": "Canonical nonzero UUID."
+                    },
+                    "description": "Explicit ordinary member attachment units; [] means unscoped. Distinct from role unit_admin_unit_ids."
+                  },
+                  "expected_version": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 1
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 120
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current owned membership after committed mutation or verified replay; Cache-Control: no-store. Replayed may reflect a later current version/scope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "organization_id",
+                    "member",
+                    "replayed"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "organization_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "description": "Canonical nonzero UUID."
+                    },
+                    "member": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "required": [
+                        "user_id",
+                        "membership_id",
+                        "status",
+                        "version",
+                        "roles",
+                        "unit_ids"
+                      ],
+                      "properties": {
+                        "user_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "description": "Canonical nonzero UUID."
+                        },
+                        "membership_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "description": "Canonical nonzero UUID."
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "ACTIVE",
+                            "DISABLED",
+                            "REVOKED"
+                          ]
+                        },
+                        "version": {
+                          "type": "integer",
+                          "format": "int64",
+                          "minimum": 1
+                        },
+                        "roles": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "unit_ids": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Canonical nonzero UUID."
+                          }
+                        },
+                        "unit_admin_unit_ids": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Canonical nonzero UUID."
+                          }
+                        },
+                        "display_name": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      }
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed/missing explicit fields or key."
+          },
+          "401": {
+            "description": "Authentication required."
+          },
+          "403": {
+            "description": "Current authority does not cover the entire original/new scope."
+          },
+          "409": {
+            "description": "Membership CAS or idempotency facts conflict."
+          },
+          "503": {
+            "description": "Unavailable or locally committed member projection ACK unknown; retry identical invocation."
+          },
+          "default": {
+            "description": "Existing stable error contract; no success inference."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "UserBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "x-existing-input-additions": {
+    "adminAddMember": {
+      "unit_ids": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Canonical nonzero UUID."
+        },
+        "description": "Optional explicit initial units for new/reactivated membership. Existing ACTIVE membership is not silently moved."
+      }
+    },
+    "createInvitation": {
+      "unit_ids": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Canonical nonzero UUID."
+        },
+        "description": "Optional frozen ordinary attachment facts. Accept rechecks current inviter authority and current units. Non-MEMBER grants additionally require current organization-wide roles.assign."
+      }
+    }
+  }
+}

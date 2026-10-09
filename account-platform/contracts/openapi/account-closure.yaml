@@ -1,0 +1,156 @@
+openapi: 3.1.0
+info:
+  title: Pinvou Account Closure API
+  version: 0.1.0
+security:
+  - oidc: []
+paths:
+  /v1/me/account-closure-request:
+    get:
+      operationId: getMyAccountClosure
+      summary: Get the current durable account-closure state and user-actionable blockers
+      responses:
+        "200":
+          description: Redacted account-closure progress
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountClosure" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/me/account-closure-requests:
+    post:
+      operationId: createMyAccountClosure
+      summary: Request account closure after recent authentication and exact explicit confirmation
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [confirmation]
+              properties:
+                confirmation: { type: string, const: CLOSE_MY_ACCOUNT }
+      responses:
+        "202":
+          description: Durable closure requested; local role blockers may keep the user active until handoff is possible
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountClosure" }
+        "401":
+          description: Recent authentication is missing or older than five minutes; stable code RECENT_AUTHENTICATION_REQUIRED
+          content: { application/json: { schema: { type: object, required: [code, message], properties: { code: {type: string}, message: {type: string}, request_id: {type: string} } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /admin/v1/account-closure-requests:
+    get:
+      operationId: listAccountClosureRepairQueue
+      summary: List redacted non-completed account-closure stages and blockers
+      description: Requires platform.account-closures.read. Domain resource identifiers remain restricted to administrators.
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /admin/v1/account-closure-requests/{closure_request_id}/actions/retry:
+    post:
+      operationId: retryAccountClosureStage
+      summary: Retry the current forward-only stage without bypassing any blocker
+      parameters:
+        - name: closure_request_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        "200": { description: Retry accepted and current stage returned }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://identity.example.invalid/realms/pinvou/.well-known/openid-configuration
+  schemas:
+    AccountClosureBlocker:
+      type: object
+      additionalProperties: false
+      required: [code, domain, resource_type]
+      properties:
+        code: { type: string }
+        domain: { type: string, enum: [ACCOUNT, BILLING, TOKEN] }
+        resource_type: { type: string }
+        user_action: { type: string }
+    AccountClosure:
+      type: object
+      additionalProperties: false
+      required: [closure_request_id, status, stage, policy_version, blockers, attempts, reauthenticated_at, sla_expires_at, version, created_at, updated_at, replayed]
+      properties:
+        closure_request_id: { type: string, format: uuid }
+        status: { type: string, enum: [IN_PROGRESS, BLOCKED, RETRY, REPAIR_REQUIRED, COMPLETED] }
+        stage: { type: string, enum: [CLOSURE_REQUESTED, QUIESCING, FINANCIAL_CLEARANCE, IDENTITY_CLEANUP, ANONYMIZED, COMPLETED] }
+        policy_version: { type: integer, minimum: 1 }
+        blockers:
+          type: array
+          items: { $ref: "#/components/schemas/AccountClosureBlocker" }
+        attempts: { type: integer, minimum: 0 }
+        last_error_code: { type: string }
+        next_attempt_at: { type: string, format: date-time }
+        reauthenticated_at: { type: string, format: date-time }
+        sla_expires_at: { type: string, format: date-time }
+        version: { type: integer, format: int64, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+        replayed: { type: boolean }
+  responses:
+    Collection:
+      description: A bounded collection ordered by recent activity
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                maxItems: 200
+                items:
+                  type: object
+                  additionalProperties: true
+    Error:
+      description: JSON API error
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [code, message]
+            properties:
+              code: { type: string }
+              message: { type: string }
+              request_id: { type: string }
+              details:
+                type: object
+                additionalProperties: true

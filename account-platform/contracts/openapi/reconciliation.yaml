@@ -1,0 +1,166 @@
+openapi: 3.1.0
+info:
+  title: Billing four-way reconciliation
+  version: 1.1.0
+  description: Draft contract revision adds dedicated financial permissions and nullable completed_at for unfinished list entries. Clients must accept null on RUNNING or FAILED batches. Synchronous success still requires COMPLETED.
+paths:
+  /admin/v1/reconciliation-runs:
+    get:
+      x-permission: platform.billing.reconciliation.read
+      responses: {'200': {description: Snapshot page, content: {application/json: {schema: {$ref: '#/components/schemas/RunPage'}}}}}
+    post:
+      x-permission: platform.billing.reconciliation.run
+      x-command-type: BILLING_RECONCILIATION_RUN
+      x-command-policy-version: 2
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunRequest'}}}}
+      responses:
+        '200': {description: Completed actual provider bill run, content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}
+        '503': {description: Durable run outcome requires refreshing batches; no completed success is asserted, content: {application/json: {schema: {$ref: '#/components/schemas/UnknownRunError'}}}}
+  /admin/v1/reconciliation-imports:
+    post:
+      x-permission: platform.billing.reconciliation.run
+      x-command-type: BILLING_PROVIDER_BILL_IMPORT
+      x-max-request-bytes: 67108864
+      x-command-policy-version: 2
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ImportRequest'}}}}
+      responses:
+        '201': {description: Completed import or identical provider/date/digest replay, content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}
+        '413': {description: Request exceeds the dedicated 64 MiB import limit}
+        '503': {description: Durable run outcome requires refreshing batches; retry identical facts to resume, content: {application/json: {schema: {$ref: '#/components/schemas/UnknownRunError'}}}}
+  /admin/v1/reconciliation-cases:
+    get:
+      x-permission: platform.billing.reconciliation.read
+      responses: {'200': {description: Snapshot page, content: {application/json: {schema: {$ref: '#/components/schemas/CasePage'}}}}}
+  /admin/v1/reconciliation-runs/{run_id}/cases:
+    parameters: [{name: run_id, in: path, required: true, schema: {type: string, format: uuid}}]
+    get:
+      x-permission: platform.billing.reconciliation.read
+      responses: {'200': {description: Cases scoped to actual run, content: {application/json: {schema: {$ref: '#/components/schemas/CasePage'}}}}}
+  /admin/v1/reconciliation-cases/{case_id}/commands:
+    parameters: [{name: case_id, in: path, required: true, schema: {type: string, format: uuid}}]
+    post:
+      x-permission: platform.billing.reconciliation.manage
+      x-command-type: BILLING_RECONCILIATION_CASE_UPDATE
+      x-command-policy-version: 2
+      parameters: [{name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8, maxLength: 120}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CaseCommand'}}}}
+      responses: {'200': {description: Frozen invocation receipt for exact actor and facts, content: {application/json: {schema: {$ref: '#/components/schemas/Case'}}}}}
+  /internal/v1/reconciliation/runs:
+    post:
+      x-permission: internal.billing.reconciliation.run
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunRequest'}}}}
+      responses:
+        '200': {description: Completed actual provider bill run, content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}
+        '503': {description: Durable run outcome requires refreshing batches; no completed success is asserted, content: {application/json: {schema: {$ref: '#/components/schemas/UnknownRunError'}}}}
+components:
+  schemas:
+    UnknownRunError:
+      type: object
+      required: [code]
+      properties:
+        code: {type: string, const: COMMAND_RESULT_UNKNOWN}
+        message: {type: string}
+        request_id: {type: string}
+        details:
+          type: object
+          properties:
+            reconciliation_run_id: {type: string, format: uuid}
+    RunRequest:
+      type: object
+      additionalProperties: false
+      required: [channel, business_date]
+      properties:
+        channel: {type: string, enum: [WECHAT, ALIPAY, UNIONPAY]}
+        business_date: {type: string, format: date}
+    ImportRequest:
+      type: object
+      additionalProperties: false
+      required: [channel, business_date, items]
+      properties:
+        channel: {type: string, enum: [WECHAT, ALIPAY, UNIONPAY]}
+        business_date: {type: string, format: date}
+        items: {type: array, maxItems: 100000, items: {$ref: '#/components/schemas/BillEntry'}}
+    BillEntry:
+      type: object
+      additionalProperties: false
+      required: [merchant_order_no, channel_transaction_id, channel, amount_fen, currency, status, paid_at]
+      properties:
+        entry_type: {type: string, enum: [PAYMENT, REFUND, CHARGEBACK]}
+        provider_reference_id: {type: string, maxLength: 256, x-max-utf8-bytes: 256}
+        merchant_order_no: {type: string, minLength: 1, maxLength: 256, x-max-utf8-bytes: 256}
+        channel_transaction_id: {type: string, maxLength: 256, x-max-utf8-bytes: 256}
+        channel: {type: string, enum: [WECHAT, ALIPAY, UNIONPAY]}
+        amount_fen: {type: integer, minimum: 1, maximum: 9223372036854775807}
+        currency: {type: string, minLength: 1, maxLength: 16, x-max-utf8-bytes: 16}
+        status: {type: string, maxLength: 64, x-max-utf8-bytes: 64}
+        paid_at: {type: string, format: date-time}
+    Run:
+      type: object
+      additionalProperties: false
+      required: [reconciliation_run_id, provider_id, provider_version, channel, business_date, source_mode, status, provider_row_count, case_count, started_at, completed_at]
+      properties:
+        reconciliation_run_id: {type: string, format: uuid}
+        provider_id: {type: string}
+        provider_version: {type: string}
+        channel: {type: string}
+        business_date: {type: string, format: date}
+        source_mode: {type: string, enum: [MANUAL_API, SCHEDULED_API, FILE_IMPORT]}
+        requested_by: {type: string, format: uuid}
+        input_digest: {type: string, pattern: '^[0-9a-f]{64}$'}
+        status: {type: string, enum: [RUNNING, COMPLETED, FAILED]}
+        provider_row_count: {type: integer, minimum: 0}
+        case_count: {type: integer, minimum: 0}
+        started_at: {type: string, format: date-time}
+        completed_at: {type: [string, 'null'], format: date-time}
+    CaseCommand:
+      type: object
+      additionalProperties: false
+      required: [action, reason]
+      properties:
+        action: {type: string, enum: [CLAIM, ASSIGN, SET_REPAIR_ACTION, RESOLVE, IGNORE, REOPEN]}
+        reason: {type: string, minLength: 10}
+        owner_id: {type: [string, 'null'], format: uuid}
+        repair_action: {type: string}
+        review_result: {type: string}
+    Case:
+      type: object
+      additionalProperties: false
+      required: [case_id, reconciliation_run_id, merchant_order_no, case_type, status, severity, created_at, updated_at, version]
+      properties:
+        case_id: {type: string, format: uuid}
+        reconciliation_run_id: {type: string, format: uuid}
+        payment_order_id: {type: string, format: uuid}
+        merchant_order_no: {type: string}
+        case_type:
+          type: string
+          description: REFUND_DATE_UNVERIFIED and CHARGEBACK_DATE_UNVERIFIED request manual occurrence-date verification when trusted supplier date evidence is absent; they do not assert missing funds or trigger financial disposal.
+        status: {type: string, enum: [OPEN, IN_REVIEW, RESOLVED, IGNORED]}
+        severity: {type: string, enum: [P0, P1, P2]}
+        owner_id: {type: string, format: uuid}
+        repair_action: {type: string}
+        review_result: {type: string}
+        provider_snapshot: {type: object, description: Actual stored facts; known money fields are recursively projected as exact decimal strings.}
+        internal_snapshot: {type: object}
+        refund_snapshot: {type: object}
+        ledger_snapshot: {type: [object, array]}
+        resolution: {type: string}
+        created_at: {type: string, format: date-time}
+        resolved_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        version: {type: integer, minimum: 1}
+    RunPage:
+      type: object
+      additionalProperties: false
+      required: [items, snapshot_as_of]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Run'}}
+        next_cursor: {type: string}
+        snapshot_as_of: {type: string, format: date-time}
+    CasePage:
+      type: object
+      additionalProperties: false
+      required: [items, snapshot_as_of]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Case'}}
+        next_cursor: {type: string}
+        snapshot_as_of: {type: string, format: date-time}
