@@ -14,6 +14,15 @@ fn grep_description_matches_default_exclusion_behavior() {
 
     assert!(description.contains("skips common non-code directories"));
     assert!(!description.contains("respects `.gitignore`"));
+    // Every disclosure sentence below was added with the `truncated` fix;
+    // dropping any of them would re-hide the behavior it names.
+    assert!(description.contains("when the cap is reached `truncated` is true"));
+    assert!(
+        description
+            .contains("Files over 10MB and files containing invalid UTF-8 are skipped silently")
+    );
+    assert!(description.contains("after 30s"));
+    assert!(description.contains("replaces that default list entirely"));
 }
 
 /// Representative of the ~150 shared `optional_*` call sites outside the
@@ -375,6 +384,32 @@ async fn test_grep_files_streaming_stops_at_max_results() {
         json!(["needle 6", "needle 7"]),
         "last match must keep after-context lines"
     );
+    // The walk stopped at the cap, so the caller must see the
+    // truncation signal.
+    assert_eq!(parsed["truncated"], json!(true));
+    // Pin the walk-stop itself: the budget filled inside the first file,
+    // so the second file must never be visited (removing the Stop would
+    // change only this counter).
+    assert_eq!(parsed["files_searched"].as_u64().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_grep_files_truncated_false_below_cap() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+    fs::write(tmp.path().join("a.txt"), "needle once\n").expect("write");
+
+    let tool = GrepFilesTool;
+    let result = tool
+        .execute(json!({"pattern": "needle", "max_results": 100}), &ctx)
+        .await
+        .expect("execute");
+
+    assert!(result.success);
+    let parsed: Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(parsed["total_matches"].as_u64().unwrap(), 1);
+    assert_eq!(parsed["truncated"], json!(false));
 }
 
 #[tokio::test]

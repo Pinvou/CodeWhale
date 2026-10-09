@@ -28,7 +28,7 @@ merge, or release. Those stay with the maintainer.
    note the starting open-count:
 
    ```bash
-   gh api repos/Hmbown/CodeWhale/milestones \
+   gh api repos/codewhale-hq/Codewhale/milestones \
      --jq '.[] | "\(.number)\t\(.title)\topen=\(.open_issues)\tstate=\(.state)"'
    ```
 
@@ -41,7 +41,7 @@ merge, or release. Those stay with the maintainer.
 
    ```bash
    for N in 3101 3102 3103; do
-     gh issue view "$N" --repo Hmbown/CodeWhale \
+     gh issue view "$N" --repo codewhale-hq/Codewhale \
        --json number,state,url,milestone \
        --jq '"\(.number)\t\(.state)\t\(.url)\tmilestone=\(.milestone.title // "none")"'
    done
@@ -55,9 +55,9 @@ merge, or release. Those stay with the maintainer.
 
    ```bash
    for N in 3101 3102 3103; do
-     if gh issue edit "$N" --repo Hmbown/CodeWhale \
-          --milestone "v0.8.61" >/dev/null 2>&1; then
-       echo "ok   #$N -> v0.8.61"
+     if gh issue edit "$N" --repo codewhale-hq/Codewhale \
+          --milestone "<milestone-title>" >/dev/null 2>&1; then
+       echo "ok   #$N -> <milestone-title>"
      else
        echo "FAIL #$N (PR? closed? bad milestone title?)"
      fi
@@ -89,4 +89,4 @@ merge, or release. Those stay with the maintainer.
 - Don't skip step 4. An unmoved open-count means the title was wrong or every
   edit silently failed.
 - Preserve contributor credit: this skill never alters authorship, harvest
-  trailers (`Co-authored-by` / `Harvested-from`), or closclosing references.
+  trailers (`Co-authored-by` / `Harvested from PR #N`), or closing references.

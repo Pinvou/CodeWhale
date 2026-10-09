@@ -685,6 +685,18 @@ workflow({
                         && leaf.prompt.contains("nothing else"),
                     "the scout discovery must stay one bounded activation-plus-search round"
                 );
+                assert!(
+                    leaf.prompt.contains(
+                        "If `tool_search` does not surface `grep_files`, that is the one exception"
+                    ) && leaf
+                        .prompt
+                        .contains("name `grep_files activation` as MISSING")
+                        && leaf
+                            .prompt
+                            .contains("Otherwise response 3 must return the verdict"),
+                    "the scout BLOCK fallback must stay pinned: without it a failed \
+                     activation leaves no legal path to a fail-closed verdict"
+                );
                 assert_eq!(
                     leaf.file_scope
                         .iter()
@@ -694,14 +706,14 @@ workflow({
                         "fleets/stopship.toml",
                         "crates/cli/src/lib.rs",
                         "crates/workflow/src/role_resolve.rs",
-                        "crates/tui/src/tools/workflow.rs",
+                        "crates/tui/src/tools/workflow/mod.rs",
                         "crates/lane/src/runtime.rs",
                     ],
                     "the scout grep must not include its own authored prompt"
                 );
                 assert!(
                     leaf.prompt.contains(
-                        "`include` set exactly to [`fleets/stopship.toml`, `crates/cli/src/lib.rs`, `crates/workflow/src/role_resolve.rs`, `crates/tui/src/tools/workflow.rs`, `crates/lane/src/runtime.rs`]"
+                        "`include` set exactly to [`fleets/stopship.toml`, `crates/cli/src/lib.rs`, `crates/workflow/src/role_resolve.rs`, `crates/tui/src/tools/workflow/mod.rs`, `crates/lane/src/runtime.rs`]"
                     ) && leaf.prompt.contains("Matches outside that exact include list do not count"),
                     "the grep_files search must constrain the actual tool input, not only file scope metadata"
                 );
@@ -733,7 +745,7 @@ workflow({
                     "fleets/stopship.toml",
                     "crates/cli/src/lib.rs",
                     "crates/workflow/src/role_resolve.rs",
-                    "crates/tui/src/tools/workflow.rs",
+                    "crates/tui/src/tools/workflow/mod.rs",
                     "crates/lane/src/runtime.rs",
                 ],
                 "every acceptance role must carry the same promoted evidence boundary"

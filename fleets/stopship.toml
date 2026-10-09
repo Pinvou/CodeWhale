@@ -8,8 +8,9 @@
 #   1. $CODEWHALE_HOME/fleets/stopship.toml
 #   2. <workspace>/fleets/stopship.toml  (this file)
 #
-# Values use the canonical Codewhale role vocabulary (explore, implement,
-# reviewer, test, advisor); keys are the workflow's own step names.
+# Values are Fleet role tokens (scout, builder, reviewer, verifier, advisor —
+# all resolve at the spawn boundary; scout/builder/verifier ride legacy
+# aliases); keys are the workflow's own step names.
 
 name = "stopship"
 description = "Read-only current release orchestration acceptance fleet"
@@ -22,22 +23,12 @@ reviewer = "reviewer"
 test = "verifier"
 release_lead = "advisor"
 
-[role_intents.explore]
-mode = "read_only"
-summary = "Source-level runtime and receipt reconnaissance"
-
-[role_intents.implement]
-mode = "read_only"
-summary = "No-edit acceptance evidence plan"
-
-[role_intents.reviewer]
-mode = "read_only"
-summary = "False-green and receipt-contract review"
-
-[role_intents.test]
-mode = "read_only"
-summary = "Static test and receipt serialization verification"
-
-[role_intents.release_lead]
-mode = "read_only"
-summary = "Final evidence-only acceptance receipt"
+# Role intents (documentation only — the minimal TOML parser reads just
+# `name`, `description`, and `[roles]`; there is no `[role_intents.*]`
+# surface). Read-only enforcement lives in the workflow's own per-node
+# mode/deny_all_tools, not here:
+#   explore:      read-only — source-level runtime and receipt reconnaissance
+#   implement:    read-only — no-edit acceptance evidence plan
+#   reviewer:     read-only — false-green and receipt-contract review
+#   test:         read-only — static test and receipt serialization verification
+#   release_lead: read-only — final evidence-only acceptance receipt

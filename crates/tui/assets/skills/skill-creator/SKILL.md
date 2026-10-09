@@ -1,19 +1,19 @@
 ---
 name: skill-creator
-description: Create or improve codewhale skills. Use when the user wants a new skill, wants to update an existing skill, or needs guidance on when a skill should be a skill versus MCP, hooks, tools, or a plugin scaffold.
+description: Create or improve Codewhale skills. Use when the user wants a new skill, wants to update an existing skill, or needs guidance on when a skill should be a skill versus MCP, hooks, tools, or a plugin scaffold.
 metadata:
-  short-description: Create DeepSeek skills
+  short-description: Create Codewhale skills
 aliases-for: create-skill
 ---
 
 # Skill Creator
 
-Use this skill to create small, useful codewhale skills that match the
+Use this skill to create small, useful Codewhale skills that match the
 runtime this repository actually ships.
 
 ## What A Skill Is
 
-A skill is a local folder with a `SKILL.md` file. DeepSeek reads the skill name
+A skill is a local folder with a `SKILL.md` file. Codewhale reads the skill name
 and description during discovery, then loads the body only when the user or task
 matches the skill.
 
@@ -25,15 +25,18 @@ Discovery paths, in precedence order:
 - `<workspace>/.claude/skills`
 - `<workspace>/.cursor/skills`
 - `<workspace>/.codewhale/skills`
+- `<workspace>/.codex/skills` (audit-compatible only; not runtime-active)
 - `~/.agents/skills`
 - `~/.claude/skills`
 - `~/.codewhale/skills`
 - `~/.deepseek/skills` (legacy fallback)
+- `~/.codex/skills` (audit-compatible only; not runtime-active)
 
 Use skills for model instructions, workflows, and lightweight conventions. Use
 MCP for live external APIs or durable tools. Use hooks for automatic local
-events. Use plugin folders only as packaging/scaffolding until a real plugin
-loader exists.
+events. Use plugin folders for versioned, trust-gated packaging — the plugin
+loader activates a bundle's Skills, MCP servers, Commands, Agents, and Hooks
+(see the plugin-creator skill).
 
 ## Minimum Shape
 
@@ -59,7 +62,7 @@ plain single-line values. Use lower-case hyphen-case names.
 ## Writing Rules
 
 - Make the `description` action-oriented and trigger-specific. It is the main
-  signal DeepSeek sees before loading the body.
+  signal Codewhale sees before loading the body.
 - Keep the body operational. Include what to do, what to avoid, and how to
   verify the result.
 - Do not include general programming advice, marketing copy, or long background
@@ -97,7 +100,7 @@ plain single-line values. Use lower-case hyphen-case names.
   unless the user asked for a rewrite.
 - Tighten descriptions when the skill is under-triggering or over-triggering.
 - Remove stale tool names, unavailable dependencies, and copied instructions
-  from other agents that do not apply to codewhale.
+  from other agents that do not apply to Codewhale.
 - Keep examples short and directly tied to this runtime's commands and tools.
 
 ## Validation Checklist

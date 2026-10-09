@@ -1,6 +1,6 @@
 ---
 name: mcp-builder
-description: Design, build, configure, or debug Model Context Protocol servers for codewhale, including stdio and HTTP/SSE transports.
+description: Design, build, configure, or debug Model Context Protocol servers for Codewhale, including stdio and HTTP/SSE transports.
 ---
 
 # MCP Builder
@@ -40,5 +40,5 @@ credentials or custom routing headers are required.
 2. Choose transport and credential handling.
 3. Implement the server using a maintained MCP SDK when available.
 4. Add the server with `codewhale mcp add` or edit `~/.codewhale/mcp.json`.
-5. Run `codewhale mcp validate`, then `codewhale mcp tools`.
+5. Run `codewhale mcp validate`, then `codewhale mcp tools`. The server's tools appear in your tool catalog deferred; activate them via `tool_search`.
 6. Test one happy path and one failure path before calling it done.

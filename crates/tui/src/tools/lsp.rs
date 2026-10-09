@@ -26,9 +26,7 @@ impl ToolSpec for LspTool {
     }
 
     fn description(&self) -> &'static str {
-        "Query the configured session LSP for diagnostics, symbols, definitions, \
-         references, or read_lints: 1-16 newline-separated files with \
-         success/error/timeout; warnings follow include_warnings."
+        "Query the configured session LSP for diagnostics, definition, references, symbols, or read_lints. The 1-16 newline-separated files contract with success/error/timeout statuses applies to read_lints; `symbols` without a `query` falls back to document symbols for `path`. Warning visibility is a session configuration, not a per-call parameter."
     }
 
     fn input_schema(&self) -> Value {
@@ -481,7 +479,8 @@ mod tests {
     fn schema_documents_read_lints_contract_query_and_character_default() {
         assert!(LspTool.description().contains("1-16 newline-separated"));
         assert!(LspTool.description().contains("success/error/timeout"));
-        assert!(LspTool.description().contains("include_warnings"));
+        assert!(LspTool.description().contains("session configuration"));
+        assert!(!LspTool.description().contains("include_warnings"));
         let schema = LspTool.input_schema();
         let properties = &schema["properties"];
         assert!(

@@ -2875,6 +2875,9 @@ fn agent_description_explains_background_child_and_transcript_handle() {
              {description}"
         );
     }
+    // Headroom note: the description sits 13 tokens (40 chars) under this
+    // cap (3032 chars = 1011 estimated tokens). Budget any reword against
+    // this limit instead of loosening the cap.
     assert!(
         estimate_tool_description_tokens_conservative(description) <= 1024,
         "agent description exceeds the conservative 1024-token budget"

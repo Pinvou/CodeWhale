@@ -893,8 +893,10 @@ impl ToolSpec for McpSyncRegistry {
         "Search installable local MCP servers for a specialized capability \
          and return at most eight scored matches; the full Registry index \
          stays host-side. Describe the capability you need in the query. \
-         The index contains only stdio packages that declare no environment \
-         variables or API keys. If a match plausibly covers the task's core \
+         The index contains only stdio packages from npm or PyPI with a \
+         pinned version and the default runtime hint that declare no \
+         environment variables or API keys — servers from other ecosystems \
+         or with custom launch commands will never match. If a match plausibly covers the task's core \
          specialized capability, call start_registry_mcp_server with its \
          exact name and inspect its tools before choosing a local \
          alternative; do not run its package command through `bash`."

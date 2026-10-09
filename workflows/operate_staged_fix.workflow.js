@@ -41,9 +41,8 @@ export default async function (args) {
     worktree: false,
     prompt: [
       "Read the implementer result and validate its reported path and diff summary.",
-      "Confirm the intended one-line clarification was made only in the isolated worktree.",
-      "Confirm the parent workspace remains unchanged until an explicit apply or merge.",
-      "Do not implement further edits. Return PASS/FAIL with evidence.",
+      "Your posture is read-only: no edit tools and no shell (the verifier role denies bash; only the bounded verification runner may be granted).",
+      "The implementer edits an isolated worktree your workspace cannot read and this workflow has no apply step, so the change itself is not directly observable: check the reported diff summary for internal consistency and read the parent copy of each reported path to confirm the change is staged only — not present in the parent workspace. Mark the worktree content itself as unverified rather than confirmed, and return PASS/FAIL with the evidence you actually gathered.",
       "",
       "implementer_result:",
       String(implement ?? "(missing)"),

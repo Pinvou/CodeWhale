@@ -765,10 +765,11 @@ impl ReadFileTool {
         let first_display = start + 1;
         let mut output = if window.first_line_too_large {
             let size = selected.first().map_or(0, |line| line.len());
+            let budget = effective_read_max_bytes();
             format!(
-                "[Line {first_display} is {}, exceeds {} limit. Use bash: sed -n '{first_display}p' {path_str} | head -c {READ_MAX_BYTES}]",
+                "[Line {first_display} is {}, exceeds {} limit. Use bash: sed -n '{first_display}p' {path_str} | head -c {budget}]",
                 contract_format_size(size),
-                contract_format_size(READ_MAX_BYTES)
+                contract_format_size(budget)
             )
         } else {
             window.content
@@ -780,8 +781,9 @@ impl ReadFileTool {
             let next_offset = last_display + 1;
             if window.truncated_by_bytes {
                 output.push_str(&format!(
-                    "\n\n[Showing lines {first_display}-{last_display} of {} (50KB limit). Use offset={next_offset} to continue.]",
-                    all_lines.len()
+                    "\n\n[Showing lines {first_display}-{last_display} of {} ({} limit). Use offset={next_offset} to continue.]",
+                    all_lines.len(),
+                    contract_format_size(effective_read_max_bytes())
                 ));
             } else {
                 output.push_str(&format!(
@@ -848,7 +850,7 @@ impl ToolSpec for ReadFileTool {
                 },
                 "max_lines": {
                     "type": "integer",
-                    "description": "Maximum lines to return (default 500, max 500; a 16KB byte budget applies regardless). Aliases: `limit`, `n_lines`"
+                    "description": "Maximum lines to return (default 500, max 500; the byte budget defaults to 16KB). Aliases: `limit`, `n_lines`"
                 },
                 "pages": {
                     "type": "string",
@@ -1210,25 +1212,27 @@ fn render_line_window(
         ));
     }
     if truncated_by_bytes {
+        let budget_kb = visible_bytes / 1024;
         if shown_first == shown_last {
             // One line alone exceeds the byte budget: no start_line/max_lines
             // combination can ever reveal the elided middle, so the note must
             // not pretend otherwise — name the escape hatch that works.
             output.push_str(&format!(
-                "\n[TRUNCATED] Line {shown_first} alone exceeds 50KB; showing its head + tail. No line window can reveal the middle of one line — use a searched shell slice when needed.\n"
+                "\n[TRUNCATED] Line {shown_first} alone exceeds the {budget_kb}KB read window; showing its head + tail. No line window can reveal the middle of one line — use a searched shell slice when needed.\n"
             ));
         } else {
             let narrower = (shown_last - shown_first).div_ceil(2).max(1);
             output.push_str(&format!(
-                "\n[TRUNCATED] The selected range exceeded 50KB; showing head + tail of lines {shown_first}-{shown_last}. Re-read narrower windows to see the middle, e.g. offset={shown_first} limit={narrower}, then advance offset.\n"
+                "\n[TRUNCATED] The selected range exceeded the {budget_kb}KB read window; showing head + tail of lines {shown_first}-{shown_last}. Re-read narrower windows to see the middle, e.g. offset={shown_first} limit={narrower}, then advance offset.\n"
             ));
         }
     }
     output.push_str("</file>");
 
-    // The file tool self-bounds at 50 KiB and carries its own continuation
-    // contract (`next_start_line`), so the large-output spillover envelope
-    // must never re-wrap a read result with a second, weaker truncation.
+    // The file tool self-bounds its window to the visible-bytes budget and
+    // carries its own continuation contract (`next_start_line`), so the
+    // large-output spillover envelope must never re-wrap a read result with
+    // a second, weaker truncation.
     // `read_budget_bytes` names the byte size this rendered result was
     // self-bounded to (the visible-bytes budget bounds the window; the
     // `<file>` wrapper and resume footer ride on top of it) so the context
@@ -1430,7 +1434,7 @@ impl WriteFileTool {
         drop(mutation_guard);
 
         let outcome = if existed_before { "updated" } else { "created" };
-        let utf16_units = file_content.encode_utf16().count();
+        let byte_len = file_content.len();
         Ok(contract_mutation_result(
             context,
             &file_path,
@@ -1438,7 +1442,7 @@ impl WriteFileTool {
             prior_contents.as_ref(),
             file_content,
             outcome,
-            format!("Successfully wrote {utf16_units} bytes to {path_str}"),
+            format!("Successfully wrote {byte_len} bytes to {path_str}"),
         )
         .await)
     }
@@ -2668,7 +2672,7 @@ impl ToolSpec for ListDirTool {
     }
 
     fn description(&self) -> &'static str {
-        "List entries in a workspace directory. This bounded, sandbox-aware tool is searchable when the core read/write/edit/bash toolbox is not enough."
+        "List entries in a workspace directory. The listing is capped at 500 entries: past the cap the response switches to an object with `entries`, `listed_entries`, `total_entries`, and `truncated`, so check `truncated` before treating the result as complete. For name or content search use `file_search` or `grep_files` instead (activate either with `tool_search` first if it is not in your tool list)."
     }
 
     fn input_schema(&self) -> Value {

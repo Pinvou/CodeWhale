@@ -32,31 +32,30 @@ Do not delegate tiny one-step tasks, ambiguous product decisions, destructive op
 
 Use `agent` for a focused child run. Launch independent children together so they can run in parallel.
 
-Prefer provider-neutral `model_strength` over hardcoded model ids. Children inherit the active model by default (`model_strength: "same"`), including `type: "scout"`, so pass `model_strength: "faster"` explicitly to get the cheaper same-family sibling for read-only exploration:
+Children inherit the active model by default, including `type: "explore"`; prefer provider-neutral routing (the operator's `[subagents]` per-role model configuration) over hardcoded model ids in prompts or Fleet config:
 
 ```json
 {
+  "action": "start",
   "name": "config_audit",
   "prompt": "Inspect crates/tui/src/config.rs and crates/tui/src/settings.rs for duplicate model-default logic. Return file/line findings only; do not edit files.",
-  "type": "scout",
-  "model_strength": "faster",
-  "cwd": "."
+  "type": "explore"
 }
 ```
 
-For code changes, give the child a precise write boundary and tell it not to revert unrelated edits. Keep implementation children capable with `model_strength: "same"`:
+For code changes, give the child a precise write boundary and tell it not to revert unrelated edits:
 
 ```json
 {
+  "action": "start",
   "name": "docs_patch",
-  "prompt": "Update only docs/configuration.md to document the new [statusline] keys. Match the surrounding style. Do not edit other files.",
-  "type": "builder",
-  "model_strength": "same",
-  "cwd": "."
+  "prompt": "Update only docs/CONFIGURATION.md to document the new [tui] keys. Match the surrounding style. Do not edit other files.",
+  "type": "implement",
+  "write_roots": ["docs/CONFIGURATION.md"]
 }
 ```
 
-Use `fork_context: true` only when the child genuinely needs the current conversation prefix. Leave it omitted for fresh, narrower context.
+Keep each child's `prompt` self-contained: pass only the context that child needs rather than the whole conversation.
 
 ## Evaluate and Verify
 
@@ -86,5 +85,5 @@ Fix the settings bug.
 Strong prompt:
 
 ```text
-Own only crates/tui/src/settings.rs and its tests. Preserve existing config key names. Add a regression test showing that provider-specific API key changes do not restart DeepSeek onboarding. Return the changed paths and test command output.
+Own only crates/tui/src/settings.rs and its tests. Preserve existing config key names. Add a regression test showing that provider-specific API key changes do not restart onboarding. Return the changed paths and test command output.
 ```

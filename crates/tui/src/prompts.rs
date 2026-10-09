@@ -82,8 +82,10 @@ impl Default for PromptSessionContext<'_> {
 /// it back on startup and prepends it to the system prompt so a fresh agent
 /// doesn't have to re-discover open blockers from scratch.
 pub const HANDOFF_RELATIVE_PATH: &str = ".codewhale/handoff.md";
-/// Legacy handoff path for reading from existing installs.
-const LEGACY_HANDOFF_RELATIVE_PATH: &str = ".deepseek/handoff.md";
+/// Legacy handoff path for reading from existing installs. `pub(crate)` so
+/// command surfaces that teach the fallback name it from the same constant
+/// instead of restating the literal beside it.
+pub(crate) const LEGACY_HANDOFF_RELATIVE_PATH: &str = ".deepseek/handoff.md";
 
 /// Per-file size cap for `instructions = [...]` entries (#454). Mirrors
 /// the existing project-context cap in `project_context::load_context_file`
@@ -110,8 +112,10 @@ Only output English for:\n\
 - Code identifiers (variable names, function names, file paths)\n\
 - Technical terms that lack a standard translation in {target_language}\n\
 - Code blocks the user explicitly requests in English\n\n\
-This is a hard display requirement: the user does not read English, \
-so any English prose in your response will block their decision-making. \
+This is a hard display requirement for this session: predominantly-English \
+turns are machine-translated before display for a {target_language}-reading \
+audience, so English prose that slips into your response may reach the user \
+untranslated. \
 This overrides the ## Language rule for this session."
     )
 }
@@ -310,8 +314,15 @@ fn load_handoff_block(workspace: &Path) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
+    // Name the path that was actually read: the legacy fallback would
+    // otherwise point the model at a file that does not exist.
+    let shown = path
+        .strip_prefix(workspace)
+        .unwrap_or(&path)
+        .to_string_lossy()
+        .into_owned();
     Some(format!(
-        "## Previous Session Relay\n\nThe previous session in this workspace left a relay artifact at `{HANDOFF_RELATIVE_PATH}`. Consider it the first artifact to read on this turn — open blockers, in-flight changes, and recent decisions live there. Update or rewrite it before exiting if state changes materially.\n\n{trimmed}"
+        "## Previous Session Relay\n\nThe previous session in this workspace left a relay artifact at `{shown}`. Consider it the first artifact to read on this turn — open blockers, in-flight changes, and recent decisions live there. Update or rewrite it before exiting if state changes materially.\n\n{trimmed}"
     ))
 }
 
@@ -1478,7 +1489,10 @@ mod tests {
 
     /// Discriminator unique to the injected relay block (not present in the
     /// agent prompt's own discussion of the convention).
-    const HANDOFF_BLOCK_MARKER: &str = "left a relay artifact at `.codewhale/handoff.md`";
+    // Path-agnostic prefix: the block names whichever path the loader
+    // actually read (primary or legacy fallback); the exact-path asserts
+    // live in the per-fixture tests below.
+    const HANDOFF_BLOCK_MARKER: &str = "left a relay artifact at `";
 
     /// The recap points at the bundled `### Whose word wins` section; an
     /// embedder composer that owns the static prefix retires that section,
@@ -3027,6 +3041,59 @@ mod tests {
         assert!(prompt.contains(HANDOFF_BLOCK_MARKER));
         assert!(prompt.contains("Finish #32."));
         assert!(prompt.contains("write the basic version"));
+        // The block must name the path that was actually read, not the
+        // primary path — the legacy fallback is otherwise invisible and
+        // the model is sent to a file that does not exist.
+        assert!(prompt.contains("relay artifact at `.deepseek/handoff.md`"));
+        assert!(!prompt.contains("relay artifact at `.codewhale/handoff.md`"));
+    }
+
+    #[test]
+    fn handoff_block_names_primary_path_when_present() {
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path();
+        let handoff_dir = workspace.join(".codewhale");
+        std::fs::create_dir_all(&handoff_dir).unwrap();
+        std::fs::write(
+            handoff_dir.join("handoff.md"),
+            "# Session relay\n\nprimary\n",
+        )
+        .unwrap();
+
+        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
+
+        assert!(prompt.contains(HANDOFF_BLOCK_MARKER));
+        assert!(prompt.contains("relay artifact at `.codewhale/handoff.md`"));
+    }
+
+    #[test]
+    fn handoff_primary_shadows_legacy_fallback_when_both_exist() {
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path();
+        for dir in [".codewhale", ".deepseek"] {
+            std::fs::create_dir_all(workspace.join(dir)).unwrap();
+        }
+        std::fs::write(
+            workspace.join(".codewhale/handoff.md"),
+            "# Session relay\n\nprimary relay marker\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join(".deepseek/handoff.md"),
+            "# Session relay\n\nlegacy relay marker\n",
+        )
+        .unwrap();
+
+        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
+
+        assert!(prompt.contains(HANDOFF_BLOCK_MARKER));
+        // /relay's "write the primary path" guarantee and the handoff skill's
+        // "only way to guarantee a fresh relay wins" clause rest on the
+        // loader checking the primary path first when both files exist.
+        assert!(prompt.contains("relay artifact at `.codewhale/handoff.md`"));
+        assert!(prompt.contains("primary relay marker"));
+        assert!(!prompt.contains("relay artifact at `.deepseek/handoff.md`"));
+        assert!(!prompt.contains("legacy relay marker"));
     }
 
     #[test]
@@ -3046,6 +3113,29 @@ mod tests {
         let prompt =
             system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
         assert!(!prompt.contains(HANDOFF_BLOCK_MARKER));
+    }
+
+    #[test]
+    fn whitespace_only_primary_does_not_fall_back_to_legacy_handoff() {
+        // The loader decides by `primary.exists()`, so a whitespace-only
+        // primary yields an empty body and no block — the legacy file is not
+        // re-read. The handoff skill's "when no primary file exists" clause
+        // and /relay's write-the-primary guarantee rest on this exact shape.
+        let tmp = tempdir().expect("tempdir");
+        let primary = tmp.path().join(".codewhale");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::write(primary.join("handoff.md"), "   \n\n  ").unwrap();
+        let legacy = tmp.path().join(".deepseek");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join("handoff.md"),
+            "# Session relay\n\nlegacy relay marker\n",
+        )
+        .unwrap();
+        let prompt =
+            system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
+        assert!(!prompt.contains(HANDOFF_BLOCK_MARKER));
+        assert!(!prompt.contains("legacy relay marker"));
     }
 
     #[test]
@@ -3313,6 +3403,21 @@ mod tests {
                 && LOCALE_PREAMBLE_ZH_HANS.contains("reasoning_content")
                 && LOCALE_CLOSER_ZH_HANS.contains("reasoning_content"),
             "language segment and locale bookends must keep the reasoning_content anchor"
+        );
+        assert!(
+            LANGUAGE_PROMPT.contains("precedence for the session language"),
+            "the language rule must keep its declared deference to locale bookends"
+        );
+        assert!(
+            translation_output_instruction("zh-Hans")
+                .contains("predominantly-English turns are machine-translated"),
+            "the translation block must describe the detector-gated interception layer, not a guarantee"
+        );
+        assert!(
+            translation_output_instruction("zh-Hans")
+                .contains("This overrides the ## Language rule"),
+            "the translation block must keep its explicit precedence over the language rule; \
+             without it the locale bookends and the language rule contradict each other again"
         );
     }
 

@@ -56,7 +56,7 @@ impl ToolSpec for GrepFilesTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search for a regex pattern in workspace files. Use this instead of `grep -r`, `rg`, or `find ... -exec grep` in `bash` — pure-Rust; skips common non-code directories (node_modules, .git, target, ...) by default; it does not apply .gitignore (built-in default exclusions only). Returns matching lines with context (default: 2 lines before/after each match)."
+        "Search for a regex pattern in workspace files. Use this instead of `grep -r`, `rg`, or `find ... -exec grep` in `bash` — pure-Rust; skips common non-code directories (node_modules, .git, target, ...) by default, and any `exclude` you pass replaces that default list entirely; it does not apply .gitignore (built-in default exclusions only). Returns matching lines with context (default: 2 lines before/after each match). The result set is capped (default 100): when the cap is reached `truncated` is true — narrow the search instead of assuming the list is complete. Files over 10MB and files containing invalid UTF-8 are skipped silently; the run aborts with a timeout error after 30s."
     }
 
     fn input_schema(&self) -> Value {
@@ -257,7 +257,10 @@ impl ToolSpec for GrepFilesTool {
                 "matches": matches_json,
                 "total_matches": total_matches,
                 "files_searched": files_searched,
-                "truncated": total_matches > max_results,
+                // The walk stops as soon as the budget is full, so
+                // total_matches can never exceed max_results. Reaching the
+                // cap is the truncation signal; `>` could never fire.
+                "truncated": total_matches >= max_results,
             }))
         })
         .await?;

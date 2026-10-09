@@ -885,7 +885,7 @@ fn json_result(snapshot: &GoalSnapshot) -> Result<ToolResult, ToolError> {
 fn require_root_goal_mutation(context: &ToolContext) -> Result<(), ToolError> {
     if context.owner_agent_id.is_some() {
         return Err(ToolError::invalid_input(
-            "Goal lifecycle mutation is root-agent only; sub-agents may inspect the parent goal with get_goal.",
+            "Goal lifecycle mutation is root-agent only; sub-agents may inspect the parent goal with get_goal (activate it via `tool_search` if it is not in your tool list).",
         ));
     }
     Ok(())
@@ -909,7 +909,7 @@ impl ToolSpec for CreateGoalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create the session's one persistent goal: a completion objective Codewhale keeps working toward across turns until it is verified complete, blocked, or the user stops it. Call this only when the user explicitly asks to use `/goal`, make an objective the goal, or otherwise explicitly requests persistent goal tracking. When the request is explicit, call `create_goal` before doing the rest of the work; acknowledging it in prose is not sufficient. Never infer a goal from an ordinary task, its apparent length, a question, or a one-file edit. Keep the user's full objective, not a shortened one-turn version. Set token_budget only when the user explicitly provides one. Creating a goal shows the user a one-line receipt (they can /goal pause or /goal clear); do not also ask for confirmation. Only one unfinished goal exists at a time: complete it before creating another; only the user can clear a goal (for example with /goal clear). Root agent only; sub-agents inspect with get_goal."
+        "Create the session's one persistent goal: a completion objective Codewhale keeps working toward across turns until it is verified complete, blocked, or the user stops it. Call this only when the user explicitly asks to use `/goal`, make an objective the goal, or otherwise explicitly requests persistent goal tracking. When the request is explicit, call `create_goal` before doing the rest of the work — if it is not in your tool list, activate it with `tool_search` first; acknowledging it in prose is not sufficient. Never infer a goal from an ordinary task, its apparent length, a question, or a one-file edit. Keep the user's full objective, not a shortened one-turn version. Set token_budget only when the user explicitly provides one. Creating a goal shows the user a one-line receipt (they can /goal pause or /goal clear); do not also ask for confirmation. Only one unfinished goal exists at a time: complete it before creating another; only the user can clear a goal (for example with /goal clear). Root agent only; sub-agents inspect with get_goal (activate it via `tool_search` if it is not in your tool list)."
     }
 
     fn input_schema(&self) -> Value {
@@ -1029,7 +1029,7 @@ impl ToolSpec for UpdateGoalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Update the runtime goal completion gate. Critical verification may seal one immutable completion contract. Advisory review is append-only context and never completes, blocks, or pauses the goal. Mark blocked when progress requires user input. Root agent only; sub-agents inspect with get_goal."
+        "Update the runtime goal completion gate. Critical verification may seal one immutable completion contract. Advisory review is append-only context and never completes, blocks, or pauses the goal. Mark blocked when progress requires user input. Root agent only; sub-agents inspect with get_goal (activate it via `tool_search` if it is not in your tool list)."
     }
 
     fn input_schema(&self) -> Value {

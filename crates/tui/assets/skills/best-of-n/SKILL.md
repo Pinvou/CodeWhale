@@ -26,13 +26,16 @@ the user has already chosen the approach.
    do not steer candidates toward different conclusions unless diversity is an
    explicit part of the request.
 4. When the tournament spans more than one parent turn, prefer a session goal
-   if `create_goal` is in your tool list; if it is not, run `tool_search` first
-   to activate it. In subagent sessions `create_goal` does not exist and
-   `tool_search` cannot surface it — track progress in your own notes instead.
+   only when the user explicitly set one via `/goal` — `create_goal` is
+   reserved for explicit goal requests, so never infer a goal from the
+   tournament itself. If `create_goal` is in your tool list, work against the
+   existing goal; if it is not, run `tool_search` first to activate it. In
+   subagent sessions `create_goal` does not exist and `tool_search` cannot
+   surface it — track progress in your own notes instead.
 
 ## Generate Independently
 
-Start the candidates as parallel background `agent` workers and return agent_ids
+Start the candidates as parallel `agent` workers and return agent_ids
 immediately so the parent stays free. For proposals, reviews, or research, keep
 them read-only:
 
@@ -41,9 +44,7 @@ them read-only:
   "action": "start",
   "name": "candidate_1",
   "prompt": "Produce candidate 1 for the task below. Return the proposal, evidence, risks, and rubric self-score. Do not edit files.\n\n<TASK AND RUBRIC>",
-  "type": "worker",
-  "model_strength": "same",
-  "write_authority": "read_only"
+  "type": "explore"
 }
 ```
 
@@ -53,18 +54,21 @@ candidate's answer before generation finishes.
 
 When candidates must implement code, give each one:
 
-- `type: "builder"`
+- `type: "implement"`
 - `worktree: true`
-- `write_authority: "worktree_write"`
-- the same bounded `write_roots` or `exact_files`
+- the same bounded `write_roots` when the task names target paths — worktree
+  isolation is what keeps parallel builders from colliding, and candidates
+  must all be able to reach the task's files
 
 Never run parallel writers in the parent checkout. Each builder must return
 the structured candidate contract (candidate id, hypothesis, paths, commands,
 self-verdict, risks, and artifact references). A self-verdict is evidence to
 inspect, not a hard-gate result.
 
-Optional diversity: pin different `model` / Fleet `fleet_profile` values when
-the project has multiple capable routes; otherwise keep model strength `same`.
+Optional diversity: candidates sharing one `type` resolve the same single
+`[subagents]` per-role model route, so get spread from prompt angles (or
+distinct roles), not from per-candidate model choices; `model` is not
+advertised on this call surface.
 
 ## Judge Once
 

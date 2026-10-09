@@ -11,7 +11,7 @@ title, label, or a hopeful PR is how reporters get burned. Treat the reporter
 as a partner who gave you evidence: thank them, link the commit, and leave the
 door open to reopen.
 
-Repo: `Hmbown/CodeWhale`. CLI: `gh`.
+Repo: `codewhale-hq/Codewhale`. CLI: `gh`.
 
 ## When to use
 
@@ -28,7 +28,7 @@ If the fix is not on the branch yet, or only partially addresses the report,
 1. **Read the issue from the source, not the title.** Pull the body, labels,
    and the full comment thread:
    ```bash
-   gh issue view N --repo Hmbown/CodeWhale \
+   gh issue view N --repo codewhale-hq/Codewhale \
      --json number,title,state,author,labels,milestone,body,comments
    ```
    Note who reported it and who added repro steps, logs, or a root cause —
@@ -63,15 +63,16 @@ If the fix is not on the branch yet, or only partially addresses the report,
 5. **Close with that comment in one step** (only with maintainer approval where
    policy requires it):
    ```bash
-   gh issue close N --repo Hmbown/CodeWhale -r completed \
+   gh issue close N --repo codewhale-hq/Codewhale -r completed \
      --comment "Thanks @reporter — fixed in <SHA> on <release-branch> (crates/tui/src/foo.rs:123); ships in the next release. Reopen if it recurs. Thanks @helper for the repro."
    ```
    Use `-r "not planned"` for wontfix/dupes (still comment, still kind). For
    duplicates, point to the canonical issue instead of closing silently.
 
 6. **Preserve PR/harvest credit.** Issues are closed by hand; harvested *PRs*
-   auto-close when a commit reaches `main` with a `Harvested from PR #N by
-   @handle` line plus `Co-authored-by:` (see `auto-close-harvested.yml`). When
+   auto-close when a commit reaches `main` carrying a `Harvested from PR #N by
+   @handle` line — the workflow matches that line, and a `Co-authored-by:`
+   trailer is what preserves authorship (see `auto-close-harvested.yml`). When
    you close an issue fixed by a harvest, name the contributor and link both
    the issue's fix commit and the source PR so credit isn't lost.
 
@@ -80,7 +81,7 @@ If the fix is not on the branch yet, or only partially addresses the report,
 If the branch only addresses part of the report, leave a status comment and
 keep it open:
 ```bash
-gh issue comment N --repo Hmbown/CodeWhale \
+gh issue comment N --repo codewhale-hq/Codewhale \
   --comment "Partly addressed by <SHA> (the crash path). The slow-render half is still open — tracking here. Thanks @reporter."
 ```
 
