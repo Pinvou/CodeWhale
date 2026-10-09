@@ -548,11 +548,18 @@ impl DesktopRemoteArtifactRuntime {
 
     pub(crate) fn clear_connection(&self, connection_id: &str) {
         let _publication = self.publication_lock.lock();
-        let _ = self.publication_revision.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |revision| Some(revision.saturating_add(1)),
-        );
+        let mut revision = self.publication_revision.load(Ordering::Acquire);
+        loop {
+            match self.publication_revision.compare_exchange_weak(
+                revision,
+                revision.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => revision = current,
+            }
+        }
         self.captures
             .lock()
             .retain(|_, capture| capture.lease.connection_id != connection_id);
@@ -1518,6 +1525,41 @@ mod tests {
         runtime_with_tasks(Arc::new(RemoteTaskService::new(Arc::new(
             RemoteTaskLedger::in_memory(),
         ))))
+    }
+
+    #[test]
+    fn concurrent_connection_cleanup_does_not_lose_publication_revisions() {
+        let runtime = runtime();
+        std::thread::scope(|scope| {
+            for _ in 0..64 {
+                let runtime = Arc::clone(&runtime);
+                scope.spawn(move || runtime.clear_connection("connection-0001"));
+            }
+        });
+        assert_eq!(runtime.publication_revision.load(Ordering::Acquire), 64);
+    }
+
+    #[test]
+    fn connection_cleanup_saturates_publication_revision_without_wrapping() {
+        let runtime = runtime();
+        runtime
+            .publication_revision
+            .store(u64::MAX - 1, Ordering::Release);
+        std::thread::scope(|scope| {
+            for _ in 0..64 {
+                let runtime = Arc::clone(&runtime);
+                scope.spawn(move || runtime.clear_connection("connection-0001"));
+            }
+        });
+        assert_eq!(
+            runtime.publication_revision.load(Ordering::Acquire),
+            u64::MAX
+        );
+        runtime.clear_connection("connection-0001");
+        assert_eq!(
+            runtime.publication_revision.load(Ordering::Acquire),
+            u64::MAX
+        );
     }
 
     struct ExistingSession(String);

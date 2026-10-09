@@ -827,7 +827,7 @@ dictZh.uiToolDetails.tmeetSteps = [{key:'runtime',label:'准备运行时',sub:'�
 // no consumer in the public tree (the flow card always renders localized copy).
 dictZh.uiToolDetails.showRawErrors = true;
 
-// 工具商店 MCP 连接器卡片三语 overlay(tool-common.jsx tsToolsData;localizeTool 按 backendId 或占位卡 'card'+id 命中)。
+// 工具商店 MCP 连接器卡片三语 overlay(tool-marketplace.jsx tsToolsData;localizeTool 按 backendId 或占位卡 'card'+id 命中)。
 // zh 与源数据逐字一致;configFields 只覆盖 label/helpText/placeholder,由 localizeTool/mergeConfigFields 按 key 深合并。
 // 后端 bundle_readiness 只下发功能事实(key/required/target/secret),从不下发展示文案;
 // label/placeholder/helpText 的唯一来源是 overlay/词典,三语必须各自齐备。
@@ -1232,7 +1232,7 @@ tokenMissing:'授权流程返回成功，但本地未检测到 OAuth token，当
 Object.assign(dictZh.uiChatView, { memStatusRemembered:'已记住', memStatusArchived:'已归档', memStatusDeleted:'已删除', memStatusArchivedNotice:'记忆已归档', memStatusDeletedNotice:'记忆已删除' });
 
 
-// tool-common.jsx 内容数据（tsSkillsData / tsCategories）的三语 overlay：
+// tool-marketplace.jsx 内容数据（tsSkillsData / tsCategories）的三语 overlay：
 // ToolStoreView 渲染处按 localizeTool() 同款模式消费（localizeSkill / localizeCategory），数据文件本身不改。
 Object.assign(dictZh.uiToolStore, { storeData: {
   skills: {

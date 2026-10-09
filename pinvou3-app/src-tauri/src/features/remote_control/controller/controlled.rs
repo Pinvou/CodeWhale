@@ -787,6 +787,7 @@ impl ControlledDeviceManager {
         &self,
         operation: ControlledOperation,
         activation_id: &str,
+        resume_request_id: &str,
         now_b: u64,
         liveness_epoch_a: impl Into<String>,
         resume_token: [u8; 32],
@@ -825,7 +826,17 @@ impl ControlledDeviceManager {
                     .is_ok(),
                 None => false,
             };
-        if !accepted {
+        let installed = accepted
+            && inner.transport.as_ref().is_some_and(|transport| {
+                transport
+                    .restore_authenticated_lease_after_resume(
+                        &context,
+                        activation_id,
+                        resume_request_id,
+                    )
+                    .is_ok()
+            });
+        if !installed {
             let generation = inner.generation.clone().unwrap_or_default();
             clear_sensitive(&mut inner, u64::MAX, true);
             inner.device_name = None;
@@ -2025,6 +2036,16 @@ mod tests {
         manager
             .complete_connected(operation.clone(), lease(&operation.generation))
             .unwrap();
+        let current = lease(&operation.generation);
+        let sender = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            current.context.clone(),
+            current.negotiated_capabilities,
+        );
+        manager
+            .replace_authenticated_transport(operation.clone(), sender.clone())
+            .unwrap();
+        super::super::relay_transport::disconnect_test_transport(&sender);
         assert_eq!(
             manager.mark_transport_disconnected(5_000).status,
             ControlledStatusKind::Reconnecting
@@ -2085,10 +2106,19 @@ mod tests {
                 operation.generation
             );
         }
+        super::super::relay_transport::dispatch_test_transport_frame(
+            &sender,
+            &super::super::test_support::resume_final_frame(
+                &current.context,
+                activation,
+                "request-resume-final",
+            ),
+        );
         let resumed = manager
             .complete_resumed(
                 operation.clone(),
                 activation,
+                "request-resume-final",
                 12_000,
                 "live:a-2",
                 [3; 32],
@@ -2218,6 +2248,86 @@ mod tests {
     }
 
     #[test]
+    fn controlled_final_without_transport_fails_closed_even_after_valid_gate() {
+        for case in ["valid", "expired", "activation", "token", "key", "no-ready"] {
+            let cleanup = Arc::new(CleanupCounter::default());
+            let manager = ControlledDeviceManager::default();
+            manager.register_cleanup_sink(cleanup.clone());
+            let operation = manager.start(None, Vec::new()).unwrap();
+            register(&manager, &operation);
+            manager.mark_claimed(operation.clone()).unwrap();
+            manager
+                .complete_connected(operation.clone(), lease(&operation.generation))
+                .unwrap();
+            manager.mark_transport_disconnected(5_000);
+            manager.begin_resume(operation.clone(), 6_000).unwrap();
+            for (now, step) in [
+                (
+                    7_000,
+                    ControlledResumeStep::Provisional {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    8_000,
+                    ControlledResumeStep::Confirmed {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    9_000,
+                    ControlledResumeStep::ActivationAcknowledged {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    10_000,
+                    ControlledResumeStep::PostActivationLiveness {
+                        activation_id: "activation-0001",
+                        liveness_epoch_b: "live-b-2",
+                    },
+                ),
+                (
+                    11_000,
+                    ControlledResumeStep::ReadyAcknowledged {
+                        activation_id: "activation-0001",
+                    },
+                ),
+            ] {
+                if case == "no-ready" && now == 11_000 {
+                    continue;
+                }
+                manager
+                    .advance_resume(operation.clone(), step, now)
+                    .unwrap();
+            }
+            let result = manager.complete_resumed(
+                operation.clone(),
+                if case == "activation" {
+                    "activation-wrong"
+                } else {
+                    "activation-0001"
+                },
+                "request-resume-0001",
+                if case == "expired" { 33_000 } else { 12_000 },
+                "live-a-2",
+                if case == "token" { [1; 32] } else { [3; 32] },
+                if case == "key" { [2; 32] } else { [4; 32] },
+                60_000,
+            );
+            assert_eq!(
+                result.unwrap_err().code,
+                "desktop_remote_resume_failed",
+                "{case}"
+            );
+            assert_eq!(manager.status().status, ControlledStatusKind::Error);
+            assert!(manager.inner.lock().watchdog.is_none());
+            assert!(manager.inner.lock().lease_context.is_none());
+            assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
     fn invalid_resumed_cycle_metadata_cleans_generation_and_notifies_once() {
         for (deadline, epoch, now) in [
             (0, "live-a-2", 12_000),
@@ -2278,7 +2388,14 @@ mod tests {
             assert_eq!(
                 manager
                     .complete_resumed(
-                        operation, activation, now, epoch, [3; 32], [4; 32], deadline
+                        operation,
+                        activation,
+                        "request-resume-final",
+                        now,
+                        epoch,
+                        [3; 32],
+                        [4; 32],
+                        deadline
                     )
                     .unwrap_err()
                     .code,
