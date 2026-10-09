@@ -81,26 +81,33 @@ func TestNormalizeRegistrationUsername(t *testing.T) {
 }
 
 type mobileAuthRepositoryFake struct {
-	deliveryMu         sync.Mutex
-	deliveryDone       chan struct{}
-	deliveryOnce       sync.Once
-	mobileExists       bool
-	securityAllowed    bool
-	securityErr        error
-	identitySubject    string
-	identityErr        error
-	usernameExists     bool
-	challenge          SMSChallenge
-	challengeSent      bool
-	challengeFailed    bool
-	readyErr           error
-	consumeVerified    bool
-	registeredUsername string
-	registeredMobile   string
-	captchaConsumed    bool
-	sliderChallenge    SliderCaptcha
-	captchaErr         error
-	operation          RegistrationOperation
+	publicAdmissionErr    error
+	publicAdmissionSource string
+	deliveryMu            sync.Mutex
+	deliveryDone          chan struct{}
+	deliveryOnce          sync.Once
+	mobileExists          bool
+	securityAllowed       bool
+	securityErr           error
+	identitySubject       string
+	identityErr           error
+	usernameExists        bool
+	challenge             SMSChallenge
+	challengeSent         bool
+	challengeFailed       bool
+	readyErr              error
+	consumeVerified       bool
+	registeredUsername    string
+	registeredMobile      string
+	captchaConsumed       bool
+	sliderChallenge       SliderCaptcha
+	captchaErr            error
+	operation             RegistrationOperation
+}
+
+func (f *mobileAuthRepositoryFake) AdmitPublicMobileRequest(_ context.Context, _, _, source string) error {
+	f.publicAdmissionSource = source
+	return f.publicAdmissionErr
 }
 
 func (f *mobileAuthRepositoryFake) MobileExists(context.Context, string) (bool, error) {
@@ -501,6 +508,9 @@ func TestMobileAuthLoginReturnsAuthoritativeIdentitySubject(t *testing.T) {
 }
 
 func TestSMSLoginVerificationReturnsIdentitySubjectToKeycloak(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("WORKLOAD_IDENTITY_ISSUER", "")
+	t.Setenv("WORKLOAD_IDENTITY_CA_FILE", "")
 	repository := &mobileAuthRepositoryFake{identitySubject: "authoritative-keycloak-subject"}
 	auth := newMobileAuthForTest(t, repository, &smsProviderFake{verified: true}, &identityProvisionerFake{})
 	service := NewService(nil, nil).WithMobileAuth(auth, "internal-service-token-for-tests-123456")

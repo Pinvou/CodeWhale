@@ -235,7 +235,7 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		api.WriteJSON(w, http.StatusTooManyRequests, api.Error{Code: "MODEL_RATE_LIMITED", Message: "the model request exceeds a rate or concurrency limit", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"retry_after_seconds": retryAfter}})
 		return
 	case errors.Is(err, ErrNotFound):
-		status, code, message = http.StatusNotFound, "TOKEN_ACCOUNT_NOT_FOUND", "the token account was not found"
+		status, code, message = http.StatusNotFound, "TOKEN_NOT_FOUND", "the token resource was not found"
 	case errors.Is(err, ErrNoEligibleRoute):
 		status, code, message = http.StatusUnprocessableEntity, "TOKEN_ROUTE_UNAVAILABLE", "no eligible token route is available"
 	case errors.Is(err, ErrIdempotencyConflict):

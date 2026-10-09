@@ -68,10 +68,14 @@ func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(
 	health := NewRouter()
 	metrics := newHTTPMetrics(cfg.ServiceName, collectors...)
 	var clock *trustedclock.Monitor
-	if strings.HasPrefix(strings.ToLower(cfg.Environment), "production") {
-		clock, _ = trustedclock.New(cfg.TrustedTimeSources)
+	var clockErr error
+	if config.IsProduction(cfg.Environment) {
+		clock, clockErr = trustedclock.New(cfg.TrustedTimeSources)
 	}
 	readiness := func(ctx context.Context) error {
+		if clockErr != nil {
+			return clockErr
+		}
 		if clock == nil {
 			return readyOrNil(ctx, ready)
 		}
@@ -117,8 +121,12 @@ func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(
 			health.ServeHTTP(w, r)
 			return
 		}
-		if clock != nil && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
-			if err := clock.Check(r.Context()); err != nil {
+		if config.IsProduction(cfg.Environment) && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			err := clockErr
+			if err == nil {
+				err = clock.Check(r.Context())
+			}
+			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Cache-Control", "no-store")
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -128,7 +136,7 @@ func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(
 		}
 		application.ServeHTTP(w, r)
 	})
-	observed := metrics.middleware(withRateLimit(cfg, dispatch), newLogger(cfg))
+	observed := metrics.middleware(withRateLimit(cfg, withRecovery(dispatch)), newLogger(cfg))
 	return observability.TraceHTTPHandler(withRequestID(withSecurityHeaders(cfg, observed))), metrics
 }
 
@@ -140,7 +148,7 @@ func readyOrNil(ctx context.Context, ready func(context.Context) error) error {
 }
 
 func withSecurityHeaders(cfg config.Config, next http.Handler) http.Handler {
-	production := cfg.Environment == "production" || cfg.Environment == "production-new"
+	production := config.IsProduction(cfg.Environment)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -161,7 +169,7 @@ func Run(serviceName string) error {
 func ConfigureProcessLogging(serviceName string) error {
 	environment := strings.TrimSpace(os.Getenv("APP_ENV"))
 	if environment == "" {
-		environment = "development"
+		return errors.New("APP_ENV must be explicitly configured")
 	}
 	config := observability.Config{Service: serviceName, Environment: environment, Version: version, Commit: commit}
 	observability.ConfigureDefaultLogger(config)

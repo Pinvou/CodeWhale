@@ -81,6 +81,9 @@ func TraceHTTPHandler(next http.Handler) http.Handler {
 	})
 }
 
+// RunBackground runs one task synchronously with correlation and tracing.
+// The caller owns scheduling, cancellation and supervision (use go explicitly
+// for a separate goroutine). A panic remains fatal, but its value is not exposed.
 func RunBackground(ctx context.Context, task string, run func(context.Context)) {
 	ctx = WithCorrelation(ctx, NewCorrelationID(), NewCorrelationID())
 	ctx, span := StartSpan(ctx, "background."+task)
@@ -88,5 +91,11 @@ func RunBackground(ctx context.Context, task string, run func(context.Context)) 
 	slogLogger := slog.Default()
 	slogLogger.InfoContext(ctx, "background task started", "task", task)
 	defer slogLogger.InfoContext(ctx, "background task stopped", "task", task)
+	defer func() {
+		if recover() != nil {
+			slogLogger.ErrorContext(ctx, "background task panicked", "error_code", "BACKGROUND_TASK_PANIC", "task", task)
+			panic("BACKGROUND_TASK_PANIC")
+		}
+	}()
 	run(ctx)
 }

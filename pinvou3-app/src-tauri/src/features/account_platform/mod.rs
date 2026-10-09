@@ -378,11 +378,18 @@ impl AccountPlatformState {
             serde_json::from_slice::<PortalSessionHandoffResponse>(&bytes).map_err(|_| {
                 "portal_session_handoff_invalid: handoff response is invalid".to_string()
             })?;
-        if handoff.ticket.trim().is_empty() {
-            return Err("portal_session_handoff_invalid: handoff ticket is empty".to_string());
+        if !valid_portal_handoff_ticket(&handoff.ticket) {
+            return Err("portal_session_handoff_invalid: handoff ticket is invalid".to_string());
         }
         Ok(PortalSessionHandoffResult::Ticket(handoff.ticket))
     }
+}
+
+fn valid_portal_handoff_ticket(ticket: &str) -> bool {
+    (16..=256).contains(&ticket.len())
+        && ticket
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 fn portal_restore_state(result: Result<bool, String>) -> Result<bool, String> {
@@ -564,6 +571,7 @@ pub struct ApiResponse {
     pub personal_authorization_version: Option<u64>,
     pub platform_authorization_version: Option<u64>,
     pub organization_authorization_version: Option<u64>,
+    pub retry_after_seconds: Option<u64>,
 }
 
 pub struct AccountPlatformState {
@@ -1367,6 +1375,9 @@ impl AccountPlatformState {
                 .body
                 .pointer("/details/retry_after_seconds")
                 .and_then(Value::as_u64)
+                .filter(|seconds| *seconds > 0)
+                .or(response.retry_after_seconds)
+                .map(|seconds| seconds.min(86_400))
                 .map(|seconds| format!(":{seconds}"))
                 .unwrap_or_default();
             log::warn!(
@@ -1839,6 +1850,21 @@ async fn bounded_response_bytes(mut response: reqwest::Response) -> Result<Vec<u
     Ok(bytes)
 }
 
+fn parse_retry_after_seconds(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<u64> {
+    let value = value.trim();
+    let seconds = if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        value.parse::<u64>().ok()?
+    } else {
+        let deadline = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+        let milliseconds = deadline.signed_duration_since(now).num_milliseconds();
+        if milliseconds <= 0 {
+            return None;
+        }
+        u64::try_from(milliseconds / 1000 + i64::from(milliseconds % 1000 != 0)).ok()?
+    };
+    (seconds > 0).then_some(seconds.min(86_400))
+}
+
 async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, String> {
     let balance_response = response.url().path().ends_with("/v1/me/balance")
         || response.url().path().starts_with("/v1/organizations/")
@@ -1850,6 +1876,11 @@ async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, Str
         || response.url().path().ends_with("/v1/me/usage-requests")
         || response.url().path().ends_with("/v1/me/usage-turns");
     let status = response.status().as_u16();
+    let retry_after_seconds = response
+        .headers()
+        .get("Retry-After")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_retry_after_seconds(value, chrono::Utc::now()));
     let context_version = response
         .headers()
         .get("X-Context-Version")
@@ -1897,6 +1928,7 @@ async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, Str
         personal_authorization_version,
         platform_authorization_version,
         organization_authorization_version,
+        retry_after_seconds,
     })
 }
 
@@ -1908,6 +1940,95 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Mutex as StdMutex;
     use std::thread;
+
+    #[test]
+    fn portal_handoff_tickets_reject_shell_metacharacters_and_invalid_lengths() {
+        assert!(valid_portal_handoff_ticket("0123456789ABC_-xyz"));
+        assert!(valid_portal_handoff_ticket(&"a".repeat(256)));
+        for ticket in [
+            "".to_string(),
+            "a".repeat(15),
+            "a".repeat(257),
+            "valid_ticket_1234&calc".into(),
+            "valid_ticket_1234|calc".into(),
+            "valid_ticket_1234^calc".into(),
+            "valid_ticket_1234%PATH%".into(),
+            "valid_ticket_1234\"".into(),
+            "valid_ticket_1234\n".into(),
+            "valid_ticket_1234 ".into(),
+            "valid_ticket_1234é".into(),
+        ] {
+            assert!(
+                !valid_portal_handoff_ticket(&ticket),
+                "unsafe ticket accepted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn portal_handoff_rejects_unsafe_server_ticket_before_building_open_target() {
+        let (base, server) =
+            spawn_portal_fixture(1, |_| (200, r#"{"ticket":"synthetic_ticket_1234&calc"}"#));
+        let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+        let mut config = config();
+        config.portal_url = base;
+        let error = state
+            .request_portal_session_handoff(&config, "public-access")
+            .await
+            .err()
+            .unwrap();
+        server.join().unwrap();
+        assert!(error.starts_with("portal_session_handoff_invalid:"));
+    }
+
+    #[test]
+    fn retry_after_preserves_bounded_seconds_and_http_dates() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-08T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(parse_retry_after_seconds("60", now), Some(60));
+        assert_eq!(parse_retry_after_seconds("999999", now), Some(86_400));
+        assert_eq!(
+            parse_retry_after_seconds("Thu, 08 Oct 2026 12:01:00 GMT", now),
+            Some(60)
+        );
+        for invalid in [
+            "",
+            "0",
+            "-1",
+            "60garbage",
+            "1.5",
+            "Wed, 07 Oct 2026 12:00:00 GMT",
+        ] {
+            assert_eq!(parse_retry_after_seconds(invalid, now), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn mobile_auth_rate_limit_retains_header_only_and_body_retry_after() {
+        for (body, expected) in [
+            (
+                r#"{"code":"SMS_RATE_LIMITED"}"#,
+                "mobile_auth_failed: SMS_RATE_LIMITED:60",
+            ),
+            (
+                r#"{"code":"SMS_RATE_LIMITED","details":{"retry_after_seconds":45}}"#,
+                "mobile_auth_failed: SMS_RATE_LIMITED:45",
+            ),
+        ] {
+            let (base, server) =
+                spawn_portal_fixture_with_headers(1, move |_| (429, body, "Retry-After: 60\r\n"));
+            let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+            let mut config = config();
+            config.account_url = base;
+            let error = state
+                .public_account_request(&config, "v1/auth/sms/challenges", serde_json::json!({}))
+                .await
+                .unwrap_err();
+            server.join().unwrap();
+            assert_eq!(error, expected);
+        }
+    }
 
     #[derive(Default)]
     struct MemoryCredentialStore {
@@ -1973,6 +2094,16 @@ mod tests {
         expected_requests: usize,
         mut respond: impl FnMut(&str) -> (u16, &'static str) + Send + 'static,
     ) -> (Url, thread::JoinHandle<()>) {
+        spawn_portal_fixture_with_headers(expected_requests, move |request| {
+            let (status, body) = respond(request);
+            (status, body, "")
+        })
+    }
+
+    fn spawn_portal_fixture_with_headers(
+        expected_requests: usize,
+        mut respond: impl FnMut(&str) -> (u16, &'static str, &'static str) + Send + 'static,
+    ) -> (Url, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
@@ -2008,7 +2139,7 @@ mod tests {
                     }
                 }
                 let request = String::from_utf8(request).unwrap();
-                let (status, body) = respond(&request);
+                let (status, body, headers) = respond(&request);
                 let reason = match status {
                     200 => "OK",
                     400 => "Bad Request",
@@ -2018,7 +2149,7 @@ mod tests {
                 };
                 write!(
                     stream,
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
                     body.len()
                 )
                 .unwrap();
@@ -2516,7 +2647,7 @@ mod tests {
                             .to_ascii_lowercase()
                             .contains("authorization: bearer restored-access")
                     );
-                    (200, r#"{"ticket":"restored-ticket"}"#)
+                    (200, r#"{"ticket":"restored-ticket-v1"}"#)
                 }
                 _ => unreachable!(),
             }
@@ -2529,7 +2660,7 @@ mod tests {
 
         let target = state.portal_target(&config, "en").await.unwrap();
         server.join().unwrap();
-        assert_eq!(target.fragment(), Some("ticket=restored-ticket"));
+        assert_eq!(target.fragment(), Some("ticket=restored-ticket-v1"));
     }
 
     #[tokio::test]

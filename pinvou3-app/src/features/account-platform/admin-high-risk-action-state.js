@@ -28,11 +28,12 @@ const safeNoWrite = new Set([
   '400:INVALID_REQUEST', '400:INVALID_COMMAND', '400:INVALID_ROUTE_COMMAND', '400:INVALID_REASON', '400:IDEMPOTENCY_KEY_REQUIRED',
   '401:LOGIN_REQUIRED', '401:RECENT_AUTHENTICATION_REQUIRED',
   '403:CSRF_REJECTED', '403:PERMISSION_DENIED', '403:TOKEN_FORBIDDEN',
-  '404:NOT_FOUND', '404:TOKEN_ACCOUNT_NOT_FOUND',
+  '404:NOT_FOUND', '404:TOKEN_ACCOUNT_NOT_FOUND', '404:TOKEN_NOT_FOUND',
   '409:CATALOG_VERSION_CONFLICT', '409:COMMAND_PRECHECK_CHANGED', '409:TOKEN_ROUTE_VERSION_CONFLICT', '409:IDEMPOTENCY_KEY_REUSED',
   '409:TOKEN_ACCOUNT_CAP_REACHED', '503:TOKEN_ACCOUNT_POLICY_UNAVAILABLE', '503:TOKEN_ACCOUNT_POLICY_CONFIG_MISMATCH',
   '412:DRAFT_ETAG_MISMATCH', '422:COMMAND_PRECHECK_FAILED', '422:TOKEN_ROUTE_REFERENCE_INVALID',
   '503:TOKEN_COMMAND_GOVERNANCE_INACTIVE', '503:IMPACT_PRECHECK_DISABLED',
+  '503:CREDENTIAL_REQUEST_DEADLINE_EXCEEDED',
 ]);
 
 const protocolFormulaSafeNoWrite = new Set([
@@ -205,7 +206,8 @@ export function validGovernedTokenCommandResult(value, expected) {
   const completed = value.completed_at != null && validDateTime(value.completed_at);
   const stableError = value.stable_error_code != null
     && /^[A-Z][A-Z0-9_]{0,119}$/.test(String(value.stable_error_code))
-    && !/(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)/.test(String(value.stable_error_code));
+    && (value.stable_error_code === 'CREDENTIAL_PROBE_OUTCOME_UNKNOWN'
+      || !/(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)/.test(String(value.stable_error_code)));
   if (value.completed_at != null && !completed) return false;
   if (value.stable_error_code != null && !stableError) return false;
   const recoveryFields = ['recovery_state', 'recovery_diagnostic_code', 'recovery_epoch'].some((field) => Object.prototype.hasOwnProperty.call(value, field));

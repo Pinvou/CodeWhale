@@ -1,26 +1,5 @@
 import { secureRequestID } from './request-id.js';
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const routeNoWritePairs = new Set([
-  '400:INVALID_ROUTE_COMMAND',
-  '400:IDEMPOTENCY_KEY_REQUIRED',
-  '401:LOGIN_REQUIRED',
-  '403:CSRF_REJECTED',
-  '403:TOKEN_FORBIDDEN',
-  '404:TOKEN_ACCOUNT_NOT_FOUND',
-  '409:TOKEN_ROUTE_VERSION_CONFLICT',
-  '422:TOKEN_ROUTE_REFERENCE_INVALID',
-  '503:TOKEN_COMMAND_GOVERNANCE_INACTIVE',
-]);
-
-function stableValue(value) {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
-}
-
-function routePayloadKey(payload) {
-  return JSON.stringify(stableValue(payload));
-}
 
 export function tokenResourceAccess(permissions = [], formsEnabled = false) {
   const granted = new Set(permissions);
@@ -41,42 +20,6 @@ export function tokenResourceAccess(permissions = [], formsEnabled = false) {
 
 export function routeEditorVisible(access, requested) {
   return Boolean(requested && access?.showRouteWrite);
-}
-
-export function prepareStableRouteCommand(previous, payload, randomUUID = () => secureRequestID()) {
-  const payloadKey = routePayloadKey(payload);
-  if (previous?.payloadKey === payloadKey) return previous.unknown || previous.completed ? { ...previous, locked: true } : previous;
-  if (previous?.completed || previous?.dispatched && !previous.provenNoWrite) return { ...previous, locked: true };
-  return { idempotencyKey: `admin-route-${randomUUID()}`, payloadKey, payload, dispatched: false, provenNoWrite: false, unknown: false, locked: false };
-}
-
-export function dispatchStableRouteCommand(command) {
-  return command?.locked ? command : { ...command, dispatched: true };
-}
-
-export function failStableRouteCommand(command, error) {
-  const status = Number.isInteger(error?.status) ? error.status : 0;
-  const code = String(error?.code || 'REQUEST_FAILED');
-  const provenNoWrite = status !== 504 && routeNoWritePairs.has(`${status}:${code}`);
-  return { ...command, dispatched: true, provenNoWrite, unknown: !provenNoWrite, locked: !provenNoWrite, error: { status, code, requestID: String(error?.requestID || '') } };
-}
-
-export async function executeStableRouteCommand(holder, payload, send, randomUUID = () => secureRequestID()) {
-  if (holder.current?.inflight) return { ok: false, duplicate: true, command: holder.current.command };
-  const prepared = prepareStableRouteCommand(holder.current?.command, payload, randomUUID);
-  if (prepared.locked) return { ok: false, duplicate: false, command: prepared, error: { code: 'COMMAND_RESULT_UNKNOWN', status: 0, requestID: prepared.error?.requestID || '' } };
-  const dispatched = dispatchStableRouteCommand(prepared);
-  holder.current = { command: dispatched, inflight: true };
-  try {
-    const value = await send(payload, prepared.idempotencyKey);
-    const completed = { ...dispatched, provenNoWrite: false, completed: true, locked: true };
-    holder.current = { command: completed, inflight: false };
-    return { ok: true, value, command: completed };
-  } catch (error) {
-    const failed = failStableRouteCommand(dispatched, error);
-    holder.current = { command: failed, inflight: false };
-    return { ok: false, duplicate: false, command: failed, error: failed.unknown ? { ...failed.error, code: 'COMMAND_RESULT_UNKNOWN' } : failed.error };
-  }
 }
 
 export function ownerCandidateQuery(ownerType, query = {}, organizationID = '') {
@@ -119,24 +62,6 @@ export function stableRouteChoices(models = []) {
       protocolVersion: Number(model.protocol_version || 0),
     }];
   });
-}
-
-export function stableRouteChange({ choice, accountVersion, existingRoute, priority, defaultScope, reason }) {
-  const expectedAccountVersion = Number(accountVersion);
-  const expectedRouteVersion = existingRoute ? Number(existingRoute.route_version) : 0;
-  const normalizedPriority = Number(priority);
-  const normalizedScope = String(defaultScope || '').toUpperCase();
-  const normalizedReason = String(reason || '').trim();
-  if (!choice || !uuidPattern.test(String(choice.modelID || '')) || !uuidPattern.test(String(choice.protocolVersionID || '')) || !Number.isInteger(expectedAccountVersion) || expectedAccountVersion < 1 || !Number.isInteger(expectedRouteVersion) || expectedRouteVersion < 0 || !Number.isInteger(normalizedPriority) || normalizedPriority < 0 || normalizedPriority > 10000 || !['NONE', 'UNIT', 'ORG'].includes(normalizedScope) || normalizedReason.length < 10 || normalizedReason.length > 2000) return null;
-  return {
-    model_id: choice.modelID,
-    protocol_version_id: choice.protocolVersionID,
-    priority: normalizedPriority,
-    default_scope: normalizedScope,
-    expected_account_version: expectedAccountVersion,
-    expected_route_version: expectedRouteVersion,
-    reason: normalizedReason,
-  };
 }
 
 export function serverRouteHealth(route = {}, authoritativeAsOf) {

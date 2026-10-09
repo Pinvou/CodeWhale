@@ -38,6 +38,7 @@ function OverviewTab({ detail, copy }) {
   return <section className="adm-card adm-model-detail-panel" aria-labelledby="model-overview-heading">
     <h2 id="model-overview-heading">{copy.detailOverview}</h2>
     <p className="adm-source-lead">{copy.detailOverviewLead}</p>
+    {!model.source_available && <p className="adm-source-lead adm-source-missing-policy">{copy.sourceMissingPolicy}</p>}
     <Facts>
       <Fact label={copy.lifecycle}><Status value={model.lifecycle_status} copy={copy} /></Fact>
       <Fact label={copy.catalogVersion}>{model.catalog_version}</Fact>

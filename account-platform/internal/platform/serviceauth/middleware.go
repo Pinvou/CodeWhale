@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -123,11 +124,11 @@ func newAuthenticator(expectedToken string) authenticator {
 	caFile := strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_CA_FILE"))
 	if issuer == "" {
 		if caFile != "" {
-			return authenticator{invalid: errWorkloadTrust}
+			return invalidAuthenticator("WORKLOAD_ISSUER_REQUIRED_FOR_CA", errWorkloadTrust)
 		}
 		environment := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
-		if environment != "" && environment != "development" && environment != "test" {
-			return authenticator{invalid: errors.New("OIDC workload identity is required outside development and test")}
+		if environment != "development" && environment != "test" {
+			return invalidAuthenticator("WORKLOAD_ISSUER_REQUIRED", errors.New("OIDC workload identity is required outside development and test"))
 		}
 		return authenticator{legacyToken: strings.TrimSpace(expectedToken)}
 	}
@@ -135,28 +136,28 @@ func newAuthenticator(expectedToken string) authenticator {
 	audience := strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_AUDIENCE"))
 	rawRules := strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_RULES_JSON"))
 	if validateHTTPSURL(issuer) != nil || validateHTTPSURL(jwksURL) != nil || audience == "" || rawRules == "" {
-		return authenticator{invalid: errors.New("workload identity issuer, JWKS URL, audience, and rules are required")}
+		return invalidAuthenticator("WORKLOAD_CONFIGURATION_INCOMPLETE", errors.New("workload identity issuer, JWKS URL, audience, and rules are required"))
 	}
 	var rules []rule
 	if err := json.Unmarshal([]byte(rawRules), &rules); err != nil || len(rules) == 0 {
-		return authenticator{invalid: errors.New("workload identity rules must be a non-empty JSON array")}
+		return invalidAuthenticator("WORKLOAD_RULES_INVALID", errors.New("workload identity rules must be a non-empty JSON array"))
 	}
 	for _, item := range rules {
 		if strings.TrimSpace(item.Subject) == "" || strings.TrimSpace(item.Service) == "" || len(item.Permissions) == 0 {
-			return authenticator{invalid: errors.New("each workload identity rule requires subject, service, and exact permissions")}
+			return invalidAuthenticator("WORKLOAD_RULE_IDENTITY_INVALID", errors.New("each workload identity rule requires subject, service, and exact permissions"))
 		}
 		for _, permission := range item.Permissions {
 			if !validPermission(permission) {
-				return authenticator{invalid: errors.New("workload identity permission must be an exact internal permission")}
+				return invalidAuthenticator("WORKLOAD_PERMISSION_INVALID", errors.New("workload identity permission must be an exact internal permission"))
 			}
 		}
 	}
 	if caFile != "" && (!canonicalWorkloadHTTPS(issuer) || !canonicalWorkloadHTTPS(jwksURL)) {
-		return authenticator{invalid: errWorkloadTrust}
+		return invalidAuthenticator("WORKLOAD_TRUST_URL_INVALID", errWorkloadTrust)
 	}
 	client, err := workloadHTTPClient(caFile)
 	if err != nil {
-		return authenticator{invalid: err}
+		return invalidAuthenticator("WORKLOAD_TRUST_INVALID", err)
 	}
 	keySet := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), jwksURL)
 	verifier := oidc.NewVerifier(issuer, keySet, &oidc.Config{ClientID: audience})
@@ -173,6 +174,13 @@ func newAuthenticator(expectedToken string) authenticator {
 		}
 		return token.Subject, nil
 	}}
+}
+
+func invalidAuthenticator(code string, err error) authenticator {
+	// Configuration is diagnosed once when constructing the middleware. URLs,
+	// rules, token values and CA contents are never included in the log.
+	slog.Error("workload identity configuration rejected", "error_code", code)
+	return authenticator{invalid: err}
 }
 
 func validTokenTimes(issued, expiry time.Time, notBefore int64, now time.Time) bool {

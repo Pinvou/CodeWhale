@@ -1,9 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
-import { reconciliationCommand, reconciliationDayRange, reconciliationImportItems, requireReconciliationDate } from '../src/features/account-platform/reconciliation-contract.js';
+import { reconciliationCommand, reconciliationDayRange, reconciliationImportItems, reconciliationCaseLabel, requireReconciliationDate } from '../src/features/account-platform/reconciliation-contract.js';
+import { reconciliationCopy } from '../src/shared/i18n.js';
 
 const ID = '11111111-1111-4111-8111-111111111111';
+test('date evidence gaps have explicit labels in all three languages and preserve unknown types', () => {
+  for (const language of ['zh', 'en', 'ja']) {
+    for (const type of ['REFUND_DATE_UNVERIFIED', 'CHARGEBACK_DATE_UNVERIFIED']) {
+      assert.equal(typeof reconciliationCopy[language].caseTypes[type], 'string');
+      assert.notEqual(reconciliationCaseLabel(type, reconciliationCopy[language]), type);
+    }
+    assert.equal(reconciliationCaseLabel('FUTURE_PROVIDER_EVIDENCE', reconciliationCopy[language]), 'FUTURE_PROVIDER_EVIDENCE');
+  }
+});
+test('published import row limit and UTF8 field budget agree with the server', () => {
+  assert.equal(reconciliationImportItems(JSON.stringify(Array.from({ length: 100000 }, () => ({ amount_fen: 1 })))).length, 100000);
+  assert.throws(() => reconciliationImportItems(JSON.stringify(Array.from({ length: 100001 }, () => ({ amount_fen: 1 })))), { message: 'INVALID_RECONCILIATION_INPUT' });
+  assert.throws(() => reconciliationImportItems(JSON.stringify([{ merchant_order_no: '界'.repeat(86) }])), { message: 'INVALID_RECONCILIATION_INPUT' });
+});
 test('import preserves int64 source digits and rejects invalid dates', () => {
   assert.equal(reconciliationImportItems('[{"amount_fen":9007199254740993}]')[0].amount_fen, '9007199254740993');
   for (const value of ['2026-02-29', '10/07/2026', '2026-13-01', '2026-99-99']) assert.throws(() => requireReconciliationDate(value), { message: 'INVALID_RECONCILIATION_INPUT' });

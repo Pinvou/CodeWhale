@@ -202,11 +202,14 @@ GROUP BY principal.id,principal.status,principal.context_version,principal.perso
 		&decision.UserID, &decision.UserStatus, &decision.ContextVersion, &decision.PersonalAuthorizationVersion,
 		&decision.PlatformAuthorizationVersion, &decision.GrantedPermissions, &allPlatform,
 	)
-	if errors.Is(err, pgx.ErrNoRows) || !allPlatform {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return AuthorizationDecision{}, ErrForbidden
 	}
 	if err != nil {
 		return AuthorizationDecision{}, err
+	}
+	if !allPlatform {
+		return AuthorizationDecision{}, ErrForbidden
 	}
 	decision.PermissionScope = "PLATFORM"
 	decision.AuthorizationVersion = decision.PlatformAuthorizationVersion

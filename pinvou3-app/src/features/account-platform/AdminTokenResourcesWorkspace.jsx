@@ -115,7 +115,9 @@ function OwnerDialog({ client, copy, query, histories, onQueryChange, onClose, o
   const previousFocus = useRef(document.activeElement);
   const ownerType = query.owner_type || 'USER';
   const organizationID = query.organization_id || '';
-  const requestQuery = useMemo(() => ownerCandidateQuery(ownerType, query, organizationID), [ownerType, organizationID, JSON.stringify(query)]);
+  const queryKey = JSON.stringify(query);
+  const requestQuery = useMemo(() => ownerCandidateQuery(ownerType, query, organizationID), [ownerType, organizationID, queryKey]);
+  const requestQueryKey = JSON.stringify(requestQuery);
   const [refresh, setRefresh] = useState(0);
   const [selected, setSelected] = useState(null);
   const [selectedOrganization, setSelectedOrganization] = useState(organizationID ? { id: organizationID, type: 'ORGANIZATION', display_label: organizationID } : null);
@@ -129,7 +131,7 @@ function OwnerDialog({ client, copy, query, histories, onQueryChange, onClose, o
   const load = useMemo(() => (filters, signal) => client.tokenOwnerCandidates(filters, signal), [client]);
   const state = useSource(load, requestQuery, true, refresh);
   useEffect(() => { first.current?.focus(); return () => previousFocus.current?.focus?.(); }, []);
-  useEffect(() => { setSelected(null); }, [JSON.stringify(requestQuery)]);
+  useEffect(() => { setSelected(null); }, [requestQueryKey]);
   useEffect(() => { setSearchDraft(query.q || ''); }, [query.q]);
   const update = (patch, mode = 'push') => onQueryChange('ownerCandidates', { ...query, ...patch }, mode);
   const retry = () => {

@@ -2,6 +2,9 @@
 # image must contain this F01 SPI and theme, with the user realm already verified.
 services:
   keycloak:
+    networks:
+      backend:
+        ipv4_address: ${PERSONAL_KEYCLOAK_BACKEND_IP:?set fixed private Keycloak peer IP}
     environment:
       PINVOU_ACCOUNT_AUTH_URL: ${KEYCLOAK_ACCOUNT_AUTH_URL:?set verified private Account origin}
       PINVOU_OIDC_ISSUER: ${USER_OIDC_ISSUER:?set exact public user realm issuer}
@@ -13,3 +16,7 @@ services:
       KC_PROXY_TRUSTED_ADDRESSES: "${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge address},${PERSONAL_IDENTITY_BACKEND_IP:?set fixed verified Identity address}"
     volumes:
       - {type: bind, source: "${KEYCLOAK_WORKLOAD_TOKEN_DIRECTORY:?set only authenticator projected token directory}", target: /run/pinvou/keycloak-workload, read_only: true, bind: {create_host_path: false}}
+networks:
+  backend:
+    external: true
+    name: ${PERSONAL_BACKEND_NETWORK:?set separately verified private business network}

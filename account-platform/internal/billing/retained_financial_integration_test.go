@@ -25,6 +25,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/simulatorschema"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -128,6 +129,46 @@ type retainedFinancialProvider struct {
 	err    error
 }
 
+// Fault-injection DDL uses the migration actor in this fixture's own UUID
+// database. Production runtime privileges remain unchanged and are exercised
+// by all financial actions through r.pool.
+func retainedFinanceOwnerExec(t *testing.T, r *PostgresRepository, ctx context.Context, statement string) (pgconn.CommandTag, error) {
+	t.Helper()
+	config := r.pool.Config().ConnConfig.Copy()
+	if !strings.HasPrefix(config.Database, "retained_finance_") {
+		t.Fatal("fault DDL requires owned UUID fixture database")
+	}
+	config.User, config.Password = "billing_migrator", ""
+	c, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		return pgconn.CommandTag{}, err
+	}
+	defer c.Close(context.Background())
+	if _, err = c.Exec(ctx, `SET ROLE billing_schema_owner`); err != nil {
+		return pgconn.CommandTag{}, err
+	}
+	return c.Exec(ctx, statement)
+}
+
+func retainedClaimAnomaly(t *testing.T, r *PostgresRepository, ctx context.Context, caseID, actor uuid.UUID) {
+	t.Helper()
+	if _, err := r.ClaimPaymentAnomaly(ctx, caseID, actor, uuid.NewString()); err != nil {
+		t.Fatal("claim fixture anomaly", err)
+	}
+}
+
+func retainedResolveClaimedAnomaly(t *testing.T, r *PostgresRepository, ctx context.Context, caseID, actor uuid.UUID, key, resolution, reason, financialStatus string) (PaymentAnomalyCase, error) {
+	t.Helper()
+	item, err := r.PaymentAnomalyDetail(ctx, caseID)
+	if err != nil {
+		return PaymentAnomalyCase{}, err
+	}
+	if item.Case.OwnerID == nil {
+		retainedClaimAnomaly(t, r, ctx, caseID, actor)
+	}
+	return r.ResolvePaymentAnomaly(ctx, caseID, actor, key, resolution, reason, financialStatus)
+}
+
 func (p *retainedFinancialProvider) Capabilities() PaymentCapabilities {
 	return PaymentCapabilities{ProviderID: "controlled", Version: "v1", Channels: []string{"ALIPAY"}, OrderQuerySupported: true, MinimumQueryIntervalSeconds: 1, ManualRepairSupported: true, RefundSupported: true, RefundIdempotencySupported: true, TestOnly: true}
 }
@@ -211,6 +252,7 @@ func TestRetainedAnomalyIntentPrecedesEffectAndReceiptRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	caseID, actor, key, reason := *forced.ManualReviewCaseID, uuid.New(), uuid.NewString(), "controlled financial resolution"
+	retainedClaimAnomaly(t, r, ctx, caseID, actor)
 	if _, complete, err := r.PreparePaymentAnomalyResolution(ctx, caseID, actor, key, "CONFIRM_FORCED_REFUND", reason); err != nil || complete {
 		t.Fatal("durable intent preparation", err)
 	}
@@ -230,22 +272,22 @@ func TestRetainedAnomalyIntentPrecedesEffectAndReceiptRecovery(t *testing.T) {
 	}
 	// A committed financial effect followed by a failed receipt must retain the
 	// original intent. Trigger is confined to this unique fixture schema.
-	if _, err = r.pool.Exec(ctx, `CREATE FUNCTION fixture_receipt_failure() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'controlled receipt fault'; END$$; CREATE TRIGGER fixture_receipt_failure BEFORE INSERT ON payment_anomaly_commands FOR EACH ROW EXECUTE FUNCTION fixture_receipt_failure()`); err != nil {
+	if _, err = retainedFinanceOwnerExec(t, r, ctx, `CREATE FUNCTION fixture_receipt_failure() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'controlled receipt fault'; END$$; CREATE TRIGGER fixture_receipt_failure BEFORE INSERT ON payment_anomaly_commands FOR EACH ROW EXECUTE FUNCTION fixture_receipt_failure()`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = r.ResolvePaymentAnomaly(ctx, caseID, actor, key, "CONFIRM_FORCED_REFUND", reason, "APPLIED"); err == nil {
+	if _, err = retainedResolveClaimedAnomaly(t, r, ctx, caseID, actor, key, "CONFIRM_FORCED_REFUND", reason, "APPLIED"); err == nil {
 		t.Fatal("receipt fault was not reached")
 	}
 	if _, _, err = r.PreparePaymentAnomalyResolution(ctx, caseID, actor, uuid.NewString(), "DISMISS", reason); !errors.Is(err, ErrConflict) {
 		t.Fatal("lost receipt permitted opposing decision", err)
 	}
-	if _, err = r.pool.Exec(ctx, `DROP TRIGGER fixture_receipt_failure ON payment_anomaly_commands; DROP FUNCTION fixture_receipt_failure()`); err != nil {
+	if _, err = retainedFinanceOwnerExec(t, r, ctx, `DROP TRIGGER fixture_receipt_failure ON payment_anomaly_commands; DROP FUNCTION fixture_receipt_failure()`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = r.ApplyReviewedForcedRefund(ctx, forced.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = r.ResolvePaymentAnomaly(ctx, caseID, actor, key, "CONFIRM_FORCED_REFUND", reason, "APPLIED"); err != nil {
+	if _, err = retainedResolveClaimedAnomaly(t, r, ctx, caseID, actor, key, "CONFIRM_FORCED_REFUND", reason, "APPLIED"); err != nil {
 		t.Fatal(err)
 	}
 	if receipt, complete, err := r.PreparePaymentAnomalyResolution(ctx, caseID, actor, key, "CONFIRM_FORCED_REFUND", reason); err != nil || !complete || receipt.Status != "RESOLVED" {
@@ -310,14 +352,14 @@ func TestRetainedCrossReviewDismissalDoesNotThawOtherDecision(t *testing.T) {
 	}
 	actor := uuid.New()
 	reason := "controlled disproved payment review"
-	if _, err = r.ResolvePaymentAnomaly(ctx, *forced.ManualReviewCaseID, actor, uuid.NewString(), "DISMISS", reason, "NONE"); err != nil {
+	if _, err = retainedResolveClaimedAnomaly(t, r, ctx, *forced.ManualReviewCaseID, actor, uuid.NewString(), "DISMISS", reason, "NONE"); err != nil {
 		t.Fatal(err)
 	}
 	var state string
 	if err = r.pool.QueryRow(ctx, `SELECT status FROM entitlement_packages WHERE id=$1`, pack).Scan(&state); err != nil || state != "FROZEN" {
 		t.Fatal("other live review was thawed", state, err)
 	}
-	if _, err = r.ResolvePaymentAnomaly(ctx, *charge.ManualReviewCaseID, actor, uuid.NewString(), "DISMISS", reason, "NONE"); err != nil {
+	if _, err = retainedResolveClaimedAnomaly(t, r, ctx, *charge.ManualReviewCaseID, actor, uuid.NewString(), "DISMISS", reason, "NONE"); err != nil {
 		t.Fatal(err)
 	}
 	if err = r.pool.QueryRow(ctx, `SELECT status FROM entitlement_packages WHERE id=$1`, pack).Scan(&state); err != nil || state != "ACTIVE" {
@@ -342,7 +384,7 @@ func TestRetainedDismissedOverdueRightsEnterOrdinaryExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = r.ResolvePaymentAnomaly(ctx, *forced.ManualReviewCaseID, uuid.New(), uuid.NewString(), "DISMISS", "controlled disproved expired review", "NONE"); err != nil {
+	if _, err = retainedResolveClaimedAnomaly(t, r, ctx, *forced.ManualReviewCaseID, uuid.New(), uuid.NewString(), "DISMISS", "controlled disproved expired review", "NONE"); err != nil {
 		t.Fatal(err)
 	}
 	_, summary, err := r.ListPackages(ctx, order.RequesterID, order.WalletID, 10)
@@ -372,7 +414,7 @@ func TestRetainedAlreadyTerminalRightsAreNotResurrected(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = r.ResolvePaymentAnomaly(ctx, *forced.ManualReviewCaseID, uuid.New(), uuid.NewString(), "DISMISS", "controlled disproved terminal review", "NONE"); err != nil {
+			if _, err = retainedResolveClaimedAnomaly(t, r, ctx, *forced.ManualReviewCaseID, uuid.New(), uuid.NewString(), "DISMISS", "controlled disproved terminal review", "NONE"); err != nil {
 				t.Fatal(err)
 			}
 			var actual string
@@ -501,19 +543,26 @@ func TestRetainedFailedRefundKeepsConcurrentChargebackFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, _, err := c.finishRefund(ctx, refund, ProviderRefund{MerchantRefundNo: refund.MerchantRefundNo, AmountFen: 100, Status: "FAILED"}, false)
-	if err != nil || result.Status != "FAILED" {
-		t.Fatal("provider failure did not persist", err)
+	if err != nil || result.Status != "MANUAL_REVIEW" {
+		t.Fatal("late receipt bypassed chargeback-owned refund review", result.Status, err)
 	}
 	var state string
 	var posted int64
 	if err = r.pool.QueryRow(ctx, `SELECT p.status,w.posted_microcredits FROM entitlement_packages p JOIN wallets w ON w.id=p.wallet_id WHERE p.id=$1`, pack).Scan(&state, &posted); err != nil || state != "FROZEN" || posted != 1000000 {
 		t.Fatal("failed refund thawed concurrent chargeback", state, posted, err)
 	}
-	if _, err = r.ResolvePaymentAnomaly(ctx, *charge.ManualReviewCaseID, uuid.New(), uuid.NewString(), "DISMISS", "controlled disproved final chargeback", "NONE"); err != nil {
+	if _, err = retainedResolveClaimedAnomaly(t, r, ctx, *charge.ManualReviewCaseID, uuid.New(), uuid.NewString(), "DISMISS", "controlled disproved final chargeback", "NONE"); err != nil {
 		t.Fatal(err)
 	}
+	if err = r.pool.QueryRow(ctx, `SELECT status FROM entitlement_packages WHERE id=$1`, pack).Scan(&state); err != nil || state != "FROZEN" {
+		t.Fatal("chargeback dismissal bypassed outstanding refund review", state, err)
+	}
+	c.provider = &reviewRefundProvider{refund: ProviderRefund{Status: "FAILED"}}
+	if result, err := c.processRefund(ctx, refund.ID, true); err != nil || result.Status != "FAILED" {
+		t.Fatal("explicit terminal refund reconciliation failed", result.Status, err)
+	}
 	if err = r.pool.QueryRow(ctx, `SELECT status FROM entitlement_packages WHERE id=$1`, pack).Scan(&state); err != nil || state != "ACTIVE" {
-		t.Fatal("final review receipt did not clear disproved fence", state, err)
+		t.Fatal("own failed-refund reservation did not restore after all fences cleared", state, err)
 	}
 }
 
@@ -772,6 +821,7 @@ func TestRetainedReviewedLossKeepsExpiredEntitlementFacts(t *testing.T) {
 					t.Fatal(err)
 				}
 				caseID = *evidence.ManualReviewCaseID
+				retainedClaimAnomaly(t, r, ctx, caseID, actor)
 				if _, _, err = r.PreparePaymentAnomalyResolution(ctx, caseID, actor, key, resolution, reason); err != nil {
 					t.Fatal(err)
 				}
@@ -784,6 +834,7 @@ func TestRetainedReviewedLossKeepsExpiredEntitlementFacts(t *testing.T) {
 					t.Fatal(err)
 				}
 				caseID = *evidence.ManualReviewCaseID
+				retainedClaimAnomaly(t, r, ctx, caseID, actor)
 				if _, _, err = r.PreparePaymentAnomalyResolution(ctx, caseID, actor, key, resolution, reason); err != nil {
 					t.Fatal(err)
 				}
@@ -791,7 +842,7 @@ func TestRetainedReviewedLossKeepsExpiredEntitlementFacts(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err := r.ResolvePaymentAnomaly(ctx, caseID, actor, key, resolution, reason, "APPLIED"); err != nil {
+			if _, err := retainedResolveClaimedAnomaly(t, r, ctx, caseID, actor, key, resolution, reason, "APPLIED"); err != nil {
 				t.Fatal(err)
 			}
 			var state string

@@ -66,8 +66,12 @@ services:
   billing-service:
     environment:
       BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED: "true"
+      TOKEN_HOLD_EXPIRY_URL: ${TOKEN_HOLD_EXPIRY_URL:?set verified HTTPS Token internal endpoint for expiry recovery}
   token-portal:
+    image: ${TOKEN_PORTAL_IMAGE:?set reviewed same-source F04 Portal image including current generated assets}
     environment:
+      PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED: "true"
+      PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED: "true"
       TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080
       CREDENTIAL_PORTAL_PUBLIC_URL: ${CREDENTIAL_PORTAL_PUBLIC_URL:?set approved separate HTTPS credentials origin}
   token-gateway:

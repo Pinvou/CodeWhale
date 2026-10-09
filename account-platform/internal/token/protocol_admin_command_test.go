@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
 )
@@ -52,46 +53,61 @@ func TestProtocolFormulaReasonUsesUTF8RuneBoundaries(t *testing.T) {
 	}
 }
 
-func TestProtocolFormulaCommandMetadataAndUnknownResultAreStable(t *testing.T) {
-	body := map[string]any{"reason": "publish the verified formula", "expected_formula_version": 3}
-	request := httptest.NewRequest(http.MethodPost, "/token/admin/v1/formulas/018f57a9-9c17-7efc-a450-35c445491003/publish", nil)
-	request.Header.Set("Idempotency-Key", "formula-publish-0001")
-	verify := func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{Subject: "018f57a9-9c17-7efc-a450-35c445491004", AuthenticatedAt: time.Now().UTC()}, nil
+func TestProtocolFormulaDomainMetadataRemainsRequired(t *testing.T) {
+	metadata := ProtocolFormulaCommandMetadata{ActorID: uuid.New(), CommandType: "TOKEN_FORMULA_PUBLISH", Reason: "publish the verified formula", IdempotencyKeyDigest: strings.Repeat("a", 64), RequestFingerprint: strings.Repeat("b", 64), CommandReference: strings.Repeat("c", 64)}
+	if err := validateProtocolFormulaCommandMetadata(metadata); err != nil {
+		t.Fatal(err)
 	}
-	var first ProtocolFormulaCommandMetadata
-	identity.Middleware(verify, http.HandlerFunc(func(_ http.ResponseWriter, authenticated *http.Request) {
-		var err error
-		first, err = protocolFormulaCommandMetadata(authenticated, "TOKEN_FORMULA_PUBLISH", "publish the verified formula", body)
-		if err != nil {
-			t.Fatal(err)
+	for _, field := range []string{"actor", "reason", "key", "fingerprint", "reference", "type"} {
+		invalid := metadata
+		switch field {
+		case "actor":
+			invalid.ActorID = uuid.Nil
+		case "reason":
+			invalid.Reason = "short"
+		case "key":
+			invalid.IdempotencyKeyDigest = ""
+		case "fingerprint":
+			invalid.RequestFingerprint = ""
+		case "reference":
+			invalid.CommandReference = ""
+		case "type":
+			invalid.CommandType = ""
 		}
-	})).ServeHTTP(httptest.NewRecorder(), withBearer(request))
-	if len(first.CommandReference) != 64 || len(first.IdempotencyKeyDigest) != 64 || len(first.RequestFingerprint) != 64 {
-		t.Fatalf("unexpected command metadata: %#v", first)
-	}
-
-	response := httptest.NewRecorder()
-	writeProtocolFormulaCommandError(response, request, first, context.DeadlineExceeded)
-	if response.Code != http.StatusGatewayTimeout || !strings.Contains(response.Body.String(), `"code":"COMMAND_RESULT_UNKNOWN"`) || !strings.Contains(response.Body.String(), first.CommandReference) {
-		t.Fatalf("unexpected unknown-result response: %d %s", response.Code, response.Body.String())
+		if validateProtocolFormulaCommandMetadata(invalid) == nil {
+			t.Fatalf("missing %s accepted", field)
+		}
 	}
 }
 
-func TestProtocolAndFormulaPublishRequireRecentAuthentication(t *testing.T) {
-	for _, authenticatedAt := range []time.Time{time.Time{}, time.Now().Add(-16 * time.Minute), time.Now().Add(2 * time.Minute)} {
-		request := httptest.NewRequest(http.MethodPost, "/publish", nil)
-		response := httptest.NewRecorder()
-		verify := func(context.Context, string) (identity.Principal, error) {
-			return identity.Principal{Subject: uuid.NewString(), AuthenticatedAt: authenticatedAt}, nil
-		}
-		identity.Middleware(verify, http.HandlerFunc(func(w http.ResponseWriter, authenticated *http.Request) {
-			if requireRecentProtocolFormulaAuthentication(w, authenticated, 15*time.Minute) {
-				t.Fatal("stale, absent, or future authentication must not pass")
-			}
-		})).ServeHTTP(response, withBearer(request))
-		if response.Code != http.StatusUnauthorized {
-			t.Fatalf("authenticated_at=%v returned %d", authenticatedAt, response.Code)
+func TestFormalProtocolAndFormulaPublishRequireRecentAuthentication(t *testing.T) {
+	authority := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Authorization-Version", "1")
+		_, _ = w.Write([]byte(`{"allowed":false}`))
+	}))
+	defer authority.Close()
+	client, err := authorization.NewClient(authority.URL, "controlled-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{authorizer: client}
+	for _, command := range []string{"TOKEN_PROTOCOL_PUBLISH", "TOKEN_FORMULA_PUBLISH"} {
+		for _, age := range []struct {
+			name   string
+			at     time.Time
+			status int
+		}{{"absent", time.Time{}, 401}, {"stale", time.Now().Add(-16 * time.Minute), 401}, {"future", time.Now().Add(2 * time.Minute), 401}, {"recent", time.Now().Add(-time.Minute), 403}, {"clock tolerance", time.Now().Add(30 * time.Second), 403}} {
+			t.Run(command+"/"+age.name, func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodPost, "/token/admin/v1/commands", strings.NewReader(`{"command_type":"`+command+`"}`))
+				response := httptest.NewRecorder()
+				handler := identity.Middleware(func(context.Context, string) (identity.Principal, error) {
+					return identity.Principal{Subject: uuid.NewString(), AuthenticatedAt: age.at}, nil
+				}, http.HandlerFunc(service.adminCreateTokenCommand))
+				handler.ServeHTTP(response, withBearer(request))
+				if response.Code != age.status {
+					t.Fatalf("formal status=%d body=%s", response.Code, response.Body.String())
+				}
+			})
 		}
 	}
 }

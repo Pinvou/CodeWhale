@@ -135,9 +135,9 @@ func buildPolicies() map[string]Policy {
 		"BILLING_RECHARGE_PRODUCT_DRAFT_UPDATE":         "platform.products.create",
 		"BILLING_RECHARGE_PRODUCT_PUBLISH":              "platform.products.publish",
 		"BILLING_RECHARGE_PRODUCT_UNPUBLISH":            "platform.products.unpublish",
-		"BILLING_RECONCILIATION_RUN":                    "platform.usage.reconcile.retry",
-		"BILLING_PROVIDER_BILL_IMPORT":                  "platform.usage.reconcile.retry",
-		"BILLING_RECONCILIATION_CASE_UPDATE":            "platform.usage.reconcile.retry",
+		"BILLING_RECONCILIATION_RUN":                    "platform.billing.reconciliation.run",
+		"BILLING_PROVIDER_BILL_IMPORT":                  "platform.billing.reconciliation.run",
+		"BILLING_RECONCILIATION_CASE_UPDATE":            "platform.billing.reconciliation.manage",
 		"BILLING_DAILY_RECONCILIATION":                  "internal.billing.payment.reconcile",
 		"BILLING_PAYMENT_EXPIRY_RECONCILE":              "internal.billing.payment.reconcile",
 		"BILLING_ENTITLEMENT_PACKAGE_EXPIRE":            "internal.billing.entitlement.expire",
@@ -160,6 +160,11 @@ func buildPolicies() map[string]Policy {
 			ApprovalCount: 0, SelfApprovalForbidden: false, SnapshotSchemaVersion: 1,
 			CriticalResourceFields: []string{"target_id", "request_fingerprint"},
 			ExpiresAfter:           24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "requesting-domain-service"}
+	}
+	for _, command := range []string{"BILLING_RECONCILIATION_RUN", "BILLING_PROVIDER_BILL_IMPORT", "BILLING_RECONCILIATION_CASE_UPDATE"} {
+		policy := result[command]
+		policy.PolicyVersion = 2
+		result[command] = policy
 	}
 	result["WALLET_ADJUSTMENT"] = Policy{
 		CommandType: "WALLET_ADJUSTMENT", PolicyVersion: 1, Mode: ApprovalRequired,

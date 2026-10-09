@@ -65,7 +65,7 @@ func TestF04PublicTokenUserOwnerAuthorityAndDirectory(t *testing.T) {
 		if err != nil || len(jobs) != 1 || jobs[0].UserID != me.UserID {
 			t.Fatalf("actual wallet job claim failed: %v", err)
 		}
-		if err = r.CompleteWalletProvisioning(ctx, me.UserID); err != nil {
+		if err = r.CompleteWalletProvisioning(ctx, jobs[0]); err != nil {
 			t.Fatal(err)
 		}
 		return me.UserID

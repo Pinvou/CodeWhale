@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -94,45 +95,11 @@ type CatalogDraftInput struct {
 	TokenizerVersion       string
 }
 
-type CatalogLifecycleInput struct {
-	ExpectedCatalogVersion int64
-	TargetStatus           string
-	EffectiveAt            time.Time
-	ReplacementModelID     *uuid.UUID
-	NewSessionCutoffAt     *time.Time
-	ContinuationCutoffAt   *time.Time
-	ForceCancelInflight    bool
-	IdempotencyKey         string
-	Reason                 string
-}
-
 type CatalogRepository interface {
 	ListCatalog(context.Context) (int64, []CatalogModel, error)
 	ResolveCatalogModel(context.Context, string, string, time.Time) (CatalogModel, error)
 	AdminCatalogModels(context.Context) (int64, []AdminCatalogModel, error)
-	CatalogModelsAtVersion(context.Context, int64) ([]CatalogModel, error)
-	SaveCatalogDraft(context.Context, uuid.UUID, CatalogDraftInput, uuid.UUID) (CatalogDraft, error)
-	PublishCatalogDraft(context.Context, uuid.UUID, int64, int64, string, string, uuid.UUID, []GatewayProtocolCapability) (CatalogModel, error)
-	TransitionCatalogModel(context.Context, uuid.UUID, CatalogLifecycleInput, uuid.UUID) (CatalogModel, error)
-	RollbackCatalog(context.Context, int64, int64, string, string, uuid.UUID, []GatewayProtocolCapability) (int64, error)
 	SyncCatalog(context.Context, string, string, []DiscoveredModel, int64, int64, uuid.UUID) (int64, bool, error)
-}
-
-func (r *PostgresRepository) CatalogModelsAtVersion(ctx context.Context, version int64) ([]CatalogModel, error) {
-	rows, err := r.pool.Query(ctx, catalogSelect+` WHERE e.catalog_version=$1 AND e.lifecycle_status<>'REMOVED' ORDER BY e.model_id`, version)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []CatalogModel{}
-	for rows.Next() {
-		item, scanErr := scanCatalogModel(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
 }
 
 const catalogSelect = `SELECT e.model_id,e.catalog_version,e.display_name,e.description,e.aliases,e.lifecycle_status,
@@ -328,67 +295,12 @@ func validateCatalogDraft(input *CatalogDraftInput) error {
 	return nil
 }
 
-func (r *PostgresRepository) SaveCatalogDraft(ctx context.Context, modelID uuid.UUID, input CatalogDraftInput, actor uuid.UUID) (CatalogDraft, error) {
-	if modelID == uuid.Nil || actor == uuid.Nil {
-		return CatalogDraft{}, ErrForbidden
-	}
-	if err := validateCatalogDraft(&input); err != nil {
-		return CatalogDraft{}, err
-	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return CatalogDraft{}, err
-	}
-	defer tx.Rollback(ctx)
-	if err := r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return CatalogDraft{}, err
-	}
-	draft, err := saveCatalogDraftEffect(ctx, tx, modelID, input, actor, r.now())
-	if err != nil {
-		return CatalogDraft{}, err
-	}
-	return draft, r.commitGovernedMutation(ctx, tx)
-}
-
 func strPtr(value string) *string { return &value }
 
 func appendCatalogAudit(ctx context.Context, tx pgx.Tx, actor uuid.UUID, action string, modelID *uuid.UUID, before, after *string, version int64, reason string, evidence any) error {
 	payload, _ := json.Marshal(evidence)
 	_, err := tx.Exec(ctx, `INSERT INTO model_catalog_audit(id,action,model_id,before_status,after_status,catalog_version,actor_id,reason,evidence,created_at) VALUES($1,$2,$3,$4,$5,NULLIF($6,0),$7,$8,$9,$10)`, uuid.Must(uuid.NewV7()), action, modelID, before, after, version, actor, strings.TrimSpace(reason), payload, time.Now().UTC())
 	return err
-}
-
-func catalogCommandDigest(value any) string {
-	payload, _ := json.Marshal(value)
-	digest := sha256.Sum256(payload)
-	return hex.EncodeToString(digest[:])
-}
-
-func claimCatalogCommand(ctx context.Context, tx pgx.Tx, key, commandType, digest string, actor uuid.UUID, now time.Time) (int64, *uuid.UUID, bool, error) {
-	key = strings.TrimSpace(key)
-	if len(key) < 16 || len(key) > 128 {
-		return 0, nil, false, ErrForbidden
-	}
-	command, err := tx.Exec(ctx, `INSERT INTO model_catalog_commands(idempotency_key,command_type,request_digest,created_by,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(idempotency_key) DO NOTHING`, key, commandType, digest, actor, now)
-	if err != nil {
-		return 0, nil, false, err
-	}
-	if command.RowsAffected() == 1 {
-		return 0, nil, true, nil
-	}
-	var storedType, storedDigest string
-	var version *int64
-	var modelID *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT command_type,request_digest,result_catalog_version,result_model_id FROM model_catalog_commands WHERE idempotency_key=$1`, key).Scan(&storedType, &storedDigest, &version, &modelID); err != nil {
-		return 0, nil, false, err
-	}
-	if storedType != commandType || storedDigest != digest {
-		return 0, nil, false, ErrIdempotencyConflict
-	}
-	if version == nil {
-		return 0, nil, false, ErrCatalogVersionConflict
-	}
-	return *version, modelID, false, nil
 }
 
 func createCatalogVersion(ctx context.Context, tx pgx.Tx, source *int64, reason string, actor uuid.UUID, now time.Time) (int64, error) {
@@ -416,47 +328,6 @@ func protocolSupported(capabilities []GatewayProtocolCapability, code string, ve
 		}
 	}
 	return false
-}
-
-func (r *PostgresRepository) PublishCatalogDraft(ctx context.Context, modelID uuid.UUID, expectedCatalog, expectedDraft int64, key, reason string, actor uuid.UUID, capabilities []GatewayProtocolCapability) (CatalogModel, error) {
-	if modelID == uuid.Nil || actor == uuid.Nil || strings.TrimSpace(reason) == "" {
-		return CatalogModel{}, ErrForbidden
-	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return CatalogModel{}, err
-	}
-	defer tx.Rollback(ctx)
-	if err := r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return CatalogModel{}, err
-	}
-	if err := lockCatalogPublication(ctx, tx); err != nil {
-		return CatalogModel{}, err
-	}
-	now := r.now()
-	digest := catalogCommandDigest(map[string]any{"model_id": modelID, "expected_catalog_version": expectedCatalog, "expected_draft_version": expectedDraft, "reason": reason})
-	replayedVersion, replayedModel, claimed, err := claimCatalogCommand(ctx, tx, key, "MODEL_DRAFT_PUBLISH", digest, actor, now)
-	if err != nil {
-		return CatalogModel{}, err
-	}
-	if !claimed {
-		if replayedModel == nil || *replayedModel != modelID {
-			return CatalogModel{}, ErrIdempotencyConflict
-		}
-		item, scanErr := scanCatalogModel(tx.QueryRow(ctx, catalogSelect+` WHERE e.catalog_version=$1 AND e.model_id=$2`, replayedVersion, modelID))
-		if scanErr != nil {
-			return CatalogModel{}, scanErr
-		}
-		return item, r.commitGovernedMutation(ctx, tx)
-	}
-	item, err := publishCatalogDraftEffect(ctx, tx, modelID, expectedCatalog, expectedDraft, reason, actor, capabilities, now)
-	if err != nil {
-		return CatalogModel{}, err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE model_catalog_commands SET result_catalog_version=$2,result_model_id=$3 WHERE idempotency_key=$1`, key, item.CatalogVersion, modelID); err != nil {
-		return CatalogModel{}, err
-	}
-	return item, r.commitGovernedMutation(ctx, tx)
 }
 
 // publishCatalogDraftEffect is the single transactional domain effect shared
@@ -538,132 +409,6 @@ func ensureCapabilityVersion(ctx context.Context, tx pgx.Tx, modelID, protocolID
 	id := uuid.Must(uuid.NewV7())
 	_, err = tx.Exec(ctx, `INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, id, modelID, next, protocolID, contextLength, maximumOutput, modalities, tokenizer, actor, now)
 	return id, err
-}
-
-func (r *PostgresRepository) TransitionCatalogModel(ctx context.Context, modelID uuid.UUID, input CatalogLifecycleInput, actor uuid.UUID) (CatalogModel, error) {
-	input.TargetStatus = strings.ToUpper(strings.TrimSpace(input.TargetStatus))
-	input.Reason = strings.TrimSpace(input.Reason)
-	if modelID == uuid.Nil || actor == uuid.Nil || input.Reason == "" || (input.TargetStatus != "DEPRECATED" && input.TargetStatus != "REMOVED") {
-		return CatalogModel{}, ErrForbidden
-	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return CatalogModel{}, err
-	}
-	defer tx.Rollback(ctx)
-	if err := r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return CatalogModel{}, err
-	}
-	if err := lockCatalogPublication(ctx, tx); err != nil {
-		return CatalogModel{}, err
-	}
-	now := r.now()
-	digest := catalogCommandDigest(map[string]any{"model_id": modelID, "input": input})
-	replayedVersion, replayedModel, claimed, err := claimCatalogCommand(ctx, tx, input.IdempotencyKey, "MODEL_LIFECYCLE_TRANSITION", digest, actor, now)
-	if err != nil {
-		return CatalogModel{}, err
-	}
-	if !claimed {
-		if replayedModel == nil || *replayedModel != modelID {
-			return CatalogModel{}, ErrIdempotencyConflict
-		}
-		item, scanErr := scanCatalogModel(tx.QueryRow(ctx, catalogSelect+` WHERE e.catalog_version=$1 AND e.model_id=$2`, replayedVersion, modelID))
-		if scanErr != nil {
-			return CatalogModel{}, scanErr
-		}
-		return item, r.commitGovernedMutation(ctx, tx)
-	}
-	current, err := currentCatalogVersion(ctx, tx)
-	if err != nil || current != input.ExpectedCatalogVersion {
-		return CatalogModel{}, ErrCatalogVersionConflict
-	}
-	item, err := scanCatalogModel(tx.QueryRow(ctx, catalogSelect+` WHERE e.catalog_version=$1 AND e.model_id=$2`, current, modelID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return CatalogModel{}, ErrNotFound
-	}
-	if err != nil {
-		return CatalogModel{}, err
-	}
-	valid := item.LifecycleStatus == "PUBLISHED" && (input.TargetStatus == "DEPRECATED" || input.TargetStatus == "REMOVED") || item.LifecycleStatus == "DEPRECATED" && input.TargetStatus == "REMOVED"
-	if !valid {
-		return CatalogModel{}, ErrForbidden
-	}
-	effective := input.EffectiveAt.UTC()
-	if effective.IsZero() {
-		effective = now
-	}
-	if input.ReplacementModelID != nil {
-		var replacementOK bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM model_catalog_entries WHERE catalog_version=$1 AND model_id=$2 AND lifecycle_status='PUBLISHED')`, current, *input.ReplacementModelID).Scan(&replacementOK); err != nil || !replacementOK {
-			return CatalogModel{}, ErrModelUnavailable
-		}
-	}
-	version, err := createCatalogVersion(ctx, tx, nil, input.Reason, actor, now)
-	if err != nil {
-		return CatalogModel{}, err
-	}
-	if err := copyCatalogExcept(ctx, tx, current, version, []uuid.UUID{modelID}); err != nil {
-		return CatalogModel{}, err
-	}
-	newCutoff, continuationCutoff := input.NewSessionCutoffAt, input.ContinuationCutoffAt
-	if input.TargetStatus == "REMOVED" {
-		newCutoff, continuationCutoff = &effective, &effective
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,description,aliases,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available,source_missing_since,source_missing_confirmations,deprecation_effective_at,replacement_model_id,new_session_cutoff_at,continuation_cutoff_at,force_cancel_inflight)
-SELECT $1,model_id,display_name,normalized_name,description,aliases,$2,model_capability_version_id,protocol_definition_id,source_available,source_missing_since,source_missing_confirmations,$3,$4,$5,$6,$7 FROM model_catalog_entries WHERE catalog_version=$8 AND model_id=$9`, version, input.TargetStatus, effective, input.ReplacementModelID, newCutoff, continuationCutoff, input.ForceCancelInflight, current, modelID)
-	if err != nil {
-		return CatalogModel{}, err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE model_catalog_commands SET result_catalog_version=$2,result_model_id=$3 WHERE idempotency_key=$1`, input.IdempotencyKey, version, modelID); err != nil {
-		return CatalogModel{}, err
-	}
-	if err := appendCatalogAudit(ctx, tx, actor, "MODEL_LIFECYCLE_CHANGED", &modelID, &item.LifecycleStatus, &input.TargetStatus, version, input.Reason, input); err != nil {
-		return CatalogModel{}, err
-	}
-	if input.TargetStatus == "REMOVED" && input.ForceCancelInflight {
-		if _, err := tx.Exec(ctx, `INSERT INTO model_emergency_cancellation_policies(id,catalog_version,model_id,effective_at,requested_by,reason,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(catalog_version,model_id) DO NOTHING`, uuid.Must(uuid.NewV7()), version, modelID, effective, actor, input.Reason, now); err != nil {
-			return CatalogModel{}, err
-		}
-	}
-	result, err := scanCatalogModel(tx.QueryRow(ctx, catalogSelect+` WHERE e.catalog_version=$1 AND e.model_id=$2`, version, modelID))
-	if err != nil {
-		return CatalogModel{}, err
-	}
-	return result, r.commitGovernedMutation(ctx, tx)
-}
-
-func (r *PostgresRepository) RollbackCatalog(ctx context.Context, sourceVersion, expectedVersion int64, key, reason string, actor uuid.UUID, capabilities []GatewayProtocolCapability) (int64, error) {
-	if sourceVersion <= 0 || expectedVersion <= 0 || actor == uuid.Nil || strings.TrimSpace(reason) == "" {
-		return 0, ErrForbidden
-	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback(ctx)
-	if err := r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return 0, err
-	}
-	if err := lockCatalogPublication(ctx, tx); err != nil {
-		return 0, err
-	}
-	now := r.now()
-	digest := catalogCommandDigest(map[string]any{"source_version": sourceVersion, "expected_version": expectedVersion, "reason": reason})
-	replayedVersion, _, claimed, err := claimCatalogCommand(ctx, tx, key, "MODEL_CATALOG_ROLLBACK", digest, actor, now)
-	if err != nil {
-		return 0, err
-	}
-	if !claimed {
-		return replayedVersion, r.commitGovernedMutation(ctx, tx)
-	}
-	version, err := rollbackCatalogEffect(ctx, tx, sourceVersion, expectedVersion, reason, actor, capabilities, now)
-	if err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE model_catalog_commands SET result_catalog_version=$2 WHERE idempotency_key=$1`, key, version); err != nil {
-		return 0, err
-	}
-	return version, r.commitGovernedMutation(ctx, tx)
 }
 
 // rollbackCatalogEffect applies a forward-only catalog rollback inside the
@@ -844,12 +589,8 @@ func (r *PostgresRepository) syncCatalogTx(ctx context.Context, tx pgx.Tx, provi
 				missingSince = &value
 			}
 			mutation := mutationFromCatalog(item, false, missingSince, confirmations)
-			if confirmations >= 2 && item.LifecycleStatus == "PUBLISHED" {
-				mutation.lifecycle = "DEPRECATED"
-				mutation.deprecationEffectiveAt = &now
-				mutation.newSessionCutoffAt = &now
-				mutation.continuationCutoffAt = &now
-			}
+			// Adapter absence is an observation, not lifecycle approval. Keep the
+			// source unavailable without changing approved lifecycle or cutoffs.
 			mutations = append(mutations, mutation)
 		}
 		if err := rows.Err(); err != nil {
@@ -880,8 +621,8 @@ func (r *PostgresRepository) syncCatalogTx(ctx context.Context, tx pgx.Tx, provi
 			return 0, false, err
 		}
 		action := "MODEL_SOURCE_SYNCHRONIZED"
-		if mutation.lifecycle == "DEPRECATED" {
-			action = "MODEL_SOURCE_MISSING_DEPRECATED"
+		if !mutation.sourceAvailable {
+			action = "MODEL_SOURCE_MISSING_OBSERVED"
 		}
 		if err := appendCatalogAudit(ctx, tx, actor, action, &mutation.modelID, nil, &mutation.lifecycle, version, "adapter catalog synchronization", map[string]any{"source_available": mutation.sourceAvailable, "missing_confirmations": mutation.missingConfirmations}); err != nil {
 			return 0, false, err
@@ -1113,8 +854,24 @@ func (s *CatalogSynchronizer) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			timeout, cancel := context.WithTimeout(ctx, 30*time.Second)
-			_, _, _ = s.Sync(timeout)
+			_ = s.runOnce(timeout)
 			cancel()
 		}
 	}
+}
+
+// Retry on the next bounded cycle without serializing provider diagnostics or
+// credentials. Catalog lifecycle decisions are independent of this diagnostic.
+func (s *CatalogSynchronizer) runOnce(ctx context.Context) error {
+	_, _, err := s.Sync(ctx)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		code := "CATALOG_SYNC_FAILED"
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = "CATALOG_SYNC_TIMEOUT"
+		} else if errors.Is(err, ErrCatalogVersionConflict) {
+			code = "CATALOG_SYNC_VERSION_CONFLICT"
+		}
+		slog.ErrorContext(ctx, "model catalog synchronization failed", "error_code", code, "component", "model-catalog-sync", "stage", "retry_pending")
+	}
+	return err
 }

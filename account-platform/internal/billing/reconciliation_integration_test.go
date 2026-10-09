@@ -138,7 +138,7 @@ func TestF03ReconciliationAuthorityAndReceipts(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resolve := ReconciliationCaseCommand{Action: "RESOLVE", ActorID: actor, Reason: "controlled case resolution reason", ReviewResult: "actual investigation complete", IdempotencyKey: uuid.NewString()}
+		resolve := ReconciliationCaseCommand{Action: "IGNORE", ActorID: actor, Reason: "controlled case resolution reason", ReviewResult: "actual investigation complete", IdempotencyKey: uuid.NewString()}
 		if _, err := r.UpdateReconciliationCase(ctx, first.ID, resolve); err != nil {
 			t.Fatal(err)
 		}
@@ -153,7 +153,7 @@ func TestF03ReconciliationAuthorityAndReceipts(t *testing.T) {
 			t.Fatal("different actor replayed another actor receipt", err)
 		}
 		actual, err := r.AdminReconciliationCases(ctx, run.ID, 20)
-		if err != nil || actual[0].Status != "RESOLVED" {
+		if err != nil || actual[0].Status != "IGNORED" {
 			t.Fatal("replay changed actual resolved case", err)
 		}
 	})

@@ -4,21 +4,14 @@ import { requireSession } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
 import { requireReconciliationDate, requireReconciliationRun } from './reconciliation-contract.js';
+import { responseRetryAfter } from './auth-error.js';
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
   error.code = payload?.code || 'REQUEST_FAILED';
   error.status = response.status;
   error.details = payload?.details || null;
   error.requestID = payload?.request_id || '';
-  const retryAfter = String(response.headers.get('Retry-After') || '').trim();
-  const retryAfterNumber = Number.parseInt(retryAfter, 10);
-  const retryAfterDate = Number.isNaN(retryAfterNumber) ? Date.parse(retryAfter) : Number.NaN;
-  const retryAfterSeconds = Number.isNaN(retryAfterNumber)
-    ? Math.ceil((retryAfterDate - Date.now()) / 1000)
-    : retryAfterNumber;
-  error.retryAfterSeconds = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-    ? Math.min(retryAfterSeconds, 86_400)
-    : 0;
+  error.retryAfterSeconds = responseRetryAfter(payload, response.headers.get('Retry-After'));
   return error;
 }
 function abortRequestError() {
@@ -162,14 +155,15 @@ export class AdminPlatformClient {
       'X-CSRF-Token': this.csrfToken,
     };
     if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
-    const response = await fetch(`${this.baseURL}/api/admin/${area}${resource}`, {
+    const options = {
       method,
       headers,
       credentials: 'same-origin',
       cache: 'no-store',
       body: body === undefined ? undefined : codec ? codec.encode(body) : area === 'billing' ? encodeFinanceJSON(body) : JSON.stringify(body),
       signal,
-    });
+    };
+    const response = await fetch(`${this.baseURL}/api/admin/${area}${resource}`, options);
     this.observeAuthorizationVersions(response.headers);
     const payload = response.status === 204 ? null : response.ok && codec ? codec.decode(await response.text()) : area === 'billing' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
     if (!response.ok) throw errorFromResponse(response, payload);
@@ -867,7 +861,10 @@ tokenAccountRecoveryActionByIdempotencyKey(commandReference, idempotencyKey, sig
     return this.mutate('token', `/admin/v1/commands/${encodeURIComponent(commandReference)}/recovery-actions/by-idempotency-key`, 'GET', undefined, idempotencyKey, signal);
   }
 
-provisionings(filtersOrSignal = {}, signal) {
+tokenModelCatalogOverview(signal) { return this.request('token', '/admin/v1/overviews/model-catalog', signal); }
+  tokenResourcesPageOverview(signal) { return this.request('token', '/admin/v1/overviews/token-resources', signal); }
+  tokenProvisioningPageOverview(signal, window = '') { return this.request('token', `/admin/v1/overviews/model-operations${window === '24h' ? '?window=24h' : ''}`, signal); }
+  provisionings(filtersOrSignal = {}, signal) {
     if (isAbortSignal(filtersOrSignal)) {
       return this.request('token', '/admin/v1/provisionings?limit=100', filtersOrSignal);
     }

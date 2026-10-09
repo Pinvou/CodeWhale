@@ -59,6 +59,10 @@ func main() {
 		log.Fatal("BILLING_DATABASE_INITIALIZATION_FAILED")
 	}
 	defer repository.Close()
+	expiredHoldClient, err := expiredHoldClientFromEnvironment(credential)
+	if err != nil {
+		log.Fatal("BILLING_HOLD_EXPIRY_CONFIGURATION_INVALID")
+	}
 	payments, err := paymentCoordinator(ctx, repository, cfg.Environment)
 	if err != nil {
 		log.Fatal("BILLING_PAYMENT_CONFIGURATION_INVALID")
@@ -148,11 +152,12 @@ func main() {
 	}
 	go observability.RunBackground(ctx, "personal-hold-expiry", billing.NewPersonalHoldExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "package-expiry", billing.NewPackageExpiryWorker(repository, time.Minute).Run)
+	go observability.RunBackground(ctx, "expired-hold-recovery", billing.NewExpiredHoldRecoveryWorker(repository, expiredHoldClient, time.Minute).Run)
 	go observability.RunBackground(ctx, "product-admission-expiry", billing.NewProductAdmissionExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "product-admission-verification", billing.NewProductAdmissionVerificationWorker(repository, payments.Capabilities(), 5*time.Second, admissionTTL).Run)
 	go observability.RunBackground(ctx, "manual-review-sla", billing.NewManualReviewSLAWorker(repository, time.Minute, onCall).Run)
 	go observability.RunBackground(ctx, "admin-pagination-cleanup", billing.NewAdminPaginationCleanupWorker(repository, time.Minute).Run)
-	if payments.Capabilities().BillSupported {
+	if payments.Capabilities().BillSupported || payments.Capabilities().BillFileImportSupported {
 		go observability.RunBackground(ctx, "daily-payment-reconciliation", billing.NewDailyPaymentReconciliationWorker(payments).Run)
 	}
 	handler := service.Handler(credential, verify)
@@ -170,6 +175,20 @@ func main() {
 	if err := httpserver.RunWithApplicationAndCollectors("billing-service", handler, ready, collectors...); err != nil {
 		log.Fatal("BILLING_SERVER_FAILED")
 	}
+}
+
+func expiredHoldClientFromEnvironment(credential string) (billing.ExpiredHoldProofClient, error) {
+	endpoint := strings.TrimSpace(os.Getenv("TOKEN_HOLD_EXPIRY_URL"))
+	if endpoint == "" {
+		// Earlier waves have no Token management endpoint. The worker still
+		// records expired holds for manual review; missing trust is never proof.
+		return nil, nil
+	}
+	client, err := serviceauth.NewWorkloadHTTPClient(os.Getenv("WORKLOAD_IDENTITY_CA_FILE"))
+	if err != nil {
+		return nil, err
+	}
+	return billing.NewHTTPExpiredHoldProofClient(endpoint, credential, client)
 }
 
 func paymentCoordinator(ctx context.Context, repository *billing.PostgresRepository, environment string) (*billing.PaymentCoordinator, error) {

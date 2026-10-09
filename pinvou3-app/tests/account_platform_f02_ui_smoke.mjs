@@ -115,6 +115,39 @@ try {
     await page.type('form textarea', 'Controlled localized display reason'); await click('saveNames'); await page.waitForFunction(() => window.f02.calls.some(call => call.url.endsWith('/display-names'))); await settled();
     assert.ok(await page.evaluate(() => window.f02.calls.filter(call => call.url.endsWith('/display-names')).length === 1 && !window.f02.calls.some(call => call.method === 'PUT')));
   });
+  await caseRun('Verified current product evidence enables publishing with the selected evidence and version', async () => {
+    await fresh('products'); await page.evaluate(() => { window.f02.verifiedProduct = true; }); await click('details'); await page.waitForSelector('form textarea'); await settled();
+    await page.type('form textarea', 'Controlled verified publication reason'); await click('publish'); await page.waitForFunction(() => window.f02.productPublished); await settled();
+    assert.ok(await page.evaluate(() => { const call = window.f02.calls.find(item => item.url.endsWith('/publish')); const facts = JSON.parse(call.body); return call.method === 'POST' && facts.evidence_id === window.f02.other && facts.expected_version === 1 && call.key; }));
+  });
+  for (const status of ['PENDING', 'FAILED', 'SUCCEEDED']) await caseRun(`Product ${status} evidence cannot publish`, async () => {
+    await fresh('products'); await page.evaluate(status => { window.f02.verifiedProduct = true; window.f02.verificationStatus = status; }, status); await click('details'); await page.waitForSelector('form textarea'); await settled(); await page.type('form textarea', 'Controlled publication reason');
+    assert.ok(await page.evaluate(() => [...document.querySelectorAll('button')].find(item => item.textContent.trim() === window.f02.languageCopy().publish).disabled));
+    assert.ok(await page.evaluate(() => !window.f02.calls.some(item => item.url.endsWith('/publish'))));
+  });
+  const anomalyChoices = { CHARGEBACK: ['CONFIRM_CHARGEBACK', 'DISMISS', 'ESCALATE_FINANCIAL_REPAIR'], FORCED_REFUND: ['CONFIRM_FORCED_REFUND', 'DISMISS', 'ESCALATE_FINANCIAL_REPAIR'], DUPLICATE_PAYMENT: ['CONFIRM_PAYMENT', 'ESCALATE_FINANCIAL_REPAIR'], LATE_PAYMENT_CONFLICT: ['CONFIRM_PAYMENT', 'ESCALATE_FINANCIAL_REPAIR'], ILLEGAL_TRANSITION: ['CONFIRM_PROVIDER_FAILED', 'ESCALATE_FINANCIAL_REPAIR'], PAYMENT_FACT_CONFLICT: ['DISMISS', 'ESCALATE_FINANCIAL_REPAIR'], REFUND_FAILURE: ['RECONCILE_REFUND', 'DISMISS', 'ESCALATE_FINANCIAL_REPAIR'], UNKNOWN: [] };
+  for (const [type, choices] of Object.entries(anomalyChoices)) await caseRun(`${type} anomaly exposes only supported localized resolutions`, async () => {
+    await fresh('admin'); await page.evaluate(type => { window.f02.anomalyType = type; }, type); await click('resolve'); await settled(); await click('details'); await page.waitForSelector('article textarea'); await settled();
+    assert.deepEqual(await page.$$eval('article select option', items => items.map(item => item.value).filter(Boolean)), choices);
+    for (const language of ['zh', 'ja', 'en']) { await page.select('[aria-label=fixture-language]', language); assert.ok(await page.evaluate(() => [...document.querySelectorAll('article select option')].filter(item => item.value).every(item => item.textContent === window.f02.languageCopy().resolutions[item.value] && item.textContent !== item.value))); }
+    if (type === 'REFUND_FAILURE') { await page.select('article select', 'RECONCILE_REFUND'); for (const language of ['zh', 'ja', 'en']) { await page.select('[aria-label=fixture-language]', language); assert.ok(await page.evaluate(() => [...document.querySelectorAll('article p')].some(item => item.textContent === window.f02.languageCopy().refundReconcileHelp))); } }
+    if (choices.length) { await page.select('article select', choices[0]); await page.type('article textarea', 'Controlled anomaly resolution reason'); await page.evaluate(() => [...document.querySelectorAll('article button')].find(item => item.textContent === window.f02.languageCopy().resolve).click()); await page.waitForFunction(() => window.f02.anomalyResolved); await settled(); assert.equal(await page.evaluate(() => JSON.parse(window.f02.calls.find(item => item.url.endsWith('/resolve')).body).resolution), choices[0]); }
+    else assert.ok(await page.evaluate(() => [...document.querySelectorAll('article button')].find(item => item.textContent === window.f02.languageCopy().resolve).disabled));
+  });
+  await caseRun('Unknown anomaly resolution retains original decision and invocation after changing language', async () => {
+    await fresh('admin'); await page.evaluate(() => { window.f02.anomalyType = 'ILLEGAL_TRANSITION'; window.f02.unknownAnomaly = true; }); await click('resolve'); await settled(); await click('details'); await page.waitForSelector('article textarea'); await settled();
+    await page.select('article select', 'CONFIRM_PROVIDER_FAILED'); await page.type('article textarea', 'Controlled provider failure evidence'); await page.evaluate(() => [...document.querySelectorAll('article button')].find(item => item.textContent === window.f02.languageCopy().resolve).click()); await page.waitForSelector('[role=alert]'); await settled();
+    await page.select('[aria-label=fixture-language]', 'ja'); assert.ok(await page.evaluate(() => document.querySelector('[role=alert]').textContent === window.f02.languageCopy().unknown));
+    await page.evaluate(() => { window.f02.unknownAnomaly = false; }); await click('retry'); await page.waitForFunction(() => window.f02.anomalyResolved); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(item => item.url.endsWith('/resolve')); return calls.length === 2 && calls[0].key === calls[1].key && calls[0].body === calls[1].body && JSON.parse(calls[1].body).resolution === 'CONFIRM_PROVIDER_FAILED'; }));
+  });
+  await caseRun('Accepted refund intent awaiting provider evidence keeps the same key until terminal reconciliation', async () => {
+    await fresh('admin'); await page.evaluate(() => { window.f02.anomalyType = 'REFUND_FAILURE'; window.f02.unknownAnomaly = true; window.f02.anomalyUnknownCode = 'COMMAND_RESULT_UNKNOWN'; }); await click('resolve'); await settled(); await click('details'); await page.waitForSelector('article textarea'); await settled();
+    await page.select('article select', 'RECONCILE_REFUND'); await page.type('article textarea', 'Controlled original refund reconciliation'); await page.evaluate(() => [...document.querySelectorAll('article button')].find(item => item.textContent === window.f02.languageCopy().resolve).click()); await page.waitForSelector('[role=alert]'); await settled();
+    assert.ok(await page.evaluate(() => !window.f02.anomalyResolved && document.querySelector('[role=alert]').textContent === window.f02.languageCopy().unknown));
+    await page.select('[aria-label=fixture-language]', 'zh'); await page.evaluate(() => { window.f02.unknownAnomaly = false; }); await click('retry'); await page.waitForFunction(() => window.f02.anomalyResolved); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(item => item.url.endsWith('/resolve')); return calls.length === 2 && calls[0].key === calls[1].key && calls[0].body === calls[1].body && JSON.parse(calls[1].body).resolution === 'RECONCILE_REFUND'; }));
+  });
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } catch (error) {
   console.error(`FAIL after ${passed} PASS: ${error.message}`);

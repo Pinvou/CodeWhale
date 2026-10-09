@@ -1,3 +1,4 @@
+import { AdminModelTokenPageOverview } from './AdminModelTokenPageOverview.jsx';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { adminModelTokenQueryUpdates, readAdminModelTokenModelTab, readAdminModelTokenQuery } from './admin-navigation.js';
 import { AdminProtocolFormulaWorkspace } from './AdminProtocolFormulaWorkspace.jsx';
@@ -66,6 +67,7 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnab
         { key: 'source_adapter', label: copy.sourceAdapter },
       ]} />
       <SourceFeedback state={state} copy={copy} onRetry={retry} />
+      <p className="adm-source-lead adm-source-missing-policy">{copy.sourceMissingPolicy}</p>
       {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.model}</th><th>{copy.lifecycle}</th><th>{copy.protocol}</th><th>{copy.contextLength}</th><th>{copy.source}</th>{(actionsEnabled || detailsEnabled) && <th>{copy.actions}</th>}</tr></thead><tbody>
 				{state.items.map((item) => <tr key={item.model_id}><td data-label={copy.model}>{detailsEnabled ? <button type="button" className="adm-name-link" onClick={() => onOpenDetail(item.model_id)}><strong>{item.display_name}</strong></button> : <strong>{item.display_name}</strong>}<small className="adm-secondary-id">{item.model_id}</small></td><td data-label={copy.lifecycle}><Status value={item.lifecycle_status} copy={copy} /></td><td data-label={copy.protocol}>{item.protocol_code} · v{item.protocol_version}</td><td data-label={copy.contextLength}>{Number(item.context_length || 0).toLocaleString()}</td><td data-label={copy.source}><Status value={item.source_available ? 'ACTIVE' : 'UNAVAILABLE'} copy={copy} /></td>{(actionsEnabled || detailsEnabled) && <td data-label={copy.actions}><div className="adm-row-actions">{detailsEnabled && <button type="button" onClick={() => onOpenDetail(item.model_id)}>{copy.viewDetail}</button>}{canPublish && item.draft && <button type="button" onClick={() => setAction({ type: 'PUBLISH', item })}>{copy.publish}</button>}{canImmediateLifecycle && item.lifecycle_status === 'PUBLISHED' && <button type="button" onClick={() => setAction({ type: 'LIFECYCLE', targetStatus: 'DEPRECATED', item })}>{copy.deprecateModel}</button>}{canImmediateLifecycle && item.lifecycle_status !== 'REMOVED' && <button type="button" onClick={() => setAction({ type: 'LIFECYCLE', targetStatus: 'REMOVED', item })}>{copy.removeModel}</button>}</div></td>}</tr>)}
       </tbody></table></div>}
@@ -117,6 +119,7 @@ export function AdminModelTokenWorkspace({ owner, section, copy, client, permiss
     tabs[target].click();
   };
   return <>
+    {['models', 'tokenResources'].includes(section) && <AdminModelTokenPageOverview {...{ section, client, permissions, routeVersion, onRouteChange }} copy={modelTokenCopy} userID={overviewUserID} authorizationVersion={overviewAuthorizationVersion} enabled={modelTokenPageOverviewsEnabled} onDrilldown={target => { cursorHistory.current[target.source] = []; onRouteChange({ ...adminModelTokenQueryUpdates(target.source, { ...target.query, cursor: '' }), ...target.page, [resultParameter]: null, [section === 'models' ? 'model_id' : 'token_account_id']: null }, 'push'); }} />}
     {notice && <div className="adm-inline-message info" role="status">{notice}</div>}
     {!modelTokenActionsEnabled && <div className="adm-inline-message info" role="status">{modelTokenCopy.actionsReadOnly}</div>}
     {section === 'models' && modelDetailsEnabled && modelID && granted.has('platform.models.read') && <AdminModelDetailWorkspace owner={owner} modelID={modelID} client={client} copy={modelTokenCopy} pricingCopy={copy} permissions={permissions} actionsEnabled={modelTokenActionsEnabled} pricingEditEnabled={modelPricingEditEnabled} routeVersion={routeVersion} onRouteChange={onRouteChange} onNavigate={onNavigate} onQueryChange={onQueryChange} cursorHistory={cursorHistory} onTabsKeyDown={moveOperationsTab} />}

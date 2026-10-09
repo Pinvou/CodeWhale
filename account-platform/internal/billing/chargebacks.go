@@ -70,8 +70,18 @@ func (r *PostgresRepository) RecordConfirmedChargebackForReview(ctx context.Cont
 		return ChargebackCase{}, err
 	}
 	now := r.now()
+	var freezeSnapshot json.RawMessage
+	if err := tx.QueryRow(ctx, `SELECT jsonb_build_object('package',to_jsonb(package),'components',COALESCE((SELECT jsonb_agg(to_jsonb(component) ORDER BY component.id) FROM entitlement_components component WHERE component.package_id=package.id),'[]'::jsonb),'grants',COALESCE((SELECT jsonb_agg(to_jsonb(member_grant) ORDER BY member_grant.id) FROM member_quota_grants member_grant WHERE member_grant.package_id=package.id),'[]'::jsonb)) FROM entitlement_packages package WHERE package.id=$1`, packageID).Scan(&freezeSnapshot); err != nil {
+		return ChargebackCase{}, err
+	}
 	result := ChargebackCase{ID: uuid.Must(uuid.NewV7()), PaymentEvidenceID: evidenceID, PaymentOrderID: orderID, PaymentTransactionID: transactionID, EntitlementPackageID: packageID, WalletID: walletID, ProviderChargebackID: providerChargebackID, Status: "REVIEW_REQUIRED", CreatedAt: now, Version: 1}
 	_, err = tx.Exec(ctx, `INSERT INTO chargeback_cases(id,payment_evidence_id,payment_order_id,payment_transaction_id,entitlement_package_id,wallet_id,provider_chargeback_id,status,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,'REVIEW_REQUIRED',$8)`, result.ID, evidenceID, orderID, transactionID, packageID, walletID, providerChargebackID, now)
+	if err == nil {
+		// The wallet/order gate also serializes ordinary refund dispatch. A
+		// chargeback supersedes an outstanding request without asserting that
+		// its provider effect succeeded or failed.
+		err = transferChargebackRefundsToReview(ctx, tx, result, now)
+	}
 	if err == nil {
 		_, err = tx.Exec(ctx, `UPDATE entitlement_packages SET status='FROZEN',updated_at=$2 WHERE id=$1 AND status NOT IN ('EXPIRED','REVOKED','CREDIT_FAILED')`, packageID, now)
 	}
@@ -87,7 +97,7 @@ func (r *PostgresRepository) RecordConfirmedChargebackForReview(ctx context.Cont
 	if err != nil {
 		return ChargebackCase{}, err
 	}
-	anomaly, err := createPaymentAnomalyWithinTransaction(ctx, tx, "CHARGEBACK", "P1", "chargeback:"+result.ID.String(), paymentAnomalyReference{PaymentOrderID: &orderID, PaymentTransactionID: &transactionID, PaymentEvidenceID: &evidenceID, ChargebackCaseID: &result.ID}, map[string]any{"provider_chargeback_id": providerChargebackID, "provider_transaction_id": providerTransactionID, "amount_fen": amountFen, "payload_digest": hex.EncodeToString(digest[:])}, now)
+	anomaly, err := createPaymentAnomalyWithinTransaction(ctx, tx, "CHARGEBACK", "P1", "chargeback:"+result.ID.String(), paymentAnomalyReference{PaymentOrderID: &orderID, PaymentTransactionID: &transactionID, PaymentEvidenceID: &evidenceID, ChargebackCaseID: &result.ID}, map[string]any{"provider_chargeback_id": providerChargebackID, "provider_transaction_id": providerTransactionID, "amount_fen": amountFen, "payload_digest": hex.EncodeToString(digest[:]), "entitlement_snapshot": freezeSnapshot}, now)
 	if err != nil {
 		return ChargebackCase{}, err
 	}
@@ -102,6 +112,41 @@ func (r *PostgresRepository) RecordConfirmedChargebackForReview(ctx context.Cont
 		return ChargebackCase{}, err
 	}
 	return result, tx.Commit(ctx)
+}
+
+func transferChargebackRefundsToReview(ctx context.Context, tx pgx.Tx, source ChargebackCase, now time.Time) error {
+	const failure = "confirmed chargeback requires financial review"
+	rows, err := tx.Query(ctx, `UPDATE refunds SET status='MANUAL_REVIEW',dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=NULL,failure_reason=$2,intent_version=intent_version+1,updated_at=$3 WHERE payment_transaction_id=$1 AND status='REQUESTED' RETURNING id,intent_version`, source.PaymentTransactionID, failure, now)
+	if err != nil {
+		return err
+	}
+	type changedRefund struct {
+		id      uuid.UUID
+		version int64
+	}
+	changed := []changedRefund{}
+	for rows.Next() {
+		var item changedRefund
+		if err := rows.Scan(&item.id, &item.version); err != nil {
+			rows.Close()
+			return err
+		}
+		changed = append(changed, item)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, item := range changed {
+		if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, "REFUND_FAILURE", "P1", "refund:"+item.id.String()+":chargeback-fence", paymentAnomalyReference{PaymentOrderID: &source.PaymentOrderID, PaymentTransactionID: &source.PaymentTransactionID, RefundID: &item.id}, map[string]any{"failure_reason": failure, "chargeback_case_id": source.ID}, now); err != nil {
+			return err
+		}
+		if err := events.AppendOutbox(ctx, tx, "billing.refund.review-required.v1", item.id, item.version, map[string]any{"refund_id": item.id, "payment_transaction_id": source.PaymentTransactionID, "entitlement_package_id": source.EntitlementPackageID, "failure_reason": failure}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type ChargebackCase struct {
@@ -141,11 +186,8 @@ func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evide
 	if err != nil {
 		return ChargebackCase{}, err
 	}
-	if !found || existing.ProviderChargebackID != providerChargebackID || existing.Status == "DISMISSED" {
+	if !found || existing.ProviderChargebackID != providerChargebackID || existing.Status != "REVIEW_REQUIRED" && existing.Status != "CONFIRMED" {
 		return ChargebackCase{}, ErrConflict
-	}
-	if existing.Status == "CONFIRMED" {
-		return existing, tx.Commit(ctx)
 	}
 
 	var orderID, transactionID, packageID, walletID uuid.UUID
@@ -166,6 +208,35 @@ func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evide
 	}
 	if err := lockPaymentSourcePackage(ctx, tx, packageID, transactionID, orderID, walletID); err != nil {
 		return ChargebackCase{}, err
+	}
+	var lockedCase ChargebackCase
+	if err := tx.QueryRow(ctx, chargebackCaseSelect+` WHERE id=$1 FOR UPDATE`, existing.ID).Scan(chargebackCaseScanTargets(&lockedCase)...); err != nil {
+		return ChargebackCase{}, err
+	}
+	if lockedCase.ProviderChargebackID != providerChargebackID || lockedCase.Status != "REVIEW_REQUIRED" && lockedCase.Status != "CONFIRMED" {
+		return ChargebackCase{}, ErrConflict
+	}
+	if lockedCase.Status == "CONFIRMED" {
+		var receipt bool
+		if lockedCase.PaymentTransactionID != transactionID || lockedCase.PaymentOrderID != orderID || lockedCase.EntitlementPackageID != packageID || lockedCase.WalletID != walletID {
+			return ChargebackCase{}, ErrConflict
+		}
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM journal_entries WHERE entry_type='CHARGEBACK' AND business_reference=$1)`, "payment-transaction:"+transactionID.String()+":chargeback:"+providerChargebackID).Scan(&receipt); err != nil {
+			return ChargebackCase{}, err
+		}
+		if !receipt {
+			return ChargebackCase{}, ErrConflict
+		}
+		return lockedCase, tx.Commit(ctx)
+	}
+	// This implementation represents a whole-payment chargeback. Earlier
+	// reviewed refunds are not a second authorization to recover the full BASE.
+	budget, err := readForcedRefundBudget(ctx, tx, transactionID, packageID, orderID, walletID, uuid.Nil, lockedCase.ID)
+	if err != nil {
+		return ChargebackCase{}, err
+	}
+	if budget.cash != 0 {
+		return ChargebackCase{}, ErrConflict
 	}
 
 	type componentState struct {

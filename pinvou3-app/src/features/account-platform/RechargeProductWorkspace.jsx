@@ -54,7 +54,7 @@ export function RechargeProductWorkspace({ client, me, copy, language }) {
       }
       if (action === 'display-names') Object.assign(body, { display_name_zh_cn: input.display_name_zh_cn.trim(), display_name_en: input.display_name_en.trim(), display_name_ja: input.display_name_ja.trim() });
       if (action === 'publish') {
-        const current = verifications.find(item => item.current && item.active && item.status === 'SUCCEEDED' && item.evidence_id);
+        const current = verifications.find(item => item.current && item.active && item.status === 'VERIFIED' && item.evidence_id);
         if (!current) return;
         body.evidence_id = current.evidence_id;
       }
@@ -82,7 +82,7 @@ export function RechargeProductWorkspace({ client, me, copy, language }) {
       {selected && <button type="button" disabled={operation.busy || operation.unknown} onClick={() => { setSelected(null); setInput(empty); setVerifications([]); }}>{copy.newInvocation}</button>}
     </form>}
     {selected && <article><h4>{copy.admission}</h4>{!canCreate && !canPublish && <label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} value={reason} onChange={event => setReason(event.target.value)} /></label>}
-      {canPublish && <><button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('verify')}>{copy.verify}</button><button disabled={operation.busy || operation.unknown || !reason.trim() || !verifications.some(item => item.current && item.active && item.status === 'SUCCEEDED' && item.evidence_id)} onClick={() => void submit('publish')}>{copy.publish}</button></>}
+      {canPublish && <><button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('verify')}>{copy.verify}</button><button disabled={operation.busy || operation.unknown || !reason.trim() || !verifications.some(item => item.current && item.active && item.status === 'VERIFIED' && item.evidence_id)} onClick={() => void submit('publish')}>{copy.publish}</button></>}
       {permissions.includes('platform.products.unpublish') && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('unpublish')}>{copy.unpublish}</button>}{permissions.includes('platform.products.delete') && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('delete')}>{copy.deleteProduct}</button>}
       <ul>{verifications.map(value => <li key={value.verification_id}>{value.status} / {value.requested_at}{canPublish && value.status === 'FAILED' && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('retry', value)}>{copy.retry}</button>}{canPublish && value.current && value.active && value.evidence_id && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('revoke', value)}>{copy.revoke}</button>}</li>)}</ul>
     </article>}

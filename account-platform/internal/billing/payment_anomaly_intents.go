@@ -57,6 +57,9 @@ func (r *PostgresRepository) PreparePaymentAnomalyResolution(ctx context.Context
 	if item.Status == "RESOLVED" || !validPaymentAnomalyResolution(item.AnomalyType, resolution, anomalyResolutionFinancialStatus(resolution)) {
 		return PaymentAnomalyCase{}, false, ErrConflict
 	}
+	if item.OwnerID == nil || *item.OwnerID != actorID {
+		return PaymentAnomalyCase{}, false, ErrConflict
+	}
 	var savedKey string
 	err = tx.QueryRow(ctx, `SELECT idempotency_key,request_hash,actor_id FROM payment_anomaly_resolution_intents WHERE payment_anomaly_case_id=$1`, caseID).Scan(&savedKey, &savedHash, &savedActor)
 	if err == nil {
@@ -81,7 +84,7 @@ func (r *PostgresRepository) PreparePaymentAnomalyResolution(ctx context.Context
 
 func anomalyResolutionFinancialStatus(resolution string) string {
 	switch resolution {
-	case "CONFIRM_CHARGEBACK", "CONFIRM_FORCED_REFUND", "CONFIRM_PAYMENT":
+	case "CONFIRM_CHARGEBACK", "CONFIRM_FORCED_REFUND", "CONFIRM_PAYMENT", "RECONCILE_REFUND":
 		return "APPLIED"
 	case "ESCALATE_FINANCIAL_REPAIR":
 		return "PENDING"

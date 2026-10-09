@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 
+	platformconfig "github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -28,7 +30,7 @@ type Shutdown func(context.Context) error
 func SetupTracing(ctx context.Context, config Config) (Shutdown, error) {
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
-	production := config.Environment == "production" || config.Environment == "production-new"
+	production := platformconfig.IsProduction(config.Environment)
 	if endpoint == "" {
 		if production {
 			return nil, errors.New("OTEL_EXPORTER_OTLP_ENDPOINT is required in production")

@@ -1,6 +1,6 @@
 # Pinvou 对 CodeWhale 底座的 fork 维护策略
 
-> 最后更新：2026-10-02（r3 收口后过渡期：不可变 tag `pinvou-v0.9.12-r3` 仍钉在其收口 `61cb769be`，登记头随 CodeWhale#80 前进至 `44921cf02`，gitlink=维护分支头并领先 tag；`verify-public-submodule.sh` 以 `TRANSITION_BASELINE` 断言过渡期钉点）
+> 最后更新：2026-10-09（r3 收口后过渡期：不可变 tag `pinvou-v0.9.12-r3` 仍钉在 `61cb769be`，本树登记 gitlink 为 `8b5a86390`（在 `44921cf02` 上普通追加 A04 已审调用身份补丁）；CI 明确校验登记快照的公开维护祖先链，默认发布校验仍要求维护分支头相等）
 > A04 本地登记（2026-10-05）：gitlink 普通追加至 `8b5a863908bf4178a8c5876c11c5884919119615`，唯一父提交为公开维护头 `44921cf028f12ffed33beb4760621a8598de48fc`；该补丁尚未推送，公开维护分支与不可变 tag 不变。下述公开分支一致性和发布门禁要求保持，须在外部写入获授权、补丁公开可达并对齐维护头后验证；本地 fast guard 通过不代表公开门禁通过。
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
 
@@ -10,7 +10,7 @@
 - 当前 fork 基线：`Pinvou/CodeWhale:pinvou3-clean`，head `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`（= 不可变 tag `pinvou-v0.9.12-r3`），共 49 个带 DCO sign-off 的提交；不可变 tag `pinvou-v0.9.12-r1` 钉在 r1 收口 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`（15 个提交），其后 34 个提交为 2026-09-10/11 backlog 批次、2026-09-17 批次、2026-09-18 批次、2026-09-20 批次、2026-09-21 批次（#64/#67）与 2026-09-22/23 批次（#63/#65/#68/#69/#70/#71/#72/#73/#76，另含 Windows 编译修复 #77）经 PR squash 合入。
 - 升级前公开回退点是不可变 tag `pinvou-v0.9.5-r13`，head `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 branch `backup/pre-v0.9.12-sync` 只作便利引用。
 - r1 已成为可消费的受保护基线；rN 收口时父仓 gitlink、维护分支和不可变 tag 指向同一 commit。
-- 过渡期豁免（2026-09-11 起）：两次 rN 收口之间，父仓 gitlink 可沿 `pinvou3-clean` 领先不可变 tag 前进；期间 `scripts/verify-public-submodule.sh` 断言 gitlink 等于公开维护分支头、不可变 tag 仍钉在其收口 commit，rN 收口时在合并头切新不可变 tag 并恢复三方相等。
+- 过渡期豁免（2026-09-11 起）：两次 rN 收口之间，父仓 gitlink 可沿 `pinvou3-clean` 领先不可变 tag 前进；默认 `scripts/verify-public-submodule.sh` 发布检查仍要求 gitlink 等于公开维护分支头、tag 钉在其收口 commit。CI 显式使用 `--registered-snapshot`：gitlink 必须精确等于 `fork-guard.sh` 的 `EXPECTED_HEAD`；全新隔离 bare 仓库匿名 fetch 公开 pin、固定 tag 和维护分支，校验对象为 commit，且固定 tag 是 pin 祖先、pin 是公开维护分支祖先。公开候选分支可达但未进入维护历史仍失败。维护分支前进不自动升级冻结 PR；运行时升级仍单独登记和审核。rN 收口清空 `TRANSITION_BASELINE` 后，两种模式均恢复分支、tag、gitlink 三方严格相等。
 - `.gitmodules` 不配置浮动 `branch`；发布后父仓 gitlink、维护分支和不可变标签必须指向同一 commit。
 - 当前维护 4 个长期主题、3 个追加减量主题与 1 个已合入维护分支的主题：
 

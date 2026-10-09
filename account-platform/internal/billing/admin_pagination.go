@@ -259,6 +259,8 @@ var adminPaginationFilters = map[string]map[string]adminFilterDefinition{
 			"PROVIDER_REFUND_INTERNAL_MISSING", "INTERNAL_REFUND_PROVIDER_MISSING", "REFUND_AMOUNT_MISMATCH",
 			"PROVIDER_CHARGEBACK_INTERNAL_MISSING", "INTERNAL_CHARGEBACK_PROVIDER_MISSING",
 			"PAYMENT_LEDGER_MISSING", "REFUND_LEDGER_MISSING", "CHARGEBACK_LEDGER_MISSING", "UNSUPPORTED_PROVIDER_ENTRY",
+			"PAYMENT_LEDGER_INVALID", "REFUND_LEDGER_INVALID", "CHARGEBACK_LEDGER_INVALID",
+			"PAYMENT_PACKAGE_INVALID", "REFUND_DATE_UNVERIFIED", "CHARGEBACK_DATE_UNVERIFIED",
 		),
 		"created_from": {rfc3339: true, maxLength: 64},
 		"created_to":   {rfc3339: true, maxLength: 64},
@@ -716,7 +718,7 @@ func adminSnapshotResourceQuery(request AdminPaginationRequest) (string, []any, 
 	case adminPageReconciliationRuns:
 		return `SELECT id::text resource_id,started_at sort_at,id sort_id FROM reconciliation_runs WHERE ($2='' OR provider_id=$2) AND ($3='' OR channel=$3) AND ($4='' OR status=$4) AND ($5='' OR business_date>=NULLIF($5,'')::date) AND ($6='' OR business_date<NULLIF($6,'')::date) ORDER BY started_at DESC,id DESC`, []any{filterArg(f, "provider_id"), filterArg(f, "channel"), filterArg(f, "status"), filterArg(f, "business_date_from"), filterArg(f, "business_date_to")}, nil
 	case adminPageReconciliationCases:
-		return `SELECT id::text resource_id,created_at sort_at,id sort_id FROM reconciliation_cases WHERE ($2='' OR reconciliation_run_id=NULLIF($2,'')::uuid) AND ($3='' OR status=$3) AND ($4='' OR severity=$4) AND ($5='' OR owner_id=NULLIF($5,'')::uuid) AND ($6='' OR case_type=$6) AND ($7='' OR created_at>=NULLIF($7,'')::timestamptz) AND ($8='' OR created_at<NULLIF($8,'')::timestamptz) ORDER BY created_at DESC,id DESC`, []any{request.Scope, filterArg(f, "status"), filterArg(f, "severity"), filterArg(f, "owner_id"), filterArg(f, "case_type"), filterArg(f, "created_from"), filterArg(f, "created_to")}, nil
+		return `SELECT id::text resource_id,created_at sort_at,id sort_id FROM reconciliation_cases WHERE ($2='' OR EXISTS(SELECT 1 FROM reconciliation_runs run WHERE run.id=NULLIF($2,'')::uuid AND ((run.active_observation_id IS NOT NULL AND EXISTS(SELECT 1 FROM reconciliation_observation_progress observation WHERE observation.observation_id=run.active_observation_id AND observation.case_id=reconciliation_cases.id)) OR (run.active_observation_id IS NULL AND EXISTS(SELECT 1 FROM reconciliation_case_runs link WHERE link.case_id=reconciliation_cases.id AND link.run_id=run.id))))) AND ($3='' OR status=$3) AND ($4='' OR severity=$4) AND ($5='' OR owner_id=NULLIF($5,'')::uuid) AND ($6='' OR case_type=$6) AND ($7='' OR created_at>=NULLIF($7,'')::timestamptz) AND ($8='' OR created_at<NULLIF($8,'')::timestamptz) ORDER BY created_at DESC,id DESC`, []any{request.Scope, filterArg(f, "status"), filterArg(f, "severity"), filterArg(f, "owner_id"), filterArg(f, "case_type"), filterArg(f, "created_from"), filterArg(f, "created_to")}, nil
 	default:
 		return "", nil, ErrPaginationCursorInvalid
 	}

@@ -13,7 +13,7 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 RUN --mount=type=cache,id=pinvou-account-platform-gomod-go126,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,id=pinvou-account-platform-gobuild-go126,target=/root/.cache/go-build,sharing=locked \
-    case "$SERVICE" in account-service|identity-service|billing-service|token-gateway|token-portal|token-credential-portal|payment-simulator|event-relay|event-resources|approval-resources|migrate|account-security|workload-token-agent|token-policy-bootstrap|token-governance|token-release-prepare|token-command-executor) ;; *) exit 1 ;; esac && \
+    case "$SERVICE" in account-service|account-approval-recovery|identity-service|billing-service|token-gateway|token-portal|token-credential-portal|payment-simulator|event-relay|event-resources|approval-resources|migrate|account-security|workload-token-agent|token-policy-bootstrap|token-governance|token-release-prepare|token-command-executor|newapi-tls) ;; *) exit 1 ;; esac && \
     CGO_ENABLED=0 go build -mod=readonly -tags=nomsgpack -trimpath \
       -ldflags="-s -w -X github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver.version=${VERSION} -X github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver.commit=${COMMIT}" \
       -o /out/service "./cmd/${SERVICE}" && \

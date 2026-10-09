@@ -266,6 +266,9 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 	if err != nil {
 		return PaymentOrder{}, err
 	}
+	if p.Capabilities().ProviderID != order.ProviderID || p.Capabilities().Version != order.ProviderVersion {
+		return PaymentOrder{}, ErrConflict
+	}
 	providerOrder, err := providerCall(ctx, p, "ORDER_QUERY", order.Channel, false, providerCallScope(order), func() (ProviderOrder, error) {
 		return p.provider.Get(ctx, order.MerchantOrderNo)
 	})

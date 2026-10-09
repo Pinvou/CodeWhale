@@ -52,6 +52,52 @@ try{
   await page.type('article textarea','Controlled reason edit');await page.evaluate(()=>{const button=[...document.querySelectorAll('article button')].find(b=>b.textContent.includes('submit')&&!b.disabled);if(!button)throw new Error('Missing draft edit');button.click();});await page.waitForFunction(()=>window.f04.approvalStatus==='SUBMITTED');
   assert.ok(await page.evaluate(()=>{const edit=window.f04.calls.find(c=>c.method==='PUT');const body=edit&&JSON.parse(edit.body);const submit=window.f04.calls.find(c=>c.path.endsWith('/actions/submit'));return edit.body.includes('"lifecycle_plan_version":9007199254740993')&&body.normalized_command.effective_at==='2099-01-01T00:00:00+08:00'&&body.normalized_command.existing_session_cutoff_at==='2099-01-02T00:00:00+08:00'&&body.normalized_command.lifecycle_plan_id===window.f04.id&&JSON.parse(submit.body).expected_version===2;}));
  });
+ for (const language of ['zh', 'en', 'ja']) await caseRun(`${language}: named pricing tables retain keyboard horizontal scrolling`, async () => {
+  await fresh(); await page.setViewport({ width: 640, height: 800 });
+  await page.evaluate(language => { window.f04.language = language; window.f04.render(); }, language);
+  for (const [index, label] of [[0, 'priceVersions'], [1, 'meteringUnits']]) {
+   const wrapper = (await page.$$('.adm-pricing-workspace > .adm-finance-subpanel > .adm-table-wrap'))[index];
+   assert.ok(wrapper, `Missing pricing scroll region ${index}`);
+   assert.ok(await wrapper.evaluate((element, label) => element.getAttribute('role') === 'region' && element.getAttribute('aria-label') === window.f04.labels()[label] && element.tabIndex === 0, label));
+   // Force overflow using viewport constraints, leaving production table CSS
+   // and native keyboard scrolling intact. No synthetic scroll event/write.
+   await wrapper.evaluate(element => { element.style.maxWidth = '300px'; element.querySelector('table').style.minWidth = '900px'; });
+   await wrapper.focus();
+   assert.ok(await wrapper.evaluate(element => document.activeElement === element && element.scrollWidth > element.clientWidth && getComputedStyle(element).overflowX === 'auto'));
+   await page.keyboard.press('ArrowRight');
+   await page.waitForFunction(index => [...document.querySelectorAll('.adm-pricing-workspace > .adm-finance-subpanel > .adm-table-wrap')][index].scrollLeft > 0, {}, index);
+  }
+ });
+ for(const language of ['zh','en','ja']) await caseRun(`${language}: actual credential page has a named heading and safety explanation`,async()=>{
+  await fresh();await page.evaluate(language=>{window.history.replaceState({},'',`${location.pathname}?token_detail_tab=credentials`);window.f04.language=language;window.f04.surface='credentials';window.f04.render();},language);
+  await page.waitForSelector('#token-credentials-heading');
+  assert.ok(await page.$eval('#token-credentials-heading',el=>el.textContent.trim().length>0));
+  assert.ok(await page.$eval('#token-credentials-heading',el=>el.closest('section').querySelector('.adm-source-lead').textContent.trim().length>0));
+ });
+ for(const type of ['TOKEN_CREDENTIAL_VALIDATE','TOKEN_MODEL_PUBLISH','TOKEN_MODEL_CATALOG_SYNC']) await caseRun(`${type}: lost ACK recovers original key without another write and allows closing terminal receipt`,async()=>{
+  await fresh();await page.evaluate(type=>{window.f04.surface='command';window.f04.commandType=type;window.f04.unknownOnce=true;window.f04.render();},type);await page.waitForSelector('.adm-high-risk-dialog');await submit('.adm-high-risk-dialog');
+  await page.waitForSelector('.adm-command-unknown');assert.ok(await page.$eval('.adm-high-risk-dialog header button',el=>el.disabled));
+  await submit('.adm-high-risk-dialog');await page.waitForFunction(()=>!document.querySelector('.adm-high-risk-dialog header button').disabled);
+  assert.ok(await page.evaluate(()=>{const calls=window.f04.calls.filter(c=>c.path.includes('/commands'));return calls.filter(c=>c.method==='POST').length===1&&calls.filter(c=>c.method==='GET').length===1&&calls[0].key===calls[1].key;}));
+  if(type==='TOKEN_CREDENTIAL_VALIDATE') assert.ok(await page.evaluate(()=>document.body.textContent.includes(window.f04.credentialProbeLabel())));
+  await page.$eval('.adm-high-risk-dialog header button',button=>button.click());await page.waitForFunction(()=>window.f04.closed===true);
+ });
+ await caseRun('Known entry expiry permits closing without treating an arbitrary timeout as safe',async()=>{
+  await fresh();await page.evaluate(()=>{window.f04.surface='command';window.f04.commandType='TOKEN_CREDENTIAL_VALIDATE';window.f04.expiredEntryOnce=true;window.f04.render();});await page.waitForSelector('.adm-high-risk-dialog');await submit('.adm-high-risk-dialog');
+  await page.waitForFunction(()=>document.body.textContent.includes(window.f04.expiredEntryLabel()));
+  assert.equal(await page.$('.adm-command-unknown'),null);assert.equal(await page.$eval('.adm-high-risk-dialog header button',el=>el.disabled),false);
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.path.endsWith('/commands')&&c.method==='POST').length),1);
+  await page.$eval('.adm-high-risk-dialog header button',button=>button.click());await page.waitForFunction(()=>window.f04.closed===true);
+ });
+ for(const language of ['zh','en','ja']) await caseRun(`${language}: missing source and published lifecycle remain distinct`,async()=>{
+  await fresh();await page.evaluate(language=>{window.f04.language=language;window.f04.models=[{model_id:window.f04.id,display_name:'Controlled missing source',lifecycle_status:'PUBLISHED',protocol_code:'CONTROLLED',protocol_version:1,context_length:4096,source_available:false,catalog_version:1}];window.f04.surface='management';window.f04.render();},language);
+  await page.waitForFunction(()=>document.body.textContent.includes('Controlled missing source'));
+  assert.ok(await page.evaluate(()=>document.querySelector('.adm-source-missing-policy').textContent===window.f04.sourceMissingPolicyLabel()));
+  assert.ok(await page.evaluate(()=>{const row=[...document.querySelectorAll('tr')].find(el=>el.textContent.includes('Controlled missing source'));const labels=window.f04.modelStatusLabels();return row.textContent.includes(labels.PUBLISHED)&&row.textContent.includes(labels.UNAVAILABLE)&&!row.textContent.includes(labels.DEPRECATED);}));
+  await page.$eval('.adm-name-link',button=>button.click());await page.waitForSelector('#model-overview-heading');
+  assert.ok(await page.$eval('.adm-model-detail .adm-source-missing-policy',el=>el.textContent===window.f04.sourceMissingPolicyLabel()));
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);
+ });
  console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 }catch(error){console.error(`FAIL after ${passed} PASS: ${error.stack}`);if(page)console.error(JSON.stringify(await page.evaluate(()=>({text:document.body.textContent.slice(0,1200),paths:window.f04?.calls.map(c=>c.path)})).catch(()=>({}))));process.exitCode=1;}
 finally{if(browser)await browser.close();if(vite)await vite.close();if(fs.existsSync(profile)){assert.equal(fs.realpathSync(profile),ownedProfile);assert.equal(path.dirname(ownedProfile),fs.realpathSync(os.tmpdir()));assert.ok(path.basename(ownedProfile).startsWith('pinvou-f04-management-'));fs.rmSync(ownedProfile,{recursive:true});}}
