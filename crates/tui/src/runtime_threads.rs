@@ -8273,11 +8273,26 @@ impl RuntimeThreadManager {
                     crate::tools::goal::new_shared_goal_state(),
                 ),
             };
+            // Round-35 M2: a PERSISTED root set is validated before arming
+            // (sibling parity — the REST resume lane 400s the same shape;
+            // normalize-only here silently granted a hand-edited row a
+            // writable sandbox).
+            let armed_workspace_roots = if thread.workspace_roots.is_empty() {
+                Vec::new()
+            } else {
+                codewhale_core::validate_workspace_roots(&thread.workspace, &thread.workspace_roots)
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "persisted workspace_roots failed validation on resume \
+                         (thread row is corrupt or hand-edited): {error}"
+                        )
+                    })?
+            };
             let engine_cfg = EngineConfig {
                 model: route_model.clone(),
                 active_route_limits: route_limits,
                 workspace: thread.workspace.clone(),
-                workspace_roots: thread.workspace_roots.clone(),
+                workspace_roots: armed_workspace_roots,
                 session_id: None,
                 subagent_state_root: None,
                 plugin_registry: thread_plugin_registry.clone(),
