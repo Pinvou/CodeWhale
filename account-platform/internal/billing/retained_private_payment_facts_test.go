@@ -13,6 +13,7 @@ import (
 // approval delivery, production activation, or a live provider connection.
 func TestRetainedPaymentRepairProviderFacts(t *testing.T) {
 	r, ctx := retainedFinanceRepository(t)
+	activationVersion := paymentFixtureActivation(t, ctx, r.pool)("ACTIVE")
 	provider := &paymentRepairStubProvider{}
 	p, err := NewPaymentCoordinatorWithProvider(r, provider)
 	if err != nil {
@@ -92,7 +93,7 @@ func TestRetainedPaymentRepairProviderFacts(t *testing.T) {
 			}
 			before := counts()
 			cmd := PaymentFinancialRepairCommandInput{PaymentOrderID: orderID, PaymentEvidenceID: evidenceID}
-			plan, err := paymentFinancialRepairPlanFrom(ctx, r.pool, cmd, 1, 1, 1)
+			plan, err := paymentFinancialRepairPlanFrom(ctx, r.pool, cmd, 1, 1, activationVersion)
 			if kind != "correct" {
 				if !errors.Is(err, ErrApprovalSnapshotMismatch) {
 					t.Errorf("invalid durable provider %s accepted as plan: %v", kind, err)
@@ -108,7 +109,7 @@ func TestRetainedPaymentRepairProviderFacts(t *testing.T) {
 			if plan.Provider.ExternalCustomerKey != owner.String() || plan.Provider.ExternalSKU != "sku-repair" {
 				t.Errorf("plan did not preserve durable customer/SKU: %q/%q", plan.Provider.ExternalCustomerKey, plan.Provider.ExternalSKU)
 			}
-			input := PaymentFinancialRepairExecutionInput{ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 2, ApproverUserID: uuid.New(), RequesterUserID: uuid.New(), ExecutionKey: "payment-repair-" + uuid.NewString(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1, Command: cmd, Frozen: PaymentFinancialRepairFrozenFacts{OrderUpdatedAt: plan.OrderUpdatedAt, AmountFen: plan.AmountFen, CreditMicrocredits: plan.CreditMicrocredits, ProviderTransactionID: plan.ProviderTransactionID, WalletID: plan.WalletID, WalletVersion: plan.WalletVersion, AppliedToReceivables: plan.AppliedToReceivables, FactsDigest: plan.FactsDigest}}
+			input := PaymentFinancialRepairExecutionInput{ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 2, ApproverUserID: uuid.New(), RequesterUserID: uuid.New(), ExecutionKey: "payment-repair-" + uuid.NewString(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion, Command: cmd, Frozen: PaymentFinancialRepairFrozenFacts{OrderUpdatedAt: plan.OrderUpdatedAt, AmountFen: plan.AmountFen, CreditMicrocredits: plan.CreditMicrocredits, ProviderTransactionID: plan.ProviderTransactionID, WalletID: plan.WalletID, WalletVersion: plan.WalletVersion, AppliedToReceivables: plan.AppliedToReceivables, FactsDigest: plan.FactsDigest}}
 			result, err := p.ApplyPaymentFinancialRepair(ctx, input)
 			if err != nil {
 				t.Fatal("actual strict matcher/merge/credit owner apply", err)

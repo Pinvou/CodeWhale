@@ -1,10 +1,10 @@
 # 支付财务修复（`PAYMENT_FINANCIAL_REPAIR`）领域设计
 
-当前状态：`PRIVATE_IMPLEMENTATION / INDEPENDENT_REVIEW_PENDING / DEFAULT_INACTIVE / NOT_DEPLOYED`。下述设计冻结记录保留历史边界；当前私有候选已装配 owner、proof/precheck、typed Detail/EDIT、专属 consumer/result、Portal 与三语言表单，有限实测不等于真实前序传播、完整审批发行或部署验收。首版范围由用户在 2026-09-19 确认为**仅“已确认支付但未入账”的补记**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-28 的 closed command/snapshot/proof、外部证据规则、幂等与恢复、失败分类、迁移与回滚及验收映射；当前唯一命令为 `PAYMENT_FINANCIAL_REPAIR` v1/s1，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
+当前状态：`PRIVATE_IMPLEMENTATION / INDEPENDENT_REVIEW_PENDING / DEFAULT_INACTIVE / NOT_DEPLOYED`。下述设计冻结记录保留历史边界；当前 F12 候选装配 owner、proof/precheck、typed Detail/EDIT、专属 consumer/result、Portal 与三语言表单，有限实测不等于真实前序传播、完整审批发行或部署验收。首版范围由用户在 2026-09-19 确认为**仅“已确认支付但未入账”的补记**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-28 的 closed command/snapshot/proof、外部证据规则、幂等与恢复、失败分类、迁移与回滚及验收映射；当前唯一命令为 `PAYMENT_FINANCIAL_REPAIR` v1/s1，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
 
 ## 1. 设计冻结时的命令现状（历史）
 
-当前私有装配使用 Account 原 `000073` consumer route、Billing 原 `000065/000066` 及 `000077` requester 审计迁移；专属 durable 为 `billing-payment-financial-repair-executor-p1-v1`，沿既有 `RunBillingApprovalConsumers` 与资源注册，无新增消费开关。只有默认 INACTIVE 已保留，以下“仅元数据/无 handler”等描述是设计冻结时的记录。
+当前 F12 装配使用 Account 原 `000073` consumer route、Billing 原 `000065/000066` 及 `000077` requester 审计迁移；专属 durable 为 `billing-payment-financial-repair-executor-p1-v1`，沿既有 `RunBillingApprovalConsumers` 与资源注册，无新增消费开关。只有默认 INACTIVE 已保留，以下“仅元数据/无 handler”等描述是设计冻结时的记录。
 
 - **只有策略元数据**：Account `approval_command_policies`/`approvalpolicy` 登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`，请求/审批权限 `platform.billing.repairs.request|approve`、`FINANCIAL_FACT_CHANGE`、一名非申请人审批、24 小时有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`、`internal/platform/approvalpolicy/registry.go`）。
 - **静态不可执行**：不在 `executableApprovalCommands` 内，create/update/submit/APPROVE/Begin 全部失败关闭。
@@ -12,8 +12,8 @@
 
 ## 2. 设计冻结时的既有“已确认支付未入账”修复路径（历史，本命令复用其账务语义）
 
-- **入口与前置**：`PaymentCoordinator.RepairReviewedOrder`（`internal/billing/reconciliation.go`）要求能力 `ManualRepairSupported`+`OrderQuerySupported`、非空 `actorID` 与 1–500 字符原因、订单 `status='MANUAL_REVIEW'` 且 `fulfillment_status='MANUAL_REVIEW'`；随后调用 Provider 查询并要求 `status='SUCCESS'`、渠道交易号/支付时间非空，且商户单号、渠道、金额（分）、币种与订单逐项相等。
-- **入账写入**：事务内重读订单（`FOR UPDATE`）→ 记录钱包 `posted_microcredits` 作为 `balanceBefore` → `mergeSuccessfulPaymentWithinTransaction(..., "MANUAL_REPAIR", "repair:"+order.ID+":"+channelTransactionID, snapshot, provider, repair=true, ...)`：写 `payment_transactions`（`status='SUCCEEDED'`）、推进订单为已支付/已履约、写 `REPAIR_CREDIT` journal（`business_reference='repair-payment-transaction:'+transactionID`）与成对 posting（BASE/BONUS lot 的可用额计入钱包负债账户、未结应收清偿`RECEIVABLE_ASSET`、`PAYMENT_CLEARING −amount`）、按 `splitProductComponents` 写 credit lot、entitlement package 与 BASE/BONUS component、更新钱包 `posted_microcredits += amount − appliedToReceivables`（`internal/billing/payments.go`）。
+- **入口与前置**：`PaymentCoordinator.RepairReviewedOrder`（`internal/billing/payment_review.go`）要求能力 `ManualRepairSupported`+`OrderQuerySupported`、非空 `actorID` 与 1–500 字符原因、订单 `status='MANUAL_REVIEW'` 且 `fulfillment_status='MANUAL_REVIEW'`；随后调用 Provider 查询并要求 `status='SUCCESS'`、渠道交易号/支付时间非空，且商户单号、渠道、金额（分）、币种与订单逐项相等。
+- **入账写入**：事务内重读订单（`FOR UPDATE`）→ 记录钱包 `posted_microcredits` 作为 `balanceBefore` → `mergeSuccessfulPaymentWithinTransaction(..., "MANUAL_REPAIR", "repair:"+order.ID+":"+channelTransactionID, snapshot, provider, repair=true, ...)`：写 `payment_transactions`（`status='SUCCEEDED'`）、推进订单为已支付/已履约、写 `REPAIR_CREDIT` journal（`business_reference='repair-payment-transaction:'+transactionID`）与成对 posting（BASE/BONUS lot 的可用额计入钱包负债账户、未结应收清偿`RECEIVABLE_ASSET`、`PAYMENT_CLEARING −amount`）、按 `splitProductComponents` 写 credit lot、entitlement package 与 BASE/BONUS component、更新钱包 `posted_microcredits += amount − appliedToReceivables`（`internal/billing/payment_evidence.go`）。
 - **审计行**：同事务追加 `payment_order_repairs`（`migrations/billing/000014`、`000015`、`000024`）：订单、交易、`payment_evidence_id`、actor、原因、Provider 快照、唯一 entitlement package、`points_awarded>0`、`wallet_balance_before/after`，以 `ON CONFLICT (payment_transaction_id) DO NOTHING` 收口；`UNIQUE(payment_transaction_id)` 与 `UNIQUE(entitlement_package_id)` 使**每笔交易至多一次补记**。
 - **支付事实**：`payment_orders`（状态含 `MANUAL_REVIEW`，无 `version`，有 `updated_at`/`attention_summary`/`summary_version`）、`payment_transactions`（`000004` 的单订单唯一索引已被 `000024` 改为普通索引 `(payment_order_id,created_at,id)`，当前唯一约束只有组合身份 `UNIQUE(id,payment_order_id)` 与 `provider_transaction_id` 唯一——**数据库不再保证"一订单一条交易"**）、`payment_evidence`（`evidence_type ∈ {CALLBACK,QUERY,BILL,MANUAL_REPAIR}`，含 `provider_id/provider_version/evidence_key/merchant_order_no/provider_transaction_id/amount_fen/currency/provider_status/payload_digest/payload_snapshot/merge_result`，唯一键 `(provider_id,provider_version,evidence_type,evidence_key,payload_digest)`）。
 - **现状缺口**：该路径由运维/对账侧直接调用，没有审批、proof、activation、专属 consumer/durable、result-first 或恢复分类；它同时**主动调用 Provider**，不能直接作为审批命令的执行体。
@@ -32,14 +32,14 @@
 2. 一条 `REPAIR_CREDIT` journal（`business_reference='repair-payment-transaction:'||<payment_transaction_id>`）与其成对 posting：每个组件的可用额记入钱包负债账户（带 lot）、未结应收清偿记入 `RECEIVABLE_ASSET`、`PAYMENT_CLEARING −amount`；journal 合计 0。
 3. credit lot（每组件一个）、entitlement package（`source_type='PAYMENT'`）与 BASE/BONUS component，字段与既有路径逐字段一致。
 4. 钱包 `posted_microcredits += amount−appliedToReceivables`、`version+1`、`updated_at`；未结应收按既有 `CASH_RECHARGE_BASE` 顺序清偿（既有语义，不新造规则）。
-5. `payment_order_repairs` 一行（审计）：`actor_id`=审批执行身份（冻结在 wire 上的审批人 `approver_user_id`，与既有 `payment_provider_resume_executions.approver_user_id` 同义；执行时缺失即拒绝，不得写入全零 `actor_id`）、`requester_user_id`=**申请人**（同一审批冻结的 `requester_user_id`；2026-09-21 用户决定要求审批驱动的修复同时记录独立审批的双方，故由前向 `000077` 追加该列——与审批联动列 all-or-none、且必须与 `actor_id` 不相等，非审批的运维修复行保持两者为空；执行时缺失或与审批人相同即拒绝）、`reason`=审批冻结的原因摘要、`provider_snapshot`=冻结证据快照摘要、`payment_evidence_id`=冻结证据行、`entitlement_package_id`、`points_awarded`、`wallet_balance_before/after`，以及 GSA-28 前向迁移追加的审批联动列。
+5. `payment_order_repairs` 一行（审计）：`actor_id`=审批执行身份（冻结在 wire 上的审批人 `approver_user_id`，与既有 `payment_provider_resume_executions.approver_user_id` 同义；执行时缺失即拒绝，不得写入全零 `actor_id`）、`requester_user_id`=**申请人**（同一审批冻结的 `requester_user_id`；2026-09-21 用户决定要求审批驱动的修复同时记录独立审批的双方，故由前向 `000077` 追加该列——与审批联动列 all-or-none、且必须与 `actor_id` 不相等，非审批的运维修复行保留原非空 `actor_id`，`requester_user_id` 与审批联动列为空；执行时缺失或与审批人相同即拒绝）、`reason`=审批冻结的原因摘要、`provider_snapshot`=冻结证据快照摘要、`payment_evidence_id`=冻结证据行、`entitlement_package_id`、`points_awarded`、`wallet_balance_before/after`，以及 GSA-28 前向迁移追加的审批联动列。
 
 **明确禁止**：
 
 - 执行期禁止调用 Provider、禁止发起任何外部网络写；外部证据必须是**已持久化**的 `payment_evidence` 行（见 §5）。
 - 禁止服务订单以外的场景：非 `MANUAL_REVIEW`、已有成功交易/package/补记行、存在退款或拒付事实、`credit_microcredits` 或 `product_snapshot` 与证据不一致的订单一律失败关闭。
-- 禁止改写订单金额、商品快照、渠道交易号、既有 journal/posting、既有 package/component/lot 或既有 `payment_order_repairs` 行。
-- 禁止一订单多于一条交易、一交易多于一次补记（DB 唯一约束）、一 package 用于第二笔交易。
+- 禁止改写订单金额、商品快照或已有且与冻结证据冲突的渠道交易号、既有 journal/posting、既有 package/component/lot 或既有 `payment_order_repairs` 行。
+- 首次补记要求订单恰好一条匹配冻结交易号的 `REVIEW_REQUIRED` 交易；复用该交易，不另造交易。每笔交易至多一次补记、每个 package 至多关联一笔交易，由既有唯一约束保护；数据库不保证一订单只能有一条历史交易。
 - 禁止把本命令当作“重复入账的更正”或“金额不符的更正”（属 GSA-33/对账家族）。
 
 ## 5. 外部证据与判据（冻结）
@@ -47,7 +47,7 @@
 | 证据 | 要求 |
 |---|---|
 | Provider 证据行 | 至少一条 `payment_evidence` 满足：`provider_status` 表示成功、`merchant_order_no`、`provider_transaction_id`、`amount_fen`、`currency`、`provider_id`/`provider_version` 与订单/订单商品快照一致，`merge_result ∈ {RECORDED,DUPLICATE,MERGED}`（`REVIEW_REQUIRED` 拒绝） |
-| 订单状态 | `status='MANUAL_REVIEW'` 且 `fulfillment_status='MANUAL_REVIEW'`；`channel_transaction_id` 为空或等于冻结的 `provider_transaction_id` |
+| 订单状态 | `status='MANUAL_REVIEW'` 且 `fulfillment_status='MANUAL_REVIEW'`；订单实际列 `primary_provider_transaction_id`（原 `000024` 从 `channel_transaction_id` 重命名）为空或等于冻结的 `provider_transaction_id` |
 | 内部未入账 | 订单不存在 `status IN ('PAID','LATE_PAID')` 或 `fulfillment_status='CREDITED'` 的交易、无可引用 package、无 `payment_order_repairs` 行；且存在恰好一条 `fulfillment_status='REVIEW_REQUIRED'` 的交易，其 `provider_transaction_id` 等于冻结交易号（该交易即订单进入 `MANUAL_REVIEW` 的来源，补记复用既有 repair 分支并产出 `REPAIR_CREDIT`） |
 | 无冲突事实 | 订单无 `refunds`/`chargebacks` 行，钱包存在且 `status='ACTIVE'`、`posted_microcredits>=0` |
 | 外部幂等引用 | 冻结 `provider_transaction_id` 作为外部幂等引用；同一交易号只能补记一次 |
@@ -73,25 +73,25 @@
 | 键 | 内容 |
 |---|---|
 | `critical_resource_versions.payment_order_updated_at` | 冻结订单 `updated_at`（RFC3339 UTC） |
-| `critical_resource_versions.facts_digest` | 下述事实集合的 closed RFC8785 摘要 |
+| `critical_resource_versions.facts_digest` | 下述 owner 重算事实集合的 SHA-256 摘要（确定性 JSON 编码；wire 的 closed command/snapshot 另由既有 RFC8785 编码器规范化） |
 | `critical_resource_versions.policy_version` | 1 |
 | `financial_snapshot.amount_fen` / `.credit_microcredits` | 订单冻结金额与额度 |
 | `financial_snapshot.provider_transaction_id` | 冻结的外部幂等引用 |
 | `financial_snapshot.wallet_id` / `.wallet_version` | 目标钱包与版本 |
 | `financial_snapshot.applied_to_receivables` | 预检计算出的未结应收清偿额 |
 
-`facts_digest` 覆盖：订单 `status/fulfillment_status/channel/amount_fen/currency/credit_microcredits/product_snapshot/channel_transaction_id/updated_at/summary_version`、冻结证据行全字段摘要（含 `payload_digest`）、钱包 `status/posted_microcredits/version`、未结应收三元组与分配汇总、以及"无交易/无 package/无补记/无退款/无拒付"的零事实证据、activation 版本与 policy/schema 版本。
+`facts_digest` 覆盖：订单 `status/fulfillment_status/channel/amount_fen/currency/credit_microcredits/product_snapshot/channel_transaction_id/updated_at/summary_version`、冻结证据行使用的身份、来源、成功状态、时间及付款事实摘要（含不可变 `payload_digest` 与真实 customer/SKU）、钱包 `status/posted_microcredits/version`、未结应收有序行与既有分配事实、以及"无已入账交易/无 package/无补记/无退款/无拒付"的零事实证据、activation 版本与 policy/schema 版本。
 
 ### 6.3 proof 与 presenter
 
 - Billing 内部证明端点只接受 Account 专属身份，2 秒绝对期限、64 KiB 上限，按 §5 重读并重算，返回闭合结果（`PROOF_VALID/PROOF_DENY`、订单、证据、金额、组件拆分（BASE/BONUS）、`applied_to_receivables`、钱包版本、`facts_digest`、policy/schema/activation 版本）。禁止执行期 Provider 调用，proof 亦不得触发外部请求。
-- presenter（GSA-37）只显示订单号（脱敏）、渠道、金额（分）、额度、冻结证据摘要（`evidence_type/received_at/payload_digest` 截断显示）、组件拆分、预计清偿应收额、钱包版本与风险警示；不下发 Provider 原文、支付凭证、个人数据或内部 proof 字段。
+- 当前 typed Detail/EDIT 从已验证的冻结 wire 提取原订单与证据 ID、金额（分）、额度、预计清偿应收额、钱包版本、固定原因和不透明 `facts_digest`，int64 均为十进制字符串；预检表单沿 closed projection 显示当前付款事实。不得下发 Provider 原文、支付凭证、个人数据、签名凭据或 proof 权限身份。
 
 ## 7. 守恒、幂等与未知结果
 
-- **守恒**：`sum(ledger_postings)=0`；`wallet.posted_microcredits` 增量必须等于 `amount−appliedToReceivables`；`sum(component.original)=order.credit_microcredits`；package/lot/component 的额度与订单冻结额度一致；`payment_order_repairs.points_awarded=order.credit_microcredits` 且 `wallet_balance_after=before+points_awarded`（既有 CHECK）。
+- **守恒**：`sum(ledger_postings)=0`；`wallet.posted_microcredits` 增量必须等于 `amount−appliedToReceivables`；`sum(component.original)=order.credit_microcredits`；package/lot/component 的额度与订单冻结额度一致；`payment_order_repairs.points_awarded=order.credit_microcredits` 且 `wallet_balance_after=before+points_awarded−appliedToReceivables` 由 owner 事务保证；原 `000015` CHECK 只要求 `wallet_balance_after>=wallet_balance_before`，不能代替精确守恒核验。
 - **线性化点**：`payment_order_repairs_payment_transaction_id_key`（同一 provider 交易至多一次补记，且既有运维路径同样受此约束）、`payment_order_repairs.entitlement_package_id` 唯一、`entitlement_packages` 的 `(id,source_payment_transaction_id)` 身份唯一与 `payment_transactions.provider_transaction_id` 唯一，辅以订单行锁；由于 `000024` 之后数据库**不再**保证一订单一条交易，执行前必须显式按"该订单是否已有绑定冻结 `provider_transaction_id` 的交易/package/补记行"判定已入账，不得依赖"每订单至多一条交易"这一已失效不变量。并发重复执行至多一次成功，第二次读回既有交易/package/审计行。
-- **result-first**：先按 `payment_order_id`/`payment_transaction_id`/`approval_request_id` 只读读回交易、package、`payment_order_repairs` 与 journal；命中即返回同一结果，不生成新 ID、不再补记。
+- **result-first**：先读回同一 `approval_request_id` 的审计结果，并严格核对 authorization event、epoch、execution key、订单、证据和独立审批双方身份；匹配才返回同一结果，不生成新 ID、不再补记。其它审批或运维产生的既有补记不是本次执行的成功收据。
 - **未知结果**：提交结果不明时只读查证上述四类事实是否同时存在；缺失或部分事实一律 `UNKNOWN_QUERY_ONLY`。禁止在未知状态下重放补记、禁止把"未查到"当作零效果。
 - **执行顺序**：认领 execution → 校验 activation/policy/schema 与 `facts_digest` → `SELECT payment_orders ... FOR UPDATE` → 复读证据与零事实 → 复用既有补记写入者 → 追加审批审计行 → 提交后复读确认。
 
@@ -101,7 +101,8 @@
 |---|---|---|
 | activation 非 `ACTIVE`、policy/schema/版本不匹配 | `POLICY_OR_SCHEMA_MISMATCH` | 失败关闭、零写入、终态 |
 | 订单非 `MANUAL_REVIEW`、证据不足/不一致、已有交易或 package、存在退款/拒付、钱包非 ACTIVE | `PROOF_DENY` | 失败关闭、零写入、终态 |
-| 已有 `payment_order_repairs`（含既有运维路径产生） | 幂等命中 | 读回既有 package/交易/审计行，`SUCCEEDED`，零新写入 |
+| 同一审批与执行身份的匹配 `payment_order_repairs` | 幂等命中 | 读回既有 package/交易/审计行，`SUCCEEDED`，零新写入；activation 关闭后仍可读匹配收据 |
+| 其它审批或运维路径产生的既有补记 | `PROOF_DENY` | 新候选重算拒绝；不得把他人补记认作本次成功收据 |
 | 5 分钟执行窗口过期 | `EXECUTION_WINDOW_EXPIRED` | 终态，零写入 |
 | 可重试领域故障（序列化失败、死锁、连接失败） | 按 GSA-16 分类 | 有界重试；应用层最多 12 次尝试，第 12 次仍失败则发布 DLQ 并按 PubAck/`ACK_PENDING`/DoubleAck 收口；禁止通用人工 replay |
 | 提交结果未知 | `UNKNOWN_QUERY_ONLY` | 只读查证，不重放、不改判 |
@@ -109,14 +110,14 @@
 ## 9. 权限、版本与 activation（复用现有 v1/s1）
 
 - 复用 `platform.billing.repairs.request|approve`、一名非申请人审批、24 小时有效期、5 分钟窗口，不新增权限或 policy/snapshot 版本。
-- 依据：该命令 `policy_version=1 / snapshot_schema_version=1` 行从未是可执行合同（静态不可执行，四入口失败关闭），不存在由该版本产生并已执行的领域事实；首次冻结的 closed 形状即该版本合同。
+- 依据：该命令 `policy_version=1 / snapshot_schema_version=1` 行从未是可执行合同（静态不可执行，五入口失败关闭），不存在由该版本产生并已执行的领域事实；首次冻结的 closed 形状即该版本合同。
 - 激活前只读守卫：目标库中该命令必须不存在 `APPROVED/EXECUTING/EXECUTION_FAILED` 或其它未终态申请；守卫同时统计"`MANUAL_REVIEW` 订单且已有 Provider 成功证据但无内部入账"的存量清单，存量必须由运维走既有 `RepairReviewedOrder` 收口或在激活后逐笔走本命令，不得在激活时批量改写。
 - `billing_approval_command_activations` 行保持 `INACTIVE`；当前交付专属 consumer/durable，运行时由有限注册集合统一装配，不使用逐命令环境开关；生产激活只属于取得独立授权的 GSA-40。
 - 放宽首版范围（例如金额不符、重复入账更正、主动 Provider 复核）必须新增 policy/schema 版本与独立设计。
 
 ## 10. 迁移、N/N-1 与回滚
 
-- 迁移只前向追加：为 `payment_order_repairs` 增加可空审批联动列（`approval_request_id`、`authorization_event_id`、`approval_epoch`、`execution_key_digest`、`facts_digest`）与相应唯一索引（非空时唯一），由 `billing_service` 持有；不改既有列、CHECK、唯一约束，不改 `000014/000015/000024/000054`。
+- 迁移只前向追加：为 `payment_order_repairs` 增加可空审批联动列（`approval_request_id`、`authorization_event_id`、`approval_epoch`、`execution_key_digest`、`facts_digest`）与相应唯一索引（非空时唯一），保留原运行角色与 schema owner 迁移协议；`000077` 扩展审批双方身份一致性；不重写既有 SQL/checksum 或发布 ledger，不改 `000014/000015/000024/000054`。
 - N/N-1：先部署可读新列的 Billing，再部署 proof 端与执行器/消费者，最后业务页；旧运维路径写入时新列为 NULL，语义为"运维补记"，读取端必须区分而不误判为审批执行。
 - 回滚：只允许停止消费者、把 activation 行翻回 `INACTIVE`；已产生的交易/package/lot/journal/审计行一律保留可读，禁止破坏性 down 撤销已入账事实。
 - 未通过 GSA-38～40 且未取得独立生产授权前，不部署、不激活。
@@ -129,7 +130,7 @@
 | 应收联动 | 钱包存在未结 `USAGE_OVERAGE` 应收时按既有顺序清偿并写 `CASH_RECHARGE_BASE` 分配；无应收时不产生分配 |
 | 证据门禁 | 无证据、证据与订单不一致、`merge_result='REVIEW_REQUIRED'`、证据缺 `provider_transaction_id` 全部 `PROOF_DENY` 且零写入 |
 | 状态门禁 | 非 `MANUAL_REVIEW`、已履约、已退款、存在拒付、钱包非 ACTIVE 全部失败关闭 |
-| 重复入账门禁 | 已有交易/package/审计行时幂等读回，不产生第二条交易、第二个 package、第二次补记 |
+| 重复入账门禁 | 匹配本次审批收据时幂等读回；其它历史补记或 package 的新候选失败关闭，不产生第二条交易、第二个 package、第二次补记 |
 | 并发 | 同订单两次并发授权/重复投递至多一次成功；与回调/查询合并并发时唯一约束生效且无死锁 |
 | 崩溃/未知 | 提交后中断可只读确认 `SUCCEEDED`；未提交保持 `UNKNOWN_QUERY_ONLY` 且零写入 |
 | 守恒 | journal 平衡、金额等于 `amount−appliedToReceivables`、组件合计等于订单额度、`points_awarded` 与余额上下界 CHECK 通过 |

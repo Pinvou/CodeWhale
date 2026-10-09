@@ -24,21 +24,32 @@ WHERE command_type = 'PAYMENT_FINANCIAL_REPAIR' AND policy_version = 1 AND snaps
 SELECT (SELECT count(*) FROM payment_order_repairs WHERE approval_request_id IS NOT NULL) AS approval_repairs,
        (SELECT count(*) FROM billing_approval_proof_claims) AS proof_claims;
 
--- Billing：存量清单——"MANUAL_REVIEW 且已有匹配成功证据但内部未入账"的订单
--- （本命令只接受其中已有一条 REVIEW_REQUIRED 交易、其 provider_transaction_id 与证据一致者；
---  其余必须走既有 RepairReviewedOrder 运维路径，或在将来另开 policy/schema 版本处理）
-SELECT payment_order.id,
-       EXISTS(SELECT 1 FROM payment_transactions t WHERE t.payment_order_id=payment_order.id
-              AND t.fulfillment_status='REVIEW_REQUIRED'
-              AND t.provider_transaction_id=evidence.provider_transaction_id) AS in_scope
+-- Billing：只读候选清单，不替代 owner 的完整商品/钱包/应收 proof。
+-- in_scope 要求恰好一条 REVIEW_REQUIRED 交易且交易号匹配；实际放行前仍须重新预检。
+SELECT payment_order.id, evidence.id AS payment_evidence_id,
+       ((SELECT count(*) FROM payment_transactions t WHERE t.payment_order_id=payment_order.id
+           AND t.fulfillment_status='REVIEW_REQUIRED')=1
+        AND (SELECT count(*) FROM payment_transactions t WHERE t.payment_order_id=payment_order.id
+           AND t.fulfillment_status='REVIEW_REQUIRED'
+           AND t.provider_transaction_id=evidence.provider_transaction_id)=1) AS in_scope
 FROM payment_orders payment_order
 JOIN payment_evidence evidence ON evidence.payment_order_id=payment_order.id
 WHERE payment_order.status='MANUAL_REVIEW' AND payment_order.fulfillment_status='MANUAL_REVIEW'
-  AND evidence.provider_transaction_id IS NOT NULL AND evidence.amount_fen=payment_order.amount_fen
-  AND evidence.currency=payment_order.currency AND evidence.merge_result IN ('RECORDED','DUPLICATE','MERGED')
+  AND upper(btrim(evidence.provider_status)) IN ('PAY_SUCCESS','SUCCESS','PAID','TRADE_SUCCESS')
+  AND evidence.provider_transaction_id IS NOT NULL AND btrim(evidence.provider_transaction_id)<>''
+  AND (COALESCE(payment_order.primary_provider_transaction_id,'')='' OR payment_order.primary_provider_transaction_id=evidence.provider_transaction_id)
+  AND evidence.amount_fen=payment_order.amount_fen AND evidence.currency=payment_order.currency
+  AND evidence.provider_id=payment_order.provider_id AND evidence.provider_version=payment_order.provider_version
+  AND evidence.merchant_order_no=payment_order.merchant_order_no
+  AND evidence.payload_snapshot->>'external_customer_key'=payment_order.requester_id::text
+  AND COALESCE(evidence.payload_snapshot->>'external_sku','')=COALESCE(payment_order.provider_sku,'')
+  AND evidence.provider_event_at IS NOT NULL AND evidence.merge_result IN ('RECORDED','DUPLICATE','MERGED')
   AND NOT EXISTS(SELECT 1 FROM payment_transactions t WHERE t.payment_order_id=payment_order.id
                  AND (t.status IN ('PAID','LATE_PAID') OR t.fulfillment_status='CREDITED'))
-  AND NOT EXISTS(SELECT 1 FROM entitlement_packages p WHERE p.payment_order_id=payment_order.id);
+  AND NOT EXISTS(SELECT 1 FROM entitlement_packages p WHERE p.payment_order_id=payment_order.id)
+  AND NOT EXISTS(SELECT 1 FROM payment_order_repairs r WHERE r.payment_order_id=payment_order.id)
+  AND NOT EXISTS(SELECT 1 FROM refunds r WHERE r.payment_order_id=payment_order.id)
+  AND NOT EXISTS(SELECT 1 FROM chargeback_cases c WHERE c.payment_order_id=payment_order.id);
 ```
 
 Account 侧核验：`approval_requests` 中该命令不得存在 `APPROVED`/`EXECUTING`/`EXECUTION_FAILED` 的遗留行；`outbox_events` 中不得存在未消费的该命令授权事件。任一不满足即阻断激活，并按设计 §8 失败分类只读查证。

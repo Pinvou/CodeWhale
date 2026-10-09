@@ -1,9 +1,11 @@
 package billing
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"time"
 
@@ -54,6 +56,7 @@ type PaymentFinancialRepairCommandInput struct {
 // approved repair. It also carries the reconstructed provider fact the existing
 // merge writer consumes, so execution never calls the provider.
 type PaymentFinancialRepairPlan struct {
+	PolicyVersion            int64
 	OrderID                  uuid.UUID
 	WalletID                 uuid.UUID
 	EvidenceID               uuid.UUID
@@ -81,9 +84,8 @@ type PaymentFinancialRepairPlan struct {
 }
 
 // PaymentFinancialRepairFrozenFacts is the wire-visible owner projection an
-// approval froze. FactsDigest is an owner-only recomputation input; a consumed
-// authorization leaves it empty and the execution transaction recomputes it,
-// while a presented digest must match exactly.
+// approval froze. Fresh execution requires an exact digest match against the
+// owner transaction recomputation; committed result lookup precedes this gate.
 type PaymentFinancialRepairFrozenFacts struct {
 	OrderUpdatedAt        time.Time
 	AmountFen             int64
@@ -163,19 +165,20 @@ WHERE wallet_id=$1 AND outstanding_microcredits>0 ORDER BY created_at,id`, walle
 func paymentFinancialRepairPlanFrom(ctx context.Context, source paymentRepairReader, input PaymentFinancialRepairCommandInput,
 	policyVersion, schemaVersion, activationVersion int64) (PaymentFinancialRepairPlan, error) {
 	if input.PaymentOrderID == uuid.Nil || input.PaymentEvidenceID == uuid.Nil ||
-		policyVersion < 1 || schemaVersion < 1 || activationVersion < 1 {
+		policyVersion != 1 || schemaVersion != 1 || activationVersion < 1 {
 		return PaymentFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
-	plan := PaymentFinancialRepairPlan{OrderID: input.PaymentOrderID, EvidenceID: input.PaymentEvidenceID}
+	plan := PaymentFinancialRepairPlan{OrderID: input.PaymentOrderID, EvidenceID: input.PaymentEvidenceID, PolicyVersion: policyVersion}
 	var orderStatus, fulfillmentStatus string
 	var rawProduct []byte
+	var orderTransactionID string
 	var requesterID uuid.UUID
 	if err := source.QueryRow(ctx, `SELECT merchant_order_no,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,
-status,fulfillment_status,COALESCE(provider_sku,''),provider_id,provider_version,updated_at,summary_version,product_snapshot,requester_id
+status,fulfillment_status,COALESCE(provider_sku,''),provider_id,provider_version,updated_at,summary_version,product_snapshot,requester_id,COALESCE(primary_provider_transaction_id,'')
 FROM payment_orders WHERE id=$1`, input.PaymentOrderID).
 		Scan(&plan.MerchantOrderNo, &plan.WalletID, &plan.ProductID, &plan.Channel, &plan.AmountFen, &plan.Currency,
 			&plan.CreditMicrocredits, &orderStatus, &fulfillmentStatus, &plan.ProviderSKU, &plan.ProviderID, &plan.ProviderVersion,
-			&plan.OrderUpdatedAt, &plan.OrderSummaryVersion, &rawProduct, &requesterID); err != nil {
+			&plan.OrderUpdatedAt, &plan.OrderSummaryVersion, &rawProduct, &requesterID, &orderTransactionID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return PaymentFinancialRepairPlan{}, ErrNotFound
 		}
@@ -202,18 +205,21 @@ FROM payment_orders WHERE id=$1`, input.PaymentOrderID).
 	var evidenceAmountFen *int64
 	var providerEventAt *time.Time
 	var rawEvidence []byte
+	var evidenceKey string
+	var evidenceReceivedAt time.Time
 	if err := source.QueryRow(ctx, `SELECT payment_order_id,evidence_type,provider_id,provider_version,merchant_order_no,
 COALESCE(provider_transaction_id,''),amount_fen,COALESCE(currency,''),COALESCE(provider_status,''),provider_event_at,
-payload_digest,merge_result,payload_snapshot FROM payment_evidence WHERE id=$1`, input.PaymentEvidenceID).
+payload_digest,merge_result,payload_snapshot,evidence_key,received_at FROM payment_evidence WHERE id=$1`, input.PaymentEvidenceID).
 		Scan(&evidenceOrderID, &evidenceType, &evidenceProviderID, &evidenceProviderVersion, &evidenceMerchantOrderNo,
 			&providerTransactionID, &evidenceAmountFen, &evidenceCurrency, &evidenceStatus, &providerEventAt,
-			&payloadDigest, &mergeResult, &rawEvidence); err != nil {
+			&payloadDigest, &mergeResult, &rawEvidence, &evidenceKey, &evidenceReceivedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return PaymentFinancialRepairPlan{}, ErrNotFound
 		}
 		return PaymentFinancialRepairPlan{}, err
 	}
 	if evidenceOrderID != plan.OrderID || !validHexDigest(payloadDigest) ||
+		(orderTransactionID != "" && orderTransactionID != providerTransactionID) ||
 		(mergeResult != "RECORDED" && mergeResult != "DUPLICATE" && mergeResult != "MERGED") ||
 		!paymentFinancialRepairSuccessStatuses[strings.ToUpper(strings.TrimSpace(evidenceStatus))] ||
 		strings.TrimSpace(providerTransactionID) != providerTransactionID || providerTransactionID == "" ||
@@ -288,8 +294,28 @@ WHERE payment_order_id=$1 AND fulfillment_status='REVIEW_REQUIRED' AND provider_
 WHERE wallet_id=$1 AND outstanding_microcredits>0`, plan.WalletID).Scan(&outstandingTotal, &receivableCount); err != nil {
 		return PaymentFinancialRepairPlan{}, err
 	}
+	productSnapshot, err := paymentRepairJSONSnapshot(rawProduct)
+	if err != nil {
+		return PaymentFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	evidenceSnapshot, err := paymentRepairJSONSnapshot(rawEvidence)
+	if err != nil {
+		return PaymentFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	var receivableFacts, allocationFacts []byte
+	if err := source.QueryRow(ctx, `SELECT
+ COALESCE((SELECT jsonb_agg(jsonb_build_array(id,source_type,source_reference,original_microcredits,settled_microcredits,outstanding_microcredits,status,version,created_at,updated_at) ORDER BY created_at,id) FROM receivables WHERE wallet_id=$1 AND outstanding_microcredits>0),'[]'::jsonb),
+ COALESCE((SELECT jsonb_agg(to_jsonb(a) ORDER BY a.receivable_id,a.created_at,a.id) FROM receivable_allocations a JOIN receivables r ON r.id=a.receivable_id WHERE r.wallet_id=$1),'[]'::jsonb)`, plan.WalletID).Scan(&receivableFacts, &allocationFacts); err != nil {
+		return PaymentFinancialRepairPlan{}, err
+	}
 	encoded, err := json.Marshal(map[string]any{
 		"command_type":     paymentFinancialRepairCommand,
+		"product_snapshot": productSnapshot, "order_channel_transaction_id": orderTransactionID,
+		"evidence_payload_snapshot": evidenceSnapshot, "evidence_key": evidenceKey, "evidence_received_at": evidenceReceivedAt.UTC().Format(time.RFC3339Nano),
+		"evidence_order_id": evidenceOrderID, "evidence_provider_id": evidenceProviderID, "evidence_provider_version": evidenceProviderVersion, "evidence_merchant_order_no": evidenceMerchantOrderNo, "evidence_amount_fen": evidenceAmountFen, "evidence_currency": evidenceCurrency, "evidence_merge_result": mergeResult,
+		"receivable_facts": json.RawMessage(receivableFacts), "allocation_facts": json.RawMessage(allocationFacts),
+		"credited_transaction": creditedTransaction, "packaged": packaged, "repaired": repaired, "refunded": refunded, "charged_back": chargedBack,
+		"review_transactions": reviewTransactions, "frozen_review_transactions": frozenReviewTransactions,
 		"payment_order_id": plan.OrderID.String(), "wallet_id": plan.WalletID.String(),
 		"merchant_order_no": plan.MerchantOrderNo, "channel": plan.Channel, "currency": plan.Currency,
 		"amount_fen": plan.AmountFen, "credit_microcredits": plan.CreditMicrocredits,
@@ -328,7 +354,7 @@ WHERE wallet_id=$1 AND outstanding_microcredits>0`, plan.WalletID).Scan(&outstan
 func paymentFinancialRepairProofProjection(plan PaymentFinancialRepairPlan) ([]byte, []byte) {
 	critical, _ := json.Marshal(map[string]any{
 		"payment_order_updated_at": plan.OrderUpdatedAt.UTC().Format(time.RFC3339Nano),
-		"facts_digest":             plan.FactsDigest, "policy_version": 1,
+		"facts_digest":             plan.FactsDigest, "policy_version": plan.PolicyVersion,
 	})
 	financial, _ := json.Marshal(map[string]any{
 		"amount_fen": plan.AmountFen, "credit_microcredits": plan.CreditMicrocredits,
@@ -408,6 +434,9 @@ func (p *PaymentCoordinator) ApplyPaymentFinancialRepair(ctx context.Context, in
 	}
 	if found {
 		return stored, tx.Commit(ctx)
+	}
+	if err := paymentFinancialRepairExecutionActivation(ctx, tx, input, p.now()); err != nil {
+		return PaymentFinancialRepairResult{}, err
 	}
 	plan, err := paymentFinancialRepairPlanFrom(ctx, tx, input.Command, input.PolicyVersion, input.SchemaVersion, input.ActivationVersion)
 	if err != nil {
@@ -602,13 +631,44 @@ func paymentFinancialRepairFrozenMismatch(plan PaymentFinancialRepairPlan, froze
 		return "wallet_version"
 	case plan.AppliedToReceivables != frozen.AppliedToReceivables:
 		return "applied_to_receivables"
-	// The consumed authorization freezes only the wire-visible owner
-	// projection; the owner-only facts digest is recomputed inside the
-	// execution transaction, so an empty value is not a caller claim.
-	case frozen.FactsDigest == "":
-		return ""
 	case plan.FactsDigest != frozen.FactsDigest:
 		return "facts_digest"
 	}
 	return ""
+}
+
+func paymentFinancialRepairExecutionActivation(ctx context.Context, source paymentRepairReader, input PaymentFinancialRepairExecutionInput, now time.Time) error {
+	var active ApprovalCommandActivation
+	err := source.QueryRow(ctx, `SELECT command_type,policy_version,snapshot_schema_version,state,version,updated_at FROM billing_approval_command_activations WHERE command_type=$1 AND policy_version=$2`, paymentFinancialRepairCommand, input.PolicyVersion).
+		Scan(&active.CommandType, &active.PolicyVersion, &active.SnapshotSchemaVersion, &active.State, &active.Version, &active.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrApprovalSnapshotMismatch
+	}
+	if err != nil {
+		return err
+	}
+	if !validActivationItem(active, paymentFinancialRepairCommand, billingApprovalActivationSpecs[paymentFinancialRepairCommand], now) ||
+		active.State != "ACTIVE" || active.PolicyVersion != input.PolicyVersion || int64(active.SnapshotSchemaVersion) != input.SchemaVersion || active.Version != input.ActivationVersion {
+		return ErrApprovalSnapshotMismatch
+	}
+	return nil
+}
+
+// Decode with Number so snapshot normalization never passes monetary tokens
+// through float64. Map-key sorting makes semantically identical jsonb objects
+// share the same stable owner digest.
+func paymentRepairJSONSnapshot(raw []byte) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value map[string]any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return nil, ErrApprovalSnapshotMismatch
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return nil, ErrApprovalSnapshotMismatch
+	}
+	return value, nil
 }

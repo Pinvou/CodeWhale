@@ -28,6 +28,7 @@ type Descriptor struct {
 }
 
 var descriptors = []Descriptor{
+	{CommandType: "PAYMENT_FINANCIAL_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-financial-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "LEDGER_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-ledger-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "WALLET_ADJUSTMENT", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-wallet-adjustment-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "PAYMENT_PROVIDER_RESUME", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-provider-resume-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},

@@ -144,3 +144,20 @@ func (f billingTxProofFacts) receivableWriteOffPlan(ctx context.Context, input R
 	}
 	return receivableWriteOffPlanFrom(ctx, f.tx, input, policyVersion, schemaVersion, version)
 }
+
+func (f billingTxProofFacts) paymentFinancialRepairPlan(ctx context.Context, input PaymentFinancialRepairCommandInput) (PaymentFinancialRepairPlan, error) {
+	var policyVersion, schemaVersion, version int64
+	var state string
+	err := f.tx.QueryRow(ctx, `SELECT policy_version,snapshot_schema_version,state,version FROM billing_approval_command_activations WHERE command_type=$1`, paymentFinancialRepairCommand).
+		Scan(&policyVersion, &schemaVersion, &state, &version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	if err != nil {
+		return PaymentFinancialRepairPlan{}, err
+	}
+	if state != "ACTIVE" || policyVersion != 1 || schemaVersion != 1 || version < 1 {
+		return PaymentFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	return paymentFinancialRepairPlanFrom(ctx, f.tx, input, policyVersion, schemaVersion, version)
+}

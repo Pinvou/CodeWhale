@@ -16,9 +16,10 @@ window.fetch=async(url,options={})=>{
  if(url==='/api/admin/account/admin/v2/approval-command-prechecks')return response(projection);
  if(url==='/api/admin/approvals/capability')return response({session_approval_wire_version:2,control:{version:1,epoch:1,authorization_relay_epoch:1}});
  if(url==='/api/admin/approvals/requests'&&options.method==='POST'){state.created=true;if(state.loseCreate){state.loseCreate=false;throw new TypeError('controlled lost ACK');}return response({approval_request_id:id(9)},201);}
- if(String(url).startsWith('/api/admin/approvals/requests?'))return response({items:state.created?[{approval_request_id:id(9),command_type:'PAYMENT_FINANCIAL_REPAIR',status:state.status,version:state.version}]:[],has_more:false});
+ if(String(url).startsWith('/api/admin/approvals/requests?'))return response({items:state.created?[{approval_request_id:id(9),command_type:'PAYMENT_FINANCIAL_REPAIR',status:state.status,version:state.version,target:{resource_type:'PAYMENT_ORDER',resource_id:id(1)}}]:[],has_more:false});
+ if(url===`/api/admin/approvals/requests/${id(9)}`&&options.method==='PUT'){state.version++;return new Response(null,{status:204});}
  if(url===`/api/admin/approvals/requests/${id(9)}/actions/submit`){state.status='SUBMITTED';state.version++;return new Response(null,{status:204});}
- if(url===`/api/admin/approvals/requests/${id(9)}`)return response({approval_request_id:id(9),command_type:'PAYMENT_FINANCIAL_REPAIR',status:state.status,version:state.version,action_control_version:1,detail_availability:'AVAILABLE',allowed_actions:state.status==='DRAFT'?['SUBMIT']:[],target:{resource_type:'PAYMENT_ORDER',resource_id:id(1)},command:projection.normalized_command,reason:'Controlled ledger correction justification'});
+ if(url===`/api/admin/approvals/requests/${id(9)}`)return response({approval_request_id:id(9),command_type:'PAYMENT_FINANCIAL_REPAIR',status:state.status,version:state.version,action_control_version:1,detail_availability:'AVAILABLE',allowed_actions:state.status==='DRAFT'?['EDIT','SUBMIT']:[],target:{resource_type:'PAYMENT_ORDER',resource_id:id(1)},command:projection.normalized_command,reason:'Controlled ledger correction justification'});
  return response({items:[],has_more:false});
 };
 createRoot(document.getElementById('root')).render(<AdminFinanceWorkspace client={client} language={language} me={{user_id:id(8),platform_permissions:params.has('deny')?[]:['platform.billing.repairs.request','platform.billing.repairs.approve']}}/>);

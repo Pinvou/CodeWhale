@@ -27,6 +27,8 @@ export function AdminFinancialRepairDraftForm({ client, copy, onCreated, owner =
   currentClient.current = client;
   const operation = useFinanceOperation(owner, operationCopy, client, `financial-repair:${commandTypes.join(':')}`);
   const writeOff = commandType === 'RECEIVABLE_WRITE_OFF';
+  const paymentRepair = commandType === 'PAYMENT_FINANCIAL_REPAIR';
+  const governed = writeOff || paymentRepair;
   const locked = busy !== '' || operation.busy || operation.unknown;
   const pending = operation.pendingFacts;
   const displayedFacts = pending ? financialRepairProjectionRows(pending.projection) : facts;
@@ -88,6 +90,11 @@ export function AdminFinancialRepairDraftForm({ client, copy, onCreated, owner =
         integerMoney(answer.normalized_command.expected_receivable_version) !== integerMoney(prepared.body.expected_version))) {
         throw Object.assign(new Error('owner projection changed the requested intent'), { code: 'FINANCIAL_REPAIR_PRECHECK_INVALID' });
       }
+      if (paymentRepair && (answer.command_type !== commandType || answer.target_resource_id !== prepared.body.target_resource_id ||
+        answer.normalized_command.payment_order_id !== prepared.body.target_resource_id ||
+        answer.normalized_command.payment_evidence_id !== prepared.body.payment_evidence_id)) {
+        throw Object.assign(new Error('owner projection changed the payment evidence'), { code: 'FINANCIAL_REPAIR_PRECHECK_INVALID' });
+      }
       setProjection(answer);
       setFacts(rendered);
     } catch (error) {
@@ -102,7 +109,7 @@ export function AdminFinancialRepairDraftForm({ client, copy, onCreated, owner =
 
   const createDraft = async (event) => {
     event.preventDefault();
-    if (writeOff) {
+    if (governed) {
       const prepared = pending || { ...financialRepairDraftFromProjection(projection, reason, requestKey), projection };
       if (!prepared.draft) { setFailure(copy.invalidDraft); return; }
       const recovering = operation.unknown;
@@ -147,15 +154,15 @@ export function AdminFinancialRepairDraftForm({ client, copy, onCreated, owner =
   return <section className="adm-financial-repair" aria-label={copy.title}>
     <h3>{copy.title}</h3>
     <p>{copy.lead}</p>
-    {writeOff && operation.error && <p role="alert">{operation.error}</p>}
+    {governed && operation.error && <p role="alert">{operation.error}</p>}
     <form className="adm-financial-repair-target" onSubmit={readFacts}>
       <label>{copy.command}
-        <select disabled={writeOff && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
+        <select disabled={governed && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
           {commandTypes.map((command) => <option key={command} value={command}>{command}</option>)}
         </select>
       </label>
       {fields.map((field) => <label key={field.key}>{label(field)}
-        <input disabled={writeOff && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : field.key === 'expected_version' ? pending.draft.normalized_command.expected_receivable_version : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
+        <input disabled={governed && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : field.key === 'expected_version' ? pending.draft.normalized_command.expected_receivable_version : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
           onChange={(event) => setValue(field.key, event.target.value)} />
       </label>)}
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
@@ -168,12 +175,12 @@ export function AdminFinancialRepairDraftForm({ client, copy, onCreated, owner =
       <details><summary>{copy.criticalFacts}</summary><pre>{displayedFacts.critical}</pre></details>
       <details><summary>{copy.financialFacts}</summary><pre>{displayedFacts.financial}</pre></details>
     </div>}
-    {(projection || writeOff && operation.unknown) && <form className="adm-financial-repair-draft" onSubmit={createDraft}>
-      <label>{copy.reason}<textarea disabled={writeOff && locked} required minLength="10" maxLength="2000" value={pending?.draft.reason ?? reason} onChange={(event) => setReason(event.target.value)} /></label>
+    {(projection || governed && operation.unknown) && <form className="adm-financial-repair-draft" onSubmit={createDraft}>
+      <label>{copy.reason}<textarea disabled={governed && locked} required minLength="10" maxLength="2000" value={pending?.draft.reason ?? reason} onChange={(event) => setReason(event.target.value)} /></label>
       <small>{copy.reasonHint}</small>
-      <label>{copy.requestKey}<input disabled={writeOff && locked} required maxLength="111" value={pending?.draft.idempotency_key?.slice('approval:'.length) ?? requestKey} onChange={(event) => setRequestKey(event.target.value)} /></label>
+      <label>{copy.requestKey}<input disabled={governed && locked} required maxLength="111" value={pending?.draft.idempotency_key?.slice('approval:'.length) ?? requestKey} onChange={(event) => setRequestKey(event.target.value)} /></label>
       <small>{copy.requestKeyHint}</small>
-      <button type="submit" disabled={busy !== '' || operation.busy}>{writeOff && operation.unknown ? operationCopy.retry : busy === 'draft' || operation.busy ? copy.creating : copy.createDraft}</button>
+      <button type="submit" disabled={busy !== '' || operation.busy}>{governed && operation.unknown ? operationCopy.retry : busy === 'draft' || operation.busy ? copy.creating : copy.createDraft}</button>
     </form>}
   </section>;
 }

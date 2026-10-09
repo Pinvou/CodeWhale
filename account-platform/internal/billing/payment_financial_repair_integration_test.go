@@ -65,6 +65,8 @@ func TestPaymentFinancialRepairPostgresIntegration(t *testing.T) {
 	t.Cleanup(cancel)
 	repository, _ := newAdminPaginationIntegrationRepository(t, ctx, databaseURL)
 	pool := repository.pool
+	setActivation := paymentFixtureActivation(t, ctx, pool)
+	activationVersion := setActivation("ACTIVE")
 	provider := &paymentRepairStubProvider{}
 	coordinator, err := NewPaymentCoordinatorWithProvider(repository, provider)
 	if err != nil {
@@ -105,11 +107,15 @@ VALUES($1,$2,$3,$3,$4,'PAYMENT_REPAIR',$5,'ALIPAY',$6,'CNY',$7,'MANUAL_REVIEW','
 			now.Add(time.Hour), now.Add(72*time.Hour), now.Add(8*24*time.Hour), now); err != nil {
 			t.Fatal(err)
 		}
+		providerFacts, err := json.Marshal(map[string]any{"external_customer_key": ownerID.String(), "external_sku": "sku-repair"})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if _, err := pool.Exec(ctx, `INSERT INTO payment_evidence(id,payment_order_id,evidence_type,provider_id,provider_version,evidence_key,
 merchant_order_no,provider_transaction_id,amount_fen,currency,provider_status,provider_event_at,received_at,payload_digest,payload_snapshot,merge_result)
-VALUES($1,$2,'QUERY','test-provider','v1',$3,$4,$5,$6,'CNY',$7,$8,$8,$9,'{}',$10)`,
+VALUES($1,$2,'QUERY','test-provider','v1',$3,$4,$5,$6,'CNY',$7,$8,$8,$9,$11,$10)`,
 			evidenceID, orderID, "query:"+evidenceID.String(), "repair-"+orderID.String(), "trade-"+evidenceID.String(),
-			amountFen, providerStatus, now, strings.Repeat("ab", 32), mergeResult); err != nil {
+			amountFen, providerStatus, now, strings.Repeat("ab", 32), mergeResult, providerFacts); err != nil {
 			t.Fatal(err)
 		}
 		// The matching success evidence and the MANUAL_REVIEW order state are
@@ -125,7 +131,7 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 	}
 	orderID, walletID, evidenceID := seed(100, 100, 80, 20, "RECORDED", "PAY_SUCCESS")
 	command := PaymentFinancialRepairCommandInput{PaymentOrderID: orderID, PaymentEvidenceID: evidenceID}
-	plan, err := paymentFinancialRepairPlanFrom(ctx, pool, command, 1, 1, 1)
+	plan, err := paymentFinancialRepairPlanFrom(ctx, pool, command, 1, 1, activationVersion)
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -136,22 +142,22 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 	}
 	// Evidence and status negatives must fail closed before any write. Persisted
 	// payment evidence is immutable, so each negative uses its own seed.
-	if _, err := paymentFinancialRepairPlanFrom(ctx, pool, PaymentFinancialRepairCommandInput{PaymentOrderID: orderID, PaymentEvidenceID: uuid.New()}, 1, 1, 1); !errors.Is(err, ErrNotFound) {
+	if _, err := paymentFinancialRepairPlanFrom(ctx, pool, PaymentFinancialRepairCommandInput{PaymentOrderID: orderID, PaymentEvidenceID: uuid.New()}, 1, 1, activationVersion); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown evidence err=%v", err)
 	}
 	reviewOrder, _, reviewEvidence := seed(100, 100, 80, 20, "REVIEW_REQUIRED", "PAY_SUCCESS")
-	if _, err := paymentFinancialRepairPlanFrom(ctx, pool, PaymentFinancialRepairCommandInput{PaymentOrderID: reviewOrder, PaymentEvidenceID: reviewEvidence}, 1, 1, 1); !errors.Is(err, ErrApprovalSnapshotMismatch) {
+	if _, err := paymentFinancialRepairPlanFrom(ctx, pool, PaymentFinancialRepairCommandInput{PaymentOrderID: reviewOrder, PaymentEvidenceID: reviewEvidence}, 1, 1, activationVersion); !errors.Is(err, ErrApprovalSnapshotMismatch) {
 		t.Fatalf("review-required evidence err=%v", err)
 	}
 	failedOrder, _, failedEvidence := seed(100, 100, 80, 20, "RECORDED", "NOTPAY")
-	if _, err := paymentFinancialRepairPlanFrom(ctx, pool, PaymentFinancialRepairCommandInput{PaymentOrderID: failedOrder, PaymentEvidenceID: failedEvidence}, 1, 1, 1); !errors.Is(err, ErrApprovalSnapshotMismatch) {
+	if _, err := paymentFinancialRepairPlanFrom(ctx, pool, PaymentFinancialRepairCommandInput{PaymentOrderID: failedOrder, PaymentEvidenceID: failedEvidence}, 1, 1, activationVersion); !errors.Is(err, ErrApprovalSnapshotMismatch) {
 		t.Fatalf("non-success evidence err=%v", err)
 	}
 	paidOrder, _, paidEvidence := seed(100, 100, 80, 20, "RECORDED", "PAY_SUCCESS")
 	if _, err := pool.Exec(ctx, `UPDATE payment_orders SET status='PAID' WHERE id=$1`, paidOrder); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := paymentFinancialRepairPlanFrom(ctx, pool, PaymentFinancialRepairCommandInput{PaymentOrderID: paidOrder, PaymentEvidenceID: paidEvidence}, 1, 1, 1); !errors.Is(err, ErrApprovalSnapshotMismatch) {
+	if _, err := paymentFinancialRepairPlanFrom(ctx, pool, PaymentFinancialRepairCommandInput{PaymentOrderID: paidOrder, PaymentEvidenceID: paidEvidence}, 1, 1, activationVersion); !errors.Is(err, ErrApprovalSnapshotMismatch) {
 		t.Fatalf("already-paid order err=%v", err)
 	}
 
@@ -160,18 +166,17 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 			OrderUpdatedAt: plan.OrderUpdatedAt, AmountFen: plan.AmountFen,
 			CreditMicrocredits: plan.CreditMicrocredits, ProviderTransactionID: plan.ProviderTransactionID,
 			WalletID: plan.WalletID, WalletVersion: plan.WalletVersion,
-			AppliedToReceivables: plan.AppliedToReceivables,
+			AppliedToReceivables: plan.AppliedToReceivables, FactsDigest: plan.FactsDigest,
 		}
 	}
-	// The frozen projection is what an approval would have captured; the
-	// owner-only facts digest stays empty and is recomputed in the execution
-	// transaction, and an idempotent replay reuses the same frozen facts.
+	// Freeze the digest actually published by the owner proof. Committed replay
+	// reuses the original identity and frozen facts before fresh-effect gates.
 	execute := func(requestID, eventID uuid.UUID, order, evidence uuid.UUID, frozen PaymentFinancialRepairFrozenFacts) (PaymentFinancialRepairResult, error) {
 		cmd := PaymentFinancialRepairCommandInput{PaymentOrderID: order, PaymentEvidenceID: evidence}
 		return coordinator.ApplyPaymentFinancialRepair(ctx, PaymentFinancialRepairExecutionInput{
 			ApprovalRequestID: requestID, AuthorizationEventID: eventID, ApprovalEpoch: 2,
 			ApproverUserID: approvingUserID, RequesterUserID: requestingUserID,
-			ExecutionKey: "payment-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+			ExecutionKey: "payment-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
 			Command: cmd, Frozen: frozen,
 		})
 	}
@@ -180,7 +185,7 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 	// requester that equals the approver must all be refused outright.
 	if _, err := coordinator.ApplyPaymentFinancialRepair(ctx, PaymentFinancialRepairExecutionInput{
 		ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 2,
-		ExecutionKey: "payment-repair:no-approver", PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+		ExecutionKey: "payment-repair:no-approver", PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
 		Command: PaymentFinancialRepairCommandInput{PaymentOrderID: orderID, PaymentEvidenceID: evidenceID},
 		Frozen:  frozenFacts(plan),
 	}); !errors.Is(err, ErrConflict) {
@@ -189,7 +194,7 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 	if _, err := coordinator.ApplyPaymentFinancialRepair(ctx, PaymentFinancialRepairExecutionInput{
 		ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 2,
 		ApproverUserID: approvingUserID,
-		ExecutionKey:   "payment-repair:no-requester", PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+		ExecutionKey:   "payment-repair:no-requester", PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
 		Command: PaymentFinancialRepairCommandInput{PaymentOrderID: orderID, PaymentEvidenceID: evidenceID},
 		Frozen:  frozenFacts(plan),
 	}); !errors.Is(err, ErrConflict) {
@@ -198,7 +203,7 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 	if _, err := coordinator.ApplyPaymentFinancialRepair(ctx, PaymentFinancialRepairExecutionInput{
 		ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 2,
 		ApproverUserID: approvingUserID, RequesterUserID: approvingUserID,
-		ExecutionKey: "payment-repair:self-approved", PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+		ExecutionKey: "payment-repair:self-approved", PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
 		Command: PaymentFinancialRepairCommandInput{PaymentOrderID: orderID, PaymentEvidenceID: evidenceID},
 		Frozen:  frozenFacts(plan),
 	}); !errors.Is(err, ErrConflict) {
@@ -300,7 +305,7 @@ VALUES($1,$2,'USAGE_OVERAGE',$3,40,40,'OPEN',$4,$4)`, uuid.New(), walletTwo, "us
 		t.Fatal(err)
 	}
 	requestTwoID := uuid.New()
-	planTwo, err := paymentFinancialRepairPlanFrom(ctx, pool, PaymentFinancialRepairCommandInput{PaymentOrderID: orderTwo, PaymentEvidenceID: evidenceTwo}, 1, 1, 1)
+	planTwo, err := paymentFinancialRepairPlanFrom(ctx, pool, PaymentFinancialRepairCommandInput{PaymentOrderID: orderTwo, PaymentEvidenceID: evidenceTwo}, 1, 1, activationVersion)
 	if err != nil {
 		t.Fatalf("plan two: %v", err)
 	}

@@ -32,7 +32,7 @@ func TestPrivateF12PublicOwnerIntegration(t *testing.T) {
 	var port, actors int
 	e = admin.QueryRow(ctx, `SELECT current_setting('data_directory'),session_user,current_setting('port')::int,(SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>'pinvou_wave_test')`).Scan(&dd, &user, &port, &actors)
 	admin.Close(ctx)
-	if e != nil || port != 55506 || user != "pinvou_wave_test" || actors != 0 || strings.ReplaceAll(dd, "\\", "/") != "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f06/data" {
+	if e != nil || port != 55504 || user != "pinvou_wave_test" || actors != 0 || strings.ReplaceAll(dd, "\\", "/") != "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data" {
 		t.Fatal("owner/port/datadir/absence guard")
 	}
 	f := newStageFixture(t, ctx, raw)
@@ -72,13 +72,9 @@ func TestPrivateF12PublicOwnerIntegration(t *testing.T) {
 			before79 := ""
 			if upgrade {
 				parent := slices.DeleteFunc(slices.Clone(all), func(m migrations.Migration) bool { return m.Version == 65 || m.Version == 66 || m.Version == 77 })
-				ordered, e := Ordered(parent)
-				if e != nil {
-					t.Fatal(e)
-				}
-				// Exact reviewed F11 public Up call body, using its original single hook.
-				if e = migrations.UpWithHooks(ctx, c, ordered, migrations.UpHooks{BeforeApply: protectLegacyRefundMigration}); e != nil {
-					t.Fatal("original F11 install", e)
+				// Install the genuine inherited public ownership wrapper.
+				if e = Up(ctx, c, parent); e != nil {
+					t.Fatal("inherited pre-F12 SQL install", e)
 				}
 				before79 = stageValue(t, ctx, c, "SELECT checksum FROM schema_migrations WHERE version=79")
 			}
@@ -121,9 +117,9 @@ func TestPrivateF12PublicOwnerIntegration(t *testing.T) {
 			t.Fatal(e)
 		}
 		injected := errors.New("owned fixture after-original079 injection")
-		e = migrations.UpWithHooks(ctx, c, ordered, migrations.UpHooks{BeforeApply: protectBillingMigrationAndLendBonusDDL, AfterApply: func(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {
+		e = migrations.UpWithHooks(ctx, c, ordered, migrations.UpHooks{BeforeApply: prepareBillingMigration, ApplySQL: applyBillingMigration, LedgerRole: "billing_schema_owner", AfterApply: func(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {
 			if m.Version != 79 {
-				return nil
+				return finishBillingMigration(ctx, tx, m)
 			}
 			var create bool
 			if e := tx.QueryRow(ctx, "SELECT has_schema_privilege('billing_service','public','CREATE')").Scan(&create); e != nil {
@@ -132,7 +128,7 @@ func TestPrivateF12PublicOwnerIntegration(t *testing.T) {
 			if !create {
 				return errors.New("loan absent before originalDDL completion")
 			}
-			if e := revokeBonusDDL(ctx, tx, m); e != nil {
+			if e := finishBillingMigration(ctx, tx, m); e != nil {
 				return e
 			}
 			return injected
@@ -165,17 +161,7 @@ func TestPrivateF12PublicOwnerIntegration(t *testing.T) {
 	})
 	t.Run("original-owner-contract-child", func(t *testing.T) {
 		dir := "../billing"
-		entries, e := os.ReadDir(dir)
-		if e != nil {
-			t.Fatal(e)
-		}
-		args := []string{"test", "-mod=readonly", "-race", "-count=1", "-json"}
-		for _, entry := range entries {
-			if strings.HasSuffix(entry.Name(), ".go") && !strings.HasSuffix(entry.Name(), "_test.go") {
-				args = append(args, entry.Name())
-			}
-		}
-		args = append(args, "retained_f12_original_owner_test.go", "entitlement_fixture_integration_test.go", "retained_f11_owner_fixture_test.go", "retained_financial_integration_test.go", "retained_private_payment_facts_test.go", "payment_financial_repair_integration_test.go", "-run", "^(TestPrivateF12OriginalOwnerIntegration|TestRetainedPaymentRepairProviderFacts)$")
+		args := []string{"test", "-mod=readonly", "-race", "-count=1", "-json", ".", "-run", "^(TestPaymentFinancialRepairPostgresIntegration|TestRetainedPaymentRepairProviderFacts|TestPaymentFinancialRepairFrozenExecutionPostgres)$"}
 		cmd := exec.CommandContext(ctx, os.Getenv("F12_GO_BINARY"), args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "PINVOU_TEST_BILLING_DATABASE_URL="+raw)
@@ -191,14 +177,22 @@ func TestPrivateF12PublicOwnerIntegration(t *testing.T) {
 		if e != nil {
 			t.Fatal("original owner child failed; retained log", e)
 		}
-		pass := 0
+		pass, failed, skipped := 0, 0, 0
+		original := make(map[string]bool)
 		for _, line := range strings.Split(string(out), "\n") {
 			var a struct{ Action, Test string }
 			if json.Unmarshal([]byte(line), &a) == nil && a.Action == "pass" && a.Test != "" {
 				pass++
+				original[a.Test] = true
+			}
+			if a.Test != "" && a.Action == "fail" {
+				failed++
+			}
+			if a.Test != "" && a.Action == "skip" {
+				skipped++
 			}
 		}
-		if pass == 0 {
+		if pass == 0 || failed != 0 || skipped != 0 || !original["TestPaymentFinancialRepairPostgresIntegration"] || !original["TestRetainedPaymentRepairProviderFacts"] || !original["TestPaymentFinancialRepairFrozenExecutionPostgres"] {
 			t.Fatal("zero original owner assertions")
 		}
 	})

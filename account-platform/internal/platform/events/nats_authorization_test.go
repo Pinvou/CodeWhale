@@ -63,12 +63,14 @@ func TestNATSFixedAuthorizationAndOverlap(t *testing.T) {
 		}
 	}
 	operator := fixedNATSPermissions("event-resource-operator")
-	if len(operator.Publish) != 19 || !reflect.DeepEqual(operator.Subscribe, []string{"_INBOX.event-resource-operator.>"}) {
+	if len(operator.Publish) != 21 || !reflect.DeepEqual(operator.Subscribe, []string{"_INBOX.event-resource-operator.>"}) {
 		t.Fatal("operator permissions")
 	}
-	// F11 adds exactly the INFO and CREATE grants for the dedicated write-off
-	// durable. The remaining fixed grants must stay unchanged and wildcard-free.
+	// F11 and F12 add exactly INFO and CREATE for the write-off and payment
+	// repair durables. The other grants remain fixed and wildcard-free.
 	for _, want := range []string{
+		"$JS.API.CONSUMER.INFO.ACCOUNT_PLATFORM.billing-payment-financial-repair-executor-p1-v1",
+		"$JS.API.CONSUMER.CREATE.ACCOUNT_PLATFORM.billing-payment-financial-repair-executor-p1-v1.account.approval-command.authorized.v1",
 		"$JS.API.CONSUMER.INFO.ACCOUNT_PLATFORM.billing-receivable-write-off-executor-p1-v1",
 		"$JS.API.CONSUMER.CREATE.ACCOUNT_PLATFORM.billing-receivable-write-off-executor-p1-v1.account.approval-command.authorized.v1",
 	} {
@@ -79,7 +81,7 @@ func TestNATSFixedAuthorizationAndOverlap(t *testing.T) {
 			}
 		}
 		if count != 1 {
-			t.Fatal("write-off durable exact grant missing or duplicated")
+			t.Fatal("own durable exact grant missing or duplicated")
 		}
 	}
 	for _, subject := range operator.Publish {

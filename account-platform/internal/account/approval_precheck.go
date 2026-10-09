@@ -40,6 +40,7 @@ var (
 // owns, so a compromised or mismatched owner response can never be presented as
 // a different resource.
 var approvalPrecheckTargetResourceTypes = map[string]string{
+	"PAYMENT_FINANCIAL_REPAIR":         "PAYMENT_ORDER",
 	"ENTITLEMENT_COMPONENT_ADJUSTMENT": "ENTITLEMENT_PACKAGE",
 	"LEDGER_REPAIR":                    "LEDGER_POSTING",
 	"RECEIVABLE_WRITE_OFF":             "RECEIVABLE",
@@ -49,6 +50,7 @@ var approvalPrecheckTargetResourceTypes = map[string]string{
 // wire exactly; empty optional references are dropped instead of being sent as
 // zero values, so the forwarded body carries only the facts the page supplied.
 type ApprovalPrecheckRequest struct {
+	PaymentEvidenceID      string `json:"payment_evidence_id,omitempty"`
 	CommandType            string `json:"command_type"`
 	TargetResourceID       string `json:"target_resource_id"`
 	PaymentOrderID         string `json:"payment_order_id,omitempty"`
@@ -249,6 +251,15 @@ func decodeApprovalPrecheckResponse(raw []byte, request ApprovalPrecheckRequest)
 		if json.Unmarshal(wire.NormalizedCommand, &selected) != nil || selected.ReceivableID != request.TargetResourceID || selected.WriteOffMicrocredits != request.WriteOffMicrocredits || selected.ExpectedReceivableVersion != request.ExpectedVersion || selected.ReasonCode != request.ReasonCode {
 			return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 		}
+	case "PAYMENT_FINANCIAL_REPAIR":
+		var selected struct {
+			PaymentOrderID    string `json:"payment_order_id"`
+			PaymentEvidenceID string `json:"payment_evidence_id"`
+			ReasonCode        string `json:"reason_code"`
+		}
+		if json.Unmarshal(wire.NormalizedCommand, &selected) != nil || selected.PaymentOrderID != request.TargetResourceID || selected.PaymentEvidenceID != request.PaymentEvidenceID || selected.ReasonCode != request.ReasonCode {
+			return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
+		}
 	default:
 		return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 	}
@@ -275,7 +286,7 @@ func closedApprovalPrecheckDocument(raw json.RawMessage) (json.RawMessage, bool)
 }
 
 func validPrecheckVersion(command string, policy int64, snapshot int) bool {
-	return command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" && policy == 2 && snapshot == 2 || (command == "LEDGER_REPAIR" || command == "RECEIVABLE_WRITE_OFF") && policy == 1 && snapshot == 1
+	return command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" && policy == 2 && snapshot == 2 || (command == "LEDGER_REPAIR" || command == "RECEIVABLE_WRITE_OFF" || command == "PAYMENT_FINANCIAL_REPAIR") && policy == 1 && snapshot == 1
 }
 
 func validApprovalPrecheckRequest(request ApprovalPrecheckRequest) bool {
@@ -287,16 +298,21 @@ func validApprovalPrecheckRequest(request ApprovalPrecheckRequest) bool {
 		if _, ok := validPrecheckIdentifier(request.PaymentOrderID); !ok {
 			return false
 		}
-		return request.ReasonCode != "" && strings.TrimSpace(request.ReasonCode) == request.ReasonCode && len(request.ReasonCode) <= 80 && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0 && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
+		return request.PaymentEvidenceID == "" && request.ReasonCode != "" && strings.TrimSpace(request.ReasonCode) == request.ReasonCode && len(request.ReasonCode) <= 80 && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0 && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
 	case "LEDGER_REPAIR":
 		for _, id := range []string{request.TargetJournalEntryID, request.WrongLedgerAccountID, request.CorrectLedgerAccountID} {
 			if _, ok := validPrecheckIdentifier(id); !ok {
 				return false
 			}
 		}
-		return request.PaymentOrderID == "" && request.WrongLedgerAccountID != request.CorrectLedgerAccountID && request.AmountMicrocredits > 0 && request.ReasonCode == "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
+		return request.PaymentOrderID == "" && request.PaymentEvidenceID == "" && request.WrongLedgerAccountID != request.CorrectLedgerAccountID && request.AmountMicrocredits > 0 && request.ReasonCode == "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
 	case "RECEIVABLE_WRITE_OFF":
-		return request.WriteOffMicrocredits > 0 && request.ExpectedVersion > 0 && request.ReasonCode == "APPROVED_RECEIVABLE_WRITE_OFF" && request.PaymentOrderID == "" && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0
+		return request.WriteOffMicrocredits > 0 && request.ExpectedVersion > 0 && request.ReasonCode == "APPROVED_RECEIVABLE_WRITE_OFF" && request.PaymentOrderID == "" && request.PaymentEvidenceID == "" && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0
+	case "PAYMENT_FINANCIAL_REPAIR":
+		if _, ok := validPrecheckIdentifier(request.PaymentEvidenceID); !ok {
+			return false
+		}
+		return request.ReasonCode == "CONFIRMED_PAYMENT_NOT_CREDITED" && request.PaymentOrderID == "" && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0 && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
 	}
 	return false
 }

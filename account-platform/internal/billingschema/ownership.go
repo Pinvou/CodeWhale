@@ -47,6 +47,16 @@ func prepareBillingMigration(ctx context.Context, tx pgx.Tx, migration migration
 	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.billing_runtime_hardening') IS NOT NULL`).Scan(&hardened); err != nil {
 		return err
 	}
+	if migration.Version == 79 {
+		if err := validateBonusDDL(migration); err != nil {
+			return err
+		}
+		// Fresh079 precedes runtime hardening. The hardened upgrade path below
+		// already borrows CREATE and object ownership for the same transaction.
+		if !hardened {
+			return protectBillingMigrationAndLendBonusDDL(ctx, tx, migration)
+		}
+	}
 	if hardened {
 		// This authority exists only in this uncommitted migration transaction.
 		// The runtime is never granted membership in the independent owner role.
@@ -72,6 +82,9 @@ SET ROLE billing_service;`); err != nil {
 }
 
 func finishBillingMigration(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
+	if err := revokeBonusDDL(ctx, tx, migration); err != nil {
+		return err
+	}
 	var hardened bool
 	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.billing_runtime_hardening') IS NOT NULL`).Scan(&hardened); err != nil {
 		return err
