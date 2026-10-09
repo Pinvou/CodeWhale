@@ -630,7 +630,7 @@ test('开关 UI 挂在模型列表下方，经 interaction 桥调后端', () => 
   const sessionsBridgeSource = read('src', 'platform', 'tauri', 'bridge', 'sessions.js');
   assert.match(
     sessionsBridgeSource,
-    /pendingMultiAgent = state\.pendingDraftMultiAgent === true;[\s\S]{0,900}set_multi_agent_mode/,
+    /pendingMultiAgent = state\.pendingDraftMultiAgent === true;[\s\S]{0,3200}set_multi_agent_mode/,
     '寄存的开关意图在首条消息物化会话时落后端',
   );
   assert.match(

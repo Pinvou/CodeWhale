@@ -17,7 +17,7 @@ import { dirname, join } from 'node:path';
 const uiState = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '../src/features/tools/connector-ui-state.js'),
   'utf8',
-);
+).replace(/\r\n/g, '\n');
 const MARKER = 'persisting their default-off consent state failed';
 assert.ok(
   uiState.includes(`export const CONSENT_SYNC_FAILURE_MARKER =\n  '${MARKER}'`)

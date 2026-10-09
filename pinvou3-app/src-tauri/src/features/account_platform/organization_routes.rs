@@ -67,7 +67,11 @@ pub(super) fn allowed(area: &str, method: &Method, path: &str, query: Option<&st
                     *name,
                     "balance" | "entitlement-packages" | "payment-capabilities" | "model-policy"
                 )
-                || *method == Method::POST && *name == "quota-grants:batch"
+                || *method == Method::POST
+                    && matches!(
+                        *name,
+                        "quota-grants:batch" | "account-closed-grants:reclaim-batch"
+                    )
                 || *method == Method::PUT && *name == "model-policy"
         }
         ["", "v1", "organizations", org, "recharge", "products"] if id(org) && query.is_none() => {
@@ -89,6 +93,15 @@ pub(super) fn allowed(area: &str, method: &Method, path: &str, query: Option<&st
             "quota-grants",
             grant,
             "revoke",
+        ] if id(org) && id(grant) && query.is_none() => *method == Method::POST,
+        [
+            "",
+            "v1",
+            "organizations",
+            org,
+            "account-closed-grants",
+            grant,
+            "reclaim",
         ] if id(org) && id(grant) && query.is_none() => *method == Method::POST,
         _ => false,
     }

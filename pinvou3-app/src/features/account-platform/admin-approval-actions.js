@@ -1,4 +1,4 @@
-export const approvalCommands = Object.freeze(['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME', 'LEDGER_REPAIR']);
+export const approvalCommands = Object.freeze(['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME', 'LEDGER_REPAIR', 'ENTITLEMENT_COMPONENT_ADJUSTMENT']);
 export const approvalViews = Object.freeze(['mine', 'pending', 'execution', 'directory']);
 export const executionStatuses = Object.freeze(['EXECUTION_FAILED', 'EXECUTING', 'APPROVED', 'EXECUTED']);
 export const approvalStatuses = Object.freeze(['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTION_FAILED', 'EXECUTED', 'REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED']);
@@ -37,6 +37,9 @@ export function approvalBusinessRoute(detail) {
   if (detail?.detail_availability !== 'AVAILABLE' || !detail.command || !detail.target) return null;
   const target = detail.target;
   switch (detail.command_type) {
+    case 'ENTITLEMENT_COMPONENT_ADJUSTMENT':
+      return target.resource_type === 'ENTITLEMENT_PACKAGE' && uuid.test(target.resource_id) && detail.command.package_id === target.resource_id
+        ? { section: 'finance', tab: 'correction' } : null;
     case 'LEDGER_REPAIR':
       return target.resource_type === 'LEDGER_POSTING' && uuid.test(target.resource_id) && detail.command.target_posting_id === target.resource_id
         ? { section: 'finance', tab: 'ledger' } : null;

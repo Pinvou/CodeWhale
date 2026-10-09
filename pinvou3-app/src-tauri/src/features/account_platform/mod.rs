@@ -1662,11 +1662,15 @@ fn prepare_request(
     }
     organization_routes::exact_body(&input.area, parsed.path(), &mut input.body)?;
     let organization_key = organization_routes::keyed(&input.area, &method, parsed.path());
-    let requires_key = input.area == "token"
+    let closure_key = input.area == "account"
         && method == Method::POST
-        && (parsed.path() == "/v1/recharge/orders"
-            || parsed.path().starts_with("/v1/usage-requests/")
-                && parsed.path().ends_with("/cancel"));
+        && parsed.path() == "/v1/me/account-closure-requests";
+    let requires_key = closure_key
+        || input.area == "token"
+            && method == Method::POST
+            && (parsed.path() == "/v1/recharge/orders"
+                || parsed.path().starts_with("/v1/usage-requests/")
+                    && parsed.path().ends_with("/cancel"));
     match &input.idempotency_key {
         Some(key)
             if requires_key
@@ -1754,13 +1758,17 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         return false;
     }
     match (method, path) {
-        (&Method::GET, "/v1/me" | "/v1/me/authorization-context") => true,
+        (
+            &Method::GET,
+            "/v1/me" | "/v1/me/authorization-context" | "/v1/me/account-closure-request",
+        ) => true,
         (
             &Method::POST,
             "/v1/account/bootstrap"
             | "/v1/auth/captcha/challenges"
             | "/v1/me/profile-change-requests"
-            | "/v1/me/password-changes",
+            | "/v1/me/password-changes"
+            | "/v1/me/account-closure-requests",
         ) => true,
         _ => {
             let segments: Vec<_> = path.split('/').collect();
@@ -2233,6 +2241,70 @@ mod tests {
             account_url: Url::parse("https://account.example.test/").unwrap(),
             token_gateway_url: Some(Url::parse("https://token.example.test/").unwrap()),
             portal_url: Url::parse("https://portal.example.test/").unwrap(),
+        }
+    }
+
+    #[test]
+    fn personal_closure_canonical_routes_require_original_key() {
+        for (method, path, key, want) in [
+            ("GET", "/v1/me/account-closure-request", None, true),
+            (
+                "POST",
+                "/v1/me/account-closure-requests",
+                Some("original-closure-key"),
+                true,
+            ),
+            ("POST", "/v1/me/account-closure-requests", None, false),
+            (
+                "POST",
+                "/v1/me/account-closure-requests",
+                Some("short"),
+                false,
+            ),
+            (
+                "POST",
+                "/v1/me/account-closure-requests",
+                Some("invalid space key"),
+                false,
+            ),
+            ("GET", "/v1/me/account-closure-requests", None, false),
+            (
+                "POST",
+                "/v1/me/account-closure-request",
+                Some("original-closure-key"),
+                false,
+            ),
+            (
+                "POST",
+                "/v1/me/account-closure-requests?force=1",
+                Some("original-closure-key"),
+                false,
+            ),
+            (
+                "POST",
+                "/v1/me/account-closure-requests/extra",
+                Some("original-closure-key"),
+                false,
+            ),
+            (
+                "POST",
+                "/admin/v1/account-closure-requests",
+                Some("original-closure-key"),
+                false,
+            ),
+        ] {
+            let input = ApiRequest {
+                area: "account".into(),
+                method: method.into(),
+                resource: path.into(),
+                body: None,
+                idempotency_key: key.map(str::to_string),
+            };
+            assert_eq!(
+                prepare_request(&config(), input).is_ok(),
+                want,
+                "{method} {path}"
+            );
         }
     }
 

@@ -132,5 +132,3 @@ export function financialRepairApprovalDraft(precheck, operatorReason, requestKe
     financial_snapshot: projection.financial,
   };
 }
-
-export const FINANCIAL_REPAIR_PRECHECK_INVALID = PRECHECK_INVALID;

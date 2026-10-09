@@ -1,4 +1,5 @@
 import { financialRepairApprovalDraft } from './admin-financial-repair-drafts.js';
+import { entitlementCorrectionPrecheck, entitlementCorrectionApprovalDraft } from './admin-entitlement-correction.js';
 import { integerMoney, requireFinanceCollection } from './finance-contract.js';
 
 const approvalIDPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -73,6 +74,16 @@ export async function currentApprovalEditDraft(client, detail, reason) {
       idempotency_key: `approval-edit:${detail.approval_request_id}`, reason: reason.trim(),
       redacted_evidence: detail.redacted_evidence || [], expected_impact: detail.expected_impact || {},
       critical_resource_versions: detail.critical_resource_versions || {}, financial_snapshot: detail.financial_snapshot || {} };
+  }
+  if (detail.command_type === 'ENTITLEMENT_COMPONENT_ADJUSTMENT') {
+    const target = detail.target || { resource_type: detail.target_resource_type, resource_id: detail.target_resource_id };
+    if (!command || target.resource_type !== 'ENTITLEMENT_PACKAGE' || !approvalIDPattern.test(target.resource_id) ||
+      command.package_id !== target.resource_id || !approvalIDPattern.test(command.payment_order_id) || !command.reason_code) throw unavailable();
+    const facts = await client.entitlementCorrectionPrecheck(command.package_id, command.payment_order_id, command.reason_code);
+    const projection = entitlementCorrectionPrecheck(facts);
+    if (!projection || projection.packageID !== command.package_id || projection.orderID !== command.payment_order_id ||
+      projection.reasonCode !== command.reason_code) throw unavailable();
+    return entitlementCorrectionApprovalDraft(facts, command.reason_code, reason, `edit:${detail.approval_request_id}`);
   }
   if (detail.command_type === 'LEDGER_REPAIR') {
     const facts = await client.approvalCommandPrecheck({ command_type: 'LEDGER_REPAIR',
