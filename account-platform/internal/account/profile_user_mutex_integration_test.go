@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestF01ProfileCommitUsesUserMutex(t *testing.T) {
@@ -44,6 +45,32 @@ func TestF01ProfileCommitUsesUserMutex(t *testing.T) {
 				}
 			}
 			if name == "create-commit-share-user-mutex" {
+				// Establish the three genuine runtime connections needed by Commit,
+				// Create and their observer inside the original fixture setup budget.
+				// Hold them together so Acquire cannot repeatedly reuse one socket;
+				// release every connection before the unchanged five-second lock test.
+				var readyConnections []*pgxpool.Conn
+				defer func() {
+					for _, connection := range readyConnections {
+						connection.Release()
+					}
+				}()
+				for range 3 {
+					connection, err := r.pool.Acquire(ctx)
+					if err != nil {
+						t.Fatal("runtime connection setup failed")
+					}
+					readyConnections = append(readyConnections, connection)
+					var database, actor string
+					var super bool
+					if err = connection.QueryRow(ctx, `SELECT current_database(),current_user,(SELECT rolsuper FROM pg_roles WHERE rolname=current_user)`).Scan(&database, &actor, &super); err != nil || database != r.pool.Config().ConnConfig.Database || actor != "account_service" || super {
+						t.Fatal("runtime connection setup identity not proven")
+					}
+				}
+				for _, connection := range readyConnections {
+					connection.Release()
+				}
+				readyConnections = nil
 				gate, err := pgx.ConnectConfig(ctx, r.pool.Config().ConnConfig.Copy())
 				if err != nil {
 					t.Fatal(err)
@@ -120,7 +147,7 @@ func TestF01ProfileCommitUsesUserMutex(t *testing.T) {
 					}
 					// Consumed results cannot reach the normal receive path: Fatal
 					// exits this subtest and its deferred gate rollback releases peers.
-					t.Fatalf("formal producer did not wait on USER: phase=%s commit=%s create=%s diagnostic=%s states=%s pool_total=%d pool_acquired=%d pool_idle=%d pool_cancelled_acquires=%d", phase, commitResult, createResult, classify(diagnosticErr), queryStates, stats.TotalConns(), stats.AcquiredConns(), stats.IdleConns(), stats.CanceledAcquireCount())
+					t.Fatalf("formal producer did not wait on USER: phase=%s commit=%s create=%s diagnostic=%s states=%s pool_total=%d pool_acquired=%d pool_idle=%d pool_constructing=%d pool_cancelled_acquires=%d", phase, commitResult, createResult, classify(diagnosticErr), queryStates, stats.TotalConns(), stats.AcquiredConns(), stats.IdleConns(), stats.ConstructingConns(), stats.CanceledAcquireCount())
 				}
 				go func() { committed <- r.CommitProfileChange(ctx, change.ID) }()
 				wait("SELECT id FROM users WHERE id=")
