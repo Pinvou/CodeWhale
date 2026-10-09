@@ -16,3 +16,15 @@
 
 状态：最终独立复审通过，确认问题均已修复；提交后推送 F00、回复并请求原审核人重审，待当前提交 CI 验证后向 F01 普通 merge 传播。
 补充 CI 验证：ab81a6087 的 Account Platform Linux race/vet 已通过；其余适用检查除 Hub 依赖审计均通过。Hub 当前锁定 Sharp 0.35.4 命中公开 GHSA-wq5f-xc86-pv6w，补丁升级至 0.35.5，锁文件同步更新；npm ci、55 项 Hub 测试（含独立临时 PostgreSQL E2E）及零漏洞 audit 通过。独立复审确认改动仅涉及 Sharp 依赖闭包。
+
+### F00 重新复核（2026-10-09）
+
+重新读取当前 head 16184c38 上 JensenChen28 与 asto18089 最新审核，确认此前三项 P1 的修复仍有效。本轮新增两项阻断已修：父目录系统别名不再因路径字符串不等而被拒绝，末级符号链接与不安全权限仍拒绝；bootstrap secret 与投影目录使用解析后的实际目录核对，新增双向别名/嵌套目录泄露拒绝回归。原子替换夹具明确设置0700，避免 umask 影响。
+
+空或仅空白 APP_ENV 不再自动选择 development，配置加载及启动日志初始化拒绝缺失环境；静态服务 token 仅在显式 development/test 接受。README 提供既有无环境本地启动的迁移方式，不改变 staging OIDC 要求或 production 前缀门禁。
+
+作者主模块13包 test、vet、架构守卫与差异检查通过。配置/鉴权/HTTP范围独立非作者实际复跑3包通过。workload范围独立源码复审通过，Windows包测试通过但明确有4项跳过：原子替换、POSIX权限、Keycloak opt-in、父目录别名（主机缺符号链接权限）。不声称别名回归、Linux race或macOS实测已通过；新增别名回归仅允许Windows权限不足跳过，Linux/macOS无法创建符号链接则失败，须由当前提交Linux CI无跳过执行后完成该边界终审。
+
+新增确认非阻塞缺口登记于 [Issue #1618](https://github.com/Pinvou/pinvou3/issues/1618)，保持开放：breaker恢复/容量、relay scope及lease契约、migration down审计及schema定位、NTP偏移/质量、限流清理、metrics超时/中断维度、JSON编码错误。此前#1559仍为完成状态。本轮不成立的意见：KMS go mod tidy -diff实际退出0无差异；普通未写响应的panic已计500，不能泛称所有panic都计200。CA重复与recipient pin仍按既有维护/威胁模型建议记录。
+
+本轮修复只向F00分支提交，待精确head独立终审和适用CI/required-gate通过后，普通merge向相邻F01传播；申请原审核者重审，不以本地内部结论替代外部批准。
