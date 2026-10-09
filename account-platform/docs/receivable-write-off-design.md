@@ -1,8 +1,8 @@
 # 应收核销（`RECEIVABLE_WRITE_OFF`）领域设计
 
-状态：`DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅 `USAGE_OVERAGE` 来源、允许部分核销（同一应收可多次核销）**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-26 的 closed command/snapshot/proof、不变量、幂等与恢复、失败分类、迁移与回滚及验收映射；不新增可执行路径，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14，账本不可改写边界见 [账本修复设计](ledger-repair-design.md) §2。
+状态：`DESIGN_FROZEN / PRIVATE_CANDIDATE_IMPLEMENTED / INDEPENDENT_REVIEW_PENDING / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅 `USAGE_OVERAGE` 来源、允许部分核销（同一应收可多次核销）**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-26 的 closed command/snapshot/proof、不变量、幂等与恢复、失败分类、迁移与回滚及验收映射；当前私有候选已接通原 closed owner/proof/consumer/审批与专属表单，activation 行仍默认 `INACTIVE`；不代表实际前序承接、生产激活或整波审核通过。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14，账本不可改写边界见 [账本修复设计](ledger-repair-design.md) §2。
 
-## 1. 命令现状（事实）
+## 1. 设计冻结时的命令基线（历史事实，非当前候选状态）
 
 - **只有策略元数据**：Account `approval_command_policies` 与 `approvalpolicy` 注册表登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`，请求权限 `platform.billing.repairs.request`、审批权限 `platform.billing.repairs.approve`、风险类 `FINANCIAL_FACT_CHANGE`、一名非申请人审批、critical 字段 `target_id/resource_version/financial_snapshot/policy_version`、24 小时申请有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`、`internal/platform/approvalpolicy/registry.go`）。
 - **静态不可执行**：不在 `executableApprovalCommands` 内，create/update/submit/APPROVE/Begin 均在领域调用前失败关闭。
@@ -13,7 +13,7 @@
 
 - **应收主表**：`receivables.source_type ∈ {USAGE_OVERAGE,CHARGEBACK}`，`UNIQUE(source_type,source_reference)`；`original_microcredits>0`、`settled_microcredits>=0`，两条硬约束 `settled+outstanding=original` 与 `(status ∈ {SETTLED,WRITTEN_OFF}) = (outstanding=0)`；`status ∈ {OPEN,PARTIALLY_SETTLED,SETTLED,WRITTEN_OFF}`，带 `version` 与 `settled_at`（`migrations/billing/000025_receivables_and_context_freeze.up.sql`）。
 - **核销明细不可变**：`receivable_allocations.source_type ∈ {CASH_RECHARGE_BASE,REFUND_RECOVERY,APPROVED_MANUAL_REPAYMENT,APPROVED_WRITE_OFF}`，`amount_microcredits>0`，必须引用既有 `journal_entry_id`，`UNIQUE(receivable_id,source_type,source_reference)`，`receivable_allocations_immutable` 触发器拒绝 UPDATE/DELETE（`000025`）。
-- **`APPROVED_WRITE_OFF` 目前没有任何写入者**：Go 侧只有创建应收与“钱包入账抵扣”两条写入路径（`internal/billing/receivables.go` 的 `createReceivableWithinTransaction`、`settleOpenReceivablesWithinTransaction`）。抵扣路径按 `CASH_RECHARGE_BASE`/`REFUND_RECOVERY` 分配，并同步 `settled/outstanding/status/version/settled_at`、钱包 `receivable_microcredits/financial_status/financial_freeze_reason` 与 `payment_orders.attention_summary`。
+- **设计冻结时 `APPROVED_WRITE_OFF` 没有核销写入者**：Go 侧只有创建应收与“钱包入账抵扣”两条写入路径（`internal/billing/receivables.go` 的 `createReceivableWithinTransaction`、`settleOpenReceivablesWithinTransaction`）。抵扣路径按 `CASH_RECHARGE_BASE`/`REFUND_RECOVERY` 分配，并同步 `settled/outstanding/status/version/settled_at`、钱包 `receivable_microcredits/financial_status/financial_freeze_reason` 与 `payment_orders.attention_summary`。
 - **钱包侧的应收投影**：创建应收时 `wallets.receivable_microcredits += amount`、`financial_status='RECEIVABLE_OPEN'`、`financial_freeze_reason=<source_type>`、`version+1`；抵扣时等量回落，清零则 `financial_status='CLEAR'` 且 `financial_freeze_reason=NULL`（`receivables.go`）。因此任何核销都必须同步该投影，否则钱包与应收事实不一致。
 - **账本侧**：系统账户含 `platform:receivables`（`RECEIVABLE_ASSET`）、`platform:adjustment`（`ADJUSTMENT`），启动时校验（`internal/billing/system_ledger_accounts.go`）；journal/posting 只能追加、必须平衡（`000002`）。
 
@@ -113,7 +113,7 @@
 - 复用 `platform.billing.repairs.request`/`platform.billing.repairs.approve`、一名非申请人审批、24 小时有效期、5 分钟窗口，不新增权限或 policy/snapshot 版本。
 - 依据：该命令 `policy_version=1 / snapshot_schema_version=1` 行从未是可执行合同（静态不可执行，create/update/submit/APPROVE/Begin 全部失败关闭），不存在由该版本产生并已执行的领域事实；首次冻结的 closed 形状即该版本合同。
 - 激活前只读守卫：目标库中该命令必须不存在 `APPROVED/EXECUTING/EXECUTION_FAILED` 或其它未终态申请，且不存在 `'APPROVED_WRITE_OFF'` allocation 与 `'write-off:'` 前缀 journal；任一存在即阻断激活并按 §8 只读查证。
-- `billing_approval_command_activations` 行保持 `INACTIVE`；GSA-26 交付默认关闭的专属 consumer/durable 开关（与 GSA-22 `BILLING_ENTITLEMENT_CONSUMER_ENABLED` 同形）；生产激活只属于取得独立授权的 GSA-40。
+- `billing_approval_command_activations` 行保持 `INACTIVE`；GSA-26 当前交付默认未激活的专属 durable，使用现有 Billing 注册循环和严格受信资源装配；不存在逐命令 consumer 环境开关；生产激活只属于取得独立授权的 GSA-40。
 - 若将来放开 `CHARGEBACK` 来源、允许核销产生余额效果或引入新权限，必须新增 policy/schema 版本与独立设计，不得在本版本内扩大解释。
 
 ## 10. 迁移、N/N-1 与回滚
@@ -140,13 +140,15 @@
 | N/N-1 与回滚 | 缺行/未知版本/翻回 `INACTIVE` 失败关闭；case/allocation/journal 保留可读 |
 | 真实领域 E2E | Account 批准 → outbox → relay → 专属 durable → 应收/钱包/账本推进 → 终态 → 重放幂等，真实 PostgreSQL + 真实 HTTP，无 SKIP 替代 |
 
-## 12. 本切片不做的事
+## 12. 设计冻结阶段的切片边界（历史）
+
+以下范围与验证记录属于原设计文档切片，不代表当前私有实现的范围或验收结论；当前状态以本文开头及本轮审核记录为准。
 
 - 不新增或修改迁移、Go/Node 代码、OpenAPI 合同、activation 行或执行路径。
 - 不改动既有应收创建/抵扣、拒付、退款阻塞、`attention_summary`、管理员只读接口或 GSA-21/22 的任何行为。
 - 设计冻结不等于实现或激活；GSA-26 未交付前该命令保持不可执行。
 
-## 13. 自检与验证
+## 13. 设计冻结阶段的自检与验证（历史）
 
 - 每条事实可回溯到 §1/§2 的迁移与源码路径；§4 的写入集合与 §6 的不变量逐一对应既有 CHECK 与投影规则。
 - 首版范围、部分核销与版本复用决策与用户 2026-09-19 确认一致，未猜测填入其它选项。
