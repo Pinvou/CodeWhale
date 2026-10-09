@@ -1,0 +1,200 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Usage settlement repair closed financial command",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/admin/v2/approval-command-prechecks": {
+      "post": {
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Read-only owner projection, including while activation INACTIVE; no financial effect."
+          },
+          "400": {
+            "description": "Closed request invalid."
+          },
+          "403": {
+            "description": "Existing platform.billing.repairs.request permission required."
+          },
+          "503": {
+            "description": "Owner unavailable."
+          },
+          "422": {
+            "description": "Owner closed projection unavailable for this target."
+          },
+          "504": {
+            "description": "Read-only owner timeout."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "NormalizedCommand": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "usage_request_id",
+          "hold_id",
+          "evidence_kind",
+          "loss_review_id",
+          "reason_code"
+        ],
+        "properties": {
+          "usage_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "hold_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "evidence_kind": {
+            "const": "LOSS_REVIEW"
+          },
+          "loss_review_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason_code": {
+            "const": "MISSING_USAGE_SETTLEMENT"
+          }
+        }
+      },
+      "CriticalResourceVersions": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "hold_updated_at",
+          "loss_review_updated_at",
+          "facts_digest",
+          "policy_version"
+        ],
+        "properties": {
+          "hold_updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "loss_review_updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "facts_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "policy_version": {
+            "const": 1
+          }
+        }
+      },
+      "FinancialSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "expected_microcredits",
+          "settled_microcredits",
+          "settlement_microcredits",
+          "overage_microcredits",
+          "wallet_id",
+          "wallet_version",
+          "allocations_digest"
+        ],
+        "properties": {
+          "expected_microcredits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "settled_microcredits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "settlement_microcredits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "overage_microcredits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "wallet_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wallet_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "allocations_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "PrecheckRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_type",
+          "target_resource_id",
+          "usage_request_id",
+          "loss_review_id",
+          "reason_code"
+        ],
+        "properties": {
+          "command_type": {
+            "const": "USAGE_SETTLEMENT_REPAIR"
+          },
+          "target_resource_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "usage_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "loss_review_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason_code": {
+            "const": "MISSING_USAGE_SETTLEMENT"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,11 +1,12 @@
 # 用量结算修复（`USAGE_SETTLEMENT_REPAIR`）领域设计
 
-状态：`DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅“少结算/未结算”补记**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-36 的 closed command/snapshot/proof、补结算账务、幂等与恢复、失败分类、迁移与回滚及验收映射；不新增可执行路径，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)（**绝不重发模型请求**），治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
+状态：领域设计冻结；当前私有完整组合已实现 handler、closed proof、executor、durable consumer、typed presenter 与只读恢复，默认 activation 仍为 `INACTIVE`，未部署或激活。当前首版仅处理 `LOSS_REVIEW`：hold 已 `RELEASED` 且原释放原因是 `ENTITLEMENT_EXPIRED_UNCERTAIN`，复核仍为 `REVIEW_REQUIRED`。`COMMITTED_SHORTFALL` 所需持久修正事实未安装，当前一律拒绝；本文后续含该情形的原设计条款作为历史设计记录保留，不表示当前可执行能力。沿用 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`，绝不重发模型请求。
 
-## 1. 命令现状（事实）
+## 1. 设计阶段基线（历史）
 
-- **只有策略元数据**：Account `approval_command_policies`/`approvalpolicy` 登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`、请求/审批权限 `platform.billing.repairs.request|approve`、`FINANCIAL_FACT_CHANGE`、一名非申请人审批、24 小时有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`）。
-- **静态不可执行**：不在 `executableApprovalCommands` 内，四入口失败关闭；Billing 侧只有 `('USAGE_SETTLEMENT_REPAIR',1,1,'INACTIVE',1)`（`migrations/billing/000054_approval_command_activations.up.sql`），无 handler、proof、executor、consumer durable 或恢复分类。
+- 原设计阶段只有策略元数据，Billing activation 为 `INACTIVE`，尚无本命令可执行路径；这是历史基线，不代表当前完整组合的实现状态。
+- 当前 Account create/update/submit/APPROVE/Begin 执行五入口沿用实时 activation 与既有授权、冻结快照和租约守卫；只读预检可在 `INACTIVE` 下准备，不能授权财务变更。实际消费注册来自 `approvalconsumer.BillingCommands()` 的有限已安装集合。
+
 
 ## 2. 用量结算现状与不变量（事实）
 

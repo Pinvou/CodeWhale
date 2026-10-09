@@ -36,7 +36,7 @@ func TestUsageSettlementRepairProofProjectionIsClosedAndActivationGated(t *testi
 		SettledMicrocredits: 100, OverageMicrocredits: 50,
 		AllocationsDigest: strings.Repeat("a", 64), FactsDigest: strings.Repeat("b", 64),
 	}
-	repository := &billingProofFactsStub{usageRepair: plan}
+	repository := &usageRepairProofFactsStub{usageRepair: plan}
 	current, reason, ownerState, err := currentBillingProofInput(context.Background(), repository, frozen)
 	if err != nil || reason != "" {
 		t.Fatalf("usage repair proof reason=%s err=%v", reason, err)
@@ -63,11 +63,11 @@ func TestUsageSettlementRepairProofProjectionIsClosedAndActivationGated(t *testi
 		t.Fatalf("unexpected financial projection %+v", financial)
 	}
 
-	rejected := &billingProofFactsStub{usageRepairErr: ErrApprovalSnapshotMismatch}
+	rejected := &usageRepairProofFactsStub{usageRepairErr: ErrApprovalSnapshotMismatch}
 	if _, reason, _, err := currentBillingProofInput(context.Background(), rejected, frozen); err != nil || reason != "DOMAIN_INVARIANT_FAILED" {
 		t.Fatalf("rejected repair reason=%s err=%v", reason, err)
 	}
-	foreign := &billingProofFactsStub{usageRepair: plan}
+	foreign := &usageRepairProofFactsStub{usageRepair: plan}
 	foreign.usageRepair.HoldID = uuid.New()
 	if _, reason, _, err := currentBillingProofInput(context.Background(), foreign, frozen); err != nil || reason != "SNAPSHOT_MISMATCH" {
 		t.Fatalf("foreign hold reason=%s err=%v", reason, err)
@@ -85,7 +85,7 @@ func TestUsageSettlementRepairProofProjectionIsClosedAndActivationGated(t *testi
 	}
 
 	now := time.Now().UTC()
-	reader := &billingApprovalProofStub{billingProofFactsStub: repository, activation: validBillingApprovalActivationSnapshot(now)}
+	reader := &usageRepairApprovalProofStub{usageRepairProofFactsStub: repository, activation: validBillingApprovalActivationSnapshot(now)}
 	service := NewService(reader)
 	if _, err := service.billingApprovalProof(context.Background(), approvalencoding.ProofRequest{
 		ApprovalRequestID: uuid.New(),
@@ -123,4 +123,24 @@ func TestUsageSettlementRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(t *testi
 	if mismatch := usageSettlementRepairFrozenMismatch(plan, frozen); mismatch != "allocations_digest" {
 		t.Fatalf("allocation digest mismatch=%q", mismatch)
 	}
+}
+
+type usageRepairProofFactsStub struct {
+	billingProofFactsStub
+	usageRepair    UsageSettlementRepairPlan
+	usageRepairErr error
+}
+
+func (s *usageRepairProofFactsStub) usageSettlementRepairPlan(context.Context, UsageSettlementRepairCommandInput) (UsageSettlementRepairPlan, error) {
+	return s.usageRepair, s.usageRepairErr
+}
+
+type usageRepairApprovalProofStub struct {
+	Repository
+	*usageRepairProofFactsStub
+	activation ApprovalCommandActivationSnapshot
+}
+
+func (s *usageRepairApprovalProofStub) ApprovalCommandActivations(context.Context) (ApprovalCommandActivationSnapshot, error) {
+	return s.activation, nil
 }

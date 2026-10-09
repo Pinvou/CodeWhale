@@ -6,8 +6,8 @@
 
 1. 目标 Commit 已完成 GSA-38/39/40 中适用于本命令的项并有独立审核记录。
 2. 用户/授权人已就该命令的生产激活给出明确授权（书面存档，含时间与范围），且确认首版只补记 `LOSS_REVIEW` 存量。
-3. 专属 durable `billing-usage-settlement-repair-executor-p1-v1` 的受信 cutover 资源绑定已就绪，Billing 以 `BILLING_USAGE_SETTLEMENT_REPAIR_CONSUMER_ENABLED=true` 启动，且不出现 `BILLING_USAGE_SETTLEMENT_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE`。未开启时该 durable 不注册。
-4. 已确认 Account 四入口在 `INACTIVE` 时全部失败关闭（`ErrBillingGovernanceInactive`）。
+3. 专属 durable `billing-usage-settlement-repair-executor-p1-v1` 的受信 cutover 资源绑定已就绪。当前 `cmd/billing-service` 通过 `approvalconsumer.BillingCommands()` 的有限已安装集合注册消费者；不存在本命令专属 `BILLING_USAGE_SETTLEMENT_REPAIR_CONSUMER_ENABLED` 开关。既有六个 `BILLING_APPROVAL_CONSUMER_*` 受信工件输入缺失、摘要不符或读取失败均失败关闭，不能以未校验资源启动消费者。
+4. 已确认 Account 五入口在 `INACTIVE` 时全部失败关闭（`ErrBillingGovernanceInactive`）。
 5. 一致性备份完成（含 Billing 库），记录备份 ID、时间与 SHA-256；激活窗口内停止写入新审批。
 
 ## 2. 只读核验（记录输出作为证据）
@@ -63,7 +63,7 @@ WHERE command_type = 'USAGE_SETTLEMENT_REPAIR'
 ## 4. 激活后验证（全部通过才可宣告完成）
 
 1. Billing 投影返回该命令 v1/s1 `state=ACTIVE`，其余命令不变，history 追加一行。
-2. Account 读取观测到 `ACTIVE`，四入口不再返回 `ErrBillingGovernanceInactive`。
+2. Account 读取观测到 `ACTIVE`，五入口不再返回 `ErrBillingGovernanceInactive`。
 3. Proof：对 `in_scope` 的损失复核返回 `PROOF_VALID`/`ALLOW`；对 hold 非 `RELEASED`、复核非 `REVIEW_REQUIRED`、`claimed<=0`、钱包非 `ACTIVE` 或已有 `usage-settlement-repair:` 引用的候选返回对应 DENY。proof 不产生任何外部请求。
 4. 消费者：durable `billing-usage-settlement-repair-executor-p1-v1` 处于消费状态，DLQ/重试计数为 0。
 5. 受控演练（一次性审批端到端）：
