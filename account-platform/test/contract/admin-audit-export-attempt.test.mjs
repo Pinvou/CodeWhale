@@ -19,7 +19,7 @@ test('audit export retry preserves one frozen filter, reason, PII choice, and id
   assert.throws(() => newAuditExportAttempt(filter, '中文五字啊', false, 'key'), { code: 'INVALID_AUDIT_EXPORT_REQUEST' });
   assert.throws(() => newAuditExportAttempt(filter, '😀'.repeat(9), false, 'key'), { code: 'INVALID_AUDIT_EXPORT_REQUEST' });
   assert.equal(newAuditExportAttempt(filter, '😀'.repeat(10), false, 'key').reason, '😀'.repeat(10));
-  assert.throws(() => newAuditExportAttempt(filter, '中'.repeat(167), false, 'key'), { code: 'INVALID_AUDIT_EXPORT_REQUEST' });
+  assert.equal(newAuditExportAttempt(filter, '中'.repeat(167), false, 'key').reason, '中'.repeat(167));
 });
 
 test('admin audit export collects reason in the page and forwards the frozen key', () => {
@@ -51,13 +51,13 @@ test('audit filters have accessible names and invalid dates do not crash export'
   assert.match(view, /try \{ filter = queryFilters\(\); \} catch \{ setError\(copy\.audit\.exportRequestInvalid\); return; \}/);
 });
 
-test('a definite audit export rejection releases the frozen attempt while unknown results keep it', () => {
+test('a first definite audit rejection releases the attempt; replay after unknown stays frozen', () => {
   const view = readFileSync(new URL('../../../pinvou3-app/src/features/account-platform/AuditWorkspace.jsx', import.meta.url), 'utf8');
-  // The server answering 4xx (except the two ambiguous ones) proves no export
-  // job was created: the operator must be able to correct the reason or PII
-  // choice instead of being trapped on a disabled form with no reset entry.
+  // Without any unknown history, a first definite rejection permits correction.
+  // A later rejected replay never proves the first attempt made no export.
+  // The real React committed503 -> replay403 case covers the history boundary.
   assert.match(view, /const status = typeof cause\?\.status === 'number' \? cause\.status : 0;/);
-  assert.match(view, /if \(status >= 400 && status < 500 && status !== 408 && status !== 409\) \{\s+exportAttemptRef\.current = null;\s+setExportAttempted\(false\);\s+\}/);
+  assert.match(view, /if \(status >= 400 && status < 500 && status !== 408 && status !== 409 && !exportOutcomeUnknownRef\.current\) \{\s+exportAttemptRef\.current = null;\s+setExportAttempted\(false\);\s+\}/);
   // An unknown result - 5xx, idempotency conflict, timeout, network loss or
   // abort - must never release the frozen attempt, so no catch may clear it
   // unconditionally.

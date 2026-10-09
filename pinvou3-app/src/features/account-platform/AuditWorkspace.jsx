@@ -140,6 +140,7 @@ function Audit({ copy, data, client, setData, permissions }) {
   const [exportAttempted, setExportAttempted] = useState(false);
   const [ticketIssueUnknown, setTicketIssueUnknown] = useState(false);
   const exportAttemptRef = useRef(null);
+  const exportOutcomeUnknownRef = useRef(false);
   const exportTicketRef = useRef(null);
   const canExport = (permissions || []).includes('platform.audit.export');
   const canExportPII = (permissions || []).includes('platform.audit.pii.export');
@@ -189,18 +190,20 @@ function Audit({ copy, data, client, setData, permissions }) {
     setError('');
     try {
       const job = await submitAuditExportAttempt(client, exportAttemptRef.current);
+      exportOutcomeUnknownRef.current = false;
       setExportJob(job);
       setExportKey(job.decryption_key || '');
     } catch (cause) {
-      // A definite rejection proves the server answered and created no export
-      // job, so the operator may correct the reason or PII choice and start a
-      // new attempt. Every other outcome - 5xx, idempotency conflict, request
-      // timeout, network loss, abort - is an unknown result and keeps the frozen
-      // attempt, leaving retrying the identical request as the only action.
+      // A first definite rejection permits correction. After any unknown
+      // outcome, a later authorization/path rejection does not prove that the
+      // first call created no job; retain the original facts and key until an
+      // authoritative create receipt is recovered.
       const status = typeof cause?.status === 'number' ? cause.status : 0;
-      if (status >= 400 && status < 500 && status !== 408 && status !== 409) {
+      if (status >= 400 && status < 500 && status !== 408 && status !== 409 && !exportOutcomeUnknownRef.current) {
         exportAttemptRef.current = null;
         setExportAttempted(false);
+      } else {
+        exportOutcomeUnknownRef.current = true;
       }
       setError(copy.audit.exportFailed);
     } finally {
@@ -366,7 +369,7 @@ function Audit({ copy, data, client, setData, permissions }) {
       </form>
       <p>{copy.audit.exportLimits}</p>
       {canExport && <form className="adm-ops-form" onSubmit={(event) => { event.preventDefault(); void createExport(); }}>
-        <label>{copy.audit.exportReason}<input value={exportReason} minLength="10" maxLength="500" disabled={exportAttempted || busy || Boolean(exportJob)} onChange={(event) => setExportReason(event.target.value)} required /></label>
+        <label>{copy.audit.exportReason}<input value={exportReason} minLength="10" disabled={exportAttempted || busy || Boolean(exportJob)} onChange={(event) => setExportReason(event.target.value)} required /></label>
         <label><input type="checkbox" checked={includePII} disabled={!canExportPII || exportAttempted || busy || Boolean(exportJob)} title={!canExportPII ? copy.permissionDenied : undefined} onChange={(event) => setIncludePII(event.target.checked)} />{copy.audit.includePII}</label>
         <button type="submit" disabled={busy || Boolean(exportJob)}>{exportAttempted ? copy.audit.retryExport : copy.audit.export}</button>
         {exportAttempted && !exportJob && <small role="status">{copy.audit.retrySameExport}</small>}
@@ -395,7 +398,7 @@ function Audit({ copy, data, client, setData, permissions }) {
           )}
           {ticketIssueUnknown && <small role="status">{copy.audit.ticketIssueUnknown}</small>}
           {exportJob.download_ticket_issued_at && !exportTicketRef.current && <small role="status">{copy.audit.ticketUnavailable}</small>}
-          <button type="button" disabled={busy} onClick={() => { exportAttemptRef.current = null; exportTicketRef.current = null; setTicketIssueUnknown(false); setExportAttempted(false); setExportJob(null); setExportKey(''); setExportReason(''); setIncludePII(false); }}>{copy.audit.newExport}</button>
+          <button type="button" disabled={busy} onClick={() => { exportAttemptRef.current = null; exportOutcomeUnknownRef.current = false; exportTicketRef.current = null; setTicketIssueUnknown(false); setExportAttempted(false); setExportJob(null); setExportKey(''); setExportReason(''); setIncludePII(false); }}>{copy.audit.newExport}</button>
         </div>
       )}
       {error && <div className="adm-inline-message error" role="alert">{error}</div>}
@@ -409,7 +412,7 @@ function Audit({ copy, data, client, setData, permissions }) {
 function AuditDetail({ copy, item, onBack }) {
   const rows = [
     [copy.audit.source, 'Account Service'],
-    [copy.audit.actor, item.actor_display_name || item.actor_email || <TechnicalID value={item.actor_user_id} copy={copy} compact={false} />],
+    [copy.audit.actor, item.actor_display_name || item.actor_email || <TechnicalID key="audit.actor" value={item.actor_user_id} copy={copy} compact={false} />],
     [copy.audit.action, item.action],
     [copy.audit.resource, <span key="audit.resource">{item.resource_type} · <TechnicalID value={item.resource_id} copy={copy} compact={false} /></span>],
     [copy.audit.result, <Status key="audit.result" value={item.result} />],

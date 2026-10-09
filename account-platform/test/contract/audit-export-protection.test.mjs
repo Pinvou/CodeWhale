@@ -11,7 +11,7 @@ test('audit export is server-generated, recently authenticated, redacted by defa
     read('migrations/account/000032_audit_export_protection.up.sql'),
     read('internal/account/audit_exports.go'),
     read('internal/account/role_bindings_admin.go'),
-    read('contracts/openapi/admin.yaml'),
+    read('contracts/openapi/audit-export.json'),
     read('../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx'),
   ]);
   assert.match(migration, /PLATFORM_AUDIT_PII_EXPORT/);
@@ -22,7 +22,7 @@ test('audit export is server-generated, recently authenticated, redacted by defa
   assert.match(service, /PermissionPlatformAuditPIIExport/);
   assert.match(service, /subject_[\s\S]*hmacHex/);
   assert.match(roles, /PLATFORM_AUDIT_PII_EXPORT[\s\S]*ExpiresAt[\s\S]*24\*time\.Hour/);
-  assert.match(contract, /\/account\/admin\/v1\/audit-exports:/);
+  assert.match(contract, /"\/account\/admin\/v1\/audit-exports"\s*:/);
   assert.doesNotMatch(ui, /function exportAuditCSV/);
 });
 
@@ -45,8 +45,8 @@ test('audit export download tickets expire in fifteen minutes and are consumed w
   const [service, portal, deploy, runner] = await Promise.all([
     read('internal/account/audit_exports.go'),
     read('internal/portal/service.go'),
-    read('deploy/helm/account-platform/templates/app-deployments.yaml'),
-    read('../scripts/account-platform.mjs'),
+    read('deploy/production/compose.audit-export.yaml'),
+    read('cmd/account-service/main.go'),
   ]);
   assert.match(service, /auditExportTicketTTL\s+= 15 \* time\.Minute/);
   assert.match(service, /status='DOWNLOADED',file_payload=NULL,download_token_digest=NULL/);

@@ -1,0 +1,9 @@
+# Apply with the existing personal and applicable phase overlays.
+services:
+  migrate-account:
+    image: ${MIGRATE_IMAGE:?set same-source F17 migration image including original Account032}
+  account-service:
+    image: ${ACCOUNT_SERVICE_IMAGE:?set same-source F17 Account image with audit worker}
+    # AUDIT_EXPORT_MASTER_KEY_BASE64 comes from the existing private env_file.
+  token-portal:
+    image: ${TOKEN_PORTAL_IMAGE:?set same-source F17 Portal image including current generated audit UI}

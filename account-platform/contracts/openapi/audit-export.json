@@ -1,0 +1,534 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Account audit export",
+    "version": "0.2.0"
+  },
+  "paths": {
+    "/account/admin/v1/audit-logs": {
+      "get": {
+        "operationId": "listAdminAuditLogs",
+        "summary": "Filter recent account audit events by actor, resource, action, time, and result",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "name": "actor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 320
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 160
+            }
+          },
+          {
+            "name": "resource",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 320
+            }
+          },
+          {
+            "name": "result",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "SUCCEEDED",
+                "DENIED",
+                "FAILED"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Collection"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/account/admin/v1/audit-logs/{audit_id}": {
+      "get": {
+        "operationId": "getAdminAuditLog",
+        "summary": "Get one audit event with its change summary",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AuditID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Overview"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/account/admin/v1/audit-exports": {
+      "post": {
+        "operationId": "createAdminAuditExport",
+        "summary": "Create a server-side encrypted, watermarked audit export under strict quotas",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuditExportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Export accepted; the file decryption key is returned only while the wrapped key remains available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditExportJob"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/account/admin/v1/audit-exports/{export_id}": {
+      "get": {
+        "operationId": "getAdminAuditExport",
+        "summary": "Get the requesting operator's export task without file contents or keys",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ExportID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Export status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditExportJob"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/account/admin/v1/audit-exports/{export_id}/download-tickets": {
+      "post": {
+        "operationId": "issueAdminAuditExportDownloadTicket",
+        "summary": "Issue the only 15-minute single-use download ticket after recent authentication",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ExportID"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Single-use ticket",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditExportDownloadTicket"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/account/admin/v1/audit-exports/{export_id}/download": {
+      "get": {
+        "operationId": "downloadAdminAuditExport",
+        "summary": "Atomically consume a download ticket and return the encrypted signed envelope once",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ExportID"
+          },
+          {
+            "name": "X-Pinvou-Download-Token",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 40,
+              "maxLength": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Encrypted audit envelope",
+            "content": {
+              "application/vnd.pinvou.audit-envelope+json": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
+        }
+      },
+      "AuditID": {
+        "name": "audit_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "ExportID": {
+        "name": "export_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "responses": {
+      "Collection": {
+        "description": "A bounded collection ordered by recent activity",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "items"
+              ],
+              "properties": {
+                "items": {
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Error": {
+        "description": "JSON API error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "code",
+                "message"
+              ],
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "request_id": {
+                  "type": "string"
+                },
+                "details": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "Overview": {
+        "description": "Generic service detail or command result",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "AuditExportRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "filter",
+          "reason",
+          "include_pii",
+          "idempotency_key"
+        ],
+        "properties": {
+          "filter": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "from",
+              "to"
+            ],
+            "properties": {
+              "actor": {
+                "type": "string",
+                "maxLength": 320
+              },
+              "action": {
+                "type": "string",
+                "maxLength": 160
+              },
+              "resource": {
+                "type": "string",
+                "maxLength": 320
+              },
+              "result": {
+                "type": "string",
+                "enum": [
+                  "SUCCEEDED",
+                  "DENIED",
+                  "FAILED"
+                ]
+              },
+              "from": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "to": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 500
+          },
+          "include_pii": {
+            "type": "boolean",
+            "default": false
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 120
+          }
+        }
+      },
+      "AuditExportJob": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "export_id",
+          "status",
+          "include_pii",
+          "filter",
+          "reason",
+          "created_at",
+          "updated_at",
+          "replayed"
+        ],
+        "properties": {
+          "export_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "GENERATING",
+              "READY",
+              "FAILED",
+              "EXPIRED",
+              "DOWNLOADED"
+            ]
+          },
+          "include_pii": {
+            "type": "boolean"
+          },
+          "filter": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "reason": {
+            "type": "string"
+          },
+          "row_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 524288000
+          },
+          "filename": {
+            "type": "string"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "download_ticket_issued_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "download_expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "downloaded_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "decryption_key": {
+            "type": "string",
+            "description": "Save securely. Returned only by creation or an authoritative same-idempotency-key receipt while the wrapped task key exists; ordinary job status queries omit it. Successful download, failure, or expiry destroys the wrapped key, preventing subsequent recovery."
+          },
+          "decryption_key_format": {
+            "type": "string",
+            "enum": [
+              "BASE64URL_AES_256_GCM_KEY"
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AuditExportDownloadTicket": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "export_id",
+          "download_url",
+          "download_token",
+          "expires_at"
+        ],
+        "properties": {
+          "export_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "download_url": {
+            "type": "string"
+          },
+          "download_token": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}
