@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/jackc/pgx/v5"
 	"strings"
 	"testing"
 
@@ -159,4 +160,36 @@ func TestBillingAuthorizationDomainEntitlementProofUsesSchemaV2BeforeEffect(t *t
 	if attempt.FailureIsDefinite || repository.entitlementRuns != 1 || proofCalls != 2 {
 		t.Fatalf("proof failure crossed effect boundary: %+v runs=%d proof=%d", attempt, repository.entitlementRuns, proofCalls)
 	}
+}
+
+// Embedding supplies only the inherited interface. Any unexpected call to
+// another financial command fails the test; no later command is implemented.
+type entitlementAuthorizationRepositoryStub struct {
+	billingAuthorizationExecutionRepository
+	entitlementCorrection    EntitlementCorrectionResult
+	entitlementCorrectionErr error
+	entitlementRunErr        error
+	entitlementFrozen        entitlementCorrectionFrozenFacts
+	entitlementKey           string
+	entitlementReasonCode    string
+	entitlementRuns          int
+}
+
+func (s *entitlementAuthorizationRepositoryStub) EntitlementCorrectionForRequest(context.Context, uuid.UUID) (EntitlementCorrectionResult, error) {
+	return s.entitlementCorrection, s.entitlementCorrectionErr
+}
+
+func (s *entitlementAuthorizationRepositoryStub) ExecuteEntitlementComponentCorrection(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ int64, _, _, _, _ uuid.UUID, key, _, code string, facts entitlementCorrectionFrozenFacts) (EntitlementCorrectionResult, error) {
+	s.entitlementRuns++
+	s.entitlementFrozen = facts
+	s.entitlementKey = key
+	s.entitlementReasonCode = code
+	return s.entitlementCorrection, s.entitlementRunErr
+}
+
+type entitlementAuthorizationQueryStub struct{ t *testing.T }
+
+func (s *entitlementAuthorizationQueryStub) QueryRow(context.Context, string, ...any) pgx.Row {
+	s.t.Fatal("entitlement result lookup must use its installed domain result repository")
+	return nil
 }

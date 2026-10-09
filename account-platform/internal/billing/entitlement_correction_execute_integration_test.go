@@ -4,15 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 func TestEntitlementCorrectionExecuteAndConsumerReadPostgresIntegration(t *testing.T) {
@@ -223,4 +225,99 @@ has_table_privilege('billing_service',$1,'UPDATE'),has_table_privilege('billing_
 	if err := connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latestVersion); err != nil || latestVersion != head {
 		t.Fatalf("failed down changed migration version: %d err=%v", latestVersion, err)
 	}
+}
+
+// Uses only this branch's installed SQL, the real versioned wrapper, and the
+// inherited strict owned UUID database cleanup. Fixed roles belong to the
+// isolated F09 test instance and are created/removed by the outer role harness.
+func entitlementRepositoryToVersion(t *testing.T, ctx context.Context, raw string, maximum int64) (*PostgresRepository, string) {
+	t.Helper()
+	if raw == "" {
+		t.Skip("PINVOU_TEST_BILLING_DATABASE_URL is required for actual PostgreSQL")
+	}
+	control, err := pgx.Connect(ctx, raw)
+	if err != nil {
+		t.Fatal("cannot connect to fixture database")
+	}
+	database := "retained_finance_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	quoted := pgx.Identifier{database}.Sanitize()
+	var exists bool
+	if err = control.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)`, database).Scan(&exists); err != nil || exists {
+		control.Close(context.Background())
+		t.Fatal("new UUID database must not already exist")
+	}
+	if _, err = control.Exec(ctx, "CREATE DATABASE "+quoted+" OWNER billing_schema_owner"); err != nil {
+		control.Close(context.Background())
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
+		defer done()
+		var owner string
+		var active int
+		// Closed client connections can remain visible until PostgreSQL finishes
+		// their backend shutdown. Wait only for this fixture's own database.
+		deadline := time.Now().Add(5 * time.Second)
+		var queryErr error
+		for {
+			queryErr = control.QueryRow(cleanup, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&owner, &active)
+			if queryErr != nil || owner != "billing_schema_owner" || active == 0 || !time.Now().Before(deadline) {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if queryErr != nil || owner != "billing_schema_owner" || active != 0 {
+			control.Close(cleanup)
+			t.Error("own-database identity/connection cleanup guard failed")
+			return
+		}
+		if _, err := control.Exec(cleanup, "DROP DATABASE "+quoted); err != nil {
+			t.Error("own-database cleanup failed")
+		}
+		control.Close(cleanup)
+	})
+	configuration, err := pgx.ParseConfig(raw)
+	if err != nil {
+		t.Fatal("cannot parse fixture connection configuration")
+	}
+	configuration.Database = database
+	configuration.User = "billing_migrator"
+	configuration.Password = ""
+	connection, err := pgx.ConnectConfig(ctx, configuration)
+	if err != nil {
+		t.Fatal("cannot connect to own UUID database")
+	}
+	t.Cleanup(func() { connection.Close(context.Background()) })
+	if _, err = connection.Exec(ctx, `SET ROLE billing_schema_owner; ALTER SCHEMA public OWNER TO billing_schema_owner; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE,CREATE ON SCHEMA public TO billing_service; SET ROLE billing_service`); err != nil {
+		t.Fatal("owned deployment migration actor setup failed")
+	}
+	loaded, err := migrations.Load("../../migrations/billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := make([]migrations.Migration, 0, len(loaded))
+	for _, migration := range loaded {
+		if maximum == 0 || migration.Version < 56 || migration.Version > 59 || migration.Version <= maximum {
+			selected = append(selected, migration)
+		}
+	}
+	if err = billingschema.Up(ctx, connection, selected); err != nil {
+		t.Fatal(err)
+	}
+	// Installation is complete. Retaining its session lock until fixture cleanup
+	// would prevent an independent migration connection from validating recovery.
+	migrations.Unlock(ctx, connection)
+	config, err := pgxpool.ParseConfig(raw)
+	if err != nil {
+		t.Fatal("cannot parse fixture database configuration")
+	}
+	config.ConnConfig.Database = database
+	config.ConnConfig.User = "billing_service"
+	config.ConnConfig.Password = ""
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal("cannot open fixture pool")
+	}
+	t.Cleanup(pool.Close)
+	return NewPostgresRepositoryWithPool(pool), "public"
 }

@@ -194,6 +194,10 @@ func (r *PostgresRepository) ExecuteEntitlementComponentCorrection(ctx context.C
 	if err := lockEntitlementCorrectionComponents(ctx, tx, plan); err != nil {
 		return EntitlementCorrectionResult{}, err
 	}
+	now = r.now()
+	if !packageUntil.After(now) || !plan.SourceExpiresAt.After(now) {
+		return EntitlementCorrectionResult{}, ErrApprovalSnapshotMismatch
+	}
 	correctionID := uuid.Must(uuid.NewV7())
 	journalID := uuid.Must(uuid.NewV7())
 	targetComponentID := uuid.Must(uuid.NewV7())

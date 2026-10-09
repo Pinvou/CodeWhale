@@ -1,3 +1,4 @@
+import { integerMoney, parseFinanceJSON, encodeFinanceJSON } from './finance-contract.js';
 // Entitlement component correction (`ENTITLEMENT_COMPONENT_ADJUSTMENT`) is a
 // closed policy v2 / snapshot schema v2 command. The business page never
 // derives domain facts: it renders the projection returned by the read-only
@@ -65,7 +66,7 @@ export function entitlementCorrectionPrecheck(value) {
   if (critical.package_id !== packageID || critical.payment_order_id !== orderID ||
     !['wallet_id', 'payment_transaction_id', 'source_component_id', 'source_lot_id'].every(name => closedUUID(critical[name])) ||
     !['target_component_id', 'target_lot_id'].every(name => critical[name] === null || closedUUID(critical[name])) ||
-    !Number.isSafeInteger(critical.wallet_version) || critical.wallet_version < 1 || critical.policy_version !== 2 ||
+    amount(critical.wallet_version) === null || amount(critical.wallet_version) < 1n || critical.policy_version !== 2 ||
     !digestPattern.test(critical.source_evidence_digest) || !digestPattern.test(critical.facts_digest) ||
     !((critical.source_type === 'BASE' && critical.target_type === 'BONUS') ||
       (critical.source_type === 'BONUS' && critical.target_type === 'BASE')) ||
@@ -101,4 +102,40 @@ export function entitlementCorrectionApprovalDraft(precheck, reasonCode, operato
     critical_resource_versions: projection.critical,
     financial_snapshot: projection.financial,
   };
+}
+
+// This closed owner response adds wallet_version to the established financial
+// int64 wire fields. Preserve its source token before JSON.parse, then restore
+// the same integer token when the frozen proof travels to Account.
+function walletVersionJSON(text, quoted) {
+  let output = '';
+  for (let i = 0; i < text.length;) {
+    if (text[i] !== '"') { output += text[i++]; continue; }
+    const start = i++;
+    while (i < text.length) {
+      if (text[i] === '\\') { i += 2; continue; }
+      if (text[i++] === '"') break;
+    }
+    const token = text.slice(start, i); output += token;
+    let cursor = i;
+    while (cursor < text.length && /\s/.test(text[cursor])) cursor++;
+    if (text[cursor] !== ':' || JSON.parse(token) !== 'wallet_version') continue;
+    cursor++;
+    while (cursor < text.length && /\s/.test(text[cursor])) cursor++;
+    const match = text.slice(cursor).match(/^(?:"(?:0|[1-9]\d*)"|(?:0|[1-9]\d*))(?=\s*[,}\]])/);
+    if (!match) throw new Error('INVALID_ENTITLEMENT_PRECHECK');
+    const digits = match[0][0] === '"' ? JSON.parse(match[0]) : match[0];
+    if (integerMoney(digits) < 1n) throw new Error('INVALID_ENTITLEMENT_PRECHECK');
+    output += text.slice(i, cursor) + (quoted ? JSON.stringify(digits) : digits);
+    i = cursor + match[0].length;
+  }
+  return output;
+}
+
+export function parseEntitlementCorrectionJSON(text) {
+  return parseFinanceJSON(walletVersionJSON(text, true));
+}
+
+export function encodeEntitlementCorrectionJSON(value) {
+  return walletVersionJSON(encodeFinanceJSON(value), false);
 }
