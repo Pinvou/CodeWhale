@@ -1,5 +1,6 @@
 mod business_worker;
 pub(crate) mod capabilities;
+pub(crate) mod clock;
 pub(crate) mod controlled;
 pub(crate) mod controlled_handshake;
 pub(crate) mod controlled_heartbeat;

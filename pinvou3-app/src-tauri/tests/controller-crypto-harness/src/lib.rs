@@ -128,6 +128,7 @@ mod features {
             pub(crate) use crate::state::{controlled, controlling, task};
             pub(crate) mod relay_runtime {
                 pub(crate) fn log_controlled_event(_event: &str, _outcome: &str) {}
+                pub(crate) fn log_controller_event(_event: &str, _outcome: &str) {}
             }
             pub(crate) use crate::transfer;
             pub(crate) use crate::{liveness, protocol, test_support};
