@@ -445,19 +445,19 @@ fn collect_artifact_files(artifacts_dir: &Path) -> io::Result<Vec<(String, PathB
 /// but alias content from anywhere on the filesystem into it; the link count
 /// is the only tell.
 #[cfg(unix)]
-fn has_single_link(_path: &Path, metadata: &fs::Metadata) -> bool {
+fn has_single_link(_path: &Path, metadata: &fs::Metadata) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
-    metadata.nlink() == 1
+    Ok(metadata.nlink() == 1)
 }
 
 /// NTFS hard links expose the count through the handle information. The
 /// `number_of_links` metadata extension is still unstable (`windows_by_handle`),
 /// so read the count through the stable Win32 call on an opened handle — the
-/// same mechanism as the Runtime store identity check. A member that cannot be
-/// opened or queried counts as single-linked: the archive writer opens it again
-/// for streaming, and that read surfaces any real problem loudly.
+/// same mechanism as the Runtime store identity check. Opening or querying a
+/// member must succeed before it is accepted; a later successful stream read
+/// cannot prove that the file was single-linked.
 #[cfg(windows)]
-fn has_single_link(path: &Path, _metadata: &fs::Metadata) -> bool {
+fn has_single_link(path: &Path, _metadata: &fs::Metadata) -> io::Result<bool> {
     use std::os::windows::fs::OpenOptionsExt as _;
     use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -465,27 +465,23 @@ fn has_single_link(path: &Path, _metadata: &fs::Metadata) -> bool {
         GetFileInformationByHandle,
     };
 
-    let file = match fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(_) => return true,
-    };
+        .open(path)?;
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: the handle and writable output remain valid for the call.
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
-        return true;
+        return Err(io::Error::last_os_error());
     }
-    info.nNumberOfLinks == 1
+    Ok(info.nNumberOfLinks == 1)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn has_single_link(_path: &Path, _metadata: &fs::Metadata) -> bool {
+fn has_single_link(_path: &Path, _metadata: &fs::Metadata) -> io::Result<bool> {
     // No portable link-count API on this target; the root-level probes and
     // the member symlink skip still confine links there.
-    true
+    Ok(true)
 }
 
 fn collect_artifact_files_recursive(
@@ -509,7 +505,7 @@ fn collect_artifact_files_recursive(
         if file_type.is_dir() {
             collect_artifact_files_recursive(&path, &member, files)?;
         } else if file_type.is_file() {
-            if !has_single_link(&path, &entry.metadata()?) {
+            if !has_single_link(&path, &entry.metadata()?)? {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
@@ -930,7 +926,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn forkguard_session_archive_rejects_artifact_hard_link() {
         // A hard link aliases outside content into the walk with no symlink
@@ -976,6 +972,61 @@ mod tests {
         )
         .expect("a clean tree exports");
         assert!(summary.includes_artifacts);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn forkguard_session_archive_link_probe_errors_preserve_output() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = dir.path().join("sessions");
+        let session = fixture_session();
+        let artifacts_dir = sessions_dir
+            .join(&session.metadata.id)
+            .join(ARTIFACTS_DIR_NAME);
+        fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
+        let artifact = artifacts_dir.join("plain.txt");
+        fs::write(&artifact, b"session data").expect("artifact");
+        let metadata = fs::metadata(&artifact).expect("artifact metadata");
+        let output = dir.path().join("out.tar.xz");
+        fs::write(&output, b"previous archive").expect("existing output");
+
+        // A real exclusive Windows handle denies the probe's open. Neither
+        // that failure nor a later stream read proves a single link.
+        let exclusive = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&artifact)
+            .expect("exclusive artifact handle");
+        let error = has_single_link(&artifact, &metadata).expect_err("probe must fail closed");
+        assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
+        write_session_archive(
+            &session,
+            Some(&sessions_dir),
+            &output,
+            SessionArchiveOptions::default(),
+        )
+        .expect_err("unproven members must not be exported");
+        assert_eq!(
+            fs::read(&output).expect("output preserved"),
+            b"previous archive"
+        );
+
+        drop(exclusive);
+        assert!(has_single_link(&artifact, &metadata).expect("unlocked probe"));
+        let summary = write_session_archive(
+            &session,
+            Some(&sessions_dir),
+            &output,
+            SessionArchiveOptions::default(),
+        )
+        .expect("unlocked export succeeds");
+        assert!(summary.includes_artifacts);
+        assert_eq!(
+            fs::read(&artifact).expect("artifact preserved"),
+            b"session data"
+        );
     }
 
     #[test]
