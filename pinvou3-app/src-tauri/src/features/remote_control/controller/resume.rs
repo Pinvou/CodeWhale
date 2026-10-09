@@ -674,6 +674,46 @@ mod tests {
     }
 
     #[test]
+    fn resume_material_debug_redacts_current_and_retired_secrets() {
+        let mut gate = ControllerResumeGate::new(
+            ControllerRole::ControlledB,
+            lease(),
+            [0xa5; 32],
+            [0xb6; 32],
+            30_000,
+        );
+        gate.retired = Some(ResumeMaterial {
+            token: Zeroizing::new([0xc7; 32]),
+            key_fingerprint: [0xd8; 32],
+        });
+        let material_debug = format!("{:?}", gate.current);
+        assert_eq!(
+            material_debug,
+            "ResumeMaterial { token: \"[REDACTED]\", key_fingerprint: \"[REDACTED]\" }"
+        );
+        let gate_debug = format!("{gate:?}");
+        // A09 deliberately omits retired material from the gate projection.
+        // Its own formatter must still redact it if formatted directly.
+        assert_eq!(gate_debug.matches("[REDACTED]").count(), 2);
+        assert!(gate_debug.contains("has_retired_material: true"));
+        assert_eq!(
+            format!("{:?}", gate.retired.as_ref().unwrap()),
+            material_debug
+        );
+        for bytes in [[0xa5_u8; 32], [0xb6; 32], [0xc7; 32], [0xd8; 32]] {
+            assert!(!gate_debug.contains(&format!("{bytes:?}")));
+        }
+        assert!(
+            gate.token_matches(ControllerRole::ControlledB, &[0xa5; 32])
+                .unwrap()
+        );
+        assert!(
+            gate.key_fingerprint_matches(ControllerRole::ControlledB, &[0xb6; 32])
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn complete_resume_keeps_watchdog_budget_and_rotates_material_once() {
         let mut gate = ControllerResumeGate::new(
             ControllerRole::ControlledB,

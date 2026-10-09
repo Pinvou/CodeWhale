@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
+import { isControllerIdentifier, isEnrollmentEndpointIdentifier } from "./identifier-contract.js";
 
-const ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
 const SOURCE = /^[\x21-\x7e]{1,128}$/u;
 const CODE = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{7}$/u;
 const REVISION = /^(0|[1-9][0-9]{0,19})$/u;
@@ -24,7 +24,12 @@ export class ControllerReservationError extends Error {
 function fail(code) { throw new ControllerReservationError(code); }
 
 function identifier(value, label) {
-  if (typeof value !== "string" || !ID.test(value)) fail(`${label}_invalid`);
+  if (!isControllerIdentifier(value)) fail(`${label}_invalid`);
+  return value;
+}
+
+function endpointIdentifier(value) {
+  if (!isEnrollmentEndpointIdentifier(value)) fail("endpoint_id_invalid");
   return value;
 }
 
@@ -93,7 +98,7 @@ export class EndpointInteractionSlots {
   #slots = new Map();
 
   read(endpointId) {
-    endpointId = identifier(endpointId, "endpoint_id");
+    endpointId = endpointIdentifier(endpointId);
     const slot = this.#slots.get(endpointId);
     return Object.freeze({
       revision: slot?.revision ?? "0",
@@ -102,7 +107,7 @@ export class EndpointInteractionSlots {
   }
 
   compareAndSwap(endpointId, expectedRevision, owner) {
-    endpointId = identifier(endpointId, "endpoint_id");
+    endpointId = endpointIdentifier(endpointId);
     const expected = revision(expectedRevision);
     owner = slotOwner(owner);
     const current = this.#slots.get(endpointId);
@@ -119,7 +124,7 @@ export class EndpointInteractionSlots {
   }
 
   acquireWeb({ endpointId, leaseId } = {}) {
-    endpointId = identifier(endpointId, "endpoint_id");
+    endpointId = endpointIdentifier(endpointId);
     leaseId = identifier(leaseId, "lease_id");
     for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt += 1) {
       const current = this.read(endpointId);
@@ -395,7 +400,7 @@ export class ControllerReservationManager {
   }
 
   async releaseEndpoint({ endpointId, reason = "endpoint_disconnected" } = {}) {
-    endpointId = identifier(endpointId, "endpoint_id");
+    endpointId = endpointIdentifier(endpointId);
     const owned = [...this.#reservations.values()]
       .filter((reservation) => reservation.endpoint_id === endpointId);
     return this.#releaseAll(owned, reason);
