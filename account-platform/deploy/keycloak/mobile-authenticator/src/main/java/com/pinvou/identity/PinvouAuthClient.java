@@ -37,19 +37,20 @@ final class PinvouAuthClient {
     PinvouAuthClient() { this(System::getenv); }
     PinvouAuthClient(Function<String, String> environment) { this.environment = environment; }
 
-    Map<String, Object> precheckPassword(String password) throws AuthClientException {
+    Map<String, Object> precheckPassword(String password, String source, String device) throws AuthClientException {
         return post(publicURL("PINVOU_IDENTITY_AUTH_URL", "/v1/registration/password-prechecks"),
-            Map.of("password", password), Map.of(), 201).body();
+            Map.of("password", password), Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device), 201).body();
     }
 
-    void precheckRegistration(String username, String mobile, String handle, String policy) throws AuthClientException {
+    void precheckRegistration(String username, String mobile, String handle, String policy, String source, String device) throws AuthClientException {
         post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/v1/auth/registration/precheck"), Map.of(
-            "username", username, "mobile", mobile, "password_handle", handle, "password_policy_version", policy), Map.of(), 200);
+            "username", username, "mobile", mobile, "password_handle", handle, "password_policy_version", policy),
+            Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device), 200);
     }
 
-    Map<String, Object> createCaptcha(String mobile, String purpose) throws AuthClientException {
+    Map<String, Object> createCaptcha(String mobile, String purpose, String source, String device) throws AuthClientException {
         return post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/v1/auth/captcha/challenges"),
-            Map.of("mobile", mobile, "purpose", purpose), Map.of(), 201).body();
+            Map.of("mobile", mobile, "purpose", purpose), Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device), 201).body();
     }
 
     Map<String, Object> sendSMS(Map<String, Object> body, String source, String device) throws AuthClientException {
