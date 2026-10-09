@@ -141,6 +141,9 @@ const LazyBrowserView = lazy(() => VIEW_LOADERS.browser().then(m => ({ default: 
 const LazyKnowledgeView = lazy(() => VIEW_LOADERS.knowledge().then(m => ({ default: m.KnowledgeView })));
 const LazyModelStoreView = lazy(() => VIEW_LOADERS.modelStore().then(m => ({ default: m.ModelStoreView })));
 const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.MonitorView })));
+// MegaCube 设备管理页：内嵌 MonitorView（chunk 间静态依赖，预取 deviceManager
+// 会连带拉下 monitor chunk），仅 megacubeDevice 平台经渲染开关挂载。
+const LazyDeviceManagerView = lazy(() => VIEW_LOADERS.deviceManager().then(m => ({ default: m.DeviceManagerView })));
 const LazySearchView = lazy(() => VIEW_LOADERS.search().then(m => ({ default: m.SearchView })));
 const LazyTeamRelayView = lazy(() => VIEW_LOADERS.teamRelay().then(m => ({ default: m.TeamRelayView })));
 const LazySearchOverlay = lazy(() => VIEW_LOADERS.searchOverlay().then(m => ({ default: m.SearchOverlay })));
@@ -265,6 +268,7 @@ const NAV_PREFETCH = {
   modelStore: () => prefetchView('modelStore'),
   outputs: () => prefetchView('knowledge'),
   monitor: () => prefetchView('monitor'),
+  deviceManager: () => prefetchView('deviceManager'),
   toolStore: () => prefetchView('toolStore'),
   cardpool: () => prefetchView('cardpool'),
   browser: () => prefetchView('browser'),
@@ -953,6 +957,9 @@ const App = () => {
         }
       }, [browserActive, currentView, setCurrentView]);
       const showMegacubeSite = !!platformCapabilities.showMegacubeSite;
+      // MegaCube 一体机：原「运行状态」入口替换为「设备管理」（渲染开关在
+      // currentView === 'monitor' 处，导航 label 同步条件化）。
+      const megacubeDevice = !!platformCapabilities.megacubeDevice;
       const codexAcpSupported = usePlatformCapability('acpCodeMode') && (isWeb || !!platformCapabilities.codexAcpSupported);
       const teamRelayAvailable = teamRelayEnabled && platformCapabilities.teamRelaySupported === true;
       const teamRelayUnread = teamRelayHasUnread(bs && bs.teamRelay && bs.teamRelay.snapshot);
@@ -2999,6 +3006,41 @@ const App = () => {
         return activateRemoteProxy(opened);
       }, [activateRemoteProxy]);
 
+      // MegaCube 设备管理（DeviceManagerView）的 AI 动作入口：安装新模型、
+      // 故障排查快捷卡和自定义提问都落到这里。与用户手点「新对话」完全一致地
+      // 物化一个普通新会话（默认模型、默认工具链），跳到聊天页后把后端
+      // device_doctor_prompt 拼好的提示词原样发出。materializeSession 立即
+      // 返回真实会话 id，sendMessage 走已物化路径直达发送，不经过
+      // scheduledTaskPendingGuide/restrictTools。失败不打断用户：设备管理页
+      // 上的按钮各自有 loading 态，这里只留一条诊断日志。
+      const openDeviceDoctorChat = useCallback(async (prompt) => {
+        if (!bridge.available || !prompt) return;
+        try {
+          return runBrowserUiTransition(async ({ isCurrent }) => {
+            const sid = await bridge.sessions.materializeSession();
+            if (!sid || !isCurrent()) return false;
+            setCodeModeOn(false);
+            closeMobileSidebar();
+            setCurrentView('chat');
+            setActiveChat(sid);
+            await bridge.chat.sendMessage(prompt);
+            return true;
+          }, {
+            channel: 'session',
+            serialize: true,
+          });
+        } catch (error) {
+          console.warn('[device-manager] doctor chat failed', error);
+          return undefined;
+        }
+      }, [closeMobileSidebar, runBrowserUiTransition, setCurrentView]);
+
+      // 设备管理页「前往模型商店」：复用模型商店既有的导航路径（与侧栏点击
+      // 同一条 runBrowserUiTransition 通道）。
+      const openModelStoreFromDevice = useCallback(() => {
+        return navigateFromScheduledRun('modelStore');
+      }, [navigateFromScheduledRun]);
+
       async function handleSearchSelect(id) {
         await handleSwitchSession(id);
         setSearchOverlayOpen(false);
@@ -4604,14 +4646,19 @@ const App = () => {
                 onPointerEnter={NAV_PREFETCH.knowledge} onFocus={NAV_PREFETCH.knowledge}
                 dragKind={canDetachWindows ? 'outputs' : undefined} dragging={canDetachWindows && !!dragAvatar && dragAvatar.key === 'outputs:'} onPickUp={canDetachWindows ? navPickUpHandlers.outputs : undefined}
               />
+              {/* MegaCube 上该入口换为「设备管理」（渲染仍走 currentView==='monitor'，
+                  见下方渲染开关）；拆离窗口只认 monitor 视图，故 megacubeDevice 时
+                  显式关闭拖拽拆离（dragKind/onPickUp 传 undefined）。悬停预取切换
+                  到 deviceManager loader（其 chunk 静态依赖 monitor，一并拉取）。 */}
               <NavItem
-                icon={NAV_ICON_MONITOR} label={t.monitor}
+                icon={NAV_ICON_MONITOR} label={megacubeDevice ? t.deviceMgr : t.monitor}
                 active={currentView === 'monitor'}
                 theme={activeTheme}
                 isSidebarOpen={isSidebarOpen}
-                onPointerEnter={NAV_PREFETCH.monitor} onFocus={NAV_PREFETCH.monitor}
+                onPointerEnter={megacubeDevice ? NAV_PREFETCH.deviceManager : NAV_PREFETCH.monitor}
+                onFocus={megacubeDevice ? NAV_PREFETCH.deviceManager : NAV_PREFETCH.monitor}
                 onClick={navNavigateHandlers.monitor}
-                dragKind={canDetachWindows ? 'monitor' : undefined} dragging={canDetachWindows && !!dragAvatar && dragAvatar.key === 'monitor:'} onPickUp={canDetachWindows ? navPickUpHandlers.monitor : undefined}
+                dragKind={!megacubeDevice && canDetachWindows ? 'monitor' : undefined} dragging={!megacubeDevice && canDetachWindows && !!dragAvatar && dragAvatar.key === 'monitor:'} onPickUp={!megacubeDevice && canDetachWindows ? navPickUpHandlers.monitor : undefined}
               />
               <NavItem
                 icon={NAV_ICON_TOOL_STORE} label={t.toolStore}
@@ -5048,7 +5095,17 @@ const App = () => {
                 复位,其余视图不受一次失败牵连。 */}
             <ViewErrorBoundary t={t} resetKey={currentView}>
               <Suspense fallback={<ViewFallback />}>
-            {currentView === 'monitor' && <LazyMonitorView theme={activeTheme} t={t} bs={bs} />}
+            {/* MegaCube：monitor 视图位渲染设备管理页（内嵌 MonitorView）；
+                其余平台保持原运行状态页，行为零变化。 */}
+            {currentView === 'monitor' && (megacubeDevice ? (
+              <LazyDeviceManagerView
+                theme={activeTheme} t={t} bs={bs}
+                onOpenChat={openDeviceDoctorChat}
+                onOpenModelStore={openModelStoreFromDevice}
+              />
+            ) : (
+              <LazyMonitorView theme={activeTheme} t={t} bs={bs} />
+            ))}
             {currentView === 'settings' && (
               <ViewErrorBoundary heading={t.uiSettingsDetail.settingsLoadFailed} detail={t.uiSettingsDetail.settingsLoadFailedDetail} t={t}>
                 <LazySettingsView
@@ -5423,7 +5480,7 @@ const App = () => {
                 onClick: () => mobileNavigate('chat') },
               { key: 'cardpool', label: t.cardPool, icon: <Layers size={18} />,
                 active: currentView === 'cardpool', onClick: () => mobileNavigate('cardpool', () => setPoolMyOnly(false)) },
-              { key: 'monitor', label: t.monitor, icon: <BarChart2 size={18} />,
+              { key: 'monitor', label: megacubeDevice ? t.deviceMgr : t.monitor, icon: <BarChart2 size={18} />,
                 active: currentView === 'monitor',
                 onClick: () => mobileNavigate('monitor', () => {
                   const liveBridge = window.TauriBridge || bridge;

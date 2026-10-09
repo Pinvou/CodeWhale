@@ -106,6 +106,7 @@ for (const language of ['zh', 'en', 'ja']) {
   for (const section of [
     'uiRemote',
     'uiMonitor',
+    'uiDeviceMgr',
     'uiSettings',
     'uiSettingsDetail',
     'uiPetSettings',
@@ -520,6 +521,10 @@ assert.match(followHook, /listen\(['"]ui:language_changed['"]/);
 assert.match(petWindow, /const petCopy = t\.uiPet/);
 
 assert.match(source('features/monitor/MonitorView.jsx'), /t\.uiMonitor/);
+// MegaCube 设备管理页：整页文案走 uiDeviceMgr（含嵌入式 MonitorView 复用）。
+const deviceManagerView = source('features/device-manager/DeviceManagerView.jsx');
+assert.match(deviceManagerView, /const copy = t\.uiDeviceMgr/);
+assert.doesNotMatch(deviceManagerView, /[\u{4e00}-\u{9fff}]/u, 'device-manager view must stay free of Chinese literals (i18n only)');
 const scheduledTasks = source('features/scheduled/ScheduledTasksView.jsx');
 assert.match(scheduledTasks, /const scheduledCopy = t\.uiScheduled/);
 assert.match(scheduledTasks, /scheduledCopy\.taskName/);

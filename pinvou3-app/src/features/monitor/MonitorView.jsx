@@ -213,7 +213,10 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
     };
 
     /* eslint-disable sonarjs/cognitive-complexity -- monitoring dashboard is a single view with many metrics, splitting has low payoff;legacy view; tracked separately */
-    const MonitorView = ({ theme, t, bs }) => {
+    // embedded: MegaCube 设备管理页（features/device-manager）内嵌复用全部卡片与
+    // 轮询，只隐藏本页的 h1 页首（标题/桥接错误徽章/时钟）。默认 false，
+    // 非 MegaCube 平台行为不变。
+    const MonitorView = ({ theme, t, bs, embedded = false }) => {
       const isDark = theme === 'dark';
       const fmt = bs && bs.monitor && bs.monitor._fmt;
       const monitorError = bs && bs.monitorError;
@@ -406,6 +409,7 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
         <div className="flex-1 w-full h-full overflow-y-auto custom-scrollbar">
           <div className="min-h-full bg-white dark:bg-[#131314] text-[#1F1F1F] dark:text-[#E3E3E3] p-4 sm:p-6 lg:p-10 font-sans selection:bg-blue-500/30 relative overflow-hidden transition-colors duration-500">
             <div className="max-w-[1400px] mx-auto relative z-10 space-y-6">
+              {!embedded && (
               <header
                 className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 pb-6 mb-4 border-b border-[rgba(198,198,200,.55)] dark:border-[rgba(255,255,255,.10)]"
               >
@@ -428,6 +432,7 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
                   </div>
                 </div>
               </header>
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
                 <MonitorCard className="md:col-span-12 lg:col-span-4">

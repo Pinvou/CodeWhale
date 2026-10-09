@@ -438,6 +438,7 @@ export const lazyChunkContracts = {
   knowledge: ['features/knowledge/KnowledgeView.jsx', 'KnowledgeView'],
   modelStore: ['features/model-store/ModelStoreView.jsx', 'ModelStoreView'],
   monitor: ['features/monitor/MonitorView.jsx', 'MonitorView'],
+  deviceManager: ['features/device-manager/DeviceManagerView.jsx', 'DeviceManagerView'],
   search: ['features/search/SearchView.jsx', 'SearchView'],
   teamRelay: ['features/team-relay/TeamRelayView.jsx', 'TeamRelayView'],
   accountPlatformPopover: ['features/account-platform/AccountPlatformPopover.jsx', 'AccountPlatformPopover'],
