@@ -1049,6 +1049,11 @@
       "name": "newapi-tls",
       "source": "account-platform/cmd/newapi-tls/main.go",
       "strategy": "workload.isolated-newapi-tls-proxy-host"
+    },
+    {
+      "name": "account-approval-recovery",
+      "source": "account-platform/cmd/account-approval-recovery/main.go",
+      "strategy": "workload.dedicated-account-approval-recovery-role"
     }
   ]
 }
