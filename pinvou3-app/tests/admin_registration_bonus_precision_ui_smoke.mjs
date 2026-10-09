@@ -184,7 +184,7 @@ try {
           assert.equal(writes.length, 1, 'foreign actor must not automatically replay the originating request');
           assert.equal(await page.$('[data-testid="registration-bonus-policy"] [role="alert"]'), null);
           assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', node => node.value), '');
-          assert.equal(await page.evaluate(() => Boolean(sessionStorage.getItem('pinvou.admin.registration-bonus.pending.0199a100-0001-7000-8000-000000000101'))), true, 'original actor recovery evidence remains preserved');
+          assert.equal(await page.evaluate(() => Boolean(document.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.pending.0199a100-0001-7000-8000-000000000101'))), true, 'original actor recovery evidence remains preserved');
           console.log(JSON.stringify({ action: 'pass', test: name }));
           continue;
         }
