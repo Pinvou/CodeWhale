@@ -8,6 +8,8 @@ name: PR Check
 # - changes:检测本 PR 有没有 Rust 代码、发布契约、L1 harness 或前端改动,给后续 job 做 paths filter。
 # - frontend-test:Draft 跑 lint/build/逻辑测试；Ready PR 与 Merge Queue 按实际
 #   base/head diff 选择浏览器 smoke；未知或共享路径保守执行全部 smoke。
+# - account-platform-test: path-aware tests/vet for all Go modules at every stage;
+#   real external-service integration remains explicit opt-in.
 # - team-relay-hub-test:Hub 或迁移变化时使用隔离 PostgreSQL 跑完整测试与依赖审计。
 # - release-contract-test:发布链路改动只跑配置/脚本契约,不在 PR 构建安装包。
 # - knowledge-rust:独立 pinvou-knowledge crate/部署入口改动跑 fmt/clippy/test 与 shell
@@ -160,6 +162,7 @@ jobs:
       pet: ${{ steps.filter.outputs.pet }}
       frontend: ${{ steps.filter.outputs.frontend }}
       relay: ${{ steps.filter.outputs.relay }}
+      account_platform: ${{ steps.filter.outputs.account_platform }}
       team_relay_hub: ${{ steps.filter.outputs.team_relay_hub }}
       update_release_console: ${{ steps.filter.outputs.update_release_console }}
       acp_runtime: ${{ steps.filter.outputs.acp_runtime }}
@@ -198,6 +201,12 @@ jobs:
         with:
           predicate-quantifier: some-with-excludes
           filters: |
+            account_platform:
+              - 'account-platform/**'
+              - 'scripts/account-platform*'
+              - 'scripts/check-token-management-authorization-coverage.mjs'
+              - '.github/workflows/pr-check.yml'
+              - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
               - '**/*.rs'
               - '**/Cargo.toml'
@@ -326,6 +335,7 @@ jobs:
             frontend:
               - 'pinvou3-app/src/**'
               - 'pinvou3-app/tests/**'
+              - 'account-platform/internal/portal/static/**'
               # multiagent_plan_normalize.test.mjs 读取下列 Rust 源做跨语言
               # 契约断言(蜂群契约/同快照不变式/编辑重发等);不列出则
               # Rust-only 改动会静默跳过该 node 门禁(同 resources/** 的
@@ -551,9 +561,10 @@ jobs:
         run: python3 scripts/check-doc-anchors.py
 
       - name: 公开底座 gitlink 可达性
-        # Fail closed: gitlink 必须等于公开维护分支头；过渡期（fork-policy 第 0 节豁免）
-        # 内不可变 tag 钉在其收口 commit，rN 收口后恢复三方相等。
-        run: ./scripts/verify-public-submodule.sh
+        # Fail closed: gitlink 必须精确匹配登记 pin，且位于公开维护历史；
+        # 过渡期内不可变 tag 钉在其收口 commit，不跟随远端升级运行时。
+        # 发布脚本默认仍要求维护头精确相等；rN 收口恢复三方严格相等。
+        run: ./scripts/verify-public-submodule.sh --registered-snapshot
 
       - name: 初始化公共底座 submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -655,6 +666,12 @@ jobs:
       - name: Vite build
         run: npm run build:ui
 
+      - name: Verify embedded Account Portal assets are current
+        run: |
+          npm run build:account-portal
+          git diff --exit-code -- ../account-platform/internal/portal/static
+          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
+
       # Web (relay) build: the startup-bundle layer and the web index contract
       # test (tests/vite_static_assets_contract.test.mjs) only cover the web
       # dist when it exists, so build it unconditionally here instead of
@@ -739,6 +756,55 @@ jobs:
           bash -n scripts/deploy-remote-relay.sh
           bash -n scripts/deploy-remote-relay-test.sh
           npm --prefix remote-control-relay test
+
+  account-platform-test:
+    name: account-platform-test
+    needs: changes
+    # Draft, Ready and the Merge Queue validate the same Go contracts. No
+    # backflow exemption may suppress this independently deployable module.
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up zram and swap
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
+
+      - name: Go toolchain
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: account-platform/go.mod
+          cache-dependency-path: account-platform/**/go.sum
+
+      - name: Node.js for Token authorization contracts
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Verify Token management authorization contracts
+        run: node scripts/check-token-management-authorization-coverage.mjs
+
+      - name: Test and vet all Account Platform Go modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          # ./... does not traverse nested modules. Discover their manifests
+          # explicitly so future tools cannot silently escape the Go gate.
+          test -f account-platform/go.mod
+          while IFS= read -r -d '' manifest; do
+            module_dir="$(dirname "$manifest")"
+            echo "Go contracts: $module_dir"
+            (
+              cd "$module_dir"
+              go test -race -tags=nomsgpack -mod=readonly -count=1 ./...
+              go vet -tags=nomsgpack -mod=readonly ./...
+            )
+          done < <(find account-platform -name vendor -prune -o -name go.mod -print0 | sort -z)
 
   team-relay-hub-test:
     name: team-relay-hub-test
@@ -2225,6 +2291,7 @@ jobs:
       - fast-gate
       - frontend-test
       - relay-test
+      - account-platform-test
       - team-relay-hub-test
       - update-release-console-test
       - release-contract-test
@@ -2259,6 +2326,8 @@ jobs:
           FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
+          ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
+          ACCOUNT_PLATFORM_REQUIRED: ${{ needs.changes.outputs.account_platform }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
           UPDATE_RELEASE_CONSOLE_RESULT: ${{ needs.update-release-console-test.result }}
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
@@ -2293,11 +2362,17 @@ jobs:
             exit 1
           fi
 
+          if [[ "$ACCOUNT_PLATFORM_REQUIRED" == "true" && "$ACCOUNT_PLATFORM_RESULT" != success ]]; then
+            echo "Required Account Platform Go gate did not pass: $ACCOUNT_PLATFORM_RESULT" >&2
+            exit 1
+          fi
+
           failed=0
           for item in \
             "backflow-portability:$BACKFLOW_PORTABILITY_RESULT" \
             "frontend-test:$FRONTEND_RESULT" \
             "relay-test:$RELAY_RESULT" \
+            "account-platform-test:$ACCOUNT_PLATFORM_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
             "update-release-console-test:$UPDATE_RELEASE_CONSOLE_RESULT" \
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \

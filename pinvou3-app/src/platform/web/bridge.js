@@ -221,8 +221,12 @@
     },
     // 「添加模型」方案:已保存模型列表 + 全局默认 id + 当前会话绑定的模型 id
     savedModels: [],
+    modelsLoaded: false,
     activeModelId: null,
+    defaultModelRef: null,
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
+    currentSessionModelRef: null,
+    pendingDraftModelRef: null,
     superPermEnabled: false,
     modeState: { mode: "yolo" },
     // 两个工作区 lane（work/code，design 并入 work）的全局默认 mode（null=该
@@ -1669,6 +1673,7 @@
   }
   // 把 active 工作集存好后切到 id 的 buffer(opts.fresh=新建空 buffer)。
   function switchActiveTo(id, opts) {
+    state.pendingDraftModelRef = null;
     // Set the new active id before touching the old buffer: the LRU prune
     // triggered by that touch protects the target via activeSessionId. Touching
     // the old buffer first (active id still old) could evict an idle target as
@@ -3164,6 +3169,9 @@
     state.scheduledRunContext = null;
     state.draftEpoch++; // 每次点击都自增——含下面提前返回的「已在草稿态」分支,让前端能重置 welcomeToolId
     state.scheduledTaskPendingGuide = null; // 换了对话,未发送的定时任务引导词作废
+    state.pendingDraftModelRef = null;
+    state.currentSessionModelId = null;
+    state.currentSessionModelRef = null;
 
     // 已在干净草稿态 → 只 notify(epoch 已自增)。注意要连 chatItems 一起判空:messages 与 chatItems
     // 会背离(persona 气泡 / ensureSession 失败的 system 报错卡只进 chatItems),否则残留卡顶掉「你好」。
@@ -3199,13 +3207,19 @@
   var ensureSessionInFlight = null;
   var ensureSessionDraftOutcome = null;
   async function ensureSession(draftOwner) {
+    function applyDraftOutcome(outcome) {
+      if (!draftOwner || !outcome || draftOwner.draftEpoch !== outcome.epoch) return;
+      draftOwner.createdSessionId = outcome.createdSessionId;
+      if (outcome.rollbackEpoch !== undefined) {
+        draftOwner.rollbackFromDraftEpoch = outcome.epoch;
+        draftOwner.draftEpoch = outcome.rollbackEpoch;
+      }
+    }
     if (state.activeSessionId) return state.activeSessionId;
     if (ensureSessionInFlight) {
       var pendingOutcome = ensureSessionDraftOutcome;
       var pendingResult = await ensureSessionInFlight;
-      if (draftOwner && pendingOutcome && draftOwner.draftEpoch === pendingOutcome.epoch) {
-        draftOwner.createdSessionId = pendingOutcome.createdSessionId;
-      }
+      applyDraftOutcome(pendingOutcome);
       return pendingResult;
     }
     // 捕获导航 token：仅判 activeSessionId 覆盖不了「再进草稿」——enterDraft
@@ -3232,11 +3246,46 @@
           draftOutcome.createdSessionId = meta.id;
           return null;
         }
+        var pendingModelRef = state.pendingDraftModelRef;
+        state.pendingDraftModelRef = null;
         switchActiveTo(meta.id, { fresh: true });
         draftOutcome.createdSessionId = meta.id;
         state.composerDraft = composerDraft;
         sessionStates[meta.id].composerDraft = composerDraft;
         getBuffer(meta.id).sessionRevision = String(meta.transcript_revision || meta.transcriptRevision || "");
+        if (pendingModelRef) {
+          try {
+            if (pendingModelRef.source === "ACCOUNT_PLATFORM") {
+              await invoke("account_platform_select_session_model", {
+                input: { sessionId: meta.id, modelId: pendingModelRef.model_id },
+              });
+            } else if (pendingModelRef.source === "LOCAL_CONFIG") {
+              await invoke("set_session_model", {
+                sessionId: meta.id,
+                modelId: pendingModelRef.saved_model_id,
+              });
+            } else {
+              throw new Error("unsupported model selection source");
+            }
+            if (state.activeSessionId === meta.id && navToken === sessionSwitchRequestToken) {
+              state.currentSessionModelRef = pendingModelRef;
+            }
+          } catch (modelError) {
+            try { await invoke("delete_session", { id: meta.id }); } catch (cleanupError) { /* keep primary failure */ }
+            draftOutcome.createdSessionId = null;
+            if (state.activeSessionId !== meta.id || navToken !== sessionSwitchRequestToken) return null;
+            var rollbackComposerDraft = state.composerDraft || "";
+            enterDraft();
+            state.composerDraft = rollbackComposerDraft;
+            state.pendingDraftModelRef = pendingModelRef;
+            draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
+            addSystemItem(bt("newChatFailed"));
+            await refreshHistoryList();
+            notify();
+            return null;
+          }
+        }
+        if (state.activeSessionId !== meta.id || navToken !== sessionSwitchRequestToken) return null;
         await refreshHistoryList();
         await syncModeState();
         // 两分 lane 语义：后端 plain 缺省恒 Yolo、lane 只有 work/code；
@@ -3278,9 +3327,7 @@
       function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; }
     );
     var result = await p;
-    if (draftOwner && draftOwner.draftEpoch === draftOutcome.epoch) {
-      draftOwner.createdSessionId = draftOutcome.createdSessionId;
-    }
+    applyDraftOutcome(draftOutcome);
     return result;
   }
 
@@ -7806,18 +7853,22 @@
   async function setBehaviorTelemetryEnabled() {
     throw new Error("behavior telemetry is unsupported by the Web host");
   }
+  var effectiveModelLoadSeq = 0;
   async function loadEffectiveModelConfig(sessionId) {
+    var seq = ++effectiveModelLoadSeq;
     var requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
     try {
       var config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
       // 快速切会话时，旧请求可能晚于新请求返回；禁止旧会话配置覆盖当前遮罩状态。
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
+      if (seq !== effectiveModelLoadSeq || (state.activeSessionId || null) !== requestedSessionId) return false;
       state.effectiveModelConfig = config;
     } catch (e) {
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
-      state.effectiveModelConfig = null;
+      if (seq !== effectiveModelLoadSeq || (state.activeSessionId || null) !== requestedSessionId) return false;
+      // Preserve the last authoritative snapshot across transient failures.
+      return false;
     }
     notify();
+    return true;
   }
   var settingsWriteQueue = Promise.resolve();
   function enqueueSettingsWrite(write) {
@@ -7911,14 +7962,18 @@
     var seq = ++modelsLoadSeq;
     try {
       var v = await invoke("list_models");
-      if (seq !== modelsLoadSeq) return;
+      if (seq !== modelsLoadSeq) return false;
       state.savedModels = (v && v.models) || [];
       state.activeModelId = (v && v.active_model_id) || null;
+      state.defaultModelRef = (v && v.default_model_ref) || null;
+      state.modelsLoaded = true;
     } catch (e) {
-      if (seq !== modelsLoadSeq) return;
-      state.savedModels = []; state.activeModelId = null;
+      if (seq !== modelsLoadSeq) return false;
+      // Keep the previous authoritative catalog on transport failure.
+      return false;
     }
     notify();
+    return true;
   }
   // model 对象字段须是 snake_case(SavedModel serde):
   // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
@@ -7942,36 +7997,61 @@
   }
   // 读某会话当前绑定的模型 id(切会话时刷新 chip)。
   async function loadSessionModel(sessionId) {
+    var effectiveSeq = ++effectiveModelLoadSeq;
     var requestedSessionId = sessionId || null;
     var modelId = null;
-    var config = null;
+    var modelRef = null;
+    var configResult = { ok: false, value: null };
     try {
       var results = await Promise.all([
         requestedSessionId
           ? invoke("get_session_model_id", { sessionId: requestedSessionId }).catch(function () { return null; })
           : Promise.resolve(null),
-        invoke("get_effective_model_config", { sessionId: requestedSessionId }).catch(function () { return null; }),
+        requestedSessionId
+          ? invoke("get_session_model_ref", { sessionId: requestedSessionId }).catch(function () { return null; })
+          : Promise.resolve(null),
+        invoke("get_effective_model_config", { sessionId: requestedSessionId })
+          .then(function (value) { return { ok: true, value: value }; })
+          .catch(function () { return { ok: false, value: null }; }),
       ]);
       modelId = results[0];
-      config = results[1];
+      modelRef = results[1];
+      configResult = results[2];
     } catch (e) {
       modelId = null;
-      config = null;
+      modelRef = null;
+      configResult = { ok: false, value: null };
     }
     // ChatView effect 可能并发加载相邻两个会话；只提交仍为当前会话的结果。
-    if ((state.activeSessionId || null) !== requestedSessionId) return;
+    if ((state.activeSessionId || null) !== requestedSessionId) return false;
     state.currentSessionModelId = modelId;
-    state.effectiveModelConfig = config;
+    state.currentSessionModelRef = modelRef;
+    var effectiveCurrent = effectiveSeq === effectiveModelLoadSeq;
+    if (effectiveCurrent && configResult.ok) state.effectiveModelConfig = configResult.value;
     notify();
+    return effectiveCurrent && configResult.ok;
   }
-  // 切当前会话模型(chip 热切)。无 session(草稿态)时改全局默认。
-  async function switchModel(sessionId, modelId) {
-    if (sessionId) {
-      await invoke("set_session_model", { sessionId: sessionId, modelId: modelId });
-      await loadSessionModel(sessionId);
-    } else {
-      await setActiveModel(modelId);
+  // 切当前会话模型；草稿态只寄存到首条消息物化，不改全局默认。
+  async function switchModelRef(sessionId, modelRef) {
+    if (!modelRef || !modelRef.source) throw new Error("model selection is required");
+    if (!sessionId) {
+      state.pendingDraftModelRef = modelRef;
+      notify();
+      return;
     }
+    if (modelRef.source === "ACCOUNT_PLATFORM") {
+      await invoke("account_platform_select_session_model", {
+        input: { sessionId: sessionId, modelId: modelRef.model_id },
+      });
+    } else if (modelRef.source === "LOCAL_CONFIG") {
+      await invoke("set_session_model", { sessionId: sessionId, modelId: modelRef.saved_model_id });
+    } else {
+      throw new Error("unsupported model selection source");
+    }
+    await loadSessionModel(sessionId);
+  }
+  async function switchModel(sessionId, modelId) {
+    return switchModelRef(sessionId, { source: "LOCAL_CONFIG", saved_model_id: modelId });
   }
   async function testModelConnection(baseUrl, apiKey, modelId) {
     return await invoke("test_model_connection", { baseUrl: baseUrl, apiKey: apiKey, modelId: modelId || null });
@@ -11014,6 +11094,7 @@
     submitFeedback: submitFeedback,
     discoverLocalVllm: discoverLocalVllm,
     getEffectiveModelConfig: getEffectiveModelConfig,
+    loadEffectiveModelConfig: loadEffectiveModelConfig,
    loadModels: loadModels,
    saveModel: saveModel,
    revealModelApiKey: revealModelApiKey,
@@ -11023,6 +11104,7 @@
     setActiveModel: setActiveModel,
     loadSessionModel: loadSessionModel,
     switchModel: switchModel,
+    switchModelRef: switchModelRef,
     testModelConnection: testModelConnection,
     probeLocalServerKind: probeLocalServerKind,
     testSearchProvider: testSearchProvider,

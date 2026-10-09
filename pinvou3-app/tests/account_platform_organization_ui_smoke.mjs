@@ -1,0 +1,83 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import react from '@vitejs/plugin-react';
+import * as puppeteer from 'puppeteer-core';
+import { createServer } from 'vite';
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const chrome=process.env.CHROME||['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe','C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome','/usr/bin/google-chrome-stable','/snap/bin/chromium','/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(fs.existsSync);
+assert.ok(chrome,'Browser unavailable; no UI validation performed');
+const profile=fs.mkdtempSync(path.join(os.tmpdir(),'pinvou-f06-ui-'));
+let vite,browser,page,passed=0;const errors=[];
+try{
+ vite=await createServer({root,configFile:false,appType:'mpa',logLevel:'error',plugins:[react()],server:{host:'127.0.0.1',port:0,watch:null}});await vite.listen();
+ browser=await puppeteer.launch({executablePath:chrome,headless:'new',userDataDir:profile,args:['--disable-gpu','--no-first-run']});page=await browser.newPage();page.setDefaultTimeout(10000);page.on('pageerror',error=>errors.push(error.message));
+ const url=`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-organization.html`;
+ const fresh=async language=>{errors.length=0;await page.goto(url);await page.waitForFunction(()=>window.f06);await page.evaluate(language=>{window.f06.language=language;window.f06.render();},language);await page.waitForFunction(()=>document.body.textContent.includes('Controlled Unit'));};
+ const form=async()=>{await page.evaluate(()=>{const form=[...document.querySelectorAll('form')].find(item=>item.querySelector('h4')?.textContent===window.f06.copy().createUnit);const input=form.querySelector('input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'Controlled New Unit');input.dispatchEvent(new Event('input',{bubbles:true}));});};
+ const click=async key=>{assert.ok(await page.evaluate(key=>{const text=window.f06.copy()[key];const button=[...document.querySelectorAll('button')].find(item=>item.textContent===text&&!item.disabled);if(!button)return false;button.click();return true;},key),`Missing action ${key}`);};
+ const run=async(name,fn)=>{await fn();assert.deepEqual(errors,[]);passed++;console.log(`PASS ${name}`);};
+ for(const language of ['zh','en','ja'])await run(`${language}: organization read-only financial facts and permission controls`,async()=>{await fresh(language);await page.evaluate(()=>{window.f06.readonly=true;window.f06.render();});await page.waitForFunction(()=>!document.querySelector('.ap-org-action'));assert.ok(await page.evaluate(()=>document.body.textContent.includes('900,719,925,474.0993')));assert.equal(await page.evaluate(()=>[...document.querySelectorAll('button')].some(button=>button.textContent===window.f06.copy().createUnit)),false);});
+ await run('Actual202 remains unknown and same immutable key/body survive language change',async()=>{await fresh('en');await form();await page.evaluate(()=>{window.f06.unknown=true;});await click('createUnit');await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f06.copy().unknown);assert.ok(await page.evaluate(()=>[...document.querySelectorAll('form')].find(item=>item.querySelector('h4')?.textContent===window.f06.copy().createUnit).querySelector('fieldset').disabled));await page.evaluate(()=>{window.f06.unknown=false;window.f06.language='ja';window.f06.render();});await click('retry');await page.waitForFunction(()=>[...document.querySelectorAll('[role=status]')].some(item=>item.textContent===window.f06.copy().saved));assert.ok(await page.evaluate(()=>{const calls=window.f06.calls.filter(call=>call.method==='POST');return calls.length===2&&calls[0].key===calls[1].key&&calls[0].body===calls[1].body;}));});
+ await run('Late write cannot settle or mutate the next identity',async()=>{await fresh('en');await form();await page.evaluate(()=>{window.f06.delayed=true;});await click('createUnit');await page.waitForFunction(()=>typeof window.f06.release==='function');await page.evaluate(()=>window.f06.switchIdentity());await page.waitForFunction(()=>!document.querySelector('.ap-org-action fieldset')?.disabled);await page.evaluate(()=>window.f06.release());assert.equal(await page.evaluate(()=>[...document.querySelectorAll('[role=status]')].some(item=>item.textContent===window.f06.copy().saved)),false);});
+ await run('Context switch sends real expected version and retires organization panel',async()=>{await fresh('en');await click('personal');await page.waitForFunction(()=>!document.querySelector('.ap-org-action'));assert.ok(await page.evaluate(()=>{const call=window.f06.calls.find(call=>call.path.endsWith('/active-context'));return JSON.parse(call.body).expected_context_version===1&&JSON.parse(call.body).context_type==='PERSONAL';}));});
+ for(const language of ['zh','en','ja'])await run(`${language}: actual Admin DTO and denied management controls`,async()=>{await fresh(language);await page.evaluate(()=>{window.f06.admin=true;window.f06.render();});await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(button=>button.textContent==='Controlled Org · ACTIVE'));await page.evaluate(()=>[...document.querySelectorAll('button')].find(button=>button.textContent==='Controlled Org · ACTIVE').click());await page.waitForFunction(()=>document.querySelector('.adm-panel h3')?.textContent==='Controlled Org');assert.equal(await page.evaluate(()=>[...document.querySelectorAll('button')].some(button=>button.textContent===window.f06.copy().delete||button.textContent===window.f06.copy().disable)),false);assert.ok(await page.evaluate(()=>!document.body.textContent.includes('undefined')));});
+ await run('Admin unknown create survives changing selected organization and retries identical facts',async()=>{await fresh('en');await page.evaluate(()=>{window.f06.admin=true;window.f06.unknown=true;window.f06.render();});await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(button=>button.textContent==='Controlled Org · ACTIVE'));await page.evaluate(()=>{const form=[...document.querySelectorAll('form')].find(item=>item.querySelector('h4')?.textContent===window.f06.copy().create);const inputs=form.querySelectorAll('input');for(const [input,value] of [[inputs[0],'Controlled New Org'],[inputs[1],window.f06.user]]){Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));}});await click('create');await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f06.copy().unknown);await page.evaluate(()=>[...document.querySelectorAll('button')].find(button=>button.textContent==='Other Org · DISABLED').click());await page.waitForFunction(()=>document.querySelector('.adm-panel h3')?.textContent==='Other Org');assert.ok(await page.evaluate(()=>[...document.querySelectorAll('[role=alert]')].some(item=>item.textContent===window.f06.copy().unknown)));await page.evaluate(()=>{window.f06.unknown=false;});await click('retry');await page.waitForFunction(()=>[...document.querySelectorAll('[role=status]')].some(item=>item.textContent===window.f06.copy().saved));assert.ok(await page.evaluate(()=>{const calls=window.f06.calls.filter(call=>call.method==='POST');return calls.length===2&&calls[0].key===calls[1].key&&calls[0].body===calls[1].body;}));});
+ await run('Organization purchase excludes a channel absent from real provider capabilities',async()=>{await fresh('en');await page.evaluate(()=>{window.f06.purchase=true;window.f06.authorizationVersion++;window.f06.capabilityChannels=['WECHAT'];window.f06.render();});await page.waitForFunction(()=>[...document.querySelectorAll('form')].some(form=>form.querySelector('h4')?.textContent===window.f06.copy().purchase));await page.waitForFunction(()=>document.body.textContent.includes(window.f06.copy().noPurchaseChannel));assert.equal(await page.evaluate(()=>{const form=[...document.querySelectorAll('form')].find(form=>form.querySelector('h4')?.textContent===window.f06.copy().purchase);return [...form.querySelectorAll('select')[1].options].some(option=>option.value==='ALIPAY');}),false);assert.equal(await page.evaluate(()=>window.f06.calls.some(call=>call.path.endsWith('/payment-capabilities'))),true);assert.equal(await page.evaluate(()=>window.f06.calls.some(call=>call.method==='POST')),false);});
+ await run('Paused product cannot initiate organization purchase',async()=>{await fresh('en');await page.evaluate(()=>{window.f06.purchase=true;window.f06.authorizationVersion++;window.f06.productStatus='PRODUCT_PAUSED';window.f06.render();});await page.waitForFunction(()=>[...document.querySelectorAll('form')].some(form=>form.querySelector('h4')?.textContent===window.f06.copy().purchase));await page.waitForFunction(()=>document.body.textContent.includes(window.f06.copy().noPurchaseChannel));assert.ok(await page.evaluate(()=>[...document.querySelectorAll('form')].find(form=>form.querySelector('h4')?.textContent===window.f06.copy().purchase).querySelector('button').disabled));assert.equal(await page.evaluate(()=>window.f06.calls.some(call=>call.method==='POST')),false);});
+ for(const language of ['zh','en','ja'])for(const testOnly of [false,true])await run(`${language}: ${testOnly?'controlled test':'formal'} available channels retain current payment mode`,async()=>{await fresh(language);await page.evaluate(testOnly=>{window.f06.purchase=true;window.f06.authorizationVersion++;window.f06.testOnly=testOnly;window.f06.render();},testOnly);await page.waitForFunction(()=>[...document.querySelectorAll('select option')].some(option=>option.value==='controlled-org-product'));await page.evaluate(()=>{const form=[...document.querySelectorAll('form')].find(form=>form.querySelector('h4')?.textContent===window.f06.copy().purchase);const product=form.querySelectorAll('select')[0];product.value='controlled-org-product';product.dispatchEvent(new Event('change',{bubbles:true}));});await page.waitForFunction(()=>[...document.querySelectorAll('select option')].some(option=>option.value==='ALIPAY'));assert.ok(await page.evaluate(testOnly=>document.body.textContent.includes(window.f06.copy()[testOnly?'testCollection':'formalCollection']),testOnly));assert.equal(await page.evaluate(()=>[...document.querySelectorAll('form')].find(form=>form.querySelector('h4')?.textContent===window.f06.copy().purchase).querySelector('button').disabled),false);assert.equal(await page.evaluate(()=>window.f06.calls.some(call=>call.method==='POST')),false);});
+ for (const language of ['zh', 'en', 'ja']) await run(`${language}: model policy labels and current read-only permission`, async () => {
+  await fresh(language);
+  await page.evaluate(() => { window.f06.modelPolicy = true; window.f06.readonly = true; window.f06.authorizationVersion++; window.f06.render(); });
+  await page.waitForFunction(() => document.querySelector('.ap-org-model-policy select'));
+  assert.ok(await page.evaluate(() => {
+   const section = document.querySelector('.ap-org-model-policy'), copy = window.f06.copy();
+   return section.querySelector('h3').textContent === copy.modelPolicy && section.querySelector('fieldset').disabled &&
+    [...section.querySelector('select').options].map(option => option.textContent).join('|') === [copy.ALLOW_ALL, copy.ALLOW_LIST, copy.DENY_LIST].join('|') &&
+    ![...section.querySelectorAll('button')].some(button => button.textContent === copy.save) && !section.textContent.includes('undefined');
+  }));
+  assert.equal(await page.evaluate(() => window.f06.calls.some(call => call.method === 'PUT')), false);
+ });
+ await run('Model policy committed PUT unknown ACK retries original CAS, models and key after language change', async () => {
+  await fresh('en');
+  await page.evaluate(() => { window.f06.modelPolicy = true; window.f06.authorizationVersion++; window.f06.render(); });
+  await page.waitForFunction(() => document.querySelector('.ap-org-model-policy select'));
+  await page.select('.ap-org-model-policy select', 'ALLOW_LIST');
+  await page.click('.ap-org-model-policy input[type=checkbox]');
+  await page.type('.ap-org-model-policy input:not([type=checkbox])', 'Controlled policy edit');
+  await page.evaluate(() => { window.f06.unknown = true; document.querySelector('.ap-org-model-policy form button').click(); });
+  await page.waitForFunction(() => document.querySelector('.ap-org-model-policy [role=alert]')?.textContent === window.f06.copy().unknown);
+  assert.ok(await page.evaluate(() => window.f06.policy.version === 1 && document.querySelector('.ap-org-model-policy fieldset').disabled));
+  await page.evaluate(() => { window.f06.unknown = false; window.f06.language = 'ja'; window.f06.render(); });
+  await page.waitForFunction(() => document.querySelector('.ap-org-model-policy form button')?.textContent === window.f06.copy().retry);
+  await page.click('.ap-org-model-policy form button');
+  await page.waitForFunction(() => document.querySelector('.ap-org-model-policy [role=status]')?.textContent === window.f06.copy().saved);
+  assert.ok(await page.evaluate(() => {
+   const calls = window.f06.calls.filter(call => call.method === 'PUT'), body = JSON.parse(calls[0].body);
+   return calls.length === 2 && calls[0].key === calls[1].key && calls[0].body === calls[1].body && body.expected_version === 0 &&
+    body.mode === 'ALLOW_LIST' && body.model_ids.length === 1 && body.model_ids[0] === window.f06.other && window.f06.policy.version === 1;
+  }));
+ });
+ for (const name of ['null', 'missing', 'invalid', 'duplicate', 'display', 'upstream']) for (const refresh of [false, true]) {
+  await run(`Model policy ${refresh ? 'refresh' : 'initial'} ${name} catalog becomes unavailable without a PUT`, async () => {
+   await fresh('en');
+   if (refresh) {
+    await page.evaluate(() => { window.f06.modelPolicy = true; window.f06.policy.mode = 'ALLOW_LIST'; window.f06.authorizationVersion++; window.f06.render(); });
+    await page.waitForFunction(() => document.querySelector('.ap-org-model-policy input[type=checkbox]'));
+   }
+   await page.evaluate(({ name, refresh }) => {
+    const model = { model_id: window.f06.other, display_name: 'Controlled model' };
+    window.f06.catalogItems = name === 'null' ? [null] : name === 'missing' ? [{}] : name === 'invalid' ? [{ model_id: 'not-a-uuid' }] : name === 'duplicate' ? [model, { ...model }] : name === 'display' ? [{ ...model, display_name: {} }] : [{ ...model, upstream_model_ref: [] }];
+    if (refresh) document.querySelector('.ap-org-model-policy > button').click();
+    else { window.f06.modelPolicy = true; window.f06.policy.mode = 'ALLOW_LIST'; window.f06.authorizationVersion++; window.f06.render(); }
+   }, { name, refresh });
+   await page.waitForFunction(() => document.querySelector('.ap-org-model-policy [role=alert]')?.textContent === window.f06.copy().unavailable);
+   assert.equal(await page.evaluate(() => !!document.querySelector('.ap-org-model-policy form')), false);
+   assert.equal(await page.evaluate(() => window.f06.calls.some(call => call.method === 'PUT')), false);
+  });
+ }
+ console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
+}catch(error){console.error(`FAIL after ${passed} PASS: ${error.message}`);process.exitCode=1;}
+finally{if(browser)await browser.close();if(vite)await vite.close();fs.rmSync(profile,{recursive:true,force:true});}

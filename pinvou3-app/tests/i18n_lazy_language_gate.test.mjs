@@ -66,9 +66,10 @@ test('失败分支:源码注入桩 loader 验证 false + 清挂起 + 可重试',
     "en: () => import('./i18n/en.js'),",
     `en: () => globalThis.__stubEn(),`,
   );
-  source = source.replace(
-    "import { dictZh } from './i18n/zh.js';",
-    `import { dictZh } from '${enUrl.replace('/en.js', '/zh.js')}';`,
+  // Resolve every static dependency, including the delivered account/admin
+  // dictionary re-exports, from the original module before using a data URL.
+  source = source.replace(/\bfrom (['"])(\.\/[^'"]+)\1/gu, (_match, quote, specifier) =>
+    `from ${quote}${new URL(specifier, i18nUrl).href}${quote}`,
   );
   let attempts = 0;
   globalThis.__stubEn = async () => {

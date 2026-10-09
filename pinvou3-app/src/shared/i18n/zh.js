@@ -26,7 +26,7 @@ const conversationZh = {
   attachment:'附件', operations:(count,failedCount)=>`执行 ${count} 项${failedCount?` · ${failedCount} 项失败`:''}`, copyReply:'复制回复', copyReplySuccess:'已复制', copyReplyFailed:'复制失败',
   exportReply:'导出', exportReplyTitle:'导出回复', exportMarkdown:'Markdown 文档', exportMarkdownHint:'默认，保留原始排版', exportHtml:'HTML 文档', exportHtmlHint:'适合在浏览器中查看', exportSuccess:'导出成功', exportFailed:'导出失败', exportTooLarge:'回复内容超出导出大小限制',
   shareReply:'分享', shareReplyTitle:'分享回复', shareSystem:'系统分享', shareSystemHint:'选择系统中已安装的通信应用', shareApps:'复制内容并打开应用', shareSuccess:'已分享', shareCopiedOpen:app=>`内容已复制，已尝试打开${app}，请粘贴发送`, shareCopiedWeb:app=>`内容已复制，请打开${app}粘贴发送`, shareFailed:'分享失败', shareUnavailable:'系统分享不可用，内容已复制', shareTargets:{wechat:'微信',wecom:'企业微信',feishu:'飞书',dingtalk:'钉钉',qq:'QQ'},
-  technicalDetails:'技术详情',
+  technicalDetails:'技术详情', walletInsufficientTitle:'余额不足', walletInsufficientMessage:'当前余额不足，无法开始本次任务。', walletInsufficientCompletedTitle:'余额不足', walletInsufficientCompletedMessage:'本次回答已完成，但账户余额不足，继续使用前请充值。', rechargeNow:'立即充值',
 };
 
 const codexZh = {
@@ -2236,3 +2236,21 @@ Object.assign(dictZh.uiChat, {
   bgTasks: '后台任务',
   bgTasksRunning: n => `${n} 个后台任务运行中`,
 });
+
+// F05 complete platform-model selection copy, supplied by shared i18n.
+dictZh.modelAccessTitle = '欢迎使用 PINVOU';
+dictZh.modelAccessDesc = '登录品悟账号即可使用平台模型，或连接你自己的本地与第三方模型。';
+dictZh.modelAccessLogin = '登录';
+dictZh.modelAccessExternal = '使用本地/第三方模型';
+Object.assign(dictZh.uiSettingsDetail, {
+  platformModels:'品悟平台模型',
+  platformModelsDesc:'选择空白新会话的默认模型，不会更改已有会话。',
+  platformModelsLoading:'正在加载平台模型…',
+  platformModelsSignIn:'登录品悟账号后可选择平台模型。',
+  platformModelsUnavailable:'暂时无法加载平台模型，请稍后重试。',
+  appliesToNewSessions:'应用于新会话',
+  modelDeprecated:'即将下架',
+  modelUnavailable:'当前不可用',
+  modelSwitchFailed:'模型切换失败，请重试。',
+});
+dictZh.uiModelReplacement = { title:'当前模型不能继续此历史会话', lead:'原会话与消息保持不变。请选择当前可用模型，创建带来源记录的新分支后继续。', create:'创建替代分支', creating:'创建中…' };
