@@ -923,6 +923,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forkguard_model_operation_vision_effective_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vision_response_body()))
+            .mount(&server)
+            .await;
+        let workspace = tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("tiny.png"),
+            create_test_png(2, 2, [1, 2, 3, 255]),
+        )
+        .unwrap();
+        let context = ToolContext::new(workspace.path());
+        for (base, suffix, matching) in [
+            (server.uri(), None, false),
+            (format!("{}/v1", server.uri()), None, true),
+            (format!("{}/v1/", server.uri()), None, false),
+            (
+                format!("{}/v1", server.uri()),
+                Some("other/chat/completions"),
+                false,
+            ),
+            (
+                format!("{}/v1", server.uri()),
+                Some("v1/chat/completions"),
+                true,
+            ),
+        ] {
+            let mut config: crate::config::Config = serde_json::from_value(json!({
+                "provider":"deepseek",
+                "providers":{"deepseek":{
+                    "api_key":"owned-test-key", "base_url":base,
+                    "model":"deepseek-v4-pro", "path_suffix":suffix
+                }},
+                "http_headers":{"X-Pinvou-Context-Id":"owned-test-context"}
+            }))
+            .unwrap();
+            config.request_idempotency_header = Some("idempotency-key".into());
+            let route = DeepSeekClient::new(&config).unwrap();
+            assert_eq!(
+                route.idempotency_matches_route(&base, "owned-test-key"),
+                matching
+            );
+            let tool = ImageAnalyzeTool::new_with_route_client(
+                VisionModelConfig {
+                    model: "test-vision-model".into(),
+                    api_key: Some("owned-test-key".into()),
+                    base_url: Some(base.clone()),
+                },
+                Some(route),
+            );
+            tool.execute(json!({"image_path":"tiny.png"}), &context)
+                .await
+                .unwrap();
+            let receipts = server.received_requests().await.unwrap();
+            let receipt = receipts.last().unwrap();
+            assert_eq!(
+                receipt.url.path(),
+                reqwest::Url::parse(&format!("{base}/chat/completions"))
+                    .unwrap()
+                    .path()
+            );
+            assert_eq!(receipt.headers.contains_key("idempotency-key"), matching);
+            assert_eq!(
+                receipt.headers.contains_key("x-pinvou-context-id"),
+                matching
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn forkguard_model_operation_vision_http_retry_keeps_id() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -949,7 +1020,7 @@ mod tests {
         let route = DeepSeekClient::new(&crate::config::Config {
             provider: Some("deepseek".into()),
             api_key: Some("owned-test-key".into()),
-            base_url: Some(server.uri()),
+            base_url: Some(format!("{}/v1", server.uri())),
             default_text_model: Some("deepseek-v4-pro".into()),
             request_idempotency_header: Some("idempotency-key".into()),
             http_headers: Some(std::collections::HashMap::from([
@@ -963,7 +1034,7 @@ mod tests {
             VisionModelConfig {
                 model: "test-vision-model".into(),
                 api_key: Some("owned-test-key".into()),
-                base_url: Some(server.uri()),
+                base_url: Some(format!("{}/v1", server.uri())),
             },
             Some(route.clone()),
         );
@@ -1009,7 +1080,7 @@ mod tests {
             VisionModelConfig {
                 model: "test-vision-model".into(),
                 api_key: Some("ordinary-vision-key".into()),
-                base_url: Some(server.uri()),
+                base_url: Some(format!("{}/v1", server.uri())),
             },
             Some(route),
         );

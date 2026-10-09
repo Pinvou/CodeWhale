@@ -4,6 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::llm_client::LlmClient;
+use crate::llm_client::PreparedStreamCall;
 use crate::llm_client::StreamEventBox;
 use crate::models::{MessageRequest, MessageResponse};
 
@@ -66,15 +67,26 @@ pub trait ModelClient: Send + Sync {
     ) -> Result<StreamEventBox> {
         self.create_message_stream(request).await
     }
+    fn prepare_stream_call(&self, request: MessageRequest) -> Result<PreparedStreamCall> {
+        Ok(PreparedStreamCall::plain(request))
+    }
+    async fn create_prepared_message_stream_for_operation(
+        &self,
+        prepared: PreparedStreamCall,
+        operation_id: uuid::Uuid,
+    ) -> Result<StreamEventBox> {
+        self.create_message_stream_for_operation(prepared.request, operation_id)
+            .await
+    }
     /// Conservative caller-request identity, including local metadata. Clients
     /// that send idempotency headers must override it with normalized outbound
     /// facts so harmless caller-local changes do not split transport retries.
     fn stream_operation_identity(&self, request: &MessageRequest) -> Result<String> {
-        Ok(crate::hashing::sha256_hex(&serde_json::to_vec(&(
+        crate::llm_client::caller_stream_operation_identity(
             self.provider_name(),
             self.billing_base_url(),
             request,
-        ))?))
+        )
     }
     async fn health_check(&self) -> Result<bool>;
 }
@@ -147,6 +159,16 @@ where
 
     fn stream_operation_identity(&self, request: &MessageRequest) -> Result<String> {
         LlmClient::stream_operation_identity(self, request)
+    }
+    fn prepare_stream_call(&self, request: MessageRequest) -> Result<PreparedStreamCall> {
+        LlmClient::prepare_stream_call(self, request)
+    }
+    async fn create_prepared_message_stream_for_operation(
+        &self,
+        prepared: PreparedStreamCall,
+        operation_id: uuid::Uuid,
+    ) -> Result<StreamEventBox> {
+        LlmClient::create_prepared_message_stream_for_operation(self, prepared, operation_id).await
     }
 }
 

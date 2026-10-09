@@ -2966,7 +2966,8 @@ pub struct Config {
     /// synthesis and native-search POSTs each start a new call whose transport
     /// retries share its key; successive agentic-search rounds use new keys.
     /// Model listing does not mint logical-call keys; native-search GETs
-    /// neither mint nor inherit them. Explicit static headers are unchanged.
+    /// neither mint nor inherit them. Ordinary routes retain static headers;
+    /// a static Idempotency-Key conflicts with this opt-in and is rejected.
     #[serde(skip)]
     pub request_idempotency_header: Option<String>,
     /// Optional user-facing tab/window title shown as `[title] …` in front of
@@ -5529,6 +5530,11 @@ impl Config {
                 "Clearing host-only request idempotency: the source provider identity is unresolved or differs from the scoped route",
             );
             self.request_idempotency_header = None;
+        }
+        if identity.migrated_legacy_ollama_cloud_route {
+            crate::logging::warn(
+                "Scoping a legacy Ollama cloud route to Ollama Cloud compatibility mode; preserving its persisted legacy identity",
+            );
         }
         self.migrated_legacy_ollama_cloud_route = identity.migrated_legacy_ollama_cloud_route;
         self.provider = Some(identity.key.clone());

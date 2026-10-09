@@ -311,6 +311,16 @@ pub struct DeepSeekClient {
     pub(super) stream_idle_timeout: Duration,
 }
 
+// Bound to the frozen route as well as the body; another client must not
+// dispatch a prepared operation using different credentials or transport.
+struct PreparedOperationStream {
+    route_identity: String,
+    wire_format: WireFormat,
+    auth_disabled: bool,
+    path_suffix: Option<String>,
+    prepared: PreparedOutboundRequest,
+}
+
 const CONNECTION_FAILURE_THRESHOLD: u32 = 2;
 const RECOVERY_PROBE_COOLDOWN: Duration = Duration::from_secs(15);
 
@@ -1288,6 +1298,15 @@ impl DeepSeekClient {
                 Ok::<_, anyhow::Error>(header)
             })
             .transpose()?;
+        // Static keys remain supported on ordinary routes, but a host-owned
+        // operation key cannot coexist with a different default key on GETs.
+        anyhow::ensure!(
+            request_idempotency_header.is_none()
+                || !http_headers
+                    .keys()
+                    .any(|name| name.eq_ignore_ascii_case("idempotency-key")),
+            "Static Idempotency-Key conflicts with host operation idempotency"
+        );
         let auth_disabled =
             auth_mode_disables_api_key(config.auth_mode_for_provider(api_provider).as_deref());
         let insecure_skip_tls_verify = config.insecure_skip_tls_verify();
@@ -3299,6 +3318,15 @@ impl DeepSeekClient {
         client
     }
 
+    fn prepared_operation_identity(&self, prepared: &PreparedOutboundRequest) -> Result<String> {
+        Ok(crate::hashing::sha256_hex(&serde_json::to_vec(&(
+            self.api_provider.as_str(),
+            &self.operation_route_identity,
+            &prepared.endpoint.url,
+            prepared.canonical_body(),
+        ))?))
+    }
+
     pub(super) fn with_operation_header(
         &self,
         builder: reqwest::RequestBuilder,
@@ -3327,7 +3355,11 @@ impl DeepSeekClient {
             && !(self.api_provider == ApiProvider::XiaomiMimo
                 && (xiaomi_mimo_base_url_uses_token_plan(&self.base_url)
                     || xiaomi_mimo_api_key_uses_token_plan(&self.api_key)))
-            && self.base_url.trim_end_matches('/') == base_url.trim_end_matches('/')
+            && api_url_with_suffix(
+                &self.base_url,
+                "chat/completions",
+                self.path_suffix.as_deref(),
+            ) == format!("{base_url}/chat/completions")
             && self.api_key == api_key
     }
     async fn perform_message(&self, request: MessageRequest) -> Result<MessageResponse> {
@@ -3355,6 +3387,16 @@ impl DeepSeekClient {
         let inference = self.acquire_remote_control_inference_permit().await;
         let permit = self.acquire_provider_request_permit().await;
         let prepared = self.prepare_outbound_request(request, true)?;
+        self.finish_prepared_stream(prepared, inference, permit)
+            .await
+    }
+
+    async fn finish_prepared_stream(
+        &self,
+        prepared: PreparedOutboundRequest,
+        inference: Option<RemoteControlInferencePermit>,
+        permit: Option<ProviderRequestPermit>,
+    ) -> Result<crate::llm_client::StreamEventBox> {
         let projection_warning = (!prepared.omitted_tool_names.is_empty()).then(|| {
             let omitted_tool_count = prepared.omitted_tool_names.len();
             (
@@ -3481,20 +3523,68 @@ impl LlmClient for DeepSeekClient {
     }
     fn stream_operation_identity(&self, request: &MessageRequest) -> Result<String> {
         if self.request_idempotency_header.is_none() {
-            // Ordinary routes do not need a second wire preparation.
-            return Ok(crate::hashing::sha256_hex(&serde_json::to_vec(&(
-                self.api_provider.as_str(),
-                &self.base_url,
+            return crate::llm_client::caller_stream_operation_identity(
+                self.provider_name(),
+                self.billing_base_url(),
                 request,
-            ))?));
+            );
         }
         let prepared = self.prepare_outbound_request(request.clone(), true)?;
-        Ok(crate::hashing::sha256_hex(&serde_json::to_vec(&(
-            self.api_provider.as_str(),
-            &self.operation_route_identity,
-            &prepared.endpoint.url,
-            prepared.canonical_body(),
-        ))?))
+        self.prepared_operation_identity(&prepared)
+    }
+
+    fn prepare_stream_call(
+        &self,
+        request: MessageRequest,
+    ) -> Result<crate::llm_client::PreparedStreamCall> {
+        if self.request_idempotency_header.is_none() {
+            return Ok(crate::llm_client::PreparedStreamCall::plain(request));
+        }
+        let prepared = self.prepare_outbound_request(request.clone(), true)?;
+        let identity = self.prepared_operation_identity(&prepared)?;
+        Ok(crate::llm_client::PreparedStreamCall::with_transport(
+            request,
+            identity,
+            PreparedOperationStream {
+                route_identity: self.operation_route_identity.clone(),
+                wire_format: self.wire_format,
+                auth_disabled: self.auth_disabled,
+                path_suffix: self.path_suffix.clone(),
+                prepared,
+            },
+        ))
+    }
+
+    async fn create_prepared_message_stream_for_operation(
+        &self,
+        call: crate::llm_client::PreparedStreamCall,
+        operation_id: uuid::Uuid,
+    ) -> Result<crate::llm_client::StreamEventBox> {
+        if self.request_idempotency_header.is_none() {
+            anyhow::ensure!(
+                call.operation_identity.is_none(),
+                "Prepared operation belongs to another route"
+            );
+            return self
+                .create_message_stream_for_operation(call.request, operation_id)
+                .await;
+        }
+        let payload = call
+            .transport::<PreparedOperationStream>()
+            .context("Missing prepared operation transport")?;
+        anyhow::ensure!(
+            payload.route_identity == self.operation_route_identity
+                && payload.wire_format == self.wire_format
+                && payload.auth_disabled == self.auth_disabled
+                && payload.path_suffix == self.path_suffix,
+            "Prepared operation belongs to another route"
+        );
+        let client = self.for_operation(operation_id);
+        let inference = client.acquire_remote_control_inference_permit().await;
+        let permit = client.acquire_provider_request_permit().await;
+        client
+            .finish_prepared_stream(payload.prepared.clone(), inference, permit)
+            .await
     }
 }
 

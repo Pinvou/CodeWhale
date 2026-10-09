@@ -680,7 +680,11 @@ pub(crate) async fn resolve_auto_route_with_inventory_for_session_and_cache_poli
     .await
     {
         Ok(Some(recommendation)) => auto_route_from_classifier(&inventory, recommendation),
-        Ok(None) | Err(_) => auto_route_classifier_fallback(heuristic, &inventory),
+        Ok(None) => auto_route_classifier_fallback(heuristic, &inventory),
+        Err(_) => {
+            crate::logging::warn("Auto-route classifier unavailable; retaining heuristic fallback");
+            auto_route_classifier_fallback(heuristic, &inventory)
+        }
     };
     Ok(normalize_auto_route_selection_for_config(config, selection))
 }
@@ -986,7 +990,10 @@ async fn auto_route_inventory_recommendation(
     // [auto.router] route when configured, else the DeepSeek flash default.
     let router_identity = config
         .resolve_provider_identity(inventory.router_provider.as_str())
-        .map_err(anyhow::Error::msg)?;
+        .map_err(|_| {
+            crate::logging::warn("Auto-route classifier provider identity could not be resolved");
+            anyhow::anyhow!("classifier provider identity unavailable")
+        })?;
     router_config.scope_to_provider_identity(&router_identity);
     router_config.default_text_model = Some(inventory.router_model.clone());
 
@@ -1219,6 +1226,34 @@ fn truncate_for_auto_router(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn forkguard_model_operation_classifier_resolution_failure_is_sanitized() {
+        let config = Config::default();
+        let inventory = ModelInventory {
+            active_provider: ApiProvider::Deepseek,
+            router_provider: ApiProvider::Custom,
+            router_model: "test-model".into(),
+            router_thinking: None,
+            router_timeout_secs: 4,
+            router_configured: true,
+            router_available: true,
+            cross_provider_auto: false,
+            candidates: Vec::new(),
+        };
+        let error = auto_route_inventory_recommendation(
+            &config, &inventory, "classify", "", "agent", "auto", "off", false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "classifier provider identity unavailable"
+        );
+        let heuristic = auto_route_from_inventory_heuristic(&config, "quick status", &inventory);
+        let fallback = auto_route_classifier_fallback(heuristic, &inventory);
+        assert_eq!(fallback.source, AutoRouteSource::Heuristic);
+    }
 
     #[tokio::test]
     async fn forkguard_model_operation_classifier_distinguishes_custom_identities() {

@@ -26,8 +26,10 @@ use crate::config::RetryPolicy;
 use crate::models::{MessageRequest, MessageResponse, StreamEvent};
 use anyhow::Result;
 use serde_json::Value;
+use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -39,6 +41,54 @@ pub mod mock;
 /// Type alias for boxed stream of SSE events
 pub type StreamEventBox =
     Pin<Box<dyn futures_util::Stream<Item = Result<StreamEvent>> + Send + 'static>>;
+
+/// Request-local preparation reused by transport retries, never a global cache.
+/// Provider payloads remain opaque to the Engine and are not logged or serialized.
+#[derive(Clone)]
+pub struct PreparedStreamCall {
+    pub request: MessageRequest,
+    pub operation_identity: Option<String>,
+    transport: Option<Arc<dyn Any + Send + Sync>>,
+}
+
+impl PreparedStreamCall {
+    #[must_use]
+    pub fn plain(request: MessageRequest) -> Self {
+        Self {
+            request,
+            operation_identity: None,
+            transport: None,
+        }
+    }
+    #[must_use]
+    pub fn with_transport<T: Any + Send + Sync>(
+        request: MessageRequest,
+        identity: String,
+        payload: T,
+    ) -> Self {
+        Self {
+            request,
+            operation_identity: Some(identity),
+            transport: Some(Arc::new(payload)),
+        }
+    }
+    #[must_use]
+    pub fn transport<T: Any>(&self) -> Option<&T> {
+        self.transport.as_ref()?.downcast_ref()
+    }
+}
+
+/// Compatibility identity for callers explicitly requesting a conservative
+/// caller-request hash. The Engine's ordinary dispatch path does not invoke it.
+pub fn caller_stream_operation_identity(
+    provider: &str,
+    base_url: Option<&str>,
+    request: &MessageRequest,
+) -> Result<String> {
+    Ok(crate::hashing::sha256_hex(&serde_json::to_vec(&(
+        provider, base_url, request,
+    ))?))
+}
 
 /// Unified interface for LLM providers.
 ///
@@ -91,16 +141,24 @@ pub trait LlmClient: Send + Sync {
         self.create_message_stream(request)
     }
 
+    fn prepare_stream_call(&self, request: MessageRequest) -> Result<PreparedStreamCall> {
+        Ok(PreparedStreamCall::plain(request))
+    }
+
+    fn create_prepared_message_stream_for_operation(
+        &self,
+        prepared: PreparedStreamCall,
+        operation_id: Uuid,
+    ) -> impl Future<Output = Result<StreamEventBox>> + Send {
+        self.create_message_stream_for_operation(prepared.request, operation_id)
+    }
+
     /// Conservative fallback identity over the full caller request, including
     /// local metadata. It may split retries whose normalized wire bodies match.
     /// Transports that opt into real idempotency headers must override this
     /// with their prepared wire body, endpoint and route identity.
     fn stream_operation_identity(&self, request: &MessageRequest) -> Result<String> {
-        Ok(crate::hashing::sha256_hex(&serde_json::to_vec(&(
-            self.provider_name(),
-            self.billing_base_url(),
-            request,
-        ))?))
+        caller_stream_operation_identity(self.provider_name(), self.billing_base_url(), request)
     }
 
     /// Optional health check to verify API connectivity

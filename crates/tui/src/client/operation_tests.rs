@@ -40,6 +40,139 @@ fn config(base: &str, header: Option<&str>) -> Config {
 }
 
 #[tokio::test]
+async fn forkguard_model_operation_static_header_conflict() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[]})))
+        .mount(&server)
+        .await;
+    for name in ["idempotency-key", "Idempotency-Key", "IDEMPOTENCY-KEY"] {
+        let mut configured = config(&server.uri(), Some("idempotency-key"));
+        configured.http_headers = Some(HashMap::from([(name.into(), "static-test-key".into())]));
+        let error = DeepSeekClient::new(&configured)
+            .err()
+            .expect("conflict rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("Static Idempotency-Key conflicts")
+        );
+        assert!(!error.to_string().contains("static-test-key"));
+        assert!(!error.to_string().contains("owned-test-key"));
+        let mut provider_headers: Config = serde_json::from_value(json!({
+            "provider":"deepseek",
+            "providers":{"deepseek":{
+                "api_key":"owned-test-key", "base_url":server.uri(),
+                "model":"deepseek-v4-pro", "http_headers":{(name):"static-test-key"}
+            }}
+        }))
+        .unwrap();
+        provider_headers.request_idempotency_header = Some("idempotency-key".into());
+        assert!(
+            DeepSeekClient::new(&provider_headers).is_err(),
+            "provider headers also conflict"
+        );
+        configured.request_idempotency_header = None;
+        DeepSeekClient::new(&configured)
+            .unwrap()
+            .list_models()
+            .await
+            .unwrap();
+    }
+    let receipts = server.received_requests().await.unwrap();
+    assert_eq!(receipts.len(), 3);
+    for receipt in receipts {
+        assert_eq!(
+            receipt.headers.get("idempotency-key").unwrap(),
+            "static-test-key"
+        );
+    }
+}
+
+#[test]
+fn forkguard_model_operation_api_key_identity() {
+    let first = config("https://example.test/v1", Some("idempotency-key"));
+    let mut second = first.clone();
+    second.api_key = Some("different-owned-test-key".into());
+    let first = DeepSeekClient::new(&first).unwrap();
+    let second = DeepSeekClient::new(&second).unwrap();
+    assert_ne!(
+        first.stream_operation_identity(&request()).unwrap(),
+        second.stream_operation_identity(&request()).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn forkguard_model_operation_prepared_stream_is_frozen() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+            .set_body_string(concat!(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            )))
+        .mount(&server).await;
+    let configured = config(&server.uri(), Some("idempotency-key"));
+    let client = DeepSeekClient::new(&configured).unwrap();
+    let mut call = client.prepare_stream_call(request()).unwrap();
+    let expected = call
+        .transport::<PreparedOperationStream>()
+        .unwrap()
+        .prepared
+        .canonical_body();
+    let id = uuid::Uuid::new_v4();
+    // Dispatch must consume the frozen wire payload, not normalize request again.
+    call.request.max_tokens += 1;
+    for _ in 0..2 {
+        let mut stream = client
+            .create_prepared_message_stream_for_operation(call.clone(), id)
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+    }
+    let mut foreign = configured.clone();
+    foreign.api_key = Some("foreign-owned-test-key".into());
+    let result = DeepSeekClient::new(&foreign)
+        .unwrap()
+        .create_prepared_message_stream_for_operation(call.clone(), id)
+        .await;
+    assert!(result.is_err());
+    let receipts = server.received_requests().await.unwrap();
+    assert_eq!(receipts.len(), 2, "foreign route must not dispatch");
+    for receipt in receipts {
+        assert_eq!(
+            serde_json::from_slice::<Value>(&receipt.body).unwrap(),
+            serde_json::from_str::<Value>(&expected).unwrap()
+        );
+        assert_eq!(
+            receipt
+                .headers
+                .get("idempotency-key")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            id.to_string()
+        );
+    }
+    let ordinary = DeepSeekClient::new(&config(&server.uri(), None)).unwrap();
+    let plain = ordinary.prepare_stream_call(request()).unwrap();
+    assert!(plain.operation_identity.is_none());
+    assert!(plain.transport::<PreparedOperationStream>().is_none());
+    assert_eq!(
+        ordinary.stream_operation_identity(&request()).unwrap(),
+        crate::llm_client::caller_stream_operation_identity(
+            ordinary.provider_name(),
+            ordinary.billing_base_url(),
+            &request()
+        )
+        .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn forkguard_model_operation_auxiliary_retry_keys() {
     for lane in [
         "translation",
