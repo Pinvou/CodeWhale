@@ -23,7 +23,7 @@ func TestRegistrationBonusLifetimeEligibilityPostgresIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
-	repository, _ := newAdminPaginationIntegrationRepository(t, ctx, databaseURL)
+	repository, _ := retainedFinanceRepository(t)
 
 	fingerprint := func(seed byte) string {
 		return strings.Repeat(string([]byte{"0123456789abcdef"[seed%16]}), 64)

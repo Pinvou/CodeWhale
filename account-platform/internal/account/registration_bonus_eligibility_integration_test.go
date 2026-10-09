@@ -18,7 +18,7 @@ func TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration(t *test
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
-	repository, _, _, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
+	repository := retainedWalletFenceActors(t).repository(t)
 	key := bytes.Repeat([]byte{0x31}, 32)
 	if err := repository.ConfigureRegistrationBonusFingerprint("registration-bonus-v1", key); err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegratio
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
-	repository, _, _, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
+	repository := retainedWalletFenceActors(t).repository(t)
 	if err := repository.ConfigureRegistrationBonusFingerprint("registration-bonus-v1", bytes.Repeat([]byte{0x41}, 32)); err != nil {
 		t.Fatal(err)
 	}
