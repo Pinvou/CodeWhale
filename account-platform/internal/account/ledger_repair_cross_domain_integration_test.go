@@ -116,7 +116,7 @@ WHERE command_type='LEDGER_REPAIR' AND policy_version=1 AND snapshot_schema_vers
 		presentedCommand.ReasonCode != "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" || !approvalPaginationHexDigest(presentedCommand.PostingSetDigest) {
 		t.Fatalf("cross-domain presenter command=%#v", detail.Command)
 	}
-	proofSource, err := NewHTTPApprovalProofSource("http://127.0.0.1", billingServer.URL, proofToken)
+	proofSource, err := NewHTTPApprovalProofSource(billingServer.URL, proofToken)
 	if err != nil {
 		t.Fatal(err)
 	}

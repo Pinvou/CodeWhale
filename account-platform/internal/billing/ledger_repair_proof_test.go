@@ -39,6 +39,18 @@ func TestLedgerRepairProofProjectionIsClosedAndActivationGated(t *testing.T) {
 		CorrectLedgerAccountID: usageRevenueAccount, CorrectLedgerAccountType: "USAGE_REVENUE",
 		PostingSetDigest: "aa", FactsDigest: "bb",
 	}
+
+	for _, reasonCode := range []string{"", "OTHER_REASON", " ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT", "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT "} {
+		bad := frozen
+		bad.NormalizedCommand = marshalRaw(map[string]any{
+			"target_journal_entry_id": journalID.String(), "target_posting_id": postingID.String(),
+			"wrong_ledger_account_id": adjustmentAccount.String(), "correct_ledger_account_id": usageRevenueAccount.String(),
+			"amount_microcredits": 30, "reason_code": reasonCode,
+		})
+		if _, _, _, err := currentBillingProofInput(context.Background(), &billingProofFactsStub{ledgerRepair: plan}, bad); !errors.Is(err, ErrApprovalSnapshotMismatch) {
+			t.Fatalf("noncontract Ledger reason accepted: %q err=%v", reasonCode, err)
+		}
+	}
 	repository := &billingProofFactsStub{ledgerRepair: plan}
 	current, reason, ownerState, err := currentBillingProofInput(context.Background(), repository, frozen)
 	if err != nil || reason != "" {

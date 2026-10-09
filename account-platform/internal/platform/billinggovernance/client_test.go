@@ -60,9 +60,9 @@ func TestActivationClientClosedAuthoritativeRead(t *testing.T) {
 	}{
 		{"current", valid, "no-store", 200, true},
 		{"existing inactive", strings.ReplaceAll(valid, `"state":"ACTIVE"`, `"state":"INACTIVE"`), "no-store", 200, true},
-		{"future entitlement v2", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
+		{"installed entitlement v2 inactive", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
 			value.Activations[1].PolicyVersion, value.Activations[1].SnapshotSchemaVersion = 2, 2
-		})), "no-store", 200, false},
+		})), "no-store", 200, true},
 		{"mixed entitlement version", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
 			value.Activations[1].PolicyVersion = 2
 		})), "no-store", 200, false},
@@ -72,7 +72,7 @@ func TestActivationClientClosedAuthoritativeRead(t *testing.T) {
 		{"activated entitlement v2", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
 			value.Activations[1].PolicyVersion, value.Activations[1].SnapshotSchemaVersion = 2, 2
 			value.Activations[1].State = "ACTIVE"
-		})), "no-store", 200, false},
+		})), "no-store", 200, true},
 		{"activated entitlement v1 history", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
 			value.Activations[1].State = "ACTIVE"
 		})), "no-store", 200, false},

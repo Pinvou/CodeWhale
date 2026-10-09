@@ -230,7 +230,8 @@
                 "TOKEN_ROUTE_UPSERT",
                 "TOKEN_ROUTE_DELETE",
                 "TOKEN_CREDENTIAL_VALIDATE",
-                "TOKEN_ROUTE_PROVISIONING_REPAIR"
+                "TOKEN_ROUTE_PROVISIONING_REPAIR",
+                "TOKEN_USAGE_RECONCILIATION_RETRY"
               ]
             },
             "description": "Currently registered COMMAND transport only; APPROVED and ISOLATED commands are excluded. Lookup is read-only and scoped to current permissions, actor, command type and the original stable key."
@@ -3918,6 +3919,366 @@
           },
           "default": {
             "description": "No proof of safe release; stable error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/organizations/{organization_id}/lifecycle": {
+      "put": {
+        "operationId": "applyOrganizationLifecycle",
+        "summary": "applyOrganizationLifecycle",
+        "x-go-handler": "applyOrganizationLifecycle",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.organization.lifecycle"
+          ]
+        },
+        "x-governance-gates": [],
+        "x-approval-policy": {
+          "command": "TOKEN_ORGANIZATION_LIFECYCLE_APPLY",
+          "mode": "AuditOnly"
+        },
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status",
+                  "account_version"
+                ],
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "ACTIVE",
+                      "DISABLED",
+                      "DELETED"
+                    ]
+                  },
+                  "account_version": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 1
+                  },
+                  "preflight_only": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current exact target/version assessment. Blocked organization deletion returns HTTP 409.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "organization_id",
+                    "status",
+                    "account_version",
+                    "ready",
+                    "blockers"
+                  ],
+                  "properties": {
+                    "organization_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ACTIVE",
+                        "DISABLED",
+                        "DELETED"
+                      ]
+                    },
+                    "account_version": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 1
+                    },
+                    "ready": {
+                      "type": "boolean"
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "code",
+                          "resource_type",
+                          "resource_id"
+                        ],
+                        "properties": {
+                          "code": {
+                            "type": "string"
+                          },
+                          "resource_type": {
+                            "type": "string"
+                          },
+                          "resource_id": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error envelope; unavailable authority or conflict is not a completion receipt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Blocked organization deletion returns its assessment; state/version conflicts return a stable error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "organization_id",
+                        "status",
+                        "account_version",
+                        "ready",
+                        "blockers"
+                      ],
+                      "properties": {
+                        "organization_id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "ACTIVE",
+                            "DISABLED",
+                            "DELETED"
+                          ]
+                        },
+                        "account_version": {
+                          "type": "integer",
+                          "format": "int64",
+                          "minimum": 1
+                        },
+                        "ready": {
+                          "type": "boolean"
+                        },
+                        "blockers": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "required": [
+                              "code",
+                              "resource_type",
+                              "resource_id"
+                            ],
+                            "properties": {
+                              "code": {
+                                "type": "string"
+                              },
+                              "resource_type": {
+                                "type": "string"
+                              },
+                              "resource_id": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/organizations/{organization_id}/units/{unit_id}/lifecycle": {
+      "put": {
+        "operationId": "organizationUnitDeletionBlockers",
+        "summary": "organizationUnitDeletionBlockers",
+        "x-go-handler": "organizationUnitDeletionBlockers",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.organization-unit.lifecycle"
+          ]
+        },
+        "x-governance-gates": [],
+        "x-approval-policy": {
+          "command": "TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY",
+          "mode": "AuditOnly"
+        },
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "unit_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status",
+                  "structure_version"
+                ],
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "ACTIVE",
+                      "DELETION_PENDING",
+                      "DELETED"
+                    ]
+                  },
+                  "structure_version": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current exact target/version assessment. Unit deletion can be blocked with ready=false and does not write DELETED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "organization_id",
+                    "status",
+                    "structure_version",
+                    "ready",
+                    "blockers",
+                    "unit_id"
+                  ],
+                  "properties": {
+                    "organization_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ACTIVE",
+                        "DELETION_PENDING",
+                        "DELETED"
+                      ]
+                    },
+                    "structure_version": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 1
+                    },
+                    "ready": {
+                      "type": "boolean"
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "code",
+                          "resource_type",
+                          "resource_id"
+                        ],
+                        "properties": {
+                          "code": {
+                            "type": "string"
+                          },
+                          "resource_type": {
+                            "type": "string"
+                          },
+                          "resource_id": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "unit_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error envelope; unavailable authority or conflict is not a completion receipt.",
             "content": {
               "application/json": {
                 "schema": {

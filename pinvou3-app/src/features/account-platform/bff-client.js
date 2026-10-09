@@ -198,6 +198,9 @@ export class AccountPlatformBffClient {
     return payload;
   }
 
+  accountClosure(signal) { return this.request('account', '/v1/me/account-closure-request', { signal }); }
+  createAccountClosure(confirmation, key, signal) { return this.request('account', '/v1/me/account-closure-requests', { method: 'POST', body: { confirmation }, headers: { 'Idempotency-Key': key }, signal }); }
+
   models(signal) {
     return this.request('token', '/v1/models', { signal });
   }

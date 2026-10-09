@@ -98,8 +98,13 @@ export { dict, LANG_TO_TAG, TAG_TO_LANG, languageFromLocaleTags, initialSystemLa
 export { accountPlatformCopy } from './account-platform-i18n.js';
 export { adminPlatformCopy } from './admin-platform-i18n.js';
 export { financeCopy } from './finance-i18n.js';
+export { ledgerRepairCopy } from './ledger-repair-i18n.js';
 export { reconciliationCopy } from './reconciliation-i18n.js';
 export { organizationCopy } from './organization-i18n.js';
 
 export { tokenManagementCopy } from './token-management-i18n.js';
 export { modelUsageCopy } from './model-usage-i18n.js';
+
+export { accountClosureCopy } from './account-closure-i18n.js';
+export { entitlementCorrectionCopy } from './entitlement-correction-i18n.js';
+export { accountClosedGrantCopy } from './account-closed-grants-i18n.js';

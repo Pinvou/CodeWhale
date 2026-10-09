@@ -231,7 +231,7 @@ WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=1 AND s
 		command.PackageID != entitlementCrossDomainPackageID || command.ReasonCode != "ORIGINAL_SPLIT_MISMATCH" {
 		t.Fatalf("cross-domain presenter command=%#v", detail.Command)
 	}
-	proofSource, err := NewHTTPApprovalProofSource("http://127.0.0.1", billingServer.URL, proofToken)
+	proofSource, err := NewHTTPApprovalProofSource(billingServer.URL, proofToken)
 	if err != nil {
 		t.Fatal(err)
 	}

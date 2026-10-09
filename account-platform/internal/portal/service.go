@@ -726,11 +726,11 @@ func accountPathAllowed(method, resource string) bool {
 	}
 	if method == http.MethodPost {
 		switch resource {
-		case "/v1/account/bootstrap", "/v1/me/password-changes", "/v1/me/profile-change-requests":
+		case "/v1/account/bootstrap", "/v1/me/password-changes", "/v1/me/profile-change-requests", "/v1/me/account-closure-requests":
 			return true
 		}
 	}
-	if method == http.MethodGet && (resource == "/v1/me" || resource == "/v1/me/authorization-context") {
+	if method == http.MethodGet && (resource == "/v1/me" || resource == "/v1/me/authorization-context" || resource == "/v1/me/account-closure-request" || resource == "/v1/me/commerce-customer-mapping") {
 		return true
 	}
 	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")
@@ -771,18 +771,21 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if method == http.MethodHead {
 		method = http.MethodGet
 	}
+	if resource == "/admin/v2/approval-command-prechecks" {
+		return method == http.MethodPost
+	}
 	if method == http.MethodGet && resource == "/admin/v1/users" {
 		return true
 	}
 	if resource == "/admin/v1/sms-configuration" {
 		return method == http.MethodGet || method == http.MethodPut
 	}
-	if method == http.MethodGet && (resource == "/admin/v1/registration-operations" || resource == "/admin/v1/profile-change-requests") {
+	if method == http.MethodGet && (resource == "/admin/v1/registration-operations" || resource == "/admin/v1/profile-change-requests" || resource == "/admin/v1/account-closure-requests") {
 		return true
 	}
 	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")
 	if method == http.MethodPost && len(parts) == 6 && parts[0] == "admin" && parts[1] == "v1" && pathUUID(parts[3]) && parts[4] == "actions" {
-		return parts[2] == "registration-operations" && (parts[5] == "retry" || parts[5] == "compensate") || parts[2] == "profile-change-requests" && parts[5] == "retry"
+		return parts[2] == "registration-operations" && (parts[5] == "retry" || parts[5] == "compensate") || parts[2] == "profile-change-requests" && parts[5] == "retry" || parts[2] == "account-closure-requests" && parts[5] == "retry"
 	}
 	return method == http.MethodPatch && len(parts) == 5 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "users" && pathUUID(parts[3]) && parts[4] == "status"
 }

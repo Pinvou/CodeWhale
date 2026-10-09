@@ -126,6 +126,7 @@ VALUES($1,'PERSONAL',$2,'ACTIVE',100,0,3,$3,$3)`, walletID, ownerID, now); err !
 		Scan(&postingCount, &postingSum); err != nil || postingCount != 2 || postingSum != 0 {
 		t.Fatalf("repair postings count=%d sum=%d err=%v", postingCount, postingSum, err)
 	}
+	ledgerRepairAssertPostingDirections(t, ctx, pool, result, 30)
 	var lotCount int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ledger_postings WHERE journal_entry_id=$1 AND credit_lot_id IS NOT NULL`, result.JournalEntryID).Scan(&lotCount); err != nil || lotCount != 0 {
 		t.Fatalf("repair postings carry credit lots: %d err=%v", lotCount, err)
@@ -236,6 +237,7 @@ func TestLedgerRepairPlatformOnlyShapePostgresIntegration(t *testing.T) {
 	}
 	// The target journal stays byte-identical and the repair touches no wallet,
 	// lot, entitlement or receivable fact.
+	ledgerRepairAssertPostingDirections(t, ctx, pool, result, -30)
 	confirmed, err := ledgerRepairReadTarget(ctx, pool, targetJournalID)
 	if err != nil {
 		t.Fatal(err)
@@ -244,6 +246,20 @@ func TestLedgerRepairPlatformOnlyShapePostgresIntegration(t *testing.T) {
 		t.Fatal("target journal was rewritten")
 	}
 	ledgerRepairAssertZeroChange(t, ctx, pool, before)
+}
+
+func ledgerRepairAssertPostingDirections(t *testing.T, ctx context.Context, pool *pgxpool.Pool, result LedgerRepairResult, targetDelta int64) {
+	t.Helper()
+	var wrongDelta, correctDelta int64
+	if err := pool.QueryRow(ctx, `SELECT delta_microcredits FROM ledger_postings WHERE journal_entry_id=$1 AND ledger_account_id=$2`, result.JournalEntryID, result.WrongLedgerAccountID).Scan(&wrongDelta); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT delta_microcredits FROM ledger_postings WHERE journal_entry_id=$1 AND ledger_account_id=$2`, result.JournalEntryID, result.CorrectLedgerAccountID).Scan(&correctDelta); err != nil {
+		t.Fatal(err)
+	}
+	if wrongDelta != -targetDelta || correctDelta != targetDelta {
+		t.Fatalf("target delta=%d correction has wrong leg directions: wrong=%d correct=%d", targetDelta, wrongDelta, correctDelta)
+	}
 }
 
 type ledgerRepairZeroChange struct {

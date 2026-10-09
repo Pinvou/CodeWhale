@@ -33,6 +33,7 @@ type Service struct {
 	humanDelegations            *humandelegation.Signer
 	recoveryResults             ApprovalRecoveryResultReader
 	recoveryEffects             approvaleffect.Reader
+	approvalPrechecks           ApprovalPrecheckSource
 	wallets                     WalletProvisioner
 	mobileAuth                  *MobileAuthService
 	profiles                    *ProfileChangeService
@@ -43,6 +44,11 @@ type Service struct {
 
 func (s *Service) WithSMSConfiguration(configuration *VersionedSMSProviderResolver) *Service {
 	s.smsConfiguration = configuration
+	return s
+}
+
+func (s *Service) WithApprovalPrecheckSource(source ApprovalPrecheckSource) *Service {
+	s.approvalPrechecks = source
 	return s
 }
 
@@ -75,6 +81,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
 	internal.GET("/client-compatibility", serviceauth.Require("internal.client-compatibility.read"), httpserver.AdaptFunc(s.internalClientCompatibility))
+	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account-closure-state.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.POST("/token-owner-authority", serviceauth.Require("internal.token-owner-authority.read"), httpserver.AdaptFunc(s.internalTokenOwnerAuthority))
 	internal.GET("/token-owner-candidates", serviceauth.Require("internal.token-owner-candidates.read"), httpserver.AdaptFunc(s.internalTokenOwnerCandidates))
 	internal.POST("/authorization/check", serviceauth.Require("internal.authorization.check"), httpserver.AdaptFunc(s.checkPermission))
@@ -110,6 +117,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.GET("/v1/me/commerce-customer-mapping", s.requirePermission(PermissionPersonalProfileRead), httpserver.AdaptFunc(s.getCommerceCustomerMapping))
 	protected.GET("/v1/me", s.requirePermission(PermissionPersonalProfileRead), httpserver.AdaptFunc(s.getMe))
 	protected.GET("/v1/me/authorization-context", s.requirePermission(PermissionPersonalProfileRead), httpserver.AdaptFunc(s.getAuthorizationContext))
+	protected.POST("/v1/me/account-closure-requests", s.requirePermission(PermissionPersonalAccountClosureRequest), httpserver.AdaptFunc(s.createAccountClosure))
+	protected.GET("/v1/me/account-closure-request", s.requirePermission(PermissionPersonalAccountClosureRead), httpserver.AdaptFunc(s.getAccountClosure))
 	if s.profiles != nil {
 		protected.POST("/v1/me/password-changes", s.requirePermission(PermissionPersonalSecurityManage), httpserver.AdaptFunc(s.changePassword))
 		protected.POST("/v1/me/profile-change-requests", s.requirePermission(PermissionPersonalProfileUpdate), httpserver.AdaptFunc(s.createProfileChange))
@@ -120,6 +129,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin := protected.Group("/admin/v1")
 	admin.GET("/users", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUsers))
 	admin.PATCH("/users/:user_id/status", s.requirePermission(PermissionPlatformUsersStatusManage), approvalpolicy.Require("ACCOUNT_USER_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetUserStatus))
+	admin.GET("/account-closure-requests", s.requirePermission(PermissionPlatformAccountClosuresRead), httpserver.AdaptFunc(s.adminAccountClosures))
+	admin.POST("/account-closure-requests/:closure_request_id/actions/retry", s.requirePermission(PermissionPlatformAccountClosuresRepair), approvalpolicy.Require("ACCOUNT_CLOSURE_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryAccountClosure))
 	admin.GET("/registration-operations", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminRegistrationOperations))
 	admin.POST("/registration-operations/:operation_id/actions/retry", s.requirePermission(PermissionPlatformRegistrationsRepair), approvalpolicy.Require("ACCOUNT_REGISTRATION_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryRegistration))
 	admin.POST("/registration-operations/:operation_id/actions/compensate", s.requirePermission(PermissionPlatformRegistrationsRepair), approvalpolicy.Require("ACCOUNT_REGISTRATION_COMPENSATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCompensateRegistration))
@@ -138,6 +149,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.POST("/approval-requests/:approval_request_id/actions/withdraw", approvalpolicy.Require("APPROVAL_REQUEST_WITHDRAW", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminWithdrawApprovalRequest))
 	admin.POST("/approval-requests/:approval_request_id/actions/decide", approvalpolicy.Require("APPROVAL_REQUEST_DECIDE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDecideApprovalRequest))
 	adminV2 := protected.Group("/admin/v2")
+	adminV2.POST("/approval-command-prechecks", s.requirePermission("platform.billing.repairs.request"), httpserver.AdaptFunc(s.adminApprovalCommandPrecheck))
 	adminV2.GET("/approval-capability", httpserver.AdaptFunc(s.adminApprovalCapability))
 	adminV2.GET("/approval-directory", httpserver.AdaptFunc(s.adminApprovalDirectory))
 	adminV2.GET("/approval-requests", httpserver.AdaptFunc(s.adminApprovalRequestsV2))

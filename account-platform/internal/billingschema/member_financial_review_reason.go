@@ -15,7 +15,7 @@ func validateMemberFinancialReviewReason(input []migrations.Migration) error {
 		if m.Version == 27 {
 			targeted = true
 		}
-		if m.Version == 900005 {
+		if m.Version == 900012 {
 			if guard != nil {
 				return errors.New("duplicate member financial reason migration")
 			}

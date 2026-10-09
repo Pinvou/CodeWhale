@@ -71,6 +71,10 @@ func main() {
 	if err != nil {
 		log.Fatal("ACCOUNT_IDENTITY_AUTHORITY_INVALID")
 	}
+	billingClosure, tokenClosure, err := configuredAccountClosureClients(credential)
+	if err != nil {
+		log.Fatal("ACCOUNT_CLOSURE_AUTHORITY_INVALID")
+	}
 	service := account.NewService(repository, wallets).WithServiceToken(credential).WithClientCompatibility(valueOrDefault("ACCOUNT_SERVICE_VERSION", "development"), valueOrDefault("ACCOUNT_CLIENT_CONTRACT_VERSION", "account-client-v1"))
 	ownerCandidateCursorKey, decodeErr := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(os.Getenv("OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64")))
 	if decodeErr != nil || len(ownerCandidateCursorKey) != 32 {
@@ -85,6 +89,7 @@ func main() {
 	if err := configureApprovals(ctx, repository, service, credential, cfg.Environment); err != nil {
 		log.Fatal(err)
 	}
+	go observability.RunBackground(ctx, "account-closure", account.NewAccountClosureWorker(repository, 5*time.Second, billingClosure, tokenClosure).WithCleanup(identities, billingClosure, tokenClosure).Run)
 	go observability.RunBackground(ctx, "wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run)
 	go observability.RunBackground(ctx, "role-binding-expiry", account.NewRoleBindingExpiryWorker(repository, time.Minute).Run)
 	if enabled("MOBILE_AUTH_ENABLED") {

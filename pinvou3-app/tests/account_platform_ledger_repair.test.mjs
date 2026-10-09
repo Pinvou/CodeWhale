@@ -48,3 +48,12 @@ test('all three languages have the complete current Ledger-only form labels', ()
   const keys = leaves(ledgerRepairCopy.zh).sort();
   for (const language of ['zh', 'en', 'ja']) { assert.deepEqual(leaves(ledgerRepairCopy[language]).sort(), keys); assert.deepEqual(Object.keys(ledgerRepairCopy[language].targets), ['LEDGER_REPAIR']); for (const key of Object.keys(values)) assert.ok(key === 'target_resource_id' ? ledgerRepairCopy[language].targets.LEDGER_REPAIR : ledgerRepairCopy[language].fields[key]); }
 });
+
+import { approvalCommands, approvalBusinessRoute, readApprovalRoute } from '../src/features/account-platform/admin-approval-actions.js';
+test('installed Ledger center filter and business drilldown preserve the closed target', () => {
+  assert.ok(approvalCommands.includes('LEDGER_REPAIR'));
+  assert.equal(readApprovalRoute('?approval_command_type=LEDGER_REPAIR').commandType, 'LEDGER_REPAIR');
+  const detail = { detail_availability: 'AVAILABLE', command_type: 'LEDGER_REPAIR', target: { resource_type: 'LEDGER_POSTING', resource_id: id(1) }, command: { target_posting_id: id(1) } };
+  assert.deepEqual(approvalBusinessRoute(detail), { section: 'finance', tab: 'ledger' });
+  for (const value of [{ ...detail, command: { target_posting_id: id(2) } }, { ...detail, detail_availability: 'DETAIL_PRESENTATION_UNAVAILABLE' }, { ...detail, command_type: 'RECEIVABLE_WRITE_OFF' }]) assert.equal(approvalBusinessRoute(value), null);
+});

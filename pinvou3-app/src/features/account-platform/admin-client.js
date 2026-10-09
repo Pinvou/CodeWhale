@@ -171,6 +171,11 @@ export class AdminPlatformClient {
     return payload;
   }
 
+  approvalCommandPrecheck(input, signal) {
+    return this.mutate('account', '/admin/v2/approval-command-prechecks', 'POST', input, '', signal, 200,
+      { encode: encodeFinanceJSON, decode: parseFinanceJSON });
+  }
+
   async authorization(signal) {
     const response = await fetch(`${this.baseURL}/api/account/v1/account/bootstrap`, {
       method: 'POST',
@@ -198,6 +203,16 @@ export class AdminPlatformClient {
     return this.mutate('account', '/admin/v1/sms-configuration', 'PUT', input, idempotencyKey, signal);
   }
 
+  accountClosures(signal) { return this.request('account', '/admin/v1/account-closure-requests', signal); }
+  retryAccountClosure(id, reason, key, signal) { return this.mutate('account', `/admin/v1/account-closure-requests/${encodeURIComponent(id)}/actions/retry`, 'POST', { reason }, key, signal, 200); }
+
+  registrationBonusPolicy(signal, { fresh = false } = {}) {
+    if (fresh) this.invalidateRead('billing', '/admin/v1/registration-bonus-policy');
+    return this.request('billing', '/admin/v1/registration-bonus-policy', signal);
+  }
+  updateRegistrationBonusPolicy(input, idempotencyKey = `registration-bonus-${secureRequestID()}`, signal) {
+    return this.mutate('billing', '/admin/v1/registration-bonus-policy', 'PUT', input, idempotencyKey, signal);
+  }
   users(searchOrFilters = '', signal, cursor = '') {
     const filters = typeof searchOrFilters === 'string' ? { q:searchOrFilters, cursor } : (searchOrFilters || {});
     const query = new URLSearchParams({ limit: '25' });
