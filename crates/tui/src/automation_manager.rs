@@ -2024,7 +2024,31 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
     let content = serde_json::to_string_pretty(value)?;
-    let tmp = path.with_extension("json.tmp");
+    // Unique per-writer staging name (pid + nanos): the fixed `<id>.json.tmp`
+    // name let two concurrent writers of the same definition (GUI scheduler
+    // tick and the pinvoy CLI's `scheduled run`/`pause`/`resume`, which now
+    // share these files through AutomationManager) truncate each other's
+    // staging file mid-write — the survivor's rename then installed a torn
+    // or foreign payload, and `list_automations` hard-bails on one
+    // unparseable definition, wedging the whole automation listing until
+    // manual repair. Hidden sibling in the target's own directory keeps the
+    // rename same-filesystem atomic; the token is unique per write so a
+    // crashed writer's litter can never collide with a later one.
+    let token = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let tmp = {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("definition.json");
+        path.with_file_name(format!(".{file_name}.tmp-{token}"))
+    };
     fs::write(&tmp, content).with_context(|| format!("Failed to write {}", tmp.display()))?;
     fs::rename(&tmp, path).with_context(|| {
         format!(
@@ -2121,6 +2145,92 @@ pub fn spawn_scheduler(
 
 #[cfg(test)]
 mod tests {
+    /// Regression for the fixed-`<id>.json.tmp` staging alias: two
+    /// interleaved writes of the same definition (GUI scheduler tick vs the
+    /// pinvoy CLI's `scheduled run` refresh) used to share one staging name,
+    /// so the second writer truncated the first's file mid-write and the
+    /// survivor's rename installed a torn or foreign payload — and
+    /// `list_automations` hard-bails the whole listing on one unparseable
+    /// definition. With unique per-write staging, concurrent saves of the
+    /// same definition both land intact, and no `.tmp` litter survives.
+    #[test]
+    fn concurrent_definition_writes_never_alias_each_other() {
+        use std::sync::Barrier;
+
+        let root = std::env::temp_dir().join(format!(
+            "automation-staging-alias-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let manager = AutomationManager::open(root.clone()).expect("manager opens");
+        let request = CreateAutomationRequest {
+            name: "staging-alias".into(),
+            prompt: "prompt".into(),
+            rrule: "FREQ=HOURLY;INTERVAL=1".into(),
+            cwds: Vec::new(),
+            model: None,
+            model_provider: None,
+            model_provider_id: None,
+            mode: None,
+            allow_shell: None,
+            trust_mode: None,
+            auto_approve: None,
+            delivery_mode: None,
+            status: None,
+        };
+        let created = manager.create_automation(request).expect("create");
+        let path = manager.automation_path(&created.id).expect("path");
+
+        // Two full saves of DIFFERENT content for the same definition race
+        // through the writer; each final file must parse as exactly one of
+        // the two payloads (never a torn mix, never empty).
+        let barrier = std::sync::Arc::new(Barrier::new(2));
+        let payload_a = "A".repeat(16_384);
+        let payload_b = "B".repeat(16_384);
+        let mut handles = Vec::new();
+        for payload in [&payload_a, &payload_b] {
+            let barrier = barrier.clone();
+            let path = path.clone();
+            let payload = payload.to_owned();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let record = serde_json::json!({ "marker": payload });
+                for _ in 0..25 {
+                    write_json_atomic(&path, &record).expect("atomic write");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("writer thread");
+        }
+
+        let raw = fs::read_to_string(&path).expect("final file readable");
+        let parsed: serde_json::Value = serde_json::from_str(&raw)
+            .unwrap_or_else(|error| panic!("final definition must parse cleanly: {error}"));
+        let marker = parsed["marker"].as_str().expect("marker string");
+        assert!(
+            marker == payload_a || marker == payload_b,
+            "the final payload must be one intact writer's content, not a torn mix"
+        );
+
+        // No staging litter may survive a clean write.
+        let litter: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-") || name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            litter.is_empty(),
+            "no staging files may survive: {litter:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     use super::*;
     use async_trait::async_trait;
     use chrono::{FixedOffset, LocalResult, NaiveDate};
