@@ -34,6 +34,8 @@ func ClassifyProofFailure(command string, policyVersion int64, code string) Reco
 		result.Class = classifyBillingFailure(code)
 	case command == "LEDGER_REPAIR" && policyVersion == 1:
 		result.Class = classifyBillingFailure(code)
+	case command == "RECEIVABLE_WRITE_OFF" && policyVersion == 1:
+		result.Class = classifyBillingFailure(code)
 	case command == "WALLET_ADJUSTMENT" && policyVersion == 1:
 		result.Class = classifyBillingFailure(code)
 	case command == "PAYMENT_PROVIDER_RESUME" && policyVersion == 2:

@@ -1,13 +1,13 @@
 # 应收核销（`RECEIVABLE_WRITE_OFF`）领域设计
 
-状态：`DESIGN_FROZEN / PRIVATE_CANDIDATE_IMPLEMENTED / INDEPENDENT_REVIEW_PENDING / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅 `USAGE_OVERAGE` 来源、允许部分核销（同一应收可多次核销）**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-26 的 closed command/snapshot/proof、不变量、幂等与恢复、失败分类、迁移与回滚及验收映射；当前私有候选已接通原 closed owner/proof/consumer/审批与专属表单，activation 行仍默认 `INACTIVE`；不代表实际前序承接、生产激活或整波审核通过。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14，账本不可改写边界见 [账本修复设计](ledger-repair-design.md) §2。
+状态：`DESIGN_FROZEN / PRIVATE_CANDIDATE_IMPLEMENTED / INDEPENDENT_REVIEW_PENDING / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅 `USAGE_OVERAGE` 来源、允许部分核销（同一应收可多次核销）**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-26 的 closed command/snapshot/proof、不变量、幂等与恢复、失败分类、迁移与回滚及验收映射；当前 F11 实现已接通原 closed owner/proof/consumer/审批与专属表单，activation 行仍默认 `INACTIVE`；不代表实际前序承接、生产激活或整波审核通过。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14，账本不可改写边界见 [账本修复设计](ledger-repair-design.md) §2。
 
 ## 1. 设计冻结时的命令基线（历史事实，非当前候选状态）
 
-- **只有策略元数据**：Account `approval_command_policies` 与 `approvalpolicy` 注册表登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`，请求权限 `platform.billing.repairs.request`、审批权限 `platform.billing.repairs.approve`、风险类 `FINANCIAL_FACT_CHANGE`、一名非申请人审批、critical 字段 `target_id/resource_version/financial_snapshot/policy_version`、24 小时申请有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`、`internal/platform/approvalpolicy/registry.go`）。
+- **数据库策略元数据先行**：Account `approval_command_policies` 登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`，请求权限 `platform.billing.repairs.request`、审批权限 `platform.billing.repairs.approve`、风险类 `FINANCIAL_FACT_CHANGE`、一名非申请人审批、critical 字段 `target_id/resource_version/financial_snapshot/policy_version`、24 小时申请有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`）。Go `internal/platform/approvalpolicy/registry.go` 的可执行注册属于当前 F11 交付，不能算作设计冻结时已完成。
 - **静态不可执行**：不在 `executableApprovalCommands` 内，create/update/submit/APPROVE/Begin 均在领域调用前失败关闭。
 - **Billing 侧只有未激活行**：`('RECEIVABLE_WRITE_OFF',1,1,'INACTIVE',1)`（`migrations/billing/000054_approval_command_activations.up.sql`）；没有该命令的 handler、proof、executor、consumer durable 或恢复分类。
-- **合同层登记为已知命令且恒为 INACTIVE**（`contracts/openapi/billing.yaml`、`test/contract/billing-approval-activation.test.mjs`）。
+- **当前交付与历史基线的区别**：当前合同位于 `contracts/openapi/receivable-write-off.json`；`internal/platform/approvalpolicy/registry.go` 与 `internal/account/approval_command_manifest.go` 注册本命令；Billing 投影及 `internal/platform/billinggovernance/client.go` 仅允许本命令 v1/s1 为 ACTIVE，其余尚未交付命令继续失败关闭。新增迁移仍默认 INACTIVE，代码具备能力不等于已生产激活。
 
 ## 2. 应收现状与不变量（事实）
 
@@ -36,7 +36,7 @@
 
 **明确禁止**：
 
-- 禁止改写或删除任何 `receivables`/`receivable_allocations`/`journal_entries`/`ledger_postings` 历史行（不可变触发器与 ACL 双重拒绝）。
+- 禁止删除应收或改写其来源、原始金额等既有事实；仅允许上述结算投影推进。禁止改写或删除任何 `receivable_allocations`/`journal_entries`/`ledger_postings` 历史行（不可变触发器与 ACL 双重拒绝）。
 - 禁止核销 `CHARGEBACK` 来源、终态应收（`SETTLED`/`WRITTEN_OFF`）、`outstanding=0` 或金额大于 outstanding 的应收。
 - 禁止产生任何可用余额、credit lot、entitlement component/package、退款、拒付或 `usage_holds` 变化：`wallets.posted_microcredits/reserved_microcredits`、`credit_lots.*`、`entitlement_*` 必须逐行不变。
 - 禁止在钱包 `receivable_microcredits<A` 时执行，禁止跳过钱包投影或只改钱包不改应收。
@@ -82,8 +82,8 @@
 - 应收三元组：写入后仍满足 `settled+outstanding=original`；`outstanding=0` 时 `status='WRITTEN_OFF'`（本命令路径）并有 `settled_at`；否则 `status='PARTIALLY_SETTLED'`。不新增列、不替换既有 CHECK，避免第二份真相。
 - 钱包投影一致：`wallets.receivable_microcredits` 必须等于该钱包所有 `outstanding_microcredits>0` 应收之和（本命令只按 A 等量回落）；`financial_status`/`financial_freeze_reason` 与清零状态一致。
 - 分配与账本一致：`sum(receivable_allocations.amount_microcredits)=settled_microcredits`；每条 allocation 的 `journal_entry_id` 指向的 journal 必须平衡且 `sum(ledger_postings.delta)=0`。
-- CAS 与锁顺序固定：`SELECT ... FROM receivables WHERE id=$1 FOR UPDATE` → `SELECT ... FROM wallets WHERE id=$2 FOR UPDATE`（先应收后钱包，与抵扣路径的 `ORDER BY created_at,id FOR UPDATE` 顺序兼容，避免死锁）→ 校验 `version`/`outstanding`/`receivable_microcredits` → 写 journal/posting → 写 allocation → 更新应收与钱包 → 更新 `attention_summary`。
-- 并发悲观证明：同一应收的两次并发核销至多一次成功（第二次 `version`/`outstanding` 校验失败或 allocation 唯一冲突）；钱包并发入账抵扣与核销都不得使 `receivable_microcredits` 与应收事实偏离。
+- 实际并发边界：Billing 在 Serializable 事务内读取应收与钱包事实并核对冻结版本/摘要，再写 journal/posting、allocation，并使用带版本/金额条件的 UPDATE 推进应收与钱包，最后更新 `attention_summary`。本命令没有 `SELECT ... FOR UPDATE`；条件更新冲突或序列化失败会回滚整笔事务，不得把文档中的锁描述当作已实现的保证。
+- 并发 CAS 与序列化约束：相同冻结版本的同一应收两次并发核销至多一次成功（第二次 `version`/`outstanding` 校验失败或 allocation 唯一冲突）；钱包并发入账抵扣与核销都不得使 `receivable_microcredits` 与应收事实偏离。
 
 ## 7. 幂等、result-first 与未知结果
 
@@ -101,7 +101,7 @@
 
 | 情形 | 分类 | 行为 |
 |---|---|---|
-| activation 非 `ACTIVE`、policy/schema/version 不匹配 | `POLICY_OR_SCHEMA_MISMATCH` | 失败关闭、零写入、终态 |
+| 新执行的 activation 非 `ACTIVE`、policy/schema/version 不匹配 | `POLICY_OR_SCHEMA_MISMATCH` | 失败关闭、零写入、终态；已提交 case 优先返回原结果，后续停用不抹除收据 |
 | `source_type='CHARGEBACK'`、终态应收、`outstanding=0`、`A>outstanding`、`expected_receivable_version` 不符、钱包投影不足 | `PROOF_DENY` | 失败关闭、零写入、终态 |
 | 同一审批重复投递/重复授权 | 幂等命中 | 读回既有 case/allocation/result，零新写入 |
 | 5 分钟执行窗口过期 | `EXECUTION_WINDOW_EXPIRED` | 终态，零写入 |
@@ -118,7 +118,7 @@
 
 ## 10. 迁移、N/N-1 与回滚
 
-- 迁移只前向追加：新增 `receivable_write_off_cases`（编号取**实现时**的下一个可用 Billing 前向编号，冻结基线为 `000061`，而 `000061` 已被 `ledger_repair_cases` 占用，故实现时应顺延），**不改** `receivables`/`receivable_allocations`/`wallets` 的列与 CHECK，不改 `000025/000045/000054/000060`。
+- F11 已发布的迁移身份保持不变：Account `000072_receivable_write_off_consumer_route`、Billing `000063_receivable_write_off_cases` 与 `000064_receivable_write_off_proof_claim_allowlist`，各有 up/down，共六条。本轮不修改任何一条 SQL；**不改** `receivables`/`receivable_allocations`/`wallets` 的列与 CHECK，不改 `000025/000045/000054/000060`。
 - N/N-1：先部署可读新表的 Billing，再部署 proof 端与执行器/消费者，最后业务页；旧客户端与旧 writer 行为不变（本命令未激活时不产生任何新行）。
 - 回滚：只允许停止消费者、把 activation 行翻回 `INACTIVE`；已产生的 case/allocation/journal 一律保留可读，禁止破坏性 down。
 - 未通过 GSA-38～40 且未取得独立生产授权前，不部署、不激活。
@@ -152,7 +152,7 @@
 
 - 每条事实可回溯到 §1/§2 的迁移与源码路径；§4 的写入集合与 §6 的不变量逐一对应既有 CHECK 与投影规则。
 - 首版范围、部分核销与版本复用决策与用户 2026-09-19 确认一致，未猜测填入其它选项。
-- 变更范围仅本文件与任务登记；运行 `node scripts/check-account-platform-tasks.mjs`、`node scripts/account-platform-migration-manifest.mjs check`、`git diff --check`，不使用 SKIP 作为通过证据。
+- 原设计记录只涉及文档与任务登记。其中旧任务脚本名称不构成当前 F11 的实际执行证据；当前验证须以最新提交的真实命令、命中用例及跳过/环境限制为准，不将历史记录或条件 SKIP 算作本轮通过。
 
 ## 14. 记录
 

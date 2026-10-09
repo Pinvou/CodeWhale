@@ -3,7 +3,7 @@ package approvalpolicy
 import "testing"
 
 func TestInstalledBillingPolicySetAndFutureDeny(t *testing.T) {
-	billing := map[string]int64{"ENTITLEMENT_COMPONENT_ADJUSTMENT": 2, "LEDGER_REPAIR": 1, "WALLET_ADJUSTMENT": 1, "PAYMENT_PROVIDER_RESUME": 2, "PAYMENT_PRODUCT_RESUME": 1}
+	billing := map[string]int64{"ENTITLEMENT_COMPONENT_ADJUSTMENT": 2, "LEDGER_REPAIR": 1, "RECEIVABLE_WRITE_OFF": 1, "WALLET_ADJUSTMENT": 1, "PAYMENT_PROVIDER_RESUME": 2, "PAYMENT_PRODUCT_RESUME": 1}
 	token := map[string]int64{
 		"TOKEN_PROTOCOL_DRAFT_CREATE": 1, "TOKEN_PROTOCOL_PUBLISH": 1, "TOKEN_FORMULA_DRAFT_CREATE": 1, "TOKEN_FORMULA_PUBLISH": 1,
 		"TOKEN_MODEL_DRAFT_SAVE": 2, "TOKEN_MODEL_PUBLISH": 2, "TOKEN_MODEL_LIFECYCLE_CHANGE": 2, "TOKEN_MODEL_CATALOG_SYNC": 2, "TOKEN_MODEL_CATALOG_ROLLBACK": 2,
@@ -31,7 +31,7 @@ func TestInstalledBillingPolicySetAndFutureDeny(t *testing.T) {
 			t.Fatalf("Token audit-only policy became executable: %s", name)
 		}
 	}
-	for _, name := range []string{"MODEL_CATALOG_PUBLISH", "REFUND_FORCE_APPLY", "RECEIVABLE_WRITE_OFF", "SUPER_ADMIN_ROLE_HANDOFF"} {
+	for _, name := range []string{"MODEL_CATALOG_PUBLISH", "REFUND_FORCE_APPLY", "RECONCILIATION_FINANCIAL_REPAIR", "SUPER_ADMIN_ROLE_HANDOFF"} {
 		if _, err := Lookup(name); err == nil || Executable(name) || TokenExecutableApproval(name) {
 			t.Fatalf("future command advertised: %s", name)
 		}

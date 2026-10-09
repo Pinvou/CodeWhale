@@ -17,7 +17,7 @@ try{
  for (const language of ['zh','en','ja']) await run('ENT installed directory excludes future commands '+language,'mode=ent&approval_view=directory&language='+language,async page=>{
   await page.evaluate(()=>[...document.querySelectorAll('main > nav button')].find(b=>b.textContent===window.installed.adminPlatformCopy[window.installed.language].nav.approvals).click());
   await page.waitForFunction(()=>document.querySelector('table')?.textContent.includes('ENTITLEMENT_COMPONENT_ADJUSTMENT'));
-  assert.equal(await page.evaluate(()=>document.querySelector('table').textContent.includes('RECEIVABLE_WRITE_OFF')),false);
+  assert.equal(await page.evaluate(()=>document.querySelector('table').textContent.includes('RECONCILIATION_FINANCIAL_REPAIR')),false);
  });
  await run('ENT real form submits and center EDIT obtains fresh original-intent proof','mode=ent',async page=>{
   const clickText=async(expression)=>page.evaluate(expression);

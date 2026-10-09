@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // TestReceivableWriteOffPostgresIntegration proves the GSA-26 domain contract on
@@ -25,6 +26,17 @@ func TestReceivableWriteOffPostgresIntegration(t *testing.T) {
 	t.Cleanup(cancel)
 	repository, _ := newAdminPaginationIntegrationRepository(t, ctx, databaseURL)
 	pool := repository.pool
+	setActivation := writeOffFixtureActivation(t, ctx, pool)
+	activationVersion := int64(1)
+	// Test the public package planner with an explicit read-only owner snapshot.
+	planFrom := func(command ReceivableWriteOffCommandInput, policy, schema, activation int64) (ReceivableWriteOffPlan, error) {
+		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: pgx.ReadOnly})
+		if err != nil {
+			return ReceivableWriteOffPlan{}, err
+		}
+		defer tx.Rollback(ctx)
+		return receivableWriteOffPlanFrom(ctx, tx, command, policy, schema, activation)
+	}
 	now := time.Now().UTC()
 
 	walletID, walletAccountID := uuid.New(), uuid.New()
@@ -81,7 +93,7 @@ VALUES($1,$2,$3,'CASH_RECHARGE_BASE',$4,$5,$6,$7)`, allocationID, receivableID, 
 
 	// The domain read path is activation-independent (only proof issuance and
 	// execution require the live ACTIVE row), so the fixture plans directly.
-	plan, err := repository.receivableWriteOffPlanFrom(ctx, ReceivableWriteOffCommandInput{ReceivableID: fullID, WriteOffMicrocredits: 50, ExpectedReceivableVersion: 1}, 1, 1, 1)
+	plan, err := planFrom(ReceivableWriteOffCommandInput{ReceivableID: fullID, WriteOffMicrocredits: 50, ExpectedReceivableVersion: 1}, 1, 1, 1)
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -95,7 +107,7 @@ VALUES($1,$2,$3,'CASH_RECHARGE_BASE',$4,$5,$6,$7)`, allocationID, receivableID, 
 		{ReceivableID: fullID, WriteOffMicrocredits: 50, ExpectedReceivableVersion: 2},
 		{ReceivableID: uuid.New(), WriteOffMicrocredits: 10, ExpectedReceivableVersion: 1},
 	} {
-		if _, err := repository.receivableWriteOffPlanFrom(ctx, invalid, 1, 1, 1); !errors.Is(err, ErrApprovalSnapshotMismatch) && !errors.Is(err, ErrNotFound) {
+		if _, err := planFrom(invalid, 1, 1, 1); !errors.Is(err, ErrApprovalSnapshotMismatch) && !errors.Is(err, ErrNotFound) {
 			t.Fatalf("invalid plan %+v err=%v", invalid, err)
 		}
 	}
@@ -105,25 +117,48 @@ VALUES($1,$2,$3,'CASH_RECHARGE_BASE',$4,$5,$6,$7)`, allocationID, receivableID, 
 	}
 	execute := func(requestID, eventID, receivableID uuid.UUID, amount, expectedVersion int64, key string) (ReceivableWriteOffResult, error) {
 		command := ReceivableWriteOffCommandInput{ReceivableID: receivableID, WriteOffMicrocredits: amount, ExpectedReceivableVersion: expectedVersion}
-		// The frozen projection is what an approval would have captured; the
-		// owner-only facts digest stays empty and is recomputed in the
-		// execution transaction.
-		frozen, err := repository.receivableWriteOffPlanFrom(ctx, command, 1, 1, 1)
+		// Freeze the same digest published in the approval proof; fresh execution
+		// must compare it with the owner transaction recomputation.
+		frozen, err := planFrom(command, 1, 1, activationVersion)
 		if err != nil {
 			return ReceivableWriteOffResult{}, err
 		}
 		return repository.ApplyReceivableWriteOff(ctx, ReceivableWriteOffExecutionInput{
 			ApprovalRequestID: requestID, AuthorizationEventID: eventID, ApprovalEpoch: 3,
-			ExecutionKey: key, PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+			ExecutionKey: key, PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
 			Command: command,
 			Frozen: ReceivableWriteOffFrozenFacts{
 				ReceivableVersion: frozen.ReceivableVersion, WriteOffMicrocredits: frozen.WriteOffMicrocredits,
 				OutstandingMicrocredits: frozen.OutstandingMicrocredits, SettledMicrocredits: frozen.SettledMicrocredits,
 				OriginalMicrocredits: frozen.OriginalMicrocredits, SourceType: frozen.SourceType,
 				SourceReference: frozen.SourceReference, WalletReceivableMicrocredits: frozen.WalletReceivableMicrocredits,
+				FactsDigest: frozen.FactsDigest,
 			},
 		})
 	}
+	// The public migration installs INACTIVE. A fresh effect must not bypass
+	// that row, and a stale activation version must also leave all facts intact.
+	for _, state := range []struct {
+		state   string
+		version int64
+	}{{"INACTIVE", 1}, {"ACTIVE", 2}} {
+		current := setActivation(state.state)
+		if current != state.version {
+			t.Fatalf("fixture activation version=%d want%d", current, state.version)
+		}
+		if _, err := execute(uuid.New(), uuid.New(), fullID, 50, 1, "activation-rejected"); !errors.Is(err, ErrApprovalSnapshotMismatch) {
+			t.Fatalf("fresh effect accepted activation %+v: %v", state, err)
+		}
+		var facts int64
+		if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM receivable_write_off_cases)+(SELECT count(*) FROM journal_entries WHERE business_reference LIKE 'write-off:%')`).Scan(&facts); err != nil || facts != 0 {
+			t.Fatalf("rejected activation wrote %d facts: %v", facts, err)
+		}
+		var outstanding, aggregate, version int64
+		if err := pool.QueryRow(ctx, `SELECT r.outstanding_microcredits,r.version,w.receivable_microcredits FROM receivables r JOIN wallets w ON w.id=r.wallet_id WHERE r.id=$1`, fullID).Scan(&outstanding, &version, &aggregate); err != nil || outstanding != 50 || version != 1 || aggregate != 90 {
+			t.Fatalf("rejected activation changed owner %d/%d/%d: %v", outstanding, version, aggregate, err)
+		}
+	}
+	activationVersion = setActivation("ACTIVE")
 	fullRequestID, fullEventID := uuid.New(), uuid.New()
 	full, err := execute(fullRequestID, fullEventID, fullID, 50, 1, "write-off:"+fullID.String())
 	if err != nil {
@@ -173,9 +208,10 @@ VALUES($1,$2,$3,'CASH_RECHARGE_BASE',$4,$5,$6,$7)`, allocationID, receivableID, 
 	// The consumer reads the result first, so the frozen projection it presents
 	// may be incomplete; only the request/event identity, the amount, the frozen
 	// version and the execution key decide the idempotent hit.
+	setActivation("INACTIVE")
 	replayed, err := repository.ApplyReceivableWriteOff(ctx, ReceivableWriteOffExecutionInput{
 		ApprovalRequestID: fullRequestID, AuthorizationEventID: fullEventID, ApprovalEpoch: 3,
-		ExecutionKey: "write-off:" + fullID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+		ExecutionKey: "write-off:" + fullID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
 		Command: ReceivableWriteOffCommandInput{ReceivableID: fullID, WriteOffMicrocredits: 50, ExpectedReceivableVersion: 1},
 		Frozen:  ReceivableWriteOffFrozenFacts{ReceivableVersion: full.ReceivableVersionBefore, WriteOffMicrocredits: full.AmountMicrocredits},
 	})
@@ -191,6 +227,7 @@ VALUES($1,$2,$3,'CASH_RECHARGE_BASE',$4,$5,$6,$7)`, allocationID, receivableID, 
 
 	// A partial write-off of the remaining receivable leaves it partially
 	// settled, then writing off the rest closes it.
+	activationVersion = setActivation("ACTIVE")
 	partialRequestID := uuid.New()
 	partial, err := execute(partialRequestID, uuid.New(), partialID, 15, 2, "partial-one")
 	if err != nil || partial.StatusAfter != "PARTIALLY_SETTLED" || partial.ReceivableVersionAfter != 3 {

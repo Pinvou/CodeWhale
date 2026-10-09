@@ -9,6 +9,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // billingProofFacts reads only owner-domain persisted facts. In particular,
@@ -182,6 +183,41 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 			plan.AmountMicrocredits != command.AmountMicrocredits {
 			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
+	case receivableWriteOffCommand:
+		var command struct {
+			ReceivableID              uuid.UUID `json:"receivable_id"`
+			WriteOffMicrocredits      int64     `json:"write_off_microcredits"`
+			ExpectedReceivableVersion int64     `json:"expected_receivable_version"`
+			ReasonCode                string    `json:"reason_code"`
+		}
+		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.ReceivableID == uuid.Nil ||
+			command.WriteOffMicrocredits < 1 || command.ExpectedReceivableVersion < 1 ||
+			command.ReasonCode != receivableWriteOffReason {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		owner, ok := repository.(interface {
+			receivableWriteOffPlan(context.Context, ReceivableWriteOffCommandInput) (ReceivableWriteOffPlan, error)
+		})
+		if !ok {
+			return current, "", "", errBillingApprovalProofUnavailable
+		}
+		plan, err := owner.receivableWriteOffPlan(ctx, ReceivableWriteOffCommandInput{
+			ReceivableID: command.ReceivableID, WriteOffMicrocredits: command.WriteOffMicrocredits,
+			ExpectedReceivableVersion: command.ExpectedReceivableVersion,
+		})
+		if errors.Is(err, ErrApprovalSnapshotMismatch) || errors.Is(err, ErrNotFound) {
+			return current, "DOMAIN_INVARIANT_FAILED", ownerState, nil
+		}
+		if err != nil {
+			return current, "", "", err
+		}
+		ownerState = plan.SourceType + ":" + plan.ReceivableStatus
+		critical, financial := receivableWriteOffProofProjection(plan)
+		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
+		if plan.ReceivableID != command.ReceivableID || plan.WriteOffMicrocredits != command.WriteOffMicrocredits ||
+			plan.ReceivableVersion != command.ExpectedReceivableVersion {
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
+		}
 	default:
 		return current, "", "", errors.New("unsupported Billing proof command")
 	}
@@ -202,4 +238,28 @@ func (r *PostgresRepository) ledgerRepairPlan(ctx context.Context, input LedgerR
 		return LedgerRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	return r.LedgerRepairPlanForCommand(ctx, input, active.PolicyVersion, int64(active.SnapshotSchemaVersion), active.Version)
+}
+
+func (r *PostgresRepository) receivableWriteOffPlan(ctx context.Context, input ReceivableWriteOffCommandInput) (ReceivableWriteOffPlan, error) {
+	snapshot, err := r.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return ReceivableWriteOffPlan{}, err
+	}
+	active, err := activeBillingProofCommand(snapshot, receivableWriteOffCommand, r.now())
+	if err != nil {
+		return ReceivableWriteOffPlan{}, ErrApprovalSnapshotMismatch
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return ReceivableWriteOffPlan{}, err
+	}
+	defer tx.Rollback(ctx)
+	plan, err := receivableWriteOffPlanFrom(ctx, tx, input, active.PolicyVersion, int64(active.SnapshotSchemaVersion), active.Version)
+	if err != nil {
+		return ReceivableWriteOffPlan{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ReceivableWriteOffPlan{}, err
+	}
+	return plan, nil
 }

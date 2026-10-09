@@ -106,7 +106,7 @@ func ValidateSnapshot(s Snapshot) error {
 			if activation.State == "ACTIVE" && (activation.PolicyVersion != 2 || activation.SnapshotSchemaVersion != 2) {
 				return ErrUnavailable
 			}
-		case "LEDGER_REPAIR", "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+		case "RECEIVABLE_WRITE_OFF", "LEDGER_REPAIR", "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
 
 		default:
 			if activation.State != "INACTIVE" {

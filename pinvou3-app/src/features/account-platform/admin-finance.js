@@ -85,6 +85,19 @@ export async function currentApprovalEditDraft(client, detail, reason) {
       projection.reasonCode !== command.reason_code) throw unavailable();
     return entitlementCorrectionApprovalDraft(facts, command.reason_code, reason, `edit:${detail.approval_request_id}`);
   }
+  if (detail.command_type === 'RECEIVABLE_WRITE_OFF') {
+    const target = detail.target || { resource_type: detail.target_resource_type, resource_id: detail.target_resource_id };
+    if (!command || target.resource_type !== 'RECEIVABLE' || !approvalIDPattern.test(target.resource_id) ||
+      command.receivable_id !== target.resource_id || command.reason_code !== 'APPROVED_RECEIVABLE_WRITE_OFF') throw unavailable();
+    const facts = await client.approvalCommandPrecheck({ command_type: 'RECEIVABLE_WRITE_OFF',
+      target_resource_id: command.receivable_id, write_off_microcredits: command.write_off_microcredits,
+      expected_version: command.expected_receivable_version, reason_code: command.reason_code });
+    const draft = financialRepairApprovalDraft(facts, reason, `edit:${detail.approval_request_id}`);
+    if (draft.command_type !== detail.command_type || draft.target_resource_id !== target.resource_id ||
+      integerMoney(draft.normalized_command.write_off_microcredits) !== integerMoney(command.write_off_microcredits) ||
+      integerMoney(draft.normalized_command.expected_receivable_version) !== integerMoney(command.expected_receivable_version)) throw unavailable();
+    return draft;
+  }
   if (detail.command_type === 'LEDGER_REPAIR') {
     const facts = await client.approvalCommandPrecheck({ command_type: 'LEDGER_REPAIR',
       target_resource_id: command?.target_posting_id, target_journal_entry_id: command?.target_journal_entry_id,

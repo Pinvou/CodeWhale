@@ -65,6 +65,17 @@ var commandSpecs = map[string]commandSpec{
 		criticalInts:   []string{"provider_control_version", "product_control_version", "catalog_version", "admission_version", "mapping_version"},
 		financialInts:  []string{"provider_control_version", "product_control_version"},
 	},
+	"RECEIVABLE_WRITE_OFF": {
+		policyVersion: 1, snapshotVersion: 1, targetType: "RECEIVABLE", executor: "billing-command-executor",
+		normalizedKeys: []string{"receivable_id", "write_off_microcredits", "expected_receivable_version", "reason_code"},
+		criticalKeys:   []string{"receivable_version", "facts_digest", "policy_version"},
+		financialKeys: []string{"write_off_microcredits", "outstanding_microcredits", "settled_microcredits",
+			"original_microcredits", "source_type", "source_reference", "wallet_receivable_microcredits"},
+		normalizedInts: []string{"write_off_microcredits", "expected_receivable_version"},
+		criticalInts:   []string{"receivable_version", "policy_version"},
+		financialInts: []string{"write_off_microcredits", "outstanding_microcredits", "settled_microcredits",
+			"original_microcredits", "wallet_receivable_microcredits"},
+	},
 	"TOKEN_MODEL_LIFECYCLE_CHANGE": {
 		policyVersion: 2, snapshotVersion: 2, targetType: "MODEL", executor: "token-command-executor",
 		normalizedKeys: []string{"model_id", "lifecycle_plan_id", "lifecycle_plan_version", "target_lifecycle", "effective_at", "existing_session_cutoff_at", "replacement_model_id"},
@@ -471,6 +482,24 @@ func validateProofValues(commandType string, spec commandSpec, targetType, targe
 			integers["f.effective_total_microcredits"] != integers["f.source_original_microcredits"]+integers["f.target_original_microcredits"] ||
 			integers["f.effective_total_microcredits"] != integers["f.package_total_microcredits"] ||
 			reasonErr != nil || len(reasonCode) == 0 || len(reasonCode) > 80 {
+			return ErrInvalidDocument
+		}
+	case "RECEIVABLE_WRITE_OFF":
+		reasonCode, reasonErr := stringValue(normalizedObject["reason_code"])
+		sourceType, sourceTypeErr := stringValue(financialObject["source_type"])
+		sourceReference, sourceReferenceErr := stringValue(financialObject["source_reference"])
+		if !validUUID(targetID) || !equalString(normalizedObject["receivable_id"], targetID) ||
+			integers["n.expected_receivable_version"] < 1 || integers["n.expected_receivable_version"] != integers["c.receivable_version"] ||
+			integers["c.policy_version"] != spec.policyVersion || !hexField(criticalObject["facts_digest"]) ||
+			integers["n.write_off_microcredits"] < 1 || integers["n.write_off_microcredits"] != integers["f.write_off_microcredits"] ||
+			integers["f.write_off_microcredits"] > integers["f.outstanding_microcredits"] ||
+			integers["f.outstanding_microcredits"] < 1 || integers["f.settled_microcredits"] < 0 ||
+			integers["f.original_microcredits"] < 1 ||
+			integers["f.settled_microcredits"]+integers["f.outstanding_microcredits"] != integers["f.original_microcredits"] ||
+			integers["f.wallet_receivable_microcredits"] < integers["f.write_off_microcredits"] ||
+			sourceTypeErr != nil || sourceType != "USAGE_OVERAGE" ||
+			sourceReferenceErr != nil || len(sourceReference) == 0 || len(sourceReference) > 200 ||
+			reasonErr != nil || reasonCode != "APPROVED_RECEIVABLE_WRITE_OFF" {
 			return ErrInvalidDocument
 		}
 	}
