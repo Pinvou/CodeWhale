@@ -587,6 +587,9 @@ func (p *PaymentCoordinator) finishRefundTransaction(ctx context.Context, tx pgx
 		if updateErr = events.AppendOutbox(ctx, tx, "billing.refund.review-required.v1", refund.ID, 2, map[string]any{"refund_id": refund.ID, "payment_transaction_id": refund.PaymentTransactionID, "entitlement_package_id": refund.EntitlementPackageID}); updateErr != nil {
 			return Refund{}, created, updateErr
 		}
+		if _, updateErr = p.insertRefundSuccessEvidence(ctx, tx, order, refund, provider, now); updateErr != nil {
+			return Refund{}, created, updateErr
+		}
 		if _, updateErr = createPaymentAnomalyWithinTransaction(ctx, tx, "REFUND_FAILURE", "P0", "refund:"+refund.ID.String()+":local-conflict", paymentAnomalyReference{PaymentOrderID: &refund.PaymentOrderID, PaymentTransactionID: &refund.PaymentTransactionID, RefundID: &refund.ID}, map[string]any{"failure_reason": "local refundable balance changed after provider refund", "provider_refund_id": provider.ChannelRefundID}, now); updateErr != nil {
 			return Refund{}, created, updateErr
 		}

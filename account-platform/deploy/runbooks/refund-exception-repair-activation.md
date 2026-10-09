@@ -1,6 +1,12 @@
 # 退款异常修复（`REFUND_EXCEPTION_REPAIR`）受控激活手册
 
-状态：能力已就绪，**默认未激活**。本手册只描述受控激活（把 Billing 逐命令 activation 行从 `INACTIVE` 翻到 `ACTIVE`）的操作与证据要求；是否执行必须另有授权，且 GSA-38～40 的切换、回滚与发布门禁全部通过后才能开始。
+本轮前向迁移 `900018_refund_activation_execution_lock` 提供固定 Refund v1/s1 的私有 owner 锁能力；先按正式 Billing Up/Verify 安装，再由已授权 operator 明确激活。默认仍为 INACTIVE。新写在同一财务事务内锁定 activation 并核对冻结版本与更新时间，停用必须等待该事务结束；已有不可变成功回执先只读回放，不因后续停用失效。不得给 runtime 表 UPDATE 或 owner 身份来绕过该接口。
+
+900018 Down 显式拒绝，保留能力、迁移账本和财务事实。运维回退通过停止 consumer 并受控设置 activation 为 INACTIVE；不删除已执行 case、journal 或回执。原 067 Up 与不可变触发器保持原字节，runtime 仅保 SELECT/INSERT，收尾及未来安装不得重新授予 UPDATE/DELETE。执行键摘要采用历史兼容域（见 `docs/financial-execution-key-compatibility.md`），没有更换历史 hash，也不声称增强 hash 隔离。
+
+状态：本轮候选实现已完成本机隔离角色和受控跨服务验收，**默认未激活**；这不是部署 NATS 或生产激活验证。本手册只描述受控激活（把 Billing 逐命令 activation 行从 `INACTIVE` 翻到 `ACTIVE`）的操作与证据要求；是否执行必须另有授权，且 GSA-38～40 的切换、回滚与发布门禁全部通过后才能开始。
+
+本轮还修正了三项独立记录：#1712 收尾权限保留 SELECT/INSERT 并撤销 UPDATE/DELETE；#1713 将退款跨服务测试装配改为官方自有 UUID 数据库和真实角色，不再依赖固定开发环境；#1714 用已发布 F12 的 84 项迁移成员和校验和固定索引测试历史阶段，再正式升级当前完整迁移集合。索引观察仅适用于隔离测试数据，不是生产性能结论。原资格反例、权限断言失败及测试装配失败保留在验证记录中，修后测试成功不等于这些问题已在生产发生或生产已修复。
 
 ## 1. 前置条件（全部满足才可开始）
 
@@ -25,8 +31,8 @@ SELECT (SELECT count(*) FROM refund_exception_repair_cases WHERE approval_reques
        (SELECT count(*) FROM billing_approval_proof_claims) AS proof_claims;
 
 -- Billing：存量清单——“Provider 已退款、本地冲销缺失”的退款
--- （in_scope=true 表示该退款当前能通过 §5 的全部闭合判据；其余候选必须走既有人工路径，
---  或在将来另开 policy/schema 版本处理。）
+-- in_scope 只表示候选证据匹配；不代表已通过全部 owner 判据。
+-- 必须使用当前只读预检确认完整冻结事实，不能直接依据本查询审批或激活。
 SELECT refund.id,
        refund.payment_order_id,
        refund.entitlement_package_id,
@@ -38,7 +44,7 @@ SELECT refund.id,
                 AND evidence.provider_refund_id = btrim(refund.channel_refund_id)
                 AND evidence.amount_fen = refund.amount_fen
                 AND evidence.currency = payment_order.currency
-                AND evidence.provider_status IS NOT NULL
+                AND evidence.provider_status IS NOT NULL AND btrim(evidence.provider_status) <> ''
                 AND upper(btrim(evidence.provider_status)) NOT IN
                     ('FAILED','FAIL','REJECTED','CLOSED','PAY_CLOSED','CANCELLED','CANCELED','REFUND_FAILED','REFUND_CLOSED')) AS in_scope
 FROM refunds refund
@@ -60,13 +66,13 @@ WHERE refund.status = 'MANUAL_REVIEW'
                  WHERE chargeback.entitlement_package_id = refund.entitlement_package_id);
 ```
 
-对每条 `in_scope=true` 的退款，还必须逐条确认（本命令的边界，任一不满足即不得纳入）：
+对每条候选证据匹配（`in_scope=true`）的退款，还必须逐条确认（本命令的边界，任一不满足即不得纳入）：
 
 - 退款包状态为 `FROZEN`，钱包为 `ACTIVE`；
 - `refund_component_reservations` 覆盖的组件金额之和恰好等于 `refunds.credit_microcredits`，且
-  `refund_grant_reservations` 的数量与执行期一致；
-- 预留组件中**不能**存在 `used_microcredits > 0` 的组件，否则该退款只能部分回收（`shortfall > 0`），
-  必须由授权人单独确认可否接受（部分回收会生成 `FORCED_REFUND` 应收，而不是静默结案）。
+  `refund_grant_reservations` 的身份、组件关联、冻结金额和当前状态完整，不能只比较数量；
+- 冻结预检必须展示 `revoked_microcredits` 与 `shortfall_microcredits`，其和等于退款额度。部分回收按既有同一次独立审批确认短缺与 `FORCED_REFUND` 应收，不允许静默结案，也不额外引入第二套审批政策；
+- facts_digest 必须覆盖预留、组件、配额、证据与零事实，并在执行时完全匹配；上述 SQL 是筛选工具，owner 的当前预检和执行判据才是权威。
 
 Account 侧核验：`approval_requests` 中该命令不得存在 `APPROVED`/`EXECUTING`/`EXECUTION_FAILED` 的遗留行；`outbox_events` 中不得存在未消费的该命令授权事件。任一不满足即阻断激活，并按设计 §8 失败分类只读查证。
 

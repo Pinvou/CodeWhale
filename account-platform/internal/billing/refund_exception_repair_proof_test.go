@@ -33,7 +33,7 @@ func TestRefundExceptionRepairProofProjectionIsClosedAndActivationGated(t *testi
 		RefundID: refundID, EvidenceID: evidenceID, AnomalyCaseID: caseID, AnomalyVersion: 4,
 		AmountFen: 1200, CreditMicrocredits: 1200, RevokedMicrocredits: 900, ShortfallMicrocredits: 300,
 		ProviderRefundID: "wx-refund-1", WalletID: walletID, WalletVersion: 7, PackageID: packageID,
-		PackageStatus: "FROZEN", RefundUpdatedAt: updatedAt, FactsDigest: strings.Repeat("a", 64),
+		PolicyVersion: 1, PackageStatus: "FROZEN", RefundUpdatedAt: updatedAt, FactsDigest: strings.Repeat("a", 64),
 	}
 	repository := &refundRepairProofFactsStub{refundRepair: plan}
 	current, reason, ownerState, err := currentBillingProofInput(context.Background(), repository, frozen)
@@ -92,10 +92,9 @@ func TestRefundExceptionRepairProofProjectionIsClosedAndActivationGated(t *testi
 	}
 }
 
-// The consumed authorization freezes only the wire-visible owner projection, so
-// an empty facts digest means "the execution transaction recomputes it" while a
-// presented digest must still match the owner revision exactly.
-func TestRefundExceptionRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(t *testing.T) {
+// Fresh execution requires the entire frozen digest; matching receipts replay
+// before this fresh owner comparison.
+func TestRefundExceptionRepairFrozenFactsDigestIsRequired(t *testing.T) {
 	plan := RefundExceptionRepairPlan{
 		RefundID: uuid.New(), EvidenceID: uuid.New(), AnomalyCaseID: uuid.New(), AnomalyVersion: 2,
 		AmountFen: 500, CreditMicrocredits: 500, RevokedMicrocredits: 500,
@@ -108,8 +107,8 @@ func TestRefundExceptionRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(t *testi
 		RevokedMicrocredits: plan.RevokedMicrocredits, ShortfallMicrocredits: plan.ShortfallMicrocredits,
 		WalletID: plan.WalletID, WalletVersion: plan.WalletVersion, PackageID: plan.PackageID,
 	}
-	if mismatch := refundExceptionRepairFrozenMismatch(plan, frozen); mismatch != "" {
-		t.Fatalf("owner-recomputed digest rejected: %s", mismatch)
+	if mismatch := refundExceptionRepairFrozenMismatch(plan, frozen); mismatch != "facts_digest" {
+		t.Fatalf("empty frozen digest accepted: %s", mismatch)
 	}
 	frozen.FactsDigest = strings.Repeat("c", 64)
 	if mismatch := refundExceptionRepairFrozenMismatch(plan, frozen); mismatch != "facts_digest" {

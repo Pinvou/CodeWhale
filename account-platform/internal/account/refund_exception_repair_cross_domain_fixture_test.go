@@ -8,7 +8,8 @@ import (
 	"time"
 
 	billingdomain "github.com/Pinvou/pinvou3/account-platform/internal/billing"
-	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -37,76 +38,15 @@ type refundExceptionCrossDomainFacts struct {
 // stays exactly as deployed: the command remains the original INACTIVE v1/s1 row.
 func newRefundExceptionRepairCrossDomainBillingFixture(t *testing.T, ctx context.Context, databaseURL string) (*billingdomain.PostgresRepository, *pgxpool.Pool, *pgx.Conn, refundExceptionCrossDomainFacts) {
 	t.Helper()
-	base, err := pgx.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgx.ConnectConfig(ctx, base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := "billing_refund_exception_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	identifier := pgx.Identifier{database}.Sanitize()
-	if _, err := admin.Exec(ctx, `CREATE DATABASE `+identifier+` OWNER billing_schema_owner TEMPLATE template0 ENCODING 'UTF8'`); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_, _ = admin.Exec(cleanup, `DROP DATABASE IF EXISTS `+identifier)
-		_ = admin.Close(context.Background())
-	})
-	migrationConfig := base.Copy()
-	migrationConfig.Database = database
-	connection, err := pgx.ConnectConfig(ctx, migrationConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = connection.Close(context.Background()) })
-	if _, err := connection.Exec(ctx, `ALTER SCHEMA public OWNER TO billing_schema_owner;
-REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-GRANT USAGE,CREATE ON SCHEMA public TO billing_service`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := connection.Exec(ctx, `SET SESSION AUTHORIZATION billing_migrator; SET ROLE billing_service`); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := migrations.Load("../../migrations/billing")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := migrations.Up(ctx, connection, loaded); err != nil {
-		t.Fatalf("Billing fixture migrations: %v", err)
-	}
-	migrations.Unlock(ctx, connection)
-
-	configuration, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	configuration.MaxConns = 20
-	configuration.ConnConfig.Database = database
-	configuration.AfterConnect = func(connectContext context.Context, connection *pgx.Conn) error {
-		_, connectErr := connection.Exec(connectContext, `SET SESSION AUTHORIZATION billing_service; SET search_path TO public,pg_temp`)
-		return connectErr
-	}
-	pool, err := pgxpool.NewWithConfig(ctx, configuration)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	repository := billingdomain.NewPostgresRepositoryWithPool(pool)
+	repository, pool, connection := newEntitlementCrossDomainBillingFixture(t, ctx, databaseURL)
 	facts := seedRefundExceptionCrossDomainException(t, ctx, pool)
 	return repository, pool, connection, facts
 }
 
-// seedRefundExceptionCrossDomainException writes the production-shaped exception
-// the command's closed plan accepts: one FROZEN package whose FROZEN BASE
-// component still holds the whole credit in one credit lot, a MANUAL_REVIEW
-// refund with a channel refund id, the matching successful provider evidence and
-// the resolved anomaly that escalated the refund to financial repair. The
-// reservation covers exactly the refunded credit, so the repair reclaims it in
-// full and needs no shortfall receivable.
+// seedRefundExceptionCrossDomainException writes a PAID/CREDITED order, a FROZEN
+// package whose BASE component still holds the whole credit in one lot, and a
+// MANUAL_REVIEW refund with matching provider evidence and an escalated anomaly.
+// The reservation covers the full refund, so no shortfall receivable is needed.
 func seedRefundExceptionCrossDomainException(t *testing.T, ctx context.Context, pool *pgxpool.Pool) refundExceptionCrossDomainFacts {
 	t.Helper()
 	now := time.Now().UTC()
@@ -190,4 +130,22 @@ VALUES($1,'REFUND_FAILURE',$2,$3,$4,$5,$6,'RESOLVED','ESCALATE_FINANCIAL_REPAIR'
 		t.Fatal(err)
 	}
 	return facts
+}
+
+// Preserve real Refund owner facts in controlled historical DRAFT/SUBMITTED rows.
+func seedRefundAdvancementRequest(t *testing.T, ctx context.Context, repo *PostgresRepository, user uuid.UUID, policy approvalpolicy.Policy, status string, frozen approvalencoding.LegacyProofInput) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	binding, authorizationVersion, _, err := strongPlatformAuthorization(ctx, repo.pool, user, policy.RequesterPermission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = repo.pool.Exec(ctx, `INSERT INTO approval_requests(id,command_type,policy_version,requester_user_id,requester_binding_id,requester_authorization_version,idempotency_key,normalized_command,command_fingerprint,target_resource_type,target_resource_id,reason,redacted_evidence,expected_impact,status,expires_at,submitted_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$9,$6,$10,decode(repeat('00',32),'hex'),'REFUND',$7,'controlled historical draft','[]','{}',$8,now()+interval '1 hour',CASE WHEN $8='SUBMITTED' THEN now() ELSE NULL END,now(),now())`, id, policy.CommandType, policy.PolicyVersion, user, binding, "historical-"+id.String(), frozen.TargetResourceID, status, authorizationVersion, frozen.NormalizedCommand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `INSERT INTO approval_request_snapshots(approval_request_id,snapshot_schema_version,critical_resource_versions,financial_snapshot,policy_snapshot,requester_authorization_snapshot,created_at) VALUES($1,$2,$3,$4,'{}','{}',now())`, id, policy.SnapshotSchemaVersion, frozen.CriticalResourceVersions, frozen.FinancialSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }

@@ -1,6 +1,6 @@
 # 退款异常修复（`REFUND_EXCEPTION_REPAIR`）领域设计
 
-当前实现：`REFUND_EXCEPTION_REPAIR v1/s1` 已接入 owner、proof、预检、审批详情/编辑、consumer 和专属表单，默认 activation 仍为 `INACTIVE`；不开放普通退款产品，不调用 Provider。本文件保留首版已冻结的财务契约。私有组合的有限验证不代表实际前序传播、生产激活或完整 E2E 验收。
+当前实现：`REFUND_EXCEPTION_REPAIR v1/s1` 已接入 owner、proof、预检、审批详情/编辑、consumer 和专属表单，默认 activation 仍为 `INACTIVE`；不开放普通退款产品，不调用 Provider。本文件保留首版已冻结的财务契约。F12 已审修复已通过普通 merge 相邻传播；本轮有限验证不代表生产激活或完整 E2E 验收。
 
 历史设计基线：2026-09-19 用户确认仅“Provider 已退款但本地未冲销”。下文明确标记的历史章节记录设计阶段，不能当作当前缺少实现的说明。
 
@@ -14,7 +14,7 @@
 
 - **退款模型**：`refunds`（`payment_order_id`、`merchant_refund_no` 唯一、`channel_refund_id` 唯一、`amount_fen>0`、`credit_microcredits>0`、`status ∈ {REQUESTED,SUCCEEDED,FAILED,MANUAL_REVIEW}`、`idempotency_key` 唯一、`reason`、`failure_reason`、`updated_at`），另有 `refund_component_reservations`/`refund_grant_reservations` 冻结退款前的组件与配额分配（`000004`、`000024`）。
 - **成功路径**（`internal/billing/refunds.go`）：冻结预留 → Provider 退款 → 事务内写 `REFUND` journal（`business_reference='refund:'||refund_id`）、按预留逐组件写钱包负债账户负 posting 与 `credit_lots.remaining_microcredits` 减少、组件（`status='FROZEN'` 且 used/reserved/expired 均为 0）置 `REVOKED`、成员配额 grant 置 `REVOKED` 并写审计/outbox、`REFUND_CLEARING +total`、钱包 `posted_microcredits-=total`、entitlement package 置 `REVOKED`、退款置 `SUCCEEDED` 并发出 `billing.refund.succeeded.v1`。
-- **本地冲突分支（本命令的触发事实）**：当预留组件缺失、合计与 `credit_microcredits` 不等或 `wallet.PostedMicrocredits<total` 时，同一事务把退款置 `MANUAL_REVIEW`、记录 `channel_refund_id`、发出 `billing.refund.review-required.v1`，并创建 P0 `REFUND_FAILURE` 异常（`dedupe_key='refund:<refund_id>:local-conflict'`）——即"Provider 已退款、本地未冲销"的持久事实。
+- **本地冲突分支（本命令的触发事实）**：当预留组件缺失、合计与 `credit_microcredits` 不等或 `wallet.PostedMicrocredits<total` 时，同一事务把退款置 `MANUAL_REVIEW`、记录 `channel_refund_id`、发出 `billing.refund.review-required.v1`，并同事务追加由原 Provider 已验证 `SUCCESS` 结果产生的不可变 `QUERY` payment evidence，再创建 P0 `REFUND_FAILURE` 异常（`dedupe_key='refund:<refund_id>:local-conflict'`）——即"Provider 已退款、本地未冲销"的持久事实。
 - **异常收口语义**：`payment_anomaly_cases`（`status ∈ {OPEN,RESOLVED}`、`resolution_code`、`financial_action_status ∈ {NONE,PENDING,APPLIED,FAILED}`、`version`）与 `ResolvePaymentAnomaly` 只允许 `REFUND_FAILURE` 的 `DISMISS`(`NONE`) 或 `ESCALATE_FINANCIAL_REPAIR`(`PENDING`)；**历史设计基线没有从 `PENDING` 推进到 `APPLIED` 的受控路径**，也没有任何命令会写 `APPROVED_WRITE_OFF` 之外的财务收口。
 - **可用账户与枚举**：`platform:refund-clearing`（`REFUND_CLEARING`）、`platform:receivables`（`RECEIVABLE_ASSET`）、`platform:adjustment`（`ADJUSTMENT`）在启动时校验；`journal_entries.entry_type` 已含 `REFUND`/`REVERSAL`/`FORCED_REFUND`；`receivables.source_type` 经前向 `000060`（提交 `d253eeb0a`）已含 `FORCED_REFUND`。
 
@@ -38,7 +38,7 @@
 
 **明确禁止**：
 
-- 禁止修改/删除任何既有 journal/posting、既有 `refunds` 行、`refund_component_reservations`/`refund_grant_reservations`、既有 `payment_evidence`、既有异常行（除 §4.6 的公开状态推进）。
+- 禁止修改/删除既有 journal/posting、`refund_component_reservations`/`refund_grant_reservations` 和 `payment_evidence`；禁止删除既有退款或改写其金额、流水与来源事实。退款和异常仅允许 §4.5/§4.6 明确列出的状态、版本与时间推进。
 - 禁止在 `channel_refund_id` 为空或缺少 Provider 退款成功证据时执行；禁止执行期调用 Provider。
 - 禁止把 `shortfall` 记为钱包可用额度、二次发放或 `WALLET_ADJUSTMENT`；只能形成应收。
 - 禁止 `revoked+shortfall<>credit_microcredits`、`revoked<0`、`shortfall<0` 的任何形态；禁止一次执行产生多条 journal 或多条应收。
@@ -52,7 +52,7 @@
 | 退款单事实 | `refunds.status='MANUAL_REVIEW'`、`credit_microcredits>0`、组件/配额预留行仍完整存在且合计等于 `credit_microcredits` |
 | 异常事实 | 存在 `payment_anomaly_cases`：`anomaly_type='REFUND_FAILURE'`、`dedupe_key='refund:<refund_id>:local-conflict'`、`financial_action_status='PENDING'`，其 `version` 参与 CAS |
 | 本地未冲销 | 不存在 `business_reference='refund-repair:'||refund_id` 的 journal、不存在 `source_reference='refund-repair:'||refund_id` 的应收、`refund_exception_repair_cases` 无该退款行 |
-| 无冲突事实 | 同一退款无进行中的强制退款案（`forced_refund_cases`）与拒付案（`chargeback_cases`）引用同一 package |
+| 无冲突事实 | 同一 package 不存在强制退款案（`forced_refund_cases`）或拒付案（`chargeback_cases`）；现有判据不按已结案状态放行 |
 
 判据全部由 Billing 从持久事实重算；proof 不接受浏览器提供的金额、`revoked/shortfall` 拆分、账户或 Provider 文本。
 
@@ -74,18 +74,18 @@
 | 键 | 内容 |
 |---|---|
 | `critical_resource_versions.refund_updated_at` / `.anomaly_version` | 冻结退款 `updated_at` 与异常 `version` |
-| `critical_resource_versions.facts_digest` | 下述事实集合的 closed RFC8785 摘要 |
+| `critical_resource_versions.facts_digest` | 下述 owner 事实结构经固定 Go JSON 编码后的 SHA-256；与审批 wire 的 RFC8785 摘要分开 |
 | `financial_snapshot.amount_fen` / `.credit_microcredits` | 退款冻结金额与额度 |
 | `financial_snapshot.provider_refund_id` | 外部幂等引用（`channel_refund_id`） |
 | `financial_snapshot.revoked_microcredits` / `.shortfall_microcredits` | 预检计算的回收额与短缺额（`revoked+shortfall=credit_microcredits`） |
 | `financial_snapshot.wallet_id` / `.wallet_version` / `.package_id` | 目标钱包、钱包版本与权益包 |
 
-`facts_digest` 覆盖：退款行全字段（含 `intent_version`）、预留组件与配额行（ID/类型/lot/冻结值/当前值）、钱包 `posted_microcredits/version`、package 与组件当前状态、Provider 证据摘要（`payload_digest`）、异常行（类型/状态/`financial_action_status`/`version`）、以及"无 journal/无应收/无 case"的零事实与 activation/policy/schema 版本。
+`facts_digest` 必须非空并与执行期重算值完全一致；不提供跳过比较的旧开发契约。它覆盖：退款行全字段（含 `intent_version`）、预留组件与配额行（ID/类型/lot/冻结值/当前值）、钱包 `posted_microcredits/version`、package 与组件当前状态、Provider 证据摘要（`payload_digest`）、异常行（类型/状态/`financial_action_status`/`version`）、以及"无 journal/无应收/无 case"的零事实与 activation/policy/schema 版本。
 
 ### 6.3 proof 与 presenter
 
 - Billing 内部证明端点只接受 Account 专属身份，2 秒绝对期限、64 KiB 上限，按 §5 重读并重算 `revoked/shortfall`，返回闭合结果（`PROOF_VALID/PROOF_DENY`、退款、证据、异常、`revoked`、`shortfall`、钱包/包版本、`facts_digest`、policy/schema/activation 版本）。执行期与 proof 均禁止 Provider 调用。
-- presenter（GSA-37）只显示退款单号（脱敏）、订单/交易引用（脱敏）、金额与额度、Provider 退款引用（脱敏）、预计回收与短缺拆分、异常状态、钱包/包版本与风险警示；不下发 Provider 原文、支付凭证或个人数据。
+- 当前 typed presenter 仅从严格校验的冻结 proof artifact 提取退款、证据、异常、钱包与包 ID、十进制字符串金额/额度/回收/短缺、facts_digest 和固定 reason_code，供原始意图 EDIT 恢复；不从实时事实另选证据，不下发 Provider 原文、支付凭证或个人数据。
 
 ## 7. 执行、幂等与状态推进
 
@@ -114,7 +114,7 @@
 | 缺 `channel_refund_id`、缺 Provider 退款证据、证据与退款不一致、退款非 `MANUAL_REVIEW`、异常未升级或 `version` 漂移、存在同包拒付/强制退款案 | `PROOF_DENY` | 失败关闭、零写入、终态 |
 | 已有同退款 case/journal/应收 | 幂等命中 | 读回既有结果，零新写入 |
 | 5 分钟执行窗口过期 | `EXECUTION_WINDOW_EXPIRED` | 终态，零写入 |
-| 可重试领域故障（序列化失败、死锁、连接失败） | 按 GSA-16 分类 | 有界重试；应用层最多 12 次尝试，第 12 次仍失败发布 DLQ 并按 PubAck/`ACK_PENDING`/DoubleAck 收口；禁止通用人工 replay |
+| 可重试领域故障（序列化失败、死锁、连接失败） | 按 GSA-16 分类 | 沿用现有 consumer 的 proof-era 单次认领与恢复分类；需要恢复时只读查询 owner 收据，禁止未知结果重新执行。历史通用最多 12 次重试不适用于本命令的财务认领 |
 | 提交结果未知 | `UNKNOWN_QUERY_ONLY` | 只读查证，不重放、不改判 |
 
 ## 9. 权限、版本与 activation（复用现有 v1/s1）

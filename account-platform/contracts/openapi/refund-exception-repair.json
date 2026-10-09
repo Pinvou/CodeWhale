@@ -225,7 +225,8 @@
           },
           "facts_digest": {
             "type": "string",
-            "pattern": "^[0-9a-f]{64}$"
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "Owner fixed Go JSON facts SHA-256, required exact nonempty match at execution; distinct from RFC8785 approval wire digest."
           },
           "policy_version": {
             "const": 1

@@ -40,6 +40,7 @@ var (
 // owns, so a compromised or mismatched owner response can never be presented as
 // a different resource.
 var approvalPrecheckTargetResourceTypes = map[string]string{
+	"REFUND_EXCEPTION_REPAIR":          "REFUND",
 	"PAYMENT_FINANCIAL_REPAIR":         "PAYMENT_ORDER",
 	"ENTITLEMENT_COMPONENT_ADJUSTMENT": "ENTITLEMENT_PACKAGE",
 	"LEDGER_REPAIR":                    "LEDGER_POSTING",
@@ -50,6 +51,7 @@ var approvalPrecheckTargetResourceTypes = map[string]string{
 // wire exactly; empty optional references are dropped instead of being sent as
 // zero values, so the forwarded body carries only the facts the page supplied.
 type ApprovalPrecheckRequest struct {
+	AnomalyCaseID          string `json:"anomaly_case_id,omitempty"`
 	PaymentEvidenceID      string `json:"payment_evidence_id,omitempty"`
 	CommandType            string `json:"command_type"`
 	TargetResourceID       string `json:"target_resource_id"`
@@ -265,6 +267,17 @@ func decodeApprovalPrecheckResponse(raw []byte, request ApprovalPrecheckRequest)
 		if json.Unmarshal(wire.NormalizedCommand, &selected) != nil || selected.PaymentOrderID != request.TargetResourceID || selected.PaymentEvidenceID != request.PaymentEvidenceID || selected.ReasonCode != request.ReasonCode {
 			return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 		}
+	case "REFUND_EXCEPTION_REPAIR":
+		var selected struct {
+			RefundID          string `json:"refund_id"`
+			PaymentEvidenceID string `json:"payment_evidence_id"`
+			AnomalyCaseID     string `json:"anomaly_case_id"`
+			ReasonCode        string `json:"reason_code"`
+		}
+		if json.Unmarshal(wire.NormalizedCommand, &selected) != nil || selected.RefundID != request.TargetResourceID || selected.PaymentEvidenceID != request.PaymentEvidenceID || selected.AnomalyCaseID != request.AnomalyCaseID || selected.ReasonCode != request.ReasonCode {
+			return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
+		}
+
 	default:
 		return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 	}
@@ -291,11 +304,14 @@ func closedApprovalPrecheckDocument(raw json.RawMessage) (json.RawMessage, bool)
 }
 
 func validPrecheckVersion(command string, policy int64, snapshot int) bool {
-	return command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" && policy == 2 && snapshot == 2 || (command == "LEDGER_REPAIR" || command == "RECEIVABLE_WRITE_OFF" || command == "PAYMENT_FINANCIAL_REPAIR") && policy == 1 && snapshot == 1
+	return command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" && policy == 2 && snapshot == 2 || (command == "LEDGER_REPAIR" || command == "RECEIVABLE_WRITE_OFF" || command == "PAYMENT_FINANCIAL_REPAIR" || command == "REFUND_EXCEPTION_REPAIR") && policy == 1 && snapshot == 1
 }
 
 func validApprovalPrecheckRequest(request ApprovalPrecheckRequest) bool {
 	if _, ok := validPrecheckIdentifier(request.TargetResourceID); !ok {
+		return false
+	}
+	if request.CommandType != "REFUND_EXCEPTION_REPAIR" && request.AnomalyCaseID != "" {
 		return false
 	}
 	switch request.CommandType {
@@ -318,6 +334,15 @@ func validApprovalPrecheckRequest(request ApprovalPrecheckRequest) bool {
 			return false
 		}
 		return request.ReasonCode == "CONFIRMED_PAYMENT_NOT_CREDITED" && request.PaymentOrderID == "" && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0 && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
+	case "REFUND_EXCEPTION_REPAIR":
+		if _, ok := validPrecheckIdentifier(request.PaymentEvidenceID); !ok {
+			return false
+		}
+		if _, ok := validPrecheckIdentifier(request.AnomalyCaseID); !ok {
+			return false
+		}
+		return request.ReasonCode == "PROVIDER_REFUNDED_LOCAL_REVERSAL_MISSING" && request.PaymentOrderID == "" && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0 && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
+
 	}
 	return false
 }

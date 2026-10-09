@@ -22,7 +22,9 @@ func TestF12PaymentRepairOrderLookupPostgres(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	t.Cleanup(cancel)
-	repository, _ := entitlementRepositoryToVersion(t, ctx, databaseURL, 900016)
+	repository, _ := entitlementRepositoryWithStage(t, ctx, databaseURL, func(loaded []migrations.Migration) ([]migrations.Migration, error) {
+		return selectF12PaymentLookupStage(loaded, 900016)
+	})
 	pool := repository.pool
 	var installedIndex, installedLedger string
 	if err := pool.QueryRow(ctx, `SELECT COALESCE(string_agg(pg_get_indexdef(indexrelid),';' ORDER BY indexrelid),'') FROM pg_index WHERE indrelid='public.payment_order_repairs'::regclass`).Scan(&installedIndex); err != nil {
@@ -190,11 +192,15 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := billingschema.Up(ctx, operator, loaded); err != nil {
+	historical, err := selectF12PaymentLookupStage(loaded, 900017)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := billingschema.Up(ctx, operator, historical); err != nil {
 		t.Fatal("official 900016 to 900017 upgrade failed", err)
 	}
 	migrations.Unlock(ctx, operator)
-	if _, err := migrations.VerifyApplied(ctx, operator, loaded); err != nil {
+	if _, err := migrations.VerifyApplied(ctx, operator, historical); err != nil {
 		t.Fatal("upgrade ledger verification failed", err)
 	}
 	after := explain("after-first-observed")
@@ -211,13 +217,22 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 	if err != nil || replay != result {
 		t.Fatal("index upgrade changed original receipt replay", err)
 	}
-	err = migrations.DownOne(ctx, operator, loaded)
+	err = migrations.DownOne(ctx, operator, historical)
 	migrations.Unlock(ctx, operator)
 	var pgError *pgconn.PgError
 	if !errors.As(err, &pgError) || pgError.Code != "55000" {
 		t.Fatal("highest lookup migration must retain forward-only rollback boundary")
 	}
-	if _, err := migrations.VerifyApplied(ctx, operator, loaded); err != nil {
+	if _, err := migrations.VerifyApplied(ctx, operator, historical); err != nil {
 		t.Fatal("refused Down changed ledger", err)
+	}
+	// Upgrade the intact historical installation to this wave's full schema.
+	// The performance observations above belong only to the F12 history.
+	if err := billingschema.Up(ctx, operator, loaded); err != nil {
+		t.Fatal("historical lookup installation cannot upgrade to current schema", err)
+	}
+	migrations.Unlock(ctx, operator)
+	if _, err := migrations.VerifyApplied(ctx, operator, loaded); err != nil {
+		t.Fatal("current upgrade ledger verification failed", err)
 	}
 }

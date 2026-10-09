@@ -156,10 +156,11 @@ func TestRefundExceptionRepairPostgresIntegration(t *testing.T) {
 	t.Cleanup(cancel)
 	repository, _ := newAdminPaginationIntegrationRepository(t, ctx, databaseURL)
 	pool := repository.pool
+	activationVersion := refundFixtureActivation(t, ctx, pool)("ACTIVE")
 
 	full := seedRefundException(t, ctx, repository, false)
 	command := RefundExceptionRepairCommandInput{RefundID: full.RefundID, PaymentEvidenceID: full.EvidenceID, AnomalyCaseID: full.AnomalyCaseID}
-	plan, err := refundExceptionRepairPlanFrom(ctx, pool, command, 1, 1, 1)
+	plan, err := refundExceptionRepairPlanFrom(ctx, pool, command, 1, 1, activationVersion)
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -170,14 +171,14 @@ func TestRefundExceptionRepairPostgresIntegration(t *testing.T) {
 	execute := func(requestID, eventID uuid.UUID, command RefundExceptionRepairCommandInput, frozen RefundExceptionRepairFrozenFacts) (RefundExceptionRepairResult, error) {
 		return repository.ApplyRefundExceptionRepair(ctx, RefundExceptionRepairExecutionInput{
 			ApprovalRequestID: requestID, AuthorizationEventID: eventID, ApprovalEpoch: 2,
-			ExecutionKey: "refund-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+			ExecutionKey: "refund-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
 			Command: command, Frozen: frozen,
 		})
 	}
 	frozen := RefundExceptionRepairFrozenFacts{RefundUpdatedAt: plan.RefundUpdatedAt, AnomalyVersion: plan.AnomalyVersion,
 		AmountFen: plan.AmountFen, CreditMicrocredits: plan.CreditMicrocredits, ProviderRefundID: plan.ProviderRefundID,
 		RevokedMicrocredits: plan.RevokedMicrocredits, ShortfallMicrocredits: plan.ShortfallMicrocredits,
-		WalletID: plan.WalletID, WalletVersion: plan.WalletVersion, PackageID: plan.PackageID}
+		WalletID: plan.WalletID, WalletVersion: plan.WalletVersion, PackageID: plan.PackageID, FactsDigest: plan.FactsDigest}
 	requestID, eventID := uuid.New(), uuid.New()
 	applied, err := execute(requestID, eventID, command, frozen)
 	if err != nil {
@@ -264,7 +265,7 @@ WHERE component.package_id=$1`, full.PackageID).Scan(&componentStatus, &revokedM
 	// shortfall receivable instead of being revoked.
 	partial := seedRefundException(t, ctx, repository, true)
 	partialCommand := RefundExceptionRepairCommandInput{RefundID: partial.RefundID, PaymentEvidenceID: partial.EvidenceID, AnomalyCaseID: partial.AnomalyCaseID}
-	partialPlan, err := refundExceptionRepairPlanFrom(ctx, pool, partialCommand, 1, 1, 1)
+	partialPlan, err := refundExceptionRepairPlanFrom(ctx, pool, partialCommand, 1, 1, activationVersion)
 	if err != nil {
 		t.Fatalf("partial plan: %v", err)
 	}
@@ -274,7 +275,7 @@ WHERE component.package_id=$1`, full.PackageID).Scan(&componentStatus, &revokedM
 	partialFrozen := RefundExceptionRepairFrozenFacts{RefundUpdatedAt: partialPlan.RefundUpdatedAt, AnomalyVersion: partialPlan.AnomalyVersion,
 		AmountFen: partialPlan.AmountFen, CreditMicrocredits: partialPlan.CreditMicrocredits, ProviderRefundID: partialPlan.ProviderRefundID,
 		RevokedMicrocredits: partialPlan.RevokedMicrocredits, ShortfallMicrocredits: partialPlan.ShortfallMicrocredits,
-		WalletID: partialPlan.WalletID, WalletVersion: partialPlan.WalletVersion, PackageID: partialPlan.PackageID}
+		WalletID: partialPlan.WalletID, WalletVersion: partialPlan.WalletVersion, PackageID: partialPlan.PackageID, FactsDigest: partialPlan.FactsDigest}
 	partialResult, err := execute(uuid.New(), uuid.New(), partialCommand, partialFrozen)
 	if err != nil {
 		t.Fatalf("partial apply: %v", err)

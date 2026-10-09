@@ -70,6 +70,7 @@ type refundExceptionReclaim struct {
 // RefundExceptionRepairPlan is the closed, recomputable owner projection of one
 // approved refund exception repair.
 type RefundExceptionRepairPlan struct {
+	PolicyVersion         int64
 	RefundID              uuid.UUID
 	PaymentOrderID        uuid.UUID
 	PaymentTransactionID  uuid.UUID
@@ -93,9 +94,8 @@ type RefundExceptionRepairPlan struct {
 }
 
 // RefundExceptionRepairFrozenFacts is the wire-visible owner projection an
-// approval froze. FactsDigest is an owner-only recomputation input; a consumed
-// authorization leaves it empty and the execution transaction recomputes it,
-// while a presented digest must match exactly.
+// approval froze. Fresh execution requires the exact owner digest; the immutable
+// matching committed receipt is read before fresh activation and snapshot gates.
 type RefundExceptionRepairFrozenFacts struct {
 	RefundUpdatedAt       time.Time
 	AnomalyVersion        int64
@@ -148,10 +148,10 @@ func refundExceptionConflict(stage string, cause error) error {
 func refundExceptionRepairPlanFrom(ctx context.Context, source refundExceptionRepairReader, input RefundExceptionRepairCommandInput,
 	policyVersion, schemaVersion, activationVersion int64) (RefundExceptionRepairPlan, error) {
 	if input.RefundID == uuid.Nil || input.PaymentEvidenceID == uuid.Nil || input.AnomalyCaseID == uuid.Nil ||
-		policyVersion < 1 || schemaVersion < 1 || activationVersion < 1 {
+		policyVersion != 1 || schemaVersion != 1 || activationVersion < 1 {
 		return RefundExceptionRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
-	plan := RefundExceptionRepairPlan{RefundID: input.RefundID, EvidenceID: input.PaymentEvidenceID, AnomalyCaseID: input.AnomalyCaseID}
+	plan := RefundExceptionRepairPlan{RefundID: input.RefundID, EvidenceID: input.PaymentEvidenceID, AnomalyCaseID: input.AnomalyCaseID, PolicyVersion: policyVersion}
 	var refundStatus, merchantRefundNo, currency string
 	var channelRefundID *string
 	var intentVersion int64
@@ -184,8 +184,8 @@ FROM refunds WHERE id=$1`, input.RefundID).
 	var evidenceRefundID, evidenceStatus, payloadDigest string
 	var evidenceAmountFen *int64
 	var evidenceCurrency *string
-	if err := source.QueryRow(ctx, `SELECT payment_order_id,payment_transaction_id,provider_refund_id,amount_fen,currency,
-provider_status,payload_digest FROM payment_evidence WHERE id=$1`, input.PaymentEvidenceID).
+	if err := source.QueryRow(ctx, `SELECT payment_order_id,payment_transaction_id,COALESCE(provider_refund_id,''),amount_fen,currency,
+COALESCE(provider_status,''),payload_digest FROM payment_evidence WHERE id=$1`, input.PaymentEvidenceID).
 		Scan(&evidenceOrderID, &evidenceTransactionID, &evidenceRefundID, &evidenceAmountFen, &evidenceCurrency,
 			&evidenceStatus, &payloadDigest); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -319,9 +319,28 @@ WHERE reservation.refund_id=$1 ORDER BY reservation.component_id`, plan.RefundID
 			ComponentType: item.ComponentType, Available: item.Available, Active: item.Active, Suspended: item.Suspended,
 			Reclaimable: item.Reclaimable, ReclaimableSize: item.ReclaimableSize})
 	}
+	// Freeze the complete persisted owner tuples, not just the reclaimable split
+	// or the count of grant reservations. PostgreSQL JSONB is decoded with Number
+	// before hashing so every bigint token remains exact.
+	var ownerRaw []byte
+	if err := source.QueryRow(ctx, `SELECT jsonb_build_object(
+ 'refund',(SELECT to_jsonb(r) FROM refunds r WHERE r.id=$1),
+ 'evidence',(SELECT to_jsonb(e) FROM payment_evidence e WHERE e.id=$2),
+ 'anomaly',(SELECT to_jsonb(a) FROM payment_anomaly_cases a WHERE a.id=$3),
+ 'package',(SELECT to_jsonb(p) FROM entitlement_packages p WHERE p.id=$4),
+ 'wallet',(SELECT to_jsonb(w) FROM wallets w WHERE w.id=$5),
+ 'components',COALESCE((SELECT jsonb_agg(jsonb_build_object('reservation',to_jsonb(r),'component',to_jsonb(c),'lot',to_jsonb(l)) ORDER BY r.component_id) FROM refund_component_reservations r JOIN entitlement_components c ON c.id=r.component_id JOIN credit_lots l ON l.id=r.credit_lot_id WHERE r.refund_id=$1),'[]'::jsonb),
+ 'grants',COALESCE((SELECT jsonb_agg(jsonb_build_object('reservation',to_jsonb(r),'grant',to_jsonb(g)) ORDER BY r.grant_id) FROM refund_grant_reservations r JOIN member_quota_grants g ON g.id=r.grant_id WHERE r.refund_id=$1),'[]'::jsonb))`, plan.RefundID, plan.EvidenceID, plan.AnomalyCaseID, plan.PackageID, plan.WalletID).Scan(&ownerRaw); err != nil {
+		return RefundExceptionRepairPlan{}, err
+	}
+	ownerSnapshot, err := paymentRepairJSONSnapshot(ownerRaw)
+	if err != nil {
+		return RefundExceptionRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
 	encoded, err := json.Marshal(map[string]any{
-		"command_type": refundExceptionRepairCommand,
-		"refund_id":    plan.RefundID.String(), "payment_order_id": plan.PaymentOrderID.String(),
+		"command_type": refundExceptionRepairCommand, "complete_owner_snapshot": ownerSnapshot,
+		"zero_facts": []bool{journalExists, receivableExists, caseExists, conflictCase},
+		"refund_id":  plan.RefundID.String(), "payment_order_id": plan.PaymentOrderID.String(),
 		"payment_transaction_id": plan.PaymentTransactionID.String(), "package_id": plan.PackageID.String(),
 		"wallet_id": plan.WalletID.String(), "wallet_posted_microcredits": plan.WalletPosted, "wallet_version": plan.WalletVersion,
 		"amount_fen": plan.AmountFen, "credit_microcredits": plan.CreditMicrocredits,
@@ -351,7 +370,7 @@ WHERE reservation.refund_id=$1 ORDER BY reservation.component_id`, plan.RefundID
 func refundExceptionRepairProofProjection(plan RefundExceptionRepairPlan) ([]byte, []byte) {
 	critical, _ := json.Marshal(map[string]any{
 		"refund_updated_at": plan.RefundUpdatedAt.UTC().Format(time.RFC3339Nano),
-		"anomaly_version":   plan.AnomalyVersion, "facts_digest": plan.FactsDigest, "policy_version": 1,
+		"anomaly_version":   plan.AnomalyVersion, "facts_digest": plan.FactsDigest, "policy_version": plan.PolicyVersion,
 	})
 	financial, _ := json.Marshal(map[string]any{
 		"amount_fen": plan.AmountFen, "credit_microcredits": plan.CreditMicrocredits,
@@ -427,6 +446,9 @@ func (r *PostgresRepository) ApplyRefundExceptionRepair(ctx context.Context, inp
 		return RefundExceptionRepairResult{}, err
 	} else if found {
 		return stored, tx.Commit(ctx)
+	}
+	if err := refundExceptionRepairExecutionActivation(ctx, tx, input, r.now()); err != nil {
+		return RefundExceptionRepairResult{}, err
 	}
 	plan, err := refundExceptionRepairPlanFrom(ctx, tx, input.Command, input.PolicyVersion, input.SchemaVersion, input.ActivationVersion)
 	if err != nil {
@@ -581,7 +603,7 @@ execution_key_digest,refund_id,anomaly_case_id,wallet_id,package_id,revoked_micr
 facts_digest,journal_entry_id,receivable_id,state,created_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'EXECUTED',$16)`,
 		caseID, input.ApprovalRequestID, input.AuthorizationEventID, input.ApprovalEpoch,
-		ledgerRepairExecutionKeyDigest(executionKey), plan.RefundID, plan.AnomalyCaseID, plan.WalletID, plan.PackageID,
+		legacyFinancialExecutionKeyDigestV1(executionKey), plan.RefundID, plan.AnomalyCaseID, plan.WalletID, plan.PackageID,
 		plan.RevokedMicrocredits, plan.ShortfallMicrocredits, plan.EvidenceID, plan.FactsDigest, entryID, receivableID, now); err != nil {
 		return RefundExceptionRepairResult{}, err
 	}
@@ -654,8 +676,8 @@ FROM refund_exception_repair_cases WHERE approval_request_id=$1`, input.Approval
 		return RefundExceptionRepairResult{}, false, err
 	}
 	if authorizationEventID != input.AuthorizationEventID || approvalEpoch != input.ApprovalEpoch ||
-		executionKeyDigest != ledgerRepairExecutionKeyDigest(executionKey) || storedRefundID != input.Command.RefundID {
-		return RefundExceptionRepairResult{}, false, nil
+		executionKeyDigest != legacyFinancialExecutionKeyDigestV1(executionKey) || storedRefundID != input.Command.RefundID {
+		return RefundExceptionRepairResult{}, false, ErrConflict
 	}
 	stored, err := readRefundExceptionRepair(ctx, source, input.ApprovalRequestID)
 	if err != nil {
@@ -686,13 +708,29 @@ func refundExceptionRepairFrozenMismatch(plan RefundExceptionRepairPlan, frozen 
 		return "wallet_version"
 	case plan.PackageID != frozen.PackageID:
 		return "package_id"
-	// The consumed authorization freezes only the wire-visible owner
-	// projection; the owner-only facts digest is recomputed inside the
-	// execution transaction, so an empty value is not a caller claim.
-	case frozen.FactsDigest == "":
-		return ""
 	case plan.FactsDigest != frozen.FactsDigest:
 		return "facts_digest"
 	}
 	return ""
+}
+
+func refundExceptionRepairExecutionActivation(ctx context.Context, source refundExceptionRepairReader, input RefundExceptionRepairExecutionInput, now time.Time) error {
+	active := ApprovalCommandActivation{CommandType: refundExceptionRepairCommand, PolicyVersion: 1, SnapshotSchemaVersion: 1, State: "INACTIVE"}
+	var enabled bool
+	err := source.QueryRow(ctx, `SELECT active,activation_version,updated_at FROM billing_approval_execution.lock_refund_activation()`).
+		Scan(&enabled, &active.Version, &active.UpdatedAt)
+	if enabled {
+		active.State = "ACTIVE"
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrApprovalSnapshotMismatch
+	}
+	if err != nil {
+		return err
+	}
+	if !validActivationItem(active, refundExceptionRepairCommand, billingApprovalActivationSpecs[refundExceptionRepairCommand], now) ||
+		active.State != "ACTIVE" || active.PolicyVersion != input.PolicyVersion || int64(active.SnapshotSchemaVersion) != input.SchemaVersion || active.Version != input.ActivationVersion {
+		return ErrApprovalSnapshotMismatch
+	}
+	return nil
 }

@@ -7,7 +7,8 @@ export const ledgerRepairCopy = {
     "targets": {
       "LEDGER_REPAIR": "目标过账 ID",
       "RECEIVABLE_WRITE_OFF": "应收 ID",
-      "PAYMENT_FINANCIAL_REPAIR": "支付订单 ID"
+      "PAYMENT_FINANCIAL_REPAIR": "支付订单 ID",
+      "REFUND_EXCEPTION_REPAIR": "退款 ID"
     },
     "fields": {
       "receivable_id": "应收 ID",
@@ -30,7 +31,15 @@ export const ledgerRepairCopy = {
       "wallet_id": "钱包 ID",
       "provider_transaction_id": "支付渠道交易 ID",
       "payment_order_updated_at": "订单更新时间",
-      "facts_digest": "事实摘要"
+      "facts_digest": "事实摘要",
+      "refund_id": "退款 ID",
+      "anomaly_case_id": "异常案件 ID",
+      "provider_refund_id": "退款渠道引用",
+      "revoked_microcredits": "回收金额（微积分）",
+      "shortfall_microcredits": "短缺金额（微积分）",
+      "package_id": "权益包 ID",
+      "refund_updated_at": "退款更新时间",
+      "anomaly_version": "异常版本"
     },
     "readFacts": "读取冻结事实",
     "reading": "正在读取…",
@@ -50,7 +59,8 @@ export const ledgerRepairCopy = {
     "invalidDraft": "冻结事实或理由/请求键不满足闭合要求，草稿未提交。",
     "draftFailed": "创建审批草稿失败，请稍后重试。",
     "controlChanged": "审批控制已变化，请重新读取冻结事实。",
-    "paymentRepairTitle": "支付财务修复"
+    "paymentRepairTitle": "支付财务修复",
+    "refundRepairTitle": "退款例外修复"
   },
   "en": {
     "title": "Start a financial repair approval",
@@ -60,7 +70,8 @@ export const ledgerRepairCopy = {
     "targets": {
       "LEDGER_REPAIR": "Target posting ID",
       "RECEIVABLE_WRITE_OFF": "Receivable ID",
-      "PAYMENT_FINANCIAL_REPAIR": "Payment order ID"
+      "PAYMENT_FINANCIAL_REPAIR": "Payment order ID",
+      "REFUND_EXCEPTION_REPAIR": "Refund ID"
     },
     "fields": {
       "receivable_id": "Receivable ID",
@@ -83,7 +94,15 @@ export const ledgerRepairCopy = {
       "wallet_id": "Wallet ID",
       "provider_transaction_id": "Provider transaction ID",
       "payment_order_updated_at": "Order updated at",
-      "facts_digest": "Facts digest"
+      "facts_digest": "Facts digest",
+      "refund_id": "Refund ID",
+      "anomaly_case_id": "Anomaly case ID",
+      "provider_refund_id": "Provider refund reference",
+      "revoked_microcredits": "Revoked amount (microcredits)",
+      "shortfall_microcredits": "Shortfall (microcredits)",
+      "package_id": "Entitlement package ID",
+      "refund_updated_at": "Refund updated at",
+      "anomaly_version": "Anomaly version"
     },
     "readFacts": "Read frozen facts",
     "reading": "Reading…",
@@ -103,7 +122,8 @@ export const ledgerRepairCopy = {
     "invalidDraft": "The frozen facts, reason or request key do not meet the closed contract; nothing was submitted.",
     "draftFailed": "Creating the approval draft failed. Try again later.",
     "controlChanged": "The approval control changed; read the frozen facts again.",
-    "paymentRepairTitle": "Payment financial repair"
+    "paymentRepairTitle": "Payment financial repair",
+    "refundRepairTitle": "Refund exception repair"
   },
   "ja": {
     "title": "財務修復の承認を起動",
@@ -113,7 +133,8 @@ export const ledgerRepairCopy = {
     "targets": {
       "LEDGER_REPAIR": "対象仕訳転記 ID",
       "RECEIVABLE_WRITE_OFF": "売掛金 ID",
-      "PAYMENT_FINANCIAL_REPAIR": "支払注文 ID"
+      "PAYMENT_FINANCIAL_REPAIR": "支払注文 ID",
+      "REFUND_EXCEPTION_REPAIR": "返金 ID"
     },
     "fields": {
       "receivable_id": "売掛金 ID",
@@ -136,7 +157,15 @@ export const ledgerRepairCopy = {
       "wallet_id": "ウォレット ID",
       "provider_transaction_id": "決済取引 ID",
       "payment_order_updated_at": "注文更新時刻",
-      "facts_digest": "事実ダイジェスト"
+      "facts_digest": "事実ダイジェスト",
+      "refund_id": "返金 ID",
+      "anomaly_case_id": "異常案件 ID",
+      "provider_refund_id": "決済返金参照",
+      "revoked_microcredits": "回収額（マイクロクレジット）",
+      "shortfall_microcredits": "不足額（マイクロクレジット）",
+      "package_id": "権利パッケージ ID",
+      "refund_updated_at": "返金更新時刻",
+      "anomaly_version": "異常版"
     },
     "readFacts": "固定事実を読み込む",
     "reading": "読み込み中…",
@@ -156,7 +185,8 @@ export const ledgerRepairCopy = {
     "invalidDraft": "固定事実・理由・リクエストキーが閉じた契約を満たさないため、送信しませんでした。",
     "draftFailed": "承認ドラフトの作成に失敗しました。後でもう一度お試しください。",
     "controlChanged": "承認制御が変更されました。固定事実を再読み込みしてください。",
-    "paymentRepairTitle": "支払財務修復"
+    "paymentRepairTitle": "支払財務修復",
+    "refundRepairTitle": "返金例外修復"
   }
 };
 

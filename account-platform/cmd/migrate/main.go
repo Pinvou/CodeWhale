@@ -227,6 +227,7 @@ func protectedMigrationDomain(version int64, name, checksum string) string {
 		{"billing", 900015, "receivable_activation_execution_lock", "e8ce834446a7fb35132b6df60c0cbaaa86d5af93163eecbe449a150af1937c38"},
 		{"billing", 900016, "payment_activation_execution_lock", "e91164261390798fd3b98be27d91ff4442b30ed3aebb72002b180104d465a6a1"},
 		{"billing", 900017, "payment_repair_order_lookup", "18d285451a58950e40ef90cf77ebe7455e86f2331db2187ba437f8c67f84a865"},
+		{"billing", 900018, "refund_activation_execution_lock", "96b284f182a33fce5c7636291be06e50c050e69ee26cf923033c2332b8a8d673"},
 		{"payment-simulator", 5, "mapped_order_facts", "c10369f3c1201aa37752d686645fac25c435b6e68daba401158f54090ae4e0bb"},
 		{"payment-simulator", 6, "merchant_customer_key", "a5629107cf1ba62324fb0fb9ea548037a291a327274ef35cdeafa69f4dc1e9dc"},
 	} {

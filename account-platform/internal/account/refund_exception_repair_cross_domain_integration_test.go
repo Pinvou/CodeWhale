@@ -39,7 +39,7 @@ func TestRefundExceptionRepairCrossDomainActivationPostgresIntegration(t *testin
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	t.Cleanup(cancel)
 
-	repository, accountConnection, relay, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, accountURL, 0)
+	repository, accountConnection, relay, _ := newEntitlementApprovalFixture(t, ctx, accountURL)
 	billingRepository, billingPool, billingConnection, exception := newRefundExceptionRepairCrossDomainBillingFixture(t, ctx, billingURL)
 	proofToken, executorToken := configureEntitlementProofIdentity(t)
 	billingServer := httptest.NewServer(billingdomain.NewService(billingRepository).Handler("account-proof-test"))
@@ -109,7 +109,7 @@ func TestRefundExceptionRepairCrossDomainActivationPostgresIntegration(t *testin
 		!approvalPaginationHexDigest(presentedCommand.FactsDigest) {
 		t.Fatalf("cross-domain presenter command=%#v", detail.Command)
 	}
-	proofSource, err := NewHTTPApprovalProofSource("http://127.0.0.1", billingServer.URL, proofToken)
+	proofSource, err := NewHTTPApprovalProofSource(billingServer.URL, proofToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,8 +120,8 @@ func TestRefundExceptionRepairCrossDomainActivationPostgresIntegration(t *testin
 	if err := repository.requireApprovalAdvancement(ctx, policy); !errors.Is(err, ErrBillingGovernanceInactive) {
 		t.Fatalf("inactive cross-domain advancement: %v", err)
 	}
-	requester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "refund-repair-activation-requester")
-	approver := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "refund-repair-activation-approver")
+	requester := seedPaymentApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "refund-repair-activation-requester")
+	approver := seedPaymentApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "refund-repair-activation-approver")
 	requesterPrincipal, approverPrincipal := approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
 	createDraft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "refund-repair-activation-create",
@@ -134,7 +134,7 @@ func TestRefundExceptionRepairCrossDomainActivationPostgresIntegration(t *testin
 		t.Fatal("inactive cross-domain create unexpectedly succeeded")
 	}
 	assertApprovalRequestAbsent(t, ctx, repository, requester.ID, createDraft.IdempotencyKey)
-	submitID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT")
+	submitID := seedRefundAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.SubmitApprovalRequest(ctx, requesterPrincipal, submitID, 1)
 		return err
@@ -142,7 +142,7 @@ func TestRefundExceptionRepairCrossDomainActivationPostgresIntegration(t *testin
 		t.Fatalf("inactive cross-domain submit: %v", err)
 	}
 	assertApprovalRequestState(t, ctx, repository, submitID, "DRAFT", 1)
-	approveID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED")
+	approveID := seedRefundAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.DecideApprovalRequest(ctx, approverPrincipal, approveID, 1, "APPROVED", "closed cross-domain gate", frozen.CriticalResourceVersions)
 		return err
@@ -192,10 +192,13 @@ WHERE command_type='REFUND_EXCEPTION_REPAIR' AND policy_version=1 AND snapshot_s
 		t.Fatalf("activated cross-domain proof=%+v err=%v", proof.Response, err)
 	}
 
-	transitionEntitlementCrossDomainAccountControl(t, ctx, accountConnection)
-	requester = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "refund-repair-chain-requester")
-	approver = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "refund-repair-chain-approver")
+	requester = seedPaymentApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "refund-repair-chain-requester")
+	approver = seedPaymentApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "refund-repair-chain-approver")
 	requesterPrincipal, approverPrincipal = approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
+	control, controlErr := repository.ApprovalActionControl(ctx)
+	if controlErr != nil || control.Mode != "PROOF_REQUIRED" {
+		t.Fatal("official Account fixture must already be PROOF_REQUIRED")
+	}
 	draft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "refund-repair-cross-domain-chain",
 		NormalizedCommand: frozen.NormalizedCommand, TargetResourceType: frozen.TargetResourceType,

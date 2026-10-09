@@ -334,6 +334,14 @@ has_table_privilege('billing_service',$1,'UPDATE'),has_table_privilege('billing_
 // inherited strict owned UUID database cleanup. Fixed roles belong to the
 // isolated F09 test instance and are created/removed by the outer role harness.
 func entitlementRepositoryToVersion(t *testing.T, ctx context.Context, raw string, maximum int64) (*PostgresRepository, string) {
+	return entitlementRepositoryWithStage(t, ctx, raw, func(loaded []migrations.Migration) ([]migrations.Migration, error) {
+		return selectEntitlementFixtureStage(loaded, maximum), nil
+	})
+}
+
+// A historical installation supplies its explicit published membership; the
+// default correction fixtures retain their original selection contract above.
+func entitlementRepositoryWithStage(t *testing.T, ctx context.Context, raw string, selectStage func([]migrations.Migration) ([]migrations.Migration, error)) (*PostgresRepository, string) {
 	t.Helper()
 	if raw == "" {
 		t.Skip("PINVOU_TEST_BILLING_DATABASE_URL is required for actual PostgreSQL")
@@ -398,7 +406,10 @@ func entitlementRepositoryToVersion(t *testing.T, ctx context.Context, raw strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	selected := selectEntitlementFixtureStage(loaded, maximum)
+	selected, err := selectStage(loaded)
+	if err != nil {
+		t.Fatal("fixture migration stage identity rejected", err)
+	}
 	if err = billingschema.Up(ctx, connection, selected); err != nil {
 		t.Fatal(err)
 	}

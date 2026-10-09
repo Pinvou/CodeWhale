@@ -12,9 +12,11 @@ try{
  for(const language of ['zh','en','ja'])await run('production Refund form / exact version / draft / lost ACK / submit '+language,async page=>{
   await page.goto(server.resolvedUrls.local[0]+`refund-fixture.html?language=${language}${language==='en'?'&lost=1':''}`);
   await page.waitForFunction(()=>window.f10);
-  await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(b=>b.textContent===window.f10.ledgerRepairCopy[window.f10.language].title).click());
+  await page.waitForFunction(()=>[...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.ledgerRepairCopy[window.f10.language].refundRepairTitle));
+  await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(b=>b.textContent===window.f10.ledgerRepairCopy[window.f10.language].refundRepairTitle).click());
   await page.waitForSelector('.adm-financial-repair-target');
   await page.select('.adm-financial-repair select','REFUND_EXCEPTION_REPAIR');
+  await page.waitForFunction(()=>document.querySelector('.adm-financial-repair select')?.value==='REFUND_EXCEPTION_REPAIR'&&document.querySelectorAll('.adm-financial-repair-target input').length===3);
   const values=await page.evaluate(()=>[window.f10.id(1),window.f10.id(2),window.f10.id(6)]);const inputs=await page.$$('.adm-financial-repair-target input');for(let i=0;i<inputs.length;i++)await inputs[i].type(values[i]);
   await page.click('.adm-financial-repair-target button');await page.waitForSelector('.adm-financial-repair-draft');
   assert.ok(await page.evaluate(()=>{const c=window.f10.calls.find(c=>c.url==='/api/admin/account/admin/v2/approval-command-prechecks');return JSON.parse(c.body).payment_evidence_id===window.f10.id(2)&&JSON.parse(c.body).anomaly_case_id===window.f10.id(6)&&JSON.parse(c.body).reason_code==='PROVIDER_REFUNDED_LOCAL_REVERSAL_MISSING'&&c.headers['X-CSRF-Token']==='controlled-csrf';}));
@@ -22,8 +24,9 @@ try{
   if(language==='en'){await page.waitForSelector('.adm-financial-repair [role=alert]');await page.waitForFunction(()=>!document.querySelector('.adm-financial-repair-draft button').disabled);await page.click('.adm-financial-repair-draft button');}
   await page.waitForFunction(()=>document.body.textContent.includes(window.f10.id(9))&&!document.querySelector('.adm-financial-repair'));
   assert.ok(await page.evaluate(()=>window.f10.calls.filter(c=>c.url==='/api/admin/approvals/requests'&&c.method==='POST').every(c=>c.body.includes('"credit_microcredits":9223372036854775807')&&c.body.includes('"wallet_version":9007199254740993')&&c.body.includes('"anomaly_version":9007199254740993')&&JSON.parse(c.body).normalized_command.payment_evidence_id===window.f10.id(2)&&JSON.parse(c.body).idempotency_key==='approval:controlled-ledger-key')));
-  await page.evaluate(()=>[...document.querySelectorAll('button')].find(b=>b.textContent===window.f10.financeCopy[window.f10.language].submit).click());await page.waitForFunction(()=>window.f10.status==='SUBMITTED');
+  await page.waitForFunction(()=>window.f10.status==='SUBMITTED');
+  assert.equal(await page.evaluate(()=>window.f10.calls.filter(c=>c.url===`/api/admin/approvals/requests/${window.f10.id(9)}/actions/submit`).length),1);
  });
- await run('permission denied hides installed repair form',async page=>{await page.goto(server.resolvedUrls.local[0]+'refund-fixture.html?deny=1');await page.waitForFunction(()=>window.f10);assert.equal(await page.$('.adm-financial-repair'),null);assert.equal(await page.evaluate(()=>[...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.ledgerRepairCopy.zh.title)),false);});
+ await run('permission denied hides installed repair form',async page=>{await page.goto(server.resolvedUrls.local[0]+'refund-fixture.html?deny=1');await page.waitForFunction(()=>window.f10);assert.equal(await page.$('.adm-financial-repair'),null);assert.equal(await page.evaluate(()=>[...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.ledgerRepairCopy.zh.refundRepairTitle)),false);});
 }finally{await browser.close();await server.close();}
 const result={pass,fail,results,limits:['Actual React/AdminPlatformClient with controlled BFF responses; no real issuer, PostgreSQL approval, canonical production build or full E2E.']};fs.writeFileSync(process.env.F13_REACT_RESULT || 'refund-smoke-result.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result));process.exitCode=fail?1:0;

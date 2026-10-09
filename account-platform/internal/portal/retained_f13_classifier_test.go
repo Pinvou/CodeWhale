@@ -12,8 +12,8 @@ import (
 )
 
 func TestF13ClassifierProductionCreate(t *testing.T) {
-	id := uuid.NewString()
-	template := `{"command_type":"REFUND_EXCEPTION_REPAIR","idempotency_key":"controlled-refund-key","target_resource_type":"REFUND_ANOMALY_CASE","target_resource_id":"` + id + `","normalized_command":{"anomaly_case_id":"` + id + `","payment_evidence_id":"` + id + `","reason_code":"REFUND_FACT_VERIFIED"},"reason":"Controlled refund approval reason","redacted_evidence":[],"expected_impact":{},"critical_resource_versions":{"wallet_version":9007199254740993},"financial_snapshot":{"amount_microcredits":9223372036854775807}}`
+	id, evidenceID, anomalyID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	template := `{"command_type":"REFUND_EXCEPTION_REPAIR","idempotency_key":"controlled-refund-repair-key","target_resource_type":"REFUND","target_resource_id":"` + id + `","normalized_command":{"refund_id":"` + id + `","payment_evidence_id":"` + evidenceID + `","anomaly_case_id":"` + anomalyID + `","reason_code":"PROVIDER_REFUNDED_LOCAL_REVERSAL_MISSING"},"reason":"Controlled payment repair approval reason","redacted_evidence":[],"expected_impact":{},"critical_resource_versions":{"refund_updated_at":"2026-10-01T00:00:00Z","anomaly_version":9007199254740993,"facts_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","policy_version":1},"financial_snapshot":{"amount_fen":9007199254740993,"credit_microcredits":9223372036854775807,"provider_refund_id":"controlled-provider-refund","wallet_id":"` + id + `","wallet_version":9007199254740993,"package_id":"` + id + `","revoked_microcredits":9223372036854775806,"shortfall_microcredits":1}}`
 	for _, test := range []struct {
 		name, command string
 		csrf          bool
@@ -93,7 +93,7 @@ func TestF13ClassifierProductionDirectory(t *testing.T) {
 			if err := store.SaveSession(context.Background(), session); err != nil {
 				t.Fatal(err)
 			}
-			body := `{"schema_version":1,"platform_authorization_version":7,"items":[{"command_type":"` + test.command + `","policy_version":1,"snapshot_schema_version":1,"risk_class":"R2","visible":true,"requestable":true}]}`
+			body := `{"schema_version":1,"platform_authorization_version":7,"items":[{"command_type":"` + test.command + `","policy_version":1,"snapshot_schema_version":1,"risk_class":"FINANCIAL_FACT_CHANGE","visible":true,"requestable":true}]}`
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Cache-Control", "no-store")

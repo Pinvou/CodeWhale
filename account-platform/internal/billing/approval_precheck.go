@@ -29,6 +29,7 @@ type billingApprovalPrecheckRepository interface {
 // send. The decoder rejects unknown fields, so a caller cannot smuggle extra
 // facts into the owner read.
 type billingApprovalPrecheckRequest struct {
+	AnomalyCaseID          string `json:"anomaly_case_id,omitempty"`
 	PaymentEvidenceID      string `json:"payment_evidence_id,omitempty"`
 	CommandType            string `json:"command_type"`
 	TargetResourceID       string `json:"target_resource_id"`
@@ -81,7 +82,7 @@ func precheckBillingApprovalCommand(ctx context.Context, repository billingAppro
 	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 		packageID, packageOK := validPrecheckUUID(request.TargetResourceID)
 		orderID, orderOK := validPrecheckUUID(request.PaymentOrderID)
-		if !packageOK || !orderOK || request.ReasonCode == "" || strings.TrimSpace(request.ReasonCode) != request.ReasonCode || len(request.ReasonCode) > 80 || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 || request.PaymentEvidenceID != "" {
+		if !packageOK || !orderOK || request.ReasonCode == "" || strings.TrimSpace(request.ReasonCode) != request.ReasonCode || len(request.ReasonCode) > 80 || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 || request.PaymentEvidenceID != "" || request.AnomalyCaseID != "" {
 			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
 		}
 		return repository.EntitlementCorrectionProofInput(ctx, packageID, orderID, request.ReasonCode)
@@ -90,7 +91,7 @@ func precheckBillingApprovalCommand(ctx context.Context, repository billingAppro
 		posting, postingOK := validPrecheckUUID(request.TargetResourceID)
 		wrong, wrongOK := validPrecheckUUID(request.WrongLedgerAccountID)
 		correct, correctOK := validPrecheckUUID(request.CorrectLedgerAccountID)
-		if !journalOK || !postingOK || !wrongOK || !correctOK || wrong == correct || request.AmountMicrocredits < 1 || request.PaymentOrderID != "" || request.ReasonCode != "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 || request.PaymentEvidenceID != "" {
+		if !journalOK || !postingOK || !wrongOK || !correctOK || wrong == correct || request.AmountMicrocredits < 1 || request.PaymentOrderID != "" || request.ReasonCode != "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 || request.PaymentEvidenceID != "" || request.AnomalyCaseID != "" {
 			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
 		}
 		owner, ok := repository.(interface {
@@ -102,7 +103,7 @@ func precheckBillingApprovalCommand(ctx context.Context, repository billingAppro
 		return owner.LedgerRepairProofInput(ctx, LedgerRepairCommandInput{TargetJournalEntryID: journal, TargetPostingID: posting, WrongLedgerAccountID: wrong, CorrectLedgerAccountID: correct, AmountMicrocredits: request.AmountMicrocredits}, request.ReasonCode)
 	case receivableWriteOffCommand:
 		receivableID, ok := validPrecheckUUID(request.TargetResourceID)
-		if !ok || request.WriteOffMicrocredits < 1 || request.ExpectedVersion < 1 || request.ReasonCode != receivableWriteOffReason || request.PaymentOrderID != "" || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 || request.PaymentEvidenceID != "" {
+		if !ok || request.WriteOffMicrocredits < 1 || request.ExpectedVersion < 1 || request.ReasonCode != receivableWriteOffReason || request.PaymentOrderID != "" || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 || request.PaymentEvidenceID != "" || request.AnomalyCaseID != "" {
 			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
 		}
 		owner, ok := repository.(interface {
@@ -115,7 +116,7 @@ func precheckBillingApprovalCommand(ctx context.Context, repository billingAppro
 	case paymentFinancialRepairCommand:
 		orderID, orderOK := validPrecheckUUID(request.TargetResourceID)
 		evidenceID, evidenceOK := validPrecheckUUID(request.PaymentEvidenceID)
-		if !orderOK || !evidenceOK || request.ReasonCode != paymentFinancialRepairReason || request.PaymentOrderID != "" || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 {
+		if !orderOK || !evidenceOK || request.ReasonCode != paymentFinancialRepairReason || request.PaymentOrderID != "" || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 || request.AnomalyCaseID != "" {
 			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
 		}
 		owner, ok := repository.(interface {
@@ -126,6 +127,22 @@ func precheckBillingApprovalCommand(ctx context.Context, repository billingAppro
 		}
 		return owner.PaymentFinancialRepairProofInput(ctx, PaymentFinancialRepairCommandInput{
 			PaymentOrderID: orderID, PaymentEvidenceID: evidenceID,
+		})
+	case refundExceptionRepairCommand:
+		refundID, refundOK := validPrecheckUUID(request.TargetResourceID)
+		evidenceID, evidenceOK := validPrecheckUUID(request.PaymentEvidenceID)
+		anomalyID, anomalyOK := validPrecheckUUID(request.AnomalyCaseID)
+		if !refundOK || !evidenceOK || !anomalyOK || request.ReasonCode != refundExceptionRepairReason || request.PaymentOrderID != "" || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		owner, ok := repository.(interface {
+			RefundExceptionRepairProofInput(context.Context, RefundExceptionRepairCommandInput) (approvalencoding.LegacyProofInput, error)
+		})
+		if !ok {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		return owner.RefundExceptionRepairProofInput(ctx, RefundExceptionRepairCommandInput{
+			RefundID: refundID, PaymentEvidenceID: evidenceID, AnomalyCaseID: anomalyID,
 		})
 	}
 	return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
