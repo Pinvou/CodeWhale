@@ -768,9 +768,7 @@ const RELAY_TRUST_UNCONFIGURED: &str = "relay_trust_unconfigured";
 /// B 端单调时钟。注册、握手、watchdog 与状态投影必须共用同一个原点，否则
 /// deadline 会由不同基准推导。
 pub(crate) fn controlled_monotonic_millis() -> u64 {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    super::clock::monotonic_millis()
 }
 
 pub(crate) struct ControlledRelayWorker {
@@ -2501,10 +2499,14 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             let Ok(fingerprint) = lane.resume_fingerprint(activation_id) else {
                 return ControlledResumeOutcome::Failed;
             };
+            let Some(resume_request_id) = message.get("request_id").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
             if manager
                 .complete_resumed(
                     operation,
                     activation_id,
+                    resume_request_id,
                     now_b,
                     liveness_epoch_a,
                     token,
@@ -4041,6 +4043,18 @@ mod tests {
                 },
             )
             .unwrap();
+        let transport = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            lease_context.clone(),
+            vec![
+                "encrypted_frames_v1".into(),
+                "resume_v1".into(),
+                "role_liveness_v1".into(),
+            ],
+        );
+        manager
+            .replace_authenticated_transport(operation.clone(), transport.clone())
+            .unwrap();
         let lane = ControlledLaneState::default();
         lane.install(HandshakeRole::B, &lease_context, b_session)
             .unwrap();
@@ -4061,6 +4075,7 @@ mod tests {
         assert_eq!(heartbeat_port.frames.lock()[0]["heartbeat_sequence"], "1");
         let mut resume = ControlledResumeAttempt::default();
         lane.suspend();
+        super::super::relay_transport::disconnect_test_transport(&transport);
         assert!(begin_controlled_resume(&port, &manager, &mut resume));
         heartbeat
             .pump(&manager, &operation, resume.is_active(), &heartbeat_port)
@@ -4251,6 +4266,7 @@ mod tests {
             ControlledResumeOutcome::Ignored
         );
         assert!(resume.is_active());
+        super::super::relay_transport::dispatch_test_transport_frame(&transport, &final_frame);
         assert!(
             lane.is_suspended(),
             "foreign B epoch cannot reopen the lane or install heartbeat state"

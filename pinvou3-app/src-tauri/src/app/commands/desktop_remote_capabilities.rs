@@ -20,6 +20,8 @@ use crate::features::remote_control::controller::capabilities::{
     CapabilityDescriptor, CapabilityError, CapabilitySnapshot, CapabilitySnapshotManager,
     CapabilitySource, MAX_DISPLAY_CHARS,
 };
+#[cfg(test)]
+pub(crate) use crate::features::remote_control::controller::clock::monotonic_millis;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis;
 use crate::features::remote_control::controller::task::RemoteSessionLane;
@@ -192,6 +194,28 @@ pub(crate) async fn build_capability_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_initialization_order_cannot_create_a_second_clock() {
+        use super::super::{desktop_remote_controlled, desktop_remote_task};
+        for clocks in [
+            [
+                monotonic_millis as fn() -> u64,
+                desktop_remote_task::monotonic_millis as fn() -> u64,
+            ],
+            [
+                desktop_remote_task::monotonic_millis as fn() -> u64,
+                monotonic_millis as fn() -> u64,
+            ],
+        ] {
+            assert!(std::ptr::fn_addr_eq(clocks[0], clocks[1]));
+            assert!(std::ptr::fn_addr_eq(
+                clocks[0],
+                desktop_remote_controlled::monotonic_millis as fn() -> u64
+            ));
+            assert!(clocks[0]() <= clocks[1]());
+        }
+    }
 
     #[test]
     fn descriptor_projection_trims_display_text_and_keeps_ids_opaque() {
