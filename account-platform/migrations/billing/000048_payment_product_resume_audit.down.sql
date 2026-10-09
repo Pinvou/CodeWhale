@@ -1,0 +1,3 @@
+DROP TRIGGER payment_product_resume_executions_immutable ON payment_product_resume_executions;
+DROP FUNCTION reject_payment_product_resume_execution_mutation();
+DROP TABLE payment_product_resume_executions;

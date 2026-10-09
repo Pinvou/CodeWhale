@@ -26,10 +26,17 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("npm", "test:tool-store-import"),
   command("npm", "test:tool-store-recycle-bin"),
   command("npm", "test:webui"),
+  command("npm", "test:account-platform-personal-ui"),
+  command("npm", "test:account-platform-finance-ui"),
+  command("npm", "test:account-platform-reconciliation-ui"),
+  command("npm", "test:account-platform-usage-governance-ui"),
+  command("npm", "test:account-platform-management-ui"),
+  command("npm", "test:account-platform-model-overviews"),
 ]);
 
 const CORE_SMOKE = command("npm", "test:ui-smoke");
 const FEATURE_COMMANDS = new Map([
+  ["account-platform", [command("npm", "test:account-platform-personal-ui"), command("npm", "test:account-platform-finance-ui"), command("npm", "test:account-platform-reconciliation-ui"), command("npm", "test:account-platform-usage-governance-ui"), command("npm", "test:account-platform-management-ui"), command("npm", "test:account-platform-model-overviews")]],
   ["knowledge", [command("npm", "test:kb-smoke")]],
   ["pet", [command("node", "tests/pet_selector_ui_smoke.js")]],
   ["scheduled", [command("node", "tests/scheduled_tasks_smoke.js")]],

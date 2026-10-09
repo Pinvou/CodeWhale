@@ -648,6 +648,33 @@ impl TurnLifecycle {
         }
     }
 
+    pub(crate) fn current_runtime_turn_generation(&self) -> Option<u64> {
+        let state = self.state.lock();
+        if state.active && !state.terminal_closing {
+            Some(state.turn_epoch)
+        } else {
+            None
+        }
+    }
+
+    /// Match and publish a bounded turn-local observation atomically. The
+    /// callback may take the timing-map lock but cannot re-enter this lifecycle.
+    pub(crate) fn with_current_turn_generation(
+        &self,
+        generation: u64,
+        callback: &mut dyn FnMut(),
+    ) -> bool {
+        let state = self.state.lock();
+        if generation == 0
+            || !(state.active || state.terminal_closing)
+            || state.turn_epoch != generation
+        {
+            return false;
+        }
+        callback();
+        true
+    }
+
     /// 当前活动轮是否已提交（`SendMessage` 已入队 / `TurnStarted` 已抵达）。
     /// 供 cancel 阶段二在 generation mismatch（新轮已 reserve）时判断新轮是否
     /// 已经真正开始：仅 reserve 未 send 时，engine 里仍是旧轮遗留的子代理，
@@ -4091,5 +4118,43 @@ mod expert_turn_invariant_tests {
             both.to_string().contains("expert snapshot"),
             "快照守卫必须先于候选行守卫（与生产装配顺序一致）: {both}"
         );
+    }
+}
+
+#[cfg(test)]
+mod runtime_turn_observation_tests {
+    use super::TurnLifecycle;
+    use std::sync::Arc;
+    #[test]
+    fn local_then_platform_turn_uses_lifecycle_epoch_and_rejects_retired_epoch() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        assert!(lifecycle.current_runtime_turn_generation().is_none());
+        assert!(lifecycle.on_submitted(None));
+        let first = lifecycle.current_runtime_turn_generation().unwrap();
+        assert!(lifecycle.claim_terminal().is_some());
+        assert!(lifecycle.current_runtime_turn_generation().is_none());
+        let mut closing_notice = false;
+        assert!(lifecycle.with_current_turn_generation(first, &mut || closing_notice = true));
+        assert!(
+            closing_notice,
+            "already admitted response remains owned during terminal close"
+        );
+        lifecycle.finish_terminal_emission();
+        let reservation = lifecycle.reserve().unwrap();
+        let second = lifecycle.current_runtime_turn_generation().unwrap();
+        assert!(second > first);
+        assert!(
+            !lifecycle.with_current_turn_generation(first, &mut || panic!("retired local turn"))
+        );
+        let mut count = 0;
+        assert!(lifecycle.with_current_turn_generation(second, &mut || count += 1));
+        assert!(lifecycle.with_current_turn_generation(second, &mut || count += 1));
+        assert_eq!(count, 2, "tool loop and retry retain the active epoch");
+        drop(reservation);
+        assert!(lifecycle.current_runtime_turn_generation().is_none());
+        assert!(
+            !lifecycle.with_current_turn_generation(second, &mut || panic!("aborted reservation"))
+        );
+        assert!(!lifecycle.with_current_turn_generation(0, &mut || panic!("zero sentinel")));
     }
 }

@@ -1,0 +1,558 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "F07 signup and registration bonus installed subset",
+    "version": "1"
+  },
+  "paths": {
+    "/v1/auth/registration-operations/{operation_id}": {
+      "get": {
+        "operationId": "registrationOperationStatus",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Registration-Query-Token",
+            "in": "header",
+            "required": true,
+            "description": "Operation-bound, expiring read-only query credential; not a bearer session.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Redacted current registration state; Cache-Control no-store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "registration_operation_id",
+                    "status",
+                    "next_retry_at"
+                  ],
+                  "properties": {
+                    "registration_operation_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "user_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "user_code": {
+                      "type": "string"
+                    },
+                    "next_retry_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "description": "Query omits username/mobile, but reports current user/code when committed."
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Absent, foreign, invalid or expired query authority."
+          }
+        }
+      }
+    },
+    "/admin/v1/registration-bonus-policy": {
+      "get": {
+        "operationId": "registrationBonusPolicy",
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "x-permission": "platform.registration-bonus.read",
+        "responses": {
+          "200": {
+            "description": "Current policy with authoritative Account eligibility readiness; no mutation."
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateRegistrationBonusPolicy",
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "x-permission": "platform.registration-bonus.manage",
+        "x-recent-authentication": true,
+        "x-command-type": "BILLING_REGISTRATION_BONUS_POLICY_UPDATE",
+        "x-approval-mode": "AUDIT_ONLY",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "16..128 Unicode characters; same actor and frozen payload replay original policy revision.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "validity_days",
+                  "expected_revision",
+                  "reason"
+                ],
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "amount_points": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 0,
+                    "maximum": 922337203685477,
+                    "default": 0
+                  },
+                  "validity_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3650
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 1
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 500
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Committed/replayed policy; exact integer points convert to microcredits at 10000 per point."
+          },
+          "400": {
+            "description": "Invalid JSON/input."
+          },
+          "401": {
+            "description": "Authentication/recent authentication required."
+          },
+          "403": {
+            "description": "Manage permission denied."
+          },
+          "409": {
+            "description": "CAS/key changed or eligibility not ready."
+          },
+          "503": {
+            "description": "Eligibility authority unavailable."
+          }
+        }
+      }
+    },
+    "/internal/v1/registration-bonus-eligibility/readiness": {
+      "get": {
+        "operationId": "registrationBonusEligibilityReadiness",
+        "security": [
+          {
+            "workloadBearer": []
+          }
+        ],
+        "x-permission": "internal.registration-bonus-eligibility.read",
+        "responses": {
+          "200": {
+            "description": "Actual readiness and historical counts; no mobile data."
+          }
+        }
+      }
+    },
+    "/internal/v1/registration-bonus-grants": {
+      "post": {
+        "operationId": "provisionRegistrationBonus",
+        "security": [
+          {
+            "workloadBearer": []
+          }
+        ],
+        "x-permission": "internal.billing.registration-bonus.provision",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Existing caller convention registration-bonus:<operation UUID>; authoritative deduplication binds the body operation/user/fingerprint tuple.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "user_id",
+                  "registration_operation_id",
+                  "fingerprint_key_id",
+                  "mobile_fingerprint"
+                ],
+                "properties": {
+                  "user_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "registration_operation_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "fingerprint_key_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "mobile_fingerprint": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "First durable exact receipt."
+          },
+          "200": {
+            "description": "Same operation/facts immutable receipt replay."
+          },
+          "409": {
+            "description": "Changed operation facts or eligibility not READY."
+          },
+          "503": {
+            "description": "Eligibility unavailable."
+          }
+        }
+      }
+    },
+    "/v1/auth/registration/precheck": {
+      "post": {
+        "operationId": "precheckRegistration",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "username": {
+                    "type": "string"
+                  },
+                  "mobile": {
+                    "type": "string"
+                  },
+                  "password_handle": {
+                    "type": "string"
+                  },
+                  "password_policy_version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "username",
+                  "mobile",
+                  "password_handle",
+                  "password_policy_version"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Normalized available username; no SMS send or registration commit."
+          },
+          "400": {
+            "description": "Invalid input/password reference."
+          },
+          "409": {
+            "description": "Duplicate identity facts."
+          },
+          "503": {
+            "description": "Identity authority unavailable."
+          }
+        }
+      }
+    },
+    "/v1/auth/captcha/challenges": {
+      "post": {
+        "operationId": "registrationSliderCaptcha",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "mobile": {
+                    "type": "string"
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "enum": [
+                      "REGISTER",
+                      "LOGIN",
+                      "PASSWORD_RESET",
+                      "PROFILE_MOBILE"
+                    ]
+                  }
+                },
+                "required": [
+                  "mobile",
+                  "purpose"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Mobile/purpose-bound captcha without target offset."
+          },
+          "400": {
+            "description": "Invalid mobile or purpose."
+          }
+        }
+      }
+    },
+    "/v1/auth/sms/challenges": {
+      "post": {
+        "operationId": "sendRegistrationOrLoginSMS",
+        "description": "Existing REGISTER/LOGIN/PASSWORD_RESET flows; public PROFILE_MOBILE send requires the existing authenticated profile route. REGISTER additionally requires valid username/password reference before send. LOGIN/PASSWORD_RESET hide user existence.",
+        "parameters": [
+          {
+            "name": "X-Device-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "username": {
+                    "type": "string"
+                  },
+                  "mobile": {
+                    "type": "string"
+                  },
+                  "password_handle": {
+                    "type": "string"
+                  },
+                  "password_policy_version": {
+                    "type": "string"
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "enum": [
+                      "REGISTER",
+                      "LOGIN",
+                      "PASSWORD_RESET"
+                    ]
+                  },
+                  "captcha_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "captcha_offset": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "mobile",
+                  "purpose",
+                  "captcha_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted challenge; REGISTER additionally returns operation UUID and scoped expiring query token; no-store."
+          },
+          "400": {
+            "description": "Invalid captcha/input/password reference."
+          },
+          "401": {
+            "description": "Unauthenticated profile-mobile send denied."
+          },
+          "409": {
+            "description": "Duplicate registration identity."
+          },
+          "429": {
+            "description": "Existing SMS cooldown/rate-limit."
+          },
+          "503": {
+            "description": "Provider unavailable; no fake success for REGISTER."
+          }
+        }
+      }
+    },
+    "/v1/auth/register": {
+      "post": {
+        "operationId": "registerMobileIdentity",
+        "description": "Uses the server-frozen operation; duplicate browser username/mobile/challenge/policy fields do not replace authority. Password handle remains validated by Identity. Same operation retry reuses durable registration/gift facts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "username": {
+                    "type": "string"
+                  },
+                  "mobile": {
+                    "type": "string"
+                  },
+                  "challenge_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "code": {
+                    "type": "string"
+                  },
+                  "password_handle": {
+                    "type": "string"
+                  },
+                  "password_policy_version": {
+                    "type": "string"
+                  },
+                  "registration_operation_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "registration_query_token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "challenge_id",
+                  "registration_operation_id",
+                  "registration_query_token",
+                  "password_handle"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Current committed/PROVISIONING registration result; not proof wallet/gift finished.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "registration_operation_id",
+                    "status",
+                    "next_retry_at"
+                  ],
+                  "properties": {
+                    "registration_operation_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "user_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "user_code": {
+                      "type": "string"
+                    },
+                    "username": {
+                      "type": "string"
+                    },
+                    "next_retry_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Existing asynchronous recovery result; no-store."
+          },
+          "400": {
+            "description": "Invalid JSON/input."
+          },
+          "409": {
+            "description": "Conflict/restart required for terminal abandoned operation."
+          },
+          "429": {
+            "description": "Existing verification rate-limit."
+          },
+          "503": {
+            "description": "SMS/Identity temporarily unavailable; durable recovery retained."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "userBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "workloadBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "x-contract-limit": "Installed signup/gift/policy/readiness subset with actual required inputs and conditional registration semantics; not a complete API catalog or new login method."
+}

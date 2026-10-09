@@ -644,12 +644,18 @@
       || "";
   }
 
-  // Official's managed model is read-only: users cannot repair its service
-  // account by editing a key or paying a third-party provider. Session model
-  // identity takes precedence over the current default, as with provider labels.
+  // Pinvou's managed account-platform model is read-only: users cannot repair
+  // its service account by editing a key or paying a third-party provider.
+  // Prefer the source-aware binding and retain the fixed saved-model id as a
+  // compatibility fallback for callers that only project legacy model fields.
   function isManagedModel(state) {
+    const modelRef = state && (
+      state.currentSessionModelRef
+      || (!state.activeSessionId && (state.pendingDraftModelRef || state.defaultModelRef))
+    );
     const id = state && (state.currentSessionModelId || state.activeModelId);
-    return id === "builtin_llmapi";
+    return (modelRef && modelRef.source === "ACCOUNT_PLATFORM")
+      || id === "builtin_account_platform";
   }
 
   const MANAGED_MODEL_COPY = {

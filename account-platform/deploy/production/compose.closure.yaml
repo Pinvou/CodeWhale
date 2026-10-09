@@ -1,0 +1,15 @@
+# Add after reviewed F07 signup/bonus and F06 organization overlays.
+name: pinvou-personal
+services:
+  account-service:
+    image: ${ACCOUNT_CLOSURE_IMAGE:?set reviewed same-source F08 Account with bounded closure worker and gift/lease guards}
+    environment:
+      TOKEN_HTTP_URL: http://token-gateway:8080
+  identity-service:
+    image: ${IDENTITY_CLOSURE_IMAGE:?set reviewed same-source F08 Identity with service-only deletion authority}
+  billing-service:
+    image: ${BILLING_CLOSURE_IMAGE:?set reviewed same-source F08 Billing assessment and isolation}
+  token-gateway:
+    image: ${TOKEN_CLOSURE_IMAGE:?set reviewed same-source F08 Token durable replay fence and cleanup}
+  token-portal:
+    image: ${PORTAL_CLOSURE_IMAGE:?set reviewed same-source F08 Portal closure whitelist and canonical generated personal/admin assets}

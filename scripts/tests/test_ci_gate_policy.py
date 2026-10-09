@@ -1,3 +1,4 @@
+import json
 import re
 import tomllib
 import unittest
@@ -143,12 +144,12 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"发布流程仍引用已退役网页模板: {retired_reference}",
             )
 
-    def test_pr_submodule_verifier_strictly_matches_the_published_tag(self):
+    def test_pr_verifier_checks_registered_history_and_keeps_release_closure(self):
         verifier = PUBLIC_SUBMODULE_VERIFIER.read_text(encoding="utf-8")
         verifier_gate = self.pr_workflow.split(
             "- name: 公开底座 gitlink 可达性", maxsplit=1
         )[1].split("- name: 初始化公共底座 submodule", maxsplit=1)[0]
-        self.assertIn("./scripts/verify-public-submodule.sh", verifier_gate)
+        self.assertIn("./scripts/verify-public-submodule.sh --registered-snapshot", verifier_gate)
         self.assertNotIn("--allow-registered-candidate", verifier_gate)
         self.assertNotIn("LOCAL_SECURITY_HEAD", verifier)
         self.assertIn('[[ "$tag_target" != "$gitlink" ]]', verifier)
@@ -210,6 +211,38 @@ class CiGatePolicyTests(unittest.TestCase):
                 frontend_paths,
                 f"静态门禁配置 {path} 不在 frontend filter 中",
             )
+
+    def test_approval_center_browser_regression_is_registered(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        finance = package["scripts"]["test:account-platform-finance-ui"]
+        self.assertIn("node tests/account_platform_approval_center_smoke.mjs", finance)
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertIn('command("npm", "test:account-platform-finance-ui")', selector)
+
+    def test_embedded_account_portal_assets_are_rebuilt_and_checked(self):
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+                "\n  fast-gate:", maxsplit=1
+            )[0]
+        )
+        paths = _extract_quoted_paths(
+            changes.split("            frontend:", maxsplit=1)[1].split(
+                "            relay:", maxsplit=1
+            )[0]
+        )
+        self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/admin.html", paths))
+        self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/assets/admin.js", paths))
+        frontend = self.pr_workflow.split("\n  frontend-test:", maxsplit=1)[1].split(
+            "\n  relay-test:", maxsplit=1
+        )[0]
+        gate = frontend.split("      - name: Verify embedded Account Portal assets are current", maxsplit=1)[1].split(
+            "      - name:", maxsplit=1
+        )[0]
+        self.assertNotIn("if:", gate)
+        self.assertIn("npm run build:account-portal", gate)
+        self.assertIn("git diff --exit-code -- ../account-platform/internal/portal/static", gate)
+        self.assertIn("git ls-files --others --exclude-standard", gate)
+        self.assertIn('test -z "$(git ls-files', gate)
 
     def test_cross_language_contract_rust_sources_route_to_frontend_test(self):
         # multiagent_plan_normalize.test.mjs reads the Rust sources below for

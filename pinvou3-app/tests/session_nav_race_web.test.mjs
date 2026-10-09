@@ -307,3 +307,36 @@ test('web archiveSession（scheduled run）：归档失败且无导航 → activ
   assert.equal(await p, false);
   assert.equal(rt.view().activeSessionId, 'sched-run-1', '无新导航时成对回滚');
 });
+
+// Drive the actual Web materialization path through the public bridge API.
+test('web ensureSession: model rejection preserves unsent text and selection intent', async () => {
+  const rt = bootWebBridge();
+  rt.setHandler('create_session', () => ({ id: 'public-web-draft', transcript_revision: 1 }));
+  rt.setHandler('account_platform_select_session_model', () => { throw new Error('controlled catalog unavailable'); });
+  rt.setHandler('list_sessions', () => []);
+  rt.setHandler('list_archived_sessions', () => []);
+  rt.flat.setComposerDraft('public web unsent');
+  await rt.flat.switchModelRef(null, { source: 'ACCOUNT_PLATFORM', model_id: 'public-catalog-model' });
+  await rt.personas.equipPersona('public-card');
+  assert.equal(rt.view().activeSessionId, null);
+  assert.equal(rt.view().composerDraft, 'public web unsent');
+  assert.equal(rt.view().pendingDraftModelRef.model_id, 'public-catalog-model');
+});
+
+test('web ensureSession: late model rejection leaves a newly entered draft unchanged', async () => {
+  const rt = bootWebBridge();
+  rt.setHandler('create_session', () => ({ id: 'public-web-draft', transcript_revision: 1 }));
+  const selection = rt.defer('account_platform_select_session_model');
+  rt.flat.setComposerDraft('old public draft');
+  await rt.flat.switchModelRef(null, { source: 'ACCOUNT_PLATFORM', model_id: 'public-catalog-model' });
+  const pending = rt.personas.equipPersona('public-card');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(rt.view().activeSessionId, 'public-web-draft');
+  rt.leave();
+  rt.flat.setComposerDraft('new public draft');
+  selection.reject(new Error('controlled catalog unavailable'));
+  await pending;
+  assert.equal(rt.view().activeSessionId, null);
+  assert.equal(rt.view().composerDraft, 'new public draft');
+  assert.equal(rt.view().pendingDraftModelRef, null);
+});
