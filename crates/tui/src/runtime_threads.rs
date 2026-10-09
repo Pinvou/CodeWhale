@@ -5823,10 +5823,17 @@ impl RuntimeThreadManager {
         {
             bail!("permission_posture must not be empty");
         }
+        // Round-29/30/31 B3: a RELATIVE workspace is rejected exactly like
+        // the empty spelling — the start/resume/fork lanes' A28-1 doctrine
+        // ("cwd must be a non-empty absolute path"). The PATCH intake used
+        // to accept it, and the workspace-only leg then silently dropped
+        // the declared root set (validate_workspace_roots' degenerate
+        // collapse) while persisting the relative primary — one
+        // token-holding PATCH wiped the declared authorization state.
         if let Some(workspace) = req.workspace.as_ref()
-            && workspace.as_os_str().is_empty()
+            && (workspace.as_os_str().is_empty() || !workspace.is_absolute())
         {
-            bail!("workspace must not be empty");
+            bail!("workspace must be a non-empty absolute path");
         }
 
         let configured_sandbox_mode = self.read_config().sandbox_mode.clone();
