@@ -3689,10 +3689,14 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_body_json(response).await;
+        // Round-29/30/31 B1: production's rejection text moved to "cwd must
+        // be a non-empty absolute path"; the stable fragment "cwd must be"
+        // matches the current text and stays sensitive to a regression to
+        // the old "must not be empty" family.
         assert!(
             body["error"]
                 .as_str()
-                .is_some_and(|message| message.contains("cwd must not be empty")),
+                .is_some_and(|message| message.contains("cwd must be")),
             "the rejection reason must be in the body: {body}"
         );
     }

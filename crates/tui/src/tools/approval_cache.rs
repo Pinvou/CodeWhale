@@ -111,7 +111,12 @@ pub fn build_approval_grouping_key(tool_name: &str, input: &serde_json::Value) -
                 // Length-prefix the operand (round-20 B20-2): the raw
                 // `prefix@cwd:` concatenation is non-injective — model-craftable
                 // spellings of prefix/cwd collide across the boundary.
-                Some(cwd) => format!("shell:{prefix}@cwd:{}:{cwd}", cwd.len()),
+                // Round-29/30 B2: length-prefix BOTH sides — the prefix
+                // comes from classify_command's positional fallback and can
+                // itself contain "@cwd:<n>:", which let {"git foo" @ cwd
+                // "a@cwd:1:b"} collide with {"git@cwd:9:a & payload" @
+                // cwd "b"} (the review's dynamic probe).
+                Some(cwd) => format!("shell:{}:{prefix}@cwd:{}:{cwd}", prefix.len(), cwd.len()),
                 None => format!("shell:{prefix}"),
             }
         }
@@ -182,17 +187,29 @@ fn hash_patch_paths(input: &serde_json::Value) -> String {
     }
     match super::apply_patch::preflight_apply_patch(&folded) {
         Ok(plan) => {
+            // Round-29/30 B2: domain-separate every hashed item — a bare
+            // `str` marker and a touched-file name feed the IDENTICAL byte
+            // stream, so hash("override", P) == hash(touched ["override",
+            // P]) and one approved override patch could auto-approve a
+            // differently-shaped replace patch (dynamically reproduced in
+            // the round-29 review). Tag each item class and length-prefix
+            // every string so no spelling of one class impersonates another.
             let mut hasher = DefaultHasher::new();
+            fn feed(tag: u8, value: &str, hasher: &mut DefaultHasher) {
+                tag.hash(hasher);
+                value.len().hash(hasher);
+                value.hash(hasher);
+            }
             if let Some(override_path) = plan.path_override.as_deref() {
-                "override".hash(&mut hasher);
-                override_path.hash(&mut hasher);
+                feed(1, "override", &mut hasher);
+                feed(2, override_path, &mut hasher);
             } else {
                 for path in &plan.touched_files {
-                    path.hash(&mut hasher);
+                    feed(3, path, &mut hasher);
                 }
                 for path in &plan.deletes {
-                    "delete".hash(&mut hasher);
-                    path.hash(&mut hasher);
+                    feed(4, "delete", &mut hasher);
+                    feed(5, path, &mut hasher);
                 }
             }
             format!("{:x}", hasher.finish())
@@ -369,6 +386,54 @@ mod tests {
         let key_a = build_approval_grouping_key("exec_shell", &json!({"command": "git status"}));
         let key_b = build_approval_grouping_key("exec_shell", &json!({"command": "git push"}));
         assert_ne!(key_a, key_b);
+    }
+
+    /// Round-29/30 B2 pin: the patch marker and touched-file name spaces
+    /// are domain-separated — an approved override-form grant must never
+    /// auto-approve a replace-form patch whose touched list is literally
+    /// ["override", <the approved target>] (the review's dynamic collision).
+    #[test]
+    fn grouping_key_separates_override_form_from_listed_override_name() {
+        let target = "/work/.env";
+        let override_form = serde_json::json!({
+            "path": target,
+            "patch": "@@
+-a
++b
+"
+        });
+        let listed_form = serde_json::json!({
+            "replace": [
+                { "path": "override", "content": "x" },
+                { "path": target, "content": "y" }
+            ]
+        });
+        let a = build_approval_grouping_key("apply_patch", &override_form);
+        let b = build_approval_grouping_key("apply_patch", &listed_form);
+        assert_ne!(
+            a, b,
+            "the override marker and a touched file named 'override' must not collide"
+        );
+    }
+
+    /// Round-29/30 B2 pin (shell side): a prefix containing the "@cwd:<n>:"
+    /// spelling must not collide with a genuine cwd-carrying key.
+    #[test]
+    fn grouping_key_separates_embedded_cwd_spelling_from_real_operand() {
+        let weird_cwd = serde_json::json!({
+            "command": "git foo",
+            "cwd": "a@cwd:1:b"
+        });
+        let payload_prefix = serde_json::json!({
+            "command": "git@cwd:9:a & payload",
+            "cwd": "b"
+        });
+        let a = build_approval_grouping_key("exec_shell", &weird_cwd);
+        let b = build_approval_grouping_key("exec_shell", &payload_prefix);
+        assert_ne!(
+            a, b,
+            "an embedded '@cwd:' spelling in either operand must not forge the other key"
+        );
     }
 
     #[test]

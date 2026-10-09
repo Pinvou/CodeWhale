@@ -8599,4 +8599,25 @@ mod tests {
             );
         }
     }
+    /// Round-31 M31-2: the PRODUCTION ask-rule call sites forward the
+    /// session's workspace_roots — every existing pin calls the functions
+    /// directly, so `&self.session.workspace_roots` -> `&[]` at either call
+    /// site shipped green. Source-order pin on the turn-loop text (the
+    /// sibling repo-law e2e pin lives in engine/tests.rs).
+    #[test]
+    fn ask_rule_call_sites_forward_session_workspace_roots() {
+        let src = include_str!("turn_loop.rs");
+        let cut = &src[..src.find("mod tests {").unwrap_or(src.len())];
+        for site in [
+            "exec_shell_ask_rule_decision(",
+            "file_tool_ask_rule_decision(",
+        ] {
+            let at = cut.rfind(site).expect("production call site must exist");
+            let window = &cut[at..(at + 400).min(cut.len())];
+            assert!(
+                window.contains("&self.session.workspace_roots"),
+                "the {site} call site must forward the session's workspace_roots"
+            );
+        }
+    }
 }

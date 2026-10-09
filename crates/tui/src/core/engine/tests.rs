@@ -20663,8 +20663,9 @@ async fn code_execution_scenario() {
 #[tokio::test]
 async fn code_execution_timeout_kills_the_interpreter_instead_of_orphaning_it() {
     // The kill path needs a real interpreter; skip where python is absent.
+    #[allow(clippy::print_stdout)]
     if crate::dependencies::resolve_python_interpreter().is_none() {
-        eprintln!("skipping: python not present");
+        println!("skipping: python not present");
         return;
     }
     let tmp = tempdir().expect("tempdir");

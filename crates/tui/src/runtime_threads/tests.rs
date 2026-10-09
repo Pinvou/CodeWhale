@@ -13188,3 +13188,37 @@ async fn the_emit_failure_rollback_never_evicts_a_foreign_same_id_entry() -> Res
     assert_eq!(manager.pending_approvals_count(), 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn update_thread_rejects_a_relative_workspace() -> Result<()> {
+    // Round-29/30/31 B3 pin: a PATCH carrying a relative workspace must be
+    // rejected with the same typed 400 as the start/resume/fork lanes
+    // (A28-1 doctrine) — the workspace-only leg used to silently drop the
+    // declared root set and persist the relative primary.
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-update-relative-ws");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            ..CreateThreadRequest::default()
+        })
+        .await?;
+    let err = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace: Some(std::path::PathBuf::from("relative/ws")),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await
+        .expect_err("a relative workspace must be rejected");
+    assert!(
+        err.to_string().contains("non-empty absolute path"),
+        "typed rejection: {err}"
+    );
+    // The stored thread is untouched by the refused patch.
+    let reloaded = manager.get_thread(&thread.id).await?;
+    assert_eq!(reloaded.workspace, workspace);
+    Ok(())
+}

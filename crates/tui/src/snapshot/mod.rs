@@ -168,7 +168,7 @@ mod tests {
         let link = workspace.join("link");
         std::os::unix::fs::symlink(&elsewhere, &link).expect("symlink");
         assert!(
-            restore_covers_primary_only(&workspace, &[link.clone()]),
+            restore_covers_primary_only(&workspace, std::slice::from_ref(&link)),
             "an inward-symlink root must fire the boundary note"
         );
         // A plain root nested under the primary keeps the old behavior even

@@ -130,6 +130,24 @@ pub(crate) fn load_repo_law_rules(workspace: &Path) -> std::sync::Arc<Vec<RepoLa
     {
         return std::sync::Arc::clone(&hit.rules);
     }
+    // Round-31 M31-1: a READ FAILURE is never cached — `chmod 000 ->
+    // enforcement trigger -> chmod 644` leaves mtime/len unchanged (chmod
+    // only touches ctime), so a cached empty entry would hit forever and
+    // repo law stays silent for the process's lifetime (fail-open; the
+    // base re-reads every call and self-heals). read_repo_constitution
+    // cannot distinguish not-found/parse-failure from a legitimately empty
+    // file at its Option boundary, so the discrimination happens here:
+    // only a file that READS successfully (load_context_file Ok) enters
+    // the cache — including an unparseable-but-readable one, whose
+    // empty-rule compile is then honestly keyed to an mtime the repair
+    // will change.
+    if !path.is_file() {
+        return std::sync::Arc::new(Vec::new());
+    }
+    if load_context_file(&path).is_err() {
+        eprintln!("[repo-law] constitution read failed (not cached; next call re-reads)");
+        return std::sync::Arc::new(Vec::new());
+    }
     let rules = std::sync::Arc::new(
         read_repo_constitution(&path)
             .map(compile_repo_law_rules)
