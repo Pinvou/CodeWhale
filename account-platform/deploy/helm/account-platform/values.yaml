@@ -38,6 +38,8 @@ images:
   tokenGovernance: { repository: pinvou/token-governance, tag: dev, pullPolicy: IfNotPresent }
   eventRelay: { repository: pinvou/account-platform-event-relay, tag: dev, pullPolicy: IfNotPresent }
   migrate: { repository: pinvou/account-platform-migrate, tag: dev, pullPolicy: IfNotPresent }
+  # Operator builds the approved newapi-tls image and supplies its immutable digest.
+  newApiTLS: { repository: "", digest: "", pullPolicy: IfNotPresent }
   newApi: { repository: calciumion/new-api, tag: v1.0.0-rc.26, digest: sha256:7b82c866e9c0fb02faca7d5068e9d1261e47edf52462d63d9db7b614e7f1027d, pullPolicy: IfNotPresent }
   # This image is built from deploy/keycloak/Dockerfile. The upstream image
   # alone does not contain the identity-security SPI or realm upgrade script.
@@ -82,11 +84,14 @@ dependencies:
 newApi:
   enabled: true
   serviceName: newapi
+  tlsSecretName: ""
+  caConfigMap: ""
   replicas: 1
   nodeType: master
   trustedProxies: none
 
 oidc:
+  authorizationUrl: ""
   issuer: https://accounts.example.invalid/realms/pinvou
   jwksUrl: ""
   tokenUrl: ""
@@ -164,10 +169,11 @@ tokenGateway:
   modelCatalogDefaultMaxOutputTokens: 4096
   modelCatalogSyncMinutes: 15
   defaultProvider: new-api
-  defaultProviderBaseUrl: http://newapi:8080
+  # Empty derives the configured in-cluster HTTPS serviceName:8443.
+  defaultProviderBaseUrl: ""
   defaultProviderModels: [deepseek-flash]
   defaultRoutePriority: 10
-  reconciliationNewApiBaseUrl: http://newapi:8080
+  reconciliationNewApiBaseUrl: ""
   reconciliationIntervalSeconds: 15
   clientContractVersion: client-readiness-v1
   minimumClientVersion: 0.6.0
@@ -205,6 +211,11 @@ tokenAccountPolicyBootstrap:
   enabled: false
 
 external:
+  natsMonitorCidrs: []
+  oidcCidrs: []
+  workloadJwksCidrs: []
+  natsCidrs: []
+  redisCidrs: []
   postgresCidrs: []
   paymentProviderCidrs: []
   secretProviderCidrs: []

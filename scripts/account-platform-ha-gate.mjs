@@ -13,6 +13,14 @@ function required(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+function nonnegative(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function count(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
 function parseTime(value, name) {
   const parsed = Date.parse(value);
   required(Number.isFinite(parsed), `${name} must be RFC3339`);
@@ -36,14 +44,14 @@ export function validateEvidence(policy, evidence, now = Date.now()) {
   required(evidence.schema_version === 1 && evidence.environment === 'production-new', 'production HA evidence is required');
   const generatedAt = parseTime(evidence.generated_at, 'generated_at');
   required(Math.abs(now - generatedAt) <= 24 * 3600 * 1000, 'HA evidence must be generated within 24 hours');
-  required(evidence.failure_domains >= policy.minimum_failure_domains, 'insufficient independent failure domains');
-  required(evidence.post_failure_headroom_percent >= policy.minimum_post_failure_headroom_percent, 'insufficient post-failure capacity headroom');
+  required(count(evidence.failure_domains) && evidence.failure_domains >= policy.minimum_failure_domains, 'insufficient independent failure domains');
+  required(nonnegative(evidence.post_failure_headroom_percent) && evidence.post_failure_headroom_percent >= policy.minimum_post_failure_headroom_percent, 'insufficient post-failure capacity headroom');
   const workloads = new Map(evidence.workloads.map((entry) => [entry.name, entry]));
   for (const name of policy.required_replicated_workloads) {
     const workload = workloads.get(name);
-    required(workload?.desired_replicas >= 2 && workload?.ready_replicas >= 2, `${name} is not ready with at least two replicas`);
-    required(workload.failure_domains >= policy.minimum_failure_domains, `${name} is not spread across failure domains`);
-    required(workload.pdb_enforced === true && workload.max_unavailable <= 1, `${name} disruption protection is invalid`);
+    required(count(workload?.desired_replicas) && count(workload?.ready_replicas) && workload.desired_replicas >= 2 && workload.ready_replicas >= 2, `${name} is not ready with at least two replicas`);
+    required(count(workload.failure_domains) && workload.failure_domains >= policy.minimum_failure_domains, `${name} is not spread across failure domains`);
+    required(workload.pdb_enforced === true && count(workload.max_unavailable) && workload.max_unavailable <= 1, `${name} disruption protection is invalid`);
   }
   const dependencyResults = new Map(evidence.dependency_failovers.map((entry) => [entry.name, entry]));
   for (const name of policy.required_dependency_failovers) {
@@ -55,12 +63,12 @@ export function validateEvidence(policy, evidence, now = Date.now()) {
   for (const name of policy.required_scenarios) {
     const scenario = scenarios.get(name);
     required(scenario?.passed === true, `${name} scenario did not pass`);
-    required(scenario.core_unavailable_seconds <= policy.maximum_core_failover_seconds, `${name} core failover exceeded limit`);
-    required(scenario.noncritical_unavailable_seconds <= policy.maximum_noncritical_failover_seconds, `${name} noncritical failover exceeded limit`);
+    required(nonnegative(scenario.core_unavailable_seconds) && scenario.core_unavailable_seconds <= policy.maximum_core_failover_seconds, `${name} core failover exceeded limit`);
+    required(nonnegative(scenario.noncritical_unavailable_seconds) && scenario.noncritical_unavailable_seconds <= policy.maximum_noncritical_failover_seconds, `${name} noncritical failover exceeded limit`);
     required(scenario.real_provider_side_effects === 0, `${name} scenario reached a real provider`);
     required(sha256.test(scenario.evidence_sha256), `${name} evidence digest is invalid`);
   }
-  required(evidence.identity_adapter_replacement_seconds <= policy.maximum_noncritical_failover_seconds, 'single-replica Identity Adapter replacement exceeded noncritical limit');
+  required(nonnegative(evidence.identity_adapter_replacement_seconds) && evidence.identity_adapter_replacement_seconds <= policy.maximum_noncritical_failover_seconds, 'single-replica Identity Adapter replacement exceeded noncritical limit');
 }
 
 async function main() {

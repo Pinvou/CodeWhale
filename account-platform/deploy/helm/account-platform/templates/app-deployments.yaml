@@ -1,7 +1,21 @@
 {{- $root := . -}}
+{{- include "pinvou.requireNewApiTLS" . -}}
 {{- $fullname := include "pinvou.fullname" . -}}
 {{- $jwksURL := .Values.oidc.jwksUrl -}}
 {{- $oidcTokenURL := .Values.oidc.tokenUrl -}}
+{{- $modelProbe := "" -}}
+{{- if .Values.newApi.enabled -}}
+{{- $modelProbe = printf `,{"key":"model-gateway","kind":"http","url":"https://%s:8444/api/status","json_boolean_field":"success"}` .Values.newApi.serviceName -}}
+{{- end -}}
+{{- $portalIssuer := trimSuffix "/" .Values.oidc.issuer -}}
+{{- $portalAuthorizationURL := default (printf "%s/protocol/openid-connect/auth" $portalIssuer) .Values.oidc.authorizationUrl -}}
+{{- $portalTokenURL := default (printf "%s/protocol/openid-connect/token" $portalIssuer) .Values.oidc.tokenUrl -}}
+{{- $portalJWKSURL := default (printf "%s/protocol/openid-connect/certs" $portalIssuer) .Values.oidc.jwksUrl -}}
+{{- if and (ne .Values.global.environment "development") (ne .Values.global.environment "test") -}}
+{{- range $endpoint := list $portalIssuer $portalAuthorizationURL $portalTokenURL $portalJWKSURL -}}
+{{- if not (hasPrefix "https://" $endpoint) -}}{{ fail "Portal production OIDC endpoints require HTTPS" }}{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.keycloak.enabled -}}
 {{- $jwksURL = printf "http://%s-keycloak:8080/realms/pinvou/protocol/openid-connect/certs" $fullname -}}
 {{- $oidcTokenURL = printf "http://%s-keycloak:8080/realms/pinvou/protocol/openid-connect/token" $fullname -}}
@@ -121,7 +135,7 @@ spec:
             - { name: ACCOUNT_SERVICE_VERSION, value: {{ $root.Chart.AppVersion | quote }} }
             - { name: ACCOUNT_CLIENT_CONTRACT_VERSION, value: "account-client-v1" }
             - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
-            - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
+            - { name: TOKEN_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
             - { name: IDENTITY_HTTP_URL, value: {{ printf "http://%s-identity-service:8080" $fullname | quote }} }
             - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.sms.enabled | quote }} }
             - { name: SMS_PROVIDER, value: {{ $root.Values.sms.provider | quote }} }
@@ -214,6 +228,9 @@ spec:
             - name: TOKEN_SECRET_PROVIDER_TOKEN
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-secret-provider-token } }
             {{- end }}
+            {{- if $root.Values.newApi.enabled }}
+            - { name: TOKEN_PROVIDER_CA_FILE, value: /run/pinvou/provider-trust/ca.crt }
+            {{- end }}
             - { name: TOKEN_PROVIDER_ALLOWED_HOSTS, value: {{ join "," $root.Values.tokenGateway.providerAllowedHosts | quote }} }
             - { name: TOKEN_GATEWAY_MAX_INPUT_TOKENS, value: {{ $root.Values.tokenGateway.maxInputTokens | quote }} }
             - { name: TOKEN_MODEL_CATALOG_DEFAULT_CONTEXT_TOKENS, value: {{ $root.Values.tokenGateway.modelCatalogDefaultContextTokens | quote }} }
@@ -221,12 +238,12 @@ spec:
             - { name: TOKEN_MODEL_CATALOG_SYNC_MINUTES, value: {{ $root.Values.tokenGateway.modelCatalogSyncMinutes | quote }} }
             - { name: TOKEN_DEFAULT_PROVIDER, value: {{ $root.Values.tokenGateway.defaultProvider | quote }} }
             - { name: TOKEN_GATEWAY_ADAPTER, value: {{ $root.Values.tokenGateway.gatewayAdapter | quote }} }
-            - { name: TOKEN_DEFAULT_PROVIDER_BASE_URL, value: {{ $root.Values.tokenGateway.defaultProviderBaseUrl | quote }} }
+            - { name: TOKEN_DEFAULT_PROVIDER_BASE_URL, value: {{ include "pinvou.newApiProviderURL" $root | quote }} }
             - { name: TOKEN_DEFAULT_PROVIDER_MODELS, value: {{ join "," $root.Values.tokenGateway.defaultProviderModels | quote }} }
             - { name: TOKEN_DEFAULT_ROUTE_PRIORITY, value: {{ $root.Values.tokenGateway.defaultRoutePriority | quote }} }
             - name: TOKEN_DEFAULT_PROVIDER_API_KEY
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-default-provider-api-key } }
-            - { name: TOKEN_RECONCILIATION_NEWAPI_BASE_URL, value: {{ $root.Values.tokenGateway.reconciliationNewApiBaseUrl | quote }} }
+            - { name: TOKEN_RECONCILIATION_NEWAPI_BASE_URL, value: {{ include "pinvou.newApiReconciliationURL" $root | quote }} }
             - name: TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-reconciliation-newapi-admin-token } }
             - name: TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID
@@ -256,8 +273,10 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-admin-pagination-cursor-hmac-key-base64, optional: true } }
             - { name: REDIS_URL, value: {{ include "pinvou.redisUrl" $root | quote }} }
             - { name: PORTAL_PUBLIC_URL, value: {{ $root.Values.public.portalUrl | quote }} }
-            - { name: PORTAL_OIDC_AUTHORIZATION_URL, value: {{ printf "%s/realms/pinvou/protocol/openid-connect/auth" $root.Values.keycloak.hostname | quote }} }
-            - { name: PORTAL_OIDC_TOKEN_URL, value: {{ $oidcTokenURL | quote }} }
+            - { name: PORTAL_OIDC_ISSUER, value: {{ $portalIssuer | quote }} }
+            - { name: PORTAL_OIDC_JWKS_URL, value: {{ $portalJWKSURL | quote }} }
+            - { name: PORTAL_OIDC_AUTHORIZATION_URL, value: {{ $portalAuthorizationURL | quote }} }
+            - { name: PORTAL_OIDC_TOKEN_URL, value: {{ $portalTokenURL | quote }} }
             - { name: PORTAL_OIDC_CLIENT_ID, value: {{ $root.Values.oidc.portalClientId | quote }} }
             - { name: PORTAL_HANDOFF_OIDC_CLIENT_ID, value: {{ $root.Values.oidc.portalHandoffClientId | quote }} }
             - { name: PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE, value: /var/run/secrets/pinvou/portal-handoff/client-secret }
@@ -265,13 +284,19 @@ spec:
             - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
             - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
             - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
+            {{- if $root.Values.newApi.enabled }}
+            - { name: PORTAL_SYSTEM_PROBE_CA_FILE, value: /run/pinvou/probe-trust/ca.crt }
+            {{- end }}
             - name: SYSTEM_PROBES_JSON
-              value: {{ printf `[{"key":"portal","kind":"local"},{"key":"account","kind":"http","url":"http://%s-account-service:8080/health/ready"},{"key":"billing","kind":"http","url":"http://%s-billing-service:8080/health/ready"},{"key":"token-gateway","kind":"http","url":"http://%s-token-gateway:8080/health/ready"},{"key":"identity-provider","kind":"http","url":"http://%s-keycloak:8080/realms/pinvou/.well-known/openid-configuration"},{"key":"model-gateway","kind":"http","url":"http://%s-newapi:8080/api/status","json_boolean_field":"success"},{"key":"event-bus","kind":"http","url":%s},{"key":"account-event-relay","kind":"relay","url":"http://%s-account-event-relay:9090"},{"key":"billing-event-relay","kind":"relay","url":"http://%s-billing-event-relay:9090"},{"key":"token-event-relay","kind":"relay","url":"http://%s-token-event-relay:9090"}]` $fullname $fullname $fullname $fullname $fullname (include "pinvou.natsMonitorUrl" $root | quote) $fullname $fullname $fullname | quote }}
+              value: {{ printf `[{"key":"portal","kind":"local"},{"key":"account","kind":"http","url":"http://%s-account-service:8080/health/ready"},{"key":"billing","kind":"http","url":"http://%s-billing-service:8080/health/ready"},{"key":"token-gateway","kind":"http","url":"http://%s-token-gateway:8080/health/ready"},{"key":"identity-provider","kind":"http","url":"http://%s-keycloak:8080/realms/pinvou/.well-known/openid-configuration"}%s,{"key":"event-bus","kind":"http","url":%s},{"key":"account-event-relay","kind":"relay","url":"http://%s-account-event-relay:9090"},{"key":"billing-event-relay","kind":"relay","url":"http://%s-billing-event-relay:9090"},{"key":"token-event-relay","kind":"relay","url":"http://%s-token-event-relay:9090"}]` $fullname $fullname $fullname $fullname $modelProbe (include "pinvou.natsMonitorUrl" $root | quote) $fullname $fullname $fullname | quote }}
             {{- end }}
           readinessProbe: { httpGet: { path: /health/ready, port: http }, periodSeconds: 10, timeoutSeconds: 3 }
           livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            {{- if and $root.Values.newApi.enabled (or (eq $app.name "token-gateway") (eq $app.name "token-portal")) }}
+            - { name: newapi-public-ca, mountPath: {{ if eq $app.name "token-gateway" }}/run/pinvou/provider-trust/ca.crt{{ else }}/run/pinvou/probe-trust/ca.crt{{ end }}, subPath: ca.crt, readOnly: true }
+            {{- end }}
             {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
             {{- include "pinvou.nativeKmsMounts" $root | nindent 12 }}
             {{- end }}
@@ -287,6 +312,10 @@ spec:
         {{- include "pinvou.nativeKmsAgent" $root | nindent 8 }}
         {{- end }}
       volumes:
+        {{- if and $root.Values.newApi.enabled (or (eq $app.name "token-gateway") (eq $app.name "token-portal")) }}
+        - name: newapi-public-ca
+          configMap: { name: {{ $root.Values.newApi.caConfigMap }}, defaultMode: 292, items: [{ key: ca.crt, path: ca.crt }] }
+        {{- end }}
         {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
         {{- include "pinvou.nativeKmsVolumes" (dict "root" $root "component" $app.name) | nindent 8 }}
         {{- end }}

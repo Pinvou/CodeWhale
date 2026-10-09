@@ -21,7 +21,7 @@ export function validatePolicy(policy) {
   required(policy.events.retained_unacked_per_stream >= 1000000 && policy.events.drain_seconds <= 900, 'event retention or drain objective is invalid');
 }
 
-function atMost(actual, limit, name) { required(Number.isFinite(actual) && actual <= limit, `${name} exceeds ${limit}`); }
+function atMost(actual, limit, name) { required(Number.isFinite(actual) && actual >= 0 && actual <= limit, `${name} exceeds ${limit}`); }
 function atLeast(actual, limit, name) { required(Number.isFinite(actual) && actual >= limit, `${name} is below ${limit}`); }
 
 export function validateEvidence(policy, evidence, now = Date.now(), provenance = {}) {
@@ -57,7 +57,7 @@ export function validateEvidence(policy, evidence, now = Date.now(), provenance 
   atMost(evidence.events.drain_seconds, policy.events.drain_seconds, 'event drain');
   atLeast(evidence.events.realtime_peak_percent, policy.events.realtime_peak_percent, 'event realtime load');
   required(evidence.events.lost_events === 0 && evidence.events.high_risk_gate_triggered === true, 'event loss or high-risk admission gate failed');
-  for (const segment of ['platform_ms', 'provider_ms', 'queue_ms', 'client_network_ms']) required(Number.isFinite(evidence.timing_segments[segment]), `timing segment ${segment} is missing`);
+  for (const segment of ['platform_ms', 'provider_ms', 'queue_ms', 'client_network_ms']) required(Number.isFinite(evidence.timing_segments[segment]) && evidence.timing_segments[segment] >= 0, `timing segment ${segment} is missing`);
 }
 
 export function performanceGateArguments(args) {

@@ -69,9 +69,9 @@ spec:
     - to:
         - podSelector:
             matchLabels: {{ include "pinvou.selector" . | nindent 14 }}
-    - to:
-        - podSelector: { matchLabels: { pinvou.io/newapi-data-plane: "true" } }
-      ports: [{ protocol: TCP, port: 8080 }, { protocol: TCP, port: 443 }]
+            matchExpressions:
+              - { key: pinvou.io/newapi-data-plane, operator: DoesNotExist }
+              - { key: pinvou.io/restricted-token-control, operator: DoesNotExist }
     {{- range $cidr := .Values.external.postgresCidrs }}
     - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
       ports: [{ protocol: TCP, port: 5432 }]
@@ -97,11 +97,18 @@ spec:
         {{- if .Values.tokenCredentialPortal.enabled }}
         - podSelector: { matchLabels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: token-credential-portal } }
         {{- end }}
-      ports: [{ protocol: TCP, port: 8080 }]
+      ports: [{ protocol: TCP, port: 8443 }]
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: token-portal } }
+      ports: [{ protocol: TCP, port: 8444 }]
   egress:
     - to:
         - podSelector: { matchLabels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: redis } }
       ports: [{ protocol: TCP, port: 6379 }]
+    {{- range $cidr := .Values.external.redisCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 6379 }]
+    {{- end }}
     {{- range $cidr := .Values.external.postgresCidrs }}
     - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
       ports: [{ protocol: TCP, port: 5432 }]
@@ -110,4 +117,50 @@ spec:
     - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
       ports: [{ protocol: TCP, port: 443 }]
     {{- end }}
+
+{{- range $caller := list (dict "name" "token-gateway" "port" 8443) (dict "name" "token-portal" "port" 8444) }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" $ }}-{{ $caller.name }}-newapi-tls }
+spec:
+  podSelector:
+    matchLabels: {{ include "pinvou.selector" $ | nindent 6 }}
+    matchExpressions: [{ key: app.kubernetes.io/component, operator: In, values: [{{ $caller.name }}] }]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {{ include "pinvou.selector" $ | nindent 14 }}
+            matchExpressions: [{ key: pinvou.io/newapi-data-plane, operator: In, values: ["true"] }]
+      ports: [{ protocol: TCP, port: {{ $caller.port }} }]
+{{- end }}
+{{- $redisCallers := list "token-portal" -}}
+{{- if .Values.security.authRiskEnabled -}}{{- $redisCallers = append $redisCallers "identity-service" -}}{{- end -}}
+{{- $outbound := list
+  (dict "name" "redis-clients" "callers" $redisCallers "cidrs" .Values.external.redisCidrs "port" 6379)
+  (dict "name" "event-clients" "callers" (list "account-service" "billing-service" "token-gateway" "account-event-relay" "billing-event-relay" "token-event-relay") "cidrs" .Values.external.natsCidrs "port" 4222)
+  (dict "name" "workload-verifiers" "callers" (list "account-service" "billing-service" "token-gateway") "cidrs" .Values.external.workloadJwksCidrs "port" 443)
+  (dict "name" "portal-oidc" "callers" (list "token-portal") "cidrs" .Values.external.oidcCidrs "port" 443)
+  (dict "name" "portal-nats-monitor" "callers" (list "token-portal") "cidrs" .Values.external.natsMonitorCidrs "port" 443)
+-}}
+{{- range $rule := $outbound }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" $ }}-{{ $rule.name }} }
+spec:
+  podSelector:
+    matchLabels: {{ include "pinvou.selector" $ | nindent 6 }}
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: {{ toJson $rule.callers }} }
+      - { key: pinvou.io/restricted-token-control, operator: DoesNotExist }
+      - { key: pinvou.io/newapi-data-plane, operator: DoesNotExist }
+  policyTypes: [Egress]
+  egress:
+    {{- range $cidr := $rule.cidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: {{ $rule.port }} }]
+    {{- end }}
+{{- end }}
 {{- end }}

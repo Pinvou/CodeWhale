@@ -54,6 +54,30 @@ helm template pinvou deploy/helm/account-platform \
   -f deploy/helm/account-platform/values-production-new.yaml > rendered.yaml
 ```
 
+Migration hooks run before ordinary chart resources. Before the first install,
+the deployment operator must provision the Secret named by `global.runtimeSecret`
+through the existing external secret mechanism and wait until it is Ready in the
+release namespace. The ordinary chart `ExternalSecret` is not a prerequisite hook
+and cannot supply this Secret during that first pre-install phase. Before upgrades,
+keep that existing Secret available while hooks run. Verify key presence without
+printing values: the three `account-migration-database-url`,
+`billing-migration-database-url`, and `token-migration-database-url` keys are required.
+For production-new, also require `migration-backup-evidence-id`,
+`migration-backup-completed-at`, and `migration-backup-sha256`; the migration binary
+validates the backup age and checksum before connecting. When policy bootstrap is
+enabled, also require `token-policy-database-url`, `token-policy-max-per-owner`,
+`token-policy-expected-version`, `token-policy-idempotency-key`, and
+`token-policy-reason`. Missing required Secret keys prevent a hook container from
+starting; missing/invalid production backup values are rejected by the binary.
+Rendering does not prove that an external Secret exists or is Ready.
+
+The dedicated `-migrations` ServiceAccount is created by a weight -40 prerequisite
+hook and retained through the release; it is separate from the ordinary runtime
+ServiceAccounts. Migration and bootstrap Pods use `global.imagePullSecrets` and
+do not mount ServiceAccount tokens. Account, Billing, Token migrations retain
+weights -30, -20, -10, followed by policy bootstrap -5. This preserves migration
+before application rollout on upgrades; no runtime ServiceAccount is deleted.
+
 Migration Jobs are pre-install/pre-upgrade hooks. Rollback does not delete PVCs;
 database rollback remains an explicit, separately approved operation.
 

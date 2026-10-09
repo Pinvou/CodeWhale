@@ -73,6 +73,9 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $app.settings.runtimeSecret }}, key: {{ $item.key }} } }
             {{- end }}
             {{- end }}
+            {{- if $root.Values.newApi.enabled }}
+            - { name: TOKEN_PROVIDER_CA_FILE, value: /run/pinvou/provider-trust/ca.crt }
+            {{- end }}
             - { name: TOKEN_PROVIDER_ALLOWED_HOSTS, value: {{ join "," $root.Values.tokenGateway.providerAllowedHosts | quote }} }
             - { name: PORTAL_PUBLIC_URL, value: {{ $root.Values.public.portalUrl | quote }} }
             - { name: CREDENTIAL_PORTAL_PUBLIC_URL, value: {{ $app.settings.publicUrl | quote }} }
@@ -90,6 +93,9 @@ spec:
           livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            {{- if and $root.Values.newApi.enabled (eq $app.name "token-credential-portal") }}
+            - { name: newapi-public-ca, mountPath: /run/pinvou/provider-trust/ca.crt, subPath: ca.crt, readOnly: true }
+            {{- end }}
             {{- if and (eq $app.name "token-credential-portal") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
             {{- include "pinvou.nativeKmsMounts" $root | nindent 12 }}
             {{- end }}
@@ -101,6 +107,10 @@ spec:
         {{- include "pinvou.nativeKmsAgent" $root | nindent 8 }}
         {{- end }}
       volumes:
+        {{- if and $root.Values.newApi.enabled (eq $app.name "token-credential-portal") }}
+        - name: newapi-public-ca
+          configMap: { name: {{ $root.Values.newApi.caConfigMap }}, defaultMode: 292, items: [{ key: ca.crt, path: ca.crt }] }
+        {{- end }}
         {{- if and (eq $app.name "token-credential-portal") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
         {{- include "pinvou.nativeKmsVolumes" (dict "root" $root "component" $app.name) | nindent 8 }}
         {{- end }}

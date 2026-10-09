@@ -20,8 +20,14 @@ function timestamp(value, name) {
   return parsed;
 }
 
+function nonnegative(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
 function ageSeconds(now, value, name) {
-  return (now - timestamp(value, name)) / 1000;
+  const age = (now - timestamp(value, name)) / 1000;
+  requireValue(nonnegative(age), `${name} must not be after the evidence time`);
+  return age;
 }
 
 export function validatePolicy(policy) {
@@ -65,25 +71,25 @@ export function validateEvidence(policy, evidence, now = Date.now()) {
     requireValue(backup.key_separated === true && backup.immutable_offsite === true && backup.production_identity_can_delete === false, `${database} backup separation or immutability evidence is invalid`);
     requireValue(typeof backup.backup_id === 'string' && backup.backup_id.length >= 8 && sha256.test(backup.checksum_sha256), `${database} backup identity/checksum is invalid`);
   }
-  requireValue(evidence.measured?.financial_rpo_seconds <= policy.objectives.rpo_seconds.financial, 'measured financial RPO exceeds 60 seconds');
-  requireValue(evidence.measured?.configuration_rpo_seconds <= policy.objectives.rpo_seconds.configuration, 'measured configuration RPO exceeds 300 seconds');
-  requireValue(evidence.measured?.core_rto_seconds <= policy.objectives.rto_seconds.core, 'measured core RTO exceeds 60 minutes');
-  requireValue(evidence.measured?.noncritical_rto_seconds <= policy.objectives.rto_seconds.noncritical, 'measured noncritical RTO exceeds 4 hours');
+  requireValue(nonnegative(evidence.measured?.financial_rpo_seconds) && evidence.measured?.financial_rpo_seconds <= policy.objectives.rpo_seconds.financial, 'measured financial RPO exceeds 60 seconds');
+  requireValue(nonnegative(evidence.measured?.configuration_rpo_seconds) && evidence.measured?.configuration_rpo_seconds <= policy.objectives.rpo_seconds.configuration, 'measured configuration RPO exceeds 300 seconds');
+  requireValue(nonnegative(evidence.measured?.core_rto_seconds) && evidence.measured?.core_rto_seconds <= policy.objectives.rto_seconds.core, 'measured core RTO exceeds 60 minutes');
+  requireValue(nonnegative(evidence.measured?.noncritical_rto_seconds) && evidence.measured?.noncritical_rto_seconds <= policy.objectives.rto_seconds.noncritical, 'measured noncritical RTO exceeds 4 hours');
   const exerciseLimits = new Map([['monthly_sample', 35], ['quarterly_end_to_end', 100], ['annual_loss', 400]]);
   for (const [kind, limitDays] of exerciseLimits) {
     const exercise = evidence.exercises.filter((entry) => entry.kind === kind).sort((a, b) => timestamp(b.completed_at, `${kind}.completed_at`) - timestamp(a.completed_at, `${kind}.completed_at`))[0];
     requireValue(exercise, `${kind} exercise evidence is missing`);
     requireValue(ageSeconds(generatedAt, exercise.completed_at, `${kind}.completed_at`) <= limitDays * 86400, `${kind} exercise is stale`);
     requireValue(exercise.audit_sql_passed === true && exercise.real_provider_side_effects === 0, `${kind} exercise validation is incomplete`);
-    requireValue(exercise.open_remediations === 0 || exercise.remediation_retest_due_within_days <= 30, `${kind} remediation has no 30-day retest`);
+    requireValue(Number.isSafeInteger(exercise.open_remediations) && exercise.open_remediations >= 0 && (exercise.open_remediations === 0 || (nonnegative(exercise.remediation_retest_due_within_days) && exercise.remediation_retest_due_within_days <= 30)), `${kind} remediation has no 30-day retest`);
   }
   const scans = new Map(evidence.retention_deletion_scans.map((entry) => [entry.classification, entry]));
   for (const retention of policy.retention) {
     const scan = scans.get(retention.classification);
     requireValue(scan, `deletion scan is missing for ${retention.classification}`);
     requireValue(ageSeconds(generatedAt, scan.scanned_at, `${retention.classification}.scanned_at`) <= 35 * 86400, `${retention.classification} deletion scan is stale`);
-    requireValue(scan.expired_eligible_count === scan.deleted_count, `${retention.classification} has expired eligible records not deleted`);
-    requireValue(scan.maximum_deletion_delay_days <= retention.deletion_sla_days, `${retention.classification} deletion exceeded SLA`);
+    requireValue(Number.isSafeInteger(scan.expired_eligible_count) && scan.expired_eligible_count >= 0 && scan.expired_eligible_count === scan.deleted_count, `${retention.classification} has expired eligible records not deleted`);
+    requireValue(nonnegative(scan.maximum_deletion_delay_days) && scan.maximum_deletion_delay_days <= retention.deletion_sla_days, `${retention.classification} deletion exceeded SLA`);
     requireValue(sha256.test(scan.receipt_sha256), `${retention.classification} deletion receipt is invalid`);
   }
 }

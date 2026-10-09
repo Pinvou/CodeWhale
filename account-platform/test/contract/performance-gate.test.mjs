@@ -59,3 +59,14 @@ test('production performance mode cannot pass without an evidence artifact', () 
   assert.throws(() => performanceGateArguments(['--require-evidence', 'performance-evidence.json']), /candidate release SHA-256 is required/);
   assert.throws(() => performanceGateArguments(['--require-evidence', 'performance-evidence.json', `--expected-release-sha256=${'a'.repeat(64)}`]), /trace artifact files are required/);
 });
+
+test('performance rejects negative durations, utilization and timing segments', () => {
+  const now = Date.parse('2026-08-24T00:00:00Z');
+  const provenance = { expectedReleaseSHA256: 'a'.repeat(64), pageTraceSHA256: 'd'.repeat(64), mutationTraceSHA256: 'e'.repeat(64) };
+  const negativeDuration = evidence(now); negativeDuration.api.read_p95_ms = -1;
+  assert.throws(() => validateEvidence(policy, negativeDuration, now, provenance), /api.read_p95_ms/);
+  const negativeUtilization = evidence(now); negativeUtilization.maximum_declared_capacity_percent = -1;
+  assert.throws(() => validateEvidence(policy, negativeUtilization, now, provenance), /capacity utilization/);
+  const segment = evidence(now); segment.timing_segments.platform_ms = -1;
+  assert.throws(() => validateEvidence(policy, segment, now, provenance), /timing segment/);
+});

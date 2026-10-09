@@ -23,6 +23,7 @@
       "type": "object",
       "required": ["environment", "runtimeSecret", "trustedTimeSources", "manualReviewOnCallUserIds"],
       "properties": {
+        "podLabels": { "type": "object", "propertyNames": { "not": { "enum": ["app.kubernetes.io/name", "app.kubernetes.io/instance", "app.kubernetes.io/component", "pinvou.io/newapi-data-plane", "pinvou.io/restricted-token-control"] } } },
         "environment": { "enum": ["development", "test", "staging", "production-new"] },
         "runtimeSecret": { "type": "string", "minLength": 1 },
         "trustedTimeSources": { "type": "array", "minItems": 3, "uniqueItems": true, "items": { "type": "string", "minLength": 3 } },
@@ -45,6 +46,7 @@
         "eventRelay": { "$ref": "#/definitions/image" },
         "migrate": { "$ref": "#/definitions/image" },
         "newApi": { "$ref": "#/definitions/imageWithDigest" },
+        "newApiTLS": { "type": "object", "additionalProperties": false, "required": ["repository", "digest", "pullPolicy"], "properties": { "repository": { "type": "string" }, "digest": { "type": "string", "pattern": "^(sha256:[a-f0-9]{64}|)$" }, "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] } } },
         "keycloak": { "$ref": "#/definitions/image" },
         "redis": { "$ref": "#/definitions/image" },
         "nats": { "$ref": "#/definitions/image" }
@@ -52,10 +54,12 @@
     },
     "newApi": {
       "type": "object",
-      "required": ["enabled", "serviceName", "replicas", "nodeType", "trustedProxies"],
+      "required": ["enabled", "serviceName", "replicas", "nodeType", "trustedProxies", "tlsSecretName", "caConfigMap"],
       "additionalProperties": false,
       "properties": {
         "enabled": { "type": "boolean" },
+        "tlsSecretName": { "$ref": "#/definitions/kmsResourceName" },
+        "caConfigMap": { "$ref": "#/definitions/kmsResourceName" },
         "serviceName": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63 },
         "replicas": { "type": "integer", "minimum": 1, "maximum": 10 },
         "nodeType": { "enum": ["master", "slave"] },
@@ -66,6 +70,7 @@
       "type": "object",
       "required": ["issuer", "jwksUrl", "tokenUrl", "audience", "portalClientId", "portalHandoffClientId"],
       "properties": {
+        "authorizationUrl": { "type": "string", "pattern": "^(https?://[^\\s]+)?$" },
         "issuer": { "type": "string", "format": "uri" },
         "jwksUrl": { "type": "string" },
         "tokenUrl": { "type": "string" },
@@ -263,6 +268,11 @@
       "required": ["postgresCidrs", "paymentProviderCidrs", "secretProviderCidrs", "modelProviderCidrs", "telemetryCollectorCidrs", "timeSourceCidrs"],
       "properties": {
         "postgresCidrs": { "$ref": "#/definitions/cidrs" },
+        "natsMonitorCidrs": { "$ref": "#/definitions/cidrs" },
+        "oidcCidrs": { "$ref": "#/definitions/cidrs" },
+        "workloadJwksCidrs": { "$ref": "#/definitions/cidrs" },
+        "natsCidrs": { "$ref": "#/definitions/cidrs" },
+        "redisCidrs": { "$ref": "#/definitions/cidrs" },
         "paymentProviderCidrs": { "$ref": "#/definitions/cidrs" },
         "secretProviderCidrs": { "$ref": "#/definitions/cidrs" },
         "modelProviderCidrs": { "$ref": "#/definitions/cidrs" },
@@ -388,6 +398,11 @@
             "type": "object",
             "properties": {
               "postgresCidrs": { "type": "array", "minItems": 1 },
+              "natsMonitorCidrs": { "type": "array", "minItems": 1 },
+              "oidcCidrs": { "type": "array", "minItems": 1 },
+              "workloadJwksCidrs": { "type": "array", "minItems": 1 },
+              "natsCidrs": { "type": "array", "minItems": 1 },
+              "redisCidrs": { "type": "array", "minItems": 1 },
               "paymentProviderCidrs": { "type": "array", "minItems": 1 },
               "timeSourceCidrs": { "type": "array", "minItems": 1 },
               "secretProviderCidrs": { "type": "array", "minItems": 1 },

@@ -21,7 +21,7 @@ spec:
     - name: account-platform.events
       rules:
         - alert: PinvouAccountPlatformEventRelayMissing
-          expr: count(pinvou_outbox_pending_events) < 3
+          expr: (count(count by (source) (pinvou_outbox_pending_events{source=~"account|billing|token"})) or vector(0)) < 3
           for: 5m
           labels: { severity: p1 }
           annotations: { summary: "One or more Account Platform event relays are not being scraped" }

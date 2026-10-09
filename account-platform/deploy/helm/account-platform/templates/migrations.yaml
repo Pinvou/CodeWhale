@@ -19,8 +19,11 @@ spec:
         app.kubernetes.io/component: migrate-{{ $domain }}
     spec:
       restartPolicy: Never
-      serviceAccountName: {{ $fullname }}
+      serviceAccountName: {{ $fullname }}-migrations
       automountServiceAccountToken: false
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: migrate
@@ -61,8 +64,11 @@ spec:
         app.kubernetes.io/component: token-policy-bootstrap
     spec:
       restartPolicy: Never
-      serviceAccountName: {{ $fullname }}
+      serviceAccountName: {{ $fullname }}-migrations
       automountServiceAccountToken: false
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: bootstrap

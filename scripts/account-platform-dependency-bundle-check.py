@@ -131,9 +131,9 @@ def verify(pki, nats, recipient):
         openssl("x509", "-in", cert, "-noout", "-checkend", "1209600")
         require(openssl("x509", "-in", cert, "-noout", "-ext", "subjectAltName").decode().splitlines()[1].strip() == "DNS:" + service)
         require(openssl("x509", "-in", cert, "-noout", "-ext", "extendedKeyUsage").decode().splitlines()[1].strip() == "TLS Web Server Authentication")
-        public = openssl("x509", "-in", cert, "-pubkey", "-noout")
-        require(public == openssl("pkey", "-in", key, "-pubout") and public not in keys)
-        keys.add(public)
+        leaf_public = openssl("x509", "-in", cert, "-pubkey", "-noout")
+        require(leaf_public == openssl("pkey", "-in", key, "-pubout") and leaf_public not in keys)
+        keys.add(leaf_public)
     require(type(public["public_keys"]) is dict and set(public["public_keys"]) == set(roles))
     require(all(type(v) is str and re.fullmatch("U[A-Z2-7]{55}", v) for v in public["public_keys"].values()) and len(set(public["public_keys"].values())) == len(roles))
     # Official key decoding/CRC checks and authorization still belong to the

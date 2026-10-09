@@ -8,7 +8,9 @@ metadata:
   name: {{ include "pinvou.fullname" . }}
   labels: {{ include "pinvou.labels" . | nindent 4 }}
 spec:
-  {{- with .Values.ingress.className }}ingressClassName: {{ . }}{{- end }}
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
   {{- with .Values.ingress.tlsSecretName }}
   tls:
     - secretName: {{ . }}
@@ -58,7 +60,9 @@ metadata:
     nginx.ingress.kubernetes.io/session-cookie-secure: "true"
     nginx.ingress.kubernetes.io/session-cookie-change-on-failure: "true"
 spec:
-  {{- with .Values.ingress.className }}ingressClassName: {{ . }}{{- end }}
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
   {{- with .Values.ingress.tlsSecretName }}
   tls:
     - secretName: {{ . }}
@@ -88,7 +92,9 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: {{ .Values.ingress.tokenAdminMaxTimeoutSeconds | quote }}
     nginx.ingress.kubernetes.io/proxy-send-timeout: {{ .Values.ingress.tokenAdminMaxTimeoutSeconds | quote }}
 spec:
-  {{- with .Values.ingress.className }}ingressClassName: {{ . }}{{- end }}
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
   {{- with .Values.ingress.tlsSecretName }}
   tls:
     - secretName: {{ . }}

@@ -1,5 +1,6 @@
 {{- if .Values.newApi.enabled }}
 {{- $root := . -}}
+{{- include "pinvou.requireNewApiTLS" . -}}
 {{- $fullname := include "pinvou.fullname" . -}}
 ---
 apiVersion: apps/v1
@@ -59,7 +60,26 @@ spec:
           volumeMounts:
             - { name: data, mountPath: /data }
             - { name: tmp, mountPath: /tmp }
+        {{- range $mode := list "data" "status-only" }}
+        - name: newapi-tls-{{ $mode }}
+          image: "{{ $root.Values.images.newApiTLS.repository }}@{{ $root.Values.images.newApiTLS.digest }}"
+          imagePullPolicy: {{ $root.Values.images.newApiTLS.pullPolicy }}
+          args: [{{ printf "--mode=%s" $mode | quote }}]
+          ports: [{ name: {{ if eq $mode "data" }}provider-tls{{ else }}status-tls{{ end }}, containerPort: {{ if eq $mode "data" }}8443{{ else }}8444{{ end }} }]
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          resources: {{ toYaml $root.Values.resources | nindent 12 }}
+          env:
+            - { name: NEWAPI_TLS_CERT_FILE, value: /run/pinvou/newapi/server.crt }
+            - { name: NEWAPI_TLS_KEY_FILE, value: /run/pinvou/newapi/server.key }
+          volumeMounts:
+            - { name: newapi-tls, mountPath: /run/pinvou/newapi, readOnly: true }
+        {{- end }}
       volumes:
+        - name: newapi-tls
+          secret:
+            secretName: {{ .Values.newApi.tlsSecretName }}
+            defaultMode: 288
+            items: [{ key: tls.crt, path: server.crt }, { key: tls.key, path: server.key }]
         - { name: data, emptyDir: { sizeLimit: 256Mi } }
         - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
 ---
@@ -74,5 +94,5 @@ spec:
   selector:
     {{- include "pinvou.selector" . | nindent 4 }}
     app.kubernetes.io/component: new-api
-  ports: [{ name: http, port: 8080, targetPort: http }]
+  ports: [{ name: provider-tls, port: 8443, targetPort: provider-tls }, { name: status-tls, port: 8444, targetPort: status-tls }]
 {{- end }}

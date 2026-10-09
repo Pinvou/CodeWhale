@@ -88,6 +88,12 @@ tokenGateway:
   providerAllowedHosts: [newapi]
 
 external:
+  # Replace these example subnet ranges with the actual existing dependency IPs.
+  redisCidrs: [10.26.0.0/24]
+  natsCidrs: [10.27.0.0/24]
+  workloadJwksCidrs: [10.28.0.0/24]
+  oidcCidrs: [10.29.0.0/24]
+  natsMonitorCidrs: [10.30.0.0/24]
   postgresCidrs: [10.20.0.0/24]
   paymentProviderCidrs: [10.21.0.0/24]
   secretProviderCidrs: [10.22.0.0/24]

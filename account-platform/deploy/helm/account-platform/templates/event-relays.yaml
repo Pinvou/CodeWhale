@@ -52,7 +52,7 @@ spec:
             - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
             - { name: EVENT_SOURCE, value: {{ $source | quote }} }
             - name: DATABASE_URL
-              valueFrom: { secretKeyRef: { name: {{ if and (eq $source "token") $root.Values.tokenGateway.runtimeSecret }}{{ $root.Values.tokenGateway.runtimeSecret }}{{ else }}{{ $root.Values.global.runtimeSecret }}{{ end }}, key: {{ if and (eq $source "token") $root.Values.tokenGateway.runtimeSecret }}token-gateway-database-url{{ else }}{{ printf "%s-service-database-url" $source }}{{ end }} } }
+              valueFrom: { secretKeyRef: { name: {{ if and (eq $source "token") $root.Values.tokenGateway.runtimeSecret }}{{ $root.Values.tokenGateway.runtimeSecret }}{{ else }}{{ $root.Values.global.runtimeSecret }}{{ end }}, key: {{ if eq $source "token" }}token-gateway-database-url{{ else }}{{ printf "%s-service-database-url" $source }}{{ end }} } }
             - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
             - { name: NATS_CREDENTIALS_FILE, value: {{ printf "/var/run/secrets/pinvou/nats/%s.creds" $source | quote }} }
             {{- if eq $source "account" }}
