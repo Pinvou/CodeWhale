@@ -39,6 +39,10 @@ type AccountClosureGrantClient interface {
 	IsolateGrants(context.Context, uuid.UUID, uuid.UUID, int64) error
 }
 
+type AccountClosureReplayClient interface {
+	ClearReplay(context.Context, uuid.UUID) error
+}
+
 type HTTPAccountClosureClient struct {
 	baseURL      *url.URL
 	serviceToken string
@@ -48,7 +52,7 @@ type HTTPAccountClosureClient struct {
 
 func NewHTTPAccountClosureClient(rawURL, serviceToken, domain string) (*HTTPAccountClosureClient, error) {
 	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(rawURL), "/"))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, errors.New("account closure service URL must be absolute")
 	}
 	domain = strings.ToUpper(strings.TrimSpace(domain))
@@ -70,24 +74,30 @@ func (c *HTTPAccountClosureClient) Assess(ctx context.Context, userID uuid.UUID)
 	}
 	response, err := c.client.Do(request)
 	if err != nil {
-		return AccountClosureAssessment{}, err
+		return AccountClosureAssessment{}, errors.New("account closure assessment transport unavailable")
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil {
-		return AccountClosureAssessment{}, err
+	body, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil || len(body) > 1<<20 {
+		return AccountClosureAssessment{}, errors.New("account closure assessment body is invalid")
 	}
 	if response.StatusCode != http.StatusOK {
 		return AccountClosureAssessment{}, fmt.Errorf("%s account closure assessment returned HTTP %d", c.domain, response.StatusCode)
 	}
-	var assessment AccountClosureAssessment
-	if err := json.Unmarshal(body, &assessment); err != nil || assessment.UserID != userID {
+	var wire struct {
+		UserID   uuid.UUID                `json:"user_id"`
+		Ready    *bool                    `json:"ready"`
+		Blockers *[]AccountClosureBlocker `json:"blockers"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil || wire.UserID != userID || userID == uuid.Nil || wire.Ready == nil || wire.Blockers == nil || *wire.Ready != (len(*wire.Blockers) == 0) {
 		return AccountClosureAssessment{}, fmt.Errorf("%s account closure assessment returned invalid data", c.domain)
 	}
-	for index := range assessment.Blockers {
-		assessment.Blockers[index].Domain = c.domain
+	for _, blocker := range *wire.Blockers {
+		if blocker.Domain != c.domain || strings.TrimSpace(blocker.Code) == "" || strings.TrimSpace(blocker.ResourceType) == "" {
+			return AccountClosureAssessment{}, errors.New("account closure blocker authority is invalid")
+		}
 	}
-	assessment.Ready = len(assessment.Blockers) == 0
+	assessment := AccountClosureAssessment{UserID: wire.UserID, Ready: *wire.Ready, Blockers: *wire.Blockers}
 	return assessment, nil
 }
 
@@ -108,12 +118,50 @@ func (c *HTTPAccountClosureClient) IsolateGrants(ctx context.Context, userID, cl
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.client.Do(request)
 	if err != nil {
-		return err
+		return errors.New("billing grant isolation transport unavailable")
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("billing account closure grant isolation returned HTTP %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil || len(body) > 1<<20 {
+		return errors.New("billing grant isolation receipt is invalid")
+	}
+	var receipt struct {
+		ClosureID uuid.UUID `json:"closure_request_id"`
+		UserID    uuid.UUID `json:"member_user_id"`
+		Lifecycle int64     `json:"subject_lifecycle_version"`
+		Count     *int      `json:"isolated_grant_count"`
+		Replayed  *bool     `json:"replayed"`
+	}
+	if json.Unmarshal(body, &receipt) != nil || receipt.ClosureID != closureID || receipt.UserID != userID || receipt.Lifecycle != lifecycleVersion || receipt.Count == nil || *receipt.Count < 0 || receipt.Replayed == nil {
+		return errors.New("billing grant isolation receipt does not match the closure")
+	}
+	return nil
+}
+
+func (c *HTTPAccountClosureClient) ClearReplay(ctx context.Context, userID uuid.UUID) error {
+	if c.domain != "TOKEN" || userID == uuid.Nil {
+		return errors.New("token replay cleanup request is invalid")
+	}
+	endpoint := *c.baseURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/internal/v1/users/" + userID.String() + "/replay-payloads"
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint.String(), nil)
+	if err != nil {
+		return errors.New("invalid token replay cleanup request")
+	}
+	if err := serviceauth.SetAuthorization(request, c.serviceToken); err != nil {
+		return err
+	}
+	response, err := c.client.Do(request)
+	if err != nil {
+		return errors.New("token replay cleanup transport unavailable")
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
+	if err != nil || len(body) != 0 || response.StatusCode != http.StatusNoContent {
+		return errors.New("token replay cleanup acknowledgement is invalid")
 	}
 	return nil
 }

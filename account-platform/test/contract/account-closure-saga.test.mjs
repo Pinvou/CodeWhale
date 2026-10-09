@@ -37,31 +37,44 @@ test('billing and token assessments cover unresolved money and usage while platf
   for (const marker of ['UNSETTLED_USAGE_HOLD', 'MODEL_EXECUTION_ACTIVE', 'USAGE_RECONCILIATION_PENDING', 'late_usage_customer_debit_prohibited']) assert.match(token, new RegExp(marker));
 });
 
-test('public and operations contracts expose progress and bounded retry but no direct administrator deletion bypass', async () => {
-  const account = YAML.parse(await read('contracts/openapi/account.yaml'));
-  const admin = YAML.parse(await read('contracts/openapi/admin.yaml'));
-  assert.ok(account.paths['/me/account-closure-request'].get);
-  assert.ok(account.paths['/me/account-closure-requests'].post);
-  assert.deepEqual(account.paths['/me/account-closure-requests'].post.requestBody.content['application/json'].schema.required, ['confirmation']);
-  assert.ok(admin.paths['/account/admin/v1/account-closure-requests'].get);
-  assert.ok(admin.paths['/account/admin/v1/account-closure-requests/{closure_request_id}/actions/retry'].post);
-  assert.equal(admin.paths['/account/admin/v1/users/{user_id}'], undefined);
+test('public and operations contracts expose progress and bounded retry but no deletion bypass', async () => {
+  const contract = YAML.parse(await read('contracts/openapi/account-closure.yaml'));
+  const get = contract.paths['/v1/me/account-closure-request'].get;
+  const create = contract.paths['/v1/me/account-closure-requests'].post;
+  assert.ok(get.responses['200']);
+  assert.deepEqual(create.requestBody.content['application/json'].schema.required, ['confirmation']);
+  assert.equal(create.requestBody.content['application/json'].schema.properties.confirmation.const, 'CLOSE_MY_ACCOUNT');
+  assert.ok(create.parameters.some(p => p.in === 'header' && p.name === 'Idempotency-Key' && p.required));
+  assert.ok(contract.paths['/admin/v1/account-closure-requests'].get);
+  const retry = contract.paths['/admin/v1/account-closure-requests/{closure_request_id}/actions/retry'].post;
+  assert.ok(retry.parameters.some(p => p.in === 'header' && p.name === 'Idempotency-Key' && p.required));
+  assert.deepEqual(retry.requestBody.content['application/json'].schema.required, ['reason']);
+  assert.equal(Object.values(contract.paths).some(methods => methods.delete), false);
 });
 
-test('user and administrator interfaces expose closure progress, blockers, and retry in all languages', async () => {
-  const [view, closureFlow, adminView, userCopy, adminCopy] = await Promise.all([
+test('dedicated user and operations views expose closure progress, blockers and retry in all languages', async () => {
+  const [view, closureFlow, adminView, personal, admin, copy, entry] = await Promise.all([
     read('../pinvou3-app/src/features/account-platform/AccountPlatformView.jsx'),
     read('../pinvou3-app/src/features/account-platform/account-closure-flow.js'),
     read('../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx'),
-    read('../pinvou3-app/src/shared/account-platform-i18n.js'),
-    read('../pinvou3-app/src/shared/admin-platform-i18n.js'),
+    read('../pinvou3-app/src/features/account-platform/AccountClosureWorkspace.jsx'),
+    read('../pinvou3-app/src/features/account-platform/AdminAccountClosureWorkspace.jsx'),
+    read('../pinvou3-app/src/shared/account-closure-i18n.js'),
+    read('../pinvou3-app/src/shared/i18n.js'),
   ]);
-  assert.match(view, /function AccountClosure/);
+  assert.match(view, /<AccountClosureWorkspace/);
   assert.match(closureFlow, /CLOSE_MY_ACCOUNT/);
-  assert.match(adminView, /retryAccountClosure/);
-  for (const copy of [userCopy, adminCopy]) {
-    assert.match(copy, /accountPlatformCopy\.zh|adminPlatformCopy\.zh/);
-    assert.match(copy, /accountPlatformCopy\.en|adminPlatformCopy\.en/);
-    assert.match(copy, /accountPlatformCopy\.ja|adminPlatformCopy\.ja/);
+  assert.match(adminView, /<AdminAccountClosureWorkspace/);
+  assert.match(admin, /retryAccountClosure/);
+  assert.match(personal, /accountClosureResumeAction/);
+  assert.match(entry, /account-closure-i18n/);
+  const { accountClosureCopy } = await import('../../../pinvou3-app/src/shared/account-closure-i18n.js');
+  assert.deepEqual(Object.keys(accountClosureCopy).sort(), ['en', 'ja', 'zh']);
+  const shape = value => typeof value === 'string' ? 'string' : Object.fromEntries(Object.keys(value).sort().map(key => [key, shape(value[key])]));
+  const nonempty = value => typeof value === 'string' ? value.length > 0 : Object.values(value).every(nonempty);
+  for (const language of ['zh', 'en', 'ja']) {
+    assert.ok(nonempty(accountClosureCopy[language]));
+    assert.deepEqual(shape(accountClosureCopy[language]), shape(accountClosureCopy.zh));
   }
+  assert.match(copy, /accountClosureCopy/);
 });

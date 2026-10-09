@@ -8,6 +8,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
@@ -37,6 +38,7 @@ type AccountClosureRequest struct {
 	CreatedAt         time.Time               `json:"created_at"`
 	UpdatedAt         time.Time               `json:"updated_at"`
 	CompletedAt       *time.Time              `json:"completed_at,omitempty"`
+	LeaseUntil        *time.Time              `json:"-"`
 	Replayed          bool                    `json:"replayed"`
 }
 
@@ -68,12 +70,12 @@ func closureDigest(value string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-const accountClosureSelect = `SELECT id,user_id,status,stage,policy_version,blocker_snapshot,attempts,COALESCE(last_error_code,''),next_attempt_at,reauthenticated_at,sla_expires_at,version,created_at,updated_at,completed_at FROM account_closure_requests`
+const accountClosureSelect = `SELECT id,user_id,status,stage,policy_version,blocker_snapshot,attempts,COALESCE(last_error_code,''),next_attempt_at,reauthenticated_at,sla_expires_at,version,created_at,updated_at,completed_at,lease_until FROM account_closure_requests`
 
 func scanAccountClosure(row interface{ Scan(...any) error }) (AccountClosureRequest, error) {
 	var item AccountClosureRequest
 	var blockers json.RawMessage
-	err := row.Scan(&item.ID, &item.UserID, &item.Status, &item.Stage, &item.PolicyVersion, &blockers, &item.Attempts, &item.LastErrorCode, &item.NextAttemptAt, &item.ReauthenticatedAt, &item.SLAExpiresAt, &item.Version, &item.CreatedAt, &item.UpdatedAt, &item.CompletedAt)
+	err := row.Scan(&item.ID, &item.UserID, &item.Status, &item.Stage, &item.PolicyVersion, &blockers, &item.Attempts, &item.LastErrorCode, &item.NextAttemptAt, &item.ReauthenticatedAt, &item.SLAExpiresAt, &item.Version, &item.CreatedAt, &item.UpdatedAt, &item.CompletedAt, &item.LeaseUntil)
 	if err == nil && len(blockers) != 0 {
 		err = json.Unmarshal(blockers, &item.Blockers)
 	}
@@ -136,14 +138,14 @@ func (r *PostgresRepository) CreateAccountClosure(ctx context.Context, principal
 		}
 		request.Stage, request.Version = "QUIESCING", 2
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,actor_user_id,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'REQUESTED',$3,'CLOSURE_REQUESTED',$4,jsonb_build_object('policy_version',$5,'recent_auth',true,'pre_quiet_blocker_codes',(SELECT COALESCE(jsonb_agg(value->>'code'),'[]'::jsonb) FROM jsonb_array_elements($6::jsonb) value)),$7)`, uuid.Must(uuid.NewV7()), request.ID, userID, request.Stage, accountClosurePolicyVersion, encodedBlockers, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,actor_user_id,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'REQUESTED',$3,'CLOSURE_REQUESTED',$4,jsonb_build_object('policy_version',$5::integer,'recent_auth',true,'pre_quiet_blocker_codes',(SELECT COALESCE(jsonb_agg(value->>'code'),'[]'::jsonb) FROM jsonb_array_elements($6::jsonb) value)),$7)`, uuid.Must(uuid.NewV7()), request.ID, userID, request.Stage, accountClosurePolicyVersion, encodedBlockers, now); err != nil {
 		return AccountClosureRequest{}, err
 	}
 	return request, tx.Commit(ctx)
 }
 
 func validateAccountClosureRequest(now time.Time, principal identity.Principal, idempotencyKey, confirmation string) error {
-	if len(idempotencyKey) < 16 || len(idempotencyKey) > 128 || confirmation != accountClosureConfirmation {
+	if utf8.RuneCountInString(idempotencyKey) < 16 || utf8.RuneCountInString(idempotencyKey) > 128 || confirmation != accountClosureConfirmation {
 		return ErrForbidden
 	}
 	if principal.AuthenticatedAt.IsZero() || principal.AuthenticatedAt.After(now.Add(time.Minute)) || now.Sub(principal.AuthenticatedAt) > accountClosureRecentAuth {
@@ -180,6 +182,8 @@ func (r *PostgresRepository) ClaimAccountClosure(ctx context.Context) (*AccountC
 	item.Attempts++
 	item.Version++
 	item.UpdatedAt = now
+	leaseUntil := now.Add(30 * time.Second)
+	item.LeaseUntil = &leaseUntil
 	return &item, tx.Commit(ctx)
 }
 
@@ -197,7 +201,6 @@ func accountClosureRoleBlockers(err error) ([]AccountClosureBlocker, error) {
 }
 
 func (r *PostgresRepository) SaveAccountClosureRequestedBlockers(ctx context.Context, item AccountClosureRequest, blockers []AccountClosureBlocker) error {
-	now := r.now()
 	encoded, err := json.Marshal(blockers)
 	if err != nil {
 		return err
@@ -207,7 +210,11 @@ func (r *PostgresRepository) SaveAccountClosureRequestedBlockers(ctx context.Con
 		return err
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status='BLOCKED',blocker_snapshot=$2,next_attempt_at=$3,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$4 WHERE id=$1 AND version=$5 AND stage='CLOSURE_REQUESTED'`, item.ID, encoded, now.Add(time.Minute), now, item.Version)
+	if err := lockAccountClosureClaim(ctx, tx, item); err != nil {
+		return err
+	}
+	now := r.now()
+	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status='BLOCKED',blocker_snapshot=$2,next_attempt_at=$3,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$4 WHERE id=$1 AND version=$5 AND stage='CLOSURE_REQUESTED' AND lease_until>clock_timestamp()`, item.ID, encoded, now.Add(time.Minute), now, item.Version)
 	if err != nil {
 		return err
 	}
@@ -221,16 +228,31 @@ func (r *PostgresRepository) SaveAccountClosureRequestedBlockers(ctx context.Con
 }
 
 func (r *PostgresRepository) EnterAccountClosureQuiescing(ctx context.Context, item AccountClosureRequest) error {
-	now := r.now()
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockAccountClosureClaim(ctx, tx, item); err != nil {
+		return err
+	}
+	var userStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 FOR UPDATE`, item.UserID).Scan(&userStatus); errors.Is(err, pgx.ErrNoRows) {
+		return ErrConflict
+	} else if err != nil {
+		return err
+	}
+	if userStatus != "ACTIVE" {
+		return ErrConflict
+	}
+	if err := requireAccountClosureClaimTx(ctx, tx, item); err != nil {
+		return err
+	}
+	now := r.now()
 	if err := checkAccountClosureRoleGateTx(ctx, tx, item.UserID); err != nil {
 		return err
 	}
-	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status='IN_PROGRESS',stage='QUIESCING',blocker_snapshot='[]'::jsonb,next_attempt_at=$2,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND version=$3 AND stage='CLOSURE_REQUESTED'`, item.ID, now, item.Version)
+	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status='IN_PROGRESS',stage='QUIESCING',blocker_snapshot='[]'::jsonb,next_attempt_at=$2,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND version=$3 AND stage='CLOSURE_REQUESTED' AND lease_until>clock_timestamp()`, item.ID, now, item.Version)
 	if err != nil {
 		return err
 	}
@@ -251,7 +273,6 @@ func (r *PostgresRepository) EnterAccountClosureQuiescing(ctx context.Context, i
 }
 
 func (r *PostgresRepository) SaveAccountClosureBlockers(ctx context.Context, item AccountClosureRequest, blockers []AccountClosureBlocker) error {
-	now := r.now()
 	encoded, err := json.Marshal(blockers)
 	if err != nil {
 		return err
@@ -265,27 +286,34 @@ func (r *PostgresRepository) SaveAccountClosureBlockers(ctx context.Context, ite
 		return err
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status=$2,stage='FINANCIAL_CLEARANCE',blocker_snapshot=$3,next_attempt_at=$4,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$5 WHERE id=$1 AND version=$6 AND stage IN ('QUIESCING','FINANCIAL_CLEARANCE')`, item.ID, status, encoded, now.Add(time.Minute), now, item.Version)
+	if err := lockAccountClosureClaim(ctx, tx, item); err != nil {
+		return err
+	}
+	now := r.now()
+	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status=$2,stage='FINANCIAL_CLEARANCE',blocker_snapshot=$3,next_attempt_at=$4,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$5 WHERE id=$1 AND version=$6 AND stage IN ('QUIESCING','FINANCIAL_CLEARANCE') AND lease_until>clock_timestamp()`, item.ID, status, encoded, now.Add(time.Minute), now, item.Version)
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() != 1 {
 		return ErrConflict
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'BLOCKERS_EVALUATED',$3,'FINANCIAL_CLEARANCE',jsonb_build_object('blocker_codes',(SELECT COALESCE(jsonb_agg(value->>'code'),'[]'::jsonb) FROM jsonb_array_elements($4::jsonb) value),'ready',$5),$6)`, uuid.Must(uuid.NewV7()), item.ID, item.Stage, encoded, len(blockers) == 0, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'BLOCKERS_EVALUATED',$3,'FINANCIAL_CLEARANCE',jsonb_build_object('blocker_codes',(SELECT COALESCE(jsonb_agg(value->>'code'),'[]'::jsonb) FROM jsonb_array_elements($4::jsonb) value),'ready',$5::boolean),$6)`, uuid.Must(uuid.NewV7()), item.ID, item.Stage, encoded, len(blockers) == 0, now); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) AdvanceAccountClosureToIdentityCleanup(ctx context.Context, item AccountClosureRequest) error {
-	now := r.now()
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status='IN_PROGRESS',stage='IDENTITY_CLEANUP',blocker_snapshot='[]'::jsonb,next_attempt_at=$2,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND version=$3 AND stage IN ('QUIESCING','FINANCIAL_CLEARANCE')`, item.ID, now, item.Version)
+	if err := lockAccountClosureClaim(ctx, tx, item); err != nil {
+		return err
+	}
+	now := r.now()
+	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status='IN_PROGRESS',stage='IDENTITY_CLEANUP',blocker_snapshot='[]'::jsonb,next_attempt_at=$2,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND version=$3 AND stage IN ('QUIESCING','FINANCIAL_CLEARANCE') AND lease_until>clock_timestamp()`, item.ID, now, item.Version)
 	if err != nil {
 		return err
 	}
@@ -299,14 +327,31 @@ func (r *PostgresRepository) AdvanceAccountClosureToIdentityCleanup(ctx context.
 }
 
 func (r *PostgresRepository) ScheduleAccountClosureError(ctx context.Context, item AccountClosureRequest, code string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockAccountClosureClaim(ctx, tx, item); err != nil {
+		return err
+	}
 	now := r.now()
 	status := "RETRY"
 	next := any(now.Add(time.Duration(min(item.Attempts, 10)) * time.Minute))
 	if !item.SLAExpiresAt.After(now) {
 		status, next = "REPAIR_REQUIRED", nil
 	}
-	_, err := r.pool.Exec(ctx, `UPDATE account_closure_requests SET status=$2,last_error_code=$3,next_attempt_at=$4,lease_until=NULL,version=version+1,updated_at=$5 WHERE id=$1 AND version=$6`, item.ID, status, strings.TrimSpace(code), next, now, item.Version)
-	return err
+	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status=$2,last_error_code=$3,next_attempt_at=$4,lease_until=NULL,version=version+1,updated_at=$5 WHERE id=$1 AND version=$6 AND lease_until>clock_timestamp()`, item.ID, status, strings.TrimSpace(code), next, now, item.Version)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *PostgresRepository) ListAccountClosureRepairs(ctx context.Context, filter AccountClosureRepairFilter) ([]AccountClosureRequest, error) {
@@ -329,7 +374,7 @@ func (r *PostgresRepository) ListAccountClosureRepairs(ctx context.Context, filt
 
 func (r *PostgresRepository) RetryAccountClosure(ctx context.Context, principal identity.Principal, closureID uuid.UUID, key, reason string) (AccountClosureRequest, error) {
 	key, reason = strings.TrimSpace(key), strings.TrimSpace(reason)
-	if closureID == uuid.Nil || len(key) < 16 || len(key) > 128 || reason == "" || len(reason) > 500 {
+	if closureID == uuid.Nil || utf8.RuneCountInString(key) < 16 || utf8.RuneCountInString(key) > 128 || reason == "" || utf8.RuneCountInString(reason) > 500 {
 		return AccountClosureRequest{}, ErrConflict
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -376,7 +421,7 @@ func (r *PostgresRepository) RetryAccountClosure(ctx context.Context, principal 
 	if _, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status='RETRY',last_error_code=NULL,next_attempt_at=$2,lease_until=NULL,version=version+1,updated_at=$2 WHERE id=$1`, closureID, now); err != nil {
 		return AccountClosureRequest{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,actor_user_id,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'MANUAL_RETRY_REQUESTED',$3,$4,$4,jsonb_build_object('reason',$5),$6)`, uuid.Must(uuid.NewV7()), closureID, *actorID, item.Stage, reason, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,actor_user_id,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'MANUAL_RETRY_REQUESTED',$3,$4,$4,jsonb_build_object('reason',$5::text),$6)`, uuid.Must(uuid.NewV7()), closureID, *actorID, item.Stage, reason, now); err != nil {
 		return AccountClosureRequest{}, err
 	}
 	item.Status, item.LastErrorCode, item.NextAttemptAt, item.UpdatedAt, item.Version = "RETRY", "", &now, now, item.Version+1
@@ -386,8 +431,9 @@ func (r *PostgresRepository) RetryAccountClosure(ctx context.Context, principal 
 type AccountClosureWorker struct {
 	repository *PostgresRepository
 	clients    []AccountClosureClient
-	identities IdentityProvisioner
+	identities AccountClosureIdentityClient
 	grants     AccountClosureGrantClient
+	replay     AccountClosureReplayClient
 	interval   time.Duration
 }
 
@@ -395,8 +441,8 @@ func NewAccountClosureWorker(repository *PostgresRepository, interval time.Durat
 	return &AccountClosureWorker{repository: repository, clients: append([]AccountClosureClient(nil), clients...), interval: interval}
 }
 
-func (w *AccountClosureWorker) WithCleanup(identities IdentityProvisioner, grants AccountClosureGrantClient) *AccountClosureWorker {
-	w.identities, w.grants = identities, grants
+func (w *AccountClosureWorker) WithCleanup(identities AccountClosureIdentityClient, grants AccountClosureGrantClient, replay AccountClosureReplayClient) *AccountClosureWorker {
+	w.identities, w.grants, w.replay = identities, grants, replay
 	return w
 }
 
@@ -439,19 +485,23 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 			continue
 		}
 		if item.Stage == "IDENTITY_CLEANUP" {
-			if w.identities == nil || w.grants == nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "CLEANUP_DEPENDENCY_UNAVAILABLE")
+			if w.identities == nil || w.grants == nil || w.replay == nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "CLEANUP_DEPENDENCY_UNAVAILABLE")
 				continue
 			}
-			preparation, err := w.repository.PrepareAccountClosureCleanup(ctx, item.ID, item.UserID)
+			preparation, err := w.repository.PrepareAccountClosureCleanup(ctx, item)
 			if err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "ACCOUNT_CLEANUP_PREPARATION_FAILED")
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "ACCOUNT_CLEANUP_PREPARATION_FAILED")
 				continue
 			}
 			identityFailed := false
 			for _, subject := range preparation.IdentitySubjects {
+				if err := w.repository.RequireAccountClosureClaim(ctx, *item); err != nil {
+					identityFailed = true
+					break
+				}
 				if err := w.identities.DeleteUser(ctx, subject); err != nil {
-					_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "IDENTITY_DELETE_UNAVAILABLE")
+					_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "IDENTITY_DELETE_UNAVAILABLE")
 					identityFailed = true
 					break
 				}
@@ -459,26 +509,40 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 			if identityFailed {
 				continue
 			}
-			if err := w.repository.MarkAccountClosureIdentityDeleted(ctx, item.ID, preparation.SubjectLifecycleVersion); err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "IDENTITY_DELETE_COMMIT_FAILED")
+			if err := w.repository.MarkAccountClosureIdentityDeleted(ctx, item, preparation.SubjectLifecycleVersion); err != nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "IDENTITY_DELETE_COMMIT_FAILED")
+				continue
+			}
+			if err := w.repository.RequireAccountClosureClaim(ctx, *item); err != nil {
 				continue
 			}
 			if err := w.grants.IsolateGrants(ctx, item.UserID, item.ID, preparation.SubjectLifecycleVersion); err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "GRANT_ISOLATION_FAILED")
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "GRANT_ISOLATION_FAILED")
 				continue
 			}
-			if err := w.repository.MarkAccountClosureGrantsIsolated(ctx, item.ID, preparation.SubjectLifecycleVersion); err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "GRANT_ISOLATION_COMMIT_FAILED")
+			if err := w.repository.MarkAccountClosureGrantsIsolated(ctx, item, preparation.SubjectLifecycleVersion); err != nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "GRANT_ISOLATION_COMMIT_FAILED")
 				continue
 			}
-			if err := w.repository.AnonymizeAccountClosure(ctx, item.ID, item.UserID, preparation.SubjectLifecycleVersion); err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "ANONYMIZATION_FAILED")
+			if err := w.repository.RequireAccountClosureClaim(ctx, *item); err != nil {
+				continue
+			}
+			if err := w.replay.ClearReplay(ctx, item.UserID); err != nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "TOKEN_REPLAY_CLEANUP_FAILED")
+				continue
+			}
+			if err := w.repository.MarkAccountClosureReplayCleared(ctx, item, preparation.SubjectLifecycleVersion); err != nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "TOKEN_REPLAY_CLEANUP_COMMIT_FAILED")
+				continue
+			}
+			if err := w.repository.AnonymizeAccountClosure(ctx, item, preparation.SubjectLifecycleVersion); err != nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "ANONYMIZATION_FAILED")
 			}
 			continue
 		}
 		if item.Stage == "ANONYMIZED" {
-			if err := w.repository.CompleteAccountClosure(ctx, item.ID); err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "OUTBOX_CONFIRMATION_PENDING")
+			if err := w.repository.CompleteAccountClosure(ctx, item); err != nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "OUTBOX_CONFIRMATION_PENDING")
 			}
 			continue
 		}
@@ -504,6 +568,7 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 }
 
 func userVisibleClosure(item AccountClosureRequest) AccountClosurePublic {
+	item.Blockers = append([]AccountClosureBlocker{}, item.Blockers...)
 	for index := range item.Blockers {
 		item.Blockers[index].ResourceID = ""
 	}

@@ -35,6 +35,7 @@ func (s *Service) createAccountClosure(w http.ResponseWriter, r *http.Request) {
 		Confirmation string `json:"confirmation"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid account closure command", httpserver.RequestID(r.Context()))
 		return
 	}
 	item, err := store.CreateAccountClosure(r.Context(), mustPrincipal(r.Context()), r.Header.Get("Idempotency-Key"), body.Confirmation)
@@ -86,6 +87,7 @@ func (s *Service) adminRetryAccountClosure(w http.ResponseWriter, r *http.Reques
 		Reason string `json:"reason"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid account closure command", httpserver.RequestID(r.Context()))
 		return
 	}
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))

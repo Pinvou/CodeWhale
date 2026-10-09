@@ -35,11 +35,7 @@ SELECT request.id,
 FROM usage_requests request
 WHERE request.user_id=$1
   AND NOT (request.status IN ('COMMITTED','RELEASED') AND request.settlement_status IN ('SETTLED','RELEASED'))
-  AND NOT EXISTS (
-      SELECT 1 FROM usage_platform_loss_reviews loss
-      WHERE loss.usage_request_id=request.id
-        AND loss.provider_cost_evidence->>'late_usage_customer_debit_prohibited'='true'
-  )
+  AND NOT (request.status='RELEASED' AND request.settlement_status='REVIEW' AND request.cancel_requested_at IS NOT NULL AND EXISTS(SELECT 1 FROM usage_cancel_commands c WHERE c.usage_request_id=request.id AND c.user_id=request.user_id) AND EXISTS(SELECT 1 FROM usage_platform_loss_reviews loss WHERE loss.usage_request_id=request.id AND loss.cause_code='CANCELLATION_RECONCILIATION_DEADLINE' AND loss.customer_debit_prohibited AND loss.provider_cost_evidence->>'customer_hold_released'='true' AND loss.provider_cost_evidence->>'late_usage_customer_debit_prohibited'='true'))
 ORDER BY request.updated_at,request.id LIMIT 100`, userID)
 	if err != nil {
 		return AccountClosureAssessment{}, err

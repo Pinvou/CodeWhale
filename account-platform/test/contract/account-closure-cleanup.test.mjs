@@ -34,9 +34,9 @@ test('account-closed organization grants remain isolated and only full eligible 
   const [migration, lifecycle, grants, tokenService, portal] = await Promise.all([
     read('migrations/billing/000030_account_closed_grants.up.sql'),
     read('internal/billing/organization_member_lifecycle.go'),
-    read('internal/billing/account_closed_grants.go'),
-    read('internal/token/service.go'),
-    read('internal/portal/service.go'),
+    Promise.all([read('internal/billing/account_closed_grants.go'), read('internal/billing/account_closure_grant_isolation.go')]).then(parts => parts.join('\n')),
+    Promise.all([read('internal/token/service.go'), read('internal/token/organization_finance_routes.go')]).then(parts => parts.join('\n')),
+    Promise.all([read('internal/portal/service.go'), read('internal/portal/organization_proxy.go')]).then(parts => parts.join('\n')),
   ]);
   assert.match(migration, /ACCOUNT_CLOSED_ISOLATED/);
   assert.match(migration, /RECLAIMED_ACCOUNT_CLOSED/);
@@ -53,9 +53,9 @@ test('account-closed organization grants remain isolated and only full eligible 
 });
 
 test('public contract exposes single and independently committed batch reclaim without an amount field', async () => {
-  const contract = YAML.parse(await read('contracts/openapi/token-gateway.yaml'));
-  const single = contract.paths['/organizations/{organization_id}/account-closed-grants/{grant_id}/reclaim'].post;
-  const batch = contract.paths['/organizations/{organization_id}/account-closed-grants:reclaim-batch'].post;
+  const contract = YAML.parse(await read('contracts/openapi/account-closed-grants.yaml'));
+  const single = contract.paths['/v1/organizations/{organization_id}/account-closed-grants/{grant_id}/reclaim'].post;
+  const batch = contract.paths['/v1/organizations/{organization_id}/account-closed-grants:reclaim-batch'].post;
   assert.ok(single);
   assert.ok(batch);
   const singleSchema = single.requestBody.content['application/json'].schema;
