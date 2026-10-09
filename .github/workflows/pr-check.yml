@@ -773,6 +773,12 @@ jobs:
           go-version-file: account-platform/go.mod
           cache-dependency-path: account-platform/**/go.sum
 
+      - name: Keycloak provisioning and theme contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          PINVOU_TEST_BASH="$(command -v bash)" python3 account-platform/deploy/keycloak/test/provision_mobile_auth_test.py
+
       - name: Test and vet all Account Platform Go modules
         shell: bash
         run: |
