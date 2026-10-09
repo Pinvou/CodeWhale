@@ -7,6 +7,7 @@ import {
   Terminal, Trash2, Upload, X,
 } from '../../components/icons.jsx';
 import { invokeTauri, isTauriAvailable, tauriEvents } from '../../platform/tauri/client.js';
+import { ModalShell } from '../../components/ModalShell.jsx';
 import {
   markAcpModelsProbePending,
   reseedDraftControlsAfterProviderSwitch,
@@ -46,30 +47,57 @@ function KeyDot({ hasCredential, copy }) {
   );
 }
 
-// Confirm card dialog (backdrop click closes + card stopPropagation + right-aligned pill button footer). Two
+// Confirm card dialog (backdrop click closes + right-aligned pill button footer). Two
 // isomorphic sites: provider delete / CLI uninstall; the uninstall "also clean up config" checkbox comes in via
 // children. The confirm callback keeps the caller's semantics: remove/uninstall setXxx(null) before awaiting
 // (confirm closes the dialog, failure lands in the red error area); this component knows nothing of close timing.
+// Built on the shared ModalShell (portal + focus restore + Escape): Esc now closes too, matching
+// the backdrop/cancel paths; dismissal stays available while a confirm is disabled.
 function CardConfirm({ title, desc, children, confirmLabel, cancelLabel, confirmTestId, confirmDisabled, onConfirm, onCancel, width }) {
   return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click-to-close layer; the keyboard path is handled by the cancel button inside the dialog
-    // biome-ignore lint/a11y/noStaticElementInteractions: backdrop click-to-close layer, a non-interactive container
-    <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200" onClick={onCancel}>
-      {/* biome-ignore lint/a11y/useKeyWithClickEvents: click-bubbling stop layer; keyboard events need no bubbling handling */}
-      {/* biome-ignore lint/a11y/noStaticElementInteractions: click-bubbling stop layer, a non-interactive container */}
-      <div onClick={event => event.stopPropagation()} className={`${width} rounded-[24px] p-6 bg-white text-[#1F1F1F] dark:bg-[#1E1F20] dark:text-[#E8EAED]`}>
-        <h3 className="text-[16px] font-semibold">{title}</h3>
-        <p className="mt-2 text-[13px] leading-relaxed opacity-75">{desc}</p>
-        {children || null}
+    <ModalShell
+      zIndexClass="z-[110]"
+      backdropClass="absolute inset-0 cursor-default bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200"
+      backdropLabel={cancelLabel}
+      panelClass={`${width} rounded-[24px] p-6 bg-white text-[#1F1F1F] dark:bg-[#1E1F20] dark:text-[#E8EAED]`}
+      onCancel={onCancel}
+      title={
+        <>
+          <h3 className="text-[16px] font-semibold">{title}</h3>
+          <p className="mt-2 text-[13px] leading-relaxed opacity-75">{desc}</p>
+        </>
+      }
+      footer={
         <div className="mt-6 flex justify-end gap-2">
           <button type="button" onClick={onCancel} className="h-9 px-4 rounded-full text-[13px] font-semibold border border-black/[0.08] dark:border-white/[0.12]">{cancelLabel}</button>
           <button type="button" data-testid={confirmTestId} onClick={onConfirm} disabled={confirmDisabled} className="h-9 px-4 rounded-full bg-red-500 text-white text-[13px] font-semibold disabled:opacity-50">{confirmLabel}</button>
         </div>
-      </div>
-    </div>
+      }
+    >
+      {children || null}
+    </ModalShell>
   );
 }
 
+// Shared backdrop + card shell for the provider export/import dialogs (identical
+// z-[110] blurred backdrop and w-[min(560px,...)] rounded-[24px] p-6 card; only the
+// content and close handler differ). Children render verbatim inside the card so the
+// pinned testids (acp-provider-export-json etc.) and DOM order survive: the export
+// "select all" button resolves the textarea via closest('div').previousElementSibling,
+// which requires the footer to directly follow the textarea. Built on the shared
+// ModalShell (portal + focus restore + Escape to close).
+function TransferModalShell({ onClose, children }) {
+  return (
+    <ModalShell
+      zIndexClass="z-[110]"
+      backdropClass="absolute inset-0 cursor-default bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200"
+      panelClass="w-[min(560px,calc(100vw-24px))] rounded-[24px] p-6 bg-white text-[#1F1F1F] dark:bg-[#1E1F20] dark:text-[#E8EAED]"
+      onCancel={onClose}
+    >
+      {children}
+    </ModalShell>
+  );
+}
 // 模块级缓存：设置页关闭导致组件卸载后仍存活，重开时同步水合（无加载闪烁），
 // 随后后台静默刷新。键 = agent id；仅在本次 app 运行期内有效。
 const PROVIDER_SECTION_CACHE = new Map();
@@ -1012,8 +1040,7 @@ export function ProvidersSection({ t }) {
 
       {/* 导出（含明文 key 警告） */}
       {exportOpen && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200" onClick={() => setExportOpen(false)}>
-          <div onClick={event => event.stopPropagation()} className={`w-[min(560px,calc(100vw-24px))] rounded-[24px] p-6 bg-white text-[#1F1F1F] dark:bg-[#1E1F20] dark:text-[#E8EAED]`}>
+        <TransferModalShell onClose={() => setExportOpen(false)}>
             <div className="flex items-start gap-2">
               <AlertTriangle size={17} className="mt-0.5 shrink-0 text-amber-500" />
               <div className="min-w-0 flex-1">
@@ -1041,14 +1068,12 @@ export function ProvidersSection({ t }) {
                 {copy.selectAll}
               </button>
             </div>
-          </div>
-        </div>
+        </TransferModalShell>
       )}
 
       {/* 导入 */}
       {importOpen && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200" onClick={() => setImportOpen(false)}>
-          <div onClick={event => event.stopPropagation()} className={`w-[min(560px,calc(100vw-24px))] rounded-[24px] p-6 bg-white text-[#1F1F1F] dark:bg-[#1E1F20] dark:text-[#E8EAED]`}>
+        <TransferModalShell onClose={() => setImportOpen(false)}>
             <h3 className="text-[15px] font-semibold">{copy.import}</h3>
             {/* 导入同样可能含明文 key：来源信任警示（复审低危 6） */}
             <div className="mt-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] leading-relaxed">
@@ -1073,8 +1098,7 @@ export function ProvidersSection({ t }) {
                 {busy === 'import' ? copy.saving : copy.import}
               </button>
             </div>
-          </div>
-        </div>
+        </TransferModalShell>
       )}
     </div>
   );
