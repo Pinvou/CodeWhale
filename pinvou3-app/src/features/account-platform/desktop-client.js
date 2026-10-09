@@ -208,6 +208,10 @@ export class AccountPlatformDesktopClient {
     });
   }
 
+  accountClosure(signal) { return this.request('account', '/v1/me/account-closure-request', { signal }); }
+  createAccountClosure(confirmation, key, signal) { return this.request('account', '/v1/me/account-closure-requests', { method: 'POST', body: { confirmation }, idempotencyKey: key, signal }); }
+  reauthenticate() { return this.openPortal(); }
+
   products(signal) { return this.request('token', '/v1/recharge/products', { signal }); }
   paymentCapabilities(signal) { return this.request('token', '/v1/payment-capabilities', { signal }); }
   rechargeOrders(signal) { return this.request('token', '/v1/recharge/orders', { signal }); }

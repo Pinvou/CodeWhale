@@ -29,6 +29,15 @@ export const financialRepairCommands = Object.freeze({
       { key: 'amount_microcredits', kind: 'integer' },
     ],
   },
+  RECEIVABLE_WRITE_OFF: {
+    targetResourceType: 'RECEIVABLE', reasonKey: 'reason_code',
+    reasonCode: 'APPROVED_RECEIVABLE_WRITE_OFF', targetKey: 'receivable_id',
+    fields: [
+      { key: 'receivable_id', kind: 'uuid' },
+      { key: 'write_off_microcredits', kind: 'integer' },
+      { key: 'expected_receivable_version', kind: 'integer' },
+    ],
+  },
 
 });
 
@@ -81,6 +90,19 @@ export function financialRepairPrecheck(value) {
       return null;
     }
   }
+  if (value.command_type === 'RECEIVABLE_WRITE_OFF') {
+    try {
+      if (normalized.reason_code !== command.reasonCode || critical.policy_version !== 1 ||
+        !/^[0-9a-f]{64}$/.test(critical.facts_digest || '') ||
+        integerMoney(critical.receivable_version) !== integerMoney(normalized.expected_receivable_version) ||
+        financial.source_type !== 'USAGE_OVERAGE' || typeof financial.source_reference !== 'string' || !financial.source_reference ||
+        integerMoney(financial.write_off_microcredits) !== integerMoney(normalized.write_off_microcredits) ||
+        integerMoney(financial.settled_microcredits) < 0n ||
+        integerMoney(financial.outstanding_microcredits) < integerMoney(normalized.write_off_microcredits) ||
+        integerMoney(financial.wallet_receivable_microcredits) < integerMoney(normalized.write_off_microcredits) ||
+        integerMoney(financial.original_microcredits) !== integerMoney(financial.outstanding_microcredits) + integerMoney(financial.settled_microcredits)) return null;
+    } catch { return null; }
+  }
   return {
     commandType: value.command_type,
     command,
@@ -100,7 +122,7 @@ export function financialRepairApprovalDraft(precheck, operatorReason, requestKe
   const projection = financialRepairPrecheck(precheck);
   const reason = closedString(operatorReason);
   const key = closedString(requestKey);
-  if (!projection || reason.length < 10 || reason.length > 2000 || !key || key.length > 200) {
+  if (!projection || reason.length < 10 || reason.length > 2000 || !key || new TextEncoder().encode(`approval:${key}`).length > 120) {
     throw Object.assign(new Error('financial repair precheck is not usable'), { code: PRECHECK_INVALID });
   }
   const normalized = {};
@@ -132,5 +154,3 @@ export function financialRepairApprovalDraft(precheck, operatorReason, requestKe
     financial_snapshot: projection.financial,
   };
 }
-
-export const FINANCIAL_REPAIR_PRECHECK_INVALID = PRECHECK_INVALID;

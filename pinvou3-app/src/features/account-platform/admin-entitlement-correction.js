@@ -16,7 +16,7 @@ const criticalKeys = ['package_id', 'wallet_id', 'wallet_version', 'payment_orde
 const financialKeys = ['package_total_microcredits', 'source_original_microcredits', 'target_original_microcredits', 'effective_total_microcredits'];
 
 function exactKeys(value, names) {
-  return value && Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name));
+  return value && Object.keys(value).length === names.length && names.every(name => Object.prototype.hasOwnProperty.call(value, name));
 }
 
 function amount(value) {
@@ -137,5 +137,96 @@ export function parseEntitlementCorrectionJSON(text) {
 }
 
 export function encodeEntitlementCorrectionJSON(value) {
+  const seen = new Set();
+  const validate = item => {
+    if (!item || typeof item !== 'object') return;
+    if (seen.has(item)) throw new Error('INVALID_FINANCE_ACK');
+    seen.add(item);
+    for (const [key, child] of Object.entries(item)) {
+      if (key === 'wallet_version' && child !== undefined) {
+        if (integerMoney(child) < 1n) throw new Error('INVALID_ENTITLEMENT_PRECHECK');
+      } else validate(child);
+    }
+    seen.delete(item);
+  };
+  validate(value);
   return walletVersionJSON(encodeFinanceJSON(value), false);
+}
+
+// Approval collections may contain several command types. Locate each object's
+// command before parsing its numeric tokens, even when it follows the facts.
+// Only ENT's wallet_version receives the closed owner codec; other commands keep
+// the established financial decoder and their existing wallet field types.
+export function parseApprovalEntitlementJSON(text, decode = parseFinanceJSON) {
+  let cursor = 0;
+  const space = () => { while (/\s/.test(text[cursor] || '') && cursor < text.length) cursor++; };
+  const invalid = () => { throw new SyntaxError('Invalid approval JSON'); };
+  const string = () => {
+    if (text[cursor++] !== '"') invalid();
+    while (cursor < text.length) {
+      if (text[cursor] === '\\') { cursor += 2; continue; }
+      if (text[cursor++] === '"') return;
+    }
+    invalid();
+  };
+  const value = () => {
+    space();
+    const node = { start: cursor, properties: [], children: [] };
+    if (text[cursor] === '{') {
+      cursor++; space();
+      if (text[cursor] !== '}') for (;;) {
+        const start = cursor; string();
+        const name = JSON.parse(text.slice(start, cursor));
+        space(); if (text[cursor++] !== ':') invalid();
+        node.properties.push({ name, value: value() });
+        space(); if (text[cursor] !== ',') break;
+        cursor++; space();
+      }
+      if (text[cursor++] !== '}') invalid();
+    } else if (text[cursor] === '[') {
+      cursor++; space();
+      if (text[cursor] !== ']') for (;;) {
+        node.children.push(value()); space();
+        if (text[cursor] !== ',') break;
+        cursor++;
+      }
+      if (text[cursor++] !== ']') invalid();
+    } else if (text[cursor] === '"') string();
+    else {
+      while (cursor < text.length && !/[\s,}\]]/.test(text[cursor])) cursor++;
+      JSON.parse(text.slice(node.start, cursor));
+    }
+    node.end = cursor;
+    return node;
+  };
+  const root = value(); space(); if (cursor !== text.length) invalid();
+  const replacements = [];
+  const visit = (node, inherited) => {
+    let command = inherited;
+    for (const property of node.properties) {
+      if (property.name === 'command_type') command = JSON.parse(text.slice(property.value.start, property.value.end));
+    }
+    for (const property of node.properties) {
+      if (command === ENTITLEMENT_CORRECTION_COMMAND && property.name === 'wallet_version') {
+        const raw = text.slice(property.value.start, property.value.end);
+        if (!/^(?:"(?:0|[1-9]\d*)"|(?:0|[1-9]\d*))$/.test(raw)) throw new Error('INVALID_ENTITLEMENT_PRECHECK');
+        const digits = raw[0] === '"' ? JSON.parse(raw) : raw;
+        if (integerMoney(digits) < 1n) throw new Error('INVALID_ENTITLEMENT_PRECHECK');
+        replacements.push({ ...property.value, text: JSON.stringify(digits) });
+      } else {
+        if (command === ENTITLEMENT_CORRECTION_COMMAND && !property.value.properties.length && !property.value.children.length) {
+          const raw = text.slice(property.value.start, property.value.end);
+          const decoded = parseFinanceJSON(`{${JSON.stringify(property.name)}:${raw}}`)[property.name];
+          if (typeof decoded === 'string' && raw[0] !== '"') replacements.push({ ...property.value, text: JSON.stringify(decoded) });
+        }
+        visit(property.value, command);
+      }
+    }
+    for (const child of node.children) visit(child, command);
+  };
+  visit(root, null);
+  for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
+    text = text.slice(0, replacement.start) + replacement.text + text.slice(replacement.end);
+  }
+  return decode(text);
 }

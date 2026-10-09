@@ -1,5 +1,6 @@
 import { parseUsageJSON, encodeUsageJSON } from './admin-usage-governance.js';
 import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder, integerMoney } from './finance-contract.js';
+import { ENTITLEMENT_CORRECTION_COMMAND, parseEntitlementCorrectionJSON, encodeEntitlementCorrectionJSON, parseApprovalEntitlementJSON } from './admin-entitlement-correction.js';
 import { requireSession } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
@@ -13,6 +14,15 @@ function errorFromResponse(response, payload) {
   error.requestID = payload?.request_id || '';
   error.retryAfterSeconds = responseRetryAfter(payload, response.headers.get('Retry-After'));
   return error;
+}
+// Only the installed write-off legacy rows use these int64 versions. Preserve
+// the original decoding of every other legacy command, including ENT's codec.
+function parseWriteOffApprovalJSON(text, fallback = JSON.parse) {
+  const original = fallback(text);
+  if (original?.command_type === 'RECEIVABLE_WRITE_OFF') return parseFinanceJSON(text);
+  if (!original?.items?.some(item => item?.command_type === 'RECEIVABLE_WRITE_OFF')) return original;
+  const exact = parseFinanceJSON(text);
+  return { ...original, items: original.items.map((item, i) => item?.command_type === 'RECEIVABLE_WRITE_OFF' ? exact.items[i] : item) };
 }
 function abortRequestError() {
   if (typeof globalThis.DOMException === 'function') return new globalThis.DOMException('The operation was aborted.', 'AbortError');
@@ -171,6 +181,21 @@ export class AdminPlatformClient {
     return payload;
   }
 
+  approvalCommandPrecheck(input, signal) {
+    return this.mutate('account', '/admin/v2/approval-command-prechecks', 'POST', input, '', signal, 200,
+      input?.command_type === ENTITLEMENT_CORRECTION_COMMAND
+        ? { encode: encodeEntitlementCorrectionJSON, decode: parseEntitlementCorrectionJSON }
+        : { encode: encodeFinanceJSON, decode: parseFinanceJSON });
+  }
+  entitlementCorrectionPrecheck(packageID, orderID, reasonCode, signal) {
+    return this.approvalCommandPrecheck({
+      command_type: ENTITLEMENT_CORRECTION_COMMAND,
+      target_resource_id: requireFinanceID(packageID),
+      payment_order_id: requireFinanceID(orderID),
+      reason_code: reasonCode,
+    }, signal);
+  }
+
   async authorization(signal) {
     const response = await fetch(`${this.baseURL}/api/account/v1/account/bootstrap`, {
       method: 'POST',
@@ -198,6 +223,16 @@ export class AdminPlatformClient {
     return this.mutate('account', '/admin/v1/sms-configuration', 'PUT', input, idempotencyKey, signal);
   }
 
+  accountClosures(signal) { return this.request('account', '/admin/v1/account-closure-requests', signal); }
+  retryAccountClosure(id, reason, key, signal) { return this.mutate('account', `/admin/v1/account-closure-requests/${encodeURIComponent(id)}/actions/retry`, 'POST', { reason }, key, signal, 200); }
+
+  registrationBonusPolicy(signal, { fresh = false } = {}) {
+    if (fresh) this.invalidateRead('billing', '/admin/v1/registration-bonus-policy');
+    return this.request('billing', '/admin/v1/registration-bonus-policy', signal);
+  }
+  updateRegistrationBonusPolicy(input, idempotencyKey = `registration-bonus-${secureRequestID()}`, signal) {
+    return this.mutate('billing', '/admin/v1/registration-bonus-policy', 'PUT', input, idempotencyKey, signal);
+  }
   users(searchOrFilters = '', signal, cursor = '') {
     const filters = typeof searchOrFilters === 'string' ? { q:searchOrFilters, cursor } : (searchOrFilters || {});
     const query = new URLSearchParams({ limit: '25' });
@@ -286,10 +321,10 @@ export class AdminPlatformClient {
   approvalRequests(filters = {}, signal) {
     const query = new URLSearchParams({ limit: '200' });
     for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value);
-    return this.request('account', `/admin/v1/approval-requests?${query}`, signal);
+    return this.request('account', `/admin/v1/approval-requests?${query}`, signal, text => parseApprovalEntitlementJSON(text, value => parseWriteOffApprovalJSON(value)));
   }
   approvalRequest(requestID, signal) {
-    return this.request('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}`, signal);
+    return this.request('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}`, signal, text => parseApprovalEntitlementJSON(text, value => parseWriteOffApprovalJSON(value)));
   }
   async governedApprovalCapability(signal) {
     const response = await fetch(`${this.baseURL}/api/admin/approvals/capability`, {
@@ -338,7 +373,7 @@ export class AdminPlatformClient {
       const response = await fetch(`${this.baseURL}/api/admin/approvals/requests${path}`, {
         headers: { Accept: 'application/json' }, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
       });
-      const payload = response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
+      const payload = response.ok ? parseApprovalEntitlementJSON(await response.text()) : await response.json().catch(() => ({}));
       if (!response.ok) {
         if (payload?.code === 'APPROVAL_ACTION_CONTROL_CHANGED' || payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE') {
           this.approvalControl = null;
@@ -455,7 +490,9 @@ export class AdminPlatformClient {
         method: kind === 'update' ? 'PUT' : 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json',
           'X-CSRF-Token': this.csrfToken, 'X-Pinvou-Approval-Action-Control-Version': String(version) },
-        credentials: 'same-origin', cache: 'no-store', body: encodeFinanceJSON(body), signal: controller.signal,
+        credentials: 'same-origin', cache: 'no-store',
+        body: body.command_type === ENTITLEMENT_CORRECTION_COMMAND ? encodeEntitlementCorrectionJSON(body) : encodeFinanceJSON(body),
+        signal: controller.signal,
       });
       const payload = response.status === 204 ? {} : await response.json().catch(() => ({}));
       if (!response.ok) {

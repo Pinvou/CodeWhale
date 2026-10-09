@@ -29,10 +29,16 @@ type billingApprovalPrecheckRepository interface {
 // send. The decoder rejects unknown fields, so a caller cannot smuggle extra
 // facts into the owner read.
 type billingApprovalPrecheckRequest struct {
-	CommandType      string `json:"command_type"`
-	TargetResourceID string `json:"target_resource_id"`
-	PaymentOrderID   string `json:"payment_order_id"`
-	ReasonCode       string `json:"reason_code"`
+	CommandType            string `json:"command_type"`
+	TargetResourceID       string `json:"target_resource_id"`
+	PaymentOrderID         string `json:"payment_order_id,omitempty"`
+	ReasonCode             string `json:"reason_code"`
+	TargetJournalEntryID   string `json:"target_journal_entry_id,omitempty"`
+	WrongLedgerAccountID   string `json:"wrong_ledger_account_id,omitempty"`
+	CorrectLedgerAccountID string `json:"correct_ledger_account_id,omitempty"`
+	AmountMicrocredits     int64  `json:"amount_microcredits,omitempty"`
+	WriteOffMicrocredits   int64  `json:"write_off_microcredits,omitempty"`
+	ExpectedVersion        int64  `json:"expected_version,omitempty"`
 }
 
 // billingApprovalPrecheckResponse is the closed projection the Portal renders.
@@ -70,13 +76,43 @@ func validPrecheckUUID(value string) (uuid.UUID, bool) {
 // branch uses the same ProofInput the proof authority uses, so the two can never
 // disagree about the frozen facts.
 func precheckBillingApprovalCommand(ctx context.Context, repository billingApprovalPrecheckRepository, request billingApprovalPrecheckRequest) (approvalencoding.LegacyProofInput, error) {
-	packageID, packageOK := validPrecheckUUID(request.TargetResourceID)
-	orderID, orderOK := validPrecheckUUID(request.PaymentOrderID)
-	if request.CommandType != "ENTITLEMENT_COMPONENT_ADJUSTMENT" || !packageOK || !orderOK ||
-		request.ReasonCode == "" || strings.TrimSpace(request.ReasonCode) != request.ReasonCode || len(request.ReasonCode) > 80 {
-		return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+	switch request.CommandType {
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		packageID, packageOK := validPrecheckUUID(request.TargetResourceID)
+		orderID, orderOK := validPrecheckUUID(request.PaymentOrderID)
+		if !packageOK || !orderOK || request.ReasonCode == "" || strings.TrimSpace(request.ReasonCode) != request.ReasonCode || len(request.ReasonCode) > 80 || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		return repository.EntitlementCorrectionProofInput(ctx, packageID, orderID, request.ReasonCode)
+	case ledgerRepairCommand:
+		journal, journalOK := validPrecheckUUID(request.TargetJournalEntryID)
+		posting, postingOK := validPrecheckUUID(request.TargetResourceID)
+		wrong, wrongOK := validPrecheckUUID(request.WrongLedgerAccountID)
+		correct, correctOK := validPrecheckUUID(request.CorrectLedgerAccountID)
+		if !journalOK || !postingOK || !wrongOK || !correctOK || wrong == correct || request.AmountMicrocredits < 1 || request.PaymentOrderID != "" || request.ReasonCode != "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		owner, ok := repository.(interface {
+			LedgerRepairProofInput(context.Context, LedgerRepairCommandInput, string) (approvalencoding.LegacyProofInput, error)
+		})
+		if !ok {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		return owner.LedgerRepairProofInput(ctx, LedgerRepairCommandInput{TargetJournalEntryID: journal, TargetPostingID: posting, WrongLedgerAccountID: wrong, CorrectLedgerAccountID: correct, AmountMicrocredits: request.AmountMicrocredits}, request.ReasonCode)
+	case receivableWriteOffCommand:
+		receivableID, ok := validPrecheckUUID(request.TargetResourceID)
+		if !ok || request.WriteOffMicrocredits < 1 || request.ExpectedVersion < 1 || request.ReasonCode != receivableWriteOffReason || request.PaymentOrderID != "" || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		owner, ok := repository.(interface {
+			ReceivableWriteOffProofInput(context.Context, ReceivableWriteOffCommandInput) (approvalencoding.LegacyProofInput, error)
+		})
+		if !ok {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		return owner.ReceivableWriteOffProofInput(ctx, ReceivableWriteOffCommandInput{ReceivableID: receivableID, WriteOffMicrocredits: request.WriteOffMicrocredits, ExpectedReceivableVersion: request.ExpectedVersion})
 	}
-	return repository.EntitlementCorrectionProofInput(ctx, packageID, orderID, request.ReasonCode)
+	return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
 }
 
 // The owner accepts one complete object with unique keys. It never accepts

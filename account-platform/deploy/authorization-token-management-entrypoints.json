@@ -833,6 +833,38 @@
         ]
       },
       "gates": []
+    },
+    {
+      "method": "put",
+      "path": "/internal/v1/organizations/{organization_id}/lifecycle",
+      "handler": "applyOrganizationLifecycle",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.organization.lifecycle"
+        ]
+      },
+      "gates": [],
+      "policy": {
+        "command": "TOKEN_ORGANIZATION_LIFECYCLE_APPLY",
+        "mode": "AuditOnly"
+      }
+    },
+    {
+      "method": "put",
+      "path": "/internal/v1/organizations/{organization_id}/units/{unit_id}/lifecycle",
+      "handler": "organizationUnitDeletionBlockers",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.organization-unit.lifecycle"
+        ]
+      },
+      "gates": [],
+      "policy": {
+        "command": "TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY",
+        "mode": "AuditOnly"
+      }
     }
   ],
   "commands": [

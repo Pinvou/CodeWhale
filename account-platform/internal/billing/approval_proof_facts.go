@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // billingProofFacts reads only owner-domain persisted facts. In particular,
@@ -118,8 +120,146 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 		if actual.ProductID != frozen.TargetResourceID || !sameProductResumeVersions(actual, command) {
 			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		var command struct {
+			PackageID      uuid.UUID `json:"package_id"`
+			PaymentOrderID uuid.UUID `json:"payment_order_id"`
+			ReasonCode     string    `json:"reason_code"`
+		}
+		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.PackageID == uuid.Nil ||
+			command.PaymentOrderID == uuid.Nil || strings.TrimSpace(command.ReasonCode) == "" {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		owner, ok := repository.(interface {
+			entitlementCorrectionPlan(context.Context, uuid.UUID, uuid.UUID) (entitlementCorrectionReadPlan, error)
+		})
+		if !ok {
+			return current, "", "", errBillingApprovalProofUnavailable
+		}
+		plan, err := owner.entitlementCorrectionPlan(ctx, command.PackageID, command.PaymentOrderID)
+		if err != nil {
+			return current, "", "", err
+		}
+		ownerState = plan.Amounts.SourceType + "->" + plan.Amounts.TargetType
+		current.CriticalResourceVersions, current.FinancialSnapshot = entitlementCorrectionProofProjection(plan)
+		if plan.PackageID != command.PackageID || plan.PaymentOrderID != command.PaymentOrderID {
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
+		}
+	case ledgerRepairCommand:
+		var command struct {
+			TargetJournalEntryID   uuid.UUID `json:"target_journal_entry_id"`
+			TargetPostingID        uuid.UUID `json:"target_posting_id"`
+			WrongLedgerAccountID   uuid.UUID `json:"wrong_ledger_account_id"`
+			CorrectLedgerAccountID uuid.UUID `json:"correct_ledger_account_id"`
+			AmountMicrocredits     int64     `json:"amount_microcredits"`
+			ReasonCode             string    `json:"reason_code"`
+		}
+		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.TargetJournalEntryID == uuid.Nil ||
+			command.TargetPostingID == uuid.Nil || command.ReasonCode != "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		owner, ok := repository.(interface {
+			ledgerRepairPlan(context.Context, LedgerRepairCommandInput) (LedgerRepairPlan, error)
+		})
+		if !ok {
+			return current, "", "", errBillingApprovalProofUnavailable
+		}
+		plan, err := owner.ledgerRepairPlan(ctx, LedgerRepairCommandInput{
+			TargetJournalEntryID: command.TargetJournalEntryID, TargetPostingID: command.TargetPostingID,
+			WrongLedgerAccountID: command.WrongLedgerAccountID, CorrectLedgerAccountID: command.CorrectLedgerAccountID,
+			AmountMicrocredits: command.AmountMicrocredits,
+		})
+		if errors.Is(err, ErrApprovalSnapshotMismatch) {
+			return current, "DOMAIN_INVARIANT_FAILED", ownerState, nil
+		}
+		if err != nil {
+			return current, "", "", err
+		}
+		ownerState = plan.EntryType + ":" + plan.WrongLedgerAccountType + "->" + plan.CorrectLedgerAccountType
+		critical, financial := ledgerRepairProofProjection(plan)
+		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
+		if plan.TargetJournalEntryID != command.TargetJournalEntryID || plan.TargetPostingID != command.TargetPostingID ||
+			plan.WrongLedgerAccountID != command.WrongLedgerAccountID || plan.CorrectLedgerAccountID != command.CorrectLedgerAccountID ||
+			plan.AmountMicrocredits != command.AmountMicrocredits {
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
+		}
+	case receivableWriteOffCommand:
+		var command struct {
+			ReceivableID              uuid.UUID `json:"receivable_id"`
+			WriteOffMicrocredits      int64     `json:"write_off_microcredits"`
+			ExpectedReceivableVersion int64     `json:"expected_receivable_version"`
+			ReasonCode                string    `json:"reason_code"`
+		}
+		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.ReceivableID == uuid.Nil ||
+			command.WriteOffMicrocredits < 1 || command.ExpectedReceivableVersion < 1 ||
+			command.ReasonCode != receivableWriteOffReason {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		owner, ok := repository.(interface {
+			receivableWriteOffPlan(context.Context, ReceivableWriteOffCommandInput) (ReceivableWriteOffPlan, error)
+		})
+		if !ok {
+			return current, "", "", errBillingApprovalProofUnavailable
+		}
+		plan, err := owner.receivableWriteOffPlan(ctx, ReceivableWriteOffCommandInput{
+			ReceivableID: command.ReceivableID, WriteOffMicrocredits: command.WriteOffMicrocredits,
+			ExpectedReceivableVersion: command.ExpectedReceivableVersion,
+		})
+		if errors.Is(err, ErrApprovalSnapshotMismatch) || errors.Is(err, ErrNotFound) {
+			return current, "DOMAIN_INVARIANT_FAILED", ownerState, nil
+		}
+		if err != nil {
+			return current, "", "", err
+		}
+		ownerState = plan.SourceType + ":" + plan.ReceivableStatus
+		critical, financial := receivableWriteOffProofProjection(plan)
+		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
+		if plan.ReceivableID != command.ReceivableID || plan.WriteOffMicrocredits != command.WriteOffMicrocredits ||
+			plan.ReceivableVersion != command.ExpectedReceivableVersion {
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
+		}
 	default:
 		return current, "", "", errors.New("unsupported Billing proof command")
 	}
 	return current, "", ownerState, nil
+}
+
+func (r *PostgresRepository) entitlementCorrectionPlan(ctx context.Context, packageID, orderID uuid.UUID) (entitlementCorrectionReadPlan, error) {
+	return r.planEntitlementComponentCorrection(ctx, packageID, orderID)
+}
+
+func (r *PostgresRepository) ledgerRepairPlan(ctx context.Context, input LedgerRepairCommandInput) (LedgerRepairPlan, error) {
+	snapshot, err := r.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return LedgerRepairPlan{}, err
+	}
+	active, err := activeBillingProofCommand(snapshot, ledgerRepairCommand, r.now())
+	if err != nil {
+		return LedgerRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	return r.LedgerRepairPlanForCommand(ctx, input, active.PolicyVersion, int64(active.SnapshotSchemaVersion), active.Version)
+}
+
+func (r *PostgresRepository) receivableWriteOffPlan(ctx context.Context, input ReceivableWriteOffCommandInput) (ReceivableWriteOffPlan, error) {
+	snapshot, err := r.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return ReceivableWriteOffPlan{}, err
+	}
+	active, err := activeBillingProofCommand(snapshot, receivableWriteOffCommand, r.now())
+	if err != nil {
+		return ReceivableWriteOffPlan{}, ErrApprovalSnapshotMismatch
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return ReceivableWriteOffPlan{}, err
+	}
+	defer tx.Rollback(ctx)
+	plan, err := receivableWriteOffPlanFrom(ctx, tx, input, active.PolicyVersion, int64(active.SnapshotSchemaVersion), active.Version)
+	if err != nil {
+		return ReceivableWriteOffPlan{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ReceivableWriteOffPlan{}, err
+	}
+	return plan, nil
 }

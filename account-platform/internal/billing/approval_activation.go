@@ -37,11 +37,11 @@ type activationSpec struct {
 var billingApprovalActivationSpecs = map[string]activationSpec{
 	"CHARGEBACK_FINANCIAL_REPAIR":      {1, 1, false},
 	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {1, 1, false},
-	"LEDGER_REPAIR":                    {1, 1, false},
+	"LEDGER_REPAIR":                    {1, 1, true},
 	"PAYMENT_FINANCIAL_REPAIR":         {1, 1, false},
 	"PAYMENT_PRODUCT_RESUME":           {1, 1, true},
 	"PAYMENT_PROVIDER_RESUME":          {2, 1, true},
-	"RECEIVABLE_WRITE_OFF":             {1, 1, false},
+	"RECEIVABLE_WRITE_OFF":             {1, 1, true},
 	"RECONCILIATION_FINANCIAL_REPAIR":  {1, 1, false},
 	"REFUND_EXCEPTION_REPAIR":          {1, 1, false},
 	"USAGE_SETTLEMENT_REPAIR":          {1, 1, false},
@@ -68,6 +68,11 @@ func validActivationItem(item ApprovalCommandActivation, commandType string, spe
 	if item.CommandType != commandType || item.Version < 1 || item.UpdatedAt.IsZero() || item.UpdatedAt.After(now.Add(time.Second)) ||
 		(item.State != "ACTIVE" && item.State != "INACTIVE") {
 		return false
+	}
+	// The original v1 row remains immutable INACTIVE history. This delivery
+	// installs only the explicitly versioned v2/s2 correction contract.
+	if commandType == entitlementComponentAdjustmentCommand && item.PolicyVersion == 2 && item.SnapshotSchemaVersion == 2 {
+		return true
 	}
 	if !spec.mayBeActive && item.State != "INACTIVE" {
 		return false
@@ -120,6 +125,18 @@ func (r *PostgresRepository) ApprovalCommandActivations(ctx context.Context) (Ap
 		}
 		item := raw[index]
 		index++
+		if commandType == entitlementComponentAdjustmentCommand {
+			if item.PolicyVersion != 1 || !validActivationItem(item, commandType, billingApprovalActivationSpecs[commandType], now) {
+				return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
+			}
+			if index < len(raw) && raw[index].CommandType == commandType {
+				item = raw[index]
+				index++
+				if item.PolicyVersion != 2 || !validActivationItem(item, commandType, billingApprovalActivationSpecs[commandType], now) {
+					return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
+				}
+			}
+		}
 		result.Activations = append(result.Activations, item)
 	}
 	if index != len(raw) || validateApprovalCommandActivationSnapshot(result, now) != nil {

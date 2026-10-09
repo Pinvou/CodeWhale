@@ -63,9 +63,8 @@ type ReceivableWriteOffPlan struct {
 }
 
 // ReceivableWriteOffFrozenFacts is the wire-visible owner projection an
-// approval froze. FactsDigest is an owner-only recomputation input; a consumed
-// authorization leaves it empty and the execution transaction recomputes and
-// stores it, while a presented digest must match exactly.
+// approval froze. Fresh execution recomputes FactsDigest inside the owner
+// transaction and requires it to match the frozen approval digest exactly.
 type ReceivableWriteOffFrozenFacts struct {
 	ReceivableVersion            int64
 	WriteOffMicrocredits         int64
@@ -291,6 +290,9 @@ func (r *PostgresRepository) ApplyReceivableWriteOff(ctx context.Context, input 
 	} else if !errors.Is(err, ErrNotFound) {
 		return ReceivableWriteOffResult{}, err
 	}
+	if err := receivableWriteOffExecutionActivation(ctx, tx, input, r.now()); err != nil {
+		return ReceivableWriteOffResult{}, err
+	}
 	plan, err := receivableWriteOffPlanFrom(ctx, tx, input.Command, input.PolicyVersion, input.SchemaVersion, input.ActivationVersion)
 	if err != nil {
 		return ReceivableWriteOffResult{}, err
@@ -472,13 +474,27 @@ func receivableWriteOffFrozenMismatch(plan ReceivableWriteOffPlan, command Recei
 		return "source_reference"
 	case plan.WalletReceivableMicrocredits != frozen.WalletReceivableMicrocredits:
 		return "wallet_receivable_microcredits"
-	// The consumed authorization freezes only the wire-visible owner
-	// projection; the owner-only facts digest is recomputed inside the
-	// execution transaction, so an empty value is not a caller claim.
-	case frozen.FactsDigest == "":
-		return ""
 	case plan.FactsDigest != frozen.FactsDigest:
 		return "facts_digest"
 	}
 	return ""
+}
+
+// Only a fresh effect needs current activation. Committed results return before
+// this check so a later deactivation cannot turn a durable success into a retry.
+func receivableWriteOffExecutionActivation(ctx context.Context, source receivableWriteOffReader, input ReceivableWriteOffExecutionInput, now time.Time) error {
+	var active ApprovalCommandActivation
+	err := source.QueryRow(ctx, `SELECT command_type,policy_version,snapshot_schema_version,state,version,updated_at FROM billing_approval_command_activations WHERE command_type=$1 AND policy_version=$2`, receivableWriteOffCommand, input.PolicyVersion).
+		Scan(&active.CommandType, &active.PolicyVersion, &active.SnapshotSchemaVersion, &active.State, &active.Version, &active.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrApprovalSnapshotMismatch
+	}
+	if err != nil {
+		return err
+	}
+	if !validActivationItem(active, receivableWriteOffCommand, billingApprovalActivationSpecs[receivableWriteOffCommand], now) ||
+		active.State != "ACTIVE" || active.PolicyVersion != input.PolicyVersion || int64(active.SnapshotSchemaVersion) != input.SchemaVersion || active.Version != input.ActivationVersion {
+		return ErrApprovalSnapshotMismatch
+	}
+	return nil
 }

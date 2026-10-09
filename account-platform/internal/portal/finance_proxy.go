@@ -17,22 +17,25 @@ import (
 const reconciliationImportBodyLimit int64 = 64 << 20
 
 func currentGovernedApprovalCommand(command string) bool {
-	return command == "WALLET_ADJUSTMENT" || command == "PAYMENT_PROVIDER_RESUME" || command == "PAYMENT_PRODUCT_RESUME" || command == "TOKEN_MODEL_LIFECYCLE_CHANGE" || command == "TOKEN_MODEL_CATALOG_ROLLBACK" || command == "TOKEN_CREDENTIAL_REVOKE"
+	return command == "RECEIVABLE_WRITE_OFF" || command == "LEDGER_REPAIR" || command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" || command == "WALLET_ADJUSTMENT" || command == "PAYMENT_PROVIDER_RESUME" || command == "PAYMENT_PRODUCT_RESUME" || command == "TOKEN_MODEL_LIFECYCLE_CHANGE" || command == "TOKEN_MODEL_CATALOG_ROLLBACK" || command == "TOKEN_CREDENTIAL_REVOKE"
 }
 
 func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
 	s.proxy(w, r, s.config.BillingURL, "/"+r.PathValue("resource"), billingAdminPathAllowed)
 }
 
-// This stage exposes payment/entitlement operations and the three actual
-// governed commands, plus F03 reconciliation reads/imports/case commands.
-// Usage repair and later governance paths remain outside this stage.
+// Expose delivered payment, entitlement, receivable and governance operations,
+// plus reconciliation reads/imports/case commands. Undelivered commands remain
+// excluded by the explicit allowlists below.
 func billingAdminPathAllowed(method, resource string) bool {
 	if pricingAdminPathAllowed(method, resource) {
 		return true
 	}
 	if method == http.MethodHead {
 		method = http.MethodGet
+	}
+	if resource == "/admin/v1/registration-bonus-policy" && (method == http.MethodGet || method == http.MethodPut) {
+		return true
 	}
 	if method == http.MethodGet {
 		switch resource {

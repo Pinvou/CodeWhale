@@ -17,6 +17,8 @@ type WalletProvisioningJob struct {
 	SLAExpiresAt            time.Time
 	Attempts                int
 	LeaseUntil              time.Time
+	FingerprintKeyID        string
+	MobileFingerprint       []byte
 }
 
 type WalletProvisioningRepository interface {

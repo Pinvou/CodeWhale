@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { financeCopy } from '../../shared/i18n.js';
+import { financeCopy, ledgerRepairCopy, entitlementCorrectionCopy } from '../../shared/i18n.js';
+import { AdminEntitlementCorrectionWorkspace } from './AdminEntitlementCorrectionWorkspace.jsx';
+import { AdminFinancialRepairDraftForm } from './AdminFinancialRepairDraftForm.jsx';
 import { formatBalance } from './balance-view.js';
 import { formatFen, integerMoney, requireFinanceCollection, requireFinanceID, wholeRefundTargets } from './finance-contract.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
@@ -7,7 +9,7 @@ import { walletAdjustmentApprovalDraft, buildPaymentControlApprovalDraft, curren
 import { createAndSubmitFreshGovernedApproval, updateAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
 import { loadFinancePage } from './admin-finance-pagination.js';
 import { secureRequestID } from './request-id.js';
-import { approvalBusinessRoute, approvalRequester } from './admin-approval-actions.js';
+import { approvalBusinessRoute, approvalRequester, approvalCommands } from './admin-approval-actions.js';
 import { AdminPaymentReviewQueue } from './AdminPaymentReviewQueue.jsx';
 
 function Feedback({ operation, copy }) {
@@ -64,7 +66,7 @@ function Payments({ client, copy, language, permissions, owner }) {
   </section>;
 }
 
-const defaultApprovalCommandTypes = Object.freeze(['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME']);
+const defaultApprovalCommandTypes = approvalCommands;
 
 export function Approvals({ client, copy, permissions, owner, commandTypes = defaultApprovalCommandTypes, initialRequestID = '', requestID = initialRequestID, query = null, pendingUserID = null, onStateChange, onNavigate, centerCopy }) {
   const [items, setItems] = useState([]);
@@ -76,7 +78,12 @@ export function Approvals({ client, copy, permissions, owner, commandTypes = def
   const operation = useFinanceOperation(owner, copy, client, 'approvals');
   const load = async (next = cursor) => { const result = await operation.read(() => loadFinancePage({ ...query, cursor: next }, filters => client.governedApprovalRequests(filters), () => { setCursor(''); setPrevious([]); })); if (result) { const value = result.value; setPage(value); setCursor(result.query.cursor); setItems(requireFinanceCollection(value).filter(item => commandTypes.includes(item.command_type) && (!pendingUserID || approvalRequester(item) !== pendingUserID))); } };
   const queryKey = JSON.stringify(query);
-  useEffect(() => { onStateChange?.(operation.busy || operation.unknown); }, [onStateChange, operation.busy, operation.unknown]);
+  useEffect(() => {
+    onStateChange?.(operation.busy || operation.unknown);
+    // This single mounted child owns its parent's navigation lock. Release it
+    // on retirement; the next child's effect installs its own current lock.
+    return () => onStateChange?.(false);
+  }, [onStateChange, operation.busy, operation.unknown]);
   useEffect(() => { let active = true; void (async () => { setDetail(null); setPage(null); setItems([]); setPrevious([]); await load(''); if (active && requestID) await open(requestID); })(); return () => { active = false; }; }, [client, owner, requestID, queryKey, pendingUserID]); // eslint-disable-line react-hooks/exhaustive-deps
   const open = async id => { const value = await operation.read(() => client.governedApprovalRequest(id)); if (value) { if (value.approval_request_id !== id || !commandTypes.includes(value.command_type)) return; setDetail(value); } };
   const act = async action => {
@@ -100,7 +107,7 @@ export function Approvals({ client, copy, permissions, owner, commandTypes = def
     <button disabled={operation.busy || operation.unknown || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); void load(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); void load(page.next_cursor); }}>{copy.next}</button>
     {detail && <article><h4>{detail.approval_request_id}</h4><p>{detail.command_type} / {detail.status} / {copy.version}: {detail.version}</p><p>{detail.reason}</p>{businessRoute && onNavigate && <button disabled={operation.busy || operation.unknown} onClick={() => onNavigate(businessRoute)}>{centerCopy.openBusinessArea}</button>}<h5>{copy.command}</h5><pre>{JSON.stringify(detail.command || {}, null, 2)}</pre>{detail.execution && <><h5>{copy.effects}</h5><p>{detail.execution.attempt_status} / {detail.execution.error_class} / {detail.execution.next_retry_at} / {detail.execution.execution_deadline}</p></>}<label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} value={reason} onChange={event => setReason(event.target.value)} maxLength={2000} /></label>{['EDIT', 'SUBMIT', 'WITHDRAW', 'APPROVE', 'REJECT'].filter(action => detail.allowed_actions?.includes(action)).map(action => {
       const approver = action === 'APPROVE' || action === 'REJECT';
-      const allowed = approver ? permissions.includes({ WALLET_ADJUSTMENT: 'platform.billing.adjustments.approve', PAYMENT_PROVIDER_RESUME: 'platform.billing.payment-controls.resume.approve', PAYMENT_PRODUCT_RESUME: 'platform.billing.payment-controls.resume.approve', TOKEN_MODEL_LIFECYCLE_CHANGE: 'platform.models.lifecycle.approve', TOKEN_MODEL_CATALOG_ROLLBACK: 'platform.models.catalog.rollback.approve', TOKEN_CREDENTIAL_REVOKE: 'platform.tokens.credentials.revoke.approve' }[detail.command_type]) : true;
+      const allowed = approver ? permissions.includes({ RECEIVABLE_WRITE_OFF: 'platform.billing.repairs.approve', ENTITLEMENT_COMPONENT_ADJUSTMENT: 'platform.billing.repairs.approve', LEDGER_REPAIR: 'platform.billing.repairs.approve', WALLET_ADJUSTMENT: 'platform.billing.adjustments.approve', PAYMENT_PROVIDER_RESUME: 'platform.billing.payment-controls.resume.approve', PAYMENT_PRODUCT_RESUME: 'platform.billing.payment-controls.resume.approve', TOKEN_MODEL_LIFECYCLE_CHANGE: 'platform.models.lifecycle.approve', TOKEN_MODEL_CATALOG_ROLLBACK: 'platform.models.catalog.rollback.approve', TOKEN_CREDENTIAL_REVOKE: 'platform.tokens.credentials.revoke.approve' }[detail.command_type]) : true;
       return allowed && <button key={action} disabled={operation.busy || operation.unknown || ((approver || action === 'EDIT') && reason.trim().length < 10)} onClick={() => void act(action)}>{copy[{ EDIT: 'editSubmit', SUBMIT: 'submit', WITHDRAW: 'withdraw', APPROVE: 'approve', REJECT: 'reject' }[action]]}</button>;
     })}</article>}
   </section>;
@@ -209,9 +216,18 @@ export function AdminFinanceWorkspace({ client, me, language, initialTab = 'orde
   const copy = financeCopy[language];
   const permissions = me.platform_permissions || [];
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
-  const [tab, setTab] = useState(initialTab);
-  useEffect(() => { if (['orders', 'wallets', 'controls'].includes(initialTab)) setTab(initialTab); }, [initialTab]);
+  const canReadFinance = permissions.includes('platform.billing.wallets.read');
+  const canRequestRepair = permissions.includes('platform.billing.repairs.request');
+  const defaultTab = canReadFinance ? 'orders' : canRequestRepair ? 'ledger' : 'approvals';
+  const [tab, setTab] = useState(canReadFinance || (['ledger', 'correction', 'writeoff'].includes(initialTab) && canRequestRepair) ? initialTab : defaultTab);
+  useEffect(() => {
+    if (['ledger', 'correction', 'writeoff'].includes(initialTab) && canRequestRepair) setTab(initialTab);
+    else if (canReadFinance && ['orders', 'wallets', 'controls'].includes(initialTab)) setTab(initialTab);
+    else setTab(defaultTab);
+  }, [initialTab, canReadFinance, canRequestRepair, defaultTab]);
   const [approvalID, setApprovalID] = useState('');
-  const tabs = [['orders', copy.orders], ['wallets', copy.wallet], ['controls', copy.providerControls], ['approvals', copy.approvals], ['late', copy.sla], ['anomalies', copy.resolve]];
-  return <section className="adm-panel"><h2>{copy.finance}</h2><nav>{tabs.map(([key, label]) => <button key={key} aria-pressed={tab === key} onClick={() => setTab(key)}>{label}</button>)}</nav><div key={`${owner}:${tab}`}>{tab === 'late' && <AdminPaymentReviewQueue {...{ client, copy, me }} />}{tab === 'anomalies' && <AdminPaymentReviewQueue {...{ client, copy, me }} anomaly />}{tab === 'orders' && <Payments {...{ client, copy, language, permissions, owner }} />}{tab === 'wallets' && <Wallets {...{ client, copy, language, permissions, owner }} requesterID={me.user_id} onViewApproval={id => { setApprovalID(id); setTab('approvals'); }} />}{tab === 'controls' && <ProviderControls {...{ client, copy, permissions, owner }} />}{tab === 'approvals' && <Approvals {...{ client, copy, permissions, owner }} initialRequestID={approvalID} />}</div></section>;
+  const tabs = [...(canRequestRepair ? [['ledger', ledgerRepairCopy[language].title], ['writeoff', ledgerRepairCopy[language].writeOffTitle], ['correction', entitlementCorrectionCopy[language].title]] : []),
+    ...(canReadFinance ? [['orders', copy.orders], ['wallets', copy.wallet], ['controls', copy.providerControls]] : []),
+    ['approvals', copy.approvals], ...(canReadFinance ? [['late', copy.sla], ['anomalies', copy.resolve]] : [])];
+  return <section className="adm-panel"><h2>{copy.finance}</h2><nav>{tabs.map(([key, label]) => <button key={key} aria-pressed={tab === key} onClick={() => setTab(key)}>{label}</button>)}</nav><div key={`${owner}:${client.financeSessionEpoch || 0}:${tab}`}>{tab === 'correction' && canRequestRepair && <AdminEntitlementCorrectionWorkspace {...{ client, copy, language, permissions, owner }} />}{tab === 'ledger' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} copy={ledgerRepairCopy[language]} commandTypes={['LEDGER_REPAIR']} onCreated={id => { setApprovalID(id); setTab('approvals'); }} />}{tab === 'writeoff' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].writeOffTitle }} commandTypes={['RECEIVABLE_WRITE_OFF']} onCreated={id => { setApprovalID(id); setTab('approvals'); }} />}{tab === 'late' && canReadFinance && <AdminPaymentReviewQueue {...{ client, copy, me }} />}{tab === 'anomalies' && canReadFinance && <AdminPaymentReviewQueue {...{ client, copy, me }} anomaly />}{tab === 'orders' && canReadFinance && <Payments {...{ client, copy, language, permissions, owner }} />}{tab === 'wallets' && canReadFinance && <Wallets {...{ client, copy, language, permissions, owner }} requesterID={me.user_id} onViewApproval={id => { setApprovalID(id); setTab('approvals'); }} />}{tab === 'controls' && canReadFinance && <ProviderControls {...{ client, copy, permissions, owner }} />}{tab === 'approvals' && <Approvals {...{ client, copy, permissions, owner }} initialRequestID={approvalID} />}</div></section>;
 }

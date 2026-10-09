@@ -95,9 +95,28 @@ type approvalCredentialSummary struct {
 	CredentialVersion      string    `json:"credential_version"`
 }
 
+type approvalEntitlementCorrectionSummary struct {
+	PackageID      uuid.UUID `json:"package_id"`
+	PaymentOrderID uuid.UUID `json:"payment_order_id"`
+	ReasonCode     string    `json:"reason_code"`
+}
+
+type approvalLedgerRepairSummary struct {
+	TargetJournalEntryID   uuid.UUID `json:"target_journal_entry_id"`
+	TargetPostingID        uuid.UUID `json:"target_posting_id"`
+	WrongLedgerAccountID   uuid.UUID `json:"wrong_ledger_account_id"`
+	CorrectLedgerAccountID uuid.UUID `json:"correct_ledger_account_id"`
+	EntryType              string    `json:"entry_type"`
+	AmountMicrocredits     string    `json:"amount_microcredits"`
+	PostingSetDigest       string    `json:"posting_set_digest"`
+	ReasonCode             string    `json:"reason_code"`
+}
+
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
 	switch command {
-	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		return policyVersion == 2 && snapshotVersion == 2
+	case "RECEIVABLE_WRITE_OFF", "LEDGER_REPAIR", "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "PAYMENT_PROVIDER_RESUME":
 		return policyVersion == 2 && snapshotVersion == 1
@@ -175,6 +194,24 @@ func approvalV2Command(item ApprovalRequest) any {
 		}
 		return approvalProductSummary{ProductID: value}
 
+	case "LEDGER_REPAIR":
+		if item.TargetResourceType != "LEDGER_POSTING" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id == uuid.Nil || id.String() != value {
+			return nil
+		}
+		return approvalLedgerRepairSummary{TargetPostingID: id}
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		if item.TargetResourceType != "ENTITLEMENT_PACKAGE" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id == uuid.Nil || id.String() != value {
+			return nil
+		}
+		return approvalEntitlementCorrectionSummary{PackageID: id}
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
 		if item.TargetResourceType != "MODEL" {
 			return nil
@@ -204,6 +241,15 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		return approvalCredentialSummary{CredentialID: id}
+	case "RECEIVABLE_WRITE_OFF":
+		if item.TargetResourceType != "RECEIVABLE" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id == uuid.Nil || id.String() != value {
+			return nil
+		}
+		return approvalReceivableWriteOffSummary{ReceivableID: id}
 	}
 	return nil
 }
@@ -224,24 +270,47 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 	}
 	var proof struct {
 		Normalized struct {
-			WalletID                uuid.UUID  `json:"wallet_id"`
-			AmountMicrocredits      string     `json:"amount_microcredits"`
-			ProviderID              string     `json:"provider_id"`
-			ProviderControlVersion  string     `json:"provider_control_version"`
-			ProductControlVersion   string     `json:"product_control_version"`
-			ModelID                 uuid.UUID  `json:"model_id"`
-			TargetLifecycle         string     `json:"target_lifecycle"`
-			EffectiveAt             *string    `json:"effective_at"`
-			LifecyclePlanID         *uuid.UUID `json:"lifecycle_plan_id"`
-			LifecyclePlanVersion    *string    `json:"lifecycle_plan_version"`
-			ExistingSessionCutoffAt *string    `json:"existing_session_cutoff_at"`
-			ReplacementModelID      *uuid.UUID `json:"replacement_model_id"`
-			TokenAccountID          uuid.UUID  `json:"token_account_id"`
-			CredentialID            uuid.UUID  `json:"credential_id"`
-			ExpectedAccountVersion  string     `json:"expected_account_version"`
-			CredentialVersion       string     `json:"credential_version"`
-			SourceCatalogVersion    string     `json:"source_catalog_version"`
+			ReceivableID              uuid.UUID  `json:"receivable_id"`
+			ExpectedReceivableVersion string     `json:"expected_receivable_version"`
+			WriteOffMicrocredits      string     `json:"write_off_microcredits"`
+			PaymentOrderID            uuid.UUID  `json:"payment_order_id"`
+			ReasonCode                string     `json:"reason_code"`
+			WalletID                  uuid.UUID  `json:"wallet_id"`
+			AmountMicrocredits        string     `json:"amount_microcredits"`
+			ProviderID                string     `json:"provider_id"`
+			ProviderControlVersion    string     `json:"provider_control_version"`
+			ProductControlVersion     string     `json:"product_control_version"`
+			ModelID                   uuid.UUID  `json:"model_id"`
+			TargetLifecycle           string     `json:"target_lifecycle"`
+			EffectiveAt               *string    `json:"effective_at"`
+			LifecyclePlanID           *uuid.UUID `json:"lifecycle_plan_id"`
+			LifecyclePlanVersion      *string    `json:"lifecycle_plan_version"`
+			ExistingSessionCutoffAt   *string    `json:"existing_session_cutoff_at"`
+			ReplacementModelID        *uuid.UUID `json:"replacement_model_id"`
+			TokenAccountID            uuid.UUID  `json:"token_account_id"`
+			CredentialID              uuid.UUID  `json:"credential_id"`
+			ExpectedAccountVersion    string     `json:"expected_account_version"`
+			CredentialVersion         string     `json:"credential_version"`
+			SourceCatalogVersion      string     `json:"source_catalog_version"`
+			TargetJournalEntryID      uuid.UUID  `json:"target_journal_entry_id"`
+			TargetPostingID           uuid.UUID  `json:"target_posting_id"`
+			WrongLedgerAccountID      uuid.UUID  `json:"wrong_ledger_account_id"`
+			CorrectLedgerAccountID    uuid.UUID  `json:"correct_ledger_account_id"`
 		} `json:"normalized_command"`
+		Critical struct {
+			FactsDigest      string `json:"facts_digest"`
+			EntryType        string `json:"entry_type"`
+			PostingSetDigest string `json:"posting_set_digest"`
+		} `json:"critical_resource_versions"`
+		Financial struct {
+			WriteOffMicrocredits         string `json:"write_off_microcredits"`
+			SourceType                   string `json:"source_type"`
+			SourceReference              string `json:"source_reference"`
+			OriginalMicrocredits         string `json:"original_microcredits"`
+			SettledMicrocredits          string `json:"settled_microcredits"`
+			OutstandingMicrocredits      string `json:"outstanding_microcredits"`
+			WalletReceivableMicrocredits string `json:"wallet_receivable_microcredits"`
+		} `json:"financial_snapshot"`
 	}
 	if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil {
 		return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
@@ -260,6 +329,22 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		target.ProductControlVersion = proof.Normalized.ProductControlVersion
 		command = target
 
+	case approvalLedgerRepairSummary:
+		if proof.Normalized.TargetJournalEntryID == uuid.Nil || proof.Normalized.TargetPostingID != target.TargetPostingID || proof.Normalized.WrongLedgerAccountID == uuid.Nil || proof.Normalized.CorrectLedgerAccountID == uuid.Nil || proof.Normalized.WrongLedgerAccountID == proof.Normalized.CorrectLedgerAccountID || proof.Critical.EntryType == "" || !approvalPaginationHexDigest(proof.Critical.PostingSetDigest) || proof.Normalized.ReasonCode != "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.TargetJournalEntryID = proof.Normalized.TargetJournalEntryID
+		target.WrongLedgerAccountID = proof.Normalized.WrongLedgerAccountID
+		target.CorrectLedgerAccountID = proof.Normalized.CorrectLedgerAccountID
+		target.EntryType = proof.Critical.EntryType
+		target.AmountMicrocredits = proof.Normalized.AmountMicrocredits
+		target.PostingSetDigest = proof.Critical.PostingSetDigest
+		target.ReasonCode = proof.Normalized.ReasonCode
+		command = target
+	case approvalEntitlementCorrectionSummary:
+		target.ReasonCode = proof.Normalized.ReasonCode
+		target.PaymentOrderID = proof.Normalized.PaymentOrderID
+		command = target
 	case approvalLifecycleSummary:
 		if proof.Normalized.ModelID != target.ModelID {
 			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
@@ -285,6 +370,23 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		target.CredentialVersion = proof.Normalized.CredentialVersion
 		command = target
 
+	case approvalReceivableWriteOffSummary:
+		if proof.Normalized.ReceivableID != target.ReceivableID || !approvalPaginationHexDigest(proof.Critical.FactsDigest) ||
+			proof.Financial.SourceType != "USAGE_OVERAGE" || proof.Financial.SourceReference == "" ||
+			proof.Normalized.ReasonCode != "APPROVED_RECEIVABLE_WRITE_OFF" {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.ExpectedReceivableVersion = proof.Normalized.ExpectedReceivableVersion
+		target.SourceType = proof.Financial.SourceType
+		target.SourceReference = proof.Financial.SourceReference
+		target.OriginalMicrocredits = proof.Financial.OriginalMicrocredits
+		target.SettledMicrocredits = proof.Financial.SettledMicrocredits
+		target.OutstandingMicrocredits = proof.Financial.OutstandingMicrocredits
+		target.WriteOffMicrocredits = proof.Financial.WriteOffMicrocredits
+		target.WalletReceivableMicrocredits = proof.Financial.WalletReceivableMicrocredits
+		target.FactsDigest = proof.Critical.FactsDigest
+		target.ReasonCode = proof.Normalized.ReasonCode
+		command = target
 	}
 	actions := append([]string{}, item.AllowedActions...)
 	return ApprovalV2Detail{ApprovalV2Summary: approvalV2Summary(item), AllowedActions: actions,

@@ -108,7 +108,7 @@ func TestReceivableWriteOffCrossDomainActivationPostgresIntegration(t *testing.T
 		presentedCommand.ReasonCode != "APPROVED_RECEIVABLE_WRITE_OFF" || !approvalPaginationHexDigest(presentedCommand.FactsDigest) {
 		t.Fatalf("cross-domain presenter command=%#v", detail.Command)
 	}
-	proofSource, err := NewHTTPApprovalProofSource("http://127.0.0.1", billingServer.URL, proofToken)
+	proofSource, err := NewHTTPApprovalProofSource(billingServer.URL, proofToken)
 	if err != nil {
 		t.Fatal(err)
 	}

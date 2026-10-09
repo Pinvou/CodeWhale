@@ -59,6 +59,7 @@ func TestLedgerRepairContractShapeSetMatchesDesign(t *testing.T) {
 		{"wrong direction on optional leg", "CHARGEBACK", map[string]int64{"CHARGEBACK_CLEARING": 30, "RECEIVABLE_ASSET": 30}},
 		{"present leg with zero delta", "USAGE", map[string]int64{"USAGE_REVENUE": 30, "WALLET_LIABILITY": 0}},
 		{"write-off shape in the wrong direction", "ADJUSTMENT", map[string]int64{"ADJUSTMENT": 25, "RECEIVABLE_ASSET": 25}},
+		{"adjustment mixes wallet and write-off shapes", "ADJUSTMENT", map[string]int64{"ADJUSTMENT": -30, "WALLET_LIABILITY": 20, "RECEIVABLE_ASSET": 10}},
 	}
 	for _, item := range illegal {
 		contract := ledgerRepairContracts[item.entryType]

@@ -13,7 +13,7 @@ const projection = () => ({ command_type: 'LEDGER_REPAIR', policy_version: 1, sn
   critical_resource_versions: { policy_version: 1, posting_set_digest: 'a'.repeat(64) },
   financial_snapshot: { amount_microcredits: values.amount_microcredits, wallet_id: null } });
 test('installed form sends owner-required fixed reason and full positive int64', () => {
-  assert.deepEqual(financialRepairCommandTypes, ['LEDGER_REPAIR']);
+  assert.deepEqual(financialRepairCommandTypes, ['LEDGER_REPAIR', 'RECEIVABLE_WRITE_OFF']);
   assert.deepEqual(financialRepairPrecheckBody('LEDGER_REPAIR', values).body, { command_type: 'LEDGER_REPAIR', ...values, reason_code: 'ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT' });
   for (const amount of ['9007199254740993', '9223372036854775807']) assert.equal(financialRepairPrecheckBody('LEDGER_REPAIR', { ...values, amount_microcredits: amount }).body.amount_microcredits, amount);
   for (const amount of ['0', '-1', '9223372036854775808', '1e2', ' 1']) assert.ok(financialRepairPrecheckBody('LEDGER_REPAIR', { ...values, amount_microcredits: amount }).error);
@@ -43,8 +43,17 @@ test('draft and typed EDIT retain exact original account/amount intent and fresh
   assert.equal(read.amount_microcredits, values.amount_microcredits); assert.equal(read.wrong_ledger_account_id, id(3)); assert.equal(read.correct_ledger_account_id, id(4));
   assert.deepEqual(edited.normalized_command, original.normalized_command); assert.equal(edited.critical_resource_versions.posting_set_digest, 'b'.repeat(64));
 });
-test('all three languages have the complete current Ledger-only form labels', () => {
+test('all three languages have the complete current Ledger and WriteOff form labels', () => {
   const leaves = (v, prefix = '') => Object.entries(v).flatMap(([k, value]) => typeof value === 'string' ? [prefix + k] : leaves(value, prefix + k + '.'));
   const keys = leaves(ledgerRepairCopy.zh).sort();
-  for (const language of ['zh', 'en', 'ja']) { assert.deepEqual(leaves(ledgerRepairCopy[language]).sort(), keys); assert.deepEqual(Object.keys(ledgerRepairCopy[language].targets), ['LEDGER_REPAIR']); for (const key of Object.keys(values)) assert.ok(key === 'target_resource_id' ? ledgerRepairCopy[language].targets.LEDGER_REPAIR : ledgerRepairCopy[language].fields[key]); }
+  for (const language of ['zh', 'en', 'ja']) { assert.deepEqual(leaves(ledgerRepairCopy[language]).sort(), keys); assert.deepEqual(Object.keys(ledgerRepairCopy[language].targets), ['LEDGER_REPAIR', 'RECEIVABLE_WRITE_OFF']); for (const key of Object.keys(values)) assert.ok(key === 'target_resource_id' ? ledgerRepairCopy[language].targets.LEDGER_REPAIR : ledgerRepairCopy[language].fields[key]); }
+});
+
+import { approvalCommands, approvalBusinessRoute, readApprovalRoute } from '../src/features/account-platform/admin-approval-actions.js';
+test('installed Ledger center filter and business drilldown preserve the closed target', () => {
+  assert.ok(approvalCommands.includes('LEDGER_REPAIR'));
+  assert.equal(readApprovalRoute('?approval_command_type=LEDGER_REPAIR').commandType, 'LEDGER_REPAIR');
+  const detail = { detail_availability: 'AVAILABLE', command_type: 'LEDGER_REPAIR', target: { resource_type: 'LEDGER_POSTING', resource_id: id(1) }, command: { target_posting_id: id(1) } };
+  assert.deepEqual(approvalBusinessRoute(detail), { section: 'finance', tab: 'ledger' });
+  for (const value of [{ ...detail, command: { target_posting_id: id(2) } }, { ...detail, detail_availability: 'DETAIL_PRESENTATION_UNAVAILABLE' }, { ...detail, command_type: 'RECEIVABLE_WRITE_OFF' }]) assert.equal(approvalBusinessRoute(value), null);
 });

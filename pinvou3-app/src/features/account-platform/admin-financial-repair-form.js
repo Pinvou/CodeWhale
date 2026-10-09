@@ -20,6 +20,11 @@ export const financialRepairInputs = Object.freeze({
     { key: 'correct_ledger_account_id', kind: 'uuid' },
     { key: 'amount_microcredits', kind: 'integer' },
   ]),
+  RECEIVABLE_WRITE_OFF: Object.freeze([
+    { key: 'target_resource_id', kind: 'uuid' },
+    { key: 'write_off_microcredits', kind: 'integer' },
+    { key: 'expected_version', kind: 'integer' },
+  ]),
 
 });
 
@@ -84,5 +89,3 @@ export function financialRepairDraftFromProjection(projection, operatorReason, r
     return { error: 'FINANCIAL_REPAIR_PRECHECK_INVALID' };
   }
 }
-
-export const FINANCIAL_REPAIR_COMMANDS = financialRepairCommands;

@@ -16,7 +16,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/tokengovernance"
 )
 
-// The three Billing and three Token approval commands are installed. Missing independent
+// The four Billing and three Token approval commands are installed. Missing independent
 // writer availability closes APPROVE, while historical reads/rejection and
 // ordinary account operations remain available through the mature pool.
 func configureApprovals(ctx context.Context, repository *account.PostgresRepository, service *account.Service, credential, environment string) error {
@@ -47,6 +47,11 @@ func configureApprovals(ctx context.Context, repository *account.PostgresReposit
 		return errors.New("ACCOUNT_APPROVAL_PROOF_CONFIGURATION_INVALID")
 	}
 	repository.WithApprovalProofSource(proofs)
+	prechecks, err := account.NewHTTPApprovalPrecheckSource(billingURL, credential)
+	if err != nil {
+		return errors.New("ACCOUNT_APPROVAL_PRECHECK_AUTHORITY_INVALID")
+	}
+	service.WithApprovalPrecheckSource(prechecks)
 	results, err := account.NewApprovalRecoveryResultClientWithToken(billingURL, tokenURL, credential)
 	if err != nil {
 		return errors.New("ACCOUNT_APPROVAL_RECOVERY_CONFIGURATION_INVALID")

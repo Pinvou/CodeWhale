@@ -40,7 +40,7 @@ const ledgerRepairCommand = "LEDGER_REPAIR"
 // activation-gated: a request may be assembled while the command is INACTIVE,
 // and only proof issuance and execution require the live ACTIVE row.
 func (r *PostgresRepository) LedgerRepairProofInput(ctx context.Context, target LedgerRepairCommandInput, reasonCode string) (approvalencoding.LegacyProofInput, error) {
-	if strings.TrimSpace(reasonCode) == "" || strings.TrimSpace(reasonCode) != reasonCode || len(reasonCode) > 80 {
+	if reasonCode != "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" {
 		return approvalencoding.LegacyProofInput{}, ErrConflict
 	}
 	snapshot, err := r.ApprovalCommandActivations(ctx)
@@ -115,6 +115,7 @@ type LedgerRepairPlan struct {
 	// targetPostingDelta is owner-derived inside the immutable target plan.
 	// The wire amount remains positive; the correction retains this signed leg.
 	targetPostingDelta       int64
+	targetBusinessReference  string
 	TargetJournalEntryID     uuid.UUID `json:"target_journal_entry_id"`
 	TargetPostingID          uuid.UUID `json:"target_posting_id"`
 	EntryType                string    `json:"entry_type"`
@@ -288,6 +289,9 @@ func ledgerRepairPlanFrom(ctx context.Context, source ledgerRepairReader, input 
 	if targetPosting.LedgerAccountID != input.WrongLedgerAccountID || targetPosting.WalletID != nil || targetPosting.CreditLotID != nil {
 		return LedgerRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
+	if _, err := ledgerRepairPlatformAccount(ctx, source, input.WrongLedgerAccountID); err != nil {
+		return LedgerRepairPlan{}, err
+	}
 	var alreadyRepaired bool
 	if err := source.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM ledger_repair_cases WHERE target_posting_id=$1)`, targetPosting.ID).Scan(&alreadyRepaired); err != nil {
 		return LedgerRepairPlan{}, err
@@ -325,6 +329,7 @@ func ledgerRepairPlanFrom(ctx context.Context, source ledgerRepairReader, input 
 	factsDigest := ledgerRepairFactsDigest(target, *targetPosting, correct, input, policyVersion, schemaVersion, activationVersion, postingSetDigest)
 	return LedgerRepairPlan{
 		targetPostingDelta:       targetPosting.Delta,
+		targetBusinessReference:  target.BusinessReference,
 		TargetJournalEntryID:     target.JournalEntryID,
 		TargetPostingID:          targetPosting.ID,
 		EntryType:                target.EntryType,
@@ -378,7 +383,13 @@ func ledgerRepairPlatformAccount(ctx context.Context, source ledgerRepairReader,
 	if err != nil {
 		return ledgerRepairAccount{}, ledgerRepairLookupError(err)
 	}
-	return account, nil
+	for _, expected := range systemLedgerAccountExpectations {
+		if account.ID == expected.ID && account.Code == expected.Code &&
+			account.AccountType == expected.AccountType && account.WalletID == nil {
+			return account, nil
+		}
+	}
+	return ledgerRepairAccount{}, ErrApprovalSnapshotMismatch
 }
 
 func ledgerRepairLookupError(err error) error {
@@ -400,6 +411,12 @@ func ledgerRepairSignatureMatches(contract []ledgerRepairContractLeg, signature 
 	allowed := map[string]ledgerRepairContractLeg{}
 	for _, leg := range contract {
 		allowed[leg.AccountType] = leg
+	}
+	// ADJUSTMENT has two disjoint writer shapes: a wallet pair in either
+	// direction, or a receivable write-off pair. They cannot be combined.
+	if leg, ok := allowed["ADJUSTMENT"]; ok && leg.Sign == 0 &&
+		signature["WALLET_LIABILITY"] != 0 && signature["RECEIVABLE_ASSET"] != 0 {
+		return false
 	}
 	var total int64
 	for accountType, delta := range signature {
@@ -528,7 +545,7 @@ func (r *PostgresRepository) ApplyLedgerRepair(ctx context.Context, input Ledger
 	journalID := uuid.Must(uuid.NewV7())
 	reference := "ledger-repair:" + plan.TargetPostingID.String()
 	now := r.now()
-	if err := insertJournal(ctx, tx, journalID, "REVERSAL", reference, "ledger repair: "+plan.EntryType, now); err != nil {
+	if err := insertJournal(ctx, tx, journalID, "REVERSAL", reference, "ledger repair: "+plan.targetBusinessReference, now); err != nil {
 		return LedgerRepairResult{}, err
 	}
 	amount := plan.AmountMicrocredits

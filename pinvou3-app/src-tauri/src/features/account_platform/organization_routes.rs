@@ -67,7 +67,11 @@ pub(super) fn allowed(area: &str, method: &Method, path: &str, query: Option<&st
                     *name,
                     "balance" | "entitlement-packages" | "payment-capabilities" | "model-policy"
                 )
-                || *method == Method::POST && *name == "quota-grants:batch"
+                || *method == Method::POST
+                    && matches!(
+                        *name,
+                        "quota-grants:batch" | "account-closed-grants:reclaim-batch"
+                    )
                 || *method == Method::PUT && *name == "model-policy"
         }
         ["", "v1", "organizations", org, "recharge", "products"] if id(org) && query.is_none() => {
@@ -81,11 +85,24 @@ pub(super) fn allowed(area: &str, method: &Method, path: &str, query: Option<&st
         {
             *method == Method::GET
         }
-        ["", "v1", "organizations", org, "quota-grants", grant, "revoke"]
-            if id(org) && id(grant) && query.is_none() =>
-        {
-            *method == Method::POST
-        }
+        [
+            "",
+            "v1",
+            "organizations",
+            org,
+            "quota-grants",
+            grant,
+            "revoke",
+        ] if id(org) && id(grant) && query.is_none() => *method == Method::POST,
+        [
+            "",
+            "v1",
+            "organizations",
+            org,
+            "account-closed-grants",
+            grant,
+            "reclaim",
+        ] if id(org) && id(grant) && query.is_none() => *method == Method::POST,
         _ => false,
     }
 }
@@ -315,12 +332,14 @@ mod tests {
             serde_json::json!("0"),
         ] {
             let mut b = Some(serde_json::json!({"items":[{"amount_microcredits":invalid}]}));
-            assert!(exact_body(
-                "token",
-                "/v1/organizations/11111111-1111-4111-8111-111111111111/quota-grants:batch",
-                &mut b
-            )
-            .is_err());
+            assert!(
+                exact_body(
+                    "token",
+                    "/v1/organizations/11111111-1111-4111-8111-111111111111/quota-grants:batch",
+                    &mut b
+                )
+                .is_err()
+            );
         }
     }
 }

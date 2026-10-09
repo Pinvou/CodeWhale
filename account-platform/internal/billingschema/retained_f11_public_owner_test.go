@@ -30,7 +30,7 @@ func TestPrivateF11PublicOwnerIntegration(t *testing.T) {
 	var port, actors int
 	e = admin.QueryRow(ctx, `SELECT current_setting('data_directory'),session_user,current_setting('port')::int,(SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>'pinvou_wave_test')`).Scan(&dd, &user, &port, &actors)
 	admin.Close(ctx)
-	if e != nil || port != 55505 || user != "pinvou_wave_test" || actors != 0 || strings.ReplaceAll(dd, "\\", "/") != "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f05/data" {
+	if e != nil || port != 55504 || user != "pinvou_wave_test" || actors != 0 || strings.ReplaceAll(dd, "\\", "/") != "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data" {
 		t.Fatal("owner/port/datadir/absence guard")
 	}
 	f := newStageFixture(t, ctx, raw)
@@ -58,17 +58,7 @@ func TestPrivateF11PublicOwnerIntegration(t *testing.T) {
 	})
 	t.Run("original-owner-contract-child", func(t *testing.T) {
 		dir := "../billing"
-		entries, e := os.ReadDir(dir)
-		if e != nil {
-			t.Fatal(e)
-		}
-		args := []string{"test", "-mod=readonly", "-race", "-count=1", "-json"}
-		for _, entry := range entries {
-			if strings.HasSuffix(entry.Name(), ".go") && !strings.HasSuffix(entry.Name(), "_test.go") {
-				args = append(args, entry.Name())
-			}
-		}
-		args = append(args, "receivable_write_off_integration_test.go", "entitlement_correction_execute_integration_test.go", "ledger_delivery_fixture_test.go", "retained_f11_owner_rollback_test.go", "-run", "^(TestReceivableWriteOffPostgresIntegration|TestPrivateF11OwnerFrozenFailureAndRollback)$")
+		args := []string{"test", "-mod=readonly", "-race", "-count=1", "-json", ".", "-run", "^(TestReceivableWriteOffPostgresIntegration|TestPrivateF11OwnerFrozenFailureAndRollback)$"}
 		cmd := exec.CommandContext(ctx, os.Getenv("F11_GO_BINARY"), args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "PINVOU_TEST_BILLING_DATABASE_URL="+raw)
@@ -84,15 +74,23 @@ func TestPrivateF11PublicOwnerIntegration(t *testing.T) {
 		if e != nil {
 			t.Fatal("original owner child failed; retained log", e)
 		}
-		pass := 0
+		pass, failed, skipped := 0, 0, 0
+		original := make(map[string]bool)
 		for _, line := range strings.Split(string(out), "\n") {
 			var a struct{ Action, Test string }
 			if json.Unmarshal([]byte(line), &a) == nil && a.Action == "pass" && a.Test != "" {
 				pass++
+				original[a.Test] = true
+			}
+			if a.Test != "" && a.Action == "fail" {
+				failed++
+			}
+			if a.Test != "" && a.Action == "skip" {
+				skipped++
 			}
 		}
-		if pass == 0 {
-			t.Fatal("zero original owner assertions")
+		if pass == 0 || failed != 0 || skipped != 0 || !original["TestReceivableWriteOffPostgresIntegration"] || !original["TestPrivateF11OwnerFrozenFailureAndRollback"] {
+			t.Fatalf("original owner assertions incomplete: pass=%d fail=%d skip=%d", pass, failed, skipped)
 		}
 	})
 }
