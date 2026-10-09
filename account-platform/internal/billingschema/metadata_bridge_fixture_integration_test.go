@@ -1,4 +1,4 @@
-package accountschema
+package billingschema
 
 import (
 	"context"
@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -52,47 +52,17 @@ func TestSparseMetadataUpgradeMatchesOriginalThrough49(t *testing.T) {
 			target = append(target, migration)
 		}
 	}
-	admin, err := pgx.Connect(ctx, raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(context.Background())
-	configuration, err := pgx.ParseConfig(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var connections []*pgx.Conn
-	for _, prefix := range []string{"bridge_sparse_", "bridge_fresh_"} {
-		database := prefix + strings.ReplaceAll(uuid.NewString(), "-", "")
-		quoted := pgx.Identifier{database}.Sanitize()
-		if _, err := admin.Exec(ctx, "CREATE DATABASE "+quoted); err != nil {
-			t.Fatal(err)
-		}
-		defer func() {
-			cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if _, err := admin.Exec(cleanup, "DROP DATABASE "+quoted); err != nil {
-				t.Errorf("cleanup own migration fixture: %v", err)
-			}
-		}()
-		owned := configuration.Copy()
-		owned.Database = database
-		connection, err := pgx.ConnectConfig(ctx, owned)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer connection.Close(context.Background())
-		connections = append(connections, connection)
-	}
+	f := newStageFixture(t, ctx, raw)
+	connections := []*pgx.Conn{f.database(t, ctx, "account", "account_service"), f.database(t, ctx, "account", "account_service")}
 	// Independent databases preserve the real public extension namespace and
 	// prevent one fixture's functions from satisfying another's dependencies.
 	connection := connections[0]
-	if err := Up(ctx, connection, installed); err != nil {
+	if err := accountschema.Up(ctx, connection, installed); err != nil {
 		t.Fatal(err)
 	}
 	// Observe retained authority edges and raw assignment rows before bridging.
 	edgesBefore := permissionEdges(t, ctx, connection)
-	if err := Up(ctx, connection, target); err != nil {
+	if err := accountschema.Up(ctx, connection, target); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := migrations.VerifyApplied(ctx, connection, target); err != nil {
@@ -110,7 +80,7 @@ func TestSparseMetadataUpgradeMatchesOriginalThrough49(t *testing.T) {
 		t.Fatalf("obsolete metadata restored by delayed original 028: count=%d err=%v", legacyCount, err)
 	}
 	connection = connections[1]
-	if err := Up(ctx, connection, target); err != nil {
+	if err := accountschema.Up(ctx, connection, target); err != nil {
 		t.Fatal(err)
 	}
 	freshEdges := permissionEdges(t, ctx, connection)
