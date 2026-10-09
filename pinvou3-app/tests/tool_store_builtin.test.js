@@ -6,7 +6,7 @@
  *   excluded from the regular card flow; a dedicated "Builtin Plugins" toolbar
  *   button opens a read-only subpage (mirroring the recycle-bin subpage) with a
  *   back button;
- * - tool-common: BuiltinPluginCard renders no action buttons; the TsActionBtn
+ * - tool-marketplace: BuiltinPluginCard renders no action buttons; the TsActionBtn
  *   builtin branch comes before the uninstall fallback branch;
  * - composer-tool-menu-logic: the isBuiltinPlugin filter is present (§3.2
  *   configuration visibility).
@@ -20,7 +20,7 @@ const path = require('path');
 const read = (rel) => fs.readFileSync(path.join(__dirname, '..', 'src', rel), 'utf8');
 
 const storeView = read('features/tools/ToolStoreView.jsx');
-const toolCommon = read('features/tools/tool-common.jsx');
+const toolMarketplace = read('features/tools/tool-marketplace.jsx');
 const composerLogic = read('features/settings/composer-tool-menu-logic.js');
 const builtinLogic = read('features/tools/builtin-plugin-logic.js');
 
@@ -68,9 +68,9 @@ assert.match(
 // BuiltinPluginCard body: no TsActionBtn/PlatformToolAction/uninstall/onAction
 // (docs/builtin-toolset-contract.md §3.1: no uninstall, no toggle); renders the
 // read-only badge; no hardcoded Chinese (copy comes from uiBuiltinPlugins)
-const cardStart = toolCommon.indexOf('const BuiltinPluginCard');
+const cardStart = toolMarketplace.indexOf('const BuiltinPluginCard');
 assert.ok(cardStart > 0, 'the BuiltinPluginCard component must exist');
-const cardBody = toolCommon.slice(cardStart, toolCommon.indexOf('export {', cardStart));
+const cardBody = toolMarketplace.slice(cardStart, toolMarketplace.indexOf('export {', cardStart));
 assert.doesNotMatch(cardBody, /TsActionBtn|PlatformToolAction|uninstall|onAction|handleAction/, 'the builtin card must not render any action button');
 assert.match(
   cardBody,
@@ -82,8 +82,8 @@ assert.doesNotMatch(cardBody, /[一-鿿]/, 'the builtin card body must not conta
 // TsActionBtn: the builtin read-only badge branch must come before the
 // no-actions uninstall fallback branch (even if a builtin card ever reaches
 // TsActionBtn, uninstall stays unreachable)
-const builtinBranch = toolCommon.indexOf('if (tool.builtin)');
-const uninstallFallback = toolCommon.indexOf('无 actions 时的旧分支');
+const builtinBranch = toolMarketplace.indexOf('if (tool.builtin)');
+const uninstallFallback = toolMarketplace.indexOf('无 actions 时的旧分支');
 assert.ok(builtinBranch > 0, 'TsActionBtn must have a builtin read-only branch');
 assert.ok(uninstallFallback > builtinBranch, 'the builtin branch must come before the uninstall fallback branch');
 
