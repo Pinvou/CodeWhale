@@ -7,8 +7,8 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const toolCommonSource = await readFile(
-  new URL('../src/features/tools/tool-common.jsx', import.meta.url),
+const toolMarketplaceSource = await readFile(
+  new URL('../src/features/tools/tool-marketplace.jsx', import.meta.url),
   'utf8',
 );
 const toolStoreSource = await readFile(
@@ -18,12 +18,12 @@ const toolStoreSource = await readFile(
 
 // 1. TsActionBtn 的 specs 映射认识 edit_display 动作，点击路由到 onEditDisplay。
 assert.match(
-  toolCommonSource,
+  toolMarketplaceSource,
   /edit_display:\s*\{\s*label:\s*T\.editDisplay/,
   'specs must map the backend edit_display action to the T.editDisplay label',
 );
 assert.match(
-  toolCommonSource,
+  toolMarketplaceSource,
   /onEditDisplay && onEditDisplay\(tool\.backendId\)/,
   'edit_display click must route to onEditDisplay(tool.backendId)',
 );
