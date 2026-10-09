@@ -17,9 +17,9 @@ import (
 )
 
 // ExecuteProtocolFormulaTokenCommand is the sole human-write adapter for the
-// four protocol/formula commands after governance activation. The historical
-// resource-specific POSTs remain present only as fail-closed compatibility
-// endpoints and never reach their domain handlers.
+// four protocol/formula commands after governance activation. Historical
+// resource-specific write endpoints are not registered; the governed command
+// dispatcher reaches these transaction adapters directly.
 func (s *Service) ExecuteProtocolFormulaTokenCommand(ctx context.Context, repository *PostgresRepository, input runtimeTokenCommandBegin) (TokenCommandResult, bool, error) {
 	if repository == nil || !isProtocolFormulaGovernedCommand(input.Envelope.CommandType) || input.ActorUserID == uuid.Nil || input.AuthorizationVersion < 1 || strings.TrimSpace(input.ActorPermission) == "" || strings.TrimSpace(input.AuditRequestID) == "" || len(input.RequestDigest) != 64 || len(input.KeyDigest) != 64 || len(input.IdempotencyFingerprint) != 64 {
 		return TokenCommandResult{}, false, ErrTokenCommandInvalid
