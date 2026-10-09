@@ -1,5 +1,14 @@
 [
   {
+    "subject": "__APPROVAL_RECOVERY_WORKLOAD_SUBJECT__",
+    "service": "account-approval-recovery",
+    "permissions": [
+      "internal.approval-recovery.plan",
+      "internal.approval-recovery.confirm",
+      "internal.approval-recovery.zero-effect"
+    ]
+  },
+  {
     "subject": "__TOKEN_WORKLOAD_SUBJECT__",
     "service": "token-gateway",
     "permissions": [

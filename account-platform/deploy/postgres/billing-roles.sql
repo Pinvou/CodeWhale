@@ -1,13 +1,14 @@
+\set ON_ERROR_STOP on
 \if :{?billing_database}
 \else
 \echo 'billing_database must explicitly name the dedicated target database'
-\quit 1
+DO $$ BEGIN RAISE EXCEPTION 'billing_database must explicitly name the dedicated target database'; END $$;
 \endif
 SELECT current_database() = :'billing_database' AS billing_target_matches \gset
 \if :billing_target_matches
 \else
 \echo 'connected database differs from the explicit Billing target'
-\quit 1
+DO $$ BEGIN RAISE EXCEPTION 'connected database differs from the explicit Billing target'; END $$;
 \endif
 BEGIN;
 -- Run only as a database role administrator, against the dedicated Billing

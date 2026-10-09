@@ -17,8 +17,8 @@ import (
 
 var errWorkloadTrust = errors.New("workload identity trust configuration is invalid")
 
-// NewWorkloadHTTPClient provides isolated verified TLS transport for authenticated
-// internal calls. It never changes public clients or follows credential redirects.
+// NewWorkloadHTTPClient creates an isolated outbound transport with verified
+// roots, no ambient proxy, bounded requests and no redirect credential forwarding.
 func NewWorkloadHTTPClient(caFile string) (*http.Client, error) {
 	return workloadHTTPClient(caFile)
 }

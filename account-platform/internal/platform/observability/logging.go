@@ -15,6 +15,8 @@ var safeLogEvents = map[string]string{
 	"expired hold recovery failed":         "expired_hold_recovery_failed",
 	"model catalog synchronization failed": "model_catalog_sync_failed",
 	"application event":                    "application_event",
+	"approval recovery pass":               "approval_recovery_pass",
+	"approval recovery failed":             "approval_recovery_failed",
 	"service listening":                    "service_listening",
 	"metrics listening":                    "metrics_listening",
 	"service shutting down":                "service_shutting_down",
@@ -57,6 +59,7 @@ var safeLogFields = map[string]struct{}{
 	"stored_fingerprint": {}, "calculated_fingerprint": {}, "stored_fingerprint_length": {},
 	"username_length": {}, "mobile_length": {}, "policy_version": {}, "challenge_id": {},
 	"rows_affected": {},
+	"candidates":    {}, "confirmed": {}, "invalidated": {}, "pending": {}, "unavailable": {}, "more_candidates": {},
 }
 
 // NewLogger returns the only logger schema used by Account Platform services.

@@ -203,15 +203,27 @@ func (r *PostgresRepository) ApplyReviewedForcedRefund(ctx context.Context, case
 	if item.PaymentTransactionID != source || item.EntitlementPackageID != packageID || item.PaymentOrderID != orderID || item.WalletID != walletID {
 		return ForcedRefundCase{}, ErrConflict
 	}
-	if item.Version > 1 {
-		if item.Status != "REVIEW_REQUIRED" && !(item.Status == "CONFIRMED" && item.ResolutionCode != nil && *item.ResolutionCode == "CONFIRM_FORCED_REFUND") {
+	var applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM journal_entries WHERE entry_type='FORCED_REFUND' AND business_reference=$1)`, "forced-refund:"+item.ID.String()).Scan(&applied); err != nil {
+		return ForcedRefundCase{}, err
+	}
+	if applied {
+		if item.Version <= 1 || item.Status != "REVIEW_REQUIRED" && !(item.Status == "RESOLVED" && item.ResolutionCode != nil && *item.ResolutionCode == "CONFIRM_FORCED_REFUND") {
 			return ForcedRefundCase{}, ErrConflict
 		}
 		return item, tx.Commit(ctx)
 	}
-	if item.Status != "REVIEW_REQUIRED" {
+	if item.Status != "REVIEW_REQUIRED" || item.Version != 1 || item.ReceivableID != nil || item.RevokedBase != 0 || item.RevokedBonus != 0 {
 		return ForcedRefundCase{}, ErrConflict
 	}
+	budget, err := readForcedRefundBudget(ctx, tx, source, packageID, orderID, walletID, item.ID, uuid.Nil)
+	if err != nil {
+		return ForcedRefundCase{}, err
+	}
+	if transactionAmountFen <= 0 || item.AmountFen <= 0 || budget.cash > transactionAmountFen || item.AmountFen > transactionAmountFen-budget.cash {
+		return ForcedRefundCase{}, ErrConflict
+	}
+	cumulativeCash := budget.cash + item.AmountFen
 	type componentState struct {
 		id, lotID                              uuid.UUID
 		kind                                   string
@@ -239,29 +251,38 @@ func (r *PostgresRepository) ApplyReviewedForcedRefund(ctx context.Context, case
 	if len(components) == 0 {
 		return ForcedRefundCase{}, ErrConflict
 	}
-	var plannedRevoked, plannedBaseShortfall int64
+	var previousBaseTarget, previousBonusTarget int64
 	for index := range components {
 		component := &components[index]
-		component.target, err = proportionalCeiling(component.original, item.AmountFen, transactionAmountFen)
+		previousTarget, targetErr := proportionalCeiling(component.original, budget.cash, transactionAmountFen)
+		if targetErr != nil {
+			return ForcedRefundCase{}, targetErr
+		}
+		component.target, err = proportionalCeiling(component.original, cumulativeCash, transactionAmountFen)
 		if err != nil {
 			return ForcedRefundCase{}, err
+		}
+		component.target -= previousTarget
+		if component.kind == "BASE" {
+			previousBaseTarget = previousTarget
+		} else {
+			previousBonusTarget = previousTarget
 		}
 		component.toRevoke = component.target
 		if revocable := component.available + component.active + component.suspended; component.toRevoke > revocable {
 			component.toRevoke = revocable
 		}
-		plannedRevoked += component.toRevoke
-		if component.kind == "BASE" {
-			plannedBaseShortfall += component.target - component.toRevoke
-		}
+	}
+	if budget.base != previousBaseTarget || budget.bonus > previousBonusTarget {
+		return ForcedRefundCase{}, ErrConflict
 	}
 	now := r.now()
 	entryID := uuid.Must(uuid.NewV7())
 	reference := "forced-refund:" + item.ID.String()
-	if plannedRevoked+plannedBaseShortfall > 0 {
-		if err := insertJournal(ctx, tx, entryID, "FORCED_REFUND", reference, "reviewed provider forced refund", now); err != nil {
-			return ForcedRefundCase{}, err
-		}
+	// A legitimate zero-rights increment still consumes reviewed cash budget.
+	// Its immutable journal is a receipt; zero-delta postings are never written.
+	if err := insertJournal(ctx, tx, entryID, "FORCED_REFUND", reference, "reviewed provider forced refund", now); err != nil {
+		return ForcedRefundCase{}, err
 	}
 	walletAccount, err := walletLedgerAccount(ctx, tx, item.WalletID)
 	if err != nil {

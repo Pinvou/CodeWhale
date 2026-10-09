@@ -543,8 +543,8 @@ func TestRetainedFailedRefundKeepsConcurrentChargebackFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, _, err := c.finishRefund(ctx, refund, ProviderRefund{MerchantRefundNo: refund.MerchantRefundNo, AmountFen: 100, Status: "FAILED"}, false)
-	if err != nil || result.Status != "FAILED" {
-		t.Fatal("provider failure did not persist", err)
+	if err != nil || result.Status != "MANUAL_REVIEW" {
+		t.Fatal("late receipt bypassed chargeback-owned refund review", result.Status, err)
 	}
 	var state string
 	var posted int64
@@ -554,8 +554,15 @@ func TestRetainedFailedRefundKeepsConcurrentChargebackFence(t *testing.T) {
 	if _, err = retainedResolveClaimedAnomaly(t, r, ctx, *charge.ManualReviewCaseID, uuid.New(), uuid.NewString(), "DISMISS", "controlled disproved final chargeback", "NONE"); err != nil {
 		t.Fatal(err)
 	}
+	if err = r.pool.QueryRow(ctx, `SELECT status FROM entitlement_packages WHERE id=$1`, pack).Scan(&state); err != nil || state != "FROZEN" {
+		t.Fatal("chargeback dismissal bypassed outstanding refund review", state, err)
+	}
+	c.provider = &reviewRefundProvider{refund: ProviderRefund{Status: "FAILED"}}
+	if result, err := c.processRefund(ctx, refund.ID, true); err != nil || result.Status != "FAILED" {
+		t.Fatal("explicit terminal refund reconciliation failed", result.Status, err)
+	}
 	if err = r.pool.QueryRow(ctx, `SELECT status FROM entitlement_packages WHERE id=$1`, pack).Scan(&state); err != nil || state != "ACTIVE" {
-		t.Fatal("final review receipt did not clear disproved fence", state, err)
+		t.Fatal("own failed-refund reservation did not restore after all fences cleared", state, err)
 	}
 }
 

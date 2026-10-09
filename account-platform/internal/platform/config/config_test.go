@@ -7,7 +7,7 @@ import (
 
 func TestLoadUsesSafeDefaults(t *testing.T) {
 	t.Setenv("PORT", "")
-	t.Setenv("APP_ENV", "")
+	t.Setenv("APP_ENV", "development")
 	t.Setenv("SHUTDOWN_TIMEOUT", "")
 	t.Setenv("RATE_LIMIT_RPS", "")
 	t.Setenv("RATE_LIMIT_BURST", "")
@@ -44,6 +44,7 @@ func TestLoadRequiresThreeTrustedTimeSourcesInProduction(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidRateLimit(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
 	for name, values := range map[string][2]string{
 		"zero rate":              {"0", "10"},
 		"zero burst":             {"10", "0"},
@@ -65,6 +66,7 @@ func TestLoadRejectsInvalidRateLimit(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidConfiguration(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
 	tests := []struct {
 		name    string
 		port    string
@@ -89,5 +91,14 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 func TestLoadRejectsEmptyServiceName(t *testing.T) {
 	if _, err := Load("  "); err == nil {
 		t.Fatal("Load succeeded, want error")
+	}
+}
+
+func TestLoadRequiresExplicitEnvironment(t *testing.T) {
+	for _, environment := range []string{"", " \t\n"} {
+		t.Setenv("APP_ENV", environment)
+		if _, err := Load("account-service"); err == nil {
+			t.Fatal("missing environment silently selected a development configuration")
+		}
 	}
 }

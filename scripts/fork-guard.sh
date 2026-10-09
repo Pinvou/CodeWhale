@@ -28,7 +28,7 @@ fail=0
 bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 35 个登记提交，r3 收口后过渡期）──"
 actual_head="$(git -C "$CODEWHALE" rev-parse HEAD 2>/dev/null || true)"
 if [[ "$actual_head" == "$EXPECTED_HEAD" ]]; then
-  green "  ✓ CodeWhale gitlink 指向登记 head ${EXPECTED_HEAD}（过渡期领先 r3 收口；CI 另核公开维护历史）"
+  green "  ✓ CodeWhale gitlink 指向登记 head ${EXPECTED_HEAD}（过渡期内领先钉在 r3 收口的 tag；公开维护祖先关系由独立门禁验证）"
 else
   red "  ✗ CodeWhale HEAD 为 ${actual_head:-<unreadable>}，登记 head 为 $EXPECTED_HEAD"
   fail=1

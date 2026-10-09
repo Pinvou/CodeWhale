@@ -1,6 +1,6 @@
 # Billing 数据库角色与升级
 
-Billing 必须使用独立数据库，不能与其他应用共享 public schema。首次本地开发、Compose 部署或已有环境升级前，由数据库管理员在目标数据库执行 `billing-roles.sql`：psql 使用 `-X -v ON_ERROR_STOP=1 -v billing_database=<实际独立数据库名> -f`。脚本核对连接数据库与显式目标一致。管理员、migrator 和 runtime 连接分别通过本机私有 pgpass 或部署 Secret 提供；脚本不设置密码，不复制凭据。本阶段没有 Helm/chart 或本地数据库 Compose 制品；以后新增这些制品须显式执行同一初始化步骤。
+Billing 必须使用独立数据库，不能与其他应用共享 public schema。首次本地开发、Compose 部署或已有环境升级前，由数据库管理员在目标数据库执行 `billing-roles.sql`：psql 使用 `-X -v ON_ERROR_STOP=1 -v billing_database=<实际独立数据库名> -f`。脚本核对连接数据库与显式目标一致，并在脚本内启用 ON_ERROR_STOP；缺失目标变量或连接到其他数据库均以非零退出码停止，不创建或修改角色。管理员、migrator 和 runtime 连接分别通过本机私有 pgpass 或部署 Secret 提供；脚本不设置密码，不复制凭据。本阶段没有 Helm/chart 或本地数据库 Compose 制品；以后新增这些制品须显式执行同一初始化步骤。
 
 `billing_schema_owner` 为 NOLOGIN；`billing_migrator` 为 LOGIN/NOINHERIT，迁移连接选择 `MIGRATION_ROLE=billing_service`；runtime 使用受限 `billing_service`。只有 owner 单向继承 runtime 的旧对象权限，runtime 不得属于 owner，包括间接成员关系。管理员须通过部署认证机制配置两种 LOGIN 身份，不能将测试的 loopback trust 用于生产。先完成备份并保留可核验回执，再执行原 `cmd/migrate -domain billing` 流程；必须使用 `billingschema.Up`，不能绕过兼容与权限收回。
 

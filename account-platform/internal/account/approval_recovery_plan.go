@@ -66,11 +66,13 @@ func (r *PostgresRepository) PlanProofApprovalRecovery(ctx context.Context, limi
 	rows, err := tx.Query(ctx, `SELECT r.id,e.id,e.execution_idempotency_key,e.authorization_event_id,e.authorization_durable,e.executor_identity,
  r.command_type,encode(r.command_fingerprint,'hex'),r.policy_version,e.authorization_approval_epoch,r.version,r.status,e.status,r.execution_deadline
 FROM public.approval_requests r JOIN public.approval_executions e ON e.approval_request_id=r.id AND e.command_type=r.command_type
+LEFT JOIN public.approval_recovery_query_leases l ON l.approval_request_id=r.id
 WHERE e.authorization_serialization_version='APPROVAL_RFC8785_DECIMAL_V1'
   AND e.status IN ('EXECUTING','FAILED') AND r.status IN ('EXECUTING','EXECUTION_FAILED')
--- Existing approval_requests_queue_idx begins with status,expires_at,updated_at,id.
--- Drive the bounded scan from that index rather than sorting all executions.
-ORDER BY r.status,r.expires_at,r.updated_at,r.id LIMIT $1`, limit+1)
+  AND (l.approval_request_id IS NULL OR (l.lease_until<=transaction_timestamp() AND l.next_query_at<=transaction_timestamp()))
+-- Never-inspected requests precede cooled-down retries. Active leases and future
+-- retries are excluded before applying the existing bounded candidate contract.
+ORDER BY COALESCE(l.next_query_at,'-infinity'::timestamptz),r.status,r.expires_at,r.updated_at,r.id LIMIT $1`, limit+1)
 	if err != nil {
 		return ApprovalRecoveryPlan{}, err
 	}

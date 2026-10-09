@@ -92,6 +92,7 @@ export const accountPlatformCopy = {"zh":{"usernameInvalid":"用户名须以字�
 "unavailable":"暂时无法交接登录会话，请稍后重试。"},
 "errors":{"ACCOUNT_CLOSING":"账号已进入注销静默期，只允许查看注销进度和完成必要交接。",
 "oidc_credentials_invalid":"账号或密码不正确，请检查后重试。",
+"oidc_direct_grant_disabled":"当前身份服务未启用此登录方式（密码或短信），请使用其他登录方式或联系管理员。",
 "mobile_auth_code_invalid":"短信验证码无效或已过期，请重新获取验证码。"}},
 "en":{"usernameInvalid":"Start the username with a letter and use only lowercase letters, digits, dots, underscores, or hyphens.",
 "mobileInvalid":"Enter a valid mainland China mobile number.",
@@ -187,6 +188,7 @@ export const accountPlatformCopy = {"zh":{"usernameInvalid":"用户名须以字�
 "unavailable":"The sign-in session cannot be handed off right now. Try again shortly."},
 "errors":{"ACCOUNT_CLOSING":"The account is in its closure quiet period. Only closure status and required handoff actions remain available.",
 "oidc_credentials_invalid":"The account or password is incorrect. Check them and try again.",
+"oidc_direct_grant_disabled":"This sign-in method (password or SMS) is disabled by the identity service. Use another method or contact an administrator.",
 "mobile_auth_code_invalid":"The SMS code is invalid or expired. Request a new code."}},
 "ja":{"usernameInvalid":"英字で始め、小文字英字、数字、ピリオド、アンダースコア、ハイフンのみを使用してください。",
 "mobileInvalid":"有効な中国本土の携帯番号を入力してください。",
@@ -282,4 +284,5 @@ export const accountPlatformCopy = {"zh":{"usernameInvalid":"用户名须以字�
 "unavailable":"現在セッションを引き継げません。しばらくしてからもう一度お試しください。"},
 "errors":{"ACCOUNT_CLOSING":"アカウントは削除の静止期間中です。削除状況の確認と必要な引き継ぎのみ利用できます。",
 "oidc_credentials_invalid":"アカウントまたはパスワードが正しくありません。確認して再試行してください。",
+"oidc_direct_grant_disabled":"認証サービスでこのログイン方法（パスワードまたはSMS）が無効です。別の方法を使用するか、管理者にお問い合わせください。",
 "mobile_auth_code_invalid":"SMS認証コードが無効か期限切れです。新しいコードを取得してください。"}}};
