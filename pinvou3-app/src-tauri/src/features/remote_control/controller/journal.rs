@@ -238,7 +238,7 @@ impl RemoteJournal {
             }
             return Err(error("journal_duplicate_event"));
         }
-        if let (Some(status), Some(task_id)) = (&terminal_status, task_id) {
+        if let (Some(_), Some(task_id)) = (&terminal_status, task_id) {
             if let Some(existing) = inner.terminals.get(task_id) {
                 let _ = existing;
                 // Exactly one terminal state per task. A conflicting terminal
@@ -254,12 +254,15 @@ impl RemoteJournal {
                     payload: Value::Null,
                 });
             }
-            inner.terminals.insert(task_id.to_owned(), status.clone());
         }
-        inner.sequence = inner
+        let next_sequence = inner
             .sequence
             .checked_add(1)
             .ok_or_else(|| error("journal_sequence_exhausted"))?;
+        if let (Some(status), Some(task_id)) = (&terminal_status, task_id) {
+            inner.terminals.insert(task_id.to_owned(), status.clone());
+        }
+        inner.sequence = next_sequence;
         let event = JournalEvent {
             event_id: event_id.to_owned(),
             epoch: inner.epoch.clone(),
@@ -289,8 +292,8 @@ impl RemoteJournal {
             .events
             .front()
             .map(|event| event.sequence)
-            .unwrap_or(inner.sequence + 1);
-        if sequence + 1 < oldest && sequence < inner.sequence {
+            .unwrap_or(inner.sequence.saturating_add(1));
+        if sequence < oldest.saturating_sub(1) && sequence < inner.sequence {
             return ReplayOutcome::Gap(Self::snapshot_locked(&inner));
         }
         ReplayOutcome::Events(
@@ -477,51 +480,43 @@ fn sanitize_value(key: &str, value: &Value) -> Value {
 }
 
 pub(crate) fn sanitize_text(text: &str) -> String {
-    let mut out = String::with_capacity(text.len().min(MAX_EVENT_TEXT_CHARS));
-    for token in text.split_whitespace() {
-        let lowered = token.to_ascii_lowercase();
-        let replacement = if lowered.starts_with("sk-")
-            || lowered.starts_with("bearer")
-            || lowered.starts_with("authorization:")
-            || lowered.starts_with("token=")
-            || lowered.starts_with("api_key")
-            || lowered.starts_with("cookie:")
-        {
-            Some("[REDACTED]")
-        } else if looks_like_path(token) {
-            Some("[PATH]")
-        } else {
-            None
-        };
-        let piece = replacement.unwrap_or(token);
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(piece);
-        if out.chars().count() >= MAX_EVENT_TEXT_CHARS {
-            break;
-        }
-    }
-    out.chars().take(MAX_EVENT_TEXT_CHARS).collect()
-}
-
-fn looks_like_path(value: &str) -> bool {
-    let trimmed = value.trim_matches(|ch: char| matches!(ch, '\'' | '"' | ',' | ';' | '(' | ')'));
-    let bytes = trimmed.as_bytes();
-    if bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'\\' | b'/')
-    {
-        return true;
-    }
-    let separators = trimmed.matches(['\\', '/']).count();
-    separators >= 2 || (separators == 1 && (trimmed.starts_with('/') || trimmed.contains('\\')))
+    super::redaction::sanitize_text(text, MAX_EVENT_TEXT_CHARS)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maximum_cursor_and_exhaustion_leave_terminal_authority_unchanged() {
+        let journal = journal();
+        assert!(
+            matches!(journal.replay_after("epoch-1", u64::MAX), ReplayOutcome::Events(events) if events.is_empty())
+        );
+        journal.inner.lock().sequence = u64::MAX;
+        assert!(
+            matches!(journal.replay_after("epoch-1", u64::MAX), ReplayOutcome::Events(events) if events.is_empty())
+        );
+        let before = journal.snapshot();
+        assert_eq!(
+            journal
+                .append_terminal(
+                    "event-1",
+                    "session-0001",
+                    "task-0001",
+                    "succeeded",
+                    json!({"status":"succeeded"})
+                )
+                .unwrap_err()
+                .code,
+            "journal_sequence_exhausted"
+        );
+        assert_eq!(journal.snapshot(), before);
+        let inner = journal.inner.lock();
+        assert!(inner.terminals.is_empty());
+        assert!(inner.event_ids.is_empty());
+        assert_eq!(inner.bytes, 0);
+    }
 
     fn journal() -> RemoteJournal {
         RemoteJournal::new("epoch-1")

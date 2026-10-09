@@ -1253,6 +1253,13 @@ pub fn run() {
                                 0,
                             ).map_err(|error| error.code.to_owned())?,
                         );
+                        // Recover before publishing any desktop state. A failed
+                        // history load must never expose a fresh writable store.
+                        let desktop_history =
+                            commands::desktop_remote_history::DesktopRemoteHistoryRuntime::with_persistent_history(
+                                crate::platform::paths::sessions_root().join("_remote_control_history.json"),
+                                format!("boot-{}", std::process::id()),
+                            )?;
                         handle.manage(ControlledDeviceManager::default());
                         handle.manage(ControllingDeviceManager::default());
                         handle.manage(CapabilitySnapshotManager::default());
@@ -1283,13 +1290,6 @@ pub fn run() {
                                 desktop_transfer_registry,
                             );
                         handle.state::<ControlledDeviceManager>().register_cleanup_sink(desktop_attachments.cleanup_sink());
-                        let history_path = crate::platform::paths::sessions_root()
-                            .join("_remote_control_history.json");
-                        let desktop_history =
-                            commands::desktop_remote_history::DesktopRemoteHistoryRuntime::with_persistent_history(
-                                history_path,
-                                format!("boot-{}", std::process::id()),
-                            );
                         desktop_task_runtime
                             .hooks()
                             .set_model_scope(temporary_models);

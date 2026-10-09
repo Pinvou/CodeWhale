@@ -8,6 +8,7 @@ pub(crate) mod journal;
 pub(crate) mod liveness;
 pub(crate) mod permission;
 pub(crate) mod protocol;
+pub(crate) mod redaction;
 pub(crate) mod relay_transport;
 pub(crate) mod resume;
 pub(crate) mod task;

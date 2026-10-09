@@ -65,11 +65,11 @@ impl DesktopRemoteHistoryRuntime {
     pub(crate) fn with_persistent_history(
         path: std::path::PathBuf,
         epoch: impl Into<String>,
-    ) -> Arc<Self> {
-        Self::new(
-            Arc::new(RemoteHistoryStore::persistent(path)),
+    ) -> Result<Arc<Self>, String> {
+        Ok(Self::new(
+            Arc::new(RemoteHistoryStore::persistent(path).map_err(|error| error.code.to_owned())?),
             Arc::new(RemoteJournal::new(epoch)),
-        )
+        ))
     }
 
     pub(crate) fn store(&self) -> &Arc<RemoteHistoryStore> {
@@ -139,6 +139,21 @@ mod tests {
     use crate::features::remote_control::controller::history::RemoteHistoryState;
     use crate::features::remote_control::controller::journal::JournalKind;
     use serde_json::json;
+
+    #[test]
+    fn production_runtime_constructor_propagates_history_load_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("remote_history.json");
+        let bytes = b"{invalid fixture";
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            DesktopRemoteHistoryRuntime::with_persistent_history(path.clone(), "epoch-1")
+                .err()
+                .unwrap(),
+            "history_corrupt"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
 
     fn runtime() -> Arc<DesktopRemoteHistoryRuntime> {
         DesktopRemoteHistoryRuntime::new(

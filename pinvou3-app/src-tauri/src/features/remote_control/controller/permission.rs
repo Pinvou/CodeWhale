@@ -653,17 +653,7 @@ impl RemoteTaskPermissionScope for PermissionAuthority {
 /// Strips credentials, absolute host paths and header values from anything the
 /// B UI or the wire preview may show.
 pub(crate) fn sanitize_preview(preview: &str) -> String {
-    let mut out = String::with_capacity(preview.len().min(MAX_PREVIEW_CHARS));
-    for (index, token) in preview.split_whitespace().enumerate() {
-        if index > 0 {
-            out.push(' ');
-        }
-        out.push_str(&sanitize_token(token));
-        if out.chars().count() >= MAX_PREVIEW_CHARS {
-            break;
-        }
-    }
-    out.chars().take(MAX_PREVIEW_CHARS).collect()
+    super::redaction::sanitize_text(preview, MAX_PREVIEW_CHARS)
 }
 
 fn sanitize_scope(scope: &str) -> String {
@@ -672,42 +662,6 @@ fn sanitize_scope(scope: &str) -> String {
         .filter(|ch| !ch.is_control())
         .take(MAX_SCOPE_CHARS)
         .collect()
-}
-
-fn sanitize_token(token: &str) -> String {
-    let trimmed = token.trim_matches(|ch: char| {
-        matches!(
-            ch,
-            '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '@'
-        )
-    });
-    let lowered = trimmed.to_ascii_lowercase();
-    if lowered.starts_with("sk-")
-        || lowered.starts_with("bearer")
-        || lowered.starts_with("authorization:")
-        || lowered.starts_with("api_key")
-        || lowered.starts_with("token=")
-        || lowered.starts_with("cookie:")
-    {
-        return "[REDACTED]".to_owned();
-    }
-    if looks_like_path(trimmed) {
-        return "[PATH]".to_owned();
-    }
-    token.to_owned()
-}
-
-fn looks_like_path(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'\\' | b'/')
-    {
-        return true;
-    }
-    let separators = value.matches(['\\', '/']).count();
-    separators >= 2 || (separators == 1 && (value.starts_with('/') || value.contains('\\')))
 }
 
 fn bounded_reason(reason: &str) -> String {

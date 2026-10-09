@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use super::journal::{JournalEvent, JournalSnapshot, sanitize_event_payload};
 
-pub(crate) const HISTORY_VERSION: u8 = 1;
+pub(crate) const HISTORY_VERSION: u8 = 2;
 pub(crate) const MAX_HISTORIES: usize = 64;
 pub(crate) const MAX_HISTORY_EVENTS: usize = 2048;
 pub(crate) const MAX_TITLE_CHARS: usize = 120;
@@ -102,6 +102,8 @@ pub(crate) struct RemoteHistoryRecord {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HistoryFile {
     version: u8,
+    /// Never decreases, including after deleting the highest or last record.
+    sequence: u64,
     records: Vec<RemoteHistoryRecord>,
 }
 
@@ -128,14 +130,14 @@ impl RemoteHistoryStore {
         Self::default()
     }
 
-    pub(crate) fn persistent(path: PathBuf) -> Self {
+    pub(crate) fn persistent(path: PathBuf) -> Result<Self> {
         let store = Self {
             path: Some(path),
             records: Mutex::new(BTreeMap::new()),
             sequence: Mutex::new(0),
         };
-        let _ = store.load_from_disk();
-        store
+        store.load_from_disk()?;
+        Ok(store)
     }
 
     pub(crate) fn load_from_disk(&self) -> Result<()> {
@@ -152,11 +154,30 @@ impl RemoteHistoryStore {
         if file.version != HISTORY_VERSION {
             return Err(error("history_version_unsupported"));
         }
-        let mut records = self.records.lock();
-        records.clear();
-        for record in file.records {
-            records.insert(record.history_id.clone(), record);
+        let mut recovered = BTreeMap::new();
+        let sequence = file.sequence;
+        if file.records.len() > MAX_HISTORIES {
+            return Err(error("history_corrupt"));
         }
+        for record in file.records {
+            let id_sequence = record
+                .history_id
+                .strip_prefix("remote-history-")
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| error("history_corrupt"))?;
+            if record.history_id != format!("remote-history-{id_sequence:08}")
+                || id_sequence > sequence
+                || record.events.len() > MAX_HISTORY_EVENTS
+                || recovered.contains_key(&record.history_id)
+            {
+                return Err(error("history_corrupt"));
+            }
+            recovered.insert(record.history_id.clone(), record);
+        }
+        let mut records = self.records.lock();
+        *self.sequence.lock() = sequence;
+        *records = recovered;
         Ok(())
     }
 
@@ -182,8 +203,10 @@ impl RemoteHistoryStore {
             return Err(error("history_capacity"));
         }
         let mut sequence = self.sequence.lock();
-        *sequence += 1;
-        let history_id = format!("remote-history-{sequence:08}");
+        let next_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| error("history_sequence_exhausted"))?;
+        let history_id = format!("remote-history-{next_sequence:08}");
         let record = RemoteHistoryRecord {
             history_id: history_id.clone(),
             title,
@@ -197,8 +220,11 @@ impl RemoteHistoryStore {
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
         };
-        records.insert(history_id.clone(), record);
-        self.persist_locked(&records)?;
+        let mut candidate = records.clone();
+        candidate.insert(history_id.clone(), record);
+        self.persist_locked(&candidate, next_sequence)?;
+        *records = candidate;
+        *sequence = next_sequence;
         Ok(history_id)
     }
 
@@ -212,7 +238,8 @@ impl RemoteHistoryStore {
         now_ms: u64,
     ) -> Result<bool> {
         let mut records = self.records.lock();
-        let record = records
+        let mut candidate = records.clone();
+        let record = candidate
             .get_mut(history_id)
             .ok_or_else(|| error("history_not_found"))?;
         if record
@@ -242,7 +269,8 @@ impl RemoteHistoryStore {
         }
         record.last_sequence = record.last_sequence.max(event.sequence);
         record.updated_at_ms = now_ms;
-        self.persist_locked(&records)?;
+        self.persist_locked(&candidate, *self.sequence.lock())?;
+        *records = candidate;
         Ok(true)
     }
 
@@ -255,7 +283,8 @@ impl RemoteHistoryStore {
         now_ms: u64,
     ) -> Result<usize> {
         let mut records = self.records.lock();
-        let record = records
+        let mut candidate = records.clone();
+        let record = candidate
             .get_mut(history_id)
             .ok_or_else(|| error("history_not_found"))?;
         record.epoch = snapshot.epoch.clone();
@@ -268,25 +297,31 @@ impl RemoteHistoryStore {
             .collect();
         record.updated_at_ms = now_ms;
         let count = record.events.len();
-        self.persist_locked(&records)?;
+        self.persist_locked(&candidate, *self.sequence.lock())?;
+        *records = candidate;
         Ok(count)
     }
 
     pub(crate) fn mark_offline(&self, history_id: &str, now_ms: u64) -> Result<()> {
         let mut records = self.records.lock();
-        let record = records
+        let mut candidate = records.clone();
+        let record = candidate
             .get_mut(history_id)
             .ok_or_else(|| error("history_not_found"))?;
         record.state = RemoteHistoryState::OfflineCopy;
         record.updated_at_ms = now_ms;
-        self.persist_locked(&records)
+        self.persist_locked(&candidate, *self.sequence.lock())?;
+        *records = candidate;
+        Ok(())
     }
 
     /// Deletes only the A-side copy. It never touches B's session.
     pub(crate) fn delete(&self, history_id: &str) -> Result<bool> {
         let mut records = self.records.lock();
-        let removed = records.remove(history_id).is_some();
-        self.persist_locked(&records)?;
+        let mut candidate = records.clone();
+        let removed = candidate.remove(history_id).is_some();
+        self.persist_locked(&candidate, *self.sequence.lock())?;
+        *records = candidate;
         Ok(removed)
     }
 
@@ -319,12 +354,17 @@ impl RemoteHistoryStore {
         serde_json::to_string(&self.list()).unwrap_or_else(|_| "[]".to_owned())
     }
 
-    fn persist_locked(&self, records: &BTreeMap<String, RemoteHistoryRecord>) -> Result<()> {
+    fn persist_locked(
+        &self,
+        records: &BTreeMap<String, RemoteHistoryRecord>,
+        sequence: u64,
+    ) -> Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };
         let file = HistoryFile {
             version: HISTORY_VERSION,
+            sequence,
             records: records.values().cloned().collect(),
         };
         let payload = serde_json::to_vec_pretty(&file).map_err(|_| error("history_serialize"))?;
@@ -499,7 +539,7 @@ mod tests {
     fn persisted_history_survives_a_reload() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("remote_history.json");
-        let store = RemoteHistoryStore::persistent(path.clone());
+        let store = RemoteHistoryStore::persistent(path.clone()).unwrap();
         let id = store
             .create("Remote task", "Office PC", "session-0001", 1_000)
             .unwrap();
@@ -510,7 +550,7 @@ mod tests {
                 1_100,
             )
             .unwrap();
-        let reloaded = RemoteHistoryStore::persistent(path);
+        let reloaded = RemoteHistoryStore::persistent(path).unwrap();
         let record = reloaded.load(&id).unwrap();
         assert_eq!(record.events.len(), 1);
         assert_eq!(record.device_display_name, "Office PC");
@@ -521,17 +561,168 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("remote_history.json");
         std::fs::write(&path, b"{not json").unwrap();
-        let store = RemoteHistoryStore {
-            path: Some(path.clone()),
-            records: Mutex::new(BTreeMap::new()),
-            sequence: Mutex::new(0),
-        };
-        assert_eq!(store.load_from_disk().unwrap_err().code, "history_corrupt");
-        std::fs::write(&path, br#"{"version":99,"records":[]}"#).unwrap();
+        let original = std::fs::read(&path).unwrap();
         assert_eq!(
-            store.load_from_disk().unwrap_err().code,
+            RemoteHistoryStore::persistent(path.clone())
+                .err()
+                .unwrap()
+                .code,
+            "history_corrupt"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        // Unreleased v1 lacked a durable high-water mark. Do not guess one,
+        // silently migrate, or overwrite a file whose deletion history is lost.
+        let legacy = br#"{"version":1,"records":[]}"#;
+        std::fs::write(&path, legacy).unwrap();
+        assert_eq!(
+            RemoteHistoryStore::persistent(path.clone())
+                .err()
+                .unwrap()
+                .code,
+            "history_corrupt"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), legacy);
+        std::fs::write(&path, br#"{"version":99,"sequence":0,"records":[]}"#).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        assert_eq!(
+            RemoteHistoryStore::persistent(path.clone())
+                .err()
+                .unwrap()
+                .code,
             "history_version_unsupported"
         );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn restart_allocates_after_existing_ids_without_overwriting() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("remote_history.json");
+        let store = RemoteHistoryStore::persistent(path.clone()).unwrap();
+        let first = store.create("first", "PC", "session-0001", 1).unwrap();
+        let second = store.create("second", "PC", "session-0002", 2).unwrap();
+        let saved_first = store.load(&first).unwrap();
+        let saved_second = store.load(&second).unwrap();
+        drop(store);
+        let recovered = RemoteHistoryStore::persistent(path.clone()).unwrap();
+        let third = recovered.create("third", "PC", "session-0003", 3).unwrap();
+        assert_eq!(third, "remote-history-00000003");
+        assert_eq!(recovered.load(&first).unwrap(), saved_first);
+        assert_eq!(recovered.load(&second).unwrap(), saved_second);
+        assert_eq!(RemoteHistoryStore::persistent(path).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn unreadable_and_duplicate_history_files_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            RemoteHistoryStore::persistent(directory.path().to_path_buf())
+                .err()
+                .unwrap()
+                .code,
+            "history_unreadable"
+        );
+        let path = directory.path().join("remote_history.json");
+        let store = RemoteHistoryStore::persistent(path.clone()).unwrap();
+        let id = store.create("first", "PC", "session-0001", 1).unwrap();
+        let record = store.load(&id).unwrap();
+        let bytes = serde_json::to_vec(&HistoryFile {
+            version: HISTORY_VERSION,
+            sequence: 1,
+            records: vec![record.clone(), record],
+        })
+        .unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            RemoteHistoryStore::persistent(path.clone())
+                .err()
+                .unwrap()
+                .code,
+            "history_corrupt"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn deleting_records_never_reuses_persisted_history_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("remote_history.json");
+        let store = RemoteHistoryStore::persistent(path.clone()).unwrap();
+        let first = store.create("first", "PC", "session-0001", 1).unwrap();
+        let second = store.create("second", "PC", "session-0002", 2).unwrap();
+        store.delete(&second).unwrap();
+        drop(store);
+        let recovered = RemoteHistoryStore::persistent(path.clone()).unwrap();
+        let third = recovered.create("third", "PC", "session-0003", 3).unwrap();
+        assert_eq!(third, "remote-history-00000003");
+        recovered.delete(&first).unwrap();
+        recovered.delete(&third).unwrap();
+        drop(recovered);
+        let empty = RemoteHistoryStore::persistent(path).unwrap();
+        assert_eq!(
+            empty.create("fourth", "PC", "session-0004", 4).unwrap(),
+            "remote-history-00000004"
+        );
+    }
+
+    #[test]
+    fn invalid_or_exhausted_persisted_high_water_is_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("remote_history.json");
+        let store = RemoteHistoryStore::persistent(path.clone()).unwrap();
+        let id = store.create("first", "PC", "session-0001", 1).unwrap();
+        let record = store.load(&id).unwrap();
+        let bytes = serde_json::to_vec(&HistoryFile {
+            version: HISTORY_VERSION,
+            sequence: 0,
+            records: vec![record.clone()],
+        })
+        .unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            RemoteHistoryStore::persistent(path.clone())
+                .err()
+                .unwrap()
+                .code,
+            "history_corrupt"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let bytes = serde_json::to_vec(&HistoryFile {
+            version: HISTORY_VERSION,
+            sequence: u64::MAX,
+            records: vec![record],
+        })
+        .unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let exhausted = RemoteHistoryStore::persistent(path.clone()).unwrap();
+        assert_eq!(
+            exhausted
+                .create("second", "PC", "session-0002", 2)
+                .unwrap_err()
+                .code,
+            "history_sequence_exhausted"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn exhausted_history_sequence_does_not_mutate_records_or_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("remote_history.json");
+        let store = RemoteHistoryStore::persistent(path.clone()).unwrap();
+        let id = store.create("first", "PC", "session-0001", 1).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        *store.sequence.lock() = u64::MAX;
+        assert_eq!(
+            store
+                .create("second", "PC", "session-0002", 2)
+                .unwrap_err()
+                .code,
+            "history_sequence_exhausted"
+        );
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.load(&id).unwrap().title, "first");
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 
     #[test]
@@ -560,6 +751,130 @@ mod tests {
         assert!(!json.contains(r"C:\"));
         let listed = store.redacted_json();
         assert!(!listed.contains("sk-live-123"));
+    }
+
+    #[test]
+    fn failed_writes_leave_records_and_id_sequence_uncommitted() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("remote_history.json");
+        let backup = directory.path().join("original.json");
+        let store = RemoteHistoryStore::persistent(path.clone()).unwrap();
+        let id = store.create("first", "PC", "session-0001", 1).unwrap();
+        let record = store.load(&id).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::rename(&path, &backup).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(
+            store
+                .create("second", "PC", "session-0002", 2)
+                .unwrap_err()
+                .code,
+            "history_write_failed"
+        );
+        let event = journal_event(1, JournalKind::AssistantDelta, json!({"delta":"new"}));
+        assert_eq!(
+            store.append_authenticated(&id, &event, 2).unwrap_err().code,
+            "history_write_failed"
+        );
+        let journal = RemoteJournal::new("epoch-1");
+        journal
+            .append(
+                "event-1",
+                JournalKind::AssistantDelta,
+                "session-0001",
+                None,
+                json!({"delta":"new"}),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .apply_snapshot(&id, &journal.snapshot(), 2)
+                .unwrap_err()
+                .code,
+            "history_write_failed"
+        );
+        assert_eq!(
+            store.mark_offline(&id, 2).unwrap_err().code,
+            "history_write_failed"
+        );
+        assert_eq!(store.delete(&id).unwrap_err().code, "history_write_failed");
+        assert_eq!(store.load(&id).unwrap(), record);
+        assert_eq!(store.len(), 1);
+        assert_eq!(*store.sequence.lock(), 1);
+        assert_eq!(std::fs::read(&backup).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&backup, &path).unwrap();
+        assert_eq!(
+            store.create("second", "PC", "session-0002", 2).unwrap(),
+            "remote-history-00000002"
+        );
+    }
+
+    #[test]
+    fn real_journal_replay_snapshot_and_persistent_copy_hide_quoted_credentials() {
+        let journal = RemoteJournal::new("epoch-1");
+        for (index, text) in [
+            "'sk-test-fixture'",
+            "[token=fixture]",
+            "Bearer plain-fixture",
+            "Authorization: Bearer plain-fixture",
+            "Cookie: a=fixture b=fixture",
+            r#"{"api_key": "plain-fixture"}"#,
+            r#"{"api_key" : "plain-fixture"}"#,
+            "token= plain-fixture",
+            "secret = plain-fixture",
+            "X-Api-Key: plain-fixture",
+            "access-token: plain-fixture",
+            "signature: plain-fixture",
+            "token: plain-fixture",
+            "secret:plain-fixture",
+            r#"secret = "plain fixture phrase""#,
+            r#"{"api_key" : "plain fixture phrase"}"#,
+            "Authorization:Bearer plain-fixture",
+            "Cookie:a=fixture b=fixture",
+        ]
+        .iter()
+        .enumerate()
+        {
+            journal
+                .append(
+                    &format!("event-{index}"),
+                    JournalKind::AssistantDelta,
+                    "session-0001",
+                    None,
+                    json!({"delta":text}),
+                )
+                .unwrap();
+        }
+        let replay = match journal.replay_after("epoch-1", 0) {
+            super::super::journal::ReplayOutcome::Events(events) => events,
+            _ => panic!("expected exact replay"),
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("remote_history.json");
+        let store = RemoteHistoryStore::persistent(path.clone()).unwrap();
+        let id = store.create("copy", "PC", "session-0001", 1).unwrap();
+        for event in &replay {
+            store.append_authenticated(&id, event, 2).unwrap();
+        }
+        store.apply_snapshot(&id, &journal.snapshot(), 3).unwrap();
+        assert!(!serde_json::to_string(&replay).unwrap().contains("fixture"));
+        assert!(
+            !serde_json::to_string(&journal.snapshot())
+                .unwrap()
+                .contains("fixture")
+        );
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("fixture"));
+        assert_eq!(
+            RemoteHistoryStore::persistent(path)
+                .unwrap()
+                .load(&id)
+                .unwrap()
+                .events
+                .len(),
+            18
+        );
     }
 
     #[test]

@@ -19,6 +19,9 @@ pub(crate) mod task;
 #[path = "../../../src/features/remote_control/controller/journal.rs"]
 pub(crate) mod journal;
 
+#[path = "../../../src/features/remote_control/controller/redaction.rs"]
+pub(crate) mod redaction;
+
 #[path = "../../../src/features/remote_control/controller/capabilities.rs"]
 pub(crate) mod capabilities;
 

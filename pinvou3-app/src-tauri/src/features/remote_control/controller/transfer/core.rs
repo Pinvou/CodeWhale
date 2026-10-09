@@ -162,13 +162,8 @@ pub(crate) struct TransferMetadata {
 
 impl TransferMetadata {
     pub(crate) fn validate(&self, limits: &TransferLimits) -> Result<()> {
-        let name = self.file_name.trim();
-        if name.is_empty()
-            || name.chars().count() > MAX_FILE_NAME_CHARS
-            || name.contains(['/', '\\'])
-            || name == "."
-            || name == ".."
-        {
+        let name = self.file_name.as_str();
+        if !is_safe_publication_file_name(name) {
             return Err(error("transfer_file_name_invalid"));
         }
         if self.mime_type.len() > MAX_MIME_CHARS
@@ -194,6 +189,44 @@ impl TransferMetadata {
         }
         Ok(())
     }
+}
+
+/// Use the strict Windows publication contract on every host. Metadata may
+/// originate elsewhere, but it must never name a device or an alternate stream
+/// on the controlled Windows endpoint. Reject before reserving any resources.
+pub(crate) fn is_safe_publication_file_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.chars().count() > MAX_FILE_NAME_CHARS
+        || name.encode_utf16().count() > 255
+        || name != name.trim()
+        || name.ends_with(['.', ' '])
+        || name.chars().any(|ch| {
+            ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        })
+    {
+        return false;
+    }
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+    ) {
+        return false;
+    }
+    let port = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"));
+    !port.is_some_and(|number| {
+        matches!(
+            number,
+            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+        )
+    })
 }
 
 /// Opaque, direction-carrying handle. It is the only capability needed to keep
@@ -1322,5 +1355,60 @@ mod tests {
         registry
             .accept_chunk(&handle, TransferDirection::Upload, 1, &data[64..], 1_300)
             .unwrap();
+    }
+
+    #[test]
+    fn unsafe_windows_names_never_reserve_transfer_budget() {
+        let registry = TransferRegistry::default();
+        let context = TransferContext::new(
+            &context("generation-0001"),
+            "session-0001",
+            "task-0001",
+            TransferDirection::Upload,
+        )
+        .unwrap();
+        for name in [
+            "CON",
+            "nul.txt",
+            "pRn.tar.gz",
+            "AUX",
+            "COM1",
+            "cOm9.txt",
+            "LPT1",
+            "lPt9.log",
+            "COM¹.txt",
+            "LPT³",
+            "CONIN$",
+            "CONOUT$",
+            "report.txt:stream",
+            "report.txt::$DATA",
+            "bad?name",
+            "bad\0name",
+            "report.",
+            "NUL .txt",
+        ] {
+            assert_eq!(
+                registry
+                    .begin(context.clone(), metadata(name, b"x"), 1)
+                    .unwrap_err()
+                    .code,
+                "transfer_file_name_invalid",
+                "name must fail before admission"
+            );
+            assert_eq!(registry.connection_bytes("connection-0001"), 0);
+        }
+        for name in [
+            "report.txt",
+            "中文附件.txt",
+            "COM10.txt",
+            "LPT0.txt",
+            "console.txt",
+            ".hidden",
+        ] {
+            let (handle, _) = registry
+                .begin(context.clone(), metadata(name, b"x"), 1)
+                .unwrap();
+            assert!(registry.abort(&handle));
+        }
     }
 }
