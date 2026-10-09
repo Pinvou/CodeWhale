@@ -1,5 +1,18 @@
 import { errorCode, localizedErrorMessage } from '../../shared/user-facing-error.js';
 
+// Round-37 F3 (review #455): the ONE consent-failure marker string, mirroring
+// `scope::CONSENT_SYNC_FAILURE_MARKER` on the Rust side (both pinned by
+// consent_marker_frontend.test.mjs + the Rust emitter pins). The three JS
+// matchers import this instead of hardcoding the literal, so one-site drift
+// cannot survive the pin.
+export const CONSENT_SYNC_FAILURE_MARKER =
+  'persisting their default-off consent state failed';
+
+// Fallback code per flow step when the backend did not attach a code. The map
+// covers the flow card's whole step vocabulary: `runtime` / `connect` cannot
+// fail today (nothing runs while only those steps are active), but the total
+// mapping keeps future failure points on a specific message instead of the
+// generic `unknown` copy.
 const STEP_ERROR_CODES = {
   runtime: 'runtime_prepare_failed',
   cli: 'cli_install_failed',

@@ -190,9 +190,12 @@ async function heartbeat(value, lease, role, sequence) {
 test("long healthy connection freezes latest authenticated role cutoffs, not the wire identity", async () => {
   const value = fixture();
   const committed = await createLease(value);
-  value.clock = 34_000;
+  value.clock = 29_000;
   await heartbeat(value, committed.lease, "A", 1);
   await heartbeat(value, committed.lease, "B", 1);
+  value.clock = 34_000;
+  await heartbeat(value, committed.lease, "A", 2);
+  await heartbeat(value, committed.lease, "B", 2);
   value.clock = 35_000;
   const provisionalResult = await provisional(value, committed);
   assert.equal(provisionalResult.deliveries.length, 2);
@@ -200,8 +203,8 @@ test("long healthy connection freezes latest authenticated role cutoffs, not the
   // Even later authenticated heartbeats on either role cannot reset a frozen
   // recovery cycle. Repeated close and prepare retry share the same cutoff.
   value.clock = 50_000;
-  await heartbeat(value, committed.lease, "A", 2);
-  await heartbeat(value, committed.lease, "B", 2);
+  await heartbeat(value, committed.lease, "A", 3);
+  await heartbeat(value, committed.lease, "B", 3);
   await detached(value, committed);
   value.clock = 64_000;
   assert.equal(await value.hooks.expire(), 1);
@@ -212,9 +215,12 @@ test("missing or expired A evidence fails closed and B activity cannot create re
   for (const missing of [false, true]) {
     const value = fixture();
     const committed = await createLease(value);
-    value.clock = 31_000;
+    value.clock = 29_000;
     await heartbeat(value, committed.lease, "B", 1);
     if (missing) await value.liveness.onSocketClosed({ lease: committed.lease });
+    value.clock = 31_000;
+    await assert.rejects(heartbeat(value, committed.lease, "B", 2),
+      { code: missing ? "controller_liveness_state_not_found" : "controller_liveness_expired" });
     const evidenceDeadline = value.liveness.resumeDeadline(committed.lease);
     assert.equal(evidenceDeadline, null);
     const result = await value.hooks.onSocketClosed({ socket_identity: "old-socket-A", role: "A",
@@ -734,17 +740,43 @@ async function routedFixture(options = {}) {
     livenessHooks: value.liveness, resumeHooks: value.hooks,
   });
   const committed = await createLease(value);
-  for (const role of ["A", "B"]) router.addSocket({ socketIdentity: `new-socket-${role}`, source: "198.51.100.2", socket: `new-socket-${role}` });
-  router.authenticateControlled({ socketIdentity: "new-socket-B", endpointId: "endpoint-0001", authenticatedContext: { endpointId: "endpoint-0001" } });
+  const socketIdentities = options.socketIdentities ?? { A: "new-socket-A", B: "new-socket-B" };
+  for (const role of ["A", "B"]) router.addSocket({ socketIdentity: socketIdentities[role], source: "198.51.100.2", socket: socketIdentities[role] });
+  router.authenticateControlled({ socketIdentity: socketIdentities.B, endpointId: "endpoint-0001", authenticatedContext: { endpointId: "endpoint-0001" } });
   await detached(value, committed);
-  return { ...value, value, router, committed };
+  return { ...value, value, router, committed, socketIdentities };
 }
 
 async function routedProvisional(value) {
-  const { router, committed } = value;
-  await router.handle({ socketIdentity: "new-socket-A", message: prepare("A", committed.lease, committed.messages.A.resume_token_b64, "request-prepare-A", ZERO_NONCE) });
-  return router.handle({ socketIdentity: "new-socket-B", message: prepare("B", committed.lease, committed.messages.B.resume_token_b64, "request-prepare-B", "AQEBAQEBAQEBAQEBAQEBAQ==") });
+  const { router, committed, socketIdentities } = value;
+  await router.handle({ socketIdentity: socketIdentities.A, message: prepare("A", committed.lease, committed.messages.A.resume_token_b64, "request-prepare-A", ZERO_NONCE) });
+  return router.handle({ socketIdentity: socketIdentities.B, message: prepare("B", committed.lease, committed.messages.B.resume_token_b64, "request-prepare-B", "AQEBAQEBAQEBAQEBAQEBAQ==") });
 }
+
+test("A05 identifier propagation accepts actual colon resume peer updates through final rotation", async () => {
+  const value = await routedFixture({ socketIdentities: { A: "new:socket:A", B: "new:socket:B" } });
+  const result = await routedProvisional(value);
+  for (const { role, message } of recoverySteps(value.committed.lease, result.deliveries[0].message.activation_id)) {
+    await value.router.handle({ socketIdentity: value.socketIdentities[role], message });
+  }
+  const current = value.manager.lease(value.committed.lease.controller_lease_id);
+  assert.deepEqual(current.sockets, value.socketIdentities);
+  assert.equal(value.hooks.phase(current.controller_lease_id), "connected");
+  assert.equal(value.hooks.isBusinessAllowed(current.controller_lease_id), true);
+});
+
+test("A05 identifier propagation rejects tilde peer updates and terminates only the exact real lease", async () => {
+  const value = await routedFixture();
+  const original = value.hooks.handle.bind(value.hooks);
+  value.hooks.handle = async (input) => {
+    const result = await original(input);
+    return { ...result, peer_updates: result.peer_updates?.map((update) => ({ ...update, socket_identity: "new~socket" })) };
+  };
+  await assert.rejects(routedProvisional(value), { code: "controller_peer_updates_invalid" });
+  assert.equal(value.manager.lease(value.committed.lease.controller_lease_id), null);
+  assert.equal(value.hooks.phase(value.committed.lease.controller_lease_id), null);
+  assert.equal(value.liveness.resumeDeadline(value.committed.lease), null);
+});
 
 test("each accepted resume delivery failure releases the authoritative lease and all peer links", async () => {
   const failures = [

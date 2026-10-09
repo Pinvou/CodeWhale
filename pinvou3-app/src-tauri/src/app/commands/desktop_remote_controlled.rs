@@ -11,6 +11,8 @@ use tauri::{AppHandle, Emitter, State};
 use crate::features::behavior_telemetry::{RemoteControlEvent, RemoteStage, track_remote_control};
 use crate::features::files::file_ingest::validate_browsable_path;
 use crate::features::remote_control::RemoteControlManager;
+#[cfg(test)]
+pub(crate) use crate::features::remote_control::controller::clock::monotonic_millis;
 use crate::features::remote_control::controller::controlled::{
     ControlledDeviceManager, ControlledStateError, ControlledStatus, ControlledWorkspaceInfo,
     WorkspaceAuthorizationRequest,
@@ -43,7 +45,12 @@ pub(crate) fn spawn_watchdog_reaper(app: AppHandle) {
                     .live_runtime_context()
                     .ok()
                     .map(|(lease, _)| lease.connection_id);
-                let status = manager.poll_watchdog(controlled_monotonic_millis());
+                let Ok(status) = manager.poll_watchdog(controlled_monotonic_millis()) else {
+                    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                        "lifecycle_checkpoint", "watchdog_poll_failed",
+                    );
+                    continue;
+                };
                 if manager.live_runtime_context().is_err() {
                     if let Some(connection_id) = connection_id {
                         app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>()
@@ -450,7 +457,9 @@ pub fn desktop_remote_controlled_status(
     manager: State<'_, ControlledDeviceManager>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
-    Ok(manager.poll_watchdog(controlled_monotonic_millis()))
+    manager
+        .poll_watchdog(controlled_monotonic_millis())
+        .map_err(|error| error.code.to_owned())
 }
 
 #[tauri::command]
@@ -459,7 +468,9 @@ pub fn desktop_remote_controlled_poll_watchdog(
     manager: State<'_, ControlledDeviceManager>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
-    let status = manager.poll_watchdog(controlled_monotonic_millis());
+    let status = manager
+        .poll_watchdog(controlled_monotonic_millis())
+        .map_err(|error| error.code.to_owned())?;
     emit_status(&app, &status);
     Ok(status)
 }

@@ -58,12 +58,14 @@ mod tests;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicU64;
 
 pub use crate::core::mode_state::{ModeLane, SerializableMode};
 use crate::platform::paths;
 use crate::platform::prefs::{CodePermissionPrefs, ModeDefaultPrefs};
 use parking_lot::{Mutex, RwLock};
+#[cfg(feature = "benchmark-hooks")]
+pub(crate) use retention::RetentionEvictionRecord;
 
 /// Re-export the session-domain mode-state types so they are owned by the
 /// sessions feature. These were historically re-exported through a `core`
@@ -107,10 +109,15 @@ pub(crate) use self::store::MAX_SESSIONS_PER_KIND;
 pub(crate) use self::store::NEW_CHAT_TITLE;
 /// Re-export transcript helpers (consumed across engine / remote-control).
 pub use self::transcript::transcript_revision;
+/// Re-export the crate-visible sched-id predicate: the send gates
+/// (alias-defeating, round-34 minor 4) and the tests that pin the
+/// predicate itself.
+pub(crate) use self::validators::is_sched_session_id;
 /// Re-export the crate-visible session-id validator (used by commands). It is
 /// `pub(crate)` so it stays out of the crate's public API surface.
 pub(crate) use self::validators::{
-    validate_scheduled_task_id, validate_session_id, validate_user_workspace_path,
+    aux_side_effect_exclusion, is_aux_session_id, validate_scheduled_task_id, validate_session_id,
+    validate_user_workspace_path,
 };
 /// Re-export the rebind outcome (public rebind docs link into it; the module
 /// itself stays private).
@@ -215,11 +222,6 @@ pub struct SessionStore {
     /// execution = bound directory and ledger = session-private directory (the
     /// same dual-root semantics as native code session bindings).
     pub(crate) session_workspaces: Arc<RwLock<HashMap<String, PathBuf>>>,
-    /// Boot parse of the legacy `_session_workspaces.json` failed (corrupt but
-    /// potentially repairable file kept on disk). While set, the rebind
-    /// degraded-path rewrite must not delete or overwrite the file — only a
-    /// file this process successfully parsed may be rewritten/removed.
-    pub(crate) legacy_session_workspaces_parse_failed: Arc<AtomicBool>,
     /// Pinvou-native code-session predicate (ACP sessions are always plain; see the
     /// codex_acp store). Shares the same `SessionAgentStore` closure with the Engine
     /// bridge / remote side, injected by the app composition root (lib.rs);
@@ -310,7 +312,14 @@ pub struct SessionStore {
     /// deletions (see `product_runtime::agentic_task`). `None` everywhere
     /// else — the GUI never installs one and the sweep pays nothing.
     #[cfg(feature = "benchmark-hooks")]
-    retention_eviction_observer: Arc<Mutex<Option<Arc<Mutex<Vec<String>>>>>>,
+    retention_eviction_observer: Arc<Mutex<Option<Arc<Mutex<RetentionEvictionRecord>>>>>,
+    /// Evictions recorded before any observer was installed (the headless
+    /// host boots — and sweeps — before the runner arms). Flushed into the
+    /// observer when one is installed; the record windows its ids, since a
+    /// process that never arms must not grow it without bound. Gated like
+    /// the observer.
+    #[cfg(feature = "benchmark-hooks")]
+    pending_retention_evictions: Arc<Mutex<RetentionEvictionRecord>>,
 }
 
 /// Execution-root resolver for native code sessions (Pinvou Engine): a native

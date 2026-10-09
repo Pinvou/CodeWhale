@@ -9,12 +9,39 @@ import { test } from "node:test";
 const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const deployScript = join(repoRoot, "scripts", "deploy-remote-relay.sh");
 
+test("production deployment requires explicit confirmed targets before network or upload", async () => {
+  const source = await readFile(deployScript, "utf8");
+  const config = source.match(/^SERVER=[^]*?(?=^BASE_PATH=)/m)?.[0];
+  assert.ok(config, "execute the actual production configuration gate");
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const valid = {
+    PINVOU_REMOTE_DEPLOY_SERVER: "fixture@relay.invalid",
+    PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER: "fixture@relay.invalid",
+    SSH_KEY: "fixture-key", PINVOU_REMOTE_DIRECT_URL: "http://direct.invalid/pinvou3/remote",
+  };
+  const cases = [valid,
+    ...Object.keys(valid).map((key) => ({ ...valid, [key]: "" })),
+    { ...valid, PINVOU_REMOTE_DEPLOY_SERVER: "other@relay.invalid" },
+    { ...valid, PINVOU_REMOTE_DEPLOY_SERVER: "-oProxyCommand=bad", PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER: "-oProxyCommand=bad" },
+  ];
+  for (let i = 0; i < cases.length; i++) {
+    const result = spawnSync(bash, ["-c", "set -euo pipefail\n" + config + '\nprintf "validated\\n"'],
+      { env: { ...process.env, ...cases[i] }, encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, i === 0 ? 0 : 64);
+    assert.equal(result.stdout, i === 0 ? "validated\n" : "");
+    for (const value of Object.values(cases[i]).filter(Boolean)) assert.equal(result.stderr.includes(value), false);
+  }
+});
+
 test("production deploy builds and replaces the complete shared WebUI dist", async () => {
   const source = await readFile(deployScript, "utf8");
   assert.match(source, /PINVOU_REMOTE_PUBLIC_BASE_PATH="\$BASE_PATH" npm run build:web/);
   assert.match(source, /tar -czf - -C "\$RELAY_DIR\/web\/dist" \./);
   assert.match(source, /behavior-telemetry-schema\.js/);
-  assert.match(source, /mapfile -t relay_modules/);
+  assert.doesNotMatch(source, /\bmapfile\b/);
+  assert.match(source, /while IFS= read -r relay_module; do/);
+  assert.match(source, /relay_modules\+=\("\$relay_module"\)/);
   assert.match(source, /"\$\{relay_modules\[@\]\}"/);
   assert.match(source, /mkdir -p "\$backup\/code-js"/);
   assert.match(source, /for module in "\$code_stage"\/\*\.js/);
@@ -59,6 +86,29 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
     "await import('./telemetry-service.js')",
   ], { cwd: stage, encoding: "utf8" });
   assert.equal(loaded.status, 0, loaded.stderr);
+});
+
+test("deploy module collection does not require mapfile and preserves relative names", async (t) => {
+  const source = await readFile(deployScript, "utf8");
+  const collection = source.match(/^relay_modules=\(\)[\s\S]*?^done < <\(cd "\$RELAY_DIR" && printf '%s\\n' \.\/\*\.js\)/m);
+  assert.ok(collection, "exercise the actual deployment module collection");
+  const root = await mkdtemp(join(tmpdir(), "pinvou-relay-modules-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const relayDir = join(root, "relay with spaces");
+  await mkdir(relayDir);
+  for (const name of ["server.js", "extra module.js", "ignored.txt"]) {
+    await writeFile(join(relayDir, name), "");
+  }
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const collected = spawnSync(bash, ["-c", [
+    "set -euo pipefail",
+    "enable -n mapfile 2>/dev/null || true",
+    'RELAY_DIR="$1"',
+    collection[0],
+    'printf \'%s\\n\' "${relay_modules[@]}"',
+  ].join("\n"), "collect", relayDir.replaceAll("\\", "/")], { encoding: "utf8" });
+  assert.equal(collected.status, 0, collected.error?.message || collected.stderr);
+  assert.deepEqual(collected.stdout.trim().split(/\r?\n/), ["./extra module.js", "./server.js"]);
 });
 
 async function executable(path, content) {
@@ -208,6 +258,9 @@ esac
       PATH: `${bin}:${process.env.PATH}`,
       XDG_CACHE_HOME: join(root, "cache"),
       PINVOU_REMOTE_PUBLIC_URL: "https://public.invalid/pinvou3/remote",
+      PINVOU_REMOTE_DEPLOY_SERVER: "fixture@relay.invalid",
+      PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER: "fixture@relay.invalid",
+      SSH_KEY: "fixture-key",
       PINVOU_REMOTE_DIRECT_URL: "http://direct.invalid/pinvou3/remote",
       PINVOU_CONFIRM_PRODUCTION_DEPLOY: "1",
       SKIP_WEB_BUILD: "1",
