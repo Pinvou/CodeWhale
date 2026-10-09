@@ -44,7 +44,7 @@ func Load(serviceName string) (Config, error) {
 
 	environment := strings.TrimSpace(os.Getenv("APP_ENV"))
 	if environment == "" {
-		environment = "development"
+		return Config{}, errors.New("APP_ENV must be explicitly configured")
 	}
 
 	shutdownTimeout := defaultShutdownTimeout

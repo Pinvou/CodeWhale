@@ -148,7 +148,7 @@ class CiGatePolicyTests(unittest.TestCase):
         verifier_gate = self.pr_workflow.split(
             "- name: 公开底座 gitlink 可达性", maxsplit=1
         )[1].split("- name: 初始化公共底座 submodule", maxsplit=1)[0]
-        self.assertIn("./scripts/verify-public-submodule.sh", verifier_gate)
+        self.assertIn("./scripts/verify-public-submodule.sh --registered-snapshot", verifier_gate)
         self.assertNotIn("--allow-registered-candidate", verifier_gate)
         self.assertNotIn("LOCAL_SECURITY_HEAD", verifier)
         self.assertIn('[[ "$tag_target" != "$gitlink" ]]', verifier)
