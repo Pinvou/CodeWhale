@@ -412,7 +412,7 @@ impl ControllingDeviceManager {
         operation: ControllerOperation,
         activation_id: &str,
         resume_request_id: &str,
-        now_b: u64,
+        now_a: u64,
         liveness_epochs: (&str, &str),
         resume_token: [u8; 32],
         transport_key_fingerprint: [u8; 32],
@@ -441,13 +441,23 @@ impl ControllingDeviceManager {
                         liveness_epoch_a,
                         resume_token,
                         transport_key_fingerprint,
-                        now_b,
+                        now_a,
                         None,
                     )
                     .is_ok(),
                 None => false,
             };
-        if !accepted {
+        let installed = accepted
+            && inner.transport.as_ref().is_some_and(|transport| {
+                transport
+                    .restore_authenticated_lease_after_resume(
+                        &lease.context,
+                        activation_id,
+                        resume_request_id,
+                    )
+                    .is_ok()
+            });
+        if !installed {
             clear_live_context(&mut inner);
             inner.phase = ControllingStatusKind::Error;
             inner.error_code = Some(RESUME_FAILED_ERROR);
@@ -458,27 +468,6 @@ impl ControllingDeviceManager {
             .as_ref()
             .and_then(|gate| gate.resumed_liveness_epoch().map(str::to_owned))
             .unwrap_or_default();
-        // Disconnect clears transport admission. Reinstall only after the complete
-        // authenticated resume gate succeeds, before publishing Connected.
-        if let Some(transport) = inner.transport.as_ref() {
-            if transport.is_stopped()
-                || transport
-                    .install_authenticated_lease_after_resume(
-                        super::relay_transport::AuthenticatedLease {
-                            context: lease.context.clone(),
-                            negotiated_capabilities: lease.negotiated_capabilities.clone(),
-                        },
-                        activation_id,
-                        resume_request_id,
-                    )
-                    .is_err()
-            {
-                clear_live_context(&mut inner);
-                inner.phase = ControllingStatusKind::Error;
-                inner.error_code = Some(RESUME_FAILED_ERROR);
-                return Err(ControllingStateError::new("controller_resume_failed"));
-            }
-        }
         inner.resume_gate = Some(ControllerResumeGate::new(
             ControllerRole::ControllerA,
             lease.context.clone(),
@@ -490,6 +479,8 @@ impl ControllingDeviceManager {
             lease.liveness_epoch_a = liveness_epoch_a;
             lease.liveness_epoch_b = liveness_epoch_b;
             lease.resume_deadline_b = new_deadline_b;
+            lease.resume_token = resume_token;
+            lease.transport_key_fingerprint = transport_key_fingerprint;
         }
         inner.phase = ControllingStatusKind::Connected;
         Ok(status_locked(&inner))
@@ -516,10 +507,7 @@ impl ControllingDeviceManager {
             None => false,
         };
         if !prepared {
-            clear_live_context(&mut inner);
-            inner.phase = ControllingStatusKind::Error;
-            inner.error_code = Some(RESUME_FAILED_ERROR);
-            return Err(ControllingStateError::new("controller_resume_failed"));
+            return fail_resume(&mut inner);
         }
         Ok(ControllingResumeMaterial {
             lease: lease.context,
@@ -562,10 +550,7 @@ impl ControllingDeviceManager {
             None => false,
         };
         if !advanced {
-            clear_live_context(&mut inner);
-            inner.phase = ControllingStatusKind::Error;
-            inner.error_code = Some(RESUME_FAILED_ERROR);
-            return Err(ControllingStateError::new("controller_resume_failed"));
+            return fail_resume(&mut inner);
         }
         Ok(status_locked(&inner))
     }
@@ -639,7 +624,6 @@ impl ControllingDeviceManager {
             .ok_or(ControllerSendError::Unauthenticated)?;
         transport.try_send_sensitive_resume_control(frame)
     }
-
     pub(crate) fn fail_connection(
         &self,
         operation: ControllerOperation,
@@ -1024,6 +1008,13 @@ fn clear_live_context(inner: &mut Inner) {
         let _ = gate.terminate("controller_cleanup");
     }
     inner.resume_gate = None;
+}
+
+fn fail_resume<T>(inner: &mut Inner) -> Result<T> {
+    clear_live_context(inner);
+    inner.phase = ControllingStatusKind::Error;
+    inner.error_code = Some("endpoint_offline");
+    Err(ControllingStateError::new("controller_resume_failed"))
 }
 
 fn status_locked(inner: &Inner) -> ControllingStatus {
@@ -1509,7 +1500,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_disconnect_and_resume_do_not_expose_the_old_token() {
+    fn unauthenticated_final_cannot_skip_resume_steps() {
         let manager = ControllingDeviceManager::default();
         let operation = manager.connect("234-4567").unwrap();
         manager.complete_reserved(operation.clone()).unwrap();
@@ -1575,50 +1566,66 @@ mod tests {
         manager
             .complete_connected(operation.clone(), lease())
             .unwrap();
+        let current = lease();
+        let sender = super::super::test_support::resume_reader_transport(
+            ControllerRole::ControllerA,
+            current.context.clone(),
+            current.negotiated_capabilities,
+        );
+        manager.replace_transport(sender.clone());
+        super::super::relay_transport::disconnect_test_transport(&sender);
         manager.mark_transport_disconnected(5_000, Some(30_000));
-        manager.begin_resume(operation.clone(), 1_000).unwrap();
+        manager.begin_resume(operation.clone(), 6_000).unwrap();
         for (step, now_b) in [
             (
                 ResumeStep::Provisional {
                     activation_id: activation,
                 },
-                2_000,
+                7_000,
             ),
             (
                 ResumeStep::Confirmed {
                     activation_id: activation,
                 },
-                3_000,
+                8_000,
             ),
             (
                 ResumeStep::ActivationPending {
                     activation_id: activation,
                 },
-                4_000,
+                9_000,
             ),
             (
                 ResumeStep::LivenessConfirmed {
                     activation_id: activation,
                 },
-                5_000,
+                10_000,
             ),
             (
                 ResumeStep::ReadyAcknowledged {
                     activation_id: activation,
                 },
-                6_000,
+                11_000,
             ),
         ] {
             manager
                 .advance_resume(operation.clone(), step, now_b)
                 .unwrap();
         }
-        let resumed = manager
-            .complete_resumed(
-                operation,
+        super::super::relay_transport::dispatch_test_transport_frame(
+            &sender,
+            &super::super::test_support::resume_final_frame(
+                &current.context,
                 activation,
                 "request-resume-final",
-                7_000,
+            ),
+        );
+        let resumed = manager
+            .complete_resumed(
+                operation.clone(),
+                activation,
+                "request-resume-final",
+                12_000,
                 ("live:a-2", "live-b-2"),
                 [3; 32],
                 [4; 32],
@@ -1630,6 +1637,24 @@ mod tests {
             manager.live_lease().unwrap().controller_lease_id,
             "lease-0001"
         );
+        assert_eq!(
+            manager
+                .complete_resumed(
+                    operation,
+                    "activation-0001",
+                    "request-resume-0001",
+                    13_000,
+                    ("live:a-2", "live-b-2"),
+                    [3; 32],
+                    [4; 32],
+                    60_000
+                )
+                .unwrap_err()
+                .code,
+            "controller_phase_invalid"
+        );
+        assert_eq!(manager.status().status, ControllingStatusKind::Connected);
+        assert!(manager.live_lease().is_ok());
     }
 
     #[test]

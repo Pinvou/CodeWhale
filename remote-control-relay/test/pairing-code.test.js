@@ -56,6 +56,20 @@ function registration(overrides = {}) {
   };
 }
 
+test("identifier contract: pairing persists and reloads colon wire IDs without a tilde alias", async () => {
+  const stateStore = new MemoryStateStore();
+  const options = { stateStore, digestKeyring: keyring(), clock: () => 1000 };
+  const store = await PairingStore.open(options);
+  const request = registration({ registration_request_id: "registration:0001", endpoint_id: "endpoint:0001",
+    remote_control_generation: "generation:0001" });
+  const first = await store.register({ request, relayEpoch: "relay:epoch:0001", sealCode: sealPairingCode });
+  assert.equal(first.result.type, "desktop_pairing_registered");
+  const restarted = await PairingStore.open(options);
+  assert.equal(restarted.activePairing(first.result.pairing_id).endpoint_id, "endpoint:0001");
+  await assert.rejects(store.register({ request: registration({ endpoint_id: "endpoint~invalid" }),
+    relayEpoch: "relay:epoch:0001", sealCode: sealPairingCode }));
+});
+
 function keyring(activeKeyId = "digest-key-1", includeOld = true) {
   const keys = includeOld ? [{ keyId: "digest-key-1", key: "digest-key-one-material-at-least-32-bytes" }] : [];
   if (activeKeyId !== "digest-key-1") keys.push({ keyId: activeKeyId, key: "digest-key-two-material-at-least-32-bytes" });

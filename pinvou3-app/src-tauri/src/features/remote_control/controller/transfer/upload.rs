@@ -33,6 +33,9 @@ struct UploadState {
     active: HashMap<String, TransferContext>,
     completed: HashMap<String, CompletedReceipt>,
     pending_cleanup: HashMap<String, TransferBinding>,
+    // Only selected, completed receipts belong to an admitted execution.
+    // An unclaimed pre-upload with a reused task ID is not that execution.
+    admission_owners: HashMap<String, u64>,
 }
 
 const MAX_COMPLETED_RECEIPTS: usize = 64;
@@ -311,12 +314,35 @@ impl AttachmentUploads {
     /// Single-use admission receipt. All IDs are checked before any are
     /// consumed; on failure the caller cannot partially install attachments.
     /// The published files remain owned here until task/connection cleanup.
+    #[cfg(test)]
     pub(crate) fn consume_completed(
         &self,
         handle_ids: &[String],
         live: &LeaseContext,
         session_id: &str,
         task_id: &str,
+    ) -> Result<Vec<PublishedAttachment>, String> {
+        self.consume_owned(handle_ids, live, session_id, task_id, None)
+    }
+
+    pub(crate) fn consume_for_admission(
+        &self,
+        handle_ids: &[String],
+        live: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        sequence: u64,
+    ) -> Result<Vec<PublishedAttachment>, String> {
+        self.consume_owned(handle_ids, live, session_id, task_id, Some(sequence))
+    }
+
+    fn consume_owned(
+        &self,
+        handle_ids: &[String],
+        live: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        sequence: Option<u64>,
     ) -> std::result::Result<Vec<PublishedAttachment>, String> {
         let mut state = self.state.lock();
         if handle_ids.len() > self.registry.limits().max_transfers_per_task
@@ -330,7 +356,12 @@ impl AttachmentUploads {
                 .completed
                 .get(handle_id)
                 .ok_or_else(|| "transfer_unknown".to_owned())?;
-            if receipt.consumed || !binding_matches(&receipt.binding, live, session_id, task_id) {
+            if receipt.consumed
+                || !binding_matches(&receipt.binding, live, session_id, task_id)
+                || sequence.is_some_and(|sequence| {
+                    state.admission_owners.get(handle_id) != Some(&sequence)
+                })
+            {
                 return Err("transfer_binding_stale".to_owned());
             }
             descriptors.push(receipt.descriptor.clone());
@@ -362,6 +393,53 @@ impl AttachmentUploads {
         self.cleanup_where(self.registry.take_for_task(task_id), |binding| {
             binding.task_id == task_id
         })
+    }
+
+    pub(crate) fn claim_for_admission(
+        &self,
+        handle_ids: &[String],
+        live: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        sequence: u64,
+    ) -> Result<(), String> {
+        let mut state = self.state.lock();
+        if handle_ids.len() > self.registry.limits().max_transfers_per_task
+            || handle_ids.iter().collect::<HashSet<_>>().len() != handle_ids.len()
+        {
+            return Err("transfer_attachment_ids_invalid".into());
+        }
+        for id in handle_ids {
+            let receipt = state.completed.get(id).ok_or("transfer_unknown")?;
+            if receipt.consumed
+                || !binding_matches(&receipt.binding, live, session_id, task_id)
+                || state.admission_owners.contains_key(id)
+            {
+                return Err("transfer_binding_stale".into());
+            }
+        }
+        for id in handle_ids {
+            state.admission_owners.insert(id.clone(), sequence);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_for_admission(&self, sequence: u64) -> usize {
+        let mut state = self.state.lock();
+        let ids: Vec<_> = state
+            .admission_owners
+            .iter()
+            .filter(|(_, owner)| **owner == sequence)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            // Handles are registry-issued immutable instance IDs, not task IDs.
+            if let Ok(handle) = Self::handle(id) {
+                self.registry.abort(&handle);
+            }
+            self.release_staging(&mut state, id);
+        }
+        ids.len()
     }
 
     pub(crate) fn cleanup_for_connection(&self, connection_id: &str) -> usize {
@@ -520,6 +598,7 @@ impl AttachmentUploads {
         };
         if self.staging.abort(handle_id).is_ok() {
             state.pending_cleanup.remove(handle_id);
+            state.admission_owners.remove(handle_id);
         } else {
             state.pending_cleanup.insert(handle_id.to_owned(), binding);
         }
@@ -870,6 +949,73 @@ mod tests {
         );
         assert!(uploads.abort(&begin.handle_id));
         assert!(!uploads.abort(&begin.handle_id));
+    }
+
+    #[test]
+    fn old_admission_cleanup_preserves_same_task_id_new_preuploads_and_receipts() {
+        let staging = Arc::new(RecordingStaging::default());
+        let uploads = uploads(staging.clone(), TransferLimits::default());
+        let data = b"owned upload";
+        let context = || {
+            TransferContext::new(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                TransferDirection::Upload,
+            )
+            .unwrap()
+        };
+        let old = uploads.begin(context(), metadata_for(data), 1).unwrap();
+        uploads.accept_chunk(&old.handle_id, 0, data, 2).unwrap();
+        uploads
+            .claim_for_admission(
+                std::slice::from_ref(&old.handle_id),
+                &lease(),
+                "session-0001",
+                "task-0001",
+                1,
+            )
+            .unwrap();
+        let active = uploads.begin(context(), metadata_for(data), 3).unwrap();
+        let new = uploads.begin(context(), metadata_for(data), 4).unwrap();
+        uploads.accept_chunk(&new.handle_id, 0, data, 5).unwrap();
+        assert_eq!(uploads.cleanup_for_admission(1), 1);
+        uploads
+            .require_upload_binding(&active.handle_id, &lease(), "session-0001", "task-0001")
+            .unwrap();
+        uploads
+            .require_upload_binding(&new.handle_id, &lease(), "session-0001", "task-0001")
+            .unwrap();
+        uploads
+            .claim_for_admission(
+                std::slice::from_ref(&new.handle_id),
+                &lease(),
+                "session-0001",
+                "task-0001",
+                257,
+            )
+            .unwrap();
+        assert_eq!(
+            uploads
+                .consume_for_admission(
+                    std::slice::from_ref(&new.handle_id),
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    1
+                )
+                .unwrap_err(),
+            "transfer_binding_stale"
+        );
+        assert!(!uploads.state.lock().completed[&new.handle_id].consumed);
+        assert_eq!(uploads.cleanup_for_admission(1), 0);
+        assert!(uploads.state.lock().completed.contains_key(&new.handle_id));
+        assert_eq!(uploads.cleanup_for_admission(257), 1);
+        uploads
+            .require_upload_binding(&active.handle_id, &lease(), "session-0001", "task-0001")
+            .unwrap();
+        uploads.cleanup_for_connection(&lease().connection_id);
+        assert!(uploads.state.lock().admission_owners.is_empty());
     }
 
     #[test]

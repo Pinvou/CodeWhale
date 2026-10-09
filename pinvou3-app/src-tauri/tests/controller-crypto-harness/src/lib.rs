@@ -42,12 +42,20 @@ pub(crate) mod panic_hooks;
 mod core {
     pub(crate) use crate::panic_hooks;
 }
+#[path = "../../../src/features/remote_control/controller/shared_transport.rs"]
+mod shared_transport;
 
 #[cfg(test)]
 mod transfer;
 
 #[cfg(test)]
 mod state;
+
+// Actual ACP instance fence and callback identity helpers; this is not a
+// provider/child-process/EventBridge integration test.
+#[cfg(test)]
+#[path = "../../../src/features/codex_acp/lifecycle.rs"]
+mod acp_lifecycle;
 
 #[cfg(test)]
 #[path = "../../../src/features/remote_control/controller/test_support.rs"]
@@ -132,9 +140,12 @@ mod features {
             pub(crate) use crate::state::{controlled, controlling, task};
             pub(crate) mod relay_runtime {
                 pub(crate) fn log_controlled_event(_event: &str, _outcome: &str) {}
+                pub(crate) fn log_controller_event(_event: &str, _outcome: &str) {}
             }
             pub(crate) use crate::transfer;
-            pub(crate) use crate::{liveness, protocol, test_support};
+            pub(crate) use crate::{
+                liveness, protocol, relay_transport, resume, shared_transport, test_support,
+            };
         }
         pub(crate) use crate::legacy_relay::relay_client;
     }

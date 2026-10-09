@@ -78,7 +78,11 @@
         {},
         state.platformCapabilities,
         detected,
-        { loaded: true, desktopRemoteControl: detected && detected.os === "windows" && detected.desktopRemoteControlSupported === true }
+        {
+          loaded: true,
+          desktopRemoteControl: !!detected && detected.os === "windows" &&
+            detected.desktopRemoteControlSupported === true,
+        }
       );
     } catch (error) {
       state.platformCapabilities = Object.assign({}, state.platformCapabilities, {
@@ -1051,6 +1055,10 @@
   var isSharedMcpArtifactPath = artifactTrackerFeature.isSharedMcpArtifactPath;
   var artifactBelongsToSession = artifactTrackerFeature.artifactBelongsToSession;
   var filterSessionArtifacts = artifactTrackerFeature.filterSessionArtifacts;
+  // Wholesale artifact saves rebase from→to while a workspace_rebound mark
+  // exists (round-B Major 1): a chat turn's buffer save must not durably
+  // revert the backend lane's rebase of the persisted artifact paths.
+  var rebaseArtifactPathsForRebind = artifactTrackerFeature.rebaseArtifactPathsForRebind;
   var isDeliverable = artifactTrackerFeature.isDeliverable;
   var trackArtifact = artifactTrackerFeature.trackArtifact;
   var markTurnDirtyArtifact = artifactTrackerFeature.markTurnDirtyArtifact;
@@ -1299,6 +1307,7 @@
   var archiveSession = sessionsFeature.archiveSession;
   var restoreArchivedSession = sessionsFeature.restoreArchivedSession;
   var exportSessionArchive = sessionsFeature.exportSessionArchive;
+  var onSessionDeleted = sessionsFeature.onSessionDeleted;
   function runSyncOnSession(sid, fn) {
     if (!sid || sid === state.activeSessionId) { fn(); return; }
     var bg = sessionStates[sid]; if (!bg) return;
@@ -1323,6 +1332,16 @@
       loadWorkingSetFrom(restoreBuffer);
     }
   }
+  // Aux chat domain: reuses the injected pieces from chat/sessions (isBusyFor,
+  // the getBuffer family, ensureSessionBufferLoaded, purgeSessionBuffer,
+  // touchSessionBuffer); it does not build its own state or event listeners.
+  var auxChatFeature = installBridgeFeature("auxChat", {
+    state: state, invoke: invoke, bt: bt, sessionStates: sessionStates,
+    ensureSessionBufferLoaded: ensureSessionBufferLoaded,
+    purgeSessionBuffer: purgeSessionBuffer,
+    touchSessionBuffer: touchSessionBuffer,
+    isBusyFor: isBusyFor,
+  });
   // ── modeState 权威写回收敛点（评审 P1）────────────────────────────
   // 任何「invoke 返回 / 事件负载」带来的权威 modeState 更新都必须走
   // applyAuthoritativeModeState：内部统一 bump per-session epoch（作废
@@ -1426,7 +1445,7 @@
     if (buf) buf.artifacts = arts;
     else state.artifacts = arts;
     try {
-      try { await invoke("save_session_artifacts", { id: sid, paths: arts.map(function (a) { return a.path; }) }); } catch (_) {}
+      try { await invoke("save_session_artifacts", { id: sid, paths: rebaseArtifactPathsForRebind(sid, arts.map(function (a) { return a.path; })) }); } catch (_) {}
       if (isDefaultChatTitle(meta.title) || personaPlaceholderTitles[sid]) {
         var firstUser = msgs.find(function (m) { return m.role === "user"; });
         // 自动标题复用展示层过滤（与 web 侧一致）：内部信封/子智能体交接不参与
@@ -2966,6 +2985,13 @@
       cancelGeneration: cancelGeneration,
       cancelShellTask: cancelShellTask,
     },
+    auxChat: {
+      ensure: auxChatFeature.ensure,
+      send: auxChatFeature.send,
+      snapshot: auxChatFeature.snapshot,
+      discard: auxChatFeature.discard,
+      reset: auxChatFeature.reset,
+    },
     voice: {
       startVoiceInput: startVoiceInput,
       installVoiceAsr: installVoiceAsr,
@@ -3030,6 +3056,10 @@
       archiveSession: archiveSession,
       restoreArchivedSession: restoreArchivedSession,
       exportSessionArchive: exportSessionArchive,
+      // session:deleted subscription (see applyDeletedSession): the one
+      // deletion path feature code can observe per id — list_sessions
+      // excludes code-mode sessions, so slice-diffing alone misses them.
+      onSessionDeleted: onSessionDeleted,
       // Draft-state working directory selection (desktop only: system directory
       // dialog + the create_session workspacePath parameter; the web side has no
       // such channel, the UI guards on method existence).

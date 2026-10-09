@@ -162,10 +162,10 @@ mod tests {
         assert!(port.frames.lock().is_empty());
         heartbeat.install(lease, "live-b-1").unwrap();
         assert_eq!(
-            manager.poll_watchdog(0).kind(),
+            manager.poll_watchdog(0).unwrap().kind(),
             super::super::controlled::ControlledStatusKind::Connected
         );
-        manager.poll_watchdog(15_000);
+        manager.poll_watchdog(15_000).unwrap();
         heartbeat.pump(&manager, &operation, false, &port).unwrap();
         assert_eq!(
             port.frames.lock().len(),
@@ -173,7 +173,7 @@ mod tests {
             "liveness-suspect permits the exact current socket's evidence"
         );
         assert_eq!(
-            manager.poll_watchdog(30_000).kind(),
+            manager.poll_watchdog(30_000).unwrap().kind(),
             super::super::controlled::ControlledStatusKind::Error,
             "a B heartbeat at 15s cannot extend the original 30s peer-A budget"
         );
