@@ -6061,6 +6061,8 @@ async fn create_thread_workspace_rejects_empty_path() -> Result<()> {
         })
         .await
         .expect_err("empty workspace must be rejected");
+    // create_thread's own guard still says "must not be empty" (only the
+    // PATCH lane moved to the A28-1 text).
     assert!(format!("{err:#}").contains("workspace must not be empty"));
     Ok(())
 }
@@ -6093,7 +6095,10 @@ async fn update_thread_workspace_rejects_empty_path() -> Result<()> {
         )
         .await
         .expect_err("empty workspace must be rejected");
-    assert!(format!("{err:#}").contains("workspace must not be empty"));
+    // Round-32 B32-1: production moved to "a non-empty absolute path";
+    // the stable fragment "must not be empty" no longer matches — assert
+    // the current text family instead.
+    assert!(format!("{err:#}").contains("non-empty absolute path"));
     Ok(())
 }
 

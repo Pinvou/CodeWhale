@@ -26993,3 +26993,34 @@ fn exec_judged_cwd_resolves_absent_interior_behind_symlink() {
         Some(ToolAskRuleDecision::Allow)
     );
 }
+/// Round-32 (M31-2 residual): the composer-bang ask-rule call site in
+/// engine.rs (distinct from the turn_loop pair) also forwards the
+/// session's workspace_roots — `&[]` there shipped green under every
+/// existing pin.
+#[test]
+fn composer_bang_ask_rule_site_forwards_session_workspace_roots() {
+    let src = include_str!("../engine.rs");
+    let cut = &src[..src.find("mod tests").unwrap_or(src.len())];
+    let mut found_any = false;
+    let mut forwarded_all = true;
+    let mut cursor = 0;
+    while let Some(rel) = cut[cursor..].find("exec_shell_ask_rule_decision(") {
+        let at = cursor + rel;
+        let window = &cut[at..(at + 300).min(cut.len())];
+        if window.contains("&self.config") {
+            found_any = true;
+            if !window.contains("&self.session.workspace_roots") {
+                forwarded_all = false;
+            }
+        }
+        cursor = at + 1;
+    }
+    assert!(
+        found_any,
+        "the engine.rs composer-bang call site must exist"
+    );
+    assert!(
+        forwarded_all,
+        "the engine.rs composer-bang call site must forward the session's workspace_roots"
+    );
+}
