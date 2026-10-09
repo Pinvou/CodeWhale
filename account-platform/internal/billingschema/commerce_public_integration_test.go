@@ -246,19 +246,16 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 			t.Fatal(e)
 		}
 		stale, e := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", "v1", time.Minute)
-		if e != nil || stale == nil || stale.ID != old.ID || stale.MappingVersion != old.MappingVersion {
-			t.Fatal("old generation retry was not actually leased", e)
-		}
-		if e = r.CompleteCommerceCustomerSyncJob(ctx, *stale, commerce.CustomerProvisionResult{ExternalReferenceRedacted: "***obsolete"}); e != nil {
-			t.Fatal(e)
+		if e != nil || stale != nil {
+			t.Fatal("old generation acquired a new dispatch lease", e)
 		}
 		after, e := r.GetCommerceCustomerMapping(ctx, p)
 		if e != nil || before != after {
 			t.Fatal("stale retry/completion changed current adapter mapping", e)
 		}
 		var outcome string
-		if e = c.QueryRow(ctx, `SELECT outcome FROM commerce_customer_sync_evidence WHERE job_id=$1 AND outcome='STALE'`, old.ID).Scan(&outcome); e != nil || outcome != "STALE" {
-			t.Fatal("stale generation evidence", e)
+		if e = c.QueryRow(ctx, `SELECT outcome FROM commerce_customer_sync_evidence WHERE job_id=$1 AND outcome='FAILED'`, old.ID).Scan(&outcome); e != nil || outcome != "FAILED" {
+			t.Fatal("old generation retry evidence retained", e)
 		}
 		current, e := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", "v2", time.Minute)
 		if e != nil || current == nil || current.MappingVersion <= old.MappingVersion {

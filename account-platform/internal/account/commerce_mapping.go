@@ -200,6 +200,10 @@ func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, p
 	var candidate CommerceCustomerSyncJob
 	err = tx.QueryRow(ctx, `SELECT id,mapping_id,subject_type,subject_id FROM commerce_customer_sync_jobs
  WHERE provider_id=$1 AND adapter_version=$2
+ AND EXISTS(SELECT 1 FROM commerce_customer_mappings m WHERE m.id=mapping_id
+ AND m.subject_type=commerce_customer_sync_jobs.subject_type AND m.subject_id=commerce_customer_sync_jobs.subject_id
+ AND m.provider_id=commerce_customer_sync_jobs.provider_id AND m.adapter_version=commerce_customer_sync_jobs.adapter_version
+ AND m.version=commerce_customer_sync_jobs.mapping_version AND m.status<>'DETACHED')
  AND (subject_type<>'USER' OR EXISTS(SELECT 1 FROM users WHERE id=subject_id AND status='ACTIVE'))
  AND ((status IN ('PENDING','RETRY') AND next_attempt_at<=clock_timestamp()) OR (status='LEASED' AND lease_until<clock_timestamp()))
  ORDER BY next_attempt_at,created_at LIMIT 1`, providerID, adapterVersion).Scan(&candidate.ID, &candidate.MappingID, &candidate.SubjectType, &candidate.SubjectID)
@@ -216,8 +220,10 @@ func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, p
 	if subjectStatus != "ACTIVE" {
 		return nil, tx.Commit(ctx)
 	}
-	var mappingID uuid.UUID
-	if err = tx.QueryRow(ctx, `SELECT id FROM commerce_customer_mappings WHERE id=$1 FOR UPDATE`, candidate.MappingID).Scan(&mappingID); err != nil {
+	var mappingID, mappingSubjectID uuid.UUID
+	var mappingSubjectType, mappingProvider, mappingAdapter, mappingStatus string
+	var mappingVersion int64
+	if err = tx.QueryRow(ctx, `SELECT id,subject_type,subject_id,provider_id,adapter_version,version,status FROM commerce_customer_mappings WHERE id=$1 FOR UPDATE`, candidate.MappingID).Scan(&mappingID, &mappingSubjectType, &mappingSubjectID, &mappingProvider, &mappingAdapter, &mappingVersion, &mappingStatus); err != nil {
 		return nil, err
 	}
 	var job CommerceCustomerSyncJob
@@ -241,6 +247,11 @@ func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, p
 	if !eligible || job.MappingID != candidate.MappingID || job.SubjectType != candidate.SubjectType || job.SubjectID != candidate.SubjectID || job.ProviderID != providerID || job.AdapterVersion != adapterVersion {
 		return nil, tx.Commit(ctx)
 	}
+	// Only the current generation may acquire a new dispatch lease. Old jobs
+	// and callbacks remain evidence; an existing live lease is handled separately.
+	if mappingStatus == "DETACHED" || mappingSubjectType != job.SubjectType || mappingSubjectID != job.SubjectID || mappingProvider != job.ProviderID || mappingAdapter != job.AdapterVersion || mappingVersion != job.MappingVersion {
+		return nil, tx.Commit(ctx)
+	}
 	command, err := tx.Exec(ctx, `UPDATE commerce_customer_sync_jobs SET status='LEASED',attempts=attempts+1,lease_until=$2,updated_at=$1 WHERE id=$3 AND status=$4 AND attempts=$5`, now, now.Add(lease), job.ID, status, job.Attempts)
 	if err != nil {
 		return nil, err
@@ -248,8 +259,12 @@ func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, p
 	if command.RowsAffected() != 1 {
 		return nil, ErrConflict
 	}
-	if _, err = tx.Exec(ctx, `UPDATE commerce_customer_mappings SET status='IN_PROGRESS',updated_at=$2 WHERE id=$1 AND status<>'DETACHED' AND version=$3`, job.MappingID, now, job.MappingVersion); err != nil {
+	command, err = tx.Exec(ctx, `UPDATE commerce_customer_mappings SET status='IN_PROGRESS',updated_at=$2 WHERE id=$1 AND status<>'DETACHED' AND version=$3`, job.MappingID, now, job.MappingVersion)
+	if err != nil {
 		return nil, err
+	}
+	if command.RowsAffected() != 1 {
+		return nil, ErrConflict
 	}
 	job.Attempts++
 	return &job, tx.Commit(ctx)
