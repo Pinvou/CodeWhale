@@ -2272,6 +2272,9 @@ impl Engine {
         let _ = self
             .tx_event
             .send(Event::TurnComplete {
+                turn_id: Some(turn_id.clone()),
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage::default(),
                 status,
                 error,
@@ -2941,12 +2944,13 @@ impl Engine {
                                 Some("tool_surface".to_string());
                         }
                         if self.active_turn_tool_security.is_some() && !dynamic_tools.is_empty() {
-                            let _ = self
-                                .tx_event
-                                .send(Event::error(ErrorEnvelope::fatal(
+                            self.reject_unstarted_submission(
+                                submission_id,
+                                ErrorEnvelope::fatal(
                                     "Restricted turns do not accept dynamic tools".to_string(),
-                                )))
-                                .await;
+                                ),
+                            )
+                            .await;
                             self.active_turn_tool_security = configured_security;
                             continue;
                         }
@@ -3645,19 +3649,20 @@ impl Engine {
                         // SendMessage is the only operation that can change
                         // restricted-turn authority.
                         if self.control_plane_restricted {
-                            let _ = self
-                                .tx_event
-                                .send(Event::error(ErrorEnvelope::fatal(
+                            self.reject_unstarted_submission(
+                                submission_id,
+                                ErrorEnvelope::fatal(
                                     "Restricted turns cannot edit and replay the last turn"
                                         .to_string(),
-                                )))
-                                .await;
+                                ),
+                            )
+                            .await;
                             continue;
                         }
                         let route = match self.current_runtime_route() {
                             Ok(route) => route,
                             Err(err) => {
-                                self.reject_edit_last_turn(ErrorEnvelope::new(
+                                self.reject_edit_last_turn(submission_id.clone(), ErrorEnvelope::new(
                                     ErrorCategory::Authentication,
                                     ErrorSeverity::Critical,
                                     false,
@@ -3682,7 +3687,7 @@ impl Engine {
                         ) {
                             crate::runtime_handoff::EditLastTurnTarget::Editable(idx) => idx,
                             crate::runtime_handoff::EditLastTurnTarget::Unsupported => {
-                                self.reject_edit_last_turn(ErrorEnvelope::new(
+                                self.reject_edit_last_turn(submission_id.clone(), ErrorEnvelope::new(
                                     ErrorCategory::InvalidInput,
                                     ErrorSeverity::Error,
                                     false,
@@ -3693,7 +3698,7 @@ impl Engine {
                                 continue;
                             }
                             crate::runtime_handoff::EditLastTurnTarget::Missing => {
-                                self.reject_edit_last_turn(ErrorEnvelope::new(
+                                self.reject_edit_last_turn(submission_id.clone(), ErrorEnvelope::new(
                                     ErrorCategory::State,
                                     ErrorSeverity::Error,
                                     false,
@@ -4586,22 +4591,41 @@ impl Engine {
         }
     }
 
-    /// Reject an edit operation before model dispatch while still completing
+    /// Reject a submitted operation before model dispatch while still completing
     /// the submitted host lifecycle. `Event::Error` is advisory to embedded
     /// hosts; `TurnComplete(Failed)` is the authoritative terminal signal that
     /// releases their busy state and closes the admitted operation.
-    async fn reject_edit_last_turn(&mut self, envelope: ErrorEnvelope) {
+    async fn reject_unstarted_submission(
+        &mut self,
+        submission_id: Option<String>,
+        envelope: ErrorEnvelope,
+    ) {
         let message = envelope.message.clone();
         let _ = self.tx_event.send(Event::error(envelope)).await;
         let _ = self
             .tx_event
             .send(Event::TurnComplete {
+                turn_id: None,
+                submission_id,
+                compaction_id: None,
                 usage: Usage::default(),
                 status: TurnOutcomeStatus::Failed,
-                error: Some(message.clone()),
+                error: Some(message),
                 tool_catalog: None,
                 base_url: None,
             })
+            .await;
+    }
+
+    // Editing an existing conversation preserves its established goal-failure
+    // reconciliation. Other callers only emit the rejected operation's receipt.
+    async fn reject_edit_last_turn(
+        &mut self,
+        submission_id: Option<String>,
+        envelope: ErrorEnvelope,
+    ) {
+        let message = envelope.message.clone();
+        self.reject_unstarted_submission(submission_id, envelope)
             .await;
         let outcome = SendMessageOutcome::NotStarted {
             error: Some(message),
@@ -5357,17 +5381,18 @@ impl Engine {
         let dispatched_product =
             crate::route_billing::capture_product(&route.config, effective_provider);
         if let Err(err) = self.install_resolved_runtime_route(route) {
-            let _ = self
-                .tx_event
-                .send(Event::error(ErrorEnvelope::fatal_auth(format!(
-                    "Cannot start the turn because its provider route is not ready: {err}"
-                ))))
-                .await;
             self.sync_unstarted_goal_for_terminal_projection(
                 goal_objective.as_deref(),
                 goal_token_budget,
                 goal_status,
             );
+            self.reject_unstarted_submission(
+                submission_id,
+                ErrorEnvelope::fatal_auth(format!(
+                    "Cannot start the turn because its provider route is not ready: {err}"
+                )),
+            )
+            .await;
             let outcome = SendMessageOutcome::NotStarted { error: Some(err) };
             self.reconcile_non_completed_goal_turn(&outcome).await;
             return outcome;
@@ -5521,7 +5546,7 @@ impl Engine {
                 // Echo the host's correlation token (`None` when this turn
                 // was self-started without one) so the host can bind its
                 // submit-window actions to the turn that actually started.
-                submission_id,
+                submission_id: submission_id.clone(),
             })
             .await;
 
@@ -5598,6 +5623,9 @@ impl Engine {
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
+                    turn_id: Some(turn.id.clone()),
+                    submission_id: submission_id.clone(),
+                    compaction_id: None,
                     usage: turn.usage.clone(),
                     status: TurnOutcomeStatus::Failed,
                     error: Some(message.clone()),
@@ -5855,6 +5883,9 @@ impl Engine {
         let turn_complete_delivered = self
             .tx_event
             .send(Event::TurnComplete {
+                turn_id: Some(turn.id.clone()),
+                submission_id,
+                compaction_id: None,
                 usage: turn.usage,
                 status,
                 error: error.clone(),
@@ -5980,6 +6011,7 @@ impl Engine {
         route: ResolvedRuntimeRoute,
         compaction: CompactionConfig,
     ) {
+        let compaction_id = Some(id.clone());
         self.emit_compaction_started(
             id.clone(),
             false,
@@ -5992,6 +6024,9 @@ impl Engine {
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id,
                     usage: Usage::default(),
                     status: TurnOutcomeStatus::Interrupted,
                     error: None,
@@ -6009,7 +6044,20 @@ impl Engine {
                 .await;
             let _ = self
                 .tx_event
-                .send(Event::error(ErrorEnvelope::fatal_auth(message)))
+                .send(Event::error(ErrorEnvelope::fatal_auth(message.clone())))
+                .await;
+            let _ = self
+                .tx_event
+                .send(Event::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id,
+                    usage: Usage::default(),
+                    status: TurnOutcomeStatus::Failed,
+                    error: Some(message),
+                    tool_catalog: None,
+                    base_url: None,
+                })
                 .await;
             return;
         }
@@ -6018,6 +6066,7 @@ impl Engine {
     }
 
     async fn handle_manual_compaction(&mut self, id: String, cancel_token: CancellationToken) {
+        let compaction_id = Some(id.clone());
         let zero_usage = Usage {
             input_tokens: 0,
             output_tokens: 0,
@@ -6035,6 +6084,9 @@ impl Engine {
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id,
                     usage: zero_usage,
                     status: TurnOutcomeStatus::Failed,
                     error: Some(message),
@@ -6077,6 +6129,9 @@ impl Engine {
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id,
                     usage: zero_usage,
                     status: TurnOutcomeStatus::Interrupted,
                     error: None,
@@ -6104,6 +6159,9 @@ impl Engine {
                         let _ = self
                             .tx_event
                             .send(Event::TurnComplete {
+                                turn_id: None,
+                                submission_id: None,
+                                compaction_id,
                                 usage: zero_usage,
                                 status: TurnOutcomeStatus::Interrupted,
                                 error: None,
@@ -6169,6 +6227,9 @@ impl Engine {
         let _ = self
             .tx_event
             .send(Event::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id,
                 usage: zero_usage,
                 status: turn_status,
                 error: turn_error,
@@ -6194,6 +6255,9 @@ impl Engine {
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: zero_usage,
                     status: TurnOutcomeStatus::Failed,
                     error: Some(message),
@@ -6251,6 +6315,9 @@ impl Engine {
         let _ = self
             .tx_event
             .send(Event::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: zero_usage,
                 status,
                 error,

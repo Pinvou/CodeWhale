@@ -2574,6 +2574,9 @@ async fn compatibility_stream_closes_losslessly_across_replay_live_handoff() -> 
             .await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 3,
                     output_tokens: 1,
@@ -2827,6 +2830,9 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
         harness
             .tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage::default(),
                 status: TurnOutcomeStatus::Completed,
                 error: None,
@@ -3187,6 +3193,9 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                         .await;
                     let _ = tx_event
                         .send(EngineEvent::TurnComplete {
+                            turn_id: None,
+                            submission_id: None,
+                            compaction_id: None,
                             usage: Usage {
                                 input_tokens: 10,
                                 output_tokens: 5,
@@ -3202,6 +3211,9 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                 Op::CompactContext { .. } => {
                     let _ = tx_event
                         .send(EngineEvent::TurnComplete {
+                            turn_id: None,
+                            submission_id: None,
+                            compaction_id: None,
                             usage: Usage {
                                 input_tokens: 0,
                                 output_tokens: 0,
@@ -3343,6 +3355,9 @@ async fn turn_endpoint_operation_key_returns_original_and_conflicts_on_mismatch(
             sleep(Duration::from_millis(20)).await;
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: Usage::default(),
                     status: TurnOutcomeStatus::Completed,
                     error: None,
@@ -3448,6 +3463,9 @@ async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
             .await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 5,
                     output_tokens: 3,
@@ -3668,6 +3686,9 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
         sleep(Duration::from_millis(60)).await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 2,
                     output_tokens: 1,
@@ -4089,6 +4110,9 @@ async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
             .await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 4,
                     output_tokens: 2,
@@ -4808,6 +4832,9 @@ async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
             .await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 2,
                     output_tokens: 1,

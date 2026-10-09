@@ -13729,6 +13729,9 @@ fn local_cancel_marks_late_stream_events_for_suppression() {
     ));
     assert!(!suppress_engine_event_after_local_cancel(
         &EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: crate::core::events::TurnOutcomeStatus::Interrupted,
             error: None,

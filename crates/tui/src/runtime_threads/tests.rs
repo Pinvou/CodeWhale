@@ -1424,6 +1424,9 @@ async fn caller_cancellation_after_engine_acceptance_keeps_owned_turn_lifecycle(
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -1536,6 +1539,9 @@ async fn operation_key_replays_torn_response_survives_restart_and_rejects_mismat
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -1747,6 +1753,9 @@ async fn thread_updates_while_start_waits_for_capacity_survive_latest_turn_write
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -1909,6 +1918,9 @@ async fn compact_lifecycle_outlives_caller_and_preserves_concurrent_thread_updat
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -5260,6 +5272,9 @@ async fn thread_lifecycle_persists_across_restart() -> Result<()> {
                 .await;
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: Usage {
                         input_tokens: 10,
                         output_tokens: 12,
@@ -5394,6 +5409,9 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage {
                 input_tokens: 10,
                 output_tokens: 4,
@@ -5502,6 +5520,9 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -5548,6 +5569,9 @@ async fn completed_turn_without_engine_output_fails() -> Result<()> {
                 .await;
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: Usage {
                         input_tokens: 10,
                         output_tokens: 0,
@@ -5636,6 +5660,9 @@ async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()>
                 .await;
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: Usage::default(),
                     status: TurnOutcomeStatus::Completed,
                     error: None,
@@ -5697,6 +5724,9 @@ async fn engine_error_remains_failed_after_nominal_turn_complete() -> Result<()>
                 .await;
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: Usage::default(),
                     status: TurnOutcomeStatus::Completed,
                     error: None,
@@ -6214,6 +6244,9 @@ async fn compact_interrupt_persists_canceled_item_for_the_exact_request() -> Res
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
             error: None,
@@ -6448,6 +6481,9 @@ async fn multi_turn_continuity_same_thread() -> Result<()> {
                 .await;
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: Usage {
                         input_tokens: 5,
                         output_tokens: 5,
@@ -6680,6 +6716,9 @@ async fn host_goal_loop_kickoff_arms_one_continuation_and_parks_at_engine_cap() 
                 .await;
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: Usage {
                         input_tokens: 10,
                         output_tokens: 10,
@@ -6793,6 +6832,9 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
                 .await;
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: Usage {
                         input_tokens: 10,
                         output_tokens: 10,
@@ -6866,6 +6908,9 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
                 .await;
             let _ = failed_tx_event
                 .send(EngineEvent::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: Usage {
                         input_tokens: 5,
                         output_tokens: 5,
@@ -6958,6 +7003,9 @@ async fn host_goal_loop_mirrors_terminal_snapshot_and_does_not_rearm() -> Result
                     .await;
                 let _ = tx_event
                     .send(EngineEvent::TurnComplete {
+                        turn_id: None,
+                        submission_id: None,
+                        compaction_id: None,
                         usage: Usage {
                             input_tokens: 7,
                             output_tokens: 3,
@@ -7243,6 +7291,9 @@ async fn approval_required_with_stale_active_turn_is_denied() -> Result<()> {
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -7362,6 +7413,9 @@ async fn approval_required_awaits_external_decision_allow() -> Result<()> {
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -7474,6 +7528,9 @@ async fn user_input_snapshot_survives_reload_and_clears_after_submission() -> Re
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -7822,6 +7879,9 @@ async fn thread_detail_cursor_precedes_projection_reads_at_terminal_boundary() -
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -8073,6 +8133,9 @@ async fn thread_detail_materializes_stream_prefixes_before_their_delta_cursor() 
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
             error: None,
@@ -8212,6 +8275,9 @@ async fn thread_detail_delta_boundary_is_replay_idempotent() -> Result<()> {
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
             error: None,
@@ -8281,6 +8347,9 @@ async fn terminal_turn_cancels_pending_user_input_and_clears_snapshot() -> Resul
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -8470,6 +8539,9 @@ async fn dynamic_tool_result_settles_snapshot_and_emits_one_safe_resolution() ->
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -8655,6 +8727,9 @@ async fn dynamic_tool_result_receipt_outlives_canceled_delivery_future() -> Resu
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -9484,6 +9559,9 @@ async fn dynamic_tool_timeout_clears_snapshot_and_emits_once() -> Result<()> {
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -9557,6 +9635,9 @@ async fn terminal_turn_cancels_pending_dynamic_tool_exactly_once() -> Result<()>
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
             error: None,
@@ -9671,6 +9752,9 @@ async fn approval_required_external_deny_is_denied() -> Result<()> {
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -9741,6 +9825,9 @@ async fn auto_review_force_prompt_is_denied_without_opening_a_modal() -> Result<
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -9858,6 +9945,9 @@ async fn approval_pends_until_interrupt_and_next_turn_can_start() -> Result<()> 
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -10304,6 +10394,9 @@ async fn thinking_delta_emits_agent_reasoning_item() -> Result<()> {
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -10441,6 +10534,9 @@ async fn approval_required_remember_flips_thread_auto_approve() -> Result<()> {
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -10521,6 +10617,9 @@ async fn elevation_required_with_stale_active_turn_is_denied() -> Result<()> {
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -10588,6 +10687,9 @@ async fn steer_turn_on_active_turn_records_item_and_event() -> Result<()> {
                 .await;
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: Usage {
                         input_tokens: 8,
                         output_tokens: 9,
@@ -10751,6 +10853,9 @@ async fn steer_receipts_outlive_caller_cancellation_after_engine_acceptance() ->
         .await?;
     tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -10838,6 +10943,9 @@ async fn steer_rejects_a_terminal_durable_turn_without_dispatch_or_item() -> Res
         .await?;
     tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -11108,6 +11216,9 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                         .await;
                     let _ = tx_event
                         .send(EngineEvent::TurnComplete {
+                            turn_id: None,
+                            submission_id: None,
+                            compaction_id: None,
                             usage: Usage {
                                 input_tokens: 3,
                                 output_tokens: 3,
@@ -11145,6 +11256,9 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                         .await;
                     let _ = tx_event
                         .send(EngineEvent::TurnComplete {
+                            turn_id: None,
+                            submission_id: None,
+                            compaction_id: None,
                             usage: Usage {
                                 input_tokens: 1,
                                 output_tokens: 1,
@@ -11998,6 +12112,9 @@ async fn agent_mail_release_acceptance_two_task_matrix() -> Result<()> {
     harness_b
         .tx_event
         .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,

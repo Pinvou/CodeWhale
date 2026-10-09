@@ -2055,6 +2055,7 @@ pub(crate) async fn run_event_loop(
                         error,
                         tool_catalog,
                         base_url,
+                        ..
                     } => {
                         // A decision whose tool never reported completion
                         // still gets its receipt before the turn closes.
