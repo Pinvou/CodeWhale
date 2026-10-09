@@ -1014,7 +1014,16 @@ impl Pinvou3Bridge {
         b
     }
 
+    fn account_gateway_runtime(&self) -> bool {
+        self.runtime_model_credential
+            .as_ref()
+            .is_some_and(|credential| credential.request_idempotency_header().is_some())
+    }
+
     pub fn provider(&self) -> String {
+        if self.account_gateway_runtime() {
+            return "openai".into();
+        }
         if is_official_deepseek_base_url(&self.base_url()) {
             return "deepseek".to_string();
         }
@@ -1290,6 +1299,15 @@ impl Pinvou3Bridge {
     /// `DtConfig.default_text_model` / `EngineConfig.model`).
     /// env var > settings.custom_model_name > vendor default.
     pub fn model(&self) -> String {
+        if self.account_gateway_runtime() {
+            // finalize_runtime_bridge always installs the prepared model with
+            // this credential. Its account route cannot inherit a cloud override.
+            return self
+                .session_model
+                .as_ref()
+                .map(|model| model.model.clone())
+                .unwrap_or_default();
+        }
         let is_official_deepseek = is_official_deepseek_base_url(&self.base_url());
         if let Ok(v) = std::env::var("DEEPSEEK_MODEL") {
             if is_official_deepseek {
@@ -1326,6 +1344,13 @@ impl Pinvou3Bridge {
     /// `DtConfig.providers.*.base_url`).
     /// env var > settings.custom_base_url > vendor default.
     pub fn base_url(&self) -> String {
+        if self.account_gateway_runtime() {
+            return self
+                .session_model
+                .as_ref()
+                .map(|model| model.base_url.clone())
+                .unwrap_or_default();
+        }
         if let Ok(v) = std::env::var("DEEPSEEK_BASE_URL") {
             return v;
         }
@@ -2602,6 +2627,11 @@ impl Pinvou3Bridge {
     /// `DEEPSEEK_*` settings in run-dev.sh).
     pub fn build_dt_config(&self) -> DtConfig {
         let mut cfg = DtConfig::default();
+        cfg.request_idempotency_header = self
+            .runtime_model_credential
+            .as_ref()
+            .and_then(|credential| credential.request_idempotency_header())
+            .map(str::to_owned);
         let provider = self.provider();
         cfg.provider = Some(provider.clone());
         let api_key = self.api_key();
@@ -8432,6 +8462,63 @@ mod tests {
                 .and_then(|providers| providers.openai.api_key.as_deref()),
             Some("runtime-key")
         );
+    }
+
+    #[test]
+    fn account_gateway_credentials_and_operation_header_stay_on_prepared_route() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        let mut bridge = fixture_bridge();
+        let mut account_model = SavedModel::builtin_account_platform();
+        account_model.base_url = "https://gateway.example.test/v1".into();
+        account_model.model = "prepared-account-model".into();
+        bridge.session_model = Some(account_model);
+        bridge.runtime_model_credential = Some(
+            RuntimeModelCredential::account_platform_access_token("isolated-account-access".into())
+                .unwrap(),
+        );
+        // SAFETY: shared test ENV_LOCK serializes mutation and restores all values.
+        unsafe {
+            std::env::set_var("DEEPSEEK_MODEL", "other-model");
+            std::env::set_var("DEEPSEEK_PROVIDER", "anthropic");
+            std::env::set_var(
+                "DEEPSEEK_BASE_URL",
+                "https://other-provider.example.test/v1",
+            );
+            std::env::set_var("DEEPSEEK_API_KEY", "other-key");
+        }
+        let config = bridge.build_dt_config();
+        assert_eq!(bridge.base_url(), "https://gateway.example.test/v1");
+        assert_eq!(bridge.model(), "prepared-account-model");
+        assert_eq!(bridge.provider(), "openai");
+        assert_eq!(
+            config.request_idempotency_header.as_deref(),
+            Some("Idempotency-Key")
+        );
+        assert_eq!(
+            config
+                .providers
+                .as_ref()
+                .unwrap()
+                .openai
+                .base_url
+                .as_deref(),
+            Some("https://gateway.example.test/v1")
+        );
+        assert!(
+            config.providers.as_ref().unwrap().openai.api_key.as_deref()
+                == Some("isolated-account-access")
+        );
+        bridge.runtime_model_credential = None;
+        let ordinary = bridge.build_dt_config();
+        assert!(ordinary.request_idempotency_header.is_none());
+        assert_eq!(bridge.base_url(), "https://other-provider.example.test/v1");
+        assert_eq!(bridge.provider(), "anthropic");
+        assert_eq!(bridge.model(), "other-model");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { can, isWeb } from '../shared/platform.js';
+import { isBuiltInAccountPlatformModel } from '../shared/model-options.js';
 
 const bridge = window.TauriBridge || { available: false };
 
@@ -67,18 +68,27 @@ function activeModelIsLocal(bs) {
   return isLocalModel(m);
 }
 
-// API Key gate 只覆盖正在交互的聊天页。设置页必须始终可达，否则首次启动时
-// “去配置”按钮会把用户送到仍被 gate 盖住的设置页，形成无法录入 Key 的死锁。
-function shouldShowApiKeyGate(bs, currentView, bridgeAvailable) {
+// 模型接入页只覆盖正在交互的聊天页。设置页必须始终可达，否则首次启动时
+// “使用本地/第三方模型”会把用户送到仍被 gate 盖住的设置页，形成死锁。
+// 除了真正没有任何可用模型的状态，旧版本的“云模型缺少用户凭据”也统一
+// 进入这里，让用户在登录平台模型和配置自己的模型之间作出明确选择。
+function shouldShowModelAccessGate(bs, currentView, bridgeAvailable) {
   const inChat = currentView === 'chat'
     || (currentView === 'scheduled' && !!(bs && bs.scheduledRunContext));
   const config = bs && bs.effectiveModelConfig;
+  const modelsLoaded = !!(bs && bs.modelsLoaded === true && Array.isArray(bs.savedModels));
+  // The managed carrier is not a concrete callable selection. It remains in
+  // list_models for native runtime routing and must not hide the first-use gate.
+  const hasSavedModel = modelsLoaded && bs.savedModels.some(model => model?.id && !isBuiltInAccountPlatformModel(model));
+  const hasEffectiveModel = !!String((config && config.model) || '').trim();
   const missingCredential = config
     && (config.credential_state === 'missing' || config.credential_state === 'unavailable');
   // 旧后端没有返回 requires_user_api_key 时保持原有安全门控；显式 false 表示凭据由
   // 运行时或无鉴权端点负责，前端不能要求用户手工填写 API Key。
   const requiresUserApiKey = config && config.requires_user_api_key !== false;
-  return !!(bridgeAvailable && inChat && missingCredential && requiresUserApiKey && !isLocalModel(config));
+  const noUsableModel = modelsLoaded && !hasSavedModel && !hasEffectiveModel;
+  const userCredentialRequired = missingCredential && requiresUserApiKey && !isLocalModel(config);
+  return !!(bridgeAvailable && inChat && (noUsableModel || userCredentialRequired));
 }
 
 export {
@@ -88,5 +98,5 @@ export {
   baseUrlIsLoopback,
   isLocalModel,
   activeModelIsLocal,
-  shouldShowApiKeyGate,
+  shouldShowModelAccessGate,
 };

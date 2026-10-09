@@ -59,6 +59,30 @@
     // and background sessions may stream concurrently.
     var STREAM_NOTIFY_MAX_WAIT_MS = 32;
     var pendingStreamNotifications = Object.create(null);
+    var pendingBillingNotices = Object.create(null);
+
+    function billingNoticeKey(sessionId, generation) {
+      return String(sessionId || "") + ":" + String(Number(generation || 0));
+    }
+
+    function billingUserError(notice) {
+      if (!notice || notice.code !== "WALLET_INSUFFICIENT" || notice.context_type !== "PERSONAL") return null;
+      var completed = notice.turn_outcome === "COMPLETED";
+      var contextType = notice.context_type || "";
+      var organizationId = String(notice.organization_id || "").trim();
+      var action = notice.action === "OPEN_RECHARGE" ? "OPEN_RECHARGE" : "";
+      return {
+        kind: "wallet_insufficient",
+        severity: completed ? "warning" : "error",
+        stage: notice.stage || "",
+        turnOutcome: notice.turn_outcome || "",
+        settlementStatus: notice.settlement_status || "",
+        action: action,
+        contextType: contextType,
+        organizationId: organizationId,
+        errorCode: notice.code,
+      };
+    }
 
     function cancelPendingStreamNotify(sid) {
       var pending = sid && pendingStreamNotifications[sid];
@@ -193,6 +217,7 @@
         status: payload && payload.status || (payload && payload.error ? "Failed" : "Completed"),
         error: payload && payload.error || null,
         user_error: payload && (payload.user_error || payload.userError) || null,
+        billing_notice: payload && payload.billing_notice || null,
         ui_turn_index: start && start.ui_turn_index,
       };
       state.turnTimeline = (state.turnTimeline || []).concat([record]);
@@ -228,6 +253,22 @@
       });
     }
 
+    function mergeLocalTimelineBusinessState(local, authoritative) {
+      var localCompletions = Object.create(null);
+      (Array.isArray(local) ? local : []).forEach(function (event) {
+        if (!event || event.event !== "assistant_done" || !event.turn_id) return;
+        if (event.user_error || event.billing_notice) localCompletions[event.turn_id] = event;
+      });
+      return (Array.isArray(authoritative) ? authoritative : []).map(function (event) {
+        var localEvent = event && localCompletions[event.turn_id];
+        if (!localEvent || event.event !== "assistant_done") return event;
+        return Object.assign({}, event, {
+          user_error: event.user_error || localEvent.user_error || null,
+          billing_notice: event.billing_notice || localEvent.billing_notice || null,
+        });
+      });
+    }
+
     // chat:done 可能来自后台、页面恢复或切换后的会话，本地 buffer 不一定见过
     // 对应的 turn_started。后端保证先落 timing_events 再发终态；这里重新读取
     // 权威时间线，避免明明已完成却漏掉状态徽标与耗时。读取失败时保留本地投影。
@@ -246,7 +287,7 @@
             // timing sidecar 是 best-effort；若权威快照明显旧于刚收到的本地终态，
             // 不用旧数据覆盖当前可见状态。
             if (localLatest && authoritativeLatest + 5000 < localLatest) return;
-            state.turnTimeline = authoritative;
+            state.turnTimeline = mergeLocalTimelineBusinessState(state.turnTimeline, authoritative);
             changed = true;
           });
           if (changed) notify();
@@ -1124,6 +1165,25 @@
         !knownDoneSession && !scheduledDoneSession) {
       return;
     }
+    var billingKey = billingNoticeKey(sid, e.payload && e.payload.generation);
+    var billingNotice = sid && pendingBillingNotices[billingKey];
+    if (billingNotice) {
+      delete pendingBillingNotices[billingKey];
+      var billingError = billingUserError(billingNotice);
+      if (billingError) {
+        e.payload = e.payload || {};
+        e.payload.billing_notice = billingNotice;
+        e.payload.user_error = billingError;
+        e.payload.userError = billingError;
+      }
+    }
+    var completedGeneration = Number(e.payload && e.payload.generation || 0);
+    var billingPrefix = String(sid || "") + ":";
+    Object.keys(pendingBillingNotices).forEach(function (key) {
+      if (key.startsWith(billingPrefix) && Number(key.slice(billingPrefix.length)) <= completedGeneration) {
+        delete pendingBillingNotices[key];
+      }
+    });
     safeConsoleInfo("[pinvou3][chat-ui] chat done event", {
       sid: sid,
       error: e.payload && e.payload.error || null,
@@ -1407,6 +1467,18 @@
       }
     }
   }); });
+
+  // The account-platform proxy observes the exact Billing contract before the
+  // model engine sees the terminal. Keep it by session and attach it to the
+  // authoritative chat:done record so successful overage settlement can show
+  // a turn-scoped warning card without turning the completed answer into an error.
+  listen("chat:billing_notice", function (e) {
+    var payload = e && e.payload || {};
+    var sid = payload.session_id;
+    var notice = payload.billing_notice;
+    if (!sid || !notice || notice.code !== "WALLET_INSUFFICIENT" || notice.context_type !== "PERSONAL") return;
+    pendingBillingNotices[billingNoticeKey(sid, payload.turn_generation)] = notice;
+  });
 
   // File watcher 推送的产物事件：session workspace 下新文件/修改/删除。
   // 路由到对应 session 的产物列表(后台 session 的产物也跟踪)。

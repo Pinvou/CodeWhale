@@ -53,6 +53,7 @@ struct ActiveTurnTiming {
     /// remains stable for the local timeline, while value signals must join
     /// the task lifecycle on the engine-provided id.
     behavior_turn_id: Option<String>,
+    billing_notice: Option<serde_json::Value>,
     engine_acquire: Option<EngineAcquireTiming>,
     engine_ready_timestamp: Option<i64>,
     first_output_timestamp: Option<i64>,
@@ -69,6 +70,7 @@ impl ActiveTurnTiming {
         Self {
             turn_id,
             behavior_turn_id: None,
+            billing_notice: None,
             engine_acquire: None,
             engine_ready_timestamp: None,
             first_output_timestamp: None,
@@ -254,6 +256,19 @@ pub(crate) fn has_extra_queued_turns(session_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Attach the structured notice to the timing owner already active for this turn.
+pub fn record_billing_notice(session_id: &str, notice: serde_json::Value) -> bool {
+    active_turns()
+        .lock()
+        .ok()
+        .and_then(|mut map| {
+            let active = map.get_mut(session_id)?.back_mut()?;
+            active.billing_notice = Some(notice);
+            Some(())
+        })
+        .is_some()
+}
+
 /// 旧调用点(无 usage):落盘不带 usage 字段,reader API 反序列化为 None。
 /// 保留是为了不强迫所有调用点同步升级(commands.rs:200 的 send_error 兜底等)。
 pub fn finish_turn(session_id: &str, status: &str, error: Option<&str>) {
@@ -400,6 +415,9 @@ fn finish_turn_internal(
     });
     if let Some(behavior_turn_id) = active_turn.behavior_turn_id {
         entry["behavior_turn_id"] = json!(behavior_turn_id);
+    }
+    if let Some(billing_notice) = active_turn.billing_notice {
+        entry["billing_notice"] = billing_notice;
     }
     if let Some(engine_acquire) = active_turn.engine_acquire {
         entry["engine_startup"] = json!({
@@ -557,6 +575,8 @@ pub struct TimelineEvent {
     pub ts: String,     // RFC3339
     pub status: Option<String>, // assistant_done only
     pub error: Option<String>, // assistant_done only
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_notice: Option<serde_json::Value>,
     pub usage: Option<TurnUsage>, // assistant_done / context_snapshot(老事件为 None)
     #[cfg(any(feature = "benchmark-hooks", test))]
     pub tool_name: Option<String>,
@@ -710,6 +730,7 @@ fn parse_timeline_line(line: &str) -> Option<TimelineEvent> {
             .and_then(|x| x.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        billing_notice: v.get("billing_notice").cloned(),
         usage,
         #[cfg(any(feature = "benchmark-hooks", test))]
         tool_name: v
@@ -846,6 +867,49 @@ pub fn compute_stats(session_id: &str) -> std::io::Result<SessionTimelineStats> 
 mod tests {
     use super::*;
     use crate::platform::paths::tests::ENV_LOCK;
+
+    #[test]
+    fn billing_notice_survives_timeline_hydration() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-timing-billing-notice-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        let sid = "session-billing-notice";
+        start_turn(sid);
+        assert!(record_billing_notice(
+            sid,
+            json!({
+                "schema_version": 1,
+                "code": "WALLET_INSUFFICIENT",
+                "stage": "INITIAL_RESERVATION",
+                "turn_outcome": "REJECTED",
+                "settlement_status": "NOT_STARTED",
+                "action": "CONTACT_ORG_ADMIN",
+                "context_type": "ORGANIZATION",
+                "usage_request_id": "0199a100-0001-7000-8000-000000000106"
+            })
+        ));
+        finish_turn(sid, "Failed", Some("wallet reservation rejected"));
+
+        let done = read_timeline(sid)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event == "assistant_done")
+            .expect("assistant terminal");
+        let notice = done.billing_notice.expect("persisted billing notice");
+        assert_eq!(notice["code"], "WALLET_INSUFFICIENT");
+        assert_eq!(notice["context_type"], "ORGANIZATION");
+        assert_eq!(notice["action"], "CONTACT_ORG_ADMIN");
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
 
     #[test]
     fn timing_events_append_and_pair_turn_id() {

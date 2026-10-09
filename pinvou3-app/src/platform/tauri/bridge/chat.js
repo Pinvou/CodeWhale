@@ -33,9 +33,6 @@
     var userMessageDisplayText = context.userMessageDisplayText;
     var parseScheduledTaskDraftFromText = context.parseScheduledTaskDraftFromText;
     var autoCreateScheduledTaskDraft = context.autoCreateScheduledTaskDraft;
-    var modelAvailabilityError = typeof context.modelAvailabilityError === "function"
-      ? context.modelAvailabilityError
-      : function () { return null; };
 
   // Composer 草稿是纯前端短期状态：写入时不 notify，避免每次按键都克隆
   // 整个 chat slice 并触发 App 重渲染。会话切换本身会 notify，ChatView 会在
@@ -369,16 +366,6 @@
   // 真正发送:在 sid 的工作集上加 user 气泡 + 流式占位 + busy,然后 invoke chat。
   // active/后台通用(后台走 runSyncOnSession 临时切工作集)。
   function doSendFor(sid, text, displayText, attachmentsPayload, meta, restrictTools, surfaceFailure) {
-    var unavailableModelMessage = modelAvailabilityError(sid);
-    if (unavailableModelMessage) {
-      var unavailableModelError = new Error(unavailableModelMessage);
-      runSyncOnSession(sid, function () {
-        state.chatItems = state.chatItems.filter(function (item) { return !item.turnErrorNotice; });
-        addSystemItem("⚠️ " + unavailableModelMessage, { turnErrorNotice: true });
-      });
-      notify();
-      return surfaceFailure ? Promise.reject(unavailableModelError) : Promise.resolve(false);
-    }
     safeConsoleInfo("[pinvou3][chat-ui] send start", {
       sid: sid,
       textLen: (text || "").length,

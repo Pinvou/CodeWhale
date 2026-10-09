@@ -1,0 +1,63 @@
+# Apply after personal/workload/finance; opt-in profile, no public ingress.
+name: pinvou-personal
+services:
+  account-approval-recovery:
+    profiles: [approval-recovery]
+    image: ${APPROVAL_RECOVERY_IMAGE:?set independently reviewed same-source recovery image}
+    pull_policy: never
+    user: "65532:65532"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 192m
+    cpus: 0.5
+    pids_limit: 32
+    ulimits: {core: {soft: 0, hard: 0}}
+    env_file:
+      - {path: "${APPROVAL_RECOVERY_PRIVATE_ENV_FILE:?set private dedicated recovery DSN file}", required: true, format: raw}
+    environment:
+      APP_ENV: production
+      PORT: "8080"
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:?set independently verified HTTPS OTLP endpoint}
+      TRUSTED_TIME_SOURCES: ${TRUSTED_TIME_SOURCES:?set at least three independently verified time sources}
+      SSL_CERT_FILE: /run/pinvou/trust/ca.crt
+      ACCOUNT_HTTP_URL: http://account-service:8080
+      BILLING_HTTP_URL: http://billing-service:8080
+      APPROVAL_RECOVERY_CA_FILE: /run/pinvou/trust/ca.crt
+      WORKLOAD_IDENTITY_TOKEN_FILE: /run/pinvou/workload/token
+      PGPASSFILE: /run/pinvou/database/pgpass
+      APPROVAL_RECOVERY_INTERVAL: 1m
+      APPROVAL_RECOVERY_BATCH_LIMIT: "200"
+    volumes:
+      - {type: bind, source: "${INFRA_CA_DIRECTORY:?set verified CA directory}", target: /run/pinvou/trust, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${APPROVAL_RECOVERY_DATABASE_DIRECTORY:?set dedicated recovery pgpass directory}", target: /run/pinvou/database, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${APPROVAL_RECOVERY_WORKLOAD_DIRECTORY:?set dedicated recovery projected token directory}", target: /run/pinvou/workload, read_only: true, bind: {create_host_path: false}}
+    depends_on:
+      account-service: {condition: service_healthy}
+      billing-service: {condition: service_healthy}
+      approval-recovery-workload-agent: {condition: service_healthy}
+    networks: [backend]
+    logging: {driver: local, options: {max-size: "2m", max-file: "2"}}
+  approval-recovery-workload-agent:
+    profiles: [approval-recovery]
+    image: ${WORKLOAD_AGENT_IMAGE:?set same-source workload agent image}
+    pull_policy: never
+    user: "65532:65532"
+    command: [-config, /run/config/workload.json]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 96m
+    cpus: 0.25
+    pids_limit: 32
+    ulimits: {core: {soft: 0, hard: 0}}
+    environment: {SSL_CERT_FILE: /run/config/ca.crt, GOMEMLIMIT: 64MiB}
+    volumes:
+      - {type: bind, source: "${APPROVAL_RECOVERY_WORKLOAD_CONFIG_DIRECTORY:?set recovery public workload config and CA directory}", target: /run/config, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${APPROVAL_RECOVERY_WORKLOAD_BOOTSTRAP_DIRECTORY:?set dedicated recovery bootstrap secret directory}", target: /run/bootstrap, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${APPROVAL_RECOVERY_WORKLOAD_DIRECTORY:?set dedicated recovery projected token directory}", target: /run/projected, bind: {create_host_path: false}}
+    healthcheck: {test: [CMD, /service, -config, /run/config/workload.json, -check], interval: 10s, timeout: 3s, retries: 6}
+    networks: [backend]
+    logging: {driver: local, options: {max-size: "2m", max-file: "2"}}

@@ -1,0 +1,2 @@
+com.pinvou.identity.MobileDirectGrantAuthenticatorFactory
+com.pinvou.identity.PinvouBrowserAuthenticatorFactory
