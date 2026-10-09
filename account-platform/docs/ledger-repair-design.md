@@ -1,22 +1,24 @@
 # 账本修复（`LEDGER_REPAIR`）领域设计
 
-状态：`DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅“归属错误”的等额冲正**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（理由与守卫见 §9）。本文冻结 GSA-24 的 closed command/snapshot/proof、账务守恒、幂等与恢复、失败分类、迁移与回滚及验收映射；不新增任何可执行路径，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
+状态：`DESIGN_FROZEN / PRIVATE_IMPLEMENTATION_READY / FULL_PARENT_REVIEW_PENDING / DEFAULT_INACTIVE / NOT_DEPLOYED`。当前私有候选已实现本章冻结范围，默认 activation 为 `INACTIVE`；尚未部署，也不表示完整父组合已获独立审核通过。首版范围由用户在 2026-09-19 确认为**仅“归属错误”的等额冲正**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（理由与守卫见 §9）。本文冻结 GSA-24 的 closed command/snapshot/proof、账务守恒、幂等与恢复、失败分类、迁移与回滚及验收映射；下列历史基线解释设计冻结时的缺口；当前实现仍以实时 activation 为授权边界，不自动激活。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
 
-## 1. 命令现状（事实）
+## 1. 设计冻结时的命令历史基线
 
 - **只有策略元数据**：Account `approval_command_policies` 与 `approvalpolicy` 注册表为该命令登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`，请求权限 `platform.billing.repairs.request`、审批权限 `platform.billing.repairs.approve`、风险类 `FINANCIAL_FACT_CHANGE`、一名非申请人审批、critical 字段 `target_id/resource_version/financial_snapshot/policy_version`、24 小时申请有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`、`internal/platform/approvalpolicy/registry.go`）。
 - **静态不可执行**：该命令不在 `executableApprovalCommands` 内，因此 create/update/submit/APPROVE/Begin 均在领域调用前失败关闭，Portal 目录以 Billing activation 真相为准（`internal/account/approvals.go`、`internal/account/token_governance_activation.go`）。
 - **Billing 侧只有未激活行**：`billing_approval_command_activations` 中为 `('LEDGER_REPAIR',1,1,'INACTIVE',1)`（`migrations/billing/000054_approval_command_activations.up.sql`）。不存在该命令的 HTTP handler、proof 投影、executor、consumer durable、恢复分类或结果载荷；`internal/platform/approvalconsumer` 的 durable 注册表只有既有六命令与 GSA-22 的权益纠错专属 durable。
 - **合同层已登记为已知命令**：OpenAPI 与 Node 合同把该命令列入 11 项 activation 投影并要求 `state=INACTIVE`（`contracts/openapi/billing.yaml`、`test/contract/billing-approval-activation.test.mjs`）。
 
-结论：当前不存在任何可执行路径，也不存在通过审批获得执行授权的可能；本命令按 GSA-24 实现前保持关闭。
+历史结论：设计冻结时不存在可执行路径或通过审批获得执行授权的可能，实现前保持关闭。
 
-## 2. 账本现状与不可改写边界（事实）
+当前私有候选已接入 Account 只读预检、权威 proof、typed 审批投影与结果/恢复客户端，Billing proof/执行器与专属 consumer、幂等回放，以及 Portal/BFF/三语修复表单。Ledger 执行新增一条平衡 `REVERSAL` journal 与两条配对 posting，仍遵守 §4–§5 的等额归属修正与不可改写边界。create/update/submit/APPROVE/Begin 五个授权入口均核对实时 activation；默认 `INACTIVE` 下可准备只读预检，发行及执行仍失败关闭。实际生产部署、activation 与完整 E2E 未执行。
+
+## 2. 设计冻结时的账本基线与不可改写边界
 
 - **账户类型与系统账户**：`ledger_accounts.account_type` 的当前白名单为七个值——`WALLET_LIABILITY/PAYMENT_CLEARING/USAGE_REVENUE/REFUND_CLEARING/ADJUSTMENT`（`000002`）加 `RECEIVABLE_ASSET/CHARGEBACK_CLEARING`（`000025`）；六个平台系统账户使用固定 UUID 并在 Billing 启动时校验存在，且 `wallet_id IS NULL`：`platform:payment-clearing`、`platform:usage-revenue`、`platform:refund-clearing`、`platform:adjustment`、`platform:receivables`、`platform:chargeback-clearing`（`000045`、`internal/billing/system_ledger_accounts.go`、`internal/billing/postgres.go`）。每个钱包另有唯一 `WALLET_LIABILITY` 账户（`walletLedgerAccount`）。
 - **journal 与 posting 必须新增、不可改写**：`journal_entries.business_reference` 全局唯一；`entry_type` 白名单经 `000025` 收窄并由前向 `000060`（提交 `d253eeb0a`）补齐实际写入值，当前为 `RECHARGE/USAGE/REFUND/REVERSAL/ADJUSTMENT/EXPIRY/RECEIVABLE/CHARGEBACK/REPAIR_CREDIT/FORCED_REFUND`；`journal_entries_immutable`、`ledger_postings_immutable` 触发器拒绝 UPDATE/DELETE；`ledger_postings.delta_microcredits<>0`；`ledger_postings_balanced`（`DEFERRABLE INITIALLY DEFERRED`）要求同一 journal 内 posting 求和为 0（`000002`）。
 - **余额与额度护栏**：`wallets.posted_microcredits>=0` 且带 `version`；`credit_lots.remaining_microcredits ∈ [0,original_microcredits]`；`entitlement_packages`/`entitlement_components` 有各自守恒约束与只读投影。钱包与 lot 的余额由写入者在同一事务内显式维护，账本本身不推导余额（`postgres.go`、`adjustments.go`）。
-- **既有账本写入者与方向（冻结契约的来源）**：`RECHARGE`（钱包 `+A`（带 lot）/`PAYMENT_CLEARING -A`，`postgres.go`）、`USAGE`（钱包 `-S`（带 lot）/`USAGE_REVENUE +A`/`RECEIVABLE_ASSET -O`，`postgres.go`）、`ADJUSTMENT`（钱包 `+A`（带 lot）/`ADJUSTMENT -A`，`adjustments.go`）、`REFUND`（钱包 `-A`（带 lot）/`REFUND_CLEARING +T`，`refunds.go`）、`CHARGEBACK`（钱包 `-R`（带 lot）/`RECEIVABLE_ASSET -B`/`CHARGEBACK_CLEARING +R+B`，`chargebacks.go`）、`EXPIRY`（钱包 `-E`（带 lot）/`ADJUSTMENT +remaining`，`packages.go`）、`REPAIR_CREDIT`（钱包 `+A`（带 lot）/`RECEIVABLE_ASSET +R`/`PAYMENT_CLEARING -A`，`payments.go`）、`FORCED_REFUND`（钱包 `-R`（带 lot）/`RECEIVABLE_ASSET -B`/`REFUND_CLEARING +R+B`，`forced_refunds.go`）。`REVERSAL` 与 `RECEIVABLE` 当前**没有任何写入者**。
+- **既有账本写入者与方向（冻结契约的来源）**：`RECHARGE`（钱包 `+A`（带 lot）/`PAYMENT_CLEARING -A`，`postgres.go`）、`USAGE`（钱包 `-S`（带 lot）/`USAGE_REVENUE +A`/`RECEIVABLE_ASSET -O`，`postgres.go`）、`ADJUSTMENT`（钱包 `+A`（带 lot）/`ADJUSTMENT -A`，`adjustments.go`）、`REFUND`（钱包 `-A`（带 lot）/`REFUND_CLEARING +T`，`refunds.go`）、`CHARGEBACK`（钱包 `-R`（带 lot）/`RECEIVABLE_ASSET -B`/`CHARGEBACK_CLEARING +R+B`，`chargebacks.go`）、`EXPIRY`（钱包 `-E`（带 lot）/`ADJUSTMENT +remaining`，`packages.go`）、`REPAIR_CREDIT`（钱包 `+A`（带 lot）/`RECEIVABLE_ASSET +R`/`PAYMENT_CLEARING -A`，`payments.go`）、`FORCED_REFUND`（钱包 `-R`（带 lot）/`RECEIVABLE_ASSET -B`/`REFUND_CLEARING +R+B`，`forced_refunds.go`）。设计冻结时 `REVERSAL` 与 `RECEIVABLE` **没有任何写入者**。本候选新增的 Ledger 修复是受 §4 限制的平衡 `REVERSAL` 写入者，不改写原 journal/posting；此处其余历史写入方向仍是冻结判据的来源。
 - **已修复的前置缺陷**：`entry_type` 白名单与写入者不一致（`EXPIRE/REPAIR_CREDIT/FORCED_REFUND`）与 `receivables.source_type` 缺少 `FORCED_REFUND` 已由前向 `000060` 修复，并新增真实 PostgreSQL 回归（提交 `d253eeb0a`，Billing 真库整包 297.290s PASS）。本文不再重复处理该缺陷。
 - **可发现的结论**：唯一 `business_reference` 是天然幂等边界；任何修复只能是“新增一个平衡 journal 及其配对 posting”，不能修改、删除、重放既有 journal/posting。
 

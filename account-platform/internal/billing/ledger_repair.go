@@ -112,6 +112,9 @@ type LedgerRepairCommandInput struct {
 // LedgerRepairPlan is the closed, recomputable owner projection of one
 // attribution-error repair.
 type LedgerRepairPlan struct {
+	// targetPostingDelta is owner-derived inside the immutable target plan.
+	// The wire amount remains positive; the correction retains this signed leg.
+	targetPostingDelta       int64
 	TargetJournalEntryID     uuid.UUID `json:"target_journal_entry_id"`
 	TargetPostingID          uuid.UUID `json:"target_posting_id"`
 	EntryType                string    `json:"entry_type"`
@@ -321,6 +324,7 @@ func ledgerRepairPlanFrom(ctx context.Context, source ledgerRepairReader, input 
 	postingSetDigest := ledgerRepairPostingSetDigest(target)
 	factsDigest := ledgerRepairFactsDigest(target, *targetPosting, correct, input, policyVersion, schemaVersion, activationVersion, postingSetDigest)
 	return LedgerRepairPlan{
+		targetPostingDelta:       targetPosting.Delta,
 		TargetJournalEntryID:     target.JournalEntryID,
 		TargetPostingID:          targetPosting.ID,
 		EntryType:                target.EntryType,
@@ -528,10 +532,10 @@ func (r *PostgresRepository) ApplyLedgerRepair(ctx context.Context, input Ledger
 		return LedgerRepairResult{}, err
 	}
 	amount := plan.AmountMicrocredits
-	if err := insertPosting(ctx, tx, journalID, plan.WrongLedgerAccountID, -amount, nil, now); err != nil {
+	if err := insertPosting(ctx, tx, journalID, plan.WrongLedgerAccountID, -plan.targetPostingDelta, nil, now); err != nil {
 		return LedgerRepairResult{}, err
 	}
-	if err := insertPosting(ctx, tx, journalID, plan.CorrectLedgerAccountID, amount, nil, now); err != nil {
+	if err := insertPosting(ctx, tx, journalID, plan.CorrectLedgerAccountID, plan.targetPostingDelta, nil, now); err != nil {
 		return LedgerRepairResult{}, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO ledger_repair_cases(id,approval_request_id,authorization_event_id,approval_epoch,execution_key_digest,
