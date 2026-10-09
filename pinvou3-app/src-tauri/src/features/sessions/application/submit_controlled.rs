@@ -155,7 +155,7 @@ pub(crate) trait ControlledSubmissionPort: Send + Sync {
         b_session_id: &str,
     ) -> Result<PreparedControlledTask, UseCaseError>;
 
-    fn admit_and_dispatch(&self, prepared: PreparedControlledTask) -> UseCaseFuture<'_, Value>;
+    fn admit_and_dispatch(&self, prepared: PreparedControlledTask) -> Result<Value, UseCaseError>;
 }
 
 pub(crate) struct ControlledSubmission<P> {
@@ -168,106 +168,115 @@ impl<P> ControlledSubmission<P> {
     }
 }
 
+impl<P: ControlledSubmissionPort> ControlledSubmission<P> {
+    /// Run synchronous preparation and admission on a host worker.
+    /// Only schedule the executor here; never block on its async execution.
+    pub(crate) fn submit_sync(
+        &self,
+        request: ControlledInput,
+    ) -> Result<ControlledSubmissionResult, UseCaseError> {
+        if !valid_remote_identifier(request.remote_ref())
+            || !valid_remote_identifier(request.generation())
+        {
+            return Err(UseCaseError::new("task_session_not_found", false));
+        }
+        // Cheap source-shape checks precede allocation. Session mapping
+        // still precedes capability/model preparation and admission.
+        match &request {
+            ControlledInput::Remote(input)
+                if input.task_id.is_empty()
+                    || input.client_request_id.is_empty()
+                    || input.input_digest.is_empty()
+                    || input.payload.get("task_id").and_then(Value::as_str)
+                        != Some(input.task_id.as_str())
+                    || input
+                        .payload
+                        .get("client_request_id")
+                        .and_then(Value::as_str)
+                        != Some(input.client_request_id.as_str())
+                    || input.payload.get("input_digest").and_then(Value::as_str)
+                        != Some(input.input_digest.as_str()) =>
+            {
+                return Err(UseCaseError::new("task_request_invalid", false));
+            }
+            ControlledInput::Local(input) if input.text.trim().is_empty() => {
+                return Err(UseCaseError::new("task_input_invalid", false));
+            }
+            _ => {}
+        }
+        if let ControlledInput::Local(input) = &request {
+            self.port.validate_local_context(input)?;
+        }
+        // Map before any capability/model preparation, even for a B-local
+        // first turn. DEV-13 serializes create/lookup under its own lock.
+        let b_session_id = match &request {
+            ControlledInput::Remote(input) => self.port.ensure_remote_mapping(input)?,
+            ControlledInput::Local(input) => self.port.ensure_local_mapping(input)?,
+        };
+        if b_session_id.is_empty() {
+            return Err(UseCaseError::new("task_session_not_found", false));
+        }
+        let request_remote_ref = request.remote_ref().to_owned();
+        let (prepared, a_identity) = match request {
+            ControlledInput::Remote(input) => {
+                let identity = (
+                    input.task_id.clone(),
+                    input.client_request_id.clone(),
+                    input.input_digest.clone(),
+                );
+                (
+                    self.port.prepare_remote(input, &b_session_id)?,
+                    Some(identity),
+                )
+            }
+            ControlledInput::Local(input) => {
+                if input.expected_session_id != b_session_id {
+                    return Err(UseCaseError::new("task_session_not_found", false));
+                }
+                (self.port.prepare_local(input, &b_session_id)?, None)
+            }
+        };
+        if prepared.b_session_id != b_session_id
+            || prepared.remote_ref != request_remote_ref
+            || prepared.task_id.is_empty()
+            || prepared.client_request_id.is_empty()
+            || prepared.input_digest.is_empty()
+            || !payload_matches_identity(
+                &prepared.payload,
+                &b_session_id,
+                &prepared.task_id,
+                &prepared.client_request_id,
+                &prepared.input_digest,
+            )
+            || a_identity.is_some_and(|(task, request, digest)| {
+                prepared.task_id != task
+                    || prepared.client_request_id != request
+                    || prepared.input_digest != digest
+            })
+        {
+            return Err(UseCaseError::new("task_request_invalid", false));
+        }
+        let task_id = prepared.task_id.clone();
+        let status = self.port.admit_and_dispatch(prepared)?;
+        if status.get("task_id").and_then(Value::as_str) != Some(task_id.as_str())
+            || status.get("session_id").and_then(Value::as_str) != Some(b_session_id.as_str())
+        {
+            return Err(UseCaseError::new("task_status_binding_invalid", false));
+        }
+        Ok(ControlledSubmissionResult {
+            b_session_id,
+            task_id,
+            status,
+        })
+    }
+}
+
 impl<P: ControlledSubmissionPort> SubmitControlledUseCase for ControlledSubmission<P> {
     type Request = ControlledInput;
     type Response = ControlledSubmissionResult;
 
     fn submit(&self, request: ControlledInput) -> UseCaseFuture<'_, ControlledSubmissionResult> {
-        Box::pin(async move {
-            if !valid_remote_identifier(request.remote_ref())
-                || !valid_remote_identifier(request.generation())
-            {
-                return Err(UseCaseError::new("task_session_not_found", false));
-            }
-            // Cheap source-shape checks precede allocation. Session mapping
-            // still precedes capability/model preparation and admission.
-            match &request {
-                ControlledInput::Remote(input)
-                    if input.task_id.is_empty()
-                        || input.client_request_id.is_empty()
-                        || input.input_digest.is_empty()
-                        || input.payload.get("task_id").and_then(Value::as_str)
-                            != Some(input.task_id.as_str())
-                        || input
-                            .payload
-                            .get("client_request_id")
-                            .and_then(Value::as_str)
-                            != Some(input.client_request_id.as_str())
-                        || input.payload.get("input_digest").and_then(Value::as_str)
-                            != Some(input.input_digest.as_str()) =>
-                {
-                    return Err(UseCaseError::new("task_request_invalid", false));
-                }
-                ControlledInput::Local(input) if input.text.trim().is_empty() => {
-                    return Err(UseCaseError::new("task_input_invalid", false));
-                }
-                _ => {}
-            }
-            if let ControlledInput::Local(input) = &request {
-                self.port.validate_local_context(input)?;
-            }
-            // Map before any capability/model preparation, even for a B-local
-            // first turn. DEV-13 serializes create/lookup under its own lock.
-            let b_session_id = match &request {
-                ControlledInput::Remote(input) => self.port.ensure_remote_mapping(input)?,
-                ControlledInput::Local(input) => self.port.ensure_local_mapping(input)?,
-            };
-            if b_session_id.is_empty() {
-                return Err(UseCaseError::new("task_session_not_found", false));
-            }
-            let request_remote_ref = request.remote_ref().to_owned();
-            let (prepared, a_identity) = match request {
-                ControlledInput::Remote(input) => {
-                    let identity = (
-                        input.task_id.clone(),
-                        input.client_request_id.clone(),
-                        input.input_digest.clone(),
-                    );
-                    (
-                        self.port.prepare_remote(input, &b_session_id)?,
-                        Some(identity),
-                    )
-                }
-                ControlledInput::Local(input) => {
-                    if input.expected_session_id != b_session_id {
-                        return Err(UseCaseError::new("task_session_not_found", false));
-                    }
-                    (self.port.prepare_local(input, &b_session_id)?, None)
-                }
-            };
-            if prepared.b_session_id != b_session_id
-                || prepared.remote_ref != request_remote_ref
-                || prepared.task_id.is_empty()
-                || prepared.client_request_id.is_empty()
-                || prepared.input_digest.is_empty()
-                || !payload_matches_identity(
-                    &prepared.payload,
-                    &b_session_id,
-                    &prepared.task_id,
-                    &prepared.client_request_id,
-                    &prepared.input_digest,
-                )
-                || a_identity.is_some_and(|(task, request, digest)| {
-                    prepared.task_id != task
-                        || prepared.client_request_id != request
-                        || prepared.input_digest != digest
-                })
-            {
-                return Err(UseCaseError::new("task_request_invalid", false));
-            }
-            let task_id = prepared.task_id.clone();
-            let status = self.port.admit_and_dispatch(prepared).await?;
-            if status.get("task_id").and_then(Value::as_str) != Some(task_id.as_str())
-                || status.get("session_id").and_then(Value::as_str) != Some(b_session_id.as_str())
-            {
-                return Err(UseCaseError::new("task_status_binding_invalid", false));
-            }
-            Ok(ControlledSubmissionResult {
-                b_session_id,
-                task_id,
-                status,
-            })
-        })
+        Box::pin(async move { self.submit_sync(request) })
     }
 }
 
@@ -414,28 +423,29 @@ mod tests {
             })
         }
 
-        fn admit_and_dispatch(&self, prepared: PreparedControlledTask) -> UseCaseFuture<'_, Value> {
-            Box::pin(async move {
-                self.trace.lock().push("admit_and_dispatch");
-                if self.active.swap(true, Ordering::SeqCst) {
-                    return Err(UseCaseError::new("task_session_busy", true));
-                }
-                self.admitted.lock().push((
-                    prepared.task_id.clone(),
-                    prepared.client_request_id.clone(),
-                    prepared.b_session_id.clone(),
-                ));
-                let session_id = if self.wrong_status_binding.load(Ordering::SeqCst) {
-                    "another-session"
-                } else {
-                    &prepared.b_session_id
-                };
-                Ok(json!({
-                    "status": "admitted",
-                    "task_id": prepared.task_id,
-                    "session_id": session_id,
-                }))
-            })
+        fn admit_and_dispatch(
+            &self,
+            prepared: PreparedControlledTask,
+        ) -> Result<Value, UseCaseError> {
+            self.trace.lock().push("admit_and_dispatch");
+            if self.active.swap(true, Ordering::SeqCst) {
+                return Err(UseCaseError::new("task_session_busy", true));
+            }
+            self.admitted.lock().push((
+                prepared.task_id.clone(),
+                prepared.client_request_id.clone(),
+                prepared.b_session_id.clone(),
+            ));
+            let session_id = if self.wrong_status_binding.load(Ordering::SeqCst) {
+                "another-session"
+            } else {
+                &prepared.b_session_id
+            };
+            Ok(json!({
+                "status": "admitted",
+                "task_id": prepared.task_id,
+                "session_id": session_id,
+            }))
         }
     }
 
