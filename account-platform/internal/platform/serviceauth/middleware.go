@@ -127,7 +127,7 @@ func newAuthenticator(expectedToken string) authenticator {
 			return invalidAuthenticator("WORKLOAD_ISSUER_REQUIRED_FOR_CA", errWorkloadTrust)
 		}
 		environment := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
-		if environment != "" && environment != "development" && environment != "test" {
+		if environment != "development" && environment != "test" {
 			return invalidAuthenticator("WORKLOAD_ISSUER_REQUIRED", errors.New("OIDC workload identity is required outside development and test"))
 		}
 		return authenticator{legacyToken: strings.TrimSpace(expectedToken)}

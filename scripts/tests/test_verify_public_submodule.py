@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -12,13 +13,16 @@ GITLINK = "1111111111111111111111111111111111111111"
 OTHER_COMMIT = "2222222222222222222222222222222222222222"
 TAG_OBJECT = "3333333333333333333333333333333333333333"
 # 与 verify-public-submodule.sh 的常量保持一致：2026-10-02 起处于两次 rN 收口
-# 之间的过渡期，TRANSITION_BASELINE 钉在 r3 收口 commit（与脚本同值），gitlink =
-# 公开维护分支头且领先不可变 tag。下一次 rN 收口时，把此处的 tag 名/钉点与脚本
+# 之间的过渡期，TRANSITION_BASELINE 钉在 r3 收口 commit（与脚本同值）；默认发布
+# 检查要求 gitlink 等于维护头且领先 tag，登记快照另有真实 Git 历史测试。下一次 rN 收口时，把此处的 tag 名/钉点与脚本
 # 常量同步推进（新 tag、清空 TRANSITION_BASELINE），并恢复三方相等断言。
 BASELINE = "61cb769be5b33abc64f64da4272f5b39a8b6c1fd"
 
 
-@unittest.skipIf(os.name == "nt", "shell verifier requires a Unix-compatible bash host")
+BASH = "C:/Program Files/Git/bin/bash.exe" if os.name == "nt" and Path("C:/Program Files/Git/bin/bash.exe").exists() else shutil.which("bash")
+
+
+@unittest.skipUnless(BASH, "shell verifier requires bash")
 class PublicSubmoduleVerifierTests(unittest.TestCase):
     def _run(self, scenario):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -34,11 +38,13 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
                     #!/usr/bin/env bash
                     set -euo pipefail
 
+                    while [[ "${{1:-}}" == "-c" ]]; do shift 2; done
                     if [[ "${{1:-}}" == "-C" ]]; then
                       shift 2
                     fi
 
                     case "${{1:-}}" in
+                      init) exit 0 ;;
                       config)
                         key="${{5:-}}"
                         case "$key" in
@@ -106,11 +112,17 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
             fake_sleep.chmod(0o755)
 
             env = os.environ.copy()
-            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            if os.name == "nt":
+                env["PINVOU_TEST_BIN"] = bin_dir.as_posix()
+                env["PINVOU_TEST_VERIFIER"] = VERIFIER.as_posix()
+                command = [BASH, "-c", 'export PATH="$(cygpath -u "$PINVOU_TEST_BIN"):$PATH"; exec bash "$PINVOU_TEST_VERIFIER"']
+            else:
+                env["PATH"] = f"{bin_dir}:{env['PATH']}"
+                command = [BASH, str(VERIFIER)]
             env["PINVOU_FAKE_GIT_SCENARIO"] = scenario
             env["PINVOU_FAKE_GIT_STATE"] = str(state_file)
             result = subprocess.run(
-                [str(VERIFIER)],
+                command,
                 cwd=ROOT,
                 env=env,
                 text=True,

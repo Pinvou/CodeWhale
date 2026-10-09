@@ -334,6 +334,7 @@ jobs:
             frontend:
               - 'pinvou3-app/src/**'
               - 'pinvou3-app/tests/**'
+              - 'account-platform/internal/portal/static/**'
               # multiagent_plan_normalize.test.mjs 读取下列 Rust 源做跨语言
               # 契约断言(蜂群契约/同快照不变式/编辑重发等);不列出则
               # Rust-only 改动会静默跳过该 node 门禁(同 resources/** 的
@@ -559,9 +560,10 @@ jobs:
         run: python3 scripts/check-doc-anchors.py
 
       - name: 公开底座 gitlink 可达性
-        # Fail closed: gitlink 必须等于公开维护分支头；过渡期（fork-policy 第 0 节豁免）
-        # 内不可变 tag 钉在其收口 commit，rN 收口后恢复三方相等。
-        run: ./scripts/verify-public-submodule.sh
+        # Fail closed: gitlink 必须精确匹配登记 pin，且位于公开维护历史；
+        # 过渡期内不可变 tag 钉在其收口 commit，不跟随远端升级运行时。
+        # 发布脚本默认仍要求维护头精确相等；rN 收口恢复三方严格相等。
+        run: ./scripts/verify-public-submodule.sh --registered-snapshot
 
       - name: 初始化公共底座 submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -662,6 +664,12 @@ jobs:
 
       - name: Vite build
         run: npm run build:ui
+
+      - name: Verify embedded Account Portal assets are current
+        run: |
+          npm run build:account-portal
+          git diff --exit-code -- ../account-platform/internal/portal/static
+          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
 
       # Web (relay) build: the startup-bundle layer and the web index contract
       # test (tests/vite_static_assets_contract.test.mjs) only cover the web

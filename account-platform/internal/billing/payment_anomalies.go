@@ -369,11 +369,31 @@ func restoreDismissedPaymentAnomalyEntitlements(ctx context.Context, tx pgx.Tx, 
 	if wallet.Status != "ACTIVE" || packageStatus != "FROZEN" {
 		return nil
 	}
-	var pending bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chargeback_cases WHERE entitlement_package_id=$1 AND status IN ('REVIEW_REQUIRED','RESOLVED')) OR EXISTS(SELECT 1 FROM forced_refund_cases WHERE entitlement_package_id=$1 AND status='REVIEW_REQUIRED') OR EXISTS(SELECT 1 FROM refunds WHERE entitlement_package_id=$1 AND status IN ('REQUESTED','MANUAL_REVIEW'))`, packageID).Scan(&pending); err != nil {
+	pending, err := packageFinancialFreezeBlocked(ctx, tx, packageID, walletID, uuid.Nil, item.ID)
+	if err != nil {
 		return err
 	}
 	if pending {
+		return nil
+	}
+	var freezeSnapshot json.RawMessage
+	// Follow only overlapping, now-disproved financial freezes in this episode.
+	// An unrelated old dismissal must not authorize a newer administrative freeze.
+	err = tx.QueryRow(ctx, `WITH RECURSIVE sources AS (
+ SELECT source.manual_review_case_id case_id,source.created_at,source.resolved_at,source.entitlement_snapshot snapshot FROM forced_refund_cases source WHERE source.entitlement_package_id=$1
+ UNION ALL
+ SELECT source.manual_review_case_id,source.created_at,source.resolved_at,anomaly.resource_snapshot->'entitlement_snapshot' FROM chargeback_cases source JOIN payment_anomaly_cases anomaly ON anomaly.id=source.manual_review_case_id WHERE source.entitlement_package_id=$1
+ ), episode AS (
+ SELECT * FROM sources WHERE case_id=$2
+ UNION
+ SELECT prior.* FROM sources prior JOIN episode current ON prior.created_at<=current.created_at AND prior.resolved_at>=current.created_at
+ ) SELECT snapshot FROM episode ORDER BY created_at,case_id LIMIT 1`, packageID, item.ID).Scan(&freezeSnapshot)
+	if err != nil {
+		return err
+	}
+	// Historical evidence that did not record the freeze origin is retained.
+	// Closing a review is not proof that every frozen right was originally active.
+	if !validFinancialFreezeSnapshot(freezeSnapshot, packageID, walletID) {
 		return nil
 	}
 	// Restore only the financial-review suspensions. Administrative suspension,
@@ -383,19 +403,21 @@ func restoreDismissedPaymentAnomalyEntitlements(ctx context.Context, tx pgx.Tx, 
  FROM entitlement_components component
  WHERE member_grant.package_id=$1 AND member_grant.status='SUSPENDED' AND member_grant.suspension_reason IN ('CHARGEBACK_REVIEW','FORCED_REFUND_REVIEW') AND member_grant.expires_at>$2
  AND component.id=member_grant.component_id AND component.status='FROZEN' AND component.expires_at>$2
+ AND EXISTS(SELECT 1 FROM jsonb_array_elements($3::jsonb->'grants') prior WHERE (prior->>'id')::uuid=member_grant.id AND prior->>'status'='ACTIVE')
+ AND EXISTS(SELECT 1 FROM jsonb_array_elements($3::jsonb->'components') prior WHERE (prior->>'id')::uuid=component.id AND prior->>'status'='ACTIVE')
  RETURNING member_grant.component_id,member_grant.available_microcredits
 ), totals AS (SELECT component_id,sum(available_microcredits)::bigint amount FROM restored GROUP BY component_id)
  UPDATE entitlement_components component SET active_grant_microcredits=component.active_grant_microcredits+totals.amount,suspended_grant_microcredits=component.suspended_grant_microcredits-totals.amount,updated_at=$2
- FROM totals WHERE component.id=totals.component_id`, packageID, now); err != nil {
+ FROM totals WHERE component.id=totals.component_id`, packageID, now, freezeSnapshot); err != nil {
 		return err
 	}
 	// Clearing a disproved financial fence does not issue or extend rights.
 	// Time-expired rights remain unusable and can enter the ordinary expiry worker;
 	// already EXPIRED/REVOKED states are never resurrected.
-	if _, err = tx.Exec(ctx, `UPDATE entitlement_components SET status='ACTIVE',updated_at=$2 WHERE package_id=$1 AND status='FROZEN'`, packageID, now); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE entitlement_components component SET status='ACTIVE',updated_at=$2 WHERE package_id=$1 AND status='FROZEN' AND EXISTS(SELECT 1 FROM jsonb_array_elements($3::jsonb->'components') prior WHERE (prior->>'id')::uuid=component.id AND prior->>'status'='ACTIVE')`, packageID, now, freezeSnapshot); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE entitlement_packages SET status='ACTIVE',updated_at=$2 WHERE id=$1 AND status='FROZEN'`, packageID, now)
+	_, err = tx.Exec(ctx, `UPDATE entitlement_packages SET status='ACTIVE',updated_at=$2 WHERE id=$1 AND status='FROZEN' AND $3::jsonb->'package'->>'status'='ACTIVE' AND NOT EXISTS(SELECT 1 FROM entitlement_components WHERE package_id=$1 AND status='FROZEN')`, packageID, now, freezeSnapshot)
 	return err
 }
 

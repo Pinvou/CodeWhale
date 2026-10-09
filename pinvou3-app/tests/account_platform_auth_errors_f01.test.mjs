@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
+import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { normalizeAccountAuthError, retryAfterSeconds } from '../src/features/account-platform/auth-error.js';
 import { localizedAccountPlatformError } from '../src/features/account-platform/error-localization.js';
 import { accountPlatformCopy } from '../src/shared/i18n.js';
 
 test('native password and SMS login rejections map to specific messages in all three languages', async () => {
-  for (const code of ['oidc_credentials_invalid', 'mobile_auth_code_invalid']) {
+  for (const code of ['oidc_credentials_invalid', 'oidc_direct_grant_disabled', 'mobile_auth_code_invalid']) {
     // Tauri serializes Result<_, String> rejections as strings, not JS Errors.
     // eslint-disable-next-line prefer-promise-reject-errors
     const client = new AccountPlatformDesktopClient({ login: () => Promise.reject(`${code}: private provider text`) });
@@ -18,6 +19,7 @@ test('native password and SMS login rejections map to specific messages in all t
         const copy = accountPlatformCopy[language];
         assert.equal(localizedAccountPlatformError(copy, error), copy.errors[code]);
         assert.notEqual(copy.errors[code], copy.requestFailed);
+        assert.match(copy.errors[code], /[^?\s]/u);
       }
       return true;
     });
@@ -40,6 +42,20 @@ test('native SMS rate limits retain bounded cooldown, including wrapped Tauri er
   assert.equal(normalizeAccountAuthError({ code: 'SMS_UNAVAILABLE', message: 'mobile_auth_failed: SMS_RATE_LIMITED:120' }).retryAfterSeconds, 0);
   const aborted = Object.assign(new Error('cancelled'), { name: 'AbortError' });
   assert.equal(normalizeAccountAuthError(aborted), aborted);
+});
+
+test('disabled direct grant explains both password and SMS sign-in in every language', async () => {
+  const client = new AccountPlatformDesktopClient({ loginSms: async () => { throw new Error('oidc_direct_grant_disabled: private provider detail'); } });
+  await assert.rejects(client.loginSms('13800138000', 'controlled-challenge', '123456'), error => {
+    assert.equal(error.code, 'oidc_direct_grant_disabled');
+    assert.equal(error.message, error.code);
+    for (const [language, methodNames] of [['zh', ['密码', '短信']], ['en', ['password', 'SMS']], ['ja', ['パスワード', 'SMS']]]) {
+      const copy = accountPlatformCopy[language];
+      const message = localizedAccountPlatformError(copy, error);
+      for (const name of methodNames) assert.ok(message.includes(name));
+    }
+    return true;
+  });
 });
 
 test('desktop HTTP error responses preserve body and header retry metadata', async () => {
@@ -76,4 +92,14 @@ test('generic native wrappers retain nested catalog codes without retaining prov
   assert.equal(error.code, 'oidc_credentials_invalid');
   assert.equal(localizedAccountPlatformError(accountPlatformCopy.en, error), accountPlatformCopy.en.errors.oidc_credentials_invalid);
   assert.equal(error.message.includes('PRIVATE_PROVIDER_DETAIL'), false);
+});
+
+test('admin errors share strict bounded cooldown parsing and body precedence', async t => {
+  const oldFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = oldFetch; });
+  const cases = [['12garbage', undefined, 0], ['1.5', undefined, 0], ['60', undefined, 60], ['999999999999', undefined, 86400], ['60', 45, 45], [new Date(Date.now() + 120000).toUTCString(), undefined, 120]];
+  for (const [header, body, expected] of cases) {
+    globalThis.fetch = async () => new Response(JSON.stringify({code: 'RATE_LIMITED', details: {retry_after_seconds: body}}), {status: 429, headers: {'Retry-After': header}});
+    await assert.rejects(new AdminPlatformClient().session(), error => error.code === 'RATE_LIMITED' && (expected === 120 ? error.retryAfterSeconds >= 119 && error.retryAfterSeconds <= 120 : error.retryAfterSeconds === expected));
+  }
 });

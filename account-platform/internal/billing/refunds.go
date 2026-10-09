@@ -258,19 +258,28 @@ func (p *PaymentCoordinator) processRefund(ctx context.Context, refundID uuid.UU
 	if refund.Status != "REQUESTED" && !(reconcile && refund.Status == "MANUAL_REVIEW") {
 		return refund, ErrConflict
 	}
-	var blocked bool
-	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chargeback_cases WHERE entitlement_package_id=$1 AND status<>'DISMISSED') OR EXISTS(SELECT 1 FROM forced_refund_cases WHERE entitlement_package_id=$1 AND resolution_code IS DISTINCT FROM 'DISMISS') OR EXISTS(SELECT 1 FROM receivables WHERE wallet_id=$2 AND outstanding_microcredits>0)`, refund.EntitlementPackageID, order.WalletID).Scan(&blocked)
+	blocked, err := packageFinancialFreezeBlocked(ctx, tx, refund.EntitlementPackageID, order.WalletID, refund.ID, uuid.Nil)
 	if err != nil {
 		return refund, err
 	}
 	if blocked {
-		if _, err := tx.Exec(ctx, `UPDATE refunds SET dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=NULL WHERE id=$1`, refundID); err != nil {
+		failure := "competing financial evidence requires refund review"
+		if _, err := tx.Exec(ctx, `UPDATE refunds SET status='MANUAL_REVIEW',dispatch_state='RESULT_UNKNOWN',dispatch_lease_until=NULL,failure_reason=$2,intent_version=intent_version+1,updated_at=$3 WHERE id=$1`, refundID, failure, p.now()); err != nil {
+			return refund, err
+		}
+		if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, "REFUND_FAILURE", "P1", "refund:"+refundID.String()+":financial-fence", paymentAnomalyReference{PaymentOrderID: &refund.PaymentOrderID, PaymentTransactionID: &refund.PaymentTransactionID, RefundID: &refund.ID}, map[string]any{"failure_reason": failure}, p.now()); err != nil {
 			return refund, err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return refund, err
 		}
-		return refund, ErrConflict
+		refund.Status, refund.FailureReason = "MANUAL_REVIEW", &failure
+		// Ordinary delivery is complete once the durable review owns recovery.
+		// An explicit reconciliation still reports the unresolved financial gate.
+		if reconcile {
+			return refund, ErrConflict
+		}
+		return refund, nil
 	}
 	merchantOrderNo, err := refundMerchantOrder(ctx, tx, refund.PaymentOrderID)
 	if err != nil {
@@ -378,6 +387,15 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 		return Refund{}, false, err
 	}
 	if abnormal {
+		return Refund{}, false, ErrConflict
+	}
+	// Source evidence has its own lifecycle: legacy RESOLVED is not a
+	// dismissal receipt. Keep existing hold/refund admission rules separate.
+	sourceBlocked, err := packageFinancialSourceBlocked(ctx, tx, packageID, order.WalletID)
+	if err != nil {
+		return Refund{}, false, err
+	}
+	if sourceBlocked {
 		return Refund{}, false, ErrConflict
 	}
 	type componentReservation struct {
@@ -650,22 +668,28 @@ func restoreRefundEntitlements(ctx context.Context, tx pgx.Tx, refundID, package
 	// Ending this refund must not release another still-live financial fence.
 	var canRestore bool
 	if err := tx.QueryRow(ctx, `SELECT package.status='FROZEN' AND wallet.status='ACTIVE'
-		AND NOT EXISTS(SELECT 1 FROM chargeback_cases WHERE entitlement_package_id=package.id AND status='REVIEW_REQUIRED')
-		AND NOT EXISTS(SELECT 1 FROM forced_refund_cases WHERE entitlement_package_id=package.id AND status='REVIEW_REQUIRED')
-		AND NOT EXISTS(SELECT 1 FROM refunds WHERE entitlement_package_id=package.id AND id<>$2 AND status IN ('REQUESTED','MANUAL_REVIEW'))
+		AND NOT EXISTS(SELECT 1 FROM refund_component_reservations WHERE refund_id=$2 AND prior_status='FROZEN')
 		FROM entitlement_packages package JOIN wallets wallet ON wallet.id=package.wallet_id WHERE package.id=$1`, packageID, refundID).Scan(&canRestore); err != nil {
 		return err
 	}
-	if !canRestore {
+	var walletID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT wallet_id FROM entitlement_packages WHERE id=$1`, packageID).Scan(&walletID); err != nil {
+		return err
+	}
+	blocked, err := packageFinancialFreezeBlocked(ctx, tx, packageID, walletID, refundID, uuid.Nil)
+	if err != nil {
+		return err
+	}
+	if !canRestore || blocked {
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `UPDATE member_quota_grants member_grant SET status=reservation.prior_status,suspension_reason=reservation.prior_suspension_reason,allocation_version=allocation_version+1,updated_at=$3 FROM refund_grant_reservations reservation WHERE reservation.refund_id=$1 AND reservation.grant_id=member_grant.id AND member_grant.package_id=$2 AND member_grant.status='SUSPENDED' AND (member_grant.suspension_reason='REFUND_PENDING' OR reservation.prior_status='SUSPENDED')`, refundID, packageID, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE member_quota_grants member_grant SET status=reservation.prior_status,suspension_reason=reservation.prior_suspension_reason,allocation_version=allocation_version+1,updated_at=$3 FROM refund_grant_reservations reservation WHERE reservation.refund_id=$1 AND reservation.grant_id=member_grant.id AND member_grant.package_id=$2 AND member_grant.status='SUSPENDED' AND member_grant.suspension_reason='REFUND_PENDING' AND reservation.prior_status='ACTIVE'`, refundID, packageID, now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE entitlement_components component SET status=reservation.prior_status,updated_at=$3 FROM refund_component_reservations reservation WHERE reservation.refund_id=$1 AND reservation.component_id=component.id AND component.package_id=$2 AND component.status='FROZEN'`, refundID, packageID, now); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `UPDATE entitlement_packages SET status='ACTIVE',updated_at=$2 WHERE id=$1 AND status='FROZEN'`, packageID, now)
+	_, err = tx.Exec(ctx, `UPDATE entitlement_packages SET status='ACTIVE',updated_at=$2 WHERE id=$1 AND status='FROZEN'`, packageID, now)
 	return err
 }
 

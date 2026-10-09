@@ -56,7 +56,7 @@ func (retainedRecoveryProof) Proof(_ context.Context, id uuid.UUID, a approvalen
 	digest, e := approvalencoding.DeriveProofDigest(v)
 	return account.ApprovalProofResult{Response: v, Digest: hex.EncodeToString(digest[:])}, e
 }
-func retainedRecoveryLeaseScenario(t *testing.T, zeroEffect, blockUntilExpired bool) {
+func retainedRecoveryLeaseScenario(t *testing.T, zeroEffect, blockUntilExpired bool, hooks ...func(context.Context, *stageFixture, *pgx.Conn, *pgx.Conn, *account.PostgresRepository, account.ApprovalRecoveryCandidate)) {
 	raw := os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL")
 	if raw == "" {
 		t.Skip("PINVOU_TEST_SCHEMA_DATABASE_URL is required for actual PostgreSQL")
@@ -134,6 +134,23 @@ INSERT INTO identities(issuer,subject,user_id,created_at,last_seen_at) VALUES
 
 	relay, err := account.NewApprovalRelayStore(ctx, f.serviceURL(t, c, "account_approval_relay"))
 	if err != nil {
+		diagnostic, connectErr := pgx.Connect(ctx, f.serviceURL(t, c, "account_approval_relay"))
+		if connectErr != nil {
+			t.Logf("relay diagnostic connect timeout=%t cancelled=%t", errors.Is(connectErr, context.DeadlineExceeded), errors.Is(connectErr, context.Canceled))
+		} else {
+			defer diagnostic.Close(context.Background())
+			var actor, login, inherit, privileged, member, databaseCreate, publicCreate, sidecarCreate bool
+			diagErr := diagnostic.QueryRow(ctx, `SELECT session_user='account_approval_relay' AND current_user=session_user,rolcanlogin,rolinherit,rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls,EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members WHERE member=r.oid OR roleid=r.oid),pg_catalog.has_database_privilege(current_user,current_database(),'CREATE'),pg_catalog.has_schema_privilege(current_user,'public','CREATE'),pg_catalog.has_schema_privilege(current_user,'account_approval_authorization','CREATE') FROM pg_catalog.pg_roles r WHERE rolname=session_user`).Scan(&actor, &login, &inherit, &privileged, &member, &databaseCreate, &publicCreate, &sidecarCreate)
+			t.Logf("relay diagnostic actor=%t login=%t inherit=%t privileged=%t member=%t database_create=%t public_create=%t sidecar_create=%t query_timeout=%t", actor, login, inherit, privileged, member, databaseCreate, publicCreate, sidecarCreate, errors.Is(diagErr, context.DeadlineExceeded))
+			var p, a, r, d int64
+			diagErr = diagnostic.QueryRow(ctx, `SELECT * FROM account_approval_authorization.authorization_relay_readiness()`).Scan(&p, &a, &r, &d)
+			var sqlErr interface{ SQLState() string }
+			state := ""
+			if errors.As(diagErr, &sqlErr) {
+				state = sqlErr.SQLState()
+			}
+			t.Logf("relay diagnostic sidecar_error=%t sqlstate=%s timeout=%t", diagErr != nil, state, errors.Is(diagErr, context.DeadlineExceeded))
+		}
 		t.Fatal("real relay readiness")
 	}
 	defer relay.Close()
@@ -200,6 +217,12 @@ INSERT INTO identities(issuer,subject,user_id,created_at,last_seen_at) VALUES
 		t.Fatal("real recovery plan failed")
 	}
 	candidate := plan.Candidates[0]
+	if len(hooks) > 0 {
+		for _, hook := range hooks {
+			hook(ctx, f, c, b, repo, candidate)
+		}
+		return
+	}
 	// Owned fixture admin assumes a pre-existing NOLOGIN recovery role only for this connection.
 	// No ALTER ROLE/grant/table mutation; session_user and SECURITY DEFINER checks run unchanged.
 	config := f.config.Copy()

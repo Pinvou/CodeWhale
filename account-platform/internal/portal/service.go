@@ -831,7 +831,7 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 				request.Header.Set(name, r.Header.Get(name))
 			}
 		}
-		if accountProofHeaderAllowed(r.Method, resource, "X-Device-ID") {
+		if accountRiskSourceAllowed(r.Method, resource) {
 			source, valid := s.clientRiskSource(r)
 			if !valid {
 				api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_SOURCE", "the request source is invalid", httpserver.RequestID(r.Context()))
@@ -862,6 +862,12 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, io.LimitReader(response.Body, 32<<20))
+}
+
+// Risk attribution is separate from device proofs: public admission endpoints
+// need the trusted client source without gaining any additional browser proof.
+func accountRiskSourceAllowed(method, resource string) bool {
+	return method == http.MethodPost && (resource == "/v1/auth/registration/precheck" || resource == "/v1/auth/captcha/challenges" || accountProofHeaderAllowed(method, resource, "X-Device-ID"))
 }
 
 // These proofs belong to the individual registration or SMS operation, not to
