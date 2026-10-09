@@ -36,10 +36,16 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
     private static final Pattern CODE = Pattern.compile("^[0-9]{6}$");
     private static final Pattern SUBJECT = Pattern.compile("^[A-Za-z0-9._:-]{1,128}$");
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
-    private static final PinvouAuthClient CLIENT = new PinvouAuthClient();
+    private static final PinvouAuthClient DEFAULT_CLIENT = new PinvouAuthClient();
+    private final PinvouAuthClient client;
+
+    public MobileDirectGrantAuthenticator() { this(DEFAULT_CLIENT); }
+    MobileDirectGrantAuthenticator(PinvouAuthClient client) { this.client = client; }
 
     @Override
     public void authenticate(AuthenticationFlowContext context) {
+        context.clearUser();
+        context.getAuthenticationSession().removeAuthNote("ATTEMPTED_USERNAME");
         MultivaluedMap<String, String> form = context.getHttpRequest().getDecodedFormParameters();
         String login = trim(form.getFirst("username"));
         String mobile = normalizeMobile(login);
@@ -48,6 +54,7 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         boolean smsLogin = !challenge.isEmpty() || !code.isEmpty();
         UserModel user;
         boolean valid;
+        boolean passwordSupplied = false;
         if (smsLogin) {
             Optional<String> subject = !mobile.isEmpty() && CHALLENGE.matcher(challenge).matches()
                 && CODE.matcher(code).matches() ? verifySMS(context, mobile, challenge, code) : Optional.empty();
@@ -56,6 +63,7 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         } else {
             user = findUser(context, login, mobile);
             String password = form.getFirst("password");
+            passwordSupplied = password != null && !password.isEmpty();
             valid = user != null && password != null && !password.isEmpty()
                 && user.credentialManager().isValid(UserCredentialModel.password(password));
         }
@@ -70,11 +78,15 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         }
 
         if (!valid) {
-            fail(context, AuthenticationFlowError.INVALID_CREDENTIALS);
+            if (passwordSupplied) {
+                context.setUser(user);
+                context.getEvent().user(user);
+            }
+            fail(context, AuthenticationFlowError.INVALID_CREDENTIALS, passwordSupplied);
             return;
         }
         try {
-            if (!CLIENT.authorizeLogin(user.getId()).allowed()) {
+            if (!client.authorizeLogin(user.getId()).allowed()) {
                 fail(context, AuthenticationFlowError.INVALID_CREDENTIALS);
                 return;
             }
@@ -148,12 +160,17 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
     }
 
     private void fail(AuthenticationFlowContext context, AuthenticationFlowError error) {
+        fail(context, error, false);
+    }
+
+    private void fail(AuthenticationFlowContext context, AuthenticationFlowError error, boolean countPasswordFailure) {
         context.getEvent().error(Errors.INVALID_USER_CREDENTIALS);
         Response response = Response.status(Response.Status.UNAUTHORIZED)
             .type(MediaType.APPLICATION_JSON_TYPE)
             .entity(Map.of("error", "invalid_grant", "error_description", "Invalid user credentials"))
             .build();
-        context.failureChallenge(error, response);
+        if (countPasswordFailure) context.failureChallenge(error, response);
+        else context.challenge(response);
     }
 
     private static String trim(String value) { return value == null ? "" : value.trim(); }
