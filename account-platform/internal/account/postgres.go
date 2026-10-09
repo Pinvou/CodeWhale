@@ -20,21 +20,23 @@ import (
 )
 
 type PostgresRepository struct {
-	pool                        *pgxpool.Pool
-	approvalWriterPool          *pgxpool.Pool
-	approvalWriterCommit        func(context.Context, pgx.Tx) error
-	commerceProviderID          string
-	commerceAdapterVersion      string
-	approvalProofSource         ApprovalProofSource
-	approvalSnapshots           ApprovalSnapshotSource
-	billingGovernanceActivation billinggovernance.Reader
-	tokenGovernanceActivation   tokengovernance.Reader
-	approvalPresenterReady      func(approvalpolicy.Policy) bool
-	approvalPagination          approvalPaginationRuntime
-	approvalPaginationMetrics   *ApprovalPaginationMetrics
-	now                         func() time.Time
-	walletPolicyVersion         string
-	walletProvisioningSLA       time.Duration
+	registrationBonusFingerprintKeyID string
+	registrationBonusFingerprintKey   []byte
+	pool                              *pgxpool.Pool
+	approvalWriterPool                *pgxpool.Pool
+	approvalWriterCommit              func(context.Context, pgx.Tx) error
+	commerceProviderID                string
+	commerceAdapterVersion            string
+	approvalProofSource               ApprovalProofSource
+	approvalSnapshots                 ApprovalSnapshotSource
+	billingGovernanceActivation       billinggovernance.Reader
+	tokenGovernanceActivation         tokengovernance.Reader
+	approvalPresenterReady            func(approvalpolicy.Policy) bool
+	approvalPagination                approvalPaginationRuntime
+	approvalPaginationMetrics         *ApprovalPaginationMetrics
+	now                               func() time.Time
+	walletPolicyVersion               string
+	walletProvisioningSLA             time.Duration
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {
@@ -496,4 +498,14 @@ func mapConstraintError(err error) error {
 func (r *PostgresRepository) WithApprovalProofSource(source ApprovalProofSource) *PostgresRepository {
 	r.approvalProofSource = source
 	return r
+}
+
+func (r *PostgresRepository) ConfigureRegistrationBonusFingerprint(keyID string, key []byte) error {
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" || len(keyID) > 100 || len(key) != 32 {
+		return errors.New("registration bonus fingerprint requires a key id and exactly 32 random bytes")
+	}
+	r.registrationBonusFingerprintKeyID = keyID
+	r.registrationBonusFingerprintKey = append(r.registrationBonusFingerprintKey[:0], key...)
+	return nil
 }

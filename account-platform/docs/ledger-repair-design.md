@@ -35,7 +35,7 @@
 **唯一允许的领域变化**（单次执行恰好产生，全部在同一 Billing Serializable 事务内）：
 
 1. 一条 `journal_entries`：`entry_type='REVERSAL'`，`business_reference='ledger-repair:'||<目标 posting 的 UUID>`，`description` 为固定模板 `ledger repair: <目标 journal 的 business_reference>`，`created_at` 取执行时刻。
-2. 恰好两条 `ledger_postings`，两者 `credit_lot_id IS NULL`：`-D` 记在**被判定归属错误的平台账户**，`+D` 记在**正确平台账户**；`D` 必须等于目标 posting 的 `abs(delta_microcredits)` 且 `D>0`；两条求和为 0。
+2. 恰好两条 `ledger_postings`，两者 `credit_lot_id IS NULL`：`-D` 记在**被判定归属错误的平台账户**，`+D` 记在**正确平台账户**；`D` 等于目标 posting 原带符号的 `delta_microcredits`，公开命令金额仍为 `abs(D)>0`；两条求和为 0。
 3. 一条 `ledger_repair_cases` 不可变审计行（新增表，见 §7.1），记录审批/授权引用、目标 journal/posting、两账户、金额、事实摘要与 journal ID。
 
 **明确禁止**：
@@ -144,7 +144,7 @@
 - 依据：该命令 `policy_version=1 / snapshot_schema_version=1` 行**从未是可执行合同**——它不在静态 `executableApprovalCommands` 内，create/update/submit/APPROVE/Begin 自 GSA-01 起全部失败关闭，因此不存在任何由本版本产生并已被执行的领域事实；首次冻结的 closed 形状即该版本合同，不构成对已发布合同的原位修改。
 - 守卫：激活前必须以只读 readiness 证明目标库中该命令不存在 `APPROVED/EXECUTING/EXECUTION_FAILED` 或其它未终态申请，且不存在任何 `ledger-repair:` 前缀 journal；任一存在即阻断激活并按 §8 分类只读查证，不得解释或改写历史。
 - 若将来需要放宽首版范围（例如缺失/重复记账、金额不符、lot/钱包归属），必须新增 policy/schema 版本与独立领域设计，不得在本版本内扩大解释。
-- `billing_approval_command_activations` 行保持 `INACTIVE`；实现（GSA-24）交付默认关闭的专属 consumer/durable 开关，与 GSA-22 的 `BILLING_ENTITLEMENT_CONSUMER_ENABLED` 同形；生产激活只属于取得独立授权的 GSA-40。
+- `billing_approval_command_activations` 行保持 `INACTIVE`；专属 durable 经 `approvalconsumer.BillingCommands()` 的既有受信资源循环注册，运行期按实时 activation 拒绝未激活命令；生产激活只属于取得独立授权的 GSA-40。
 
 ## 10. 迁移、N/N-1 与回滚
 

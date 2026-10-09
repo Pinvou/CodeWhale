@@ -220,6 +220,54 @@ func validBillingRecoveryPayload(command string, domainResult, ledgerReferences 
 		var ledger map[string]any
 		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) && ledger != nil && len(ledger) == 0 &&
 			result.ExecutionID != uuid.Nil && result.ProviderID != "" && result.Status == "RESUMED"
+	case "LEDGER_REPAIR":
+		var result struct {
+			CaseID                 uuid.UUID `json:"case_id"`
+			TargetJournalEntryID   uuid.UUID `json:"target_journal_entry_id"`
+			TargetPostingID        uuid.UUID `json:"target_posting_id"`
+			WrongLedgerAccountID   uuid.UUID `json:"wrong_ledger_account_id"`
+			CorrectLedgerAccountID uuid.UUID `json:"correct_ledger_account_id"`
+			EntryType              string    `json:"entry_type"`
+			AmountMicrocredits     int64     `json:"amount_microcredits"`
+			PostingSetDigest       string    `json:"posting_set_digest"`
+			JournalEntryID         uuid.UUID `json:"journal_entry_id"`
+			Status                 string    `json:"status"`
+		}
+		var ledger struct {
+			JournalEntryID uuid.UUID `json:"journal_entry_id"`
+		}
+		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) &&
+			result.CaseID != uuid.Nil && result.TargetJournalEntryID != uuid.Nil && result.TargetPostingID != uuid.Nil &&
+			result.WrongLedgerAccountID != uuid.Nil && result.CorrectLedgerAccountID != uuid.Nil &&
+			result.WrongLedgerAccountID != result.CorrectLedgerAccountID && result.EntryType != "" &&
+			result.AmountMicrocredits > 0 && lowerHexDigest(result.PostingSetDigest) &&
+			result.JournalEntryID != uuid.Nil && result.Status == "SUCCEEDED" &&
+			ledger.JournalEntryID == result.JournalEntryID
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		var result struct {
+			CorrectionID       uuid.UUID `json:"correction_id"`
+			PackageID          uuid.UUID `json:"package_id"`
+			WalletID           uuid.UUID `json:"wallet_id"`
+			SourceComponentID  uuid.UUID `json:"source_component_id"`
+			SourceLotID        uuid.UUID `json:"source_lot_id"`
+			TargetComponentID  uuid.UUID `json:"target_component_id"`
+			TargetLotID        uuid.UUID `json:"target_lot_id"`
+			SourceType         string    `json:"source_type"`
+			TargetType         string    `json:"target_type"`
+			AmountMicrocredits int64     `json:"amount_microcredits"`
+			JournalEntryID     uuid.UUID `json:"journal_entry_id"`
+			Status             string    `json:"status"`
+		}
+		var ledger struct {
+			JournalEntryID uuid.UUID `json:"journal_entry_id"`
+		}
+		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) && result.CorrectionID != uuid.Nil &&
+			result.PackageID != uuid.Nil && result.WalletID != uuid.Nil && result.SourceComponentID != uuid.Nil &&
+			result.SourceLotID != uuid.Nil && result.TargetComponentID != uuid.Nil && result.TargetLotID != uuid.Nil &&
+			((result.SourceType == "BASE" && result.TargetType == "BONUS") ||
+				(result.SourceType == "BONUS" && result.TargetType == "BASE")) &&
+			result.AmountMicrocredits > 0 && result.JournalEntryID != uuid.Nil && result.Status == "SUCCEEDED" &&
+			ledger.JournalEntryID == result.JournalEntryID
 	case "PAYMENT_PRODUCT_RESUME":
 		var result struct {
 			ExecutionID uuid.UUID `json:"execution_id"`

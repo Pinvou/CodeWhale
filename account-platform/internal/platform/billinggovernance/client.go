@@ -63,7 +63,7 @@ type activationVersion struct {
 // v1/s1 pair, which is the only projection of that command that may be active.
 var activationVersions = map[string][]activationVersion{
 	"CHARGEBACK_FINANCIAL_REPAIR":      {{1, 1}},
-	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {{1, 1}},
+	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {{1, 1}, {2, 2}},
 	"LEDGER_REPAIR":                    {{1, 1}},
 	"PAYMENT_FINANCIAL_REPAIR":         {{1, 1}},
 	"PAYMENT_PRODUCT_RESUME":           {{1, 1}},
@@ -102,7 +102,11 @@ func ValidateSnapshot(s Snapshot) error {
 			return ErrUnavailable
 		}
 		switch activation.CommandType {
-		case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+		case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+			if activation.State == "ACTIVE" && (activation.PolicyVersion != 2 || activation.SnapshotSchemaVersion != 2) {
+				return ErrUnavailable
+			}
+		case "LEDGER_REPAIR", "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
 
 		default:
 			if activation.State != "INACTIVE" {

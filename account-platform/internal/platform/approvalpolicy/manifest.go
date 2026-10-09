@@ -17,7 +17,7 @@ import (
 // the intersection of whatever happens to exist in the current database.
 // Workload-only AUDIT_ONLY registry entries have no approval database row.
 var governancePolicyCommands = []string{
-	"WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME",
+	"LEDGER_REPAIR", "ENTITLEMENT_COMPONENT_ADJUSTMENT", "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME",
 	"TOKEN_PROTOCOL_DRAFT_CREATE",
 	"TOKEN_PROTOCOL_PUBLISH",
 	"TOKEN_FORMULA_DRAFT_CREATE",

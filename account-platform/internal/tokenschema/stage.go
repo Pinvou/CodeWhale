@@ -1,5 +1,5 @@
-// Package tokenschema pins the installed personal execution and management storage.
-// Organization lifecycle, event replay and privacy stages remain excluded.
+// Package tokenschema pins the installed personal execution, management,
+// organization lifecycle and account-closure replay storage.
 package tokenschema
 
 import (
@@ -23,6 +23,8 @@ var installed = map[int64]identity{
 	5:      {name: "platform_managed_routes", checksum: "8f883d69bd354f3df610cbec935620147c10d2953a43b1306da9b912532e014c", downChecksum: "58be33664d79125fe58b26eb7d96e16382991dc6b69b0cfb52df9b98d0052e3c"},
 	6:      {name: "usage_reconciliation", checksum: "fbe6f72000c39b0eb730a28c297f8336655fa084f48ebf2309388cad96f4e52b", downChecksum: "5fea6a6d5473a6673808b218e42a7942926dad5756bc15d163ab06253f153da4"},
 	7:      {name: "gateway_operations", checksum: "edf07b129b426eaca42ff452c77b8f835754071c05263de89ba895fca89c66c0", downChecksum: "e0eeb8bdf985867d519bee2116f58a6ffad0e33bf9fb1fba513f5251ec9caf34"},
+	8:      {name: "organization_lifecycle", checksum: "eb4fa4e06482ca9a29e8d9eb95d0b83a07e12d1c9771a0afed7174713b5268a5", downChecksum: "f7238ab3f21eeb95df0eac6ec66ff8c0b6380adc10cffcf42f2273048d973f3e"},
+	9:      {name: "organization_unit_blockers", checksum: "ec8be96b67b071aeed1280a71c459465a935d0fddb5542edbf6f876935b8178f", downChecksum: "3808826093f96cde619ab7a9836925da286b478c77abe5f1f48a3d6c48164186"},
 	10:     {name: "protocol_formula_versions", checksum: "40a37eb1ab122daa40b27ba2554c1dcfda0b066ed174705be1adfc2164fa3734", downChecksum: "8d2e3d5efe27c742dd9580b14e392ae0a7724dd17b93db912916214d3d8c09b4"},
 	11:     {name: "gateway_adapter_neutrality", checksum: "368c439e88cc3aafd1a173d049f68522c1b83013cb6c3abd65308f141e62fc90", downChecksum: "0ae06c1a023e4afa6982f6a86234c9a54eeec903748ece2f2888f16a46a5b006"},
 	12:     {name: "model_catalog_lifecycle", checksum: "dda62680bc527e56036b3c8e7d1c05efea45da8aa1f667676708f41e4f3cffe4", downChecksum: "09ac8b24d9163faff505a464608602f0d96637029f8b201c6339cc0ef4b054c2"},
@@ -49,6 +51,7 @@ var installed = map[int64]identity{
 	34:     {name: "usage_history_groups", checksum: "8f25256da33ce045b00f5f96471dee1169f92047a82fefa42d5485add44a4948", downChecksum: "7ffd599821fb4aa220ca06ef305af84527cbd5b3f27a9fbc9dbadf803f6099c0"},
 	900001: {name: "runtime_storage_hardening", checksum: "4590d925d2575b0b1076c864f9cfe3b9a8115a9eee864a8a19fba48003f85bac", downChecksum: "3d4e34c2499153f8d63292ccdae47c3cf4bb5a2ba93ad5093cc0cfdbcd4ada92"},
 	900002: {name: "hold_expiry_dispatch_fence", checksum: "70e1ab2e4df09da798f8960aef356fb91ed6cef675dcb0613b5e7f303839af55", downChecksum: "718410daef7dece72847123a0db47c6636ce7a7c008c4fd4d15470ddd058581d"},
+	900003: {name: "account_closure_replay_fence", checksum: "1e662dda9e4b27674da7bda3949d8fefef10c18f84c0d626d4093271d46a5a30", downChecksum: "c608e17db02229461ea934f93debdc2f11f656f1005d49d4bc75890b51e1e1fa"},
 }
 
 func Ordered(loaded []migrations.Migration) ([]migrations.Migration, error) {
@@ -68,8 +71,8 @@ func Ordered(loaded []migrations.Migration) ([]migrations.Migration, error) {
 	return result, nil
 }
 
-// Validate the existing ledger before applying anything. In particular an
-// F08 privacy/anonymization history cannot be run through the F04 runtime.
+// Validate every existing ledger identity before applying anything. Only the
+// installed lifecycle, replay and management migration package is accepted.
 func Up(ctx context.Context, c *pgx.Conn, loaded []migrations.Migration) error {
 	ordered, err := Ordered(loaded)
 	if err != nil {

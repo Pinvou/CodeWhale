@@ -18,7 +18,7 @@ func TestMemberFinancialReviewReasonPinned(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			in := append([]migrations.Migration(nil), full...)
 			for i := range in {
-				if in[i].Version == 900005 {
+				if in[i].Version == 900012 {
 					switch kind {
 					case "missing":
 						in = append(in[:i], in[i+1:]...)
@@ -61,12 +61,12 @@ func TestMemberFinancialReviewReasonPublicUpgrade(t *testing.T) {
 	}
 	var prior []migrations.Migration
 	for _, x := range ordered {
-		if x.Version != 900005 {
+		if x.Version != 900012 {
 			prior = append(prior, x)
 		}
 	}
 	// The exact previous public order is retained, omitting only this newly delivered final pair.
-	if e = migrations.UpWithHooks(ctx, upgrade, prior, migrations.UpHooks{BeforeApply: protectLegacyRefundMigration}); e != nil {
+	if e = migrations.UpWithHooks(ctx, upgrade, prior, migrations.UpHooks{BeforeApply: prepareBillingMigration, AfterApply: finishBillingMigration, ApplySQL: applyBillingMigration, LedgerRole: "billing_schema_owner"}); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = upgrade.Exec(ctx, stageBillingSeed); e != nil {

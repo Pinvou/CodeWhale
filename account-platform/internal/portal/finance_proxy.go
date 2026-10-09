@@ -17,7 +17,7 @@ import (
 const reconciliationImportBodyLimit int64 = 64 << 20
 
 func currentGovernedApprovalCommand(command string) bool {
-	return command == "WALLET_ADJUSTMENT" || command == "PAYMENT_PROVIDER_RESUME" || command == "PAYMENT_PRODUCT_RESUME" || command == "TOKEN_MODEL_LIFECYCLE_CHANGE" || command == "TOKEN_MODEL_CATALOG_ROLLBACK" || command == "TOKEN_CREDENTIAL_REVOKE"
+	return command == "LEDGER_REPAIR" || command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" || command == "WALLET_ADJUSTMENT" || command == "PAYMENT_PROVIDER_RESUME" || command == "PAYMENT_PRODUCT_RESUME" || command == "TOKEN_MODEL_LIFECYCLE_CHANGE" || command == "TOKEN_MODEL_CATALOG_ROLLBACK" || command == "TOKEN_CREDENTIAL_REVOKE"
 }
 
 func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
@@ -33,6 +33,9 @@ func billingAdminPathAllowed(method, resource string) bool {
 	}
 	if method == http.MethodHead {
 		method = http.MethodGet
+	}
+	if resource == "/admin/v1/registration-bonus-policy" && (method == http.MethodGet || method == http.MethodPut) {
+		return true
 	}
 	if method == http.MethodGet {
 		switch resource {

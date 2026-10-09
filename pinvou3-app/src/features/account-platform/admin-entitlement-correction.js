@@ -16,7 +16,7 @@ const criticalKeys = ['package_id', 'wallet_id', 'wallet_version', 'payment_orde
 const financialKeys = ['package_total_microcredits', 'source_original_microcredits', 'target_original_microcredits', 'effective_total_microcredits'];
 
 function exactKeys(value, names) {
-  return value && Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name));
+  return value && Object.keys(value).length === names.length && names.every(name => Object.prototype.hasOwnProperty.call(value, name));
 }
 
 function amount(value) {

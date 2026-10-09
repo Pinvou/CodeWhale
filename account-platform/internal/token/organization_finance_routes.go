@@ -17,4 +17,6 @@ func (s *Service) registerOrganizationFinanceRoutes(routes *httpserver.RouteGrou
 	routes.GET("/organizations/:organization_id/quota-grants", httpserver.AdaptFunc(s.listOrganizationQuotaGrants))
 	routes.POST("/organizations/:organization_id/quota-grants:batch", httpserver.AdaptFunc(s.allocateOrganizationQuotaBatch))
 	routes.POST("/organizations/:organization_id/quota-grants/:grant_id/revoke", httpserver.AdaptFunc(s.revokeOrganizationQuotaGrant))
+	routes.POST("/organizations/:organization_id/account-closed-grants/:grant_id/reclaim", httpserver.AdaptFunc(s.reclaimAccountClosedGrant))
+	routes.POST("/organizations/:organization_id/account-closed-grants:reclaim-batch", httpserver.AdaptFunc(s.reclaimAccountClosedGrantsBatch))
 }

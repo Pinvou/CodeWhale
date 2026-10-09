@@ -1,3 +1,4 @@
+import { financialRepairApprovalDraft } from './admin-financial-repair-drafts.js';
 import { integerMoney, requireFinanceCollection } from './finance-contract.js';
 
 const approvalIDPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -72,6 +73,15 @@ export async function currentApprovalEditDraft(client, detail, reason) {
       idempotency_key: `approval-edit:${detail.approval_request_id}`, reason: reason.trim(),
       redacted_evidence: detail.redacted_evidence || [], expected_impact: detail.expected_impact || {},
       critical_resource_versions: detail.critical_resource_versions || {}, financial_snapshot: detail.financial_snapshot || {} };
+  }
+  if (detail.command_type === 'LEDGER_REPAIR') {
+    const facts = await client.approvalCommandPrecheck({ command_type: 'LEDGER_REPAIR',
+      target_resource_id: command?.target_posting_id, target_journal_entry_id: command?.target_journal_entry_id,
+      wrong_ledger_account_id: command?.wrong_ledger_account_id, correct_ledger_account_id: command?.correct_ledger_account_id,
+      amount_microcredits: command?.amount_microcredits, reason_code: 'ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT' });
+    const draft = financialRepairApprovalDraft(facts, reason, `edit:${detail.approval_request_id}`);
+    if (draft.target_resource_id !== (detail.target?.resource_id || detail.target_resource_id)) throw unavailable();
+    return draft;
   }
   if (detail.command_type === 'WALLET_ADJUSTMENT') {
     const page = await client.adjustments({ wallet_id: command?.wallet_id, status: 'PENDING_APPROVAL', limit: 200 });

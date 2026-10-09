@@ -115,7 +115,7 @@ func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixtur
 func TestPrivateF06OrganizationFundsPG(t *testing.T) {
 	raw := os.Getenv("PINVOU_TEST_BILLING_DATABASE_URL")
 	if raw == "" {
-		t.Fatal("isolatedPG required")
+		t.Skip("explicit isolated PostgreSQL configuration is required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Second)
 	t.Cleanup(cancel)

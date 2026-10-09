@@ -22,7 +22,7 @@ WHERE command_type = 'LEDGER_REPAIR' AND policy_version = 1 AND snapshot_schema_
 
 -- Billing：确认没有该命令的修复案件与 proof claim
 SELECT (SELECT count(*) FROM ledger_repair_cases) AS cases,
-       (SELECT count(*) FROM billing_approval_proof_claims) AS proof_claims;
+       (SELECT count(*) FROM billing_approval_proof_claims WHERE command_type = 'LEDGER_REPAIR') AS proof_claims;
 
 -- Billing：确认没有任何已提交的账本修复 journal
 SELECT count(*) FROM journal_entries WHERE business_reference LIKE 'ledger-repair:%';
@@ -51,7 +51,7 @@ Guard 会拒绝身份/版本之外的改写；`journal_entries`/`ledger_postings
 2. Account 读取：`billinggovernance` 客户端观测到 `ACTIVE`，五入口不再返回 `ErrBillingGovernanceInactive`。
 3. Proof：以真实 Account 身份调用 Billing proof endpoint，对一件真实存在且违反归属契约的候选 posting 返回 `PROOF_VALID`/`ALLOW`；对已满足契约、钱包账户或已冲正的目标返回对应 DENY。
 4. 消费者：durable `billing-ledger-repair-executor-p1-v1` 处于消费状态（Q+1 起始序与收据一致），DLQ/重试计数为 0。
-5. 受控演练：以一条一次性审批完成端到端执行，核对新 `REVERSAL` journal 恰含两条相反平台账户 posting、`ledger_repair_cases` 追加一行且不可变、`wallets`/`credit_lots`/`entitlement_*`/`receivables`/`payment_*` 零变化、result-first 幂等重放不产生第二次冲正，并在演练记录中登记真实 ID 与校验结果。
+5. 受控演练：以一条一次性审批完成端到端执行，按目标 posting 原带符号 delta `D` 逐腿核对新 `REVERSAL` 的错误账户 `-D`、正确账户 `+D`，正、负目标各验证一例；两腿求和为零，`ledger_repair_cases` 追加一行且不可变、`wallets`/`credit_lots`/`entitlement_*`/`receivables`/`payment_*` 零变化、result-first 幂等重放不产生第二次冲正，并在演练记录中登记真实 ID 与校验结果。
 
 将上述输出归档到发布证据（脱敏，不含 Secret/Token/Cookie/个人信息）。
 

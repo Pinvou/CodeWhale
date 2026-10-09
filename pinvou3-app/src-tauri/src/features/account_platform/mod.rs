@@ -7,8 +7,8 @@
 
 pub(crate) mod client_migration;
 mod model_proxy;
-mod platform;
 mod organization_routes;
+mod platform;
 pub(crate) mod runtime_model;
 
 use std::sync::Arc;
@@ -1701,7 +1701,9 @@ fn prepare_request(
 }
 
 fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -> bool {
-    if organization_routes::allowed(area, method, path, query) { return true; }
+    if organization_routes::allowed(area, method, path, query) {
+        return true;
+    }
     if area == "token" {
         if path == "/v1/me/balance" {
             return *method == Method::GET && matches!(query, None | Some("consistency=strong"));

@@ -26,6 +26,23 @@ type commandSpec struct {
 }
 
 var commandSpecs = map[string]commandSpec{
+	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {
+		policyVersion: 2, snapshotVersion: 2, targetType: "ENTITLEMENT_PACKAGE", executor: "billing-command-executor",
+		normalizedKeys: []string{"package_id", "payment_order_id", "reason_code"},
+		criticalKeys: []string{"package_id", "wallet_id", "wallet_version", "payment_order_id", "payment_transaction_id",
+			"source_component_id", "source_lot_id", "target_component_id", "target_lot_id", "source_type", "target_type",
+			"amount_microcredits", "source_evidence_digest", "facts_digest", "policy_version"},
+		financialKeys: []string{"package_total_microcredits", "source_original_microcredits", "target_original_microcredits", "effective_total_microcredits"},
+		criticalInts:  []string{"wallet_version", "amount_microcredits", "policy_version"},
+		financialInts: []string{"package_total_microcredits", "source_original_microcredits", "target_original_microcredits", "effective_total_microcredits"},
+	},
+	"LEDGER_REPAIR": {
+		policyVersion: 1, snapshotVersion: 1, targetType: "LEDGER_POSTING", executor: "billing-command-executor",
+		normalizedKeys: []string{"target_journal_entry_id", "target_posting_id", "wrong_ledger_account_id", "correct_ledger_account_id", "amount_microcredits", "reason_code"},
+		criticalKeys:   []string{"target_journal_entry_id", "target_posting_id", "posting_set_digest", "entry_type", "policy_version"},
+		financialKeys:  []string{"amount_microcredits", "wrong_ledger_account_id", "correct_ledger_account_id", "wrong_account_type", "correct_account_type", "wallet_id"},
+		normalizedInts: []string{"amount_microcredits"}, criticalInts: []string{"policy_version"}, financialInts: []string{"amount_microcredits"},
+	},
 	"WALLET_ADJUSTMENT": {
 		policyVersion: 1, snapshotVersion: 1, targetType: "MANUAL_ADJUSTMENT", executor: "billing-command-executor",
 		normalizedKeys: []string{"adjustment_id", "wallet_id", "amount_microcredits", "requested_by"},
@@ -412,6 +429,50 @@ func validateProofValues(commandType string, spec commandSpec, targetType, targe
 			return ErrInvalidDocument
 		}
 
+	case "LEDGER_REPAIR":
+		reasonCode, reasonErr := stringValue(normalizedObject["reason_code"])
+		wrongAccountType, wrongAccountTypeErr := stringValue(financialObject["wrong_account_type"])
+		correctAccountType, correctAccountTypeErr := stringValue(financialObject["correct_account_type"])
+		if !validUUID(targetID) || !equalString(normalizedObject["target_posting_id"], targetID) ||
+			!sameCanonical(normalizedObject["target_posting_id"], criticalObject["target_posting_id"]) ||
+			!validUUIDField(normalizedObject["target_journal_entry_id"]) ||
+			!sameCanonical(normalizedObject["target_journal_entry_id"], criticalObject["target_journal_entry_id"]) ||
+			!validUUIDField(normalizedObject["wrong_ledger_account_id"]) ||
+			!sameCanonical(normalizedObject["wrong_ledger_account_id"], financialObject["wrong_ledger_account_id"]) ||
+			!validUUIDField(normalizedObject["correct_ledger_account_id"]) ||
+			!sameCanonical(normalizedObject["correct_ledger_account_id"], financialObject["correct_ledger_account_id"]) ||
+			sameCanonical(normalizedObject["wrong_ledger_account_id"], normalizedObject["correct_ledger_account_id"]) ||
+			integers["n.amount_microcredits"] < 1 || integers["n.amount_microcredits"] != integers["f.amount_microcredits"] ||
+			integers["c.policy_version"] != spec.policyVersion || !hexField(criticalObject["posting_set_digest"]) ||
+			!oneOfString(criticalObject["entry_type"], "RECHARGE", "USAGE", "ADJUSTMENT", "REFUND", "EXPIRY", "CHARGEBACK", "REPAIR_CREDIT", "FORCED_REFUND") ||
+			wrongAccountTypeErr != nil || correctAccountTypeErr != nil ||
+			!oneOf(wrongAccountType, "PAYMENT_CLEARING", "USAGE_REVENUE", "REFUND_CLEARING", "ADJUSTMENT", "RECEIVABLE_ASSET", "CHARGEBACK_CLEARING") ||
+			!oneOf(correctAccountType, "PAYMENT_CLEARING", "USAGE_REVENUE", "REFUND_CLEARING", "ADJUSTMENT", "RECEIVABLE_ASSET", "CHARGEBACK_CLEARING") ||
+			financialObject["wallet_id"].kind != jsonNull ||
+			reasonErr != nil || reasonCode != "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" {
+			return ErrInvalidDocument
+		}
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		sourceType, sourceErr := stringValue(criticalObject["source_type"])
+		targetType, targetErr := stringValue(criticalObject["target_type"])
+		reasonCode, reasonErr := stringValue(normalizedObject["reason_code"])
+		if !validUUID(targetID) || !equalString(normalizedObject["package_id"], targetID) ||
+			!sameCanonical(normalizedObject["package_id"], criticalObject["package_id"]) ||
+			!validUUIDField(normalizedObject["payment_order_id"]) || !sameCanonical(normalizedObject["payment_order_id"], criticalObject["payment_order_id"]) ||
+			!validUUIDField(criticalObject["wallet_id"]) || integers["c.wallet_version"] < 1 ||
+			!validUUIDField(criticalObject["payment_transaction_id"]) ||
+			!validUUIDField(criticalObject["source_component_id"]) || !validUUIDField(criticalObject["source_lot_id"]) ||
+			!nullableUUID(criticalObject["target_component_id"]) || !nullableUUID(criticalObject["target_lot_id"]) ||
+			sourceErr != nil || targetErr != nil || !((sourceType == "BASE" && targetType == "BONUS") || (sourceType == "BONUS" && targetType == "BASE")) ||
+			!hexField(criticalObject["source_evidence_digest"]) || !hexField(criticalObject["facts_digest"]) ||
+			integers["c.policy_version"] != spec.policyVersion || integers["c.amount_microcredits"] < 1 ||
+			integers["c.amount_microcredits"] > integers["f.source_original_microcredits"] ||
+			integers["f.package_total_microcredits"] < 1 || integers["f.source_original_microcredits"] < 1 || integers["f.target_original_microcredits"] < 0 ||
+			integers["f.effective_total_microcredits"] != integers["f.source_original_microcredits"]+integers["f.target_original_microcredits"] ||
+			integers["f.effective_total_microcredits"] != integers["f.package_total_microcredits"] ||
+			reasonErr != nil || len(reasonCode) == 0 || len(reasonCode) > 80 {
+			return ErrInvalidDocument
+		}
 	}
 	return nil
 }
