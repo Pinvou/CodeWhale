@@ -1,3 +1,4 @@
+// architecture-guard: allow-target-cfg -- The test-only reader_resume_tests host driver constructs real Windows Wry without windows/event loop; unsupported platforms must not run a simulated desktop-control host. Product OS adaptation remains in the feature platform module.
 use base64::Engine as _;
 use serde::Serialize;
 use serde_json::Value;
@@ -2135,3 +2136,5 @@ mod tests {
         }
     }
 }
+#[cfg(all(test, target_os = "windows"))]
+mod reader_resume_tests;

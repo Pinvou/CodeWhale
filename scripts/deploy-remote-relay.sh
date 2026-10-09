@@ -115,7 +115,10 @@ fi
 ensure_cached_db "$IPV4_DB_CACHE" "$IPV4_DB_URL" "$IPV4_DB_SHA256"
 ensure_cached_db "$IPV6_DB_CACHE" "$IPV6_DB_URL" "$IPV6_DB_SHA256"
 
-mapfile -t relay_modules < <(cd "$RELAY_DIR" && printf '%s\n' ./*.js)
+relay_modules=()
+while IFS= read -r relay_module; do
+  relay_modules+=("$relay_module")
+done < <(cd "$RELAY_DIR" && printf '%s\n' ./*.js)
 tar -czf - -C "$RELAY_DIR" \
   "${relay_modules[@]}" \
   -C "$ROOT" \

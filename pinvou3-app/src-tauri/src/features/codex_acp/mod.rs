@@ -7772,24 +7772,37 @@ mod tests {
         &src[start..end]
     }
 
+    fn production_source(src: &str) -> String {
+        let normalized = src.replace("\r\n", "\n");
+        let end = normalized
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("the test module marker must exist");
+        normalized[..end].to_owned()
+    }
+
+    #[test]
+    fn production_source_is_line_ending_independent_and_excludes_test_text() {
+        let fixture = "pub fn production() {}\n#[cfg(test)]\nmod tests {\n prompt_pending\n}";
+        let lf = production_source(fixture);
+        assert_eq!(lf, "pub fn production() {}\n");
+        assert_eq!(production_source(&fixture.replace('\n', "\r\n")), lf);
+        assert!(!lf.contains("prompt_pending"));
+    }
+
     #[test]
     fn rebind_acp_production_closures_read_prompt_pending() {
-        // Normalize checkout line endings, not the production tokens/assertions.
-        let src = include_str!("mod.rs").replace("\r\n", "\n");
         // Round-26 MAJOR-3: cut at the test module exactly like projects.rs's
         // `production_source` (round-18) — an unanchored find over the WHOLE
         // file lands on this probe's own string argument once the production
         // function is deleted or renamed, and the span then contains the
         // probe's own assertion text, which can never fail.
-        let src = &src[..src
-            .find("#[cfg(test)]\nmod tests {")
-            .expect("the test module marker must exist")];
-        let fence = production_body(src, "pub async fn rebind_blocking_sessions");
+        let src = production_source(include_str!("mod.rs"));
+        let fence = production_body(&src, "pub async fn rebind_blocking_sessions");
         assert!(
             fence.contains("prompt_pending"),
             "the fence must count a resolved-but-unadmitted prompt as busy",
         );
-        let take = production_body(src, "pub async fn evict_if_idle_for_rebind");
+        let take = production_body(&src, "pub async fn evict_if_idle_for_rebind");
         assert!(
             take.contains("prompt_pending"),
             "the eviction recheck must count a resolved-but-unadmitted prompt",
