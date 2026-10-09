@@ -76,3 +76,22 @@ COMMIT;
 按数据库迁移成功、独立 agent sink 可用、各服务真实 health/readiness 的依赖启动。Billing 模型定价投影通过其实际本地定价库读取路径启用，未添加虚构的跨服务目录查询。Portal 使用 Token 管理 API；Account 用实际 Token snapshot/proof/effect/result，并保留现有 Billing 三命令。public edge 不直接开放 Token 管理或内部 workload 路径。
 
 当前源码、受控 TLS/HTTP、真实公开 PG schema 与独有 loopback NATS 证明分别记录其输入及限制。未运行真实 Compose/NGINX/OpenBao/Keycloak 发行或完整 E2E；目标系统的 ACL、TLS/DNS、端口隔离、部署审批、required CI 和生产恢复验证仍须实际完成，不能从单测或静态模板推断已通过。
+
+
+## 用量、对账概览与原可信来源协议
+
+Portal 的 page overview flag 优先于旧 aggregate flag。page 模式按当前权限返回 TOKEN_ONLY、USAGE_ONLY 或 TOKEN_AND_USAGE；有用量权限时传递原 24h/7d/30d 窗口，趋势卡片映射实际用量或对账列表，Provisioning 卡片映射原只读列表。aggregate fallback 仍要求 models.read、tokens.read、usage.read 三权限；关闭 flag 不挂载 reader。无效结构、不安全整数、错误或权限不足不显示虚假零计数，旧治理 UNKNOWN/410 恢复保持原契约。
+
+Portal page queries use the existing Token HMAC-SHA256 source protocol. Set
+`TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64` in both the existing private
+Portal environment file (`TOKEN_PORTAL_PRIVATE_ENV_FILE`) and Token environment
+file (`TOKEN_GATEWAY_PRIVATE_ENV_FILE`) to the same externally managed key,
+with at least 32 decoded bytes. Never put its value into this template, browser
+configuration or logs. The Portal loader rejects malformed/short configured
+keys and an enabled page-overview flag without a key; disabled flags retain the
+existing key-absent startup behavior. Token keeps its current paginationKey,
+`WithAdminProxyHMACKey` verifier and private/loopback immediate-peer requirement.
+The Portal derives the source using its existing exact trusted-edge policy and
+signs the final method, upstream RequestURI (including query) and canonical IP;
+browser source/signature headers are not forwarded as authority. Actual remote
+deployment and secret injection are not exercised by the finite HTTP proof.

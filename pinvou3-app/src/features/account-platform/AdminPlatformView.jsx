@@ -91,6 +91,7 @@ function RepairQueue({ client, copy, profile = false }) {
 export function AdminPlatformView({ client, copy, language, onLanguageChange }) {
   const [authorization, setAuthorization] = useState(null);
   const [credentialOrigin, setCredentialOrigin] = useState('');
+  const [overviewFlags, setOverviewFlags] = useState({});
   const [authorizationOwner, setAuthorizationOwner] = useState(client);
   const [state, setState] = useState('loading');
   const [error, setError] = useState('');
@@ -107,6 +108,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       if (request !== generation.current) return;
       if (!result?.user_id || !Array.isArray(result.platform_permissions)) throw new Error('INVALID_AUTHORIZATION');
       setCredentialOrigin(typeof session.credential_origin === 'string' ? session.credential_origin : '');
+      setOverviewFlags({ page: session.feature_flags?.admin_model_token_page_overviews === true, aggregate: session.feature_flags?.admin_model_operations_overview === true });
       setAuthorization(result); setState('ready');
     } catch (reason) { if (request === generation.current) { setError(localizedAccountPlatformError(copy, reason)); setState('error'); } }
   };
@@ -134,7 +136,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     {renderedState === 'loading' && <p role="status">{copy.loading}</p>}{error && <div role="alert">{error}<button onClick={load}>{copy.retry}</button></div>}
     {renderedState === 'guest' && <a href="/auth/login?return_to=%2Fadmin.html">{copy.login}</a>}
     {renderedState === 'ready' && <><nav>{pages.map(([key, , label]) => <button key={key} aria-pressed={visibleSection === key} onClick={() => setSection(key)}>{label}</button>)}</nav>{!pages.length && <p role="alert">{copy.permissionDenied}</p>}
-      <div key={authorization.user_id}>{visibleSection === 'management' && <AdminManagementWorkspace client={client} copy={copy} language={language} permissions={permissions} owner={authorization.user_id} credentialOrigin={credentialOrigin} />}{visibleSection === 'reconciliation' && <AdminReconciliationWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'products' && <RechargeProductWorkspace client={client} me={authorization} copy={financeCopy[language]} language={language} />}{visibleSection === 'finance' && <AdminFinanceWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'users' && <Users client={client} copy={copy} canManage={permissions.includes('platform.users.status.manage')} />}{visibleSection === 'registration' && <RepairQueue client={client} copy={copy} />}{visibleSection === 'profile' && <RepairQueue key="profile" client={client} copy={copy} profile />}{visibleSection === 'settings' && <SettingsWorkspace client={client} copy={copy} language={language} onLanguageChange={onLanguageChange} permissions={permissions} />}</div>
+      <div key={authorization.user_id}>{visibleSection === 'management' && <AdminManagementWorkspace client={client} copy={copy} language={language} permissions={permissions} owner={authorization.user_id} credentialOrigin={credentialOrigin} authorizationVersion={authorization.authorization_version} overviewFlags={overviewFlags} />}{visibleSection === 'reconciliation' && <AdminReconciliationWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'products' && <RechargeProductWorkspace client={client} me={authorization} copy={financeCopy[language]} language={language} />}{visibleSection === 'finance' && <AdminFinanceWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'users' && <Users client={client} copy={copy} canManage={permissions.includes('platform.users.status.manage')} />}{visibleSection === 'registration' && <RepairQueue client={client} copy={copy} />}{visibleSection === 'profile' && <RepairQueue key="profile" client={client} copy={copy} profile />}{visibleSection === 'settings' && <SettingsWorkspace client={client} copy={copy} language={language} onLanguageChange={onLanguageChange} permissions={permissions} />}</div>
     </>}
   </main>;
 }
