@@ -72,6 +72,7 @@ const protocolSources = {
   knowledge: ['bridge/knowledge-model.js'],
   memory: ['bridge/memory.js'],
   monitor: ['bridge/monitor.js'],
+  device: ['bridge/device.js'],
   personas: ['bridge/personas.js'],
   remoteControl: ['bridge/remote-control.js'],
   scheduled: ['bridge/scheduled.js'],
@@ -227,6 +228,12 @@ const expectedProtocolHashes = {
   // 参数化薄包装），命令面无增删。
   memory: 'ca88a71d9f0f9b15f1df52cf80218694f76b2295add98e65a0d167fc88b627c8',
   monitor: 'e63e8d5d4edf813640e08c9951a12abdbc3cad4991763d3dd956e883e277fb1c',
+  // New domain: MegaCube 设备管理 (device manager). Six commands —
+  // get_device_snapshot (2s polling) / get_device_services / get_external_models /
+  // device_register_external_model / device_remove_external_model /
+  // device_doctor_prompt — no listen() entries (the device feature polls, it
+  // does not subscribe to events). Initial hash for bridge/device.js.
+  device: 'bf61134e5c434322c08b149ce68529c7588ff2cada3b58f44230a5643c22ea24',
   personas: '33efcab9c42a6830ade35861b8a6c60891da9cb282954e78c3bda42091e2474d',
   // 为 rebase 带入的已合并面重算（PR #2322，community #781）：
   // bridge/remote-control.js 增 web_access_revoke_host_workspace 一个 invoke

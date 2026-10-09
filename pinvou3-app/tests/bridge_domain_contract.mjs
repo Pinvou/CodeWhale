@@ -10,6 +10,9 @@ export const desktopBridgeApi = {
   scheduled: ['clearScheduledTaskSelection', 'createScheduledTask', 'deleteScheduledTask', 'dismissScheduledTaskError', 'exitScheduledRunChat', 'loadScheduledTaskRecentRuns', 'loadScheduledTaskRuns', 'loadScheduledTasks', 'openScheduledRunChat', 'pauseScheduledTask', 'readScheduledTask', 'refreshScheduledTaskData', 'resumeScheduledTask', 'runScheduledTaskNow', 'selectScheduledTask', 'startScheduledTaskChat', 'toggleScheduledTaskPinned', 'updateScheduledTask'],
   sessions: ['archiveSession', 'beginLocalNavigationIntent', 'onLocalNavigation', 'getLocalNavigationEpoch', 'captureControlledNavigationOwner', 'createNewSession', 'deleteSession', 'exitControlledScheduledRunChat', 'exportSessionArchive', 'isControlledNavigationOwnerCurrent', 'getSessionWorkspaceBinding', 'materializeSession', 'onSessionDeleted', 'boundDraftMode', 'pickDraftWorkspace', 'rememberDraftWorkspaceRecent', 'renameSession', 'restoreArchivedSession', 'setDraftWorkspace', 'switchToControlledSession', 'switchToSession', 'toggleSessionPinned'],
   monitor: ['clearMonitorStats', 'startMonitorPolling', 'stopMonitorPolling'],
+  // MegaCube 设备管理（bridge/device.js）：快照轮询 + 服务探测 + 外部模型 +
+  // 故障排查提示词。Web 端以 no-op 桩保持同形（web_bridge_domain_contract 锁面）。
+  device: ['buildDoctorPrompt', 'fetchExternalModels', 'pollDeviceServices', 'registerExternalModel', 'removeExternalModel', 'startDevicePolling', 'stopDevicePolling'],
   settings: ['listBuiltinFeatures', 'loadBehaviorTelemetryStatus', 'saveSearchSettings', 'saveSearchSettingsAndRestart', 'saveSettings', 'saveSettingsAndRestart', 'setBehaviorTelemetryEnabled', 'setBuiltinFeatureEnabled', 'setGlobalShortcutConfig', 'setSelectedPet', 'testSearchProvider'],
   feedback: ['submitFeedback', 'listFailureDiagnostics', 'previewFailureDiagnostic', 'submitFailureDiagnostic', 'pickDiagnosticFiles'],
   vllm: ['discoverLocalVllm'],

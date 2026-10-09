@@ -177,7 +177,7 @@ const APP_BRIDGE_STATE_DOMAINS = [
   'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
   'settings', 'models', 'vllm', 'interaction', 'personas',
   'memory', 'remoteControl', 'updater', 'dependencies', 'teamRelay',
-  'projects', 'desktopRemoteControl', 'computerUse',
+  'projects', 'desktopRemoteControl', 'computerUse', 'device',
 ];
 
 function emitPetEvent(ev, name, payload) {

@@ -192,6 +192,12 @@ function pinvouSharedweb() {
     turnPresentedArtifacts: [],
     busy: false,
     monitor: null,
+    // MegaCube 设备管理切片（桌面专属）：Web 恒无 MegaCube，只播种静态空默认
+    // 保证 device 域切片逐键有定义（与桌面 STATE_SLICE_FIELDS 同形）。
+    device: null,
+    deviceError: null,
+    deviceServices: null,
+    externalModels: null,
     backendOnline: null, // null=checking, true, false
     settings: null,
     selectedPet: "lingling",

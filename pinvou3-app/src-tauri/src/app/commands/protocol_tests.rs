@@ -229,8 +229,6 @@ command_protocol!(
     ]
 );
 command_protocol!(
-    device_protocol_2,  // placeholder to remove
-command_protocol!(
     files_protocol,
     "files.rs",
     [

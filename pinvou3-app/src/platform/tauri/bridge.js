@@ -243,6 +243,11 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
     turnPresentedArtifacts: [],
     busy: false,
     monitor: null,
+    // MegaCube 设备管理快照（bridge/device.js 轮询组装 _fmt）；非 MegaCube 平台恒 null。
+    device: null,
+    deviceError: null,
+    deviceServices: null,
+    externalModels: null,
     backendOnline: null, // null=checking, true, false
     platformCapabilities: {
       loaded: false,
@@ -261,6 +266,8 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
       // Linux. Fail-closed so the settings toggle stays disabled until
       // load_platform_capabilities corrects the slice.
       globalShortcutsAvailable: false,
+      // MegaCube 一体机（DMI product_name 含 megacube）：监控入口换成设备管理。
+      megacubeDevice: false,
     },
     settings: null,
     behaviorTelemetry: null,
@@ -2135,6 +2142,16 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var stopMonitorPolling = monitorFeature.stopMonitorPolling;
   var clearMonitorStats = monitorFeature.clearMonitorStats;
   var pollBackendStatus = monitorFeature.pollBackendStatus;
+  // MegaCube 设备管理（bridge/device.js）：快照轮询、服务探测、外部模型与
+  // 故障排查提示词都在 feature 内组装，facade 只暴露方法面。
+  var deviceFeature = installBridgeFeature("device", { state: state, notify: notify, invoke: invoke });
+  var startDevicePolling = deviceFeature.startDevicePolling;
+  var stopDevicePolling = deviceFeature.stopDevicePolling;
+  var pollDeviceServices = deviceFeature.pollDeviceServices;
+  var fetchExternalModels = deviceFeature.fetchExternalModels;
+  var registerExternalModel = deviceFeature.registerExternalModel;
+  var removeExternalModel = deviceFeature.removeExternalModel;
+  var buildDoctorPrompt = deviceFeature.buildDoctorPrompt;
   var settingsFeature = installBridgeFeature("settings", { state: state, notify: notify, invoke: invoke, listen: listen });
   var loadSettings = settingsFeature.loadSettings;
   var loadBehaviorTelemetryStatus = settingsFeature.loadBehaviorTelemetryStatus;
@@ -2685,6 +2702,15 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       startMonitorPolling: startMonitorPolling,
       stopMonitorPolling: stopMonitorPolling,
       clearMonitorStats: clearMonitorStats,
+    },
+    device: {
+      startDevicePolling: startDevicePolling,
+      stopDevicePolling: stopDevicePolling,
+      pollDeviceServices: pollDeviceServices,
+      fetchExternalModels: fetchExternalModels,
+      registerExternalModel: registerExternalModel,
+      removeExternalModel: removeExternalModel,
+      buildDoctorPrompt: buildDoctorPrompt,
     },
     settings: {
       setSelectedPet: setSelectedPet,
