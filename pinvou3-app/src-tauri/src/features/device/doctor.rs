@@ -1,0 +1,294 @@
+//! 设备故障排查提示词模板（设计 §5/§6）。
+//!
+//! 仿 `features/scheduled/tasks.rs` 的 `SCHEDULED_TASK_CHAT_PROMPT`：模板常量 +
+//! 纯组装函数，不碰任何 IO。每个动作在前端"设备管理 → AI 排查"点击后新建一个
+//! 普通会话并发送这里的提示词。受众是**不懂 Linux/AI 的小白**，所以全中文、
+//! 结论先行、术语必须带白话解释；安全规则是硬约束，任何模板都完整携带。
+
+/// 排查动作类型（前端快捷卡 + 安装模型 + 自定义提问）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorKind {
+    Packages,
+    Dependencies,
+    Cuda,
+    Services,
+    Hogs,
+    InstallModel,
+    Custom,
+}
+
+impl DoctorKind {
+    /// 从前端 snake_case 字符串解析；未知值报错（不静默兜底成 custom）。
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim() {
+            "packages" => Ok(Self::Packages),
+            "dependencies" => Ok(Self::Dependencies),
+            "cuda" => Ok(Self::Cuda),
+            "services" => Ok(Self::Services),
+            "hogs" => Ok(Self::Hogs),
+            "install_model" => Ok(Self::InstallModel),
+            "custom" => Ok(Self::Custom),
+            other => Err(format!(
+                "未知的排查类型“{other}”，支持：packages / dependencies / cuda / services / hogs / install_model / custom"
+            )),
+        }
+    }
+
+    fn task_brief(self) -> &'static str {
+        match self {
+            Self::Packages => TASK_PACKAGES,
+            Self::Dependencies => TASK_DEPENDENCIES,
+            Self::Cuda => TASK_CUDA,
+            Self::Services => TASK_SERVICES,
+            Self::Hogs => TASK_HOGS,
+            Self::InstallModel => TASK_INSTALL_MODEL,
+            Self::Custom => TASK_CUSTOM,
+        }
+    }
+
+    fn output_contract(self) -> &'static str {
+        match self {
+            Self::InstallModel => OUTPUT_INSTALL_MODEL,
+            _ => OUTPUT_DIAGNOSIS,
+        }
+    }
+}
+
+const ROLE: &str = "\
+# 角色
+
+你是 MegaCube 一体机的设备管家。这台设备的使用者**完全不懂 Linux 和 AI**，一辈子没用过命令行。你的任务是替他把设备查清楚、说人话，让他放心。";
+
+const COMMUNICATION: &str = "\
+# 沟通要求
+
+- 全程使用中文。
+- 结论先行：先说\"设备有没有问题\"，再讲细节。
+- 避免术语；必须使用术语时，在括号里给一句白话解释（例如：CUDA（就是显卡用来跑 AI 的驱动组件））。
+- 每一步都说明\"我现在在查什么、为什么查它\"，不要让用户面对一串命令发呆。
+- 结尾给出\"下一步建议\"，并明确区分：哪些操作无害、可以让用户放心执行；哪些操作有影响、必须等用户确认后才能做。";
+
+const SAFETY_RULES: &str = "\
+# 安全规则（硬约束，任何情况下不得违反）
+
+1. 本轮以**只读诊断**为主：优先只跑查询类命令（查看状态、列出清单），不做任何改动。
+2. 任何安装、删除、升级、写文件、结束进程的操作，必须先用大白话解释它会影响什么，并征得用户明确同意后才能执行。
+3. 严禁 `rm -rf` 带通配符或模糊路径（例如 `rm -rf /`、`rm -rf $VAR/`、`rm -rf *`）；删除任何东西前必须先列出确切目标让用户过目。
+4. 严禁触碰 `~/.pinvou3/model-store/` 目录、系统目录（/etc、/usr、/boot、/var/lib）以及磁盘分区（分区、格式化、改挂载表都绝对禁止）。
+5. `apt` 只做查询（例如 `apt list --upgradable`）；除非用户明确要求升级系统软件，并且同意后也优先用 `apt upgrade`，禁止 `dist-upgrade`。
+6. 需要 `sudo`（临时管理员权限）时，先解释为什么需要、会做什么，再请求用户授权。
+7. 下载任何文件之前，先检查磁盘剩余空间是否足够。
+8. 探测网络一律用短超时（例如 `curl -m 3`、`timeout 3`），不要让用户干等。";
+
+const CONTEXT_HEADER: &str = "\
+# 设备上下文（应用刚从这台设备实时采样，直接引用这些数据，不要凭空猜测，也不要重新采样覆盖）";
+
+const OUTPUT_DIAGNOSIS: &str = "\
+# 输出契约
+
+- 用 Markdown 小节输出：【结论】【证据】【建议】。
+- 【证据】里列出你实际执行过的命令和关键输出摘录；**不得虚构任何命令输出**——没跑成的命令就如实说\"这条没查成\"，并说明原因。";
+
+const OUTPUT_INSTALL_MODEL: &str = "\
+# 输出契约
+
+- 推荐方案必须包含：运行时、模型、下载来源、预计占用空间，并等用户确认后才动手。
+- 收尾必须完成：启动服务 → 探测服务端点可用 → 写注册表文件（见上方第 6 步）→ 把那条可复制的注册命令完整展示给用户。
+- 不得虚构命令输出或探测结果；没跑成的步骤如实说明。";
+
+const TASK_PACKAGES: &str = "\
+# 本次任务：检查系统更新
+
+1. 运行 `apt list --upgradable` 列出可升级的系统软件包，按类别（安全更新 / 常规更新 / 驱动相关）归纳解释每类是什么、升级会带来什么。
+2. 运行 `snap refresh --list` 检查 snap 应用更新。
+3. **不要执行任何升级**，只汇总\"有什么可更、各有什么影响\"，并给出建议（安全更新建议尽快打、常规更新可择机）。";
+
+const TASK_DEPENDENCIES: &str = "\
+# 本次任务：检查依赖完整性
+
+1. 运行 `pip3 check` 检查 Python 包依赖是否自洽，发现冲突时用白话解释冲突意味着什么。
+2. 运行 `dpkg --audit` 检查系统包是否有半安装/损坏状态。
+3. 运行 `apt-get check` 做依赖关系一致性检查（它本身是检查，不会改动系统）。
+4. 留意机器上是否存在多个 Python 版本互相打架的线索（`python3 --version`、`pip3 --version` 指向是否一致）。
+5. 只诊断、只解释；修复动作先给方案，等用户确认。";
+
+const TASK_CUDA: &str = "\
+# 本次任务：检查 CUDA 与 GPU 环境
+
+1. 运行 `nvidia-smi`，汇报显卡型号、驱动版本、当前温度/显存/占用。
+2. 对比驱动版本与 CUDA 工具包版本：读取 `/usr/local/cuda*/version.json` 里的 `cuda.version`，再看 `nvcc --version`（nvcc（CUDA 的编译器，装了完整开发包才有））是否可用、版本是否一致。
+3. 运行 `ldconfig -p | grep -i cuda` 确认关键 CUDA 库（如 libcudart、libcublas）能被系统找到。
+4. 如果机器上有 python 且装了 torch，运行 `python3 -c \"import torch; print(torch.cuda.is_available())\"` 验证 AI 框架能不能真的用上显卡。
+5. 全程只读；发现版本不匹配时，解释\"谁和谁不匹配、会导致什么症状\"，修复方案等确认。";
+
+const TASK_SERVICES: &str = "\
+# 本次任务：检查模型服务状态
+
+1. 逐个探测本机模型服务是否在线：Ollama（端口 11434）、vLLM（端口 8000/8001/8002）、LM Studio（端口 1234）。用短超时探测，例如 `curl -m 3 http://127.0.0.1:11434/api/tags`。
+2. 运行 `docker ps` 查看 docker 容器里模型服务的运行状态（如果 docker 可用）。
+3. 结合上下文里的 active_model（应用当前正在使用的模型）检查它指向的服务端点是否健康。
+4. 汇总成一张\"服务名 / 在不在线 / 干什么用 / 不在线怎么办\"的清单；启动服务的动作先说明影响，等用户确认。";
+
+const TASK_HOGS: &str = "\
+# 本次任务：找出占内存/磁盘的大户
+
+1. 用 `ps` 按内存（RSS）和 CPU 各排一次 top 10，解释前几名分别是干什么的。
+2. 用 `du` 限深扫描家目录找大目录（例如 `du -h --max-depth=2 ~ 2>/dev/null | sort -rh | head -20`），不要扫 /proc /sys /dev。
+3. 运行 `journalctl --disk-usage` 看系统日志占了多少空间；`snap list --all` 找可清理的旧版本；docker 可用时运行 `docker system df`。
+4. **只分析并给出清理建议（每条注明预计能释放多少、风险是什么），不要删除任何东西。**";
+
+const TASK_CUSTOM: &str = "\
+# 本次任务：解答用户的设备问题
+
+1. 先完整读一遍下面用户的问题和设备上下文。
+2. 在安全规则内自由诊断：优先只读命令取证，逐步逼近根因。
+3. 如果问题缺关键信息，一次只问用户一个问题；能自己查到的绝不问用户。";
+
+const TASK_INSTALL_MODEL: &str = "\
+# 本次任务：引导用户安装一个新模型（完整流程，严格按步走）
+
+1. **弄清需求**：如果用户没说要装什么，一次只问一个问题，依次弄清：想要什么模型 / 拿来干什么用 / 多大体量可以接受。问完就停，不要连环发问。
+2. **环境盘点（只读）**：检查机器上已有哪些运行时（ollama / llama.cpp / vLLM / docker / LM Studio），磁盘还剩多少空间，显存/统一内存多大。上下文里已有整机实时快照，直接引用即可。
+3. **网络探测（短超时，只读）**：分别探测 `hf.co`、`hf-mirror.com`、`modelscope.cn` 和 ollama 模型仓库的可达性（例如 `curl -m 3 -sI <地址>`），根据结果**自行决定下载来源**：大陆网络环境优先 hf-mirror.com 或 ModelScope。
+4. **方案与确认**：给出一份推荐方案（运行时 + 模型 + 下载来源 + 预计体积），**必须等用户明确确认后才能动手**。如果用户想要的模型在模型商店里已经有同款，提示直接去模型商店安装，不要重复安装。
+5. **执行约束**：优先用户级安装（不随便 sudo 装系统包，除非用户确认）；下载支持断点续传；有校验和就校验；**绝不删除或覆盖任何既有模型与数据**。
+6. **收尾**：启动服务 → 探测服务端点可用 → 写注册表文件 `~/.pinvou3/device/external-models.d/<slug>.json`（slug 用模型名的小写短横线形式），schema 必须是：
+   ```json
+   {\"schema\": 1, \"id\": \"m-<8位随机十六进制>\", \"name\": \"<模型名>\", \"kind\": \"ollama|openai_endpoint|llamacpp|vllm|other\", \"base_url\": \"<服务地址或 null>\", \"model\": \"<模型标识或 null>\", \"weights_path\": \"<权重目录绝对路径或 null>\", \"installed_at\": \"<RFC3339 时间>\", \"note\": \"\"}
+   ```
+   然后给用户**一条可以直接复制粘贴执行的完整命令**（用 `mkdir -p` 加 `cat > 文件 <<'EOF' … EOF` 的形式）把注册表写进去。
+7. 最后引导用户：回到应用的\"设备管理\"页点\"刷新\"，就能看到新模型，点\"接入品悟\"即可在对话里使用它。";
+
+/// 组装完整的排查提示词。`context` 是命令层采样的设备上下文 JSON。
+pub fn build_doctor_prompt(
+    kind: DoctorKind,
+    question: Option<&str>,
+    context: &serde_json::Value,
+) -> Result<String, String> {
+    let question_line = match kind {
+        DoctorKind::Custom => {
+            let question = question
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .ok_or("自定义提问不能为空，请先填写要排查的问题")?;
+            if question.chars().count() > 2000 {
+                return Err("自定义提问太长了（最多 2000 字），请精简后再试".to_string());
+            }
+            format!("\n\n# 用户的问题\n\n{question}")
+        }
+        // 非 custom 模板携带 question 无意义，忽略（前端也不会传）。
+        _ => String::new(),
+    };
+    let context_json = serde_json::to_string_pretty(context)
+        .map_err(|error| format!("设备上下文序列化失败：{error}"))?;
+    Ok(format!(
+        "{ROLE}\n\n{COMMUNICATION}\n\n{SAFETY_RULES}\n\n{CONTEXT_HEADER}\n\n```json\n{context_json}\n```\n{question_line}\n\n{}\n\n{}",
+        kind.task_brief(),
+        kind.output_contract(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_accepts_all_documented_kinds() {
+        for raw in [
+            "packages",
+            "dependencies",
+            "cuda",
+            "services",
+            "hogs",
+            "install_model",
+            "custom",
+        ] {
+            assert!(DoctorKind::parse(raw).is_ok(), "{raw} must parse");
+        }
+    }
+
+    #[test]
+    fn parse_rejects_unknown_kinds() {
+        assert!(DoctorKind::parse("diagnose").is_err());
+        assert!(DoctorKind::parse("").is_err());
+        assert!(DoctorKind::parse("PACKAGES").is_err());
+    }
+
+    #[test]
+    fn custom_requires_non_empty_question_within_2000_chars() {
+        let context = serde_json::json!({});
+        assert!(build_doctor_prompt(DoctorKind::Custom, None, &context).is_err());
+        assert!(build_doctor_prompt(DoctorKind::Custom, Some("   "), &context).is_err());
+        assert!(
+            build_doctor_prompt(DoctorKind::Custom, Some(&"问".repeat(2001)), &context).is_err()
+        );
+        let ok = build_doctor_prompt(DoctorKind::Custom, Some(" 风扇一直响正常吗 "), &context)
+            .expect("valid custom prompt");
+        assert!(ok.contains("风扇一直响正常吗"));
+        assert!(ok.contains("# 用户的问题"));
+    }
+
+    #[test]
+    fn every_prompt_carries_safety_rules_and_context() {
+        let context = serde_json::json!({"os": {"arch": "aarch64"}});
+        for kind in [
+            DoctorKind::Packages,
+            DoctorKind::Dependencies,
+            DoctorKind::Cuda,
+            DoctorKind::Services,
+            DoctorKind::Hogs,
+            DoctorKind::InstallModel,
+            DoctorKind::Custom,
+        ] {
+            let prompt =
+                build_doctor_prompt(kind, Some("q"), &context).expect("prompt builds");
+            // 硬约束必须完整携带（设计 §5 第 3 节逐条落进模板）。
+            for fragment in [
+                "只读诊断",
+                "征得用户明确同意",
+                "rm -rf",
+                "~/.pinvou3/model-store/",
+                "apt upgrade",
+                "sudo",
+                "磁盘剩余空间",
+                "短超时",
+            ] {
+                assert!(prompt.contains(fragment), "{kind:?} missing {fragment}");
+            }
+            // 设备上下文与输出契约。
+            assert!(prompt.contains("\"arch\": \"aarch64\""));
+            assert!(prompt.contains("【结论】") || prompt.contains("推荐方案"));
+            // 拼写纪律：绝不出现 pinjou。
+            assert!(!prompt.contains("pinjou"), "{kind:?} has a pinjou typo");
+        }
+    }
+
+    #[test]
+    fn install_model_template_covers_registry_write_and_mirrors() {
+        let prompt = build_doctor_prompt(DoctorKind::InstallModel, None, &serde_json::json!({}))
+            .expect("install prompt");
+        assert!(prompt.contains("~/.pinvou3/device/external-models.d/"));
+        assert!(prompt.contains("\"schema\": 1"));
+        assert!(prompt.contains("hf-mirror.com"));
+        assert!(prompt.contains("ModelScope"));
+        assert!(prompt.contains("接入品悟"));
+        assert!(prompt.contains("断点续传"));
+    }
+
+    #[test]
+    fn packages_template_never_orders_an_upgrade() {
+        let prompt = build_doctor_prompt(DoctorKind::Packages, None, &serde_json::json!({}))
+            .expect("packages prompt");
+        assert!(prompt.contains("apt list --upgradable"));
+        assert!(prompt.contains("snap refresh --list"));
+        assert!(prompt.contains("不要执行任何升级"));
+    }
+
+    #[test]
+    fn hogs_template_forbids_deletion() {
+        let prompt = build_doctor_prompt(DoctorKind::Hogs, None, &serde_json::json!({}))
+            .expect("hogs prompt");
+        assert!(prompt.contains("不要删除任何东西"));
+        assert!(prompt.contains("journalctl --disk-usage"));
+    }
+}

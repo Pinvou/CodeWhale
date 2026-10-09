@@ -82,3 +82,7 @@ pub use platform::backend::{
     run_startup_refresh, set_storage_settings, start_deploy, start_download, start_lifecycle,
     storage_settings, take_startup_cleanup, test_store_state, unlock_test_store,
 };
+
+// 商店边界查询：供其他 feature（设备管理的外部模型登记/移除）判断某个名字
+// 是否已被商店接管。见 platform::store_model_name 的说明。
+pub(crate) use platform::store_model_name;

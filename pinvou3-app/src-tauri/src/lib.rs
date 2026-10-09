@@ -1808,6 +1808,10 @@ pub fn run() {
             // get_monitor_snapshot 时触发（监控页面 1s interval，离开页面停）。
             let monitor_state = MonitorState::new();
             app.handle().manage(monitor_state);
+            // MegaCube 设备管理：持有必须跨采样存续的 sysinfo System/Networks 实例
+            // （进程 CPU% 与网络速率都靠同一实例两次刷新求差）。非 MegaCube 平台
+            // 上无人调用，开销为零。
+            app.handle().manage(crate::features::device::DeviceState::new());
             app.handle()
                 .manage(notifications::NotificationState::default());
             app.handle()
@@ -2055,6 +2059,12 @@ pub fn run() {
             commands::sessions::clear_session,
             commands::monitor::get_monitor_snapshot,
             commands::monitor::get_backend_status,
+            commands::device::get_device_snapshot,
+            commands::device::get_device_services,
+            commands::device::get_external_models,
+            commands::device::device_register_external_model,
+            commands::device::device_remove_external_model,
+            commands::device::device_doctor_prompt,
             commands::monitor::discover_local_vllm,
             commands::model_store::model_store_availability,
             commands::model_store::model_store_cards,

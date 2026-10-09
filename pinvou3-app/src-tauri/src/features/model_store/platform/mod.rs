@@ -26,3 +26,20 @@ pub mod unsupported;
 pub(crate) use linux as backend;
 #[cfg(not(target_os = "linux"))]
 pub(crate) use unsupported as backend;
+
+/// 跨平台的商店边界查询：按模型名查商店库，命中返回商店里的规范名。
+/// 设备管理（features/device）的外部模型登记/移除用它拒绝"把商店模型当成
+/// 外部模型"的越界操作。Linux 查 sqlite；其他平台没有商店，恒为 None。
+/// 查询出错按未命中处理——商店库打不开时商店自身也不可用，不存在"误接管"。
+#[cfg(target_os = "linux")]
+pub(crate) fn store_model_name(model_name: &str) -> Option<String> {
+    linux::db::get_store_model_by_name(model_name)
+        .ok()
+        .flatten()
+        .map(|record| record.model_name)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn store_model_name(_model_name: &str) -> Option<String> {
+    None
+}

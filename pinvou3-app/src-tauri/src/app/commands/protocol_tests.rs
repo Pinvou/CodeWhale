@@ -217,6 +217,20 @@ command_protocol!(
     ["set_global_shortcut_config"]
 );
 command_protocol!(
+    device_protocol,
+    "device.rs",
+    [
+        "get_device_snapshot",
+        "get_device_services",
+        "get_external_models",
+        "device_register_external_model",
+        "device_remove_external_model",
+        "device_doctor_prompt"
+    ]
+);
+command_protocol!(
+    device_protocol_2,  // placeholder to remove
+command_protocol!(
     files_protocol,
     "files.rs",
     [
