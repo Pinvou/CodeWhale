@@ -50,7 +50,19 @@ globalThis.fetch = async (url, options = {}) => {
   if (url.includes('/payment-orders?')) return json({ items: [order()] });
   if (url.endsWith('/admin/v1/overview')) return json({ payment_capabilities: { normal_refund_creation_enabled: true } });
   if (url.endsWith(`/payment-orders/${id}`)) return json({ ...order(), transactions: [{ payment_transaction_id: id, payment_order_id: id, status: 'PAID', fulfillment_status: 'CREDITED', amount_fen: '9007199254740993' }], entitlement_packages: [pkg()] });
-  if (url.endsWith(`/payment-orders/${id}/refunds`)) { const facts = JSON.parse(options.body); return control.unknownRefund ? json({ code: 'UPSTREAM_UNAVAILABLE' }, 503) : json({ refund_id: id, payment_order_id: id, ...facts, amount_fen: control.wrongRefund ? '1' : '9007199254740993' }, 201); }
+  if (url.endsWith(`/payment-orders/${id}/refunds`)) {
+    const facts = JSON.parse(options.body);
+    if (control.refundResponses) {
+      const status = control.refundResponses.shift() || 201;
+      if (status === 401 || status === 403) return json({ code: status === 401 ? 'AUTH_REQUIRED' : 'PERMISSION_DENIED' }, status);
+      control.refundReceipts ||= new Map();
+      const key = options.headers['Idempotency-Key'];
+      let receipt = control.refundReceipts.get(key);
+      if (!receipt) { receipt = { refund_id: id, payment_order_id: id, ...facts, amount_fen: '9007199254740993' }; control.refundReceipts.set(key, receipt); control.refundEffects = (control.refundEffects || 0) + 1; }
+      return status === 503 ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : json(receipt, 201);
+    }
+    return control.unknownRefund ? json({ code: 'UPSTREAM_UNAVAILABLE' }, 503) : json({ refund_id: id, payment_order_id: id, ...facts, amount_fen: control.wrongRefund ? '1' : '9007199254740993' }, 201);
+  }
   if (url.includes('/late-payment-reviews?')) return json({ items: [late()] });
   if (url.endsWith(`/late-payment-reviews/${id}`)) return json({ case: late(), events: [] });
   if (url.endsWith(`/late-payment-reviews/${id}/query`)) return json(late());
@@ -87,4 +99,5 @@ function render() {
 control.render = kind => { control.kind = kind; render(); };
 control.languageCopy = () => financeCopy[control.language];
 control.switchIdentity = () => { control.user = other; render(); };
+control.setAdminEpoch = value => { admin.financeSessionEpoch = value; render(); };
 window.f02 = control; render();

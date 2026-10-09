@@ -29,6 +29,10 @@ export function useFinanceOperation(owner, copy, client, scope) {
   };
   const mutate = async (facts, action) => {
     if (running.current) return;
+    // A denial of this replay cannot establish whether its earlier dispatch
+    // committed. The retained invocation, rather than asynchronously rendered
+    // state, is the authority for its original facts and idempotency key.
+    const hadUnresolved = Boolean(intent.current);
     const current = intent.current || { facts, key: `finance-${secureRequestID()}` };
     intent.current = current;
     pending.set(identity, current);
@@ -39,7 +43,7 @@ export function useFinanceOperation(owner, copy, client, scope) {
       intent.current = null; pending.delete(identity); setUnknown(false); setMessage('saved'); return value;
     } catch (reason) {
       if (stamp !== generation.current) return;
-      const uncertain = !Number.isInteger(reason.status) || reason.status >= 500 || reason.code === 'COMMAND_RESULT_UNKNOWN';
+      const uncertain = hadUnresolved || !Number.isInteger(reason.status) || reason.status >= 500 || reason.code === 'COMMAND_RESULT_UNKNOWN';
       if (!uncertain) { intent.current = null; pending.delete(identity); }
       setUnknown(uncertain); setError(uncertain ? 'unknown' : reason.status === 403 ? 'permissions' : 'sourceChanged');
     } finally { if (stamp === generation.current) { running.current = false; setBusy(false); } }
