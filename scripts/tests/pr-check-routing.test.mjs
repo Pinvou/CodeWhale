@@ -85,6 +85,17 @@ function jobBlock(name) {
   return match[0];
 }
 
+// Read one named step; another gate in the same job must never become part
+// of its isolated fixture, regardless of the step's position in the job.
+function stepRun(job, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const step = job.match(new RegExp(`^ {6}- name: ${escaped}\\r?\\n[\\s\\S]*?(?=^ {6}- |$(?![\\s\\S]))`, "m"));
+  assert.ok(step, `step '${name}' not found`);
+  const run = step[0].match(/^ {8}run: \|\r?\n([\s\S]*)/m);
+  assert.ok(run, `step '${name}' has no literal run block`);
+  return run[1].replace(/^ {10}/gm, "");
+}
+
 const bash = process.platform === "win32" && existsSync("C:/Program Files/Git/bin/bash.exe")
   ? "C:/Program Files/Git/bin/bash.exe" : "bash";
 
@@ -105,7 +116,7 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
 
 test("Go gate executes test and vet for root and future nested modules, and fails on errors", () => {
   const job = jobBlock("account-platform-test");
-  const run = job.match(/        run: \|\r?\n([\s\S]*)/)[1].replace(/^ {10}/gm, "");
+  const run = stepRun(job, "Test and vet all Account Platform Go modules");
   const directory = mkdtempSync(join(tmpdir(), "pinvou-go-gate-"));
   try {
     for (const module of ["account-platform", "account-platform/tools/kms-recovery", "account-platform/tools/future tool"]) {
@@ -130,6 +141,28 @@ test("Go gate executes test and vet for root and future nested modules, and fail
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("Keycloak contract gate invokes the existing suite and propagates failure", () => {
+  const run = stepRun(jobBlock("account-platform-test"), "Keycloak provisioning and theme contracts");
+  const prefix = "python3() { printf '%s|%s\\n' \"$PINVOU_TEST_BASH\" \"$*\"; }; export -f python3;\n";
+  const result = spawnSync(bash, ["-c", prefix + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+  assert.equal(result.status, 0, result.stderr);
+  const calls = result.stdout.trim().split("\n");
+  assert.equal(calls.length, 1, result.stdout);
+  const [shell, script] = calls[0].split("|");
+  assert.ok(shell, "the suite must receive an explicit POSIX shell");
+  assert.equal(script, "account-platform/deploy/keycloak/test/provision_mobile_auth_test.py");
+  const failed = spawnSync(bash, ["-c", "python3() { return 7; }; export -f python3;\n" + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+  assert.equal(failed.status, 7, "a failing Keycloak contract must fail the gate");
+});
+
+test("named step fixtures exclude later steps and fail closed on missing names", () => {
+  const job = jobBlock("account-platform-test");
+  const name = "Test and vet all Account Platform Go modules";
+  const later = "      - name: Unrelated fixture\n        run: |\n          exit 99\n";
+  assert.equal(stepRun(job + later, name), stepRun(job, name));
+  assert.throws(() => stepRun(job, "Missing gate"), /not found/);
 });
 
 test("required-gate rejects skipped applicable Go checks and permits unrelated skips", () => {
