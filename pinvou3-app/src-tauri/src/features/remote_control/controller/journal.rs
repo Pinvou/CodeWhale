@@ -29,6 +29,8 @@ pub(crate) const JOURNAL_CAPACITY: usize = 512;
 pub(crate) const JOURNAL_BYTES_CAPACITY: usize = 256 * 1024;
 pub(crate) const MAX_EVENT_PAYLOAD_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_EVENT_TEXT_CHARS: usize = 4096;
+/// Pending raw text is bounded in UTF-8 bytes, not Unicode scalar count.
+pub(crate) const MAX_PENDING_TOKEN_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_TASK_ID_CHARS: usize = 128;
 pub(crate) const MAX_SESSION_ID_CHARS: usize = 128;
 const MAX_JOURNAL_SESSIONS: usize = 256;
@@ -1227,76 +1229,99 @@ fn sanitize_value(key: &str, value: &Value) -> Value {
 pub(crate) fn sanitize_text(text: &str) -> String {
     let mut sanitizer = StreamingTextSanitizer::default();
     let mut out = sanitizer.push(text);
-    out.push_str(&sanitizer.finish());
+    out.push_str(&sanitizer.finish_completed());
     out.chars().take(MAX_EVENT_TEXT_CHARS).collect()
 }
 
-/// Stateful sanitizer for streamed model output. An incomplete ASCII token is
-/// retained until a safe boundary, so splitting `sk-secret`, a host path, or a
-/// signed URL across provider deltas cannot bypass journal redaction.
+/// Stateful sanitizer for remote presentation text. Every non-whitespace
+/// block, including ordinary CJK, waits for classification before publication.
+/// The pending UTF-8 block is bounded; exhaustion masks the remaining line
+/// rather than flushing an unclassified prefix to make room.
 #[derive(Default)]
 pub(crate) struct StreamingTextSanitizer {
-    token: String,
-    redact_next: bool,
+    token: zeroize::Zeroizing<String>,
+    discarding_token: bool,
+    awaiting_separator: bool,
     redact_line: bool,
 }
 
 impl StreamingTextSanitizer {
     pub(crate) fn push(&mut self, text: &str) -> String {
-        let mut out = String::with_capacity(text.len());
+        let mut out = String::with_capacity(text.len().min(MAX_EVENT_TEXT_CHARS));
         for ch in text.chars() {
             if ch.is_whitespace() {
                 self.flush_token(&mut out);
                 out.push(ch);
                 if matches!(ch, '\n' | '\r') {
-                    self.redact_next = false;
+                    self.awaiting_separator = false;
                     self.redact_line = false;
                 }
-            } else if ch.is_ascii() {
-                self.token.push(ch);
-            } else {
-                // Credential/path syntax is ASCII. Treating a non-ASCII code
-                // point as a boundary keeps CJK reasoning visibly streaming
-                // without weakening protection for split ASCII secrets.
-                self.flush_token(&mut out);
-                out.push(ch);
+            } else if !self.discarding_token {
+                if self.token.is_empty() && self.awaiting_separator {
+                    self.redact_line |= matches!(ch, ':' | '=');
+                    self.awaiting_separator = false;
+                }
+                if self.token.len() + ch.len_utf8() > MAX_PENDING_TOKEN_BYTES {
+                    // No timeout/capacity path may publish a raw prefix.
+                    // Preserve header/value protection even when the field's
+                    // first token itself exhausts the buffer.
+                    use zeroize::Zeroize as _;
+                    self.token.zeroize();
+                    self.discarding_token = true;
+                    self.awaiting_separator = false;
+                    self.redact_line = true;
+                    out.push_str("[REDACTED]");
+                } else {
+                    self.token.push(ch);
+                }
             }
         }
         out
     }
 
-    pub(crate) fn finish(&mut self) -> String {
+    /// Only a confirmed complete stream may classify its final block.
+    pub(crate) fn finish_completed(&mut self) -> String {
         let mut out = String::new();
         self.flush_token(&mut out);
-        self.redact_next = false;
+        self.awaiting_separator = false;
+        self.redact_line = false;
+        out
+    }
+
+    /// Cancellation, retirement and an unconfirmed stream end never expose
+    /// the still-ambiguous block. Drop also zeroizes the retained allocation.
+    pub(crate) fn abort_pending(&mut self) -> String {
+        use zeroize::Zeroize as _;
+        let out = if self.token.is_empty() {
+            String::new()
+        } else {
+            "[REDACTED]".to_owned()
+        };
+        self.token.zeroize();
+        self.discarding_token = false;
+        self.awaiting_separator = false;
         self.redact_line = false;
         out
     }
 
     fn flush_token(&mut self, out: &mut String) {
+        if self.discarding_token {
+            self.discarding_token = false;
+            return;
+        }
         if self.token.is_empty() {
             return;
         }
-        let lowered = self.token.to_ascii_lowercase();
-        let authorization_marker = lowered
-            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != ':' && ch != '-')
-            .starts_with("authorization:");
-        let cookie_marker = lowered
-            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != ':' && ch != '-')
-            .starts_with("cookie:");
+        let lowered = zeroize::Zeroizing::new(self.token.to_ascii_lowercase());
+        let credential_field = super::redaction::is_credential_field(&lowered);
+        let field_syntax = lowered.contains([':', '=']);
         let bearer_marker = lowered
             .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
             .eq("bearer");
-        let forced_redaction = self.redact_line || self.redact_next;
-        self.redact_next = bearer_marker;
-        self.redact_line |= authorization_marker || cookie_marker;
+        self.awaiting_separator = credential_field && !field_syntax;
+        self.redact_line |= bearer_marker || (credential_field && field_syntax);
 
-        if forced_redaction
-            || authorization_marker
-            || cookie_marker
-            || bearer_marker
-            || looks_like_secret(&lowered)
-        {
+        if self.redact_line || super::redaction::looks_like_secret(&lowered) {
             out.push_str("[REDACTED]");
         } else if let Some(url) = sanitize_url_token(&self.token) {
             out.push_str(&url);
@@ -1305,27 +1330,10 @@ impl StreamingTextSanitizer {
         } else {
             out.push_str(&self.token);
         }
-        self.token.clear();
+        use zeroize::Zeroize as _;
+        self.token.zeroize();
     }
 }
-
-fn looks_like_secret(lowered: &str) -> bool {
-    [
-        "sk-",
-        "token=",
-        "access_token=",
-        "access-token=",
-        "api_key",
-        "api-key",
-        "secret=",
-        "signature=",
-        "x-amz-signature=",
-        "sig=",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
-}
-
 /// Preserve a public link's Markdown shape while removing query/fragment data.
 /// User-info cannot be made safely presentational and therefore fails closed.
 fn sanitize_url_token(token: &str) -> Option<String> {
@@ -1384,6 +1392,44 @@ fn looks_like_path(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maximum_cursor_and_exhaustion_leave_terminal_authority_unchanged() {
+        let journal = journal();
+        assert!(
+            matches!(journal.replay_after_for("session-0001", "epoch-1", u64::MAX).unwrap(), ReplayOutcome::Events(events) if events.is_empty())
+        );
+        let mut exhausted = RemoteJournal::new_stream();
+        exhausted.sequence = u64::MAX;
+        journal
+            .inner
+            .lock()
+            .sessions
+            .insert("session-0001".into(), exhausted);
+        assert!(
+            matches!(journal.replay_after_for("session-0001", "epoch-1", u64::MAX).unwrap(), ReplayOutcome::Events(events) if events.is_empty())
+        );
+        let before = journal.snapshot_for("session-0001").unwrap();
+        assert_eq!(
+            journal
+                .append_terminal(
+                    "event-1",
+                    "session-0001",
+                    "task-0001",
+                    "succeeded",
+                    json!({"status":"succeeded"})
+                )
+                .unwrap_err()
+                .code,
+            "journal_sequence_exhausted"
+        );
+        assert_eq!(journal.snapshot_for("session-0001").unwrap(), before);
+        let state = journal.inner.lock();
+        let inner = &state.sessions["session-0001"];
+        assert!(inner.terminals.is_empty());
+        assert!(inner.event_ids.is_empty());
+        assert_eq!(inner.bytes, 0);
+    }
 
     fn journal() -> RemoteJournal {
         RemoteJournal::new("epoch-1")
@@ -1452,9 +1498,11 @@ mod tests {
     #[test]
     fn byte_budget_produces_valid_shorter_snapshot_at_same_cursor() {
         let journal = RemoteJournal::new("epoch-1");
-        // Exercise the byte window after the 4096-character sanitizer, not a
-        // raw ASCII input that is truncated below the window before append.
-        let body = "界".repeat(MAX_EVENT_TEXT_CHARS);
+        // Keep the 4096-character/byte-window test independent of pending
+        // block exhaustion: each short word is classifiable and not masked.
+        let body = "界 ".repeat(MAX_EVENT_TEXT_CHARS / 2);
+        assert_eq!(sanitize_text(&body), body);
+        assert!(body.len() > MAX_EVENT_TEXT_CHARS);
         for sequence in 1..=40 {
             journal
                 .append(
@@ -1597,8 +1645,171 @@ mod tests {
         output.push_str(&sanitizer.push("\\me\\secret.txt then "));
         output.push_str(&sanitizer.push("https://example.com/file?access_"));
         output.push_str(&sanitizer.push("token=secret"));
-        output.push_str(&sanitizer.finish());
+        output.push_str(&sanitizer.finish_completed());
         assert_eq!(output, "prefix [REDACTED] and [PATH] then [REDACTED]");
+    }
+
+    #[test]
+    fn inherited_sensitive_fields_redact_values_at_every_stream_split() {
+        for raw in [
+            "'sk-test-fixture'",
+            "[SK-test-fixture]",
+            "`token=fixture`",
+            "(api_key=fixture)",
+            "Bearer plain-fixture",
+            "Authorization: Bearer plain-fixture",
+            "Cookie: a=fixture b=fixture",
+            r#"{"api_key": "plain-fixture"}"#,
+            r#"{"api_key" : "plain-fixture"}"#,
+            "token= plain-fixture",
+            "secret = plain-fixture",
+            "X-Api-Key: plain-fixture",
+            "access-token: plain-fixture",
+            "signature: plain-fixture",
+            "token: plain-fixture",
+            "secret:plain-fixture",
+            r#"secret = "plain fixture phrase""#,
+            r#"{"api_key" : "plain fixture phrase"}"#,
+            "Authorization:Bearer plain-fixture",
+            "Cookie:a=fixture b=fixture",
+            "secret = 中文口令 日本語口令",
+            "Bearer 中文口令",
+            "token=中文口令",
+            "sk-中文口令",
+            "prefix sk-中文口令",
+            "C:\\Users\\中文用户\\fixture.txt",
+            r"\\服务器\中文用户\fixture.txt",
+            "/tmp/中文用户/fixture.txt",
+            "https://user:中文口令@example.com/a",
+        ]
+        .into_iter()
+        .chain(["目录/秘密/fixture.txt", r"目录\秘密.txt", "foo中文/bar/baz"])
+        {
+            let plans = raw
+                .char_indices()
+                .map(|(offset, _)| offset)
+                .chain([raw.len()])
+                .map(|split| vec![raw[..split].to_owned(), raw[split..].to_owned()])
+                .chain(std::iter::once(
+                    raw.chars().map(|ch| ch.to_string()).collect(),
+                ));
+            for (plan, chunks) in plans.enumerate() {
+                let mut sanitizer = StreamingTextSanitizer::default();
+                let mut parts: Vec<String> =
+                    chunks.iter().map(|chunk| sanitizer.push(chunk)).collect();
+                parts.push(sanitizer.finish_completed());
+                let output = parts.concat();
+                assert!(
+                    !output.contains("fixture") && !output.contains("口令"),
+                    "{raw:?} plan {plan}: {output:?}"
+                );
+                assert!(output.contains("[REDACTED]") || output.contains("[PATH]"));
+                let journal = journal();
+                // Real producers publish each push result independently;
+                // later chunks can never retract an already visible prefix.
+                for (index, part) in parts.into_iter().enumerate() {
+                    if part.is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        !part.contains("fixture")
+                            && !part.contains("口令")
+                            && !part.contains("中文用户")
+                            && !part.contains("目录")
+                            && !part.contains("秘密")
+                            && !part.contains("foo中文")
+                    );
+                    journal
+                        .append(
+                            &format!("event-{index}"),
+                            JournalKind::AssistantDelta,
+                            "session-0001",
+                            Some("task-0001"),
+                            json!({"delta": part}),
+                        )
+                        .unwrap();
+                }
+                let snapshot = journal.snapshot_for("session-0001").unwrap();
+                let replay = journal
+                    .replay_after_for("session-0001", "epoch-1", 0)
+                    .unwrap();
+                let bytes = format!("{} {replay:?}", serde_json::to_string(&snapshot).unwrap());
+                assert!(!bytes.contains("fixture") && !bytes.contains("口令"));
+                assert!(snapshot.verify_digest());
+            }
+        }
+        let positive =
+            "token budget = 10 normal: text\n普通中文 English 日本語 https://example.com/文档";
+        let mut sanitizer = StreamingTextSanitizer::default();
+        let mut output = String::new();
+        for ch in positive.chars() {
+            output.push_str(&sanitizer.push(&ch.to_string()));
+        }
+        output.push_str(&sanitizer.finish_completed());
+        assert_eq!(output, positive);
+        let mut sanitizer = StreamingTextSanitizer::default();
+        assert_eq!(sanitizer.push("普通中文"), "");
+        assert_eq!(sanitizer.push("继续 "), "普通中文继续 ");
+        assert_eq!(
+            sanitize_text("secret = fixture\n正常文本"),
+            "secret [REDACTED] [REDACTED]\n正常文本"
+        );
+    }
+
+    #[test]
+    fn pending_blocks_are_utf8_bounded_and_never_flushed_raw_on_exhaustion() {
+        let mut sanitizer = StreamingTextSanitizer::default();
+        assert_eq!(sanitizer.push(&"x".repeat(MAX_PENDING_TOKEN_BYTES)), "");
+        assert_eq!(sanitizer.token.len(), MAX_PENDING_TOKEN_BYTES);
+        assert_eq!(sanitizer.push("目录/秘密/file.txt"), "[REDACTED]");
+        assert!(sanitizer.token.is_empty());
+        assert!(sanitizer.discarding_token);
+        assert_eq!(sanitizer.push(&"tail".repeat(MAX_PENDING_TOKEN_BYTES)), "");
+        assert!(sanitizer.token.is_empty());
+        assert_eq!(sanitizer.push(" normal\n正常 "), " [REDACTED]\n正常 ");
+        assert_eq!(sanitizer.finish_completed(), "");
+
+        let mut sanitizer = StreamingTextSanitizer::default();
+        let near_limit = "中".repeat(MAX_PENDING_TOKEN_BYTES / 3);
+        assert_eq!(sanitizer.push(&near_limit), "");
+        assert!(sanitizer.token.len() <= MAX_PENDING_TOKEN_BYTES);
+        assert_eq!(sanitizer.push("文"), "[REDACTED]");
+        assert!(sanitizer.token.is_empty());
+        assert_eq!(sanitizer.abort_pending(), "");
+        assert_eq!(sanitizer.push("恢复 "), "恢复 ");
+
+        let mut sanitizer = StreamingTextSanitizer::default();
+        for ch in format!(
+            "secret={} multi word value\nnormal ",
+            "x".repeat(MAX_PENDING_TOKEN_BYTES)
+        )
+        .chars()
+        {
+            let output = sanitizer.push(&ch.to_string());
+            assert!(
+                !output.contains('x') && !output.contains("multi") && !output.contains("value")
+            );
+            assert!(sanitizer.token.len() <= MAX_PENDING_TOKEN_BYTES);
+        }
+        assert_eq!(sanitizer.finish_completed(), "");
+    }
+
+    #[test]
+    fn complete_and_aborted_block_ends_have_distinct_publication_contracts() {
+        let mut sanitizer = StreamingTextSanitizer::default();
+        assert_eq!(sanitizer.push("目录"), "");
+        assert_eq!(sanitizer.abort_pending(), "[REDACTED]");
+        assert_eq!(sanitizer.abort_pending(), "");
+        assert!(sanitizer.token.is_empty());
+        assert_eq!(sanitizer.push("正常文本"), "");
+        assert_eq!(sanitizer.finish_completed(), "正常文本");
+        assert_eq!(sanitizer.finish_completed(), "");
+        assert_eq!(sanitizer.push("secret ="), "secret ");
+        assert_eq!(
+            sanitizer.push(" value words\n正常"),
+            "[REDACTED] [REDACTED] [REDACTED]\n"
+        );
+        assert_eq!(sanitizer.finish_completed(), "正常");
     }
 
     #[test]

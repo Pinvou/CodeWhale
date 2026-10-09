@@ -589,6 +589,7 @@ dependencies = [
  "futures-util",
  "hkdf",
  "libc",
+ "log",
  "parking_lot",
  "rand",
  "ring",

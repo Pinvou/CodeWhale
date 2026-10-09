@@ -16,10 +16,121 @@
     return parts[parts.length - 1] || p;
   }
   function isAbsPath(p) {
-    return typeof p === "string" && (p.charAt(0) === "/" || /^[A-Za-z]:[\\/]/.test(p));
+    // UNC network-share paths (\\server\\share\...) are absolute too —
+    // validate_codex_project_workspace stores them after platform_compat_path,
+    // and without this arm the rebase transform returned them unmapped
+    // (review #463 round-20 minor 6; Windows network-share workspaces only).
+    return (
+      typeof p === "string"
+        && (p.charAt(0) === "/" || /^[A-Za-z]:[\\/]/.test(p) || /^\\\\[^\\]/.test(p))
+    );
   }
   function normalizedPath(p) {
     return String(p || "").replace(/\\/g, "/");
+  }
+  // Freshness window for the workspace_rebound mark's VIEW heal (the
+  // basename-based reconcile arm): generous enough to cover the rebind
+  // dialog's retry flow, short enough that an old mark cannot misfire the
+  // arm on an unrelated later basename collision. Deliberately does NOT
+  // delete the mark on expiry (review #463 round-C Major 2): the save-path
+  // transform (rebaseArtifactPathsForRebind) is prefix-exact and shares the
+  // mark, and its "whole process lifetime" contract requires the mark to
+  // survive while the session's buffer may still hold stale paths — pruning
+  // here re-armed the durable revert the transform exists to prevent.
+  var REBIND_RECONCILE_WINDOW_MS = 10 * 60 * 1000;
+  function sessionRecentlyRebound(sid) {
+    var marks = state.reboundSessionIds;
+    if (!marks || !sid) return false;
+    var mark = marks[sid];
+    if (!mark || !mark.at) return false;
+    return Date.now() - mark.at <= REBIND_RECONCILE_WINDOW_MS;
+  }
+  // Strips trailing separators without a regex (the ESLint deny gate flags
+  // the previous /\/+$/ form as super-linear).
+  function trimTrailingSlashes(p) {
+    var s = normalizedPath(p);
+    while (s.endsWith("/")) s = s.slice(0, -1);
+    return s;
+  }
+  // Locates the folded prefix match in the ORIGINAL string and returns the
+  // code-unit length to cut there, or -1 when no prefix of `original` folds
+  // to `foldedKey`. The fold is for the comparison only — the cut must NOT
+  // use the folded prefix's length: expanding case mappings (U+0130 "İ"
+  // lowercases to "i" + U+0307, two code units for one) make the folded form
+  // longer than the original prefix, and slicing the original at the folded
+  // length eats a character of the saved suffix (review #463 round-13:
+  // "/data/İstanbul/a.txt" used to save as "<to>a.txt"). Lowercasing never
+  // shrinks a string, so the scan can stop once the folded prefix outgrows
+  // the key.
+  function foldedPrefixCutLength(original, foldedKey) {
+    for (var cut = 0; cut <= original.length; cut++) {
+      var folded = original.slice(0, cut).toLowerCase();
+      if (folded === foldedKey) return cut;
+      if (folded.length >= foldedKey.length) return -1;
+    }
+    return -1;
+  }
+  // Rebases absolute artifact paths along the session's rebind SEGMENT CHAIN
+  // while a workspace_rebound mark exists (review #463 round-B Major 1 + the
+  // round-D vintage fix): a post-rebind wholesale save of a chat turn's
+  // buffer would otherwise durably revert the backend lane's rebase of
+  // SavedSession.artifacts[].storage_path. Segments apply in order — an
+  // A-era path resolves A→B→C, a buffer re-vintaged from the durable JSON
+  // between chained rebinds (B-era) resolves B→C, a C-era path matches
+  // nothing. Prefix-exact on the folded normalized form; the suffix keeps
+  // the original casing. Relative paths already resolve against the CURRENT
+  // workspace and are untouched; marks are memory-only, so a restart starts
+  // from the already-rebased JSON with no marks and this is a no-op.
+  function rebaseArtifactPathsForRebind(sid, paths) {
+    var marks = state.reboundSessionIds;
+    var mark = marks && sid ? marks[sid] : null;
+    if (!mark || !Array.isArray(mark.chain) || !mark.chain.length || !Array.isArray(paths)) {
+      return paths;
+    }
+    var segments = mark.chain
+      .map(function (segment) {
+        return {
+          // The case fold is unconditional (review #463 round-13): the
+          // bridges have no filesystem-case-sensitivity capability to gate
+          // it on — adding one would span the Rust capability surface, both
+          // lanes' platform wiring and this factory's deps, which is not a
+          // small change. On a case-sensitive filesystem two roots differing
+          // only in case are indistinguishable HERE while the POSIX backend
+          // identity key stays case-sensitive — the fold is this transform's
+          // own trade-off (the backend folds unconditionally only on
+          // Windows); reworded per round-24 minor 15, capability-gating
+          // stays the recorded later option.
+          fromKey: trimTrailingSlashes(segment.from).toLowerCase(),
+          toKey: trimTrailingSlashes(segment.to),
+        };
+      })
+      .filter(function (segment) { return segment.fromKey; });
+    if (!segments.length) return paths;
+    return paths.map(function (p) {
+      if (typeof p !== "string" || !isAbsPath(p)) return p;
+      var norm = normalizedPath(p);
+      var mapped = false;
+      for (var i = 0; i < segments.length; i++) {
+        var cut = foldedPrefixCutLength(norm, segments[i].fromKey);
+        if (cut >= 0 && (cut === norm.length || norm.charAt(cut) === "/")) {
+          norm = segments[i].toKey + norm.slice(cut);
+          mapped = true;
+        }
+      }
+      return mapped ? norm : p;
+    });
+  }
+  // Whether the path still points at a PRE-rebind location on this
+  // session's rebind chain (review #463 round-24 minor 3): the reconcile's
+  // stale-absolute heal arm is gated on it, so an unrelated live absolute
+  // entry whose basename collides cannot be taken over and the wrong path
+  // persisted.
+  function pathIsRebindStale(sid, path) {
+    var marks = state.reboundSessionIds;
+    var mark = marks && sid ? marks[sid] : null;
+    if (!mark || !Array.isArray(mark.chain) || !mark.chain.length) return false;
+    var mapped = rebaseArtifactPathsForRebind(sid, [path]);
+    return Array.isArray(mapped) && normalizedPath(mapped[0]) !== normalizedPath(path);
   }
   function noteArtifactChange(path, event, sessionId) {
     if (!path) return;
@@ -195,11 +306,24 @@
           if (!isDeliverable(p)) return;
           var na = { path: p, basename: bn }; state.artifacts.push(na); byName[bn] = na; added = true;
         }
-        else if (isAbsPath(p) && !isAbsPath(ex.path)) { ex.path = p; added = true; } // 相对→绝对,open 可靠
+        else if (isAbsPath(p) && (!isAbsPath(ex.path) || (normalizedPath(ex.path) !== normalizedPath(p) && sessionRecentlyRebound(sid) && pathIsRebindStale(sid, ex.path)))) {
+          // Relative→absolute opens reliably; or stale absolute → live
+          // workspace file, matched by basename — ONLY for a session the
+          // rebind command just moved (the workspace_rebound mark, review
+          // #463 round-10 Major 2) AND only when the stored entry is real
+          // stale rebind geometry (its path sits under a chain from-prefix;
+          // round-24 minor 3: the mark alone let an unrelated live absolute
+          // entry whose basename collides be taken over and the wrong path
+          // persisted). After a folder rebind the persisted entry keeps the
+          // vanished root, and the relative→absolute escape hatch never
+          // fires for an already-absolute stale entry, so the
+          // freshness-windowed mark is what lets the reconcile heal it.
+          ex.path = p; added = true;
+        }
       });
       if (added) {
         notify();
-        try { await invoke("save_session_artifacts", { id: sid, paths: state.artifacts.map(function (a) { return a.path; }) }); } catch (_) {}
+        try { await invoke("save_session_artifacts", { id: sid, paths: rebaseArtifactPathsForRebind(sid, state.artifacts.map(function (a) { return a.path; })) }); } catch (_) {}
       }
     } catch (e) { /* workspace 不存在(新 session)等,忽略 */ }
   }
@@ -301,6 +425,8 @@
       basename: basename,
       isAbsPath: isAbsPath,
       normalizedPath: normalizedPath,
+      sessionRecentlyRebound: sessionRecentlyRebound,
+      rebaseArtifactPathsForRebind: rebaseArtifactPathsForRebind,
       noteArtifactChange: noteArtifactChange,
       isSharedMcpArtifactPath: isSharedMcpArtifactPath,
       artifactBelongsToSession: artifactBelongsToSession,

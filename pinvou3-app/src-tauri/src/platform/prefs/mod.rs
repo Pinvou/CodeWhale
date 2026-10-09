@@ -1722,6 +1722,8 @@ mod tests {
         let _home = TemporaryPrefsHome::new("pinvou3-remote-model-readonly");
         let path = super::super::paths::settings_path();
         let mut prefs = UserPrefs::default();
+        // Alias normalization belongs to LocalVllm, not the OS default preset.
+        prefs.advanced.model_preset = Some(ModelPreset::LocalVllm);
         prefs.migrate_models();
         prefs.advanced.saved_models[0].alias = Some("old-local-alias".into());
         let original = serde_json::to_vec(&prefs).unwrap();
