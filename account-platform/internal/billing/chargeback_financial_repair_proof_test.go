@@ -32,7 +32,7 @@ func TestChargebackFinancialRepairProofProjectionIsClosedAndActivationGated(t *t
 		ProviderChargebackID: "cb-refund-1", BaseShortfallMicrocredits: 250,
 		ComponentDigest: strings.Repeat("d", 64), FactsDigest: strings.Repeat("e", 64),
 	}
-	repository := &billingProofFactsStub{chargebackRepair: plan}
+	repository := &chargebackRepairProofFactsStub{chargebackRepair: plan}
 	current, reason, ownerState, err := currentBillingProofInput(context.Background(), repository, frozen)
 	if err != nil || reason != "" {
 		t.Fatalf("chargeback repair proof reason=%s err=%v", reason, err)
@@ -58,16 +58,16 @@ func TestChargebackFinancialRepairProofProjectionIsClosedAndActivationGated(t *t
 		t.Fatalf("unexpected financial projection %+v", financial)
 	}
 
-	rejected := &billingProofFactsStub{chargebackRepairErr: ErrApprovalSnapshotMismatch}
+	rejected := &chargebackRepairProofFactsStub{chargebackRepairErr: ErrApprovalSnapshotMismatch}
 	if _, reason, _, err := currentBillingProofInput(context.Background(), rejected, frozen); err != nil || reason != "DOMAIN_INVARIANT_FAILED" {
 		t.Fatalf("rejected compensation reason=%s err=%v", reason, err)
 	}
-	mismatched := &billingProofFactsStub{chargebackRepair: plan}
+	mismatched := &chargebackRepairProofFactsStub{chargebackRepair: plan}
 	mismatched.chargebackRepair.CaseVersion = 4
 	if _, reason, _, err := currentBillingProofInput(context.Background(), mismatched, frozen); err != nil || reason != "SNAPSHOT_MISMATCH" {
 		t.Fatalf("mismatched compensation reason=%s err=%v", reason, err)
 	}
-	foreignCase := &billingProofFactsStub{chargebackRepair: plan}
+	foreignCase := &chargebackRepairProofFactsStub{chargebackRepair: plan}
 	foreignCase.chargebackRepair.ChargebackCaseID = uuid.New()
 	if _, reason, _, err := currentBillingProofInput(context.Background(), foreignCase, frozen); err != nil || reason != "SNAPSHOT_MISMATCH" {
 		t.Fatalf("foreign case reason=%s err=%v", reason, err)
@@ -84,7 +84,7 @@ func TestChargebackFinancialRepairProofProjectionIsClosedAndActivationGated(t *t
 	}
 
 	now := time.Now().UTC()
-	reader := &billingApprovalProofStub{billingProofFactsStub: repository, activation: validBillingApprovalActivationSnapshot(now)}
+	reader := &chargebackRepairApprovalProofStub{chargebackRepairProofFactsStub: repository, activation: validBillingApprovalActivationSnapshot(now)}
 	service := NewService(reader)
 	if _, err := service.billingApprovalProof(context.Background(), approvalencoding.ProofRequest{
 		ApprovalRequestID: uuid.New(),
@@ -123,4 +123,24 @@ func TestChargebackFinancialRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(t *t
 	if mismatch := chargebackFinancialRepairFrozenMismatch(plan, frozen); mismatch != "component_digest" {
 		t.Fatalf("component digest mismatch=%q", mismatch)
 	}
+}
+
+type chargebackRepairProofFactsStub struct {
+	billingProofFactsStub
+	chargebackRepair    ChargebackFinancialRepairPlan
+	chargebackRepairErr error
+}
+
+func (s *chargebackRepairProofFactsStub) chargebackFinancialRepairPlan(context.Context, ChargebackFinancialRepairCommandInput) (ChargebackFinancialRepairPlan, error) {
+	return s.chargebackRepair, s.chargebackRepairErr
+}
+
+type chargebackRepairApprovalProofStub struct {
+	Repository
+	*chargebackRepairProofFactsStub
+	activation ApprovalCommandActivationSnapshot
+}
+
+func (s *chargebackRepairApprovalProofStub) ApprovalCommandActivations(context.Context) (ApprovalCommandActivationSnapshot, error) {
+	return s.activation, nil
 }
