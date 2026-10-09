@@ -28,3 +28,7 @@
 新增确认非阻塞缺口登记于 [Issue #1618](https://github.com/Pinvou/pinvou3/issues/1618)，保持开放：breaker恢复/容量、relay scope及lease契约、migration down审计及schema定位、NTP偏移/质量、限流清理、metrics超时/中断维度、JSON编码错误。此前#1559仍为完成状态。本轮不成立的意见：KMS go mod tidy -diff实际退出0无差异；普通未写响应的panic已计500，不能泛称所有panic都计200。CA重复与recipient pin仍按既有维护/威胁模型建议记录。
 
 本轮修复只向F00分支提交，待精确head独立终审和适用CI/required-gate通过后，普通merge向相邻F01传播；申请原审核者重审，不以本地内部结论替代外部批准。
+补充运行层终审：1396088a 的 Ubuntu 22.04 CI（run 37876196848、job 113645527899）实际执行主模块及嵌套模块 Go race 测试与 vet，全部通过。独立非作者核对该 head 的 GitHub 合并组合和测试源码：POSIX 路径别名、原子替换及权限回归不可跳过，workload 包实际通过，因此该修复运行边界通过终审。未运行真实 macOS 或外部 Keycloak。
+
+该 head 的 fast-gate 失败来自公开维护分支已前进至0bc868ff、冻结登记 gitlink 仍为44921cf02；不是上述 Go 回归失败。F00 独立修复 CI 冻结版本校验，保持默认发布校验、固定标签和运行时不变，并要求匿名新 bare 仓库证明固定标签→登记 pin→公开维护历史。新增控制仓库回归及精确提交复审完成后另行提交，不据旧 head 的 Go 通过向 F01 提前传播。
+冻结底座门禁修复验证完成：作者18项测试（11真实受控bare历史场景+7默认/失败重试场景）全部通过、零跳过；CI gate/merge_queue/rust三个策略模块合计71项通过。独立非作者在冻结源码上实际复跑18项全部通过、零跳过，另单独运行CI gate策略35项通过。真实匿名GitHub公开快照验证通过，控制仓库的file transport测试不冒充公网验证。隔离首次ls-remote及fetch的本地rewrite、凭证、对象和禁用TLS校验环境；固定标签、精确登记pin、维护祖先及commit类型必须成立，公开候选未入维护历史仍失败。默认发布和rN收口严格规则保留，gitlink/登记计数/指纹不变。fork-guard --fast、架构、文档锚点与diff检查通过；完成签名后仍须该新head全部适用CI及required-gate成功再传播F01。
