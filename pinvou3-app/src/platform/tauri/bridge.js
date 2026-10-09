@@ -3156,6 +3156,7 @@
       deny: computerUseFeature.deny,
       setEnabled: computerUseFeature.setEnabled,
       requestPermissions: computerUseFeature.requestPermissions,
+      permissionStatus: computerUseFeature.permissionStatus,
     },
     files: {
       pickFiles,
