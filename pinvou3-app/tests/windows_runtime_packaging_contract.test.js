@@ -285,6 +285,39 @@ for (const recoveryHint of [
 }
 assert.match(vcRedistTempPreflight, /S-1-5-18/);
 assert.match(vcRedistTempPreflight, /S-1-5-32-544/);
+// SID constants alone are not a behavior pin: require the full grant chain
+// (both SIDs in the applied set, rule granted and written back, every ensured
+// directory running the grant) so deleting the ACL repair still fails here.
+assert.match(
+  vcRedistTempPreflight,
+  /\$requiredSids = @\(\$systemSid, \$administratorsSid\)/,
+  "SYSTEM and Administrators SIDs must form the required-access set",
+);
+assert.match(
+  vcRedistTempPreflight,
+  /\[void\]\$acl\.AddAccessRule\(\$rule\)/,
+  "the required-access set must be granted through ACL access rules",
+);
+assert.match(
+  vcRedistTempPreflight,
+  /Set-Acl -LiteralPath \$Path -AclObject \$acl/,
+  "granted ACL rules must be written back to the repaired directory",
+);
+assert.match(
+  vcRedistTempPreflight,
+  /Add-RequiredAccess -Path \$Path/,
+  "every ensured system directory must receive the required ACL entries",
+);
+assert.match(
+  vcRedistTempPreflight,
+  /Ensure-SystemDirectory -Path \$windowsTempPath/,
+  "the Windows temp directory must run the ACL-preserving ensure",
+);
+assert.match(
+  vcRedistTempPreflight,
+  /Ensure-SystemDirectory -Path \$windowsInstallerPath -HiddenSystem/,
+  "the Windows Installer directory must run the ACL-preserving ensure",
+);
 assert.match(
   vcRedistTempPreflight,
   /SetEnvironmentVariable\(\$Name, \$FallbackPath, "Machine"\)/,
@@ -615,10 +648,15 @@ assert.match(
   /isDev && process\.platform === "win32"[\s\S]*?stageWindowsOnnxRuntime\(\)/u,
   "Windows dev must stage only the pinned ONNX Runtime before starting Tauri",
 );
-assert.doesNotMatch(
+// Positive anchor: only a build/bundle command may widen into the full
+// packaging runtime. A negative "(hasTauriBuildCommand || isDev)" scan would
+// also hit the unrelated Windows toolchain-check gate above. Official's
+// runtime staging widens through the NSIS-staging validator, so the anchor
+// points at that gate expression.
+assert.match(
   buildScript,
-  /\(hasTauriBuildCommand \|\| isDev\)[\s\S]*?stageWindowsRuntime\(\)/u,
-  "Windows dev must not stage the complete packaging runtime",
+  /hasTauriBuildCommand && process\.platform === "win32"\s*\?\s*\(usesValidatedNsisStaging\(args\)/u,
+  "only a build/bundle command must stage the complete packaging runtime",
 );
 assert.match(
   buildScript,

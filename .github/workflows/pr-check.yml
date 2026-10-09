@@ -426,6 +426,7 @@ jobs:
               - 'pinvou3-app/scripts/tauri/windows-runtime.js'
               - 'pinvou3-app/src-tauri/config/platforms/windows/runtime/**'
               - 'pinvou3-app/src-tauri/packaging/windows/runtime/**'
+              - 'pinvou3-app/src-tauri/packaging/windows/nsis/**'
               - 'pinvou3-app/src-tauri/src/features/codex_acp/**'
               - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
               - 'pinvou3-app/src-tauri/resources/common/bundle/mcp-servers/browser-*'
@@ -449,9 +450,10 @@ jobs:
               - '.github/workflows/pr-check.yml'
             windows_rustup_repair:
               - '.github/workflows/pr-check.yml'
-              - 'pinvou3-app/scripts/ci/ensure-rust-toolchain.ps1'
+              - 'pinvou3-app/scripts/ci/**'
               - 'pinvou3-app/scripts/tauri/build.js'
               - 'pinvou3-app/tests/windows_rustup_repair_smoke.ps1'
+              - 'pinvou3-app/tests/windows_rust_toolchain_contract.test.js'
               - 'pinvou3-app/src-tauri/rust-toolchain.toml'
               - 'pinvou3-app/package.json'
             windows_static_updater:
@@ -2119,7 +2121,12 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: windows-latest
-    timeout-minutes: 30
+    # smoke 保留引擎生产环境的 1500s 修复预算;"所有下载源都僵死"的病态情形
+    # 必须在引擎自身的诊断输出之后再截断,而不是提前,因此上限要盖过
+    # checkout + setup + 工具链拷贝、该预算及其文档化的超冲:最后一次预算
+    # 检查之后,引擎还可能再烧一轮有界安装尝试和一轮有界卸载重置(smoke
+    # 配置下各约 650s)。
+    timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -2132,6 +2139,8 @@ jobs:
       - name: 安装锁定的 Rust 工具链
         shell: pwsh
         run: |
+          # 不加 --force:runner 的工具链 home 是全新的,强制重装是下方被测
+          # 修复引擎自己的职责。
           $config = Get-Content pinvou3-app/src-tauri/rust-toolchain.toml -Raw
           $match = [regex]::Match($config, '(?m)^\s*channel\s*=\s*"([^"]+)"')
           if (-not $match.Success) {
@@ -2139,7 +2148,19 @@ jobs:
           }
           rustup toolchain install $match.Groups[1].Value `
             --profile minimal --component clippy --component rustfmt --no-self-update
+          if ($LASTEXITCODE -ne 0) {
+            throw "rustup toolchain install failed with exit code $LASTEXITCODE."
+          }
 
+      # scripts/ci/** 不在任何其它 job filter 里,因此本 job 是
+      # ensure-rust-toolchain.ps1 改动触发的唯一门禁;frontend-test(Linux)
+      # 也会自动发现契约测试,但只有本 job 在 Windows 上运行它。仅用 Node
+      # 内建模块,无需 ci。
+      - name: Rust 工具链契约测试
+        run: node --test pinvou3-app/tests/windows_rust_toolchain_contract.test.js
+
+      # smoke 把账号工具链拷进临时 RUSTUP_HOME,删掉其中的 cargo.exe/rustc.exe,
+      # 要求修复脚本从不可达下载源失败转移到链上的下一个镜像。
       - name: 隔离工具链损坏修复与下载源回退
         run: npm --prefix pinvou3-app run test:windows-rustup-repair
 
