@@ -1,0 +1,48 @@
+[
+  {
+    "subject": "__APPROVAL_RECOVERY_WORKLOAD_SUBJECT__",
+    "service": "account-approval-recovery",
+    "permissions": [
+      "internal.billing.approval-effect.read",
+      "internal.billing.approval-result.read"
+    ]
+  },
+  {
+    "subject": "__ACCOUNT_WORKLOAD_SUBJECT__",
+    "service": "account-service",
+    "permissions": [
+      "internal.billing.wallet.ensure",
+      "internal.billing.approval-activation.read",
+      "internal.billing.approval-proof.read",
+      "internal.billing.approval-effect.read",
+      "internal.billing.approval-result.read",
+      "internal.billing.organization.lifecycle",
+      "internal.billing.organization-unit.lifecycle",
+      "internal.billing.organization-member.lifecycle"
+    ]
+  },
+  {
+    "subject": "__TOKEN_WORKLOAD_SUBJECT__",
+    "service": "token-gateway",
+    "permissions": [
+      "internal.billing.wallet.ensure",
+      "internal.billing.wallet.read",
+      "internal.billing.product.read",
+      "internal.billing.payment-capability.read",
+      "internal.billing.recharge-order.create",
+      "internal.billing.recharge-order.read",
+      "internal.billing.recharge-order.close",
+      "internal.billing.payment-claim.create",
+      "internal.billing.entitlement.read",
+      "internal.billing.pricing.read",
+      "internal.billing.pricing.bind",
+      "internal.billing.hold.reserve",
+      "internal.billing.hold.release",
+      "internal.billing.hold.extend",
+      "internal.billing.hold.commit",
+      "internal.billing.quota.read",
+      "internal.billing.quota.allocate",
+      "internal.billing.quota.revoke"
+    ]
+  }
+]

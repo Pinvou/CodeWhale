@@ -73,6 +73,8 @@ import {
   claimNativeControlsRefreshId,
   finalizePreparedSessionCreation,
   resolveNativeModelId,
+  resolveNativeModelRef,
+  persistNativeSessionModelRef,
 } from './native-session-handoff.js';
 import {
   checkpointRefreshKey,
@@ -632,6 +634,7 @@ export function CodexAcpView({
   onGotoModelSettings,
   onGotoSettings,
   fixedSession = false,
+  accountPlatformClient,
 }) {
   const codeTelemetryViewIdRef = useRef(null);
   const codeTelemetryReportedRef = useRef(false);
@@ -1020,6 +1023,7 @@ export function CodexAcpView({
   // mode 由后端 get_mode_state 驱动（code 会话首次默认 Plan），不写死初值。
   const [nativeControls, setNativeControls] = useState({
     modelId: null,
+    modelRef: null,
     mountedId: null,
     mode: CODE_MODE_FALLBACK,
     multiAgent: false,
@@ -1158,6 +1162,13 @@ export function CodexAcpView({
     controlsModelId: nativeControls.modelId,
     draftModelId: nativeDraftControls.modelId,
     handoffModelId: nativeDraftControlsHandoff?.modelId,
+  });
+  const nativeSessionModelRef = resolveNativeModelRef({
+    activeId,
+    controlsSessionId: nativeControlsSessionRef.current,
+    controlsModelRef: nativeControls.modelRef,
+    draftModelRef: nativeDraftControls.modelRef,
+    handoffModelRef: nativeDraftControlsHandoff?.modelRef,
   });
   const nativeMountedId = activeId
     ? (nativeControlsSessionRef.current === activeId
@@ -1442,13 +1453,15 @@ export function CodexAcpView({
     });
     nativeControlsRequestRef.current = claimed.latestRequestId;
     const requestId = claimed.requestId;
-    const [modelId, mountedId, modeState] = await Promise.all([
+    const [modelId, modelRef, mountedId, modeState] = await Promise.all([
       invoke('get_session_model_id', { sessionId }).catch(() => null),
+      invoke('get_session_model_ref', { sessionId }).catch(() => null),
       invoke('session_mounted_collection', { sessionId }).catch(() => null),
       invoke('get_mode_state', { sessionId }).catch(() => null),
     ]);
     const controls = {
       modelId: modelId || null,
+      modelRef: modelRef || null,
       mountedId: mountedId ?? null,
       // 读取失败兜底走全局默认（首次使用 → Plan 只读），不回退写死 yolo。
       mode: (modeState && modeState.mode) || nativeModeFallback(codePermPrefs),
@@ -1495,10 +1508,12 @@ export function CodexAcpView({
 
   async function persistNativeDraftControls(sessionId, staged) {
     const hasMultiAgentSelection = Object.prototype.hasOwnProperty.call(staged, 'multiAgent');
-    const hasStaged = staged.modelId || staged.mountedId != null || staged.mode || hasMultiAgentSelection;
+    const hasStaged = staged.modelRef || staged.modelId || staged.mountedId != null || staged.mode || hasMultiAgentSelection;
     if (!hasStaged) return false;
     try {
-      if (staged.modelId) {
+      if (staged.modelRef) {
+        await persistNativeSessionModelRef(invoke, sessionId, staged.modelRef);
+      } else if (staged.modelId) {
         await invoke('set_session_model', { sessionId, modelId: staged.modelId });
       }
       if (staged.mountedId != null) {
@@ -1526,17 +1541,22 @@ export function CodexAcpView({
     return true;
   }
 
-  /// 切模型：set_session_model 会 evict 该会话 engine，lane busy 时由控件禁用兜底。
-  async function switchNativeModel(sessionId, modelId) {
+  // Keep the selection target fixed to Code's session, including draft materialization.
+  async function switchNativeModelRef(sessionId, modelRef) {
+    if (busy || working || sessionId !== activeIdRef.current) return;
     if (!sessionId) {
-      setNativeDraftControls(current => ({ ...current, modelId }));
+      const modelId = modelRef.source === 'ACCOUNT_PLATFORM' ? 'builtin_account_platform' : modelRef.saved_model_id;
+      setNativeDraftControls(current => ({ ...current, modelId, modelRef: { ...modelRef } }));
       return;
     }
     setError('');
     try {
-      await invoke('set_session_model', { sessionId, modelId });
+      await persistNativeSessionModelRef(invoke, sessionId, modelRef);
       await refreshNativeControls(sessionId);
-    } catch (err) { showError(err); }
+    } catch (err) {
+      showError(err);
+      throw err;
+    }
   }
 
   async function switchNativeMultiAgent(enabled) {
@@ -4000,15 +4020,17 @@ export function CodexAcpView({
                         busy={busy || working}
                         onSwitch={switchNativeMode}
                       />
-                      {nativeModelChoices.length > 0 && (
+                      {(nativeModelChoices.length > 0 || accountPlatformClient) && (
                         <ComposerModelSelector
                           t={t}
                           bs={bs}
                           onGotoSettings={onGotoModelSettings}
                           sessionId={activeId}
                           sessionModelId={nativeSessionModelId}
+                          sessionModelRef={nativeSessionModelRef}
+                          accountPlatformClient={accountPlatformClient}
                           busy={busy || working}
-                          onSwitchModel={(sessionId, modelId) => switchNativeModel(sessionId, String(modelId))}
+                          onSwitchModelRef={switchNativeModelRef}
                           multiAgentEnabled={nativeMultiAgentEnabled}
                           multiAgentAvailable={nativeMultiAgentAvailable}
                           onToggleMultiAgent={switchNativeMultiAgent}

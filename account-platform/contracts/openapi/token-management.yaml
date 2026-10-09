@@ -1,0 +1,5654 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Token management current contract",
+    "version": "F05",
+    "description": "Current management API. Personal invocation/usage and signed readiness are specified separately in token-invocation.yaml. This finite document covers every installed management method/path and authority; selected write and receipt DTOs are specified, other read projections are explicitly partial. Platform GET routes also register authenticated HEAD with the same authority."
+  },
+  "paths": {
+    "/admin/v1/commands/{command_reference}": {
+      "get": {
+        "operationId": "get__admin_v1_commands__command_reference_",
+        "summary": "adminTokenCommandResult",
+        "x-go-handler": "adminTokenCommandResult",
+        "x-authority": {
+          "kind": "bearer_handler_authority",
+          "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+        },
+        "x-governance-gates": [
+          "KNOWN_GOVERNANCE"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "command_reference",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/commands/{command_reference}/recovery-actions/{action_id}": {
+      "get": {
+        "operationId": "get__admin_v1_commands__command_reference__recovery_actions__action_id_",
+        "summary": "adminTokenAccountRecoveryActionResult",
+        "x-go-handler": "adminTokenAccountRecoveryActionResult",
+        "x-authority": {
+          "kind": "bearer_handler_authority",
+          "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+        },
+        "x-governance-gates": [
+          "KNOWN_GOVERNANCE"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "command_reference",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "action_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenAccountRecoveryActionResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/commands/{command_reference}/recovery-actions/by-idempotency-key": {
+      "get": {
+        "operationId": "get__admin_v1_commands__command_reference__recovery_actions_by_idempotency_key",
+        "summary": "adminTokenAccountRecoveryActionByKey",
+        "x-go-handler": "adminTokenAccountRecoveryActionByKey",
+        "x-authority": {
+          "kind": "bearer_handler_authority",
+          "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+        },
+        "x-governance-gates": [
+          "KNOWN_GOVERNANCE"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "command_reference",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128
+            },
+            "description": "Original recovery action key, scoped to command reference and current authorized operator."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenAccountRecoveryActionResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/commands/by-idempotency-key": {
+      "get": {
+        "operationId": "get__admin_v1_commands_by_idempotency_key",
+        "summary": "adminTokenCommandByIdempotencyKey",
+        "x-go-handler": "adminTokenCommandByIdempotencyKey",
+        "x-authority": {
+          "kind": "bearer_handler_authority",
+          "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+        },
+        "x-governance-gates": [
+          "KNOWN_GOVERNANCE"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128
+            },
+            "description": "Original stable command key, scoped to the currently authorized actor and command type."
+          },
+          {
+            "name": "command_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "TOKEN_ACCOUNT_CREATE",
+                "TOKEN_ACCOUNT_STATUS_CHANGE",
+                "TOKEN_PROTOCOL_DRAFT_CREATE",
+                "TOKEN_PROTOCOL_PUBLISH",
+                "TOKEN_FORMULA_DRAFT_CREATE",
+                "TOKEN_FORMULA_PUBLISH",
+                "TOKEN_MODEL_DRAFT_SAVE",
+                "TOKEN_MODEL_PUBLISH",
+                "TOKEN_MODEL_CATALOG_SYNC",
+                "TOKEN_ROUTE_UPSERT",
+                "TOKEN_ROUTE_DELETE",
+                "TOKEN_CREDENTIAL_VALIDATE",
+                "TOKEN_ROUTE_PROVISIONING_REPAIR"
+              ]
+            },
+            "description": "Currently registered COMMAND transport only; APPROVED and ISOLATED commands are excluded. Lookup is read-only and scoped to current permissions, actor, command type and the original stable key."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actor-scoped immutable command receipt, including pending or unknown status. Cache-Control: no-store; lookup does not execute the command or contact its provider.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/commands/recovery-queue": {
+      "get": {
+        "operationId": "get__admin_v1_commands_recovery_queue",
+        "summary": "adminTokenAccountRecoveryQueue",
+        "x-go-handler": "adminTokenAccountRecoveryQueue",
+        "x-authority": {
+          "kind": "bearer_handler_authority",
+          "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+        },
+        "x-governance-gates": [
+          "KNOWN_GOVERNANCE"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/credential-results/{result_ref}": {
+      "get": {
+        "operationId": "get__admin_v1_credential_results__result_ref_",
+        "summary": "adminCredentialIsolationResult",
+        "x-go-handler": "adminCredentialIsolationResult",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [
+          "CREDENTIAL_ISOLATION"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "result_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialIsolationResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/formulas": {
+      "get": {
+        "operationId": "get__admin_v1_formulas",
+        "summary": "adminFormulas",
+        "x-go-handler": "adminFormulas",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.pricing.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/formulas/{formula_version_id}/preview": {
+      "get": {
+        "operationId": "get__admin_v1_formulas__formula_version_id__preview",
+        "summary": "adminPreviewFormula",
+        "x-go-handler": "adminPreviewFormula",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.pricing.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "formula_version_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/model-catalog/impact/rollback": {
+      "get": {
+        "operationId": "get__admin_v1_model_catalog_impact_rollback",
+        "summary": "adminCatalogRollbackImpact",
+        "x-go-handler": "adminCatalogRollbackImpact",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.models.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "source_catalog_version",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            },
+            "description": "Original catalog version selected for rollback."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/models": {
+      "get": {
+        "operationId": "get__admin_v1_models",
+        "summary": "adminCatalogModels",
+        "description": "Source availability is independent of lifecycle. Missing source disables resolution without automatically deprecating the model or changing cutoff times; lifecycle changes require the existing approved plan.",
+        "x-go-handler": "adminCatalogModels",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.models.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/models/{model_id}": {
+      "get": {
+        "operationId": "get__admin_v1_models__model_id_",
+        "summary": "adminModelDetail",
+        "description": "Source recovery does not undo an approved lifecycle change. Source availability and lifecycle are reported independently.",
+        "x-go-handler": "adminModelDetail",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.models.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/models/{model_id}/impact/lifecycle": {
+      "get": {
+        "operationId": "get__admin_v1_models__model_id__impact_lifecycle",
+        "summary": "adminModelLifecycleImpact",
+        "x-go-handler": "adminModelLifecycleImpact",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.models.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "target_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "PUBLISHED",
+                "DEPRECATED",
+                "REMOVED"
+              ]
+            },
+            "description": "Required when lifecycle_plan_id is absent; a selected plan supplies its immutable target."
+          },
+          {
+            "name": "lifecycle_plan_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Optional stored plan. It supplies immutable target/time/cutoff facts."
+          },
+          {
+            "name": "replacement_model_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "If supplied with a plan, must equal its stored replacement."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-query-constraints": [
+          "target_status required unless lifecycle_plan_id supplies a valid plan"
+        ]
+      }
+    },
+    "/admin/v1/models/{model_id}/lifecycle-plans": {
+      "get": {
+        "operationId": "get__admin_v1_models__model_id__lifecycle_plans",
+        "summary": "adminLifecyclePlans",
+        "x-go-handler": "adminLifecyclePlans",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.models.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "post__admin_v1_models__model_id__lifecycle_plans",
+        "summary": "adminCreateLifecyclePlan",
+        "x-go-handler": "adminCreateLifecyclePlan",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.models.lifecycle.request"
+          ]
+        },
+        "x-governance-gates": [
+          "ACTIVE"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Stable key for the same immutable action; changed facts are rejected."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecyclePlan"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecyclePlan"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LifecyclePlanInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/models/{model_id}/lifecycle-plans/{lifecycle_plan_id}": {
+      "get": {
+        "operationId": "get__admin_v1_models__model_id__lifecycle_plans__lifecycle_plan_id_",
+        "summary": "adminLifecyclePlan",
+        "x-go-handler": "adminLifecyclePlan",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.models.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "lifecycle_plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecyclePlan"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/models/{model_id}/versions": {
+      "get": {
+        "operationId": "get__admin_v1_models__model_id__versions",
+        "summary": "adminModelVersions",
+        "x-go-handler": "adminModelVersions",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.models.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/operations-overview": {
+      "get": {
+        "operationId": "get__admin_v1_operations_overview",
+        "summary": "adminTokenOperationsOverview",
+        "x-go-handler": "adminTokenOperationsOverview",
+        "x-authority": {
+          "kind": "bearer",
+          "anyAnd": [
+            [
+              "platform.models.read"
+            ],
+            [
+              "platform.tokens.read",
+              "platform.usage.read"
+            ]
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "window",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "24h",
+                "7d",
+                "30d"
+              ]
+            },
+            "description": "Exactly one window value; extra query keys are rejected."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-exact-query-parameters": [
+          "window"
+        ]
+      }
+    },
+    "/admin/v1/overview": {
+      "get": {
+        "operationId": "get__admin_v1_overview",
+        "summary": "adminOverview",
+        "x-go-handler": "adminOverview",
+        "x-authority": {
+          "kind": "bearer",
+          "any": [
+            "platform.tokens.read",
+            "platform.usage.read",
+            "platform.system.status.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/overviews/model-catalog": {
+      "get": {
+        "operationId": "get__admin_v1_overviews_model_catalog",
+        "summary": "adminModelCatalogOverview",
+        "x-go-handler": "adminModelCatalogOverview",
+        "x-authority": {
+          "kind": "bearer",
+          "any": [
+            "platform.models.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/overviews/model-operations": {
+      "get": {
+        "operationId": "get__admin_v1_overviews_model_operations",
+        "summary": "adminModelOperationsPageOverview",
+        "x-go-handler": "adminModelOperationsPageOverview",
+        "x-authority": {
+          "kind": "bearer",
+          "any": [
+            "platform.tokens.read",
+            "platform.usage.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/overviews/token-resources": {
+      "get": {
+        "operationId": "get__admin_v1_overviews_token_resources",
+        "summary": "adminTokenResourcesOverview",
+        "x-go-handler": "adminTokenResourcesOverview",
+        "x-authority": {
+          "kind": "bearer",
+          "any": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/owner-candidates": {
+      "get": {
+        "operationId": "get__admin_v1_owner_candidates",
+        "summary": "adminOwnerCandidates",
+        "x-go-handler": "adminOwnerCandidates",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.owner-candidates.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/protocols": {
+      "get": {
+        "operationId": "get__admin_v1_protocols",
+        "summary": "adminProtocols",
+        "x-go-handler": "adminProtocols",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.pricing.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/provisionings": {
+      "get": {
+        "operationId": "get__admin_v1_provisionings",
+        "summary": "adminProvisionings",
+        "x-go-handler": "adminProvisionings",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/provisionings/{provisioning_id}": {
+      "get": {
+        "operationId": "get__admin_v1_provisionings__provisioning_id_",
+        "summary": "adminProvisioning",
+        "x-go-handler": "adminProvisioning",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "provisioning_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/provisionings/{provisioning_id}/attempts": {
+      "get": {
+        "operationId": "get__admin_v1_provisionings__provisioning_id__attempts",
+        "summary": "adminProvisioningAttempts",
+        "x-go-handler": "adminProvisioningAttempts",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "provisioning_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/resource-audit": {
+      "get": {
+        "operationId": "get__admin_v1_resource_audit",
+        "summary": "adminResourceAudit",
+        "x-go-handler": "adminResourceAudit",
+        "x-authority": {
+          "kind": "bearer",
+          "anyAnd": [
+            [
+              "platform.models.read",
+              "platform.tokens.read"
+            ],
+            [
+              "platform.audit.read"
+            ]
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/token-accounts": {
+      "get": {
+        "operationId": "get__admin_v1_token_accounts",
+        "summary": "adminTokenAccounts",
+        "x-go-handler": "adminTokenAccounts",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/token-accounts/{token_account_id}": {
+      "get": {
+        "operationId": "get__admin_v1_token_accounts__token_account_id_",
+        "summary": "adminTokenAccount",
+        "x-go-handler": "adminTokenAccount",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/token-accounts/{token_account_id}/credentials": {
+      "get": {
+        "operationId": "get__admin_v1_token_accounts__token_account_id__credentials",
+        "summary": "adminTokenCredentials",
+        "x-go-handler": "adminTokenCredentials",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/token-accounts/{token_account_id}/impact/credential": {
+      "get": {
+        "operationId": "get__admin_v1_token_accounts__token_account_id__impact_credential",
+        "summary": "adminTokenCredentialImpact",
+        "x-go-handler": "adminTokenCredentialImpact",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ENROLL",
+                "ROTATE",
+                "REVOKE",
+                "VALIDATE"
+              ]
+            },
+            "description": "Credential action."
+          },
+          {
+            "name": "credential_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required for ROTATE, REVOKE and VALIDATE; optional for ENROLL."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-query-constraints": [
+          "credential_id required unless action is ENROLL"
+        ]
+      }
+    },
+    "/admin/v1/token-accounts/{token_account_id}/impact/route": {
+      "get": {
+        "operationId": "get__admin_v1_token_accounts__token_account_id__impact_route",
+        "summary": "adminTokenRouteImpact",
+        "x-go-handler": "adminTokenRouteImpact",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "UPSERT",
+                "DELETE"
+              ]
+            },
+            "description": "Actual route action."
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "description": "Current model ID string."
+          },
+          {
+            "name": "protocol_code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required for UPSERT."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-query-constraints": [
+          "protocol_code is required for UPSERT"
+        ]
+      }
+    },
+    "/admin/v1/token-accounts/{token_account_id}/impact/status": {
+      "get": {
+        "operationId": "get__admin_v1_token_accounts__token_account_id__impact_status",
+        "summary": "adminTokenAccountStatusImpact",
+        "x-go-handler": "adminTokenAccountStatusImpact",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "target_status",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ACTIVE",
+                "DISABLED"
+              ]
+            },
+            "description": "Requested status transition."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/token-accounts/{token_account_id}/routes": {
+      "get": {
+        "operationId": "get__admin_v1_token_accounts__token_account_id__routes",
+        "summary": "adminTokenRoutes",
+        "x-go-handler": "adminTokenRoutes",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/token-resources/readiness": {
+      "get": {
+        "operationId": "get__admin_v1_token_resources_readiness",
+        "summary": "adminTokenResourceReadiness",
+        "x-go-handler": "adminTokenResourceReadiness",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v2/provisionings/{provisioning_id}": {
+      "get": {
+        "operationId": "get__admin_v2_provisionings__provisioning_id_",
+        "summary": "adminProvisioningV2",
+        "x-go-handler": "adminProvisioningV2",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "provisioning_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v2/token-accounts/{token_account_id}": {
+      "get": {
+        "operationId": "get__admin_v2_token_accounts__token_account_id_",
+        "summary": "adminTokenAccountV2",
+        "x-go-handler": "adminTokenAccountV2",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v2/token-accounts/{token_account_id}/impact/route": {
+      "get": {
+        "operationId": "get__admin_v2_token_accounts__token_account_id__impact_route",
+        "summary": "adminStableTokenRouteImpact",
+        "x-go-handler": "adminStableTokenRouteImpact",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "UPSERT",
+                "DELETE"
+              ]
+            },
+            "description": "Stable route action."
+          },
+          {
+            "name": "model_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required for UPSERT."
+          },
+          {
+            "name": "protocol_version_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required for UPSERT."
+          },
+          {
+            "name": "route_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required for DELETE."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-query-constraints": [
+          "UPSERT requires model_id and protocol_version_id; DELETE requires route_id"
+        ]
+      }
+    },
+    "/internal/v1/approval-effects/{approval_request_id}": {
+      "get": {
+        "operationId": "get__internal_v1_approval_effects__approval_request_id_",
+        "summary": "approvalEffectObservation",
+        "x-go-handler": "approvalEffectObservation",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.approval-effect.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "approval_request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "command_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required single value. Extra or repeated query parameters are rejected."
+          },
+          {
+            "name": "command_fingerprint",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "description": "Required single value. Extra or repeated query parameters are rejected."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-exact-query-parameters": [
+          "command_type",
+          "command_fingerprint"
+        ]
+      }
+    },
+    "/internal/v1/approval-recovery/results/{approval_request_id}": {
+      "get": {
+        "operationId": "get__internal_v1_approval_recovery_results__approval_request_id_",
+        "summary": "tokenApprovalRecoveryResult",
+        "x-go-handler": "tokenApprovalRecoveryResult",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.approval-result.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "approval_request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "command_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required single value. Extra or repeated query parameters are rejected."
+          },
+          {
+            "name": "command_fingerprint",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "description": "Required single value. Extra or repeated query parameters are rejected."
+          },
+          {
+            "name": "original_key_digest",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "description": "Required single value. Extra or repeated query parameters are rejected."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/tokenRecoveryResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-exact-query-parameters": [
+          "command_type",
+          "command_fingerprint",
+          "original_key_digest"
+        ]
+      }
+    },
+    "/internal/v1/commands/catalog-rollback/result": {
+      "get": {
+        "operationId": "get__internal_v1_commands_catalog_rollback_result",
+        "summary": "approvedTokenCommandResult(\"TOKEN_MODEL_CATALOG_ROLLBACK\")",
+        "x-go-handler": "approvedTokenCommandResult(\"TOKEN_MODEL_CATALOG_ROLLBACK\")",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.catalog-rollback.execute"
+          ]
+        },
+        "x-governance-gates": [
+          "KNOWN_GOVERNANCE"
+        ],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "approval_request_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required single value. Extra or repeated query parameters are rejected."
+          },
+          {
+            "name": "command_fingerprint",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "description": "Required single value. Extra or repeated query parameters are rejected."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-exact-query-parameters": [
+          "approval_request_id",
+          "command_fingerprint"
+        ]
+      }
+    },
+    "/internal/v1/commands/credential-revoke/result": {
+      "get": {
+        "operationId": "get__internal_v1_commands_credential_revoke_result",
+        "summary": "approvedTokenCommandResult(\"TOKEN_CREDENTIAL_REVOKE\")",
+        "x-go-handler": "approvedTokenCommandResult(\"TOKEN_CREDENTIAL_REVOKE\")",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.credential-revoke.execute"
+          ]
+        },
+        "x-governance-gates": [
+          "KNOWN_GOVERNANCE"
+        ],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "approval_request_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required single value. Extra or repeated query parameters are rejected."
+          },
+          {
+            "name": "command_fingerprint",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "description": "Required single value. Extra or repeated query parameters are rejected."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-exact-query-parameters": [
+          "approval_request_id",
+          "command_fingerprint"
+        ]
+      }
+    },
+    "/internal/v1/commands/model-lifecycle/result": {
+      "get": {
+        "operationId": "get__internal_v1_commands_model_lifecycle_result",
+        "summary": "approvedTokenCommandResult(\"TOKEN_MODEL_LIFECYCLE_CHANGE\")",
+        "x-go-handler": "approvedTokenCommandResult(\"TOKEN_MODEL_LIFECYCLE_CHANGE\")",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.model-lifecycle.execute"
+          ]
+        },
+        "x-governance-gates": [
+          "KNOWN_GOVERNANCE"
+        ],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "approval_request_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required single value. Extra or repeated query parameters are rejected."
+          },
+          {
+            "name": "command_fingerprint",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "description": "Required single value. Extra or repeated query parameters are rejected."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-exact-query-parameters": [
+          "approval_request_id",
+          "command_fingerprint"
+        ]
+      }
+    },
+    "/internal/v1/token-governance/activation": {
+      "get": {
+        "operationId": "get__internal_v1_token_governance_activation",
+        "summary": "internalTokenGovernanceActivation",
+        "x-go-handler": "internalTokenGovernanceActivation",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.authorization.check"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/commands:precheck": {
+      "post": {
+        "operationId": "post__admin_v1_commands_precheck",
+        "summary": "adminTokenCommandPrecheck",
+        "x-go-handler": "adminTokenCommandPrecheck",
+        "x-authority": {
+          "kind": "bearer_handler_authority",
+          "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+        },
+        "x-governance-gates": [
+          "ACTIVE"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandPrecheckResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenCommandPrecheckRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/commands": {
+      "post": {
+        "operationId": "post__admin_v1_commands",
+        "summary": "adminCreateTokenCommand",
+        "x-go-handler": "adminCreateTokenCommand",
+        "x-authority": {
+          "kind": "bearer_handler_authority",
+          "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+        },
+        "x-governance-gates": [
+          "ACTIVE"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Stable key for the same immutable action; changed facts are rejected."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "COMMAND transport only: approval-required commands use Account approvals; credential enroll/rotate use the isolated launch routes. Idempotency-Key is bound to immutable actor and command facts. Unknown acknowledgement requires querying the same command reference/key.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenCommandEnvelope"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/commands/{command_reference}/recovery-actions": {
+      "post": {
+        "operationId": "post__admin_v1_commands__command_reference__recovery_actions",
+        "summary": "adminTokenAccountRecoveryAction",
+        "x-go-handler": "adminTokenAccountRecoveryAction",
+        "x-authority": {
+          "kind": "bearer_handler_authority",
+          "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+        },
+        "x-governance-gates": [
+          "ACTIVE"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "command_reference",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Stable key for the same immutable action; changed facts are rejected."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenAccountRecoveryActionResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenAccountRecoveryActionResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoveryAction"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/credential-results/{result_ref}/revoke-window": {
+      "post": {
+        "operationId": "post__admin_v1_credential_results__result_ref__revoke_window",
+        "summary": "adminRevokeCredentialLaunch",
+        "x-go-handler": "adminRevokeCredentialLaunch",
+        "x-authority": {
+          "kind": "bearer_actor_bound",
+          "note": "Repository verifies the issuing actor; permission revocation must not prevent terminalizing the issued launch."
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "result_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Issuing actor terminalized the launch. No JSON response body."
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeWindow"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/models/{model_id}/lifecycle-plans/{lifecycle_plan_id}/cancel": {
+      "post": {
+        "operationId": "post__admin_v1_models__model_id__lifecycle_plans__lifecycle_plan_id__cancel",
+        "summary": "adminCancelLifecyclePlan",
+        "x-go-handler": "adminCancelLifecyclePlan",
+        "x-authority": {
+          "kind": "bearer",
+          "any": [
+            "platform.models.manage",
+            "platform.models.lifecycle.request"
+          ]
+        },
+        "x-governance-gates": [
+          "ACTIVE"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "lifecycle_plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Durable cancel receipt: the plan stores key digest, normalized reason/expected plan version digest and actor. Same actor/key/expected version/reason replays the stored result; mismatching receipt facts conflict. It does not increment plan version on replay."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecyclePlan"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LifecycleCancel"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/token-accounts/{token_account_id}/credential-launches/enroll": {
+      "post": {
+        "operationId": "post__admin_v1_token_accounts__token_account_id__credential_launches_enroll",
+        "summary": "registeredTokenHandler(\"TOKEN_CREDENTIAL_ENROLL\", \"ISOLATED\")",
+        "x-go-handler": "registeredTokenHandler(\"TOKEN_CREDENTIAL_ENROLL\", \"ISOLATED\")",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.manage"
+          ]
+        },
+        "x-governance-gates": [
+          "ACTIVE",
+          "CREDENTIAL_ISOLATION"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Stable key for the same immutable action; changed facts are rejected."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialLaunch"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-approval-policy": {
+          "command": "TOKEN_CREDENTIAL_ENROLL",
+          "mode": "AuditOnly"
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialLaunchRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/token-accounts/{token_account_id}/credential-launches/rotate": {
+      "post": {
+        "operationId": "post__admin_v1_token_accounts__token_account_id__credential_launches_rotate",
+        "summary": "registeredTokenHandler(\"TOKEN_CREDENTIAL_ROTATE\", \"ISOLATED\")",
+        "x-go-handler": "registeredTokenHandler(\"TOKEN_CREDENTIAL_ROTATE\", \"ISOLATED\")",
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.tokens.manage"
+          ]
+        },
+        "x-governance-gates": [
+          "ACTIVE",
+          "CREDENTIAL_ISOLATION"
+        ],
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Stable key for the same immutable action; changed facts are rejected."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialLaunch"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-approval-policy": {
+          "command": "TOKEN_CREDENTIAL_ROTATE",
+          "mode": "AuditOnly"
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialLaunchRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/approval-command-prechecks": {
+      "post": {
+        "operationId": "post__internal_v1_approval_command_prechecks",
+        "summary": "internalApprovalCommandPrecheck",
+        "x-go-handler": "internalApprovalCommandPrecheck",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.approval-snapshot.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GeneralObject"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/approval-command-proofs": {
+      "post": {
+        "operationId": "post__internal_v1_approval_command_proofs",
+        "summary": "internalTokenApprovalProof",
+        "x-go-handler": "internalTokenApprovalProof",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.approval-proof.read"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GeneralObject"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/commands/catalog-rollback/execute": {
+      "post": {
+        "operationId": "post__internal_v1_commands_catalog_rollback_execute",
+        "summary": "executeApprovedCatalogRollback",
+        "x-go-handler": "executeApprovedCatalogRollback",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.catalog-rollback.execute"
+          ]
+        },
+        "x-governance-gates": [
+          "ACTIVE"
+        ],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/approvedTokenCommandBody"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/commands/catalog-rollback/precheck": {
+      "post": {
+        "operationId": "post__internal_v1_commands_catalog_rollback_precheck",
+        "summary": "approvedTokenCommandPrecheck(\"TOKEN_MODEL_CATALOG_ROLLBACK\")",
+        "x-go-handler": "approvedTokenCommandPrecheck(\"TOKEN_MODEL_CATALOG_ROLLBACK\")",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.catalog-rollback.execute"
+          ]
+        },
+        "x-governance-gates": [
+          "ACTIVE"
+        ],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GeneralObject"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/commands/credential-revoke/execute": {
+      "post": {
+        "operationId": "post__internal_v1_commands_credential_revoke_execute",
+        "summary": "executeApprovedCredentialRevoke",
+        "x-go-handler": "executeApprovedCredentialRevoke",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.credential-revoke.execute"
+          ]
+        },
+        "x-governance-gates": [
+          "ACTIVE"
+        ],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/approvedTokenCommandBody"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/commands/credential-revoke/precheck": {
+      "post": {
+        "operationId": "post__internal_v1_commands_credential_revoke_precheck",
+        "summary": "approvedTokenCommandPrecheck(\"TOKEN_CREDENTIAL_REVOKE\")",
+        "x-go-handler": "approvedTokenCommandPrecheck(\"TOKEN_CREDENTIAL_REVOKE\")",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.credential-revoke.execute"
+          ]
+        },
+        "x-governance-gates": [
+          "ACTIVE"
+        ],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GeneralObject"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/commands/model-lifecycle/execute": {
+      "post": {
+        "operationId": "post__internal_v1_commands_model_lifecycle_execute",
+        "summary": "executeApprovedModelLifecycle",
+        "x-go-handler": "executeApprovedModelLifecycle",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.model-lifecycle.execute"
+          ]
+        },
+        "x-governance-gates": [
+          "ACTIVE"
+        ],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCommandResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/approvedTokenCommandBody"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/commands/model-lifecycle/precheck": {
+      "post": {
+        "operationId": "post__internal_v1_commands_model_lifecycle_precheck",
+        "summary": "approvedTokenCommandPrecheck(\"TOKEN_MODEL_LIFECYCLE_CHANGE\")",
+        "x-go-handler": "approvedTokenCommandPrecheck(\"TOKEN_MODEL_LIFECYCLE_CHANGE\")",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.model-lifecycle.execute"
+          ]
+        },
+        "x-governance-gates": [
+          "ACTIVE"
+        ],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralObject"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Non-success responses use a stable error envelope; a missing or unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GeneralObject"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/usage-requests": {
+      "get": {
+        "operationId": "token_adminUsageRequests",
+        "x-go-handler": "adminUsageRequests",
+        "x-service": "token",
+        "x-permission": "platform.usage.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "execution_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "settlement_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "token_account_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "organization_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "started_from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "started_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.usage.read"
+          ]
+        },
+        "x-governance-gates": []
+      }
+    },
+    "/admin/v1/usage-requests/{usage_request_id}": {
+      "get": {
+        "operationId": "token_adminUsageRequest",
+        "x-go-handler": "adminUsageRequest",
+        "x-service": "token",
+        "x-permission": "platform.usage.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "usage_request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.usage.read"
+          ]
+        },
+        "x-governance-gates": []
+      }
+    },
+    "/admin/v1/usage-requests/{usage_request_id}/evidence": {
+      "get": {
+        "operationId": "token_adminUsageEvidence",
+        "x-go-handler": "adminUsageEvidence",
+        "x-service": "token",
+        "x-permission": "platform.usage.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "usage_request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "evidence_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.usage.read"
+          ]
+        },
+        "x-governance-gates": []
+      }
+    },
+    "/admin/v1/reconciliation-cases": {
+      "get": {
+        "operationId": "token_adminReconciliationCases",
+        "x-go-handler": "adminReconciliationCases",
+        "x-service": "token",
+        "x-permission": "platform.usage.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "severity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "case_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "owner_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sla_overdue",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.usage.read"
+          ]
+        },
+        "x-governance-gates": []
+      }
+    },
+    "/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness": {
+      "get": {
+        "operationId": "token_adminUsageReconciliationCommandReadiness",
+        "x-go-handler": "adminUsageReconciliationCommandReadiness",
+        "x-service": "token",
+        "x-permission": "platform.usage.reconcile.retry",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "x-authority": {
+          "kind": "bearer",
+          "all": [
+            "platform.usage.reconcile.retry"
+          ]
+        },
+        "x-governance-gates": []
+      }
+    },
+    "/internal/v1/holds/expiry-proof": {
+      "post": {
+        "operationId": "post_internal_v1_holds_expiry_proof",
+        "summary": "expiredHoldProof",
+        "description": "Billing workload only. Locks the real usage dispatch fence, verifies canonical reservation identity, persists cancellation, then uses the existing release/confirmation workflow. Only a locally confirmed cancellation returns success. Timeouts or unknown results require manual review; Billing rereads its own RELEASED hold before completing recovery.",
+        "x-go-handler": "expiredHoldProof",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.hold-expiry.prove"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExpiredHoldIdentity"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Durable cancellation and local confirmation receipt; receiver also verifies service=billing-service.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpiredHoldReceipt"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "No proof of safe release; stable error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "UserBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "OIDC"
+      },
+      "WorkloadBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "workload JWT"
+      }
+    },
+    "schemas": {
+      "GeneralObject": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Partial contract: this operation returns a management projection whose individual fields are not specified here. Path and authority coverage does not establish full DTO conformance."
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "details": {}
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      },
+      "TokenCommandEnvelope": {
+        "type": "object",
+        "properties": {
+          "command_type": {
+            "type": "string",
+            "enum": [
+              "TOKEN_ACCOUNT_CREATE",
+              "TOKEN_ACCOUNT_STATUS_CHANGE",
+              "TOKEN_CREDENTIAL_ENROLL",
+              "TOKEN_CREDENTIAL_REVOKE",
+              "TOKEN_CREDENTIAL_ROTATE",
+              "TOKEN_CREDENTIAL_VALIDATE",
+              "TOKEN_FORMULA_DRAFT_CREATE",
+              "TOKEN_FORMULA_PUBLISH",
+              "TOKEN_MODEL_CATALOG_ROLLBACK",
+              "TOKEN_MODEL_CATALOG_SYNC",
+              "TOKEN_MODEL_DRAFT_SAVE",
+              "TOKEN_MODEL_LIFECYCLE_CHANGE",
+              "TOKEN_MODEL_PUBLISH",
+              "TOKEN_PROTOCOL_DRAFT_CREATE",
+              "TOKEN_PROTOCOL_PUBLISH",
+              "TOKEN_ROUTE_DELETE",
+              "TOKEN_ROUTE_PROVISIONING_REPAIR",
+              "TOKEN_ROUTE_UPSERT",
+              "TOKEN_USAGE_RECONCILIATION_RETRY"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "target_resource_type": {
+            "type": "string"
+          },
+          "target_resource_id": {
+            "type": "string"
+          },
+          "expected_versions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts."
+          },
+          "precheck_fingerprint": {
+            "type": "string"
+          },
+          "command": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts."
+          }
+        },
+        "required": [
+          "command_type",
+          "reason",
+          "target_resource_type",
+          "target_resource_id",
+          "expected_versions",
+          "precheck_fingerprint",
+          "command"
+        ],
+        "additionalProperties": false,
+        "x-go-type": "TokenCommandEnvelope",
+        "x-go-source": "internal/token/command_governance.go"
+      },
+      "TokenCommandResult": {
+        "type": "object",
+        "properties": {
+          "command_reference": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "command_type": {
+            "type": "string"
+          },
+          "policy_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "actor_user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "actor_permission": {
+            "type": "string"
+          },
+          "authorization_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "idempotency_fingerprint": {
+            "type": "string"
+          },
+          "target_resource_type": {
+            "type": "string"
+          },
+          "target_resource_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "redacted_result": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts."
+          },
+          "stable_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "approval_request_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "audit_request_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_diagnostic_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_epoch": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "JSON integer; consumers must preserve exact integer precision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "command_reference",
+          "command_type",
+          "policy_version",
+          "actor_user_id",
+          "actor_permission",
+          "authorization_version",
+          "idempotency_fingerprint",
+          "target_resource_type",
+          "target_resource_id",
+          "status",
+          "audit_request_id",
+          "created_at"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "TokenCommandResult",
+        "x-go-source": "internal/token/command_governance.go"
+      },
+      "TokenCommandPrecheckRequest": {
+        "type": "object",
+        "properties": {
+          "command_type": {
+            "type": "string",
+            "enum": [
+              "TOKEN_ACCOUNT_CREATE",
+              "TOKEN_ACCOUNT_STATUS_CHANGE",
+              "TOKEN_CREDENTIAL_VALIDATE",
+              "TOKEN_FORMULA_DRAFT_CREATE",
+              "TOKEN_FORMULA_PUBLISH",
+              "TOKEN_MODEL_CATALOG_SYNC",
+              "TOKEN_MODEL_DRAFT_SAVE",
+              "TOKEN_MODEL_PUBLISH",
+              "TOKEN_PROTOCOL_DRAFT_CREATE",
+              "TOKEN_PROTOCOL_PUBLISH",
+              "TOKEN_ROUTE_DELETE",
+              "TOKEN_ROUTE_PROVISIONING_REPAIR",
+              "TOKEN_ROUTE_UPSERT",
+              "TOKEN_USAGE_RECONCILIATION_RETRY"
+            ]
+          },
+          "target_resource_type": {
+            "type": "string"
+          },
+          "target_resource_id": {
+            "type": "string"
+          },
+          "command": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts."
+          }
+        },
+        "required": [
+          "command_type",
+          "target_resource_type",
+          "target_resource_id",
+          "command"
+        ],
+        "additionalProperties": false,
+        "x-go-type": "TokenCommandPrecheckRequest",
+        "x-go-source": "internal/token/command_precheck.go"
+      },
+      "TokenCommandPrecheckResult": {
+        "type": "object",
+        "properties": {
+          "expected_versions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts."
+          },
+          "action": {
+            "type": "string"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/ImpactLocalEvidence"
+          },
+          "price_coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ImpactPriceSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "blockers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "token_observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "billing_observed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "snapshot_semantics": {
+            "type": "string"
+          },
+          "precheck_fingerprint": {
+            "type": "string"
+          },
+          "requires_cas_revalidation": {
+            "type": "boolean"
+          },
+          "critical_resource_versions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts."
+          },
+          "financial_snapshot": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts."
+          },
+          "catalog_diff": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CatalogDifference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "expected_versions",
+          "action",
+          "evidence",
+          "blockers",
+          "token_observed_at",
+          "snapshot_semantics",
+          "precheck_fingerprint",
+          "requires_cas_revalidation"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "TokenCommandPrecheckResult",
+        "x-go-source": "internal/token/command_precheck.go"
+      },
+      "ImpactPrecheckResult": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/ImpactLocalEvidence"
+          },
+          "price_coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ImpactPriceSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "blockers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "token_observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "billing_observed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "snapshot_semantics": {
+            "type": "string"
+          },
+          "precheck_fingerprint": {
+            "type": "string"
+          },
+          "requires_cas_revalidation": {
+            "type": "boolean"
+          },
+          "critical_resource_versions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts."
+          },
+          "financial_snapshot": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts."
+          },
+          "catalog_diff": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CatalogDifference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "evidence",
+          "blockers",
+          "token_observed_at",
+          "snapshot_semantics",
+          "precheck_fingerprint",
+          "requires_cas_revalidation"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "ImpactPrecheckResult",
+        "x-go-source": "internal/token/impact_precheck.go"
+      },
+      "ImpactLocalEvidence": {
+        "type": "object",
+        "properties": {
+          "resource_type": {
+            "type": "string"
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "current_status": {
+            "type": "string"
+          },
+          "current_version": {
+            "$ref": "#/components/schemas/ImpactResourceVersion"
+          },
+          "dependencies": {
+            "$ref": "#/components/schemas/ImpactDependencySummary"
+          },
+          "replacement_model_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "replacement_model_ready": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "resource_type",
+          "resource_id",
+          "current_status",
+          "current_version",
+          "dependencies"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "ImpactLocalEvidence",
+        "x-go-source": "internal/token/impact_precheck.go"
+      },
+      "ImpactResourceVersion": {
+        "type": "object",
+        "properties": {
+          "catalog_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "JSON integer; consumers must preserve exact integer precision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model_capability_version_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "protocol_definition_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "account_updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "route_generation": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "JSON integer; consumers must preserve exact integer precision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "route_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "JSON integer; consumers must preserve exact integer precision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "account_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "JSON integer; consumers must preserve exact integer precision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "credential_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "JSON integer; consumers must preserve exact integer precision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence_etag": {
+            "type": "string"
+          },
+          "evidence_set_sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_etag",
+          "evidence_set_sha256"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "ImpactResourceVersion",
+        "x-go-source": "internal/token/impact_precheck.go"
+      },
+      "ImpactDependencySummary": {
+        "type": "object",
+        "properties": {
+          "routes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "healthy_routes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "provisionings": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "ready_provisionings": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "active_leases": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "inflight_requests": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "active_sessions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "alternative_credentials": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "alternative_accounts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "affected_coverage_tuples": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "remaining_ready_coverage": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "coverage_gaps": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          }
+        },
+        "required": [
+          "routes",
+          "healthy_routes",
+          "provisionings",
+          "ready_provisionings",
+          "active_leases",
+          "inflight_requests",
+          "active_sessions",
+          "alternative_credentials",
+          "alternative_accounts",
+          "affected_coverage_tuples",
+          "remaining_ready_coverage",
+          "coverage_gaps"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "ImpactDependencySummary",
+        "x-go-source": "internal/token/impact_precheck.go"
+      },
+      "ImpactPriceSummary": {
+        "type": "object",
+        "properties": {
+          "models_checked": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "models_covered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "fully_covered": {
+            "type": "boolean"
+          },
+          "versions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ImpactPriceEvidence"
+            }
+          },
+          "billing_observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "financial_fact_revision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "price_set_fingerprint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "models_checked",
+          "models_covered",
+          "fully_covered",
+          "versions",
+          "billing_observed_at",
+          "financial_fact_revision",
+          "price_set_fingerprint"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "ImpactPriceSummary",
+        "x-go-source": "internal/token/impact_precheck.go"
+      },
+      "ImpactPriceEvidence": {
+        "type": "object",
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "protocol_code": {
+            "type": "string"
+          },
+          "formula_version_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "credit_unit": {
+            "type": "string"
+          },
+          "covered": {
+            "type": "boolean"
+          },
+          "price_version_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "price_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "JSON integer; consumers must preserve exact integer precision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "effective_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "effective_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "model_id",
+          "protocol_code",
+          "credit_unit",
+          "covered"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "ImpactPriceEvidence",
+        "x-go-source": "internal/token/impact_precheck.go"
+      },
+      "CatalogDifference": {
+        "type": "object",
+        "properties": {
+          "baseline_catalog_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "target_catalog_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "JSON integer; consumers must preserve exact integer precision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_observed_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "added_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "modified_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "removed_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "total_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/CatalogDifferenceItem"
+            }
+          }
+        },
+        "required": [
+          "baseline_catalog_version",
+          "target_catalog_version",
+          "target_observed_version",
+          "added_count",
+          "modified_count",
+          "removed_count",
+          "total_count",
+          "truncated",
+          "items"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "CatalogDifference",
+        "x-go-source": "internal/token/impact_precheck.go"
+      },
+      "CatalogDifferenceItem": {
+        "type": "object",
+        "properties": {
+          "change_type": {
+            "type": "string"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "display_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "change_type",
+          "model_id",
+          "display_name"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "CatalogDifferenceItem",
+        "x-go-source": "internal/token/impact_precheck.go"
+      },
+      "CredentialLaunchRequest": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "Optional; if present must match the ENROLL or ROTATE route."
+          },
+          "expected_account_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision.",
+            "minimum": 1
+          },
+          "expected_credential_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision.",
+            "minimum": 0
+          },
+          "slot": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "expected_account_version",
+          "slot",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "x-go-type": "CredentialLaunchRequest",
+        "x-go-source": "internal/token/credential_isolation.go"
+      },
+      "CredentialLaunch": {
+        "type": "object",
+        "properties": {
+          "launch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "result_ref": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "token_account_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "action": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "audit_request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "launch_id",
+          "result_ref",
+          "token_account_id",
+          "action",
+          "status",
+          "expires_at",
+          "audit_request_id"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "CredentialLaunch",
+        "x-go-source": "internal/token/credential_isolation.go"
+      },
+      "CredentialIsolationResult": {
+        "type": "object",
+        "properties": {
+          "result_ref": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "token_account_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "action": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "credential_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "credential_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "JSON integer; consumers must preserve exact integer precision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "credential_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "validation_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "audit_request_id": {
+            "type": "string"
+          },
+          "window_confirmed": {
+            "type": "boolean"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "result_ref",
+          "token_account_id",
+          "action",
+          "status",
+          "audit_request_id",
+          "window_confirmed",
+          "updated_at"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "CredentialIsolationResult",
+        "x-go-source": "internal/token/credential_isolation.go"
+      },
+      "LifecyclePlan": {
+        "type": "object",
+        "properties": {
+          "lifecycle_plan_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "model_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "lifecycle_plan_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "expected_catalog_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "current_lifecycle": {
+            "type": "string"
+          },
+          "target_lifecycle": {
+            "type": "string"
+          },
+          "effective_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "existing_session_cutoff_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "replacement_model_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "force_cancel_inflight": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "approval_request_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "governed_command_reference": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_lease_until": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_attempt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "result_catalog_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "JSON integer; consumers must preserve exact integer precision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stable_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_plan_id",
+          "model_id",
+          "lifecycle_plan_version",
+          "expected_catalog_version",
+          "current_lifecycle",
+          "target_lifecycle",
+          "effective_at",
+          "existing_session_cutoff_at",
+          "replacement_model_id",
+          "force_cancel_inflight",
+          "status",
+          "reason",
+          "execution_attempt",
+          "created_by",
+          "created_at",
+          "updated_at"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "LifecyclePlan",
+        "x-go-source": "internal/token/lifecycle_plans.go"
+      },
+      "LifecyclePlanInput": {
+        "type": "object",
+        "properties": {
+          "expected_catalog_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "expected_plan_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "target_lifecycle": {
+            "type": "string",
+            "enum": [
+              "DEPRECATED",
+              "REMOVED"
+            ]
+          },
+          "effective_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "existing_session_cutoff_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "replacement_model_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "force_cancel_inflight": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_catalog_version",
+          "target_lifecycle",
+          "effective_at",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "x-go-type": "LifecyclePlanInput",
+        "x-go-source": "internal/token/lifecycle_plans.go"
+      },
+      "TokenAccountRecoveryActionResult": {
+        "type": "object",
+        "properties": {
+          "action_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "command_reference": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "command_type": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "recovery_state": {
+            "type": "string"
+          },
+          "recovery_epoch": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "JSON integer; consumers must preserve exact integer precision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stable_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "audit_reference": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action_id",
+          "command_reference",
+          "command_type",
+          "action",
+          "status",
+          "recovery_state",
+          "recovery_epoch",
+          "stable_error_code",
+          "audit_reference",
+          "created_at",
+          "completed_at"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "TokenAccountRecoveryActionResult",
+        "x-go-source": "internal/token/account_provisioning_saga.go"
+      },
+      "tokenRecoveryResult": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "command_type": {
+            "type": "string"
+          },
+          "command_fingerprint": {
+            "type": "string"
+          },
+          "original_key_digest": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "command_reference": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "schema_version",
+          "approval_request_id",
+          "command_type",
+          "command_fingerprint",
+          "original_key_digest",
+          "state",
+          "observed_at"
+        ],
+        "additionalProperties": true,
+        "x-go-type": "tokenRecoveryResult",
+        "x-go-source": "internal/token/approval_recovery_result.go"
+      },
+      "approvedTokenCommandBody": {
+        "type": "object",
+        "properties": {
+          "activation_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requester_user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "authorization_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "command_fingerprint": {
+            "type": "string"
+          },
+          "execution_idempotency_key": {
+            "type": "string"
+          },
+          "critical_resource_versions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts."
+          },
+          "financial_snapshot": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Command-specific exact JSON facts; no float conversion is permitted for version facts."
+          },
+          "proof_schema_version": {
+            "type": "string"
+          },
+          "command_digest": {
+            "type": "string"
+          },
+          "snapshot_digest": {
+            "type": "string"
+          },
+          "domain_revision": {
+            "type": "string"
+          },
+          "proof_digest": {
+            "type": "string"
+          },
+          "approval_control_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON integer; consumers must preserve exact integer precision."
+          },
+          "command": {
+            "$ref": "#/components/schemas/TokenCommandEnvelope"
+          }
+        },
+        "required": [
+          "activation_epoch",
+          "approval_request_id",
+          "requester_user_id",
+          "authorization_version",
+          "command_fingerprint",
+          "execution_idempotency_key",
+          "command"
+        ],
+        "additionalProperties": false,
+        "x-go-type": "approvedTokenCommandBody",
+        "x-go-source": "internal/token/command_governance.go"
+      },
+      "LifecycleCancel": {
+        "type": "object",
+        "properties": {
+          "expected_plan_version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_plan_version",
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "RecoveryAction": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "REQUEUE",
+              "CANCEL"
+            ]
+          },
+          "expected_recovery_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "action",
+          "expected_recovery_epoch",
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "RevokeWindow": {
+        "type": "object",
+        "properties": {
+          "reason_code": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExpiredHoldIdentity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "usage_request_id",
+          "hold_id",
+          "wallet_id",
+          "max_microcredits",
+          "expires_at"
+        ],
+        "properties": {
+          "usage_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "hold_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wallet_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "max_microcredits": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Exact nonnegative int64 microcredits encoded as a decimal string."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ExpiredHoldReceipt": {
+        "type": "object",
+        "required": [
+          "usage_request_id",
+          "hold_id",
+          "wallet_id",
+          "max_microcredits",
+          "expires_at",
+          "proof_id",
+          "status"
+        ],
+        "properties": {
+          "usage_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "hold_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wallet_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "max_microcredits": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Exact nonnegative int64 microcredits encoded as a decimal string."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "proof_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "LOCAL_CONFIRMED"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "x-installed-runtime-usage-command": {
+    "command_type": "TOKEN_USAGE_RECONCILIATION_RETRY",
+    "policy_version": 2,
+    "snapshot_schema_version": 2,
+    "mode": "AUDIT_ONLY",
+    "permission": "platform.usage.reconcile.retry",
+    "command_required": [
+      "usage_request_id",
+      "expected_usage_version",
+      "evidence_high_watermark",
+      "replay_model_request"
+    ],
+    "replay_model_request": false,
+    "receipt": "Generic current /admin/v1/commands result; immutable key/fingerprint binding. Does not call provider or acquire approval consumer."
+  }
+}

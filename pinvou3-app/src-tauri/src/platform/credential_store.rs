@@ -81,6 +81,8 @@ fn key_lock_for(service: &str, account: &str) -> Arc<Mutex<()>> {
         .clone()
 }
 const SEARCH_API_KEY_SERVICE: &str = "pinvou3-search-api-key";
+const ACCOUNT_PLATFORM_REFRESH_TOKEN_SERVICE: &str = "pinvou3-account-platform-refresh-token";
+const ACCOUNT_PLATFORM_REGISTRATION_SERVICE: &str = "pinvou3-account-platform-registration";
 const MCP_SECRET_SERVICE: &str = "pinvou3-mcp-secret";
 const LLMAPI_TOKEN_SERVICE: &str = "pinvou3-llmapi-token";
 const LLMAPI_ADMIN_SERVICE: &str = "pinvou3-llmapi-admin";
@@ -100,6 +102,22 @@ pub struct CredentialReference {
 }
 
 impl CredentialReference {
+    pub fn for_account_platform_refresh_token() -> Self {
+        Self {
+            service: ACCOUNT_PLATFORM_REFRESH_TOKEN_SERVICE.to_string(),
+            account: "active-user".to_string(),
+            version: 1,
+        }
+    }
+
+    pub fn for_account_platform_registration() -> Self {
+        Self {
+            service: ACCOUNT_PLATFORM_REGISTRATION_SERVICE.to_string(),
+            account: "pending-registration".to_string(),
+            version: 1,
+        }
+    }
+
     pub fn for_model(model_id: &str) -> Self {
         Self {
             service: MODEL_API_KEY_SERVICE.to_string(),

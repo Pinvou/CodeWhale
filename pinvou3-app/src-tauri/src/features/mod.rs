@@ -1,3 +1,4 @@
+pub(crate) mod account_platform;
 pub mod assistant;
 pub(crate) mod behavior_telemetry;
 pub(crate) mod browser;

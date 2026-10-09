@@ -8,8 +8,9 @@ import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
 import { bridge, isLocalModel, useBridgeState } from '../../hooks/useBridge.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
-import { isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
+import { isBuiltInAccountPlatformModel, selectableModels } from '../../shared/model-options.js';
 import { can, isWeb } from '../../shared/platform.js';
+import { refreshModelAccessAfterAuthentication } from './model-access.js';
 import qwenIcon from '../../brand-icons/qwen.svg';
 import {
   MODEL_PRESET_DEFS, PROVIDER_KIND_CODING_PLAN, PROVIDER_KIND_OFFICIAL_API, PROVIDER_KIND_CUSTOM,
@@ -31,6 +32,11 @@ import {
   COMMUNITY_QQ_QR_IMAGE_SRC,
 } from './community-config.js';
 import { ProvidersSection } from './ProvidersSection.jsx';
+import {
+  ACCOUNT_PLATFORM_SOURCE,
+  LOCAL_CONFIG_SOURCE,
+  platformModelSelectableForNewSession,
+} from '../account-platform/model-catalog-selection.js';
 import {
   VOICE_POSTPROCESS_ENABLED_KEY,
   VOICE_SHORTCUT_ENABLED_KEY,
@@ -1719,7 +1725,7 @@ const formatMemoryTime = (item, copy) => {
 
     /** @typedef {{ behaviorAnalyticsTitle: string, behaviorAnalyticsEntryTitle: string, behaviorAnalyticsEntryDesc: string, behaviorAnalyticsBack: string, behaviorAnalyticsLabel: string, behaviorAnalyticsDesc: string, behaviorAnalyticsNotConfigured: string, behaviorAnalyticsEnableConfirm: string, behaviorAnalyticsDisableConfirm: string, behaviorAnalyticsStatusEnabled: string, behaviorAnalyticsStatusDisabled: string, behaviorAnalyticsStatusWithdrawalPending: string, behaviorAnalyticsActionFailed: string }} BehaviorAnalyticsSettingsCopy */
     // eslint-disable-next-line no-unused-vars, sonarjs/cognitive-complexity -- contract slot parameters kept; the settings page aggregates many form branches, splitting needs a dedicated design
-    const SettingsView = ({ activeTheme, colorScheme, onColorSchemeChange, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
+    const SettingsView = ({ activeTheme, colorScheme, onColorSchemeChange, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, defaultModelRef, accountPlatformClient, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
       const settingsCopy = /** @type {typeof t.uiSettingsDetail & BehaviorAnalyticsSettingsCopy} */ (t.uiSettingsDetail);
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const showSuperPermissionSettings = !!platformCapabilities.showSuperPermissionSettings;
@@ -1745,6 +1751,9 @@ const formatMemoryTime = (item, copy) => {
       const canPickHostFiles = can('hostFilePicker');
       const [editingModel, setEditingModel] = useState(null);
       const [modelDeleteConfirm, setModelDeleteConfirm] = useState(/** @type {SettingsModelEntry | null} */ (null));
+      const [platformCatalog, setPlatformCatalog] = useState({ items: [] });
+      const [platformCatalogState, setPlatformCatalogState] = useState('idle');
+      const [platformDefaultBusy, setPlatformDefaultBusy] = useState('');
       const [editingSearch, setEditingSearch] = useState(null);
       const [pendingSearchProvider, setPendingSearchProvider] = useState(null);
       const [searchDeleteConfirm, setSearchDeleteConfirm] = useState(/** @type {{ key: string, label: string } | null} */ (null));
@@ -1756,13 +1765,9 @@ const formatMemoryTime = (item, copy) => {
       const [feedbackStatus, setFeedbackStatus] = useState({ state: 'idle', message: '', receipt: null });
       const [feedbackNotice, setFeedbackNotice] = useState('');
       const [archivedDeleteConfirm, setArchivedDeleteConfirm] = useState(null);
-      const [llmApiModelBusy, setLlmApiModelBusy] = useState(false);
       const [behaviorTelemetryBusy, setBehaviorTelemetryBusy] = useState(false);
       const [behaviorTelemetryError, setBehaviorTelemetryError] = useState('');
       const [feedbackCloseConfirm, setFeedbackCloseConfirm] = useState(false);
-      const llmApiModels = (bs && bs.llmApiModels) || {};
-      const builtinAvailableModels = llmApiModels.available_models || [];
-      const builtinDefaultModel = llmApiModels.default_model || (((bs && bs.settings && bs.settings.advanced && bs.settings.advanced.builtin_llmapi_default_model) || '') || '');
       const versionUpdateRef = useRef(null);
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
       const archivedSessions = (bs && bs.archivedSessions) || [];
@@ -1815,6 +1820,26 @@ const formatMemoryTime = (item, copy) => {
         bridge.computerUse.refreshStatus(bs && bs.activeSessionId).catch(() => {});
         // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only: the read is idempotent and must not refire on every bs change
       }, []);
+      useEffect(() => {
+        if (activeSection !== 'model' || !accountPlatformClient) return undefined;
+        const controller = new window.AbortController();
+        setPlatformCatalogState('loading');
+        accountPlatformClient.session(controller.signal).then(session => {
+          if (!session?.authenticated) {
+            setPlatformCatalog({ items: [] });
+            setPlatformCatalogState('auth_required');
+            return null;
+          }
+          return accountPlatformClient.modelCatalog(controller.signal);
+        }).then(catalog => {
+          if (!catalog || controller.signal.aborted) return;
+          setPlatformCatalog(catalog);
+          setPlatformCatalogState('ready');
+        }).catch(() => {
+          if (!controller.signal.aborted) setPlatformCatalogState('error');
+        });
+        return () => controller.abort();
+      }, [activeSection, accountPlatformClient]);
       useEffect(() => {
         if (!feedbackNotice) return;
         const timer = window.setTimeout(() => setFeedbackNotice(''), 2600);
@@ -1983,16 +2008,6 @@ const formatMemoryTime = (item, copy) => {
         setArchivedDeleteConfirm(null);
         if (id && onDeleteArchived) onDeleteArchived(id);
       };
-      const refreshBuiltinModels = async () => {
-        if (!bridge.available || !bridge.llmapi.refreshLlmApi) return;
-        setLlmApiModelBusy(true);
-        try { await bridge.llmapi.refreshLlmApi(); } finally { setLlmApiModelBusy(false); }
-      };
-      const setBuiltinDefaultModel = async model => {
-        if (!bridge.available || !bridge.llmapi.setLlmApiDefaultModel || !model) return;
-        setLlmApiModelBusy(true);
-        try { await bridge.llmapi.setLlmApiDefaultModel(model); } finally { setLlmApiModelBusy(false); }
-      };
       // 进设置页自动体检一次可选依赖装齐没; 之后用户可手动「重新检测」
       useEffect(() => {
         if (!canInstallDependencies || !bridge.available || (bs && (bs.deps || bs.depsChecking))) return;
@@ -2016,9 +2031,30 @@ const formatMemoryTime = (item, copy) => {
         if (tone === 'red') return 'text-[#FF3B30] hover:bg-[#FF3B30]/10';
         return 'text-[#007AFF] hover:bg-[#007AFF]/10';
       };
-      const userModels = selectableModels(savedModels || [], bs && bs.llmApiStatus)
-        .slice()
-        .sort((a, b) => Number(isBuiltInLlmApiModel(b)) - Number(isBuiltInLlmApiModel(a)));
+      const userModels = selectableModels(savedModels || [])
+        .filter(model => !isBuiltInAccountPlatformModel(model));
+      const activeLocalModelId = defaultModelRef?.source === LOCAL_CONFIG_SOURCE
+        ? defaultModelRef.saved_model_id
+        : (defaultModelRef ? null : activeModelId);
+      const activePlatformModelId = defaultModelRef?.source === ACCOUNT_PLATFORM_SOURCE
+        ? defaultModelRef.model_id
+        : null;
+      const selectPlatformDefault = async modelId => {
+        if (!modelId || platformDefaultBusy || !accountPlatformClient) return;
+        setPlatformDefaultBusy(modelId);
+        try {
+          await accountPlatformClient.selectCatalogModel(modelId);
+          setPlatformCatalog(current => ({ ...current, selected_model_id: modelId }));
+          if (bridge.available && !await refreshModelAccessAfterAuthentication(bridge.models)) {
+            throw new Error('model_configuration_refresh_unavailable');
+          }
+          setPlatformCatalogState('ready');
+        } catch (_) {
+          setPlatformCatalogState('error');
+        } finally {
+          setPlatformDefaultBusy('');
+        }
+      };
       const searchOptions = [
         { key: 'bing', label: 'Bing', desc: settingsCopy.searchDescriptions.bing },
         { key: 'metaso', label: t.uiSettingsView.searchProviderMetaso, desc: settingsCopy.searchDescriptions.metaso },
@@ -2211,9 +2247,8 @@ const formatMemoryTime = (item, copy) => {
           multiline: false,
         });
       };
-      const renderModelRows = (models, totalCount) => models.length ? models.map(m => {
-        const total = totalCount != null ? totalCount : models.length;
-        const isActive = m.id === activeModelId;
+      const renderModelRows = models => models.length ? models.map(m => {
+        const isActive = m.id === activeLocalModelId;
         const isLocal = isLocalModel(m);
         const isReadonly = isReadonlyModel(m);
         const codingPlan = isCodingPlanModel(m);
@@ -2233,34 +2268,14 @@ const formatMemoryTime = (item, copy) => {
               <div className="flex items-center gap-2 min-w-0">
                 <span className={`text-[15px] leading-5 font-normal truncate text-[#1C1C1E] dark:text-[#F2F2F7]`}>{title}</span>
                 {isLocal && <Tag tone="gray">{settingsCopy.localModel}</Tag>}
-                {isBuiltInLlmApiModel(m) && <Tag tone="gray">{settingsCopy.builtinModel}</Tag>}
                 {codingPlan && <Tag tone="gray">Coding Plan</Tag>}
                 {isActive && <Tag>{settingsCopy.defaultTag}</Tag>}
               </div>
               <div className="mt-0.5 text-[12px] leading-[17px] truncate text-[#8A8A8E] dark:text-[#98989D]">{providerLabel} · {m.model}</div>
-              {isBuiltInLlmApiModel(m) && (
-                <div className="mt-2 flex items-center gap-2 flex-wrap">
-                  <span className="text-[12px] text-[#8A8A8E] dark:text-[#98989D]">{t.builtinModelSelect}</span>
-                  <select
-                    value={builtinDefaultModel || m.model || ''}
-                    disabled={llmApiModelBusy || builtinAvailableModels.length === 0}
-                    onChange={e => setBuiltinDefaultModel(e.target.value)}
-                    className="min-w-[220px] max-w-full rounded-lg border px-3 py-1.5 text-[12px] outline-none bg-white border-black/[0.12] text-[#1C1C1E] dark:bg-[#1E1F20] dark:border-white/[0.10] dark:text-[#F2F2F7]"
-                  >
-                    {builtinAvailableModels.length === 0 ? (
-                      <option value={m.model || ''}>{t.builtinModelEmpty}</option>
-                    ) : builtinAvailableModels.map(model => <option key={model} value={model}>{model}</option>)}
-                  </select>
-                  <button onClick={refreshBuiltinModels} disabled={llmApiModelBusy}
-                    className={`min-h-8 px-3 rounded-full text-[14px] font-medium disabled:opacity-50 ${actionButton('blue')}`}>
-                    {llmApiModelBusy ? t.builtinModelLoading : t.builtinModelRefresh}
-                  </button>
-                </div>
-              )}
             </div>
             <div className="shrink-0 flex items-center gap-2">
               {!isReadonly && <button onClick={() => setEditingModel({ ...m, __scope: isLocal ? 'local' : 'cloud' })} className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('blue')}`}>{settingsCopy.edit}</button>}
-              {!isReadonly && total > 1 && <button onClick={() => setModelDeleteConfirm(m)} className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('red')}`}>{settingsCopy.delete}</button>}
+              {!isReadonly && <button onClick={() => setModelDeleteConfirm(m)} className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('red')}`}>{settingsCopy.delete}</button>}
             </div>
           </div>
         );
@@ -2397,6 +2412,44 @@ const formatMemoryTime = (item, copy) => {
           {modelTab === 'acp' && acpProvidersTabVisible ? (
             <ProvidersSection t={t} />
           ) : (
+          <>
+          <section className="mb-6" data-testid="settings-platform-models">
+            <SectionTitle>{settingsCopy.platformModels}</SectionTitle>
+            <Group>
+              {platformCatalogState === 'loading' && <div className="px-4 py-4 text-[14px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.platformModelsLoading}</div>}
+              {platformCatalogState === 'auth_required' && <div className="px-4 py-4 text-[14px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.platformModelsSignIn}</div>}
+              {platformCatalogState === 'error' && <div className="px-4 py-4 text-[14px] text-[#FF3B30]">{settingsCopy.platformModelsUnavailable}</div>}
+              {platformCatalogState === 'ready' && (platformCatalog.items || []).length === 0 && <div className="px-4 py-4 text-[14px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.noModels}</div>}
+              {platformCatalogState === 'ready' && (platformCatalog.items || []).map(item => {
+                const selectable = platformModelSelectableForNewSession(item);
+                const selected = item.model_id === activePlatformModelId;
+                return (
+                  <div key={item.model_id} className="min-h-[60px] grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 border-b last:border-b-0 border-black/[0.12] dark:border-white/[0.10]">
+                    <button
+                      type="button"
+                      disabled={!selectable || !!platformDefaultBusy}
+                      onClick={() => !selected && selectPlatformDefault(item.model_id)}
+                      className="shrink-0 disabled:opacity-35"
+                      title={settingsCopy.setDefault}
+                    >
+                      <RadioDot active={selected} />
+                    </button>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-[15px] leading-5 font-normal truncate text-[#1C1C1E] dark:text-[#F2F2F7]">{item.display_name || item.model_id}</span>
+                        {selected && <Tag>{settingsCopy.defaultTag}</Tag>}
+                        {item.lifecycle_status === 'DEPRECATED' && <Tag tone="gray">{settingsCopy.modelDeprecated}</Tag>}
+                        {!selectable && <Tag tone="gray">{settingsCopy.modelUnavailable}</Tag>}
+                      </div>
+                      <div className="mt-0.5 text-[12px] leading-[17px] truncate text-[#8A8A8E] dark:text-[#98989D]">{item.model_id}</div>
+                    </div>
+                    <span className="text-[12px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.appliesToNewSessions}</span>
+                  </div>
+                );
+              })}
+            </Group>
+            <div className="px-3 mt-2 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]">{settingsCopy.platformModelsDesc}</div>
+          </section>
           <section className="mb-6">
             {/* 有 ACP 子页时顶端胶囊切换已承担「模型」标题语义，不再重复小字标题 */}
             {!acpProvidersTabVisible && <SectionTitle>{settingsCopy.modelSection}</SectionTitle>}
@@ -2406,17 +2459,17 @@ const formatMemoryTime = (item, copy) => {
                 const any = preset.length > 0 || custom.length > 0;
                 return (
                   <>
-                    {!any && renderModelRows([], userModels.length)}
+                    {!any && renderModelRows([])}
                     {preset.length > 0 && (
                       <>
                         <div className="px-4 pt-2 pb-1 text-[12px] font-semibold text-[#8A8A8E] dark:text-[#8E8E93]">{t.modelGroupPreset}</div>
-                        {renderModelRows(preset, userModels.length)}
+                        {renderModelRows(preset)}
                       </>
                     )}
                     {custom.length > 0 && (
                       <>
                         <div className={`px-4 pt-2 pb-1 text-[12px] font-semibold text-[#8A8A8E] dark:text-[#8E8E93]${preset.length > 0 ? ' border-t border-black/[0.12] dark:border-white/[0.10]' : ''}`}>{t.modelGroupCustom}</div>
-                        {renderModelRows(custom, userModels.length)}
+                        {renderModelRows(custom)}
                       </>
                     )}
                   </>
@@ -2430,6 +2483,7 @@ const formatMemoryTime = (item, copy) => {
             </Group>
             {modelEnvLocked.length > 0 && <div className={`px-3 mt-2 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]`}>{settingsCopy.envManaged}</div>}
           </section>
+          </>
           )}
         </>
       );

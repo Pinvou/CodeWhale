@@ -1,0 +1,12 @@
+[Unit]
+Description=Preserving KMS audit rotation and verified reopen
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+UMask=0077
+LimitCORE=0
+TimeoutStartSec=300
+NoNewPrivileges=true
+ExecStart=/usr/sbin/logrotate --state /opt/pinvou-security/monitor/audit-logrotate.state /opt/pinvou-security/monitor/audit.logrotate.conf

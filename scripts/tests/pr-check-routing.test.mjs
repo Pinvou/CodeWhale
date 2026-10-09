@@ -7,6 +7,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const workflow = await readFile(
   new URL("../../.github/workflows/pr-check.yml", import.meta.url),
@@ -74,6 +78,79 @@ function pullRequestTypes(text) {
   );
   return items;
 }
+
+function jobBlock(name) {
+  const match = workflow.match(new RegExp(`^  ${name}:\\r?\\n[\\s\\S]*?(?=^  [\\w-]+:|$(?![\\s\\S]))`, "m"));
+  assert.ok(match, `job '${name}' not found`);
+  return match[0];
+}
+
+const bash = process.platform === "win32" && existsSync("C:/Program Files/Git/bin/bash.exe")
+  ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+
+test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
+  const paths = filterPaths(workflow, "account_platform");
+  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-token-management-authorization-coverage.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
+    assert.ok(paths.includes(path), `Go routing must cover ${path}`);
+  }
+  assert.match(workflow, /account_platform: \$\{\{ steps\.filter\.outputs\.account_platform \}\}/);
+  const job = jobBlock("account-platform-test");
+  assert.match(job, /needs\.changes\.outputs\.account_platform == 'true'/);
+  assert.doesNotMatch(job, /draft|pure_release_backflow|trusted_backflow|github\.event_name == 'pull_request'/);
+  assert.match(job, /go-version-file: account-platform\/go\.mod/);
+  assert.match(job, /GOTOOLCHAIN: local/);
+  assert.match(job, /CGO_ENABLED: "1"/);
+  assert.match(job, /run: node scripts\/check-token-management-authorization-coverage\.mjs/);
+  assert.doesNotMatch(job, /secrets\.|services:|continue-on-error:/);
+});
+
+test("Go gate executes test and vet for root and future nested modules, and fails on errors", () => {
+  const job = jobBlock("account-platform-test");
+  const run = job.match(/        run: \|\r?\n([\s\S]*)/)[1].replace(/^ {10}/gm, "");
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-go-gate-"));
+  try {
+    for (const module of ["account-platform", "account-platform/tools/kms-recovery", "account-platform/tools/future tool"]) {
+      mkdirSync(join(directory, module), { recursive: true });
+      writeFileSync(join(directory, module, "go.mod"), "module example.test/fixture\n");
+    }
+    const prefix = "go() { printf '%s|%s\\n' \"$PWD\" \"$*\"; }; export -f go;\n";
+    const result = spawnSync(bash, ["-c", prefix + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+    const calls = result.stdout.split("\n").filter((line) => line.includes("|"));
+    assert.equal(calls.length, 6, result.stdout);
+    for (const module of ["account-platform", "account-platform/tools/kms-recovery", "account-platform/tools/future tool"]) {
+      const moduleCalls = calls.filter((line) => line.includes(`/${module}|`));
+      assert.equal(moduleCalls.length, 2, result.stdout);
+      assert.ok(moduleCalls.some((line) => line.endsWith("|test -race -tags=nomsgpack -mod=readonly -count=1 ./...")));
+      assert.ok(moduleCalls.some((line) => line.endsWith("|vet -tags=nomsgpack -mod=readonly ./...")));
+    }
+    for (const command of ["test", "vet"]) {
+      const failed = spawnSync(bash, ["-c", `go() { if [[ "$1" == "${command}" ]]; then return 7; fi; }; export -f go;\n` + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true });
+      assert.equal(failed.status, 7, `a failing go ${command} must fail the gate: ${failed.stderr}`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("required-gate rejects skipped applicable Go checks and permits unrelated skips", () => {
+  const gate = jobBlock("required-gate");
+  assert.match(gate, /^      - account-platform-test$/m);
+  assert.match(gate, /ACCOUNT_PLATFORM_REQUIRED: \$\{\{ needs\.changes\.outputs\.account_platform \}\}/);
+  assert.match(gate, /ACCOUNT_PLATFORM_RESULT: \$\{\{ needs\.account-platform-test\.result \}\}/);
+  const run = gate.match(/        run: \|\r?\n([\s\S]*)/)[1].replace(/^ {10}/gm, "");
+  const baseEnv = { ...process.env, GITHUB_EVENT_NAME: "pull_request", WINDOWS_RUST_REQUIRED_BY_POLICY: "false" };
+  for (const match of gate.matchAll(/^          ([A-Z_]+_RESULT):/gm)) baseEnv[match[1]] = "success";
+  for (const event of ["pull_request", "merge_group"]) {
+    for (const applicable of ["true", "false"]) {
+      for (const status of ["success", "skipped", "failure", "cancelled", ""]) {
+        const result = spawnSync(bash, ["-c", run], { encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...baseEnv, GITHUB_EVENT_NAME: event, ACCOUNT_PLATFORM_REQUIRED: applicable, ACCOUNT_PLATFORM_RESULT: status } });
+        const expectedPass = status === "success" || (applicable === "false" && status === "skipped");
+        assert.equal(result.status, expectedPass ? 0 : 1, `${event}/${applicable}/${status}: ${result.stderr}`);
+      }
+    }
+  }
+});
 
 test("rust_code filter covers plain Rust source changes", () => {
   const paths = filterPaths(workflow, "rust_code");

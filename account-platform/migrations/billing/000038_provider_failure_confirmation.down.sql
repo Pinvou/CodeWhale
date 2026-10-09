@@ -1,0 +1,3 @@
+DROP TRIGGER IF EXISTS payment_provider_failure_confirmations_immutable ON payment_provider_failure_confirmations;
+DROP FUNCTION IF EXISTS reject_payment_provider_failure_confirmation_mutation();
+DROP TABLE IF EXISTS payment_provider_failure_confirmations;
