@@ -221,7 +221,9 @@ struct TrustedSystemTools {
     msiexec: PathBuf,
 }
 
-pub fn cleanup_stale_backup() {}
+pub fn cleanup_stale_backup() -> Result<(), String> {
+    Ok(())
+}
 
 fn allow_insecure_asset_url() -> bool {
     let manifest = super::super::manifest_url();

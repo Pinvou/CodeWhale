@@ -620,7 +620,8 @@ command_protocol!(
         "install_update",
         "restart_app",
         "cancel_download",
-        "report_pending_update_result"
+        "report_pending_update_result",
+        "commit_pending_update_ready"
     ]
 );
 command_protocol!(
