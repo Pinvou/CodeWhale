@@ -462,7 +462,7 @@ const formatMemoryTime = (item, copy) => {
         const nextModel = item.custom ? '' : (item.model || defs.model);
         const nextBaseUrl = normalizedProviderBaseUrl(group) || defs.baseUrl;
         setProviderKey(group.key || '');
-        setProviderKind(group.providerKind || (p === 'openai_compatible' ? PROVIDER_KIND_CUSTOM : PROVIDER_KIND_OFFICIAL_API));
+        setProviderKind(group.providerKind || ((p === 'openai_compatible' || p === 'openai_responses') ? PROVIDER_KIND_CUSTOM : PROVIDER_KIND_OFFICIAL_API));
         setVendor(group.vendor || '');
         setEndpointMode(group.endpointMode || '');
         setBaseUrl(nextBaseUrl);
@@ -610,7 +610,8 @@ const formatMemoryTime = (item, copy) => {
       const showCodingPlanModelField = !isLocalPreset && isCodingPlan;
       const showProviderModelField = !isLocalPreset && !!activeProvider && Array.isArray(activeProvider.items) && activeProvider.items.length > 0;
       const showModelIdField = isLocalPreset || customModel || showProviderModelField;
-      const showBaseUrlField = isLocalPreset || (customModel && preset === 'openai_compatible' && !isCodingPlan);
+      const showBaseUrlField = isLocalPreset
+        || (customModel && (preset === 'openai_compatible' || preset === 'openai_responses') && !isCodingPlan);
       const showCustomCloudKeyField = !isLocalPreset && customModel;
       const showLocalKeyField = isLocalPreset && localKeyEnabled;
       const showDisplayNameField = isLocalPreset && !initial.__new;
@@ -834,7 +835,7 @@ const formatMemoryTime = (item, copy) => {
           ? copy.customCodingPlanDesc
           : (group && group.preset === 'local_vllm'
             ? copy.customLocalDesc
-            : (group && group.preset === 'openai_compatible' ? copy.customCompatibleDesc : copy.customModelDesc))));
+            : (group && (group.preset === 'openai_compatible' || group.preset === 'openai_responses') ? copy.customCompatibleDesc : copy.customModelDesc))));
       const renderProviderModelField = () => {
         const items = activeProvider ? activeProvider.items : [];
         const known = items.some(item => !item.custom && catalogItemMatchesModel(item, model));
