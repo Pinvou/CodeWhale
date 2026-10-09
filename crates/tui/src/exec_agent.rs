@@ -206,9 +206,27 @@ pub(crate) async fn run_exec_agent(
     // API / headless), so capture them once at resume: the engine starts with
     // this set and the save path must write the same set back, or a follow-up
     // `exec --resume` silently degrades the thread to single-root.
-    let resume_workspace_roots: Vec<PathBuf> = resume_session
-        .as_ref()
-        .map_or_else(Vec::new, |saved| saved.metadata.workspace_roots.clone());
+    // Round-35 M2: a PERSISTED set is validated before arming — every sibling
+    // lane consuming one (ACP session/load, REST resume-thread, fork,
+    // /cd, fork_from_session) hard-refuses a hand-edited/poisoned row, and
+    // normalize-only here silently granted a filesystem-writable sandbox in
+    // headless runs (the review's sibling-parity finding).
+    let resume_workspace_roots: Vec<PathBuf> = match resume_session.as_ref() {
+        None => Vec::new(),
+        Some(saved) => {
+            let raw = saved.metadata.workspace_roots.clone();
+            if raw.is_empty() {
+                Vec::new()
+            } else {
+                codewhale_core::validate_workspace_roots(&workspace, &raw).map_err(|error| {
+                    anyhow::anyhow!(
+                        "persisted workspace_roots failed validation on resume \
+                         (session row is corrupt or hand-edited): {error}"
+                    )
+                })?
+            }
+        }
+    };
 
     let engine_config = EngineConfig {
         model: effective_model.clone(),
