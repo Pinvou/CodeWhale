@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isDirectCliEntry } from "../cli-entrypoint.js";
 
 const REQUIRED_KEYS = Object.freeze([
   "NODE_ENV",
@@ -165,8 +165,7 @@ export async function validateControllerStateDirectories(
   }
 }
 
-const invokedPath = process.argv[1] ? resolve(process.argv[1]) : null;
-if (invokedPath === fileURLToPath(import.meta.url)) {
+if (isDirectCliEntry(import.meta.url)) {
   validateControllerEnvironmentFile(process.argv[2] || "")
     .then(() => validateControllerStateDirectories())
     .catch((error) => {

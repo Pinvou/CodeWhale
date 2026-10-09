@@ -20,6 +20,42 @@ use super::protocol::LeaseContext;
 use super::relay_transport::ControllerTransportSender;
 use super::resume::{ControllerResumeGate, ResumePhase};
 
+/// A and B use different physical transports. Both must consume a real,
+/// current-reader final proof; absence of either implementation fails closed.
+pub(crate) trait ControlledTransportAuthority: Send + Sync {
+    fn restore_authenticated_lease_after_resume(
+        &self,
+        context: &LeaseContext,
+        activation_id: &str,
+        request_id: &str,
+    ) -> bool;
+    fn is_stopped(&self) -> bool;
+    fn stop(&self);
+}
+
+impl ControlledTransportAuthority for ControllerTransportSender {
+    fn restore_authenticated_lease_after_resume(
+        &self,
+        context: &LeaseContext,
+        activation_id: &str,
+        request_id: &str,
+    ) -> bool {
+        ControllerTransportSender::restore_authenticated_lease_after_resume(
+            self,
+            context,
+            activation_id,
+            request_id,
+        )
+        .is_ok()
+    }
+    fn is_stopped(&self) -> bool {
+        ControllerTransportSender::is_stopped(self)
+    }
+    fn stop(&self) {
+        ControllerTransportSender::stop(self);
+    }
+}
+
 const MAX_DEVICE_NAME_CHARS: usize = 80;
 const MAX_WORKSPACES: usize = 16;
 const MAX_DISPLAY_NAME_CHARS: usize = 120;
@@ -297,7 +333,7 @@ struct Inner {
     resume_gate: Option<ControllerResumeGate>,
     reconnect_reason: Option<ReconnectReason>,
     last_observed_now_b: u64,
-    transport: Option<ControllerTransportSender>,
+    transport: Option<Arc<dyn ControlledTransportAuthority>>,
     workspaces: Vec<WorkspaceAuthorization>,
     error_code: Option<String>,
 }
@@ -527,22 +563,25 @@ impl ControlledDeviceManager {
         Ok(status_locked(&inner))
     }
 
-    pub(crate) fn replace_authenticated_transport(
+    pub(crate) fn replace_authenticated_transport<T: ControlledTransportAuthority + 'static>(
         &self,
         operation: ControlledOperation,
-        transport: ControllerTransportSender,
+        transport: T,
     ) -> Result<()> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
-        if let Some(previous) = inner.transport.replace(transport) {
+        if let Some(previous) = inner.transport.replace(Arc::new(transport)) {
             previous.stop();
         }
         Ok(())
     }
 
-    pub(crate) fn replace_transport(&self, transport: ControllerTransportSender) {
+    pub(crate) fn replace_transport<T: ControlledTransportAuthority + 'static>(
+        &self,
+        transport: T,
+    ) {
         let mut inner = self.inner.lock();
-        if let Some(previous) = inner.transport.replace(transport) {
+        if let Some(previous) = inner.transport.replace(Arc::new(transport)) {
             previous.stop();
         }
     }
@@ -787,6 +826,7 @@ impl ControlledDeviceManager {
         &self,
         operation: ControlledOperation,
         activation_id: &str,
+        resume_request_id: &str,
         now_b: u64,
         liveness_epoch_a: impl Into<String>,
         resume_token: [u8; 32],
@@ -825,7 +865,15 @@ impl ControlledDeviceManager {
                     .is_ok(),
                 None => false,
             };
-        if !accepted {
+        let installed = accepted
+            && inner.transport.as_ref().is_some_and(|transport| {
+                transport.restore_authenticated_lease_after_resume(
+                    &context,
+                    activation_id,
+                    resume_request_id,
+                )
+            });
+        if !installed {
             let generation = inner.generation.clone().unwrap_or_default();
             clear_sensitive(&mut inner, u64::MAX, true);
             inner.device_name = None;
@@ -1026,9 +1074,8 @@ impl ControlledDeviceManager {
         )
     }
 
-    pub(crate) fn poll_watchdog(&self, now_b: u64) -> ControlledStatus {
+    pub(crate) fn poll_watchdog(&self, now_b: u64) -> Result<ControlledStatus> {
         self.poll_watchdog_inner(None, now_b)
-            .expect("an unfenced watchdog poll has no stale operation")
     }
 
     pub(crate) fn poll_watchdog_for(
@@ -1151,6 +1198,11 @@ impl ControlledDeviceManager {
             .watchdog
             .as_ref()
             .and_then(|watchdog| watchdog.deadline_b())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_liveness_epoch_for_test(&self) -> Option<String> {
+        self.inner.lock().liveness_epoch_a.clone()
     }
 
     pub(crate) fn status(&self) -> ControlledStatus {
@@ -2044,6 +2096,16 @@ mod tests {
         manager
             .complete_connected(operation.clone(), lease(&operation.generation))
             .unwrap();
+        let current = lease(&operation.generation);
+        let sender = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            current.context.clone(),
+            current.negotiated_capabilities,
+        );
+        manager
+            .replace_authenticated_transport(operation.clone(), sender.clone())
+            .unwrap();
+        super::super::relay_transport::disconnect_test_transport(&sender);
         assert_eq!(
             manager.mark_transport_disconnected(5_000).status,
             ControlledStatusKind::Reconnecting
@@ -2104,10 +2166,19 @@ mod tests {
                 operation.generation
             );
         }
+        super::super::relay_transport::dispatch_test_transport_frame(
+            &sender,
+            &super::super::test_support::resume_final_frame(
+                &current.context,
+                activation,
+                "request-resume-final",
+            ),
+        );
         let resumed = manager
             .complete_resumed(
                 operation.clone(),
                 activation,
+                "request-resume-final",
                 12_000,
                 "live:a-2",
                 [3; 32],
@@ -2162,7 +2233,7 @@ mod tests {
             .accept_direct_liveness(&direct_liveness(&operation.generation), 2_000)
             .unwrap();
         assert_eq!(
-            manager.poll_watchdog(17_000).status,
+            manager.poll_watchdog(17_000).unwrap().status,
             ControlledStatusKind::Reconnecting
         );
         let mut proof: serde_json::Value =
@@ -2206,7 +2277,7 @@ mod tests {
         manager.mark_transport_disconnected(25_000);
         assert_eq!(manager.status().watchdog_deadline_b, Some(46_000));
         assert_eq!(
-            manager.poll_watchdog(46_000).status,
+            manager.poll_watchdog(46_000).unwrap().status,
             ControlledStatusKind::Error
         );
     }
@@ -2232,6 +2303,86 @@ mod tests {
             );
             assert!(manager.inner.lock().lease_context.is_none());
             assert!(manager.inner.lock().resume_gate.is_none());
+            assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn controlled_final_without_transport_fails_closed_even_after_valid_gate() {
+        for case in ["valid", "expired", "activation", "token", "key", "no-ready"] {
+            let cleanup = Arc::new(CleanupCounter::default());
+            let manager = ControlledDeviceManager::default();
+            manager.register_cleanup_sink(cleanup.clone());
+            let operation = manager.start(None, Vec::new()).unwrap();
+            register(&manager, &operation);
+            manager.mark_claimed(operation.clone()).unwrap();
+            manager
+                .complete_connected(operation.clone(), lease(&operation.generation))
+                .unwrap();
+            manager.mark_transport_disconnected(5_000);
+            manager.begin_resume(operation.clone(), 6_000).unwrap();
+            for (now, step) in [
+                (
+                    7_000,
+                    ControlledResumeStep::Provisional {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    8_000,
+                    ControlledResumeStep::Confirmed {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    9_000,
+                    ControlledResumeStep::ActivationAcknowledged {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    10_000,
+                    ControlledResumeStep::PostActivationLiveness {
+                        activation_id: "activation-0001",
+                        liveness_epoch_b: "live-b-2",
+                    },
+                ),
+                (
+                    11_000,
+                    ControlledResumeStep::ReadyAcknowledged {
+                        activation_id: "activation-0001",
+                    },
+                ),
+            ] {
+                if case == "no-ready" && now == 11_000 {
+                    continue;
+                }
+                manager
+                    .advance_resume(operation.clone(), step, now)
+                    .unwrap();
+            }
+            let result = manager.complete_resumed(
+                operation.clone(),
+                if case == "activation" {
+                    "activation-wrong"
+                } else {
+                    "activation-0001"
+                },
+                "request-resume-0001",
+                if case == "expired" { 33_000 } else { 12_000 },
+                "live-a-2",
+                if case == "token" { [1; 32] } else { [3; 32] },
+                if case == "key" { [2; 32] } else { [4; 32] },
+                60_000,
+            );
+            assert_eq!(
+                result.unwrap_err().code,
+                "desktop_remote_resume_failed",
+                "{case}"
+            );
+            assert_eq!(manager.status().status, ControlledStatusKind::Error);
+            assert!(manager.inner.lock().watchdog.is_none());
+            assert!(manager.inner.lock().lease_context.is_none());
             assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
         }
     }
@@ -2297,7 +2448,14 @@ mod tests {
             assert_eq!(
                 manager
                     .complete_resumed(
-                        operation, activation, now, epoch, [3; 32], [4; 32], deadline
+                        operation,
+                        activation,
+                        "request-resume-final",
+                        now,
+                        epoch,
+                        [3; 32],
+                        [4; 32],
+                        deadline
                     )
                     .unwrap_err()
                     .code,
@@ -2438,10 +2596,10 @@ mod tests {
         assert!(manager.status().watchdog_deadline_b.is_some());
         assert!(!manager.status().watchdog_suspect);
         assert_eq!(
-            manager.poll_watchdog(17_000).status,
+            manager.poll_watchdog(17_000).unwrap().status,
             ControlledStatusKind::Reconnecting
         );
-        let status = manager.poll_watchdog(31_000);
+        let status = manager.poll_watchdog(31_000).unwrap();
         assert_eq!(
             status.generation.as_deref(),
             Some(operation.generation.as_str())
@@ -2473,7 +2631,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            manager.poll_watchdog(17_000).status,
+            manager.poll_watchdog(17_000).unwrap().status,
             ControlledStatusKind::Reconnecting
         );
         manager

@@ -2,24 +2,74 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { verifyWebDist } from "../verify-web-dist.js";
 
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-const verifier = join(root, "remote-control-relay", "verify-web-dist.js");
+const verifier = join(root, "remote-control-relay", "verify-web-dist-cli.js");
 const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
 const shellPath = (value) => process.platform === "win32"
   ? value.replaceAll("\\", "/").replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`)
   : value;
 
+test("Web checker imports without running a CLI and CLI missing arguments fail closed", () => {
+  const imported = spawnSync(process.execPath, ["--input-type=module", "-e",
+    'process.argv = [process.execPath, "missing-entry", "missing-dist"]; '
+    + 'const checker = await import("./verify-web-dist.js"); '
+    + 'if (typeof checker.verifyWebDist !== "function" || process.exitCode !== undefined) process.exit(99);'],
+  { cwd: dirname(verifier), encoding: "utf8", timeout: 10_000 });
+  assert.equal(imported.error, undefined);
+  assert.equal(imported.status, 0);
+  assert.equal(imported.stdout + imported.stderr, "");
+  const missing = spawnSync(process.execPath, [verifier], { encoding: "utf8", timeout: 10_000 });
+  assert.equal(missing.error, undefined);
+  assert.equal(missing.status, 1);
+  assert.equal(missing.stdout, "");
+  assert.equal(missing.stderr.trim(), "WebUI 产物校验失败：入口、base 或引用资源不完整");
+});
+
+test("Web validator CLI never skips validation through a directory link", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-web-cli-link-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const modules = join(directory, "modules");
+  const alias = join(directory, "linked-modules");
+  mkdirSync(modules);
+  for (const source of new Set([verifier, join(root, "remote-control-relay", "verify-web-dist.js")])) {
+    copyFileSync(source, join(modules, basename(source)));
+  }
+  copyFileSync(join(root, "remote-control-relay", "package.json"), join(modules, "package.json"));
+  // Windows directory junctions exercise the same canonical-entry mismatch
+  // without requiring file-symlink privileges or conditionally skipping.
+  symlinkSync(modules, alias, process.platform === "win32" ? "junction" : "dir");
+  for (const complete of [true, false]) {
+    const dist = join(directory, complete ? "complete" : "missing-module");
+    mkdirSync(join(dist, "assets"), { recursive: true });
+    mkdirSync(join(dist, "startup"));
+    writeFileSync(join(dist, "index.html"), '<title>PINVOU 智能助手</title><base href="/pinvou3/remote/">'
+      + '<script src="/pinvou3/remote/startup/fixture.js"></script>'
+      + '<script type="module" src="/pinvou3/remote/assets/fixture.js"></script>');
+    writeFileSync(join(dist, "startup", "fixture.js"), "/* isolated startup */");
+    if (complete) writeFileSync(join(dist, "assets", "fixture.js"), "/* isolated entry */");
+    for (const entryDirectory of [modules, alias]) {
+      const result = spawnSync(process.execPath,
+        [join(entryDirectory, basename(verifier)), dist, "/pinvou3/remote"],
+        { encoding: "utf8", timeout: 10_000 });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, complete ? 0 : 1, "linked CLI must execute the same validation as its real path");
+      assert.equal(result.stdout, "");
+      assert.equal(result.stderr.trim(), complete ? "" : "WebUI 产物校验失败：入口、base 或引用资源不完整");
+    }
+  }
+});
+
 test("actual local and staged deployment checks require current Web entry resources, not a bridge", (t) => {
   assert.ok(process.platform !== "win32" || existsSync(bash));
   const production = readFileSync(join(root, "scripts", "deploy-remote-relay.sh"), "utf8");
   const testing = readFileSync(join(root, "scripts", "deploy-remote-relay-test.sh"), "utf8");
-  const local = /^node "\$RELAY_DIR\/verify-web-dist\.js" "\$RELAY_DIR\/web\/dist" "\$BASE_PATH"$/m;
-  const staged = /^node "\$code_stage\/verify-web-dist\.js" "\$web_stage" "\/pinvou3\/remote"$/m;
+  const local = /^node "\$RELAY_DIR\/verify-web-dist-cli\.js" "\$RELAY_DIR\/web\/dist" "\$BASE_PATH"$/m;
+  const staged = /^node "\$code_stage\/verify-web-dist-cli\.js" "\$web_stage" "\/pinvou3\/remote"$/m;
   const prepare = production.match(/^cp "\$package_tmp" "\$code_stage\/package\.json"$/m)?.[0];
   assert.ok(prepare, "stage must use this upload's ESM manifest before verification");
   assert.ok(production.indexOf(prepare) < production.indexOf('node --check "$code_stage/server.js"'));
@@ -34,13 +84,17 @@ test("actual local and staged deployment checks require current Web entry resour
     const relay = join(directory, "relay");
     const stage = join(directory, "code-stage");
     mkdirSync(stage);
-    copyFileSync(verifier, join(stage, "verify-web-dist.js"));
+    for (const source of [verifier, join(root, "remote-control-relay", "verify-web-dist.js")]) {
+      copyFileSync(source, join(stage, basename(source)));
+    }
     const uploadedPackage = join(directory, "package-upload.json");
     copyFileSync(join(root, "remote-control-relay", "package.json"), uploadedPackage);
     const dist = join(relay, "web", "dist");
     mkdirSync(join(dist, "assets"), { recursive: true });
     mkdirSync(join(dist, "startup"), { recursive: true });
-    copyFileSync(verifier, join(relay, "verify-web-dist.js"));
+    for (const source of [verifier, join(root, "remote-control-relay", "verify-web-dist.js")]) {
+      copyFileSync(source, join(relay, basename(source)));
+    }
     // Local checkout has its manifest; production stage receives it separately.
     copyFileSync(uploadedPackage, join(relay, "package.json"));
     assert.equal(existsSync(join(stage, "package.json")), false);

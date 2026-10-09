@@ -539,10 +539,28 @@ pub async fn dingtalk_apply_skills() -> Result<Value, String> {
     })??;
     // scope 门禁同步：见 feishu_apply_skills 同名注释（code 默认关语义对齐）。
     if show {
-        crate::features::marketplace::sync_deny_all_scopes_after_install("dingtalk");
+        // Fail-visible persist (review #455 R13-B3): swallowing the error would
+        // let the connector go live with zero consent; the error text carries
+        // recovery guidance and the shared consent marker (pinned on both
+        // sides), and the raw cause is logged.
+        crate::features::connectors::skill_gate::apply_skills_consent_sync("dingtalk")?;
     }
     Ok(json!({ "visible": show }))
 }
+/// 启动期门控刷新的单连接器步骤（`refresh_connector_auth_gates` 调）：
+/// 实时探测应否可见，按结果写 / 删技能目录；转为可见时跑 LEDGER-GATED
+/// 同步（review #455 round-31 BLOCKER：只补写从未同步过的默认关行，
+/// 用户显式开启不会被开机刷新回退）。
+pub(crate) fn dingtalk_gate_step() -> Result<bool, String> {
+    let show = dingtalk_skills_should_show();
+    GATE.apply_skills(show)
+        .map_err(|e| format!("更新钉钉技能失败: {e}"))?;
+    if show {
+        crate::features::connectors::skill_gate::refresh_gate_consent_sync("dingtalk", "钉钉")?;
+    }
+    Ok(show)
+}
+
 pub async fn dingtalk_skills_state() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         let disabled = is_dingtalk_disabled();

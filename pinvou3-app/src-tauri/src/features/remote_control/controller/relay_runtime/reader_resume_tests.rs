@@ -5,72 +5,8 @@
 #![cfg(target_os = "windows")]
 use super::*;
 use futures_util::{SinkExt, StreamExt};
-use std::io::Read;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
-
-#[test]
-fn real_reader_manager_worker_resume_round_trip() {
-    const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
-    if std::env::var(CHILD).as_deref() == Ok("1") {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(15), resume_round_trip())
-                .await
-                .unwrap();
-        });
-        return;
-    }
-    // A separate process owns Tauri's global runtime and path/env overrides.
-    // Never alter the test runner's home or share its live managed states.
-    let module = module_path!().split_once("::").unwrap().1;
-    let filter = format!("{module}::real_reader_manager_worker_resume_round_trip");
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &filter, "--nocapture"])
-        .env(CHILD, "1")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(25);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            // Only the exact child just created by this test is terminated.
-            child.kill().unwrap();
-            child.wait().unwrap();
-            panic!("isolated reader/worker regression exceeded its watchdog");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    let mut output = String::new();
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut output)
-        .unwrap();
-    let mut errors = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut errors)
-        .unwrap();
-    assert!(
-        status.success(),
-        "isolated regression failed: {output}\n{errors}"
-    );
-    assert!(
-        output.contains("test result: ok. 1 passed;"),
-        "zero-match child is not evidence"
-    );
-}
 
 type Socket = WebSocketStream<TcpStream>;
 
@@ -78,20 +14,7 @@ async fn accept(listener: &TcpListener) -> Socket {
     let (stream, _) = listener.accept().await.unwrap();
     tokio_tungstenite::accept_hdr_async(
         stream,
-        |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-         mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-            assert_eq!(
-                request.headers()["Sec-WebSocket-Protocol"],
-                super::super::protocol::CONTROLLER_SUBPROTOCOL
-            );
-            response.headers_mut().insert(
-                "Sec-WebSocket-Protocol",
-                super::super::protocol::CONTROLLER_SUBPROTOCOL
-                    .parse()
-                    .unwrap(),
-            );
-            Ok(response)
-        },
+        super::super::test_support::ControllerReaderProtocol,
     )
     .await
     .unwrap()
@@ -158,14 +81,33 @@ async fn registered(socket: &mut Socket) {
     .await;
 }
 
-async fn wait_status(manager: &ControlledDeviceManager, expected: ControlledStatusKind) {
+async fn wait_status(
+    manager: &ControlledDeviceManager,
+    expected: ControlledStatusKind,
+    stage: &'static str,
+) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while manager.status().kind() != expected {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|_| {
+        panic!(
+            "reader regression stage {stage}: expected {expected:?}, actual {:?}",
+            manager.status().kind()
+        )
+    });
+}
+
+async fn wait_prepared(manager: &ControlledDeviceManager) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while manager.resume_phase_for_test() != Some(super::super::resume::ResumePhase::Prepared) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("disconnect must freeze/prepare before the new socket upgrade");
 }
 
 // Any unexpected business entry fails rather than returning plausible output.
@@ -230,7 +172,7 @@ impl Drop for OwnedLane {
     }
 }
 
-async fn resume_round_trip() {
+pub(crate) async fn resume_round_trip<T>(build_host: impl FnOnce() -> (tauri::AppHandle, T)) {
     use super::super::controlling_handshake::ControllingHandshake;
     use super::super::encrypted_lane::ControllingLaneState;
     use super::super::test_support::{hex_lower, joined_message, pairing_fixture};
@@ -252,18 +194,8 @@ async fn resume_round_trip() {
                 .encode(fixture.relay.key_pair.public_key().as_ref()),
         );
     }
-    // Use the project's single context expansion (also avoids duplicate plist
-    // sections); no windows are built and no event loop is run.
-    let mut context = crate::build_tauri_context();
-    context.config_mut().app.windows.clear();
-    let app = tauri::Builder::default()
-        .any_thread()
-        .manage(ControlledDeviceManager::default())
-        .manage(ControlledLaneState::default())
-        .manage(ControlledOutboundState::default())
-        .build(context)
-        .unwrap();
-    let handle = app.handle().clone();
+    // App owns host construction. Keep its guard alive through all readers.
+    let (handle, _host) = build_host();
     let manager = handle.state::<ControlledDeviceManager>();
     let operation = manager.start(None, Vec::new()).unwrap();
     // Match a genuine operation before signing, not a forged post-sign tuple.
@@ -351,12 +283,22 @@ async fn resume_round_trip() {
         .install(HandshakeRole::A, &lease, peer.take_session().unwrap())
         .unwrap();
     send(&mut socket, &joined).await;
-    wait_status(&manager, ControlledStatusKind::Connected).await;
+    wait_status(
+        &manager,
+        ControlledStatusKind::Connected,
+        "initial_connected",
+    )
+    .await;
     let frozen = manager.watchdog_deadline_for_test().unwrap();
     // A real socket close goes through RelayClient's connection event and the
     // manager reader, rather than directly invoking a resume helper.
     socket.close(None).await.unwrap();
     drop(socket);
+    // No new upgrade can complete until this test accepts its socket. Force
+    // the real disconnected branch first, rather than depending on scheduling.
+    wait_prepared(&manager).await;
+    assert!(!owned.worker.as_ref().unwrap().is_finished());
+    assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
     let mut socket = accept(&listener).await;
     registered(&mut socket).await;
     let prepare = receive(&mut socket, "controller_resume_prepare").await;
@@ -373,7 +315,11 @@ async fn resume_round_trip() {
     let mut stale = provisional.clone();
     stale["remote_control_generation"] = json!("generation-retired");
     let before_stale = manager.status().kind();
-    let before_epoch = manager.live_liveness_epoch();
+    let before_epoch = manager.retained_liveness_epoch_for_test();
+    assert!(
+        before_epoch.is_some(),
+        "observe retained evidence, not a None projection"
+    );
     send(&mut socket, &stale).await;
     processed(&mut processed_rx, &stale).await;
     assert_eq!(
@@ -385,7 +331,7 @@ async fn resume_round_trip() {
         before_stale,
         "retired generation must not advance resume"
     );
-    assert_eq!(manager.live_liveness_epoch(), before_epoch);
+    assert_eq!(manager.retained_liveness_epoch_for_test(), before_epoch);
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
     send(&mut socket, &provisional).await;
     receive(&mut socket, "encrypted_resume_confirm").await;
@@ -410,7 +356,7 @@ async fn resume_round_trip() {
         ControlledStatusKind::ResumeProvisional,
         "wrong activation must not confirm or produce an ACK"
     );
-    assert_eq!(manager.live_liveness_epoch(), before_epoch);
+    assert_eq!(manager.retained_liveness_epoch_for_test(), before_epoch);
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
     let confirm = a_lane
         .seal_resume_confirm("request-peer-current", activation)
@@ -443,8 +389,23 @@ async fn resume_round_trip() {
     resumed["resume_deadline_ms"] = json!("1700000030000");
     resumed["new_resume_token_b64"] =
         json!(base64::engine::general_purpose::STANDARD.encode([3_u8; 32]));
+    let mut wrong_final = resumed.clone();
+    wrong_final["liveness_epoch_b"] = json!("liveness-b-retired-0001");
+    send(&mut socket, &wrong_final).await;
+    processed(&mut processed_rx, &wrong_final).await;
+    assert_eq!(
+        manager.status().kind(),
+        ControlledStatusKind::ResumeActivatedPendingLiveness
+    );
+    assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
+    assert_eq!(manager.retained_liveness_epoch_for_test(), before_epoch);
     send(&mut socket, &resumed).await;
-    wait_status(&manager, ControlledStatusKind::Connected).await;
+    wait_status(
+        &manager,
+        ControlledStatusKind::Connected,
+        "resumed_connected",
+    )
+    .await;
     assert!(!handle.state::<ControlledLaneState>().is_suspended());
     assert_eq!(
         manager.live_liveness_epoch().as_deref(),
@@ -455,6 +416,7 @@ async fn resume_round_trip() {
     let second_frozen = manager.watchdog_deadline_for_test().unwrap();
     socket.close(None).await.unwrap();
     drop(socket);
+    wait_prepared(&manager).await;
     let mut socket = accept(&listener).await;
     registered(&mut socket).await;
     let second_prepare = receive(&mut socket, "controller_resume_prepare").await;
@@ -462,7 +424,8 @@ async fn resume_round_trip() {
     let foreign_error = json!({"v":1,"type":"error","request_id":"request-foreign",
         "code":"invalid_message","message":"rejected"});
     let before_foreign = manager.status().kind();
-    let before_foreign_epoch = manager.live_liveness_epoch();
+    let before_foreign_epoch = manager.retained_liveness_epoch_for_test();
+    assert!(before_foreign_epoch.is_some());
     send(&mut socket, &foreign_error).await;
     processed(&mut processed_rx, &foreign_error).await;
     assert_eq!(
@@ -475,14 +438,17 @@ async fn resume_round_trip() {
         "foreign request cannot fail this recovery"
     );
     assert_eq!(manager.watchdog_deadline_for_test(), Some(second_frozen));
-    assert_eq!(manager.live_liveness_epoch(), before_foreign_epoch);
+    assert_eq!(
+        manager.retained_liveness_epoch_for_test(),
+        before_foreign_epoch
+    );
     send(
         &mut socket,
         &json!({"v":1,"type":"error","request_id":second_prepare["request_id"],
         "code":"invalid_message","message":"rejected"}),
     )
     .await;
-    wait_status(&manager, ControlledStatusKind::Error).await;
+    wait_status(&manager, ControlledStatusKind::Error, "own_error_closed").await;
     tokio::time::timeout(Duration::from_secs(3), owned.worker.take().unwrap())
         .await
         .unwrap()
@@ -494,5 +460,37 @@ async fn resume_round_trip() {
         .start_controller_relay(operation.generation())
         .await
         .unwrap();
+    drop(replacement);
+    let retired_reader = relay.replace_loopback_reader_for_test();
+    let mut replacement_socket = accept(&listener).await;
+    registered(&mut replacement_socket).await;
+    // Registration forwarding precedes the manager projection. Wait for the
+    // real projection before subscribing, so an in-flight real registration
+    // cannot race its synthetic replay into this routing-negative assertion.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while relay.status().status
+            != crate::features::remote_control::protocol::WebAccessStatusKind::WaitingWebClient
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("replacement reader registration was not committed");
+    let mut replacement = relay
+        .start_controller_relay("generation-reader-successor")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame = replacement.recv().await.expect("replacement reader exited");
+            if frame["type"] == "desktop_endpoint_registered" {
+                break;
+            }
+            assert_eq!(frame["type"], "desktop_relay_connection");
+        }
+    })
+    .await
+    .expect("replacement registration timed out");
+    relay.assert_retired_reader_fenced_for_test(&retired_reader, &mut replacement);
     drop(replacement);
 }

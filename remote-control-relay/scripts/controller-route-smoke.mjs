@@ -1,5 +1,4 @@
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isDirectCliEntry } from "../cli-entrypoint.js";
 import WebSocket from "ws";
 import { CONTROLLER_SUBPROTOCOL } from "../protocol-controller.js";
 
@@ -63,11 +62,11 @@ export async function smokeControllerRoute(url) {
   });
 }
 
-const invokedPath = process.argv[1] ? resolve(process.argv[1]) : null;
-if (invokedPath === fileURLToPath(import.meta.url)) {
+if (isDirectCliEntry(import.meta.url)) {
   smokeControllerRoute(process.argv[2] || "ws://127.0.0.1:8787/pinvou3/remote/ws")
-    .catch((error) => {
-      console.error(error?.code || error?.message || "controller_route_smoke_failed");
+    .catch(() => {
+      // WebSocket errors can include the supplied URL, credentials or local paths.
+      console.error("controller_route_smoke_failed");
       process.exitCode = 1;
     });
 }
