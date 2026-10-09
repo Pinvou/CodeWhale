@@ -434,8 +434,10 @@ from, in order:
    (`WorkerRuntimeProfile::default_max_steps` returns zero), plus a **1800 s**
    wall-clock default.
 
-Omitted or zero `max_steps` remains unbounded even when an operator default is
-configured; positive step values clamp to the 2000-turn hard ceiling.
+An explicit zero `max_steps` stays unbounded even when an operator default is
+configured; an omitted `max_steps` falls back to that operator default (the
+fleet role default otherwise), and positive step values clamp to the
+2000-turn hard ceiling.
 Wall-time values clamp to 1..=86400 s.
 
 ## Token budget governor
@@ -593,6 +595,22 @@ The effective heartbeat is kept at least 30 seconds above both the resolved
 progress at step boundaries, not mid-tool, so a silent build or MCP call must
 not be cleaned up mid-run), so neither a configured long model request nor a
 long in-flight tool is cancelled before its own timeout can fire.
+
+Inside a durable task these budgets are additionally bounded by the task's
+`wall_time` (default 30 minutes, measured from task start): the wall clock
+pauses while a pending approval or user-input prompt waits on a human (with a
+24-hour fail-safe cap that bounds each open window and the windows summed
+across the whole task), but it otherwise wins over an in-flight sub-agent, so
+a maximal 1800-second tool started late in a task can still be interrupted by
+the task deadline. Raising `execute_timeout` or the tool budget above the
+remaining task wall has no effect inside a task. The pause applies only where
+a host can actually deliver the decision: the runtime API serves task threads
+with HTTP `decide_approval`/`submit_user_input`, so its tasks pause; the
+TUI's private task runtime has no such channel, so there a prompt is not
+treated as a human-paced wait at all and the wall clock keeps running.
+While parked, the task keeps holding its worker slot (two workers by
+default), so several simultaneously parked tasks can stall the durable-task
+queue until their answers arrive or the fail-safe cap fires.
 
 ## Lifecycle
 

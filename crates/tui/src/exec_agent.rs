@@ -471,6 +471,7 @@ pub(crate) async fn run_exec_agent(
     let mut tool_error_seen = false;
     let mut last_error_category = None;
     let mut reported_sandbox_contract = false;
+    let mut reported_user_input_contract = false;
 
     let should_persist_session = resuming_session || output_format == ExecOutputFormat::StreamJson;
     let mut latest_session_id = loaded_session_id;
@@ -698,6 +699,20 @@ pub(crate) async fn run_exec_agent(
                 } else {
                     approval_required = true;
                     let _ = engine_handle.deny_tool_call(id).await;
+                }
+            }
+            Event::UserInputRequired { id, .. } => {
+                // A headless run has no one to answer a request_user_input
+                // prompt, and the engine's wait is unbounded (human-paced),
+                // so without an explicit resolution the run parks forever.
+                // Cancel the request: the tool returns a cancelled error and
+                // the turn continues, mirroring how approvals auto-deny here.
+                let _ = engine_handle.cancel_user_input(id).await;
+                if !reported_user_input_contract {
+                    eprintln!(
+                        "request_user_input cannot be answered in a headless run; the request was cancelled so the turn can continue"
+                    );
+                    reported_user_input_contract = true;
                 }
             }
             Event::ElevationRequired {

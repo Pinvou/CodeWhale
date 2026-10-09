@@ -160,8 +160,9 @@ max_concurrent = 20
 launch_concurrency = 20
 max_admitted = 200
 max_depth = 6
-# 调用不带预算时的每个子代理运行预算（角色默认：60/120 回合）。
-default_max_steps = 120
+# 调用不带预算时的每个子代理运行预算。模型回合预算省略或为零时不设上限；
+# 仅当操作者确实需要每个子代理的回合上限时才设正值。
+default_max_steps = 0
 default_wall_time_secs = 1800
 token_budget = 100000
 
@@ -217,9 +218,11 @@ max_admitted = 12
 
 1. 调用上一个显式的、解析接受的 `max_steps` / `wall_time_secs`（重放兼容），
 2. 操作者默认 `[subagents] default_max_steps` 和 `[subagents] default_wall_time_secs`，
-3. Fleet 角色默认：读取为主的角色（scout/planner/reviewer/verifier/consultant）为 **60** 个模型回合，builder/worker/custom 为 **120**（`WorkerRuntimeProfile::default_max_steps`），墙钟默认 **1800 秒**。
+3. Fleet 角色默认：所有角色的模型回合数**不设上限**（`WorkerRuntimeProfile::default_max_steps` 返回零），墙钟默认 **1800 秒**。
 
-步数值钳制到 2000 回合的硬上限；墙钟值钳制到 1..=86400 秒。
+显式为零的 `max_steps` 即使在操作者默认已配置时仍不设上限；省略 `max_steps`
+时落到操作者默认（未配置则为角色默认），正值钳制到 2000 回合的硬上限。
+墙钟值钳制到 1..=86400 秒。
 
 ## Token 预算调节器
 
@@ -318,6 +321,8 @@ heartbeat_timeout_secs = 300  # 钳制到 30..=3600
 ```
 
 有效心跳至少保持在解析后的 `api_timeout_secs` 与内置子代理工具超时之上各 30 秒（子代理只在步骤边界记录进度，不会在工具执行中途记录，因此静默的构建或 MCP 调用不能在运行中被清理），所以配置的长模型请求与长时间在途工具都不会在自己的超时触发之前被取消。
+
+在持久任务内部，这些预算还受任务 `wall_time`（默认 30 分钟，自任务启动起算）约束：等待审批或用户输入时墙钟会暂停（24 小时兜底上限既约束每个打开的窗口，也约束整个任务内各窗口之和），其余情况下墙钟优先于在途子代理——任务后段启动的满额 1800 秒工具仍可能被任务截止时间中断。在任务内部把 `execute_timeout` 或工具预算调到超过剩余任务墙钟不会生效。暂停只在确有宿主能送达决策的场合生效：runtime API 的任务线程可通过 HTTP `decide_approval`/`submit_user_input` 应答，其任务会暂停；TUI 的私有任务运行时没有这条通道，那里的提示不会被视为一个人工等待，墙钟继续运行。暂停期间任务仍占用其工作者槽位（默认两个工作者），因此多个同时暂停的任务可能让持久任务队列停摆，直到应答抵达或兜底上限触发。
 
 ## 生命周期
 
