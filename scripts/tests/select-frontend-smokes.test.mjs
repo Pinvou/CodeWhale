@@ -117,3 +117,9 @@ test("organization and member unit browsers run for feature and shared changes",
     assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])).includes(`npm:${target}`));
   }
 });
+
+test("registration bonus compiled browsers are kept in full and feature suites", () => {
+  const target = "npm:test:account-platform-registration-bonus-ui";
+  assert.ok(fullLabels.includes(target));
+  assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminOperationsWorkspace.jsx"])).includes(target));
+});

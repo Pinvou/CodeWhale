@@ -85,6 +85,9 @@ func main() {
 	if err := configureApprovals(ctx, repository, service, credential, cfg.Environment); err != nil {
 		log.Fatal(err)
 	}
+	if err := configureRegistrationBonus(ctx, repository, enabled("MOBILE_AUTH_ENABLED"), os.Getenv("REGISTRATION_BONUS_FINGERPRINT_KEY_ID"), os.Getenv("REGISTRATION_BONUS_FINGERPRINT_HMAC_KEY_BASE64")); err != nil {
+		log.Fatal("REGISTRATION_BONUS_CONFIGURATION_INVALID")
+	}
 	go observability.RunBackground(ctx, "wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run)
 	go observability.RunBackground(ctx, "role-binding-expiry", account.NewRoleBindingExpiryWorker(repository, time.Minute).Run)
 	if enabled("MOBILE_AUTH_ENABLED") {

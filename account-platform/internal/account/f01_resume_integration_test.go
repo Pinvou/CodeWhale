@@ -170,18 +170,40 @@ func TestF01WalletIndex93PreservesApplied87(t *testing.T) {
 	if _, err = conn.Exec(ctx, `SET ROLE account_service; DROP INDEX wallet_provisioning_leased_idx; DELETE FROM schema_migrations WHERE version=93`); err != nil {
 		t.Fatal(err)
 	}
-	// Production read-only evidence established this immutable ledger identity.
-	// F01 does not install F07's bonus schema or its prior domain dependencies;
-	// seed only its ledger fact to test collision/replay preservation. This is
-	// not a replay of the production database or bonus SQL acceptance.
-	if _, err = conn.Exec(ctx, `INSERT INTO schema_migrations(version,name,checksum) VALUES($1,$2,$3)`, bonus.Version, bonus.Name, bonus.Checksum); err != nil {
+	// F07 installs the real immutable bonus migration. F01's narrower fixture
+	// lacks that schema: only there seed the original ledger fact. Preserve an
+	// existing record exactly, and reject any unexpected identity.
+	var appliedName, appliedChecksum string
+	err = conn.QueryRow(ctx, `SELECT name,checksum FROM schema_migrations WHERE version=87`).Scan(&appliedName, &appliedChecksum)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if _, err = conn.Exec(ctx, `INSERT INTO schema_migrations(version,name,checksum) VALUES($1,$2,$3)`, bonus.Version, bonus.Name, bonus.Checksum); err != nil {
+			t.Fatal(err)
+		}
+	} else if err != nil {
 		t.Fatal(err)
+	} else if appliedName != bonus.Name || appliedChecksum != bonus.Checksum {
+		t.Fatal("installed migration87 identity changed")
 	}
 	var before string
 	if err = conn.QueryRow(ctx, `SELECT row_to_json(m)::text FROM schema_migrations m WHERE version=87`).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
-	combined := append(append([]migrations.Migration{}, installed...), bonus)
+	combined := append([]migrations.Migration{}, installed...)
+	bonusCount := 0
+	for _, m := range installed {
+		if m.Version == bonus.Version {
+			bonusCount++
+			if m.Name != bonus.Name || m.Checksum != bonus.Checksum {
+				t.Fatal("packaged migration87 identity changed")
+			}
+		}
+	}
+	if bonusCount > 1 {
+		t.Fatal("duplicate packaged migration87")
+	}
+	if bonusCount == 0 {
+		combined = append(combined, bonus)
+	}
 	sort.Slice(combined, func(i, j int) bool { return combined[i].Version < combined[j].Version })
 	if err = accountschema.Up(ctx, conn, combined); err != nil {
 		t.Fatal(err)
