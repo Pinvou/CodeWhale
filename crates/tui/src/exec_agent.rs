@@ -202,10 +202,37 @@ pub(crate) async fn run_exec_agent(
         ..crate::tools::spec::RuntimeToolServices::default()
     };
 
+    // Roots enter exec only through the persisted session metadata (Runtime
+    // API / headless), so capture them once at resume: the engine starts with
+    // this set and the save path must write the same set back, or a follow-up
+    // `exec --resume` silently degrades the thread to single-root.
+    // Round-35 M2: a PERSISTED set is validated before arming — every sibling
+    // lane consuming one (ACP session/load, REST resume-thread, fork,
+    // /cd, fork_from_session) hard-refuses a hand-edited/poisoned row, and
+    // normalize-only here silently granted a filesystem-writable sandbox in
+    // headless runs (the review's sibling-parity finding).
+    let resume_workspace_roots: Vec<PathBuf> = match resume_session.as_ref() {
+        None => Vec::new(),
+        Some(saved) => {
+            let raw = saved.metadata.workspace_roots.clone();
+            if raw.is_empty() {
+                Vec::new()
+            } else {
+                codewhale_core::validate_workspace_roots(&workspace, &raw).map_err(|error| {
+                    anyhow::anyhow!(
+                        "persisted workspace_roots failed validation on resume \
+                         (session row is corrupt or hand-edited): {error}"
+                    )
+                })?
+            }
+        }
+    };
+
     let engine_config = EngineConfig {
         model: effective_model.clone(),
         active_route_limits,
         workspace: workspace.clone(),
+        workspace_roots: resume_workspace_roots.clone(),
         session_id: None,
         subagent_state_root: None,
         plugin_registry: Some(std::sync::Arc::clone(&engine_plugin_registry)),
@@ -356,12 +383,27 @@ pub(crate) async fn run_exec_agent(
     let mode = AppMode::Agent;
 
     let resuming_session = resume_session.is_some();
+    let latest_workspace_roots = resume_workspace_roots;
     let mut loaded_session_id = None;
     if let Some(saved) = resume_session {
         let saved_id = saved.metadata.id.clone();
-        if saved.metadata.workspace != workspace && output_format == ExecOutputFormat::Text {
+        if saved.metadata.workspace != workspace {
+            // The engine runs the SAVED workspace/root pair (the
+            // `Op::SyncSession` below re-normalizes it against itself), so
+            // the CLI `--workspace` does not re-anchor a resumed session and
+            // there is nothing to validate here — the lane never mints a
+            // moved row. The warning only tells the user which directory the
+            // session actually runs in (round-22 SF22-3 retires the round-21
+            // hard block, which refused legitimate resumes against a
+            // workspace the lane never adopts and named a
+            // `--workspace-roots` flag that does not exist).
+            // Round-24 P3: the old Text-format gate dropped this warning
+            // for JSON consumers entirely — it goes to stderr and never
+            // touches the stdout JSON stream, so the gate suppressed
+            // safety-relevant information for no compatibility gain.
             eprintln!(
-                "Warning: session {} was created in a different workspace ({}). Resuming anyway.",
+                "Warning: session {} was created in a different workspace ({}). \
+                 Resuming in the session's own workspace.",
                 truncate_id(&saved_id),
                 saved.metadata.workspace.display(),
             );
@@ -375,6 +417,7 @@ pub(crate) async fn run_exec_agent(
                 system_prompt_override: false,
                 model: saved.metadata.model,
                 workspace: saved.metadata.workspace,
+                workspace_roots: saved.metadata.workspace_roots.clone(),
                 mode,
             })
             .await?;
@@ -929,6 +972,7 @@ pub(crate) async fn run_exec_agent(
                             id: effective_provider_id.as_deref(),
                         },
                         &latest_workspace,
+                        &latest_workspace_roots,
                         &latest_system_prompt,
                         latest_session_id.as_deref(),
                         u64::from(usage.input_tokens) + u64::from(usage.output_tokens),

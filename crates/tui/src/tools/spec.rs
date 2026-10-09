@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
@@ -603,6 +603,22 @@ pub struct ToolExecutionState {
     pub(crate) tool_authority: Option<Arc<ToolAuthorityEnvelope>>,
     /// Whether to allow paths outside workspace
     pub trust_mode: bool,
+    /// Additional workspace roots tools may touch; `workspace` is always the
+    /// primary root. Empty means the historical single-root boundary.
+    pub workspace_roots: Vec<PathBuf>,
+    /// Round-24 P3 perf memo for `boundary_roots()`: the normalized set plus
+    /// each root's canonical spelling, canonicalizing once per context
+    /// lifetime instead of once per `resolve_path` call (several judgments
+    /// ride every tool call). Invariant: `workspace` and `workspace_roots`
+    /// change ONLY through [`ToolContext::rebase_roots`] (which swaps this
+    /// Arc for a fresh one) or at construction — clones share the Arc, which
+    /// is sound only while the pair stays identical. Round-26 B26-1 closed
+    /// the regression this comment's earlier "no in-place mutation" survey
+    /// missed: the worktree spawn/resume sites and the per-turn live context
+    /// used to assign the fields in place on a clone, so a parent-filled
+    /// memo kept judging the CHILD's file-tool containment against the
+    /// PARENT boundary (fail-open for worktree isolation).
+    pub(crate) boundary_roots_cache: std::sync::Arc<std::sync::OnceLock<Vec<(PathBuf, PathBuf)>>>,
     /// Current sandbox policy
     #[allow(dead_code)]
     pub sandbox_policy: SandboxPolicy,
@@ -779,6 +795,8 @@ impl ToolContext {
                 origin_turn_id: None,
                 tool_authority,
                 trust_mode,
+                workspace_roots: Vec::new(),
+                boundary_roots_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
                 sandbox_policy: SandboxPolicy::None,
                 notes_path: notes_path.into(),
                 mcp_config_path: mcp_config_path.into(),
@@ -832,6 +850,37 @@ impl ToolContext {
     pub fn with_network_policy(mut self, policy: NetworkPolicyDecider) -> Self {
         self.network_policy = Some(policy);
         self
+    }
+
+    /// Attach the session's additional workspace roots. The primary root
+    /// stays `workspace`; boundary checks accept a path contained in any
+    /// root. An empty set keeps the historical single-root boundary.
+    #[must_use]
+    pub fn with_workspace_roots(mut self, workspace_roots: Vec<PathBuf>) -> Self {
+        self.workspace_roots = workspace_roots;
+        // Fresh memo: the boundary must never judge the previous set's
+        // canonical spellings (see the field's invariant note).
+        self.boundary_roots_cache = std::sync::Arc::new(std::sync::OnceLock::new());
+        self
+    }
+
+    /// Replace the (primary workspace, attached roots) pair on a LIVE
+    /// context and refresh the boundary memo atomically (round-26 B26-1).
+    ///
+    /// Cloned contexts share the parent's memo `Arc`; assigning the two
+    /// fields in place used to leave that shared memo filled with the
+    /// PARENT's boundary, so the child's file-tool containment judged
+    /// against the parent workspace plus its attached roots — for a
+    /// worktree child (whose boundary is the worktree alone) that passed
+    /// containment for the entire parent checkout: fail-open for exactly
+    /// the isolation the worktree contract names. Every site that moves a
+    /// context onto a different primary or root set MUST go through here;
+    /// the memo swap is not optional. Callers that change the roots derive
+    /// them into the sandbox policy separately (`rederive_sandbox_policy_roots`).
+    pub(crate) fn rebase_roots(&mut self, workspace: PathBuf, workspace_roots: Vec<PathBuf>) {
+        self.workspace = workspace;
+        self.workspace_roots = workspace_roots;
+        self.boundary_roots_cache = std::sync::Arc::new(std::sync::OnceLock::new());
     }
 
     /// Attach durable runtime services to tools.
@@ -1058,6 +1107,27 @@ impl ToolContext {
     /// let path = ctx.resolve_path("README.md")?;
     /// # Ok::<(), crate::tools::spec::ToolError>(())
     /// ```
+    /// Boundary roots for escape checks: the primary workspace followed by
+    /// any additional roots, each paired with its canonical (or raw fallback)
+    /// form. With no additional roots configured this is exactly the primary
+    /// root, so single-root sessions take the historical code path.
+    fn boundary_roots(&self) -> &[(PathBuf, PathBuf)] {
+        // Round-24 P3 perf: memoized per context (roots are lifetime-
+        // immutable, see the cache field's invariant note). The canonicalize
+        // chain per root used to run on every resolve_path call — several
+        // per tool turn — which on a 64-root session was hundreds of
+        // realpath syscalls per turn for an unchanged set.
+        self.boundary_roots_cache.get_or_init(|| {
+            codewhale_core::normalize_workspace_roots(&self.workspace, &self.workspace_roots)
+                .into_iter()
+                .map(|root| {
+                    let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+                    (root, canonical)
+                })
+                .collect()
+        })
+    }
+
     pub fn resolve_path(&self, raw: &str) -> Result<PathBuf, ToolError> {
         let candidate = if std::path::Path::new(raw).is_absolute() {
             PathBuf::from(raw)
@@ -1071,33 +1141,30 @@ impl ToolContext {
             return Ok(candidate.canonicalize().unwrap_or(candidate));
         }
 
-        // Try to canonicalize the workspace
-        let workspace_canonical = self
-            .workspace
-            .canonicalize()
-            .unwrap_or_else(|_| self.workspace.clone());
+        let boundary_roots = self.boundary_roots();
+        let candidate_normalized = normalize_path(&candidate);
 
         // When follow_symlinks is enabled, check the non-canonical (symlink)
-        // path against the workspace first. A symlink inside the workspace
-        // that resolves outside is allowed — the symlink itself is the gate.
+        // path against each root first. A symlink inside a root that resolves
+        // outside is allowed — the symlink itself is the gate.
         if self.follow_symlinks {
-            let candidate_normalized = normalize_path(&candidate);
-            let workspace_normalized = normalize_path(&self.workspace);
-            let workspace_canonical_normalized = normalize_path(&workspace_canonical);
-
-            if candidate_normalized.starts_with(&workspace_normalized)
-                || candidate_normalized.starts_with(&workspace_canonical_normalized)
-            {
-                // The symlink (or plain path) is inside the workspace.
-                // Return the canonicalized target so file I/O works correctly.
-                if candidate.exists() {
-                    return Ok(candidate.canonicalize().unwrap_or(candidate));
+            for (root, root_canonical) in boundary_roots {
+                let root_normalized = normalize_path(root);
+                let root_canonical_normalized = normalize_path(root_canonical);
+                if candidate_normalized.starts_with(&root_normalized)
+                    || candidate_normalized.starts_with(&root_canonical_normalized)
+                {
+                    // The symlink (or plain path) is inside this root.
+                    // Return the canonicalized target so file I/O works correctly.
+                    if candidate.exists() {
+                        return Ok(candidate.canonicalize().unwrap_or(candidate));
+                    }
+                    // Non-existent path: canonicalize the deepest existing ancestor
+                    return self.resolve_nonexistent_path(candidate, root_canonical);
                 }
-                // Non-existent path: canonicalize the deepest existing ancestor
-                return self.resolve_nonexistent_path(candidate, &workspace_canonical);
             }
 
-            // Path is outside workspace even before resolving symlinks.
+            // Path is outside every root even before resolving symlinks.
             // Fall through to the standard escape check.
         }
 
@@ -1105,23 +1172,21 @@ impl ToolContext {
         // This handles symlinks like /var -> /private/var on macOS
         let candidate_canonical = candidate
             .canonicalize()
-            .unwrap_or_else(|_| normalize_path(&candidate));
-        let workspace_normalized = normalize_path(&workspace_canonical);
+            .unwrap_or_else(|_| candidate_normalized.clone());
 
-        // Check if the candidate is under the workspace (comparing canonical paths)
-        if !candidate_canonical.starts_with(&workspace_normalized) {
-            // Also try with non-canonical workspace for cases where workspace itself
-            // hasn't been canonicalized yet
-            let workspace_plain = normalize_path(&self.workspace);
-            let candidate_normalized = normalize_path(&candidate);
-            if !candidate_normalized.starts_with(&workspace_plain)
-                && !self.is_trusted_external_path(&candidate_canonical)
-                && !self.is_trusted_external_path(&candidate_normalized)
-            {
-                return Err(ToolError::PathEscape {
-                    path: candidate_canonical,
-                });
-            }
+        // The candidate must sit under at least one root (comparing canonical
+        // paths, then plain paths for roots that do not canonicalize yet).
+        let contained = boundary_roots.iter().any(|(root, root_canonical)| {
+            candidate_canonical.starts_with(normalize_path(root_canonical))
+                || candidate_normalized.starts_with(normalize_path(root))
+        });
+        if !contained
+            && !self.is_trusted_external_path(&candidate_canonical)
+            && !self.is_trusted_external_path(&candidate_normalized)
+        {
+            return Err(ToolError::PathEscape {
+                path: candidate_canonical,
+            });
         }
 
         // For existing paths, use canonicalize directly
@@ -1134,16 +1199,31 @@ impl ToolContext {
                 ))
             })?;
 
-            if !canonical.starts_with(&workspace_canonical)
-                && !self.is_trusted_external_path(&canonical)
-            {
+            let under_root = boundary_roots
+                .iter()
+                .any(|(_, root_canonical)| canonical.starts_with(root_canonical));
+            if !under_root && !self.is_trusted_external_path(&canonical) {
                 return Err(ToolError::PathEscape { path: canonical });
             }
 
             return Ok(canonical);
         }
 
-        self.resolve_nonexistent_path(candidate, &workspace_canonical)
+        // Non-existent path: resolve against the containing root's boundary;
+        // `resolve_nonexistent_path` re-checks trusted external paths itself.
+        let boundary = boundary_roots
+            .iter()
+            .find(|(root, root_canonical)| {
+                candidate_canonical.starts_with(normalize_path(root_canonical))
+                    || candidate_normalized.starts_with(normalize_path(root))
+            })
+            .map(|(_, root_canonical)| root_canonical.clone())
+            .unwrap_or_else(|| {
+                self.workspace
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.workspace.clone())
+            });
+        self.resolve_nonexistent_path(candidate, &boundary)
     }
 
     /// Resolve a non-existent path by canonicalizing its deepest existing
@@ -1319,48 +1399,13 @@ pub async fn lsp_diagnostics_for_paths(context: &ToolContext, paths: &[PathBuf])
     render_blocks(&blocks)
 }
 
+/// The tools boundary's landing normalizer: clamps a `..` at the filesystem
+/// root, keeps a `..` a relative spelling cannot pop. Delegates to the shared
+/// core implementation so the judgment lanes (repo law, the judged exec cwd)
+/// normalize identically by construction instead of by copy
+/// (review #484/CodeWhale round-22 B22-5).
 pub(crate) fn normalize_path(path: &Path) -> PathBuf {
-    let mut prefix: Option<std::ffi::OsString> = None;
-    let mut is_root = false;
-    let mut stack: Vec<std::ffi::OsString> = Vec::new();
-
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix_component) => {
-                prefix = Some(prefix_component.as_os_str().to_owned());
-            }
-            Component::RootDir => {
-                is_root = true;
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                let parent = Component::ParentDir.as_os_str();
-                if let Some(last) = stack.pop() {
-                    if last == parent {
-                        stack.push(last);
-                        stack.push(parent.to_owned());
-                    }
-                } else if !is_root {
-                    stack.push(parent.to_owned());
-                }
-            }
-            Component::Normal(part) => {
-                stack.push(part.to_owned());
-            }
-        }
-    }
-
-    let mut normalized = PathBuf::new();
-    if let Some(prefix) = prefix {
-        normalized.push(prefix);
-    }
-    if is_root {
-        normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR));
-    }
-    for part in stack {
-        normalized.push(part);
-    }
-    normalized
+    codewhale_core::normalize_path_lexically(path)
 }
 
 /// The core trait that all tools must implement.

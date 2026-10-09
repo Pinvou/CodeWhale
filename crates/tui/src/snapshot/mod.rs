@@ -51,8 +51,140 @@ pub use prune::{DEFAULT_MAX_AGE, prune_older_than};
 /// Maximum snapshots kept per workspace side-repo. Oldest are pruned
 /// after each new snapshot to cap disk usage (#1112).
 pub const DEFAULT_MAX_SNAPSHOTS: usize = 50;
+
+/// Honesty clause for revert/undo reports when the session root set extends
+/// beyond the primary workspace: the snapshot side-repo is rooted at the
+/// primary, so a restore rolls back only the primary while attached-root
+/// writes persist. Appended verbatim so single-root reports stay
+/// byte-identical (the clause is simply never added there).
+pub const ATTACHED_ROOTS_NOT_REVERTED_NOTE: &str =
+    "Only the primary workspace was reverted; attached workspace roots were not rolled back.";
+
+/// Whether a restore from the workspace snapshot repo covers only the
+/// primary root — true exactly when the normalized root set has an entry
+/// OUTSIDE the primary tree. Revert/undo reports must carry
+/// [`ATTACHED_ROOTS_NOT_REVERTED_NOTE`] in that case instead of implying a
+/// full rollback.
+///
+/// A root nested under the primary does NOT count
+/// (review #484/CodeWhale round-22 N22-3): `validate_workspace_roots`
+/// explicitly allows attached roots under the primary, and the side repo's
+/// work-tree IS the primary tree, so `repo.restore` reverts those writes
+/// with the primary — claiming they "were not rolled back" would tell the
+/// user the opposite of what happened.
+///
+/// Round-23 B23-1 + round-24 B24-1: BOTH spellings of every side are judged.
+/// The lexically normalized forms catch `..`-spelled roots (`/ws/../shared`
+/// collapses outside the primary); the canonical-or-raw forms (the
+/// `ToolContext::boundary_roots` idiom) catch inward-symlink roots
+/// (`/ws/link → /elsewhere`) that lexically nest under the primary while
+/// every consumer canonicalizes them outside — writes through such a root
+/// persist past the primary-rooted restore, so withholding the note for
+/// either class was fail-unsafe (and an earlier doc asserted the opposite
+/// of the code). The clause fires when EITHER form lands outside the
+/// primary; over-disclosing the boundary is the safe side.
+pub fn restore_covers_primary_only(
+    workspace: &std::path::Path,
+    workspace_roots: &[std::path::PathBuf],
+) -> bool {
+    let workspace_lexical = codewhale_core::normalize_path_lexically(workspace);
+    let workspace_canonical = codewhale_core::normalize_path_lexically(
+        &workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf()),
+    );
+    codewhale_core::normalize_workspace_roots(workspace, workspace_roots)
+        .iter()
+        .skip(1)
+        .any(|root| {
+            let root_lexical = codewhale_core::normalize_path_lexically(root);
+            let root_canonical = codewhale_core::normalize_path_lexically(
+                &root.canonicalize().unwrap_or_else(|_| root.clone()),
+            );
+            !root_lexical.starts_with(&workspace_lexical)
+                || !root_canonical.starts_with(&workspace_canonical)
+        })
+}
 #[allow(unused_imports)]
 pub use repo::{
     DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT, Snapshot, SnapshotId, SnapshotRepo,
     estimate_workspace_size_bounded,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn nested_under_primary_attached_roots_are_reverted_with_the_primary() {
+        // Round-22 N22-3: the side repo's work-tree IS the primary tree, so a
+        // root nested under it (validate_workspace_roots explicitly allows
+        // those) is rolled back by the restore — the boundary note must not
+        // claim otherwise.
+        let workspace = PathBuf::from("/ws");
+        assert!(restore_covers_primary_only(
+            &workspace,
+            &[PathBuf::from("/elsewhere")],
+        ));
+        assert!(!restore_covers_primary_only(
+            &workspace,
+            &[PathBuf::from("/ws/nested")],
+        ));
+        assert!(!restore_covers_primary_only(
+            &workspace,
+            &[PathBuf::from("/ws/nested/deeper")],
+        ));
+        // A root that contains the primary (`/`, a legacy-row ancestor) is
+        // outside the reverted tree's spelling — its writes outside the
+        // primary persist. A root equal to the primary dedups away in the
+        // normalizer, like the empty set.
+        assert!(restore_covers_primary_only(
+            &workspace,
+            &[PathBuf::from("/")],
+        ));
+        assert!(!restore_covers_primary_only(
+            &workspace,
+            &[PathBuf::from("/ws")],
+        ));
+        assert!(!restore_covers_primary_only(&workspace, &[]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inward_symlink_root_fires_the_boundary_note() {
+        // Round-24 B24-1: lexical normalization cannot see through an inward
+        // symlink — `/ws/link → /elsewhere` lexically nests under `/ws`
+        // while every consumer canonicalizes it outside, so the
+        // lexical-only predicate withheld the boundary note while writes
+        // through the root persisted past the primary-rooted restore. The
+        // canonical leg (raw fallback for roots that do not resolve) must
+        // fire it; a genuinely nested plain root must stay silent.
+        let base = tempfile::tempdir().expect("tempdir");
+        let workspace = base.path().join("ws");
+        std::fs::create_dir_all(&workspace).expect("mkdir ws");
+        let elsewhere = base.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
+        let link = workspace.join("link");
+        std::os::unix::fs::symlink(&elsewhere, &link).expect("symlink");
+        assert!(
+            restore_covers_primary_only(&workspace, std::slice::from_ref(&link)),
+            "an inward-symlink root must fire the boundary note"
+        );
+        // A plain root nested under the primary keeps the old behavior even
+        // though the primary itself now also canonicalizes. A28-4: the dir
+        // must EXIST first — a missing target canonicalizes to the raw
+        // /var spelling while the primary canonicalizes to /private/var,
+        // mixing spellings and spuriously firing the note on stock macOS.
+        let nested_plain = workspace.join("nested");
+        std::fs::create_dir_all(&nested_plain).expect("mkdir nested");
+        assert!(!restore_covers_primary_only(&workspace, &[nested_plain]));
+        // A symlink INSIDE the primary pointing at a nested directory stays
+        // inside on both spellings — no note.
+        let nested = workspace.join("nested-real");
+        std::fs::create_dir_all(&nested).expect("mkdir nested");
+        let inner_link = workspace.join("inner-link");
+        std::os::unix::fs::symlink(&nested, &inner_link).expect("symlink");
+        assert!(!restore_covers_primary_only(&workspace, &[inner_link]));
+    }
+}

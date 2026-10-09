@@ -4473,7 +4473,11 @@ async fn patch_undo_thread_turn(
         .get_thread(&id)
         .await
         .map_err(map_thread_err)?;
-    let patch_result = patch_undo_workspace_files(&thread.workspace, thread.session_id.as_deref());
+    let patch_result = patch_undo_workspace_files(
+        &thread.workspace,
+        &thread.workspace_roots,
+        thread.session_id.as_deref(),
+    );
 
     // Step 2: Remove the last conversation turn (undo_conversation).
     let (forked_thread, original_user_text) = state
@@ -4496,6 +4500,7 @@ async fn patch_undo_thread_turn(
 /// current workspace — same target selection as the TUI's `patch_undo`.
 fn patch_undo_workspace_files(
     workspace: &FsPath,
+    workspace_roots: &[std::path::PathBuf],
     current_session_id: Option<&str>,
 ) -> PatchUndoResult {
     let repo = match crate::snapshot::SnapshotRepo::open_or_init(workspace) {
@@ -4565,13 +4570,21 @@ fn patch_undo_workspace_files(
     });
 
     let short = &target.id.as_str()[..target.id.as_str().len().min(8)];
+    // Snapshots are primary-bound: with attached roots in the thread set,
+    // name the rollback boundary instead of implying a full revert.
+    let boundary_note = if crate::snapshot::restore_covers_primary_only(workspace, workspace_roots)
+    {
+        format!("\n{}", crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE)
+    } else {
+        String::new()
+    };
     let summary = match diff_stat {
         Some(ref stat) => format!(
-            "Restored snapshot '{}' ({}). Files affected:\n{stat}",
+            "Restored snapshot '{}' ({}). Files affected:\n{stat}{boundary_note}",
             target.label, short
         ),
         None => format!(
-            "Restored snapshot '{}' ({}). No diff changes detected.",
+            "Restored snapshot '{}' ({}). No diff changes detected.{boundary_note}",
             target.label, short
         ),
     };
@@ -5904,34 +5917,104 @@ async fn restore_snapshot(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    restore_snapshot_for_workspace(&state.workspace, &id)?;
-    Ok(Json(json!({
-        "restored": id,
-    })))
+    // Round-23 SF23-1 + B23-2: every read happens BEFORE the mutating
+    // restore (a thread-store failure must not turn a completed rollback
+    // into a 500), and the boundary decision no longer depends on the
+    // snapshot's `[sid=...]` tag matching a live thread record — `PUT
+    // /v1/sessions` re-keys the thread to a new session handle, so the
+    // exact join silently dropped the clause through an ordinary,
+    // disclosed-API sequence.
+    let snapshot = snapshot_for_workspace(&state.workspace, &id)?;
+    let mut payload = json!({ "restored": id });
+    let mut boundary = false;
+    // Snapshots are primary-bound: with attached roots in the owning
+    // thread's set, name the rollback boundary instead of implying a full
+    // revert (review #484/CodeWhale round-22 B22-4). An untagged (legacy)
+    // snapshot has no owner to consult and stays unchanged; a TAGGED
+    // snapshot always names the boundary — fail-safe by construction:
+    // a matching multi-root thread proves it, and a tagged snapshot whose
+    // owner no longer matches (the PUT re-key sequence) proves an
+    // interactive owner existed while proving nothing about the roots
+    // (round-23 B23-2).
+    if snapshot.session_id.is_some() {
+        match state
+            .runtime_threads
+            .list_threads(ThreadListFilter::IncludeArchived, None)
+            .await
+        {
+            Ok(threads) => {
+                let matched = threads
+                    .iter()
+                    .find(|thread| thread.session_id.as_deref() == snapshot.session_id.as_deref());
+                boundary = match matched {
+                    Some(thread) => crate::snapshot::restore_covers_primary_only(
+                        &thread.workspace,
+                        &thread.workspace_roots,
+                    ),
+                    None => true,
+                };
+            }
+            // A thread-store read failure degrades to the conservative
+            // clause (naming the boundary) rather than a 500 after the
+            // rollback, and without leaking the store error text.
+            Err(err) => {
+                eprintln!(
+                    "[runtime_api] restore boundary lookup failed; naming the boundary conservatively: {err}"
+                );
+                boundary = true;
+            }
+        }
+    }
+    if boundary {
+        payload["boundary"] = json!({
+            "attached_roots_not_reverted": true,
+            "note": crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE,
+        });
+    }
+    restore_snapshot_for_workspace(&state.workspace, &snapshot)?;
+    Ok(Json(payload))
 }
 
-fn restore_snapshot_for_workspace(workspace: &FsPath, id: &str) -> Result<(), ApiError> {
+/// Round-23 B23-2/SF23-1: the read half of the restore — find and return
+/// the snapshot WITHOUT mutating, so callers can compute the response
+/// before the rollback runs.
+fn snapshot_for_workspace(
+    workspace: &FsPath,
+    id: &str,
+) -> Result<crate::snapshot::Snapshot, ApiError> {
     let repo = crate::snapshot::SnapshotRepo::open_or_init(workspace)
         .map_err(|e| ApiError::internal(format!("Snapshot repo init failed: {e}")))?;
-    // The id arrives from the request path and is handed to git as a
-    // treeish, so it is accepted only if the side repo actually knows it —
-    // anything else is a 404 rather than an arbitrary string on a git
-    // command line. The membership check also marks the id as validated
-    // for command-line-injection scanners (an allowlist `contains` is
-    // their modeled trust boundary), so the pre-existing, accepted flow
-    // stops re-flagging when call sites are refactored.
-    let known_ids: Vec<String> = repo
+    let known = repo
         .list(usize::MAX)
-        .map_err(|e| ApiError::internal(format!("Failed to list snapshots: {e}")))?
-        .into_iter()
-        .map(|snapshot| snapshot.id.as_str().to_string())
-        .collect();
-    if !known_ids.contains(&id.to_string()) {
-        return Err(ApiError::not_found(format!("no such snapshot: {id}")));
-    }
-    let snapshot_id = crate::snapshot::SnapshotId(id.to_string());
-    repo.restore(&snapshot_id)
-        .map_err(|e| ApiError::internal(format!("Snapshot restore failed: {e}")))
+        .map_err(|e| ApiError::internal(format!("Failed to list snapshots: {e}")))?;
+    known
+        .iter()
+        .find(|snapshot| snapshot.id.as_str() == id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found(format!("no such snapshot: {id}")))
+}
+
+fn restore_snapshot_for_workspace(
+    workspace: &FsPath,
+    snapshot: &crate::snapshot::Snapshot,
+) -> Result<(), ApiError> {
+    // Round-24 P3 perf: the already-fetched membership-checked snapshot is
+    // threaded through instead of re-listing the store a second time per
+    // restore request (the read half above already proved the id belongs to
+    // this repo).
+    let repo = crate::snapshot::SnapshotRepo::open_or_init(workspace)
+        .map_err(|e| ApiError::internal(format!("Snapshot repo init failed: {e}")))?;
+    // The id arrived from the request path and is handed to git as a
+    // treeish; it reached this fn only through the side repo's own
+    // membership list, so anything else was already answered 404 rather
+    // than an arbitrary string on a git command line. The membership check
+    // also marks the id as validated for command-line-injection scanners
+    // (an allowlist `contains` is their modeled trust boundary), so the
+    // pre-existing, accepted flow stops re-flagging when call sites are
+    // refactored.
+    repo.restore(&snapshot.id)
+        .map_err(|e| ApiError::internal(format!("Snapshot restore failed: {e}")))?;
+    Ok(())
 }
 
 fn snapshot_entries_for_workspace(

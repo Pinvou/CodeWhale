@@ -1524,6 +1524,7 @@ pub enum MessageId {
     // `/status` report labels and runtime summaries.
     StatusLabelRoute,
     StatusLabelDirectory,
+    StatusLabelWorkspaceRoots,
     StatusLabelProjectDocs,
     StatusLabelMode,
     StatusLabelSafety,
@@ -1576,6 +1577,15 @@ pub enum MessageId {
     StatusSafetyDisabledSetuidAllowed,
     StatusSafetyExternal,
     StatusPointers,
+    // Multi-root workspace disclosure and /cd persistence receipts.
+    WorkspaceRootsNotice,
+    WorkspaceRootsRemainder,
+    WorkspaceSwitchBusy,
+    WorkspaceSwitchPersistedActorUnavailable,
+    WorkspaceSwitchSaveFailedActorQueued,
+    WorkspaceSwitchPersistFailed,
+    WorkspaceSwitchSnapshotFailed,
+    WorkspaceSwitchSessionsDirFailed,
     // Underwater post-launch empty state.
     EmptyStateNoGit,
     EmptyStateMcpLabel,
@@ -3646,6 +3656,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::SessionMetricsStatusLine,
     MessageId::StatusLabelRoute,
     MessageId::StatusLabelDirectory,
+    MessageId::StatusLabelWorkspaceRoots,
     MessageId::StatusLabelProjectDocs,
     MessageId::StatusLabelMode,
     MessageId::StatusLabelSafety,
@@ -3698,6 +3709,14 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::StatusSafetyDisabledSetuidAllowed,
     MessageId::StatusSafetyExternal,
     MessageId::StatusPointers,
+    MessageId::WorkspaceRootsNotice,
+    MessageId::WorkspaceRootsRemainder,
+    MessageId::WorkspaceSwitchBusy,
+    MessageId::WorkspaceSwitchPersistedActorUnavailable,
+    MessageId::WorkspaceSwitchSaveFailedActorQueued,
+    MessageId::WorkspaceSwitchPersistFailed,
+    MessageId::WorkspaceSwitchSnapshotFailed,
+    MessageId::WorkspaceSwitchSessionsDirFailed,
     MessageId::EmptyStateNoGit,
     MessageId::EmptyStateMcpLabel,
     MessageId::EmptyStatePrompt,
@@ -5197,33 +5216,90 @@ mod tests {
         );
     }
 
-    #[test]
-    fn status_report_copy_has_placeholder_parity_across_complete_packs() {
-        let english = raw_locale_messages(Locale::En);
-        let status_ids = ALL_MESSAGE_IDS
-            .iter()
-            .filter(|id| format!("{id:?}").starts_with("Status"));
+    /// `Some` when `pack` spells a different placeholder set for `key` than
+    /// the English pack — the signal every placeholder-parity gate fails on.
+    /// Missing keys are gate-precondition violations and panic, matching the
+    /// gates' previous inline behavior.
+    fn placeholder_parity_mismatch(
+        english: &serde_json::Map<String, serde_json::Value>,
+        pack: &serde_json::Map<String, serde_json::Value>,
+        key: &str,
+        tag: &str,
+    ) -> Option<String> {
+        let english_value = english
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("English {key} must be a string"));
+        let translated = pack
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("{tag} is missing raw key {key}"));
+        let expected = message_placeholders(english_value);
+        let actual = message_placeholders(translated);
+        (actual != expected)
+            .then(|| format!("{key}: {tag} placeholders {actual:?} != English {expected:?}"))
+    }
 
-        for id in status_ids {
+    #[test]
+    fn status_and_workspace_copy_has_placeholder_parity_across_complete_packs() {
+        let english = raw_locale_messages(Locale::En);
+        let gated_ids = ALL_MESSAGE_IDS
+            .iter()
+            .filter(|id| {
+                let key = format!("{id:?}");
+                key.starts_with("Status") || key.starts_with("Workspace")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            gated_ids
+                .iter()
+                .any(|id| format!("{id:?}").starts_with("Workspace")),
+            "the gate must cover the Workspace* MessageIds"
+        );
+
+        for id in gated_ids {
             let key = format!("{id:?}");
-            let english_value = english
-                .get(&key)
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_else(|| panic!("English {key} must be a string"));
             for locale in Locale::shipped_complete() {
                 let pack = raw_locale_messages(*locale);
-                let translated = pack
-                    .get(&key)
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_else(|| panic!("{} is missing raw key {key}", locale.tag()));
-                assert_eq!(
-                    message_placeholders(translated),
-                    message_placeholders(english_value),
-                    "{} changed placeholders for {key}",
-                    locale.tag()
-                );
+                if let Some(mismatch) =
+                    placeholder_parity_mismatch(&english, &pack, &key, locale.tag())
+                {
+                    panic!("{} changed placeholders: {mismatch}", locale.tag());
+                }
             }
         }
+    }
+
+    /// A pack that drops a `{error}` placeholder from a `Workspace*` key must
+    /// fail the gate — the exact slip that used to ship silently while only
+    /// `Status*` keys were gated (round-15).
+    #[test]
+    fn workspace_placeholder_parity_gate_detects_a_dropped_placeholder() {
+        let key = "WorkspaceSwitchSnapshotFailed";
+        let english = serde_json::json!({
+            key: "Failed to snapshot the session for the workspace switch: {error}",
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+        let mut pack = english.clone();
+        pack.insert(
+            key.to_string(),
+            serde_json::Value::String("snapshot failed".to_string()),
+        );
+        assert!(
+            placeholder_parity_mismatch(&english, &pack, key, "test").is_some(),
+            "a dropped {{error}} placeholder must fail the gate"
+        );
+
+        pack.insert(
+            key.to_string(),
+            serde_json::Value::String("échec de l'instantané : {error}".to_string()),
+        );
+        assert!(
+            placeholder_parity_mismatch(&english, &pack, key, "test").is_none(),
+            "a translated string keeping the placeholder set passes"
+        );
     }
 
     #[test]

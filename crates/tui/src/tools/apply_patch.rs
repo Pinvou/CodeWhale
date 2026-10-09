@@ -555,9 +555,23 @@ fn verify_patch_expected_hash(
 /// This deliberately stops before workspace resolution or file reads. It is
 /// suitable for policy checks, audit logs, diagnostics hooks, and future undo
 /// planning that must know the target files before mutation.
+///
+/// The `path` alias spellings (`file_path`/`filePath`) are folded exactly
+/// like `execute` folds them before reading the top-level override (review
+/// #484/CodeWhale round-24 B24-2): every plan-time consumer of this summary
+/// (ask rules, the in-workspace write carve-out, auto-review, resource
+/// claims, the work-surface activity line) judges the RAW input, so an
+/// alias-spelled override used to be invisible here while execution folded
+/// it — the judged files and the written file could differ, and a patch
+/// with innocuous headers plus a `filePath` override landed its write on
+/// the override target past every plan-time gate. `execute` folds before
+/// calling the plan fn directly, so folding again here is a no-op for that
+/// lane; alias-conflict errors surface identically to execute time.
 pub fn preflight_apply_patch(input: &Value) -> Result<ApplyPatchPreflight, ToolError> {
-    let normalized = normalize_apply_patch_input(input)?;
-    Ok(preflight_apply_patch_plan(input, normalized)?.summary)
+    let mut folded = input.clone();
+    apply_param_aliases(&mut folded, PATH_ALIASES, "apply_patch")?;
+    let normalized = normalize_apply_patch_input(&folded)?;
+    Ok(preflight_apply_patch_plan(&folded, normalized)?.summary)
 }
 
 fn preflight_apply_patch_plan(
@@ -1677,6 +1691,47 @@ mod tests {
         assert_eq!(preflight.files_total, 1);
         assert_eq!(preflight.hunks_total, 1);
         assert_eq!(preflight.path_override.as_deref(), Some("src/lib.rs"));
+    }
+
+    #[test]
+    fn test_preflight_apply_patch_folds_alias_path_override() {
+        // Round-24 B24-2: the alias-spelled top-level override is folded
+        // exactly like execute folds it, so the plan-time gates that judge
+        // raw input see the file the write will actually land on — with an
+        // innocuous patch header, the override (not the header) must be the
+        // preflight's touched file.
+        let patch = r"@@ -1,2 +1,2 @@
+ old
+-value
++new-value
+";
+
+        for alias in ["file_path", "filePath"] {
+            let preflight = preflight_apply_patch(&json!({
+                alias: ".git/hooks/pre-commit",
+                "patch": patch,
+                // A decoy header must not become the judged target.
+            }))
+            .expect("preflight");
+            assert_eq!(
+                preflight.touched_files,
+                vec![".git/hooks/pre-commit"],
+                "alias `{alias}` override must be visible to preflight"
+            );
+            assert_eq!(
+                preflight.path_override.as_deref(),
+                Some(".git/hooks/pre-commit")
+            );
+        }
+
+        // Conflicting alias + canonical spellings fail exactly like
+        // execute time, instead of silently judging one of them.
+        let conflict = preflight_apply_patch(&json!({
+            "path": "a.rs",
+            "filePath": "b.rs",
+            "patch": patch,
+        }));
+        assert!(conflict.is_err(), "alias/canonical disagreement must fail");
     }
 
     #[test]

@@ -2276,7 +2276,7 @@ fn test_elevation_option_descriptions() {
 fn test_elevation_option_to_policy() {
     let cwd = PathBuf::from("/tmp/test");
 
-    let policy = ElevationOption::WithNetwork.to_policy(&cwd);
+    let policy = ElevationOption::WithNetwork.to_policy(&cwd, &[]);
     assert!(matches!(
         policy,
         SandboxPolicy::WorkspaceWrite {
@@ -2285,12 +2285,50 @@ fn test_elevation_option_to_policy() {
         }
     ));
 
-    let policy = ElevationOption::FullAccess.to_policy(&cwd);
+    let policy = ElevationOption::FullAccess.to_policy(&cwd, &[]);
     assert!(matches!(policy, SandboxPolicy::DangerFullAccess));
 
     let paths = vec![PathBuf::from("/tmp/test/src")];
-    let policy = ElevationOption::WithWriteAccess(paths).to_policy(&cwd);
+    let policy = ElevationOption::WithWriteAccess(paths).to_policy(&cwd, &[]);
     assert!(matches!(policy, SandboxPolicy::WorkspaceWrite { .. }));
+}
+
+/// The retry policy must materialize the session's live root set (round-15):
+/// a denied call retried WithNetwork keeps every attached root writable,
+/// matching the per-turn policy instead of shrinking to the bare cwd.
+#[test]
+fn elevation_retry_policy_keeps_the_sessions_attached_roots() {
+    let cwd = PathBuf::from("/work/primary");
+    let attached = PathBuf::from("/work/attached");
+    let session_roots = vec![cwd.clone(), attached.clone()];
+
+    let SandboxPolicy::WorkspaceWrite {
+        writable_roots,
+        network_access,
+        ..
+    } = ElevationOption::WithNetwork.to_policy(&cwd, &session_roots)
+    else {
+        panic!("WithNetwork stays workspace-write");
+    };
+    assert!(network_access);
+    assert_eq!(writable_roots, session_roots);
+
+    let extra = PathBuf::from("/work/extra");
+    let SandboxPolicy::WorkspaceWrite {
+        writable_roots,
+        network_access,
+        ..
+    } = ElevationOption::WithWriteAccess(vec![extra.clone()]).to_policy(&cwd, &session_roots)
+    else {
+        panic!("WithWriteAccess stays workspace-write");
+    };
+    assert!(!network_access);
+    for root in [&extra, &cwd, &attached] {
+        assert!(
+            writable_roots.contains(root),
+            "retry must keep {root:?} writable: {writable_roots:?}"
+        );
+    }
 }
 
 // ========================================================================

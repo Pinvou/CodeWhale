@@ -759,8 +759,10 @@ mod tests {
             .decode(payload)
             .expect("payload is base64");
         let units: Vec<u16> = decoded
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         let text = String::from_utf16(&units).expect("payload is UTF-16LE");
         assert!(text.contains("Write-Output '中文-ok'"), "{text}");
