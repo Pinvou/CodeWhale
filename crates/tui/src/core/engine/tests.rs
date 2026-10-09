@@ -183,10 +183,23 @@ async fn rejected_manual_compaction_route_closes_typed_lifecycle() {
                 order.push("failed");
             }
             Event::Error { .. } => order.push("error"),
+            Event::TurnComplete {
+                turn_id,
+                submission_id,
+                compaction_id,
+                status,
+                ..
+            } => {
+                assert!(turn_id.is_none());
+                assert!(submission_id.is_none());
+                assert_eq!(compaction_id.as_deref(), Some("compact-route-invalid"));
+                assert_eq!(status, TurnOutcomeStatus::Failed);
+                order.push("terminal");
+            }
             _ => {}
         }
     }
-    assert_eq!(order, ["started", "failed", "error"]);
+    assert_eq!(order, ["started", "failed", "error", "terminal"]);
     assert_eq!(started_id, failed_id);
 }
 
@@ -224,8 +237,9 @@ async fn queued_manual_compaction_cancellation_is_idempotent_and_skips_route_act
         [
             Event::CompactionStarted { id: started, auto: false, .. },
             Event::CompactionCancelled { id: cancelled, auto: false, .. },
-            Event::TurnComplete { status: TurnOutcomeStatus::Interrupted, .. }
-        ] if started == id && cancelled == id
+            Event::TurnComplete { turn_id: None, submission_id: None,
+                compaction_id: Some(terminal), status: TurnOutcomeStatus::Interrupted, .. }
+        ] if started == id && cancelled == id && terminal == id
     ));
     assert!(
         !drained
@@ -246,6 +260,207 @@ async fn queued_manual_compaction_cancellation_is_idempotent_and_skips_route_act
         "running cancellation reaches its token"
     );
     engine.finish_compaction(id);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn terminal_correlation_preflight_failures_keep_each_submitted_owner() {
+    let _env_lock = lock_test_env();
+    let _api_key = EnvVarGuard::remove("DEEPSEEK_API_KEY");
+    let workspace = tempdir().expect("isolated workspace");
+    let config = Config {
+        provider: Some("deepseek".to_string()),
+        api_key: Some(String::new()),
+        ..Config::default()
+    };
+    let invalid_route = resolve_runtime_route(
+        &config,
+        ApiProvider::Deepseek,
+        Some(crate::config::DEFAULT_TEXT_MODEL),
+    )
+    .expect("structurally resolved route");
+    assert!(invalid_route.clone().validate().is_err());
+    let (engine, handle) = Engine::new(deterministic_engine_config(workspace.path()), &config);
+    let task = tokio::spawn(engine.run());
+    let mut restricted = restricted_user_message_op("rejected dynamic tool", &Config::default());
+    if let Op::SendMessage {
+        submission_id,
+        dynamic_tools,
+        ..
+    } = &mut restricted
+    {
+        *submission_id = Some("sub-restricted-send".into());
+        dynamic_tools.push(DynamicToolSpec {
+            namespace: None,
+            name: "fixture_tool".into(),
+            description: "not dispatched".into(),
+            input_schema: json!({"type": "object"}),
+            defer_loading: false,
+        });
+    }
+    handle
+        .send(restricted)
+        .await
+        .expect("queue rejected restricted send");
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "rejected restricted edit".into(),
+            submission_id: Some("sub-restricted-edit".into()),
+        })
+        .await
+        .expect("queue rejected restricted edit");
+    for submission in [None, Some("sub-route-rejected")] {
+        let mut op = external_user_message_op_with_submission(
+            "invalid route",
+            AppMode::Agent,
+            &Config::default(),
+            submission.map(str::to_string),
+        );
+        if let Op::SendMessage {
+            route, provenance, ..
+        } = &mut op
+        {
+            **route = invalid_route.clone();
+            if submission.is_none() {
+                *provenance = UserInputProvenance::Runtime;
+            }
+        }
+        handle.send(op).await.expect("queue route rejection");
+    }
+    handle
+        .send(Op::CompactContext {
+            id: "compact-after-rejections".into(),
+            route: Box::new(invalid_route),
+            compaction: Box::new(CompactionConfig::default()),
+        })
+        .await
+        .expect("queue compaction rejection");
+    let expected = [
+        (Some("sub-restricted-send"), None),
+        (Some("sub-restricted-edit"), None),
+        (None, None),
+        (Some("sub-route-rejected"), None),
+        (None, Some("compact-after-rejections")),
+    ];
+    let mut terminal_count = 0;
+    {
+        let mut rx = handle.rx_event.write().await;
+        while terminal_count < expected.len() {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("every rejected operation must settle")
+                .expect("engine event");
+            match event {
+                Event::TurnStarted { .. } => panic!("preflight rejections must not start turns"),
+                Event::TurnComplete {
+                    turn_id,
+                    submission_id,
+                    compaction_id,
+                    status,
+                    error,
+                    ..
+                } => {
+                    assert!(turn_id.is_none());
+                    assert_eq!(
+                        (submission_id.as_deref(), compaction_id.as_deref()),
+                        expected[terminal_count]
+                    );
+                    assert_eq!(status, TurnOutcomeStatus::Failed);
+                    assert!(error.is_some());
+                    terminal_count += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    handle.send(Op::Shutdown).await.expect("shutdown");
+    task.await.expect("engine task");
+    let mut rx = handle.rx_event.write().await;
+    assert!(
+        !std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(
+            event,
+            Event::TurnStarted { .. } | Event::TurnComplete { .. }
+        )),
+        "each rejected operation has exactly one terminal and no provider turn"
+    );
+}
+
+#[tokio::test]
+async fn terminal_correlation_started_failure_matches_its_original_submission() {
+    let workspace = tempdir().expect("isolated workspace");
+    let model = Arc::new(FailingGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        message: "deterministic terminal correlation failure".into(),
+    });
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op_with_submission(
+            "fail this turn",
+            AppMode::Agent,
+            &Config::default(),
+            Some("sub-started-failure".into()),
+        ))
+        .await
+        .expect("submit");
+    let mut started = None;
+    {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("failed model turn must settle")
+                .expect("engine event");
+            match event {
+                Event::TurnStarted {
+                    turn_id,
+                    submission_id,
+                    ..
+                } => {
+                    assert!(started.is_none(), "exactly one start");
+                    assert_eq!(submission_id.as_deref(), Some("sub-started-failure"));
+                    started = Some(turn_id);
+                }
+                Event::TurnComplete {
+                    turn_id,
+                    submission_id,
+                    compaction_id,
+                    status,
+                    error,
+                    ..
+                } => {
+                    assert!(started.is_some());
+                    assert_eq!(turn_id, started);
+                    assert_eq!(submission_id.as_deref(), Some("sub-started-failure"));
+                    assert!(compaction_id.is_none());
+                    assert_eq!(status, TurnOutcomeStatus::Failed);
+                    assert!(
+                        error
+                            .as_deref()
+                            .is_some_and(|s| s.contains("terminal correlation failure"))
+                    );
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    handle.send(Op::Shutdown).await.expect("shutdown");
+    task.await.expect("engine task");
+    assert_eq!(model.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let mut rx = handle.rx_event.write().await;
+    assert!(
+        !std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(
+            event,
+            Event::TurnStarted { .. } | Event::TurnComplete { .. }
+        )),
+        "a model failure must not produce a second terminal"
+    );
 }
 
 struct BlockingEmergencyCompactionModelClient {
@@ -10095,6 +10310,7 @@ async fn forkguard_turn_started_echoes_submission_id_self_starts_stay_none() {
             payload: "child finished its work".to_string(),
         })
         .expect("inject idle sub-agent completion");
+    let mut saw_host_terminal = false;
     let self_started_turn_id = {
         let mut rx = handle.rx_event.write().await;
         loop {
@@ -10102,6 +10318,20 @@ async fn forkguard_turn_started_echoes_submission_id_self_starts_stay_none() {
                 .await
                 .expect("timed out waiting for the self-started turn")
                 .expect("engine event");
+            if let Event::TurnComplete {
+                turn_id,
+                submission_id,
+                compaction_id,
+                status,
+                ..
+            } = &event
+            {
+                assert_eq!(turn_id.as_deref(), Some(first_turn_id.as_str()));
+                assert_eq!(submission_id.as_deref(), Some("sub-host-1"));
+                assert!(compaction_id.is_none());
+                assert_eq!(*status, TurnOutcomeStatus::Completed);
+                saw_host_terminal = true;
+            }
             if let Event::TurnStarted {
                 turn_id,
                 submission_id,
@@ -10120,6 +10350,10 @@ async fn forkguard_turn_started_echoes_submission_id_self_starts_stay_none() {
             }
         }
     };
+    assert!(
+        saw_host_terminal,
+        "the submitted turn must close before autonomous follow-up"
+    );
     // The self-started turn is in its blocked model request; a turn-bound
     // cancel by its observed id still lands (unchanged contract) and drops
     // the future so the engine task can finish.
@@ -10133,7 +10367,21 @@ async fn forkguard_turn_started_echoes_submission_id_self_starts_stay_none() {
         .await
         .expect("timed out waiting for the self-start cancellation")
     {
-        if let Event::TurnComplete { status, error, .. } = event {
+        if let Event::TurnComplete {
+            turn_id,
+            submission_id,
+            compaction_id,
+            status,
+            error,
+            ..
+        } = event
+        {
+            assert_eq!(turn_id.as_deref(), Some(self_started_turn_id.as_str()));
+            assert!(
+                submission_id.is_none(),
+                "autonomous terminal must not inherit the preceding host token"
+            );
+            assert!(compaction_id.is_none());
             assert_eq!(status, TurnOutcomeStatus::Interrupted, "{error:?}");
             break;
         }
@@ -16636,7 +16884,7 @@ async fn edit_last_turn_without_user_prompt_errors_and_sends_nothing() {
     handle
         .send(Op::EditLastTurn {
             new_message: "edited prompt".to_string(),
-            submission_id: None,
+            submission_id: Some("sub-edit-rejected".to_string()),
         })
         .await
         .expect("send edit");
@@ -16658,7 +16906,18 @@ async fn edit_last_turn_without_user_prompt_errors_and_sends_nothing() {
                     );
                     saw_edit_error = true;
                 }
-                Event::TurnComplete { status, error, .. } => {
+                Event::TurnStarted { .. } => panic!("rejected edit must not start a turn"),
+                Event::TurnComplete {
+                    turn_id,
+                    submission_id,
+                    compaction_id,
+                    status,
+                    error,
+                    ..
+                } => {
+                    assert!(turn_id.is_none());
+                    assert_eq!(submission_id.as_deref(), Some("sub-edit-rejected"));
+                    assert!(compaction_id.is_none());
                     assert_eq!(status, TurnOutcomeStatus::Failed);
                     assert!(
                         error
@@ -25053,7 +25312,7 @@ async fn forkguard_reload_injects_recovery_notice_exactly_once() {
         let briefed = snapshot
             .messages
             .iter()
-            .any(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message));
+            .any(crate::runtime_handoff::is_mcp_boot_failure_briefing_message);
         if briefed {
             break;
         }

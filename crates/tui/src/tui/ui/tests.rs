@@ -13729,6 +13729,9 @@ fn local_cancel_marks_late_stream_events_for_suppression() {
     ));
     assert!(!suppress_engine_event_after_local_cancel(
         &EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: Usage::default(),
             status: crate::core::events::TurnOutcomeStatus::Interrupted,
             error: None,
@@ -13741,6 +13744,38 @@ fn local_cancel_marks_late_stream_events_for_suppression() {
             message: "Request cancelled".to_string(),
         }
     ));
+}
+
+#[test]
+fn turn_end_outbox_uses_the_terminal_events_owner() {
+    let mut app = create_test_app();
+    app.runtime_turn_id = Some("turn-model".to_string());
+
+    let model = super::event_loop::turn_end_lifecycle_event(
+        &app,
+        Some("turn-model".to_string()),
+        "completed",
+        Duration::from_millis(37),
+        None,
+    );
+    assert_eq!(model.kind, "turn.completed");
+    assert_eq!(model.turn_id.as_deref(), Some("turn-model"));
+
+    let rejected = super::event_loop::turn_end_lifecycle_event(
+        &app,
+        None,
+        "failed",
+        Duration::ZERO,
+        Some("route rejected"),
+    );
+    assert_eq!(rejected.kind, "turn.failed");
+    assert!(rejected.turn_id.is_none());
+
+    let manual_compaction =
+        super::event_loop::turn_end_lifecycle_event(&app, None, "completed", Duration::ZERO, None);
+    assert_eq!(manual_compaction.kind, "turn.completed");
+    assert!(manual_compaction.turn_id.is_none());
+    assert_eq!(app.runtime_turn_id.as_deref(), Some("turn-model"));
 }
 
 #[test]
