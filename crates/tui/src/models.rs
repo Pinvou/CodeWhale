@@ -723,6 +723,17 @@ pub enum StreamEvent {
     Error { error: serde_json::Value },
 }
 
+/// Decode the `redacted_thinking` start-event payload, tolerating the
+/// missing-key shape (`#[serde(default)]`) and an explicit `"data": null`
+/// from nonconforming gateways. Both decode to the empty payload that the
+/// capture site warns about, instead of failing the whole SSE event.
+fn deserialize_redacted_data<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type")]
@@ -732,6 +743,23 @@ pub enum ContentBlockStart {
     Text { text: String },
     #[serde(rename = "thinking")]
     Thinking { thinking: String },
+    /// Anthropic `redacted_thinking`: the provider withheld the whole block
+    /// for safety and replaced it with an encrypted payload that arrives
+    /// complete on the start event (no deltas). It must be captured and
+    /// replayed byte-exact — the API decrypts it to restore the turn's
+    /// reasoning, and dropping it makes the next tool-loop request fail with
+    /// "Expected `thinking` or `redacted_thinking`, but found `tool_use`".
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking {
+        /// Tolerant of both a missing and an explicit-null `data`
+        /// (`deserialize_redacted_data` + default): a contract-violating
+        /// start event still decodes (empty payload + capture warn) instead
+        /// of failing the whole event and silently losing the turn. Note
+        /// that `#[serde(default)]` alone only covers the missing key — an
+        /// explicit `"data": null` would still fail `String` decoding.
+        #[serde(default, deserialize_with = "deserialize_redacted_data")]
+        data: String,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -768,10 +796,26 @@ pub enum Delta {
     /// of a thinking block on the native Messages stream.
     #[serde(rename = "signature_delta")]
     SignatureDelta { signature: String },
+    /// Google thought signature that arrived on a continuation chunk of an
+    /// already-started tool call (`delta.tool_calls[].extra_content.google.
+    /// thought_signature`). Gemini 3 signs the first function-call part of a
+    /// step, and some gateways split the signed chunk from the chunk that
+    /// opens the tool call, so the signature must attach after start.
+    #[serde(rename = "tool_thought_signature_delta")]
+    ToolThoughtSignatureDelta { signature: String },
     /// Opaque Responses reasoning continuity, attached only when the provider
     /// returns an encrypted item on the exact originating route.
     #[serde(rename = "reasoning_state_delta")]
     ReasoningStateDelta { state: OpaqueReasoningState },
+    /// OpenRouter `reasoning_details` snapshot for the current thinking
+    /// block, carried verbatim from the streamed `delta.reasoning_details`
+    /// entries. Each event replaces the previous snapshot; the last one
+    /// before the block closes is the most complete version OpenRouter sent
+    /// (their stream repeats the growing array). Entries whose encrypted
+    /// payload arrived as the `[REDACTED]` streaming placeholder never
+    /// enter the snapshot — they cannot be replayed.
+    #[serde(rename = "reasoning_details_delta")]
+    ReasoningDetailsDelta { details: Vec<serde_json::Value> },
 }
 
 #[allow(dead_code)]
@@ -787,6 +831,43 @@ mod tests {
     use super::*;
     use std::any::TypeId;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn redacted_thinking_stream_start_decodes_with_its_payload() {
+        // A safeguard-triggered redacted block arrives complete on the start
+        // event. Before the variant existed this line failed the whole SSE
+        // event decode and lost the turn.
+        let block: ContentBlockStart = serde_json::from_value(serde_json::json!({
+            "type": "redacted_thinking",
+            "data": "ENC_REDACTED_PAYLOAD",
+        }))
+        .expect("redacted_thinking must decode");
+        match block {
+            ContentBlockStart::RedactedThinking { data } => {
+                assert_eq!(data, "ENC_REDACTED_PAYLOAD");
+            }
+            other => panic!("expected RedactedThinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redacted_thinking_start_tolerates_an_explicit_null_payload() {
+        // `#[serde(default)]` covers a missing key only; a nonconforming
+        // gateway sending `"data": null` must still decode to the empty
+        // payload (capture warn downstream) instead of failing the whole
+        // SSE event and silently losing the turn's redacted block.
+        let block: ContentBlockStart = serde_json::from_value(serde_json::json!({
+            "type": "redacted_thinking",
+            "data": null,
+        }))
+        .expect("an explicit null payload must not fail the event decode");
+        match block {
+            ContentBlockStart::RedactedThinking { data } => {
+                assert_eq!(data, "");
+            }
+            other => panic!("expected RedactedThinking, got {other:?}"),
+        }
+    }
 
     #[test]
     fn output_limit_stop_reason_accepts_provider_aliases_only() {

@@ -27,6 +27,8 @@ fn decode_chunk_with_reasoning(json_text: &str, is_reasoning_model: bool) -> Vec
         &mut thinking_started,
         &mut tool_indices,
         &mut reasoning_detail_buffers,
+        &mut ReasoningDetailsBuffer::default(),
+        false,
         is_reasoning_model,
     )
 }
@@ -52,6 +54,8 @@ fn decode_chunks_with_style(
             &mut thinking_started,
             &mut tool_indices,
             &mut reasoning_detail_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
             &mut inline_reasoning_tags,
             reasoning_stream_style,
         ));
@@ -112,6 +116,8 @@ fn decode_sse_byte_chunks(chunks: &[&[u8]]) -> Result<Vec<StreamEvent>, InvalidS
                 &mut self.thinking_started,
                 &mut self.tool_indices,
                 &mut self.reasoning_detail_buffers,
+                &mut ReasoningDetailsBuffer::default(),
+                false,
                 &mut self.inline_reasoning_tags,
                 ReasoningStreamStyle::SeparateField,
             ) {
@@ -312,6 +318,8 @@ fn decoder_streams_moonshot_multi_chunk_reasoning_as_thinking() {
             &mut thinking_started,
             &mut tool_indices,
             &mut reasoning_detail_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
             is_reasoning,
         ));
     }
@@ -400,6 +408,8 @@ fn decoder_streams_minimax_reasoning_details_as_incremental_thinking() {
             &mut thinking_started,
             &mut tool_indices,
             &mut reasoning_detail_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
             is_reasoning,
         ));
     }
@@ -472,6 +482,8 @@ fn modelstudio_streams_reasoning_content_as_thinking() {
                 &mut thinking_started,
                 &mut tool_indices,
                 &mut reasoning_detail_buffers,
+                &mut ReasoningDetailsBuffer::default(),
+                false,
                 &mut inline_reasoning_tags,
                 style,
             ));
@@ -545,6 +557,8 @@ fn decoder_does_not_render_reasoning_as_text_for_known_provider_models() {
         &mut thinking_started,
         &mut tool_indices,
         &mut reasoning_detail_buffers,
+        &mut ReasoningDetailsBuffer::default(),
+        false,
         is_reasoning_model,
     );
 
@@ -753,6 +767,8 @@ fn decoder_treats_done_frame_as_terminal() {
         &mut thinking_started,
         &mut tool_indices,
         &mut reasoning_detail_buffers,
+        &mut ReasoningDetailsBuffer::default(),
+        false,
         &mut inline_reasoning_tags,
         ReasoningStreamStyle::SeparateField,
     );
@@ -1495,4 +1511,251 @@ fn mistral_stream_blocks_are_decoded_only_by_the_mistral_style() {
             ..
         }
     )));
+}
+
+// === OpenRouter structured reasoning_details capture ========================
+
+/// Decode chunks with an explicit details-capture flag, mirroring the live
+/// loop's wiring (`capture_reasoning_details` is true on OpenRouter only).
+fn decode_chunks_capturing_details(chunks: &[Value], capture: bool) -> Vec<StreamEvent> {
+    let mut content_index = 0u32;
+    let mut text_started = false;
+    let mut thinking_started = false;
+    let mut tool_indices = std::collections::HashMap::new();
+    let mut reasoning_detail_buffers = std::collections::HashMap::new();
+    let mut reasoning_details_buffer = ReasoningDetailsBuffer::default();
+    let mut events = Vec::new();
+    for chunk in chunks {
+        events.extend(parse_sse_chunk(
+            chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_detail_buffers,
+            &mut reasoning_details_buffer,
+            capture,
+            true,
+        ));
+    }
+    events
+}
+
+fn details_delta_payloads(events: &[StreamEvent]) -> Vec<Vec<Value>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::ReasoningDetailsDelta { details },
+                ..
+            } => Some(details.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn openrouter_details_entries_grow_in_first_seen_order() {
+    // A second entry appearing mid-stream must join the snapshot after the
+    // first-seen one, and both entries' fragments must concatenate — the
+    // snapshot grows with the stream instead of being replaced by it.
+    let chunks = vec![
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "ab" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "cd" },
+                        { "type": "reasoning.encrypted", "index": 1, "data": "blob" }
+                    ]
+                }
+            }]
+        }),
+    ];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    let snapshots = details_delta_payloads(&events);
+    assert_eq!(snapshots.len(), 2, "one snapshot per absorbing chunk");
+    assert_eq!(snapshots[0].len(), 1);
+    let last = snapshots.last().expect("final snapshot");
+    assert_eq!(last.len(), 2, "entry count grows with the array");
+    assert_eq!(last[0]["text"], "abcd", "fragments concatenate in order");
+    assert_eq!(last[0]["type"], "reasoning.text", "first-seen order kept");
+    assert_eq!(last[1]["type"], "reasoning.encrypted");
+}
+
+#[test]
+fn openrouter_details_placeholder_entries_never_enter_the_snapshot() {
+    let chunks = vec![serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "reasoning_details": [
+                    { "type": "reasoning.encrypted", "index": 0, "data": "[REDACTED]" }
+                ]
+            }
+        }]
+    })];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    assert!(
+        details_delta_payloads(&events).is_empty(),
+        "a [REDACTED] payload cannot be replayed and must not be captured"
+    );
+}
+
+#[test]
+fn openrouter_details_without_index_key_by_array_position() {
+    // Entries without an `index` are keyed by their position in the
+    // incoming array. A `type` key would merge two same-type entries into
+    // one (losing the other), and a running counter would re-key every
+    // reappearance of an entry and grow the snapshot.
+    let chunks = vec![
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "text": "one" },
+                        { "type": "reasoning.text", "text": "two" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "text": "th" },
+                        { "type": "reasoning.text", "text": "!" }
+                    ]
+                }
+            }]
+        }),
+    ];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    let snapshots = details_delta_payloads(&events);
+    assert_eq!(snapshots.len(), 2, "one snapshot per absorbing chunk");
+    let last = snapshots.last().expect("final snapshot");
+    assert_eq!(last.len(), 2, "both index-less entries survive");
+    assert_eq!(last[0]["text"], "oneth", "each position concatenates");
+    assert_eq!(last[1]["text"], "two!", "each position concatenates");
+}
+
+#[test]
+fn openrouter_details_identical_fragments_concatenate() {
+    // The minimal content-sniffing trap: two consecutive fragments with the
+    // same content ("a", "a") must store "aa". Treating a fragment that
+    // equals (or extends) the stored text as a duplicate cumulative re-send
+    // would silently drop repeated tokens from a replayed sequence the API
+    // requires unmodified.
+    let chunks = vec![
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "a" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "a" }
+                    ]
+                }
+            }]
+        }),
+    ];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    let snapshots = details_delta_payloads(&events);
+    let last = snapshots.last().expect("final snapshot");
+    assert_eq!(
+        last[0]["text"], "aa",
+        "identical consecutive fragments must concatenate, not dedupe"
+    );
+}
+
+#[test]
+fn openrouter_details_fragments_concatenate_per_index() {
+    // OpenRouter's documented streaming contract: each detail chunk is sent
+    // as it becomes available and the complete sequence is built by
+    // concatenating chunks in order. Two non-cumulative fragments for one
+    // index must join ("al" + "pha" = "alpha") — a last-wins store would
+    // replay only "pha", truncating a sequence the API requires unmodified.
+    // A trailing signature-only fragment (Anthropic-style) fills the entry's
+    // signature instead of being dropped.
+    let chunks = vec![
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "al" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "pha" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "", "signature": "SIG-tail" }
+                    ]
+                }
+            }]
+        }),
+    ];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    let snapshots = details_delta_payloads(&events);
+    let last = snapshots.last().expect("final snapshot");
+    assert_eq!(last.len(), 1, "one entry across all fragments");
+    assert_eq!(
+        last[0]["text"], "alpha",
+        "non-cumulative fragments must concatenate in arrival order"
+    );
+    assert_eq!(
+        last[0]["signature"], "SIG-tail",
+        "a trailing signature must fill the entry"
+    );
+}
+
+#[test]
+fn non_openrouter_routes_never_emit_details_deltas() {
+    let chunks = vec![serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "reasoning_details": [
+                    { "type": "text", "text": "minimax trace" }
+                ]
+            }
+        }]
+    })];
+    let events = decode_chunks_capturing_details(&chunks, false);
+    assert!(details_delta_payloads(&events).is_empty());
 }

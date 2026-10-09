@@ -690,6 +690,15 @@ struct StreamOutcome {
     current_thinking: String,
     current_thinking_signature: Option<String>,
     current_thinking_state: Option<crate::models::OpaqueReasoningState>,
+    /// OpenRouter `reasoning_details` snapshot for the current thinking
+    /// block; the stream repeats the growing array, so only the last
+    /// snapshot per block is kept and replayed verbatim.
+    current_thinking_details: Option<Vec<serde_json::Value>>,
+    /// Thinking blocks already terminated by a `content_block_stop`, in wire
+    /// order. Adaptive/interleaved thinking emits several per assistant turn;
+    /// Anthropic requires the whole sequence replayed unmodified, so finished
+    /// blocks are parked here instead of being overwritten by the next one.
+    completed_thinking: Vec<ContentBlock>,
     tool_uses: Vec<ToolUseState>,
     usage: Usage,
     usage_reported: bool,
@@ -718,6 +727,52 @@ pub(super) fn preview_request_error_user_message(
     error: &anyhow::Error,
 ) -> String {
     format!("{error:#}")
+}
+
+/// Park a finished thinking block (deltas + signature + optional Responses
+/// continuity state) into the turn's ordered completed list.
+///
+/// A block survives only if the provider actually emitted reasoning: readable
+/// text (minus the wire-only "(reasoning omitted)" placeholder), an Anthropic
+/// signature, an encrypted Responses state, or OpenRouter structured
+/// `reasoning_details`. A signature-only block is real
+/// content — newer Claude models ship `display: "omitted"` thinking (empty
+/// text plus the encrypted signature) — and dropping it would strip a block
+/// Anthropic requires back verbatim in tool-loop replays. The same holds for
+/// an encrypted-only OpenRouter details array.
+fn flush_thinking_block(
+    thinking: &mut String,
+    signature: &mut Option<String>,
+    state: &mut Option<crate::models::OpaqueReasoningState>,
+    details: &mut Option<Vec<serde_json::Value>>,
+    completed: &mut Vec<ContentBlock>,
+) {
+    let placeholder_only = crate::client::is_reasoning_replay_placeholder(thinking);
+    if (!thinking.is_empty() && !placeholder_only)
+        || signature_carries_content(signature.as_deref())
+        || state.is_some()
+        || details.is_some()
+    {
+        completed.push(ContentBlock::Thinking {
+            thinking: std::mem::take(thinking),
+            signature: signature.take(),
+            state: state.take(),
+            redacted_data: None,
+            reasoning_details: details.take(),
+        });
+    }
+    thinking.clear();
+    *signature = None;
+    *state = None;
+    *details = None;
+}
+
+/// A signature only counts as block content when it is non-empty: a provider
+/// streaming a bare empty `signature_delta` must not mint a signature-only
+/// (`display: "omitted"`) thinking block out of nothing and replay
+/// `{"signature": ""}` back to the API.
+fn signature_carries_content(signature: Option<&str>) -> bool {
+    signature.is_some_and(|signature| !signature.is_empty())
 }
 
 fn approval_intent_summary(text: &str) -> Option<String> {
@@ -2136,6 +2191,8 @@ impl Engine {
                 current_thinking,
                 current_thinking_signature,
                 current_thinking_state,
+                current_thinking_details,
+                mut completed_thinking,
                 mut tool_uses,
                 usage,
                 usage_reported,
@@ -2262,10 +2319,16 @@ impl Engine {
             // appends a synthetic user message to the persisted
             // conversation — the retried request is the persisted
             // conversation re-issued, nothing else.
+            // `completed_thinking` is part of the "something" too: a block
+            // already flushed at its stop event is received content, and
+            // silently re-running the request would double-bill for it. A
+            // stream that died after completing thinking must surface its
+            // error like any other post-content death.
             let stream_died_with_nothing = stream_errors > 0
                 && tool_uses.is_empty()
                 && current_text_visible.trim().is_empty()
                 && current_thinking.trim().is_empty()
+                && completed_thinking.is_empty()
                 && !pending_message_complete;
             let pending_resume = match pending_resume {
                 Some(resume) => Some(resume),
@@ -2312,17 +2375,25 @@ impl Engine {
                         // variable is still empty at this point and will be
                         // rebuilt on the next round.
                         let mut resume_blocks: Vec<ContentBlock> = Vec::new();
+                        // Thinking blocks the stream already terminated stay
+                        // in the retry prefix, in wire order, ahead of the
+                        // block that was still open when the stream died.
+                        resume_blocks.append(&mut completed_thinking);
                         // A wire-only placeholder must not ride into the
                         // retry prefix as stored reasoning either.
                         let thinking_is_placeholder_only =
                             crate::client::is_reasoning_replay_placeholder(&current_thinking);
                         if (!current_thinking.is_empty() && !thinking_is_placeholder_only)
                             || current_thinking_state.is_some()
+                            || signature_carries_content(current_thinking_signature.as_deref())
+                            || current_thinking_details.is_some()
                         {
                             resume_blocks.push(ContentBlock::Thinking {
                                 thinking: current_thinking.clone(),
                                 signature: current_thinking_signature.clone(),
                                 state: current_thinking_state.clone(),
+                                redacted_data: None,
+                                reasoning_details: current_thinking_details.clone(),
                             });
                         }
                         if !current_text_visible.is_empty() {
@@ -2434,15 +2505,26 @@ impl Engine {
             // that compatibility value to the outgoing JSON only. Persisting
             // it here leaked an invented "(reasoning omitted)" block into the
             // transcript and every provider-neutral session replay.
+            // `completed_thinking` holds every thinking/redacted block the
+            // stream already terminated, in wire order; the guard below keeps
+            // a trailing block whose stop event never arrived. Both must
+            // survive — Anthropic replays the whole thinking sequence
+            // unmodified, and a signature-only block (Claude's
+            // `display: "omitted"`) is real content.
+            content_blocks.append(&mut completed_thinking);
             let thinking_is_placeholder_only =
                 crate::client::is_reasoning_replay_placeholder(&current_thinking);
             if (!current_thinking.is_empty() && !thinking_is_placeholder_only)
                 || current_thinking_state.is_some()
+                || signature_carries_content(current_thinking_signature.as_deref())
+                || current_thinking_details.is_some()
             {
                 content_blocks.push(ContentBlock::Thinking {
                     thinking: current_thinking.clone(),
                     signature: current_thinking_signature.clone(),
                     state: current_thinking_state.clone(),
+                    redacted_data: None,
+                    reasoning_details: current_thinking_details.clone(),
                 });
             }
             let mut final_text = current_text_visible.clone();
@@ -2553,9 +2635,16 @@ impl Engine {
                     block,
                     ContentBlock::Thinking {
                         thinking,
+                        signature,
                         state,
+                        redacted_data,
+                        reasoning_details,
                         ..
-                    } if !thinking.trim().is_empty() || state.is_some()
+                    } if !thinking.trim().is_empty()
+                        || signature_carries_content(signature.as_deref())
+                        || state.is_some()
+                        || redacted_data.is_some()
+                        || reasoning_details.is_some()
                 )
             });
 
@@ -5120,6 +5209,16 @@ impl Engine {
         // thinking block; must be replayed verbatim in tool loops.
         let mut current_thinking_signature: Option<String> = None;
         let mut current_thinking_state: Option<crate::models::OpaqueReasoningState> = None;
+        // OpenRouter structured reasoning entries for the current thinking
+        // block; each delta replaces the snapshot (the stream repeats the
+        // growing array) and the final one is replayed verbatim.
+        let mut current_thinking_details: Option<Vec<serde_json::Value>> = None;
+        // Adaptive/interleaved thinking can emit more than one thinking block
+        // per assistant turn. Anthropic requires the entire sequence of
+        // thinking blocks to be replayed "complete and unmodified" and in the
+        // original order, so finished blocks are parked here in arrival order
+        // instead of being overwritten by the next block's deltas.
+        let mut completed_thinking: Vec<ContentBlock> = Vec::new();
         let mut tool_uses: Vec<ToolUseState> = Vec::new();
         let mut usage = Usage {
             input_tokens: 0,
@@ -5469,9 +5568,18 @@ impl Engine {
                             .await;
                     }
                     ContentBlockStart::Thinking { thinking } => {
+                        // A previous thinking block that never saw a stop
+                        // event still counts as finished; park it so the new
+                        // block cannot overwrite it.
+                        flush_thinking_block(
+                            &mut current_thinking,
+                            &mut current_thinking_signature,
+                            &mut current_thinking_state,
+                            &mut current_thinking_details,
+                            &mut completed_thinking,
+                        );
                         current_thinking = thinking;
-                        current_thinking_signature = None;
-                        current_thinking_state = None;
+                        current_thinking_details = None;
                         current_block_kind = Some(ContentBlockKind::Thinking);
                         let _ = self
                             .tx_event
@@ -5479,6 +5587,46 @@ impl Engine {
                                 index: index as usize,
                             })
                             .await;
+                    }
+                    ContentBlockStart::RedactedThinking { data } => {
+                        // Anthropic withheld this whole thinking block for
+                        // safety and replaced it with an encrypted payload.
+                        // There are no deltas; the block arrives complete at
+                        // start and must be replayed byte-exact, so park it
+                        // immediately. No UI events: there is no readable
+                        // content to stream.
+                        stream_content_bytes = stream_content_bytes.saturating_add(data.len());
+                        if data.is_empty() {
+                            // With serde's default this can only come from a
+                            // contract-violating block (missing `data`). It
+                            // still parks so the failure surfaces at replay
+                            // with a diagnosable shape.
+                            crate::logging::warn(
+                                "Captured a redacted thinking block with an empty payload; it will replay verbatim and the API may reject the request",
+                            );
+                        }
+                        flush_thinking_block(
+                            &mut current_thinking,
+                            &mut current_thinking_signature,
+                            &mut current_thinking_state,
+                            &mut current_thinking_details,
+                            &mut completed_thinking,
+                        );
+                        completed_thinking.push(ContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: None,
+                            state: None,
+                            redacted_data: Some(data),
+                            reasoning_details: None,
+                        });
+                        // Kind is cleared so the block's stop event needs no
+                        // handling — it was parked above and has no deltas —
+                        // and so a stale kind cannot emit a ThinkingComplete
+                        // for a provider that skips stops.
+                        current_block_kind = None;
+                        crate::logging::info(
+                            "Captured redacted thinking block for verbatim replay",
+                        );
                     }
                     ContentBlockStart::ToolUse {
                         id,
@@ -5581,6 +5729,24 @@ impl Engine {
                     Delta::ReasoningStateDelta { state } => {
                         current_thinking_state = Some(state);
                     }
+                    Delta::ReasoningDetailsDelta { details } => {
+                        // Each decoder event carries the complete
+                        // accumulated snapshot (every entry, fragment text
+                        // concatenated in arrival order), so the latest
+                        // event supersedes the previous one wholesale.
+                        current_thinking_details = Some(details);
+                    }
+                    Delta::ToolThoughtSignatureDelta { signature } => {
+                        // Google thought signature delivered on a continuation
+                        // chunk of an already-started tool call. First one
+                        // wins: a call carries exactly one signature.
+                        if let Some(&tool_idx) = current_tool_indices.get(&index)
+                            && let Some(tool_state) = tool_uses.get_mut(tool_idx)
+                            && tool_state.thought_signature.is_none()
+                        {
+                            tool_state.thought_signature = Some(signature);
+                        }
+                    }
                     Delta::InputJsonDelta { partial_json } => {
                         if let Some(&tool_idx) = current_tool_indices.get(&index)
                             && let Some(tool_state) = tool_uses.get_mut(tool_idx)
@@ -5641,6 +5807,17 @@ impl Engine {
                                     index: index as usize,
                                 })
                                 .await;
+                            // The block is finished: park it in wire order so
+                            // a following thinking block cannot overwrite it
+                            // (adaptive/interleaved thinking emits several per
+                            // turn; Anthropic replays the whole sequence).
+                            flush_thinking_block(
+                                &mut current_thinking,
+                                &mut current_thinking_signature,
+                                &mut current_thinking_state,
+                                &mut current_thinking_details,
+                                &mut completed_thinking,
+                            );
                         }
                         Some(ContentBlockKind::ToolUse) | None => {}
                     }
@@ -5774,6 +5951,8 @@ impl Engine {
             current_thinking,
             current_thinking_signature,
             current_thinking_state,
+            current_thinking_details,
+            completed_thinking,
             tool_uses,
             usage,
             usage_reported,
@@ -6850,6 +7029,9 @@ fn stream_event_has_actionable_content(event: &StreamEvent) -> bool {
         StreamEvent::ContentBlockStart { content_block, .. } => match content_block {
             ContentBlockStart::Text { text } => !text.is_empty(),
             ContentBlockStart::Thinking { thinking } => !thinking.is_empty(),
+            // A redacted thinking block is provider-owned encrypted content —
+            // its arrival is actionable reasoning output even without text.
+            ContentBlockStart::RedactedThinking { .. } => true,
             ContentBlockStart::ToolUse { .. } | ContentBlockStart::ServerToolUse { .. } => true,
         },
         StreamEvent::ContentBlockDelta { delta, .. } => match delta {
@@ -6857,7 +7039,11 @@ fn stream_event_has_actionable_content(event: &StreamEvent) -> bool {
             Delta::ThinkingDelta { thinking } => !thinking.is_empty(),
             Delta::InputJsonDelta { partial_json } => !partial_json.is_empty(),
             Delta::SignatureDelta { signature } => !signature.is_empty(),
+            Delta::ToolThoughtSignatureDelta { signature } => !signature.is_empty(),
             Delta::ReasoningStateDelta { .. } => true,
+            // Structured OpenRouter reasoning is provider-owned content even
+            // when no readable text delta accompanies it.
+            Delta::ReasoningDetailsDelta { details } => !details.is_empty(),
         },
         StreamEvent::ToolProjectionWarning { .. }
         | StreamEvent::MessageStart { .. }
@@ -6942,6 +7128,51 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn flush_keeps_signature_only_blocks_but_not_empty_signature_mints() {
+        // A display:"omitted" block (empty text, real signature) is real
+        // content and must park; a bare empty `signature_delta` must not
+        // mint one — replaying {"signature": ""} would only earn a 400.
+        let mut completed = Vec::new();
+        flush_thinking_block(
+            &mut String::new(),
+            &mut Some("sig-real".to_string()),
+            &mut None,
+            &mut None,
+            &mut completed,
+        );
+        assert_eq!(completed.len(), 1);
+        match &completed[0] {
+            ContentBlock::Thinking { signature, .. } => {
+                assert_eq!(signature.as_deref(), Some("sig-real"));
+            }
+            other => panic!("expected a thinking block: {other:?}"),
+        }
+
+        completed.clear();
+        flush_thinking_block(
+            &mut String::new(),
+            &mut Some(String::new()),
+            &mut None,
+            &mut None,
+            &mut completed,
+        );
+        assert!(
+            completed.is_empty(),
+            "an empty-signature-only block must not persist: {completed:?}"
+        );
+
+        completed.clear();
+        flush_thinking_block(
+            &mut "readable reasoning".to_string(),
+            &mut Some(String::new()),
+            &mut None,
+            &mut None,
+            &mut completed,
+        );
+        assert_eq!(completed.len(), 1, "readable text persists regardless");
+    }
 
     /// A 1x1 PNG, kept as bytes so the tool-result image tests need no
     /// checked-in fixture file.
@@ -7524,6 +7755,50 @@ mod tests {
         )));
         assert!(stream_event_has_actionable_content(
             &canned::tool_use_block_start(0, "call-1", "read_file")
+        ));
+
+        // The preserved-thinking variants: a redacted block is provider-
+        // owned content the moment it arrives, an empty signature/details
+        // fragment carries nothing, and a non-empty one is real content.
+        assert!(stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: crate::models::ContentBlockStart::RedactedThinking {
+                    data: "ENC".to_string(),
+                },
+            }
+        ));
+        assert!(!stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::ToolThoughtSignatureDelta {
+                    signature: String::new(),
+                },
+            }
+        ));
+        assert!(stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::ToolThoughtSignatureDelta {
+                    signature: "SIG".to_string(),
+                },
+            }
+        ));
+        assert!(!stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::ReasoningDetailsDelta {
+                    details: Vec::new()
+                },
+            }
+        ));
+        assert!(stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::ReasoningDetailsDelta {
+                    details: vec![serde_json::json!({"type": "reasoning.encrypted"})],
+                },
+            }
         ));
     }
 

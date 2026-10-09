@@ -864,11 +864,46 @@ pub fn estimate_message_chars(messages: &[Message]) -> usize {
         for block in &msg.content {
             match block {
                 ContentBlock::Text { text, .. } => total += text.len(),
-                ContentBlock::Thinking { thinking, .. } => total += thinking.len(),
-                ContentBlock::ToolUse { input, .. } => {
+                // Every payload a thinking block can carry rides the wire
+                // under at least one provider's replay contract (Anthropic
+                // signature/redacted payload, Responses encrypted state,
+                // OpenRouter reasoning_details), so all of it counts even
+                // when the readable text is empty — a signature-only
+                // (`display: "omitted"`) block is exactly that shape.
+                ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                    state,
+                    redacted_data,
+                    reasoning_details,
+                } => {
+                    total += thinking.len();
+                    total += signature.as_deref().map_or(0, str::len);
+                    if let Some(data) = redacted_data {
+                        total += data.len();
+                    }
+                    if let Some(state) = state {
+                        total += state.encrypted_content.len();
+                    }
+                    if let Some(details) = reasoning_details {
+                        total += details
+                            .iter()
+                            .map(|entry| entry.to_string().len())
+                            .sum::<usize>();
+                    }
+                }
+                // Google's thought_signature rides every replayed tool call
+                // on the exact Google route; the token estimator counts it,
+                // so the char estimator must too.
+                ContentBlock::ToolUse {
+                    input,
+                    thought_signature,
+                    ..
+                } => {
                     let mut cw = CountingWriter::new();
                     let _ = serde_json::to_writer(&mut cw, input);
                     total += cw.count();
+                    total += thought_signature.as_deref().map_or(0, str::len);
                 }
                 ContentBlock::ToolResult { content, .. } => total += content.len(),
                 ContentBlock::ServerToolUse { .. }
@@ -911,6 +946,56 @@ mod tests {
     #[test]
     fn redacted_identifier_for_log_marks_empty_values() {
         assert_eq!(redacted_identifier_for_log(""), "<redacted:empty>");
+    }
+
+    #[test]
+    fn estimate_message_chars_counts_signature_only_thinking_blocks() {
+        use super::estimate_message_chars;
+        use crate::models::{ContentBlock, Message, Role};
+        // A signature-only (`display: "omitted"`) block rides the wire with
+        // empty readable text; its signature bytes must still count, exactly
+        // as the compaction estimator counts them.
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: Some("SIG-BYTES".to_string()),
+                state: None,
+                redacted_data: None,
+                reasoning_details: None,
+            }],
+        };
+        assert!(
+            estimate_message_chars(std::slice::from_ref(&message)) >= "SIG-BYTES".len(),
+            "signature-only blocks must not score zero"
+        );
+    }
+
+    #[test]
+    fn estimate_message_chars_counts_google_thought_signatures() {
+        use super::estimate_message_chars;
+        use crate::models::{ContentBlock, Message, Role};
+        // The thought_signature replays verbatim on every tool call of the
+        // exact Google route and the compaction estimator counts it; the
+        // char estimator must not score it zero.
+        let tool_use = |thought_signature: Option<String>| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({}),
+                caller: None,
+                thought_signature,
+            }],
+        };
+        let with_signature =
+            estimate_message_chars(std::slice::from_ref(&tool_use(Some("THOUGHT-SIG".into()))));
+        let bare = estimate_message_chars(std::slice::from_ref(&tool_use(None)));
+        assert_eq!(
+            with_signature - bare,
+            "THOUGHT-SIG".len(),
+            "thought_signature bytes must count toward the estimate"
+        );
     }
 
     #[test]

@@ -576,6 +576,8 @@ pub(super) fn messages_from_thread_detail(detail: &ThreadDetail) -> Vec<Message>
                             thinking: thinking.to_string(),
                             signature: None,
                             state: None,
+                            redacted_data: None,
+                            reasoning_details: None,
                         });
                     }
                 }

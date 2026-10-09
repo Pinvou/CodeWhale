@@ -680,6 +680,14 @@ fn apply_google_thinking_level(
 /// tool calls without the thought signatures Google's thinking models
 /// require. The error names the model and tells the operator how to
 /// recover instead of letting Google reject or corrupt the tool loop.
+///
+/// Scope mirrors Google's own validation: only the current turn (messages
+/// after the last user message) is checked, and within it only the first
+/// tool call of each assistant step must carry a signature — Gemini 3 signs
+/// only the first function-call part of a step, so demanding signatures on
+/// parallel calls 2..n would block valid turns. Older turns are not
+/// validated: Google accepts them without signatures, and compaction or
+/// pre-capture sessions must not brick new requests.
 fn validate_google_thought_signature_replay(
     provider: ApiProvider,
     base_url: &str,
@@ -691,24 +699,34 @@ fn validate_google_thought_signature_replay(
     {
         return Ok(());
     }
-    for message in messages {
+    let current_turn_start = messages
+        .iter()
+        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .map_or(0, |index| index + 1);
+    for message in &messages[current_turn_start..] {
         let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
             continue;
         };
-        for call in tool_calls {
-            let missing = call
-                .pointer("/extra_content/google/thought_signature")
-                .and_then(Value::as_str)
-                .is_none();
-            if missing {
-                let id = call.get("id").and_then(Value::as_str).unwrap_or("?");
-                anyhow::bail!(
-                    "Gemini model `{model}` requires a thought signature to replay tool call \
-                     `{id}`, but none was captured (the turn predates signature capture, or \
-                     the provider omitted it). Start a new session before using tools on \
-                     this route."
-                );
-            }
+        let Some(first_call) = tool_calls.first() else {
+            continue;
+        };
+        // An empty string is no signature: capture filters it since this
+        // series, but sessions saved by older builds can still carry
+        // `Some("")` — treat it as missing so the replay fails here with
+        // the diagnostic instead of at Google with a raw 400.
+        let missing = first_call
+            .pointer("/extra_content/google/thought_signature")
+            .and_then(Value::as_str)
+            .filter(|signature| !signature.is_empty())
+            .is_none();
+        if missing {
+            let id = first_call.get("id").and_then(Value::as_str).unwrap_or("?");
+            anyhow::bail!(
+                "Gemini model `{model}` requires a thought signature to replay tool call \
+                 `{id}`, but none was captured (the turn predates signature capture, or \
+                 the provider omitted it). Start a new session before using tools on \
+                 this route."
+            );
         }
     }
     Ok(())
@@ -734,6 +752,21 @@ fn strip_google_tool_call_extra_content(messages: &mut [Value]) {
             }
         }
     }
+}
+
+/// Thought signature for one streaming tool-call entry: the per-call
+/// `tool_calls[].extra_content.google.thought_signature`, falling back to the
+/// chunk-level `delta.extra_content.google.thought_signature` (the official
+/// compat route signs the pre-tool text part there).
+fn tool_call_thought_signature<'a>(tool_call: &'a Value, delta: &'a Value) -> Option<&'a str> {
+    tool_call
+        .pointer("/extra_content/google/thought_signature")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            delta
+                .pointer("/extra_content/google/thought_signature")
+                .and_then(Value::as_str)
+        })
 }
 
 fn mistral_model_has_adjustable_reasoning(model: &str) -> bool {
@@ -939,6 +972,33 @@ fn openai_compatible_reasoning_effort(
         "max" | "highest" | "ultra" | "ultracode" if supports_max => Some("max"),
         "max" | "highest" | "ultra" | "ultracode" => Some("xhigh"),
         _ => None,
+    }
+}
+
+/// OpenRouter round-trip: when an assistant message carries structured
+/// `reasoning_details`, drop the parallel `reasoning_content` text field so
+/// the provider receives the reasoning sequence once, verbatim.
+fn suppress_reasoning_content_where_details_replay(messages: &mut [Value]) {
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        if message.get("reasoning_details").is_none() {
+            continue;
+        }
+        if let Some(object) = message.as_object_mut() {
+            object.remove("reasoning_content");
+        }
+    }
+}
+
+/// Captured `reasoning_details` are OpenRouter-owned continuity; strip the
+/// field from every message before it can reach any other dialect.
+fn strip_openrouter_reasoning_details(messages: &mut [Value]) {
+    for message in messages {
+        if let Some(object) = message.as_object_mut() {
+            object.remove("reasoning_details");
+        }
     }
 }
 
@@ -1385,6 +1445,11 @@ impl DeepSeekClient {
             let mut thinking_started = false;
             let mut tool_indices: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
             let mut reasoning_detail_buffers: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+            // OpenRouter structured `reasoning_details` round-trip: the raw
+            // entries must be stored verbatim and replayed unmodified (see
+            // ReasoningDetailsBuffer). Other providers never capture.
+            let mut reasoning_details_buffer = ReasoningDetailsBuffer::default();
+            let capture_reasoning_details = api_provider == ApiProvider::Openrouter;
             let mut inline_reasoning_tags = InlineReasoningTagState::default();
             let reasoning_stream_style = reasoning_stream_style_for_route(
                 api_provider,
@@ -1505,6 +1570,8 @@ impl DeepSeekClient {
                                 &mut thinking_started,
                                 &mut tool_indices,
                                 &mut reasoning_detail_buffers,
+                                &mut reasoning_details_buffer,
+                                capture_reasoning_details,
                                 &mut inline_reasoning_tags,
                                 reasoning_stream_style,
                             ) {
@@ -1599,6 +1666,8 @@ impl DeepSeekClient {
                         &mut thinking_started,
                         &mut tool_indices,
                         &mut reasoning_detail_buffers,
+                        &mut reasoning_details_buffer,
+                        capture_reasoning_details,
                         &mut inline_reasoning_tags,
                         reasoning_stream_style,
                     ) {
@@ -1744,6 +1813,19 @@ impl<'a> PromptBuilder<'a> {
             false,
         );
         dump_system_prompt_if_requested(&messages);
+        if provider == ApiProvider::Openrouter {
+            // The details array is the carrier OpenRouter round-trips
+            // ("the entire sequence of consecutive reasoning blocks must
+            // match the outputs generated by the model"); a parallel
+            // `reasoning_content` field would present the same reasoning
+            // twice in unknown precedence.
+            suppress_reasoning_content_where_details_replay(&mut messages);
+        } else {
+            // Captured details are OpenRouter-owned continuity. No other
+            // dialect may see the field, even when a session built on
+            // OpenRouter is replayed against a direct provider route.
+            strip_openrouter_reasoning_details(&mut messages);
+        }
         if provider == ApiProvider::Arcee {
             apply_arcee_waf_safe_message_encoding(&mut messages);
         }
@@ -2662,6 +2744,9 @@ fn build_chat_messages_with_reasoning(
         let mut text_parts = Vec::new();
         let mut image_parts = Vec::new();
         let mut thinking_parts = Vec::new();
+        // Structured OpenRouter continuity captured with this message, if
+        // any; emitted verbatim below when reasoning replay is on.
+        let mut wire_reasoning_details: Option<Vec<Value>> = None;
         let mut tool_calls = Vec::new();
         let mut tool_call_infos = Vec::new();
         let mut tool_results: Vec<(String, String, String, Vec<Value>)> = Vec::new();
@@ -2687,7 +2772,16 @@ fn build_chat_messages_with_reasoning(
                         },
                     }));
                 }
-                ContentBlock::Thinking { thinking, .. } => thinking_parts.push(thinking.clone()),
+                ContentBlock::Thinking {
+                    thinking,
+                    reasoning_details,
+                    ..
+                } => {
+                    thinking_parts.push(thinking.clone());
+                    if wire_reasoning_details.is_none() {
+                        wire_reasoning_details = reasoning_details.clone();
+                    }
+                }
                 ContentBlock::ToolUse {
                     id,
                     name,
@@ -2756,6 +2850,14 @@ fn build_chat_messages_with_reasoning(
             let mut reasoning_content = thinking_parts.join("\n");
             let has_text = !content.trim().is_empty();
             let has_tool_calls = !tool_calls.is_empty();
+            // Structured OpenRouter details replay only when this route
+            // replays reasoning at all; every other route never sees the
+            // field (route post-processing strips it as defense in depth).
+            let wire_reasoning_details = if include_reasoning {
+                wire_reasoning_details
+            } else {
+                None
+            };
             // Reasoning replay must be a function of the stored message ONLY,
             // never of later history. DeepSeek's prefix cache hashes the raw
             // bytes of every message; flipping `reasoning_content` on/off
@@ -2767,9 +2869,13 @@ fn build_chat_messages_with_reasoning(
             // (DeepSeek 400s without it), but text-only assistant messages
             // simply omit the field when there's nothing to replay.
             let mut has_reasoning = include_reasoning && !reasoning_content.trim().is_empty();
-            if include_reasoning && has_tool_calls && !has_reasoning {
+            if include_reasoning
+                && has_tool_calls
+                && !has_reasoning
+                && wire_reasoning_details.is_none()
+            {
                 logging::warn(
-                    "Substituting placeholder reasoning_content for DeepSeek tool-call assistant message",
+                    "Substituting placeholder reasoning_content for a tool-call assistant message on a reasoning-replay route",
                 );
                 reasoning_content = String::from(REASONING_REPLAY_PLACEHOLDER);
                 has_reasoning = true;
@@ -2779,7 +2885,7 @@ fn build_chat_messages_with_reasoning(
             // `tool_calls` are missing/null. Skip such entries even if they
             // carry reasoning-only metadata unless we can send a non-null
             // placeholder content field.
-            if !has_text && !has_tool_calls && !has_reasoning {
+            if !has_text && !has_tool_calls && !has_reasoning && wire_reasoning_details.is_none() {
                 pending_tool_calls.clear();
                 deferred_tool_result_images.clear();
                 continue;
@@ -2789,7 +2895,7 @@ fn build_chat_messages_with_reasoning(
                 "role": "assistant",
                 "content": if has_text {
                     json!(content)
-                } else if has_reasoning {
+                } else if has_reasoning || wire_reasoning_details.is_some() {
                     json!("")
                 } else {
                     Value::Null
@@ -2797,6 +2903,9 @@ fn build_chat_messages_with_reasoning(
             });
             if has_reasoning {
                 msg["reasoning_content"] = json!(reasoning_content);
+            }
+            if let Some(details) = wire_reasoning_details {
+                msg["reasoning_details"] = Value::Array(details);
             }
             if has_tool_calls {
                 msg["tool_calls"] = json!(tool_calls);
@@ -3192,10 +3301,15 @@ pub(super) fn sanitize_thinking_mode_messages_for_route(
             continue;
         }
         let has_tool_calls = msg.get("tool_calls").is_some();
-        let needs_placeholder = msg
-            .get("reasoning_content")
-            .and_then(Value::as_str)
-            .is_none_or(|s| s.trim().is_empty());
+        // OpenRouter details replay: the structured array already carries the
+        // reasoning; injecting a text placeholder alongside it would present
+        // the sequence twice.
+        let has_details = msg.get("reasoning_details").is_some();
+        let needs_placeholder = !has_details
+            && msg
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .is_none_or(|s| s.trim().is_empty());
         if has_tool_calls && needs_placeholder {
             msg["reasoning_content"] = json!(REASONING_REPLAY_PLACEHOLDER);
             substitutions = substitutions.saturating_add(1);
@@ -3205,6 +3319,13 @@ pub(super) fn sanitize_thinking_mode_messages_for_route(
         }
         if let Some(reasoning) = msg.get("reasoning_content").and_then(Value::as_str) {
             let len = reasoning.len() as u64;
+            if len > 0 {
+                replay_chars = replay_chars.saturating_add(len);
+                replay_messages = replay_messages.saturating_add(1);
+            }
+        }
+        if let Some(details) = msg.get("reasoning_details") {
+            let len = details.to_string().len() as u64;
             if len > 0 {
                 replay_chars = replay_chars.saturating_add(len);
                 replay_messages = replay_messages.saturating_add(1);
@@ -3521,6 +3642,17 @@ fn reasoning_stream_style_for_route(
             "Ignoring unrecognized reasoning_stream_style `{configured}`; expected separate_field, inline_tags, or none"
         ));
     }
+    // Google's official OpenAI-compat route returns reasoning summaries in
+    // `delta.reasoning_content` (the non-streaming decoder already promotes
+    // the same field to a Thinking block), so stream parity applies here.
+    // Not spelled out in Google's current official pages — best-effort
+    // interpretation of an, if present, `reasoning_content` field, so the
+    // risk is only how a summary renders, never what is sent. Scoping to
+    // the exact official host keeps the generic-proxy fallback — render
+    // reasoning_content as answer text — for unknown gateways.
+    if is_exact_google_chat_route(provider, base_url) {
+        return ReasoningStreamStyle::SeparateField;
+    }
     if is_reasoning_model_for_stream_on_route(provider, base_url, model) {
         ReasoningStreamStyle::SeparateField
     } else {
@@ -3651,6 +3783,122 @@ fn reasoning_message_text(value: &Value) -> Option<String> {
         })
 }
 
+/// OpenRouter documents that streamed encrypted entries can arrive as the
+/// literal `[REDACTED]` placeholder instead of a real payload. A placeholder
+/// cannot be replayed, so it is dropped at capture time rather than stored
+/// to poison the round-trip.
+fn replayable_reasoning_details(details: &[Value]) -> Vec<Value> {
+    details
+        .iter()
+        .filter(|entry| entry.get("data").and_then(Value::as_str) != Some("[REDACTED]"))
+        .cloned()
+        .collect()
+}
+
+/// Merge one streamed fragment into its stored entry, per OpenRouter's
+/// documented incremental contract ("each reasoning detail chunk is sent as
+/// it becomes available"; "the complete reasoning sequence is built by
+/// concatenating all chunks in order"). Fragment text continues the stored
+/// text unconditionally — last-wins would truncate a replayed sequence the
+/// API requires unmodified, and so would sniffing a fragment that happens
+/// to equal or extend the stored text as a "cumulative re-send": repeated
+/// tokens are ordinary reasoning output, and content guessing cannot tell
+/// the shapes apart. This buffer runs on the OpenRouter route only, where
+/// the documented assembly rule is concatenation; cumulative
+/// `reasoning_details` producers (e.g. MiniMax's reasoning_split stream)
+/// never reach it — capture is OpenRouter-only, and their display path
+/// keeps its own prefix handling. Any other field the fragment carries
+/// that the entry still lacks (a signature trailing the text, an id, a
+/// format) is filled in.
+fn merge_reasoning_detail_entry(stored: &mut Value, fragment: &Value) -> bool {
+    let mut changed = false;
+    if let Some(incoming) = fragment.get("text").and_then(Value::as_str)
+        && !incoming.is_empty()
+    {
+        let current = stored.get("text").and_then(Value::as_str).unwrap_or("");
+        let mut merged = String::with_capacity(current.len() + incoming.len());
+        merged.push_str(current);
+        merged.push_str(incoming);
+        stored["text"] = Value::String(merged);
+        changed = true;
+    }
+    if let (Some(fields), Some(incoming_fields)) = (stored.as_object_mut(), fragment.as_object()) {
+        for (field, value) in incoming_fields {
+            if field == "text" {
+                continue;
+            }
+            let lacks = match fields.get(field) {
+                None | Some(Value::Null) => true,
+                Some(Value::String(text)) => text.is_empty(),
+                _ => false,
+            };
+            if lacks {
+                fields.insert(field.clone(), value.clone());
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Accumulates OpenRouter `reasoning_details` entries across stream chunks.
+/// OpenRouter's documented streaming contract is incremental — "each
+/// reasoning detail chunk is sent as it becomes available", "the complete
+/// reasoning sequence is built by concatenating all chunks in order" — so a
+/// fragment for a known key (the entry's `index`, or its position in the
+/// incoming array when the entry carries none; a `type` key would collide
+/// two same-type entries into one) is concatenated onto the stored entry
+/// rather than replacing it. The concatenation is unconditional: a fragment
+/// that happens to repeat or extend the stored text is still a fragment,
+/// and guessing "cumulative re-send" from content would silently drop
+/// legitimate increments. Capture runs on the OpenRouter route only, so
+/// cumulative producers like MiniMax's reasoning_split stream never reach
+/// this buffer (their display path keeps its own prefix handling), and
+/// fields the fragment carries that the entry still lacks — a signature
+/// trailing the text, an id, a format — are filled in.
+#[derive(Default)]
+pub(super) struct ReasoningDetailsBuffer {
+    order: Vec<String>,
+    entries: HashMap<String, Value>,
+}
+
+impl ReasoningDetailsBuffer {
+    /// Absorb one chunk's entries; returns true when the snapshot changed.
+    fn absorb(&mut self, details: &[Value]) -> bool {
+        let mut changed = false;
+        for (position, entry) in replayable_reasoning_details(details)
+            .into_iter()
+            .enumerate()
+        {
+            let key = entry
+                .get("index")
+                .and_then(Value::as_u64)
+                .map(|index| index.to_string())
+                .unwrap_or_else(|| format!("_arr{position}"));
+            if !self.order.contains(&key) {
+                self.order.push(key.clone());
+                self.entries.insert(key, entry);
+                changed = true;
+            } else if merge_reasoning_detail_entry(
+                self.entries.get_mut(&key).expect("key is present in order"),
+                &entry,
+            ) {
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Entries in first-seen order, fragment texts concatenated in arrival
+    /// order.
+    fn snapshot(&self) -> Vec<Value> {
+        self.order
+            .iter()
+            .filter_map(|key| self.entries.get(key).cloned())
+            .collect()
+    }
+}
+
 #[cfg(test)]
 pub(super) fn parse_chat_message(payload: &Value) -> Result<MessageResponse> {
     parse_chat_message_for_route(payload, ApiProvider::Openai, "")
@@ -3684,13 +3932,40 @@ fn parse_chat_message_for_route(
         .context("Chat API response missing message")?;
 
     let mut content_blocks = Vec::new();
+    // OpenRouter structured reasoning (`reasoning.text` with signatures,
+    // `reasoning.encrypted` payloads) must round-trip verbatim for tool-call
+    // continuity; the joined text alone cannot carry it. Store the raw
+    // entries only on OpenRouter routes — every other dialect must never
+    // see the field.
+    let openrouter_reasoning_details = if provider == ApiProvider::Openrouter {
+        message
+            .get("reasoning_details")
+            .and_then(Value::as_array)
+            .map(|details| replayable_reasoning_details(details))
+            .filter(|details| !details.is_empty())
+    } else {
+        None
+    };
     if let Some(reasoning) =
         reasoning_message_text(message).filter(|reasoning| !reasoning.trim().is_empty())
     {
         content_blocks.push(ContentBlock::Thinking {
             signature: None,
             state: None,
+            redacted_data: None,
+            reasoning_details: openrouter_reasoning_details.clone(),
             thinking: reasoning.to_string(),
+        });
+    } else if let Some(details) = openrouter_reasoning_details {
+        // Encrypted-only details with no readable text (hidden-CoT models
+        // behind OpenRouter): the payload is the only reasoning continuity
+        // this turn has, so materialize the block around it.
+        content_blocks.push(ContentBlock::Thinking {
+            signature: None,
+            state: None,
+            redacted_data: None,
+            reasoning_details: Some(details),
+            thinking: String::new(),
         });
     }
     let (mistral_thinking, mistral_text) = if is_exact_mistral_chat_route(provider, base_url) {
@@ -3702,6 +3977,8 @@ fn parse_chat_message_for_route(
         content_blocks.push(ContentBlock::Thinking {
             signature: None,
             state: None,
+            redacted_data: None,
+            reasoning_details: None,
             thinking,
         });
     }
@@ -3749,9 +4026,13 @@ fn parse_chat_message_for_route(
                     })
             });
 
+            // An empty string is no signature; storing Some("") would both
+            // replay `extra_content.google.thought_signature: ""` and block a
+            // real signature captured later for the same call.
             let thought_signature = call
                 .pointer("/extra_content/google/thought_signature")
                 .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
                 .map(str::to_string);
             content_blocks.push(ContentBlock::ToolUse {
                 id,
@@ -3956,6 +4237,8 @@ fn parse_sse_data_frame(
     thinking_started: &mut bool,
     tool_indices: &mut std::collections::HashMap<u32, u32>,
     reasoning_detail_buffers: &mut std::collections::HashMap<u32, String>,
+    reasoning_details_buffer: &mut ReasoningDetailsBuffer,
+    capture_reasoning_details: bool,
     inline_reasoning_tags: &mut InlineReasoningTagState,
     reasoning_stream_style: ReasoningStreamStyle,
 ) -> SseDataFrame {
@@ -3972,6 +4255,8 @@ fn parse_sse_data_frame(
                 thinking_started,
                 tool_indices,
                 reasoning_detail_buffers,
+                reasoning_details_buffer,
+                capture_reasoning_details,
                 inline_reasoning_tags,
                 reasoning_stream_style,
             )
@@ -3982,7 +4267,12 @@ fn parse_sse_data_frame(
 
 /// Parse a single SSE chunk from the Chat Completions streaming API into
 /// our internal `StreamEvent` representation.
+///
+/// The parameters are the per-stream parse threads themselves (`&mut` state
+/// plus two route flags); threading them through a struct would only move
+/// the same count behind a field access, so the lint is allowed explicitly.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn parse_sse_chunk(
     chunk: &Value,
     content_index: &mut u32,
@@ -3990,6 +4280,8 @@ pub(super) fn parse_sse_chunk(
     thinking_started: &mut bool,
     tool_indices: &mut std::collections::HashMap<u32, u32>,
     reasoning_detail_buffers: &mut std::collections::HashMap<u32, String>,
+    reasoning_details_buffer: &mut ReasoningDetailsBuffer,
+    capture_reasoning_details: bool,
     is_reasoning_model: bool,
 ) -> Vec<StreamEvent> {
     let mut inline_reasoning_tags = InlineReasoningTagState::default();
@@ -4005,6 +4297,8 @@ pub(super) fn parse_sse_chunk(
         thinking_started,
         tool_indices,
         reasoning_detail_buffers,
+        reasoning_details_buffer,
+        capture_reasoning_details,
         &mut inline_reasoning_tags,
         reasoning_stream_style,
     )
@@ -4019,6 +4313,8 @@ fn parse_sse_chunk_with_reasoning_style(
     thinking_started: &mut bool,
     tool_indices: &mut std::collections::HashMap<u32, u32>,
     reasoning_detail_buffers: &mut std::collections::HashMap<u32, String>,
+    reasoning_details_buffer: &mut ReasoningDetailsBuffer,
+    capture_reasoning_details: bool,
     inline_reasoning_tags: &mut InlineReasoningTagState,
     reasoning_stream_style: ReasoningStreamStyle,
 ) -> Vec<StreamEvent> {
@@ -4122,6 +4418,25 @@ fn parse_sse_chunk_with_reasoning_style(
                 );
             }
 
+            // OpenRouter structured reasoning: carry the raw
+            // `delta.reasoning_details` entries verbatim alongside the
+            // joined text delta. The snapshot rides the same thinking block
+            // index as the text deltas; the engine keeps only the last
+            // snapshot per block, which is the most complete version
+            // OpenRouter sent. Capture is wired per route (OpenRouter only);
+            // `capture_reasoning_details` is false everywhere else.
+            if capture_reasoning_details
+                && let Some(details) = delta.get("reasoning_details").and_then(Value::as_array)
+                && reasoning_details_buffer.absorb(details)
+            {
+                events.push(StreamEvent::ContentBlockDelta {
+                    index: *content_index,
+                    delta: Delta::ReasoningDetailsDelta {
+                        details: reasoning_details_buffer.snapshot(),
+                    },
+                });
+            }
+
             // Generic OpenAI-compatible proxies sometimes stream answer text
             // in `reasoning_content`. If this route is configured with no
             // reasoning semantics, render that field as normal text when no
@@ -4174,7 +4489,38 @@ fn parse_sse_chunk_with_reasoning_style(
                 for tc in tool_calls {
                     let tc_index = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
                     let tool_block_index = match tool_indices.entry(tc_index) {
-                        std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                        std::collections::hash_map::Entry::Occupied(entry) => {
+                            let block_index = *entry.get();
+                            // A thought signature can arrive on a continuation
+                            // chunk of the same tool call (some gateways split
+                            // the signed chunk from the one that opens the
+                            // call); capture it instead of dropping it with
+                            // the rest of the non-start fields. The official
+                            // compat route also signs the chunk-level
+                            // `delta.extra_content` on the pre-tool text part
+                            // (observed shapes; Google's current docs no
+                            // longer spell out the streaming placement —
+                            // their thought-signature page is a stub — so
+                            // treat both forms as best-effort).
+                            // Known limit: that chunk-level form is only read
+                            // when the same delta also carries the `tool_calls`
+                            // entry. A signature emitted exclusively on an
+                            // earlier text-only chunk is not buffered here —
+                            // the validator then fails closed with its
+                            // diagnostic instead of replaying a call Google
+                            // would reject unsigned.
+                            if let Some(signature) = tool_call_thought_signature(tc, delta)
+                                .filter(|value| !value.is_empty())
+                            {
+                                events.push(StreamEvent::ContentBlockDelta {
+                                    index: block_index,
+                                    delta: Delta::ToolThoughtSignatureDelta {
+                                        signature: signature.to_string(),
+                                    },
+                                });
+                            }
+                            block_index
+                        }
                         std::collections::hash_map::Entry::Vacant(entry) => {
                             // Close text block if transitioning to tool use
                             if *text_started {
@@ -4224,9 +4570,13 @@ fn parse_sse_chunk_with_reasoning_style(
                                 })
                             });
 
-                            let thought_signature = tc
-                                .pointer("/extra_content/google/thought_signature")
-                                .and_then(Value::as_str)
+                            // Mirror the continuation-chunk path: an empty
+                            // string is no signature. Storing Some("") here
+                            // would win the engine's first-capture-wins race
+                            // and drop the real signature when it arrives on
+                            // a later chunk of the same tool call.
+                            let thought_signature = tool_call_thought_signature(tc, delta)
+                                .filter(|value| !value.is_empty())
                                 .map(str::to_string);
                             events.push(StreamEvent::ContentBlockStart {
                                 index: block_index,
@@ -4376,6 +4726,8 @@ mod stream_diagnostics_tests {
                 &mut thinking_started,
                 &mut tool_indices,
                 &mut reasoning_buffers,
+                &mut ReasoningDetailsBuffer::default(),
+                false,
                 false,
             );
             assert_eq!(
@@ -4401,6 +4753,8 @@ mod stream_diagnostics_tests {
             &mut thinking_started,
             &mut tool_indices,
             &mut reasoning_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
             false,
         );
         assert!(
@@ -4610,6 +4964,8 @@ mod minimax_reasoning_replay_tests {
                         thinking: "Inspect tool state".to_string(),
                         signature: None,
                         state: None,
+                        redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::Text {
                         text: "Done.".to_string(),
@@ -4709,6 +5065,8 @@ mod minimax_reasoning_replay_tests {
                         thinking: "stale thinking from the prior turn".to_string(),
                         signature: None,
                         state: None,
+                        redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::Text {
                         text: "I'll read the widget first.".to_string(),
@@ -4826,6 +5184,245 @@ mod minimax_reasoning_replay_tests {
                 .and_then(serde_json::Value::as_str),
             Some("stale thinking from the prior turn"),
             "documented preserve-thinking models keep replaying history"
+        );
+    }
+}
+
+#[cfg(test)]
+mod openrouter_reasoning_details_tests {
+    //! OpenRouter structured reasoning round-trip: the `reasoning_details`
+    //! sequence is captured verbatim, replayed verbatim, and never leaks to
+    //! another dialect (docs/use-cases/reasoning-tokens, re-checked 2026-10-08).
+
+    use super::{build_chat_messages_for_request_and_provider, parse_chat_message_for_route};
+    use crate::config::{ApiProvider, DEFAULT_OPENROUTER_MODEL};
+    use crate::models::Role;
+    use crate::models::{ContentBlock, Message, MessageRequest};
+    use serde_json::{Value, json};
+
+    fn details_entries() -> Vec<Value> {
+        vec![
+            json!({
+                "type": "reasoning.text",
+                "format": "anthropic-claude-v1",
+                "index": 0,
+                "text": "step one",
+                "signature": "sha256:abc",
+            }),
+            json!({
+                "type": "reasoning.encrypted",
+                "format": "openai-responses-v1",
+                "index": 1,
+                "data": "opaque-blob",
+            }),
+        ]
+    }
+
+    fn request_with_details() -> MessageRequest {
+        MessageRequest {
+            model: DEFAULT_OPENROUTER_MODEL.to_string(),
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "step one".to_string(),
+                        signature: None,
+                        state: None,
+                        redacted_data: None,
+                        reasoning_details: Some(details_entries()),
+                    },
+                    ContentBlock::Text {
+                        text: "Done.".to_string(),
+                        cache_control: None,
+                    },
+                ],
+            }],
+            max_tokens: 16,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    #[test]
+    fn openrouter_replays_details_verbatim_instead_of_reasoning_content() {
+        let messages = build_chat_messages_for_request_and_provider(
+            &request_with_details(),
+            ApiProvider::Openrouter,
+        );
+        let assistant = &messages[0];
+        assert_eq!(
+            assistant.get("reasoning_details"),
+            Some(&Value::Array(details_entries())),
+            "the structured sequence must round-trip unmodified"
+        );
+        assert!(
+            assistant.get("reasoning_content").is_none(),
+            "a parallel reasoning_content field would present the same reasoning twice"
+        );
+    }
+
+    #[test]
+    fn other_routes_never_see_captured_details() {
+        for provider in [ApiProvider::Openai, ApiProvider::Deepseek] {
+            let messages =
+                build_chat_messages_for_request_and_provider(&request_with_details(), provider);
+            assert!(
+                messages[0].get("reasoning_details").is_none(),
+                "{provider:?} must not receive OpenRouter-owned details"
+            );
+        }
+    }
+
+    #[test]
+    fn openrouter_effort_off_suppresses_details_replay() {
+        let mut request = request_with_details();
+        request.reasoning_effort = Some("off".to_string());
+        let messages =
+            build_chat_messages_for_request_and_provider(&request, ApiProvider::Openrouter);
+        assert!(
+            messages[0].get("reasoning_details").is_none(),
+            "reasoning replay off must also drop structured details"
+        );
+    }
+
+    #[test]
+    fn openrouter_response_captures_details_and_filters_placeholders() {
+        let payload = json!({
+            "id": "or-1",
+            "model": DEFAULT_OPENROUTER_MODEL,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Done.",
+                    "reasoning": "step one",
+                    "reasoning_details": [
+                        {
+                            "type": "reasoning.text",
+                            "format": "anthropic-claude-v1",
+                            "index": 0,
+                            "text": "step one",
+                            "signature": "sha256:abc",
+                        },
+                        {
+                            "type": "reasoning.encrypted",
+                            "format": "openai-responses-v1",
+                            "index": 1,
+                            "data": "[REDACTED]",
+                        },
+                        {
+                            "type": "reasoning.encrypted",
+                            "format": "openai-responses-v1",
+                            "index": 2,
+                            "data": "opaque-blob",
+                        },
+                    ],
+                },
+                "finish_reason": "stop",
+            }],
+        });
+        let response =
+            parse_chat_message_for_route(&payload, ApiProvider::Openrouter, "").expect("parse");
+        let details = response
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Thinking {
+                    reasoning_details, ..
+                } => reasoning_details.clone(),
+                _ => None,
+            })
+            .expect("details captured on the thinking block");
+        assert_eq!(
+            details.len(),
+            2,
+            "the [REDACTED] placeholder cannot be replayed and must not be stored"
+        );
+        assert_eq!(details[0]["type"], "reasoning.text");
+        assert_eq!(details[1]["index"], 2);
+    }
+
+    #[test]
+    fn openrouter_encrypted_only_details_materialize_a_block() {
+        let payload = json!({
+            "id": "or-2",
+            "model": DEFAULT_OPENROUTER_MODEL,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Done.",
+                    "reasoning_details": [
+                        {
+                            "type": "reasoning.encrypted",
+                            "format": "openai-responses-v1",
+                            "index": 0,
+                            "data": "opaque-blob",
+                        }
+                    ],
+                },
+                "finish_reason": "stop",
+            }],
+        });
+        let response =
+            parse_chat_message_for_route(&payload, ApiProvider::Openrouter, "").expect("parse");
+        let thinking_blocks: Vec<_> = response
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Thinking {
+                    thinking,
+                    reasoning_details,
+                    ..
+                } => Some((thinking.clone(), reasoning_details.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            thinking_blocks.len(),
+            1,
+            "the payload is the only continuity this turn has"
+        );
+        assert!(thinking_blocks[0].0.is_empty());
+        assert!(thinking_blocks[0].1.is_some());
+    }
+
+    #[test]
+    fn non_openrouter_responses_never_store_details() {
+        let payload = json!({
+            "id": "mm-1",
+            "model": "MiniMax-M3",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Done.",
+                    "reasoning_details": [{ "type": "text", "text": "minimax trace" }],
+                },
+                "finish_reason": "stop",
+            }],
+        });
+        let response =
+            parse_chat_message_for_route(&payload, ApiProvider::Minimax, "").expect("parse");
+        let stores_details = response.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::Thinking {
+                    reasoning_details: Some(_),
+                    ..
+                }
+            )
+        });
+        assert!(
+            !stores_details,
+            "capture is OpenRouter-only; other providers keep the text-only shape"
         );
     }
 }
@@ -7539,6 +8136,8 @@ mod mistral_reasoning_tests {
                                 .to_string(),
                             signature: None,
                             state: None,
+                            redacted_data: None,
+                            reasoning_details: None,
                         },
                         ContentBlock::Text {
                             text: "I will inspect it now.".to_string(),
@@ -8120,6 +8719,246 @@ mod google_thought_signature_tests {
     }
 
     #[test]
+    fn google_parallel_calls_require_only_the_first_signature() {
+        // Gemini 3 signs only the first function-call part of a step, so a
+        // valid parallel-call turn must not be blocked for missing
+        // signatures on calls 2..n.
+        let request = MessageRequest {
+            model: "gemini-3.1-pro-preview".to_string(),
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "Read both.".to_string(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::ToolUse {
+                            id: "call-g-1".to_string(),
+                            name: "read".to_string(),
+                            input: json!({"path": "a.toml"}),
+                            caller: None,
+                            thought_signature: Some("SIG-first".to_string()),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "call-g-2".to_string(),
+                            name: "read".to_string(),
+                            input: json!({"path": "b.toml"}),
+                            caller: None,
+                            thought_signature: None,
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        ContentBlock::ToolResult {
+                            tool_use_id: "call-g-1".to_string(),
+                            content: "a".to_string(),
+                            is_error: None,
+                            content_blocks: None,
+                        },
+                        ContentBlock::ToolResult {
+                            tool_use_id: "call-g-2".to_string(),
+                            content: "b".to_string(),
+                            is_error: None,
+                            content_blocks: None,
+                        },
+                    ],
+                },
+            ],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("high".to_string()),
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+            false,
+        )
+        .expect("parallel calls with only the first signed must pass validation");
+        let assistant = body.body["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .find(|m| m.get("role") == Some(&json!("assistant")))
+            .expect("assistant message");
+        let calls = assistant["tool_calls"].as_array().expect("tool calls");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0]
+                .pointer("/extra_content/google/thought_signature")
+                .and_then(Value::as_str),
+            Some("SIG-first")
+        );
+        assert!(
+            calls[1].get("extra_content").is_none(),
+            "unsigned parallel call must not gain invented metadata: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn google_legacy_empty_signature_is_treated_as_missing() {
+        // Capture has filtered empty-string signatures since the
+        // preserved-thinking series, but sessions saved by older builds can
+        // still carry `Some("")` on the first call of the current turn.
+        // Validation must treat that as missing so the turn fails with the
+        // actionable diagnostic instead of at Google with a raw 400.
+        let request = MessageRequest {
+            model: "gemini-3.1-pro-preview".to_string(),
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "Read it.".to_string(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-g-empty".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"path": "a.toml"}),
+                        caller: None,
+                        thought_signature: Some(String::new()),
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-g-empty".to_string(),
+                        content: "a".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+            ],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("high".to_string()),
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let error = match build_chat_wire_body(
+            &request,
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+            false,
+        ) {
+            Ok(body) => panic!(
+                "an empty-string signature is no signature; body built: {}",
+                body.body
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("call-g-empty"),
+            "the diagnostic must name the unsigned call: {error}"
+        );
+    }
+
+    #[test]
+    fn google_older_turns_without_signatures_are_not_validated() {
+        // Google enforces signatures only on the current turn; a session
+        // that predates signature capture (or lost them to compaction) must
+        // not be bricked for old turns once the fresh turn is signed.
+        let request = MessageRequest {
+            model: "gemini-3.1-pro-preview".to_string(),
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "first request".to_string(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-g-old".to_string(),
+                        name: "read".to_string(),
+                        input: json!({}),
+                        caller: None,
+                        thought_signature: None,
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-g-old".to_string(),
+                        content: "old output".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "next request".to_string(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-g-new".to_string(),
+                        name: "read".to_string(),
+                        input: json!({}),
+                        caller: None,
+                        thought_signature: Some("SIG-new".to_string()),
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-g-new".to_string(),
+                        content: "new output".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+            ],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("high".to_string()),
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        build_chat_wire_body(
+            &request,
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+            false,
+        )
+        .expect("signed current turn must pass even with unsigned older turns");
+    }
+
+    #[test]
     fn google_signature_captured_from_non_streaming_tool_call() {
         let payload = json!({
             "id": "resp-1",
@@ -8186,6 +9025,8 @@ mod google_thought_signature_tests {
             &mut thinking_started,
             &mut tool_indices,
             &mut reasoning_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
             &mut inline_tags,
             ReasoningStreamStyle::None,
         );
@@ -8200,5 +9041,369 @@ mod google_thought_signature_tests {
             _ => None,
         });
         assert_eq!(signature.as_deref(), Some("SIG-delta"));
+    }
+
+    #[test]
+    fn google_signature_captured_from_continuation_chunk() {
+        // Some gateways split the signed chunk from the one that opens the
+        // tool call; the signature must attach to the already-started block
+        // instead of being dropped with the rest of the non-start fields.
+        let opening_chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-g-8",
+                        "type": "function",
+                        "function": { "name": "read", "arguments": "{" }
+                    }]
+                }
+            }]
+        });
+        let continuation_chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": "}" },
+                        "extra_content": {
+                            "google": { "thought_signature": "SIG-late" }
+                        }
+                    }]
+                }
+            }]
+        });
+        let mut content_index = 0u32;
+        let mut text_started = false;
+        let mut thinking_started = false;
+        let mut tool_indices = std::collections::HashMap::new();
+        let mut reasoning_buffers = std::collections::HashMap::new();
+        let mut inline_tags = InlineReasoningTagState::default();
+        let style = ReasoningStreamStyle::None;
+        let _ = parse_sse_chunk_with_reasoning_style(
+            &opening_chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
+            &mut inline_tags,
+            style,
+        );
+        let events = parse_sse_chunk_with_reasoning_style(
+            &continuation_chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
+            &mut inline_tags,
+            style,
+        );
+        let signature = events.iter().find_map(|event| match event {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::ToolThoughtSignatureDelta { signature },
+                ..
+            } => Some(signature.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            signature.as_deref(),
+            Some("SIG-late"),
+            "continuation-chunk signature must be captured: {events:?}"
+        );
+    }
+
+    #[test]
+    fn google_chunk_level_extra_content_signature_is_captured() {
+        // The official compat route sometimes signs the chunk itself
+        // (`delta.extra_content`) rather than the tool_calls entry; that form
+        // must reach the tool call too, or the current-turn validator would
+        // fail a turn Google actually signed.
+        let opening_chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "extra_content": {
+                        "google": { "thought_signature": "SIG-chunk-level" }
+                    },
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-g-9",
+                        "type": "function",
+                        "function": { "name": "read", "arguments": "{}" }
+                    }]
+                }
+            }]
+        });
+        let mut content_index = 0u32;
+        let mut text_started = false;
+        let mut thinking_started = false;
+        let mut tool_indices = std::collections::HashMap::new();
+        let mut reasoning_buffers = std::collections::HashMap::new();
+        let mut inline_tags = InlineReasoningTagState::default();
+        let events = parse_sse_chunk_with_reasoning_style(
+            &opening_chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
+            &mut inline_tags,
+            ReasoningStreamStyle::None,
+        );
+        let signature = events.iter().find_map(|event| match event {
+            StreamEvent::ContentBlockStart {
+                content_block:
+                    ContentBlockStart::ToolUse {
+                        thought_signature, ..
+                    },
+                ..
+            } => thought_signature.clone(),
+            _ => None,
+        });
+        assert_eq!(
+            signature.as_deref(),
+            Some("SIG-chunk-level"),
+            "chunk-level extra_content signature must be captured: {events:?}"
+        );
+    }
+
+    #[test]
+    fn google_empty_signature_on_the_opening_chunk_never_blocks_the_real_one() {
+        // A gateway that emits `"thought_signature": ""` on the chunk
+        // opening the tool call must not win the engine's first-capture-wins
+        // race: storing Some("") would drop the real signature arriving on
+        // the continuation chunk and replay an empty string instead.
+        let opening_chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-g-10",
+                        "type": "function",
+                        "function": { "name": "read", "arguments": "{" },
+                        "extra_content": {
+                            "google": { "thought_signature": "" }
+                        }
+                    }]
+                }
+            }]
+        });
+        let continuation_chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": "}" },
+                        "extra_content": {
+                            "google": { "thought_signature": "SIG-real" }
+                        }
+                    }]
+                }
+            }]
+        });
+        let mut content_index = 0u32;
+        let mut text_started = false;
+        let mut thinking_started = false;
+        let mut tool_indices = std::collections::HashMap::new();
+        let mut reasoning_buffers = std::collections::HashMap::new();
+        let mut inline_tags = InlineReasoningTagState::default();
+        let style = ReasoningStreamStyle::None;
+        let opening_events = parse_sse_chunk_with_reasoning_style(
+            &opening_chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
+            &mut inline_tags,
+            style,
+        );
+        let opening_signature = opening_events.iter().find_map(|event| match event {
+            StreamEvent::ContentBlockStart {
+                content_block:
+                    ContentBlockStart::ToolUse {
+                        thought_signature, ..
+                    },
+                ..
+            } => thought_signature.clone(),
+            _ => None,
+        });
+        assert_eq!(
+            opening_signature.as_deref(),
+            None,
+            "an empty opening signature must be stored as absent: {opening_events:?}"
+        );
+        let continuation_events = parse_sse_chunk_with_reasoning_style(
+            &continuation_chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
+            &mut inline_tags,
+            style,
+        );
+        let real_signature = continuation_events.iter().find_map(|event| match event {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::ToolThoughtSignatureDelta { signature },
+                ..
+            } => Some(signature.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            real_signature.as_deref(),
+            Some("SIG-real"),
+            "the real continuation signature must still attach: {continuation_events:?}"
+        );
+    }
+
+    #[test]
+    fn google_nonstream_empty_signature_stays_absent() {
+        // Non-stream mirror of the empty-signature rule: `""` is no
+        // signature, so the ToolUse block must carry None rather than an
+        // empty string that would replay as `thought_signature: ""`.
+        let payload = json!({
+            "id": "chatcmpl-g-empty",
+            "model": "gemini-3.1-pro-preview",
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call-g-11",
+                    "type": "function",
+                    "function": { "name": "read", "arguments": "{}" },
+                    "extra_content": {
+                        "google": { "thought_signature": "" }
+                    }
+                }]}
+            }]
+        });
+        let message =
+            parse_chat_message_for_route(&payload, ApiProvider::Google, DEFAULT_GOOGLE_BASE_URL)
+                .expect("Google payload parses");
+        let signature = message.content.iter().find_map(|block| match block {
+            ContentBlock::ToolUse {
+                thought_signature, ..
+            } => thought_signature.clone(),
+            _ => None,
+        });
+        assert_eq!(
+            signature.as_deref(),
+            None,
+            "an empty non-stream signature must stay absent: {:?}",
+            message.content
+        );
+    }
+
+    #[test]
+    fn google_route_defaults_to_separate_field_stream_style_and_config_still_wins() {
+        // Stream parity with the non-streaming decoder: on the exact official
+        // route, `delta.reasoning_content` is a Thinking block, not answer
+        // text. An explicit reasoning_stream_style must still override it,
+        // and unknown gateways keep the render-as-text fallback.
+        assert_eq!(
+            reasoning_stream_style_for_route(
+                ApiProvider::Google,
+                DEFAULT_GOOGLE_BASE_URL,
+                "gemini-3.1-pro-preview",
+                None,
+            ),
+            ReasoningStreamStyle::SeparateField,
+            "exact Google route must default to SeparateField"
+        );
+        assert_eq!(
+            reasoning_stream_style_for_route(
+                ApiProvider::Google,
+                DEFAULT_GOOGLE_BASE_URL,
+                "gemini-3.1-pro-preview",
+                Some("none"),
+            ),
+            ReasoningStreamStyle::None,
+            "explicit configuration must override the Google default"
+        );
+        assert_eq!(
+            reasoning_stream_style_for_route(
+                ApiProvider::Google,
+                "https://gateway.example.com/v1",
+                "gemini-3.1-pro-preview",
+                None,
+            ),
+            ReasoningStreamStyle::None,
+            "unknown gateways keep the generic fallback"
+        );
+    }
+
+    #[test]
+    fn google_stream_reasoning_content_becomes_thinking_not_answer_text() {
+        let chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_content": "weighing the two files",
+                    "content": "The answer is"
+                }
+            }]
+        });
+        let mut content_index = 0u32;
+        let mut text_started = false;
+        let mut thinking_started = false;
+        let mut tool_indices = std::collections::HashMap::new();
+        let mut reasoning_buffers = std::collections::HashMap::new();
+        let mut inline_tags = InlineReasoningTagState::default();
+        let events = parse_sse_chunk_with_reasoning_style(
+            &chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
+            &mut inline_tags,
+            reasoning_stream_style_for_route(
+                ApiProvider::Google,
+                DEFAULT_GOOGLE_BASE_URL,
+                "gemini-3.1-pro-preview",
+                None,
+            ),
+        );
+        let thinking = events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::ContentBlockDelta {
+                    delta: Delta::ThinkingDelta { .. },
+                    ..
+                }
+            )
+        });
+        let leaked_to_text = events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::ContentBlockDelta {
+                    delta: Delta::TextDelta { text },
+                    ..
+                } if text.contains("weighing the two files")
+            )
+        });
+        assert!(thinking, "reasoning_content must stream as thinking");
+        assert!(
+            !leaked_to_text,
+            "reasoning_content must not leak into answer text: {events:?}"
+        );
     }
 }
