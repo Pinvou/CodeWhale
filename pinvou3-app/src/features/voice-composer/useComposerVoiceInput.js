@@ -323,8 +323,7 @@ function useComposerVoiceInput(adapter) {
     }
     if (!bridge || !bridge.available) return false;
     if (voiceInput.status === 'requesting_permission') {
-      bridge.voice.cancelVoiceInput();
-      bridge.voice.clearVoiceInput();
+      cancelVoice();
       return false;
     }
     if (voiceInput.status === 'recording') {
@@ -377,7 +376,7 @@ function useComposerVoiceInput(adapter) {
       },
     );
     return true;
-  }, [handleVoiceResult, discardEditPreview]);
+  }, [handleVoiceResult, discardEditPreview, cancelVoice]);
 
   useEffect(() => {
     const current = adapterRef.current || {};

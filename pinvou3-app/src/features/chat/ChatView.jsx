@@ -134,20 +134,20 @@ import { createVisualPosterMessageMeta, shouldUseVisualPosterScene } from './vis
 import {
   createDataVisualizationMessageMeta,
   createDocumentWritingMessageMeta,
-  createPersonalWorkbenchMessageMeta,
   createPptDesignMessageMeta,
-  PERSONAL_WORKBENCH_SCENE_KEY,
   shouldUseDataVisualizationScene,
   shouldUseDocumentWritingScene,
-  shouldUsePersonalWorkbenchScene,
   shouldUsePptDesignScene,
 } from './work-scene-routes.js';
 import {
+  createPersonalWorkbenchMessageMeta,
+  PERSONAL_WORKBENCH_SCENE_KEY,
   PERSONAL_WORKBENCH_TEMPLATES,
   findPersonalWorkbenchTemplateDraft,
   getPersonalWorkbenchTemplate,
   getPersonalWorkbenchTemplateById,
   isPersonalWorkbenchTemplateDraftForTemplate,
+  shouldUsePersonalWorkbenchScene,
 } from './personal-workbench-scene.js';
 import { canPrepareSceneCapabilities, prepareSceneCapabilities, requiredCapabilitiesForMeta } from './scene-capabilities.js';
 import { consumeWelcomeOptIn, resolveSendCapabilityStatus, runSharedWelcomeOptIn } from './welcome-optin.js';
