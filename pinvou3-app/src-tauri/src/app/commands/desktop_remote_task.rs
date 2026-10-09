@@ -707,6 +707,9 @@ fn local_controlled_attachments(
                 .filter(|name| !name.is_empty())
                 .ok_or_else(|| "task_attachments_invalid".to_owned())?
                 .to_owned();
+            if !crate::features::remote_control::controller::transfer::core::is_safe_publication_file_name(&display_name) {
+                return Err("task_attachments_invalid".to_owned());
+            }
             let handle_id = format!("local-attach-{}", Uuid::new_v4().simple());
             use std::io::Read as _;
             let mut bytes = Vec::new();
@@ -728,11 +731,7 @@ fn local_controlled_attachments(
                 .map_err(|_| "task_attachment_unavailable".to_owned())?;
             let read_owner = match crate::platform::filesystem::publish_private_read_path(
                 directory,
-                std::ffi::OsStr::new(
-                    &crate::features::remote_control::controller::transfer::staging::safe_file_name(
-                        &display_name,
-                    ),
-                ),
+                std::ffi::OsStr::new(&display_name),
                 &bytes,
             ) {
                 Ok(owner) => Arc::new(owner),

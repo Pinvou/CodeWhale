@@ -30,6 +30,9 @@ pub(crate) mod task;
 pub(crate) mod journal;
 
 pub(crate) use crate::transfer;
+#[path = "../../../src/features/remote_control/controller/redaction.rs"]
+pub(crate) mod redaction;
+
 #[path = "../../../src/features/remote_control/controller/capabilities.rs"]
 pub(crate) mod capabilities;
 

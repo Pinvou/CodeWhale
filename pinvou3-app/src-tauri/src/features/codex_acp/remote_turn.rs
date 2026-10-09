@@ -178,18 +178,13 @@ impl AcpTurnEventRelay {
             if envelope.session_id != listener_session {
                 return;
             }
-            let projected = {
-                let mut state = listener_state.lock();
-                project_acp_event(&mut state, &envelope)
-            };
-            for (kind, payload) in projected {
-                listener_events.emit_journal(
-                    kind,
-                    &listener_session,
-                    Some(&listener_task),
-                    payload,
-                );
-            }
+            relay_acp_event(
+                &listener_state,
+                &listener_events,
+                &listener_session,
+                &listener_task,
+                &envelope,
+            );
         });
         Self {
             app: app.clone(),
@@ -201,22 +196,17 @@ impl AcpTurnEventRelay {
         }
     }
 
-    fn finish(&mut self) -> Option<String> {
+    fn finish(&mut self, completed: bool) -> Option<String> {
         if let Some(listener_id) = self.listener_id.take() {
             self.app.unlisten(listener_id);
         }
-        let (assistant_tail, reasoning_tail, terminal) = {
-            let mut state = self.state.lock();
-            if state.stopped {
-                return terminal_result(&state).err();
-            }
-            state.stopped = true;
-            (
-                state.assistant.finish(),
-                state.reasoning.finish(),
-                state.terminal.clone(),
-            )
-        };
+        let mut state = self.state.lock();
+        if state.stopped {
+            return terminal_result(&state).err();
+        }
+        state.stopped = true;
+        let (assistant_tail, reasoning_tail) = close_acp_pending(&mut state, completed);
+        let terminal = state.terminal.clone();
         if !reasoning_tail.is_empty() {
             self.events.emit_journal(
                 JournalKind::Reasoning,
@@ -242,7 +232,7 @@ impl AcpTurnEventRelay {
 
 impl Drop for AcpTurnEventRelay {
     fn drop(&mut self) {
-        let _ = self.finish();
+        let _ = self.finish(false);
     }
 }
 
@@ -283,14 +273,43 @@ fn protocol_text(data: &Value) -> Option<&str> {
         .or_else(|| content.get("text").and_then(Value::as_str))
 }
 
-fn flush_acp_streams(state: &mut AcpTurnRelayState, projected: &mut Vec<(JournalKind, Value)>) {
-    let reasoning = state.reasoning.finish();
+fn close_acp_pending(state: &mut AcpTurnRelayState, confirmed: bool) -> (String, String) {
+    let completed = confirmed && terminal_result(state).is_ok();
+    let assistant = if completed {
+        state.assistant.finish_completed()
+    } else {
+        state.assistant.abort_pending()
+    };
+    let reasoning = if completed {
+        state.reasoning.finish_completed()
+    } else {
+        state.reasoning.abort_pending()
+    };
+    (assistant, reasoning)
+}
+
+fn finish_acp_streams(state: &mut AcpTurnRelayState, projected: &mut Vec<(JournalKind, Value)>) {
+    let (assistant, reasoning) = close_acp_pending(state, true);
     if !reasoning.is_empty() {
         projected.push((JournalKind::Reasoning, json!({ "text": reasoning })));
     }
-    let assistant = state.assistant.finish();
     if !assistant.is_empty() {
         projected.push((JournalKind::AssistantDelta, json!({ "text": assistant })));
+    }
+}
+
+// The production sink only journals/enqueues and emits distinct remote events.
+// Deliver under the close lock: no prepared callback batch escapes after close.
+fn relay_acp_event(
+    state: &Mutex<AcpTurnRelayState>,
+    events: &Arc<dyn ControllerTaskEventSink>,
+    session_id: &str,
+    task_id: &str,
+    envelope: &super::AcpEventEnvelope,
+) {
+    let mut state = state.lock();
+    for (kind, payload) in project_acp_event(&mut state, envelope) {
+        events.emit_journal(kind, session_id, Some(task_id), payload);
     }
 }
 
@@ -298,7 +317,7 @@ fn project_acp_event(
     state: &mut AcpTurnRelayState,
     envelope: &super::AcpEventEnvelope,
 ) -> Vec<(JournalKind, Value)> {
-    if state.stopped || envelope.seq <= state.last_seq {
+    if state.stopped || state.terminal.is_some() || envelope.seq <= state.last_seq {
         return Vec::new();
     }
     if envelope.event.event_type == "turn_started" {
@@ -314,10 +333,6 @@ fn project_acp_event(
     let mut projected = Vec::new();
     match envelope.event.event_type.as_str() {
         "agent_message_chunk" => {
-            let reasoning = state.reasoning.finish();
-            if !reasoning.is_empty() {
-                projected.push((JournalKind::Reasoning, json!({ "text": reasoning })));
-            }
             if let Some(text) = protocol_text(&envelope.event.data) {
                 let text = state.assistant.push(text);
                 if !text.is_empty() {
@@ -334,7 +349,6 @@ fn project_acp_event(
             }
         }
         "tool_call" | "tool_call_update" => {
-            flush_acp_streams(state, &mut projected);
             let update = envelope.event.data.get("update").unwrap_or(&Value::Null);
             let Some(tool_id) = update.get("toolCallId").and_then(Value::as_str) else {
                 return projected;
@@ -375,7 +389,6 @@ fn project_acp_event(
             ));
         }
         "turn_completed" => {
-            flush_acp_streams(state, &mut projected);
             let status = envelope.event.data.get("status").and_then(Value::as_str);
             let message = envelope
                 .event
@@ -385,6 +398,7 @@ fn project_acp_event(
                 .and_then(Value::as_str)
                 .map(sanitize_text);
             state.terminal = Some((status.unwrap_or("Failed").to_owned(), message));
+            finish_acp_streams(state, &mut projected);
         }
         _ => {}
     }
@@ -877,7 +891,7 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
                     .await;
             }
         }
-        let terminal_error = turn_relay.finish();
+        let terminal_error = turn_relay.finish(result.is_ok());
         if result.is_ok() {
             if let Some(error) = terminal_error {
                 result = Err(error);
@@ -1093,6 +1107,289 @@ mod tests {
             "event": { "type": event_type, "data": data },
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn acp_pending_blocks_survive_tools_and_channel_interleaving() {
+        let mut state = AcpTurnRelayState {
+            turn_id: Some("turn-1".into()),
+            ..AcpTurnRelayState::default()
+        };
+        assert!(
+            project_acp_event(
+                &mut state,
+                &envelope(
+                    1,
+                    "turn-1",
+                    "agent_message_chunk",
+                    json!({"update":{"content":{"text":"目录"}}})
+                )
+            )
+            .is_empty()
+        );
+        assert!(
+            project_acp_event(
+                &mut state,
+                &envelope(
+                    2,
+                    "turn-1",
+                    "agent_thought_chunk",
+                    json!({"update":{"content":{"text":"推理目录"}}})
+                )
+            )
+            .is_empty()
+        );
+        let tool = project_acp_event(
+            &mut state,
+            &envelope(
+                3,
+                "turn-1",
+                "tool_call",
+                json!({"update":{"toolCallId":"tool-1","title":"read_file","status":"in_progress"}}),
+            ),
+        );
+        assert_eq!(tool.len(), 1);
+        assert_eq!(tool[0].0, JournalKind::Tool);
+        let message = project_acp_event(
+            &mut state,
+            &envelope(
+                4,
+                "turn-1",
+                "agent_message_chunk",
+                json!({"update":{"content":{"text":"/秘密/file.txt "}}}),
+            ),
+        );
+        assert_eq!(
+            message,
+            vec![(JournalKind::AssistantDelta, json!({"text":"[PATH] "}))]
+        );
+        let thought = project_acp_event(
+            &mut state,
+            &envelope(
+                5,
+                "turn-1",
+                "agent_thought_chunk",
+                json!({"update":{"content":{"text":"/秘密/file.txt "}}}),
+            ),
+        );
+        assert_eq!(
+            thought,
+            vec![(JournalKind::Reasoning, json!({"text":"[PATH] "}))]
+        );
+
+        let mut state = AcpTurnRelayState {
+            turn_id: Some("turn-1".into()),
+            ..AcpTurnRelayState::default()
+        };
+        let first = project_acp_event(
+            &mut state,
+            &envelope(
+                1,
+                "turn-1",
+                "agent_message_chunk",
+                json!({"update":{"content":{"text":"Authorization "}}}),
+            ),
+        );
+        assert_eq!(
+            first,
+            vec![(
+                JournalKind::AssistantDelta,
+                json!({"text":"Authorization "})
+            )]
+        );
+        let tool = project_acp_event(
+            &mut state,
+            &envelope(
+                2,
+                "turn-1",
+                "tool_call_update",
+                json!({"update":{"toolCallId":"tool-1","status":"completed"}}),
+            ),
+        );
+        assert_eq!(tool.len(), 1);
+        assert_eq!(tool[0].0, JournalKind::Tool);
+        let next = project_acp_event(
+            &mut state,
+            &envelope(
+                3,
+                "turn-1",
+                "agent_message_chunk",
+                json!({"update":{"content":{"text":"= 中文口令 multi words "}}}),
+            ),
+        );
+        assert!(!serde_json::to_string(&next[0].1).unwrap().contains("口令"));
+        assert!(next.iter().all(|(_, payload)| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| !text.contains("multi") && !text.contains("words"))
+        }));
+    }
+
+    #[test]
+    fn acp_only_completed_releases_pending_tail_and_terminal_fences_late_chunks() {
+        for status in [Some("Completed"), Some("Interrupted"), Some("Failed"), None] {
+            let mut state = AcpTurnRelayState {
+                turn_id: Some("turn-1".into()),
+                ..AcpTurnRelayState::default()
+            };
+            assert!(
+                project_acp_event(
+                    &mut state,
+                    &envelope(
+                        1,
+                        "turn-1",
+                        "agent_message_chunk",
+                        json!({"update":{"content":{"text":"普通正文"}}})
+                    )
+                )
+                .is_empty()
+            );
+            assert!(
+                project_acp_event(
+                    &mut state,
+                    &envelope(
+                        2,
+                        "turn-1",
+                        "agent_thought_chunk",
+                        json!({"update":{"content":{"text":"普通推理"}}})
+                    )
+                )
+                .is_empty()
+            );
+            let terminal = project_acp_event(
+                &mut state,
+                &envelope(3, "turn-1", "turn_completed", json!({"status":status})),
+            );
+            let successful = status == Some("Completed");
+            assert_eq!(
+                terminal,
+                vec![
+                    (
+                        JournalKind::Reasoning,
+                        json!({"text":if successful {"普通推理"} else {"[REDACTED]"}})
+                    ),
+                    (
+                        JournalKind::AssistantDelta,
+                        json!({"text":if successful {"普通正文"} else {"[REDACTED]"}})
+                    ),
+                ]
+            );
+            assert!(
+                project_acp_event(
+                    &mut state,
+                    &envelope(
+                        4,
+                        "turn-1",
+                        "agent_message_chunk",
+                        json!({"update":{"content":{"text":"late private data "}}})
+                    )
+                )
+                .is_empty()
+            );
+            assert_eq!(state.last_seq, 3);
+            assert_eq!(
+                close_acp_pending(&mut state, false),
+                (String::new(), String::new())
+            );
+        }
+    }
+
+    #[test]
+    fn acp_abort_path_never_infers_success_from_observed_terminal() {
+        let mut state = AcpTurnRelayState {
+            turn_id: Some("turn-1".into()),
+            ..AcpTurnRelayState::default()
+        };
+        assert!(state.assistant.push("目录").is_empty());
+        assert!(state.reasoning.push("推理目录").is_empty());
+        // Even a recorded Completed does not authorize a Drop/error caller
+        // to finish the ambiguous block as ordinary source text.
+        state.terminal = Some(("Completed".into(), None));
+        assert_eq!(
+            close_acp_pending(&mut state, false),
+            ("[REDACTED]".into(), "[REDACTED]".into())
+        );
+        assert_eq!(
+            close_acp_pending(&mut state, false),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn acp_delivery_cannot_be_overtaken_by_close_and_late_tools_are_rejected() {
+        struct BarrierSink {
+            prepared: std::sync::mpsc::Sender<()>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+            delivered: Mutex<Vec<(JournalKind, Value)>>,
+        }
+        impl ControllerTaskEventSink for BarrierSink {
+            fn emit(&self, _: Value) {}
+            fn emit_journal(&self, kind: JournalKind, _: &str, _: Option<&str>, payload: Value) {
+                self.prepared.send(()).unwrap();
+                self.release
+                    .lock()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                self.delivered.lock().push((kind, payload));
+            }
+        }
+        let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let sink = Arc::new(BarrierSink {
+            prepared: prepared_tx,
+            release: Mutex::new(release_rx),
+            delivered: Mutex::new(Vec::new()),
+        });
+        let events: Arc<dyn ControllerTaskEventSink> = sink.clone();
+        let state = Arc::new(Mutex::new(AcpTurnRelayState {
+            turn_id: Some("turn-1".into()),
+            ..AcpTurnRelayState::default()
+        }));
+        let worker_state = Arc::clone(&state);
+        let worker_events = Arc::clone(&events);
+        let worker = std::thread::spawn(move || {
+            relay_acp_event(
+                &worker_state,
+                &worker_events,
+                "session-0001",
+                "task-1",
+                &envelope(
+                    1,
+                    "turn-1",
+                    "agent_message_chunk",
+                    json!({"update":{"content":{"text":"safe "}}}),
+                ),
+            );
+        });
+        prepared_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(state.try_lock().is_none());
+        assert!(sink.delivered.lock().is_empty());
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        state.lock().stopped = true;
+        for (seq, event_type) in [
+            (2, "tool_call"),
+            (3, "tool_call_update"),
+            (4, "agent_message_chunk"),
+        ] {
+            relay_acp_event(
+                &state,
+                &events,
+                "session-0001",
+                "task-1",
+                &envelope(
+                    seq,
+                    "turn-1",
+                    event_type,
+                    json!({"update":{"toolCallId":"tool-1","title":"read_file","content":{"text":"late "}}}),
+                ),
+            );
+        }
+        assert_eq!(state.lock().last_seq, 1);
+        assert_eq!(
+            sink.delivered.lock().as_slice(),
+            &[(JournalKind::AssistantDelta, json!({"text":"safe "}))]
+        );
     }
 
     #[test]

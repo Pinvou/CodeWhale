@@ -203,6 +203,8 @@ impl TurnEventRelayState {
 
     fn push_reasoning(&mut self, generation: Option<u64>, text: &str) -> Option<(bool, bool)> {
         if self.stopped
+            || self.terminal.is_some()
+            || self.generation.is_none()
             || generation != self.generation
             || self.emitted_events >= MAX_REASONING_EVENTS_PER_TURN
             || self.emitted_chars >= MAX_REASONING_CHARS_PER_TURN
@@ -221,6 +223,7 @@ impl TurnEventRelayState {
 
     fn push_assistant(&mut self, text: &str) -> Option<String> {
         if self.stopped
+            || self.terminal.is_some()
             || self.generation.is_none()
             || self.assistant_events >= MAX_ASSISTANT_EVENTS_PER_TURN
             || self.assistant_chars >= MAX_ASSISTANT_CHARS_PER_TURN
@@ -231,13 +234,39 @@ impl TurnEventRelayState {
         self.bound_assistant(sanitized)
     }
 
-    fn finish_assistant_token(&mut self) -> Option<String> {
-        let tail = self.assistant_sanitizer.finish();
+    fn finish_assistant_token(&mut self, completed: bool) -> Option<String> {
+        let tail = if completed {
+            self.assistant_sanitizer.finish_completed()
+        } else {
+            self.assistant_sanitizer.abort_pending()
+        };
         self.bound_assistant(tail)
     }
 
+    fn close_streams(&mut self, completed: bool) -> (Vec<String>, Option<String>) {
+        if self.stopped {
+            return (Vec::new(), None);
+        }
+        self.stopped = true;
+        let completed = completed && matches!(self.terminal, Some(Ok(())));
+        let tail = if completed {
+            self.reasoning_sanitizer.finish_completed()
+        } else {
+            self.reasoning_sanitizer.abort_pending()
+        };
+        self.reasoning_ready.push_str(&tail);
+        let mut batches = Vec::new();
+        while let Some(batch) = take_reasoning_batch(self, true) {
+            batches.push(batch);
+        }
+        (batches, self.finish_assistant_token(completed))
+    }
+
     fn bound_assistant(&mut self, text: String) -> Option<String> {
-        if text.is_empty() {
+        if text.is_empty()
+            || self.assistant_events >= MAX_ASSISTANT_EVENTS_PER_TURN
+            || self.assistant_chars >= MAX_ASSISTANT_CHARS_PER_TURN
+        {
             return None;
         }
         let remaining = MAX_ASSISTANT_CHARS_PER_TURN.saturating_sub(self.assistant_chars);
@@ -268,25 +297,13 @@ impl TurnEventRelayHandle {
         self.state.lock().generation = Some(generation);
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, completed: bool) {
         for listener_id in self.listener_ids.drain(..) {
             self.app.unlisten(listener_id);
         }
-        let (reasoning_batches, assistant_tail) = {
-            let mut state = self.state.lock();
-            if state.stopped {
-                return;
-            }
-            state.stopped = true;
-            let tail = state.reasoning_sanitizer.finish();
-            state.reasoning_ready.push_str(&tail);
-            let mut reasoning_batches = Vec::new();
-            while let Some(batch) = take_reasoning_batch(&mut state, true) {
-                reasoning_batches.push(batch);
-            }
-            let assistant_tail = state.finish_assistant_token();
-            (reasoning_batches, assistant_tail)
-        };
+        // The same lock fences callback delivery, terminal acceptance and close.
+        let mut state = self.state.lock();
+        let (reasoning_batches, assistant_tail) = state.close_streams(completed);
         for text in reasoning_batches {
             self.events.emit_journal(
                 JournalKind::Reasoning,
@@ -308,7 +325,7 @@ impl TurnEventRelayHandle {
 
 impl Drop for TurnEventRelayHandle {
     fn drop(&mut self) {
-        self.finish();
+        self.finish(false);
     }
 }
 
@@ -351,11 +368,21 @@ fn flush_reasoning(
     // unlistening, so a timer that already removed a batch cannot publish it
     // after the final assistant event has been journaled.
     let mut state = state.lock();
+    flush_reasoning_locked(&mut state, events, session_id, task_id, force);
+}
+
+fn flush_reasoning_locked(
+    state: &mut TurnEventRelayState,
+    events: &Arc<dyn ControllerTaskEventSink>,
+    session_id: &str,
+    task_id: &str,
+    force: bool,
+) {
     state.flush_scheduled = false;
-    let batch = if state.stopped && !force {
+    let batch = if state.stopped {
         None
     } else {
-        take_reasoning_batch(&mut state, force)
+        take_reasoning_batch(state, force)
     };
     if let Some(text) = batch {
         events.emit_journal(
@@ -365,6 +392,53 @@ fn flush_reasoning(
             json!({ "text": text }),
         );
     }
+}
+
+/// Delivery is synchronous: the production sink journals/enqueues and emits
+/// distinct desktop-remote events; it never calls this chat relay. Keep the
+/// lock until delivery finishes so close cannot overtake prepared output.
+fn with_open_chat_relay(
+    state: &Mutex<TurnEventRelayState>,
+    deliver: impl FnOnce(&mut TurnEventRelayState),
+) {
+    let mut state = state.lock();
+    if state.stopped || state.terminal.is_some() || state.generation.is_none() {
+        return;
+    }
+    deliver(&mut state);
+}
+
+fn relay_chat_assistant(
+    state: &Mutex<TurnEventRelayState>,
+    events: &Arc<dyn ControllerTaskEventSink>,
+    session_id: &str,
+    task_id: &str,
+    text: &str,
+) {
+    with_open_chat_relay(state, |state| {
+        flush_reasoning_locked(state, events, session_id, task_id, true);
+        if let Some(text) = state.push_assistant(text) {
+            events.emit_journal(
+                JournalKind::AssistantDelta,
+                session_id,
+                Some(task_id),
+                json!({ "text": text }),
+            );
+        }
+    });
+}
+
+fn relay_chat_tool(
+    state: &Mutex<TurnEventRelayState>,
+    events: &Arc<dyn ControllerTaskEventSink>,
+    session_id: &str,
+    task_id: &str,
+    payload: Value,
+) {
+    with_open_chat_relay(state, |state| {
+        flush_reasoning_locked(state, events, session_id, task_id, true);
+        events.emit_journal(JournalKind::Tool, session_id, Some(task_id), payload);
+    });
 }
 
 pub(crate) struct EnginePoolChatEngine {
@@ -657,25 +731,16 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             else {
                 return;
             };
-            // A reasoning token that preceded this assistant delta must reach
-            // the authoritative journal first, even when its batching timer
-            // has not fired yet.
-            flush_reasoning(
+            // Already-classified reasoning is delivered first. An ambiguous
+            // block waits for its own boundary rather than leaking a prefix
+            // merely to preserve cross-channel arrival order.
+            relay_chat_assistant(
                 &assistant_state,
                 &assistant_events,
                 &assistant_session_id,
                 &assistant_task_id,
-                true,
+                text,
             );
-            let text = assistant_state.lock().push_assistant(text);
-            if let Some(text) = text {
-                assistant_events.emit_journal(
-                    JournalKind::AssistantDelta,
-                    &assistant_session_id,
-                    Some(&assistant_task_id),
-                    json!({ "text": text }),
-                );
-            }
         });
 
         let tool_start_state = Arc::clone(&state);
@@ -688,24 +753,8 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             };
             if payload.get("session_id").and_then(Value::as_str)
                 != Some(tool_start_session_id.as_str())
-                || tool_start_state.lock().generation.is_none()
             {
                 return;
-            }
-            flush_reasoning(
-                &tool_start_state,
-                &tool_start_events,
-                &tool_start_session_id,
-                &tool_start_task_id,
-                true,
-            );
-            if let Some(text) = tool_start_state.lock().finish_assistant_token() {
-                tool_start_events.emit_journal(
-                    JournalKind::AssistantDelta,
-                    &tool_start_session_id,
-                    Some(&tool_start_task_id),
-                    json!({ "text": text }),
-                );
             }
             let Some(tool_id) = payload.get("id").and_then(Value::as_str) else {
                 return;
@@ -715,10 +764,11 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             };
             // Never project `args`: tool arguments can contain credentials,
             // signed URLs, or B-local host paths.
-            tool_start_events.emit_journal(
-                JournalKind::Tool,
+            relay_chat_tool(
+                &tool_start_state,
+                &tool_start_events,
                 &tool_start_session_id,
-                Some(&tool_start_task_id),
+                &tool_start_task_id,
                 json!({
                     "tool_id": tool_id,
                     "tool_name": tool_name,
@@ -737,24 +787,8 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             };
             if payload.get("session_id").and_then(Value::as_str)
                 != Some(tool_end_session_id.as_str())
-                || tool_end_state.lock().generation.is_none()
             {
                 return;
-            }
-            flush_reasoning(
-                &tool_end_state,
-                &tool_end_events,
-                &tool_end_session_id,
-                &tool_end_task_id,
-                true,
-            );
-            if let Some(text) = tool_end_state.lock().finish_assistant_token() {
-                tool_end_events.emit_journal(
-                    JournalKind::AssistantDelta,
-                    &tool_end_session_id,
-                    Some(&tool_end_task_id),
-                    json!({ "text": text }),
-                );
             }
             let Some(tool_id) = payload.get("id").and_then(Value::as_str) else {
                 return;
@@ -771,10 +805,11 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                 .and_then(Value::as_str)
                 .map(sanitize_text)
                 .filter(|text| !text.is_empty());
-            tool_end_events.emit_journal(
-                JournalKind::Tool,
+            relay_chat_tool(
+                &tool_end_state,
+                &tool_end_events,
                 &tool_end_session_id,
-                Some(&tool_end_task_id),
+                &tool_end_task_id,
                 json!({
                     "tool_id": tool_id,
                     "tool_name": tool_name,
@@ -921,11 +956,12 @@ impl EnginePoolChatTurnPort {
             )
             .await;
         }
-        // Flush the last redaction-safe token before the task terminal event.
+        // Only a successful, accepted terminal can classify the final block.
+        // Cancellation, failure and Drop mask pending text instead.
         // Assistant content is journaled from real `chat:delta` callbacks,
         // never synthesized as one final response here.
         if let Some(relay) = turn_relay.as_mut() {
-            relay.finish();
+            relay.finish(result.is_ok());
         }
         // All remote model sources own a private skills root. Retire only this
         // attempt's entry before releasing credentials; never rewrite shared B
@@ -2270,7 +2306,172 @@ mod tests {
             state.push_assistant("secret-value after "),
             Some("[REDACTED] after ".into())
         );
-        assert_eq!(state.finish_assistant_token(), None);
+        assert_eq!(state.finish_assistant_token(true), None);
+    }
+
+    #[test]
+    fn pending_projection_waits_while_other_safe_channel_batches_are_delivered() {
+        let mut state = TurnEventRelayState {
+            generation: Some(7),
+            ..TurnEventRelayState::default()
+        };
+        assert_eq!(state.push_assistant("目录"), None);
+        assert!(state.push_reasoning(Some(7), "推理 ").is_some());
+        assert_eq!(take_reasoning_batch(&mut state, true), Some("推理 ".into()));
+        assert_eq!(
+            state.push_assistant("/秘密/file.txt "),
+            Some("[PATH] ".into())
+        );
+        assert!(state.push_reasoning(Some(7), "推理目录").is_some());
+        assert_eq!(take_reasoning_batch(&mut state, true), None);
+        assert_eq!(state.push_assistant("正文 "), Some("正文 ".into()));
+        assert!(state.push_reasoning(Some(7), "/秘密/file.txt ").is_some());
+        assert_eq!(
+            take_reasoning_batch(&mut state, true),
+            Some("[PATH] ".into())
+        );
+        state.terminal = Some(Ok(()));
+        assert_eq!(state.close_streams(true), (Vec::new(), None));
+    }
+
+    #[test]
+    fn remote_projection_success_abort_and_duplicate_close_are_bounded() {
+        for completed in [false, true] {
+            for terminal in [
+                None,
+                Some(Ok(())),
+                Some(Err(TASK_CANCELLED_CODE.to_owned())),
+                Some(Err(TURN_TIMEOUT_CODE.to_owned())),
+            ] {
+                let mut state = TurnEventRelayState {
+                    generation: Some(7),
+                    ..TurnEventRelayState::default()
+                };
+                assert_eq!(state.push_assistant("普通正文"), None);
+                assert!(state.push_reasoning(Some(7), "普通推理").is_some());
+                state.terminal = terminal;
+                let successful = completed && matches!(state.terminal, Some(Ok(())));
+                let (reasoning, assistant) = state.close_streams(completed);
+                assert_eq!(
+                    reasoning,
+                    vec![
+                        if successful {
+                            "普通推理"
+                        } else {
+                            "[REDACTED]"
+                        }
+                        .to_owned()
+                    ]
+                );
+                assert_eq!(
+                    assistant,
+                    Some(
+                        if successful {
+                            "普通正文"
+                        } else {
+                            "[REDACTED]"
+                        }
+                        .to_owned()
+                    )
+                );
+                assert_eq!(state.close_streams(true), (Vec::new(), None));
+                assert_eq!(state.push_assistant("late "), None);
+                assert_eq!(state.push_reasoning(Some(7), "late "), None);
+            }
+        }
+        let mut state = TurnEventRelayState {
+            generation: Some(7),
+            terminal: Some(Ok(())),
+            ..TurnEventRelayState::default()
+        };
+        assert_eq!(state.push_assistant("late "), None);
+        let mut state = TurnEventRelayState {
+            generation: Some(7),
+            ..TurnEventRelayState::default()
+        };
+        assert_eq!(state.push_assistant("pending"), None);
+        assert!(state.push_reasoning(Some(7), "pending").is_some());
+        state.assistant_events = MAX_ASSISTANT_EVENTS_PER_TURN;
+        state.emitted_events = MAX_REASONING_EVENTS_PER_TURN;
+        assert_eq!(state.close_streams(false), (Vec::new(), None));
+        let mut unarmed = TurnEventRelayState::default();
+        assert_eq!(unarmed.push_reasoning(None, "must not leak "), None);
+    }
+
+    #[test]
+    fn chat_delivery_cannot_be_overtaken_by_close_and_late_tools_are_rejected() {
+        use parking_lot::Mutex;
+
+        struct BarrierSink {
+            prepared: std::sync::mpsc::Sender<()>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+            delivered: Mutex<Vec<(JournalKind, Value)>>,
+        }
+        impl ControllerTaskEventSink for BarrierSink {
+            fn emit(&self, _: Value) {}
+            fn emit_journal(&self, kind: JournalKind, _: &str, _: Option<&str>, payload: Value) {
+                self.prepared.send(()).unwrap();
+                self.release
+                    .lock()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                self.delivered.lock().push((kind, payload));
+            }
+        }
+        let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let sink = Arc::new(BarrierSink {
+            prepared: prepared_tx,
+            release: Mutex::new(release_rx),
+            delivered: Mutex::new(Vec::new()),
+        });
+        let events: Arc<dyn ControllerTaskEventSink> = sink.clone();
+        let state = Arc::new(Mutex::new(TurnEventRelayState {
+            generation: Some(7),
+            ..TurnEventRelayState::default()
+        }));
+        let worker_state = Arc::clone(&state);
+        let worker_events = Arc::clone(&events);
+        let worker = std::thread::spawn(move || {
+            relay_chat_assistant(
+                &worker_state,
+                &worker_events,
+                "session-1",
+                "task-1",
+                "safe ",
+            );
+        });
+        prepared_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Output has been prepared but the sink has not delivered it. Close
+        // must acquire this same lock, so it cannot cross this barrier.
+        assert!(state.try_lock().is_none());
+        assert!(sink.delivered.lock().is_empty());
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(state.lock().close_streams(false), (Vec::new(), None));
+        for tool_state in ["running", "completed"] {
+            relay_chat_tool(
+                &state,
+                &events,
+                "session-1",
+                "task-1",
+                json!({"tool_state":tool_state}),
+            );
+        }
+        relay_chat_assistant(&state, &events, "session-1", "task-1", "late ");
+        assert_eq!(sink.delivered.lock().len(), 1);
+        assert_eq!(
+            sink.delivered.lock()[0],
+            (JournalKind::AssistantDelta, json!({"text":"safe "}))
+        );
+
+        // A terminal is itself a fence, even before the handle closes.
+        let mut guard = state.lock();
+        guard.stopped = false;
+        guard.terminal = Some(Ok(()));
+        drop(guard);
+        relay_chat_tool(&state, &events, "session-1", "task-1", json!({}));
+        assert_eq!(sink.delivered.lock().len(), 1);
     }
 
     #[test]
