@@ -2064,6 +2064,8 @@ mod tests {
     #[derive(Default)]
     struct TestLane {
         events: VecDeque<ControllerLaneEvent>,
+        reader_transport: Option<ControllerTransportSender>,
+        authorize_resume_final: bool,
         /// E2E-06：恢复族出站帧（prepare/confirm/ready_ack）的记录口。
         resume_frames: Arc<std::sync::Mutex<Vec<Value>>>,
     }
@@ -2084,7 +2086,25 @@ mod tests {
     #[async_trait::async_trait]
     impl ControllingLane for TestLane {
         async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent> {
-            self.events.pop_front()
+            let event = self.events.pop_front();
+            if let Some(sender) = self.reader_transport.as_ref() {
+                match event.as_ref() {
+                    Some(ControllerLaneEvent::Disconnected) => {
+                        super::super::relay_transport::disconnect_test_transport(sender);
+                    }
+                    Some(ControllerLaneEvent::Frame(text)) if self.authorize_resume_final => {
+                        if let Ok(frame) = serde_json::from_str::<Value>(text)
+                            && frame["type"] == "controller_resumed"
+                        {
+                            super::super::relay_transport::dispatch_test_transport_frame(
+                                sender, &frame,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            event
         }
 
         fn send_resume_control(&self, message: Value) -> Result<(), String> {
@@ -2759,6 +2779,11 @@ mod tests {
     /// ready_ack → resumed，且业务闸门在 resumed 之前始终关闭。
     #[tokio::test]
     async fn resume_sequence_reopens_business_only_after_controller_resumed() {
+        assert_resume_service_sequence(false).await;
+        assert_resume_service_sequence(true).await;
+    }
+
+    async fn assert_resume_service_sequence(reader_authorized: bool) {
         let manager = ControllingDeviceManager::default();
         let operation = manager.connect("234-4567").unwrap();
         manager.complete_reserved(operation.clone()).unwrap();
@@ -2791,6 +2816,13 @@ mod tests {
             )
             .unwrap();
         let lease = manager.live_lease().unwrap();
+        let (context, capabilities) = manager.live_runtime_context().unwrap();
+        let reader_transport = super::super::test_support::resume_reader_transport(
+            ControllerRole::ControllerA,
+            context,
+            capabilities,
+        );
+        manager.replace_transport(reader_transport.clone());
         let sessions = ControllingSessionManager::default();
         let business = ControllingLaneState::default();
         // 安装真实加密通道：恢复确认与 resumed 后的业务帧都走同一条通道。
@@ -2881,6 +2913,8 @@ mod tests {
                 .to_string(),
             ),
         ]);
+        lane.reader_transport = Some(reader_transport);
+        lane.authorize_resume_final = reader_authorized;
         let mut statuses: Vec<String> = Vec::new();
         let mut on_status = |status: &ControllingStatus| {
             statuses.push(projection(status)["status"].as_str().unwrap().to_owned());
@@ -2916,6 +2950,15 @@ mod tests {
             "恢复必须按冻结顺序发出 prepare/confirm/ready_ack"
         );
         assert_eq!(frames[2]["liveness_epoch_b"], "live-b-2");
+        if !reader_authorized {
+            assert_eq!(
+                statuses,
+                vec!["reconnecting".to_owned(), "error".to_owned()]
+            );
+            assert!(manager.live_lease().is_err());
+            assert!(!business.is_installed() || business.is_suspended());
+            return;
+        }
         assert_eq!(
             statuses,
             vec!["reconnecting".to_owned()],
