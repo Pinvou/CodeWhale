@@ -1,0 +1,25 @@
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import { AdminPlatformView } from '../../src/features/account-platform/AdminPlatformView.jsx';
+import { AdminManagementWorkspace } from '../../src/features/account-platform/AdminManagementWorkspace.jsx';
+import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
+import { adminPlatformCopy, tokenManagementCopy } from '../../src/shared/i18n.js';
+const root=createRoot(document.querySelector('#root'));const client=new AdminPlatformClient();
+const control={language:'en',owner:'11111111-1111-4111-8111-111111111111',version:1,calls:[],flags:{admin_model_operations_overview:true,admin_model_token_page_overviews:true},permissions:['platform.models.read','platform.tokens.read'],failure:0,unsafe:false,delay:false,release:null};
+const contracts={models:[['published_model_count',3,['PUBLISHED'],null],['deprecated_model_count',2,['DEPRECATED'],null],['model_draft_count',1,['DRAFT'],null]],tokenResources:[['stable_route_count',4,['RESOLVED'],null],['healthy_route_count',3,['HEALTHY'],'stable_route_count'],['route_attention_count',1,['UNKNOWN','PROBING','DEGRADED','UNHEALTHY','STALE','EXPIRED_HEALTH'],'stable_route_count']],modelOperations:[['provisioning_pending_count',2,['PENDING'],null],['provisioning_attention_count',1,['FAILED','REPAIR_REQUIRED'],null]]};
+const payload=section=>{const metrics=contracts[section].map(([key,value,included_statuses,denominator_key])=>({key,value:control.unsafe?9007199254740992:value,unit:'COUNT',aggregation:'POINT_IN_TIME',included_statuses,denominator_key}));const base={schema_version:'1',as_of:'2026-10-09T00:00:00Z'};return section==='modelOperations'?{...base,permission_view:'TOKEN_ONLY',provisioning:{metrics}}:{...base,metrics};};
+const json=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
+globalThis.fetch=async(target,options={})=>{const url=new URL(target,location.href);control.calls.push({path:url.pathname,query:url.search,method:options.method||'GET'});
+ if(url.pathname==='/api/session')return json({authenticated:true,csrf_token:'CONTROLLED_SYNTHETIC_CSRF',feature_flags:control.flags});
+ if(url.pathname.endsWith('/account/bootstrap'))return json({user_id:control.owner,status:'ACTIVE',platform_authorization_version:control.version,platform_permissions:control.permissions,personal_permissions:[]});
+ const section={'model-catalog':'models','token-resources':'tokenResources','model-operations':'modelOperations'}[url.pathname.split('/').at(-1)];
+ if(url.pathname.includes('/overviews/')&&section){if(section==='modelOperations'&&control.permissions.includes('platform.usage.read')&&url.search!=='?window=24h')return json({code:'INVALID_TIME_WINDOW'},400);const raw=payload(section);if(section==='modelOperations'&&control.permissions.includes('platform.usage.read')){raw.permission_view='TOKEN_AND_USAGE';const from='2026-10-08T00:00:00Z',to=raw.as_of;raw.usage={window:{from,to,timezone:'UTC'},metrics:[{key:'usage_request_count',value:0,unit:'COUNT',aggregation:'WINDOW',included_statuses:['CREATED','RESERVED','UPSTREAM_ACTIVE','SETTLEMENT_PENDING','COMMITTED','RELEASED','REVIEW'],denominator_key:null},...['reconciliation_pending_count','reconciliation_stopped_count'].map(key=>({key,value:0,unit:'COUNT',aggregation:'POINT_IN_TIME',included_statuses:['SETTLEMENT_PENDING','REVIEW'],denominator_key:null}))],trend:{bucket_seconds:3600,points:Array.from({length:24},(_,i)=>({from:new Date(Date.parse(from)+i*3600000).toISOString(),to:new Date(Date.parse(from)+(i+1)*3600000).toISOString(),usage_request_count:0,reconciliation_attention_count:0}))}};}if(control.delay){control.delay=false;return new Promise(resolve=>{control.release=()=>resolve(json(raw));});}if(control.failure)return json({code:'CONTROLLED_PERMISSION_DENIED'},control.failure);return json(raw);}
+ if(url.pathname.endsWith('/token-resources/readiness'))return json({});
+ if(url.pathname.endsWith('/owner-candidates'))return json({items:[]});
+ if(url.pathname.endsWith('/models')||url.pathname.endsWith('/token-accounts')||url.pathname.endsWith('/provisionings'))return json({items:[],limit:50,has_more:false,next_cursor:null,as_of:'2026-10-09T00:00:00Z'});
+ if(/\/(models|token-accounts)\/[0-9a-f-]+$/.test(url.pathname))return json({code:'CONTROLLED_DETAIL_UNAVAILABLE'},503);
+ if(url.pathname.endsWith('/protocols'))return json({protocols:[],formulas:[]});
+ throw new Error('UNEXPECTED_CONTROLLED_READ '+url.pathname);
+};
+function render(){root.render(control.host?<AdminPlatformView client={client} copy={adminPlatformCopy[control.language]} language={control.language} onLanguageChange={language=>{control.language=language;render();}}/>:<AdminManagementWorkspace client={client} copy={adminPlatformCopy[control.language]} language={control.language} permissions={control.permissions} owner={control.owner} overviewFlags={control.flags} overviewAuthorizationVersion={control.version}/>);}
+control.render=render;control.labels=()=>tokenManagementCopy[control.language].modelToken;window.overview=control;render();

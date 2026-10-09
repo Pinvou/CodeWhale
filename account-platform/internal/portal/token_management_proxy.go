@@ -17,7 +17,7 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	}
 	if method == http.MethodGet {
 		switch resource {
-		case "/admin/v1/token-resources/readiness", "/admin/v1/models", "/admin/v1/protocols", "/admin/v1/formulas", "/admin/v1/token-accounts", "/admin/v1/provisionings", "/admin/v1/owner-candidates", "/admin/v1/resource-audit", "/admin/v1/model-catalog/impact/rollback", "/admin/v1/commands/by-idempotency-key", "/admin/v1/commands/recovery-queue":
+		case "/admin/v1/overviews/model-catalog", "/admin/v1/overviews/token-resources", "/admin/v1/overviews/model-operations", "/admin/v1/token-resources/readiness", "/admin/v1/models", "/admin/v1/protocols", "/admin/v1/formulas", "/admin/v1/token-accounts", "/admin/v1/provisionings", "/admin/v1/owner-candidates", "/admin/v1/resource-audit", "/admin/v1/model-catalog/impact/rollback", "/admin/v1/commands/by-idempotency-key", "/admin/v1/commands/recovery-queue":
 			return true
 		}
 	}

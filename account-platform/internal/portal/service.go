@@ -24,25 +24,28 @@ import (
 )
 
 type Config struct {
-	AdminTokenDetailsEnabled   bool
-	CredentialOrigin           *url.URL
-	Environment                string
-	IssuerURL                  *url.URL
-	JWKSURL                    *url.URL
-	PublicURL                  *url.URL
-	AuthorizationURL           *url.URL
-	TokenURL                   *url.URL
-	AccountURL                 *url.URL
-	TokenGatewayURL            *url.URL
-	BillingURL                 *url.URL
-	ClientID                   string
-	HandoffClientID            string
-	HandoffClientSecret        string
-	PrivateCAFile              string
-	HandoffSubjectTokenEnabled bool
-	SecureCookies              bool
-	SessionHandoffTTL          time.Duration
-	TrustedProxyIPs            []netip.Addr
+	TokenAdminProxyHMACKey              []byte
+	AdminModelOperationsOverviewEnabled bool
+	AdminModelTokenPageOverviewsEnabled bool
+	AdminTokenDetailsEnabled            bool
+	CredentialOrigin                    *url.URL
+	Environment                         string
+	IssuerURL                           *url.URL
+	JWKSURL                             *url.URL
+	PublicURL                           *url.URL
+	AuthorizationURL                    *url.URL
+	TokenURL                            *url.URL
+	AccountURL                          *url.URL
+	TokenGatewayURL                     *url.URL
+	BillingURL                          *url.URL
+	ClientID                            string
+	HandoffClientID                     string
+	HandoffClientSecret                 string
+	PrivateCAFile                       string
+	HandoffSubjectTokenEnabled          bool
+	SecureCookies                       bool
+	SessionHandoffTTL                   time.Duration
+	TrustedProxyIPs                     []netip.Addr
 }
 type Service struct {
 	config          Config
@@ -124,6 +127,10 @@ func NewService(config Config, store Store) (*Service, error) {
 			return nil, errors.New("credential origin must be isolated from the management portal origin")
 		}
 	}
+	if len(config.TokenAdminProxyHMACKey) > 0 && len(config.TokenAdminProxyHMACKey) < 32 || config.AdminModelTokenPageOverviewsEnabled && len(config.TokenAdminProxyHMACKey) < 32 {
+		return nil, errors.New("model and Token page overviews require a proxy HMAC key with at least 32 bytes")
+	}
+	config.TokenAdminProxyHMACKey = append([]byte(nil), config.TokenAdminProxyHMACKey...)
 	client, err := newPortalHTTPClient(config.PrivateCAFile)
 	if err != nil {
 		return nil, err
@@ -367,7 +374,7 @@ func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookies(w, session)
-	api.WriteJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "credential_origin": credentialOriginProjection(s.config)})
+	api.WriteJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "credential_origin": credentialOriginProjection(s.config), "feature_flags": map[string]bool{"admin_model_operations_overview": s.config.AdminModelOperationsOverviewEnabled, "admin_model_token_page_overviews": s.config.AdminModelTokenPageOverviewsEnabled}})
 }
 func (s *Service) sessionLineageStatus(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"schema_version": 1, "capable": true, "enabled": true})
@@ -859,6 +866,17 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 			return
 		}
 		request.Header.Set("X-Forwarded-For", source)
+	}
+	if upstream == s.config.TokenGatewayURL && tokenPageQuerySigningPath(r.Method, resource) {
+		source, valid := s.clientRiskSource(r)
+		if !valid {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_SOURCE", "the request source is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		if !s.signTokenPageQuery(request, source) {
+			api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_OVERVIEW_UNAVAILABLE", "the Token overview source authority is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
 	}
 	response, err := s.client.Do(request)
 	if err != nil {

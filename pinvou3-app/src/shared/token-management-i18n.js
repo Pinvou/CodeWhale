@@ -67,6 +67,15 @@ function completeTokenManagementCopy(translations) {
   };
   for (const language of ['zh', 'en', 'ja']) {
     const copy = translations[language].modelToken;
+    const provisioningCopy = {
+      zh: { title: 'Provisioning 概览', boundary: '仅汇总当前路由 Provisioning 权威事实。', unavailable: 'Provisioning 概览暂时不可用，运行列表仍可使用。' },
+      en: { title: 'Provisioning overview', boundary: 'Current authoritative route provisioning facts only.', unavailable: 'Provisioning overview is unavailable; the provisioning list remains available.' },
+      ja: { title: 'Provisioning 概要', boundary: '現在のルート Provisioning の正式な情報のみを集計します。', unavailable: 'Provisioning 概要は利用できません。実行一覧は引き続き利用できます。' },
+    }[language];
+    copy.pageOverviews.titles.modelOperations = provisioningCopy.title;
+    copy.pageOverviews.boundaries.modelOperations = provisioningCopy.boundary;
+    copy.pageOverviews.unavailable.modelOperations = provisioningCopy.unavailable;
+
     Object.assign(copy, additions[language], { commandErrors: { ...copy.commandErrors, ...additions[language].commandErrors } });
   }
   return translations;

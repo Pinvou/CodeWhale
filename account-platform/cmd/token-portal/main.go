@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"errors"
 	"io"
 	"log"
@@ -61,6 +62,31 @@ func loadPortalConfig(environment string, getenv func(string) string) (portal.Co
 			return portal.Config{}, errors.New(item.name + " must be an absolute HTTP(S) URL")
 		}
 		*item.target = parsed
+	}
+	for _, flag := range []struct {
+		name   string
+		target *bool
+	}{
+		{"PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED", &cfg.AdminModelOperationsOverviewEnabled},
+		{"PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED", &cfg.AdminModelTokenPageOverviewsEnabled},
+	} {
+		if raw := strings.TrimSpace(getenv(flag.name)); raw != "" {
+			enabled, err := strconv.ParseBool(raw)
+			if err != nil {
+				return portal.Config{}, errors.New(flag.name + " must be boolean")
+			}
+			*flag.target = enabled
+		}
+	}
+	if raw := strings.TrimSpace(getenv("TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64")); raw != "" {
+		key, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil || len(key) < 32 {
+			return portal.Config{}, errors.New("TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64 must contain at least 32 base64-decoded bytes")
+		}
+		cfg.TokenAdminProxyHMACKey = key
+	}
+	if cfg.AdminModelTokenPageOverviewsEnabled && len(cfg.TokenAdminProxyHMACKey) < 32 {
+		return portal.Config{}, errors.New("PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED requires TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64")
 	}
 	if raw := strings.TrimSpace(getenv("PORTAL_ADMIN_TOKEN_DETAILS_ENABLED")); raw != "" {
 		enabled, err := strconv.ParseBool(raw)

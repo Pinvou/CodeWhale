@@ -1,3 +1,4 @@
+import { AdminModelTokenPageOverview } from './AdminModelTokenPageOverview.jsx';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { adminModelTokenQueryUpdates, readAdminModelTokenModelTab, readAdminModelTokenQuery } from './admin-navigation.js';
 import { AdminProtocolFormulaWorkspace } from './AdminProtocolFormulaWorkspace.jsx';
@@ -118,6 +119,7 @@ export function AdminModelTokenWorkspace({ owner, section, copy, client, permiss
     tabs[target].click();
   };
   return <>
+    {['models', 'tokenResources'].includes(section) && <AdminModelTokenPageOverview {...{ section, client, permissions, routeVersion, onRouteChange }} copy={modelTokenCopy} userID={overviewUserID} authorizationVersion={overviewAuthorizationVersion} enabled={modelTokenPageOverviewsEnabled} onDrilldown={target => { cursorHistory.current[target.source] = []; onRouteChange({ ...adminModelTokenQueryUpdates(target.source, { ...target.query, cursor: '' }), ...target.page, [resultParameter]: null, [section === 'models' ? 'model_id' : 'token_account_id']: null }, 'push'); }} />}
     {notice && <div className="adm-inline-message info" role="status">{notice}</div>}
     {!modelTokenActionsEnabled && <div className="adm-inline-message info" role="status">{modelTokenCopy.actionsReadOnly}</div>}
     {section === 'models' && modelDetailsEnabled && modelID && granted.has('platform.models.read') && <AdminModelDetailWorkspace owner={owner} modelID={modelID} client={client} copy={modelTokenCopy} pricingCopy={copy} permissions={permissions} actionsEnabled={modelTokenActionsEnabled} pricingEditEnabled={modelPricingEditEnabled} routeVersion={routeVersion} onRouteChange={onRouteChange} onNavigate={onNavigate} onQueryChange={onQueryChange} cursorHistory={cursorHistory} onTabsKeyDown={moveOperationsTab} />}

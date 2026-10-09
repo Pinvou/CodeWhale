@@ -76,3 +76,33 @@ COMMIT;
 按数据库迁移成功、独立 agent sink 可用、各服务真实 health/readiness 的依赖启动。Billing 模型定价投影通过其实际本地定价库读取路径启用，未添加虚构的跨服务目录查询。Portal 使用 Token 管理 API；Account 用实际 Token snapshot/proof/effect/result，并保留现有 Billing 三命令。public edge 不直接开放 Token 管理或内部 workload 路径。
 
 当前源码、受控 TLS/HTTP、真实公开 PG schema 与独有 loopback NATS 证明分别记录其输入及限制。未运行真实 Compose/NGINX/OpenBao/Keycloak 发行或完整 E2E；目标系统的 ACL、TLS/DNS、端口隔离、部署审批、required CI 和生产恢复验证仍须实际完成，不能从单测或静态模板推断已通过。
+
+### F04 model and Token page overviews
+
+The model deployment overlay enables the two existing Portal overview flags and
+requires a reviewed Portal image built from the same F04 source and generated
+assets. Model catalog and route-health pages read the installed page projections;
+the Provisioning page reads the provisioning block. Token-only authority uses
+`TOKEN_ONLY` without a window; dual Token/usage authority uses the existing
+`window=24h` and strictly validates `TOKEN_AND_USAGE`, without presenting usage
+or reconciliation trends in this phase. Account/Token permission checks remain
+authoritative. Disabled flags do not mount these readers. Invalid, unavailable,
+or unsafe-integer counts do not become zero or rounded displayed counts.
+
+The legacy aggregate operations overview and usage/reconciliation trends belong
+to the first usage phase F05 and are not forwarded by this F04 Portal whitelist.
+
+
+Portal page queries use the existing Token HMAC-SHA256 source protocol. Set
+`TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64` in both the existing private
+Portal environment file (`TOKEN_PORTAL_PRIVATE_ENV_FILE`) and Token environment
+file (`TOKEN_GATEWAY_PRIVATE_ENV_FILE`) to the same externally managed key,
+with at least 32 decoded bytes. Never put its value into this template, browser
+configuration or logs. The Portal loader rejects malformed/short configured
+keys and an enabled page-overview flag without a key; disabled flags retain the
+existing key-absent startup behavior. Token keeps its current paginationKey,
+`WithAdminProxyHMACKey` verifier and private/loopback immediate-peer requirement.
+The Portal derives the source using its existing exact trusted-edge policy and
+signs the final method, upstream RequestURI (including query) and canonical IP;
+browser source/signature headers are not forwarded as authority. Actual remote
+deployment and secret injection are not exercised by the finite HTTP proof.

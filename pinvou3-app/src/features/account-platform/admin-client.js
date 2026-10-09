@@ -826,7 +826,10 @@ tokenAccountRecoveryActionByIdempotencyKey(commandReference, idempotencyKey, sig
     return this.mutate('token', `/admin/v1/commands/${encodeURIComponent(commandReference)}/recovery-actions/by-idempotency-key`, 'GET', undefined, idempotencyKey, signal);
   }
 
-provisionings(filtersOrSignal = {}, signal) {
+tokenModelCatalogOverview(signal) { return this.request('token', '/admin/v1/overviews/model-catalog', signal); }
+  tokenResourcesPageOverview(signal) { return this.request('token', '/admin/v1/overviews/token-resources', signal); }
+  tokenProvisioningPageOverview(signal, window = '') { return this.request('token', `/admin/v1/overviews/model-operations${window === '24h' ? '?window=24h' : ''}`, signal); }
+  provisionings(filtersOrSignal = {}, signal) {
     if (isAbortSignal(filtersOrSignal)) {
       return this.request('token', '/admin/v1/provisionings?limit=100', filtersOrSignal);
     }
