@@ -136,7 +136,7 @@ func TestPersonalUsageHoldClockBoundaries(t *testing.T) {
 			t.Error("invalid extension changed original active hold", err)
 		}
 	})
-	t.Run("expired-candidate-does-not-release-successful-renewal", func(t *testing.T) {
+	t.Run("expired-hold-cannot-be-renewed-or-released-without-proof", func(t *testing.T) {
 		r, ctx, w, clock, base := personalHoldClockFixture(t)
 		id := uuid.New()
 		h, err := r.Reserve(ctx, id, w.ID, 100, nil, base.Add(time.Minute))
@@ -144,43 +144,19 @@ func TestPersonalUsageHoldClockBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 		clock.Store(base.Add(2 * time.Minute).UnixNano())
-		tx := blockPersonalWallet(t, ctx, r, w.ID)
-		extension := make(chan error, 1)
-		go func() { _, err := r.ExtendHold(ctx, id, h.ID, base.Add(time.Hour), 0); extension <- err }()
-		waitForPersonalWalletWaiters(t, ctx, r, 1)
-		type expiredResult struct {
-			count int
-			err   error
+		if _, err = r.ExtendHold(ctx, id, h.ID, base.Add(time.Hour), 40); !errors.Is(err, ErrConflict) {
+			t.Fatal("expired hold renewed", err)
 		}
-		expiry := make(chan expiredResult, 1)
-		go func() { count, err := r.ExpireHolds(ctx, 100); expiry <- expiredResult{count, err} }()
-		waitForPersonalWalletWaiters(t, ctx, r, 2)
-		if err = tx.Commit(ctx); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case err = <-extension:
-			if err != nil {
-				t.Fatal("still-active original hold failed genuine renewal", err)
-			}
-		case <-time.After(3 * time.Second):
-			t.Fatal("renewal did not leave controlled lock")
-		}
-		select {
-		case result := <-expiry:
-			if result.err != nil || result.count != 0 {
-				t.Error("stale expiry candidate released renewed hold", result.count, result.err)
-			}
-		case <-time.After(3 * time.Second):
-			t.Fatal("expiry did not leave controlled lock")
+		if count, err := r.ExpireHolds(ctx, 100); count != 0 || !errors.Is(err, ErrHoldExpiryProofRequired) {
+			t.Fatal("unproven expiry must fail closed", count, err)
 		}
 		got, err := getHoldByUsage(ctx, r.pool, id, false)
-		if err != nil || got.Status != "ACTIVE" || !got.ExpiresAt.Equal(base.Add(time.Hour)) {
-			t.Error("successful renewal lost original active hold", err)
+		if err != nil || got.Status != "ACTIVE" || got.MaxMicrocredits != 100 || !got.ExpiresAt.Equal(h.ExpiresAt) {
+			t.Fatal("expired hold changed", err)
 		}
 		var reserved int64
 		if err = r.pool.QueryRow(ctx, `SELECT reserved_microcredits FROM wallets WHERE id=$1`, w.ID).Scan(&reserved); err != nil || reserved != 100 {
-			t.Error("renewed usage lost wallet reservation", err)
+			t.Fatal("expiry lost reservation", reserved, err)
 		}
 	})
 }

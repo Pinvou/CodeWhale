@@ -54,6 +54,14 @@ test("feature-local changes select core and feature smokes", () => {
   );
 });
 
+test("account platform changes route all five concrete F05 browser smokes", () => {
+  const selected = labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/PersonalUsageWorkspace.jsx"]));
+  for (const feature of ["model-selection", "native-code", "billing-notice", "usage", "usage-governance"]) {
+    assert.ok(selected.includes(`npm:test:account-platform-${feature}-ui`), `${feature} browser smoke must run for account changes`);
+    assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])).includes(`npm:test:account-platform-${feature}-ui`), `${feature} browser smoke must run for shared changes`);
+  }
+});
+
 test("knowledge changes select the desktop knowledge smoke", () => {
   assert.deepEqual(
     labels(
@@ -100,4 +108,12 @@ test("unknown frontend features fail closed to the full browser suite", () => {
 
 test("an empty or unrelated diff fails closed", () => {
   assert.deepEqual(labels(selectFrontendSmokes(["docs/ci.md"])), fullLabels);
+});
+
+test("organization and member unit browsers run for feature and shared changes", () => {
+  for (const target of ["test:account-platform-organization-ui", "test:account-platform-member-units-ui"]) {
+    assert.ok(fullLabels.includes(`npm:${target}`));
+    assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/ModelPolicyWorkspace.jsx"])).includes(`npm:${target}`));
+    assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])).includes(`npm:${target}`));
+  }
 });

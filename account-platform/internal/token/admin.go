@@ -134,6 +134,8 @@ func stableReconciliationDiagnostic(value *string) *string {
 }
 
 type adminRepository interface {
+	AdminUsageRequests(context.Context, int) ([]AdminUsageRequest, error)
+	AdminUsageRequest(context.Context, uuid.UUID) (AdminUsageRequest, error)
 	AdminOverview(context.Context) (AdminOverview, error)
 	AdminTokenAccounts(context.Context, int) ([]AdminTokenAccount, error)
 	AdminTokenAccount(context.Context, uuid.UUID) (AdminTokenAccountDetail, error)

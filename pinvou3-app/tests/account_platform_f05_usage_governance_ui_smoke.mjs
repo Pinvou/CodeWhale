@@ -13,7 +13,7 @@ assert.ok(browserPath, 'Browser unavailable; usage UI validation not performed')
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-f05-usage-')); const ownedProfile = fs.realpathSync(profile);
 let vite, browser, page, passed = 0; const errors = [];
 try {
-  vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } }); await vite.listen();
+  vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null, fs: { allow: [root, fs.realpathSync(path.join(root, 'node_modules'))], deny: [] } } }); await vite.listen();
   browser = await puppeteer.launch({ executablePath: browserPath, headless: 'new', userDataDir: profile, args: ['--disable-gpu', '--no-first-run'] });
   page = await browser.newPage(); page.setDefaultTimeout(10000); page.on('pageerror', error => errors.push(error.message));
   const url = `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f05-usage-governance.html`;

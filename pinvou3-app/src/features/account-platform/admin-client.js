@@ -787,6 +787,14 @@ catalogRollbackImpact(sourceCatalogVersion, signal) {
     return this.request('token', `/admin/v1/model-catalog/impact/rollback?${query}`, signal);
   }
 
+tokenOperationsOverview(window = '24h', signal) {
+  if (!['24h', '7d', '30d'].includes(window)) throw new Error('INVALID_OVERVIEW_WINDOW');
+  return this.request('token', `/admin/v1/operations-overview?${new URLSearchParams({ window })}`, signal);
+}
+tokenModelOperationsPageOverview(window = '', signal) {
+  if (window && !['24h', '7d', '30d'].includes(window)) throw new Error('INVALID_OVERVIEW_WINDOW');
+  return this.request('token', `/admin/v1/overviews/model-operations${window ? `?${new URLSearchParams({ window })}` : ''}`, signal);
+}
 usageRequests(filters = {}, signal) {
     // F05 advertises personal execution, not an organization producer/filter.
     const personalFilters = { ...filters };

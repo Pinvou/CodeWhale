@@ -196,6 +196,25 @@ func TestOrganizationLifecyclePublicRepositoryAndAccountClient(t *testing.T) {
 			t.Fatalf("disabled organization create: %v", err)
 		}
 	})
+	t.Run("default-route-cannot-create-disabled-organization", func(t *testing.T) {
+		org := uuid.New()
+		if _, err := client.Apply(ctx, org, "DISABLED", 1); err != nil {
+			t.Fatal(err)
+		}
+		provider, err := NewDefaultRouteProvisioner(repository, ProviderURLPolicy{environment: "test", allowedHosts: map[string]bool{"example.invalid": true}}, DefaultRouteConfig{Provider: "controlled", AdapterVersion: "new-api-v1", BaseURL: "https://example.invalid", Secret: []byte("controlled-provider-secret"), Priority: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		provider.WithTokenAccountCreateCapability(true)
+		model := CatalogModel{ModelID: uuid.New(), ProtocolDefinitionID: uuid.MustParse("00000000-0000-7000-8200-000000000000"), ProtocolCode: "CHAT", ProviderID: "controlled", AdapterVersion: "new-api-v1", UpstreamModelRef: "controlled-model", LifecycleStatus: "PUBLISHED", SourceAvailable: true}
+		if err := provider.provisionResources(ctx, AuthorizationContext{UserID: uuid.New(), ContextType: "ORGANIZATION", OrganizationID: &org}, uuid.New(), model, 1); !errors.Is(err, ErrForbidden) {
+			t.Fatal("default route bypassed disabled organization", err)
+		}
+		var accounts int
+		if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM token_accounts WHERE owner_organization_id=$1`, org).Scan(&accounts); err != nil || accounts != 0 {
+			t.Fatal("default route left an account behind", accounts, err)
+		}
+	})
 	t.Run("new-usage-denied-existing-receipt-replayable", func(t *testing.T) {
 		org, user, wallet := uuid.New(), uuid.New(), uuid.New()
 		if _, err := client.Apply(ctx, org, "ACTIVE", 1); err != nil {

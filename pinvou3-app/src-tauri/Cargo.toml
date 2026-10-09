@@ -88,6 +88,7 @@ tauri-plugin-notification = "2"
 
 # 异步 / 错误
 anyhow = "1.0"
+axum = { version = "0.8.5", features = ["json"] }
 async-trait = "0.1" # impl 底座 ToolSpec(kb_search Agentic 工具)
 agent-backend-api = { path = "../../pinvou-cli/crates/agent-backend-api", optional = true }
 tokio = { version = "1.49", features = ["full"] }

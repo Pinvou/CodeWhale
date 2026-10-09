@@ -1,5 +1,6 @@
 use super::prelude::*;
 use crate::platform::credential_store::CredentialReference;
+use crate::platform::prefs::ModelSelectionRef;
 
 /// 从 disk 读最新 UserPrefs。
 /// 注意走 disk 而非 engine.bridge.prefs——如果用户手改 settings.json，

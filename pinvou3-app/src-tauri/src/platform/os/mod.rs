@@ -53,4 +53,6 @@ pub use interface::{
 };
 
 #[cfg(target_os = "windows")]
+// Retain the OS interface for compatibility with inactive legacy source.
+#[allow(unused_imports)]
 pub use interface::bios_serial_number;
