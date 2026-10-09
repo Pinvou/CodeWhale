@@ -75,6 +75,16 @@ Nginx 的 `client_max_body_size` 设为 `4224m`，为 4 GiB 安装器之外的 m
 
 ## Docker Compose 部署
 
+本地与生产默认仍从 Docker Hub 的 `node:20-bookworm-slim` 构建。
+CI 为避免 Docker Hub 匿名拉取限流，使用 Google 官方
+[`mirror.gcr.io` 缓存](https://cloud.google.com/artifact-registry/docs/pull-cached-dockerhub-images)，
+并固定 PostgreSQL、Node、Nginx 的镜像索引摘要。CI 的 `PINVOU_UPDATE_NODE_IMAGE`
+同时传给直接 Docker 构建和 Compose 构建；不设置时保留原默认来源。
+更新摘要前应从 Docker Hub 与 Google 缓存分别读取索引及目标平台 manifest，
+核对原始字节 SHA-256、配置和有序层摘要一致，再运行实际 Linux 容器门禁。
+缓存可能清理未使用镜像，固定摘要不可拉取仍应让门禁失败；不通过跳过检查或隐式换源处理。
+manifest 可读不能代替服务启动、Nginx 配置、健康检查和认证状态接口验收。
+
 1. 确认 `/var/www/pinvou3/latest.json` 是经过复核的当前线上清单、是权限为 `0644` 的实际普通文件，
    且运行容器的 UID 对该目录有写权限。不得为了通过启动门禁而将未经复核的清单直接改为公开可读。
 2. 生成令牌并写入不进 Git 的 `update-release-console/deploy/.env`：
