@@ -6,14 +6,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
 )
 
 func TestF14RefundAndChargebackThroughProductionPortal(t *testing.T) {
 	id := uuid.NewString()
-	body := `{"command_type":"ENTITLEMENT_COMPONENT_ADJUSTMENT","idempotency_key":"controlled-correction-key","target_resource_type":"ENTITLEMENT_PACKAGE","target_resource_id":"` + id + `","normalized_command":{"package_id":"` + id + `","payment_order_id":"` + id + `","reason_code":"ORIGINAL_SPLIT_MISMATCH"},"reason":"Controlled correction approval reason","redacted_evidence":[],"expected_impact":{},"critical_resource_versions":{"wallet_version":9007199254740993},"financial_snapshot":{"package_total_microcredits":9223372036854775807}}`
+
+	evidenceID, anomalyID := uuid.NewString(), uuid.NewString()
+	refundBody := `{"command_type":"REFUND_EXCEPTION_REPAIR","idempotency_key":"controlled-refund-repair-key","target_resource_type":"REFUND","target_resource_id":"` + id + `","normalized_command":{"refund_id":"` + id + `","payment_evidence_id":"` + evidenceID + `","anomaly_case_id":"` + anomalyID + `","reason_code":"PROVIDER_REFUNDED_LOCAL_REVERSAL_MISSING"},"reason":"Controlled payment repair approval reason","redacted_evidence":[],"expected_impact":{},"critical_resource_versions":{"refund_updated_at":"2026-10-01T00:00:00Z","anomaly_version":9007199254740993,"facts_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","policy_version":1},"financial_snapshot":{"amount_fen":9007199254740993,"credit_microcredits":9223372036854775807,"provider_refund_id":"controlled-provider-refund","wallet_id":"` + id + `","wallet_version":9007199254740993,"package_id":"` + id + `","revoked_microcredits":9223372036854775806,"shortfall_microcredits":1}}`
 	for _, test := range []struct {
 		name, method, path, body string
 		session, csrf            bool
@@ -21,7 +22,7 @@ func TestF14RefundAndChargebackThroughProductionPortal(t *testing.T) {
 		header                   string
 	}{
 
-		{"installed-refund-parent-typed-create", "POST", "/api/admin/approvals/requests", strings.Replace(body, "ENTITLEMENT_COMPONENT_ADJUSTMENT", "REFUND_EXCEPTION_REPAIR", 1), true, true, 201, "1"},
+		{"installed-refund-parent-typed-create", "POST", "/api/admin/approvals/requests", refundBody, true, true, 201, "1"},
 		{"installed-chargeback-typed-create", "POST", "/api/admin/approvals/requests", `{"command_type":"CHARGEBACK_FINANCIAL_REPAIR","idempotency_key":"controlled-chargeback-key","target_resource_type":"CHARGEBACK_CASE","target_resource_id":"00000000-0000-4000-8000-000000000001","normalized_command":{"chargeback_case_id":"00000000-0000-4000-8000-000000000001","payment_evidence_id":"00000000-0000-4000-8000-000000000002","expected_case_version":9007199254740993,"reason_code":"BASE_SHORTFALL_COMPENSATION"},"reason":"Controlled chargeback correction reason","redacted_evidence":[],"expected_impact":{},"critical_resource_versions":{"chargeback_case_version":9007199254740993,"facts_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","policy_version":1},"financial_snapshot":{"base_shortfall_microcredits":9223372036854775807,"wallet_id":"00000000-0000-4000-8000-000000000003","wallet_version":9007199254740993,"package_id":"00000000-0000-4000-8000-000000000004","component_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","provider_chargeback_id":"controlled-provider-chargeback"}}`, true, true, 201, "1"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

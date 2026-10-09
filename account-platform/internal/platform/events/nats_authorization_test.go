@@ -67,9 +67,11 @@ func TestNATSFixedAuthorizationAndOverlap(t *testing.T) {
 	if len(operator.Publish) != 3+2*len(provisionedConsumers())+2*len(approvalconsumer.BillingCommands()) || !reflect.DeepEqual(operator.Subscribe, []string{"_INBOX.event-resource-operator.>"}) {
 		t.Fatal("operator permissions")
 	}
-	// F11–F13 add exactly INFO and CREATE for the write-off, payment and
-	// refund-repair durables. Other grants remain fixed and wildcard-free.
+	// F11–F14 add exactly INFO and CREATE for the write-off, payment,
+	// refund-repair and chargeback-repair durables. Other grants remain fixed and wildcard-free.
 	for _, want := range []string{
+		"$JS.API.CONSUMER.INFO.ACCOUNT_PLATFORM.billing-chargeback-financial-repair-executor-p1-v1",
+		"$JS.API.CONSUMER.CREATE.ACCOUNT_PLATFORM.billing-chargeback-financial-repair-executor-p1-v1.account.approval-command.authorized.v1",
 		"$JS.API.CONSUMER.INFO.ACCOUNT_PLATFORM.billing-refund-exception-repair-executor-p1-v1",
 		"$JS.API.CONSUMER.CREATE.ACCOUNT_PLATFORM.billing-refund-exception-repair-executor-p1-v1.account.approval-command.authorized.v1",
 		"$JS.API.CONSUMER.INFO.ACCOUNT_PLATFORM.billing-payment-financial-repair-executor-p1-v1",

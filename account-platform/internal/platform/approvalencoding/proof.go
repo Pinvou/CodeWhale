@@ -95,6 +95,16 @@ var commandSpecs = map[string]commandSpec{
 		financialInts: []string{"amount_fen", "credit_microcredits", "revoked_microcredits",
 			"shortfall_microcredits", "wallet_version"},
 	},
+	"CHARGEBACK_FINANCIAL_REPAIR": {
+		policyVersion: 1, snapshotVersion: 1, targetType: "CHARGEBACK_CASE", executor: "billing-command-executor",
+		normalizedKeys: []string{"chargeback_case_id", "payment_evidence_id", "expected_case_version", "reason_code"},
+		criticalKeys:   []string{"chargeback_case_version", "facts_digest", "policy_version"},
+		financialKeys: []string{"base_shortfall_microcredits", "wallet_id", "wallet_version", "package_id",
+			"component_digest", "provider_chargeback_id"},
+		normalizedInts: []string{"expected_case_version"},
+		criticalInts:   []string{"chargeback_case_version", "policy_version"},
+		financialInts:  []string{"base_shortfall_microcredits", "wallet_version"},
+	},
 	"TOKEN_MODEL_LIFECYCLE_CHANGE": {
 		policyVersion: 2, snapshotVersion: 2, targetType: "MODEL", executor: "token-command-executor",
 		normalizedKeys: []string{"model_id", "lifecycle_plan_id", "lifecycle_plan_version", "target_lifecycle", "effective_at", "existing_session_cutoff_at", "replacement_model_id"},
@@ -539,6 +549,21 @@ func validateProofValues(commandType string, spec commandSpec, targetType, targe
 			!validUUIDField(financialObject["wallet_id"]) || integers["f.wallet_version"] < 1 ||
 			!validUUIDField(financialObject["package_id"]) ||
 			reasonErr != nil || reasonCode != "PROVIDER_REFUNDED_LOCAL_REVERSAL_MISSING" {
+			return ErrInvalidDocument
+		}
+	case "CHARGEBACK_FINANCIAL_REPAIR":
+		reasonCode, reasonErr := stringValue(normalizedObject["reason_code"])
+		providerChargebackID, providerErr := stringValue(financialObject["provider_chargeback_id"])
+		if !validUUID(targetID) || !equalString(normalizedObject["chargeback_case_id"], targetID) ||
+			integers["n.expected_case_version"] < 1 ||
+			integers["n.expected_case_version"] != integers["c.chargeback_case_version"] ||
+			!validUUIDField(normalizedObject["payment_evidence_id"]) ||
+			integers["c.policy_version"] != spec.policyVersion || !hexField(criticalObject["facts_digest"]) ||
+			integers["f.base_shortfall_microcredits"] < 1 ||
+			!validUUIDField(financialObject["wallet_id"]) || integers["f.wallet_version"] < 1 ||
+			!validUUIDField(financialObject["package_id"]) || !hexField(financialObject["component_digest"]) ||
+			providerErr != nil || len(providerChargebackID) == 0 || len(providerChargebackID) > 200 ||
+			reasonErr != nil || reasonCode != "BASE_SHORTFALL_COMPENSATION" {
 			return ErrInvalidDocument
 		}
 	}

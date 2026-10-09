@@ -8,7 +8,8 @@ export const ledgerRepairCopy = {
       "LEDGER_REPAIR": "目标过账 ID",
       "RECEIVABLE_WRITE_OFF": "应收 ID",
       "PAYMENT_FINANCIAL_REPAIR": "支付订单 ID",
-      "REFUND_EXCEPTION_REPAIR": "退款 ID"
+      "REFUND_EXCEPTION_REPAIR": "退款 ID",
+      "CHARGEBACK_FINANCIAL_REPAIR": "拒付案件 ID"
     },
     "fields": {
       "receivable_id": "应收 ID",
@@ -39,7 +40,13 @@ export const ledgerRepairCopy = {
       "shortfall_microcredits": "短缺金额（微积分）",
       "package_id": "权益包 ID",
       "refund_updated_at": "退款更新时间",
-      "anomaly_version": "异常版本"
+      "anomaly_version": "异常版本",
+      "chargeback_case_id": "拒付案件 ID",
+      "expected_case_version": "预期拒付案件版本",
+      "chargeback_case_version": "拒付案件版本",
+      "base_shortfall_microcredits": "BASE 短缺金额（微积分）",
+      "component_digest": "组件摘要",
+      "provider_chargeback_id": "支付渠道拒付引用"
     },
     "readFacts": "读取冻结事实",
     "reading": "正在读取…",
@@ -60,7 +67,8 @@ export const ledgerRepairCopy = {
     "draftFailed": "创建审批草稿失败，请稍后重试。",
     "controlChanged": "审批控制已变化，请重新读取冻结事实。",
     "paymentRepairTitle": "支付财务修复",
-    "refundRepairTitle": "退款例外修复"
+    "refundRepairTitle": "退款例外修复",
+    "chargebackRepairTitle": "拒付财务修复"
   },
   "en": {
     "title": "Start a financial repair approval",
@@ -71,7 +79,8 @@ export const ledgerRepairCopy = {
       "LEDGER_REPAIR": "Target posting ID",
       "RECEIVABLE_WRITE_OFF": "Receivable ID",
       "PAYMENT_FINANCIAL_REPAIR": "Payment order ID",
-      "REFUND_EXCEPTION_REPAIR": "Refund ID"
+      "REFUND_EXCEPTION_REPAIR": "Refund ID",
+      "CHARGEBACK_FINANCIAL_REPAIR": "Chargeback case ID"
     },
     "fields": {
       "receivable_id": "Receivable ID",
@@ -102,7 +111,13 @@ export const ledgerRepairCopy = {
       "shortfall_microcredits": "Shortfall (microcredits)",
       "package_id": "Entitlement package ID",
       "refund_updated_at": "Refund updated at",
-      "anomaly_version": "Anomaly version"
+      "anomaly_version": "Anomaly version",
+      "chargeback_case_id": "Chargeback case ID",
+      "expected_case_version": "Expected chargeback case version",
+      "chargeback_case_version": "Chargeback case version",
+      "base_shortfall_microcredits": "BASE shortfall (microcredits)",
+      "component_digest": "Component digest",
+      "provider_chargeback_id": "Provider chargeback reference"
     },
     "readFacts": "Read frozen facts",
     "reading": "Reading…",
@@ -123,7 +138,8 @@ export const ledgerRepairCopy = {
     "draftFailed": "Creating the approval draft failed. Try again later.",
     "controlChanged": "The approval control changed; read the frozen facts again.",
     "paymentRepairTitle": "Payment financial repair",
-    "refundRepairTitle": "Refund exception repair"
+    "refundRepairTitle": "Refund exception repair",
+    "chargebackRepairTitle": "Chargeback financial repair"
   },
   "ja": {
     "title": "財務修復の承認を起動",
@@ -134,7 +150,8 @@ export const ledgerRepairCopy = {
       "LEDGER_REPAIR": "対象仕訳転記 ID",
       "RECEIVABLE_WRITE_OFF": "売掛金 ID",
       "PAYMENT_FINANCIAL_REPAIR": "支払注文 ID",
-      "REFUND_EXCEPTION_REPAIR": "返金 ID"
+      "REFUND_EXCEPTION_REPAIR": "返金 ID",
+      "CHARGEBACK_FINANCIAL_REPAIR": "チャージバック案件 ID"
     },
     "fields": {
       "receivable_id": "売掛金 ID",
@@ -165,7 +182,13 @@ export const ledgerRepairCopy = {
       "shortfall_microcredits": "不足額（マイクロクレジット）",
       "package_id": "権利パッケージ ID",
       "refund_updated_at": "返金更新時刻",
-      "anomaly_version": "異常版"
+      "anomaly_version": "異常版",
+      "chargeback_case_id": "チャージバック案件 ID",
+      "expected_case_version": "予想チャージバック案件版",
+      "chargeback_case_version": "チャージバック案件版",
+      "base_shortfall_microcredits": "BASE 不足額（マイクロクレジット）",
+      "component_digest": "構成要素ダイジェスト",
+      "provider_chargeback_id": "決済チャージバック参照"
     },
     "readFacts": "固定事実を読み込む",
     "reading": "読み込み中…",
@@ -186,7 +209,8 @@ export const ledgerRepairCopy = {
     "draftFailed": "承認ドラフトの作成に失敗しました。後でもう一度お試しください。",
     "controlChanged": "承認制御が変更されました。固定事実を再読み込みしてください。",
     "paymentRepairTitle": "支払財務修復",
-    "refundRepairTitle": "返金例外修復"
+    "refundRepairTitle": "返金例外修復",
+    "chargebackRepairTitle": "チャージバック財務修復"
   }
 };
 

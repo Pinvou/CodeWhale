@@ -20,7 +20,7 @@ func TestInstalledPaymentActivationContract(t *testing.T) {
 			}
 		})
 	}
-	for _, command := range []string{"CHARGEBACK_FINANCIAL_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR", "USAGE_SETTLEMENT_REPAIR"} {
+	for _, command := range []string{"RECONCILIATION_FINANCIAL_REPAIR", "USAGE_SETTLEMENT_REPAIR"} {
 		t.Run("future-"+command, func(t *testing.T) {
 			s := entitlementFirstDeliverySnapshot()
 			for i := range s.Activations {

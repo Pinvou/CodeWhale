@@ -238,6 +238,29 @@ func (domain *billingAuthorizationDomain) LookupAuthorizationResult(ctx context.
 		}
 		ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
 		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}, true, nil
+	case chargebackFinancialRepairCommand:
+		if domain.repository == nil {
+			return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable
+		}
+		owner, ok := domain.repository.(interface {
+			ChargebackFinancialRepairForRequest(context.Context, uuid.UUID) (ChargebackFinancialRepairResult, error)
+		})
+		if !ok {
+			return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable
+		}
+		result, err := owner.ChargebackFinancialRepairForRequest(ctx, binding.ApprovalRequestID)
+		if errors.Is(err, ErrNotFound) {
+			return authorizationDomainResult{}, false, nil
+		}
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
+		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}, true, nil
 	}
 }
 
@@ -286,6 +309,8 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 		return domain.executePaymentFinancialRepair(ctx, binding, event, command)
 	case refundExceptionRepairCommand:
 		return domain.executeRefundExceptionRepair(ctx, binding, event, command)
+	case chargebackFinancialRepairCommand:
+		return domain.executeChargebackFinancialRepair(ctx, binding, event, command)
 	default:
 		return authorizationDomainAttempt{StableFailureCode: "COMMAND_MAPPING_INVALID", FailureIsDefinite: true}
 	}
@@ -478,6 +503,9 @@ func validAuthorizationCommandTarget(event approvalencoding.AuthorizationEvent) 
 	case receivableWriteOffCommand:
 		id, err := uuid.Parse(event.TargetResourceID)
 		return err == nil && id != uuid.Nil && id.String() == event.TargetResourceID && event.PolicyVersion == 1 && event.TargetResourceType == "RECEIVABLE"
+	case chargebackFinancialRepairCommand:
+		id, err := uuid.Parse(event.TargetResourceID)
+		return event.PolicyVersion == 1 && err == nil && id != uuid.Nil && id.String() == event.TargetResourceID && event.TargetResourceType == "CHARGEBACK_CASE"
 	default:
 		return false
 	}
@@ -935,6 +963,98 @@ func (domain *billingAuthorizationDomain) executeRefundExceptionRepair(ctx conte
 			CreditMicrocredits: financial.CreditMicrocredits, ProviderRefundID: financial.ProviderRefundID,
 			RevokedMicrocredits: financial.RevokedMicrocredits, ShortfallMicrocredits: financial.ShortfallMicrocredits,
 			WalletID: walletID, WalletVersion: financial.WalletVersion, PackageID: packageID, FactsDigest: critical.FactsDigest,
+		},
+	})
+	if err != nil {
+		return classifyAuthorizationDomainFailure(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return authorizationDomainAttempt{}
+	}
+	ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
+	return authorizationDomainAttempt{Result: authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}}
+}
+
+func (domain *billingAuthorizationDomain) executeChargebackFinancialRepair(ctx context.Context, binding ApprovalAuthorizationBinding,
+	event approvalencoding.AuthorizationEvent, command ApprovedCommand) authorizationDomainAttempt {
+	if domain.repository == nil {
+		return authorizationDomainAttempt{}
+	}
+	var normalized struct {
+		ChargebackCaseID    uuid.UUID `json:"chargeback_case_id"`
+		PaymentEvidenceID   uuid.UUID `json:"payment_evidence_id"`
+		ExpectedCaseVersion int64     `json:"expected_case_version"`
+		ReasonCode          string    `json:"reason_code"`
+	}
+	var critical struct {
+		ChargebackCaseVersion int64  `json:"chargeback_case_version"`
+		FactsDigest           string `json:"facts_digest"`
+		PolicyVersion         int64  `json:"policy_version"`
+	}
+	var financial struct {
+		BaseShortfallMicrocredits int64  `json:"base_shortfall_microcredits"`
+		WalletID                  string `json:"wallet_id"`
+		WalletVersion             int64  `json:"wallet_version"`
+		PackageID                 string `json:"package_id"`
+		ComponentDigest           string `json:"component_digest"`
+		ProviderChargebackID      string `json:"provider_chargeback_id"`
+	}
+	if json.Unmarshal(event.NormalizedCommand, &normalized) != nil || json.Unmarshal(event.CriticalResourceVersions, &critical) != nil ||
+		json.Unmarshal(event.FinancialSnapshot, &financial) != nil {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	walletID, walletErr := uuid.Parse(strings.TrimSpace(financial.WalletID))
+	packageID, packageErr := uuid.Parse(strings.TrimSpace(financial.PackageID))
+	providerChargebackID := strings.TrimSpace(financial.ProviderChargebackID)
+	if normalized.ChargebackCaseID == uuid.Nil || normalized.PaymentEvidenceID == uuid.Nil ||
+		normalized.ExpectedCaseVersion < 1 || normalized.ReasonCode != chargebackFinancialRepairReason ||
+		critical.PolicyVersion != 1 || critical.ChargebackCaseVersion != normalized.ExpectedCaseVersion ||
+		!validHexDigest(critical.FactsDigest) || !validHexDigest(financial.ComponentDigest) ||
+		financial.BaseShortfallMicrocredits < 1 || walletErr != nil || walletID == uuid.Nil ||
+		financial.WalletVersion < 1 || packageErr != nil || packageID == uuid.Nil ||
+		providerChargebackID == "" || providerChargebackID != financial.ProviderChargebackID {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	if event.CommandType != chargebackFinancialRepairCommand || event.TargetResourceType != "CHARGEBACK_CASE" ||
+		event.TargetResourceID != normalized.ChargebackCaseID.String() ||
+		command.TargetResourceType != event.TargetResourceType || command.TargetResourceID != event.TargetResourceID ||
+		!sameRawJSON(event.NormalizedCommand, command.NormalizedCommand) ||
+		!sameRawJSON(event.CriticalResourceVersions, command.CriticalResourceVersions) ||
+		!sameRawJSON(event.FinancialSnapshot, command.FinancialSnapshot) ||
+		event.ApprovalRequestID != binding.ApprovalRequestID || command.ApprovalRequestID != binding.ApprovalRequestID ||
+		event.EventID != binding.EventID || event.ApprovalControlEpoch != binding.ApprovalEpoch ||
+		event.ExecutorIdentity != billingApprovalExecutorIdentity || command.ExecutorIdentity != billingApprovalExecutorIdentity ||
+		binding.ExecutorIdentity != billingApprovalExecutorIdentity ||
+		event.PolicyVersion != 1 || command.PolicyVersion != 1 || binding.PolicyVersion != 1 ||
+		!validIndependentApproval(command.RequesterUserID, command.ApproverUserID, command.DecisionReason) {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	snapshot, err := domain.repository.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return authorizationDomainAttempt{}
+	}
+	active, ok := findActiveAuthorizationCommand(snapshot, chargebackFinancialRepairCommand)
+	if !ok || active.PolicyVersion != 1 || active.SnapshotSchemaVersion != 1 {
+		return definiteAuthorizationFailure("POLICY_OR_SCHEMA_MISMATCH")
+	}
+	owner, ok := domain.repository.(interface {
+		ApplyChargebackFinancialRepair(context.Context, ChargebackFinancialRepairExecutionInput) (ChargebackFinancialRepairResult, error)
+	})
+	if !ok {
+		return authorizationDomainAttempt{}
+	}
+	result, err := owner.ApplyChargebackFinancialRepair(ctx, ChargebackFinancialRepairExecutionInput{
+		ApprovalRequestID: binding.ApprovalRequestID, AuthorizationEventID: binding.EventID, ApprovalEpoch: binding.ApprovalEpoch,
+		ExecutionKey:  command.ExecutionIdempotencyKey,
+		PolicyVersion: active.PolicyVersion, SchemaVersion: int64(active.SnapshotSchemaVersion), ActivationVersion: active.Version,
+		Command: ChargebackFinancialRepairCommandInput{
+			ChargebackCaseID: normalized.ChargebackCaseID, PaymentEvidenceID: normalized.PaymentEvidenceID,
+		},
+		Frozen: ChargebackFinancialRepairFrozenFacts{
+			CaseVersion: critical.ChargebackCaseVersion, BaseShortfallMicrocredits: financial.BaseShortfallMicrocredits,
+			ComponentDigest: financial.ComponentDigest, WalletID: walletID, WalletVersion: financial.WalletVersion,
+			PackageID: packageID, FactsDigest: critical.FactsDigest,
 		},
 	})
 	if err != nil {

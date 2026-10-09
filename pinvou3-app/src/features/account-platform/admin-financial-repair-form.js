@@ -34,6 +34,10 @@ export const financialRepairInputs = Object.freeze({
     { key: 'payment_evidence_id', kind: 'uuid' },
     { key: 'anomaly_case_id', kind: 'uuid' },
   ]),
+  CHARGEBACK_FINANCIAL_REPAIR: Object.freeze([
+    { key: 'target_resource_id', kind: 'uuid' },
+    { key: 'payment_evidence_id', kind: 'uuid' },
+  ]),
 
 });
 

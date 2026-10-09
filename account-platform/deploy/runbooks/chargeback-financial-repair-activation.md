@@ -1,5 +1,15 @@
 # 拒付财务修复（`CHARGEBACK_FINANCIAL_REPAIR`）受控激活手册
 
+## 本轮实现与验证边界
+
+独立复验曾在 Account relay 就绪阶段失败，尚未进入 Billing 装配、proof、consumer 或财务执行，具体原因没有被原固定错误消息保留下来。后续带安全诊断的隔离运行通过，仅说明该次未重现，不能证明偶发根因已修。F14 专属测试现在可输出闭合阶段、SQLSTATE 和固定错误分类；共享默认装配及公开错误仍脱敏，原 5 秒就绪预算与全部权限判据不变。此未定位风险由 Issue #1719 保留，即使随后正式独立测试通过也不自动视为根因收尾。
+
+前向迁移 `900019_chargeback_activation_execution_lock` 提供无参数、固定 v1/s1 的 owner 锁接口。新财务事务在已有不可变回执只读核对之后，通过该接口锁住 activation 行并核对 ACTIVE、版本与时间；部署身份的停用更新必须等待正在执行的财务事务提交。运行身份只持有私有 schema USAGE 和函数 EXECUTE，不能修改 activation 或成为 owner。900019 的 Down 显式返回 55000；停止消费者及切换 INACTIVE 是操作回退，不能删除已执行事实。
+
+本轮隔离 PostgreSQL 验证包含未激活及旧版本零写、真实停用等待、停用后原回执只读重放、默认 ACL 注入回收、错误身份拒绝、未来迁移成功及失败后的权限保持。原 070 的不可变触发器保留；收尾撤回纠正事实表的 UPDATE/DELETE，保留 SELECT/INSERT，关联 Issue #1716。固定历史 execution-key 摘要保持原 wire 字节，通用 helper 命名不增强 hash 隔离；跨命令隔离依赖原审批、目标和 proof claim 绑定，Issue #1678 尚待后继波次完成。
+
+跨域验收使用自有 UUID 数据库、正式 Account/Billing 角色、真实 HTTP proof 和注册消费者，外部依赖受控；这不代表部署 NATS、生产激活或生产端到端演练已经通过。旧环境夹具的角色前置失败、旧钱包占位快照导致的 proof 拒绝，以及新增测试接口名和冻结投影不完整的失败均保留在私有验收记录，不作为生产缺陷或通过证据。跨域装配的可复验性修复关联 Issue #1717；其收尾仍须独立验证和正常推送。
+
 状态：能力已就绪，**默认未激活**。本手册只描述受控激活（把 Billing 逐命令 activation 行从 `INACTIVE` 翻到 `ACTIVE`）的操作与证据要求；是否执行必须另有授权，且 GSA-38～40 的切换、回滚与发布门禁全部通过后才能开始。
 
 ## 1. 前置条件（全部满足才可开始）
@@ -25,7 +35,7 @@ SELECT (SELECT count(*) FROM chargeback_financial_repair_cases WHERE approval_re
        (SELECT count(*) FROM billing_approval_proof_claims) AS proof_claims;
 
 -- Billing：存量清单——“已确认拒付、但仍留有可撤销额度”的候选会走既有 CONFIRM_CHARGEBACK 路径，
--- 只有 in_scope=true（全部组件可撤销额度为 0）的案件才在首版范围内。
+-- 以下只读 SQL 仅生成候选排查清单，不是权威 owner precheck 或激活准入证明。
 SELECT chargeback.id,
        chargeback.entitlement_package_id,
        chargeback.provider_chargeback_id,
@@ -64,7 +74,7 @@ WHERE chargeback.status = 'REVIEW_REQUIRED'
   AND NOT EXISTS(SELECT 1 FROM chargeback_financial_repair_cases repair WHERE repair.chargeback_case_id = chargeback.id);
 ```
 
-逐条判据：只有 `revocable_microcredits = 0`、`base_shortfall_microcredits > 0` 且 `evidence_ok`/`transaction_ok`/`anomaly_ok`/四个 `*_clear` 全部为真时，该案件才是首版范围（`in_scope`）。**存在任何可撤销额度（`revocable_microcredits > 0`）的案件必须走既有 `CONFIRM_CHARGEBACK` 收口**，不得用本命令部分补偿；BONUS 侧在任何情况下都不参与本命令。
+候选筛选：只有 `revocable_microcredits = 0`、`base_shortfall_microcredits > 0` 且 `evidence_ok`/`transaction_ok`/`anomaly_ok`/四个 `*_clear` 全部为真时，该案件才通过此初筛；它仍须通过正式 owner 预检和 proof 的完整身份、关联、版本、零事实与可撤销量检查。**存在任何可撤销额度（`revocable_microcredits > 0`）的案件必须走既有 `CONFIRM_CHARGEBACK` 收口**，不得用本命令部分补偿；BONUS 侧在任何情况下都不参与本命令。
 
 Account 侧核验：`approval_requests` 中该命令不得存在 `APPROVED`/`EXECUTING`/`EXECUTION_FAILED` 的遗留行；`outbox_events` 中不得存在未消费的该命令授权事件。任一不满足即阻断激活，并按设计 §8 失败分类只读查证。
 
@@ -87,7 +97,7 @@ WHERE command_type = 'CHARGEBACK_FINANCIAL_REPAIR'
 
 1. Billing 投影：`GET /internal/v1/approval-command-activations` 返回该命令 `policy_version=1 / snapshot_schema_version=1 / state=ACTIVE`，其余命令状态不变，`billing_approval_command_activation_history` 追加一行且旧行未被改写。
 2. Account 读取：`billinggovernance` 客户端观测到 `ACTIVE`，五入口不再返回 `ErrBillingGovernanceInactive`。
-3. Proof：以真实 Account 身份调用 Billing proof endpoint，对一件存量清单内（`in_scope=true`）的案件返回 `PROOF_VALID`/`ALLOW`；对仍可撤销额度、证据非 `CHARGEBACK_CONFIRMED`、交易非 `PAID/LATE_PAID`、案件已 `CONFIRMED/DISMISSED`、`B<=0`、钱包非 `ACTIVE` 或存在 `chargeback-repair:` journal / 应收 / 修复 case 的候选返回对应 DENY。proof 本身不得触发任何 Provider 请求。
+3. Proof：以真实 Account 身份调用 Billing proof endpoint，对一件候选清单中且经完整 owner 预检确认的案件返回 `PROOF_VALID`/`ALLOW`；对仍可撤销额度、证据非 `CHARGEBACK_CONFIRMED`、交易非 `PAID/LATE_PAID`、案件已 `CONFIRMED/DISMISSED`、`B<=0`、钱包非 `ACTIVE` 或存在 `chargeback-repair:` journal / 应收 / 修复 case 的候选返回对应 DENY。proof 本身不得触发任何 Provider 请求。
 4. 消费者：durable `billing-chargeback-financial-repair-executor-p1-v1` 处于消费状态（Q+1 起始序与收据一致），DLQ/重试计数为 0。
 5. 受控演练：以一条一次性审批完成端到端执行，核对：
    - `chargeback_cases` 由 `REVIEW_REQUIRED` 推进为 `CONFIRMED`，`revoked_base/bonus_microcredits` 保持 0、`resolution_code='CONFIRM_CHARGEBACK_SHORTFALL'`、`version+1`；
@@ -95,7 +105,8 @@ WHERE command_type = 'CHARGEBACK_FINANCIAL_REPAIR'
    - 一笔两腿平衡的 `CHARGEBACK` journal（引用 `chargeback-repair:<case_id>`：`RECEIVABLE_ASSET -B`、`CHARGEBACK_CLEARING +B`）；
    - 组件、lot、`wallets.posted_microcredits` 与 BONUS 侧**逐行零变化**；
    - `payment_anomaly_cases` 由 `PENDING` 推进为 `APPLIED`（version CAS），并写入不可改写的 `chargeback_financial_repair_cases` 行（含审批联动列）；
-   - result-first 幂等重放不产生第二条 case/journal/应收；
+   - 同事务重算订单 `chargeback_summary/attention_summary` 并推进 `summary_version`，与案件 CONFIRMED 与新应收一致；
+   - result-first 按原审批、授权事件、epoch、execution key 和目标案件核对收据，幂等重放不产生第二条 case/journal/应收；
    - 在演练记录中登记真实 ID、审批/授权事件 ID 与 Provider 调用计数为 0 的观测。
 
 将上述输出归档到发布证据（脱敏，不含 Secret/Token/Cookie/个人信息与 Provider 原文）。

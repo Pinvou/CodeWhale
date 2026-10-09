@@ -154,10 +154,11 @@ func TestChargebackFinancialRepairPostgresIntegration(t *testing.T) {
 	t.Cleanup(cancel)
 	repository, _ := newAdminPaginationIntegrationRepository(t, ctx, databaseURL)
 	pool := repository.pool
+	activationVersion := chargebackFixtureActivation(t, ctx, pool)("ACTIVE")
 
 	fixture := seedChargebackShortfall(t, ctx, repository, true)
 	command := ChargebackFinancialRepairCommandInput{ChargebackCaseID: fixture.ChargebackCaseID, PaymentEvidenceID: fixture.EvidenceID}
-	plan, err := chargebackFinancialRepairPlanFrom(ctx, pool, command, 1, 1, 1)
+	plan, err := chargebackFinancialRepairPlanFrom(ctx, pool, command, 1, 1, activationVersion)
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -168,13 +169,13 @@ func TestChargebackFinancialRepairPostgresIntegration(t *testing.T) {
 	execute := func(requestID, eventID uuid.UUID, command ChargebackFinancialRepairCommandInput, frozen ChargebackFinancialRepairFrozenFacts) (ChargebackFinancialRepairResult, error) {
 		return repository.ApplyChargebackFinancialRepair(ctx, ChargebackFinancialRepairExecutionInput{
 			ApprovalRequestID: requestID, AuthorizationEventID: eventID, ApprovalEpoch: 3,
-			ExecutionKey: "chargeback-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+			ExecutionKey: "chargeback-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
 			Command: command, Frozen: frozen,
 		})
 	}
 	frozen := ChargebackFinancialRepairFrozenFacts{CaseVersion: plan.CaseVersion,
 		BaseShortfallMicrocredits: plan.BaseShortfallMicrocredits, ComponentDigest: plan.ComponentDigest,
-		WalletID: plan.WalletID, WalletVersion: plan.WalletVersion, PackageID: plan.PackageID}
+		WalletID: plan.WalletID, WalletVersion: plan.WalletVersion, PackageID: plan.PackageID, FactsDigest: plan.FactsDigest}
 	requestID, eventID := uuid.New(), uuid.New()
 	applied, err := execute(requestID, eventID, command, frozen)
 	if err != nil {

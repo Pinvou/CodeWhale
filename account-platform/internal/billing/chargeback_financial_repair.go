@@ -64,15 +64,17 @@ type ChargebackFinancialRepairCommandInput struct {
 // Revocable must be zero for every component: any remaining availability means
 // the case belongs to the existing confirmation path, not to this repair.
 type chargebackRepairComponent struct {
-	ID                uuid.UUID
-	ComponentType     string
-	EffectiveOriginal int64
-	Revocable         int64
+	ID                                                      uuid.UUID
+	ComponentType                                           string
+	EffectiveOriginal                                       int64
+	Revocable                                               int64
+	Original, ReclassifiedOut, Available, Active, Suspended int64
 }
 
 // ChargebackFinancialRepairPlan is the closed, recomputable owner projection of
 // one approved chargeback shortfall compensation.
 type ChargebackFinancialRepairPlan struct {
+	PolicyVersion             int64
 	ChargebackCaseID          uuid.UUID
 	CaseVersion               int64
 	EvidenceID                uuid.UUID
@@ -91,9 +93,8 @@ type ChargebackFinancialRepairPlan struct {
 }
 
 // ChargebackFinancialRepairFrozenFacts is the wire-visible owner projection an
-// approval froze. FactsDigest is an owner-only recomputation input; a consumed
-// authorization leaves it empty and the execution transaction recomputes it,
-// while a presented digest must match exactly.
+// approval froze. Fresh execution requires the exact owner digest. A matching
+// immutable committed result is returned before these fresh snapshot gates.
 type ChargebackFinancialRepairFrozenFacts struct {
 	CaseVersion               int64
 	BaseShortfallMicrocredits int64
@@ -140,10 +141,10 @@ func chargebackRepairConflict(stage string, cause error) error {
 func chargebackFinancialRepairPlanFrom(ctx context.Context, source chargebackRepairReader, input ChargebackFinancialRepairCommandInput,
 	policyVersion, schemaVersion, activationVersion int64) (ChargebackFinancialRepairPlan, error) {
 	if input.ChargebackCaseID == uuid.Nil || input.PaymentEvidenceID == uuid.Nil ||
-		policyVersion < 1 || schemaVersion < 1 || activationVersion < 1 {
+		policyVersion != 1 || schemaVersion != 1 || activationVersion < 1 {
 		return ChargebackFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
-	plan := ChargebackFinancialRepairPlan{ChargebackCaseID: input.ChargebackCaseID, EvidenceID: input.PaymentEvidenceID}
+	plan := ChargebackFinancialRepairPlan{ChargebackCaseID: input.ChargebackCaseID, EvidenceID: input.PaymentEvidenceID, PolicyVersion: policyVersion}
 	var caseStatus string
 	var revokedBase, revokedBonus int64
 	var caseReceivableID *uuid.UUID
@@ -237,6 +238,8 @@ FROM entitlement_components WHERE package_id=$1 ORDER BY id`, plan.PackageID)
 			rows.Close()
 			return ChargebackFinancialRepairPlan{}, err
 		}
+		item.Original, item.ReclassifiedOut = historicalOriginal, reclassifiedOut
+		item.Available, item.Active, item.Suspended = available, active, suspended
 		item.EffectiveOriginal = effective
 		item.Revocable = available + active + suspended
 		if item.Revocable != 0 {
@@ -270,11 +273,16 @@ FROM entitlement_components WHERE package_id=$1 ORDER BY id`, plan.PackageID)
 		ComponentType         string `json:"component_type"`
 		EffectiveOriginal     int64  `json:"effective_original_microcredits"`
 		RevocableMicrocredits int64  `json:"revocable_microcredits"`
+		Original              int64  `json:"original_microcredits"`
+		ReclassifiedOut       int64  `json:"reclassified_out_microcredits"`
+		Available             int64  `json:"available_microcredits"`
+		Active                int64  `json:"active_grant_microcredits"`
+		Suspended             int64  `json:"suspended_grant_microcredits"`
 	}
 	facts := make([]componentFacts, 0, len(components))
 	for _, item := range components {
 		facts = append(facts, componentFacts{ComponentID: item.ID.String(), ComponentType: item.ComponentType,
-			EffectiveOriginal: item.EffectiveOriginal, RevocableMicrocredits: item.Revocable})
+			EffectiveOriginal: item.EffectiveOriginal, RevocableMicrocredits: item.Revocable, Original: item.Original, ReclassifiedOut: item.ReclassifiedOut, Available: item.Available, Active: item.Active, Suspended: item.Suspended})
 	}
 	digest, err := json.Marshal(map[string]any{
 		"command_type": chargebackFinancialRepairCommand, "policy_version": policyVersion,
@@ -290,7 +298,8 @@ FROM entitlement_components WHERE package_id=$1 ORDER BY id`, plan.PackageID)
 	}
 	plan.ComponentDigest = digestHex(digest)
 	// Zero facts: no previous compensation journal, receivable or case row, and no
-	// in-flight forced refund or refund reversal for the same package.
+	// historical forced refund or refund row for the same package. The existing
+	// predicate deliberately remains unchanged while eligibility is reviewed.
 	var journalExists, receivableExists, caseExists, conflictCase bool
 	reference := chargebackRepairReferencePrefix + plan.ChargebackCaseID.String()
 	if err := source.QueryRow(ctx, `SELECT
@@ -316,8 +325,26 @@ WHERE chargeback_case_id=$1 AND anomaly_type='CHARGEBACK'`, plan.ChargebackCaseI
 	if plan.AnomalyVersion < 1 || (plan.AnomalyStatus != "PENDING" && plan.AnomalyStatus != "APPLIED") {
 		return ChargebackFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
+	// Persisted source tuples are part of the frozen owner facts. Decode JSONB
+	// with Number before hashing so wallet and financial bigint tokens stay exact.
+	var ownerRaw []byte
+	if err := source.QueryRow(ctx, `SELECT jsonb_build_object(
+ 'case',(SELECT to_jsonb(c) FROM chargeback_cases c WHERE c.id=$1),
+ 'evidence',(SELECT to_jsonb(e) FROM payment_evidence e WHERE e.id=$2),
+ 'anomaly',(SELECT to_jsonb(a) FROM payment_anomaly_cases a WHERE a.id=$3),
+ 'order',(SELECT to_jsonb(o) FROM payment_orders o WHERE o.id=$4),
+ 'transaction',(SELECT to_jsonb(t) FROM payment_transactions t WHERE t.id=$5),
+ 'package',(SELECT to_jsonb(p) FROM entitlement_packages p WHERE p.id=$6),
+ 'components',COALESCE((SELECT jsonb_agg(jsonb_build_object('component',to_jsonb(c),'lot',to_jsonb(l)) ORDER BY c.id) FROM entitlement_components c JOIN credit_lots l ON l.id=c.credit_lot_id WHERE c.package_id=$6),'[]'::jsonb),
+ 'wallet',(SELECT jsonb_build_object('id',w.id,'status',w.status,'version',w.version,'posted_microcredits',w.posted_microcredits,'receivable_microcredits',w.receivable_microcredits,'financial_status',w.financial_status) FROM wallets w WHERE w.id=$7))`, plan.ChargebackCaseID, plan.EvidenceID, plan.AnomalyCaseID, plan.PaymentOrderID, plan.PaymentTransactionID, plan.PackageID, plan.WalletID).Scan(&ownerRaw); err != nil {
+		return ChargebackFinancialRepairPlan{}, err
+	}
+	ownerSnapshot, err := paymentRepairJSONSnapshot(ownerRaw)
+	if err != nil {
+		return ChargebackFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
 	encoded, err := json.Marshal(map[string]any{
-		"command_type": chargebackFinancialRepairCommand, "chargeback_case_id": plan.ChargebackCaseID.String(),
+		"command_type": chargebackFinancialRepairCommand, "owner_snapshot": ownerSnapshot, "zero_facts": []bool{journalExists, receivableExists, caseExists, conflictCase}, "chargeback_case_id": plan.ChargebackCaseID.String(),
 		"case_version": plan.CaseVersion, "case_status": caseStatus,
 		"provider_chargeback_id": plan.ProviderChargebackID, "payment_evidence_id": plan.EvidenceID.String(),
 		"evidence_status": evidenceStatus, "evidence_payload_digest": payloadDigest,
@@ -341,7 +368,7 @@ WHERE chargeback_case_id=$1 AND anomaly_type='CHARGEBACK'`, plan.ChargebackCaseI
 // recomputation.
 func chargebackFinancialRepairProofProjection(plan ChargebackFinancialRepairPlan) ([]byte, []byte) {
 	critical, _ := json.Marshal(map[string]any{
-		"chargeback_case_version": plan.CaseVersion, "facts_digest": plan.FactsDigest, "policy_version": 1,
+		"chargeback_case_version": plan.CaseVersion, "facts_digest": plan.FactsDigest, "policy_version": plan.PolicyVersion,
 	})
 	financial, _ := json.Marshal(map[string]any{
 		"base_shortfall_microcredits": plan.BaseShortfallMicrocredits,
@@ -420,6 +447,43 @@ func (r *PostgresRepository) ApplyChargebackFinancialRepair(ctx context.Context,
 	} else if found {
 		return stored, tx.Commit(ctx)
 	}
+	// Match the ordinary confirmation lock order before deriving fresh facts.
+	if err := lockTransactionKey(ctx, tx, chargebackRepairLockScope, input.Command.PaymentEvidenceID.String()); err != nil {
+		return ChargebackFinancialRepairResult{}, err
+	}
+	var orderID, transactionID, packageID, walletID, evidenceID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT payment_order_id,payment_transaction_id,entitlement_package_id,wallet_id,payment_evidence_id FROM chargeback_cases WHERE id=$1`, input.Command.ChargebackCaseID).Scan(&orderID, &transactionID, &packageID, &walletID, &evidenceID); err != nil {
+		return ChargebackFinancialRepairResult{}, err
+	}
+	if evidenceID != input.Command.PaymentEvidenceID {
+		return ChargebackFinancialRepairResult{}, ErrApprovalSnapshotMismatch
+	}
+	if err := lockPaymentSourcePackage(ctx, tx, packageID, transactionID, orderID, walletID); err != nil {
+		return ChargebackFinancialRepairResult{}, err
+	}
+	var lockedID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM chargeback_cases WHERE id=$1 FOR UPDATE`, input.Command.ChargebackCaseID).Scan(&lockedID); err != nil {
+		return ChargebackFinancialRepairResult{}, err
+	}
+	rows, err := tx.Query(ctx, `SELECT id FROM entitlement_components WHERE package_id=$1 ORDER BY id FOR UPDATE`, packageID)
+	if err != nil {
+		return ChargebackFinancialRepairResult{}, err
+	}
+	for rows.Next() {
+		if err := rows.Scan(&lockedID); err != nil {
+			rows.Close()
+			return ChargebackFinancialRepairResult{}, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return ChargebackFinancialRepairResult{}, err
+	}
+	rows.Close()
+	now := r.now()
+	if err := chargebackFinancialRepairExecutionActivation(ctx, tx, input, now); err != nil {
+		return ChargebackFinancialRepairResult{}, err
+	}
 	plan, err := chargebackFinancialRepairPlanFrom(ctx, tx, input.Command, input.PolicyVersion, input.SchemaVersion, input.ActivationVersion)
 	if err != nil {
 		return ChargebackFinancialRepairResult{}, err
@@ -427,21 +491,7 @@ func (r *PostgresRepository) ApplyChargebackFinancialRepair(ctx context.Context,
 	if mismatch := chargebackFinancialRepairFrozenMismatch(plan, input.Frozen); mismatch != "" {
 		return ChargebackFinancialRepairResult{}, wrapSnapshotMismatch(mismatch)
 	}
-	// Serialize with the existing confirmation path for the same chargeback
-	// evidence before any effect is written.
-	if err := lockTransactionKey(ctx, tx, chargebackRepairLockScope, plan.EvidenceID.String()); err != nil {
-		return ChargebackFinancialRepairResult{}, err
-	}
-	now := r.now()
-	var lockedStatus string
-	var lockedVersion int64
-	if err := tx.QueryRow(ctx, `SELECT status,version FROM chargeback_cases WHERE id=$1 FOR UPDATE`, plan.ChargebackCaseID).
-		Scan(&lockedStatus, &lockedVersion); err != nil {
-		return ChargebackFinancialRepairResult{}, err
-	}
-	if lockedStatus != "REVIEW_REQUIRED" || lockedVersion != plan.CaseVersion {
-		return ChargebackFinancialRepairResult{}, wrapSnapshotMismatch("chargeback_case_version")
-	}
+
 	tag, err := tx.Exec(ctx, `UPDATE chargeback_cases SET status='CONFIRMED',resolution_code='CONFIRM_CHARGEBACK_SHORTFALL',
 resolution_reason=$3,resolved_at=$4,version=version+1
 WHERE id=$1 AND version=$2 AND status='REVIEW_REQUIRED' AND revoked_base_microcredits=0
@@ -480,12 +530,15 @@ WHERE id=$1 AND anomaly_type='CHARGEBACK' AND financial_action_status='PENDING' 
 			return ChargebackFinancialRepairResult{}, chargebackRepairConflict("anomaly_cas", err)
 		}
 	}
+	if _, err := tx.Exec(ctx, `UPDATE payment_orders payment_order SET chargeback_summary=(SELECT jsonb_build_object('open_count',count(*) FILTER(WHERE chargeback.status='CONFIRMED'),'lost_amount_fen',COALESCE(sum(transaction.amount_fen) FILTER(WHERE chargeback.status='CONFIRMED'),0)::text) FROM chargeback_cases chargeback JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id WHERE chargeback.payment_order_id=$1),attention_summary=CASE WHEN EXISTS(SELECT 1 FROM receivables receivable WHERE receivable.payment_order_id=$1 AND receivable.outstanding_microcredits>0) THEN 'RECEIVABLE_OPEN' WHEN payment_order.attention_summary='RECEIVABLE_OPEN' THEN 'NORMAL' ELSE payment_order.attention_summary END,summary_version=summary_version+1,updated_at=$2 WHERE payment_order.id=$1`, plan.PaymentOrderID, now); err != nil {
+		return ChargebackFinancialRepairResult{}, err
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO chargeback_financial_repair_cases(id,approval_request_id,authorization_event_id,
 approval_epoch,execution_key_digest,chargeback_case_id,anomaly_case_id,wallet_id,package_id,payment_evidence_id,
 base_shortfall_microcredits,component_digest,facts_digest,journal_entry_id,receivable_id,state,created_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'EXECUTED',$16)`,
 		caseID, input.ApprovalRequestID, input.AuthorizationEventID, input.ApprovalEpoch,
-		ledgerRepairExecutionKeyDigest(executionKey), plan.ChargebackCaseID, plan.AnomalyCaseID, plan.WalletID,
+		legacyFinancialExecutionKeyDigestV1(executionKey), plan.ChargebackCaseID, plan.AnomalyCaseID, plan.WalletID,
 		plan.PackageID, plan.EvidenceID, plan.BaseShortfallMicrocredits, plan.ComponentDigest, plan.FactsDigest,
 		entryID, receivable.ID, now); err != nil {
 		return ChargebackFinancialRepairResult{}, err
@@ -566,7 +619,7 @@ FROM chargeback_financial_repair_cases WHERE chargeback_case_id=$1`, input.Comma
 		return ChargebackFinancialRepairResult{}, false, err
 	}
 	if storedRequestID != input.ApprovalRequestID || storedEventID != input.AuthorizationEventID ||
-		storedEpoch != input.ApprovalEpoch || storedDigest != ledgerRepairExecutionKeyDigest(executionKey) {
+		storedEpoch != input.ApprovalEpoch || storedDigest != legacyFinancialExecutionKeyDigestV1(executionKey) {
 		return ChargebackFinancialRepairResult{}, false, ErrConflict
 	}
 	stored, err := readChargebackFinancialRepair(ctx, source, input.ApprovalRequestID)
@@ -580,8 +633,7 @@ FROM chargeback_financial_repair_cases WHERE chargeback_case_id=$1`, input.Comma
 }
 
 // chargebackFinancialRepairFrozenMismatch compares the frozen wire projection
-// with the owner-recomputed plan. The consumed authorization freezes only the
-// wire-visible projection, so an empty facts digest is not a caller claim.
+// with the owner-recomputed plan. Fresh execution never accepts an empty digest.
 func chargebackFinancialRepairFrozenMismatch(plan ChargebackFinancialRepairPlan, frozen ChargebackFinancialRepairFrozenFacts) string {
 	switch {
 	case plan.CaseVersion != frozen.CaseVersion:
@@ -596,10 +648,29 @@ func chargebackFinancialRepairFrozenMismatch(plan ChargebackFinancialRepairPlan,
 		return "wallet_version"
 	case plan.PackageID != frozen.PackageID:
 		return "package_id"
-	case frozen.FactsDigest == "":
-		return ""
 	case plan.FactsDigest != frozen.FactsDigest:
 		return "facts_digest"
 	}
 	return ""
+}
+
+func chargebackFinancialRepairExecutionActivation(ctx context.Context, source chargebackRepairReader, input ChargebackFinancialRepairExecutionInput, now time.Time) error {
+	active := ApprovalCommandActivation{CommandType: chargebackFinancialRepairCommand, PolicyVersion: 1, SnapshotSchemaVersion: 1, State: "INACTIVE"}
+	var enabled bool
+	err := source.QueryRow(ctx, `SELECT active,activation_version,updated_at FROM billing_approval_execution.lock_chargeback_activation()`).
+		Scan(&enabled, &active.Version, &active.UpdatedAt)
+	if enabled {
+		active.State = "ACTIVE"
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrApprovalSnapshotMismatch
+	}
+	if err != nil {
+		return err
+	}
+	if !validActivationItem(active, chargebackFinancialRepairCommand, billingApprovalActivationSpecs[chargebackFinancialRepairCommand], now) ||
+		active.State != "ACTIVE" || active.PolicyVersion != input.PolicyVersion || int64(active.SnapshotSchemaVersion) != input.SchemaVersion || active.Version != input.ActivationVersion {
+		return ErrApprovalSnapshotMismatch
+	}
+	return nil
 }

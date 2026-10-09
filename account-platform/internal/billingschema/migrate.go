@@ -53,6 +53,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if err := validateRefundActivationLock(input); err != nil {
 		return nil, err
 	}
+	if err := validateChargebackActivationLock(input); err != nil {
+		return nil, err
+	}
 	if err := validateReceivableActivationLock(input); err != nil {
 		return nil, err
 	}

@@ -29,6 +29,11 @@ export const financialRepairCommands = Object.freeze({
       { key: 'amount_microcredits', kind: 'integer' },
     ],
   },
+  CHARGEBACK_FINANCIAL_REPAIR: {
+    targetResourceType: 'CHARGEBACK_CASE', reasonKey: 'reason_code',
+    reasonCode: 'BASE_SHORTFALL_COMPENSATION', targetKey: 'chargeback_case_id',
+    fields: [{ key: 'chargeback_case_id', kind: 'uuid' }, { key: 'payment_evidence_id', kind: 'uuid' }, { key: 'expected_case_version', kind: 'integer' }],
+  },
   REFUND_EXCEPTION_REPAIR: {
     targetResourceType: 'REFUND', reasonKey: 'reason_code',
     reasonCode: 'PROVIDER_REFUNDED_LOCAL_REVERSAL_MISSING', targetKey: 'refund_id',
@@ -99,6 +104,18 @@ export function financialRepairPrecheck(value) {
     if (!validField(normalized[field.key], field)) {
       return null;
     }
+  }
+  if (value.command_type === 'CHARGEBACK_FINANCIAL_REPAIR') {
+    try {
+      if (normalized.reason_code !== command.reasonCode || critical.policy_version !== 1 ||
+        !/^[0-9a-f]{64}$/.test(critical.facts_digest || '') ||
+        integerMoney(critical.chargeback_case_version) !== integerMoney(normalized.expected_case_version) ||
+        integerMoney(financial.base_shortfall_microcredits) <= 0n || integerMoney(financial.wallet_version) <= 0n ||
+        !/^[0-9a-f]{64}$/.test(financial.component_digest || '') ||
+        !uuidPattern.test(financial.wallet_id || '') || !uuidPattern.test(financial.package_id || '') ||
+        typeof financial.provider_chargeback_id !== 'string' || !financial.provider_chargeback_id.trim() ||
+        financial.provider_chargeback_id.trim() !== financial.provider_chargeback_id) return null;
+    } catch { return null; }
   }
   if (value.command_type === 'REFUND_EXCEPTION_REPAIR') {
     try {

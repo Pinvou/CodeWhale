@@ -144,6 +144,21 @@ func precheckBillingApprovalCommand(ctx context.Context, repository billingAppro
 		return owner.RefundExceptionRepairProofInput(ctx, RefundExceptionRepairCommandInput{
 			RefundID: refundID, PaymentEvidenceID: evidenceID, AnomalyCaseID: anomalyID,
 		})
+	case chargebackFinancialRepairCommand:
+		caseID, caseOK := validPrecheckUUID(request.TargetResourceID)
+		evidenceID, evidenceOK := validPrecheckUUID(request.PaymentEvidenceID)
+		if !caseOK || !evidenceOK || request.ReasonCode != chargebackFinancialRepairReason || request.AnomalyCaseID != "" || request.PaymentOrderID != "" || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		owner, ok := repository.(interface {
+			ChargebackFinancialRepairProofInput(context.Context, ChargebackFinancialRepairCommandInput) (approvalencoding.LegacyProofInput, error)
+		})
+		if !ok {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		return owner.ChargebackFinancialRepairProofInput(ctx, ChargebackFinancialRepairCommandInput{
+			ChargebackCaseID: caseID, PaymentEvidenceID: evidenceID,
+		})
 	}
 	return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
 }

@@ -1,6 +1,6 @@
 # 拒付财务修复（`CHARGEBACK_FINANCIAL_REPAIR`）领域设计
 
-状态：领域设计冻结；当前私有完整组合已实现 handler、closed proof、executor、durable consumer 与只读恢复，默认 activation 仍为 `INACTIVE`，未部署或激活。首版范围仅 **BASE 短缺补偿入账**，沿用 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`。本文后续章节保留原冻结业务契约；完整发行、审批跨域与生产激活验收仍须独立完成。
+状态：领域设计冻结；F14 本地当前实现包含 handler、closed proof、executor、durable consumer 与只读恢复，默认 activation 仍为 `INACTIVE`，未部署或激活。首版范围仅 **BASE 短缺补偿入账**，沿用 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`。以下现状说明与冻结业务契约一同用于本 PR 审核；完整发行、审批跨域与生产激活验收仍须独立完成。
 
 ## 1. 设计阶段基线（历史）
 
@@ -27,9 +27,10 @@
 
 1. 一条 `journal_entries`：`entry_type='CHARGEBACK'`、`business_reference='chargeback-repair:'||<chargeback_case_id>`，`description` 为固定模板；postings 恰好两条：`RECEIVABLE_ASSET -B`（无 lot）与 `CHARGEBACK_CLEARING +B`（无 lot），`B>0` 且合计 0。
 2. 一条应收：`source_type='CHARGEBACK'`、`source_reference='chargeback-repair:'||<case_id>`、`original=B`、`outstanding=B`，按既有 `createReceivableWithinTransaction` 语义同步钱包 `receivable_microcredits += B`、`financial_status='RECEIVABLE_OPEN'`、`financial_freeze_reason='CHARGEBACK'`、`version+1`。
-3. `chargeback_cases` 单行推进（`WHERE id=$1 AND version=$2`）：`status='CONFIRMED'`、`revoked_base_microcredits=0`、`revoked_bonus_microcredits=0`、`receivable_id=<新应收>`、`resolution_code='CONFIRM_CHARGEBACK_SHORTFALL'`、`resolution_reason=<审批摘要>`、`resolved_at=now`、`version+1`。
+3. `chargeback_cases` 单行推进（`WHERE id=$1 AND version=$2`）：`status='CONFIRMED'`、`revoked_base_microcredits=0`、`revoked_bonus_microcredits=0`、`receivable_id=<新应收>`、`resolution_code='CONFIRM_CHARGEBACK_SHORTFALL'`、`resolution_reason=固定领域模板`、`resolved_at=now`、`version+1`。
 4. 同一事务把该案件的 `CHARGEBACK` 异常推进为 `financial_action_status='APPLIED'`（`version+1`、`updated_at`，`status/resolution_code/resolved_at` 不变），复用 §7 的受控 CAS 语句。
 5. 一条 `chargeback_financial_repair_cases` 不可变审计行（见 §7.1）。
+6. 与既有拒付确认路径同事务维护 `payment_orders.chargeback_summary/attention_summary/summary_version`，由当前案件和应收事实重算已确认拒付 open 数与 lost 金额，并标明 `RECEIVABLE_OPEN`。
 
 **明确禁止**：
 
@@ -42,11 +43,11 @@
 
 | 证据 | 要求 |
 |---|---|
-| Provider 拒付确认 | `payment_evidence.evidence_type='CHARGEBACK'` 且 `provider_status='CHARGEBACK_CONFIRMED'`，其 `payment_order_id`/`payment_transaction_id` 与案件一致，`provider_refund_id`/`evidence_key` 与案件 `provider_chargeback_id` 一致 |
+| Provider 拒付确认 | `payment_evidence.evidence_type='CHARGEBACK'` 且 `provider_status='CHARGEBACK_CONFIRMED'`，其 `payment_order_id`/`payment_transaction_id` 与案件一致，`evidence_key` 与案件 `provider_chargeback_id` 一致。既有拒付写入者不填写退款专用的 `provider_refund_id`，本命令不依赖该字段 |
 | 案件事实 | `chargeback_cases.status='REVIEW_REQUIRED'`、`revoked_base_microcredits=0`、`revoked_bonus_microcredits=0`、`receivable_id IS NULL`，`version` 参与 CAS |
 | 交易事实 | 交易状态 `PAID`/`LATE_PAID`，package 与交易/订单绑定一致，钱包存在且 `status='ACTIVE'` |
 | 短缺事实 | 遍历 package 全部组件：`revocable=available+active+suspended` 必须**全部为 0**；`B=sum(BASE.effective_original)` 且 `B>0`（`effective_original=original−reclassified_out`，与既有 `effectiveComponentOriginal` 一致） |
-| 零事实 | 不存在 `'chargeback-repair:'` 前缀的 journal/应收/案件行；不存在同 package 的进行中强制退款案或退款冲销案 |
+| 零事实 | 不存在 `'chargeback-repair:'` 前缀的 journal/应收/案件行；不存在同 package 的任何历史强制退款案或退款记录。即使记录为 FAILED 且未产生账务效果，当前仍拒绝本修复；本轮不扩大该财务资格 |
 | 异常事实 | 存在 `anomaly_type='CHARGEBACK'` 的异常行，`financial_action_status ∈ {APPLIED, PENDING}` 且 `version` 参与 CAS |
 
 判据全部由 Billing 从持久事实重算；proof 不接受浏览器提供的金额、组件、账户或 Provider 文本，执行期不调用 Provider。
@@ -69,7 +70,7 @@
 | 键 | 内容 |
 |---|---|
 | `critical_resource_versions.chargeback_case_version` | 冻结案件 `version` |
-| `critical_resource_versions.facts_digest` | 下述事实集合的 closed RFC8785 摘要 |
+| `critical_resource_versions.facts_digest` | 下述 Billing owner 固定 JSON 事实集合的 SHA-256 摘要；与审批 wire RFC8785 摘要分别计算 |
 | `critical_resource_versions.policy_version` | 1 |
 | `financial_snapshot.base_shortfall_microcredits` | `B`（预检重算值） |
 | `financial_snapshot.wallet_id` / `.wallet_version` | 目标钱包与版本 |
@@ -98,7 +99,7 @@
 - 线性化点：`chargeback_financial_repair_cases.chargeback_case_id` 唯一 + 案件 `version` CAS + journal `business_reference` 唯一 + 应收 `UNIQUE(source_type,source_reference)`；同一案件至多一次补记。
 - result-first：先按 `chargeback_case_id`/`approval_request_id`/`execution_key_digest` 只读读回 case、journal、应收与案件状态；命中即返回同一结果。
 - 未知结果：提交结果不明时只读查证 case、journal、应收、案件 `CONFIRMED` 与异常 `APPLIED` 是否同时一致；缺失或部分事实一律 `UNKNOWN_QUERY_ONLY`，禁止重放、禁止假定零效果。
-- 执行顺序：认领 execution → 校验 activation/policy/schema 与 `facts_digest` → 锁证据/交易/package/组件/钱包（沿用既有确认路径的锁顺序）→ 复读零事实与可撤销量为 0 → 写应收与钱包应收投影 → 写 journal → 推进案件与异常 → 写 case → 提交后复读确认。
+- 执行顺序：匹配审批身份的已有收据先 result-first 返回；新效果在同一 Serializable 事务内先取证据对应 `chargeback.apply` advisory lock → 用 `lockPaymentSourcePackage` 锁钱包、订单、交易、package 并核对来源 tuple → 锁案件与按 ID 排序的组件 → 读取实时 activation/policy/schema/版本 → 锁后重算完整 plan、零事实、可撤销量与非空冻结摘要 → CAS 推进案件、写应收/钱包应收投影与 journal、收口异常、维护订单摘要、写不可变 case → 提交后只读确认。证据与历史账务事实只读，不调用 Provider。
 
 ## 8. 失败分类与 DLQ 收口（GSA-16 合同）
 
@@ -107,8 +108,8 @@
 | activation 非 `ACTIVE`、policy/schema/版本不匹配 | `POLICY_OR_SCHEMA_MISMATCH` | 失败关闭、零写入、终态 |
 | 证据非 `CHARGEBACK_CONFIRMED`、交易非 `PAID/LATE_PAID`、案件已 `CONFIRMED/DISMISSED`、存在可撤销额度、`B<=0`、钱包非 ACTIVE、`version` 漂移 | `PROOF_DENY` | 失败关闭、零写入、终态，并提示走既有确认路径 |
 | 已有同案件 case/journal/应收 | 幂等命中 | 读回既有结果，零新写入 |
-| 5 分钟执行窗口过期 | `EXECUTION_WINDOW_EXPIRED` | 终态，零写入 |
-| 可重试领域故障（序列化失败、死锁、连接失败） | 按 GSA-16 分类 | 有界重试；应用层最多 12 次尝试，第 12 次仍失败发布 DLQ 并按 PubAck/`ACK_PENDING`/DoubleAck 收口；禁止通用人工 replay |
+| 审批规定的 5 分钟执行窗口过期 | `EXECUTION_WINDOW_EXPIRED` | 终态，零写入 |
+| 可重试领域故障（序列化失败、死锁、连接失败） | 按 GSA-16 分类 | 有界重试；原普通事件重试采用最多 12 次尝试；财务审批通过现有 proof claim/typed result/只读恢复收口，不将普通事件次数解释为新的财务执行授权；禁止通用人工 replay |
 | 提交结果未知 | `UNKNOWN_QUERY_ONLY` | 只读查证，不重放、不改判 |
 
 ## 9. 权限、版本与 activation（复用现有 v1/s1）
@@ -116,12 +117,12 @@
 - 复用 `platform.billing.repairs.request|approve`、一名非申请人审批、24 小时有效期、5 分钟窗口，不新增权限与 policy/snapshot 版本。
 - 依据：该命令 v1/s1 行从未是可执行合同（静态不可执行、四入口失败关闭），不存在由该版本产生并已执行的领域事实。
 - 激活前只读守卫：该命令必须不存在未终态申请；守卫同时只读列出"`REVIEW_REQUIRED` 拒付且可撤销额度为 0 的存量案件"清单，存量在激活后逐笔走本命令或既有 `CONFIRM_CHARGEBACK`，不得在激活时批量改写。
-- activation 行保持 `INACTIVE`；GSA-32 交付默认关闭的专属 consumer/durable 开关；生产激活只属于取得独立授权的 GSA-40。
+- activation 行保持 `INACTIVE`；本命令注册专属 durable，使用既有受信消费者工件输入，未新增独立环境开关；生产激活只属于取得独立授权的 GSA-40。
 - 放宽范围（含 BONUS 缺口、部分撤销、借用退款规则）必须新增 policy/schema 版本与独立设计。
 
 ## 10. 迁移、N/N-1 与回滚
 
-- 迁移只前向追加：新增 `chargeback_financial_repair_cases`（当前为 `000061`）与异常 `PENDING→APPLIED` 的最小权限；不改 `000025/000029/000054/000060` 与既有案件列，不放宽任何枚举。
+- 迁移只前向追加：新增 `chargeback_financial_repair_cases`（Billing `000070`）、proof claim allowlist（Billing `000071`）及 Account consumer route（`000075`）与异常 `PENDING→APPLIED` 的最小权限；不改 `000025/000029/000054/000060` 与既有案件列，不放宽任何枚举。
 - N/N-1：先部署可读新表的 Billing，再部署 proof 端与执行器/消费者，最后业务页；既有拒付确认路径行为不变。
 - 回滚：只允许停止消费者、把 activation 行翻回 `INACTIVE`；case/应收/journal 与异常状态保留可读，禁止破坏性 down。
 - 未通过 GSA-38～40 且未取得独立生产授权前，不部署、不激活。
@@ -142,13 +143,13 @@
 | N/N-1 与回滚 | 缺行/未知版本/翻回 `INACTIVE` 失败关闭；case/应收/journal 与异常状态保留可读 |
 | 真实领域 E2E | Account 批准 → outbox → relay → 专属 durable → 应收/journal/案件与异常收口 → 终态 → 重放幂等，真实 PostgreSQL + 真实 HTTP，无 SKIP 替代 |
 
-## 12. 本切片不做的事
+## 12. 原设计切片范围（历史）
 
 - 不新增或修改迁移、Go/Node 代码、OpenAPI 合同、activation 行或执行路径。
 - 不改动既有拒付确认/驳回、强制退款、退款、应收抵扣或异常收口 helper 的既有行为。
 - 设计冻结不等于实现或激活；GSA-32 未交付前该命令保持不可执行。
 
-## 13. 自检与验证
+## 13. 原设计切片自检（历史）
 
 - 每条事实可回溯到 §1/§2 的迁移与源码路径；`B` 的定义与既有确认路径的 `baseShortfall` 完全一致（含 `reclassified_out_microcredits`）。
 - 首版范围与版本复用决策与用户 2026-09-19 确认一致；"存在可撤销额度即拒绝"这一边界防止与既有路径重叠执行。

@@ -20,6 +20,7 @@ window.fetch=async(url,options={})=>{
  if(url==='/api/admin/approvals/requests'&&options.method==='POST'){state.created=true;if(state.loseCreate){state.loseCreate=false;throw new TypeError('controlled lost ACK');}return response({approval_request_id:id(9)},201);}
  if(String(url).startsWith('/api/admin/approvals/requests?'))return response({items:state.created?[{approval_request_id:id(9),command_type:'CHARGEBACK_FINANCIAL_REPAIR',status:state.status,version:state.version}]:[],has_more:false});
  if(url===`/api/admin/approvals/requests/${id(9)}/actions/submit`){state.status='SUBMITTED';state.version++;return new Response(null,{status:204});}
+ if(url===`/api/admin/approvals/requests/${id(9)}`&&options.method==='PUT'){state.version++;return new Response(null,{status:204});}
  if(url===`/api/admin/approvals/requests/${id(9)}`)return response({approval_request_id:id(9),command_type:'CHARGEBACK_FINANCIAL_REPAIR',status:state.status,version:state.version,action_control_version:1,detail_availability:'AVAILABLE',allowed_actions:state.status==='DRAFT'?['SUBMIT']:[],target:{resource_type:'CHARGEBACK_CASE',resource_id:id(1)},command:projection.normalized_command,reason:'Controlled ledger correction justification'});
  return response({items:[],has_more:false});
 };

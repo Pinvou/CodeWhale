@@ -27,7 +27,7 @@ func TestChargebackFinancialRepairProofProjectionIsClosedAndActivationGated(t *t
 		}),
 	}
 	plan := ChargebackFinancialRepairPlan{
-		ChargebackCaseID: caseID, CaseVersion: 3, EvidenceID: evidenceID, AnomalyCaseID: uuid.New(),
+		ChargebackCaseID: caseID, PolicyVersion: 1, CaseVersion: 3, EvidenceID: evidenceID, AnomalyCaseID: uuid.New(),
 		AnomalyVersion: 2, AnomalyStatus: "PENDING", PackageID: packageID, WalletID: walletID, WalletVersion: 4,
 		ProviderChargebackID: "cb-refund-1", BaseShortfallMicrocredits: 250,
 		ComponentDigest: strings.Repeat("d", 64), FactsDigest: strings.Repeat("e", 64),
@@ -94,10 +94,9 @@ func TestChargebackFinancialRepairProofProjectionIsClosedAndActivationGated(t *t
 	}
 }
 
-// The consumed authorization freezes only the wire-visible owner projection, so
-// an empty facts digest means "the execution transaction recomputes it" while a
-// presented digest must still match the owner revision exactly.
-func TestChargebackFinancialRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(t *testing.T) {
+// Fresh execution requires the exact frozen owner digest; an empty digest is
+// not permission to execute against a different persisted owner revision.
+func TestChargebackFinancialRepairFrozenFactsDigestIsRequired(t *testing.T) {
 	plan := ChargebackFinancialRepairPlan{
 		ChargebackCaseID: uuid.New(), CaseVersion: 2, BaseShortfallMicrocredits: 70,
 		ComponentDigest: strings.Repeat("1", 64), WalletID: uuid.New(), WalletVersion: 5,
@@ -108,8 +107,8 @@ func TestChargebackFinancialRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(t *t
 		ComponentDigest: plan.ComponentDigest, WalletID: plan.WalletID, WalletVersion: plan.WalletVersion,
 		PackageID: plan.PackageID,
 	}
-	if mismatch := chargebackFinancialRepairFrozenMismatch(plan, frozen); mismatch != "" {
-		t.Fatalf("owner-recomputed digest rejected: %s", mismatch)
+	if mismatch := chargebackFinancialRepairFrozenMismatch(plan, frozen); mismatch != "facts_digest" {
+		t.Fatalf("empty digest accepted: %s", mismatch)
 	}
 	frozen.FactsDigest = strings.Repeat("3", 64)
 	if mismatch := chargebackFinancialRepairFrozenMismatch(plan, frozen); mismatch != "facts_digest" {

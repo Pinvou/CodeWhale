@@ -438,12 +438,19 @@ func TestRefreshFailureDistinguishesUnavailableFromInvalidGrant(t *testing.T) {
 			if mode == "lock-conflict" {
 				store.TryRefreshLock(context.Background(), session.ID, "another-owner")
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			handler := service.Handler(nil)
+			// Classify the provider response without charging route setup to the request deadline.
+			// Only the lock-conflict case depends on a short request timeout.
+			timeout := 2 * time.Second
+			if mode == "lock-conflict" {
+				timeout = 50 * time.Millisecond
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			request := httptest.NewRequest(http.MethodGet, "/api/session", nil).WithContext(ctx)
 			request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
 			response := httptest.NewRecorder()
-			service.Handler(nil).ServeHTTP(response, request)
+			handler.ServeHTTP(response, request)
 			expected := http.StatusServiceUnavailable
 			if mode == "invalid-grant" {
 				expected = http.StatusUnauthorized
