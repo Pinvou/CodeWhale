@@ -33,6 +33,9 @@ mod resume;
 #[path = "../../../src/features/remote_control/controller/recovery_budget.rs"]
 mod recovery_budget;
 
+#[path = "../../../src/features/remote_control/controller/shared_transport.rs"]
+mod shared_transport;
+
 #[cfg(test)]
 mod transfer;
 
@@ -131,7 +134,9 @@ mod features {
                 pub(crate) fn log_controller_event(_event: &str, _outcome: &str) {}
             }
             pub(crate) use crate::transfer;
-            pub(crate) use crate::{liveness, protocol, test_support};
+            pub(crate) use crate::{
+                liveness, protocol, relay_transport, resume, shared_transport, test_support,
+            };
         }
         pub(crate) use crate::legacy_relay::relay_client;
     }
