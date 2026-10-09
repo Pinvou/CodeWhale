@@ -17,6 +17,13 @@ export function requireMembership(value, user = '') {
  return value;
 }
 function membershipAck(value, org, user) { owned(value, org); requireMembership(value.member, user); return value; }
+export function organizationUnitIDs(value) { if (!Array.isArray(value)) throw new Error('INVALID_ORGANIZATION_INPUT'); return [...new Set(value.map(organizationID))].sort(); }
+function memberUnitsAck(value, org, user, body) {
+ membershipAck(value, org, user);
+ const expected = organizationUnitIDs(body.unit_ids), current = organizationUnitIDs(value.member.unit_ids);
+ if (value.member.version < body.expected_version + 1 || value.replayed !== true && (value.member.status !== 'ACTIVE' || value.member.version !== body.expected_version + 1 || JSON.stringify(current) !== JSON.stringify(expected))) invalid();
+ return value;
+}
 function unitAck(value, org, unit = '') { owned(value?.unit, org, 'unit_id'); organizationVersion(value.structure_version); if (unit && value.unit.unit_id !== unit) invalid(); return value; }
 function bindingAck(value, org, binding = '') { owned(value, org, 'binding_id'); organizationID(value.user_id); if (binding && value.binding_id !== binding || !['ACTIVE', 'REVOKED', 'EXPIRED'].includes(value.status)) invalid(); return value; }
 function invitationAck(value, org = '', invitation = '') { organizationID(value?.invitation_id); organizationID(value.organization_id); if (org && value.organization_id !== org || invitation && value.invitation_id !== invitation || !['PENDING', 'ACCEPTED', 'REVOKED', 'EXPIRED'].includes(value.status)) invalid(); return value; }
@@ -59,11 +66,19 @@ export class OrganizationClient {
  async bindings(org, signal) { return collection(await this.request('account', `${orgPath(org)}/role-bindings`, 'GET', undefined, '', [200], signal), item => bindingAck(item, org)); }
  async createUnit(org, body, key) { return unitAck(await this.request('account', `${orgPath(org)}/units`, 'POST', body, key, [200, 201]), org); }
  async moveUnit(org, unit, body, key) { return unitAck(await this.request('account', `${orgPath(org)}/units/${organizationID(unit)}/parent`, 'PATCH', body, key), org, unit); }
- async invite(org, body, key) { return invitationAck(await this.request('account', `${orgPath(org)}/invitations`, 'POST', body, key, [201]), org); }
+ async invite(org, body, key) {
+  const value = invitationAck(await this.request('account', `${orgPath(org)}/invitations`, 'POST', body, key, [201]), org);
+  if (body.unit_ids !== undefined && JSON.stringify(organizationUnitIDs(value.unit_ids ?? [])) !== JSON.stringify(organizationUnitIDs(body.unit_ids))) invalid();
+  return value;
+ }
  async revokeInvitation(org, id, key) { return invitationAck(await this.request('account', `${orgPath(org)}/invitations/${organizationID(id)}`, 'DELETE', undefined, key), org, id); }
  async grantRole(org, body, key) { const value = bindingAck(await this.request('account', `${orgPath(org)}/role-bindings`, 'POST', { ...body, idempotency_key: key }, key, [201]), org); if (value.user_id !== body.user_id || value.role_code !== body.role_code || (value.unit_id || null) !== (body.unit_id || null)) invalid(); return value; }
  async revokeRole(org, id, key) { return bindingAck(await this.request('account', `${orgPath(org)}/role-bindings/${organizationID(id)}`, 'DELETE', undefined, key), org, id); }
  async replaceRoles(org, user, roles, key) { return requireMembership(await this.request('account', `${orgPath(org)}/members/${organizationID(user)}/roles`, 'PUT', { roles }, key), user); }
+ async replaceUnits(org, user, unitIDs, version, key) {
+  const body = { unit_ids: organizationUnitIDs(unitIDs), expected_version: organizationVersion(version) };
+  return memberUnitsAck(await this.request('account', `${orgPath(org)}/members/${organizationID(user)}/units`, 'PUT', body, key), org, user, body);
+ }
  async removeMember(org, user, key) { return membershipAck(await this.request('account', `${orgPath(org)}/members/${organizationID(user)}`, 'DELETE', undefined, key), org, user); }
  async transfer(org, user, key) { const value = await this.request('account', `${orgPath(org)}/ownership`, 'POST', { new_owner_user_id: organizationID(user), idempotency_key: key }, key); owned(value, org); if (value.new_owner_user_id !== user) invalid(); requireMembership(value.new_owner_membership, user); return value; }
  async balance(org, signal) { const value = await this.request('token', `${orgPath(org)}/balance`, 'GET', undefined, '', [200], signal); if (value?.owner_type !== 'ORGANIZATION' || value.owner_id !== org) invalid(); organizationID(value.wallet_id); for (const name of ['posted_microcredits', 'reserved_microcredits', 'available_microcredits']) integerMoney(value[name]); return value; }
@@ -99,15 +114,17 @@ export class OrganizationAdminClient {
   const id = target ? organizationID(target) : '';
   const spec = {
    create: [root, 'POST', 201], rename: [root, 'PATCH', 204], status: [`${root}/status`, 'PATCH', 204], delete: [root, 'DELETE', 204],
-   add: [`${root}/members`, 'POST', [200, 201]], roles: [`${root}/members/${id}/roles`, 'PUT', 200], remove: [`${root}/members/${id}`, 'DELETE', 200], transfer: [`${root}/ownership`, 'POST', 200],
+   add: [`${root}/members`, 'POST', [200, 201]], roles: [`${root}/members/${id}/roles`, 'PUT', 200], units: [`${root}/members/${id}/units`, 'PUT', 200], remove: [`${root}/members/${id}`, 'DELETE', 200], transfer: [`${root}/ownership`, 'POST', 200],
    unit: [`${root}/units`, 'POST', [200, 201]], renameUnit: [`${root}/units/${id}`, 'PATCH', 200], moveUnit: [`${root}/units/${id}/parent`, 'PATCH', 200], deleteUnit: [`${root}/units/${id}`, 'DELETE', 200],
   }[action];
   if (!spec) throw new Error('INVALID_ORGANIZATION_INPUT');
+  if (action === 'units') body = { unit_ids: organizationUnitIDs(body.unit_ids), expected_version: organizationVersion(body.expected_version) };
   const value = await this.client.mutate('account', spec[0], spec[1], body, key, undefined, spec[2]);
   if (spec[2] === 204) { if (value !== null) invalid(); return null; }
   if (action === 'create') return requireOrganization(value);
   if (['unit', 'renameUnit', 'moveUnit', 'deleteUnit'].includes(action)) return unitAck(value, org, id);
   if (action === 'roles') return requireMembership(value, id);
+  if (action === 'units') return memberUnitsAck(value, org, id, body);
   if (action === 'transfer') { owned(value, org); if (value.new_owner_user_id !== body.new_owner_user_id) invalid(); requireMembership(value.new_owner_membership, body.new_owner_user_id); return value; }
   return membershipAck(value, org, action === 'add' ? body.user_id : id);
  }

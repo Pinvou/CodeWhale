@@ -68,7 +68,9 @@ func (r *PostgresRepository) SaveOrganizationModelPolicy(ctx context.Context, or
 		}
 		unique[id] = true
 	}
-	modelIDs = modelIDs[:0]
+	// Empty selections are valid for every mode. Normalize nil and [] to the
+	// same non-null stored array and immutable request facts.
+	modelIDs = make([]uuid.UUID, 0, len(unique))
 	for id := range unique {
 		modelIDs = append(modelIDs, id)
 	}

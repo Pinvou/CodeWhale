@@ -1,0 +1,24 @@
+# Apply after the reviewed personal/workload/finance/reconciliation/models/invocation overlays.
+# All referenced images must be built from the same reviewed F06 source.
+services:
+  account-service:
+    image: ${ACCOUNT_ORGANIZATION_IMAGE:?set reviewed same-source F06 Account image}
+    environment:
+      TOKEN_HTTP_URL: http://token-gateway:8080
+      BILLING_HTTP_URL: http://billing-service:8080
+  token-gateway:
+    image: ${TOKEN_ORGANIZATION_IMAGE:?set reviewed same-source F06 Token organization image}
+  billing-service:
+    image: ${BILLING_ORGANIZATION_IMAGE:?set reviewed same-source F06 Billing organization image}
+  token-portal:
+    image: ${PORTAL_ORGANIZATION_IMAGE:?set reviewed same-source F06 organization Portal image}
+  account-event-relay:
+    image: ${EVENT_RELAY_ORGANIZATION_IMAGE:?set reviewed same-source F06 relay image}
+  account-migrate:
+    image: ${MIGRATE_ORGANIZATION_IMAGE:?set reviewed same-source F06 sparse migration image}
+  billing-migrate:
+    image: ${MIGRATE_ORGANIZATION_IMAGE:?set reviewed same-source F06 sparse migration image}
+  token-migrate:
+    image: ${MIGRATE_ORGANIZATION_IMAGE:?set reviewed same-source F06 sparse migration image}
+  approval-resources:
+    image: ${APPROVAL_RESOURCES_ORGANIZATION_IMAGE:?set reviewed same-source F06 membership consumer resource image}

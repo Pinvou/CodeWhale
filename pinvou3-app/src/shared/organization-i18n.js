@@ -1,5 +1,7 @@
 export const organizationCopy = {
  zh: {
+  memberUnits: '普通成员归属', roleUnit: 'UNIT_ADMIN 角色范围', replaceMemberUnits: '替换成员归属', unscopedUnits: '未选择单元表示无归属范围。',
+  modelPolicy: '组织模型政策', modelPolicyMode: '模型范围', models: '模型', ALLOW_ALL: '允许全部模型', ALLOW_LIST: '只允许所选模型', DENY_LIST: '禁止所选模型',
   testCollection: '当前为受控测试付款，不是正式收款。', formalCollection: '当前提供正式收款渠道。', collectionUnavailable: '当前渠道未获正式收款准入，请核实付款用途。', noPurchaseChannel: '当前没有可用付款渠道。',
   title: '组织', personal: '个人账户', context: '当前工作身份', switch: '切换身份', refresh: '刷新', save: '提交', retry: '重试同一操作', saved: '操作已确认', loading: '正在读取', empty: '暂无记录',
   unavailable: '暂时无法读取，请刷新后重试。', permissions: '当前身份没有此权限。', sourceChanged: '权限或资源已变化，请刷新核实。', unknown: '结果尚未确认。重试将使用相同请求及操作编号。', invalid: '请检查输入的标识、版本、时间与金额。', contextUnknown: '身份切换结果尚未确认，请刷新当前身份后继续。',
@@ -11,6 +13,8 @@ export const organizationCopy = {
   create: '创建组织', rename: '修改名称', disable: '停用', enable: '启用', delete: '删除组织', readiness: '检查删除条件', blockers: '阻断条件', addMember: '添加成员', renameUnit: '修改单元名称', deleteUnit: '删除单元', previous: '上一页', next: '下一页', search: '搜索名称',
  },
  en: {
+  memberUnits: 'Ordinary member units', roleUnit: 'UNIT_ADMIN role scope', replaceMemberUnits: 'Replace member units', unscopedUnits: 'No selected unit means an unscoped membership.',
+  modelPolicy: 'Organization model policy', modelPolicyMode: 'Model scope', models: 'Models', ALLOW_ALL: 'Allow all models', ALLOW_LIST: 'Allow selected models only', DENY_LIST: 'Deny selected models',
   testCollection: 'Controlled test payments only; this is not formal collection.', formalCollection: 'Formal collection channels are currently available.', collectionUnavailable: 'This provider is not admitted for formal collection. Verify the payment purpose.', noPurchaseChannel: 'No payment channel is currently available.',
   title: 'Organizations', personal: 'Personal account', context: 'Current identity', switch: 'Switch identity', refresh: 'Refresh', save: 'Submit', retry: 'Retry the same operation', saved: 'Operation confirmed', loading: 'Loading', empty: 'No records',
   unavailable: 'Cannot read this resource now. Refresh and try again.', permissions: 'This identity lacks the required permission.', sourceChanged: 'Permissions or resource facts changed. Refresh to verify.', unknown: 'The outcome is unconfirmed. Retrying preserves the request and operation key.', invalid: 'Check identifiers, versions, times and amounts.', contextUnknown: 'The identity switch is unconfirmed. Refresh the current identity before continuing.',
@@ -22,6 +26,8 @@ export const organizationCopy = {
   create: 'Create organization', rename: 'Rename', disable: 'Disable', enable: 'Enable', delete: 'Delete organization', readiness: 'Check deletion conditions', blockers: 'Blocking conditions', addMember: 'Add member', renameUnit: 'Rename unit', deleteUnit: 'Delete unit', previous: 'Previous page', next: 'Next page', search: 'Search names',
  },
  ja: {
+  memberUnits: '通常メンバーの所属単位', roleUnit: 'UNIT_ADMIN ロールの範囲', replaceMemberUnits: 'メンバーの所属単位を置換', unscopedUnits: '単位を選択しない場合は所属範囲なしになります。',
+  modelPolicy: '組織のモデルポリシー', modelPolicyMode: 'モデル範囲', models: 'モデル', ALLOW_ALL: 'すべてのモデルを許可', ALLOW_LIST: '選択したモデルのみ許可', DENY_LIST: '選択したモデルを禁止',
   testCollection: '現在は管理されたテスト決済であり、正式な集金ではありません。', formalCollection: '正式な集金手段を利用できます。', collectionUnavailable: '正式な集金の認可がありません。決済目的を確認してください。', noPurchaseChannel: '現在利用可能な決済手段がありません。',
   title: '組織', personal: '個人アカウント', context: '現在の利用者コンテキスト', switch: 'コンテキストを切り替え', refresh: '更新', save: '送信', retry: '同じ操作を再試行', saved: '操作を確認しました', loading: '読み込み中', empty: '記録がありません',
   unavailable: '現在読み込めません。更新して再試行してください。', permissions: '現在の権限では実行できません。', sourceChanged: '権限またはリソースが変更されました。更新して確認してください。', unknown: '結果は未確認です。再試行は同じリクエストと操作番号を使用します。', invalid: '識別子、バージョン、日時、金額を確認してください。', contextUnknown: '切り替え結果は未確認です。現在のコンテキストを更新してください。',

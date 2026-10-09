@@ -55,22 +55,24 @@ type QuotaMember struct {
 }
 
 type Invitation struct {
-	ID               uuid.UUID  `json:"invitation_id"`
-	OrganizationID   uuid.UUID  `json:"organization_id"`
-	TargetType       string     `json:"target_type"`
-	OrganizationName string     `json:"organization_name,omitempty"`
-	TargetHint       string     `json:"target_hint,omitempty"`
-	Roles            []string   `json:"roles"`
-	Status           string     `json:"status"`
-	Version          int64      `json:"version"`
-	ExpiresAt        time.Time  `json:"expires_at"`
-	AcceptedAt       *time.Time `json:"accepted_at,omitempty"`
-	RevokedAt        *time.Time `json:"revoked_at,omitempty"`
-	Token            string     `json:"token,omitempty"`
-	Replayed         bool       `json:"replayed"`
+	UnitIDs          []uuid.UUID `json:"unit_ids,omitempty"`
+	ID               uuid.UUID   `json:"invitation_id"`
+	OrganizationID   uuid.UUID   `json:"organization_id"`
+	TargetType       string      `json:"target_type"`
+	OrganizationName string      `json:"organization_name,omitempty"`
+	TargetHint       string      `json:"target_hint,omitempty"`
+	Roles            []string    `json:"roles"`
+	Status           string      `json:"status"`
+	Version          int64       `json:"version"`
+	ExpiresAt        time.Time   `json:"expires_at"`
+	AcceptedAt       *time.Time  `json:"accepted_at,omitempty"`
+	RevokedAt        *time.Time  `json:"revoked_at,omitempty"`
+	Token            string      `json:"token,omitempty"`
+	Replayed         bool        `json:"replayed"`
 }
 
 type InvitationCreateRequest struct {
+	UnitIDs        []uuid.UUID
 	TargetType     string
 	Target         string
 	Roles          []string

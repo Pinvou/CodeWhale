@@ -349,12 +349,13 @@ func (s *Service) createInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		TargetType     string   `json:"target_type"`
-		Target         string   `json:"target"`
-		Email          string   `json:"email"`
-		Roles          []string `json:"roles"`
-		ExpiresInHours int      `json:"expires_in_hours"`
-		IdempotencyKey string   `json:"idempotency_key"`
+		UnitIDs        []uuid.UUID `json:"unit_ids"`
+		TargetType     string      `json:"target_type"`
+		Target         string      `json:"target"`
+		Email          string      `json:"email"`
+		Roles          []string    `json:"roles"`
+		ExpiresInHours int         `json:"expires_in_hours"`
+		IdempotencyKey string      `json:"idempotency_key"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.ExpiresInHours < 1 || body.ExpiresInHours > 24*30 {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid invitation request", httpserver.RequestID(r.Context()))
@@ -364,7 +365,7 @@ func (s *Service) createInvitation(w http.ResponseWriter, r *http.Request) {
 		body.TargetType, body.Target = "EMAIL", body.Email
 	}
 	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "invitation-create:"+organizationID.String()+":"+strings.ToUpper(strings.TrimSpace(body.TargetType))+":"+strings.TrimSpace(body.Target))
-	invitation, err := repository.CreateInvitation(r.Context(), mustPrincipal(r.Context()), organizationID, InvitationCreateRequest{TargetType: body.TargetType, Target: body.Target, Roles: body.Roles, ExpiresInHours: body.ExpiresInHours, IdempotencyKey: idempotencyKey})
+	invitation, err := repository.CreateInvitation(r.Context(), mustPrincipal(r.Context()), organizationID, InvitationCreateRequest{UnitIDs: body.UnitIDs, TargetType: body.TargetType, Target: body.Target, Roles: body.Roles, ExpiresInHours: body.ExpiresInHours, IdempotencyKey: idempotencyKey})
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -427,8 +428,8 @@ func (s *Service) acceptInvitation(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, "ACTIVE"); err != nil {
-		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the invitation was accepted locally but grant activation must be retried", httpserver.RequestID(r.Context()))
+	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, result.Member.Status); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the current membership is stored locally but lifecycle synchronization must be retried with the same invitation reference", httpserver.RequestID(r.Context()))
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, result)
@@ -454,8 +455,8 @@ func (s *Service) revokeMembership(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, "REVOKED"); err != nil {
-		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the membership was revoked locally but grant suspension must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
+	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, result.Member.Status); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the current membership is stored locally but lifecycle synchronization must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, result)

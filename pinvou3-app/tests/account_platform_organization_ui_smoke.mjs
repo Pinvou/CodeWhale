@@ -28,6 +28,56 @@ try{
  await run('Organization purchase excludes a channel absent from real provider capabilities',async()=>{await fresh('en');await page.evaluate(()=>{window.f06.purchase=true;window.f06.authorizationVersion++;window.f06.capabilityChannels=['WECHAT'];window.f06.render();});await page.waitForFunction(()=>[...document.querySelectorAll('form')].some(form=>form.querySelector('h4')?.textContent===window.f06.copy().purchase));await page.waitForFunction(()=>document.body.textContent.includes(window.f06.copy().noPurchaseChannel));assert.equal(await page.evaluate(()=>{const form=[...document.querySelectorAll('form')].find(form=>form.querySelector('h4')?.textContent===window.f06.copy().purchase);return [...form.querySelectorAll('select')[1].options].some(option=>option.value==='ALIPAY');}),false);assert.equal(await page.evaluate(()=>window.f06.calls.some(call=>call.path.endsWith('/payment-capabilities'))),true);assert.equal(await page.evaluate(()=>window.f06.calls.some(call=>call.method==='POST')),false);});
  await run('Paused product cannot initiate organization purchase',async()=>{await fresh('en');await page.evaluate(()=>{window.f06.purchase=true;window.f06.authorizationVersion++;window.f06.productStatus='PRODUCT_PAUSED';window.f06.render();});await page.waitForFunction(()=>[...document.querySelectorAll('form')].some(form=>form.querySelector('h4')?.textContent===window.f06.copy().purchase));await page.waitForFunction(()=>document.body.textContent.includes(window.f06.copy().noPurchaseChannel));assert.ok(await page.evaluate(()=>[...document.querySelectorAll('form')].find(form=>form.querySelector('h4')?.textContent===window.f06.copy().purchase).querySelector('button').disabled));assert.equal(await page.evaluate(()=>window.f06.calls.some(call=>call.method==='POST')),false);});
  for(const language of ['zh','en','ja'])for(const testOnly of [false,true])await run(`${language}: ${testOnly?'controlled test':'formal'} available channels retain current payment mode`,async()=>{await fresh(language);await page.evaluate(testOnly=>{window.f06.purchase=true;window.f06.authorizationVersion++;window.f06.testOnly=testOnly;window.f06.render();},testOnly);await page.waitForFunction(()=>[...document.querySelectorAll('select option')].some(option=>option.value==='controlled-org-product'));await page.evaluate(()=>{const form=[...document.querySelectorAll('form')].find(form=>form.querySelector('h4')?.textContent===window.f06.copy().purchase);const product=form.querySelectorAll('select')[0];product.value='controlled-org-product';product.dispatchEvent(new Event('change',{bubbles:true}));});await page.waitForFunction(()=>[...document.querySelectorAll('select option')].some(option=>option.value==='ALIPAY'));assert.ok(await page.evaluate(testOnly=>document.body.textContent.includes(window.f06.copy()[testOnly?'testCollection':'formalCollection']),testOnly));assert.equal(await page.evaluate(()=>[...document.querySelectorAll('form')].find(form=>form.querySelector('h4')?.textContent===window.f06.copy().purchase).querySelector('button').disabled),false);assert.equal(await page.evaluate(()=>window.f06.calls.some(call=>call.method==='POST')),false);});
+ for (const language of ['zh', 'en', 'ja']) await run(`${language}: model policy labels and current read-only permission`, async () => {
+  await fresh(language);
+  await page.evaluate(() => { window.f06.modelPolicy = true; window.f06.readonly = true; window.f06.authorizationVersion++; window.f06.render(); });
+  await page.waitForFunction(() => document.querySelector('.ap-org-model-policy select'));
+  assert.ok(await page.evaluate(() => {
+   const section = document.querySelector('.ap-org-model-policy'), copy = window.f06.copy();
+   return section.querySelector('h3').textContent === copy.modelPolicy && section.querySelector('fieldset').disabled &&
+    [...section.querySelector('select').options].map(option => option.textContent).join('|') === [copy.ALLOW_ALL, copy.ALLOW_LIST, copy.DENY_LIST].join('|') &&
+    ![...section.querySelectorAll('button')].some(button => button.textContent === copy.save) && !section.textContent.includes('undefined');
+  }));
+  assert.equal(await page.evaluate(() => window.f06.calls.some(call => call.method === 'PUT')), false);
+ });
+ await run('Model policy committed PUT unknown ACK retries original CAS, models and key after language change', async () => {
+  await fresh('en');
+  await page.evaluate(() => { window.f06.modelPolicy = true; window.f06.authorizationVersion++; window.f06.render(); });
+  await page.waitForFunction(() => document.querySelector('.ap-org-model-policy select'));
+  await page.select('.ap-org-model-policy select', 'ALLOW_LIST');
+  await page.click('.ap-org-model-policy input[type=checkbox]');
+  await page.type('.ap-org-model-policy input:not([type=checkbox])', 'Controlled policy edit');
+  await page.evaluate(() => { window.f06.unknown = true; document.querySelector('.ap-org-model-policy form button').click(); });
+  await page.waitForFunction(() => document.querySelector('.ap-org-model-policy [role=alert]')?.textContent === window.f06.copy().unknown);
+  assert.ok(await page.evaluate(() => window.f06.policy.version === 1 && document.querySelector('.ap-org-model-policy fieldset').disabled));
+  await page.evaluate(() => { window.f06.unknown = false; window.f06.language = 'ja'; window.f06.render(); });
+  await page.waitForFunction(() => document.querySelector('.ap-org-model-policy form button')?.textContent === window.f06.copy().retry);
+  await page.click('.ap-org-model-policy form button');
+  await page.waitForFunction(() => document.querySelector('.ap-org-model-policy [role=status]')?.textContent === window.f06.copy().saved);
+  assert.ok(await page.evaluate(() => {
+   const calls = window.f06.calls.filter(call => call.method === 'PUT'), body = JSON.parse(calls[0].body);
+   return calls.length === 2 && calls[0].key === calls[1].key && calls[0].body === calls[1].body && body.expected_version === 0 &&
+    body.mode === 'ALLOW_LIST' && body.model_ids.length === 1 && body.model_ids[0] === window.f06.other && window.f06.policy.version === 1;
+  }));
+ });
+ for (const name of ['null', 'missing', 'invalid', 'duplicate', 'display', 'upstream']) for (const refresh of [false, true]) {
+  await run(`Model policy ${refresh ? 'refresh' : 'initial'} ${name} catalog becomes unavailable without a PUT`, async () => {
+   await fresh('en');
+   if (refresh) {
+    await page.evaluate(() => { window.f06.modelPolicy = true; window.f06.policy.mode = 'ALLOW_LIST'; window.f06.authorizationVersion++; window.f06.render(); });
+    await page.waitForFunction(() => document.querySelector('.ap-org-model-policy input[type=checkbox]'));
+   }
+   await page.evaluate(({ name, refresh }) => {
+    const model = { model_id: window.f06.other, display_name: 'Controlled model' };
+    window.f06.catalogItems = name === 'null' ? [null] : name === 'missing' ? [{}] : name === 'invalid' ? [{ model_id: 'not-a-uuid' }] : name === 'duplicate' ? [model, { ...model }] : name === 'display' ? [{ ...model, display_name: {} }] : [{ ...model, upstream_model_ref: [] }];
+    if (refresh) document.querySelector('.ap-org-model-policy > button').click();
+    else { window.f06.modelPolicy = true; window.f06.policy.mode = 'ALLOW_LIST'; window.f06.authorizationVersion++; window.f06.render(); }
+   }, { name, refresh });
+   await page.waitForFunction(() => document.querySelector('.ap-org-model-policy [role=alert]')?.textContent === window.f06.copy().unavailable);
+   assert.equal(await page.evaluate(() => !!document.querySelector('.ap-org-model-policy form')), false);
+   assert.equal(await page.evaluate(() => window.f06.calls.some(call => call.method === 'PUT')), false);
+  });
+ }
  console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 }catch(error){console.error(`FAIL after ${passed} PASS: ${error.message}`);process.exitCode=1;}
 finally{if(browser)await browser.close();if(vite)await vite.close();fs.rmSync(profile,{recursive:true,force:true});}

@@ -297,6 +297,10 @@ func expireMemberQuotaGrantsForComponent(ctx context.Context, tx pgx.Tx, compone
 		}
 		ids = append(ids, id)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 	for _, id := range ids {
 		grant, _, err := loadMemberQuotaGrant(ctx, tx, id, false)
@@ -323,6 +327,8 @@ func expireMemberQuotaGrantsForComponent(ctx context.Context, tx pgx.Tx, compone
 	return nil
 }
 
+// Every grant/hold/lifecycle mutation locks the wallet before member, component,
+// or grant rows, matching settlement, refund, waiver, and package expiry.
 func lockMemberQuotaWallet(ctx context.Context, tx pgx.Tx, organizationID uuid.UUID) (Wallet, error) {
 	var id uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT id FROM wallets WHERE owner_type='ORGANIZATION' AND owner_id=$1 FOR UPDATE`, organizationID).Scan(&id); err != nil {

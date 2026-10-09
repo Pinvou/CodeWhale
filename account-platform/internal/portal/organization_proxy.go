@@ -31,7 +31,7 @@ func organizationAccountPathAllowed(method, resource string) bool {
 	if len(p) == 5 && pathUUID(p[4]) {
 		return method == http.MethodDelete && (p[3] == "invitations" || p[3] == "role-bindings" || p[3] == "members")
 	}
-	return len(p) == 6 && pathUUID(p[4]) && (method == http.MethodPut && p[3] == "members" && p[5] == "roles" || method == http.MethodPatch && p[3] == "units" && p[5] == "parent")
+	return len(p) == 6 && pathUUID(p[4]) && (method == http.MethodPut && p[3] == "members" && (p[5] == "roles" || p[5] == "units") || method == http.MethodPatch && p[3] == "units" && p[5] == "parent")
 }
 
 func organizationTokenPathAllowed(method, resource string) bool {
@@ -77,5 +77,5 @@ func organizationAdminPathAllowed(method, resource string) bool {
 	if len(p) == 6 && pathUUID(p[5]) {
 		return method == http.MethodDelete && (p[4] == "members" || p[4] == "units") || method == http.MethodPatch && p[4] == "units"
 	}
-	return len(p) == 7 && pathUUID(p[5]) && (method == http.MethodPut && p[4] == "members" && p[6] == "roles" || method == http.MethodPatch && p[4] == "units" && p[6] == "parent")
+	return len(p) == 7 && pathUUID(p[5]) && (method == http.MethodPut && p[4] == "members" && (p[6] == "roles" || p[6] == "units") || method == http.MethodPatch && p[4] == "units" && p[6] == "parent")
 }

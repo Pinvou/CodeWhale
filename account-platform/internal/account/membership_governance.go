@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -60,7 +61,16 @@ func markMembershipResultReplayed(result *MembershipMutationResult) { result.Rep
 func markOwnershipResultReplayed(result *OwnershipTransferResult)   { result.Replayed = true }
 
 func (r *PostgresRepository) AdminAddMember(ctx context.Context, principal identity.Principal, organizationID, userID uuid.UUID, roles []string, unitAdminIDs []uuid.UUID, idempotencyKey string) (MembershipMutationResult, error) {
-	roles, unitAdminIDs, err := normalizeAdminMemberRoles(roles, unitAdminIDs)
+	return r.AdminAddMemberWithUnits(ctx, principal, organizationID, userID, roles, unitAdminIDs, nil, idempotencyKey)
+}
+func (r *PostgresRepository) AdminAddMemberWithUnits(ctx context.Context, principal identity.Principal, organizationID, userID uuid.UUID, roles []string, unitAdminIDs, input []uuid.UUID, key string) (MembershipMutationResult, error) {
+	idempotencyKey := key
+	units, err := normalizedMemberUnits(input)
+	if err != nil {
+		return MembershipMutationResult{}, err
+	}
+
+	roles, unitAdminIDs, err = normalizeAdminMemberRoles(roles, unitAdminIDs)
 	if err != nil || !validOrganizationUnitIdempotencyKey(idempotencyKey) {
 		return MembershipMutationResult{}, ErrConflict
 	}
@@ -76,13 +86,27 @@ func (r *PostgresRepository) AdminAddMember(ctx context.Context, principal ident
 	if actorID == nil {
 		return MembershipMutationResult{}, ErrForbidden
 	}
+	if units != nil {
+		if err = requireMemberUnitPlatformPermission(ctx, tx, *actorID); err != nil {
+			return MembershipMutationResult{}, err
+		}
+	}
 	requestHash := membershipRequestHash("ADD", userID, roles, unitAdminIDs)
+	if units != nil {
+		encoded, _ := json.Marshal(map[string]any{"legacy_fingerprint": requestHash, "unit_ids": units})
+		digest := sha256.Sum256(encoded)
+		requestHash = hex.EncodeToString(digest[:])
+	}
 	var replay MembershipMutationResult
 	found, err := lockMembershipCommand(ctx, tx, *actorID, organizationID, "ADD", strings.TrimSpace(idempotencyKey), requestHash, &replay)
 	if err != nil {
 		return MembershipMutationResult{}, err
 	}
 	if found {
+		replay.Member, err = getMember(ctx, tx, replay.Member.MembershipID)
+		if err != nil {
+			return MembershipMutationResult{}, err
+		}
 		markMembershipResultReplayed(&replay)
 		return replay, tx.Commit(ctx)
 	}
@@ -99,7 +123,7 @@ func (r *PostgresRepository) AdminAddMember(ctx context.Context, principal ident
 	if organizationStatus != "ACTIVE" || userStatus != "ACTIVE" {
 		return MembershipMutationResult{}, ErrConflict
 	}
-	if err := validateAdminUnits(ctx, tx, organizationID, unitAdminIDs); err != nil {
+	if err := validateAdminUnits(ctx, tx, organizationID, append(append([]uuid.UUID{}, unitAdminIDs...), units...)); err != nil {
 		return MembershipMutationResult{}, err
 	}
 	var membershipID uuid.UUID
@@ -120,7 +144,22 @@ func (r *PostgresRepository) AdminAddMember(ctx context.Context, principal ident
 		return MembershipMutationResult{}, err
 	}
 	var version int64
+
+	if !changed && units != nil {
+		existing, err := readMemberUnits(ctx, tx, membershipID)
+		if err != nil {
+			return MembershipMutationResult{}, err
+		}
+		if !slices.Equal(existing, units) {
+			return MembershipMutationResult{}, ErrConflict
+		}
+	}
 	if changed {
+		if units != nil {
+			if err = writeMemberUnits(ctx, tx, membershipID, units, now); err != nil {
+				return MembershipMutationResult{}, err
+			}
+		}
 		version, err = replaceAdminMemberRoles(ctx, tx, membershipID, userID, *actorID, roles, unitAdminIDs, now)
 		if err != nil {
 			return MembershipMutationResult{}, err

@@ -7,6 +7,7 @@ import (
 )
 
 type adminMemberRolesBody struct {
+	UnitIDs          []uuid.UUID `json:"unit_ids"`
 	UserID           uuid.UUID   `json:"user_id"`
 	Roles            []string    `json:"roles"`
 	UnitAdminUnitIDs []uuid.UUID `json:"unit_admin_unit_ids"`

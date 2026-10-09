@@ -176,6 +176,9 @@ func (r *PostgresRepository) GrantOrganizationRoleBinding(ctx context.Context, p
 	} else if err != nil {
 		return RoleBinding{}, err
 	}
+	if err := requireOrganizationPermission(ctx, tx, actorID, *request.OrganizationID, request.UnitID, PermissionOrganizationRolesAssign); err != nil {
+		return RoleBinding{}, err
+	}
 	if existing, found, err := roleBindingByIdempotencyKey(ctx, tx, membershipID, request.IdempotencyKey); err != nil {
 		return RoleBinding{}, err
 	} else if found {

@@ -14,7 +14,7 @@ func configureOrganizationLifecycle(service *account.Service, credential string)
 	if err != nil {
 		return errors.New("ACCOUNT_ORGANIZATION_BILLING_AUTHORITY_INVALID")
 	}
-	token, err := account.NewHTTPOrganizationLifecycleClient(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), credential, "TOKEN")
+	token, err := account.NewHTTPOrganizationLifecycleClient(os.Getenv("TOKEN_HTTP_URL"), credential, "TOKEN")
 	if err != nil {
 		return errors.New("ACCOUNT_ORGANIZATION_TOKEN_AUTHORITY_INVALID")
 	}

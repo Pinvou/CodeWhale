@@ -1,11 +1,13 @@
 package account
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
 	"net/http"
 	"strings"
@@ -193,13 +195,26 @@ func (s *Service) adminAddMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "admin-member-add:"+organizationID.String()+":"+body.UserID.String())
-	result, err := repository.AdminAddMember(r.Context(), mustPrincipal(r.Context()), organizationID, body.UserID, body.Roles, body.UnitAdminUnitIDs, idempotencyKey)
+	var result MembershipMutationResult
+	var err error
+	if body.UnitIDs == nil {
+		result, err = repository.AdminAddMember(r.Context(), mustPrincipal(r.Context()), organizationID, body.UserID, body.Roles, body.UnitAdminUnitIDs, idempotencyKey)
+	} else {
+		scoped, ok := repository.(interface {
+			AdminAddMemberWithUnits(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string, []uuid.UUID, []uuid.UUID, string) (MembershipMutationResult, error)
+		})
+		if !ok {
+			api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_UNAVAILABLE", "member attachment service is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
+		result, err = scoped.AdminAddMemberWithUnits(r.Context(), mustPrincipal(r.Context()), organizationID, body.UserID, body.Roles, body.UnitAdminUnitIDs, body.UnitIDs, idempotencyKey)
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, "ACTIVE"); err != nil {
-		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the member was added locally but grant activation must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
+	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, result.Member.Status); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the current membership is stored locally but lifecycle synchronization must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
 		return
 	}
 	status := http.StatusCreated
@@ -254,8 +269,8 @@ func (s *Service) adminRemoveMember(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, "REVOKED"); err != nil {
-		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the membership was revoked locally but grant suspension must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
+	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, result.Member.Status); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the current membership is stored locally but lifecycle synchronization must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, result)

@@ -66,7 +66,7 @@ func invitationRequestHash(targetType string, targetDigest []byte, roles []strin
 func scanInvitation(row pgx.Row) (Invitation, []byte, []byte, error) {
 	var invitation Invitation
 	var rolesJSON, targetDigest []byte
-	err := row.Scan(&invitation.ID, &invitation.OrganizationID, &invitation.TargetType, &targetDigest, &invitation.TargetHint, &rolesJSON, &invitation.Status, &invitation.Version, &invitation.ExpiresAt, &invitation.AcceptedAt, &invitation.RevokedAt, &invitation.OrganizationName)
+	err := row.Scan(&invitation.ID, &invitation.OrganizationID, &invitation.TargetType, &targetDigest, &invitation.TargetHint, &rolesJSON, &invitation.Status, &invitation.Version, &invitation.ExpiresAt, &invitation.AcceptedAt, &invitation.RevokedAt, &invitation.OrganizationName, &invitation.UnitIDs)
 	if err == nil {
 		err = json.Unmarshal(rolesJSON, &invitation.Roles)
 	}
@@ -76,7 +76,7 @@ func scanInvitation(row pgx.Row) (Invitation, []byte, []byte, error) {
 // The target-bound invitation grants visibility of its organization name only;
 // it does not grant access to the organization directory or member list.
 const invitationSelect = `SELECT id,organization_id,target_type,target_digest,COALESCE(target_hint,''),roles,status,version,expires_at,accepted_at,revoked_at,
-    COALESCE((SELECT o.name FROM organizations o WHERE o.id=invitations.organization_id),'') FROM invitations`
+    COALESCE((SELECT o.name FROM organizations o WHERE o.id=invitations.organization_id),''),unit_ids FROM invitations`
 
 func (r *PostgresRepository) CreateInvitation(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, request InvitationCreateRequest) (Invitation, error) {
 	roles, err := validateInvitationRoles(request.Roles)
@@ -84,11 +84,21 @@ func (r *PostgresRepository) CreateInvitation(ctx context.Context, principal ide
 		return Invitation{}, ErrConflict
 	}
 	roles = sortedInvitationRoles(roles)
+	units, err := normalizedMemberUnits(request.UnitIDs)
+	if err != nil {
+		return Invitation{}, err
+	}
+	request.UnitIDs = units
 	targetType, targetHint, targetDigest, err := normalizeInvitationTarget(request.TargetType, request.Target)
 	if err != nil {
 		return Invitation{}, ErrConflict
 	}
 	requestHash := invitationRequestHash(targetType, targetDigest, roles, request.ExpiresInHours)
+	if units != nil {
+		encoded, _ := json.Marshal(map[string]any{"legacy_fingerprint": requestHash, "unit_ids": units})
+		digest := sha256.Sum256(encoded)
+		requestHash = hex.EncodeToString(digest[:])
+	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return Invitation{}, err
@@ -98,7 +108,7 @@ func (r *PostgresRepository) CreateInvitation(ctx context.Context, principal ide
 	if err != nil {
 		return Invitation{}, err
 	}
-	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationMembersManage); err != nil {
+	if err := requireMembershipRemovalReplayPermission(ctx, tx, actorID, organizationID, units); err != nil {
 		return Invitation{}, err
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "invitation:"+actorID.String()+":"+organizationID.String()+":"+request.IdempotencyKey); err != nil {
@@ -126,6 +136,22 @@ func (r *PostgresRepository) CreateInvitation(ctx context.Context, principal ide
 	if organizationStatus != "ACTIVE" {
 		return Invitation{}, ErrConflict
 	}
+	if err = validateAdminUnits(ctx, tx, organizationID, units); err != nil {
+		return Invitation{}, err
+	}
+	if err = requireMembershipRemovalReplayPermission(ctx, tx, actorID, organizationID, units); err != nil {
+		return Invitation{}, err
+	}
+	// Scoped membership management does not confer organization role assignment.
+	for _, role := range roles {
+		if role != "MEMBER" {
+			if err = requireOrganizationMutationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationRolesAssign); err != nil {
+				return Invitation{}, err
+			}
+			break
+		}
+	}
+
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return Invitation{}, err
@@ -133,14 +159,14 @@ func (r *PostgresRepository) CreateInvitation(ctx context.Context, principal ide
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	tokenHash := sha256.Sum256([]byte(token))
 	now := r.now()
-	invitation = Invitation{ID: uuid.Must(uuid.NewV7()), OrganizationID: organizationID, TargetType: targetType, TargetHint: targetHint, Roles: roles, Status: "PENDING", Version: 1, ExpiresAt: now.Add(time.Duration(request.ExpiresInHours) * time.Hour), Token: token}
+	invitation = Invitation{UnitIDs: units, ID: uuid.Must(uuid.NewV7()), OrganizationID: organizationID, TargetType: targetType, TargetHint: targetHint, Roles: roles, Status: "PENDING", Version: 1, ExpiresAt: now.Add(time.Duration(request.ExpiresInHours) * time.Hour), Token: token}
 	rolesJSON, _ := json.Marshal(roles)
 	var legacyEmail *string
 	if targetType == "EMAIL" {
 		normalized := normalizeEmail(request.Target)
 		legacyEmail = &normalized
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO invitations(id,organization_id,email_normalized,token_hash,status,roles,invited_by,expires_at,created_at,updated_at,target_type,target_digest,target_hint,idempotency_key,request_hash) VALUES($1,$2,$3,$4,'PENDING',$5,$6,$7,$8,$8,$9,$10,$11,$12,$13)`, invitation.ID, organizationID, legacyEmail, tokenHash[:], rolesJSON, actorID, invitation.ExpiresAt, now, targetType, targetDigest, targetHint, strings.TrimSpace(request.IdempotencyKey), requestHash); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO invitations(id,organization_id,email_normalized,token_hash,status,roles,invited_by,expires_at,created_at,updated_at,target_type,target_digest,target_hint,idempotency_key,request_hash,unit_ids) VALUES($1,$2,$3,$4,'PENDING',$5,$6,$7,$8,$8,$9,$10,$11,$12,$13,$14)`, invitation.ID, organizationID, legacyEmail, tokenHash[:], rolesJSON, actorID, invitation.ExpiresAt, now, targetType, targetDigest, targetHint, strings.TrimSpace(request.IdempotencyKey), requestHash, units); err != nil {
 		return Invitation{}, mapConstraintError(err)
 	}
 	if err := appendAudit(ctx, tx, actorID, principal.SessionID, &organizationID, "invitation.create", "invitation", invitation.ID.String(), "SUCCEEDED", map[string]any{"target_type": targetType, "target_hint": targetHint, "roles": roles, "expires_at": invitation.ExpiresAt, "idempotency_key": request.IdempotencyKey}); err != nil {
@@ -313,7 +339,51 @@ func (r *PostgresRepository) AcceptInvitation(ctx context.Context, principal ide
 			return MembershipMutationResult{}, err
 		}
 	}
+
+	needsRoleAuthority := false
 	if membershipChanged {
+		for _, role := range invitation.Roles {
+			if role != "MEMBER" {
+				needsRoleAuthority = true
+				break
+			}
+		}
+	}
+	if invitation.UnitIDs != nil || needsRoleAuthority {
+		if err = validateAdminUnits(ctx, tx, invitation.OrganizationID, invitation.UnitIDs); err != nil {
+			return MembershipMutationResult{}, err
+		}
+		var inviter uuid.UUID
+		if err = tx.QueryRow(ctx, `SELECT invited_by FROM invitations WHERE id=$1`, invitation.ID).Scan(&inviter); err != nil {
+			return MembershipMutationResult{}, err
+		}
+		if invitation.UnitIDs != nil {
+			if err = requireMembershipRemovalReplayPermission(ctx, tx, inviter, invitation.OrganizationID, invitation.UnitIDs); err != nil {
+				return MembershipMutationResult{}, err
+			}
+		}
+		// Frozen roles are intent, not a grant after the inviter loses current
+		// authority. Already accepted replays grant no additional roles.
+		if needsRoleAuthority {
+			if err = requireOrganizationMutationPermission(ctx, tx, inviter, invitation.OrganizationID, nil, PermissionOrganizationRolesAssign); err != nil {
+				return MembershipMutationResult{}, err
+			}
+		}
+	}
+	if invitation.UnitIDs != nil || needsRoleAuthority {
+		if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+			return MembershipMutationResult{}, err
+		}
+		if !invitation.ExpiresAt.After(now) {
+			return MembershipMutationResult{}, ErrInvitationExpired
+		}
+	}
+	if membershipChanged {
+		if invitation.UnitIDs != nil {
+			if err = writeMemberUnits(ctx, tx, membershipID, invitation.UnitIDs, now); err != nil {
+				return MembershipMutationResult{}, err
+			}
+		}
 		for _, role := range invitation.Roles {
 			if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,starts_at,grant_source) VALUES($1,$2,$3,$4,$5,$5,'INVITATION')`, uuid.Must(uuid.NewV7()), membershipID, role, userID, now); err != nil {
 				return MembershipMutationResult{}, mapConstraintError(err)

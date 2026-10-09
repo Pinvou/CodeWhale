@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { OrganizationClient, OrganizationAdminClient, requireQuotaGrant, organizationPaymentChannels } from '../src/features/account-platform/organization-client.js';
+import { OrganizationClient, OrganizationAdminClient, requireQuotaGrant, organizationPaymentChannels, requireOrganizationModelPolicy } from '../src/features/account-platform/organization-client.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { organizationCopy } from '../src/shared/i18n.js';
@@ -60,4 +60,20 @@ test('organization payment selection uses current capability and product availab
 test('organization capabilities reject missing or malformed source facts',async()=>{
  for(const value of [{},{channels:['ALIPAY'],test_only:true},{channels:['ALIPAY'],test_only:true,formal_collection_admitted:'false'}]){const client=new OrganizationClient({request:async()=>value});await assert.rejects(client.capabilities(org));}
  const value={channels:['ALIPAY'],test_only:true,formal_collection_admitted:false};assert.equal((await new OrganizationClient({request:async()=>value}).capabilities(org)).test_only,true);
+});
+
+test('organization model policy uses exact CAS, body/key and owned matching receipt',async()=>{
+ const body={expected_version:0,mode:'ALLOW_LIST',model_ids:[other],reason:'Controlled policy'},calls=[];
+ const client=new OrganizationClient({request:async(area,path,options)=>{calls.push({area,path,options});return {organization_id:org,version:1,mode:body.mode,model_ids:[other],authorization_version:3};}});
+ assert.equal((await client.saveModelPolicy(org,body,'organization-policy-operation-key')).version,1);
+ assert.equal(calls[0].area,'token');assert.equal(calls[0].path,`/v1/organizations/${org}/model-policy`);
+ assert.equal(calls[0].options.method,'PUT');assert.deepEqual(calls[0].options.body,body);assert.equal(calls[0].options.idempotencyKey,'organization-policy-operation-key');assert.equal(calls[0].options.headers['Idempotency-Key'],'organization-policy-operation-key');
+ const value={organization_id:org,version:1,mode:body.mode,model_ids:[other],authorization_version:3};
+ for(const malformed of [{...value,organization_id:user},{...value,version:2},{...value,mode:'DENY_LIST'},{...value,model_ids:[user]}]){client.client.request=async()=>malformed;await assert.rejects(client.saveModelPolicy(org,body,'organization-policy-operation-key'));}
+});
+
+test('organization model policy initial version zero is valid but malformed or unsafe facts fail closed',()=>{
+ const value={organization_id:org,version:0,mode:'ALLOW_ALL',model_ids:[],authorization_version:1};assert.equal(requireOrganizationModelPolicy(value,org).version,0);
+ for(const malformed of [{...value,version:-1},{...value,version:9007199254740992},{...value,mode:'UNKNOWN'},{...value,model_ids:[other]},{...value,mode:'ALLOW_LIST',model_ids:[other,other]},{...value,authorization_version:0}])assert.throws(()=>requireOrganizationModelPolicy(malformed,org));
+ for(const locale of ['zh','en','ja'])for(const key of ['modelPolicy','modelPolicyMode','models','ALLOW_ALL','ALLOW_LIST','DENY_LIST'])assert.ok(organizationCopy[locale][key]?.trim());
 });
