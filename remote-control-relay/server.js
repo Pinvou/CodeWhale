@@ -19,6 +19,7 @@ import {
   parseControllerWireJson, parseLegacyWebWireJson,
 } from "./protocol-controller.js";
 import { RelayStateStore } from "./relay-state-store.js";
+import { isControllerIdentifier, isLegacyWebEndpointIdentifier } from "./identifier-contract.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIB = 1024 * 1024;
@@ -213,7 +214,7 @@ async function createControllerRuntime() {
       throw new Error("pairing_digest_key_invalid");
     }
     const signingKeyId = process.env.PINVOU_REMOTE_RELAY_SIGNING_KEY_ID || "";
-    if (!/^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u.test(signingKeyId)) {
+    if (!isControllerIdentifier(signingKeyId)) {
       throw new Error("relay_signing_key_id_invalid");
     }
     const signingKeyB64 = process.env.PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64 || "";
@@ -548,10 +549,7 @@ function hasLegacyTokenAlias(message) {
 }
 
 function validEndpointId(value) {
-  return typeof value === "string"
-    && value.length >= 4
-    && value.length <= 128
-    && /^[A-Za-z0-9_-]+$/.test(value);
+  return isLegacyWebEndpointIdentifier(value);
 }
 
 function relayStateContents(entries) {
@@ -954,6 +952,14 @@ async function registerDesktop(ws, msg) {
       rejectSocket(ws, error?.code || "enrollment_required", "desktop endpoint enrollment required");
       return;
     }
+  }
+
+  // Authentication may yield: another registration can claim this socket, or
+  // its close handler can run, before the validated credentials return.
+  if (!socketOpen(ws)) return;
+  if (ws.role !== "unknown") {
+    rejectSocket(ws, "bad_desktop_endpoint_register", "bad desktop endpoint registration");
+    return;
   }
 
   pruneExpiredEndpoints();

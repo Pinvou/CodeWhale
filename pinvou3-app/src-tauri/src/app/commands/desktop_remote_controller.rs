@@ -142,6 +142,7 @@ pub fn desktop_remote_controller_status(
 
 #[cfg(test)]
 mod tests {
+
     #[test]
     fn controller_command_surface_is_stable_and_contains_no_code_storage() {
         assert_eq!(super::STATUS_EVENT, "desktop-remote-controller-status");

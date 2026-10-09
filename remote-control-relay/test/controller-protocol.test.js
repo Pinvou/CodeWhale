@@ -182,6 +182,15 @@ test("raw controller JSON rejects duplicate keys before object construction", ()
   }
 });
 
+test("protocol document freezes the executable contract digest", async () => {
+  const document = await readFile(new URL("../PROTOCOL.md", import.meta.url), "utf8");
+  const digests = [...document.matchAll(/The contract digest is\s+`([a-f0-9]{64})`/gu)];
+  assert.equal(digests.length, 1, "document must declare exactly one contract digest");
+  assert.equal(digests[0][1], CONTROLLER_CONTRACT_SHA256);
+  assert.equal(digests[0][1], canonicalControllerContractHash(fixture));
+  assert.equal(digests[0][1], fixture.contract.sha256);
+});
+
 test("every outer message has an exhaustive transport-role matrix", () => {
   assert.deepEqual(Object.keys(fixture.message_role_matrix), fixture.expected_message_types);
   for (const type of CONTROLLER_MESSAGE_TYPES) {

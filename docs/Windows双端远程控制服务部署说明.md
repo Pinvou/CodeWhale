@@ -58,7 +58,7 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 |---|---|
 | `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT` | `official` / `self_hosted`（生产不得用 `development`） |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID` / `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY` | registry HMAC（32–4096 字节） |
-| `PINVOU_REMOTE_PAIRING_HMAC_KEY_ID` / `PINVOU_REMOTE_PAIRING_HMAC_KEY` | 连接码摘要 keyring（支持轮换，见发布文档第 7.3 节） |
+| `PINVOU_REMOTE_PAIRING_HMAC_KEY_ID` / `PINVOU_REMOTE_PAIRING_HMAC_KEY` | 连接码摘要 keyring（支持轮换，见发布文档第 2 节步骤 2、第 3 节旅程 20） |
 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64` | Ed25519 PKCS#8 DER base64，签名 pairing transcript |
 | `PINVOU_REMOTE_CONTROLLER_STATE_PATH` / `PINVOU_REMOTE_STATE_PATH` | 新旧状态文件绝对路径，必须不同 |
 | 遥测（可选） | enrollment token / device pepper / admin password；未配置即禁用遥测（本机部署即此状态） |
@@ -76,76 +76,49 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 - [ ] 发布文档第 4 节的监控阈值已接入告警（claim/busy、handshake rejected、liveness timeout、resume failed、task conflict、transfer budget）
 - [ ] 回滚演练证据：gateway 预检结果、旧 Web 分享链接可用性、关闭 `desktop_remote_control` 后的行为
 
-## 3. 我需要哪些输入才能代为执行生产部署
+## 3. 运维输入与发布执行边界
 
-当前环境只能完成本机部署。要真正部署到服务器，请提供：
+部署前须由运维在本地受控配置中提供 SSH 目标、独立登记目标、部署私钥路径、域名/TLS、部署目录和 secret 注入方式；禁止提交这些实例值。secret 材料仅由部署环境生成、验证和注入，Agent 不通过 PR 或日志传递私钥。
 
-1. 目标主机与访问方式（SSH/部署通道）与部署目录；
-2. 域名与 TLS 证书（或 ACME 签发方式）以及 nginx 落点；
-3. secret 注入方式（secret manager / 环境文件路径），以及上面 2.2 的密钥材料由谁生成（我可以生成候选并只把私钥交给运维）；
-4. registry 状态文件路径与现有 v2 endpoint 清单（迁移输入）；
-5. 是否启用遥测及其凭据。
+生产脚本必须同时配置 `PINVOU_CONFIRM_PRODUCTION_DEPLOY=1`、`PINVOU_REMOTE_DEPLOY_SERVER`、`PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER`、`SSH_KEY`、`PINVOU_REMOTE_DIRECT_URL`。两份目标必须一致，不配置或不一致时，在联网、上传前退出。确认标志不是 enrollment、验收或回滚门禁豁免。
 
-拿到上述输入后，我会按 2.1 的顺序执行并逐项产出 2.3 的验收证据。
+测试脚本必须同时配置 `RELAY_SERVER`、`EXPECTED_RELAY_SERVER`、`PROXY_SERVER`、`EXPECTED_PROXY_SERVER` 和 `SSH_KEY`；目标为 SSH 账号与字面 IPv4，登记值从运维清单独立取得，不能从实际目标自动赋值。有跳板时同时配置 `PROXY_SSH_JUMP` 与 `EXPECTED_PROXY_SSH_JUMP`。参见 [测试端点操作说明](remote-e2e-test-endpoint.md)。
 
-## 4. 云端测试端点部署记录（2026-09-19，已完成）
+## 4. 云端测试端点历史记录（2026-09-19，非当前验收）
 
-按 `docs/remote-e2e-test-endpoint.md` 的幂等脚本 `scripts/deploy-remote-relay-test.sh`（带 `ENABLE_DESKTOP_CONTROLLER=1`）把
-Windows 双端远控的 controller-v1 lane 部署到云端测试端点。生产 relay（8787 / `/pinvou3/remote`）全程未改动。
+本节保留当次部署结论，不公开具体 SSH 登录目标、个人密钥名、服务器布局或备份定位。脚本的隔离测试服务、持久身份目录、专用隧道账户、受限转发和局部失败回滚均须按当前源码与运维清单核对；未在本轮重新部署或修改线上配置。
 
-### 4.1 已完成（relay 侧）
+### 4.1 历史 Relay 侧证据与当前身份规则
 
-| 项 | 值 |
-|---|---|
-| 实例 | `pinvou-remote-relay-test.service`，`/opt/pinvou-remote-relay-test`，端口 8788 |
-| 状态 | `active`；`curl http://127.0.0.1:8788/pinvou3/remote-test/healthz` → **200** |
-| 协议 | 启动日志：`pinvou remote relay listening on http://0.0.0.0:8788 (protocol=v2+controller-v1, …)` |
-| controller 环境 | 历史位置为代码目录；现由部署脚本存入 `/var/lib/pinvou-remote-relay-test/identity/controller.env`（0600，目录 0700，必需的 `EnvironmentFile=`），重部署保留 Ed25519 与两组 HMAC 身份；旧文件先验证并一次性迁移，损坏/缺失身份且存在状态时失败关闭，不静默换钥 |
-| 状态目录 | `/var/lib/pinvou-remote-relay-test/state`（0700，位于代码目录之外，重新部署不丢 tombstone/keyring） |
-| 客户端信任根 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1`、`PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64=otRocTSuXfkyfUKA6Gx71zvxII60UdxGK5h/dJ8aOIg=` |
-| 客户端入口 | `PINVOU_REMOTE_PUBLIC_URL=https://pinvou.com/pinvou3/remote-test`、`PINVOU_REMOTE_RELAY_WS_URL=wss://pinvou.com/pinvou3/remote-test/ws`（**公网路由尚未生效**，见 4.2） |
+当次记录包括测试实例 active、loopback 健康检查成功及 controller-v1 启用。首次记录时公网路由未就绪；后续代理配置与公网探测成功，二者有时间先后，不代表当前服务状态。
 
-首次空安装可生成全新身份，但新公钥不会自动等于客户端内置 test pin，必须取回脚本输出的公钥并显式配置同一 key ID/public key 后才演练。已有安装只验证复用或一次性迁移旧身份；不能通过删除状态/身份来修复信任根失配，也不能随代码回滚回收持久身份目录。
+身份与状态必须位于整体替换的代码目录之外。已有身份验证后复用，旧代码目录的身份仅作一次性只读迁移；已有状态或公钥痕迹而身份丢失时失败关闭，不重新铸钥。私钥/HMAC 环境文件为 0600，父目录为 0700；代码回滚、普通 teardown 不回收该持久身份。
 
-### 4.2 代理侧（已完成，用 SSH 跳板写入）
+内置测试 profile 的公开信任根为 `relay-test-key-1` / `otRocTSuXfkyfUKA6Gx71zvxII60UdxGK5h/dJ8aOIg=`。首次空安装生成的新公钥不会自动等于此 pin；必须取回实际公钥并成对显式配置同一 key ID/public key 才能演练。脚本尚未自动交叉校验内置 pin（#1507），不能用删身份或状态解决失配。
 
-本机出口 IP 直连共享代理会被 TCP 重置（fail2ban 类封禁，密钥授权正常），而 relay 主机到代理的 22 端口可达。因此给部署脚本
-新增 `PROXY_SSH_JUMP=root@47.120.8.237`（跳板只做 `-W` TCP 转发，认证仍用本机 `SSH_KEY`），用它完成了：
+公开客户端入口继续使用 `https://pinvou.com/pinvou3/remote-test` 与 `wss://pinvou.com/pinvou3/remote-test/ws`；它们是随包发布的用户访问合同，不是 SSH 管理入口。
 
-1. 代理侧 `relay-tunnel` 账号与 `authorized_keys`、`/etc/ssh/sshd_config` 的 `Match User` 限权块；
-2. 代理侧 nginx snippet `pinvou3-remote-relay-test.conf` 与 `sites-enabled/pinvou` 的 include（`/pinvou3/remote-test` 路由，`nginx -t` 通过后 reload）；
-3. relay → 代理的 `pinvou-remote-relay-test-tunnel.service`（active，回环健康检查通过）。
+### 4.2 历史代理配置与公网探测
 
-### 4.3 公网验收（已完成）
+当次通过受限 SSH 跳板完成代理侧专用隧道账户、authorized_keys、sshd 转发限制、nginx 测试路由和反向隧道的配置。保留这些变更类型以便核查副作用，具体管理目标与配置布局仅在运维清单登记。
 
-| 检查 | 结果 |
-|---|---|
-| `https://pinvou.com/pinvou3/remote-test/healthz` | 200，`{"ok":true,"endpoint_count":0,…}` |
-| `https://pinvou.com/pinvou3/remote-test/r/deploy-check` | 200，页面标题与 bridge 路径匹配 |
-| `https://pinvou.com/pinvou3/remote/healthz`（生产） | 200，未被本次部署影响 |
-| 测试实例 / 隧道 | `pinvou-remote-relay-test.service` active、`pinvou-remote-relay-test-tunnel.service` active |
-| 运行版本 | `protocol=v2+controller-v1`，`controller-router.js`/`controller-resume.js` 等模块在位 |
-| **controller lane 探针** | 从公网 `wss://pinvou.com/pinvou3/remote-test/ws` 发 `controller_pairing_claim`（故意不完整）→ 收到控制器族错误信封 `{"v":1,"type":"error","code":"invalid_message","message":"消息无效"}`，证明 controller-v1 分发器已启用且公网可达 |
+当次探测记录包含测试/生产健康接口成功、旧版本页面成功及不完整 controller claim 返回 `invalid_message`。旧页面含 bridge 的观测不是当前产物校验标准；现在使用 CLI 检查 index、base、startup 和模块资源，并检查公网当前 base 的 assets。
 
-**唯一遗留**：脚本内置的 `public_verify` 从**本机**执行，而本机到 `pinvou.com` 超时（同环境访问生产 URL 亦超时），因此该步判失败并
-把 relay 侧回滚到上一版；由于两次上传的代码内容一致（均含 controller 支持）且状态目录已外置，当前实例功能等价。若要让磁盘上的版本与
-“最新一次上传”完全一致，请从一个能访问 `pinvou.com` 的网络重跑同一条命令（幂等）。
+历史本机到公网不可达曾触发 Relay 侧自动回滚；不把其他位置的探测成功等同于本机发布脚本成功，也不声称这次审核重跑了公网验收。临时部署密钥已在当次操作后删除，文件名与目标不入库。
 
-部署过程中在 47 上生成的临时密钥 `id_ed25519_pinvou_test_proxy` 已删除。
+### 4.3 当前操作与验证要求
 
-### 4.4 部署命令（含跳板）
+先在本地加载不入库的受控配置，再执行：
 
 ```bash
-PROXY_SSH_JUMP=root@47.120.8.237 SKIP_LOCAL_TESTS=1 ENABLE_DESKTOP_CONTROLLER=1 \
-  bash scripts/deploy-remote-relay-test.sh
+bash scripts/deploy-remote-relay-test.sh --validate-only
+ENABLE_DESKTOP_CONTROLLER=1 bash scripts/deploy-remote-relay-test.sh
 ```
 
-### 4.5 本次踩到并已修复的脚本缺陷（`dd307239`）
+默认执行本地测试和 Web 构建；只有已有对应实际证据时才可显式跳过。测试端点使用 development + TOFU，只供测试，不是生产配置。首次部署、重部署与回滚都不得代替第 2.3 节和真实双 Windows 发布验收。
 
-1. 上传清单是旧白名单，缺 `controller-*.js` / `enrollment-*.js` / `pairing-*.js` / `relay-state-store.js` 等运行时模块 →
-   启用 controller 后启动即 `ERR_MODULE_NOT_FOUND`；已改为打包 relay 根目录全部 `*.js`。
-2. `legacy` 状态文件被放在 controller 状态目录内 → `legacy_state_path_inside_controller_directory`；已移到同级。
-3. 状态目录默认 755 且位于会被整体替换的代码目录 → `relay_state_permissions_unsafe` 且重部署丢状态；
-   已改到 `/var/lib/pinvou-remote-relay-test` 并 `chmod 700`。
-4. 单元 `EnvironmentFile` 不可选、回滚不恢复 unit、健康检查固定 `sleep 2` → 回滚后进入重启循环 / 启动稍慢被误判；
-   已改为可选 `EnvironmentFile=-`、回滚同时恢复 unit、健康检查有界重试 30s。
+Windows 本机应执行 `npm --prefix remote-control-relay test`，保留 PowerShell 身份、属主和 launcher 行为测试的实际结果；Linux 的 win32 skip 和文件符号链接权限 skip 均不计通过。CI 的具体选择与结果以当前提交工作流为准，不以 required gate 绿色声称所有平台行为已执行。
+
+非阻塞跟进：Windows 脚本行为 CI 覆盖见 #1512；本地自测秘密文件当前依赖 LOCALAPPDATA 继承权限，尚无显式 DACL 验证/收紧，后续实测与硬化见 #1675。未复现越权读取，不据此声称发生泄露；launcher 的健康 warning 或缺可执行文件退出也不是应用已成功启动的证据。
+
+历史脚本曾遗漏运行期模块、错误放置 legacy 状态、随代码替换丢状态、用固定等待误判健康；目前分别由完整模块归档、独立状态/身份目录、回滚恢复单元与有界健康重试覆盖。具体实现、测试数量和是否通过以当前源码与当前执行输出为准。

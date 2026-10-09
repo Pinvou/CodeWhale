@@ -17,8 +17,9 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes256Gcm, Nonce};
+use aes::Aes256;
+use aes_gcm::aead::{Aead, KeyInit, Payload, consts::U12};
+use aes_gcm::{AesGcm, Nonce};
 use base64::Engine as _;
 use hkdf::Hkdf;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -35,6 +36,10 @@ use super::protocol::{
     MAX_ENCRYPTED_FRAME_BYTES, ParsedTranscript, Result, build_receipt_commitment_preimage,
     parse_liveness_attestation,
 };
+
+// Explicitly use the AES implementation whose key-schedule Drop is zeroized.
+// This is exactly aes_gcm::Aes256Gcm (96-bit nonce, default 128-bit tag).
+type Aes256Gcm = AesGcm<Aes256, U12>;
 
 const AEAD_NONCE_BYTES: usize = 12;
 const AEAD_TAG_BYTES: usize = 16;
@@ -1767,7 +1772,15 @@ mod tests {
     #[test]
     fn aes_key_schedule_requires_zeroize_on_drop() {
         fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
-        assert_zeroize_on_drop::<aes_gcm::aes::Aes256>();
+        assert_zeroize_on_drop::<Aes256>();
+    }
+
+    #[test]
+    fn explicit_cipher_is_the_standard_aes_256_gcm_type() {
+        // The assignment proves type identity, not just a matching round trip.
+        let key = [7_u8; 32];
+        let cipher: Aes256Gcm = aes_gcm::Aes256Gcm::new((&key).into());
+        let _: aes_gcm::Aes256Gcm = cipher;
     }
 
     fn fixture() -> Value {
