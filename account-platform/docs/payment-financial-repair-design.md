@@ -1,14 +1,16 @@
 # 支付财务修复（`PAYMENT_FINANCIAL_REPAIR`）领域设计
 
-状态：`DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅“已确认支付但未入账”的补记**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-28 的 closed command/snapshot/proof、外部证据规则、幂等与恢复、失败分类、迁移与回滚及验收映射；不新增可执行路径，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
+当前状态：`PRIVATE_IMPLEMENTATION / INDEPENDENT_REVIEW_PENDING / DEFAULT_INACTIVE / NOT_DEPLOYED`。下述设计冻结记录保留历史边界；当前私有候选已装配 owner、proof/precheck、typed Detail/EDIT、专属 consumer/result、Portal 与三语言表单，有限实测不等于真实前序传播、完整审批发行或部署验收。首版范围由用户在 2026-09-19 确认为**仅“已确认支付但未入账”的补记**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-28 的 closed command/snapshot/proof、外部证据规则、幂等与恢复、失败分类、迁移与回滚及验收映射；当前唯一命令为 `PAYMENT_FINANCIAL_REPAIR` v1/s1，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
 
-## 1. 命令现状（事实）
+## 1. 设计冻结时的命令现状（历史）
+
+当前私有装配使用 Account 原 `000073` consumer route、Billing 原 `000065/000066` 及 `000077` requester 审计迁移；专属 durable 为 `billing-payment-financial-repair-executor-p1-v1`，沿既有 `RunBillingApprovalConsumers` 与资源注册，无新增消费开关。只有默认 INACTIVE 已保留，以下“仅元数据/无 handler”等描述是设计冻结时的记录。
 
 - **只有策略元数据**：Account `approval_command_policies`/`approvalpolicy` 登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`，请求/审批权限 `platform.billing.repairs.request|approve`、`FINANCIAL_FACT_CHANGE`、一名非申请人审批、24 小时有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`、`internal/platform/approvalpolicy/registry.go`）。
 - **静态不可执行**：不在 `executableApprovalCommands` 内，create/update/submit/APPROVE/Begin 全部失败关闭。
 - **Billing 侧只有未激活行**：`('PAYMENT_FINANCIAL_REPAIR',1,1,'INACTIVE',1)`（`migrations/billing/000054_approval_command_activations.up.sql`）；无 handler、proof、executor、consumer durable 或恢复分类。
 
-## 2. 既有“已确认支付未入账”修复路径（事实，本命令必须复用）
+## 2. 设计冻结时的既有“已确认支付未入账”修复路径（历史，本命令复用其账务语义）
 
 - **入口与前置**：`PaymentCoordinator.RepairReviewedOrder`（`internal/billing/reconciliation.go`）要求能力 `ManualRepairSupported`+`OrderQuerySupported`、非空 `actorID` 与 1–500 字符原因、订单 `status='MANUAL_REVIEW'` 且 `fulfillment_status='MANUAL_REVIEW'`；随后调用 Provider 查询并要求 `status='SUCCESS'`、渠道交易号/支付时间非空，且商户单号、渠道、金额（分）、币种与订单逐项相等。
 - **入账写入**：事务内重读订单（`FOR UPDATE`）→ 记录钱包 `posted_microcredits` 作为 `balanceBefore` → `mergeSuccessfulPaymentWithinTransaction(..., "MANUAL_REPAIR", "repair:"+order.ID+":"+channelTransactionID, snapshot, provider, repair=true, ...)`：写 `payment_transactions`（`status='SUCCEEDED'`）、推进订单为已支付/已履约、写 `REPAIR_CREDIT` journal（`business_reference='repair-payment-transaction:'+transactionID`）与成对 posting（BASE/BONUS lot 的可用额计入钱包负债账户、未结应收清偿`RECEIVABLE_ASSET`、`PAYMENT_CLEARING −amount`）、按 `splitProductComponents` 写 credit lot、entitlement package 与 BASE/BONUS component、更新钱包 `posted_microcredits += amount − appliedToReceivables`（`internal/billing/payments.go`）。
@@ -109,7 +111,7 @@
 - 复用 `platform.billing.repairs.request|approve`、一名非申请人审批、24 小时有效期、5 分钟窗口，不新增权限或 policy/snapshot 版本。
 - 依据：该命令 `policy_version=1 / snapshot_schema_version=1` 行从未是可执行合同（静态不可执行，四入口失败关闭），不存在由该版本产生并已执行的领域事实；首次冻结的 closed 形状即该版本合同。
 - 激活前只读守卫：目标库中该命令必须不存在 `APPROVED/EXECUTING/EXECUTION_FAILED` 或其它未终态申请；守卫同时统计"`MANUAL_REVIEW` 订单且已有 Provider 成功证据但无内部入账"的存量清单，存量必须由运维走既有 `RepairReviewedOrder` 收口或在激活后逐笔走本命令，不得在激活时批量改写。
-- `billing_approval_command_activations` 行保持 `INACTIVE`；GSA-28 交付默认关闭的专属 consumer/durable 开关；生产激活只属于取得独立授权的 GSA-40。
+- `billing_approval_command_activations` 行保持 `INACTIVE`；当前交付专属 consumer/durable，运行时由有限注册集合统一装配，不使用逐命令环境开关；生产激活只属于取得独立授权的 GSA-40。
 - 放宽首版范围（例如金额不符、重复入账更正、主动 Provider 复核）必须新增 policy/schema 版本与独立设计。
 
 ## 10. 迁移、N/N-1 与回滚
@@ -136,13 +138,15 @@
 | N/N-1 与回滚 | 旧运维路径行（新列为 NULL）可读且不被误判；翻回 `INACTIVE` 后失败关闭，历史保留 |
 | 真实领域 E2E | Account 批准 → outbox → relay → 专属 durable → 补记入账 → 终态 → 重放幂等，真实 PostgreSQL + 真实 HTTP，无 SKIP 替代 |
 
-## 12. 本切片不做的事
+## 12. 设计冻结阶段范围（历史）
+
+以下为原设计切片记录，非当前实现或验收结论；当前接线与有限验证以本波冻结证据为准。
 
 - 不新增或修改迁移、Go/Node 代码、OpenAPI 合同、activation 行或执行路径。
 - 不改动既有 `RepairReviewedOrder`、回调/查询合并、退款、拒付、对账或 `attention_summary` 的既有行为。
 - 设计冻结不等于实现或激活；GSA-28 未交付前该命令保持不可执行。
 
-## 13. 自检与验证
+## 13. 设计冻结阶段自检与验证（历史）
 
 - 每条事实可回溯到 §1/§2 的迁移与源码路径；§4 的允许变化逐项对应既有补记写入者实际写入的表与列。
 - 首版范围与版本复用决策与用户 2026-09-19 确认一致，未猜测填入其它选项。

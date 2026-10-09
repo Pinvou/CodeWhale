@@ -169,12 +169,13 @@ func paymentFinancialRepairPlanFrom(ctx context.Context, source paymentRepairRea
 	plan := PaymentFinancialRepairPlan{OrderID: input.PaymentOrderID, EvidenceID: input.PaymentEvidenceID}
 	var orderStatus, fulfillmentStatus string
 	var rawProduct []byte
+	var requesterID uuid.UUID
 	if err := source.QueryRow(ctx, `SELECT merchant_order_no,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,
-status,fulfillment_status,COALESCE(provider_sku,''),provider_id,provider_version,updated_at,summary_version,product_snapshot
+status,fulfillment_status,COALESCE(provider_sku,''),provider_id,provider_version,updated_at,summary_version,product_snapshot,requester_id
 FROM payment_orders WHERE id=$1`, input.PaymentOrderID).
 		Scan(&plan.MerchantOrderNo, &plan.WalletID, &plan.ProductID, &plan.Channel, &plan.AmountFen, &plan.Currency,
 			&plan.CreditMicrocredits, &orderStatus, &fulfillmentStatus, &plan.ProviderSKU, &plan.ProviderID, &plan.ProviderVersion,
-			&plan.OrderUpdatedAt, &plan.OrderSummaryVersion, &rawProduct); err != nil {
+			&plan.OrderUpdatedAt, &plan.OrderSummaryVersion, &rawProduct, &requesterID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return PaymentFinancialRepairPlan{}, ErrNotFound
 		}
@@ -200,12 +201,13 @@ FROM payment_orders WHERE id=$1`, input.PaymentOrderID).
 	var evidenceType, providerTransactionID, evidenceCurrency string
 	var evidenceAmountFen *int64
 	var providerEventAt *time.Time
+	var rawEvidence []byte
 	if err := source.QueryRow(ctx, `SELECT payment_order_id,evidence_type,provider_id,provider_version,merchant_order_no,
 COALESCE(provider_transaction_id,''),amount_fen,COALESCE(currency,''),COALESCE(provider_status,''),provider_event_at,
-payload_digest,merge_result FROM payment_evidence WHERE id=$1`, input.PaymentEvidenceID).
+payload_digest,merge_result,payload_snapshot FROM payment_evidence WHERE id=$1`, input.PaymentEvidenceID).
 		Scan(&evidenceOrderID, &evidenceType, &evidenceProviderID, &evidenceProviderVersion, &evidenceMerchantOrderNo,
 			&providerTransactionID, &evidenceAmountFen, &evidenceCurrency, &evidenceStatus, &providerEventAt,
-			&payloadDigest, &mergeResult); err != nil {
+			&payloadDigest, &mergeResult, &rawEvidence); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return PaymentFinancialRepairPlan{}, ErrNotFound
 		}
@@ -220,6 +222,22 @@ payload_digest,merge_result FROM payment_evidence WHERE id=$1`, input.PaymentEvi
 		evidenceMerchantOrderNo != plan.MerchantOrderNo || evidenceAmountFen == nil || *evidenceAmountFen != plan.AmountFen ||
 		evidenceCurrency != plan.Currency {
 		return PaymentFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	// Only the immutable provider evidence can supply customer and SKU facts.
+	// An order snapshot is an expected value, never a missing provider fact.
+	var providerFacts struct {
+		Customer *string `json:"external_customer_key"`
+		SKU      *string `json:"external_sku"`
+	}
+	if json.Unmarshal(rawEvidence, &providerFacts) != nil || providerFacts.Customer == nil ||
+		*providerFacts.Customer != requesterID.String() ||
+		(providerFacts.SKU == nil && plan.ProviderSKU != "") ||
+		(providerFacts.SKU != nil && *providerFacts.SKU != plan.ProviderSKU) {
+		return PaymentFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	evidenceSKU := ""
+	if providerFacts.SKU != nil {
+		evidenceSKU = *providerFacts.SKU
 	}
 	plan.ProviderTransactionID, plan.PaidAt = providerTransactionID, providerEventAt.UTC()
 	// Internal absence (design §5 as amended): the order must not be credited,
@@ -281,6 +299,7 @@ WHERE wallet_id=$1 AND outstanding_microcredits>0`, plan.WalletID).Scan(&outstan
 		"order_status":            orderStatus, "fulfillment_status": fulfillmentStatus,
 		"order_updated_at": plan.OrderUpdatedAt.UTC().Format(time.RFC3339Nano), "order_summary_version": plan.OrderSummaryVersion,
 		"evidence_id": plan.EvidenceID.String(), "evidence_type": evidenceType,
+		"evidence_external_customer_key": *providerFacts.Customer, "evidence_external_sku": evidenceSKU,
 		"evidence_status": evidenceStatus, "evidence_payload_digest": payloadDigest,
 		"evidence_paid_at":      plan.PaidAt.Format(time.RFC3339Nano),
 		"review_transaction_id": plan.ReviewTransactionID.String(),
@@ -298,7 +317,7 @@ WHERE wallet_id=$1 AND outstanding_microcredits>0`, plan.WalletID).Scan(&outstan
 		MerchantOrderNo: plan.MerchantOrderNo, Status: "SUCCESS", Channel: plan.Channel,
 		AmountFen: plan.AmountFen, Currency: plan.Currency,
 		ChannelTransactionID: &plan.ProviderTransactionID, PaidAt: &plan.PaidAt,
-		ProviderStatus: evidenceStatus, ExternalSKU: plan.ProviderSKU,
+		ProviderStatus: evidenceStatus, ExternalSKU: evidenceSKU, ExternalCustomerKey: *providerFacts.Customer,
 	}
 	return plan, nil
 }
@@ -418,6 +437,7 @@ func (p *PaymentCoordinator) ApplyPaymentFinancialRepair(ctx context.Context, in
 	snapshot, err := json.Marshal(map[string]any{
 		"status": plan.Provider.Status, "provider_status": plan.Provider.ProviderStatus,
 		"provider_transaction_id": plan.ProviderTransactionID, "paid_at": plan.PaidAt,
+		"external_customer_key": plan.Provider.ExternalCustomerKey, "external_sku": plan.Provider.ExternalSKU,
 	})
 	if err != nil {
 		return PaymentFinancialRepairResult{}, ErrConflict
