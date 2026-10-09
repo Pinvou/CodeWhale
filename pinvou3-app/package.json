@@ -4,6 +4,7 @@
   "description": "品悟智能助手桌面应用",
   "private": true,
   "scripts": {
+    "test:account-platform-registration-bonus-ui": "node tests/admin_registration_bonus_ui_smoke.mjs && node tests/admin_registration_bonus_precision_ui_smoke.mjs",
     "tauri": "node scripts/tauri/build.js",
     "dev": "node scripts/tauri/build.js dev",
     "dev:ui": "node scripts/tauri/build.js dev",
@@ -157,12 +158,18 @@
     "test:account-platform-finance-ui": "node tests/account_platform_f02_ui_smoke.mjs && node tests/account_platform_order_presentation_ui_smoke.mjs && node tests/account_platform_f02_admin_recovery_smoke.mjs && node tests/account_platform_approval_center_smoke.mjs",
     "test:account-platform-reconciliation": "node --test tests/account_platform_reconciliation.test.mjs",
     "test:account-platform-reconciliation-ui": "node tests/account_platform_reconciliation_ui_smoke.mjs",
+    "test:account-platform-usage-governance": "node --test tests/account_platform_usage_governance.test.mjs",
+    "test:account-platform-model-selection-ui": "node tests/account_platform_f05_model_selection_ui_smoke.mjs",
+    "test:account-platform-native-code-ui": "node tests/account_platform_f05_native_code_ui_smoke.mjs",
+    "test:account-platform-billing-notice-ui": "node tests/account_platform_f05_billing_notice_ui_smoke.mjs",
+    "test:account-platform-usage-ui": "node tests/account_platform_f05_usage_ui_smoke.mjs && node tests/account_platform_usage_overview_ui_smoke.mjs",
+    "test:account-platform-usage-governance-ui": "node tests/account_platform_f05_usage_governance_ui_smoke.mjs",
     "test:account-platform-model-overviews": "node --test tests/account_platform_f04_overview.test.mjs && node tests/account_platform_f04_overview_ui_smoke.mjs",
     "test:account-platform-management-ui": "node tests/account_platform_f04_management_ui_smoke.mjs",
-    "test:account-platform-usage-governance": "node --test tests/account_platform_usage_governance.test.mjs",
-    "test:account-platform-usage-governance-ui": "node tests/account_platform_f05_usage_governance_ui_smoke.mjs",
     "test:account-platform-organization": "node --test tests/account_platform_organization.test.mjs",
-    "test:account-platform-organization-ui": "node tests/account_platform_organization_ui_smoke.mjs"
+    "test:account-platform-organization-ui": "node tests/account_platform_organization_ui_smoke.mjs",
+    "test:account-platform-member-units": "node --test tests/account_platform_member_units.test.mjs",
+    "test:account-platform-member-units-ui": "node tests/account_platform_member_units_ui_smoke.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.10",

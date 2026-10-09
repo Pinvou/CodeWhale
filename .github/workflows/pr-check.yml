@@ -789,6 +789,12 @@ jobs:
       - name: Verify Token management authorization contracts
         run: node scripts/check-token-management-authorization-coverage.mjs
 
+      - name: Keycloak provisioning and theme contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          PINVOU_TEST_BASH="$(command -v bash)" python3 account-platform/deploy/keycloak/test/provision_mobile_auth_test.py
+
       - name: Test and vet all Account Platform Go modules
         shell: bash
         run: |

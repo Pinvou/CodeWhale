@@ -5,6 +5,7 @@ import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
 import { requireReconciliationDate, requireReconciliationRun } from './reconciliation-contract.js';
 import { responseRetryAfter } from './auth-error.js';
+import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON } from './registration-bonus-contract.js';
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
   error.code = payload?.code || 'REQUEST_FAILED';
@@ -146,6 +147,17 @@ export class AdminPlatformClient {
     if (!entry) return;
     entry.abandon();
     entry.controller.abort();
+  }
+
+  registrationBonusPolicy(signal, { fresh = false } = {}) {
+    const resource = '/admin/v1/registration-bonus-policy';
+    if (fresh) this.invalidateRead('billing', resource);
+    return this.request('billing', resource, signal, parseRegistrationBonusJSON);
+  }
+
+  updateRegistrationBonusPolicy(body, idempotencyKey, signal) {
+    if (typeof idempotencyKey !== 'string' || idempotencyKey.length < 16 || idempotencyKey.length > 128) throw new Error('INVALID_REGISTRATION_BONUS_REQUEST');
+    return this.mutate('billing', '/admin/v1/registration-bonus-policy', 'PUT', body, idempotencyKey, signal, 200, { decode: parseRegistrationBonusJSON, encode: encodeRegistrationBonusJSON });
   }
 
   async mutate(area, resource, method, body, idempotencyKey = '', signal, expectedStatus = 0, codec = null) {
@@ -787,6 +799,14 @@ catalogRollbackImpact(sourceCatalogVersion, signal) {
     return this.request('token', `/admin/v1/model-catalog/impact/rollback?${query}`, signal);
   }
 
+tokenOperationsOverview(window = '24h', signal) {
+  if (!['24h', '7d', '30d'].includes(window)) throw new Error('INVALID_OVERVIEW_WINDOW');
+  return this.request('token', `/admin/v1/operations-overview?${new URLSearchParams({ window })}`, signal);
+}
+tokenModelOperationsPageOverview(window = '', signal) {
+  if (window && !['24h', '7d', '30d'].includes(window)) throw new Error('INVALID_OVERVIEW_WINDOW');
+  return this.request('token', `/admin/v1/overviews/model-operations${window ? `?${new URLSearchParams({ window })}` : ''}`, signal);
+}
 usageRequests(filters = {}, signal) {
     // F05 advertises personal execution, not an organization producer/filter.
     const personalFilters = { ...filters };

@@ -28,7 +28,7 @@ const pricingReceiptVersion int64 = 900008
 const pricingReceiptChecksum = "60cb8519502e377de242d858872366486083cdd9b501d80a60421d663c250b43"
 const pricingReceiptDownChecksum = "49843bf03fc3120f13798ff4b4296344ca9dd12a73544e0a041009f28172af6e"
 
-const memberIdentityVersion int64 = 900003
+const memberIdentityVersion int64 = 900011
 const memberIdentityChecksum = "af4a63ed0592a0e60d5f4744176e15cc5013c3633c6f0f414f7580b7132b2aa8"
 const memberIdentityDownChecksum = "051eae7b8cf15c7708fbfe88aa096c4d85a284e35465f0684a1ff25fe3af6925"
 
@@ -37,6 +37,9 @@ const memberIdentityDownChecksum = "051eae7b8cf15c7708fbfe88aa096c4d85a284e35465
 // numeric versions remains possible after the high-numbered fence is recorded.
 // The same validation is required before DownOne to prevent rollback-file edits.
 func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
+	if err := validateMemberFinancialReviewReason(input); err != nil {
+		return nil, err
+	}
 	var fence *migrations.Migration
 	var intent *migrations.Migration
 	var pricingReceipt *migrations.Migration
@@ -62,10 +65,6 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 		if migration.Version == intentVersion {
 			copy := migration
 			intent = &copy
-		}
-		if migration.Version == memberIdentityVersion {
-			copy := migration
-			memberIdentity = &copy
 		}
 	}
 	if fence == nil || !seen[1] || !seen[6] {

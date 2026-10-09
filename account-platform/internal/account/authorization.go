@@ -296,6 +296,11 @@ func (s *Service) requirePermission(permission string) gin.HandlerFunc {
 			return
 		}
 		decision, err := repository.Authorize(c.Request.Context(), principal, permission, nil, nil)
+		if err != nil && !errors.Is(err, ErrForbidden) {
+			api.WriteError(c.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
 		if err != nil || !decision.Allowed {
 			if auditor, auditOK := s.repository.(interface {
 				RecordPermissionDenial(context.Context, identity.Principal, string, string) error

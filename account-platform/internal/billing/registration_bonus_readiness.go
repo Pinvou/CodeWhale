@@ -41,7 +41,7 @@ type HTTPRegistrationBonusEligibilityVerifier struct {
 
 func NewHTTPRegistrationBonusEligibilityVerifier(rawURL, serviceToken string) (*HTTPRegistrationBonusEligibilityVerifier, error) {
 	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(rawURL), "/"))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || strings.TrimSpace(serviceToken) == "" {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" || parsed.Opaque != "" || strings.TrimSpace(serviceToken) == "" {
 		return nil, errors.New("registration bonus eligibility verifier requires an absolute Account URL and service token")
 	}
 	return &HTTPRegistrationBonusEligibilityVerifier{baseURL: parsed, serviceToken: strings.TrimSpace(serviceToken), client: observability.NewHTTPClient(5 * time.Second)}, nil

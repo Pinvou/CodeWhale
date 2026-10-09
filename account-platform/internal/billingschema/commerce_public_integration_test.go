@@ -347,10 +347,19 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 				deadline := time.Now().Add(time.Second)
 				for {
 					var expired bool
-					if e = c.QueryRow(ctx, `SELECT clock_timestamp()>lease_until FROM commerce_customer_sync_jobs WHERE id=$1`, first.ID).Scan(&expired); e != nil {
+					var leaseUntil time.Time
+					if e = c.QueryRow(ctx, `SELECT clock_timestamp()>lease_until,lease_until FROM commerce_customer_sync_jobs WHERE id=$1`, first.ID).Scan(&expired, &leaseUntil); e != nil {
 						t.Fatal(e)
 					}
-					if expired {
+					// Claim uses the repository's real Go clock. PostgreSQL's
+					// clock alone can cross this 20ms boundary first on Windows.
+					// Require expiry in both clock domains without changing the
+					// lease or weakening the subsequent reclaim assertion.
+					applicationExpired := time.Now().After(leaseUntil)
+					if expired && !applicationExpired {
+						t.Log("database lease clock passed expiry before the application claim clock")
+					}
+					if expired && applicationExpired {
 						break
 					}
 					if time.Now().After(deadline) {
@@ -521,7 +530,7 @@ func TestF02CommerceOriginal15LateUpgradePreservesFacts(t *testing.T) {
 	}
 	var prior []migrations.Migration
 	for _, m := range all {
-		if m.Version != 15 {
+		if m.Version != 15 && m.Version != 91 {
 			prior = append(prior, m)
 		}
 	}
@@ -550,6 +559,16 @@ func TestF02CommerceOriginal15LateUpgradePreservesFacts(t *testing.T) {
 	}
 	if _, err = migrations.VerifyApplied(ctx, c, all); err != nil {
 		t.Fatal(err)
+	}
+	var indexDefinition string
+	if err = c.QueryRow(ctx, `SELECT pg_get_indexdef('commerce_customer_sync_jobs_leased_idx'::regclass)`).Scan(&indexDefinition); err != nil || !strings.Contains(indexDefinition, "lease_until") || !strings.Contains(indexDefinition, "LEASED") {
+		t.Fatal("late lease index not installed", err)
+	}
+	if err = accountschema.Up(ctx, c, all); err != nil {
+		t.Fatal("late upgrade replay", err)
+	}
+	if _, err = migrations.VerifyApplied(ctx, c, all); err != nil {
+		t.Fatal("late replay checksum", err)
 	}
 	var oldTable *string
 	if err = c.QueryRow(ctx, `SELECT to_regclass('mall_user_sync_jobs')::text`).Scan(&oldTable); err != nil || oldTable != nil {

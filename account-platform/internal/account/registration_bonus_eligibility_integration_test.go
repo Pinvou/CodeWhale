@@ -49,6 +49,10 @@ func TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration(t *test
 	if _, err := repository.pool.Exec(ctx, `UPDATE users SET status='DELETED',username='closed_'||replace(gen_random_uuid()::text,'-',''),mobile_e164='closed:'||gen_random_uuid()::text,mobile_verified_at=NULL,updated_at=now() WHERE id=$1`, first); err != nil {
 		t.Fatal(err)
 	}
+	// A real new registration still obeys SMS cooldown. Advance the repository's
+	// injected business clock, without deleting or rewriting admission evidence.
+	nextRegistration := repository.now().Add(2 * time.Minute)
+	repository.now = func() time.Time { return nextRegistration }
 	second := commitRegistrationBonusTestOperation(t, ctx, repository, "bonus_second", "+8613900139000")
 	assertRegistrationBonusJobMode(t, ctx, repository, second, "NOT_APPLICABLE")
 }
@@ -86,7 +90,7 @@ func TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegratio
 
 func registrationBonusTestOperation(t *testing.T, ctx context.Context, repository *PostgresRepository, username, mobile string) uuid.UUID {
 	t.Helper()
-	now := time.Now().UTC()
+	now := repository.now()
 	operationID, candidateUserID, challengeID := uuid.New(), uuid.New(), uuid.New()
 	operation := RegistrationOperation{ID: operationID, CandidateUserID: candidateUserID, QueryTokenHash: bytes.Repeat([]byte{1}, 32), RequestFingerprint: bytes.Repeat([]byte{2}, 32), Username: username, Mobile: mobile, ChallengeID: challengeID, PasswordPolicyVersion: "user-v1", CreatedAt: now, UpdatedAt: now}
 	challenge := SMSChallenge{ID: challengeID, Mobile: mobile, Purpose: SMSPurposeRegister, ExpiresAt: now.Add(5 * time.Minute), Source: "registration-bonus-test", Device: uuid.NewString(), Provider: SMSProviderDescriptor{ID: "generated", AdapterVersion: "v1"}}
