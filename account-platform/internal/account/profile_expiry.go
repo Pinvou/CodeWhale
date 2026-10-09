@@ -7,8 +7,9 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Call only while holding the same user's row lock used by profile creation
-// and SMS verification. State and audit commit with the password operation.
+// Call only while holding the user's row lock shared with profile creation.
+// SMS verification serializes on the profile row; the UPDATE proof predicates
+// prevent superseding verified work. State and audit share the password transaction.
 func supersedeExpiredPendingProfileChanges(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
 	rows, err := tx.Query(ctx, `UPDATE profile_change_requests
  SET status='SUPERSEDED',version=version+1,last_error_code='EXPIRED_BEFORE_VERIFICATION',updated_at=clock_timestamp()
