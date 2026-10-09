@@ -319,7 +319,7 @@ test('connection is integrated into the remote-control page instead of a detache
   assert.ok(panel.includes('<RemoteConnectForm'));
   assert.ok(!panel.includes('<RemoteConnectionShell'));
   assert.ok(main.includes('LazyRemoteConnectionShell'));
-  assert.ok(main.includes('remoteConversationOpen && ('));
+  assert.match(main, /can\('desktopRemoteControl'\) && remoteConversationOpen && browserOverlayPublicationReady && \(/);
   assert.ok(main.includes('remoteChatConnection = bs?.controllerConnection || REMOTE_DISCONNECTED_CONNECTION'));
   assert.ok(main.includes('remoteConnection={remoteChatConnection}'));
   assert.ok(main.includes('onRemoteConnected={activateRemoteProxy}'));
