@@ -35,7 +35,7 @@ func TestRefundExceptionRepairProofProjectionIsClosedAndActivationGated(t *testi
 		ProviderRefundID: "wx-refund-1", WalletID: walletID, WalletVersion: 7, PackageID: packageID,
 		PackageStatus: "FROZEN", RefundUpdatedAt: updatedAt, FactsDigest: strings.Repeat("a", 64),
 	}
-	repository := &billingProofFactsStub{refundRepair: plan}
+	repository := &refundRepairProofFactsStub{refundRepair: plan}
 	current, reason, ownerState, err := currentBillingProofInput(context.Background(), repository, frozen)
 	if err != nil || reason != "" {
 		t.Fatalf("refund exception repair proof reason=%s err=%v", reason, err)
@@ -61,11 +61,11 @@ func TestRefundExceptionRepairProofProjectionIsClosedAndActivationGated(t *testi
 		t.Fatalf("unexpected financial projection %+v", financial)
 	}
 
-	rejected := &billingProofFactsStub{refundRepairErr: ErrApprovalSnapshotMismatch}
+	rejected := &refundRepairProofFactsStub{refundRepairErr: ErrApprovalSnapshotMismatch}
 	if _, reason, _, err := currentBillingProofInput(context.Background(), rejected, frozen); err != nil || reason != "DOMAIN_INVARIANT_FAILED" {
 		t.Fatalf("rejected repair reason=%s err=%v", reason, err)
 	}
-	mismatched := &billingProofFactsStub{refundRepair: plan}
+	mismatched := &refundRepairProofFactsStub{refundRepair: plan}
 	mismatched.refundRepair.RefundID = uuid.New()
 	if _, reason, _, err := currentBillingProofInput(context.Background(), mismatched, frozen); err != nil || reason != "SNAPSHOT_MISMATCH" {
 		t.Fatalf("mismatched repair reason=%s err=%v", reason, err)
@@ -82,7 +82,7 @@ func TestRefundExceptionRepairProofProjectionIsClosedAndActivationGated(t *testi
 	}
 
 	now := time.Now().UTC()
-	reader := &billingApprovalProofStub{billingProofFactsStub: repository, activation: validBillingApprovalActivationSnapshot(now)}
+	reader := &refundRepairApprovalProofStub{refundRepairProofFactsStub: repository, activation: validBillingApprovalActivationSnapshot(now)}
 	service := NewService(reader)
 	if _, err := service.billingApprovalProof(context.Background(), approvalencoding.ProofRequest{
 		ApprovalRequestID: uuid.New(),
@@ -123,4 +123,24 @@ func TestRefundExceptionRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(t *testi
 	if mismatch := refundExceptionRepairFrozenMismatch(plan, frozen); mismatch != "wallet_version" {
 		t.Fatalf("wallet version mismatch=%q", mismatch)
 	}
+}
+
+type refundRepairProofFactsStub struct {
+	billingProofFactsStub
+	refundRepair    RefundExceptionRepairPlan
+	refundRepairErr error
+}
+
+func (s *refundRepairProofFactsStub) refundExceptionRepairPlan(context.Context, RefundExceptionRepairCommandInput) (RefundExceptionRepairPlan, error) {
+	return s.refundRepair, s.refundRepairErr
+}
+
+type refundRepairApprovalProofStub struct {
+	Repository
+	*refundRepairProofFactsStub
+	activation ApprovalCommandActivationSnapshot
+}
+
+func (s *refundRepairApprovalProofStub) ApprovalCommandActivations(context.Context) (ApprovalCommandActivationSnapshot, error) {
+	return s.activation, nil
 }

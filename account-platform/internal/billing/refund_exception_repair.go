@@ -476,14 +476,53 @@ AND used_microcredits=0 AND reserved_microcredits=0 AND expired_microcredits=0`,
 		}
 	}
 	if plan.ExpectedGrants > 0 {
-		tag, err := tx.Exec(ctx, `UPDATE member_quota_grants grant SET revoked_microcredits=revoked_microcredits+reservation.available_microcredits,
+		tag, err := tx.Exec(ctx, `UPDATE member_quota_grants AS quota_grant SET revoked_microcredits=revoked_microcredits+reservation.available_microcredits,
 available_microcredits=0,status='REVOKED',suspension_reason=NULL,allocation_version=allocation_version+1,updated_at=$2
 FROM refund_grant_reservations reservation
-WHERE reservation.refund_id=$1 AND reservation.grant_id=grant.id AND grant.available_microcredits=reservation.available_microcredits
-AND grant.used_microcredits=0 AND grant.reserved_microcredits=0 AND grant.expired_microcredits=0 AND grant.revoked_microcredits=0
-AND grant.status='SUSPENDED' AND grant.suspension_reason='REFUND_PENDING'`, plan.RefundID, now)
+WHERE reservation.refund_id=$1 AND reservation.grant_id=quota_grant.id AND quota_grant.available_microcredits=reservation.available_microcredits
+AND quota_grant.used_microcredits=0 AND quota_grant.reserved_microcredits=0 AND quota_grant.expired_microcredits=0 AND quota_grant.revoked_microcredits=0
+AND quota_grant.status='SUSPENDED' AND quota_grant.suspension_reason='REFUND_PENDING'`, plan.RefundID, now)
 		if err != nil || tag.RowsAffected() != plan.ExpectedGrants {
 			return RefundExceptionRepairResult{}, refundExceptionConflict("grant_cas", err)
+		}
+		// Preserve the ordinary refund grant audit and event contract. Read and
+		// close the result set before using the same pgx transaction to write.
+		grantRows, err := tx.Query(ctx, `SELECT quota_grant.id,quota_grant.organization_id,quota_grant.member_user_id,
+quota_grant.package_id,quota_grant.component_id,quota_grant.component_type,quota_grant.original_microcredits,
+quota_grant.available_microcredits,quota_grant.reserved_microcredits,quota_grant.used_microcredits,
+quota_grant.expired_microcredits,quota_grant.revoked_microcredits,quota_grant.status,quota_grant.suspension_reason,
+quota_grant.membership_version,quota_grant.allocation_version,quota_grant.created_by,quota_grant.expires_at,
+quota_grant.created_at,quota_grant.updated_at,reservation.available_microcredits
+FROM refund_grant_reservations reservation JOIN member_quota_grants AS quota_grant ON quota_grant.id=reservation.grant_id
+WHERE reservation.refund_id=$1 ORDER BY quota_grant.id`, plan.RefundID)
+		if err != nil {
+			return RefundExceptionRepairResult{}, err
+		}
+		type revokedGrant struct {
+			grant  MemberQuotaGrant
+			amount int64
+		}
+		grants := make([]revokedGrant, 0)
+		for grantRows.Next() {
+			var item revokedGrant
+			if err := scanMemberQuotaGrantWithAmount(grantRows, &item.grant, &item.amount); err != nil {
+				grantRows.Close()
+				return RefundExceptionRepairResult{}, err
+			}
+			grants = append(grants, item)
+		}
+		if err := grantRows.Err(); err != nil {
+			grantRows.Close()
+			return RefundExceptionRepairResult{}, err
+		}
+		grantRows.Close()
+		for _, item := range grants {
+			if err := appendMemberQuotaAudit(ctx, tx, item.grant, "REVOKED", nil, item.amount, now); err != nil {
+				return RefundExceptionRepairResult{}, err
+			}
+			if err := appendMemberQuotaOutbox(ctx, tx, item.grant, "billing.member-quota.revoked.v1", now); err != nil {
+				return RefundExceptionRepairResult{}, err
+			}
 		}
 	}
 	total := plan.RevokedMicrocredits + plan.ShortfallMicrocredits

@@ -1,8 +1,10 @@
 # 退款异常修复（`REFUND_EXCEPTION_REPAIR`）领域设计
 
-状态：`DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅“Provider 已退款但本地未冲销”**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-30 的 closed command/snapshot/proof、补偿账务、幂等与恢复、失败分类、迁移与回滚及验收映射；不新增可执行路径，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
+当前实现：`REFUND_EXCEPTION_REPAIR v1/s1` 已接入 owner、proof、预检、审批详情/编辑、consumer 和专属表单，默认 activation 仍为 `INACTIVE`；不开放普通退款产品，不调用 Provider。本文件保留首版已冻结的财务契约。私有组合的有限验证不代表实际前序传播、生产激活或完整 E2E 验收。
 
-## 1. 命令现状（事实）
+历史设计基线：2026-09-19 用户确认仅“Provider 已退款但本地未冲销”。下文明确标记的历史章节记录设计阶段，不能当作当前缺少实现的说明。
+
+## 1. 命令现状（历史设计基线）
 
 - **只有策略元数据**：Account `approval_command_policies`/`approvalpolicy` 登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`，请求/审批权限 `platform.billing.repairs.request|approve`、`FINANCIAL_FACT_CHANGE`、一名非申请人审批、24 小时有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`）。
 - **静态不可执行**：不在 `executableApprovalCommands` 内，create/update/submit/APPROVE/Begin 全部失败关闭；Billing 侧只有 `('REFUND_EXCEPTION_REPAIR',1,1,'INACTIVE',1)`（`migrations/billing/000054_approval_command_activations.up.sql`），无 handler、proof、executor、consumer durable 或恢复分类。
@@ -13,7 +15,7 @@
 - **退款模型**：`refunds`（`payment_order_id`、`merchant_refund_no` 唯一、`channel_refund_id` 唯一、`amount_fen>0`、`credit_microcredits>0`、`status ∈ {REQUESTED,SUCCEEDED,FAILED,MANUAL_REVIEW}`、`idempotency_key` 唯一、`reason`、`failure_reason`、`updated_at`），另有 `refund_component_reservations`/`refund_grant_reservations` 冻结退款前的组件与配额分配（`000004`、`000024`）。
 - **成功路径**（`internal/billing/refunds.go`）：冻结预留 → Provider 退款 → 事务内写 `REFUND` journal（`business_reference='refund:'||refund_id`）、按预留逐组件写钱包负债账户负 posting 与 `credit_lots.remaining_microcredits` 减少、组件（`status='FROZEN'` 且 used/reserved/expired 均为 0）置 `REVOKED`、成员配额 grant 置 `REVOKED` 并写审计/outbox、`REFUND_CLEARING +total`、钱包 `posted_microcredits-=total`、entitlement package 置 `REVOKED`、退款置 `SUCCEEDED` 并发出 `billing.refund.succeeded.v1`。
 - **本地冲突分支（本命令的触发事实）**：当预留组件缺失、合计与 `credit_microcredits` 不等或 `wallet.PostedMicrocredits<total` 时，同一事务把退款置 `MANUAL_REVIEW`、记录 `channel_refund_id`、发出 `billing.refund.review-required.v1`，并创建 P0 `REFUND_FAILURE` 异常（`dedupe_key='refund:<refund_id>:local-conflict'`）——即"Provider 已退款、本地未冲销"的持久事实。
-- **异常收口语义**：`payment_anomaly_cases`（`status ∈ {OPEN,RESOLVED}`、`resolution_code`、`financial_action_status ∈ {NONE,PENDING,APPLIED,FAILED}`、`version`）与 `ResolvePaymentAnomaly` 只允许 `REFUND_FAILURE` 的 `DISMISS`(`NONE`) 或 `ESCALATE_FINANCIAL_REPAIR`(`PENDING`)；**当前没有从 `PENDING` 推进到 `APPLIED` 的受控路径**，也没有任何命令会写 `APPROVED_WRITE_OFF` 之外的财务收口。
+- **异常收口语义**：`payment_anomaly_cases`（`status ∈ {OPEN,RESOLVED}`、`resolution_code`、`financial_action_status ∈ {NONE,PENDING,APPLIED,FAILED}`、`version`）与 `ResolvePaymentAnomaly` 只允许 `REFUND_FAILURE` 的 `DISMISS`(`NONE`) 或 `ESCALATE_FINANCIAL_REPAIR`(`PENDING`)；**历史设计基线没有从 `PENDING` 推进到 `APPLIED` 的受控路径**，也没有任何命令会写 `APPROVED_WRITE_OFF` 之外的财务收口。
 - **可用账户与枚举**：`platform:refund-clearing`（`REFUND_CLEARING`）、`platform:receivables`（`RECEIVABLE_ASSET`）、`platform:adjustment`（`ADJUSTMENT`）在启动时校验；`journal_entries.entry_type` 已含 `REFUND`/`REVERSAL`/`FORCED_REFUND`；`receivables.source_type` 经前向 `000060`（提交 `d253eeb0a`）已含 `FORCED_REFUND`。
 
 ## 3. 与相邻流程的职责边界（避免重复建设）
@@ -93,7 +95,7 @@
 
 ### 7.2 异常状态推进（本命令引入的唯一新状态边）
 
-- 既有 `ResolvePaymentAnomaly` 只允许 `REFUND_FAILURE` 的 `DISMISS(NONE)` 或 `ESCALATE_FINANCIAL_REPAIR(PENDING)`，没有 `PENDING→APPLIED` 的路径。GSA-30 必须新增一个受控、可测试的推进（同一事务内 `UPDATE payment_anomaly_cases SET financial_action_status='APPLIED',version=version+1,updated_at=$now WHERE id=$1 AND status='RESOLVED' AND resolution_code='ESCALATE_FINANCIAL_REPAIR' AND financial_action_status='PENDING' AND version=$2`），并保持 `status/resolution_code/resolved_at` 不变。
+- 既有 `ResolvePaymentAnomaly` 只允许 `REFUND_FAILURE` 的 `DISMISS(NONE)` 或 `ESCALATE_FINANCIAL_REPAIR(PENDING)`，历史设计时没有 `PENDING→APPLIED` 的路径。GSA-30 引入一个受控、可测试的推进（同一事务内 `UPDATE payment_anomaly_cases SET financial_action_status='APPLIED',version=version+1,updated_at=$now WHERE id=$1 AND status='RESOLVED' AND resolution_code='ESCALATE_FINANCIAL_REPAIR' AND financial_action_status='PENDING' AND version=$2`），并保持 `status/resolution_code/resolved_at` 不变。
 - 该推进必须幂等：已为 `APPLIED` 且存在同 `refund_id` 的 case 时按 result-first 读回，不重复推进、不再写账。
 - 若异常仍是 `OPEN`/`NONE`（未升级）或 `version` 漂移，整笔失败关闭，禁止自行升级或替审批人决定。
 
@@ -120,11 +122,11 @@
 - 复用 `platform.billing.repairs.request|approve`、一名非申请人审批、24 小时有效期、5 分钟窗口，不新增权限与 policy/snapshot 版本；不开放任何退款入口。
 - 依据：该命令的 v1/s1 行从未是可执行合同（静态不可执行、四入口失败关闭），不存在由该版本产生并已执行的领域事实；首次冻结的 closed 形状即该版本合同。
 - 激活前只读守卫：目标库中该命令必须不存在未终态申请（`APPROVED/EXECUTING/EXECUTION_FAILED`）；守卫同时只读列出"`MANUAL_REVIEW` 退款 + `REFUND_FAILURE` 异常 PENDING"的存量清单，存量必须在激活后逐笔走本命令收口，不得在激活时批量改写。
-- activation 行保持 `INACTIVE`；GSA-30 交付默认关闭的专属 consumer/durable 开关；生产激活只属于取得独立授权的 GSA-40。
+- activation 行保持 `INACTIVE`；GSA-30 交付默认 INACTIVE 的专属 consumer/durable 资源绑定；生产激活只属于取得独立授权的 GSA-40。
 
 ## 10. 迁移、N/N-1 与回滚
 
-- 迁移只前向追加：新增 `refund_exception_repair_cases`（当前为 `000061`）与异常 `PENDING→APPLIED` 的受控写入所需的最小权限；不改 `000004/000024/000025/000029/000054/000060` 的既有列、CHECK 与历史行。
+- 迁移只前向追加：新增 `refund_exception_repair_cases`（Billing `000067`，proof allowlist 为 `000068`，Account consumer route 为 `000074`）与异常 `PENDING→APPLIED` 的受控写入所需的最小权限；不改 `000004/000024/000025/000029/000054/000060` 的既有列、CHECK 与历史行。
 - N/N-1：先部署可读新表的 Billing，再部署 proof 端与执行器/消费者，最后业务页；旧客户端与既有退款链路行为不变。
 - 回滚：只允许停止消费者、把 activation 行翻回 `INACTIVE`；已产生的 case/应收/journal 与异常 `APPLIED` 状态一律保留可读，禁止破坏性 down。
 - 未通过 GSA-38～40 且未取得独立生产授权前，不部署、不激活。
@@ -144,13 +146,15 @@
 | N/N-1 与回滚 | 缺行/未知版本/翻回 `INACTIVE` 失败关闭；case/应收/journal 与异常状态保留可读 |
 | 真实领域 E2E | Account 批准 → outbox → relay → 专属 durable → 回收/应收/journal/异常收口 → 终态 → 重放幂等，真实 PostgreSQL + 真实 HTTP，无 SKIP 替代 |
 
-## 12. 本切片不做的事
+## 12. 设计冻结阶段范围（历史）
+
+以下仅记录原文档切片范围，不代表当前功能实现或验收。
 
 - 不新增或修改迁移、Go/Node 代码、OpenAPI 合同、activation 行或执行路径。
 - 不改动既有退款成功/失败/评审链路、强制退款、拒付、应收抵扣或异常收口 helper 的既有行为。
 - 设计冻结不等于实现或激活；GSA-30 未交付前该命令保持不可执行。
 
-## 13. 自检与验证
+## 13. 设计冻结阶段验证（历史）
 
 - 每条事实可回溯到 §1/§2 的迁移与源码路径；`revoked/shortfall` 拆分对应既有两个写入者的实际账户方向。
 - 首版范围与版本复用决策与用户 2026-09-19 确认一致；`PENDING→APPLIED` 是显式登记的新增状态边，不假装既有能力已具备。
