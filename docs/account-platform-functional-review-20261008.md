@@ -24,6 +24,8 @@ F04 全主模块检查首次仅 Billing 三个旧 impact 测试因未显式测�
 
 旧写入口/owner 过滤/未来认证范围非作者最终真实 PostgreSQL 8 顶层、26 子场景，70.208 秒实际通过，无跳过；默认 Token 测试 8.448 秒与 vet 通过。删除函数的生产调用图复核无剩余调用，正式 route Tx effects、SyncCatalog 与十八类命令保留。早期 pointer 编译、completed_at 约束及 UNKNOWN 不可变约束三次夹具失败均留档，按真实合同修正夹具，未放宽生产约束。查询、Billing 与此范围分别由非作者审核，未自批各自作者代码；公开记录和部署说明也经独立核验。当前修复范围独立审核通过，仍须签名推送、回复及申请重审，并等精确提交门禁及传播前全部前序复查。
 
+F04 `ae9e6fcf8` 已签名推送、回复 #1531 并申请两位原审核人重审，Draft 保留。当前 CI `37897511178` 的 Account Platform 及其他适用检查成功，但 frontend-test 和 required-gate 失败：1340 个前端测试中 1323 通过、1 失败、16 跳过，唯一失败为新增概览浏览器 smoke 没有登记到 FULL_FRONTEND_SMOKES。未向 F05 传播。补齐现有 npm 概览命令的完整清单及功能选择清单，未删除或弱化覆盖契约；覆盖契约 5 项、选择器 11 项和现有概览逻辑 9 项/浏览器 12 项实际通过，无跳过。此补修仍须独立审核、签名推送及精确新提交 CI，旧失败不计作通过。
+
 ## F00 / PR #1527
 
 审核来源： https://github.com/Pinvou/pinvou3/pull/1527#pullrequestreview-5453328209
