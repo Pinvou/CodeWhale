@@ -8,7 +8,7 @@ const installer = read("src-tauri", "src", "features", "connectors", "native_ins
 const paths = read("src-tauri", "src", "platform", "paths.rs");
 const build = read("scripts", "tauri", "build.js");
 const tmeet = read("src-tauri", "src", "features", "connectors", "tmeet.rs");
-const toolCommon = read("src", "features", "tools", "tool-common.jsx");
+const toolMarketplace = read("src", "features", "tools", "tool-marketplace.jsx");
 const linux = read("src-tauri", "src", "platform", "os", "linux", "linux_path.rs");
 const macos = read("src-tauri", "src", "platform", "os", "macos", "macos_path.rs");
 
@@ -67,9 +67,9 @@ for (const [platform, versions] of Object.entries(lockVersionsByPlatform)) {
   assert.deepEqual(versions, lockVersions, `${platform} connectors.lock.json 版本与其他平台不一致`);
 }
 const cardVersion = (marker) => {
-  const line = toolCommon.split("\n").find((l) => l.includes(marker));
+  const line = toolMarketplace.split("\n").find((l) => l.includes(marker));
   const match = line && line.match(/version:\s*['"]v([\d.]+)['"]/);
-  assert.ok(match, `tool-common.jsx 未在 ${marker} 行找到 version: 'v…'（格式变更须同步本断言）`);
+  assert.ok(match, `tool-marketplace.jsx 未在 ${marker} 行找到 version: 'v…'（格式变更须同步本断言）`);
   return match[1];
 };
 assert.equal(cardVersion("backendId: 'feishu', feishuCli: true"), lockVersions["lark-cli"]);

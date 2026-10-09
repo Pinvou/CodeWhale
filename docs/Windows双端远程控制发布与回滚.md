@@ -104,3 +104,11 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_con
 | 跨 lease 任务清理语义 | B 端 `cancel` 只校验帧租约与任务存在性；旧 lease 遗留任务由 stop/refresh/远端断开的清理端口负责 |
 | `DesktopControlledCleanup` 适配器测试 | 仓库无 `mock_app` 先例，当前由 manager 侧三条路径用例覆盖触发面，Tauri 级测试列入后续 |
 | remote_control 之外的既有失败 | 全量 `cargo test --lib` 有 6～8 条与本功能无关的既有失败（进程树终止超时、marketplace 工具缺失等），属环境限制，已在任务文档登记 |
+
+### 7.4 当前自动化恢复接线回归的证据边界
+
+`app/commands/remote_control/reader_resume_tests.rs` 的独立子进程创建真实 Windows Wry 宿主，调用 feature 中的共享恢复夹具，经真实 RelayClient reader、RemoteControlManager 和 ControlledRelayWorker 执行恢复。前序 A08 的宿主分层、断线 prepared 屏障、错误 final liveness 拒绝、retained epoch 非空断言和旧 reader 围栏在 A13 中继续保留；不重新启用旧 feature 内宿主初始化，也不以非 Connected 投影的 `None == None` 声称覆盖内部 epoch。
+
+此用例仅在 Windows 编译与执行，须取得当前提交适用 Windows 原生 CI 的真实执行结果；Linux / macOS 的条件排除或 Draft skip 不是该用例的通过证据。子进程整体 15 秒、父进程 25 秒和局部等待 3 秒均为失败退出的 watchdog，不是平台启动性能承诺；本轮未完成冷启动及高负载 Windows runner 的时限余量验收。
+
+它使用真实 loopback WebSocket 与认证测试材料，没有真实 renderer、在线 provider、生产网关或双 Windows 设备，不能替代第 7.1 节的发布验收。测试数量以当前提交实际输出为准。

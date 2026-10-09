@@ -33,6 +33,26 @@ function claim(manager, overrides = {}) {
   });
 }
 
+test("identifier contract: reservation accepts wire colon IDs without changing ownership", async () => {
+  const slots = new EndpointInteractionSlots();
+  const manager = new ControllerReservationManager({ pairingStore: pairingStore(), interactionSlots: slots });
+  const result = claim(manager, { requestId: "claim:request:0001", socketIdentity: "socket:A" });
+  assert.equal(result.owner_socket_identity, "socket:A");
+  assert.equal(slots.read("endpoint-0001").owner.owner_id, result.reservation_id);
+  await manager.release({ reservationId: result.reservation_id, socketIdentity: "socket:A", reason: "failed" });
+  assert.equal(slots.read("endpoint-0001").owner, null);
+});
+
+test("identifier contract: shared Web slots preserve legacy leading underscore and hyphen IDs", () => {
+  const slots = new EndpointInteractionSlots();
+  for (const endpointId of ["_old", "-old"]) {
+    slots.acquireWeb({ endpointId, leaseId: "web-lease-0001" });
+    assert.equal(slots.read(endpointId).owner.kind, "web_lease");
+    assert.equal(slots.releaseWeb({ endpointId, leaseId: "web-lease-0001" }), true);
+    assert.equal(slots.read(endpointId).owner, null);
+  }
+});
+
 test("two A claims and Web joins share one endpoint interaction slot", async () => {
   const pairings = pairingStore();
   const slots = new EndpointInteractionSlots();

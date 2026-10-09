@@ -477,7 +477,11 @@ pub async fn feishu_apply_skills() -> Result<Value, String> {
     // scope 门禁同步：连接器转为可用等同「新装」——已初始化 code 开关时加入 code
     // 禁用集，保持「code 会话外部能力默认关」语义（与 MCP 新装连接器一致）。
     if show {
-        crate::features::marketplace::sync_deny_all_scopes_after_install("feishu");
+        // Fail-visible persist (review #455 R13-B3): swallowing the error would
+        // let the connector go live with zero consent; the error text carries
+        // recovery guidance and the shared consent marker (pinned on both
+        // sides), and the raw cause is logged.
+        crate::features::connectors::skill_gate::apply_skills_consent_sync("feishu")?;
     }
     // 技能写盘即可——连接成功弹窗已引导「新建对话」,新会话 spawn 时自然扫到飞书技能;
     // 不再原地广播刷新当前对话(故不依赖子模块 Op::RefreshSystemPrompt)。
@@ -485,6 +489,20 @@ pub async fn feishu_apply_skills() -> Result<Value, String> {
 }
 
 /// 给前端渲染开关态:`{connected, enabled(=未停用), visible(=connected&&enabled)}`。
+/// 启动期门控刷新的单连接器步骤（`refresh_connector_auth_gates` 调）：
+/// 实时探测应否可见，按结果写 / 删技能目录；转为可见时跑 LEDGER-GATED
+/// 同步（review #455 round-31 BLOCKER：只补写从未同步过的默认关行，
+/// 用户显式开启不会被开机刷新回退）。
+pub(crate) fn feishu_gate_step() -> Result<bool, String> {
+    let show = feishu_skills_should_show();
+    GATE.apply_skills(show)
+        .map_err(|e| format!("更新飞书技能失败: {e}"))?;
+    if show {
+        crate::features::connectors::skill_gate::refresh_gate_consent_sync("feishu", "飞书")?;
+    }
+    Ok(show)
+}
+
 pub async fn feishu_skills_state() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         let disabled = is_feishu_disabled();
