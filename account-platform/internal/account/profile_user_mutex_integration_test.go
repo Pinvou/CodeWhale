@@ -57,6 +57,8 @@ func TestF01ProfileCommitUsesUserMutex(t *testing.T) {
 				if _, err = hold.Exec(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, user); err != nil {
 					t.Fatal(err)
 				}
+				committed := make(chan error, 1)
+				created := make(chan error, 1)
 				wait := func(fragment string) {
 					t.Helper()
 					deadline := time.Now().Add(5 * time.Second)
@@ -70,9 +72,56 @@ func TestF01ProfileCommitUsesUserMutex(t *testing.T) {
 						}
 						time.Sleep(5 * time.Millisecond)
 					}
-					t.Fatal("formal producer did not wait on USER", fragment)
+					// Failure-only diagnostics preserve the original observation budget
+					// and assertions. The first intermittent failure is not explained
+					// by a later successful run or by these observations alone.
+					classify := func(e error) string {
+						if e == nil {
+							return "SUCCESS"
+						}
+						if errors.Is(e, ErrProfileChangeConflict) {
+							return "PROFILE_CONFLICT"
+						}
+						if errors.Is(e, ErrNotFound) {
+							return "NOT_FOUND"
+						}
+						if errors.Is(e, context.Canceled) {
+							return "CANCELLED"
+						}
+						if errors.Is(e, context.DeadlineExceeded) {
+							return "DEADLINE"
+						}
+						var databaseError interface{ SQLState() string }
+						if errors.As(e, &databaseError) {
+							code := databaseError.SQLState()
+							if len(code) == 5 && strings.Trim(code, "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") == "" {
+								return "PG_" + code
+							}
+						}
+						return "OTHER"
+					}
+					returned := func(result <-chan error) string {
+						select {
+						case e := <-result:
+							return classify(e)
+						default:
+							return "NOT_RETURNED"
+						}
+					}
+					commitResult, createResult := returned(committed), returned(created)
+					stats := r.pool.Stat()
+					diagnosticCtx, diagnosticCancel := context.WithTimeout(ctx, time.Second)
+					defer diagnosticCancel()
+					var queryStates string
+					diagnosticErr := r.pool.QueryRow(diagnosticCtx, `SELECT COALESCE(string_agg(CASE WHEN query LIKE '%FROM users u JOIN identities i%' THEN 'CREATE_USER' WHEN query LIKE 'SELECT id FROM users%' THEN 'COMMIT_USER' WHEN query LIKE '%FROM profile_change_requests%' THEN 'PROFILE' ELSE 'OTHER' END || ':' || COALESCE(wait_event_type,'NONE') || ':' || COALESCE(wait_event,'NONE') || ':' || cardinality(pg_blocking_pids(pid))::text,','),'EMPTY') FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='active'`).Scan(&queryStates)
+					phase := "COMMIT_USER"
+					if fragment == "FROM users u JOIN identities i" {
+						phase = "CREATE_USER"
+					}
+					// Consumed results cannot reach the normal receive path: Fatal
+					// exits this subtest and its deferred gate rollback releases peers.
+					t.Fatalf("formal producer did not wait on USER: phase=%s commit=%s create=%s diagnostic=%s states=%s pool_total=%d pool_acquired=%d pool_idle=%d pool_cancelled_acquires=%d", phase, commitResult, createResult, classify(diagnosticErr), queryStates, stats.TotalConns(), stats.AcquiredConns(), stats.IdleConns(), stats.CanceledAcquireCount())
 				}
-				committed := make(chan error, 1)
 				go func() { committed <- r.CommitProfileChange(ctx, change.ID) }()
 				wait("SELECT id FROM users WHERE id=")
 				probe, err := r.pool.Begin(ctx)
@@ -86,7 +135,6 @@ func TestF01ProfileCommitUsesUserMutex(t *testing.T) {
 				if err = probe.Rollback(ctx); err != nil {
 					t.Fatal(err)
 				}
-				created := make(chan error, 1)
 				go func() {
 					_, e := r.CreateProfileChange(ctx, principal, "USERNAME", "next"+strings.ReplaceAll(uuid.NewString(), "-", "")[:15])
 					created <- e
