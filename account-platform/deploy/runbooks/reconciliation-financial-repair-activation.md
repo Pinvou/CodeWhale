@@ -1,3 +1,7 @@
+# 当前实现说明
+
+本波已安装 RECONCILIATION_FINANCIAL_REPAIR v1/s1 的完整私有功能组合，激活默认 INACTIVE；审批、签发、消费与执行仍遵守既有五道激活及身份门禁。下文原设计冻结阶段记录是历史依据，不代表当前实现或整链验收。实际迁移为 Billing 000072/000073 与 Account 000076；原 owner 有限 PG 证据按既有范围继承，部署与完整 E2E 未执行。
+
 # 对账财务修复（`RECONCILIATION_FINANCIAL_REPAIR`）受控激活手册
 
 状态：能力已就绪，**默认未激活**。本手册只描述受控激活（把 Billing 逐命令 activation 行从 `INACTIVE` 翻到 `ACTIVE`）的操作与证据要求；是否执行必须另有授权，且 GSA-38～40 的切换、回滚与发布门禁全部通过后才能开始。
@@ -6,7 +10,7 @@
 
 1. 目标 Commit 已完成 GSA-38（切换/回滚工具、资源清单与只读 readiness）、GSA-39（生产等价集成、性能、N/N-1 与故障演练）与 GSA-40（逐命令额度与生产证据归档）中适用于本命令的项，并有独立审核记录。
 2. 用户/授权人已就该命令的生产激活给出明确授权（书面记录存档，含时间与范围）。首版范围只含 **`PROVIDER_PAID_INTERNAL_MISSING` 差异的零账务效果结案**；任何需要账务效果的解释（补记入账、新账户类型、人工指定归属）都必须新增账户类型、policy/schema 版本与独立设计。
-3. 专属 durable `billing-reconciliation-financial-repair-executor-p1-v1` 的受信 cutover 资源绑定已就绪，Billing 以 `BILLING_RECONCILIATION_FINANCIAL_REPAIR_CONSUMER_ENABLED=true` 启动，且启动时不出现 `BILLING_RECONCILIATION_FINANCIAL_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE`。未开启该开关时该 durable 不注册，本命令不会被执行。
+3. 专属 durable `billing-reconciliation-financial-repair-executor-p1-v1` 的受信 cutover 资源绑定已就绪。当前 Billing 启动从 `approvalconsumer.BillingCommands()` 的已安装目录注册本命令，按通用 `BILLING_APPROVAL_CONSUMER_RESOURCES_UNAVAILABLE` 资源守卫失败关闭；不使用历史开发开关 `BILLING_RECONCILIATION_FINANCIAL_REPAIR_CONSUMER_ENABLED`，该环境变量不能作为激活或执行依据。
 4. 已验证 Account 侧四入口读取实时 Billing activation：行仍为 `INACTIVE` 时 create/update/submit/APPROVE 全部失败关闭（`ErrBillingGovernanceInactive`）。
 5. 已完成一致性备份（含 Billing 库）并记录备份 ID、完成时间与 SHA-256；激活窗口内停止写入新审批。
 

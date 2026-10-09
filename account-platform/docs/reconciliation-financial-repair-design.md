@@ -1,8 +1,12 @@
+# 当前实现说明
+
+本波已安装 RECONCILIATION_FINANCIAL_REPAIR v1/s1 的完整私有功能组合，激活默认 INACTIVE；审批、签发、消费与执行仍遵守既有五道激活及身份门禁。下文原设计冻结阶段记录是历史依据，不代表当前实现或整链验收。实际迁移为 Billing 000072/000073 与 Account 000076；原 owner 有限 PG 证据按既有范围继承，部署与完整 E2E 未执行。
+
 # 对账财务修复（`RECONCILIATION_FINANCIAL_REPAIR`）领域设计
 
-状态：`DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅 `PROVIDER_PAID_INTERNAL_MISSING` 差异**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-34 的 closed command/snapshot/proof、归因与结案规则、零账务效果的守恒证明、幂等与恢复、失败分类、迁移与回滚及验收映射；不新增可执行路径，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
+历史设计阶段状态：`DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / 历史设计阶段：NOT_IMPLEMENTED / NOT_DEPLOYED`。首版范围由用户在 2026-09-19 确认为**仅 `PROVIDER_PAID_INTERNAL_MISSING` 差异**，权限与命令版本复用现有 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`（守卫见 §9）。本文冻结 GSA-34 的 closed command/snapshot/proof、归因与结案规则、零账务效果的守恒证明、幂等与恢复、失败分类、迁移与回滚及验收映射；不新增可执行路径，activation 行保持 `INACTIVE`。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
 
-## 1. 命令现状（事实）
+## 1. 设计冻结阶段命令现状（历史）
 
 - **只有策略元数据**：Account `approval_command_policies`/`approvalpolicy` 登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`、请求/审批权限 `platform.billing.repairs.request|approve`、`FINANCIAL_FACT_CHANGE`、一名非申请人审批、24 小时有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`）。
 - **静态不可执行**：不在 `executableApprovalCommands` 内，四入口失败关闭；Billing 侧只有 `('RECONCILIATION_FINANCIAL_REPAIR',1,1,'INACTIVE',1)`（`migrations/billing/000054_approval_command_activations.up.sql`），无 handler、proof、executor、consumer durable 或恢复分类。
@@ -114,7 +118,7 @@
 
 ## 10. 迁移、N/N-1 与回滚
 
-- 迁移只前向追加：新增 `reconciliation_repair_cases`（当前为 `000061`）；不改 `000004/000025/000029/000054/000060`，不放宽任何枚举，不新增账户类型。
+- 迁移只前向追加：新增 `reconciliation_repair_cases`（原设计拟编号为 `000061`；当前公开累计迁移为 Billing `000072`）；不改 `000004/000025/000029/000054/000060`，不放宽任何枚举，不新增账户类型。
 - N/N-1：先部署可读新表的 Billing，再部署 proof 端与执行器/消费者，最后业务页；既有对账运行与结案链路行为不变。
 - 回滚：只允许停止消费者、把 activation 行翻回 `INACTIVE`；已结案案件与 case 行保留可读，禁止破坏性 down 或重开案件。
 - 未通过 GSA-38～40 且未取得独立生产授权前，不部署、不激活。
@@ -146,7 +150,7 @@
 
 ## 13. 本切片不做的事
 
-- 不新增或修改迁移、Go/Node 代码、OpenAPI 合同、activation 行或执行路径。
+- 历史设计冻结切片未新增或修改迁移、Go/Node 代码、OpenAPI 合同、activation 行或执行路径；当前实现范围见本文开头说明。
 - 不改动既有对账运行/比对/结案、支付、退款、拒付、应收与钱包的任何行为。
 - 设计冻结不等于实现或激活；GSA-34 未交付前该命令保持不可执行。
 
