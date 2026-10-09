@@ -3853,6 +3853,7 @@ const NAV_PREFETCH = {
         personaEditor ? 'persona-editor' : '',
         savedConfirm ? 'saved-confirm' : '',
         can('webAccessAdmin') && webAccessOpen ? 'web-access' : '',
+        can('desktopRemoteControl') && remoteConversationOpen ? 'remote-connection' : '',
         apiKeyGateOpen ? 'api-key' : '',
         bs && bs.pinvouModal ? 'pinvou-review' : '',
         isCompactShell && isSidebarOpen ? 'mobile-sidebar' : '',
@@ -4831,7 +4832,7 @@ const NAV_PREFETCH = {
             )}
 
             {/* A 端连接成功后直接进入对话层；关闭只隐藏会话，显式断开才结束连接。 */}
-            {can('desktopRemoteControl') && remoteConversationOpen && (
+            {can('desktopRemoteControl') && remoteConversationOpen && browserOverlayPublicationReady && (
               <ViewErrorBoundary t={t}>
                 <Suspense fallback={null}>
                   <div className="fixed inset-0 z-[120] flex items-start sm:items-center justify-center bg-black/50 p-3 sm:p-6">

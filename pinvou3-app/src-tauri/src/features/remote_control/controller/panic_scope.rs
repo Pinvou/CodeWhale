@@ -39,7 +39,7 @@ impl Drop for Scope {
     }
 }
 
-pub(super) fn run<T>(action: impl FnOnce() -> T) -> T {
+pub(crate) fn run<T>(action: impl FnOnce() -> T) -> T {
     let _scope = Scope::enter();
     action()
 }

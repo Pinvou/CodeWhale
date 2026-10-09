@@ -785,6 +785,24 @@ pub(crate) struct ControlledRelayWorker {
     /// Dropping the generation owner clears them; every hit is fingerprint-bound.
     action_results: std::sync::Arc<RemoteActionResultCache>,
     business_epoch: std::sync::Arc<AtomicU64>,
+    #[cfg(test)]
+    processed_frames: Option<tokio::sync::mpsc::Sender<Value>>,
+}
+
+/// Completion observation only; all routing and decisions stay production.
+#[cfg(test)]
+struct ProcessedControllerFrame {
+    sink: Option<tokio::sync::mpsc::Sender<Value>>,
+    frame: Value,
+}
+
+#[cfg(test)]
+impl Drop for ProcessedControllerFrame {
+    fn drop(&mut self) {
+        if let Some(sink) = &self.sink {
+            let _ = sink.try_send(self.frame.clone());
+        }
+    }
 }
 
 /// Narrow port over the generation-bound Relay lane. Keeps the registration
@@ -1002,6 +1020,8 @@ impl ControlledRelayWorker {
             business,
             action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
             business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            processed_frames: None,
         };
         tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
@@ -1155,6 +1175,10 @@ impl ControlledRelayWorker {
                 }
                 message = self.channel.recv() => {
                     let Some(message) = message else { break 'serve };
+                    #[cfg(test)]
+                    let _processed = ProcessedControllerFrame {
+                        sink: self.processed_frames.clone(), frame: message.clone(),
+                    };
                     if message.get("type").and_then(Value::as_str) == Some("desktop_controller_stop") {
                         break 'serve;
                     }
@@ -1535,6 +1559,13 @@ impl ControlledRelayWorker {
         }
         // 出站旁路（journal 事件回传）与通道一起就位。
         let outbound = self.app.state::<ControlledOutboundState>();
+        let transport = self
+            .channel
+            .authenticated_transport(&lease.context, lease.negotiated_capabilities.clone())
+            .map_err(|_| self.fail_completed_handshake(&manager))?;
+        manager
+            .replace_authenticated_transport(self.operation.clone(), transport)
+            .map_err(|_| self.fail_completed_handshake(&manager))?;
         outbound.install(self.channel.sender());
         let status = manager
             .complete_connected(self.operation.clone(), lease)
@@ -2643,6 +2674,11 @@ fn sanitize_error(value: &str) -> String {
         bounded
     }
 }
+
+// The real Windows Wry host is used without creating windows. Unsupported
+// platforms do not run a simulated desktop-control adapter.
+#[cfg(test)]
+pub(crate) mod reader_resume_tests;
 
 #[cfg(test)]
 mod tests {
