@@ -14,14 +14,16 @@ pub(crate) mod encrypted_lane;
 pub(crate) mod event_envelope;
 pub(crate) mod journal;
 pub(crate) mod liveness;
-mod panic_scope;
+pub(crate) mod panic_scope;
 pub(crate) mod permission;
 pub(crate) mod ports;
 pub(crate) mod protocol;
 pub(crate) mod recovery_budget;
+pub(crate) mod redaction;
 pub(crate) mod relay_runtime;
 pub(crate) mod relay_transport;
 pub(crate) mod resume;
+pub(crate) mod shared_transport;
 pub(crate) mod task;
 pub(crate) mod temporary_model;
 #[cfg(test)]

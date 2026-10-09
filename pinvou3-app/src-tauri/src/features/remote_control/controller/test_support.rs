@@ -17,6 +17,33 @@ use super::crypto::{
 };
 use super::protocol::build_pairing_transcript_preimage;
 
+/// The upstream Callback trait fixes the ErrorResponse ABI. Use its named
+/// implementation rather than an oversized-Err closure in strict lint tests.
+pub(crate) struct ControllerReaderProtocol;
+
+impl tokio_tungstenite::tungstenite::handshake::server::Callback for ControllerReaderProtocol {
+    fn on_request(
+        self,
+        request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+        mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+    ) -> std::result::Result<
+        tokio_tungstenite::tungstenite::handshake::server::Response,
+        tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+    > {
+        assert_eq!(
+            request.headers()["Sec-WebSocket-Protocol"],
+            super::protocol::CONTROLLER_SUBPROTOCOL
+        );
+        response.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_static(
+                super::protocol::CONTROLLER_SUBPROTOCOL,
+            ),
+        );
+        Ok(response)
+    }
+}
+
 pub(crate) struct SignedRelay {
     pub(crate) trust: AuthenticatedRelayTrustConfig,
     pub(crate) key_id: String,

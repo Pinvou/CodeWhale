@@ -76,6 +76,47 @@ struct TaskCaptureAttempt<'a> {
     sequence: u64,
 }
 
+/// Own one exact chat capture across worker hand-offs and early returns.
+/// Dropping an old attempt must never discard a replacement task's capture.
+pub(super) struct OwnedTaskCapture {
+    runtime: Arc<DesktopRemoteArtifactRuntime>,
+    lease: TaskLeaseBinding,
+    session_id: String,
+    task_id: String,
+    sequence: u64,
+}
+
+impl OwnedTaskCapture {
+    pub(super) fn new(
+        runtime: Arc<DesktopRemoteArtifactRuntime>,
+        lease: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        sequence: u64,
+    ) -> Self {
+        Self {
+            runtime,
+            lease: TaskLeaseBinding::from_context(lease),
+            session_id: session_id.to_owned(),
+            task_id: task_id.to_owned(),
+            sequence,
+        }
+    }
+}
+
+impl Drop for OwnedTaskCapture {
+    fn drop(&mut self) {
+        let mut captures = self.runtime.captures.lock();
+        if captures.get(&self.task_id).is_some_and(|capture| {
+            capture.task_sequence == self.sequence
+                && capture.session_id == self.session_id
+                && capture.lease == self.lease
+        }) {
+            captures.remove(&self.task_id);
+        }
+    }
+}
+
 impl Drop for TaskCaptureAttempt<'_> {
     fn drop(&mut self) {
         let mut captures = self.runtime.captures.lock();
@@ -1528,6 +1569,53 @@ mod tests {
     }
 
     #[test]
+    fn owned_chat_capture_cleanup_is_exact_and_unwind_safe() {
+        let runtime = runtime();
+        let lease = test_lease();
+        let task = "task-capture-owned";
+        for variant in 0..4 {
+            let cleanup = OwnedTaskCapture::new(Arc::clone(&runtime), &lease, "session-1", task, 1);
+            let mut binding = TaskLeaseBinding::from_context(&lease);
+            if variant == 3 {
+                binding.remote_control_generation = "replacement-generation".into();
+            }
+            runtime.captures.lock().insert(
+                task.into(),
+                TaskArtifactCapture {
+                    task_sequence: if variant == 1 { 2 } else { 1 },
+                    session_id: if variant == 2 {
+                        "session-2"
+                    } else {
+                        "session-1"
+                    }
+                    .into(),
+                    lease: binding,
+                    before: HashMap::new(),
+                },
+            );
+            drop(cleanup);
+            assert_eq!(runtime.captures.lock().contains_key(task), variant != 0);
+            runtime.captures.lock().clear();
+        }
+        let cleanup = OwnedTaskCapture::new(Arc::clone(&runtime), &lease, "session-1", task, 1);
+        runtime.captures.lock().insert(
+            task.into(),
+            TaskArtifactCapture {
+                task_sequence: 1,
+                session_id: "session-1".into(),
+                lease: TaskLeaseBinding::from_context(&lease),
+                before: HashMap::new(),
+            },
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _cleanup = cleanup;
+            panic!("test capture unwind");
+        }));
+        assert!(result.is_err());
+        assert!(runtime.captures.lock().is_empty());
+    }
+
+    #[test]
     fn concurrent_connection_cleanup_does_not_lose_publication_revisions() {
         let runtime = runtime();
         std::thread::scope(|scope| {
@@ -2125,6 +2213,57 @@ mod tests {
                     .unwrap()
                     .len(),
                 1
+            );
+        });
+    }
+
+    #[test]
+    fn owned_chat_capture_releases_real_begin_on_pre_dispatch_timeout() {
+        crate::platform::test_support::with_temp_home("pinvou3-chat-owned-timeout", || {
+            let project = tempfile::tempdir().unwrap();
+            let store =
+                SessionStore::boot_at_test_dir(&crate::platform::paths::pinvou3_home()).unwrap();
+            let session = store
+                .create_new("model".into(), None, project.path().into())
+                .unwrap()
+                .metadata
+                .id;
+            let runtime = bound_runtime(&session);
+            let task = "task-chat-owned-timeout";
+            admit_task(&runtime, &session, task);
+            let sequence = runtime.tasks.status(task).unwrap().sequence;
+            let result = (|| -> Result<(), String> {
+                let _cleanup = OwnedTaskCapture::new(
+                    Arc::clone(&runtime),
+                    &test_lease(),
+                    &session,
+                    task,
+                    sequence,
+                );
+                runtime.begin_task_capture(
+                    &store,
+                    &test_lease(),
+                    &session,
+                    task,
+                    sequence,
+                    &|| Ok(()),
+                )?;
+                assert!(runtime.captures.lock().contains_key(task));
+                crate::features::remote_control::controller::turn_budget::TurnBudget::for_test(
+                    std::time::Duration::ZERO,
+                )
+                .checkpoint(&tokio_util::sync::CancellationToken::new())
+            })();
+            assert_eq!(result.unwrap_err(), "task_turn_timeout");
+            assert!(runtime.captures.lock().is_empty());
+            assert_eq!(runtime.downloads.index().len(), 0);
+            runtime
+                .tasks
+                .fail_admitted(task, sequence, "task_turn_timeout", 1_100)
+                .unwrap();
+            assert_eq!(
+                runtime.tasks.status(task).unwrap().state,
+                RemoteTaskState::Failed
             );
         });
     }

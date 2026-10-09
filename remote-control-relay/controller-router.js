@@ -332,7 +332,7 @@ export class ControllerRouter {
       if (hooks) {
         const lease = typeof message?.controller_lease_id === "string"
           ? this.#leases.lease(message.controller_lease_id) : null;
-        // A periodic old-epoch heartbeat can already be in flight when its
+        // A heartbeat for the frozen lease's current liveness epoch can be in flight when its
         // counterpart closes. During recovery it is neither new evidence nor
         // a fatal error: returning an error can abort A's recovery worker.
         // Validate the surviving socket and frozen context before ignoring it;

@@ -20,6 +20,42 @@ use super::protocol::LeaseContext;
 use super::relay_transport::ControllerTransportSender;
 use super::resume::{ControllerResumeGate, ResumePhase};
 
+/// A and B use different physical transports. Both must consume a real,
+/// current-reader final proof; absence of either implementation fails closed.
+pub(crate) trait ControlledTransportAuthority: Send + Sync {
+    fn restore_authenticated_lease_after_resume(
+        &self,
+        context: &LeaseContext,
+        activation_id: &str,
+        request_id: &str,
+    ) -> bool;
+    fn is_stopped(&self) -> bool;
+    fn stop(&self);
+}
+
+impl ControlledTransportAuthority for ControllerTransportSender {
+    fn restore_authenticated_lease_after_resume(
+        &self,
+        context: &LeaseContext,
+        activation_id: &str,
+        request_id: &str,
+    ) -> bool {
+        ControllerTransportSender::restore_authenticated_lease_after_resume(
+            self,
+            context,
+            activation_id,
+            request_id,
+        )
+        .is_ok()
+    }
+    fn is_stopped(&self) -> bool {
+        ControllerTransportSender::is_stopped(self)
+    }
+    fn stop(&self) {
+        ControllerTransportSender::stop(self);
+    }
+}
+
 const MAX_DEVICE_NAME_CHARS: usize = 80;
 const MAX_WORKSPACES: usize = 16;
 const MAX_DISPLAY_NAME_CHARS: usize = 120;
@@ -297,7 +333,7 @@ struct Inner {
     resume_gate: Option<ControllerResumeGate>,
     reconnect_reason: Option<ReconnectReason>,
     last_observed_now_b: u64,
-    transport: Option<ControllerTransportSender>,
+    transport: Option<Arc<dyn ControlledTransportAuthority>>,
     workspaces: Vec<WorkspaceAuthorization>,
     error_code: Option<String>,
 }
@@ -527,22 +563,25 @@ impl ControlledDeviceManager {
         Ok(status_locked(&inner))
     }
 
-    pub(crate) fn replace_authenticated_transport(
+    pub(crate) fn replace_authenticated_transport<T: ControlledTransportAuthority + 'static>(
         &self,
         operation: ControlledOperation,
-        transport: ControllerTransportSender,
+        transport: T,
     ) -> Result<()> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
-        if let Some(previous) = inner.transport.replace(transport) {
+        if let Some(previous) = inner.transport.replace(Arc::new(transport)) {
             previous.stop();
         }
         Ok(())
     }
 
-    pub(crate) fn replace_transport(&self, transport: ControllerTransportSender) {
+    pub(crate) fn replace_transport<T: ControlledTransportAuthority + 'static>(
+        &self,
+        transport: T,
+    ) {
         let mut inner = self.inner.lock();
-        if let Some(previous) = inner.transport.replace(transport) {
+        if let Some(previous) = inner.transport.replace(Arc::new(transport)) {
             previous.stop();
         }
     }
@@ -828,13 +867,11 @@ impl ControlledDeviceManager {
             };
         let installed = accepted
             && inner.transport.as_ref().is_some_and(|transport| {
-                transport
-                    .restore_authenticated_lease_after_resume(
-                        &context,
-                        activation_id,
-                        resume_request_id,
-                    )
-                    .is_ok()
+                transport.restore_authenticated_lease_after_resume(
+                    &context,
+                    activation_id,
+                    resume_request_id,
+                )
             });
         if !installed {
             let generation = inner.generation.clone().unwrap_or_default();
@@ -1143,6 +1180,29 @@ impl ControlledDeviceManager {
             return Err(ControlledStateError::new("desktop_remote_not_connected"));
         }
         resolve_workspace_locked(&inner, workspace_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_phase_for_test(&self) -> Option<ResumePhase> {
+        self.inner
+            .lock()
+            .resume_gate
+            .as_ref()
+            .map(|gate| gate.phase())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn watchdog_deadline_for_test(&self) -> Option<u64> {
+        self.inner
+            .lock()
+            .watchdog
+            .as_ref()
+            .and_then(|watchdog| watchdog.deadline_b())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_liveness_epoch_for_test(&self) -> Option<String> {
+        self.inner.lock().liveness_epoch_a.clone()
     }
 
     pub(crate) fn status(&self) -> ControlledStatus {
