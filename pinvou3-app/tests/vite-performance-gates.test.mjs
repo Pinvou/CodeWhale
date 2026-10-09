@@ -15,9 +15,10 @@ function chunk({ name, modules = {}, isEntry = false, code = '' }) {
 }
 
 const mainSource = readFileSync(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
+const chatSource = readFileSync(new URL('../src/features/chat/ChatView.jsx', import.meta.url), 'utf8');
 
 test('startup gates remain active in desktop and web production builds', () => {
-  assert.equal(MAIN_ENTRY_BUDGET_BYTES, 516_000);
+  assert.equal(MAIN_ENTRY_BUDGET_BYTES, 486_000);
   for (const mode of ['production', 'web']) {
     const config = createViteConfig({ command: 'build', mode });
     const pluginNames = new Set(config.plugins.flat(Infinity).filter(Boolean).map(plugin => plugin.name));
@@ -33,10 +34,16 @@ test('search overlay chunk failures render inside the visible app flow', () => {
   );
 });
 
-test('every view loader has an explicit lazy chunk contract', () => {
+test('every view loader and the tool welcome card have explicit lazy chunk contracts', () => {
   assert.deepEqual(
     Object.keys(lazyChunkContracts).toSorted((left, right) => left.localeCompare(right)),
-    Object.keys(VIEW_LOADERS).toSorted((left, right) => left.localeCompare(right)),
+    [...Object.keys(VIEW_LOADERS), 'toolWelcome'].toSorted((left, right) => left.localeCompare(right)),
+  );
+  assert.match(chatSource, /React\.lazy\(\(\) => import\('\.\.\/tools\/ToolWelcomeCard\.jsx'\)\)/u);
+  assert.doesNotMatch(chatSource, /from ['"][^'"]*tool-marketplace\.jsx['"]/u);
+  assert.match(
+    chatSource,
+    /<ViewErrorBoundary t=\{t\}>\s*<React\.Suspense fallback=\{null\}>\s*<LazyToolWelcomeCard/u,
   );
 });
 
