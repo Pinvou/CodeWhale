@@ -35,10 +35,7 @@ type adminPaginationRepository interface {
 	adminProvisioningDetail(context.Context, uuid.UUID) (AdminProvisioningDetail, error)
 	adminProvisioningAttemptsByIDs(context.Context, uuid.UUID, []string) ([]AdminProvisioningAttempt, error)
 	adminProvisioningExists(context.Context, uuid.UUID) (bool, error)
-	adminUsageByIDs(context.Context, []string) ([]AdminUsageSummary, error)
-	adminReconciliationByIDs(context.Context, []string) ([]AdminReconciliationCase, error)
 	adminAuditByIDs(context.Context, string, []string) ([]AdminResourceAudit, error)
-	adminEvidenceByIDs(context.Context, []string) ([]AdminUsageEvidence, error)
 }
 
 type adminModelDetailRepository interface {

@@ -106,8 +106,6 @@ type PostgresRepository struct {
 
 type Repository interface {
 	CreateAccount(context.Context, CreateAccountRequest) (TokenAccount, error)
-	SetAccountStatus(context.Context, uuid.UUID, string, uuid.UUID, string) (TokenAccount, error)
-	UpsertRoute(context.Context, uuid.UUID, string, string, int, string, string, uuid.UUID) (RoutingPolicy, error)
 	ListCandidates(context.Context, string, string) ([]Candidate, error)
 	CredentialSecret(context.Context, uuid.UUID, uuid.UUID) (Credential, []byte, error)
 	GetUsage(context.Context, uuid.UUID) (UsageRequest, error)

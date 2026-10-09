@@ -93,8 +93,10 @@ func TestF04MissingModelThroughAuthenticatedManagementHTTPReturns404(t *testing.
 		t.Fatal("missing model was not explicit404", response.Code, response.Body.String(), err)
 	}
 }
-func TestF04AdminQueryMissingResourceReturns404(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/admin/v1/usage-requests/"+uuid.NewString(), nil)
+
+// This tests the error mapper directly; it does not claim a registered usage route.
+func TestF04AdminQueryErrorMappingMissingResourceReturns404(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	response := httptest.NewRecorder()
 	writeAdminQueryError(response, request, fmt.Errorf("controlled wrapper: %w", ErrNotFound))
 	var body struct {

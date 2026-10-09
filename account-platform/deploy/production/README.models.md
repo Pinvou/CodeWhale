@@ -93,6 +93,24 @@ The legacy aggregate operations overview and usage/reconciliation trends belong
 to the first usage phase F05 and are not forwarded by this F04 Portal whitelist.
 
 
+Account also requires `OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64` in its existing
+private environment file (`ACCOUNT_SERVICE_PRIVATE_ENV_FILE`). Use an independently
+generated random key encoded with standard Base64, decoding to exactly 32 bytes.
+Do not reuse the Token pagination/proxy key or write secret values into Compose
+templates, examples, logs, or expanded `docker compose config` output. Missing,
+malformed, or incorrectly sized keys prevent Account startup with
+`ACCOUNT_OWNER_CURSOR_KEY_INVALID`; verify private secret injection before rollout.
+
+Metering-unit deactivation keeps the existing empty-body API. Send a stable
+`Idempotency-Key` to recover the original actor-scoped receipt after a lost
+response. Legacy callers without the header still work, with a generated key
+for that request only; this does not provide cross-request receipt recovery.
+The ACTIVE-to-INACTIVE update, before/after audit and receipt commit together.
+Repeated deactivation of an inactive unit preserves its deactivation time and
+does not append another mutation audit. Apply the new forward migration
+`900010_metering_deactivation_receipts` before running the updated Billing service;
+do not rewrite already applied migration checksums.
+
 Portal page queries use the existing Token HMAC-SHA256 source protocol. Set
 `TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64` in both the existing private
 Portal environment file (`TOKEN_PORTAL_PRIVATE_ENV_FILE`) and Token environment

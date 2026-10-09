@@ -2,12 +2,14 @@ package token
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/holdexpiry"
 	"github.com/google/uuid"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -281,11 +283,28 @@ func TestF04CatalogAbsencePreservesApprovedLifecycle(t *testing.T) {
 	// Install explicit lifecycle policy through the existing domain transition,
 	// rather than rewriting an immutable catalog entry with a fixture UPDATE.
 	effective := time.Now().UTC().Truncate(time.Microsecond).Add(time.Hour)
-	newCutoff := effective.Add(time.Hour)
+	newCutoff := effective
 	continueCutoff := effective.Add(2 * time.Hour)
-	manual, err := r.TransitionCatalogModel(ctx, id, CatalogLifecycleInput{ExpectedCatalogVersion: models[0].CatalogVersion, TargetStatus: "DEPRECATED", EffectiveAt: effective, NewSessionCutoffAt: &newCutoff, ContinuationCutoffAt: &continueCutoff, IdempotencyKey: "controlled-manual-deprecation-" + id.String(), Reason: "Controlled explicit lifecycle policy"}, actor)
-	if err != nil || manual.LifecycleStatus != "DEPRECATED" {
-		t.Fatal("explicit lifecycle fixture", err)
+	plan, _, err := r.CreateLifecyclePlan(ctx, id, LifecyclePlanInput{ExpectedCatalogVersion: models[0].CatalogVersion, TargetLifecycle: "DEPRECATED", EffectiveAt: effective, ExistingSessionCutoffAt: &continueCutoff, Reason: "Controlled explicit lifecycle policy"}, actor, uuid.NewString())
+	if err != nil {
+		t.Fatal("explicit lifecycle plan", err)
+	}
+	evidence, err := r.ModelLifecycleImpact(ctx, id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	critical, _ := json.Marshal(lifecyclePlanCritical{ModelID: id, CatalogVersion: models[0].CatalogVersion, CurrentLifecycle: "PUBLISHED", TargetLifecycle: "DEPRECATED", LifecyclePlanVersion: plan.PlanVersion, EffectiveAt: effective, ExistingSessionCutoffAt: &continueCutoff, PolicyVersion: 2, RouteSetFingerprint: evidence.RouteSetFingerprint, ProvisioningSetFingerprint: evidence.ProvisioningSetFingerprint, InflightRequestSetFingerprint: evidence.InflightSetFingerprint})
+	// This owned fixture supplies the reviewed approval facts; the actual
+	// lifecycle claim/apply performs the immutable publication and audit.
+	if _, err = r.pool.Exec(ctx, `UPDATE model_lifecycle_plans SET status='SCHEDULED',approval_request_id=$2,approval_command_fingerprint=$3,critical_resource_versions=$4,financial_snapshot='{}' WHERE id=$1`, plan.ID, uuid.New(), strings.Repeat("a", 64), critical); err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := r.claimDueLifecyclePlan(ctx, "controlled-manual-deprecation", &effective)
+	if err != nil || !ok || claimed.ID != plan.ID {
+		t.Fatal("explicit lifecycle claim", err)
+	}
+	if err = r.ApplyClaimedLifecyclePlan(ctx, plan.ID, "controlled-manual-deprecation", nil); err != nil {
+		t.Fatal("explicit lifecycle application", err)
 	}
 	for _, observed := range [][]DiscoveredModel{nil, nil, source} {
 		if _, _, err = r.SyncCatalog(ctx, "controlled-f04", "v1", observed, 32000, 1024, actor); err != nil {

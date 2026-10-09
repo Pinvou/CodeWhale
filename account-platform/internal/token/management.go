@@ -2,121 +2,12 @@ package token
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"slices"
-	"sort"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
-
-func (r *PostgresRepository) SetAccountStatus(ctx context.Context, accountID uuid.UUID, status string, actorID uuid.UUID, reason string) (TokenAccount, error) {
-	status, reason = strings.ToUpper(strings.TrimSpace(status)), strings.TrimSpace(reason)
-	if accountID == uuid.Nil || actorID == uuid.Nil || !slices.Contains([]string{"ACTIVE", "DISABLED"}, status) || reason == "" {
-		return TokenAccount{}, ErrForbidden
-	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return TokenAccount{}, err
-	}
-	defer tx.Rollback(ctx)
-	if err := r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return TokenAccount{}, err
-	}
-	account, _, err := setAccountStatusEffect(ctx, tx, accountID, status, actorID, reason, r.now())
-	if err != nil {
-		return TokenAccount{}, err
-	}
-	return account, r.commitGovernedMutation(ctx, tx)
-}
-
-func (r *PostgresRepository) RevokeCredential(ctx context.Context, accountID, credentialID, actorID uuid.UUID, reason string) (Credential, error) {
-	reason = strings.TrimSpace(reason)
-	if accountID == uuid.Nil || credentialID == uuid.Nil || actorID == uuid.Nil || reason == "" {
-		return Credential{}, ErrForbidden
-	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return Credential{}, err
-	}
-	defer tx.Rollback(ctx)
-	var platformManaged bool
-	if err := tx.QueryRow(ctx, `SELECT management_mode='PLATFORM' FROM token_accounts WHERE id=$1`, accountID).Scan(&platformManaged); err != nil || !platformManaged {
-		return Credential{}, ErrNotFound
-	}
-	credential, err := getCredential(ctx, tx, accountID, credentialID, true)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Credential{}, ErrNotFound
-	}
-	if err != nil {
-		return Credential{}, err
-	}
-	if credential.Status == "REVOKED" {
-		return credential, tx.Commit(ctx)
-	}
-	if credential.Status != "ACTIVE" && credential.Status != "RETIRED" {
-		return Credential{}, ErrForbidden
-	}
-	now := r.now()
-	command, err := tx.Exec(ctx, `UPDATE provider_credentials SET status='REVOKED',revoked_at=$3,revoked_by=$4,revocation_reason=$5 WHERE id=$1 AND token_account_id=$2 AND status IN ('ACTIVE','RETIRED')`, credentialID, accountID, now, actorID, reason)
-	if err != nil {
-		return Credential{}, err
-	}
-	if command.RowsAffected() != 1 {
-		return Credential{}, ErrForbidden
-	}
-	credential.Status = "REVOKED"
-	return credential, tx.Commit(ctx)
-}
-
-func (r *PostgresRepository) UpdateSharePolicy(ctx context.Context, accountID uuid.UUID, scope string, members []uuid.UUID, actorID uuid.UUID) (TokenAccount, error) {
-	scope = strings.ToUpper(strings.TrimSpace(scope))
-	if accountID == uuid.Nil || actorID == uuid.Nil || !validShareScope(scope) {
-		return TokenAccount{}, ErrForbidden
-	}
-	members = normalizeMemberIDs(members)
-	if scope != "EXPLICIT_MEMBERS" && len(members) != 0 {
-		return TokenAccount{}, ErrForbidden
-	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return TokenAccount{}, err
-	}
-	defer tx.Rollback(ctx)
-	account, err := getTokenAccount(ctx, tx, accountID, true)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return TokenAccount{}, ErrNotFound
-	}
-	if err != nil {
-		return TokenAccount{}, err
-	}
-	if account.ManagementMode != "PLATFORM" {
-		return TokenAccount{}, ErrNotFound
-	}
-	if !shareScopeAllowed(account.OwnerType, scope) {
-		return TokenAccount{}, ErrForbidden
-	}
-	now := r.now()
-	if _, err := tx.Exec(ctx, `UPDATE token_share_policies SET scope=$2,updated_at=$3,updated_by=$4 WHERE token_account_id=$1`, accountID, scope, now, actorID); err != nil {
-		return TokenAccount{}, err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM token_explicit_members WHERE token_account_id=$1`, accountID); err != nil {
-		return TokenAccount{}, err
-	}
-	for _, memberID := range members {
-		if _, err := tx.Exec(ctx, `INSERT INTO token_explicit_members(token_account_id,user_id,created_at,created_by) VALUES($1,$2,$3,$4)`, accountID, memberID, now, actorID); err != nil {
-			return TokenAccount{}, err
-		}
-	}
-	account.ShareScope = scope
-	return account, tx.Commit(ctx)
-}
 
 type StableRouteInput struct {
 	ModelID                uuid.UUID
@@ -127,89 +18,6 @@ type StableRouteInput struct {
 	ExpectedRouteVersion   int64
 	IdempotencyKey         string
 	Reason                 string
-}
-
-// UpsertRoute is the frozen v1 direct contract. APT-138 switches callers to
-// the v2 governed route. Until then this path remains available and never
-// creates a stable reference from untrusted text.
-func (r *PostgresRepository) UpsertRoute(ctx context.Context, accountID uuid.UUID, model, protocolCode string, priority int, defaultScope, healthStatus string, actorID uuid.UUID) (RoutingPolicy, error) {
-	model, protocolCode = strings.TrimSpace(model), strings.ToUpper(strings.TrimSpace(protocolCode))
-	defaultScope, healthStatus = strings.ToUpper(strings.TrimSpace(defaultScope)), strings.ToUpper(strings.TrimSpace(healthStatus))
-	if accountID == uuid.Nil || actorID == uuid.Nil || model == "" || protocolCode != "CHAT" || priority < 0 || priority > 10000 || !slices.Contains([]string{"NONE", "UNIT", "ORG"}, defaultScope) || !slices.Contains([]string{"HEALTHY", "DEGRADED", "UNHEALTHY"}, healthStatus) {
-		return RoutingPolicy{}, ErrForbidden
-	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return RoutingPolicy{}, err
-	}
-	defer tx.Rollback(ctx)
-	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return RoutingPolicy{}, err
-	}
-	account, err := getTokenAccount(ctx, tx, accountID, true)
-	if errors.Is(err, pgx.ErrNoRows) || account.ManagementMode != "PLATFORM" {
-		return RoutingPolicy{}, ErrNotFound
-	}
-	if err != nil {
-		return RoutingPolicy{}, err
-	}
-	if !defaultScopeAllowed(account.OwnerType, defaultScope) {
-		return RoutingPolicy{}, ErrForbidden
-	}
-	var allowed bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM provider_credentials WHERE token_account_id=$1 AND status='ACTIVE' AND validation_status='VALID' AND $2=ANY(allowed_models))`, accountID, model).Scan(&allowed); err != nil {
-		return RoutingPolicy{}, err
-	}
-	if !allowed {
-		return RoutingPolicy{}, ErrNotFound
-	}
-	now := r.now().UTC()
-	var routeID uuid.UUID
-	var referenceStatus string
-	var routeCount int
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM routing_policies WHERE token_account_id=$1 AND model=$2 AND reference_status<>'DELETED'`, accountID, model).Scan(&routeCount); err != nil {
-		return RoutingPolicy{}, err
-	}
-	if routeCount == 0 {
-		routeID = uuid.Must(uuid.NewV7())
-		_, err = tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at,updated_by,route_generation,reference_status,route_version,health_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,1,'LEGACY_UNRESOLVED',1,1)`, routeID, accountID, model, protocolCode, priority, defaultScope, healthStatus, now, actorID)
-	} else if routeCount > 1 {
-		// Multiple protocol-versioned routes deliberately make the text-only v1
-		// mutation ambiguous; callers must wait for the v2 activation.
-		return RoutingPolicy{}, ErrAmbiguousRoute
-	} else if err = tx.QueryRow(ctx, `SELECT id,reference_status FROM routing_policies WHERE token_account_id=$1 AND model=$2 AND reference_status<>'DELETED' FOR UPDATE`, accountID, model).Scan(&routeID, &referenceStatus); err != nil {
-		return RoutingPolicy{}, err
-	} else if referenceStatus == "LEGACY_UNRESOLVED" {
-		_, err = tx.Exec(ctx, `UPDATE routing_policies SET protocol_code=$2,priority=$3,default_scope=$4,health_status=$5,updated_at=$6,updated_by=$7,route_generation=route_generation+1,route_version=route_version+1 WHERE id=$1`, routeID, protocolCode, priority, defaultScope, healthStatus, now, actorID)
-	} else {
-		_, err = tx.Exec(ctx, `UPDATE routing_policies SET priority=$2,default_scope=$3,health_status='UNKNOWN',health_diagnostic_code='LEGACY_CONFIGURATION_CHANGED',health_observed_at=NULL,health_expires_at=NULL,next_probe_at=$4,updated_at=$4,updated_by=$5,route_generation=route_generation+1,route_version=route_version+1,health_version=health_version+1 WHERE id=$1`, routeID, priority, defaultScope, now, actorID)
-	}
-	if err != nil {
-		return RoutingPolicy{}, err
-	}
-	if err = recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_UPSERTED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('model',$6,'protocol_code',$7,'priority',$8,'default_scope',$9,'health_status',$10)`, model, protocolCode, priority, defaultScope, healthStatus); err != nil {
-		return RoutingPolicy{}, err
-	}
-	item, err := scanRoutingPolicy(tx.QueryRow(ctx, routingPolicyProjection+` WHERE id=$1`, routeID))
-	if err != nil {
-		return RoutingPolicy{}, err
-	}
-	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return RoutingPolicy{}, err
-	}
-	return item, tx.Commit(ctx)
-}
-
-func stableRouteDigest(command string, accountID uuid.UUID, input StableRouteInput) string {
-	payload, _ := json.Marshal(map[string]any{"command_type": command, "token_account_id": accountID, "model_id": input.ModelID, "protocol_version_id": input.ProtocolVersionID, "priority": input.Priority, "default_scope": input.DefaultScope, "expected_account_version": input.ExpectedAccountVersion, "expected_route_version": input.ExpectedRouteVersion, "reason": input.Reason})
-	digest := sha256.Sum256(payload)
-	return hex.EncodeToString(digest[:])
-}
-
-func validStableRouteInput(accountID, actorID uuid.UUID, input StableRouteInput) bool {
-	input.DefaultScope = strings.ToUpper(strings.TrimSpace(input.DefaultScope))
-	input.Reason = strings.TrimSpace(input.Reason)
-	return accountID != uuid.Nil && actorID != uuid.Nil && input.ModelID != uuid.Nil && input.ProtocolVersionID != uuid.Nil && input.Priority >= 0 && input.Priority <= 10000 && slices.Contains([]string{"NONE", "UNIT", "ORG"}, input.DefaultScope) && input.ExpectedAccountVersion > 0 && input.ExpectedRouteVersion >= 0 && len(input.IdempotencyKey) >= 16 && len(input.IdempotencyKey) <= 128 && utf8.RuneCountInString(input.Reason) >= 10 && utf8.RuneCountInString(input.Reason) <= 2000
 }
 
 func scanRoutingPolicy(row interface{ Scan(...any) error }) (RoutingPolicy, error) {
@@ -254,56 +62,6 @@ WHERE current.version=(SELECT max(version) FROM model_catalog_versions)`, modelI
 		return stableRouteReference{}, ErrRouteReferenceInvalid
 	}
 	return result, err
-}
-
-func (r *PostgresRepository) UpsertStableRoute(ctx context.Context, accountID uuid.UUID, input StableRouteInput, actorID uuid.UUID) (StableRouteResult, error) {
-	input.DefaultScope, input.IdempotencyKey, input.Reason = strings.ToUpper(strings.TrimSpace(input.DefaultScope)), strings.TrimSpace(input.IdempotencyKey), strings.TrimSpace(input.Reason)
-	if !validStableRouteInput(accountID, actorID, input) {
-		return StableRouteResult{}, ErrForbidden
-	}
-	digest := stableRouteDigest("TOKEN_ROUTE_UPSERT", accountID, input)
-	tx, release, err := r.beginTokenSerializedTransaction(ctx, "TOKEN_ROUTE_ACCOUNT:"+accountID.String())
-	if err != nil {
-		return StableRouteResult{}, err
-	}
-	defer release()
-	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return StableRouteResult{}, err
-	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "TOKEN_ROUTE:"+input.IdempotencyKey); err != nil {
-		return StableRouteResult{}, err
-	}
-	var storedActor uuid.UUID
-	var storedDigest string
-	var snapshot []byte
-	if err = tx.QueryRow(ctx, `SELECT actor_id,request_digest,result_snapshot FROM routing_policy_mutations WHERE idempotency_key=$1`, input.IdempotencyKey).Scan(&storedActor, &storedDigest, &snapshot); err == nil {
-		if storedActor != actorID || storedDigest != digest {
-			return StableRouteResult{}, ErrIdempotencyConflict
-		}
-		var replay StableRouteResult
-		if json.Unmarshal(snapshot, &replay) != nil || replay.ID == uuid.Nil || replay.ModelID == uuid.Nil || replay.ProtocolVersionID == uuid.Nil {
-			return StableRouteResult{}, ErrRouteVersionConflict
-		}
-		if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
-			return StableRouteResult{}, err
-		}
-		return replay, tx.Commit(ctx)
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return StableRouteResult{}, err
-	}
-	result, err := r.upsertStableRouteTx(ctx, tx, accountID, input, actorID, true)
-	if err != nil {
-		return StableRouteResult{}, err
-	}
-	snapshot, _ = json.Marshal(result)
-	now := r.now().UTC()
-	if _, err = tx.Exec(ctx, `INSERT INTO routing_policy_mutations(idempotency_key,actor_id,command_type,request_digest,route_id,result_snapshot,created_at,expires_at) VALUES($1,$2,'TOKEN_ROUTE_UPSERT',$3,$4,$5,$6::timestamptz,$6::timestamptz+interval '7 days')`, input.IdempotencyKey, actorID, digest, result.ID, snapshot, now); err != nil {
-		return StableRouteResult{}, err
-	}
-	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return StableRouteResult{}, err
-	}
-	return result, tx.Commit(ctx)
 }
 
 // upsertStableRouteTx shares only the domain effect. Its caller owns the
@@ -394,51 +152,6 @@ type StableRouteDeleteInput struct {
 	Reason                 string
 }
 
-func (r *PostgresRepository) DeleteStableRoute(ctx context.Context, accountID uuid.UUID, input StableRouteDeleteInput, actorID uuid.UUID) error {
-	input.IdempotencyKey, input.Reason = strings.TrimSpace(input.IdempotencyKey), strings.TrimSpace(input.Reason)
-	if accountID == uuid.Nil || input.RouteID == uuid.Nil || actorID == uuid.Nil || input.ExpectedAccountVersion <= 0 || input.ExpectedRouteVersion <= 0 || len(input.IdempotencyKey) < 16 || len(input.IdempotencyKey) > 128 || utf8.RuneCountInString(input.Reason) < 10 || utf8.RuneCountInString(input.Reason) > 2000 {
-		return ErrForbidden
-	}
-	digestInput := StableRouteInput{ExpectedAccountVersion: input.ExpectedAccountVersion, ExpectedRouteVersion: input.ExpectedRouteVersion, IdempotencyKey: input.IdempotencyKey, Reason: input.Reason}
-	digest := stableRouteDigest("TOKEN_ROUTE_DELETE:"+input.RouteID.String(), accountID, digestInput)
-	tx, release, err := r.beginTokenSerializedTransaction(ctx, "TOKEN_ROUTE_ACCOUNT:"+accountID.String())
-	if err != nil {
-		return err
-	}
-	defer release()
-	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "TOKEN_ROUTE:"+input.IdempotencyKey); err != nil {
-		return err
-	}
-	var storedActor uuid.UUID
-	var storedDigest string
-	if err = tx.QueryRow(ctx, `SELECT actor_id,request_digest FROM routing_policy_mutations WHERE idempotency_key=$1`, input.IdempotencyKey).Scan(&storedActor, &storedDigest); err == nil {
-		if storedActor != actorID || storedDigest != digest {
-			return ErrIdempotencyConflict
-		}
-		if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
-			return err
-		}
-		return tx.Commit(ctx)
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return err
-	}
-	if err = r.deleteStableRouteTx(ctx, tx, accountID, input, actorID, true); err != nil {
-		return err
-	}
-	snapshot, _ := json.Marshal(map[string]any{"route_id": input.RouteID, "deleted": true})
-	now := r.now().UTC()
-	if _, err = tx.Exec(ctx, `INSERT INTO routing_policy_mutations(idempotency_key,actor_id,command_type,request_digest,route_id,result_snapshot,created_at,expires_at) VALUES($1,$2,'TOKEN_ROUTE_DELETE',$3,$4,$5,$6::timestamptz,$6::timestamptz+interval '7 days')`, input.IdempotencyKey, actorID, digest, input.RouteID, snapshot, now); err != nil {
-		return err
-	}
-	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
 func (r *PostgresRepository) deleteStableRouteTx(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, input StableRouteDeleteInput, actorID uuid.UUID, legacyAudit bool) error {
 	var err error
 	var accountVersion int64
@@ -496,44 +209,6 @@ func getTokenAccount(ctx context.Context, database interface {
 	var account TokenAccount
 	err := database.QueryRow(ctx, query, accountID).Scan(&account.ID, &account.OwnerType, &account.OwnerID, &account.OwnerOrganization, &account.OwnerUnit, &account.WalletID, &account.Name, &account.Status, &account.ShareScope, &account.DefaultPriority, &account.ManagementMode)
 	return account, err
-}
-
-func getCredential(ctx context.Context, database interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}, accountID, credentialID uuid.UUID, lock bool) (Credential, error) {
-	query := `SELECT id,token_account_id,provider,base_url,fingerprint,version,status,allowed_models,validated_at FROM provider_credentials WHERE id=$1 AND token_account_id=$2`
-	if lock {
-		query += ` FOR UPDATE`
-	}
-	var credential Credential
-	err := database.QueryRow(ctx, query, credentialID, accountID).Scan(&credential.ID, &credential.TokenAccountID, &credential.Provider, &credential.BaseURL, &credential.Fingerprint, &credential.Version, &credential.Status, &credential.AllowedModels, &credential.ValidatedAt)
-	return credential, err
-}
-
-func normalizeMemberIDs(members []uuid.UUID) []uuid.UUID {
-	seen := make(map[uuid.UUID]bool, len(members))
-	result := make([]uuid.UUID, 0, len(members))
-	for _, memberID := range members {
-		if memberID != uuid.Nil && !seen[memberID] {
-			seen[memberID] = true
-			result = append(result, memberID)
-		}
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].String() < result[j].String() })
-	return result
-}
-
-func shareScopeAllowed(ownerType, scope string) bool {
-	switch ownerType {
-	case "USER":
-		return scope == "OWNER_UNIT_ONLY"
-	case "ORG":
-		return scope == "ORG_ALL" || scope == "EXPLICIT_MEMBERS"
-	case "ORG_UNIT":
-		return validShareScope(scope)
-	default:
-		return false
-	}
 }
 
 func defaultScopeAllowed(ownerType, scope string) bool {

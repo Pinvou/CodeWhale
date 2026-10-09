@@ -36,6 +36,8 @@ func (stub stubImpactPriceRepository) BatchCurrentPriceCoverage(_ context.Contex
 }
 
 func TestBillingImpactPriceCoverageIsServiceAuthenticatedCompleteAndRedacted(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("WORKLOAD_AUTH_ISSUER", "")
 	modelID, missingID, priceID := uuid.New(), uuid.New(), uuid.New()
 	now := time.Now().UTC()
 	formulaID := uuid.New()
@@ -67,6 +69,8 @@ func TestBillingImpactPriceCoverageIsServiceAuthenticatedCompleteAndRedacted(t *
 }
 
 func TestBillingImpactPriceCoverageFailsWholeRequest(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("WORKLOAD_AUTH_ISSUER", "")
 	modelID := uuid.New()
 	service := NewService(nil).WithImpactPriceRepository(stubImpactPriceRepository{err: errors.New("database detail")})
 	handler := service.Handler("impact-service-token")
@@ -83,6 +87,8 @@ func TestBillingImpactPriceCoverageFailsWholeRequest(t *testing.T) {
 }
 
 func TestBillingImpactPriceCoverageLimitsAndStableErrors(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("WORKLOAD_AUTH_ISSUER", "")
 	items := make([]ImpactPriceQuery, maximumImpactPriceModels+1)
 	for index := range items {
 		items[index] = ImpactPriceQuery{ModelID: uuid.New(), ProtocolCode: "CHAT", CreditUnit: "MICROCREDIT"}

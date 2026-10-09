@@ -51,7 +51,8 @@ func governancePolicies() ([]Policy, error) {
 	return result, nil
 }
 
-// PolicySetDigest binds the three installed executable Billing policies. Historical database versions remain immutable.
+// PolicySetDigest binds the closed Billing and Token governance policy set.
+// Historical database versions remain immutable.
 func PolicySetDigest() (string, error) {
 	policies, err := governancePolicies()
 	if err != nil {
