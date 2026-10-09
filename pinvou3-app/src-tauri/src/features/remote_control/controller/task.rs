@@ -1553,20 +1553,28 @@ impl RemoteTaskService {
     fn publish_with_reason(&self, record: &RemoteTaskRecord, reason: String) {
         let journal = self.hooks.journal.lock().clone();
         if let Some(journal) = journal {
-            let Ok(previous) = self.event_sequence.fetch_update(
-                AtomicOrdering::Relaxed,
-                AtomicOrdering::Relaxed,
-                |sequence| sequence.checked_add(1),
-            ) else {
-                // Never wrap and reuse a published identity.
-                eprintln!("[remote-control] task event sequence exhausted");
-                return;
+            // Checked CAS keeps the MSRV and never wraps a published identity.
+            let mut previous = self.event_sequence.load(AtomicOrdering::Relaxed);
+            let sequence = loop {
+                let Some(next) = previous.checked_add(1) else {
+                    eprintln!("[remote-control] task event sequence exhausted");
+                    return;
+                };
+                match self.event_sequence.compare_exchange_weak(
+                    previous,
+                    next,
+                    AtomicOrdering::Relaxed,
+                    AtomicOrdering::Relaxed,
+                ) {
+                    Ok(_) => break next,
+                    Err(current) => previous = current,
+                }
             };
             journal.publish_task_event(&RemoteTaskEvent {
                 task_id: record.task_id.clone(),
                 session_id: record.session_id.clone(),
                 status: record.view_status().to_owned(),
-                sequence: (previous + 1).to_string(),
+                sequence: sequence.to_string(),
                 outcome_unknown: record.outcome_unknown,
                 terminal_reason: Some(bounded_reason_owned(reason)),
                 result_digest: record.result_digest.clone(),
@@ -2762,6 +2770,39 @@ mod tests {
             1,
             "overflow cannot replay an old identity"
         );
+    }
+
+    #[test]
+    fn concurrent_publications_claim_each_remaining_sequence_once() {
+        let (service, hooks) = service(RecordingExecutor::ok());
+        let ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "client-0001", &digest(1)),
+            1_000,
+        );
+        hooks.events.lock().clear();
+        service
+            .event_sequence
+            .store(u64::MAX - 32, AtomicOrdering::Relaxed);
+        std::thread::scope(|scope| {
+            for _ in 0..64 {
+                scope.spawn(|| service.publish(&ticket.record));
+            }
+        });
+        let mut sequences = hooks
+            .events
+            .lock()
+            .iter()
+            .map(|event| event.sequence.parse::<u64>().unwrap())
+            .collect::<Vec<_>>();
+        sequences.sort_unstable();
+        assert_eq!(sequences, ((u64::MAX - 31)..=u64::MAX).collect::<Vec<_>>());
+        assert_eq!(
+            service.event_sequence.load(AtomicOrdering::Relaxed),
+            u64::MAX
+        );
+        service.publish(&ticket.record);
+        assert_eq!(hooks.events.lock().len(), 32);
     }
 
     #[test]
