@@ -1,11 +1,10 @@
 import crypto from "node:crypto";
+import { isEnrollmentEndpointIdentifier, isMigrationRequestIdentifier } from "./identifier-contract.js";
 import {
   compareEnrollmentIdentifiers,
   validateEnrollmentRegistrySnapshot,
 } from "./enrollment-registry.js";
 
-const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/u;
-const ENDPOINT_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
 const BACKUP_SCHEMA = "pinvou-enrollment-migration-backup";
 const BACKUP_VERSION = 1;
 const SOCKET_PROOFS = new WeakMap();
@@ -27,12 +26,12 @@ function fail(code, cause) {
 }
 
 function requestId(value) {
-  if (typeof value !== "string" || !REQUEST_ID.test(value)) fail("migration_request_id_invalid");
+  if (!isMigrationRequestIdentifier(value)) fail("migration_request_id_invalid");
   return value;
 }
 
 function endpointId(value) {
-  if (typeof value !== "string" || !ENDPOINT_ID.test(value)) fail("migration_endpoint_id_invalid");
+  if (!isEnrollmentEndpointIdentifier(value)) fail("migration_endpoint_id_invalid");
   return value;
 }
 
@@ -67,8 +66,8 @@ function proofPayload(value) {
     fail("migration_identity_proof_invalid");
   }
   if (value.schema !== "pinvou-official-endpoint-enrollment-proof" || value.version !== 1
-    || !PROOF_KEY_ID.test(value.key_id) || !ENDPOINT_ID.test(value.device_id)
-    || !ENDPOINT_ID.test(value.endpoint_id) || !/^[a-f0-9]{64}$/u.test(value.access_token_sha256)
+    || !PROOF_KEY_ID.test(value.key_id) || !isEnrollmentEndpointIdentifier(value.device_id)
+    || !isEnrollmentEndpointIdentifier(value.endpoint_id) || !/^[a-f0-9]{64}$/u.test(value.access_token_sha256)
     || !/^[a-f0-9]{64}$/u.test(value.desktop_secret_sha256)) fail("migration_identity_proof_invalid");
   base64Url(value.socket_challenge_b64, 32, "migration_socket_challenge");
   if (!Number.isSafeInteger(value.issued_at_ms) || !Number.isSafeInteger(value.expires_at_ms)

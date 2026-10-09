@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isDirectCliEntry } from "../cli-entrypoint.js";
 import { validateLegacyRollbackTopology } from "../enrollment-gateway.js";
 
 export async function main(env = process.env, io = console) {
@@ -10,6 +9,7 @@ export async function main(env = process.env, io = console) {
       publicEntrypoints,
       legacyRelayUrl: env.PINVOU_REMOTE_LEGACY_RELAY_URL,
       legacyRelayBindHost: env.PINVOU_REMOTE_LEGACY_RELAY_BIND_HOST,
+      expectedGatewayInstance: env.PINVOU_REMOTE_EXPECTED_GATEWAY_INSTANCE,
     });
     io.log(JSON.stringify({ ok: true, ...result }));
     return 0;
@@ -19,6 +19,6 @@ export async function main(env = process.env, io = console) {
   }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+if (isDirectCliEntry(import.meta.url)) {
   process.exitCode = await main();
 }

@@ -1,6 +1,9 @@
 // Keep the actual manager's parent-module boundary while compiling its local
 // state tests independently of the full product graph.
-pub(crate) use crate::{crypto, encrypted_lane, liveness, protocol, relay_transport, resume};
+pub(crate) use crate::test_support;
+pub(crate) use crate::{
+    crypto, encrypted_lane, liveness, panic_scope, protocol, relay_transport, resume,
+};
 
 #[path = "../../../src/features/remote_control/controller/controlled.rs"]
 pub(crate) mod controlled;
@@ -29,3 +32,11 @@ pub(crate) mod task;
 pub(crate) mod journal;
 
 pub(crate) use crate::transfer;
+#[path = "../../../src/features/remote_control/controller/redaction.rs"]
+pub(crate) mod redaction;
+
+#[path = "../../../src/features/remote_control/controller/capabilities.rs"]
+pub(crate) mod capabilities;
+
+#[path = "../../../src/features/remote_control/controller/turn_budget.rs"]
+pub(crate) mod turn_budget;

@@ -24,11 +24,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub(crate) use super::transfer::upload::PublishedAttachment;
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -97,6 +99,23 @@ fn error(code: &'static str) -> RemoteTaskError {
 pub(crate) trait ControllerTaskEventSink: Send + Sync {
     fn emit(&self, event: Value);
 
+    // A trusted, process-local permit. It must not acquire resource gates:
+    // artifact owners check it while holding their publication mutex.
+    fn check_artifact_budget(&self, _sequence: u64) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    /// Only the terminal artifact owner calls this after its successful CAS.
+    fn emit_committed_artifact(
+        &self,
+        _sequence: u64,
+        session_id: &str,
+        task_id: &str,
+        payload: Value,
+    ) {
+        self.emit_journal(JournalKind::Artifact, session_id, Some(task_id), payload);
+    }
+
     /// E2E-05：执行器产出的正文类事件（用户消息 / assistant 回复 / 推理等）。
     /// 默认忽略；命令层实现为「写权威 journal + 经加密通道回传 A」。
     fn emit_journal(
@@ -106,6 +125,101 @@ pub(crate) trait ControllerTaskEventSink: Send + Sync {
         _task_id: Option<&str>,
         _payload: Value,
     ) {
+    }
+}
+
+/// A detached executor may outlive its terminal transition. Fence its output
+/// against the captured admission, not a subsequently reused wire task ID.
+struct AdmissionEventSink {
+    ledger: Arc<RemoteTaskLedger>,
+    record: RemoteTaskRecord,
+    inner: Arc<dyn ControllerTaskEventSink>,
+    budget: Option<super::turn_budget::TurnBudget>,
+}
+
+impl AdmissionEventSink {
+    fn publish(&self, action: impl FnOnce(&dyn ControllerTaskEventSink)) {
+        let gate = self.ledger.resource_gate(&self.record.task_id);
+        let resource = gate.lock();
+        if !self
+            .ledger
+            .record(&self.record.task_id)
+            .is_ok_and(|current| current.sequence == self.record.sequence && !current.is_terminal())
+        {
+            return;
+        }
+        let _active = CleanupActive {
+            active: &resource,
+            previous: resource.replace(true),
+        };
+        action(self.inner.as_ref());
+    }
+}
+
+impl ControllerTaskEventSink for AdmissionEventSink {
+    fn emit(&self, event: Value) {
+        self.publish(|sink| sink.emit(event));
+    }
+    fn check_artifact_budget(&self, sequence: u64) -> std::result::Result<(), String> {
+        if sequence != self.record.sequence {
+            return Err("task_binding_stale".into());
+        }
+        self.budget
+            .map(|budget| budget.checkpoint(&CancellationToken::new()))
+            .unwrap_or(Ok(()))
+    }
+    fn emit_committed_artifact(
+        &self,
+        sequence: u64,
+        session_id: &str,
+        task_id: &str,
+        payload: Value,
+    ) {
+        if self
+            .budget
+            .is_some_and(|budget| budget.checkpoint(&CancellationToken::new()).is_err())
+        {
+            return;
+        }
+        if sequence != self.record.sequence
+            || session_id != self.record.session_id
+            || task_id != self.record.task_id
+        {
+            return;
+        }
+        let gate = self.ledger.resource_gate(task_id);
+        let resource = gate.lock();
+        if self
+            .budget
+            .is_some_and(|budget| budget.checkpoint(&CancellationToken::new()).is_err())
+        {
+            return;
+        }
+        if !self.ledger.record(task_id).is_ok_and(|current| {
+            current.sequence == sequence
+                && current.state == RemoteTaskState::Succeeded
+                && !current.outcome_unknown
+        }) {
+            return;
+        }
+        let _active = CleanupActive {
+            active: &resource,
+            previous: resource.replace(true),
+        };
+        self.inner
+            .emit_committed_artifact(sequence, session_id, task_id, payload);
+    }
+    fn emit_journal(
+        &self,
+        kind: JournalKind,
+        session_id: &str,
+        task_id: Option<&str>,
+        payload: Value,
+    ) {
+        if session_id != self.record.session_id || task_id != Some(self.record.task_id.as_str()) {
+            return;
+        }
+        self.publish(|sink| sink.emit_journal(kind, session_id, task_id, payload));
     }
 }
 
@@ -425,6 +539,16 @@ impl RemoteTaskRecord {
             self.state.wire_status()
         }
     }
+
+    /// Local cancellation acknowledgement is monotonic until a proven terminal.
+    /// It does not change the frozen business task_status enumeration.
+    fn view_status(&self) -> &'static str {
+        if self.cancel_requested && !self.is_terminal() {
+            "cancel_requested"
+        } else {
+            self.wire_status()
+        }
+    }
 }
 
 /// Durable ledger sink. `persist` runs inside the ledger critical section and
@@ -518,11 +642,18 @@ struct LedgerInner {
     turn_locks: HashMap<String, String>,
     order: Vec<String>,
     sequence: u64,
+    // Process-local evidence of durable boot closure, consumed after hooks attach.
+    // Never persisted or inferred from historical terminal records.
+    pending_recovery: Vec<RemoteTaskRecord>,
 }
 
 pub(crate) struct RemoteTaskTicket {
     pub(crate) record: RemoteTaskRecord,
     pub(crate) input: Value,
+    /// B-only selection captured while the capability admission token is held.
+    /// Never serialized, persisted, or substituted into the authenticated input.
+    pub(crate) execution_skill_names: Option<Vec<String>>,
+    pub(crate) execution_budget: Option<super::turn_budget::TurnBudget>,
 }
 
 impl fmt::Debug for RemoteTaskTicket {
@@ -558,7 +689,21 @@ pub(crate) enum CancelOutcome {
     AlreadyTerminal(RemoteTaskRecord),
 }
 
+type TaskResourceGate = parking_lot::ReentrantMutex<std::cell::Cell<bool>>;
+
+struct CleanupActive<'a> {
+    active: &'a std::cell::Cell<bool>,
+    previous: bool,
+}
+
+impl Drop for CleanupActive<'_> {
+    fn drop(&mut self) {
+        self.active.set(self.previous);
+    }
+}
+
 pub(crate) struct RemoteTaskLedger {
+    resource_gates: Mutex<HashMap<String, std::sync::Weak<TaskResourceGate>>>,
     inner: Mutex<LedgerInner>,
     store: Arc<dyn RemoteTaskLedgerStore>,
 }
@@ -566,6 +711,7 @@ pub(crate) struct RemoteTaskLedger {
 impl RemoteTaskLedger {
     pub(crate) fn new(store: Arc<dyn RemoteTaskLedgerStore>) -> Self {
         Self {
+            resource_gates: Mutex::new(HashMap::new()),
             inner: Mutex::new(LedgerInner::default()),
             store,
         }
@@ -573,6 +719,28 @@ impl RemoteTaskLedger {
 
     pub(crate) fn in_memory() -> Self {
         Self::new(Arc::new(InMemoryTaskLedgerStore))
+    }
+
+    /// Serialize exact-ID admission with synchronous resource cleanup only.
+    /// Never hold this across await; dead weak entries do not reserve IDs.
+    fn resource_gate(&self, task_id: &str) -> Arc<TaskResourceGate> {
+        let mut gates = self.resource_gates.lock();
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(task_id).and_then(std::sync::Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(parking_lot::ReentrantMutex::new(std::cell::Cell::new(
+            false,
+        )));
+        gates.insert(task_id.to_owned(), Arc::downgrade(&gate));
+        gate
+    }
+
+    fn require_sequence(&self, task_id: &str, sequence: u64) -> Result<()> {
+        if self.record(task_id)?.sequence != sequence {
+            return Err(error("task_binding_stale"));
+        }
+        Ok(())
     }
 
     /// Open a fresh process owner and durably close every interrupted task
@@ -612,6 +780,20 @@ impl RemoteTaskLedger {
             }
             recovered.turn_locks.clear();
             self.persist_inner(&recovered)?;
+            recovered.pending_recovery = recovered
+                .tasks
+                .values()
+                .filter(|record| {
+                    inner
+                        .tasks
+                        .get(&record.task_id)
+                        .is_some_and(|old| !old.is_terminal())
+                })
+                .cloned()
+                .collect();
+            recovered
+                .pending_recovery
+                .sort_by_key(|record| record.sequence);
             *inner = recovered;
         }
         Ok(())
@@ -690,6 +872,7 @@ impl RemoteTaskLedger {
         }
         Ok(Self {
             inner: Mutex::new(inner),
+            resource_gates: Mutex::new(HashMap::new()),
             store,
         })
     }
@@ -700,6 +883,15 @@ impl RemoteTaskLedger {
         request: &RemoteTaskRequest,
         now_b: u64,
     ) -> Result<AdmissionOutcome> {
+        let resource_gate = self.resource_gate(&request.task_id);
+        // The caller may hold B's lifecycle gate. Never wait here for cleanup
+        // that publishes through that gate in the opposite direction.
+        let resource = resource_gate
+            .try_lock()
+            .ok_or_else(|| error("task_cleanup_busy"))?;
+        if resource.get() {
+            return Err(error("task_cleanup_busy"));
+        }
         request.validate()?;
         if request.lease != TaskLeaseBinding::from_context(live) {
             return Err(error("task_binding_stale"));
@@ -771,6 +963,8 @@ impl RemoteTaskLedger {
         Ok(AdmissionOutcome::Admitted(RemoteTaskTicket {
             record,
             input: request.input.clone(),
+            execution_skill_names: None,
+            execution_budget: None,
         }))
     }
 
@@ -807,6 +1001,23 @@ impl RemoteTaskLedger {
             updated.dispatch_committed = true;
         }
         self.commit(&mut inner, updated)
+    }
+
+    /// Native resource entry points may be called with the controlled owner
+    /// held. Never wait for a gate whose cleanup can publish back to that owner.
+    pub(crate) fn with_task_resources<T>(
+        &self,
+        task_id: &str,
+        sequence: u64,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let gate = self.resource_gate(task_id);
+        let resource = gate.try_lock().ok_or_else(|| error("task_cleanup_busy"))?;
+        if resource.get() {
+            return Err(error("task_cleanup_busy"));
+        }
+        self.require_sequence(task_id, sequence)?;
+        Ok(action())
     }
 
     pub(crate) fn complete(
@@ -929,7 +1140,7 @@ impl RemoteTaskLedger {
     pub(crate) fn recover_after_restart(&self, now_b: u64) -> Vec<RemoteTaskRecord> {
         let mut inner = self.inner.lock();
         let ids = self.non_terminal_ids(&inner, |_| true);
-        let mut recovered = Vec::new();
+        let mut recovered = std::mem::take(&mut inner.pending_recovery);
         for id in ids {
             let Some(previous) = inner.tasks.get(&id).cloned() else {
                 continue;
@@ -1460,7 +1671,7 @@ impl ChatTurnExecutor {
             relay_epoch: lease_text("relay_epoch")?,
             remote_control_generation: lease_text("remote_control_generation")?,
         };
-        let skill_ids = extract_skill_ids(&request)?;
+        let skill_ids = extract_execution_skill_names(&request)?;
         // E2E-05：用户消息与回复正文都写进权威 journal（再经 wire 回传 A）。
         events.emit_journal(
             JournalKind::UserMessage,
@@ -1559,7 +1770,7 @@ impl CodeTurnExecutor {
             .and_then(|input| input.get("workspace_id"))
             .and_then(Value::as_str)
             .ok_or_else(|| "task_workspace_required".to_owned())?;
-        let skill_ids = extract_skill_ids(&request)?;
+        let skill_ids = extract_execution_skill_names(&request)?;
         events.emit_journal(
             JournalKind::UserMessage,
             &session_id,
@@ -1635,6 +1846,39 @@ fn extract_skill_ids(request: &Value) -> std::result::Result<Vec<String>, String
         .and_then(extract_skill_ids_from_input)
 }
 
+/// This envelope is built only by the private B dispatcher. Wire input remains
+/// opaque and digest-bound; it must never be interpreted as a directory name.
+fn extract_execution_skill_names(request: &Value) -> std::result::Result<Vec<String>, String> {
+    let ids = extract_skill_ids(request)?;
+    let values = request
+        .get("resolved_skill_names")
+        .and_then(Value::as_array);
+    if ids.is_empty() && values.is_none() {
+        return Ok(Vec::new());
+    }
+    let values = values
+        .filter(|values| values.len() == ids.len())
+        .ok_or_else(|| "task_skill_binding_missing".to_owned())?;
+    ids.iter()
+        .zip(values)
+        .map(|(id, value)| {
+            let name = value
+                .as_str()
+                .filter(|name| !name.is_empty() && name.len() <= 1024)
+                .ok_or_else(|| "task_skill_binding_invalid".to_owned())?;
+            if name
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
+                || matches!(name, "." | "..")
+                || super::capabilities::opaque_skill_id(name) != *id
+            {
+                return Err("task_skill_binding_invalid".to_owned());
+            }
+            Ok(name.to_owned())
+        })
+        .collect()
+}
+
 fn extract_skill_ids_from_input(input: &Value) -> std::result::Result<Vec<String>, String> {
     input
         .get("skill_ids")
@@ -1664,7 +1908,7 @@ pub(crate) trait RemoteTaskPermissionScope: Send + Sync {
 /// Extension surface frozen for DEV-17/DEV-18 (attachment and artifact
 /// transfers).
 pub(crate) trait RemoteTaskTransferScope: Send + Sync {
-    fn abort_transfers_for_task(&self, task_id: &str) -> usize;
+    fn abort_transfers_for_task(&self, record: &RemoteTaskRecord) -> usize;
 }
 
 /// Two-phase artifact publication boundary. Executors may stage private
@@ -1672,7 +1916,7 @@ pub(crate) trait RemoteTaskTransferScope: Send + Sync {
 /// them visible. Implementations must consume staged state idempotently.
 pub(crate) trait RemoteTaskArtifactScope: Send + Sync {
     fn commit_task_artifacts(&self, record: &RemoteTaskRecord);
-    fn discard_task_artifacts(&self, task_id: &str);
+    fn discard_task_artifacts(&self, record: &RemoteTaskRecord);
 }
 
 /// Extension surface frozen for DEV-19 (authoritative event journal).
@@ -1761,6 +2005,32 @@ pub(crate) struct PreparedTaskSession {
     provisioner: Arc<dyn RemoteSessionProvisioner>,
 }
 
+enum PreparedTaskDispatch {
+    Terminal(Box<RemoteTaskRecord>),
+    Running(Box<RunningTaskDispatch>),
+}
+
+struct RunningTaskDispatch {
+    running: RemoteTaskRecord,
+    executor: Arc<dyn ControllerTaskExecutor>,
+    budget: super::turn_budget::TurnBudget,
+    execution_request: Value,
+    attachments: Vec<PublishedAttachment>,
+    events: Arc<dyn ControllerTaskEventSink>,
+    cancel: CancellationToken,
+}
+
+enum ExecutedTaskDispatch {
+    Terminal(Box<RemoteTaskRecord>),
+    Finished {
+        running: Box<RemoteTaskRecord>,
+        events: Arc<dyn ControllerTaskEventSink>,
+        result: std::result::Result<(), String>,
+        budget: super::turn_budget::TurnBudget,
+        cancel: CancellationToken,
+    },
+}
+
 pub(crate) struct RemoteTaskService {
     ledger: Arc<RemoteTaskLedger>,
     sessions: RemoteSessionMap,
@@ -1776,6 +2046,19 @@ pub(crate) struct RemoteTaskService {
 }
 
 impl RemoteTaskService {
+    pub(crate) fn events_for_record(
+        &self,
+        record: &RemoteTaskRecord,
+        inner: Arc<dyn ControllerTaskEventSink>,
+        budget: Option<super::turn_budget::TurnBudget>,
+    ) -> Arc<dyn ControllerTaskEventSink> {
+        Arc::new(AdmissionEventSink {
+            ledger: Arc::clone(&self.ledger),
+            record: record.clone(),
+            inner,
+            budget,
+        })
+    }
     pub(crate) fn new(ledger: Arc<RemoteTaskLedger>) -> Self {
         Self {
             ledger,
@@ -2268,7 +2551,14 @@ impl RemoteTaskService {
         }
         let outcome = self.ledger.admit(live, &request, now_b)?;
         if let AdmissionOutcome::Admitted(ticket) = &outcome {
-            if let Err(code) = install(ticket) {
+            // The owner lock is still held here: convert only installation
+            // panics into the existing callback-free durable failure, then
+            // let finish_bound_admission run re-entrant cleanup after unlock.
+            let installed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::panic_scope::run(|| install(ticket))
+            }))
+            .unwrap_or(Err("task_resource_installation_failed"));
+            if let Err(code) = installed {
                 let failed = self.ledger.complete_with_reason(
                     &ticket.record.task_id,
                     RemoteTaskTerminal::Failed,
@@ -2327,54 +2617,280 @@ impl RemoteTaskService {
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
         let task_id = ticket.record.task_id.clone();
-        let requested = ticket.input.get("attachment_ids").and_then(Value::as_array);
-        let exact = requested.is_some_and(|ids| {
-            ids.len() == attachments.len()
-                && ids
-                    .iter()
-                    .zip(&attachments)
-                    .all(|(id, attachment)| id.as_str() == Some(attachment.handle_id.as_str()))
-        });
-        if !exact {
-            events.emit_journal(
-                JournalKind::Error,
-                &ticket.record.session_id,
-                Some(&task_id),
-                json!({ "code": "task_attachments_invalid" }),
-            );
-            return self.finish(
-                &task_id,
-                RemoteTaskTerminal::Failed,
-                Some("task_attachments_invalid".to_owned()),
-                now_b,
-            );
+        let sequence = ticket.record.sequence;
+        match AssertUnwindSafe(super::panic_scope::future(async {
+            let prepared = self.prepare_dispatch(ticket, attachments, events, cancel, now_b)?;
+            let executed = Self::execute_dispatch(prepared).await;
+            self.settle_dispatch(executed, now_b)
+        }))
+        .catch_unwind()
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                self.contain_failed_dispatch(&task_id, sequence, now_b, "task_dispatch_panicked")
+            }
         }
-        self.cancel_tokens
-            .lock()
-            .insert(task_id.clone(), cancel.clone());
-        let running = match self.ledger.begin_dispatch(&task_id, now_b) {
-            Ok(running) => running,
-            Err(error) => {
-                self.cancel_tokens.lock().remove(&task_id);
-                return Err(error);
+    }
+
+    /// Production host dispatch: ledger persistence and resource hooks run on
+    /// blocking workers, while the real executor future stays asynchronous.
+    /// Each worker installs its own thread-local redaction scope; that scope
+    /// cannot be inherited from the thread which queued the work.
+    pub(crate) async fn dispatch_with_attachments_on_worker(
+        self: &Arc<Self>,
+        ticket: RemoteTaskTicket,
+        attachments: Vec<PublishedAttachment>,
+        events: Arc<dyn ControllerTaskEventSink>,
+        cancel: CancellationToken,
+        now_b: u64,
+    ) -> Result<RemoteTaskRecord> {
+        let task_id = ticket.record.task_id.clone();
+        let sequence = ticket.record.sequence;
+        let service = Arc::clone(self);
+        let prepared = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                super::panic_scope::run(|| {
+                    service.prepare_dispatch(ticket, attachments, events, cancel, now_b)
+                })
+            }))
+        })
+        .await;
+        let prepared = match prepared {
+            Ok(Ok(result)) => result?,
+            Ok(Err(_)) => {
+                return self
+                    .close_failed_dispatch_worker(
+                        task_id,
+                        sequence,
+                        now_b,
+                        "task_dispatch_panicked",
+                    )
+                    .await;
+            }
+            Err(_) => {
+                return self
+                    .close_failed_dispatch_worker(
+                        task_id,
+                        sequence,
+                        now_b,
+                        "task_dispatch_worker_failed",
+                    )
+                    .await;
             }
         };
-        self.publish(&running);
-        let executor = self.executors.lock().get(&running.mode).cloned();
-        let Some(executor) = executor else {
-            self.cancel_tokens.lock().remove(&task_id);
-            events.emit_journal(
-                JournalKind::Error,
-                &running.session_id,
-                Some(&task_id),
-                json!({ "code": "executor_unavailable" }),
-            );
-            return self.finish(
-                &task_id,
-                RemoteTaskTerminal::Failed,
-                Some("executor_unavailable".to_owned()),
-                now_b,
-            );
+        let executed =
+            match AssertUnwindSafe(super::panic_scope::future(Self::execute_dispatch(prepared)))
+                .catch_unwind()
+                .await
+            {
+                Ok(executed) => executed,
+                Err(_) => {
+                    return self
+                        .close_failed_dispatch_worker(
+                            task_id,
+                            sequence,
+                            now_b,
+                            "task_dispatch_panicked",
+                        )
+                        .await;
+                }
+            };
+        let service = Arc::clone(self);
+        let settled = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                super::panic_scope::run(|| service.settle_dispatch(executed, now_b))
+            }))
+        })
+        .await;
+        match settled {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                self.close_failed_dispatch_worker(
+                    task_id,
+                    sequence,
+                    now_b,
+                    "task_dispatch_panicked",
+                )
+                .await
+            }
+            Err(_) => {
+                self.close_failed_dispatch_worker(
+                    task_id,
+                    sequence,
+                    now_b,
+                    "task_dispatch_worker_failed",
+                )
+                .await
+            }
+        }
+    }
+
+    async fn close_failed_dispatch_worker(
+        self: &Arc<Self>,
+        task_id: String,
+        sequence: u64,
+        now_b: u64,
+        reason: &'static str,
+    ) -> Result<RemoteTaskRecord> {
+        let service = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            service.contain_failed_dispatch(&task_id, sequence, now_b, reason)
+        })
+        .await
+        .map_err(|_| error("task_dispatch_worker_failed"))?
+    }
+
+    fn contain_failed_dispatch(
+        &self,
+        task_id: &str,
+        sequence: u64,
+        now_b: u64,
+        reason: &'static str,
+    ) -> Result<RemoteTaskRecord> {
+        catch_unwind(AssertUnwindSafe(|| {
+            super::panic_scope::run(|| {
+                self.finish_failed_dispatch(task_id, sequence, now_b, reason)
+            })
+        }))
+        .unwrap_or_else(|_| Err(error("task_dispatch_worker_failed")))
+    }
+
+    fn finish_failed_dispatch(
+        &self,
+        task_id: &str,
+        sequence: u64,
+        now_b: u64,
+        reason: &'static str,
+    ) -> Result<RemoteTaskRecord> {
+        let gate = self.ledger.resource_gate(task_id);
+        let _resource = gate.lock();
+        // Never cancel or finalize a newer admission which reused this task ID.
+        self.ledger.require_sequence(task_id, sequence)?;
+        if let Some(token) = self.cancel_tokens.lock().remove(task_id) {
+            token.cancel();
+        }
+        let record = self.ledger.record(task_id)?;
+        if record.is_terminal() {
+            // Another terminal owner already ran independently contained
+            // resource cleanup. Do not replay successful hooks or journal
+            // publication because an old executor panicked afterwards.
+            return Ok(record);
+        }
+        self.finish(
+            task_id,
+            RemoteTaskTerminal::Failed,
+            Some(reason.to_owned()),
+            now_b,
+            Some(sequence),
+        )
+    }
+
+    fn prepare_dispatch(
+        &self,
+        ticket: RemoteTaskTicket,
+        attachments: Vec<PublishedAttachment>,
+        events: Arc<dyn ControllerTaskEventSink>,
+        cancel: CancellationToken,
+        now_b: u64,
+    ) -> Result<PreparedTaskDispatch> {
+        let task_id = ticket.record.task_id.clone();
+        let budget = match ticket.execution_budget {
+            Some(budget) => budget,
+            None => match super::turn_budget::TurnBudget::current_or_new() {
+                Ok(budget) => budget,
+                Err(_) => {
+                    return self
+                        .fail_admitted(
+                            &task_id,
+                            ticket.record.sequence,
+                            "task_turn_timeout_config_invalid",
+                            now_b,
+                        )
+                        .map(|record| PreparedTaskDispatch::Terminal(Box::new(record)));
+                }
+            },
+        };
+        let resource_gate = self.ledger.resource_gate(&task_id);
+        let (running, executor) = {
+            let _resource = resource_gate.lock();
+            self.ledger
+                .require_sequence(&task_id, ticket.record.sequence)?;
+            if let Err(code) = budget.checkpoint(&cancel) {
+                return self
+                    .finish(
+                        &task_id,
+                        if code == TASK_CANCELLED_CODE {
+                            RemoteTaskTerminal::Cancelled
+                        } else {
+                            RemoteTaskTerminal::Failed
+                        },
+                        if code == TASK_CANCELLED_CODE {
+                            None
+                        } else {
+                            Some(code)
+                        },
+                        now_b,
+                        Some(ticket.record.sequence),
+                    )
+                    .map(|record| PreparedTaskDispatch::Terminal(Box::new(record)));
+            }
+            let requested = ticket.input.get("attachment_ids").and_then(Value::as_array);
+            let exact = requested.is_some_and(|ids| {
+                ids.len() == attachments.len()
+                    && ids
+                        .iter()
+                        .zip(&attachments)
+                        .all(|(id, attachment)| id.as_str() == Some(attachment.handle_id.as_str()))
+            });
+            if !exact {
+                events.emit_journal(
+                    JournalKind::Error,
+                    &ticket.record.session_id,
+                    Some(&task_id),
+                    json!({ "code": "task_attachments_invalid" }),
+                );
+                return self
+                    .finish(
+                        &task_id,
+                        RemoteTaskTerminal::Failed,
+                        Some("task_attachments_invalid".to_owned()),
+                        now_b,
+                        Some(ticket.record.sequence),
+                    )
+                    .map(|record| PreparedTaskDispatch::Terminal(Box::new(record)));
+            }
+            self.cancel_tokens
+                .lock()
+                .insert(task_id.clone(), cancel.clone());
+            let running = match self.ledger.begin_dispatch(&task_id, now_b) {
+                Ok(running) => running,
+                Err(error) => {
+                    self.cancel_tokens.lock().remove(&task_id);
+                    return Err(error);
+                }
+            };
+            self.publish(&running);
+            let executor = self.executors.lock().get(&running.mode).cloned();
+            let Some(executor) = executor else {
+                self.cancel_tokens.lock().remove(&task_id);
+                events.emit_journal(
+                    JournalKind::Error,
+                    &running.session_id,
+                    Some(&task_id),
+                    json!({ "code": "executor_unavailable" }),
+                );
+                return self
+                    .finish(
+                        &task_id,
+                        RemoteTaskTerminal::Failed,
+                        Some("executor_unavailable".to_owned()),
+                        now_b,
+                        Some(running.sequence),
+                    )
+                    .map(|record| PreparedTaskDispatch::Terminal(Box::new(record)));
+            };
+            (running, executor)
         };
         // Executors consume the complete execution envelope. The ledger keeps
         // prompt input separate from durable task metadata so secrets never
@@ -2392,10 +2908,77 @@ impl RemoteTaskService {
             "relay_epoch": running.lease.relay_epoch,
             "remote_control_generation": running.lease.remote_control_generation,
             "input": ticket.input,
+            "resolved_skill_names": ticket.execution_skill_names,
         });
-        let result = executor
-            .execute_with_attachments(execution_request, attachments, Arc::clone(&events), cancel)
+        let events = self.events_for_record(&running, events, Some(budget));
+        Ok(PreparedTaskDispatch::Running(Box::new(
+            RunningTaskDispatch {
+                running,
+                executor,
+                budget,
+                execution_request,
+                attachments,
+                events,
+                cancel,
+            },
+        )))
+    }
+
+    async fn execute_dispatch(prepared: PreparedTaskDispatch) -> ExecutedTaskDispatch {
+        let dispatch = match prepared {
+            PreparedTaskDispatch::Terminal(record) => {
+                return ExecutedTaskDispatch::Terminal(record);
+            }
+            PreparedTaskDispatch::Running(dispatch) => *dispatch,
+        };
+        let RunningTaskDispatch {
+            running,
+            executor,
+            budget,
+            execution_request,
+            attachments,
+            events,
+            cancel,
+        } = dispatch;
+        let result = budget
+            .scope(executor.execute_with_attachments(
+                execution_request,
+                attachments,
+                Arc::clone(&events),
+                cancel.clone(),
+            ))
             .await;
+        ExecutedTaskDispatch::Finished {
+            running: Box::new(running),
+            events,
+            result,
+            budget,
+            cancel,
+        }
+    }
+
+    fn settle_dispatch(
+        &self,
+        executed: ExecutedTaskDispatch,
+        now_b: u64,
+    ) -> Result<RemoteTaskRecord> {
+        let (running, events, result, budget, cancel) = match executed {
+            ExecutedTaskDispatch::Terminal(record) => return Ok(*record),
+            ExecutedTaskDispatch::Finished {
+                running,
+                events,
+                result,
+                budget,
+                cancel,
+            } => (*running, events, result, budget, cancel),
+        };
+        let task_id = running.task_id.clone();
+        let resource_gate = self.ledger.resource_gate(&task_id);
+        let _resource = resource_gate.lock();
+        self.ledger.require_sequence(&task_id, running.sequence)?;
+        // Settling may have queued behind disk work or waited for the exact
+        // resource gate. The accepted deadline/cancel token still wins here.
+        let result = budget.checkpoint(&cancel).and(result);
         self.cancel_tokens.lock().remove(&task_id);
         let cancel_won = self
             .ledger
@@ -2431,7 +3014,31 @@ impl RemoteTaskService {
                 (RemoteTaskTerminal::Failed, Some(code))
             }
         };
-        self.finish(&task_id, terminal, reason, now_b)
+        self.finish(&task_id, terminal, reason, now_b, Some(running.sequence))
+    }
+
+    /// Retry interrupted idempotent hooks only for the captured terminal.
+    /// Callers contain hook panics; this never changes another admission.
+    pub(crate) fn retry_terminal_cleanup(
+        &self,
+        task_id: &str,
+        sequence: u64,
+    ) -> Result<RemoteTaskRecord> {
+        let gate = self.ledger.resource_gate(task_id);
+        let _resource = gate.lock();
+        self.ledger.require_sequence(task_id, sequence)?;
+        let record = self.ledger.record(task_id)?;
+        if !record.is_terminal() {
+            return Err(error("task_state_invalid"));
+        }
+        self.cleanup(
+            &record,
+            record
+                .terminal_reason
+                .clone()
+                .unwrap_or_else(|| record.wire_status().to_owned()),
+        );
+        Ok(record)
     }
 
     pub(crate) fn complete(
@@ -2441,6 +3048,9 @@ impl RemoteTaskService {
         result_digest: Option<String>,
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
+        let resource_gate = self.ledger.resource_gate(task_id);
+        let _resource = resource_gate.lock();
+        let captured = self.ledger.record(task_id)?;
         let record = match self
             .ledger
             .complete(task_id, terminal, result_digest, now_b)
@@ -2448,7 +3058,7 @@ impl RemoteTaskService {
             Ok(record) => record,
             Err(error) => {
                 if let Some(scope) = self.hooks.artifact.lock().clone() {
-                    scope.discard_task_artifacts(task_id);
+                    retry_resource_cleanup(|| scope.discard_task_artifacts(&captured));
                 }
                 return Err(error);
             }
@@ -2469,10 +3079,16 @@ impl RemoteTaskService {
     pub(crate) fn fail_admitted(
         &self,
         task_id: &str,
+        expected_sequence: u64,
         reason: &'static str,
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
+        let resource_gate = self.ledger.resource_gate(task_id);
+        let _resource = resource_gate.lock();
         let current = self.ledger.record(task_id)?;
+        if current.sequence != expected_sequence {
+            return Err(error("task_binding_stale"));
+        }
         if current.state != RemoteTaskState::Admitted {
             return Err(error("task_state_invalid"));
         }
@@ -2481,14 +3097,19 @@ impl RemoteTaskService {
             RemoteTaskTerminal::Failed,
             Some(reason.to_owned()),
             now_b,
+            Some(current.sequence),
         )
     }
 
     pub(crate) fn enter_waiting_permission(
         &self,
         task_id: &str,
+        expected_sequence: u64,
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
+        let resource_gate = self.ledger.resource_gate(task_id);
+        let _resource = resource_gate.lock();
+        self.ledger.require_sequence(task_id, expected_sequence)?;
         let record = self
             .ledger
             .transition(task_id, RemoteTaskState::WaitingPermission, now_b)?;
@@ -2496,7 +3117,15 @@ impl RemoteTaskService {
         Ok(record)
     }
 
-    pub(crate) fn resume_running(&self, task_id: &str, now_b: u64) -> Result<RemoteTaskRecord> {
+    pub(crate) fn resume_running(
+        &self,
+        task_id: &str,
+        expected_sequence: u64,
+        now_b: u64,
+    ) -> Result<RemoteTaskRecord> {
+        let resource_gate = self.ledger.resource_gate(task_id);
+        let _resource = resource_gate.lock();
+        self.ledger.require_sequence(task_id, expected_sequence)?;
         let record = self
             .ledger
             .transition(task_id, RemoteTaskState::Running, now_b)?;
@@ -2560,6 +3189,20 @@ impl RemoteTaskService {
     }
 
     pub(crate) fn finish_cancel_outcome(&self, outcome: &CancelOutcome) {
+        let record = match outcome {
+            CancelOutcome::CancelledBeforeDispatch(record)
+            | CancelOutcome::CancellationRequested(record)
+            | CancelOutcome::AlreadyTerminal(record) => record,
+        };
+        let resource_gate = self.ledger.resource_gate(&record.task_id);
+        let _resource = resource_gate.lock();
+        if self
+            .ledger
+            .record(&record.task_id)
+            .is_ok_and(|current| current.sequence != record.sequence)
+        {
+            return;
+        }
         match outcome {
             CancelOutcome::CancelledBeforeDispatch(record)
             | CancelOutcome::CancellationRequested(record)
@@ -2637,13 +3280,41 @@ impl RemoteTaskService {
         Ok(payload)
     }
 
+    /// B-local IPC projection, deliberately distinct from the frozen wire DTO.
+    /// Polling and cancellation use exactly the same shape as the local event.
+    pub(crate) fn status_view_payload(&self, task_id: &str) -> Result<Value> {
+        let record = self.ledger.record(task_id)?;
+        Ok(json!({
+            "taskId": record.task_id,
+            "sessionId": record.session_id,
+            "generation": record.lease.remote_control_generation,
+            "modelSource": record.model_source,
+            "status": record.view_status(),
+            "connectionId": record.lease.connection_id,
+            "controllerLeaseId": record.lease.controller_lease_id,
+            "leaseEpoch": record.lease.lease_epoch,
+            "relayEpoch": record.lease.relay_epoch,
+            "remoteControlGeneration": record.lease.remote_control_generation,
+            "outcomeUnknown": record.outcome_unknown,
+            "terminalReason": record.terminal_reason,
+            "resultDigest": record.result_digest,
+        }))
+    }
+
     fn finish(
         &self,
         task_id: &str,
         terminal: RemoteTaskTerminal,
         reason: Option<String>,
         now_b: u64,
+        expected_sequence: Option<u64>,
     ) -> Result<RemoteTaskRecord> {
+        let resource_gate = self.ledger.resource_gate(task_id);
+        let _resource = resource_gate.lock();
+        let captured = self.ledger.record(task_id)?;
+        if expected_sequence.is_some_and(|sequence| sequence != captured.sequence) {
+            return Err(error("task_binding_stale"));
+        }
         let record = match self
             .ledger
             .complete_with_reason(task_id, terminal, reason, None, now_b)
@@ -2651,7 +3322,7 @@ impl RemoteTaskService {
             Ok(record) => record,
             Err(error) => {
                 if let Some(scope) = self.hooks.artifact.lock().clone() {
-                    scope.discard_task_artifacts(task_id);
+                    retry_resource_cleanup(|| scope.discard_task_artifacts(&captured));
                 }
                 return Err(error);
             }
@@ -2666,9 +3337,6 @@ impl RemoteTaskService {
 
     fn finish_interrupted(&self, records: Vec<RemoteTaskRecord>) -> Vec<RemoteTaskRecord> {
         for record in &records {
-            if let Some(token) = self.cancel_tokens.lock().remove(&record.task_id) {
-                token.cancel();
-            }
             self.cleanup(
                 record,
                 record
@@ -2681,23 +3349,45 @@ impl RemoteTaskService {
     }
 
     fn cleanup(&self, record: &RemoteTaskRecord, reason: String) {
+        let resource_gate = self.ledger.resource_gate(&record.task_id);
+        let _resource = resource_gate.lock();
+        if self
+            .ledger
+            .record(&record.task_id)
+            .is_ok_and(|current| current.sequence != record.sequence)
+        {
+            return;
+        }
+        let _cleanup_active = CleanupActive {
+            active: &_resource,
+            previous: _resource.replace(true),
+        };
+        if let Some(token) = self.cancel_tokens.lock().remove(&record.task_id) {
+            token.cancel();
+        }
         if let Some(scope) = self.hooks.artifact.lock().clone() {
-            if record.state == RemoteTaskState::Succeeded && !record.outcome_unknown {
-                scope.commit_task_artifacts(record);
-            } else {
-                scope.discard_task_artifacts(&record.task_id);
-            }
+            retry_resource_cleanup(|| {
+                if record.state == RemoteTaskState::Succeeded && !record.outcome_unknown {
+                    scope.commit_task_artifacts(record);
+                } else {
+                    scope.discard_task_artifacts(record);
+                }
+            });
         }
         if let Some(scope) = self.hooks.model.lock().clone() {
-            scope.release_task_credentials(&record.task_id);
+            retry_resource_cleanup(|| scope.release_task_credentials(&record.task_id));
         }
         if let Some(scope) = self.hooks.permission.lock().clone() {
-            scope.deny_pending_for_task(&record.task_id);
+            retry_resource_cleanup(|| {
+                scope.deny_pending_for_task(&record.task_id);
+            });
         }
         if let Some(scope) = self.hooks.transfer.lock().clone() {
-            scope.abort_transfers_for_task(&record.task_id);
+            retry_resource_cleanup(|| {
+                scope.abort_transfers_for_task(record);
+            });
         }
-        self.publish_with_reason(record, reason);
+        contain_cleanup_panic(|| self.publish_with_reason(record, reason));
     }
 
     fn publish(&self, record: &RemoteTaskRecord) {
@@ -2709,6 +3399,19 @@ impl RemoteTaskService {
     }
 
     fn publish_with_reason(&self, record: &RemoteTaskRecord, reason: String) {
+        let resource_gate = self.ledger.resource_gate(&record.task_id);
+        let resource = resource_gate.lock();
+        if self
+            .ledger
+            .record(&record.task_id)
+            .is_ok_and(|current| current.sequence != record.sequence)
+        {
+            return;
+        }
+        let _publication_active = CleanupActive {
+            active: &resource,
+            previous: resource.replace(true),
+        };
         let journal = self.hooks.journal.lock().clone();
         if let (Some(journal), Some(model_source)) =
             (journal, RemoteTaskModelSource::from_record(record))
@@ -2718,7 +3421,7 @@ impl RemoteTaskService {
                 session_id: record.session_id.clone(),
                 generation: record.lease.remote_control_generation.clone(),
                 model_source,
-                status: record.wire_status().to_owned(),
+                status: record.view_status().to_owned(),
                 sequence: record.sequence.to_string(),
                 transition_sequence: record.transition_sequence,
                 outcome_unknown: record.outcome_unknown,
@@ -2726,6 +3429,28 @@ impl RemoteTaskService {
                 result_digest: record.result_digest.clone(),
             });
         }
+    }
+}
+
+// The authoritative terminal/turn-lock commit precedes external cleanup.
+// One faulty port must not prevent the remaining independent ports running.
+// Catching a callback is not proof that that callback released its resources.
+/// Resource scopes consume/remove exact-owner state idempotently. Retry only
+/// a failed scope, never a successful sibling or the journal publication.
+/// A permanently faulty scope is contained after two attempts, so it cannot
+/// prevent the remaining independent resources from being released.
+fn retry_resource_cleanup(mut action: impl FnMut()) {
+    for _ in 0..2 {
+        if catch_unwind(AssertUnwindSafe(|| super::panic_scope::run(&mut action))).is_ok() {
+            return;
+        }
+        eprintln!("[remote-control] task_cleanup_hook_panicked");
+    }
+}
+
+fn contain_cleanup_panic(action: impl FnOnce()) {
+    if catch_unwind(AssertUnwindSafe(|| super::panic_scope::run(action))).is_err() {
+        eprintln!("[remote-control] task_cleanup_hook_panicked");
     }
 }
 
@@ -2974,7 +3699,7 @@ mod tests {
     }
 
     impl RemoteTaskTransferScope for CountingHooks {
-        fn abort_transfers_for_task(&self, _task_id: &str) -> usize {
+        fn abort_transfers_for_task(&self, _record: &RemoteTaskRecord) -> usize {
             self.transfer.fetch_add(1, Ordering::SeqCst);
             1
         }
@@ -3079,6 +3804,253 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_settlement_rechecks_same_deadline_and_cancel_after_resource_wait() {
+        use std::time::Duration;
+        for cancelled in [false, true] {
+            let executor = RecordingExecutor::ok();
+            let (service, _) = service(executor.clone());
+            let service = Arc::new(service);
+            let body = payload("session-0001", "task-0001", "request-0001", &digest(1));
+            let mut ticket = admitted(&service, &body, 1_000);
+            let budget = super::super::turn_budget::TurnBudget::for_test(Duration::from_secs(1));
+            ticket.execution_budget = Some(budget);
+            let cancel = CancellationToken::new();
+            let prepared = service
+                .prepare_dispatch(
+                    ticket,
+                    Vec::new(),
+                    Arc::new(NoopSink),
+                    cancel.clone(),
+                    1_100,
+                )
+                .unwrap();
+            let executed = RemoteTaskService::execute_dispatch(prepared).await;
+            let gate = service.ledger.resource_gate("task-0001");
+            let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let owner = std::thread::spawn(move || {
+                let _resource = gate.lock();
+                let _ = locked_tx.send(());
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            });
+            locked_rx.await.unwrap();
+            let worker_service = Arc::clone(&service);
+            let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
+            let settle = tokio::task::spawn_blocking(move || {
+                let _ = queued_tx.send(());
+                worker_service.settle_dispatch(executed, 1_200)
+            });
+            queued_rx.await.unwrap();
+            if cancelled {
+                cancel.cancel();
+            } else {
+                tokio::time::advance(Duration::from_secs(2)).await;
+            }
+            release_tx.send(()).unwrap();
+            let record = settle.await.unwrap().unwrap();
+            owner.join().unwrap();
+            assert_eq!(
+                record.state,
+                if cancelled {
+                    RemoteTaskState::Cancelled
+                } else {
+                    RemoteTaskState::Failed
+                }
+            );
+            assert_eq!(
+                record.terminal_reason.as_deref(),
+                if cancelled {
+                    Some("cancelled")
+                } else {
+                    Some("task_turn_timeout")
+                }
+            );
+            assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_worker_pre_cancel_and_expiry_have_exact_terminal_without_executor() {
+        use std::time::Duration;
+        for cancelled in [false, true] {
+            let executor = RecordingExecutor::ok();
+            let (service, _) = service(executor.clone());
+            let service = Arc::new(service);
+            let body = payload("session-0001", "task-0001", "request-0001", &digest(1));
+            let mut ticket = admitted(&service, &body, 1_000);
+            ticket.execution_budget = Some(super::super::turn_budget::TurnBudget::for_test(
+                if cancelled {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::ZERO
+                },
+            ));
+            let cancel = CancellationToken::new();
+            if cancelled {
+                cancel.cancel();
+            }
+            let record = service
+                .dispatch_with_attachments_on_worker(
+                    ticket,
+                    Vec::new(),
+                    Arc::new(NoopSink),
+                    cancel,
+                    1_100,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                record.state,
+                if cancelled {
+                    RemoteTaskState::Cancelled
+                } else {
+                    RemoteTaskState::Failed
+                }
+            );
+            assert_eq!(
+                record.terminal_reason.as_deref(),
+                if cancelled {
+                    Some("cancelled")
+                } else {
+                    Some("task_turn_timeout")
+                }
+            );
+            assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_worker_recovers_cleanup_panic_after_durable_terminal() {
+        struct PanicOnce(AtomicUsize);
+        impl RemoteTaskModelScope for PanicOnce {
+            fn release_task_credentials(&self, _: &str) {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("test terminal cleanup panic once");
+                }
+            }
+        }
+        let executor = RecordingExecutor::ok();
+        let (service, hooks) = service(executor.clone());
+        let service = Arc::new(service);
+        let model = Arc::new(PanicOnce(AtomicUsize::new(0)));
+        service.hooks().set_model_scope(model.clone());
+        let body = payload("session-0001", "task-0001", "request-0001", &digest(1));
+        let ticket = admitted(&service, &body, 1_000);
+        let record = service
+            .dispatch_with_attachments_on_worker(
+                ticket,
+                Vec::new(),
+                Arc::new(NoopSink),
+                CancellationToken::new(),
+                1_100,
+            )
+            .await
+            .unwrap();
+        assert_eq!(record.state, RemoteTaskState::Succeeded);
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(model.0.load(Ordering::SeqCst), 2);
+        assert_eq!(hooks.transfer.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_workers_keep_heartbeat_during_ledger_persist_and_cleanup() {
+        use std::time::Duration;
+        struct BlockOnce {
+            entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl BlockOnce {
+            fn wait(&self) {
+                if let Some(entered) = self.entered.lock().take() {
+                    let _ = entered.send(());
+                    self.release
+                        .lock()
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap();
+                }
+            }
+        }
+        struct Store {
+            actual: JsonTaskLedgerStore,
+            block: BlockOnce,
+        }
+        impl RemoteTaskLedgerStore for Store {
+            fn persist(&self, records: &[RemoteTaskRecord]) -> std::result::Result<(), String> {
+                if records
+                    .iter()
+                    .any(|record| record.state == RemoteTaskState::Running)
+                {
+                    self.block.wait();
+                }
+                self.actual.persist(records)
+            }
+        }
+        struct Cleanup(BlockOnce);
+        impl RemoteTaskTransferScope for Cleanup {
+            fn abort_transfers_for_task(&self, _: &RemoteTaskRecord) -> usize {
+                self.0.wait();
+                1
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let ledger_file = temp.path().join("ledger.json");
+        let (persist_tx, persist_rx) = tokio::sync::oneshot::channel();
+        let (persist_release, persist_wait) = std::sync::mpsc::channel();
+        let (cleanup_tx, cleanup_rx) = tokio::sync::oneshot::channel();
+        let (cleanup_release, cleanup_wait) = std::sync::mpsc::channel();
+        let service = Arc::new(RemoteTaskService::new(Arc::new(RemoteTaskLedger::new(
+            Arc::new(Store {
+                actual: JsonTaskLedgerStore::new(ledger_file.clone()),
+                block: BlockOnce {
+                    entered: Mutex::new(Some(persist_tx)),
+                    release: Mutex::new(persist_wait),
+                },
+            }),
+        ))));
+        service
+            .hooks()
+            .set_transfer_scope(Arc::new(Cleanup(BlockOnce {
+                entered: Mutex::new(Some(cleanup_tx)),
+                release: Mutex::new(cleanup_wait),
+            })));
+        let executor = RecordingExecutor::ok();
+        service.register_executor(TASK_MODE_CHAT, executor.clone());
+        let body = payload("session-0001", "task-0001", "request-0001", &digest(1));
+        let ticket = admitted(&service, &body, 1_000);
+        let worker_service = Arc::clone(&service);
+        let dispatch = tokio::spawn(async move {
+            worker_service
+                .dispatch_with_attachments_on_worker(
+                    ticket,
+                    Vec::new(),
+                    Arc::new(NoopSink),
+                    CancellationToken::new(),
+                    1_100,
+                )
+                .await
+        });
+        persist_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        persist_release.send(()).unwrap();
+        cleanup_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        cleanup_release.send(()).unwrap();
+        let record = dispatch.await.unwrap().unwrap();
+        assert_eq!(record.state, RemoteTaskState::Succeeded);
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+        let persisted = JsonTaskLedgerStore::load(&ledger_file).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].state, RemoteTaskState::Succeeded);
+        assert!(matches!(
+            service
+                .submit(&context("generation-0001"), &body, 1_200)
+                .unwrap(),
+            AdmissionOutcome::Replay(_)
+        ));
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn real_service_transitions_keep_durable_identity_and_only_one_terminal_journal() {
         struct Capture {
@@ -3134,10 +4106,10 @@ mod tests {
             };
             executor.started.notified().await;
             let waiting = service
-                .enter_waiting_permission("task-0001", 1_200)
+                .enter_waiting_permission("task-0001", 1, 1_200)
                 .unwrap();
             assert_eq!(waiting.transition_sequence, 3);
-            let running = service.resume_running("task-0001", 1_300).unwrap();
+            let running = service.resume_running("task-0001", 1, 1_300).unwrap();
             assert_eq!(running.transition_sequence, 4);
             assert_eq!(capture.journal.len_for("session-0001"), 0);
             executor.done.notify_one();
@@ -3164,6 +4136,380 @@ mod tests {
             assert_eq!(retry.events.len(), 1);
             assert_eq!(retry.events[0].event_id, event_id);
         });
+    }
+
+    #[test]
+    fn dispatch_panic_reaches_terminal_and_releases_turn_and_tokens() {
+        struct PanicExecutor(bool);
+        #[async_trait]
+        impl ControllerTaskExecutor for PanicExecutor {
+            async fn execute(
+                &self,
+                _request: Value,
+                events: Arc<dyn ControllerTaskEventSink>,
+                _cancel: CancellationToken,
+            ) -> std::result::Result<(), String> {
+                tokio::task::yield_now().await;
+                if self.0 {
+                    events.emit(json!({ "type": "test-event" }));
+                }
+                panic!("test executor panic");
+            }
+        }
+        struct PanicSink;
+        impl ControllerTaskEventSink for PanicSink {
+            fn emit(&self, _event: Value) {
+                panic!("test event bridge panic");
+            }
+        }
+        struct PanicRunningJournal(Mutex<Vec<String>>);
+        impl RemoteTaskEventSink for PanicRunningJournal {
+            fn publish_task_event(&self, event: &RemoteTaskEvent) {
+                if event.status == TASK_STATUS_RUNNING {
+                    panic!("test journal panic");
+                }
+                self.0.lock().push(event.status.clone());
+            }
+        }
+        for (on_worker, origin) in [
+            (false, 0),
+            (false, 1),
+            (false, 2),
+            (true, 0),
+            (true, 1),
+            (true, 2),
+        ] {
+            let (service, hooks) = service(RecordingExecutor::ok());
+            let service = Arc::new(service);
+            let body = payload("session-0001", "task-0001", "request-0001", &digest(1));
+            let ticket = admitted(&service, &body, 1_000);
+            service.register_executor(TASK_MODE_CHAT, Arc::new(PanicExecutor(origin == 1)));
+            let journal = Arc::new(PanicRunningJournal(Mutex::new(Vec::new())));
+            if origin == 2 {
+                service.hooks().set_journal(journal.clone());
+            }
+            let sink: Arc<dyn ControllerTaskEventSink> = if origin == 1 {
+                Arc::new(PanicSink)
+            } else {
+                Arc::new(NoopSink)
+            };
+            let cancel = CancellationToken::new();
+            let record = runtime()
+                .block_on(async {
+                    if on_worker {
+                        service
+                            .dispatch_with_attachments_on_worker(
+                                ticket,
+                                Vec::new(),
+                                sink,
+                                cancel.clone(),
+                                1_100,
+                            )
+                            .await
+                    } else {
+                        service.dispatch(ticket, sink, cancel.clone(), 1_100).await
+                    }
+                })
+                .unwrap();
+            assert_eq!(record.state, RemoteTaskState::Failed);
+            assert_eq!(
+                record.terminal_reason.as_deref(),
+                Some("task_dispatch_panicked")
+            );
+            assert!(cancel.is_cancelled());
+            assert!(service.cancel_tokens.lock().is_empty());
+            assert_eq!(hooks.model.load(Ordering::SeqCst), 1);
+            assert_eq!(hooks.permission.load(Ordering::SeqCst), 1);
+            assert_eq!(hooks.transfer.load(Ordering::SeqCst), 1);
+            if origin == 2 {
+                assert_eq!(journal.0.lock().as_slice(), &[TASK_STATUS_FAILED]);
+            }
+            let retry = service
+                .submit(&context("generation-0001"), &body, 1_200)
+                .unwrap();
+            assert!(matches!(retry, AdmissionOutcome::Replay(existing) if existing.is_terminal()));
+            // The same session is no longer stuck busy after a panic.
+            admitted(
+                &service,
+                &payload("session-0001", "task-0002", "request-0002", &digest(2)),
+                1_300,
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_panic_after_cancel_or_disconnect_preserves_the_committed_terminal() {
+        struct PanicAfterSignal(Arc<tokio::sync::Notify>);
+        #[async_trait]
+        impl ControllerTaskExecutor for PanicAfterSignal {
+            async fn execute(
+                &self,
+                _request: Value,
+                _events: Arc<dyn ControllerTaskEventSink>,
+                cancel: CancellationToken,
+            ) -> std::result::Result<(), String> {
+                self.0.notify_one();
+                cancel.cancelled().await;
+                panic!("test panic after terminal signal");
+            }
+        }
+        for (on_worker, disconnect) in [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let (service, hooks) = service(RecordingExecutor::ok());
+            let service = Arc::new(service);
+            let entered = Arc::new(tokio::sync::Notify::new());
+            service.register_executor(TASK_MODE_CHAT, Arc::new(PanicAfterSignal(entered.clone())));
+            let ticket = admitted(
+                &service,
+                &payload("session-0001", "task-0001", "request-0001", &digest(1)),
+                1_000,
+            );
+            runtime().block_on(async {
+                let dispatched = service.clone();
+                let worker = tokio::spawn(async move {
+                    if on_worker {
+                        dispatched
+                            .dispatch_with_attachments_on_worker(
+                                ticket,
+                                Vec::new(),
+                                Arc::new(NoopSink),
+                                CancellationToken::new(),
+                                1_100,
+                            )
+                            .await
+                    } else {
+                        dispatched
+                            .dispatch(ticket, Arc::new(NoopSink), CancellationToken::new(), 1_100)
+                            .await
+                    }
+                });
+                entered.notified().await;
+                let expected = if disconnect {
+                    service.interrupt_generation("generation-0001", "test_disconnect", 1_200);
+                    RemoteTaskState::Interrupted
+                } else {
+                    // Simulate another owner having already committed the
+                    // executor-confirmed cancellation before the late panic.
+                    let token = service
+                        .cancel_tokens
+                        .lock()
+                        .get("task-0001")
+                        .unwrap()
+                        .clone();
+                    service
+                        .complete("task-0001", RemoteTaskTerminal::Cancelled, None, 1_200)
+                        .unwrap();
+                    token.cancel();
+                    RemoteTaskState::Cancelled
+                };
+                let record = tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(record.state, expected);
+                assert_eq!(service.status("task-0001").unwrap().state, expected);
+                assert!(service.cancel_tokens.lock().is_empty());
+                assert_eq!(hooks.model.load(Ordering::SeqCst), 1);
+                assert_eq!(hooks.permission.load(Ordering::SeqCst), 1);
+                assert_eq!(hooks.transfer.load(Ordering::SeqCst), 1);
+            });
+        }
+    }
+
+    #[test]
+    fn cleanup_panic_does_not_skip_other_ports_or_change_committed_terminal() {
+        struct PanicModel(AtomicUsize);
+        impl RemoteTaskModelScope for PanicModel {
+            fn release_task_credentials(&self, _task_id: &str) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                panic!("test cleanup panic");
+            }
+        }
+        let (service, hooks) = service(RecordingExecutor::ok());
+        let model = Arc::new(PanicModel(AtomicUsize::new(0)));
+        service.hooks().set_model_scope(model.clone());
+        let ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "request-0001", &digest(1)),
+            1_000,
+        );
+        let record = runtime()
+            .block_on(service.dispatch(ticket, Arc::new(NoopSink), CancellationToken::new(), 1_100))
+            .unwrap();
+        assert_eq!(record.state, RemoteTaskState::Succeeded);
+        assert_eq!(model.0.load(Ordering::SeqCst), 2);
+        assert_eq!(hooks.permission.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.transfer.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            hooks.events.lock().last().unwrap().status,
+            TASK_STATUS_SUCCEEDED
+        );
+        assert!(service.cancel_tokens.lock().is_empty());
+        admitted(
+            &service,
+            &payload("session-0001", "task-0002", "request-0002", &digest(2)),
+            1_300,
+        );
+    }
+
+    #[test]
+    fn dispatch_and_fallback_persistence_panics_are_bounded_and_redacted() {
+        const CHILD: &str = "PINVOU_DISPATCH_FALLBACK_PANIC_CHILD";
+        const SENTINEL: &str = "test-private-ledger-panic-sentinel";
+        if std::env::var_os(CHILD).is_some() {
+            struct PanicStore {
+                armed: AtomicBool,
+                panics: AtomicUsize,
+            }
+            impl RemoteTaskLedgerStore for PanicStore {
+                fn persist(&self, _: &[RemoteTaskRecord]) -> std::result::Result<(), String> {
+                    if self.armed.load(Ordering::SeqCst) {
+                        self.panics.fetch_add(1, Ordering::SeqCst);
+                        panic!("{SENTINEL}");
+                    }
+                    Ok(())
+                }
+            }
+            for on_worker in [false, true] {
+                let store = Arc::new(PanicStore {
+                    armed: AtomicBool::new(false),
+                    panics: AtomicUsize::new(0),
+                });
+                let service = Arc::new(RemoteTaskService::new(Arc::new(RemoteTaskLedger::new(
+                    store.clone(),
+                ))));
+                service.register_executor(TASK_MODE_CHAT, RecordingExecutor::ok());
+                let ticket = admitted(
+                    &service,
+                    &payload("session-0001", "task-0001", "request-0001", &digest(1)),
+                    1_000,
+                );
+                store.armed.store(true, Ordering::SeqCst);
+                let cancel = CancellationToken::new();
+                let result = runtime().block_on(async {
+                    if on_worker {
+                        service
+                            .dispatch_with_attachments_on_worker(
+                                ticket,
+                                Vec::new(),
+                                Arc::new(NoopSink),
+                                cancel.clone(),
+                                1_100,
+                            )
+                            .await
+                    } else {
+                        service
+                            .dispatch(ticket, Arc::new(NoopSink), cancel.clone(), 1_100)
+                            .await
+                    }
+                });
+                assert_eq!(result.unwrap_err().code, "task_dispatch_worker_failed");
+                assert_eq!(store.panics.load(Ordering::SeqCst), 2);
+                assert!(cancel.is_cancelled());
+                assert!(service.cancel_tokens.lock().is_empty());
+                // Persistence is broken: do not claim a durable terminal.
+                assert_eq!(
+                    service.status("task-0001").unwrap().state,
+                    RemoteTaskState::Admitted
+                );
+            }
+            return;
+        }
+        let module = module_path!().split_once("::").unwrap().1;
+        let filter =
+            format!("{module}::dispatch_and_fallback_persistence_panics_are_bounded_and_redacted");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &filter, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated dispatch/fallback regression failed"
+        );
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("1 passed"),
+            "isolated test matched zero cases"
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !stderr.contains(SENTINEL),
+            "private persistence panic reached stderr"
+        );
+        assert_eq!(stderr.matches("task panic: payload withheld").count(), 4);
+    }
+
+    #[test]
+    fn terminal_journal_panic_is_contained_without_republishing() {
+        struct PanicJournal(AtomicUsize);
+        impl RemoteTaskEventSink for PanicJournal {
+            fn publish_task_event(&self, _event: &RemoteTaskEvent) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                panic!("test terminal journal panic");
+            }
+        }
+        let (service, hooks) = service(RecordingExecutor::ok());
+        let ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "request-0001", &digest(1)),
+            1_000,
+        );
+        let journal = Arc::new(PanicJournal(AtomicUsize::new(0)));
+        service.hooks().set_journal(journal.clone());
+        let record = service
+            .ledger
+            .complete("task-0001", RemoteTaskTerminal::Cancelled, None, 1_100)
+            .unwrap();
+        service.cleanup(&record, "cancelled".into());
+        assert_eq!(journal.0.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.model.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.permission.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.transfer.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            service.status(&ticket.record.task_id).unwrap().state,
+            RemoteTaskState::Cancelled
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn late_dispatch_panic_cannot_cancel_a_different_admission_sequence() {
+        let (service, hooks) = service(RecordingExecutor::ok());
+        let ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "request-0001", &digest(1)),
+            1_000,
+        );
+        let sequence = ticket.record.sequence;
+        let cancel = CancellationToken::new();
+        let prepared = service
+            .prepare_dispatch(
+                ticket,
+                Vec::new(),
+                Arc::new(NoopSink),
+                cancel.clone(),
+                1_100,
+            )
+            .unwrap();
+        assert!(
+            service
+                .finish_failed_dispatch("task-0001", sequence + 1, 1_200, "task_dispatch_panicked")
+                .is_err()
+        );
+        assert!(!cancel.is_cancelled());
+        assert!(service.cancel_tokens.lock().contains_key("task-0001"));
+        assert_eq!(
+            service.status("task-0001").unwrap().state,
+            RemoteTaskState::Running
+        );
+        assert_eq!(hooks.model.load(Ordering::SeqCst), 0);
+        let executed = RemoteTaskService::execute_dispatch(prepared).await;
+        assert_eq!(
+            service.settle_dispatch(executed, 1_300).unwrap().state,
+            RemoteTaskState::Succeeded
+        );
     }
 
     #[test]
@@ -4071,6 +5417,242 @@ mod tests {
     }
 
     #[test]
+    fn old_terminal_cleanup_and_ticket_cannot_touch_readmitted_task_after_pruning() {
+        let (service, hooks) = service(RecordingExecutor::ok());
+        let body = payload("session-0001", "task-reused", "client-reused", &digest(1));
+        let old_ticket = admitted(&service, &body, 1_000);
+        let old = service
+            .ledger
+            .complete("task-reused", RemoteTaskTerminal::Failed, None, 1_001)
+            .unwrap();
+        for index in 0..MAX_TRACKED_TASKS {
+            let filler = payload(
+                "session-0001",
+                &format!("task-filler-{index}"),
+                &format!("client-filler-{index}"),
+                &digest(1),
+            );
+            service
+                .ledger
+                .admit(&context("generation-0001"), &request(&filler), 1_002)
+                .unwrap();
+            service
+                .ledger
+                .complete(
+                    &format!("task-filler-{index}"),
+                    RemoteTaskTerminal::Succeeded,
+                    None,
+                    1_003,
+                )
+                .unwrap();
+        }
+        assert!(service.ledger.record("task-reused").is_err());
+        let new_ticket = admitted(&service, &body, 2_000);
+        assert_ne!(new_ticket.record.sequence, old.sequence);
+        let authority = super::super::permission::PermissionAuthority::default();
+        let now = authority.now_ms();
+        let approval = authority
+            .request(
+                &context("generation-0001"),
+                "task-reused",
+                super::super::permission::PermissionRequest {
+                    operation_type: "file_write".into(),
+                    risk_level: "medium".into(),
+                    target_scope: "workspace-0001/report.md".into(),
+                    preview: "write report".into(),
+                    expires_at_ms: now + 60_000,
+                },
+                now,
+            )
+            .unwrap();
+        assert!(
+            service
+                .ledger()
+                .with_task_resources("task-reused", old.sequence, || {
+                    authority.deny_all_for_task("task-reused", "old_port_terminal", now)
+                })
+                .is_err()
+        );
+        assert_eq!(
+            authority
+                .view(&approval.permission_request_id)
+                .unwrap()
+                .state,
+            "pending"
+        );
+        let new_cancel = CancellationToken::new();
+        service
+            .cancel_tokens
+            .lock()
+            .insert("task-reused".into(), new_cancel.clone());
+        service.cleanup(&old, "late-old-cleanup".into());
+        service.finish_interrupted(vec![old.clone()]);
+        service.finish_cancel_outcome(&CancelOutcome::CancellationRequested(old.clone()));
+        assert!(!new_cancel.is_cancelled());
+        assert!(service.cancel_tokens.lock().contains_key("task-reused"));
+        assert_eq!(hooks.model.load(Ordering::SeqCst), 0);
+        assert_eq!(hooks.permission.load(Ordering::SeqCst), 0);
+        assert_eq!(hooks.transfer.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            service
+                .fail_admitted("task-reused", old.sequence, "old-failure", 2_001)
+                .unwrap_err()
+                .code,
+            "task_binding_stale"
+        );
+        assert_eq!(
+            service
+                .enter_waiting_permission("task-reused", old.sequence, 2_001)
+                .unwrap_err()
+                .code,
+            "task_binding_stale"
+        );
+        assert_eq!(
+            service
+                .resume_running("task-reused", old.sequence, 2_001)
+                .unwrap_err()
+                .code,
+            "task_binding_stale"
+        );
+        assert_eq!(
+            runtime()
+                .block_on(service.dispatch(
+                    old_ticket,
+                    Arc::new(NoopSink),
+                    CancellationToken::new(),
+                    2_002,
+                ))
+                .unwrap_err()
+                .code,
+            "task_binding_stale"
+        );
+        assert_eq!(
+            service.ledger.record("task-reused").unwrap(),
+            new_ticket.record
+        );
+        assert!(!new_cancel.is_cancelled());
+    }
+
+    #[test]
+    fn admission_fails_closed_during_same_id_cleanup_without_waiting_or_reserving_history() {
+        let ledger = RemoteTaskLedger::in_memory();
+        let gate = ledger.resource_gate("task-0001");
+        let active = gate.lock();
+        active.set(true);
+        let body = payload("session-0001", "task-0001", "client-0001", &digest(1));
+        assert_eq!(
+            ledger
+                .admit(&context("generation-0001"), &request(&body), 1_000)
+                .unwrap_err()
+                .code,
+            "task_cleanup_busy"
+        );
+        let other = payload("session-0002", "task-0002", "client-0002", &digest(1));
+        assert!(
+            ledger
+                .admit(&context("generation-0001"), &request(&other), 1_000)
+                .is_ok()
+        );
+        active.set(false);
+        drop(active);
+        drop(gate);
+        assert!(
+            ledger
+                .admit(&context("generation-0001"), &request(&body), 1_001)
+                .is_ok()
+        );
+        assert!(
+            ledger.resource_gates.lock().len() <= 1,
+            "expired custody is not a permanent ID registry"
+        );
+    }
+
+    #[test]
+    fn opaque_skill_binding_is_private_and_survives_snapshot_refresh_and_expiry() {
+        use super::super::capabilities::{
+            CapabilityDescriptor, CapabilitySnapshotManager, CapabilitySource, opaque_skill_id,
+        };
+        let capabilities = CapabilitySnapshotManager::default();
+        let lease = context("generation-0001");
+        let source = CapabilitySource {
+            plain_skills: vec![CapabilityDescriptor {
+                id: "我的技能".into(),
+                display_name: "中文技能".into(),
+            }],
+            ..CapabilitySource::default()
+        };
+        capabilities.build(lease.clone(), source, 1_000).unwrap();
+        let ids = vec![opaque_skill_id("我的技能")];
+        let executor = RecordingExecutor::ok();
+        let (service, _) = service(executor.clone());
+        let mut wire = payload("session-0001", "task-0001", "client-0001", &digest(1));
+        wire["input"]["skill_ids"] = json!(ids);
+        wire["input_digest"] = json!(task_input_digest_for_value(&wire["input"]).unwrap());
+        let wire_before = wire.clone();
+        let admission = capabilities
+            .pin_task_admission("1", &lease, "chat", &ids, None, 2_000)
+            .unwrap();
+        let names = capabilities
+            .skills_for_task("1", &lease, "chat", &ids, 2_000)
+            .unwrap();
+        let mut ticket = admitted(&service, &wire, 2_000);
+        ticket.execution_skill_names = Some(names);
+        assert_eq!(ticket.input, wire["input"]);
+        drop(admission);
+        capabilities
+            .build(lease, CapabilitySource::default(), 40_000)
+            .unwrap();
+        let record = runtime()
+            .block_on(service.dispatch(
+                ticket,
+                Arc::new(NoopSink),
+                CancellationToken::new(),
+                50_000,
+            ))
+            .unwrap();
+        assert_eq!(record.state, RemoteTaskState::Succeeded);
+        assert_eq!(
+            record.input_digest,
+            wire_before["input_digest"].as_str().unwrap()
+        );
+        let seen = executor.seen_request.lock();
+        let seen = seen.as_ref().unwrap();
+        assert_eq!(seen["input"], wire_before["input"]);
+        assert_eq!(extract_execution_skill_names(seen).unwrap(), ["我的技能"]);
+        assert_eq!(wire, wire_before);
+        assert!(!serde_json::to_string(&record).unwrap().contains("我的技能"));
+        assert!(!format!("{record:?}").contains("我的技能"));
+    }
+
+    #[test]
+    fn execution_never_interprets_wire_skill_ids_as_directory_names() {
+        let mut envelope = payload("session-0001", "task-0001", "client-0001", &digest(1));
+        envelope["input"]["skill_ids"] =
+            json!([super::super::capabilities::opaque_skill_id("我的技能")]);
+        assert_eq!(
+            extract_execution_skill_names(&envelope).unwrap_err(),
+            "task_skill_binding_missing"
+        );
+        for name in [
+            "wrong-name",
+            "../我的技能",
+            "我的技能/child",
+            "我的技能\\child",
+        ] {
+            envelope["resolved_skill_names"] = json!([name]);
+            assert_eq!(
+                extract_execution_skill_names(&envelope).unwrap_err(),
+                "task_skill_binding_invalid"
+            );
+        }
+        envelope["resolved_skill_names"] = json!(["我的技能"]);
+        assert_eq!(
+            extract_execution_skill_names(&envelope).unwrap(),
+            ["我的技能"]
+        );
+    }
+
+    #[test]
     fn published_attachments_reach_the_executor_only_when_ids_match_exactly() {
         struct AttachmentExecutor(Mutex<Vec<super::super::transfer::upload::PublishedAttachment>>);
 
@@ -4154,7 +5736,7 @@ mod tests {
             1_000,
         );
         let failed = service
-            .fail_admitted("task-0001", "task_attachment_unconfirmed", 1_100)
+            .fail_admitted("task-0001", 1, "task_attachment_unconfirmed", 1_100)
             .unwrap();
         assert_eq!(failed.state, RemoteTaskState::Failed);
         assert_eq!(
@@ -4167,7 +5749,7 @@ mod tests {
         assert_eq!(hooks.transfer.load(Ordering::SeqCst), 1);
         assert_eq!(
             service
-                .fail_admitted("task-0001", "again", 1_200)
+                .fail_admitted("task-0001", 1, "again", 1_200)
                 .unwrap_err()
                 .code,
             "task_state_invalid"
@@ -4224,7 +5806,9 @@ mod tests {
         let port = Arc::new(AttachmentPort(Mutex::new(Vec::new())));
         let executor = ChatTurnExecutor::new(port.clone());
         let mut request = payload("session-0001", "task-0001", "client-0001", &digest(1));
-        request["input"]["skill_ids"] = json!(["skill-1"]);
+        request["input"]["skill_ids"] =
+            json!([super::super::capabilities::opaque_skill_id("skill-1")]);
+        request["resolved_skill_names"] = json!(["skill-1"]);
         request["input_digest"] = json!(task_input_digest_for_value(&request["input"]).unwrap());
         let descriptor = super::super::transfer::upload::PublishedAttachment {
             handle_id: "ctr-up-00000001-1".into(),
@@ -4324,6 +5908,91 @@ mod tests {
             record.terminal_reason.as_deref(),
             Some("cancelled"),
             "the executor-confirmed terminal must be recorded"
+        );
+    }
+
+    #[test]
+    fn durable_open_recovery_is_published_once_after_the_real_journal_is_attached() {
+        use super::super::journal::RemoteJournal;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task-ledger.json");
+        let ledger = RemoteTaskLedger::new(Arc::new(JsonTaskLedgerStore::new(path.clone())));
+        for (index, dispatched) in [(1, false), (2, true), (3, false)] {
+            let task = format!("task-{index}");
+            ledger
+                .admit(
+                    &context("generation-0001"),
+                    &request(&payload(
+                        &format!("session-{index}"),
+                        &task,
+                        &format!("client-{index}"),
+                        &digest(1),
+                    )),
+                    100,
+                )
+                .unwrap();
+            if dispatched {
+                ledger.begin_dispatch(&task, 110).unwrap();
+            }
+            if index == 3 {
+                ledger
+                    .complete(&task, RemoteTaskTerminal::Succeeded, None, 120)
+                    .unwrap();
+            }
+        }
+        drop(ledger);
+        let ledger = Arc::new(RemoteTaskLedger::open_recovered(path.clone(), 200).unwrap());
+        let persisted = JsonTaskLedgerStore::load(&path).unwrap();
+        assert!(persisted.iter().all(RemoteTaskRecord::is_terminal));
+        let service = RemoteTaskService::new(ledger);
+        let journal = Arc::new(RemoteJournal::new("new-boot"));
+        service.hooks().set_journal(journal.clone());
+        let recovered = service.recover_after_restart(300);
+        assert_eq!(
+            recovered.len(),
+            2,
+            "durable close must retain unpublished recovery evidence"
+        );
+        assert!(recovered.iter().all(|record| record.updated_at_ms == 200));
+        assert!(
+            recovered
+                .iter()
+                .find(|record| record.task_id == "task-2")
+                .unwrap()
+                .outcome_unknown
+        );
+        assert!(
+            !recovered
+                .iter()
+                .find(|record| record.task_id == "task-1")
+                .unwrap()
+                .outcome_unknown
+        );
+        let mut events = journal.snapshot_for("session-1").unwrap().events;
+        events.extend(journal.snapshot_for("session-2").unwrap().events);
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.terminal_status.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["interrupted", "result_unknown"]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.payload["terminal_reason"] == json!("process_restart"))
+        );
+        assert!(service.recover_after_restart(400).is_empty());
+        assert_eq!(journal.snapshot_for("session-1").unwrap().events.len(), 1);
+        assert_eq!(journal.snapshot_for("session-2").unwrap().events.len(), 1);
+        assert_eq!(JsonTaskLedgerStore::load(&path).unwrap(), persisted);
+        let next_boot = RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::open_recovered(path, 500).unwrap(),
+        ));
+        assert!(
+            next_boot.recover_after_restart(600).is_empty(),
+            "historical terminals are not replayed as fresh recovery"
         );
     }
 
@@ -4540,7 +6209,9 @@ mod tests {
         let sink = Arc::new(Recording::default());
         let executor = ChatTurnExecutor::new(Arc::new(Port));
         let mut request = payload("session-0001", "task-0001", "client-0001", &digest(1));
-        request["input"]["skill_ids"] = json!(["skill-1"]);
+        request["input"]["skill_ids"] =
+            json!([super::super::capabilities::opaque_skill_id("skill-1")]);
+        request["resolved_skill_names"] = json!(["skill-1"]);
         request["input_digest"] = json!(task_input_digest_for_value(&request["input"]).unwrap());
         runtime()
             .block_on(executor.execute(request, sink.clone(), CancellationToken::new()))
@@ -4605,7 +6276,9 @@ mod tests {
         let executor = CodeTurnExecutor::new(Arc::new(Port(recorded)));
         let mut request =
             code_payload("session-0001", "task-0001", "client-0001", "workspace-0001");
-        request["input"]["skill_ids"] = json!(["code-skill"]);
+        request["input"]["skill_ids"] =
+            json!([super::super::capabilities::opaque_skill_id("code-skill")]);
+        request["resolved_skill_names"] = json!(["code-skill"]);
         request["input_digest"] = json!(task_input_digest_for_value(&request["input"]).unwrap());
         runtime()
             .block_on(executor.execute(request, sink.clone(), CancellationToken::new()))
@@ -5730,6 +7403,79 @@ mod tests {
             Some("session-0001".to_owned())
         );
         assert!(!service.is_remote_session("session-0001"));
+    }
+
+    #[test]
+    fn local_status_projection_matches_rust_js_shared_fixtures_and_never_changes_wire() {
+        let (service, _) = service(RecordingExecutor::ok());
+        let _ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "client-0001", &digest(1)),
+            100,
+        );
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/desktop_remote_status.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            service.status_view_payload("task-0001").unwrap(),
+            fixtures["taskStatus"]
+        );
+        service.ledger.begin_dispatch("task-0001", 110).unwrap();
+        service.cancel("task-0001", 120).unwrap();
+        assert_eq!(
+            service.status_view_payload("task-0001").unwrap(),
+            fixtures["taskCancelRequested"]
+        );
+        let wire = service.status_payload("task-0001").unwrap();
+        assert_eq!(wire["task_status"], json!("running"));
+        assert!(wire.get("taskId").is_none());
+        let encoded = serde_json::to_string(&wire).unwrap();
+        crate::features::remote_control::controller::protocol::validate_controller_payload_json(
+            &encoded,
+            SenderRole::ControlledB,
+        )
+        .unwrap();
+        service
+            .complete("task-0001", RemoteTaskTerminal::Cancelled, None, 130)
+            .unwrap();
+        let terminal = service.status_view_payload("task-0001").unwrap();
+        assert_eq!(terminal["status"], json!("cancelled"));
+        assert_eq!(terminal["terminalReason"], json!("cancelled"));
+    }
+
+    #[test]
+    fn cancelled_local_task_publications_do_not_resume_ordinary_status() {
+        let (service, hooks) = service(RecordingExecutor::ok());
+        let _ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "client-0001", &digest(1)),
+            100,
+        );
+        service.ledger.begin_dispatch("task-0001", 110).unwrap();
+        service.cancel("task-0001", 120).unwrap();
+        service
+            .enter_waiting_permission("task-0001", 1, 130)
+            .unwrap();
+        service.resume_running("task-0001", 1, 140).unwrap();
+        let events = hooks.events.lock();
+        assert_eq!(
+            events
+                .iter()
+                .skip(1)
+                .map(|event| event.status.as_str())
+                .collect::<Vec<_>>(),
+            ["cancel_requested", "cancel_requested", "cancel_requested"]
+        );
+        assert_eq!(
+            service.status_view_payload("task-0001").unwrap()["status"],
+            json!("cancel_requested")
+        );
+        drop(events);
+        service
+            .complete("task-0001", RemoteTaskTerminal::Cancelled, None, 150)
+            .unwrap();
+        assert_eq!(hooks.events.lock().last().unwrap().status, "cancelled");
     }
 
     #[test]

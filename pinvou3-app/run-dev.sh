@@ -7,7 +7,7 @@ OS_NAME="$(uname -s)"
 
 # ── 自托管 vLLM 连接(明文 HTTP,仅可信内网)────────────────────────
 # 底座默认拒绝对非 loopback 的明文 http:// 发请求(client.rs validate_base_url_security),
-# 且 reqwest 默认协议协商在某些网关下会 502。开发机连内网 GB10(http://10.214.74.113:8000)
+# 且 reqwest 默认协议协商在某些网关下会 502。开发机的私有服务地址仅由本地配置提供。
 # 必须显式放行明文 HTTP + 钉死 HTTP/1.1。可在外部 export 覆盖。
 # macOS 走远程 HTTPS API,不需要这两项,跳过。
 if [ "$OS_NAME" = "Linux" ]; then
@@ -26,7 +26,8 @@ fi
 # 避免「地址指向 remote-test、信任根仍取 production」导致 controller 握手必然失败。
 # 正式安装包不经过本脚本，默认走内置 `production` profile，用户零配置。
 # 需要临时指向别处时显式覆盖：
-#   PINVOU_REMOTE_ENDPOINT_PROFILE=production   # 切回生产（含地址与信任根）
+#   PINVOU_REMOTE_ENDPOINT_PROFILE=production   # 无更高优先级覆盖时切回生产（地址与信任根）
+# 切换 profile 不清除 runtime/URL/pin 环境覆盖或用户持久自定义地址，需先独立核对。
 #   PINVOU_REMOTE_RUNTIME_RELAY_WS_URL=ws://10.x.x.x:8787/pinvou3/remote/ws
 # 直接用 PINVOU_REMOTE_RELAY_WS_URL / PINVOU_REMOTE_PUBLIC_URL 只覆盖地址，信任根
 # 仍来自当前 profile；只有自建 Relay 与该 profile 共用信任根时才这样用。
