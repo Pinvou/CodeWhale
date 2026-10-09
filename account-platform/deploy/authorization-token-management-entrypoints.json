@@ -1,0 +1,1185 @@
+{
+  "version": "F05",
+  "description": "Installed entrypoint inventory, not a runtime ACL issuer. Dynamic handler authorization and repository authority checks are preserved; this file does not grant permissions.",
+  "routes": [
+    {
+      "method": "get",
+      "path": "/admin/v1/commands/{command_reference}",
+      "handler": "adminTokenCommandResult",
+      "authority": {
+        "kind": "bearer_handler_authority",
+        "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+      },
+      "gates": [
+        "KNOWN_GOVERNANCE"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/commands/{command_reference}/recovery-actions/{action_id}",
+      "handler": "adminTokenAccountRecoveryActionResult",
+      "authority": {
+        "kind": "bearer_handler_authority",
+        "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+      },
+      "gates": [
+        "KNOWN_GOVERNANCE"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/commands/{command_reference}/recovery-actions/by-idempotency-key",
+      "handler": "adminTokenAccountRecoveryActionByKey",
+      "authority": {
+        "kind": "bearer_handler_authority",
+        "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+      },
+      "gates": [
+        "KNOWN_GOVERNANCE"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/commands/by-idempotency-key",
+      "handler": "adminTokenCommandByIdempotencyKey",
+      "authority": {
+        "kind": "bearer_handler_authority",
+        "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+      },
+      "gates": [
+        "KNOWN_GOVERNANCE"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/commands/recovery-queue",
+      "handler": "adminTokenAccountRecoveryQueue",
+      "authority": {
+        "kind": "bearer_handler_authority",
+        "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+      },
+      "gates": [
+        "KNOWN_GOVERNANCE"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness",
+      "handler": "adminUsageReconciliationCommandReadiness",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.usage.reconcile.retry"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/credential-results/{result_ref}",
+      "handler": "adminCredentialIsolationResult",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": [
+        "CREDENTIAL_ISOLATION"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/formulas",
+      "handler": "adminFormulas",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.pricing.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/formulas/{formula_version_id}/preview",
+      "handler": "adminPreviewFormula",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.pricing.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/model-catalog/impact/rollback",
+      "handler": "adminCatalogRollbackImpact",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.models.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/models",
+      "handler": "adminCatalogModels",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.models.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/models/{model_id}",
+      "handler": "adminModelDetail",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.models.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/models/{model_id}/impact/lifecycle",
+      "handler": "adminModelLifecycleImpact",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.models.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/models/{model_id}/lifecycle-plans",
+      "handler": "adminLifecyclePlans",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.models.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/models/{model_id}/lifecycle-plans/{lifecycle_plan_id}",
+      "handler": "adminLifecyclePlan",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.models.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/models/{model_id}/versions",
+      "handler": "adminModelVersions",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.models.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/operations-overview",
+      "handler": "adminTokenOperationsOverview",
+      "authority": {
+        "kind": "bearer",
+        "anyAnd": [
+          [
+            "platform.models.read"
+          ],
+          [
+            "platform.tokens.read",
+            "platform.usage.read"
+          ]
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/overview",
+      "handler": "adminOverview",
+      "authority": {
+        "kind": "bearer",
+        "any": [
+          "platform.tokens.read",
+          "platform.usage.read",
+          "platform.system.status.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/overviews/model-catalog",
+      "handler": "adminModelCatalogOverview",
+      "authority": {
+        "kind": "bearer",
+        "any": [
+          "platform.models.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/overviews/model-operations",
+      "handler": "adminModelOperationsPageOverview",
+      "authority": {
+        "kind": "bearer",
+        "any": [
+          "platform.tokens.read",
+          "platform.usage.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/overviews/token-resources",
+      "handler": "adminTokenResourcesOverview",
+      "authority": {
+        "kind": "bearer",
+        "any": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/owner-candidates",
+      "handler": "adminOwnerCandidates",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.owner-candidates.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/protocols",
+      "handler": "adminProtocols",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.pricing.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/provisionings",
+      "handler": "adminProvisionings",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/provisionings/{provisioning_id}",
+      "handler": "adminProvisioning",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/provisionings/{provisioning_id}/attempts",
+      "handler": "adminProvisioningAttempts",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/reconciliation-cases",
+      "handler": "adminReconciliationCases",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.usage.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/resource-audit",
+      "handler": "adminResourceAudit",
+      "authority": {
+        "kind": "bearer",
+        "anyAnd": [
+          [
+            "platform.models.read",
+            "platform.tokens.read"
+          ],
+          [
+            "platform.audit.read"
+          ]
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/token-accounts",
+      "handler": "adminTokenAccounts",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/token-accounts/{token_account_id}",
+      "handler": "adminTokenAccount",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/token-accounts/{token_account_id}/credentials",
+      "handler": "adminTokenCredentials",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/token-accounts/{token_account_id}/impact/credential",
+      "handler": "adminTokenCredentialImpact",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/token-accounts/{token_account_id}/impact/route",
+      "handler": "adminTokenRouteImpact",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/token-accounts/{token_account_id}/impact/status",
+      "handler": "adminTokenAccountStatusImpact",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/token-accounts/{token_account_id}/routes",
+      "handler": "adminTokenRoutes",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/token-resources/readiness",
+      "handler": "adminTokenResourceReadiness",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/usage-requests",
+      "handler": "adminUsageRequests",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.usage.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/usage-requests/{usage_request_id}",
+      "handler": "adminUsageRequest",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.usage.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v1/usage-requests/{usage_request_id}/evidence",
+      "handler": "adminUsageEvidence",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.usage.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v2/provisionings/{provisioning_id}",
+      "handler": "adminProvisioningV2",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v2/token-accounts/{token_account_id}",
+      "handler": "adminTokenAccountV2",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/admin/v2/token-accounts/{token_account_id}/impact/route",
+      "handler": "adminStableTokenRouteImpact",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/internal/v1/approval-effects/{approval_request_id}",
+      "handler": "approvalEffectObservation",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.approval-effect.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/internal/v1/approval-recovery/results/{approval_request_id}",
+      "handler": "tokenApprovalRecoveryResult",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.approval-result.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/internal/v1/commands/catalog-rollback/result",
+      "handler": "approvedTokenCommandResult(\"TOKEN_MODEL_CATALOG_ROLLBACK\")",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.catalog-rollback.execute"
+        ]
+      },
+      "gates": [
+        "KNOWN_GOVERNANCE"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/internal/v1/commands/credential-revoke/result",
+      "handler": "approvedTokenCommandResult(\"TOKEN_CREDENTIAL_REVOKE\")",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.credential-revoke.execute"
+        ]
+      },
+      "gates": [
+        "KNOWN_GOVERNANCE"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/internal/v1/commands/model-lifecycle/result",
+      "handler": "approvedTokenCommandResult(\"TOKEN_MODEL_LIFECYCLE_CHANGE\")",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.model-lifecycle.execute"
+        ]
+      },
+      "gates": [
+        "KNOWN_GOVERNANCE"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/internal/v1/token-governance/activation",
+      "handler": "internalTokenGovernanceActivation",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.authorization.check"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "post",
+      "path": "/admin/v1/commands:precheck",
+      "handler": "adminTokenCommandPrecheck",
+      "authority": {
+        "kind": "bearer_handler_authority",
+        "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+      },
+      "gates": [
+        "ACTIVE"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/admin/v1/commands",
+      "handler": "adminCreateTokenCommand",
+      "authority": {
+        "kind": "bearer_handler_authority",
+        "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+      },
+      "gates": [
+        "ACTIVE"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/admin/v1/commands/{command_reference}/recovery-actions",
+      "handler": "adminTokenAccountRecoveryAction",
+      "authority": {
+        "kind": "bearer_handler_authority",
+        "note": "Handler rechecks the command permissions or the combined Account owner authority; no unguarded public mutation."
+      },
+      "gates": [
+        "ACTIVE"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/admin/v1/credential-results/{result_ref}/revoke-window",
+      "handler": "adminRevokeCredentialLaunch",
+      "authority": {
+        "kind": "bearer_actor_bound",
+        "note": "Repository verifies the issuing actor; permission revocation must not prevent terminalizing the issued launch."
+      },
+      "gates": []
+    },
+    {
+      "method": "post",
+      "path": "/admin/v1/models/{model_id}/lifecycle-plans",
+      "handler": "adminCreateLifecyclePlan",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.models.lifecycle.request"
+        ]
+      },
+      "gates": [
+        "ACTIVE"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/admin/v1/models/{model_id}/lifecycle-plans/{lifecycle_plan_id}/cancel",
+      "handler": "adminCancelLifecyclePlan",
+      "authority": {
+        "kind": "bearer",
+        "any": [
+          "platform.models.manage",
+          "platform.models.lifecycle.request"
+        ]
+      },
+      "gates": [
+        "ACTIVE"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/admin/v1/token-accounts/{token_account_id}/credential-launches/enroll",
+      "handler": "registeredTokenHandler(\"TOKEN_CREDENTIAL_ENROLL\", \"ISOLATED\")",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.manage"
+        ]
+      },
+      "gates": [
+        "ACTIVE",
+        "CREDENTIAL_ISOLATION"
+      ],
+      "policy": {
+        "command": "TOKEN_CREDENTIAL_ENROLL",
+        "mode": "AuditOnly"
+      }
+    },
+    {
+      "method": "post",
+      "path": "/admin/v1/token-accounts/{token_account_id}/credential-launches/rotate",
+      "handler": "registeredTokenHandler(\"TOKEN_CREDENTIAL_ROTATE\", \"ISOLATED\")",
+      "authority": {
+        "kind": "bearer",
+        "all": [
+          "platform.tokens.manage"
+        ]
+      },
+      "gates": [
+        "ACTIVE",
+        "CREDENTIAL_ISOLATION"
+      ],
+      "policy": {
+        "command": "TOKEN_CREDENTIAL_ROTATE",
+        "mode": "AuditOnly"
+      }
+    },
+    {
+      "method": "post",
+      "path": "/internal/v1/approval-command-prechecks",
+      "handler": "internalApprovalCommandPrecheck",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.approval-snapshot.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "post",
+      "path": "/internal/v1/approval-command-proofs",
+      "handler": "internalTokenApprovalProof",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.approval-proof.read"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "post",
+      "path": "/internal/v1/commands/catalog-rollback/execute",
+      "handler": "executeApprovedCatalogRollback",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.catalog-rollback.execute"
+        ]
+      },
+      "gates": [
+        "ACTIVE"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/internal/v1/commands/catalog-rollback/precheck",
+      "handler": "approvedTokenCommandPrecheck(\"TOKEN_MODEL_CATALOG_ROLLBACK\")",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.catalog-rollback.execute"
+        ]
+      },
+      "gates": [
+        "ACTIVE"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/internal/v1/commands/credential-revoke/execute",
+      "handler": "executeApprovedCredentialRevoke",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.credential-revoke.execute"
+        ]
+      },
+      "gates": [
+        "ACTIVE"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/internal/v1/commands/credential-revoke/precheck",
+      "handler": "approvedTokenCommandPrecheck(\"TOKEN_CREDENTIAL_REVOKE\")",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.credential-revoke.execute"
+        ]
+      },
+      "gates": [
+        "ACTIVE"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/internal/v1/commands/model-lifecycle/execute",
+      "handler": "executeApprovedModelLifecycle",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.model-lifecycle.execute"
+        ]
+      },
+      "gates": [
+        "ACTIVE"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/internal/v1/commands/model-lifecycle/precheck",
+      "handler": "approvedTokenCommandPrecheck(\"TOKEN_MODEL_LIFECYCLE_CHANGE\")",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.model-lifecycle.execute"
+        ]
+      },
+      "gates": [
+        "ACTIVE"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/internal/v1/holds/expiry-proof",
+      "handler": "expiredHoldProof",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.hold-expiry.prove"
+        ]
+      },
+      "gates": []
+    }
+  ],
+  "commands": [
+    {
+      "command": "TOKEN_ACCOUNT_CREATE",
+      "permissions": [
+        "platform.tokens.manage",
+        "platform.tokens.owner-candidates.read"
+      ],
+      "recentAuth": true,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "owner_type",
+        "owner_id",
+        "owner_authorization_version",
+        "owner_version",
+        "owner_identity_digest",
+        "owner_account_count",
+        "owner_account_cap",
+        "owner_account_cap_policy_version",
+        "creation_version",
+        "precheck_fingerprint",
+        "request_fingerprint"
+      ],
+      "family": "MODEL_ACCOUNT",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_ACCOUNT_STATUS_CHANGE",
+      "permissions": [
+        "platform.tokens.manage"
+      ],
+      "recentAuth": true,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "token_account_id",
+        "expected_account_version",
+        "target_status",
+        "precheck_fingerprint",
+        "request_fingerprint"
+      ],
+      "family": "MODEL_ACCOUNT",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_CREDENTIAL_ENROLL",
+      "permissions": [
+        "platform.tokens.manage"
+      ],
+      "recentAuth": true,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "token_account_id",
+        "expected_account_version",
+        "credential_slot_version",
+        "launch_fingerprint"
+      ],
+      "family": "CREDENTIAL_ENROLL",
+      "transport": "ISOLATED"
+    },
+    {
+      "command": "TOKEN_CREDENTIAL_REVOKE",
+      "permissions": [
+        "platform.tokens.credentials.revoke.request"
+      ],
+      "recentAuth": true,
+      "approvalRequired": true,
+      "requiredFacts": [],
+      "family": "CREDENTIAL_REVOKE",
+      "transport": "APPROVED"
+    },
+    {
+      "command": "TOKEN_CREDENTIAL_ROTATE",
+      "permissions": [
+        "platform.tokens.manage"
+      ],
+      "recentAuth": true,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "token_account_id",
+        "expected_account_version",
+        "active_credential_version",
+        "launch_fingerprint"
+      ],
+      "family": "CREDENTIAL_ROTATE",
+      "transport": "ISOLATED"
+    },
+    {
+      "command": "TOKEN_CREDENTIAL_VALIDATE",
+      "permissions": [
+        "platform.tokens.credentials.validate"
+      ],
+      "recentAuth": true,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "token_account_id",
+        "expected_account_version",
+        "credential_id",
+        "credential_version",
+        "precheck_fingerprint",
+        "request_fingerprint"
+      ],
+      "family": "CREDENTIAL_VALIDATE",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_FORMULA_DRAFT_CREATE",
+      "permissions": [
+        "platform.pricing.manage"
+      ],
+      "recentAuth": false,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "protocol_definition_id",
+        "expected_protocol_version",
+        "expected_formula_head_version",
+        "request_fingerprint"
+      ],
+      "family": "PROTOCOL_FORMULA",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_FORMULA_PUBLISH",
+      "permissions": [
+        "platform.pricing.manage"
+      ],
+      "recentAuth": true,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "formula_version_id",
+        "expected_formula_version",
+        "draft_etag",
+        "request_fingerprint"
+      ],
+      "family": "PROTOCOL_FORMULA",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_MODEL_CATALOG_ROLLBACK",
+      "permissions": [
+        "platform.models.catalog.rollback.request"
+      ],
+      "recentAuth": true,
+      "approvalRequired": true,
+      "requiredFacts": [],
+      "family": "CATALOG_ROLLBACK",
+      "transport": "APPROVED"
+    },
+    {
+      "command": "TOKEN_MODEL_CATALOG_SYNC",
+      "permissions": [
+        "platform.models.sync"
+      ],
+      "recentAuth": false,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "expected_catalog_version",
+        "adapter_observed_version",
+        "catalog_diff_fingerprint",
+        "request_fingerprint"
+      ],
+      "family": "CATALOG_SYNC",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_MODEL_DRAFT_SAVE",
+      "permissions": [
+        "platform.models.manage"
+      ],
+      "recentAuth": false,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "model_id",
+        "expected_catalog_version",
+        "expected_draft_version",
+        "precheck_fingerprint",
+        "request_fingerprint"
+      ],
+      "family": "MODEL_ACCOUNT",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_MODEL_LIFECYCLE_CHANGE",
+      "permissions": [
+        "platform.models.lifecycle.request"
+      ],
+      "recentAuth": true,
+      "approvalRequired": true,
+      "requiredFacts": [],
+      "family": "LIFECYCLE",
+      "transport": "APPROVED"
+    },
+    {
+      "command": "TOKEN_MODEL_PUBLISH",
+      "permissions": [
+        "platform.models.manage"
+      ],
+      "recentAuth": true,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "model_id",
+        "expected_catalog_version",
+        "expected_draft_version",
+        "precheck_fingerprint",
+        "request_fingerprint"
+      ],
+      "family": "MODEL_ACCOUNT",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_PROTOCOL_DRAFT_CREATE",
+      "permissions": [
+        "platform.pricing.manage"
+      ],
+      "recentAuth": false,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "protocol_code",
+        "expected_protocol_head_version",
+        "request_fingerprint"
+      ],
+      "family": "PROTOCOL_FORMULA",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_PROTOCOL_PUBLISH",
+      "permissions": [
+        "platform.pricing.manage"
+      ],
+      "recentAuth": true,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "protocol_definition_id",
+        "expected_protocol_version",
+        "draft_etag",
+        "request_fingerprint"
+      ],
+      "family": "PROTOCOL_FORMULA",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_ROUTE_DELETE",
+      "permissions": [
+        "platform.tokens.manage"
+      ],
+      "recentAuth": true,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "token_account_id",
+        "route_id",
+        "expected_account_version",
+        "expected_route_version",
+        "precheck_fingerprint",
+        "request_fingerprint"
+      ],
+      "family": "ROUTE",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_ROUTE_PROVISIONING_REPAIR",
+      "permissions": [
+        "platform.tokens.manage"
+      ],
+      "recentAuth": true,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "provisioning_id",
+        "expected_provisioning_version",
+        "target_generation",
+        "precheck_fingerprint",
+        "request_fingerprint"
+      ],
+      "family": "RUNTIME",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_ROUTE_UPSERT",
+      "permissions": [
+        "platform.tokens.manage"
+      ],
+      "recentAuth": true,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "token_account_id",
+        "expected_account_version",
+        "expected_route_version",
+        "model_id",
+        "protocol_version_id",
+        "precheck_fingerprint",
+        "request_fingerprint"
+      ],
+      "family": "ROUTE",
+      "transport": "COMMAND"
+    },
+    {
+      "command": "TOKEN_USAGE_RECONCILIATION_RETRY",
+      "permissions": [
+        "platform.usage.reconcile.retry"
+      ],
+      "recentAuth": false,
+      "approvalRequired": false,
+      "requiredFacts": [
+        "usage_request_id",
+        "expected_usage_version",
+        "evidence_high_watermark",
+        "precheck_fingerprint",
+        "request_fingerprint"
+      ],
+      "family": "RUNTIME",
+      "transport": "COMMAND"
+    }
+  ],
+  "credentialRoutes": [
+    {
+      "method": "get",
+      "path": "/assets/credential-auth.js",
+      "handler": "authenticationScript"
+    },
+    {
+      "method": "get",
+      "path": "/assets/credential-submit.js",
+      "handler": "credentialSubmitScript"
+    },
+    {
+      "method": "get",
+      "path": "/assets/credential.css",
+      "handler": "stylesheet"
+    },
+    {
+      "method": "get",
+      "path": "/oidc/callback",
+      "handler": "callback"
+    },
+    {
+      "method": "get",
+      "path": "/session",
+      "handler": "session"
+    },
+    {
+      "method": "post",
+      "path": "/credentials",
+      "handler": "submitCredential"
+    },
+    {
+      "method": "post",
+      "path": "/launch",
+      "handler": "launch"
+    }
+  ]
+}

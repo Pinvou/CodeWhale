@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { CodexAcpView as LazyCodexAcpView } from '../features/codex/LazyCodexAcpView.jsx';
 import { ChatView } from '../features/chat/ChatView.jsx';
 import { VIEW_LOADERS } from './view-loaders.js';
@@ -19,7 +19,8 @@ const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: 
 const LazyToolStoreView = lazy(() => VIEW_LOADERS.toolStore().then(m => ({ default: m.ToolStoreView })));
 const LazyCardPoolView = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.CardPoolView })));
 const DetachedViewFallback = () => <div className="p-6 text-sm opacity-60">…</div>;
-import { useBridgeState } from '../hooks/useBridge.js';
+import { bridge, useBridgeState } from '../hooks/useBridge.js';
+import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
 import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
 import { normalizeColorScheme, resolveTheme } from '../shared/color-scheme.js';
 import { emitTauri, invokeTauri, isTauriAvailable, listenTauri } from '../platform/tauri/client.js';
@@ -97,6 +98,8 @@ class DetachedErrorBoundary extends React.Component {
 }
 
 function DetachedCodexSessionView({ id, theme, t, bs }) {
+  const personalAccountClient = useMemo(() => bridge.available && bridge.accountPlatform
+    ? new AccountPlatformDesktopClient(bridge.accountPlatform) : null, []);
   const [sessions, setSessions] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
 
@@ -141,6 +144,7 @@ function DetachedCodexSessionView({ id, theme, t, bs }) {
       theme={theme}
       t={t}
       sessions={sessions}
+      accountPlatformClient={personalAccountClient}
       activeId={id}
       onActiveSessionChange={() => {}}
       onSessionsChange={next => setSessions(Array.isArray(next) ? next : [])}

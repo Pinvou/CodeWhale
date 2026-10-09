@@ -1,0 +1,71 @@
+openapi: 3.1.0
+info:
+  title: Installed account-closed organization grant reclaim
+  version: 0.10.6
+paths:
+  /v1/organizations/{organization_id}/account-closed-grants/{grant_id}/reclaim:
+    post:
+      operationId: reclaimAccountClosedGrant
+      x-service: token-gateway
+      x-permission: org.grants.reclaim_closed
+      parameters:
+        - {name: organization_id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: grant_id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 16, maxLength: 128}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties: {reason: {type: string, minLength: 1, maxLength: 500}}
+      responses:
+        '200': {description: Whole eligible remainder reclaimed or the same immutable receipt replayed, content: {application/json: {schema: {$ref: '#/components/schemas/Reclaim'}}}}
+        '400': {description: Invalid UUID, key or reason}
+        '401': {description: Authentication required}
+        '403': {description: Current organization authorization denied}
+        '409': {description: Anonymous-state authority unavailable, not anonymized, expired, frozen, reserved or changed command facts}
+  /v1/organizations/{organization_id}/account-closed-grants:reclaim-batch:
+    post:
+      operationId: reclaimAccountClosedGrantsBatch
+      x-service: token-gateway
+      x-permission: org.grants.reclaim_closed
+      parameters:
+        - {name: organization_id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 16, maxLength: 128}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [grant_ids, reason]
+              properties:
+                grant_ids: {type: array, minItems: 1, maxItems: 200, uniqueItems: true, items: {type: string, format: uuid}}
+                reason: {type: string, minLength: 1, maxLength: 500}
+      responses:
+        '207': {description: Each item independently commits or returns rejection; stable derived item keys preserve input order, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/BatchItem'}}}}}}}
+        '400': {description: Invalid batch body or key}
+        '401': {description: Authentication required}
+        '403': {description: Current organization authorization denied}
+components:
+  schemas:
+    Reclaim:
+      type: object
+      required: [grant, amount_microcredits, subject_lifecycle_version, replayed]
+      properties:
+        grant: {type: object, description: Existing MemberQuotaGrant projection with terminal RECLAIMED_ACCOUNT_CLOSED status}
+        amount_microcredits: {type: integer, format: int64, minimum: 1}
+        subject_lifecycle_version: {type: integer, format: int64, minimum: 2}
+        replayed: {type: boolean}
+    BatchItem:
+      type: object
+      required: [grant_id, status]
+      properties:
+        grant_id: {type: string, format: uuid}
+        status: {type: string, enum: [SUCCEEDED, FAILED]}
+        result: {$ref: '#/components/schemas/Reclaim'}
+        code: {type: string, enum: [ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED]}

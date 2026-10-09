@@ -1,5 +1,6 @@
 const DEFAULT_DESKTOP_CAPABILITIES = Object.freeze({
   desktopChrome: true,
+  accountPlatform: true,
   detachWindows: true,
   pet: true,
   oauth: true,

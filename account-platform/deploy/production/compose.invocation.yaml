@@ -1,0 +1,30 @@
+# Add after compose.models.yaml. Same-source F05 management + personal execution.
+name: pinvou-personal
+services:
+  token-portal:
+    image: ${TOKEN_PORTAL_IMAGE:?set reviewed same-source F05 Portal with current personal usage routes and generated static assets}
+  account-service:
+    image: ${ACCOUNT_INVOCATION_IMAGE:?set reviewed same-source F05 Account compatibility image}
+    environment:
+      ACCOUNT_SERVICE_VERSION: ${ACCOUNT_SERVICE_VERSION:?set reviewed current Account service version}
+      ACCOUNT_CLIENT_CONTRACT_VERSION: account-client-v1
+      TOKEN_GOVERNANCE_POLICY_SET_DIGEST: ${TOKEN_GOVERNANCE_POLICY_SET_DIGEST:?set current Billing3 plus Token19 policy digest}
+      TOKEN_GOVERNANCE_HANDLER_SET_DIGEST: ${TOKEN_GOVERNANCE_HANDLER_SET_DIGEST:?set current nineteen-handler digest}
+  token-gateway:
+    image: ${TOKEN_GATEWAY_IMAGE:?set reviewed same-source F05 invocation image}
+    environment:
+      TOKEN_SERVICE_VERSION: ${TOKEN_SERVICE_VERSION:?set reviewed current Token service version}
+      TOKEN_CLIENT_CONTRACT_VERSION: client-readiness-v1
+      TOKEN_MINIMUM_CLIENT_VERSION: ${TOKEN_MINIMUM_CLIENT_VERSION:?set current supported minimum client version}
+      TOKEN_MAXIMUM_CLIENT_VERSION: ${TOKEN_MAXIMUM_CLIENT_VERSION:?set current supported maximum client version}
+      TOKEN_GATEWAY_MAX_INPUT_TOKENS: ${TOKEN_GATEWAY_MAX_INPUT_TOKENS:-128000}
+      CLIENT_READINESS_ATTESTATION_KEY_ID: ${CLIENT_READINESS_ATTESTATION_KEY_ID:?set independently approved public signing key ID}
+      CLIENT_READINESS_ATTESTATION_TTL_SECONDS: ${CLIENT_READINESS_ATTESTATION_TTL_SECONDS:-600}
+      TOKEN_RECONCILIATION_INTERVAL_SECONDS: ${TOKEN_RECONCILIATION_INTERVAL_SECONDS:-15}
+      TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID: ${TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID:-}
+      TOKEN_RECONCILIATION_NEWAPI_BASE_URL: ${TOKEN_RECONCILIATION_NEWAPI_BASE_URL:-}
+      TOKEN_MANUAL_REVIEW_ONCALL_USER_IDS: ${TOKEN_MANUAL_REVIEW_ONCALL_USER_IDS:?set real Token on-call schedule}
+  billing-service:
+    image: ${BILLING_INVOCATION_IMAGE:?set reviewed same-source F05 settlement and hold-expiry image}
+  token-command-executor:
+    image: ${TOKEN_COMMAND_EXECUTOR_IMAGE:?set reviewed same-source nineteen-policy executor image}
