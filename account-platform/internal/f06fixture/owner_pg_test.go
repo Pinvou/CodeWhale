@@ -113,9 +113,9 @@ func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixtur
 }
 
 func TestPrivateF06OrganizationFundsPG(t *testing.T) {
-	raw := os.Getenv("PINVOU_TEST_BILLING_DATABASE_URL")
+	raw := os.Getenv("PINVOU_TEST_F06_OWNER_DATABASE_URL")
 	if raw == "" {
-		t.Fatal("isolatedPG required")
+		t.Skip("PINVOU_TEST_F06_OWNER_DATABASE_URL is required for the private isolated owner runtime")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Second)
 	t.Cleanup(cancel)
@@ -163,7 +163,12 @@ func TestPrivateF06OrganizationFundsPG(t *testing.T) {
 	defer s.Close()
 	cmd := exec.CommandContext(ctx, os.Getenv("PINVOU_PRIVATE_GO"), "test", "-race", "-json", "-count=1", "-mod=readonly", "-run", "^TestOrganizationExecutionPublicPostgresFundsAndReplay$", "./internal/token")
 	cmd.Dir = "../.."
-	cmd.Env = os.Environ()
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(strings.ToUpper(value), "PINVOU_TEST_BILLING_DATABASE_URL=") {
+			cmd.Env = append(cmd.Env, value)
+		}
+	}
+	cmd.Env = append(cmd.Env, "PINVOU_TEST_BILLING_DATABASE_URL="+raw)
 	cmd.Stdout = o
 	cmd.Stderr = s
 	if e = cmd.Run(); e != nil {

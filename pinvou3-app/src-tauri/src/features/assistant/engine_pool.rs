@@ -2713,6 +2713,15 @@ impl EnginePool {
     }
 
     async fn reclaim_engine_entry(&self, session_id: &str, entry: EngineEntry) {
+        let preserved_generation = self.turn_lifecycles.get(session_id).and_then(|lifecycle| {
+            if lifecycle.is_current_turn_submitted() {
+                None
+            } else {
+                lifecycle.current_runtime_turn_generation()
+            }
+        });
+        self.runtime_model_provider
+            .reclaim_model_session(session_id, preserved_generation);
         // Stop the producer before admission fallback awaits disk I/O.
         // An in-flight SessionUpdated save is serialized with the fallback
         // by SessionStore's mutation gate; no later delta/tool event can
@@ -2861,6 +2870,7 @@ impl EnginePool {
     }
 
     pub(crate) fn forget_session(&self, session_id: &str) {
+        self.runtime_model_provider.forget_model_session(session_id);
         #[cfg(any(feature = "benchmark-hooks", test))]
         self.eval_model_snapshots.forget_session(session_id);
         self.turn_lifecycles.remove(session_id);
@@ -3559,6 +3569,11 @@ impl EnginePool {
     /// SteerDropped so the frontend removes the chip with a notice —
     /// preventing a "gone from the UI but alive in the engine" hang.
     pub async fn cancel(&self, session_id: &str, keep_inbox: bool) -> CancelOutcome {
+        // Reset can reuse a session ID and lifecycle epoch. Freeze the transport
+        // incarnation before any await so a delayed old stop cannot target it.
+        let model_cancel_scope = self
+            .runtime_model_provider
+            .capture_model_cancellation_scope(session_id);
         // r10 foundation: the steer disposition
         // (InterruptKeepInbox/StopDropInbox) and the cancel token are
         // published atomically by cancel_with_mode; a separate keepInbox
@@ -3636,6 +3651,15 @@ impl EnginePool {
                 // N's leftover subagents is the stop contract and N+1's
                 // just-spawned subagents are indistinguishable app-side; see
                 // the fork registration docs.
+                if let Some(identity) = identity.as_ref() {
+                    if !identity.closing {
+                        self.runtime_model_provider.cancel_logical_turn(
+                            session_id,
+                            identity.epoch,
+                            model_cancel_scope.as_deref(),
+                        );
+                    }
+                }
                 dispatch_turn_bound_cancel(engine, identity.as_ref(), steer_mode);
                 let _ = engine.handle.try_send(Op::CancelSubAgents);
             },

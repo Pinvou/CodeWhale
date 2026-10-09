@@ -238,6 +238,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusNotFound, "TOKEN_NOT_FOUND", "the token resource was not found"
 	case errors.Is(err, ErrNoEligibleRoute):
 		status, code, message = http.StatusUnprocessableEntity, "TOKEN_ROUTE_UNAVAILABLE", "no eligible token route is available"
+	case errors.Is(err, ErrOrganizationLifecycleConflict):
+		status, code, message = http.StatusConflict, "ORGANIZATION_LIFECYCLE_CONFLICT", "the organization lifecycle facts conflict"
 	case errors.Is(err, ErrIdempotencyConflict):
 		status, code, message = http.StatusConflict, "IDEMPOTENCY_CONFLICT", "the idempotency key was already used with different input"
 	case errors.Is(err, ErrForbidden):

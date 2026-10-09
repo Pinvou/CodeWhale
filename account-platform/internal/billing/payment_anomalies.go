@@ -396,20 +396,94 @@ func restoreDismissedPaymentAnomalyEntitlements(ctx context.Context, tx pgx.Tx, 
 	if !validFinancialFreezeSnapshot(freezeSnapshot, packageID, walletID) {
 		return nil
 	}
+	// A financial suspension may have hidden a newer membership projection.
+	// Missing organization evidence keeps the financial fence intact.
+	if wallet.OwnerType == "ORGANIZATION" {
+		var unknown bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM member_quota_grants g LEFT JOIN organization_member_lifecycle_states m ON m.organization_id=g.organization_id AND m.user_id=g.member_user_id WHERE g.package_id=$1 AND g.status='SUSPENDED' AND g.suspension_reason IN ('CHARGEBACK_REVIEW','FORCED_REFUND_REVIEW') AND (m.user_id IS NULL OR m.membership_version<g.membership_version))`, packageID).Scan(&unknown); err != nil {
+			return err
+		}
+		if unknown {
+			return nil
+		}
+		rows, err := tx.Query(ctx, `UPDATE member_quota_grants g SET suspension_reason='MEMBER_REMOVED',membership_version=m.membership_version,allocation_version=g.allocation_version+1,updated_at=$2 FROM organization_member_lifecycle_states m WHERE g.package_id=$1 AND g.status='SUSPENDED' AND g.suspension_reason IN ('CHARGEBACK_REVIEW','FORCED_REFUND_REVIEW') AND m.organization_id=g.organization_id AND m.user_id=g.member_user_id AND m.status IN ('REVOKED','SUSPENDED') AND EXISTS(SELECT 1 FROM jsonb_array_elements($3::jsonb->'grants') prior WHERE (prior->>'id')::uuid=g.id AND prior->>'status'='ACTIVE') RETURNING g.id`, packageID, now, freezeSnapshot)
+		if err != nil {
+			return err
+		}
+		ids := []uuid.UUID{}
+		for rows.Next() {
+			var id uuid.UUID
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			grant, _, err := loadMemberQuotaGrant(ctx, tx, id, false)
+			if err != nil {
+				return err
+			}
+			if err := appendMemberQuotaAudit(ctx, tx, grant, "SUSPENDED", nil, 0, now); err != nil {
+				return err
+			}
+			if err := appendMemberQuotaOutbox(ctx, tx, grant, "billing.member-quota.suspended.v1", now); err != nil {
+				return err
+			}
+		}
+	}
+	var restoredOrganizationGrants []uuid.UUID
+	if wallet.OwnerType == "ORGANIZATION" {
+		rows, err := tx.Query(ctx, `SELECT g.id FROM member_quota_grants g JOIN entitlement_components c ON c.id=g.component_id JOIN organization_member_lifecycle_states m ON m.organization_id=g.organization_id AND m.user_id=g.member_user_id WHERE g.package_id=$1 AND g.status='SUSPENDED' AND g.suspension_reason IN ('CHARGEBACK_REVIEW','FORCED_REFUND_REVIEW') AND g.expires_at>$2 AND c.status='FROZEN' AND c.expires_at>$2 AND m.status='ACTIVE' AND EXISTS(SELECT 1 FROM jsonb_array_elements($3::jsonb->'grants') prior WHERE (prior->>'id')::uuid=g.id AND prior->>'status'='ACTIVE') AND EXISTS(SELECT 1 FROM jsonb_array_elements($3::jsonb->'components') prior WHERE (prior->>'id')::uuid=c.id AND prior->>'status'='ACTIVE') ORDER BY g.id`, packageID, now, freezeSnapshot)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id uuid.UUID
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			restoredOrganizationGrants = append(restoredOrganizationGrants, id)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+	}
 	// Restore only the financial-review suspensions. Administrative suspension,
 	// expiry and revocation remain intact, and no credit is minted or extended.
 	if _, err = tx.Exec(ctx, `WITH restored AS (
- UPDATE member_quota_grants member_grant SET status='ACTIVE',suspension_reason=NULL,allocation_version=allocation_version+1,updated_at=$2
+ UPDATE member_quota_grants member_grant SET status='ACTIVE',suspension_reason=NULL,membership_version=CASE WHEN $4='ORGANIZATION' THEN (SELECT m.membership_version FROM organization_member_lifecycle_states m WHERE m.organization_id=member_grant.organization_id AND m.user_id=member_grant.member_user_id) ELSE member_grant.membership_version END,allocation_version=allocation_version+1,updated_at=$2
  FROM entitlement_components component
  WHERE member_grant.package_id=$1 AND member_grant.status='SUSPENDED' AND member_grant.suspension_reason IN ('CHARGEBACK_REVIEW','FORCED_REFUND_REVIEW') AND member_grant.expires_at>$2
  AND component.id=member_grant.component_id AND component.status='FROZEN' AND component.expires_at>$2
+ AND ($4<>'ORGANIZATION' OR EXISTS(SELECT 1 FROM organization_member_lifecycle_states m WHERE m.organization_id=member_grant.organization_id AND m.user_id=member_grant.member_user_id AND m.status='ACTIVE'))
  AND EXISTS(SELECT 1 FROM jsonb_array_elements($3::jsonb->'grants') prior WHERE (prior->>'id')::uuid=member_grant.id AND prior->>'status'='ACTIVE')
  AND EXISTS(SELECT 1 FROM jsonb_array_elements($3::jsonb->'components') prior WHERE (prior->>'id')::uuid=component.id AND prior->>'status'='ACTIVE')
  RETURNING member_grant.component_id,member_grant.available_microcredits
 ), totals AS (SELECT component_id,sum(available_microcredits)::bigint amount FROM restored GROUP BY component_id)
  UPDATE entitlement_components component SET active_grant_microcredits=component.active_grant_microcredits+totals.amount,suspended_grant_microcredits=component.suspended_grant_microcredits-totals.amount,updated_at=$2
- FROM totals WHERE component.id=totals.component_id`, packageID, now, freezeSnapshot); err != nil {
+ FROM totals WHERE component.id=totals.component_id`, packageID, now, freezeSnapshot, wallet.OwnerType); err != nil {
 		return err
+	}
+	for _, id := range restoredOrganizationGrants {
+		grant, _, err := loadMemberQuotaGrant(ctx, tx, id, false)
+		if err != nil {
+			return err
+		}
+		if err := appendMemberQuotaAudit(ctx, tx, grant, "RESTORED", nil, grant.AvailableMicrocredits, now); err != nil {
+			return err
+		}
+		if err := appendMemberQuotaOutbox(ctx, tx, grant, "billing.member-quota.restored.v1", now); err != nil {
+			return err
+		}
 	}
 	// Clearing a disproved financial fence does not issue or extend rights.
 	// Time-expired rights remain unusable and can enter the ordinary expiry worker;

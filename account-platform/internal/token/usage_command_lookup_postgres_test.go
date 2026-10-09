@@ -133,7 +133,7 @@ func TestUsageCommandLookupThroughCurrentHandler(t *testing.T) {
 			{"permission-denied", "denied", input.IdempotencyKey, "TOKEN_USAGE_RECONCILIATION_RETRY", 403},
 			{"missing-original-key", "actor", uuid.NewString(), "TOKEN_USAGE_RECONCILIATION_RETRY", 404},
 			{"short-key", "actor", "short", "TOKEN_USAGE_RECONCILIATION_RETRY", 400},
-			{"future-runtime-denied", "actor", input.IdempotencyKey, "TOKEN_ROUTE_PROVISIONING_REPAIR", 400},
+			{"future-runtime-denied", "actor", input.IdempotencyKey, "TOKEN_USAGE_FUTURE_RUNTIME", 400},
 			{"unknown-command-denied", "actor", input.IdempotencyKey, "TOKEN_FUTURE_UNKNOWN", 400},
 		} {
 			t.Run(check.name, func(t *testing.T) {
@@ -164,7 +164,7 @@ func TestUsageCommandLookupThroughCurrentHandler(t *testing.T) {
 
 }
 
-// Existing route/account reads retain their authentication boundary. Future
+// Installed command reads retain their authentication boundary. Unknown
 // runtime families must not become reachable through the current usage lookup.
 func TestCurrentCommandKeyLookupDispatchBoundaries(t *testing.T) {
 	service := &Service{authorizer: &authorization.Client{}}
@@ -176,7 +176,7 @@ func TestCurrentCommandKeyLookupDispatchBoundaries(t *testing.T) {
 		{"TOKEN_ROUTE_UPSERT", http.StatusUnauthorized},
 		{"TOKEN_ROUTE_DELETE", http.StatusUnauthorized},
 		{"TOKEN_ACCOUNT_CREATE", http.StatusUnauthorized},
-		{"TOKEN_ROUTE_PROVISIONING_REPAIR", http.StatusBadRequest},
+		{"TOKEN_ROUTE_PROVISIONING_REPAIR", http.StatusUnauthorized},
 		{"TOKEN_FUTURE_UNKNOWN", http.StatusBadRequest},
 	} {
 		t.Run(entry.command, func(t *testing.T) {

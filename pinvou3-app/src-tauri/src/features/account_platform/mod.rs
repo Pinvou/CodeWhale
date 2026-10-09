@@ -6,9 +6,10 @@
 //! token in the system credential store so the next launch can sign in again.
 
 pub(crate) mod client_migration;
+mod model_cancellation;
 mod model_proxy;
-mod platform;
 mod organization_routes;
+mod platform;
 pub(crate) mod runtime_model;
 
 use std::sync::Arc;
@@ -1663,10 +1664,11 @@ fn prepare_request(
     organization_routes::exact_body(&input.area, parsed.path(), &mut input.body)?;
     let organization_key = organization_routes::keyed(&input.area, &method, parsed.path());
     let requires_key = input.area == "token"
-        && method == Method::POST
-        && (parsed.path() == "/v1/recharge/orders"
-            || parsed.path().starts_with("/v1/usage-requests/")
-                && parsed.path().ends_with("/cancel"));
+        && ((method == Method::POST
+            && (parsed.path() == "/v1/recharge/orders"
+                || parsed.path().starts_with("/v1/usage-requests/")
+                    && parsed.path().ends_with("/cancel")))
+            || method == Method::GET && parsed.path() == "/v1/usage-requests/by-idempotency-key");
     match &input.idempotency_key {
         Some(key)
             if requires_key
@@ -1701,7 +1703,9 @@ fn prepare_request(
 }
 
 fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -> bool {
-    if organization_routes::allowed(area, method, path, query) { return true; }
+    if organization_routes::allowed(area, method, path, query) {
+        return true;
+    }
     if area == "token" {
         if path == "/v1/me/balance" {
             return *method == Method::GET && matches!(query, None | Some("consistency=strong"));
@@ -1718,6 +1722,7 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
                 path,
                 "/v1/recharge/products"
                     | "/v1/models"
+                    | "/v1/usage-requests/by-idempotency-key"
                     | "/v1/payment-capabilities"
                     | "/v1/recharge/orders"
                     | "/v1/recharge/orders/recent"
@@ -1731,6 +1736,8 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         }
         let parts: Vec<_> = path.split('/').collect();
         return match parts.as_slice() {
+            ["", "v1", "usage-requests", id] if *method == Method::GET => uuid::Uuid::parse_str(id)
+                .is_ok_and(|value| !value.is_nil() && value.to_string() == *id),
             ["", "v1", "usage-requests", id, "cancel"] if *method == Method::POST => {
                 uuid::Uuid::parse_str(id)
                     .is_ok_and(|value| !value.is_nil() && value.to_string() == *id)
@@ -3225,6 +3232,29 @@ mod tests {
             idempotency_key: Some("cancel-operation-0001".into()),
         };
         assert!(prepare_request(&config(), request()).is_ok());
+        let lookup = || ApiRequest {
+            area: "token".into(),
+            resource: "/v1/usage-requests/by-idempotency-key".into(),
+            method: "GET".into(),
+            body: None,
+            idempotency_key: Some("original-invocation-0001".into()),
+        };
+        assert!(prepare_request(&config(), lookup()).is_ok());
+        let mut no_key = lookup();
+        no_key.idempotency_key = None;
+        assert!(prepare_request(&config(), no_key).is_err());
+        let mut query = lookup();
+        query.resource.push_str("?key=private");
+        assert!(prepare_request(&config(), query).is_err());
+        let mut body = lookup();
+        body.body = Some(serde_json::json!({}));
+        assert!(prepare_request(&config(), body).is_err());
+        assert!(route_allowed(
+            "token",
+            &Method::GET,
+            &format!("/v1/usage-requests/{id}"),
+            None
+        ));
         let mut absent = request();
         absent.idempotency_key = None;
         assert!(prepare_request(&config(), absent).is_err());

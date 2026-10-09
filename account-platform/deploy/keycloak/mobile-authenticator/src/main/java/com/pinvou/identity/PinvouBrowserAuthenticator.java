@@ -5,6 +5,7 @@ import jakarta.ws.rs.core.Response;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.jboss.logging.Logger;
@@ -28,8 +29,13 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
     private static final Pattern DEVICE = Pattern.compile("^[A-Za-z0-9._:-]{8,128}$");
     private static final String TEMPLATE = "pinvou-login.ftl";
     private static final String NOTE_PREFIX = "pinvou.browser.";
+    private static final String FAILED_PASSWORD_USER_NOTE = NOTE_PREFIX + "failed_password_user";
     private static final String REGISTRATION_OPERATION_ATTRIBUTE = "pinvou_registration_operation_id";
-    private static final PinvouAuthClient CLIENT = new PinvouAuthClient();
+    private static final PinvouAuthClient DEFAULT_CLIENT = new PinvouAuthClient();
+    private final PinvouAuthClient client;
+
+    public PinvouBrowserAuthenticator() { this(DEFAULT_CLIENT); }
+    PinvouBrowserAuthenticator(PinvouAuthClient client) { this.client = client; }
 
     @Override
     public void authenticate(AuthenticationFlowContext context) {
@@ -97,10 +103,10 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
                     render(context, mode, passwordMessage);
                     return;
                 }
-                Map<String, Object> reference = CLIENT.precheckPassword(password);
+                Map<String, Object> reference = client.precheckPassword(password, source(context), device);
                 String handle = PinvouAuthClient.string(reference.get("password_handle"));
                 String policy = PinvouAuthClient.string(reference.get("password_policy_version"));
-                CLIENT.precheckRegistration(username, mobile, handle, policy);
+                client.precheckRegistration(username, mobile, handle, policy, source(context), device);
                 put(context, "password_handle", handle);
                 put(context, "password_policy", policy);
             }
@@ -111,11 +117,11 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
                 render(context, mode, "pinvouPasswordInvalid");
                 return;
             }
-            Map<String, Object> reference = CLIENT.precheckPassword(password);
+            Map<String, Object> reference = client.precheckPassword(password, source(context), device);
             put(context, "password_handle", PinvouAuthClient.string(reference.get("password_handle")));
             put(context, "password_policy", PinvouAuthClient.string(reference.get("password_policy_version")));
         }
-        Map<String, Object> captcha = CLIENT.createCaptcha(mobile, purpose(mode));
+        Map<String, Object> captcha = client.createCaptcha(mobile, purpose(mode), source(context), device);
         put(context, "captcha_id", PinvouAuthClient.string(captcha.get("captcha_id")));
         put(context, "captcha_background", PinvouAuthClient.string(captcha.get("background_image")));
         put(context, "captcha_piece", PinvouAuthClient.string(captcha.get("piece_image")));
@@ -147,7 +153,7 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         request.put("purpose", purpose(mode));
         request.put("captcha_id", captchaID);
         request.put("captcha_offset", offset);
-        Map<String, Object> response = CLIENT.sendSMS(request, source(context), get(context, "device"));
+        Map<String, Object> response = client.sendSMS(request, source(context), get(context, "device"));
         put(context, "sms_challenge", PinvouAuthClient.string(response.get("challenge_id")));
         put(context, "sms_sent", "true");
         put(context, "retry_after", PinvouAuthClient.string(response.getOrDefault("retry_after_seconds", "60")));
@@ -172,6 +178,7 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             render(context, mode, "pinvouCodeInvalid");
             return;
         }
+        clearFailedPasswordAttribution(context);
         if ("register".equals(mode)) {
             Map<String, Object> request = new LinkedHashMap<>();
             request.put("username", get(context, "username"));
@@ -182,12 +189,12 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             request.put("password_policy_version", get(context, "password_policy"));
             request.put("registration_operation_id", get(context, "registration_operation"));
             request.put("registration_query_token", get(context, "registration_token"));
-            Map<String, Object> result = CLIENT.register(request, source(context), get(context, "device"));
+            Map<String, Object> result = client.register(request, source(context), get(context, "device"));
             String operationID = get(context, "registration_operation");
             UserModel user = findRegistrationUser(context, operationID);
             PinvouAuthClient.LoginAuthorization authorization = user == null
                 ? new PinvouAuthClient.LoginAuthorization(false, "")
-                : CLIENT.authorizeLogin(user.getId());
+                : client.authorizeLogin(user.getId());
             if (!RegistrationLoginPolicy.allows(
                 PinvouAuthClient.string(result.get("status")),
                 operationID,
@@ -212,12 +219,12 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             request.put("code", code);
             request.put("password_handle", get(context, "password_handle"));
             request.put("password_policy_version", get(context, "password_policy"));
-            CLIENT.resetPassword(request, source(context), get(context, "device"));
+            client.resetPassword(request, source(context), get(context, "device"));
             clearState(context);
             render(context, "password", "pinvouPasswordResetSuccess");
             return;
         }
-        String subject = CLIENT.verifySMS(mobile, challenge, code, source(context), get(context, "device"));
+        String subject = client.verifySMS(mobile, challenge, code, source(context), get(context, "device"));
         UserModel user = context.getSession().users().getUserById(context.getRealm(), subject);
         if (user == null || !user.isEnabled()) {
             credentialFailure(context, mode);
@@ -228,20 +235,38 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
 
     private void authenticatePassword(AuthenticationFlowContext context, MultivaluedMap<String, String> form)
         throws PinvouAuthClient.AuthClientException {
+        // Only a fresh password attempt replaces prior credential attribution.
+        context.clearUser();
+        context.getAuthenticationSession().removeAuthNote("ATTEMPTED_USERNAME");
+        context.getAuthenticationSession().removeAuthNote(FAILED_PASSWORD_USER_NOTE);
         String login = trim(form.getFirst("username"));
         String password = form.getFirst("password");
         UserModel user = findUser(context, login);
         if (user == null) AuthenticatorUtils.dummyHash(context);
+        AtomicBoolean incorrectPassword = new AtomicBoolean();
         boolean allowed = PasswordLoginGate.allows(
             password,
             user != null,
-            candidate -> user != null && user.credentialManager().isValid(UserCredentialModel.password(candidate)),
+            candidate -> {
+                boolean valid = user.credentialManager().isValid(UserCredentialModel.password(candidate));
+                incorrectPassword.set(!valid);
+                return valid;
+            },
             () -> user.isEnabled(),
             () -> AuthenticatorUtils.getDisabledByBruteForceEventError(context, user) != null,
-            () -> CLIENT.authorizeLogin(user.getId())
+            () -> client.authorizeLogin(user.getId())
         );
         if (!allowed) {
-            credentialFailure(context, "password");
+            boolean countPasswordFailure = incorrectPassword.get() && user.isEnabled()
+                && AuthenticatorUtils.getDisabledByBruteForceEventError(context, user) == null;
+            if (countPasswordFailure) {
+                // Keycloak's flow logs failures from the authentication session,
+                // not the event user alone. Never bind denied or unknown users.
+                context.setUser(user);
+                context.getEvent().user(user);
+                context.getAuthenticationSession().setAuthNote(FAILED_PASSWORD_USER_NOTE, user.getId());
+            }
+            credentialFailure(context, "password", countPasswordFailure);
             return;
         }
         complete(context, user);
@@ -273,7 +298,7 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
     }
 
     private void succeed(AuthenticationFlowContext context, UserModel user) throws PinvouAuthClient.AuthClientException {
-        if (!CLIENT.authorizeLogin(user.getId()).allowed()) {
+        if (!client.authorizeLogin(user.getId()).allowed()) {
             clearState(context);
             credentialFailure(context, "password");
             return;
@@ -289,9 +314,24 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
     }
 
     private void credentialFailure(AuthenticationFlowContext context, String mode) {
+        credentialFailure(context, mode, false);
+    }
+
+    private static void clearFailedPasswordAttribution(AuthenticationFlowContext context) {
+        String failedUser = context.getAuthenticationSession().getAuthNote(FAILED_PASSWORD_USER_NOTE);
+        UserModel current = context.getUser();
+        if (failedUser != null && current != null && failedUser.equals(current.getId())) {
+            context.clearUser();
+            context.getAuthenticationSession().removeAuthNote("ATTEMPTED_USERNAME");
+        }
+        context.getAuthenticationSession().removeAuthNote(FAILED_PASSWORD_USER_NOTE);
+    }
+
+    private void credentialFailure(AuthenticationFlowContext context, String mode, boolean countPasswordFailure) {
         context.getEvent().error(Errors.INVALID_USER_CREDENTIALS);
         Response response = form(context, mode, "pinvouInvalidCredentials").createForm(TEMPLATE);
-        context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, response);
+        if (countPasswordFailure) context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, response);
+        else context.challenge(response);
     }
 
     private void render(AuthenticationFlowContext context, String mode, String message) {

@@ -21,7 +21,7 @@ pub mod dependencies;
 pub mod feedback;
 pub mod files;
 pub mod knowledge;
-pub mod llmapi_hub;
+// Legacy source is retained for migration history; no runtime/invoke consumer remains.
 pub mod marketplace;
 pub mod memory;
 pub(crate) mod model_store;

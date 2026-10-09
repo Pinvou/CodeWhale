@@ -91,12 +91,15 @@ func Require(commandType string, expected Mode) gin.HandlerFunc {
 func buildPolicies() map[string]Policy {
 	result := make(map[string]Policy)
 	for commandType, permission := range map[string]string{
+		"TOKEN_ORGANIZATION_LIFECYCLE_APPLY":            "internal.token.organization.lifecycle",
+		"TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY":       "internal.token.organization-unit.lifecycle",
 		"BILLING_ORGANIZATION_LIFECYCLE_APPLY":          "internal.billing.organization.lifecycle",
 		"BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY":   "internal.billing.organization-member.lifecycle",
 		"BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY":     "internal.billing.organization-unit.lifecycle",
 		"ACCOUNT_MEMBER_ADD":                            "platform.organizations.members.manage",
 		"ACCOUNT_MEMBER_REMOVE":                         "platform.organizations.members.manage",
 		"ACCOUNT_MEMBER_ROLES_REPLACE":                  "platform.organizations.members.manage",
+		"ACCOUNT_MEMBER_UNITS_REPLACE":                  "platform.organizations.members.manage",
 		"ACCOUNT_ORGANIZATION_CREATE":                   "platform.organizations.create",
 		"ACCOUNT_ORGANIZATION_DELETE":                   "platform.organizations.delete",
 		"ACCOUNT_ORGANIZATION_RENAME":                   "platform.organizations.profile.manage",
