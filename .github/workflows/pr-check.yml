@@ -798,7 +798,7 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_PASSWORD: team_relay_ci_only
           POSTGRES_DB: team_relay_ci_test
@@ -869,13 +869,14 @@ jobs:
         if: ${{ matrix.node-version == '20' }}
         env:
           PINVOU_UPDATE_ADMIN_TOKEN: ci-only-token-that-is-at-least-32-characters
+          PINVOU_UPDATE_NODE_IMAGE: mirror.gcr.io/library/node@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
         run: |
-          docker build --file update-release-console/Dockerfile update-release-console
+          docker build --build-arg NODE_IMAGE="$PINVOU_UPDATE_NODE_IMAGE" --file update-release-console/Dockerfile update-release-console
           docker compose --file update-release-console/deploy/compose.yaml config --quiet
           docker run --rm \
             -v "$PWD/update-release-console/deploy/nginx-test.conf:/etc/nginx/nginx.conf:ro" \
             -v "$PWD/update-release-console/deploy/nginx-location.conf:/etc/nginx/pinvou3-release-location.conf:ro" \
-            nginx:1.27-alpine nginx -t
+            mirror.gcr.io/library/nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 nginx -t
           sudo mkdir -p /var/www/pinvou3
           printf '%s\n' '{"platforms":{"linux-x86_64":{"version":"0.10.4"},"macos-universal":{"version":"0.10.4"}}}' \
             | sudo tee /var/www/pinvou3/latest.json >/dev/null
@@ -900,6 +901,7 @@ jobs:
         if: ${{ always() && matrix.node-version == '20' }}
         env:
           PINVOU_UPDATE_ADMIN_TOKEN: ci-only-token-that-is-at-least-32-characters
+          PINVOU_UPDATE_NODE_IMAGE: mirror.gcr.io/library/node@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
         run: docker compose --file update-release-console/deploy/compose.yaml down --volumes --remove-orphans
 
   release-contract-test:

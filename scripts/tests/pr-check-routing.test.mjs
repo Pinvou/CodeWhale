@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -87,6 +87,39 @@ function jobBlock(name) {
 
 const bash = process.platform === "win32" && existsSync("C:/Program Files/Git/bin/bash.exe")
   ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+
+test("container CI uses immutable official cache images without losing either build or runtime gates", () => {
+  const relay = jobBlock("team-relay-hub-test");
+  assert.match(relay, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
+  assert.match(relay, /--health-cmd "pg_isready/);
+  const consoleJob = jobBlock("update-release-console-test");
+  const selected = consoleJob.match(/PINVOU_UPDATE_NODE_IMAGE: (mirror\.gcr\.io\/library\/node@sha256:[a-f0-9]{64})/)[1];
+  const step = consoleJob.split("- name: 发布台容器与 Compose 配置校验")[1].split("- name: 清理发布台容器")[0];
+  assert.match(step, /if: \$\{\{ matrix\.node-version == '20' \}\}/);
+  const run = step.split(/run: \|\r?\n/)[1].split(/\r?\n/).map(line => line.replace(/^ {10}/, "")).join("\n");
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-container-routing-"));
+  try {
+    const log = join(directory, "calls");
+    const prefix = 'docker() { printf "%s|%s\\n" "$PINVOU_UPDATE_NODE_IMAGE" "$*" >> "$LOG"; }; sudo() { return 0; }; curl() { return 0; };\n';
+    const result = spawnSync(bash, ["-e", "-c", prefix + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...process.env, LOG: log, PINVOU_UPDATE_NODE_IMAGE: selected } });
+    assert.equal(result.status, 0, result.stderr);
+    const calls = readFileSync(log, "utf8").trim().split("\n");
+    assert.ok(calls.some(line => line.includes(`build --build-arg NODE_IMAGE=${selected} --file`)), "direct build must receive the selected base");
+    assert.ok(calls.some(line => line.startsWith(selected + "|compose ") && line.includes("up --detach --build")), "Compose rebuild must inherit the same selection");
+    assert.ok(calls.some(line => /mirror\.gcr\.io\/library\/nginx@sha256:[a-f0-9]{64} nginx -t/.test(line)));
+    assert.match(run, /for attempt in \{1\.\.30\}/);
+    assert.match(run, /exit 1/);
+    assert.match(run, /release-console\/healthz/);
+    assert.match(run, /Authorization: Bearer \$PINVOU_UPDATE_ADMIN_TOKEN/);
+    assert.match(consoleJob, /always\(\)[\s\S]*down --volumes --remove-orphans/);
+    assert.doesNotMatch(step, /continue-on-error|\|\| true/);
+    const rejected = spawnSync(bash, ["-e", "-c", 'docker() { return 7; }; sudo() { return 0; }; curl() { return 0; };\n' + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...process.env, PINVOU_UPDATE_NODE_IMAGE: selected } });
+    assert.equal(rejected.status, 7, "image build failure must fail the gate before later checks");
+  } finally {
+    assert.ok(directory.startsWith(join(tmpdir(), "pinvou-container-routing-")));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
   const paths = filterPaths(workflow, "account_platform");

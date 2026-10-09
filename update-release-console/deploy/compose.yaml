@@ -5,6 +5,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        NODE_IMAGE: ${PINVOU_UPDATE_NODE_IMAGE:-node:20-bookworm-slim}
     restart: unless-stopped
     environment:
       PINVOU_UPDATE_ADMIN_TOKEN: ${PINVOU_UPDATE_ADMIN_TOKEN:?set PINVOU_UPDATE_ADMIN_TOKEN}
