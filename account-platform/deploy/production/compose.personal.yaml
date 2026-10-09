@@ -76,7 +76,7 @@ services:
     <<: *runtime
     image: ${ACCOUNT_SERVICE_IMAGE:?set same-source F01 Account image}
     env_file:
-      - {path: "${ACCOUNT_SERVICE_PRIVATE_ENV_FILE:?set private Account HMAC SMS DSN and workload rules file}", required: true, format: raw}
+      - {path: "${ACCOUNT_SERVICE_PRIVATE_ENV_FILE:?set private Account HMAC SMS owner-cursor DSN and workload rules file}", required: true, format: raw}
     environment:
       <<: *http
       MOBILE_AUTH_ENABLED: "true"

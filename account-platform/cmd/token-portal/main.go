@@ -63,19 +63,20 @@ func loadPortalConfig(environment string, getenv func(string) string) (portal.Co
 		}
 		*item.target = parsed
 	}
-	if raw := strings.TrimSpace(getenv("PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED")); raw != "" {
-		enabled, err := strconv.ParseBool(raw)
-		if err != nil {
-			return portal.Config{}, errors.New("PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED must be boolean")
+	for _, flag := range []struct {
+		name   string
+		target *bool
+	}{
+		{"PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED", &cfg.AdminModelOperationsOverviewEnabled},
+		{"PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED", &cfg.AdminModelTokenPageOverviewsEnabled},
+	} {
+		if raw := strings.TrimSpace(getenv(flag.name)); raw != "" {
+			enabled, err := strconv.ParseBool(raw)
+			if err != nil {
+				return portal.Config{}, errors.New(flag.name + " must be boolean")
+			}
+			*flag.target = enabled
 		}
-		cfg.AdminModelOperationsOverviewEnabled = enabled
-	}
-	if raw := strings.TrimSpace(getenv("PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED")); raw != "" {
-		enabled, err := strconv.ParseBool(raw)
-		if err != nil {
-			return portal.Config{}, errors.New("PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED must be boolean")
-		}
-		cfg.AdminModelTokenPageOverviewsEnabled = enabled
 	}
 	if raw := strings.TrimSpace(getenv("TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64")); raw != "" {
 		key, err := base64.StdEncoding.DecodeString(raw)

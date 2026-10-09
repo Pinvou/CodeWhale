@@ -51,6 +51,8 @@ func TestF05OverviewProxyExactReadAuthority(t *testing.T) {
 		status            int
 	}{
 		{"aggregate", "/admin/v1/operations-overview", "window=7d", 200},
+		{"usage-list", "/admin/v1/usage-requests", "status=SUCCEEDED", 200},
+		{"reconciliation-list", "/admin/v1/reconciliation-cases", "status=OPEN", 200},
 		{"token-only", "/admin/v1/overviews/model-operations", "", 200},
 		{"usage-only", "/admin/v1/overviews/model-operations", "window=24h", 200},
 		{"both", "/admin/v1/overviews/model-operations", "window=30d", 200},
@@ -102,7 +104,7 @@ func TestF05OverviewProxyExactReadAuthority(t *testing.T) {
 }
 
 func TestF05OverviewWhitelistRemainsReadOnlyAndClosed(t *testing.T) {
-	for _, tc := range []struct{ method, path string }{{"POST", "/admin/v1/operations-overview"}, {"PUT", "/admin/v1/overviews/model-operations"}, {"GET", "/admin/v1/overviews/future"}, {"GET", "/admin/v1/overviews/model-operations/extra"}, {"GET", "/v1/chat/completions"}} {
+	for _, tc := range []struct{ method, path string }{{"POST", "/admin/v1/operations-overview"}, {"PUT", "/admin/v1/operations-overview"}, {"GET", "/admin/v1/operations-overview/extra"}, {"POST", "/admin/v1/usage-requests"}, {"PUT", "/admin/v1/usage-requests"}, {"POST", "/admin/v1/reconciliation-cases"}, {"PUT", "/admin/v1/reconciliation-cases"}, {"PUT", "/admin/v1/overviews/model-operations"}, {"GET", "/admin/v1/overviews/future"}, {"GET", "/admin/v1/overviews/model-operations/extra"}, {"GET", "/v1/chat/completions"}} {
 		if tokenAdminPathAllowed(tc.method, tc.path) {
 			t.Fatalf("uninstalled %s %s", tc.method, tc.path)
 		}

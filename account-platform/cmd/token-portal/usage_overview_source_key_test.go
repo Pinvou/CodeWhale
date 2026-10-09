@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestRetainedF04OverviewProxyKeyConfig(t *testing.T) {
+func TestF05UsageOverviewProxyKeyConfig(t *testing.T) {
 	env := map[string]string{"PORTAL_PUBLIC_URL": "https://portal.example", "PORTAL_OIDC_ISSUER": "https://identity.example/realm", "PORTAL_OIDC_JWKS_URL": "https://identity.example/keys", "PORTAL_OIDC_AUTHORIZATION_URL": "https://identity.example/auth", "PORTAL_OIDC_TOKEN_URL": "https://identity.example/token", "PORTAL_OIDC_CLIENT_ID": "portal", "ACCOUNT_HTTP_URL": "http://account.example", "TOKEN_GATEWAY_HTTP_URL": "http://token.example", "BILLING_HTTP_URL": "http://billing.example"}
 	for _, tc := range []struct {
 		name, key, flag string

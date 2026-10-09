@@ -16,7 +16,7 @@
 
 | 进程 | 私有文件中必需的实际输入 |
 | --- | --- |
-| Account | `DATABASE_URL`（TLS verify-full）、`WORKLOAD_IDENTITY_RULES_JSON`、`REGISTRATION_QUERY_HMAC_KEY_BASE64`、`SMS_VERIFICATION_HMAC_KEY_BASE64`、`SMS_PROVIDER` 及对应 Aliyun/HTTP provider 的真实凭证和四种用途模板；钱包策略版本与 1–1440 分钟 SLA 可沿既有默认。 |
+| Account | `DATABASE_URL`（TLS verify-full）、`WORKLOAD_IDENTITY_RULES_JSON`、`REGISTRATION_QUERY_HMAC_KEY_BASE64`、`SMS_VERIFICATION_HMAC_KEY_BASE64`、`SMS_PROVIDER` 及对应 Aliyun/HTTP provider 的真实凭证和四种用途模板；F04 起还须提供独立的 `OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64`（标准 Base64，解码后恰好 32 字节）；钱包策略版本与 1–1440 分钟 SLA 可沿既有默认。 |
 | Identity | `IDENTITY_PASSWORD_HMAC_KEY_BASE64`、`AUTH_RISK_REDIS_URL`（identity ACL 用户、TLS）、`AUTH_RISK_HMAC_KEY_BASE64`、`WORKLOAD_IDENTITY_RULES_JSON`；挂载 Keycloak provisioner client-secret。没有风险 Redis 就无法提供必需的 OIDC token proxy，不可当作可运行装配。 |
 | Billing | `DATABASE_URL`（TLS verify-full）、仅本阶段钱包权限的 `WORKLOAD_IDENTITY_RULES_JSON`。 |
 | Token | 出站 workload token；只有个人余额 facade，无数据库、模型路由或 readiness GO。 |

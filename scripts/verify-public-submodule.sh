@@ -8,8 +8,8 @@ PINVOU_CODEWHALE_BRANCH="pinvou3-clean"
 PINVOU_CODEWHALE_TAG="pinvou-v0.9.12-r3"
 # 过渡期豁免（fork-policy.md 第 0 节）：两次 rN 收口之间，父仓 gitlink 可沿受保护
 # 维护分支领先不可变 tag 前进。TRANSITION_BASELINE 非空即启用过渡期断言：
-# tag 必须钉在其收口 commit；默认发布校验要求 gitlink 等于维护头且领先 tag。
-# CI 显式冻结审核模式另证明登记 pin 的公开维护祖先关系，不自动升级运行时。
+# 默认发布检查要求 gitlink 等于公开维护分支头；CI 显式登记快照模式允许
+# 维护分支前进，但必须证明固定 tag → 精确登记 pin → 公开维护头的祖先链。
 # rN 收口时：把 TAG 更新为新 tag、删除 TRANSITION_BASELINE，恢复三方相等断言。
 TRANSITION_BASELINE="61cb769be5b33abc64f64da4272f5b39a8b6c1fd"
 # 2026-10-02 entered the transition window: the registered head advanced with
@@ -19,11 +19,16 @@ TRANSITION_BASELINE="61cb769be5b33abc64f64da4272f5b39a8b6c1fd"
 MAX_ATTEMPTS=3
 registered_snapshot=false
 
-public_git() {
-  env -u GIT_CONFIG_PARAMETERS -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
-    -u GIT_ASKPASS -u SSH_ASKPASS -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
-    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-    GIT_CONFIG_COUNT=0 GIT_TERMINAL_PROMPT=0 \
+# Never let ambient credentials, URL rewrites or repository objects stand in
+# for anonymously available public history. Remote commands use a fresh bare
+# repository, including ls-remote (which otherwise reads the caller's config).
+clean_git() {
+  env -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG -u GIT_DIR -u GIT_WORK_TREE \
+    -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_ASKPASS -u SSH_ASKPASS -u GIT_SSL_NO_VERIFY \
+    -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    -u GIT_SHALLOW_FILE -u GIT_NAMESPACE -u GIT_REPLACE_REF_BASE \
+    -u GIT_TEMPLATE_DIR GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 GIT_TERMINAL_PROMPT=0 \
     git -c credential.helper= -c core.askPass= -c http.extraHeader= "$@"
 }
 
@@ -34,8 +39,8 @@ elif [[ $# -ne 0 ]]; then
   exit 2
 fi
 
-actual_path="$(git -C "$REPO" config -f .gitmodules --get submodule.CodeWhale.path)"
-actual_url="$(git -C "$REPO" config -f .gitmodules --get submodule.CodeWhale.url)"
+actual_path="$(clean_git -C "$REPO" config -f .gitmodules --get submodule.CodeWhale.path)"
+actual_url="$(clean_git -C "$REPO" config -f .gitmodules --get submodule.CodeWhale.url)"
 
 if [[ "$actual_path" != "$PINVOU_CODEWHALE_PATH" ]]; then
   echo "错误：CodeWhale submodule path 应为 ${PINVOU_CODEWHALE_PATH}，实际为 $actual_path" >&2
@@ -47,13 +52,13 @@ if [[ "$actual_url" != "$PINVOU_CODEWHALE_URL" ]]; then
   exit 1
 fi
 
-if git -C "$REPO" config -f .gitmodules --get submodule.CodeWhale.branch >/dev/null; then
+if clean_git -C "$REPO" config -f .gitmodules --get submodule.CodeWhale.branch >/dev/null; then
   echo "错误：.gitmodules 不得配置浮动的 submodule.CodeWhale.branch" >&2
   exit 1
 fi
 
 gitlink="$(
-  git -C "$REPO" ls-files --stage -- "$PINVOU_CODEWHALE_PATH" |
+  clean_git -C "$REPO" ls-files --stage -- "$PINVOU_CODEWHALE_PATH" |
     awk '$1 == "160000" { print $2 }'
 )"
 
@@ -61,6 +66,17 @@ if [[ ! "$gitlink" =~ ^[0-9a-f]{40}$ ]]; then
   echo "错误：无法从索引读取唯一的 CodeWhale gitlink commit" >&2
   exit 1
 fi
+
+scratch_root="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+temporary_repository="$(mktemp -d "$scratch_root/pinvou-codewhale-check.XXXXXX")"
+temporary_repository="$(cd "$temporary_repository" && pwd -P)"
+if [[ "$temporary_repository" != "$scratch_root"/pinvou-codewhale-check.* ]]; then
+  echo "错误：公开提交校验临时目录越界" >&2
+  exit 1
+fi
+trap 'rm -rf -- "$temporary_repository"' EXIT
+clean_git init --bare --template= "$temporary_repository" >/dev/null 2>&1
+public_git() { clean_git -C "$temporary_repository" "$@"; }
 
 remote_refs=""
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
@@ -109,28 +125,14 @@ if [[ -n "$TRANSITION_BASELINE" ]]; then
     exit 1
   fi
   if [[ "$registered_snapshot" == true ]]; then
-    # CI verifies the reviewed pin, not a floating runtime upgrade. Release
-    # verification without this flag retains the existing exact-head rule.
     registered_pin="$(sed -n 's/^EXPECTED_HEAD="\([0-9a-f]\{40\}\)"$/\1/p' "$REPO/scripts/fork-guard.sh")"
     if [[ ! "$registered_pin" =~ ^[0-9a-f]{40}$ || "$registered_pin" != "$gitlink" || ! "$branch_target" =~ ^[0-9a-f]{40}$ ]]; then
       echo "错误：冻结审核 gitlink 必须精确匹配登记 pin，且公开维护分支必须存在" >&2
       exit 1
     fi
-    scratch_root="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
-    temporary_repository="$(mktemp -d "$scratch_root/pinvou-codewhale-check.XXXXXX")"
-    temporary_repository="$(cd "$temporary_repository" && pwd -P)"
-    if [[ "$temporary_repository" != "$scratch_root"/pinvou-codewhale-check.* ]]; then
-      echo "错误：公开提交校验临时目录越界" >&2
-      exit 1
-    fi
-    trap 'rm -rf -- "$temporary_repository"' EXIT
-    # No caller credentials, global URL rewrites, or ambient repository objects
-    # can make a private/unpublished commit pass this public-history check.
-    public_git init --bare "$temporary_repository" >/dev/null 2>&1
     fetched=false
     for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-      if public_git -C "$temporary_repository" fetch --quiet --filter=tree:0 --no-tags \
-          "$PINVOU_CODEWHALE_URL" \
+      if public_git fetch --quiet --filter=tree:0 --no-tags "$PINVOU_CODEWHALE_URL" \
           "+refs/heads/${PINVOU_CODEWHALE_BRANCH}:refs/heads/maintenance" \
           "+refs/tags/${PINVOU_CODEWHALE_TAG}:refs/tags/baseline" "$gitlink"; then
         fetched=true
@@ -139,10 +141,10 @@ if [[ -n "$TRANSITION_BASELINE" ]]; then
       sleep "$attempt"
     done
     if [[ "$fetched" != true ]] || \
-        [[ "$(public_git -C "$temporary_repository" rev-parse 'refs/tags/baseline^{commit}' 2>/dev/null)" != "$TRANSITION_BASELINE" ]] || \
-        [[ "$(public_git -C "$temporary_repository" cat-file -t "$gitlink" 2>/dev/null)" != commit ]] || \
-        ! public_git -C "$temporary_repository" merge-base --is-ancestor "$TRANSITION_BASELINE" "$gitlink" || \
-        ! public_git -C "$temporary_repository" merge-base --is-ancestor "$gitlink" refs/heads/maintenance; then
+        [[ "$(public_git rev-parse 'refs/tags/baseline^{commit}' 2>/dev/null)" != "$TRANSITION_BASELINE" ]] || \
+        [[ "$(public_git cat-file -t "$gitlink" 2>/dev/null)" != commit ]] || \
+        ! public_git merge-base --is-ancestor "$TRANSITION_BASELINE" "$gitlink" || \
+        ! public_git merge-base --is-ancestor "$gitlink" refs/heads/maintenance; then
       echo "错误：冻结审核 pin 无法证明公开可达、固定标签历史及维护分支包含关系" >&2
       exit 1
     fi

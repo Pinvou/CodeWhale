@@ -19,6 +19,7 @@ type reconciliationAuditRequest struct {
 	Transaction string   `json:"transaction_id"`
 	Source      string   `json:"source_id"`
 	References  []string `json:"journal_refs"`
+	IsForced    bool     `json:"is_forced"`
 }
 type reconciliationAuditRecord map[string]json.RawMessage
 
@@ -66,6 +67,7 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
 			case f.EntryType == "CHARGEBACK":
 				request.References = []string{"payment-transaction:" + request.Transaction + ":chargeback:" + auditString(source, "provider_chargeback_id")}
 			case auditString(source, "provider_refund_id") != "":
+				request.IsForced = true
 				request.References = []string{"forced-refund:" + request.Source}
 			default:
 				request.References = []string{"refund:" + request.Source}
@@ -89,8 +91,17 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
  'postings',COALESCE((SELECT jsonb_agg(to_jsonb(post)||jsonb_build_object('account',to_jsonb(a))) FROM ledger_postings post JOIN journal_entries j ON j.id=post.journal_entry_id LEFT JOIN ledger_accounts a ON a.id=post.ledger_account_id WHERE j.business_reference=ANY(input.journal_refs)),'[]'),
  'allocations',COALESCE((SELECT jsonb_agg(to_jsonb(a)||jsonb_build_object('receivable_wallet_id',r.wallet_id)) FROM receivable_allocations a JOIN receivables r ON r.id=a.receivable_id JOIN journal_entries j ON j.id=a.journal_entry_id WHERE j.business_reference=ANY(input.journal_refs)),'[]'),
  'receivables',COALESCE((SELECT jsonb_agg(to_jsonb(r)) FROM receivables r WHERE r.source_reference=ANY(input.journal_refs)),'[]'),
- 'reservations',COALESCE((SELECT jsonb_agg(to_jsonb(r)) FROM refund_component_reservations r WHERE r.refund_id=NULLIF(input.source_id,'')::uuid),'[]'))
- FROM jsonb_to_recordset($1::jsonb) AS input(index int,order_id text,transaction_id text,source_id text,journal_refs text[])`, raw)
+ 'reservations',COALESCE((SELECT jsonb_agg(to_jsonb(r)) FROM refund_component_reservations r WHERE r.refund_id=NULLIF(input.source_id,'')::uuid),'[]'),
+ 'forced_history',COALESCE((SELECT jsonb_agg(jsonb_build_object(
+  'source',to_jsonb(s),
+  'dismissed',EXISTS(SELECT 1 FROM payment_anomaly_cases anomaly JOIN payment_anomaly_commands command ON command.payment_anomaly_case_id=anomaly.id AND command.action='DISMISS' WHERE anomaly.id=s.manual_review_case_id AND anomaly.forced_refund_case_id=s.id AND anomaly.status='RESOLVED' AND anomaly.resolution_code='DISMISS' AND anomaly.financial_action_status='NONE'),
+  'journals',COALESCE((SELECT jsonb_agg(to_jsonb(j)) FROM journal_entries j WHERE j.business_reference='forced-refund:'||s.id::text),'[]'),
+  'postings',COALESCE((SELECT jsonb_agg(to_jsonb(post)||jsonb_build_object('account',to_jsonb(a))) FROM ledger_postings post JOIN journal_entries j ON j.id=post.journal_entry_id LEFT JOIN ledger_accounts a ON a.id=post.ledger_account_id WHERE j.business_reference='forced-refund:'||s.id::text),'[]'),
+  'receivables',COALESCE((SELECT jsonb_agg(to_jsonb(r)) FROM receivables r WHERE r.source_reference='forced-refund:'||s.id::text),'[]')))
+ FROM forced_refund_cases s WHERE input.is_forced AND s.payment_transaction_id=input.transaction_id::uuid),'[]'),
+ 'forced_mixed',input.is_forced AND (EXISTS(SELECT 1 FROM refunds r WHERE r.payment_transaction_id=input.transaction_id::uuid AND (r.status='SUCCEEDED' OR EXISTS(SELECT 1 FROM journal_entries j WHERE j.entry_type='REFUND' AND j.business_reference='refund:'||r.id::text)))
+ OR EXISTS(SELECT 1 FROM chargeback_cases c WHERE c.payment_transaction_id=input.transaction_id::uuid AND (c.status='CONFIRMED' OR EXISTS(SELECT 1 FROM journal_entries j WHERE j.entry_type='CHARGEBACK' AND j.business_reference='payment-transaction:'||input.transaction_id||':chargeback:'||c.provider_chargeback_id)))))
+ FROM jsonb_to_recordset($1::jsonb) AS input(index int,order_id text,transaction_id text,source_id text,journal_refs text[],is_forced bool)`, raw)
 	if err != nil {
 		return fmt.Errorf("query reconciliation integrity: %w", err)
 	}
@@ -124,6 +135,10 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
 }
 
 func auditReconciliationFact(f *ReconciliationInternalFact, request reconciliationAuditRequest, payload reconciliationAuditRecord) {
+	auditReconciliationFactWithForcedGroup(f, request, payload, true)
+}
+
+func auditReconciliationFactWithForcedGroup(f *ReconciliationInternalFact, request reconciliationAuditRequest, payload reconciliationAuditRecord, verifyGroup bool) {
 	if f.EntryType != "PAYMENT" {
 		payload["source"] = f.RefundSnapshot
 	}
@@ -342,6 +357,18 @@ func auditReconciliationFact(f *ReconciliationInternalFact, request reconciliati
 				}
 				targetBase.SetInt64(baseAmount)
 				targetBonus.SetInt64(bonusAmount)
+				if verifyGroup && !auditForcedRefundGroup(request, payload, originalBase, originalBonus, transactionAmount) {
+					return
+				}
+				// Receipts have no durable cross-process execution ordinal. Validate
+				// the group's exact cumulative target, then each receipt's possible
+				// floor/ceiling increment; never infer ordering from wall clocks.
+				lower := new(big.Int).Quo(new(big.Int).Mul(originalBase, amount), transactionAmount)
+				actualBase := new(big.Int).Add(base, receivableExpected)
+				if actualBase.Cmp(lower) < 0 || actualBase.Cmp(targetBase) > 0 {
+					return
+				}
+				targetBase.Set(actualBase)
 			}
 			// BASE shortfall is an actual receivable; consumed BONUS is never debt.
 			if base.Sign() < 0 || bonus.Sign() < 0 || new(big.Int).Add(base, receivableExpected).Cmp(targetBase) != 0 || bonus.Cmp(targetBonus) > 0 {
@@ -440,6 +467,101 @@ func auditReconciliationFact(f *ReconciliationInternalFact, request reconciliati
 	f.IntegrityCaseType = ""
 }
 
+// This proves cumulative disposition and receipt accounting, not historical
+// execution order. Application timestamps and UUIDs are not a cross-process
+// ordinal. Unknown legacy allocations remain incidents, never new fund actions.
+func auditForcedRefundGroup(request reconciliationAuditRequest, payload reconciliationAuditRecord, originalBase, originalBonus, transactionAmount *big.Int) bool {
+	var mixed bool
+	if json.Unmarshal(payload["forced_mixed"], &mixed) != nil || mixed {
+		return false
+	}
+	cash, base, bonus := new(big.Int), new(big.Int), new(big.Int)
+	seen := map[string]bool{}
+	found := false
+	for _, history := range auditRecords(payload["forced_history"]) {
+		var source reconciliationAuditRecord
+		if json.Unmarshal(history["source"], &source) != nil {
+			return false
+		}
+		id := auditString(source, "id")
+		if id == "" || seen[id] || auditString(source, "payment_order_id") != request.Order || auditString(source, "payment_transaction_id") != request.Transaction {
+			return false
+		}
+		seen[id] = true
+		version := auditInteger(source, "version")
+		if version == nil || version.Sign() <= 0 {
+			return false
+		}
+		journals := auditRecords(history["journals"])
+		if len(journals) == 0 {
+			if len(auditRecords(history["receivables"])) != 0 || len(auditRecords(history["postings"])) != 0 {
+				return false
+			}
+			var dismissed bool
+			_ = json.Unmarshal(history["dismissed"], &dismissed)
+			if auditString(source, "receivable_id") != "" || !bytesEqualJSONInteger(source["revoked_base_microcredits"], json.RawMessage(`0`)) || !bytesEqualJSONInteger(source["revoked_bonus_microcredits"], json.RawMessage(`0`)) {
+				return false
+			}
+			if !(version.Cmp(big.NewInt(1)) == 0 && auditString(source, "status") == "REVIEW_REQUIRED") && !(auditString(source, "status") == "RESOLVED" && auditString(source, "resolution_code") == "DISMISS" && dismissed) {
+				return false
+			}
+			continue
+		}
+		if version.Cmp(big.NewInt(1)) <= 0 || !(auditString(source, "status") == "REVIEW_REQUIRED" || auditString(source, "status") == "RESOLVED" && auditString(source, "resolution_code") == "CONFIRM_FORCED_REFUND") {
+			return false
+		}
+		peerPayload := reconciliationAuditRecord{}
+		for key, value := range payload {
+			if key != "forced_history" {
+				peerPayload[key] = value
+			}
+		}
+		for _, key := range []string{"journals", "postings", "receivables"} {
+			peerPayload[key] = history[key]
+		}
+		peerRequest := request
+		peerRequest.Source, peerRequest.References = id, []string{"forced-refund:" + id}
+		peer := ReconciliationInternalFact{EntryType: "REFUND", RefundSnapshot: history["source"]}
+		auditReconciliationFactWithForcedGroup(&peer, peerRequest, peerPayload, false)
+		if !peer.LedgerValid {
+			return false
+		}
+		amount, revokedBase, revokedBonus := auditInteger(source, "amount_fen"), auditInteger(source, "revoked_base_microcredits"), auditInteger(source, "revoked_bonus_microcredits")
+		if amount == nil || revokedBase == nil || revokedBonus == nil {
+			return false
+		}
+		cash.Add(cash, amount)
+		base.Add(base, revokedBase)
+		bonus.Add(bonus, revokedBonus)
+		for _, debt := range auditRecords(history["receivables"]) {
+			n := auditInteger(debt, "original_microcredits")
+			if n == nil {
+				return false
+			}
+			base.Add(base, n)
+		}
+		if id == request.Source {
+			var current reconciliationAuditRecord
+			_ = json.Unmarshal(payload["source"], &current)
+			for _, key := range []string{"id", "payment_order_id", "payment_transaction_id", "entitlement_package_id", "wallet_id", "amount_fen", "revoked_base_microcredits", "revoked_bonus_microcredits", "receivable_id", "provider_refund_id"} {
+				if string(current[key]) != string(source[key]) {
+					return false
+				}
+			}
+			found = true
+		}
+	}
+	if !found || cash.Sign() <= 0 || cash.Cmp(transactionAmount) > 0 || !cash.IsInt64() || !transactionAmount.IsInt64() || !originalBase.IsInt64() || !originalBonus.IsInt64() {
+		return false
+	}
+	baseTarget, err := proportionalCeiling(originalBase.Int64(), cash.Int64(), transactionAmount.Int64())
+	if err != nil {
+		return false
+	}
+	bonusTarget, err := proportionalCeiling(originalBonus.Int64(), cash.Int64(), transactionAmount.Int64())
+	return err == nil && base.Cmp(big.NewInt(baseTarget)) == 0 && bonus.Cmp(big.NewInt(bonusTarget)) <= 0
+}
+
 func bytesEqualJSONInteger(a, b json.RawMessage) bool {
 	left, ok := new(big.Int).SetString(string(a), 10)
 	right, ok2 := new(big.Int).SetString(string(b), 10)
@@ -450,6 +572,31 @@ func bytesEqualJSONInteger(a, b json.RawMessage) bool {
 // review versions and clock changes cannot manufacture another incident.
 func reconciliationIntegrityDigest(payload reconciliationAuditRecord) string {
 	selected := []string{}
+	for _, history := range auditRecords(payload["forced_history"]) {
+		peer := reconciliationAuditRecord{}
+		for key, value := range payload {
+			if key != "forced_history" {
+				peer[key] = value
+			}
+		}
+		for _, key := range []string{"source", "journals", "postings", "receivables"} {
+			peer[key] = history[key]
+		}
+		var source reconciliationAuditRecord
+		_ = json.Unmarshal(history["source"], &source)
+		version := auditInteger(source, "version")
+		var dismissed bool
+		_ = json.Unmarshal(history["dismissed"], &dismissed)
+		known := version != nil && ((len(auditRecords(history["journals"])) > 0 && version.Cmp(big.NewInt(1)) > 0 && (auditString(source, "status") == "REVIEW_REQUIRED" || auditString(source, "status") == "RESOLVED" && auditString(source, "resolution_code") == "CONFIRM_FORCED_REFUND")) || (len(auditRecords(history["journals"])) == 0 && (version.Cmp(big.NewInt(1)) == 0 && auditString(source, "status") == "REVIEW_REQUIRED" || auditString(source, "status") == "RESOLVED" && auditString(source, "resolution_code") == "DISMISS" && dismissed)))
+		if len(auditRecords(history["journals"])) == 0 && known && auditString(source, "receivable_id") == "" && bytesEqualJSONInteger(source["revoked_base_microcredits"], json.RawMessage(`0`)) && bytesEqualJSONInteger(source["revoked_bonus_microcredits"], json.RawMessage(`0`)) && len(auditRecords(history["receivables"])) == 0 {
+			// Recorded but undisposed evidence is not another financial incident.
+			continue
+		}
+		selected = append(selected, fmt.Sprintf("forced-history:%t:%s", known, reconciliationIntegrityDigest(peer)))
+	}
+	if len(auditRecords(payload["forced_history"])) > 0 {
+		selected = append(selected, "forced-mixed:"+string(payload["forced_mixed"]))
+	}
 	for section, keys := range map[string][]string{"order": {"id", "wallet_id", "requester_id", "beneficiary_organization_id", "amount_fen", "currency", "credit_microcredits", "product_snapshot"}, "transaction": {"id", "payment_order_id", "amount_fen", "currency"}, "source": {"id", "payment_order_id", "payment_transaction_id", "entitlement_package_id", "wallet_id", "amount_fen", "credit_microcredits", "base_microcredits", "bonus_microcredits", "revoked_base_microcredits", "revoked_bonus_microcredits", "provider_refund_id", "provider_chargeback_id", "merchant_refund_no", "channel_refund_id", "receivable_id"}} {
 		var record reconciliationAuditRecord
 		_ = json.Unmarshal(payload[section], &record)

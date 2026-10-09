@@ -239,13 +239,26 @@ func TestF04CommandReceiptRecoveryIsActorAndTypeScoped(t *testing.T) {
 				t.Fatalf("revoked permission %d %s", w.Code, w.Body.String())
 			}
 			allowed.Store(true)
-			if _, err := r.pool.Exec(ctx, `UPDATE token_command_results SET status='SUCCEEDED',completed_at=transaction_timestamp() WHERE command_reference=$1`, reference); err != nil {
+			if _, err := r.pool.Exec(ctx, `UPDATE token_command_results SET status='SUCCEEDED',stable_error_code=NULL,completed_at=transaction_timestamp() WHERE command_reference=$1`, reference); err != nil {
 				t.Fatal(err)
 			}
 			w = f04Request(handler, "GET", "/recovery?command_type="+command, nil, key)
 			_ = json.Unmarshal(w.Body.Bytes(), &result)
 			if w.Code != 200 || result.Status != "SUCCEEDED" {
 				t.Fatalf("terminal %d %s", w.Code, w.Body.String())
+			}
+			// UNKNOWN is an immutable terminal receipt. A separate controlled
+			// key checks recovery without falsely rewriting UNKNOWN to success.
+			unknownKey := key + "-unknown"
+			unknownHash := sha256.Sum256([]byte(unknownKey))
+			unknownDigest := hex.EncodeToString(unknownHash[:])
+			unknownReference := uuid.New()
+			if _, err := r.pool.Exec(ctx, `INSERT INTO token_command_results(command_reference,command_type,policy_version,actor_user_id,actor_permission,authorization_version,idempotency_key_digest,idempotency_fingerprint,request_digest,target_resource_type,target_resource_id,reason,expected_versions,precheck_fingerprint,status,audit_request_id,stable_error_code,completed_at) VALUES($1,$2,1,$3,'controlled',19,$4,$4,$4,'CONTROLLED','controlled','Controlled unknown receipt','{}',$4,'UNKNOWN','controlled','COMMAND_RESULT_UNKNOWN',transaction_timestamp())`, unknownReference, command, owner, unknownDigest); err != nil {
+				t.Fatal(err)
+			}
+			w = f04Request(handler, "GET", "/recovery?command_type="+command, nil, unknownKey)
+			if json.Unmarshal(w.Body.Bytes(), &result) != nil || w.Code != 200 || result.CommandReference != unknownReference || result.Status != "UNKNOWN" || result.StableErrorCode == nil || *result.StableErrorCode != "COMMAND_RESULT_UNKNOWN" {
+				t.Fatalf("unknown recovery %d %s", w.Code, w.Body.String())
 			}
 		})
 	}

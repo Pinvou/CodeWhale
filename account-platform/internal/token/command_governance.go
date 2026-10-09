@@ -667,7 +667,7 @@ func (s *Service) adminCreateTokenCommandBody(w http.ResponseWriter, r *http.Req
 		api.WriteError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "a valid bearer token is required", httpserver.RequestID(r.Context()))
 		return
 	}
-	if spec.RecentAuth && (principal.AuthenticatedAt.IsZero() || time.Since(principal.AuthenticatedAt) > 15*time.Minute) {
+	if spec.RecentAuth && (principal.AuthenticatedAt.IsZero() || principal.AuthenticatedAt.After(time.Now().Add(time.Minute)) || time.Since(principal.AuthenticatedAt) > 15*time.Minute) {
 		api.WriteError(w, http.StatusUnauthorized, "RECENT_AUTHENTICATION_REQUIRED", "authentication within the last 15 minutes is required", httpserver.RequestID(r.Context()))
 		return
 	}

@@ -38,6 +38,9 @@ func TestWorkloadValidityInterval(t *testing.T) {
 }
 
 func TestMiddlewareRequiresExactToken(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("WORKLOAD_IDENTITY_ISSUER", "")
+	t.Setenv("WORKLOAD_IDENTITY_CA_FILE", "")
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	for _, test := range []struct {
 		header string
@@ -113,6 +116,26 @@ func TestStaticServiceTokenRejectedOutsideDevelopment(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer legacy")
 	if _, status := newAuthenticator("legacy").authenticate(request); status != http.StatusUnauthorized {
 		t.Fatalf("expected fail closed, got %d", status)
+	}
+}
+
+func TestLegacyAuthenticationRequiresExplicitDevelopmentOrTest(t *testing.T) {
+	t.Setenv("WORKLOAD_IDENTITY_ISSUER", "")
+	t.Setenv("WORKLOAD_IDENTITY_CA_FILE", "")
+	for _, environment := range []string{"", " \t", "staging", "production", "development", "test"} {
+		t.Run(environment, func(t *testing.T) {
+			t.Setenv("APP_ENV", environment)
+			request := httptest.NewRequest(http.MethodGet, "/internal/v1/check", nil)
+			request.Header.Set("Authorization", "Bearer legacy")
+			_, status := newAuthenticator("legacy").authenticate(request)
+			want := http.StatusUnauthorized
+			if environment == "development" || environment == "test" {
+				want = http.StatusOK
+			}
+			if status != want {
+				t.Fatalf("status = %d, want %d", status, want)
+			}
+		})
 	}
 }
 

@@ -16,12 +16,12 @@ import (
 	"time"
 )
 
-type retainedF04SignedPortalStore struct {
+type retainedF05SignedPortalStore struct {
 	portal.Store
 	session portal.Session
 }
 
-func (s retainedF04SignedPortalStore) GetSession(_ context.Context, id string) (portal.Session, error) {
+func (s retainedF05SignedPortalStore) GetSession(_ context.Context, id string) (portal.Session, error) {
 	if id != s.session.ID {
 		return portal.Session{}, portal.ErrSessionNotFound
 	}
@@ -93,7 +93,7 @@ func TestRetainedF05PortalCurrentTokenSourceProtocol(t *testing.T) {
 				cfg.TrustedProxyIPs = []netip.Addr{netip.MustParseAddr("10.0.0.8")}
 			}
 			session := portal.Session{ID: "controlled-session", AccessToken: "controlled-access", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(2 * time.Hour)}
-			svc, err := portal.NewService(cfg, retainedF04SignedPortalStore{session: session})
+			svc, err := portal.NewService(cfg, retainedF05SignedPortalStore{session: session})
 			if err != nil {
 				t.Fatal(err)
 			}

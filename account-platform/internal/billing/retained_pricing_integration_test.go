@@ -21,6 +21,8 @@ import (
 // under isolated migrator/runtime actors in an owned UUID database. HTTP here
 // uses controlled test service credentials, not a production identity issuer.
 func TestRetainedF04PricingFirstDelivery(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("WORKLOAD_AUTH_ISSUER", "")
 	repository, ctx := retainedFinanceRepository(t)
 	unit := uuid.MustParse("00000000-0000-7000-8100-000000000005")
 	formula := uuid.New()
@@ -101,7 +103,7 @@ func TestRetainedF04PricingFirstDelivery(t *testing.T) {
 		}
 	})
 	t.Run("published-binding-replay-survives-unit-deactivation", func(t *testing.T) {
-		if _, err := repository.DeactivateMeteringUnit(ctx, unit); err != nil {
+		if _, err := repository.DeactivateMeteringUnit(ctx, unit, uuid.New(), uuid.NewString()); err != nil {
 			t.Fatal(err)
 		}
 		got, err := repository.RegisterFormulaBinding(ctx, formula, "REQUEST", []uuid.UUID{unit}, json.RawMessage(`{"decimal":1,"large":9007199254740992}`))

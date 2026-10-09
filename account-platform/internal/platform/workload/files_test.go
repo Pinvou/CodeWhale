@@ -13,7 +13,11 @@ func TestProjectionAtomicReplacement(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows open-file sharing denies concurrent rename; Linux production atomicity is verified separately")
 	}
-	path := filepath.Join(t.TempDir(), "token")
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "token")
 	first, second := strings.Repeat("a", maximumToken), strings.Repeat("b", maximumToken)
 	if err := publish(path, []byte(first)); err != nil {
 		t.Fatal(err)

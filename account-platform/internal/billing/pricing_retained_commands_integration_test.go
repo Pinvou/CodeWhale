@@ -50,11 +50,11 @@ func TestPostgresMeteringCreateLostReplyAndConcurrentReplay(t *testing.T) {
 	if _, err := repo.CreateMeteringUnitVersion(ctx, command, actor, key); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("changed command accepted: %v", err)
 	}
-	inactive, err := repo.DeactivateMeteringUnit(ctx, first.ID)
+	inactive, err := repo.DeactivateMeteringUnit(ctx, first.ID, actor, uuid.NewString())
 	if err != nil {
 		t.Fatal(err)
 	}
-	replay, err := repo.DeactivateMeteringUnit(ctx, first.ID)
+	replay, err := repo.DeactivateMeteringUnit(ctx, first.ID, actor, uuid.NewString())
 	if err != nil || inactive.DeactivatedAt == nil || replay.DeactivatedAt == nil || !inactive.DeactivatedAt.Equal(*replay.DeactivatedAt) {
 		t.Fatal("deactivation replay changed lifecycle fact")
 	}

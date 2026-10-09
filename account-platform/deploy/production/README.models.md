@@ -82,6 +82,41 @@ COMMIT;
 
 Portal 的 page overview flag 优先于旧 aggregate flag。page 模式按当前权限返回 TOKEN_ONLY、USAGE_ONLY 或 TOKEN_AND_USAGE；有用量权限时传递原 24h/7d/30d 窗口，趋势卡片映射实际用量或对账列表，Provisioning 卡片映射原只读列表。aggregate fallback 仍要求 models.read、tokens.read、usage.read 三权限；关闭 flag 不挂载 reader。无效结构、不安全整数、错误或权限不足不显示虚假零计数，旧治理 UNKNOWN/410 恢复保持原契约。
 
+### F04 model and Token page overviews
+
+The model deployment overlay enables the two existing Portal overview flags and
+requires a reviewed Portal image built from the same F04 source and generated
+assets. Model catalog and route-health pages read the installed page projections;
+the Provisioning page reads the provisioning block. Token-only authority uses
+`TOKEN_ONLY` without a window; dual Token/usage authority uses the existing
+`window=24h` and strictly validates `TOKEN_AND_USAGE`, without presenting usage
+or reconciliation trends in this phase. Account/Token permission checks remain
+authoritative. Disabled flags do not mount these readers. Invalid, unavailable,
+or unsafe-integer counts do not become zero or rounded displayed counts.
+
+F05 extends this F04 baseline with the aggregate operations overview and
+usage/reconciliation readers described above. Their installed read routes retain
+the existing Account/Token permission checks and trusted-source protocol.
+
+
+Account also requires `OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64` in its existing
+private environment file (`ACCOUNT_SERVICE_PRIVATE_ENV_FILE`). Use an independently
+generated random key encoded with standard Base64, decoding to exactly 32 bytes.
+Do not reuse the Token pagination/proxy key or write secret values into Compose
+templates, examples, logs, or expanded `docker compose config` output. Missing,
+malformed, or incorrectly sized keys prevent Account startup with
+`ACCOUNT_OWNER_CURSOR_KEY_INVALID`; verify private secret injection before rollout.
+
+Metering-unit deactivation keeps the existing empty-body API. Send a stable
+`Idempotency-Key` to recover the original actor-scoped receipt after a lost
+response. Legacy callers without the header still work, with a generated key
+for that request only; this does not provide cross-request receipt recovery.
+The ACTIVE-to-INACTIVE update, before/after audit and receipt commit together.
+Repeated deactivation of an inactive unit preserves its deactivation time and
+does not append another mutation audit. Apply the new forward migration
+`900010_metering_deactivation_receipts` before running the updated Billing service;
+do not rewrite already applied migration checksums.
+
 Portal page queries use the existing Token HMAC-SHA256 source protocol. Set
 `TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64` in both the existing private
 Portal environment file (`TOKEN_PORTAL_PRIVATE_ENV_FILE`) and Token environment

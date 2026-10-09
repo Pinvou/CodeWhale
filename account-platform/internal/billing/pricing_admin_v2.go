@@ -165,13 +165,20 @@ func (r *PostgresRepository) CreateMeteringUnitVersion(ctx context.Context, unit
 	return unit, r.completePricingCommand(ctx, tx, actor, idempotencyKey, "UNIT_CREATE", fingerprint, unit)
 }
 
-func (r *PostgresRepository) DeactivateMeteringUnit(ctx context.Context, id uuid.UUID) (MeteringUnitDefinition, error) {
+func (r *PostgresRepository) DeactivateMeteringUnit(ctx context.Context, id, actor uuid.UUID, idempotencyKey string) (MeteringUnitDefinition, error) {
 	if id == uuid.Nil {
 		return MeteringUnitDefinition{}, ErrConflict
 	}
-	tx, err := r.pool.Begin(ctx)
+	tx, reply, fingerprint, err := r.beginPricingCommand(ctx, actor, idempotencyKey, "UNIT_DEACTIVATE", id)
 	if err != nil {
 		return MeteringUnitDefinition{}, err
+	}
+	if reply != nil {
+		var previous MeteringUnitDefinition
+		if err := json.Unmarshal(reply, &previous); err != nil {
+			return MeteringUnitDefinition{}, err
+		}
+		return previous, nil
 	}
 	defer tx.Rollback(ctx)
 	var item MeteringUnitDefinition
@@ -183,17 +190,34 @@ func (r *PostgresRepository) DeactivateMeteringUnit(ctx context.Context, id uuid
 		return MeteringUnitDefinition{}, err
 	}
 	if item.Status == "INACTIVE" {
-		return item, tx.Commit(ctx)
+		return item, r.completePricingCommand(ctx, tx, actor, idempotencyKey, "UNIT_DEACTIVATE", fingerprint, item)
 	}
 	if item.Status != "ACTIVE" {
 		return MeteringUnitDefinition{}, ErrConflict
 	}
+	before := item
 	now := r.now()
 	if err := tx.QueryRow(ctx, `UPDATE metering_unit_definitions SET status='INACTIVE',deactivated_at=$2 WHERE id=$1 AND status='ACTIVE' RETURNING deactivated_at`, id, now).Scan(&item.DeactivatedAt); err != nil {
 		return MeteringUnitDefinition{}, err
 	}
 	item.Status = "INACTIVE"
-	return item, tx.Commit(ctx)
+	if err := appendMeteringUnitDeactivationAudit(ctx, tx, actor, before, item, now); err != nil {
+		return MeteringUnitDefinition{}, err
+	}
+	return item, r.completePricingCommand(ctx, tx, actor, idempotencyKey, "UNIT_DEACTIVATE", fingerprint, item)
+}
+
+func appendMeteringUnitDeactivationAudit(ctx context.Context, tx pgx.Tx, actor uuid.UUID, before, after MeteringUnitDefinition, now time.Time) error {
+	beforeJSON, err := json.Marshal(before)
+	if err != nil {
+		return err
+	}
+	afterJSON, err := json.Marshal(after)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO pricing_audits(id,price_version_id,action,actor_user_id,before_snapshot,after_snapshot,occurred_at) VALUES($1,NULL,'UNIT_DEACTIVATED',$2,$3,$4,$5)`, uuid.Must(uuid.NewV7()), actor, beforeJSON, afterJSON, now)
+	return err
 }
 
 func (r *PostgresRepository) CreatePriceDraft(ctx context.Context, command PriceDraftCommand, actor uuid.UUID, idempotencyKey string) (ManagedPriceVersion, error) {
@@ -995,7 +1019,7 @@ func (s *Service) adminCreateMeteringUnit(w http.ResponseWriter, r *http.Request
 }
 func (s *Service) adminDeactivateMeteringUnit(w http.ResponseWriter, r *http.Request) {
 	repository, ok := s.repository.(interface {
-		DeactivateMeteringUnit(context.Context, uuid.UUID) (MeteringUnitDefinition, error)
+		DeactivateMeteringUnit(context.Context, uuid.UUID, uuid.UUID, string) (MeteringUnitDefinition, error)
 	})
 	if !ok {
 		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "pricing administration is unavailable", httpserver.RequestID(r.Context()))
@@ -1006,7 +1030,17 @@ func (s *Service) adminDeactivateMeteringUnit(w http.ResponseWriter, r *http.Req
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid unit definition", httpserver.RequestID(r.Context()))
 		return
 	}
-	item, err := repository.DeactivateMeteringUnit(r.Context(), id)
+	principal := adminPrincipal(r)
+	if strings.TrimSpace(principal.Subject) == "" {
+		api.WriteError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "authentication is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		// Legacy empty-body callers remain valid; this key records only this call.
+		key = uuid.NewString()
+	}
+	item, err := repository.DeactivateMeteringUnit(r.Context(), id, adminActor(principal), key)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
