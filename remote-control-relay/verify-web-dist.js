@@ -1,9 +1,8 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 
 // Validate the entry's real local resources, not a stripped Tauri bridge.
-// This same file is shipped with the Relay modules and runs before replacement.
+// The deployment CLI imports this pure checker before replacement.
 export function verifyWebDist(directory, basePath) {
   const root = realpathSync(directory);
   const base = `${basePath.replace(/\/+$/, "")}/`;
@@ -37,14 +36,4 @@ export function verifyWebDist(directory, basePath) {
     if (/^<script\b/i.test(tag[0]) && local.startsWith("startup/")) startup = true;
   }
   if (!moduleEntry || !startup) throw new Error("Web module/startup entry missing");
-}
-
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try {
-    verifyWebDist(process.argv[2], process.argv[3]);
-  } catch {
-    // Keep host paths and infrastructure details out of validation output.
-    console.error("WebUI 产物校验失败：入口、base 或引用资源不完整");
-    process.exitCode = 1;
-  }
 }

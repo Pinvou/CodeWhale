@@ -2,6 +2,7 @@
 import { EnrollmentRegistry, loadEnrollmentRegistryConfig } from "../enrollment-registry.js";
 import { createEnrollmentGateway } from "../enrollment-gateway.js";
 import { RelayStateStore } from "../relay-state-store.js";
+import { createEnrollmentCoverageControl, loadEnrollmentCoverageControlConfig } from "../enrollment-coverage-control.js";
 
 function port(value) {
   const parsed = Number(value);
@@ -22,6 +23,7 @@ function optionalInteger(value) {
 
 let store;
 let gateway;
+let coverageControl;
 try {
   const host = process.env.PINVOU_REMOTE_GATEWAY_HOST;
   if (!(host === "127.0.0.1" || host === "::1")) throw new Error("gateway_host_not_loopback");
@@ -46,14 +48,21 @@ try {
     ingressByteLimit: optionalInteger(process.env.WS_INGRESS_BYTE_LIMIT),
   });
   const address = await gateway.listen({ host, port: port(process.env.PINVOU_REMOTE_GATEWAY_PORT) });
+  if (loadEnrollmentCoverageControlConfig(process.env)) {
+    coverageControl = createEnrollmentCoverageControl({ registry, stateStore: store, gatewayInstanceId: gateway.instanceId });
+    await coverageControl.listen();
+  }
   process.stdout.write(`${JSON.stringify({ ok: true, enrollment_gateway: "v1", host: address.address, port: address.port })}\n`);
 } catch (error) {
   process.stderr.write(`${JSON.stringify({ ok: false, code: error?.code || error?.message || "gateway_start_failed" })}\n`);
+  await coverageControl?.close().catch(() => {});
+  await gateway?.close().catch(() => {});
   await store?.close().catch(() => {});
   process.exit(1);
 }
 
 async function shutdown() {
+  await coverageControl?.close().catch(() => {});
   await gateway?.close().catch(() => {});
   await store?.close().catch(() => {});
   process.exit(0);

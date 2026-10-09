@@ -261,6 +261,20 @@ impl SessionStore {
                 if candidate.cursor.sequence < previous.sequence {
                     bail!("remote snapshot cursor moved backwards");
                 }
+                // Authentication proves the sender, not immutability of the
+                // retained history. A forward snapshot must obey the same
+                // event-key/id rule as a single-entry write before retiring
+                // pending requests or replacing any persisted state.
+                for incoming in &candidate.projection.entries {
+                    if record.projection.entries.iter().any(|existing| {
+                        ((existing.journal_epoch == incoming.journal_epoch
+                            && existing.sequence == incoming.sequence)
+                            || existing.event_id == incoming.event_id)
+                            && existing != incoming
+                    }) {
+                        bail!("remote snapshot event key or id was reused with different content");
+                    }
+                }
                 if candidate.cursor.sequence == previous.sequence {
                     if candidate.projection == record.projection {
                         return Ok(ProjectionWrite::Unchanged);
@@ -585,6 +599,164 @@ mod tests {
                     &AcceptSnapshot,
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn advancing_snapshot_rejects_rewritten_history_without_retiring_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+        let live = live();
+        let (local, remote_ref) = opened(&store, &live);
+        let first = entry(1, "original");
+        store
+            .project_authenticated_remote_entry(
+                &local,
+                &remote_ref,
+                &live,
+                "b-session-1",
+                first.clone(),
+            )
+            .unwrap();
+        let fingerprint = "a".repeat(64);
+        store
+            .insert_remote_pending(
+                &local,
+                &remote_ref,
+                &live,
+                PendingRemoteRequest {
+                    client_request_id: "request-2".into(),
+                    task_id: "task-2".into(),
+                    request_fingerprint: fingerprint.clone(),
+                    dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+                    reservation_fingerprint: None,
+                },
+            )
+            .unwrap();
+        store
+            .mark_remote_dispatch_attempt(
+                &local,
+                &remote_ref,
+                &live,
+                "request-2",
+                "task-2",
+                &fingerprint,
+            )
+            .unwrap();
+        let terminal = ProjectionEntry {
+            kind: ProjectionKind::Status,
+            task_id: Some("task-2".into()),
+            ..entry(2, "succeeded")
+        };
+        let before = store.remote_proxy_snapshot(&local).unwrap();
+        let path = temp.path().join("sessions/_remote_proxies.json");
+        let disk_before = std::fs::read(&path).unwrap();
+        let mut changed = vec![first.clone(); 5];
+        changed[0].body = Some("rewritten".into());
+        changed[1].event_id = "replacement-event".into();
+        changed[2].task_id = Some("other-task".into());
+        changed[3].kind = ProjectionKind::Reasoning;
+        changed[4]
+            .attachments
+            .push(super::super::schema::ProjectionAttachment {
+                id: "attachment-1".into(),
+                display_name: "receipt.txt".into(),
+                content_type: "text/plain".into(),
+                byte_length: 1,
+                checksum_sha256: "b".repeat(64),
+            });
+        let mut windows: Vec<_> = changed
+            .into_iter()
+            .map(|old| vec![old, terminal.clone()])
+            .collect();
+        windows.push(vec![ProjectionEntry {
+            event_id: first.event_id.clone(),
+            ..terminal
+        }]);
+        for (case, entries) in windows.into_iter().enumerate() {
+            assert!(
+                store
+                    .project_authenticated_remote_snapshot(
+                        &local,
+                        &remote_ref,
+                        &live,
+                        "b-session-1",
+                        SnapshotCandidate {
+                            projection: AuthenticatedProjection {
+                                schema_version: 1,
+                                entries
+                            },
+                            cursor: AuthenticatedCursor {
+                                journal_epoch: "journal-1".into(),
+                                sequence: 2
+                            },
+                        },
+                        &AcceptSnapshot,
+                    )
+                    .is_err(),
+                "advancing snapshot must reject changed committed identity/content, case {case}",
+            );
+            assert_eq!(store.remote_proxy_snapshot(&local).unwrap(), before);
+            assert_eq!(std::fs::read(&path).unwrap(), disk_before);
+        }
+    }
+
+    #[test]
+    fn advancing_snapshot_keeps_equal_overlap_and_allows_disjoint_or_new_epoch() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+        let live = live();
+        let (local, remote_ref) = opened(&store, &live);
+        for sequence in 1..=2 {
+            store
+                .project_authenticated_remote_entry(
+                    &local,
+                    &remote_ref,
+                    &live,
+                    "b-session-1",
+                    entry(sequence, "original"),
+                )
+                .unwrap();
+        }
+        let mut new_epoch = entry(1, "new epoch");
+        new_epoch.journal_epoch = "journal-2".into();
+        for entries in [
+            vec![entry(2, "original"), entry(3, "next")],
+            vec![entry(4, "disjoint")],
+            vec![new_epoch],
+        ] {
+            let tail = entries.last().unwrap();
+            let cursor = AuthenticatedCursor {
+                journal_epoch: tail.journal_epoch.clone(),
+                sequence: tail.sequence,
+            };
+            let projection = AuthenticatedProjection {
+                schema_version: 1,
+                entries,
+            };
+            assert_eq!(
+                store
+                    .project_authenticated_remote_snapshot(
+                        &local,
+                        &remote_ref,
+                        &live,
+                        "b-session-1",
+                        SnapshotCandidate {
+                            projection: projection.clone(),
+                            cursor: cursor.clone()
+                        },
+                        &AcceptSnapshot,
+                    )
+                    .unwrap(),
+                ProjectionWrite::Inserted,
+            );
+            let after = store.remote_proxy_snapshot(&local).unwrap();
+            assert_eq!(after.projection, projection);
+            assert_eq!(after.authenticated_cursor, Some(cursor));
+        }
+        assert_eq!(
+            store.remote_proxy_snapshot(&local).unwrap().retired_epochs,
+            vec!["journal-1"]
         );
     }
 

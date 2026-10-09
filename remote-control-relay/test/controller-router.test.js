@@ -128,16 +128,18 @@ test("real close hooks snapshot evidence before deleting it and freeze only the 
   let clock = 1_000;
   const value = fixture({ clock: () => clock, capabilities: ["encrypted_frames_v1", "task_v1", "role_liveness_v1", "resume_v1"] });
   await joined(value);
-  clock = 34_000;
-  for (const role of ["A", "B"]) {
-    const lease = value.activeLease;
-    await value.router.handle({ socketIdentity: `socket-${role}`, message: {
-      v: 1, type: "controller_liveness", connection_id: lease.connection_id,
-      controller_lease_id: lease.controller_lease_id, lease_epoch: lease.lease_epoch,
-      relay_epoch: lease.relay_epoch, remote_control_generation: lease.remote_control_generation,
-      sender_role: role, liveness_epoch: role === "A" ? lease.liveness_epoch_a : lease.liveness_epoch_b,
-      heartbeat_sequence: "1",
-    } });
+  for (const [at, sequence] of [[29_000, "1"], [34_000, "2"]]) {
+    clock = at;
+    for (const role of ["A", "B"]) {
+      const lease = value.activeLease;
+      await value.router.handle({ socketIdentity: `socket-${role}`, message: {
+        v: 1, type: "controller_liveness", connection_id: lease.connection_id,
+        controller_lease_id: lease.controller_lease_id, lease_epoch: lease.lease_epoch,
+        relay_epoch: lease.relay_epoch, remote_control_generation: lease.remote_control_generation,
+        sender_role: role, liveness_epoch: role === "A" ? lease.liveness_epoch_a : lease.liveness_epoch_b,
+        heartbeat_sequence: sequence,
+      } });
+    }
   }
   clock = 35_000;
   assert.equal((await value.router.removeSocket("socket-A")).leases, 0);
@@ -151,6 +153,39 @@ test("real close hooks snapshot evidence before deleting it and freeze only the 
   assert.equal(await value.resume.expire(), 0);
   clock = 64_000;
   assert.equal(await value.resume.expire(), 1);
+});
+
+test("router rejects a late heartbeat and retires only the expired connected lease before cleanup tick", async () => {
+  for (const lateRole of ["A", "B"]) {
+    let clock = 0;
+    const value = fixture({ clock: () => clock, realLeaseHooks: true,
+      capabilities: ["encrypted_frames_v1", "task_v1", "role_liveness_v1", "resume_v1"] });
+    await joined(value);
+    const lease = value.activeLease;
+    const message = (role) => ({
+      v: 1, type: "controller_liveness", connection_id: lease.connection_id,
+      controller_lease_id: lease.controller_lease_id, lease_epoch: lease.lease_epoch,
+      relay_epoch: lease.relay_epoch, remote_control_generation: lease.remote_control_generation,
+      sender_role: role, liveness_epoch: role === "A" ? lease.liveness_epoch_a : lease.liveness_epoch_b,
+      heartbeat_sequence: "1",
+    });
+    const freshRole = lateRole === "A" ? "B" : "A";
+    clock = 29_000;
+    await value.router.handle({ socketIdentity: `socket-${freshRole}`, message: message(freshRole) });
+    const deliveries = value.sent.get(`socket-${freshRole}`).length;
+    clock = 30_000;
+    await assert.rejects(value.router.handle({ socketIdentity: `socket-${lateRole}`, message: message(lateRole) }),
+      { code: "controller_liveness_expired" });
+    assert.equal(value.sent.get(`socket-${freshRole}`).length, deliveries);
+    assert.equal(value.leases.lease(lease.controller_lease_id), null);
+    assert.equal(value.liveness.resumeDeadline(lease), null);
+    assert.equal(value.resume.phase(lease.controller_lease_id), null);
+    assert.equal(value.terminated.length, 1);
+    assert.equal(value.terminated[0].expectedLease, lease);
+    assert.equal(value.terminated[0].reason, "controller_liveness_expired");
+    assert.equal((await value.router.removeSocket(`socket-${lateRole}`)).leases, 0);
+    assert.equal(value.terminated.length, 1);
+  }
 });
 
 test("surviving role heartbeats during recovery neither error nor extend the frozen deadline", async () => {
@@ -215,6 +250,23 @@ test("snapshot exceptions and invalid clocks cannot skip peer, hook or lease cle
     clock = 1_000;
     assert.equal(ControllerLivenessHooks.prototype.resumeDeadline.call(value.liveness, value.activeLease), null);
     assert.deepEqual(await value.router.removeSocket("socket-B"), { handshakes: 0, leases: 0 });
+  }
+});
+
+test("identifier contract: router accepts wire colon socket and endpoint IDs", () => {
+  const { router } = fixture();
+  router.addSocket({ socketIdentity: "socket:B", source: "198.51.100.3", socket: {} });
+  router.authenticateControlled({ socketIdentity: "socket:B", endpointId: "endpoint:0001", authenticatedContext: {} });
+  assert.deepEqual(router.resolveControlledEndpoint("endpoint:0001"), { socketIdentity: "socket:B" });
+  assert.throws(() => router.addSocket({ socketIdentity: "socket~C", source: "source-C", socket: {} }),
+    { code: "socket_identity_invalid" });
+});
+
+test("identifier contract: controlled Web endpoint mapping preserves released legacy identities", () => {
+  const { router } = fixture();
+  for (const endpointId of ["_old", "-old"]) {
+    router.authenticateControlled({ socketIdentity: "socket-B", endpointId, authenticatedContext: {} });
+    assert.deepEqual(router.resolveControlledEndpoint(endpointId), { socketIdentity: "socket-B" });
   }
 });
 

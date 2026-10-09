@@ -643,19 +643,12 @@ pub(crate) fn validate_export_target(base_url: &str) -> Result<()> {
     validate_controller_base_url(base_url, "temporary_model_package.base_url")
         .map_err(|_| error("model_endpoint_invalid"))?;
     let is_https = base_url.starts_with("https://");
-    let rest = base_url
-        .strip_prefix("https://")
-        .or_else(|| base_url.strip_prefix("http://"))
+    // Classify the canonical host used by the HTTP URL parser, not a DNS-like
+    // spelling that it can normalize into an equivalent numeric address.
+    let parsed = reqwest::Url::parse(base_url).map_err(|_| error("model_endpoint_invalid"))?;
+    let host = parsed
+        .host_str()
         .ok_or_else(|| error("model_endpoint_invalid"))?;
-    let authority_end = rest
-        .bytes()
-        .position(|byte| matches!(byte, b'/' | b'?' | b'#'))
-        .unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    let host = authority
-        .rsplit_once(':')
-        .map(|(host, _)| host)
-        .unwrap_or(authority);
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host.is_empty() {
         return Err(error("model_endpoint_invalid"));
@@ -682,7 +675,9 @@ pub(crate) fn validate_export_target(base_url: &str) -> Result<()> {
 fn is_globally_routable(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => {
-            let [a, b, c, _] = address.octets();
+            let octets = address.octets();
+            // IANA non-global shared/benchmark/protocol ranges. Keep the
+            // globally reachable protocol-assignment exceptions .9 and .10.
             !(address.is_loopback()
                 || address.is_private()
                 || address.is_link_local()
@@ -690,12 +685,12 @@ fn is_globally_routable(address: IpAddr) -> bool {
                 || address.is_documentation()
                 || address.is_multicast()
                 || address.is_unspecified()
-                || a == 0
-                || a >= 224
-                || (a == 100 && (64..=127).contains(&b))
-                || (a == 198 && (b == 18 || b == 19))
-                || (a == 192 && b == 0 && c == 0)
-                || (a == 192 && b == 88 && c == 99))
+                || octets[0] == 0
+                || octets[0] >= 224
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 198 && (18..=19).contains(&octets[1]))
+                || (octets[..3] == [192, 0, 0] && ![9, 10].contains(&octets[3]))
+                || octets == [192, 88, 99, 2])
         }
         IpAddr::V6(address) => {
             if let Some(mapped) = address.to_ipv4_mapped() {
@@ -1402,6 +1397,113 @@ mod tests {
                 .code,
             "model_package_unknown_field"
         );
+    }
+
+    #[test]
+    fn special_ipv4_export_targets_fail_closed_without_blocking_global_exceptions() {
+        for host in [
+            "100.64.0.0",
+            "100.64.0.1",
+            "100.127.255.255",
+            "198.18.0.0",
+            "198.18.0.1",
+            "198.19.255.255",
+            "192.0.0.0",
+            "192.0.0.8",
+            "192.0.0.11",
+            "192.0.0.255",
+            "192.88.99.2",
+        ] {
+            assert_eq!(
+                validate_export_target(&format!("https://{host}/v1"))
+                    .unwrap_err()
+                    .code,
+                "model_endpoint_private",
+                "{host}"
+            );
+            let mut model = saved_model();
+            model.base_url = format!("https://{host}/v1");
+            assert_eq!(
+                export_decision(&model).reason,
+                Some("model_endpoint_unreachable")
+            );
+            let mut candidate = package("synthetic-test-api-key");
+            candidate.primary.base_url = format!("https://{host}/v1");
+            assert_eq!(
+                candidate.validate().unwrap_err().code,
+                "model_endpoint_private"
+            );
+            let mut fallback = package("synthetic-test-api-key");
+            fallback.vision_fallback = Some(route(
+                &format!("https://{host}/v1"),
+                "openai",
+                "synthetic-fallback-api-key",
+            ));
+            assert_eq!(
+                fallback.validate().unwrap_err().code,
+                "model_endpoint_private"
+            );
+        }
+        for host in [
+            "100.63.255.255",
+            "100.128.0.0",
+            "198.17.255.255",
+            "198.20.0.0",
+            "192.0.0.9",
+            "192.0.0.10",
+            "192.0.1.0",
+            "192.31.196.1",
+            "192.52.193.1",
+            "192.175.48.1",
+        ] {
+            validate_export_target(&format!("https://{host}/v1")).unwrap();
+        }
+    }
+
+    #[test]
+    fn equivalent_ipv4_hosts_are_classified_after_url_normalization() {
+        for (host, canonical) in [
+            ("0x64400001", "100.64.0.1"),
+            ("0xc6120001", "198.18.0.1"),
+            ("0xc0000008", "192.0.0.8"),
+            ("0xc0586302", "192.88.99.2"),
+            ("0x7f000001", "127.0.0.1"),
+        ] {
+            let base_url = format!("https://{host}/v1");
+            let parsed = reqwest::Url::parse(&base_url).unwrap();
+            assert_eq!(parsed.host_str(), Some(canonical));
+            assert_eq!(
+                validate_export_target(&base_url).unwrap_err().code,
+                "model_endpoint_private"
+            );
+            let mut model = saved_model();
+            model.base_url = base_url.clone();
+            assert_eq!(
+                export_decision(&model).reason,
+                Some("model_endpoint_unreachable")
+            );
+            let mut candidate = package("synthetic-test-api-key");
+            candidate.primary.base_url = base_url.clone();
+            assert_eq!(
+                candidate.validate().unwrap_err().code,
+                "model_endpoint_private"
+            );
+            let mut fallback = package("synthetic-test-api-key");
+            fallback.vision_fallback =
+                Some(route(&base_url, "openai", "synthetic-fallback-api-key"));
+            assert_eq!(
+                fallback.validate().unwrap_err().code,
+                "model_endpoint_private"
+            );
+        }
+        for host in [
+            "0x08080808",
+            "0xc0000009",
+            "0xc000000a",
+            "0xfeed.api.example.com",
+        ] {
+            validate_export_target(&format!("https://{host}/v1")).unwrap();
+        }
     }
 
     #[tokio::test]
