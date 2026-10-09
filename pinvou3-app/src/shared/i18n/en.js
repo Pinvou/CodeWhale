@@ -944,6 +944,7 @@ Object.assign(dictEn.uiConversation, {
   feedbackNegative: 'Not helpful',
   retryReply: 'Regenerate',
   callingTool: name => `Calling ${name}`,
+  copyCode: 'Copy code',
   inputPlaceholder: 'Enter a value',
   otherAnswer: 'Other',
   otherPlaceholder: 'Other',
