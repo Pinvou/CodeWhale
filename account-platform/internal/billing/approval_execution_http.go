@@ -59,10 +59,11 @@ func (s *Service) executeApprovedAdjustmentCommand(ctx context.Context, adjustme
 		AdjustmentVersion int64 `json:"adjustment_version"`
 	}
 	if json.Unmarshal(observedVersions, &observed) != nil || observed.AdjustmentVersion != adjustment.Version {
-		actualVersions, _ := json.Marshal(map[string]any{"adjustment_version": adjustment.Version})
-		if _, err := s.approvalGate.Begin(ctx, approvalRequestID, jobRunID, actualVersions); err != nil && approvalGateUnavailable(err) {
-			return ManualAdjustment{}, ErrApprovalExecutionUnavailable
-		}
+		// Reject invalid caller observations before claiming an execution. A
+		// domain read cannot prove that an existing execution has no effects:
+		// its POSTED receipt may merely be waiting for a completion ACK. Neither
+		// Begin nor a guessed FAILED completion is safe on this input-error path.
+		// A valid retry still goes through Account's frozen-version/expiry fence.
 		return ManualAdjustment{}, ErrApprovalSnapshotMismatch
 	}
 	command, err := s.approvalGate.Begin(ctx, approvalRequestID, jobRunID, observedVersions)

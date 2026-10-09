@@ -32,6 +32,20 @@ type Client struct {
 	httpClient      *http.Client
 }
 
+// NewClientWithHTTPClient injects the caller's isolated trust configuration.
+// The caller must keep that configuration immutable for this client's lifetime.
+func NewClientWithHTTPClient(baseURL, credential string, httpClient *http.Client) (*Client, error) {
+	if httpClient == nil {
+		return nil, ErrUnavailable
+	}
+	client, err := NewClient(baseURL, credential)
+	if err != nil {
+		return nil, err
+	}
+	client.httpClient = httpClient
+	return client, nil
+}
+
 func NewClient(billingBaseURL, serviceToken string) (*Client, error) {
 	billingEndpoint, err := effectEndpoint(billingBaseURL)
 	if err != nil {
