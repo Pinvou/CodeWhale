@@ -537,4 +537,50 @@ mod tests {
             warnings
         );
     }
+    /// Round-32 (M31-1 pin): a READ failure is never cached — the chmod-000
+    /// window self-heals on the next read once permissions recover (chmod
+    /// only touches ctime, so mtime/len stay identical), and the empty
+    /// answer never becomes sticky. Drives the public cache entry with the
+    /// discoverable `.codewhale/constitution.json` placement.
+    #[test]
+    fn constitution_read_failure_is_not_cached_across_permission_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("work");
+        std::fs::create_dir_all(nested.join(".codewhale")).unwrap();
+        let path = nested.join(".codewhale").join("constitution.json");
+        std::fs::write(
+            &path,
+            r#"{"protected_invariants": [{"text": "stay kind", "paths": ["src/**"]}]}"#,
+        )
+        .expect("seed");
+
+        // The failure window comes FIRST (nothing cached yet) — the cache
+        // is a process-global keyed on the resolved path, so a prior good
+        // call for the same path would legitimately serve its cached rules
+        // and mask the pin.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let degraded = load_repo_law_rules(&nested);
+            let read_blocked = std::fs::read(&path).is_err();
+            if read_blocked {
+                assert!(
+                    degraded.is_empty(),
+                    "the read failure answers empty for this call"
+                );
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let recovered = load_repo_law_rules(&nested);
+            assert!(
+                !recovered.is_empty(),
+                "recovery is not blocked by a cached empty entry (mtime/len unchanged by chmod)"
+            );
+        }
+        let readable = load_repo_law_rules(&nested);
+        assert!(
+            !readable.is_empty(),
+            "the readable constitution compiles to at least one rule"
+        );
+    }
 }

@@ -117,7 +117,14 @@ pub fn build_approval_grouping_key(tool_name: &str, input: &serde_json::Value) -
                 // "a@cwd:1:b"} collide with {"git@cwd:9:a & payload" @
                 // cwd "b"} (the review's dynamic probe).
                 Some(cwd) => format!("shell:{}:{prefix}@cwd:{}:{cwd}", prefix.len(), cwd.len()),
-                None => format!("shell:{prefix}"),
+                // Round-32 B32-2: length-prefix the operand-less arm too —
+                // classify_command's fallback prefix is any single token, so
+                // a forged `2:sh@cwd:1:/` command string produced the same
+                // key as a genuine operand-carrying `sh` grant (the
+                // review's dynamic probe: one approve-for-session on the
+                // odd spelling auto-approved the whole `sh` family at any
+                // absolute cwd).
+                None => format!("shell:{}:{prefix}", prefix.len()),
             }
         }
         "fetch_url" | "web.fetch" | "web_fetch" => {
@@ -413,6 +420,27 @@ mod tests {
         assert_ne!(
             a, b,
             "the override marker and a touched file named 'override' must not collide"
+        );
+    }
+
+    /// Round-32 B32-2 pin: the operand-less (None-cwd) arm is
+    /// length-prefixed — a forged single-token command containing the
+    /// `shell:<len>:<prefix>@cwd:<len>:` shape must not collide with a
+    /// genuine operand-carrying key.
+    #[test]
+    fn grouping_key_separates_operandless_forgery_from_real_operand_key() {
+        let forged = serde_json::json!({
+            "command": "2:sh@cwd:1:/"
+        });
+        let genuine = serde_json::json!({
+            "command": "sh -c 'payload'",
+            "cwd": "/"
+        });
+        let a = build_approval_grouping_key("exec_shell", &forged);
+        let b = build_approval_grouping_key("exec_shell", &genuine);
+        assert_ne!(
+            a, b,
+            "an operand-less spelling must not forge an operand-carrying key"
         );
     }
 
