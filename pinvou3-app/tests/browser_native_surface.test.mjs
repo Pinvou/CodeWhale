@@ -197,6 +197,7 @@ test('normal mode uses one Right Dock switcher for artifact and browser entries'
   assert.match(chatView, /\{ id: 'browser', label: browserLabel/);
   assert.match(main, /browserDockAvailable=\{browserDockAvailable\}/);
   assert.match(main, /platformCapabilities\.browserNativeDisplay/);
+  assert.match(main, /prefetchView\('browser'\)[\s\S]*invokeTauri\('browser_prepare'/);
   assert.match(main, /invokeTauri\('browser_prepare', \{ sessionId: requestedSessionId \}\)/);
   assert.match(main, /const \[browserPaneStates, setBrowserPaneStates\] = useState\(\{\}\)/);
   assert.match(main, /browserPaneStateFor\(browserPaneStates, browserSessionId\)/);
