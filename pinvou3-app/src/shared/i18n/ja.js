@@ -934,6 +934,7 @@ Object.assign(dictJa.uiConversation, {
   feedbackNegative: '役に立たなかった',
   retryReply: '再生成',
   callingTool: name => `${name} を呼び出し中`,
+  copyCode: 'コードをコピー',
   inputPlaceholder: '入力してください',
   otherAnswer: 'その他',
   otherPlaceholder: 'その他',

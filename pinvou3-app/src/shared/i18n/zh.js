@@ -985,6 +985,7 @@ Object.assign(dictZh.uiConversation, {
   feedbackNegative: '没有帮助',
   retryReply: '重新生成',
   callingTool: name => `正在调用 ${name}`,
+  copyCode: '复制代码',
   inputPlaceholder: '请输入',
   otherAnswer: '其他',
   otherPlaceholder: '其他',
