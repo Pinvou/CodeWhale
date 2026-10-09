@@ -1166,6 +1166,10 @@ pub async fn compact_messages_safe(
 
     let mut last_error: Option<anyhow::Error> = None;
     let mut quality_retries = 0u32;
+    // The outer transient retry owns the logical call. Changed quality or
+    // overflow requests must get a new ID even if a later retry rebuilds the
+    // original request again.
+    let mut summary_operation = None;
 
     for attempt in 0..MAX_RETRIES {
         if attempt > 0 {
@@ -1174,8 +1178,14 @@ pub async fn compact_messages_safe(
             tokio::time::sleep(delay).await;
         }
 
-        match compact_messages_with_metadata(client, compaction_input, config, &mut quality_retries)
-            .await
+        match compact_messages_with_metadata(
+            client,
+            compaction_input,
+            config,
+            &mut quality_retries,
+            &mut summary_operation,
+        )
+        .await
         {
             Ok((msgs, prompt, mut coverage)) => {
                 let kept = sanitize_retained_messages(msgs);
@@ -1279,7 +1289,8 @@ async fn compact_messages(
 ) -> Result<(Vec<Message>, Option<SystemPrompt>, Vec<Message>)> {
     let mut quality_retries = 0;
     let (messages, summary_prompt, _coverage) =
-        compact_messages_with_metadata(client, messages, config, &mut quality_retries).await?;
+        compact_messages_with_metadata(client, messages, config, &mut quality_retries, &mut None)
+            .await?;
     Ok((messages, summary_prompt, Vec::new()))
 }
 
@@ -1288,12 +1299,14 @@ async fn compact_messages_with_metadata(
     messages: &[Message],
     config: &CompactionConfig,
     quality_retries: &mut u32,
+    summary_operation: &mut Option<(String, uuid::Uuid)>,
 ) -> Result<(Vec<Message>, Option<SystemPrompt>, CompactionCoverage)> {
     if messages.is_empty() {
         return Ok((Vec::new(), None, CompactionCoverage::default()));
     }
 
-    let summary = create_summary(client, messages, config, quality_retries).await?;
+    let summary =
+        create_summary(client, messages, config, quality_retries, summary_operation).await?;
     let anchors = user_anchors_section(config.workspace.as_deref());
     let checkpoint_text = build_compaction_summary_block_text(&summary, &anchors);
     let summary_block = SystemBlock {
@@ -1410,6 +1423,7 @@ async fn create_summary(
     messages: &[Message],
     config: &CompactionConfig,
     quality_retries: &mut u32,
+    summary_operation: &mut Option<(String, uuid::Uuid)>,
 ) -> Result<String> {
     // The summarization request IS the live conversation plus one final user
     // message asking for the handoff summary, so the provider's prefix cache
@@ -1464,7 +1478,19 @@ async fn create_summary(
         // Capture the session scope before awaiting so a late response cannot
         // accrue into a subsequently loaded/new session.
         let cost_scope = crate::cost_status::scope_token();
-        let response = match client.create_message(request).await {
+        // This fixed client route sends a deterministic non-streaming request
+        // without caller-local metadata. Compare the complete request so a
+        // shortened history or conservative prompt cannot reuse an old key.
+        let identity = crate::hashing::sha256_hex(&serde_json::to_vec(&request)?);
+        let operation_id = match summary_operation.as_ref() {
+            Some((previous, id)) if previous == &identity => *id,
+            _ => uuid::Uuid::new_v4(),
+        };
+        *summary_operation = Some((identity, operation_id));
+        let response = match client
+            .create_message_for_operation(request, operation_id)
+            .await
+        {
             Ok(response) => response,
             Err(err) if is_context_window_error(&err) && request_messages.len() > 2 => {
                 logging::warn(format!(
@@ -1898,6 +1924,7 @@ mod tests {
     struct ScriptedSummaryClient {
         responses: std::sync::Mutex<std::collections::VecDeque<anyhow::Result<Vec<ContentBlock>>>>,
         requests: std::sync::Mutex<Vec<MessageRequest>>,
+        operations: std::sync::Mutex<Vec<uuid::Uuid>>,
     }
 
     impl ScriptedSummaryClient {
@@ -1909,6 +1936,7 @@ mod tests {
             Self {
                 responses: std::sync::Mutex::new(responses.into()),
                 requests: std::sync::Mutex::new(Vec::new()),
+                operations: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -1949,6 +1977,15 @@ mod tests {
                 container: None,
                 usage: crate::models::Usage::default(),
             })
+        }
+
+        async fn create_message_for_operation(
+            &self,
+            request: MessageRequest,
+            operation_id: uuid::Uuid,
+        ) -> anyhow::Result<crate::models::MessageResponse> {
+            self.operations.lock().unwrap().push(operation_id);
+            self.create_message(request).await
         }
 
         async fn create_message_stream(
@@ -2351,6 +2388,12 @@ mod tests {
         };
         assert!(text.contains("previous handoff response was empty"));
         drop(requests);
+        let operations = client.operations.lock().unwrap();
+        assert_eq!(operations.len(), 2);
+        assert_ne!(
+            operations[0], operations[1],
+            "quality retry changes the prompt"
+        );
 
         assert_eq!(
             result.retries_used, 1,
@@ -2405,6 +2448,57 @@ mod tests {
                 .len(),
             3,
             "the diagnostic count must match the two calls after the initial request"
+        );
+        let requests = client.requests.lock().unwrap();
+        assert_eq!(
+            serde_json::to_vec(&requests[0]).unwrap(),
+            serde_json::to_vec(&requests[2]).unwrap()
+        );
+        assert_ne!(
+            serde_json::to_vec(&requests[0]).unwrap(),
+            serde_json::to_vec(&requests[1]).unwrap()
+        );
+        let operations = client.operations.lock().unwrap();
+        assert_eq!(operations.len(), 3);
+        assert_ne!(operations[0], operations[1]);
+        assert_ne!(operations[1], operations[2]);
+        assert_ne!(
+            operations[0], operations[2],
+            "rebuilding the original prompt after a changed call must not resurrect its ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn forkguard_model_operation_compaction_overflow_changes_id() {
+        let client = ScriptedSummaryClient::with_outcomes(vec![
+            Err(anyhow::anyhow!("request exceeds context window")),
+            Ok(vec![ContentBlock::Text {
+                text: FIXED_SUMMARY.into(),
+                cache_control: None,
+            }]),
+        ]);
+        let config = CompactionConfig {
+            model: "test-model".into(),
+            cache_summary: false,
+            ..Default::default()
+        };
+        compact_messages_safe(
+            &client,
+            &[msg("user", "old history"), msg("assistant", "current work")],
+            None,
+            &prepared(&config),
+        )
+        .await
+        .unwrap();
+        let requests = client.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].messages.len(), requests[1].messages.len() + 1);
+        assert_eq!(&requests[0].messages[1..], requests[1].messages.as_slice());
+        let operations = client.operations.lock().unwrap();
+        assert_eq!(operations.len(), 2);
+        assert_ne!(
+            operations[0], operations[1],
+            "dropping history changes the call"
         );
     }
 

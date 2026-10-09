@@ -1401,6 +1401,9 @@ impl Engine {
         // failure to the user. `StreamRetryBudget` enforces that bound in
         // mechanism — `authorize()` is the only way to spend a resume.
         let mut stream_retry_budget = StreamRetryBudget::default();
+        // A completed response consumes a logical call. Transport resumes
+        // retain its ID only while the actual outbound facts remain equal.
+        let mut model_operation: Option<(String, uuid::Uuid)> = None;
 
         loop {
             if self.cancel_token.is_cancelled() {
@@ -2045,27 +2048,56 @@ impl Engine {
                     inspection_surface.as_ref(),
                 );
 
-            // Stream the response. Keep the request around (cloned into the
-            // first call) so we can resend it on a transparent retry below
-            // when the wire dies before any content was streamed (#103).
-            let stream_request = request;
-            let _ = self
-                .tx_event
-                .send(Event::ToolRequestSnapshot {
-                    snapshot: tool_request_snapshot,
-                })
-                .await;
-            if let Some(mut route) = turn.pending_route.take() {
-                if let Some(billing) = route.billing.as_mut() {
-                    billing.dispatched_at = chrono::Utc::now();
+            // Prepare once for this outer round. Transport retries reuse this
+            // request-local payload rather than repeating provider normalization.
+            // Preparation errors follow the same localized/authenticated error
+            // path as dispatch errors; cancellation wins before preparation.
+            let preparation = tokio::select! {
+                biased;
+                () = self.cancel_token.cancelled() => {
+                    self.settle_steers_on_interrupt().await;
+                    let _ = self.tx_event.send(Event::status("Request cancelled")).await;
+                    return (TurnOutcomeStatus::Interrupted, None);
                 }
+                result = async { client.prepare_stream_call(request) } => result,
+            };
+            let prepared_stream = preparation.as_ref().ok().cloned();
+            let operation_id = match prepared_stream
+                .as_ref()
+                .and_then(|call| call.operation_identity.as_ref())
+            {
+                Some(identity) => {
+                    let id = match &model_operation {
+                        Some((previous, id)) if previous == identity => *id,
+                        _ => uuid::Uuid::new_v4(),
+                    };
+                    model_operation = Some((identity.clone(), id));
+                    id
+                }
+                None => {
+                    model_operation = None;
+                    uuid::Uuid::new_v4()
+                }
+            };
+            if prepared_stream.is_some() {
                 let _ = self
                     .tx_event
-                    .send(Event::RouteDispatched {
-                        turn_id: turn.id.clone(),
-                        route,
+                    .send(Event::ToolRequestSnapshot {
+                        snapshot: tool_request_snapshot,
                     })
                     .await;
+                if let Some(mut route) = turn.pending_route.take() {
+                    if let Some(billing) = route.billing.as_mut() {
+                        billing.dispatched_at = chrono::Utc::now();
+                    }
+                    let _ = self
+                        .tx_event
+                        .send(Event::RouteDispatched {
+                            turn_id: turn.id.clone(),
+                            route,
+                        })
+                        .await;
+                }
             }
             // Session metrics: the model call is measured from this dispatch
             // instant (connection setup included), and time-to-first-token is
@@ -2078,7 +2110,10 @@ impl Engine {
                     let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                     return (TurnOutcomeStatus::Interrupted, None);
                 }
-                result = client.create_message_stream(stream_request.clone()) => result,
+                result = async {
+                    let prepared = preparation?;
+                    client.create_prepared_message_stream_for_operation(prepared, operation_id).await
+                } => result,
             };
             let stream = match stream_result {
                 Ok(s) => {
@@ -2152,7 +2187,10 @@ impl Engine {
                 .process_stream(
                     client.as_ref(),
                     stream,
-                    &stream_request,
+                    prepared_stream
+                        .as_ref()
+                        .expect("successful stream has a prepared call"),
+                    operation_id,
                     request_dispatched_at,
                     stream_retry_budget.spent(),
                 )
@@ -2423,6 +2461,9 @@ impl Engine {
                 // state from a previous bad round.
                 stream_retry_budget.reset();
             }
+            // All later continuations (including a reasoning-only response
+            // or tool follow-up) are new calls, even with an identical body.
+            model_operation = None;
             if turn_end_child_coordination_responses_remaining > 0 {
                 turn_end_child_coordination_responses_remaining =
                     turn_end_child_coordination_responses_remaining.saturating_sub(1);
@@ -5103,7 +5144,8 @@ impl Engine {
         &mut self,
         client: &dyn crate::core::model_client::ModelClient,
         stream: crate::llm_client::StreamEventBox,
-        stream_request: &crate::models::MessageRequest,
+        prepared_stream: &crate::llm_client::PreparedStreamCall,
+        operation_id: uuid::Uuid,
         mut request_dispatched_at: Instant,
         drop_resumes_spent: u32,
     ) -> StreamOutcome {
@@ -5305,7 +5347,9 @@ impl Engine {
                         let retry_stream_result = tokio::select! {
                             biased;
                             () = self.cancel_token.cancelled() => break,
-                            result = client.create_message_stream(stream_request.clone()) => result,
+                            result = client.create_prepared_message_stream_for_operation(
+                                prepared_stream.clone(), operation_id
+                            ) => result,
                         };
                         match retry_stream_result {
                             Ok(fresh) => {

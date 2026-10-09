@@ -283,6 +283,14 @@ impl ToolSpec for ImageAnalyzeTool {
 
         let url = format!("{}/chat/completions", self.base_url());
         let api_key = self.api_key();
+        let operation_id = uuid::Uuid::new_v4();
+        // The route client can be the parent's main model while vision has a
+        // separate provider. Only the exact matching route may contribute
+        // its frozen context headers or logical-call opt-in.
+        let idempotency_route = self
+            .route_client
+            .as_ref()
+            .filter(|route| route.idempotency_matches_route(&self.base_url(), &api_key));
 
         let retry_config = RetryConfig {
             max_retries: 3,
@@ -303,16 +311,25 @@ impl ToolSpec for ImageAnalyzeTool {
             let response = with_retry(
                 &retry_config,
                 || {
-                    let client = self.client.clone();
+                    let client = idempotency_route
+                        .map(|route| route.http_client.clone())
+                        .unwrap_or_else(|| self.client.clone());
                     let url = url.clone();
                     let api_key = api_key.clone();
                     let payload = payload.clone();
                     async move {
-                        let response = client
+                        let builder = client
                             .post(&url)
                             .header("Content-Type", "application/json")
                             .header("Authorization", format!("Bearer {api_key}"))
-                            .json(&payload)
+                            .json(&payload);
+                        let builder = match idempotency_route {
+                            Some(route) => {
+                                route.with_operation_header_for_id(builder, operation_id)
+                            }
+                            None => builder,
+                        };
+                        let response = builder
                             .send()
                             .await
                             .map_err(|e| LlmError::from_reqwest(&e))?;
@@ -816,5 +833,279 @@ mod tests {
         let payload: Value =
             serde_json::from_str(&result.content).expect("tool result must carry json");
         assert_eq!(payload["analysis"], "a red square");
+    }
+
+    #[tokio::test]
+    async fn forkguard_model_operation_vision_rejects_incompatible_transport() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vision_response_body()))
+            .mount(&server)
+            .await;
+        let workspace = tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("tiny.png"),
+            create_test_png(2, 2, [1, 2, 3, 255]),
+        )
+        .unwrap();
+        let context = ToolContext::new(workspace.path());
+        for (provider, model, key, auth_mode) in [
+            (
+                crate::config::ApiProvider::Anthropic,
+                "claude-sonnet-4-6",
+                "owned-test-key",
+                None,
+            ),
+            (
+                crate::config::ApiProvider::Deepseek,
+                "deepseek-v4-pro",
+                "",
+                Some("none"),
+            ),
+            (
+                crate::config::ApiProvider::XiaomiMimo,
+                "mimo-v2.5",
+                "tp-owned-test-key",
+                None,
+            ),
+        ] {
+            let provider_table = if provider == crate::config::ApiProvider::XiaomiMimo {
+                "xiaomi_mimo"
+            } else {
+                provider.as_str()
+            };
+            let mut config: crate::config::Config = serde_json::from_value(json!({
+                "provider": provider.as_str(),
+                "providers": {
+                    (provider_table): {
+                        "api_key": key, "base_url": server.uri(), "model": model,
+                        "auth_mode": auth_mode
+                    }
+                }
+            }))
+            .unwrap();
+            config.request_idempotency_header = Some("idempotency-key".into());
+            config.http_headers = Some(std::collections::HashMap::from([(
+                "X-Pinvou-Context-Id".into(),
+                "owned-context".into(),
+            )]));
+            let route = DeepSeekClient::new(&config).unwrap();
+            assert!(!route.idempotency_matches_route(&server.uri(), key));
+            let tool = ImageAnalyzeTool::new_with_route_client(
+                VisionModelConfig {
+                    model: "test-vision-model".into(),
+                    api_key: Some(key.into()),
+                    base_url: Some(server.uri()),
+                },
+                Some(route),
+            );
+            let result = tool
+                .execute(json!({"image_path":"tiny.png"}), &context)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_str(&result.content).unwrap();
+            assert_eq!(body["analysis"], "a red square");
+        }
+        let receipts = server.received_requests().await.unwrap();
+        assert_eq!(receipts.len(), 3);
+        for receipt in &receipts {
+            assert!(receipt.url.path().ends_with("/chat/completions"));
+            for header in [
+                "idempotency-key",
+                "x-api-key",
+                "api-key",
+                "anthropic-version",
+                "x-pinvou-context-id",
+            ] {
+                assert!(
+                    !receipt.headers.contains_key(header),
+                    "incompatible parent header {header}"
+                );
+            }
+            assert!(
+                receipt
+                    .headers
+                    .get("authorization")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("Bearer")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn forkguard_model_operation_vision_effective_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vision_response_body()))
+            .mount(&server)
+            .await;
+        let workspace = tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("tiny.png"),
+            create_test_png(2, 2, [1, 2, 3, 255]),
+        )
+        .unwrap();
+        let context = ToolContext::new(workspace.path());
+        for (base, suffix, matching) in [
+            (server.uri(), None, false),
+            (format!("{}/v1", server.uri()), None, true),
+            (format!("{}/v1/", server.uri()), None, false),
+            (
+                format!("{}/v1", server.uri()),
+                Some("other/chat/completions"),
+                false,
+            ),
+            (
+                format!("{}/v1", server.uri()),
+                Some("v1/chat/completions"),
+                true,
+            ),
+        ] {
+            let mut config: crate::config::Config = serde_json::from_value(json!({
+                "provider":"deepseek",
+                "providers":{"deepseek":{
+                    "api_key":"owned-test-key", "base_url":base,
+                    "model":"deepseek-v4-pro", "path_suffix":suffix
+                }},
+                "http_headers":{"X-Pinvou-Context-Id":"owned-test-context"}
+            }))
+            .unwrap();
+            config.request_idempotency_header = Some("idempotency-key".into());
+            let route = DeepSeekClient::new(&config).unwrap();
+            assert_eq!(
+                route.idempotency_matches_route(&base, "owned-test-key"),
+                matching
+            );
+            let tool = ImageAnalyzeTool::new_with_route_client(
+                VisionModelConfig {
+                    model: "test-vision-model".into(),
+                    api_key: Some("owned-test-key".into()),
+                    base_url: Some(base.clone()),
+                },
+                Some(route),
+            );
+            tool.execute(json!({"image_path":"tiny.png"}), &context)
+                .await
+                .unwrap();
+            let receipts = server.received_requests().await.unwrap();
+            let receipt = receipts.last().unwrap();
+            assert_eq!(
+                receipt.url.path(),
+                reqwest::Url::parse(&format!("{base}/chat/completions"))
+                    .unwrap()
+                    .path()
+            );
+            assert_eq!(receipt.headers.contains_key("idempotency-key"), matching);
+            assert_eq!(
+                receipt.headers.contains_key("x-pinvou-context-id"),
+                matching
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn forkguard_model_operation_vision_http_retry_keeps_id() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        Mock::given(method("POST"))
+            .respond_with(move |_: &wiremock::Request| {
+                if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(503)
+                } else {
+                    ResponseTemplate::new(200).set_body_json(vision_response_body())
+                }
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("tiny.png"),
+            create_test_png(2, 2, [1, 2, 3, 255]),
+        )
+        .unwrap();
+        let context = ToolContext::new(workspace.path());
+        let route = DeepSeekClient::new(&crate::config::Config {
+            provider: Some("deepseek".into()),
+            api_key: Some("owned-test-key".into()),
+            base_url: Some(format!("{}/v1", server.uri())),
+            default_text_model: Some("deepseek-v4-pro".into()),
+            request_idempotency_header: Some("idempotency-key".into()),
+            http_headers: Some(std::collections::HashMap::from([
+                ("X-Pinvou-Context-Type".into(), "ORG".into()),
+                ("X-Pinvou-Context-Id".into(), "owned-test-context".into()),
+            ])),
+            ..Default::default()
+        })
+        .unwrap();
+        let tool = ImageAnalyzeTool::new_with_route_client(
+            VisionModelConfig {
+                model: "test-vision-model".into(),
+                api_key: Some("owned-test-key".into()),
+                base_url: Some(format!("{}/v1", server.uri())),
+            },
+            Some(route.clone()),
+        );
+        for _ in 0..2 {
+            let result = tool
+                .execute(
+                    json!({"image_path":"tiny.png","prompt":"same prompt"}),
+                    &context,
+                )
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_str(&result.content).unwrap();
+            assert_eq!(body["analysis"], "a red square");
+        }
+        let receipts = server.received_requests().await.unwrap();
+        assert_eq!(receipts.len(), 3);
+        let ids: Vec<_> = receipts
+            .iter()
+            .map(|receipt| {
+                receipt
+                    .headers
+                    .get("idempotency-key")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        assert!(receipts.windows(2).all(|pair| pair[0].body == pair[1].body));
+        assert!(receipts.iter().all(|receipt| {
+            receipt
+                .headers
+                .get("x-pinvou-context-id")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                == "owned-test-context"
+        }));
+        // Parent main-route state must not leak into a separately configured
+        // vision provider, even when the loopback endpoint is the same.
+        let ordinary = ImageAnalyzeTool::new_with_route_client(
+            VisionModelConfig {
+                model: "test-vision-model".into(),
+                api_key: Some("ordinary-vision-key".into()),
+                base_url: Some(format!("{}/v1", server.uri())),
+            },
+            Some(route),
+        );
+        ordinary
+            .execute(
+                json!({"image_path":"tiny.png","prompt":"same prompt"}),
+                &context,
+            )
+            .await
+            .unwrap();
+        let receipts = server.received_requests().await.unwrap();
+        assert_eq!(receipts.len(), 4);
+        assert!(!receipts[3].headers.contains_key("idempotency-key"));
+        assert!(!receipts[3].headers.contains_key("x-pinvou-context-id"));
     }
 }

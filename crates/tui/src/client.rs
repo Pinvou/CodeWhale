@@ -253,6 +253,11 @@ pub struct DeepSeekClient {
     /// HTTP/1.1-only twin of [`Self::http_client`], used for automatic
     /// stream-header fallback when H2 stalls. Same auth and headers.
     pub(super) http1_client: reqwest::Client,
+    request_idempotency_header: Option<HeaderName>,
+    operation_id: Option<uuid::Uuid>,
+    // In-memory only: includes frozen auth/context headers without exposing
+    // their values in receipts, logs, prompts, or persisted session state.
+    operation_route_identity: String,
     api_key: String,
     /// Exact configured credential values removed from model-bound tool
     /// results. Structural redaction handles config/JSON assignments, while
@@ -277,6 +282,7 @@ pub struct DeepSeekClient {
     /// resolution as the Codex bearer token.
     pub(super) codex_account_id: Option<String>,
     wire_format: WireFormat,
+    auth_disabled: bool,
     retry: RetryPolicy,
     /// Auxiliary inspection calls use the normal bounded retry schedule but
     /// never publish retry/rate-limit state into process-global UI cells.
@@ -303,6 +309,16 @@ pub struct DeepSeekClient {
     test_messages_transport_base_url: Option<String>,
     pub(super) reasoning_stream_style: Option<String>,
     pub(super) stream_idle_timeout: Duration,
+}
+
+// Bound to the frozen route as well as the body; another client must not
+// dispatch a prepared operation using different credentials or transport.
+struct PreparedOperationStream {
+    route_identity: String,
+    wire_format: WireFormat,
+    auth_disabled: bool,
+    path_suffix: Option<String>,
+    prepared: PreparedOutboundRequest,
 }
 
 const CONNECTION_FAILURE_THRESHOLD: u32 = 2;
@@ -573,6 +589,9 @@ impl Clone for DeepSeekClient {
         Self {
             http_client: self.http_client.clone(),
             http1_client: self.http1_client.clone(),
+            request_idempotency_header: self.request_idempotency_header.clone(),
+            operation_id: self.operation_id,
+            operation_route_identity: self.operation_route_identity.clone(),
             api_key: self.api_key.clone(),
             model_bound_secret_values: Arc::clone(&self.model_bound_secret_values),
             base_url: self.base_url.clone(),
@@ -583,6 +602,7 @@ impl Clone for DeepSeekClient {
             route_limits: self.route_limits,
             codex_account_id: self.codex_account_id.clone(),
             wire_format: self.wire_format,
+            auth_disabled: self.auth_disabled,
             retry: self.retry.clone(),
             isolated_request_state: self.isolated_request_state,
             remote_control_inference_participant: self.remote_control_inference_participant,
@@ -1256,6 +1276,37 @@ impl DeepSeekClient {
         let retry = config.retry_policy();
         let stream_idle_timeout = Duration::from_secs(config.stream_chunk_timeout_secs());
         let http_headers = config.http_headers();
+        let sorted_headers: std::collections::BTreeMap<_, _> = http_headers.iter().collect();
+        let operation_route_identity = crate::hashing::sha256_hex(&serde_json::to_vec(&(
+            &provider_identity,
+            &base_url,
+            &api_key,
+            sorted_headers,
+        ))?);
+        let request_idempotency_header = config
+            .request_idempotency_header
+            .as_deref()
+            .map(|name| {
+                let header = HeaderName::from_bytes(name.as_bytes())
+                    .context("Invalid request idempotency header name")?;
+                // This host-only seam implements the existing standard
+                // idempotency contract; it cannot overwrite auth or framing.
+                anyhow::ensure!(
+                    header == HeaderName::from_static("idempotency-key"),
+                    "Unsupported request idempotency header name"
+                );
+                Ok::<_, anyhow::Error>(header)
+            })
+            .transpose()?;
+        // Static keys remain supported on ordinary routes, but a host-owned
+        // operation key cannot coexist with a different default key on GETs.
+        anyhow::ensure!(
+            request_idempotency_header.is_none()
+                || !http_headers
+                    .keys()
+                    .any(|name| name.eq_ignore_ascii_case("idempotency-key")),
+            "Static Idempotency-Key conflicts with host operation idempotency"
+        );
         let auth_disabled =
             auth_mode_disables_api_key(config.auth_mode_for_provider(api_provider).as_deref());
         let insecure_skip_tls_verify = config.insecure_skip_tls_verify();
@@ -1327,6 +1378,9 @@ impl DeepSeekClient {
         Ok(Self {
             http_client,
             http1_client,
+            request_idempotency_header,
+            operation_id: None,
+            operation_route_identity,
             api_key,
             model_bound_secret_values,
             base_url,
@@ -1337,6 +1391,7 @@ impl DeepSeekClient {
             route_limits,
             codex_account_id,
             wire_format,
+            auth_disabled,
             retry,
             isolated_request_state: false,
             remote_control_inference_participant: !config.runtime_chat_isolated
@@ -2411,6 +2466,7 @@ impl DeepSeekClient {
         let _permit = self.acquire_provider_request_permit().await;
         let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
         let max_tokens = self.effective_max_output_tokens(&model);
+        let call = self.for_operation(uuid::Uuid::new_v4());
         if self.wire_format != WireFormat::ChatCompletions {
             // Non-Chat dialects reuse the prepared-request seam so translation
             // cannot drift from production shaping. Translation is still an
@@ -2423,8 +2479,8 @@ impl DeepSeekClient {
                 false,
             )?;
             let response = match prepared.dialect {
-                WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await?,
-                WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await?,
+                WireDialect::OpenAiResponses => call.handle_responses_message(&prepared).await?,
+                WireDialect::AnthropicMessages => call.handle_anthropic_message(&prepared).await?,
                 WireDialect::ChatCompletions => unreachable!(),
             };
             return translation_text_from_response(&response);
@@ -2458,7 +2514,7 @@ impl DeepSeekClient {
             Some("off"),
         );
 
-        let response = self.send_json_with_retry(&url, &body).await?;
+        let response = call.send_json_with_retry(&url, &body).await?;
 
         let value: serde_json::Value = response.json().await?;
         let translated = value["choices"][0]["message"]["content"]
@@ -2819,7 +2875,8 @@ impl DeepSeekClient {
         let body = build_speech_synthesis_body(&model, &text, instruction, audio);
 
         let url = api_url(&self.base_url, "chat/completions");
-        let response = self.send_json_with_retry(&url, &body).await?;
+        let call = self.for_operation(uuid::Uuid::new_v4());
+        let response = call.send_json_with_retry(&url, &body).await?;
         let status = response.status();
         if !status.is_success() {
             let raw_error_text = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
@@ -2987,8 +3044,8 @@ impl DeepSeekClient {
                 // reqwest's per-request timeout also covers the response
                 // body, so a slow-drip body cannot outlive the budget.
                 let request = match attempt_total {
-                    Some(total) => build().timeout(total),
-                    None => build(),
+                    Some(total) => self.with_operation_header(build()).timeout(total),
+                    None => self.with_operation_header(build()),
                 };
                 async move {
                     // Sleep in bounded slices rather than the full remaining
@@ -3101,7 +3158,7 @@ impl DeepSeekClient {
         let request_result = with_retry(
             &retry_cfg,
             || {
-                let request = build();
+                let request = self.with_operation_header(build());
                 async move {
                     self.wait_for_rate_limit().await;
                     let response = request
@@ -3239,6 +3296,7 @@ impl DeepSeekClient {
         request: MessageRequest,
     ) -> Result<MessageResponse> {
         let mut isolated = self.clone();
+        isolated.operation_id = Some(uuid::Uuid::new_v4());
         isolated.isolated_request_state = true;
         // The ordinary clone shares its provider token bucket so concurrent
         // production calls observe one rate budget. Request inspection is an
@@ -3253,6 +3311,127 @@ impl DeepSeekClient {
             WireDialect::AnthropicMessages => isolated.handle_anthropic_message(&prepared).await,
             WireDialect::ChatCompletions => isolated.create_message_chat(&prepared, false).await,
         }
+    }
+}
+
+impl DeepSeekClient {
+    // A request-local clone owns exactly one outbound logical call. Do not
+    // reuse it for an auxiliary request with a different body.
+    fn for_operation(&self, operation_id: uuid::Uuid) -> Self {
+        let mut client = self.clone();
+        client.operation_id = Some(operation_id);
+        client
+    }
+
+    fn prepared_operation_identity(&self, prepared: &PreparedOutboundRequest) -> Result<String> {
+        Ok(crate::hashing::sha256_hex(&serde_json::to_vec(&(
+            self.api_provider.as_str(),
+            &self.operation_route_identity,
+            &prepared.endpoint.url,
+            prepared.canonical_body(),
+        ))?))
+    }
+
+    pub(super) fn with_operation_header(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        match self.operation_id {
+            Some(id) => self.with_operation_header_for_id(builder, id),
+            None => builder,
+        }
+    }
+    /// For the existing vision adapter, which owns its own HTTP retry loop.
+    /// The caller mints one ID before that loop; ordinary routes are unchanged.
+    pub(crate) fn with_operation_header_for_id(
+        &self,
+        builder: reqwest::RequestBuilder,
+        id: uuid::Uuid,
+    ) -> reqwest::RequestBuilder {
+        match &self.request_idempotency_header {
+            Some(header) => builder.header(header.clone(), id.to_string()),
+            None => builder,
+        }
+    }
+    pub(crate) fn idempotency_matches_route(&self, base_url: &str, api_key: &str) -> bool {
+        self.request_idempotency_header.is_some()
+            && self.wire_format == WireFormat::ChatCompletions
+            && !self.auth_disabled
+            && !(self.api_provider == ApiProvider::XiaomiMimo
+                && (xiaomi_mimo_base_url_uses_token_plan(&self.base_url)
+                    || xiaomi_mimo_api_key_uses_token_plan(&self.api_key)))
+            && api_url_with_suffix(
+                &self.base_url,
+                "chat/completions",
+                self.path_suffix.as_deref(),
+            ) == format!("{base_url}/chat/completions")
+            && self.api_key == api_key
+    }
+    async fn perform_message(&self, request: MessageRequest) -> Result<MessageResponse> {
+        let _inference = self.acquire_remote_control_inference_permit().await;
+        let _permit = self.acquire_provider_request_permit().await;
+        // Cacheability is a property of the caller's request, not of the wire
+        // body, so it is read before the request is consumed by the seam.
+        // A route that owns per-operation accounting must observe each new
+        // logical call. The process-local body cache has no operation or
+        // payer-context dimension, so it remains for ordinary routes only.
+        let cacheable = self.request_idempotency_header.is_none()
+            && crate::llm_response_cache::request_is_cacheable(&request);
+        let prepared = self.prepare_outbound_request(request, false)?;
+        match prepared.dialect {
+            WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await,
+            WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await,
+            WireDialect::ChatCompletions => self.create_message_chat(&prepared, cacheable).await,
+        }
+    }
+
+    async fn perform_message_stream(
+        &self,
+        request: MessageRequest,
+    ) -> Result<crate::llm_client::StreamEventBox> {
+        let inference = self.acquire_remote_control_inference_permit().await;
+        let permit = self.acquire_provider_request_permit().await;
+        let prepared = self.prepare_outbound_request(request, true)?;
+        self.finish_prepared_stream(prepared, inference, permit)
+            .await
+    }
+
+    async fn finish_prepared_stream(
+        &self,
+        prepared: PreparedOutboundRequest,
+        inference: Option<RemoteControlInferencePermit>,
+        permit: Option<ProviderRequestPermit>,
+    ) -> Result<crate::llm_client::StreamEventBox> {
+        let projection_warning = (!prepared.omitted_tool_names.is_empty()).then(|| {
+            let omitted_tool_count = prepared.omitted_tool_names.len();
+            (
+                prepared.endpoint.provider_display.clone(),
+                crate::core::events::bounded_tool_projection_warning_names(
+                    &prepared.omitted_tool_names,
+                ),
+                omitted_tool_count,
+            )
+        });
+        let stream = match prepared.dialect {
+            WireDialect::OpenAiResponses => self.handle_responses_stream(&prepared).await?,
+            WireDialect::AnthropicMessages => self.handle_anthropic_stream(&prepared).await?,
+            WireDialect::ChatCompletions => self.handle_chat_completion_stream(prepared).await?,
+        };
+        let stream = match projection_warning {
+            Some((provider, omitted_tool_names, omitted_tool_count)) => {
+                Self::prepend_tool_projection_warning(
+                    stream,
+                    provider,
+                    omitted_tool_names,
+                    omitted_tool_count,
+                )
+            }
+            None => stream,
+        };
+        let stream = Self::hold_provider_request_permit_for_stream(stream, permit);
+        Ok(Self::hold_remote_control_inference_permit_for_stream(
+            stream, inference,
+        ))
     }
 }
 
@@ -3319,56 +3498,98 @@ impl LlmClient for DeepSeekClient {
     }
 
     async fn create_message(&self, request: MessageRequest) -> Result<MessageResponse> {
-        let _inference = self.acquire_remote_control_inference_permit().await;
-        let _permit = self.acquire_provider_request_permit().await;
-        // Cacheability is a property of the caller's request, not of the wire
-        // body, so it is read before the request is consumed by the seam.
-        let cacheable = crate::llm_response_cache::request_is_cacheable(&request);
-        let prepared = self.prepare_outbound_request(request, false)?;
-        match prepared.dialect {
-            WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await,
-            WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await,
-            WireDialect::ChatCompletions => self.create_message_chat(&prepared, cacheable).await,
-        }
+        self.create_message_for_operation(request, uuid::Uuid::new_v4())
+            .await
     }
-
     async fn create_message_stream(
         &self,
         request: MessageRequest,
     ) -> Result<crate::llm_client::StreamEventBox> {
-        let inference = self.acquire_remote_control_inference_permit().await;
-        let permit = self.acquire_provider_request_permit().await;
-        let prepared = self.prepare_outbound_request(request, true)?;
-        let projection_warning = (!prepared.omitted_tool_names.is_empty()).then(|| {
-            let omitted_tool_count = prepared.omitted_tool_names.len();
-            (
-                prepared.endpoint.provider_display.clone(),
-                crate::core::events::bounded_tool_projection_warning_names(
-                    &prepared.omitted_tool_names,
-                ),
-                omitted_tool_count,
-            )
-        });
-        let stream = match prepared.dialect {
-            WireDialect::OpenAiResponses => self.handle_responses_stream(&prepared).await?,
-            WireDialect::AnthropicMessages => self.handle_anthropic_stream(&prepared).await?,
-            WireDialect::ChatCompletions => self.handle_chat_completion_stream(prepared).await?,
-        };
-        let stream = match projection_warning {
-            Some((provider, omitted_tool_names, omitted_tool_count)) => {
-                Self::prepend_tool_projection_warning(
-                    stream,
-                    provider,
-                    omitted_tool_names,
-                    omitted_tool_count,
-                )
-            }
-            None => stream,
-        };
-        let stream = Self::hold_provider_request_permit_for_stream(stream, permit);
-        Ok(Self::hold_remote_control_inference_permit_for_stream(
-            stream, inference,
+        self.create_message_stream_for_operation(request, uuid::Uuid::new_v4())
+            .await
+    }
+    async fn create_message_for_operation(
+        &self,
+        request: MessageRequest,
+        operation_id: uuid::Uuid,
+    ) -> Result<MessageResponse> {
+        self.for_operation(operation_id)
+            .perform_message(request)
+            .await
+    }
+    async fn create_message_stream_for_operation(
+        &self,
+        request: MessageRequest,
+        operation_id: uuid::Uuid,
+    ) -> Result<crate::llm_client::StreamEventBox> {
+        self.for_operation(operation_id)
+            .perform_message_stream(request)
+            .await
+    }
+    fn stream_operation_identity(&self, request: &MessageRequest) -> Result<String> {
+        if self.request_idempotency_header.is_none() {
+            return crate::llm_client::caller_stream_operation_identity(
+                self.provider_name(),
+                self.billing_base_url(),
+                request,
+            );
+        }
+        let prepared = self.prepare_outbound_request(request.clone(), true)?;
+        self.prepared_operation_identity(&prepared)
+    }
+
+    fn prepare_stream_call(
+        &self,
+        request: MessageRequest,
+    ) -> Result<crate::llm_client::PreparedStreamCall> {
+        if self.request_idempotency_header.is_none() {
+            return Ok(crate::llm_client::PreparedStreamCall::plain(request));
+        }
+        let prepared = self.prepare_outbound_request(request.clone(), true)?;
+        let identity = self.prepared_operation_identity(&prepared)?;
+        Ok(crate::llm_client::PreparedStreamCall::with_transport(
+            request,
+            identity,
+            PreparedOperationStream {
+                route_identity: self.operation_route_identity.clone(),
+                wire_format: self.wire_format,
+                auth_disabled: self.auth_disabled,
+                path_suffix: self.path_suffix.clone(),
+                prepared,
+            },
         ))
+    }
+
+    async fn create_prepared_message_stream_for_operation(
+        &self,
+        call: crate::llm_client::PreparedStreamCall,
+        operation_id: uuid::Uuid,
+    ) -> Result<crate::llm_client::StreamEventBox> {
+        if self.request_idempotency_header.is_none() {
+            anyhow::ensure!(
+                call.operation_identity.is_none(),
+                "Prepared operation belongs to another route"
+            );
+            return self
+                .create_message_stream_for_operation(call.request, operation_id)
+                .await;
+        }
+        let payload = call
+            .transport::<PreparedOperationStream>()
+            .context("Missing prepared operation transport")?;
+        anyhow::ensure!(
+            payload.route_identity == self.operation_route_identity
+                && payload.wire_format == self.wire_format
+                && payload.auth_disabled == self.auth_disabled
+                && payload.path_suffix == self.path_suffix,
+            "Prepared operation belongs to another route"
+        );
+        let client = self.for_operation(operation_id);
+        let inference = client.acquire_remote_control_inference_permit().await;
+        let permit = client.acquire_provider_request_permit().await;
+        client
+            .finish_prepared_stream(payload.prepared.clone(), inference, permit)
+            .await
     }
 }
 
@@ -4119,7 +4340,8 @@ impl DeepSeekClient {
             "suffix": suffix,
             "max_tokens": max_tokens,
         });
-        let response = self.send_json_with_retry(&url, &body).await?;
+        let call = self.for_operation(uuid::Uuid::new_v4());
+        let response = call.send_json_with_retry(&url, &body).await?;
         let status = response.status();
         if !status.is_success() {
             let raw_error_text = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
@@ -4149,6 +4371,10 @@ mod chat;
 mod deepseek_effort;
 #[cfg(test)]
 mod ds4_tests;
+
+#[cfg(test)]
+#[path = "client/operation_tests.rs"]
+mod operation_tests;
 mod prepared;
 mod provider_native_search;
 mod responses;

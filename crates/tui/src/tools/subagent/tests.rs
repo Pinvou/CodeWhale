@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::{Builder as TempDirBuilder, tempdir};
 
 mod launch_receipt;
+mod operation_identity;
 
 fn built_in_whale_name_that_cannot_be_generated_for(agent_id: &str) -> &'static str {
     WHALE_NICKNAMES
