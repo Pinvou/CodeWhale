@@ -84,5 +84,3 @@ export function financialRepairDraftFromProjection(projection, operatorReason, r
     return { error: 'FINANCIAL_REPAIR_PRECHECK_INVALID' };
   }
 }
-
-export const FINANCIAL_REPAIR_COMMANDS = financialRepairCommands;

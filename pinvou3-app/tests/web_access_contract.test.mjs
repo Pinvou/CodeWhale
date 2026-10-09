@@ -839,7 +839,7 @@ assert.ok(
 );
 const toolEvents = readSource(path.join(root, 'src', 'features', 'tools', 'tool-events.js'), 'utf8');
 assert.match(toolEvents, /export \{ notifyComposerToolsChanged, notifyChatRoundCommitted \};/);
-assert.match(composerShared, /bridge\.models\.switchModel\(activeSessionId, id\)/);
+assert.match(composerShared, /bridge\.models\.switchModelRef\(activeSessionId, modelRef\)/);
 assert.match(settingsView, /\{canManageModels && editingModel && \(/);
 assert.match(toolStoreView, /if \(!can\('toolStoreMutations'\)\) \{/);
 assert.match(toolStoreView, /const canMutateToolStore = can\('toolStoreMutations'\);/);

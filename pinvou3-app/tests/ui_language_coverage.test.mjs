@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 import { dict } from './helpers/i18n-all.js'; // 三语全量断言：浏览器入口惰性装载，测试使用聚合 shim。
 import { errorCode, localizedErrorMessage } from '../src/shared/user-facing-error.js';
 import {
@@ -11,7 +12,7 @@ import {
   localizeConnectorAlert,
 } from '../src/features/tools/connector-ui-state.js';
 
-const source = relative => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8');
+const source = relative => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 // Shape pins must not match text inside comments: a guard commented out in
 // the source would otherwise still satisfy every anchor. Round-23 should-fix
 // 2 dropped full-line `//` comments (live-verified — commenting out the
@@ -170,10 +171,9 @@ for (const language of ['zh', 'en', 'ja']) {
   );
   assert.ok(dict[language].uiChatExtra.draftingScheduled, `${language}.uiChatExtra.draftingScheduled must exist`);
   assert.ok(dict[language].uiChatScenes.attachmentPrompt, `${language}.uiChatScenes.attachmentPrompt must exist`);
-  assert.ok(dict[language].uiAccount.availableQuota, `${language}.uiAccount.availableQuota must exist`);
-  assert.ok(dict[language].uiAccount.settingsLoadFailed, `${language}.uiAccount.settingsLoadFailed must exist`);
-  assert.ok(dict[language].uiAccount.settingsLoadFailedDetail, `${language}.uiAccount.settingsLoadFailedDetail must exist`);
-  assert.ok(dict[language].uiAccount.errors.service_unreachable, `${language}.uiAccount.errors.service_unreachable must exist`);
+  assert.ok(accountPlatformCopy[language].availableCredits, `${language}.uiAccountPlatform.balance must exist`);
+  assert.ok(accountPlatformCopy[language].requestFailed, `${language}.uiAccountPlatform.requestFailed must exist`);
+  assert.ok(accountPlatformCopy[language].errors.oidc_credentials_invalid, `${language}.uiAccountPlatform.errors.oidc_credentials_invalid must exist`);
   assert.ok(dict[language].uiToolStore.toolNames.eip, `${language}.uiToolStore.toolNames.eip must exist`);
   assert.ok(dict[language].uiToolStore.toolNames.zhidao, `${language}.uiToolStore.toolNames.zhidao must exist`);
   assert.ok(dict[language].uiToolStore.sso, `${language}.uiToolStore.sso must exist`);
@@ -191,7 +191,6 @@ for (const language of ['zh', 'en', 'ja']) {
     }
     assert.equal(tool.welcomeQueries.length, 4, `${language}.uiToolDetails.tools.${toolId}.welcomeQueries must contain four prompts`);
   }
-  assert.ok(dict[language].uiPlatformMisc.tauriBridge.builtinModelUnavailable, `${language}.uiPlatformMisc.tauriBridge.builtinModelUnavailable must exist`);
   assert.ok(dict[language].uiSettingsDetail.settingsLoadFailed, `${language}.uiSettingsDetail.settingsLoadFailed must exist`);
   // uiMultiAgent 收缩为活键集（ADR-0006）：开关行 + 行内专家卡 + 只读面板。
   // 确认卡/审批链/台账时代的键已随旧入口退役，不再断言存在。
@@ -292,21 +291,19 @@ const viewLoaders = source('app/view-loaders.js');
 assert.match(viewLoaders, new RegExp("toolStore: \\(\\) => import\\('\\.\\./features/tools/ToolStoreView\\.jsx'\\)"));
 assert.match(main, /<LazyToolStoreView[^>]*t=\{t\}/);
 assert.match(main, /<WebConnectionStatus[^>]*t=\{t\}/);
-assert.match(main, /<AccountPopover[\s\S]{0,300}t=\{t\}/);
-assert.match(main, /const accountCopy = t\.uiAccount/);
-assert.match(main, /accountCopy\.availableQuota/);
-assert.match(main, /accountCopy\.loginAndSync/);
-assert.match(main, /setLoginErrorCode\(errorCode\(err\) \|\| 'unknown'\)/);
-assert.match(main, /localizedErrorMessage\(\{ code: loginErrorCode \}, accountCopy\.errors, accountCopy\.builtinLoginFailed\)/);
-assert.match(main, /localizedErrorMessage\(\{ code: accountErrorCode \}, accountCopy\.errors, accountCopy\.syncFailed\)/);
-assert.doesNotMatch(main, /setLoginError\(err && err\.message/);
-assert.doesNotMatch(main, /setLlmApiError\(e && e\.message/);
-assert.doesNotMatch(main, /console\.error\('llm api (?:quota refresh|login) failed:', e\)/);
-assert.match(main, /const refreshLlmApiStatus = useCallback\(async \(\) => \{[\s\S]{0,1000}\}, \[\]\);/);
-assert.doesNotMatch(main, /\}, \[t\.uiAccount\.syncFailed\]\);/);
-assert.match(main, /formatQuotaTokens\(limit, t\.langTag\)/);
-assert.match(main, /t\.uiAccount\.viewQuota/);
-assert.doesNotMatch(main, />查看可用额度</);
+assert.match(main, /<LazyAccountPlatformPopover[\s\S]{0,400}copy=\{accountPlatformCopy\[language\]\}/);
+assert.match(main, /title=\{accountPlatformCopy\[language\]\.title\}/);
+assert.doesNotMatch(main, /<AccountPopover/);
+const accountPlatformPopover = source('features/account-platform/AccountPlatformPopover.jsx');
+assert.match(accountPlatformPopover, /<AccountPlatformView \{\.\.\.props\}/);
+const accountPlatformView = source('features/account-platform/AccountPlatformView.jsx');
+assert.match(accountPlatformView, /copy\.availableCredits/);
+assert.match(accountPlatformView, /copy\.reservedCredits/);
+assert.match(accountPlatformView, /localizedAccountPlatformError/);
+assert.doesNotMatch(accountPlatformPopover, /platformModel|selectPlatformModel|modelSelectionSaved/);
+assert.doesNotMatch(accountPlatformPopover, />可用余额</);
+assert.equal(accountPlatformCopy.zh.availableCredits, '可用积分');
+assert.equal(accountPlatformCopy.zh.reservedCredits, '使用中');
 assert.match(main, /<ViewErrorBoundary[^>]*heading=\{t\.uiSettingsDetail\.settingsLoadFailed\}[^>]*detail=\{t\.uiSettingsDetail\.settingsLoadFailedDetail\}[^>]*t=\{t\}/);
 assert.match(viewLoaders, new RegExp("codex: \\(\\) => import\\('\\.\\./features/codex/CodexAcpView\\.jsx'\\)"));
 // The main window renders codex through the LazyCodexAcpView wrapper (which
@@ -320,7 +317,6 @@ assert.match(viewErrorBoundary, /this\.props\.detail \|\| message/);
 assert.doesNotMatch(viewErrorBoundary, />设置页加载失败</);
 assert.match(main, /t\.uiScheduled\.runStatus\[value\]/);
 assert.doesNotMatch(main, /queued:\s*'等待中'/);
-assert.match(main, /window\.PinvouTauriBridgeStrings = misc\.tauriBridge/);
 
 const petWindow = source('features/pet/PetWindow.jsx');
 assert.match(petWindow, /invokeTauri\(['"]get_settings['"]\)/);
@@ -392,27 +388,27 @@ assert.doesNotMatch(chatRaw, /:\s*'描述你想生成或调整的内容'/);
 assert.doesNotMatch(chatRaw, />下载语音识别模型</);
 assert.match(auxChatPanel, /const copy = t\.uiAuxChat/);
 assert.match(auxChatPanel, /copy=\{conversationCopy\}/);
-const tauriSettingsBridge = source('platform/tauri/bridge/settings.js');
-assert.match(tauriSettingsBridge, /root\.PinvouTauriBridgeStrings/);
+// Account Platform replaces the retired LLMAPI availability messages;
+// localized account failures are pinned below through localizedErrorMessage.
 
 assert.equal(errorCode({ code: 'sso_timeout', message: '原始诊断' }), 'sso_timeout');
-assert.equal(errorCode(new Error('service_unreachable: raw backend detail')), 'service_unreachable');
+assert.equal(errorCode(new Error('oidc_credentials_invalid: raw backend detail')), 'oidc_credentials_invalid');
 assert.equal(errorCode(new Error('raw backend detail')), '');
 assert.equal(
   localizedErrorMessage(
-    new Error('service_unreachable: raw backend detail'),
-    dict.ja.uiAccount.errors,
-    dict.ja.uiAccount.syncFailed,
+    new Error('oidc_credentials_invalid: raw backend detail'),
+    accountPlatformCopy.ja.errors,
+    accountPlatformCopy.ja.requestFailed,
   ),
-  dict.ja.uiAccount.errors.service_unreachable,
+  accountPlatformCopy.ja.errors.oidc_credentials_invalid,
 );
 assert.equal(
   localizedErrorMessage(
     new Error('未知的底层诊断'),
-    dict.en.uiAccount.errors,
-    dict.en.uiAccount.syncFailed,
+    accountPlatformCopy.en.errors,
+    accountPlatformCopy.en.requestFailed,
   ),
-  dict.en.uiAccount.syncFailed,
+  accountPlatformCopy.en.requestFailed,
 );
 assert.equal(connectorErrorCodeForStep('runtime'), 'runtime_prepare_failed');
 assert.equal(connectorErrorCodeForStep('cli'), 'cli_install_failed');
@@ -441,19 +437,19 @@ assert.equal(failedAuthorizationFlow.steps.cli, 'done');
 assert.equal(failedAuthorizationFlow.steps.qr, 'error');
 assert.equal(Object.hasOwn(failedAuthorizationFlow.steps, 'authorize'), false);
 assert.equal(Object.hasOwn(failedAuthorizationFlow, 'errorDetail'), false);
-const storedAccountErrorCode = errorCode(new Error('service_unreachable: raw backend detail'));
+const storedAccountErrorCode = errorCode(new Error('oidc_credentials_invalid: raw backend detail'));
 const englishAccountError = localizedErrorMessage(
   { code: storedAccountErrorCode },
-  dict.en.uiAccount.errors,
-  dict.en.uiAccount.syncFailed,
+  accountPlatformCopy.en.errors,
+  accountPlatformCopy.en.requestFailed,
 );
 const japaneseAccountError = localizedErrorMessage(
   { code: storedAccountErrorCode },
-  dict.ja.uiAccount.errors,
-  dict.ja.uiAccount.syncFailed,
+  accountPlatformCopy.ja.errors,
+  accountPlatformCopy.ja.requestFailed,
 );
-assert.equal(englishAccountError, dict.en.uiAccount.errors.service_unreachable);
-assert.equal(japaneseAccountError, dict.ja.uiAccount.errors.service_unreachable);
+assert.equal(englishAccountError, accountPlatformCopy.en.errors.oidc_credentials_invalid);
+assert.equal(japaneseAccountError, accountPlatformCopy.ja.errors.oidc_credentials_invalid);
 assert.notEqual(englishAccountError, japaneseAccountError);
 const semanticAlert = { visible: true, connectorAlert: 'failed', errorCode: 'auth_failed', toolId: 'wecom' };
 const englishAlert = localizeConnectorAlert(semanticAlert, dict.en.uiToolStore, dict.en.uiToolDetails);
