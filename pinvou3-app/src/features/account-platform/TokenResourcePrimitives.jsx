@@ -18,4 +18,3 @@ export function TokenResourcePaging({ source, query, state, copy, histories, onC
     <button type="button" disabled={state.loading || !state.page.nextCursor} onClick={() => { histories.current[source] = rememberAdminModelTokenNextCursor(history, state.page.nextCursor); onChange({ ...query, cursor: state.page.nextCursor }); }}>{copy.next}</button>
   </div></div>;
 }
-
