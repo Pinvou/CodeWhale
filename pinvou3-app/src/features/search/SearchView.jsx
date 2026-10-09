@@ -12,6 +12,8 @@ import {
 } from '../attachments/attachment-message.js';
 import { formatDateGroupLabel, formatSessionDate, localDateKey } from '../../shared/date-utils.js';
 import { sessionRoute } from '../../shared/session-management.js';
+import { compareSessionsByRecentUpdate, filterSessionsByTab, groupSessionsByLocalDate, sessionListComparator } from '../../shared/session-list-pipeline.js';
+import { DEFAULT_CHAT_TITLES } from '../../shared/i18n.js';
 
 // 对话管理页:上方搜索框,工具行「对话|已收纳」切换 + 批量管理,左侧日期栏,右侧对话列表。
 // 已收纳与在线对话共用同一套日期分组/搜索/多选管线,仅数据源与行操作不同
@@ -20,6 +22,11 @@ import { sessionRoute } from '../../shared/session-management.js';
 // 左侧只保留有匹配的日期,点击日期平滑滚动到右侧对应分组。
 // Stable empty-array default: an inline [] is a new reference on every render, which makes memoized children re-render repeatedly.
 const EMPTY_ARCHIVED = [];
+
+// 与 main.jsx 的 isDefaultChatTitle 同口径:后端默认标题是三语哨兵
+// (shared/i18n.js DEFAULT_CHAT_TITLES),展示层统一映射为当前语言的 t.newChat,
+// 避免非中文界面显示硬编码的中文标题。
+const isDefaultChatTitle = (title) => DEFAULT_CHAT_TITLES.has(title);
 
 // Round checkbox for bulk multi-select: the in-row check (large) and select-all (small) share one stroke/fill style set
 const CircleCheck = ({ checked, size }) => (
@@ -63,7 +70,7 @@ export const SearchView = ({ theme, history, t, language, archived = EMPTY_ARCHI
   // 已收纳复用同一套日期分组管线:归一成 history 形状(updatedAt 取对话自身更新时间),
   // 原始 DTO 挂 raw 供恢复/删除按钮取 archived_at 等信息
   const archivedHistory = archivedList.map(s => {
-    const titlePresentation = sessionTitlePresentation(s.title || t.newChat, s.title_attachment_names);
+    const titlePresentation = sessionTitlePresentation(!s.title || isDefaultChatTitle(s.title) ? t.newChat : s.title, s.title_attachment_names);
     return {
       id: s.id,
       title: sessionTitlePlainText(titlePresentation),
@@ -85,22 +92,11 @@ export const SearchView = ({ theme, history, t, language, archived = EMPTY_ARCHI
     { id: 'pinned_first', label: t.sidebarTaskSortPinnedFirst },
     { id: 'recent', label: t.sidebarTaskSortRecent },
   ];
-  const sourceHistory = (showArchived ? archivedHistory : (history || []))
-    .filter(c => {
-      if (showArchived || listFilter === 'all') return true;
-      if (listFilter === 'pinned') return !!c.pinned;
-      if (listFilter === 'scheduled') return c.taskKind === 'scheduled';
-      return true;
-    })
-    .sort((a, b) => {
-      if (showArchived || listSort === 'recent') {
-        return String(b.updatedAt || b.pinnedAt || '').localeCompare(String(a.updatedAt || a.pinnedAt || ''));
-      }
-      if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
-      const aTime = a.pinned ? (a.pinnedAt || a.updatedAt) : (a.updatedAt || a.pinnedAt);
-      const bTime = b.pinned ? (b.pinnedAt || b.updatedAt) : (b.updatedAt || b.pinnedAt);
-      return String(bTime || '').localeCompare(String(aTime || ''));
-    });
+  const rawList = showArchived ? archivedHistory : (history || []);
+  // 筛选/排序走 shared/session-list-pipeline(与 main.jsx 侧栏任务列表同一条管线);
+  // 已收纳面板无 tab 过滤,恒按最近更新排。
+  const sourceHistory = (showArchived ? rawList : filterSessionsByTab(rawList, listFilter))
+    .sort(showArchived ? compareSessionsByRecentUpdate : sessionListComparator(listSort));
 
   // 筛选菜单:点外部/Escape 关闭(与侧栏筛选菜单同款交互)
   useOutsidePointerClose(filterOpen, () => setFilterOpen(false), [filterRef], {
@@ -110,22 +106,8 @@ export const SearchView = ({ theme, history, t, language, archived = EMPTY_ARCHI
   });
 
   // 按本地日历日分组:组内时间倒序,组间日期倒序,无时间戳落 'unknown' 沉底
-  const dateGroups = [];
-  {
-    const byDate = new Map();
-    // sourceHistory 已按当前面板排好序(置顶优先/最近更新),组内顺序即排序结果
-    sourceHistory.forEach(chat => {
-      const key = localDateKey(chat.updatedAt);
-      if (!byDate.has(key)) byDate.set(key, []);
-      byDate.get(key).push(chat);
-    });
-    byDate.forEach((rows, key) => dateGroups.push({ key, rows }));
-    dateGroups.sort((a, b) => {
-      if (a.key === 'unknown') return 1;
-      if (b.key === 'unknown') return -1;
-      return b.key.localeCompare(a.key);
-    });
-  }
+  // (sourceHistory 已按当前面板排好序,组内顺序即排序结果)
+  const dateGroups = groupSessionsByLocalDate(sourceHistory, chat => localDateKey(chat.updatedAt));
   // 'all' = 全部日期;未选或所选日期已不存在时,默认落在最近一天
   const activeDate = selectedDate === 'all'
     ? 'all'

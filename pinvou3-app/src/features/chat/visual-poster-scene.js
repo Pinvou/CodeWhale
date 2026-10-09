@@ -1,4 +1,5 @@
-const VISUAL_POSTER_SCENE_KEY = 'poster';
+import { POSTER_SCENE_KEY, pinvouSceneTag } from './scene-registry.js';
+import { buildScenePayloadText } from './work-scene-routes.js';
 
 const VISUAL_POSTER_CONTEXT = `Pinvou 视觉海报场景约束：
 - 交付物优先生成自包含 HTML/CSS 视觉海报或 Banner，保证可以在 Pinvou 产物预览里继续点选、编辑文字和样式。
@@ -25,20 +26,13 @@ const VISUAL_POSTER_AUDIT = `生成完成前执行海报自检：
 如有问题，先自行修正再交付，并在回复中用简短「海报自检」说明结果。`;
 
 function shouldUseVisualPosterScene(subtab) {
-  return subtab === VISUAL_POSTER_SCENE_KEY;
-}
-
-function buildVisualPosterPayloadText(text) {
-  const raw = String(text || '').trim();
-  if (!raw) return raw;
-  return `${raw}\n\n---\n${VISUAL_POSTER_CONTEXT}\n\n${VISUAL_POSTER_AUDIT}`;
+  return subtab === POSTER_SCENE_KEY;
 }
 
 function createVisualPosterMessageMeta(text) {
   return {
-    pinvouScene: `design:${VISUAL_POSTER_SCENE_KEY}`,
-    pinvouDesignScene: VISUAL_POSTER_SCENE_KEY,
-    pinvouPayloadText: buildVisualPosterPayloadText(text),
+    pinvouScene: pinvouSceneTag(POSTER_SCENE_KEY),
+    pinvouPayloadText: buildScenePayloadText(text, VISUAL_POSTER_CONTEXT, VISUAL_POSTER_AUDIT),
   };
 }
 

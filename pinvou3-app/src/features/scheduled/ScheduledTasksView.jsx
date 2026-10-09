@@ -490,47 +490,16 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
         ))}
       </div>
     );
-    // Factory: binds the shared state and render callbacks needed by the "My Tasks" list and returns a
-    // render function whose only remaining argument is className. Call sites invoke it as a plain
-    // function (not a JSX element), so no component type or remount semantics are involved.
-    /**
-     * @param {{
-     *   scheduledCopy: ScheduledCopy, taskFilter: string, setTaskFilter: (value: string) => void, error?: string,
-     *   filtered: ScheduledTask[], loading?: boolean,
-     *   renderTaskRow: (task: ScheduledTask, index: number, list: ScheduledTask[]) => import('react').ReactNode,
-     * }} shared - Task list section state and row renderer.
-     */
-    const makeMyTasksSection = ({ scheduledCopy, taskFilter, setTaskFilter, error, filtered, loading, renderTaskRow }) => {
-      const MyTasksSection = ({ className = '' } = {}) => (
-        <section className={className || 'mb-5'}>
-          <div className="mb-4 ml-1 flex items-center justify-between gap-4">
-            <h2 className={`text-[13px] font-bold uppercase tracking-wider ${mutedValue}`}>{scheduledCopy.myTasks}</h2>
-            <FilterTabs scheduledCopy={scheduledCopy} taskFilter={taskFilter} setTaskFilter={setTaskFilter} />
-          </div>
-          <div className={`overflow-hidden rounded-[20px] border shadow-[0_2px_10px_rgba(0,0,0,0.02),0_8px_32px_rgba(0,0,0,0.04)] border-black/5 bg-white dark:border-white/15 dark:bg-[#1C1C1E]`}>
-            {error && (
-              <div role="alert" data-testid="scheduled-error" className={`m-3 flex items-start gap-2 rounded-[12px] px-3 py-2 text-[13px] bg-[#FCE8E6] text-[#A50E0E] dark:bg-[#3A2424] dark:text-[#F2B8B5]`}>
-                <span className="min-w-0 flex-1">{error}</span>
-                <button type="button" onClick={() => bridge?.dismissScheduledTaskError?.()}
-                  aria-label={scheduledCopy.closeError} className="mt-[-2px] rounded-full p-1 opacity-65 transition-opacity hover:opacity-100">
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            )}
-            {filtered.length ? (
-              <div data-testid="scheduled-task-groups">
-                {filtered.map((task, index) => renderTaskRow(task, index, filtered))}
-              </div>
-            ) : (
-              <div className={`px-4 py-8 text-center text-[14px] ${mutedValue}`}>
-                {loading ? scheduledCopy.loading : scheduledCopy.empty}
-              </div>
-            )}
-          </div>
-        </section>
+    // 必填字段（name/prompt/rrule）在 patch 中存在且为空白即视为无效草稿；
+    // 卸载兜底保存与 flushTextEdits 共用同一判定。
+    function hasBlankRequiredField(patch) {
+      return ['name', 'prompt', 'rrule'].some(key =>
+        // biome-ignore lint/suspicious/noPrototypeBuiltins: Safari 14 is the floor; Object.hasOwn is unavailable, and this call is already the safe form
+        Object.prototype.hasOwnProperty.call(patch, key) && !String(patch[key] || '').trim()
       );
-      return MyTasksSection;
-    };
+    }
+    // ScheduledTasksView 内的 MyTasksSection 分区（见组件内定义）直接闭包共享状态；
+    // 原模块级 makeMyTasksSection 工厂只有一个调用点，已内联为普通渲染函数。
 
     const ScheduledTasksView = ({ theme, t, onOpenChat, onGotoModelSettings }) => {
       // The settings slice is required here: the memory-organize template card
@@ -731,9 +700,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
           const taskId = editTaskIdRef.current;
           saveChainRef.current.catch(() => {}).then(() => {
             const patch = pendingPatchRef.current;
-            const invalid = ['name', 'prompt', 'rrule'].some(key =>
-              Object.prototype.hasOwnProperty.call(patch, key) && !String(patch[key] || '').trim()
-            );
+            const invalid = hasBlankRequiredField(patch);
             if (!taskId || invalid || !Object.keys(patch).length || !bridge || !bridge.scheduled.updateScheduledTask) return null;
             pendingPatchRef.current = {};
             return bridge.scheduled.updateScheduledTask(taskId, patch);
@@ -776,10 +743,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
         const patch = pendingPatchRef.current;
-        const hasBlankRequiredField = ['name', 'prompt', 'rrule'].some(key =>
-          Object.prototype.hasOwnProperty.call(patch, key) && !String(patch[key] || '').trim()
-        );
-        if (hasBlankRequiredField) {
+        if (hasBlankRequiredField(patch)) {
           if (mountedRef.current) setSaveState('invalid');
           return Promise.resolve({ok: false, invalid: true});
         }
@@ -1425,10 +1389,9 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
 
       // My Tasks 分区（原 makeMyTasksSection 工厂内联为普通渲染函数）：闭包共享本视图的
       // 过滤/加载状态；按普通函数调用而非 JSX 元素——每次渲染新建组件类型会导致子树重挂载。
-      // 唯一调用点固定传 'mb-0'，className 缺省即该值。
-      // eslint-disable-next-line @eslint-react/no-nested-component-definitions -- plain render function, never used as a JSX element (call site is MyTasksSection({ className: 'mb-0' })); the props-like signature only exists because that call form is pinned by tests
-      const MyTasksSection = ({ className = 'mb-0' } = {}) => (
-        <section className={className}>
+      // eslint-disable-next-line @eslint-react/no-nested-component-definitions -- plain render function, never used as a JSX element (call site is MyTasksSection()); the render-function form only exists because that call form is pinned by tests
+      const MyTasksSection = () => (
+        <section className="mb-0">
           <div className="mb-4 ml-1 flex items-center justify-between gap-4">
             <h2 className={`text-[13px] font-bold uppercase tracking-wider ${mutedValue}`}>{scheduledCopy.myTasks}</h2>
             <FilterTabs scheduledCopy={scheduledCopy} taskFilter={taskFilter} setTaskFilter={setTaskFilter} />
@@ -1437,7 +1400,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
             {error && (
               <div role="alert" data-testid="scheduled-error" className={`m-3 flex items-start gap-2 rounded-[12px] px-3 py-2 text-[13px] bg-[#FCE8E6] text-[#A50E0E] dark:bg-[#3A2424] dark:text-[#F2B8B5]`}>
                 <span className="min-w-0 flex-1">{error}</span>
-                <button type="button" onClick={() => bridge?.dismissScheduledTaskError?.()}
+                <button type="button" onClick={() => bridge?.scheduled?.dismissScheduledTaskError?.()}
                   aria-label={scheduledCopy.closeError} className="mt-[-2px] rounded-full p-1 opacity-65 transition-opacity hover:opacity-100">
                   <X className="h-3.5 w-3.5" />
                 </button>
@@ -1674,7 +1637,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
               </div>
               <main className="min-h-0 flex-1 overflow-y-auto pb-6 custom-scrollbar">
                 {renderTemplateSuggestions()}
-                <MyTasksSection className="mb-0" />
+                {MyTasksSection()}
               </main>
             </div>
           </div>

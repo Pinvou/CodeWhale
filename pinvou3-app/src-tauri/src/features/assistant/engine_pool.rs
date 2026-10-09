@@ -462,9 +462,7 @@ pub(crate) fn forward_edit_resend_with_reminder<F>(
     send: impl FnOnce(String) -> F,
 ) -> F {
     send(match merge_aux_zero_tool_reminder(session_id, None) {
-        Some(reminder) => {
-            format!("<system-reminder>\n{reminder}\n</system-reminder>\n\n{new_message}")
-        }
+        Some(reminder) => super::engine_support::wrap_system_reminder(&reminder, &new_message),
         None => new_message,
     })
 }

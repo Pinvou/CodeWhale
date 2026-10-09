@@ -34,7 +34,6 @@ use introspect::*;
 use login::*;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
