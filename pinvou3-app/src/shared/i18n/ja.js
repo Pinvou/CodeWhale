@@ -353,6 +353,7 @@ const jaBase = {
           networkEmpty:'ネットワークインターフェースを検出できませんでした', netTypeEthernet:'イーサネット', netTypeWifi:'Wi-Fi', netTypeLoopback:'ループバック', netTypeBridge:'ブリッジ', netTypeVirtual:'仮想', netTypeOther:'その他',
           procCpuTitle:'CPU 使用率トップ 8', procMemTitle:'メモリ使用量トップ 8', procGpuTitle:'GPU 計算プロセス', procNote:'取得した瞬間の使用状況です。数値は常に変化します。',
           modelsTitle:'この端末のモデル', storeSubtitle:'モデルストア', externalSubtitle:'外部モデル', refresh:'更新', install:'新しいモデルをインストール',
+          servicesLoading:'ローカルモデルサービスを確認中…', svcOllama:'Ollama サービス', svcVllm:'vLLM サービス', svcLmStudio:'LM Studio', svcDocker:'Docker',
           storeManaged:'モデルストアが管理', gotoModelStore:'モデルストアを開く', statusRunning:'実行中', statusDeployed:'デプロイ済み', statusPending:'未デプロイ',
           kindOllama:'Ollama', kindEndpoint:'エンドポイント', kindWeights:'ローカル重み', kindOther:'その他',
           registeredBadge:'登録済み', statusAvailable:'利用可能', statusUnreachable:'到達不可',

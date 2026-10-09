@@ -62,13 +62,22 @@
     return v.toFixed(1);
   }
 
-  // 告警档位：≥critical → crit；≥max-10 或 ≥critical-10 → warn；否则 ok。
-  function sensorLevel(value, critical, max) {
+  // 告警档位：≥critical → crit；温度量另有 ±10 预警带（≥max-10 或 ≥critical-10
+  // → warn）。±10 带只对温度有意义：电压/电流/功率贴着 max 是常态读数
+  // （如 INA3221 的 12.06V vs 12.1V max），套预警带会常年误报 warn；这些量只有
+  // 真正越过 critical（或 max）才算 crit，其余一律 ok。
+  function sensorLevel(kind, value, critical, max) {
     var v = typeof value === "number" && isFinite(value) ? value : null;
     if (v == null) return "ok";
-    if (typeof critical === "number" && isFinite(critical) && v >= critical) return "crit";
-    var nearMax = typeof max === "number" && isFinite(max) && v >= max - 10;
-    var nearCrit = typeof critical === "number" && isFinite(critical) && v >= critical - 10;
+    var hasCritical = typeof critical === "number" && isFinite(critical);
+    var hasMax = typeof max === "number" && isFinite(max);
+    if (hasCritical && v >= critical) return "crit";
+    if (kind !== "temperature") {
+      if (hasMax && v >= max) return "crit";
+      return "ok";
+    }
+    var nearMax = hasMax && v >= max - 10;
+    var nearCrit = hasCritical && v >= critical - 10;
     if (nearMax || nearCrit) return "warn";
     return "ok";
   }
@@ -84,7 +93,7 @@
           valueText: sensorValueText(e.kind, e.value),
           critical: typeof e.critical === "number" && isFinite(e.critical) ? e.critical : null,
           max: typeof e.max === "number" && isFinite(e.max) ? e.max : null,
-          level: sensorLevel(e.value, e.critical, e.max),
+          level: sensorLevel(e.kind, e.value, e.critical, e.max),
         };
       });
       return {

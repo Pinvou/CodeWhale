@@ -93,7 +93,13 @@ fn model_store_dir() -> PathBuf {
 
 /// 本机全部外部模型：注册表 + Ollama 在线列表（去重已注册者）。
 pub async fn get_external_models() -> Result<ExternalModelsView, String> {
-    let (mut models, mut warnings) = read_registry(&registry_dir());
+    // 注册表目录扫描是阻塞文件 IO（read_dir + 逐文件读 + JSON 解析），而本函数
+    // 由 async 命令处理器直接调用：注册文件多或磁盘慢时不能占住 async worker，
+    // 整个扫描放 blocking 池。
+    let dir = registry_dir();
+    let (mut models, mut warnings) = tokio::task::spawn_blocking(move || read_registry(&dir))
+        .await
+        .map_err(|error| format!("注册表目录扫描失败：{error}"))?;
     dedupe_registry_by_id(&mut models, &mut warnings);
 
     match fetch_ollama_model_names().await {
@@ -211,25 +217,40 @@ pub async fn register_external_model(
         ));
     }
 
+    // 纯校验（名字/类别/URL/商店边界）已在上方完成；剩下的建目录 → 生成 id →
+    // 写文件整段是阻塞文件 IO，放 blocking 池，避免占住 async worker。
+    // JoinError 也映射进写失败的同一句人话报错。
     let dir = registry_dir();
-    std::fs::create_dir_all(&dir).map_err(|error| format!("注册表目录创建失败：{error}"))?;
-    let id = fresh_record_id(&dir)?;
-    let record = RegistryRecord {
-        schema: 1,
-        id: id.clone(),
-        name: name.clone(),
-        kind: kind.clone(),
-        base_url: base_url.clone(),
-        model: model.clone(),
-        weights_path: weights_path.clone(),
-        installed_at: Some(chrono::Utc::now().to_rfc3339()),
-        note: None,
-    };
-    let path = dir.join(format!("{id}.json"));
-    let json = serde_json::to_string_pretty(&record)
-        .map_err(|error| format!("注册表序列化失败：{error}"))?;
-    std::fs::write(&path, format!("{json}\n"))
-        .map_err(|error| format!("注册表写入失败：{error}"))?;
+    let id = tokio::task::spawn_blocking({
+        let name = name.clone();
+        let kind = kind.clone();
+        let base_url = base_url.clone();
+        let model = model.clone();
+        let weights_path = weights_path.clone();
+        move || -> Result<String, String> {
+            std::fs::create_dir_all(&dir).map_err(|error| format!("注册表目录创建失败：{error}"))?;
+            let id = fresh_record_id(&dir)?;
+            let record = RegistryRecord {
+                schema: 1,
+                id: id.clone(),
+                name,
+                kind,
+                base_url,
+                model,
+                weights_path,
+                installed_at: Some(chrono::Utc::now().to_rfc3339()),
+                note: None,
+            };
+            let json = serde_json::to_string_pretty(&record)
+                .map_err(|error| format!("注册表序列化失败：{error}"))?;
+            let path = dir.join(format!("{id}.json"));
+            std::fs::write(&path, format!("{json}\n"))
+                .map_err(|error| format!("注册表写入失败：{error}"))?;
+            Ok(id)
+        }
+    })
+    .await
+    .map_err(|error| format!("注册表写入失败：{error}"))??;
 
     let status =
         probe_status_for(&kind, base_url.as_deref(), weights_path.as_deref()).await;
@@ -318,6 +339,9 @@ pub async fn remove_external_model(
     }
 
     // 守卫 3：权重目录删除（绝对路径 / 家目录之下 / 深度 ≥ 3 / 存在的目录）。
+    // 守卫是纯路径计算，留在 async 侧；只有整目录删除进 blocking 池——大权重
+    // 目录的 remove_dir_all 可能跑很久，不能占住 async worker。JoinError 与
+    // 删除失败映射进同一句人话报错。
     let mut removed_weights = false;
     if delete_weights {
         match record.weights_path.as_deref() {
@@ -327,8 +351,11 @@ pub async fn remove_external_model(
                     &crate::platform::paths::user_home_dir(),
                     Path::new(weights),
                 )?;
-                std::fs::remove_dir_all(&target)
-                    .map_err(|error| format!("权重目录删除失败（{}）：{error}", target.display()))?;
+                let display = target.display().to_string();
+                tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&target))
+                    .await
+                    .map_err(|error| format!("权重目录删除失败（{display}）：{error}"))?
+                    .map_err(|error| format!("权重目录删除失败（{display}）：{error}"))?;
                 removed_weights = true;
             }
         }

@@ -42,6 +42,13 @@ import { buildSavedModel, findLinkedRows } from '../model-store/pinvou-model-lin
 import { MsButton, MsPill, MsToast } from '../model-store/model-store-ui.jsx';
 
 const TOAST_MS = 3200;
+// Slow-cadence probe for model services (ollama/vllm/lmstudio/docker); the
+// bridge documents the same 10s rhythm next to pollDeviceServices.
+const SERVICES_POLL_MS = 10000;
+// Ollama rows listed straight from the local service (not yet in the registry)
+// carry no base_url, but the daemon is fixed on the loopback: linking can
+// assume the canonical /v1 address (same one the registry examples document).
+const OLLAMA_LINK_BASE_URL = 'http://127.0.0.1:11434/v1';
 // Disk usage thresholds: >=85% amber, >=95% red (same family as the sensor
 // near-critical bands the bridge computes).
 const DISK_WARN_PCT = 85;
@@ -92,6 +99,15 @@ const KIND_LABEL_KEYS = {
   vllm: 'kindEndpoint',
   llamacpp: 'kindWeights',
   other: 'kindOther',
+};
+
+// Model service key (see the backend ServiceStatus docs for the key set)
+// -> i18n label key. Unknown keys fall back to the raw key at render.
+const SERVICE_LABEL_KEYS = {
+  ollama: 'svcOllama',
+  vllm: 'svcVllm',
+  lmstudio: 'svcLmStudio',
+  docker: 'svcDocker',
 };
 
 // AI doctor quick actions (kind values are the backend doctor.rs contract).
@@ -281,11 +297,13 @@ const NetworkRow = ({ iface }) => {
   );
 };
 
-const ProcList = ({ title, rows, metricKey, testId }) => (
+// `placeholder` replaces the em-dash while the first snapshot is still in
+// flight, so a slow first frame shows the loading line instead of "no data".
+const ProcList = ({ title, rows, metricKey, testId, placeholder = null }) => (
   <div className={`${CARD_CLASS} p-5`} data-testid={testId}>
     <div className="mb-3 text-[12px] font-bold uppercase tracking-wider text-black/50 dark:text-white/50">{title}</div>
     {(rows || []).length === 0 ? (
-      <div className={`text-[12px] ${MUTED_TEXT}`}>{'\u2014'}</div>
+      <div className={`text-[12px] ${MUTED_TEXT}`}>{placeholder || '\u2014'}</div>
     ) : (
       <div className="space-y-2">
         {rows.map((proc, index) => (
@@ -301,6 +319,28 @@ const ProcList = ({ title, rows, metricKey, testId }) => (
   </div>
 );
 
+// One muted chip per model service in the models section header: green dot
+// while the probe answers, gray otherwise, detail as the title tooltip.
+const ServiceChip = ({ label, running, detail }) => (
+  <span
+    data-testid="device-manager-service-chip"
+    title={detail || undefined}
+    className="inline-flex items-center gap-1.5 rounded-full bg-black/[0.04] px-2.5 py-1 text-[11px] font-semibold dark:bg-white/[0.06]"
+  >
+    <span className={`h-1.5 w-1.5 rounded-full ${running ? LEVEL_DOT.ok : 'bg-black/25 dark:bg-white/30'}`} />
+    <span className={MUTED_TEXT}>{label}</span>
+  </span>
+);
+
+// Effective link identity of an external-model row. Registry rows carry their
+// own base_url/model; Ollama rows listed straight from the service have
+// neither, so fall back to the fixed loopback daemon address and the listing
+// name (which is exactly the model id the daemon serves).
+const linkTargetOf = (row) => ({
+  model: row.model || (row.source === 'ollama' ? row.name : null),
+  baseUrl: row.base_url || (row.source === 'ollama' ? OLLAMA_LINK_BASE_URL : null),
+});
+
 const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const copy = t.uiDeviceMgr;
   const deviceFmt = bs?.device?._fmt || null;
@@ -309,6 +349,9 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const external = bs?.externalModels || null;
   const externalModels = Array.isArray(external?.models) ? external.models : [];
   const externalWarnings = Array.isArray(external?.warnings) ? external.warnings : [];
+  // Model-service probe result: null until the first round answers, then one
+  // { key, running, detail } per service.
+  const deviceServices = Array.isArray(bs?.deviceServices) ? bs.deviceServices : null;
 
   // The bridge suppresses notify for display-equal snapshots (including the
   // updatedAt clock field), so the "updated at" label needs its own slow tick
@@ -320,7 +363,8 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   }, []);
 
   // Polling lifecycle mirrors MonitorView: start on mount (with one immediate
-  // services probe + external-model fetch), stop on unmount.
+  // services probe + external-model fetch), stop on unmount. The services
+  // probe keeps its slow 10s cadence for as long as the page stays mounted.
   const deviceApiReady = !!((window.TauriBridge || bridge)?.device?.startDevicePolling);
   useEffect(() => {
     const liveBridge = window.TauriBridge || bridge;
@@ -330,9 +374,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       return undefined;
     }
     dev.startDevicePolling();
-    if (typeof dev.pollDeviceServices === 'function') dev.pollDeviceServices().catch(() => {});
+    const pollServices = () => {
+      if (typeof dev.pollDeviceServices === 'function') dev.pollDeviceServices().catch(() => {});
+    };
+    pollServices();
+    const servicesTimer = setInterval(pollServices, SERVICES_POLL_MS);
     if (typeof dev.fetchExternalModels === 'function') dev.fetchExternalModels().catch(() => {});
     return () => {
+      clearInterval(servicesTimer);
       if (typeof dev.stopDevicePolling === 'function') dev.stopDevicePolling();
     };
   }, []);
@@ -410,10 +459,16 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     }
     setBusyKey(`link:${row.id}`);
     try {
+      const target = linkTargetOf(row);
+      // findLinkedRows takes (...names): pass both the registry model and the
+      // listing name so a relink updates the already-saved row in place
+      // (existingId) instead of duplicating it in Pinvou's model list.
+      const existing = findLinkedRows(bs?.savedModels, row.model, row.name)[0] || null;
       const saved = buildSavedModel({
-        modelName: row.model,
+        modelName: target.model,
         displayName: row.name,
-        baseUrl: row.base_url,
+        baseUrl: target.baseUrl,
+        existingId: existing?.id || null,
       });
       await liveBridge.models.saveModel(saved);
       if (liveBridge.models.setActiveModel) await liveBridge.models.setActiveModel(saved.id);
@@ -423,7 +478,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     } finally {
       setBusyKey(null);
     }
-  }, [copy, showToast, t]);
+  }, [bs, copy, showToast, t]);
 
   const armRemove = useCallback((row) => {
     setDeleteWeights(false);
@@ -598,7 +653,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
 
           {/* ── Sensors ────────────────────────────────────────────── */}
           <SectionShell id="sensors" icon={Cpu} title={copy.sectionSensors}>
-            {(deviceFmt?.sensors || []).length === 0 ? (
+            {/* First frames (snapshot not yet arrived) show the loading line;
+                the empty state is only truthful once a real snapshot landed. */}
+            {!deviceFmt ? (
+              <div className={`${CARD_CLASS} p-6 text-center text-[13px] ${MUTED_TEXT}`}>{copy.loading}</div>
+            ) : deviceFmt.sensors.length === 0 ? (
               <div className={`${CARD_CLASS} p-6 text-center text-[13px] ${MUTED_TEXT}`}>{copy.sensorEmpty}</div>
             ) : (
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -611,7 +670,9 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
 
           {/* ── Storage ────────────────────────────────────────────── */}
           <SectionShell id="storage" icon={Database} title={copy.sectionStorage}>
-            {(deviceFmt?.disks || []).length === 0 ? (
+            {!deviceFmt ? (
+              <div className={`${CARD_CLASS} p-6 text-center text-[13px] ${MUTED_TEXT}`}>{copy.loading}</div>
+            ) : deviceFmt.disks.length === 0 ? (
               <div className={`${CARD_CLASS} p-6 text-center text-[13px] ${MUTED_TEXT}`}>{copy.storageEmpty}</div>
             ) : (
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -624,7 +685,9 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
 
           {/* ── Network ────────────────────────────────────────────── */}
           <SectionShell id="network" icon={Radio} title={copy.sectionNetwork}>
-            {(deviceFmt?.network || []).length === 0 ? (
+            {!deviceFmt ? (
+              <div className={`${CARD_CLASS} p-6 text-center text-[13px] ${MUTED_TEXT}`}>{copy.loading}</div>
+            ) : deviceFmt.network.length === 0 ? (
               <div className={`${CARD_CLASS} p-6 text-center text-[13px] ${MUTED_TEXT}`}>{copy.networkEmpty}</div>
             ) : (
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -647,12 +710,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                   title={copy.procCpuTitle}
                   rows={deviceFmt?.processes?.topCpu}
                   metricKey="cpuPctText"
+                  placeholder={deviceFmt ? null : copy.loading}
                 />
                 <ProcList
                   testId="device-manager-proc-mem"
                   title={copy.procMemTitle}
                   rows={deviceFmt?.processes?.topMemory}
                   metricKey="memText"
+                  placeholder={deviceFmt ? null : copy.loading}
                 />
               </div>
               {(deviceFmt?.gpuExt?.computeProcesses || []).length > 0 && (
@@ -696,6 +761,25 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                   </MsButton>
                 </div>
               </div>
+
+              {/* Model services probe: one subtle line of chips (null = the
+                  first probe is still in flight). */}
+              {!deviceServices ? (
+                <div className={`text-[11px] ${MUTED_TEXT}`} data-testid="device-manager-services-loading">
+                  {copy.servicesLoading}
+                </div>
+              ) : deviceServices.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5" data-testid="device-manager-services">
+                  {deviceServices.map((service) => (
+                    <ServiceChip
+                      key={service.key}
+                      label={copy[SERVICE_LABEL_KEYS[service.key]] || service.key}
+                      running={!!service.running}
+                      detail={service.detail}
+                    />
+                  ))}
+                </div>
+              )}
 
               {externalWarnings.length > 0 && (
                 <div className={`space-y-0.5 text-[11px] ${MUTED_TEXT}`} data-testid="device-manager-model-warnings">
@@ -752,7 +836,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                   <div className={`text-[12px] font-bold uppercase tracking-wider ${MUTED_TEXT}`}>{copy.externalSubtitle}</div>
                   {externalModels.map((row) => {
                     const linked = isRowLinked(row);
-                    const linkable = !!(row.base_url && row.model);
+                    // Unregistered Ollama listing rows resolve through the
+                    // fixed loopback fallback, so the link button shows for
+                    // them too (see linkTargetOf).
+                    const target = linkTargetOf(row);
+                    const linkable = !!(target.model && target.baseUrl);
                     const armed = armedRemoveId === (row.id || row.name);
                     const kindLabel = copy[KIND_LABEL_KEYS[row.kind] || 'kindOther'];
                     const rowBusy = busyKey === `link:${row.id}` || busyKey === `remove:${row.id}`;

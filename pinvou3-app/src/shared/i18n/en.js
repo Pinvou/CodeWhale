@@ -355,6 +355,7 @@ export const dictEn = {
           networkEmpty:'No network interfaces detected', netTypeEthernet:'Ethernet', netTypeWifi:'Wi-Fi', netTypeLoopback:'Loopback', netTypeBridge:'Bridge', netTypeVirtual:'Virtual', netTypeOther:'Other',
           procCpuTitle:'Top 8 by CPU', procMemTitle:'Top 8 by memory', procGpuTitle:'GPU compute processes', procNote:'A moment-in-time sample; values keep changing.',
           modelsTitle:'Models on this device', storeSubtitle:'Model Store', externalSubtitle:'External models', refresh:'Refresh', install:'Install a new model',
+          servicesLoading:'Probing local model services…', svcOllama:'Ollama service', svcVllm:'vLLM service', svcLmStudio:'LM Studio', svcDocker:'Docker',
           storeManaged:'Managed by Model Store', gotoModelStore:'Open Model Store', statusRunning:'Running', statusDeployed:'Deployed', statusPending:'Not deployed',
           kindOllama:'Ollama', kindEndpoint:'Endpoint', kindWeights:'Local weights', kindOther:'Other',
           registeredBadge:'Registered', statusAvailable:'Available', statusUnreachable:'Unreachable',

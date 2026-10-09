@@ -70,7 +70,8 @@ const fixtureSnapshot = () => ({
       { kind: 'temperature', name: 'wifi_max_warn', value: 72, critical: 90, max: 80 },
     ] },
     { chip: 'INA3221', entries: [
-      { kind: 'voltage', name: 'in0', value: 12.06, critical: null, max: null },
+      { kind: 'voltage', name: 'in0', value: 12.06, critical: null, max: 12.1 },
+      { kind: 'voltage', name: 'in1', value: 13.2, critical: 13, max: null },
       { kind: 'current', name: 'curr1', value: 3.2, critical: null, max: null },
       { kind: 'power', name: 'power1', value: 28.46, critical: null, max: null },
     ] },
@@ -158,8 +159,15 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   // 未知 chip 保留小写原文做 key，交给视图兜底。
   assert.equal(power.chipKey, 'ina3221');
   assert.equal(power.entries[0].valueText, '12.1 V');
-  assert.equal(power.entries[1].valueText, '3.2 A');
-  assert.equal(power.entries[2].valueText, '28.5 W');
+  // ±10 预警带只属于温度：12.06V 贴着 12.1V max 是常态读数，必须保持 ok
+  // （旧口径会落进 max-10=2.1 的 warn）；真正越过 critical 才升 crit。
+  assert.equal(power.entries[0].level, 'ok');
+  assert.equal(power.entries[1].valueText, '13.2 V');
+  assert.equal(power.entries[1].level, 'crit');
+  assert.equal(power.entries[2].valueText, '3.2 A');
+  assert.equal(power.entries[2].level, 'ok');
+  assert.equal(power.entries[3].valueText, '28.5 W');
+  assert.equal(power.entries[3].level, 'ok');
 
   // 网络：typeKey 白名单校验、累计与速率文本；非法/负速率按 0。
   assert.equal(fmt.network[0].typeKey, 'loopback');

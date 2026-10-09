@@ -356,6 +356,7 @@ export const dictZh = {
           networkEmpty:'未读到网络接口', netTypeEthernet:'以太网', netTypeWifi:'无线网络', netTypeLoopback:'本地回环', netTypeBridge:'网桥', netTypeVirtual:'虚拟接口', netTypeOther:'其他接口',
           procCpuTitle:'CPU 占用前 8', procMemTitle:'内存占用前 8', procGpuTitle:'GPU 计算进程', procNote:'以上是取样瞬间的占用情况，数值会随时变化。',
           modelsTitle:'本机模型', storeSubtitle:'模型商店', externalSubtitle:'外部模型', refresh:'刷新', install:'安装新模型',
+          servicesLoading:'正在探测本机模型服务…', svcOllama:'Ollama 服务', svcVllm:'vLLM 服务', svcLmStudio:'LM Studio', svcDocker:'Docker',
           storeManaged:'由模型商店管理', gotoModelStore:'前往模型商店', statusRunning:'运行中', statusDeployed:'已部署', statusPending:'未部署',
           kindOllama:'Ollama', kindEndpoint:'端点', kindWeights:'本地权重', kindOther:'其他',
           registeredBadge:'已登记', statusAvailable:'可用', statusUnreachable:'不可达',

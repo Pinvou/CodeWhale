@@ -154,8 +154,9 @@ const TASK_INSTALL_MODEL: &str = "\
 5. **执行约束**：优先用户级安装（不随便 sudo 装系统包，除非用户确认）；下载支持断点续传；有校验和就校验；**绝不删除或覆盖任何既有模型与数据**。
 6. **收尾**：启动服务 → 探测服务端点可用 → 写注册表文件 `~/.pinvou3/device/external-models.d/<slug>.json`（slug 用模型名的小写短横线形式），schema 必须是：
    ```json
-   {\"schema\": 1, \"id\": \"m-<8位随机十六进制>\", \"name\": \"<模型名>\", \"kind\": \"ollama|openai_endpoint|llamacpp|vllm|other\", \"base_url\": \"<服务地址或 null>\", \"model\": \"<模型标识或 null>\", \"weights_path\": \"<权重目录绝对路径或 null>\", \"installed_at\": \"<RFC3339 时间>\", \"note\": \"\"}
+   {\"schema\": 1, \"id\": \"m-<8位随机十六进制>\", \"name\": \"<模型名>\", \"kind\": \"ollama|openai_endpoint|llamacpp|vllm|other\", \"base_url\": \"<服务地址或 null>\", \"model\": \"<模型标识或 null>\", \"weights_path\": null, \"installed_at\": \"<RFC3339 时间>\", \"note\": \"\"}
    ```
+   `weights_path` 一律填 `null`：Ollama / vLLM / LM Studio 这类运行时自己管理模型存储，不要把它们的目录登记进来。只有当本流程**自己新建了专用权重目录**（例如为 llama.cpp 建的模型目录）时才填绝对路径，且必须位于家目录下第三层或更深（例如 `~/ai-weights/llamacpp/qwen3`），否则设备管理页的移除守卫会拒绝删除它。
    然后给用户**一条可以直接复制粘贴执行的完整命令**（用 `mkdir -p` 加 `cat > 文件 <<'EOF' … EOF` 的形式）把注册表写进去。
 7. 最后引导用户：回到应用的\"设备管理\"页点\"刷新\"，就能看到新模型，点\"接入品悟\"即可在对话里使用它。";
 
@@ -269,6 +270,12 @@ mod tests {
             .expect("install prompt");
         assert!(prompt.contains("~/.pinvou3/device/external-models.d/"));
         assert!(prompt.contains("\"schema\": 1"));
+        // 注册表示例里的 weights_path 必须教成 null：运行时（ollama/vllm/LM Studio）
+        // 自管存储；只有流程自建的专用权重目录才填路径。写反了示例会教唆把运行时
+        // 的模型目录登记进注册表，用户随后删除模型时就会动到运行时自管的文件。
+        assert!(prompt.contains("\"weights_path\": null"));
+        assert!(!prompt.contains("权重目录绝对路径或 null"), "the old example registered runtime-managed dirs; keep the null guidance");
+        assert!(prompt.contains("第三层或更深"));
         assert!(prompt.contains("hf-mirror.com"));
         assert!(prompt.contains("ModelScope"));
         assert!(prompt.contains("接入品悟"));

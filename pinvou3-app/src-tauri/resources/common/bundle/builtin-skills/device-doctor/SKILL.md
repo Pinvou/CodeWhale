@@ -94,7 +94,7 @@ metadata:
 3. **网络探测**（短超时，只读）：测 `hf.co`、`hf-mirror.com`、`modelscope.cn` 可达性，据此决定下载源——大陆网络优先 hf-mirror / ModelScope。
 4. **方案与确认**：给出推荐（运行时 + 模型 + 下载源 + 预计体积），**经用户明确同意后再动手**。方案必须避开模型商店已提供的同款——商店有的引导用户去模型商店，不得重复安装或绕过商店。
 5. **执行约束**：优先用户级安装（不 sudo 装系统包，除非用户确认）；下载支持断点续传；有校验和就校验；**不删除、不覆盖任何既有模型与数据**。
-6. **收尾注册**：启动服务 → 探测端点可用 → 写注册表文件 `~/.pinvou3/device/external-models.d/<slug>.json`（`<slug>` 用模型短名的小写短横线形式；`kind` 取 `ollama|openai_endpoint|llamacpp|vllm|other` 之一）。可直接复制的写文件命令示例（每个字段换成真实值后再给用户执行；写这个新文件也是写操作，先一句话说明"只是登记，方便设备管理页识别"再征得同意）：
+6. **收尾注册**：启动服务 → 探测端点可用 → 写注册表文件 `~/.pinvou3/device/external-models.d/<slug>.json`（`<slug>` 用模型短名的小写短横线形式；`kind` 取 `ollama|openai_endpoint|llamacpp|vllm|other` 之一）。`weights_path` 一律填 `null`：Ollama / vLLM / LM Studio 这类运行时自己管理模型存储，不要把它们的目录登记进来；只有当本流程**自己新建了专用权重目录**（例如为 llama.cpp 建的模型目录）时才填绝对路径，且必须位于家目录下第三层或更深（例如 `~/ai-weights/llamacpp/qwen3-8b`），否则设备管理页的移除守卫会拒绝删除它。可直接复制的写文件命令示例（每个字段换成真实值后再给用户执行；写这个新文件也是写操作，先一句话说明"只是登记，方便设备管理页识别"再征得同意）：
 
    ```bash
    mkdir -p ~/.pinvou3/device/external-models.d && cat > ~/.pinvou3/device/external-models.d/qwen3-8b.json <<'EOF'
@@ -105,7 +105,7 @@ metadata:
      "kind": "ollama",
      "base_url": "http://127.0.0.1:11434/v1",
      "model": "qwen3:8b",
-     "weights_path": "/home/user/.ollama/models",
+     "weights_path": null,
      "installed_at": "2026-10-09T10:00:00+08:00",
      "note": ""
    }
