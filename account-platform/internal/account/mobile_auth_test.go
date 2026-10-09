@@ -508,6 +508,9 @@ func TestMobileAuthLoginReturnsAuthoritativeIdentitySubject(t *testing.T) {
 }
 
 func TestSMSLoginVerificationReturnsIdentitySubjectToKeycloak(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("WORKLOAD_IDENTITY_ISSUER", "")
+	t.Setenv("WORKLOAD_IDENTITY_CA_FILE", "")
 	repository := &mobileAuthRepositoryFake{identitySubject: "authoritative-keycloak-subject"}
 	auth := newMobileAuthForTest(t, repository, &smsProviderFake{verified: true}, &identityProvisionerFake{})
 	service := NewService(nil, nil).WithMobileAuth(auth, "internal-service-token-for-tests-123456")

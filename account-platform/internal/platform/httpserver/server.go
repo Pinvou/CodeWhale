@@ -169,7 +169,7 @@ func Run(serviceName string) error {
 func ConfigureProcessLogging(serviceName string) error {
 	environment := strings.TrimSpace(os.Getenv("APP_ENV"))
 	if environment == "" {
-		environment = "development"
+		return errors.New("APP_ENV must be explicitly configured")
 	}
 	config := observability.Config{Service: serviceName, Environment: environment, Version: version, Commit: commit}
 	observability.ConfigureDefaultLogger(config)

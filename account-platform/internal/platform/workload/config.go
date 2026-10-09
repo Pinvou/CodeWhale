@@ -60,7 +60,15 @@ func (c Config) validate() error {
 	}
 	// Readers mount the whole output directory to observe atomic replacement.
 	// It must not expose the bootstrap secret, including via a parent mount.
-	relative, err := filepath.Rel(filepath.Dir(c.TokenFile), c.ClientSecretFile)
+	projectedDirectory, err := filepath.EvalSymlinks(filepath.Dir(c.TokenFile))
+	if err != nil {
+		return errors.New("workload projected directory is unreadable")
+	}
+	secretDirectory, err := filepath.EvalSymlinks(filepath.Dir(c.ClientSecretFile))
+	if err != nil {
+		return errors.New("workload bootstrap directory is unreadable")
+	}
+	relative, err := filepath.Rel(projectedDirectory, filepath.Join(secretDirectory, filepath.Base(c.ClientSecretFile)))
 	if err != nil || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
 		return errors.New("workload bootstrap secret must be outside the projected directory")
 	}
@@ -73,8 +81,12 @@ func privateDirectory(path string) error {
 		return errors.New("workload directory must exist and disallow group or other writes")
 	}
 	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil || resolved != path {
-		return errors.New("workload directory must not contain symlinks")
+	if err != nil {
+		return errors.New("workload directory cannot be resolved")
+	}
+	resolvedInfo, err := os.Stat(resolved)
+	if err != nil || !os.SameFile(info, resolvedInfo) {
+		return errors.New("workload directory changed while resolving")
 	}
 	return nil
 }
