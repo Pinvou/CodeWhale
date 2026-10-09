@@ -25,5 +25,7 @@ sync_command_passthrough!(updater_domain, cancel_download());
 async_command_passthrough!(updater_domain, report_pending_update_result() -> Result<PendingUpdateReportResult, String>);
 async_command_passthrough!(
     updater_domain,
-    commit_pending_update_ready(window: tauri::WebviewWindow) -> Result<UpdateReadyCommitResult, String>
+    commit_pending_update_ready(
+        window: tauri::WebviewWindow,
+    ) -> Result<UpdateReadyCommitResult, String>
 );
