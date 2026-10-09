@@ -11,6 +11,8 @@ use tauri::{AppHandle, Emitter, State};
 use crate::features::behavior_telemetry::{RemoteControlEvent, RemoteStage, track_remote_control};
 use crate::features::files::file_ingest::validate_browsable_path;
 use crate::features::remote_control::RemoteControlManager;
+#[cfg(test)]
+pub(crate) use crate::features::remote_control::controller::clock::monotonic_millis;
 use crate::features::remote_control::controller::controlled::{
     ControlledDeviceManager, ControlledStateError, ControlledStatus, ControlledWorkspaceInfo,
     WorkspaceAuthorizationRequest,
