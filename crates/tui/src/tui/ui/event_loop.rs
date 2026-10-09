@@ -26,6 +26,43 @@ pub(super) fn event_owner_is_active(
     !owner_session_id.is_empty() && current_session_id == Some(owner_session_id)
 }
 
+/// Build the lifecycle receipt from the terminal event's captured owner.
+///
+/// `runtime_turn_id` deliberately survives a completed turn for saved-session
+/// and remote-control projections. It is therefore not an authority for a
+/// later `TurnComplete`: a preflight rejection or manual compaction has no
+/// model turn id and must not inherit the preceding model turn.
+pub(super) fn turn_end_lifecycle_event(
+    app: &App,
+    turn_id: Option<String>,
+    status: &str,
+    turn_elapsed: Duration,
+    error: Option<&str>,
+) -> codewhale_hooks::LifecycleEvent {
+    let kind = match status {
+        "completed" => "turn.completed",
+        "failed" => "turn.failed",
+        "interrupted" => "turn.interrupted",
+        _ => "turn.ended",
+    };
+    codewhale_hooks::LifecycleEvent {
+        event: "turn_end".to_string(),
+        kind: kind.to_string(),
+        thread_id: app.hooks.session_id().to_string(),
+        turn_id,
+        item_id: None,
+        payload: serde_json::json!({
+            "status": status,
+            "duration_ms": turn_elapsed.as_millis() as u64,
+            "workspace": app.workspace.display().to_string(),
+            "error": error.map(|message| codewhale_hooks::bounded_text(
+                message,
+                codewhale_hooks::OUTBOX_DETAIL_MAX_CHARS,
+            )),
+        }),
+    }
+}
+
 fn current_session_fleet_workers_status(
     locale: crate::localization::Locale,
     count: usize,
@@ -2050,6 +2087,7 @@ pub(crate) async fn run_event_loop(
                     }
                     EngineEvent::RouteDispatched { .. } => {}
                     EngineEvent::TurnComplete {
+                        turn_id,
                         usage,
                         status,
                         error,
@@ -2551,30 +2589,14 @@ pub(crate) async fn run_event_loop(
                         {
                             let outbox_status =
                                 app.runtime_turn_status.as_deref().unwrap_or("unknown");
-                            let kind = match outbox_status {
-                                "completed" => "turn.completed",
-                                "failed" => "turn.failed",
-                                "interrupted" => "turn.interrupted",
-                                _ => "turn.ended",
-                            };
-                            app.lifecycle_outbox.emit(codewhale_hooks::LifecycleEvent {
-                                event: "turn_end".to_string(),
-                                kind: kind.to_string(),
-                                thread_id: app.hooks.session_id().to_string(),
-                                turn_id: app.runtime_turn_id.clone(),
-                                item_id: None,
-                                payload: serde_json::json!({
-                                    "status": outbox_status,
-                                    "duration_ms": turn_elapsed.as_millis() as u64,
-                                    "workspace": app.workspace.display().to_string(),
-                                    "error": error
-                                        .as_deref()
-                                        .map(|message| codewhale_hooks::bounded_text(
-                                            message,
-                                            codewhale_hooks::OUTBOX_DETAIL_MAX_CHARS,
-                                        )),
-                                }),
-                            });
+                            let event = turn_end_lifecycle_event(
+                                app,
+                                turn_id,
+                                outbox_status,
+                                turn_elapsed,
+                                error.as_deref(),
+                            );
+                            app.lifecycle_outbox.emit(event);
                         }
 
                         if queued_to_send.is_none() {
