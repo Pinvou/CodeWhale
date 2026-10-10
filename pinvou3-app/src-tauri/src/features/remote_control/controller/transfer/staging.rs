@@ -2,10 +2,9 @@
 // architecture-guard: allow-target-cfg -- Windows tests exercise mandatory sharing leases; runtime OS selection stays in platform::filesystem.
 use super::core::{
     CompletedTransfer, TransferContext, TransferDirection, TransferHandle, TransferMetadata,
+    is_safe_publication_file_name,
 };
 use super::limits::MAX_TRANSFER_BYTES;
-#[cfg(test)]
-use super::upload::AttachmentUploads;
 use super::upload::UploadStaging;
 use crate::platform::filesystem::{
     PrivateFileDirectory, PrivatePublicationCleanup, PublishedPrivateFile,
@@ -14,7 +13,7 @@ use crate::platform::filesystem::{
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 const STAGING_DIR: &str = "remote_uploads";
 
@@ -73,6 +72,10 @@ impl SessionIsolationStaging {
         metadata: &TransferMetadata,
     ) -> Result<(), String> {
         Self::validate_handle(handle_id)?;
+        if !is_safe_publication_file_name(&metadata.file_name) {
+            return Err("transfer_file_name_invalid".to_owned());
+        }
+        let file_name = metadata.file_name.clone();
         if !supports_private_read_path_publication() {
             return Err("unsupported".to_owned());
         }
@@ -98,7 +101,6 @@ impl SessionIsolationStaging {
         let directory = parent
             .create_private_child_directory(std::ffi::OsStr::new(handle_id))
             .map_err(|_| "transfer_staging_failed".to_owned())?;
-        let file_name = safe_file_name(&metadata.file_name);
         let directory_path = root_path.join(STAGING_DIR).join(handle_id);
         let mut staging_name = format!(".pinvou-upload-{}", uuid::Uuid::new_v4().simple());
         if staging_name == file_name {
@@ -119,12 +121,14 @@ impl SessionIsolationStaging {
                 rejected_publication: None,
             },
         );
-        let entry = sessions.get_mut(handle_id).expect("target just reserved");
+        let entry = sessions
+            .get_mut(handle_id)
+            .ok_or_else(|| "transfer_staging_failed".to_owned())?;
         entry.file = Some(
             entry
                 .directory
                 .as_ref()
-                .expect("directory just reserved")
+                .ok_or_else(|| "transfer_staging_failed".to_owned())?
                 .create_delete_on_close_file(&entry.staging_name)
                 .map_err(|_| "transfer_staging_failed".to_owned())?,
         );
@@ -269,27 +273,6 @@ impl SessionIsolationStaging {
 
 const MAX_STAGED_SESSIONS: usize = 64;
 
-/// Bounded basename. The transfer core already rejected separators, but the
-/// staging layer re-derives the name from the final path component so a
-/// platform-specific separator can never escape the isolation directory.
-pub(crate) fn safe_file_name(file_name: &str) -> String {
-    let candidate = Path::new(file_name)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("attachment.bin");
-    let cleaned: String = candidate
-        .chars()
-        .filter(|ch| !matches!(ch, '/' | '\\' | '\0') && !ch.is_control())
-        .take(120)
-        .collect();
-    let cleaned = cleaned.trim_matches(['.', ' ']).to_owned();
-    if cleaned.is_empty() {
-        "attachment.bin".to_owned()
-    } else {
-        cleaned
-    }
-}
-
 impl UploadStaging for SessionIsolationStaging {
     fn begin(
         &self,
@@ -331,9 +314,11 @@ impl UploadStaging for SessionIsolationStaging {
 
 #[cfg(all(test, windows))]
 mod tests {
+    use super::super::upload::AttachmentUploads;
     use super::*;
     use crate::features::remote_control::controller::protocol::LeaseContext;
     use crate::features::remote_control::controller::transfer::TransferDirection;
+    use std::path::Path;
 
     fn lease() -> LeaseContext {
         LeaseContext {
@@ -976,13 +961,63 @@ mod tests {
 mod portable_staging_tests {
     use super::*;
     #[test]
-    fn safe_file_name_never_escapes_the_staging_directory() {
-        assert_eq!(safe_file_name("report.txt"), "report.txt");
-        assert_eq!(safe_file_name("../../escape.txt"), "escape.txt");
-        assert_eq!(safe_file_name(r"..\..\escape.txt"), "escape.txt");
-        assert_eq!(safe_file_name(".."), "attachment.bin");
-        assert_eq!(safe_file_name(""), "attachment.bin");
-        assert!(safe_file_name(&"a".repeat(500)).len() <= 120);
+    fn device_and_stream_names_fail_before_resolving_or_allocating() {
+        let stager = SessionIsolationStaging::new(Arc::new(|_| {
+            panic!("invalid name must not resolve a root")
+        }));
+        let context = TransferContext::new(
+            &crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-0001".into(),
+                controller_lease_id: "lease-0001".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-epoch-0001".into(),
+                remote_control_generation: "generation-0001".into(),
+            },
+            "session-0001",
+            "task-0001",
+            TransferDirection::Upload,
+        )
+        .unwrap();
+        for name in [
+            "NUL",
+            "con.txt",
+            "PRN",
+            "AUX.txt",
+            "COM9",
+            "LPT1.txt",
+            "COM²",
+            "a.txt:stream",
+            "a.txt::$DATA",
+        ] {
+            let mut meta = TransferMetadata {
+                file_name: "report.txt".into(),
+                mime_type: "text/plain".into(),
+                total_bytes: 1,
+                sha256: "0".repeat(64),
+            };
+            meta.file_name = name.into();
+            assert_eq!(
+                stager
+                    .begin_raw("ctr-up-invalid-name", &context, &meta)
+                    .unwrap_err(),
+                "transfer_file_name_invalid"
+            );
+            assert!(stager.sessions.lock().is_empty());
+        }
+        let mut meta = TransferMetadata {
+            file_name: "report.txt".into(),
+            mime_type: "text/plain".into(),
+            total_bytes: 1,
+            sha256: "0".repeat(64),
+        };
+        meta.file_name = "a".repeat(201);
+        assert_eq!(
+            stager
+                .begin_raw("ctr-up-long-name", &context, &meta)
+                .unwrap_err(),
+            "transfer_file_name_invalid"
+        );
+        assert!(stager.sessions.lock().is_empty());
     }
 
     #[test]

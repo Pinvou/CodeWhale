@@ -29,7 +29,7 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         # Immutable integration target used for this migration calibration.
         # It includes frozen main's builtin references; never use a moving ref.
         # generated_from tracks older resources, not the migration target.
-        reference = "0841a2d04dcd9aff9eba57c29525a8854694090b"
+        reference = "006c9ce7130e7e35c9871b03ff5d4b26a3ecd822"
         self.assertEqual(
             reference,
             subprocess.check_output(
@@ -443,10 +443,11 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         migration_limits, migration_cycles = self.guard.merged_migration_limits(
             merge_state, anchor_state, target_state
         )
-        self.assertEqual(
-            dict(migration_limits["rust_cyclic_feature_dependencies"]),
-            baseline["rules"]["rust_cyclic_feature_dependencies"],
-        )
+        expected = dict(migration_limits["rust_cyclic_feature_dependencies"])
+        # The A20 adapter removes one marketplace dependency from reviewed A19.
+        self.assertEqual(65, expected["assistant->marketplace"])
+        expected["assistant->marketplace"] = 64
+        self.assertEqual(expected, baseline["rules"]["rust_cyclic_feature_dependencies"])
         self.assertEqual(
             dict(migration_limits["rust_platform_depends_on_upper_layer"]),
             baseline["rules"]["rust_platform_depends_on_upper_layer"],
@@ -456,12 +457,11 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
             baseline, previous, merge_state, anchor_state, target_state
         ))
 
-        # These extra allowances are valid only when the target actually owns
-        # frozen main's builtin references. The old 57/47 calibration must
-        # still reject a candidate claiming 58/50; no global exemption is added.
+        # Target debt cleanup must reduce the three-way allowance, not be
+        # hidden by resetting the marker/anchor or trusting the candidate JSON.
         stale_target_edges = Counter(target_state[2])
-        stale_target_edges[("assistant", "marketplace")] -= 1
-        stale_target_edges[("runtime_bundle", "marketplace")] -= 3
+        stale_target_edges[("assistant", "marketplace")] -= 2
+        stale_target_edges[("runtime_bundle", "marketplace")] -= 1
         stale_failures = self.guard.compare_baseline_ratchet(
             baseline, previous, merge_state, anchor_state,
             (target_state[0], target_state[1], stale_target_edges),
@@ -1361,6 +1361,76 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         self.assertNotIn(
             "host_emit", self.guard.remote_control_host_api_counts("sink.emit(event);")
         )
+
+    def test_reader_fixture_has_only_the_registered_windows_test_factory_type(self):
+        relative = self.guard.READER_TEST_HOST_PATH
+        actual = (REPO_ROOT / relative).read_text(encoding="utf-8")
+        self.assertTrue(self.guard.reader_test_host_type_allowed(relative, actual))
+        self.assertEqual(
+            Counter({"tauri_path": 1}),
+            self.guard.remote_control_host_api_counts(actual, inherited_emitter=True),
+        )
+
+    def test_reader_type_exception_rejects_host_calls_cfg_drift_and_copying(self):
+        relative = self.guard.READER_TEST_HOST_PATH
+        reason = self.guard.READER_TEST_HOST_REASON
+        canonical = (
+            reason + '\n// architecture-guard: allow-target-cfg -- Real Windows test host only.\n'
+            '#![cfg(all(test, target_os = "windows"))]\nuse super::*;\n'
+            'pub(crate) async fn resume_round_trip<T>'
+            '(build_host: impl FnOnce() -> (tauri::AppHandle, T)) {}\n'
+        )
+        cases = {
+            "extra type": canonical + "type Extra = tauri::AppHandle;\n",
+            "extra inherited type": canonical + "type Extra = AppHandle;\n",
+            "extra inherited type alias": canonical + "use super::AppHandle as H; type Extra = H;\n",
+            "same count host call": canonical.replace("tauri::AppHandle", "AppHandle")
+                + "fn leak() { tauri::async_runtime::spawn(work()); }\n",
+            "same type wrong signature": canonical.replace("resume_round_trip", "other"),
+            "parenthesized macro signature": canonical.replace(
+                "pub(crate) async", "macro_rules! wrap { ($($i:tt)*) => {$($i)*}; }\nwrap!(pub(crate) async"
+            ).replace("{}\n", "{});\n"),
+            "bracketed macro signature": canonical.replace(
+                "pub(crate) async", "macro_rules! wrap { ($($i:tt)*) => {$($i)*}; }\nwrap![pub(crate) async"
+            ).replace("{}\n", "{}];\n"),
+            "inherited emit": canonical.replace("{}", '{ app.emit("leak", ()); }'),
+            "inherited generic emit": canonical.replace("{}", '{ app.emit_to::<String>("main", "leak", value); }'),
+            "inherited static emit": canonical.replace("{}", '{ Emitter::emit(&app, "leak", ()); }'),
+            "inherited aliased static emit": canonical.replace("{}", '{ HiddenEmitter::emit(&app, "leak", ()); }'),
+            "command": canonical + "#[tauri::command]\nfn leak() {}\n",
+            "app dependency": canonical + "use crate::app::commands;\n",
+            "events dependency": canonical + "use crate::platform::app_events;\n",
+            "missing test": canonical.replace('all(test, target_os = "windows")', 'target_os = "windows"'),
+            "missing windows": canonical.replace('all(test, target_os = "windows")', "test"),
+            "wrong OS literal": canonical.replace('"windows"', '"linux"'),
+            "any instead of all": canonical.replace("all(test", "any(test"),
+            "missing reason": canonical.replace(reason, "// allow-reader-test-host-type"),
+            "copied exception": canonical,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / relative
+            path.parent.mkdir(parents=True)
+            for label, source in {"positive": canonical, **cases}.items():
+                with self.subTest(label=label):
+                    destination = path if label != "copied exception" else path.with_name("copied.rs")
+                    path.unlink(missing_ok=True)
+                    destination.write_text(source, encoding="utf-8")
+                    rules, cycles = self.guard.scan_rust(root)
+                    failures, _ = self.guard.compare(
+                        {"schema_version": 1, "rules": rules, "rust_feature_cycles": cycles},
+                        {"schema_version": 1, "rules": {}, "rust_feature_cycles": []},
+                    )
+                    self.assertEqual(label != "positive", bool(failures), failures)
+                    if label == "same count host call":
+                        self.assertEqual(1, self.guard.remote_control_host_api_counts(source)["tauri_path"])
+                    if label.startswith("inherited"):
+                        self.assertTrue(any("rust_reader_test_host_exception" in item for item in failures))
+                    if label == "app dependency":
+                        self.assertTrue(any("rust_feature_depends_on_app" in item for item in failures))
+                    if label == "command":
+                        self.assertTrue(any("rust_tauri_commands_outside_app" in item for item in failures))
+                    destination.unlink()
 
     def test_new_remote_host_api_baseline_has_only_exact_legacy_allowances(self):
         baseline = json.loads(

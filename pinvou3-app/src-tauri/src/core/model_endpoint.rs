@@ -123,7 +123,7 @@ pub async fn probe_openai_models(base_url: &str) -> Option<OpenAiModelsProbe> {
 
 /// Ollama `/api/ps` 返回的已加载模型名集合。解析失败按空集处理
 /// （宁可全部标未加载，也不错标已加载）。
-fn parse_ollama_ps_names(v: serde_json::Value) -> std::collections::HashSet<String> {
+fn parse_ollama_ps_names(v: &serde_json::Value) -> std::collections::HashSet<String> {
     v.get("models")
         .and_then(|m| m.as_array())
         .map(|models| {
@@ -139,6 +139,97 @@ fn parse_ollama_ps_names(v: serde_json::Value) -> std::collections::HashSet<Stri
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Ollama `/api/ps` 返回的已加载模型 → 实际生效上下文。`context_length` 是
+/// 服务端 `num_ctx`（Modelfile 参数 / `OLLAMA_CONTEXT_LENGTH` / 服务端默认值）
+/// 叠加后的最终生效值，即部署真相本身；模型未加载时该接口不包含它。
+/// 同一条目的 `name` 与 `model` 两个键都登记（显式 digest 拉取时二者不同）。
+/// 非正值 / 越界值按未声明处理（与 `parse_positive_u32` 同口径）。
+fn parse_ollama_ps_contexts(v: &serde_json::Value) -> std::collections::HashMap<String, u32> {
+    let mut out = std::collections::HashMap::new();
+    if let Some(models) = v.get("models").and_then(|m| m.as_array()) {
+        for item in models {
+            let Some(ctx) = item.get("context_length").and_then(parse_positive_u32) else {
+                continue;
+            };
+            for key in ["name", "model"] {
+                if let Some(name) = item.get(key).and_then(|v| v.as_str()).map(str::trim) {
+                    if !name.is_empty() {
+                        out.insert(name.to_string(), ctx);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Ollama 裸名的规范形：模型段（最后一个 `/` 之后）不含 tag（`:`）时为
+/// `{name}:latest`，否则原样返回（registry 形如 `host:port/ns/model` 的
+/// 主机端口不算 tag）。ps 键匹配（[`ollama_ps_context_lookup`]）与采纳 /
+/// 展示两侧的闸门（monitor 的 `adopts_probed_facts`、
+/// `native_display_window_adoptable`）必须共用同一口径：同一个裸名在引擎
+/// 预算与监控展示两侧都要解析到同一条目。
+pub(crate) fn ollama_canonical_name(name: &str) -> String {
+    let name_segment = name.rsplit('/').next().unwrap_or(name);
+    if name_segment.contains(':') {
+        name.to_string()
+    } else {
+        format!("{name}:latest")
+    }
+}
+
+/// `/api/ps` 表按配置名取生效上下文，容忍省略 tag 的裸名：Ollama 把裸名
+/// 规范化为 `name:latest`（`ollama run llama3` 在 `/api/ps` 里报
+/// `llama3:latest`），手敲配置名省略 tag 时按规范化形式补查一次——否则
+/// 全局 `OLLAMA_CONTEXT_LENGTH` 部署的真实窗口永远只挂在规范化键下，裸名
+/// 路由的首载自愈永远落空（2026-09-30 报告的手打名形态）。tag 判定收敛在
+/// [`ollama_canonical_name`]。带 tag 的名字只做精确查找（其规范形即自身）
+/// ：tag 不同即不同模型，绝不跨条目借用。
+pub(crate) fn ollama_ps_context_lookup(
+    contexts: &std::collections::HashMap<String, u32>,
+    model: &str,
+) -> Option<u32> {
+    if let Some(ctx) = contexts.get(model) {
+        return Some(*ctx);
+    }
+    let canonical = ollama_canonical_name(model);
+    if canonical != model {
+        if let Some(ctx) = contexts.get(&canonical) {
+            return Some(*ctx);
+        }
+    }
+    None
+}
+
+/// Ollama `/api/show` 单模型上下文事实：仅采信 `parameters` 中的 `num_ctx N`
+/// —— Modelfile 显式声明的运行配置，模型加载后即生效值。
+///
+/// `model_info` 的 `<arch>.context_length` 是 GGUF 训练上下文（能力上限），
+/// **不是**运行配置：未声明 `num_ctx` 时 Ollama 按服务端默认值（常见 4096，
+/// `OLLAMA_CONTEXT_LENGTH`）运行，该默认值对未加载模型不可探测。采信训练
+/// 上限会在常见首启路径高报窗口，放宽 compaction/输入预算后由上游静默截断
+/// （低报只是早压缩，高报会让上游截断——保守方向必须拒绝），因此无声明时
+/// 返回 None，调用方保留各自的保守兜底；窗口事实在引擎生成时一次性采纳，
+/// 模型首次加载后的纠正依赖下次生成（`/api/ps` 生效值）。
+///
+/// 第一条 `num_ctx` 行即定论（ollama 由 map 生成 `parameters`，一个键一行；
+/// 后续行不可能推翻它）：值合法返回 `Some`，畸形（非正 / 越界 / 非数字）
+/// 按"声明存在但不可证明"返回 None——后续合法行不追认。
+fn parse_ollama_show_context(v: serde_json::Value) -> Option<u32> {
+    let params = v.get("parameters").and_then(|v| v.as_str())?;
+    for line in params.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() == Some("num_ctx") {
+            return parts
+                .next()
+                .and_then(|n| n.parse::<u64>().ok())
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n > 0);
+        }
+    }
+    None
 }
 
 /// Ollama `/api/tags` 返回的已下载模型名列表（保持顺序、去重）。
@@ -173,9 +264,26 @@ fn parse_lmstudio_v0_models(v: &serde_json::Value) -> Option<Vec<OpenAiModelInfo
                 .get("state")
                 .and_then(|v| v.as_str())
                 .map(|state| state == "loaded");
+            // The only served-window fact in the native v0 listing is
+            // `loaded_context_length` on a loaded entry (real payloads carry
+            // it next to the cap, and the two diverge when the model was
+            // loaded with a reduced context override — lmstudio-bug-tracker
+            // #726: 131072 vs 12918). `max_context_length` is the model's
+            // *capability* ("maximum context length supported by the model",
+            // lmstudio.ai REST docs; embeddings entries carry it too), the
+            // same class refused for Ollama's GGUF trained cap: adopting it
+            // would over-report the window whenever the load override is
+            // below the cap and let upstream silently truncate. Unloaded and
+            // legacy entries therefore stay undeclared.
+            let max_model_len = if loaded == Some(true) {
+                item.get("loaded_context_length")
+                    .and_then(parse_positive_u32)
+            } else {
+                None
+            };
             Some(OpenAiModelInfo {
                 id: id.to_string(),
-                max_model_len: None,
+                max_model_len,
                 max_output_tokens: None,
                 loaded,
             })
@@ -224,6 +332,9 @@ fn shared_probe_client() -> Option<&'static reqwest::Client> {
 
 /// 探测 Ollama：区分"已加载"（/api/ps）与"仅下载未加载"（/api/tags）。
 /// 两个接口都是只读列表，不会触发加载；绝不能用推理请求探测。
+/// `/api/ps` 的 `context_length`（已加载模型的生效上下文）同步填入对应条目的
+/// `max_model_len`；未加载模型不补查 `/api/show`（列表探测保持零推理元数据
+/// 之外的开销，逐模型事实由 `fetch_ollama_model_context` 按需查询）。
 /// See [`apply_bearer`] for `bearer` semantics.
 pub async fn probe_ollama_models(
     base_url: &str,
@@ -231,19 +342,19 @@ pub async fn probe_ollama_models(
 ) -> Option<OpenAiModelsProbe> {
     let host = strip_v1_suffix(base_url)?;
     let client = shared_probe_client()?;
-    // 已加载集合：失败按空集（全部未加载），不影响已下载列表。
-    let loaded_names = match apply_bearer(client.get(format!("{host}/api/ps")), bearer)
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-    {
-        Ok(resp) => resp
-            .json::<serde_json::Value>()
+    // 已加载集合与生效上下文表：失败按空（全部未加载、无窗口事实），不影响已下载列表。
+    let (loaded_names, ps_contexts) =
+        match apply_bearer(client.get(format!("{host}/api/ps")), bearer)
+            .send()
             .await
-            .map(parse_ollama_ps_names)
-            .unwrap_or_default(),
-        Err(_) => Default::default(),
-    };
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(v) => (parse_ollama_ps_names(&v), parse_ollama_ps_contexts(&v)),
+                Err(_) => Default::default(),
+            },
+            Err(_) => Default::default(),
+        };
     // 已下载列表：/api/tags 是必需项，失败则整个候选离线。
     let resp = apply_bearer(client.get(format!("{host}/api/tags")), bearer)
         .send()
@@ -257,14 +368,246 @@ pub async fn probe_ollama_models(
             .map(|name| {
                 let loaded = loaded_names.contains(&name);
                 OpenAiModelInfo {
+                    max_model_len: ps_contexts.get(&name).copied(),
                     id: name,
-                    max_model_len: None,
                     max_output_tokens: None,
                     loaded: Some(loaded),
                 }
             })
             .collect(),
     })
+}
+
+/// 拉取 Ollama `/api/ps` 的已加载模型生效上下文表。返回值三态：
+/// `Some(map)` —— 端点以 Ollama 形状应答（`models` 数组存在，可为空）；
+/// `None` —— 请求失败 / 非成功状态 / 响应不是 Ollama 形状（非 Ollama 端点）。
+/// 调用方以 `Some` 判定"这是 Ollama 形状的原生接口"，再决定是否补查
+/// `/api/show`。See [`apply_bearer`] for `bearer` semantics.
+pub async fn fetch_ollama_contexts(
+    base_url: &str,
+    bearer: Option<&str>,
+) -> Option<std::collections::HashMap<String, u32>> {
+    let host = strip_v1_suffix(base_url)?;
+    let client = shared_probe_client()?;
+    let resp = apply_bearer(client.get(format!("{host}/api/ps")), bearer)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v = resp.json::<serde_json::Value>().await.ok()?;
+    let ollama_shaped = v.get("models").and_then(|m| m.as_array()).is_some();
+    ollama_shaped.then(|| parse_ollama_ps_contexts(&v))
+}
+
+/// `/api/show` 的探测结果三态：`Declared` —— `parameters` 带可采纳的
+/// `num_ctx`；`NoDeclaration` —— 2xx 且 JSON 合形但无 `num_ctx`，或 404
+/// （清单里没有这个名字：未下载 / 名称不符——与"未声明"一样是稳定的按名
+/// 事实，可负缓存，否则 monitor 1 Hz 轮询会对同一个不存在的名字每秒重发
+/// POST）；`Unreachable` —— 传输失败 / 其余非成功状态 / 响应不合形（瞬态，
+/// 不缓存，下轮重询）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OllamaShowProbe {
+    Declared(u32),
+    NoDeclaration,
+    Unreachable,
+}
+
+/// Ollama `/api/show` 单模型窗口探测（只读元数据查询，不触发模型加载）。
+/// 只读事实口径见 [`parse_ollama_show_context`]：仅 Modelfile `num_ctx`
+/// 声明，不采信 GGUF 训练上限。
+pub(crate) async fn probe_ollama_show_context(
+    base_url: &str,
+    bearer: Option<&str>,
+    model: &str,
+) -> OllamaShowProbe {
+    let probe = async {
+        let host = strip_v1_suffix(base_url)?;
+        let client = shared_probe_client()?;
+        let resp = apply_bearer(client.post(format!("{host}/api/show")), bearer)
+            .json(&serde_json::json!({ "model": model }))
+            .send()
+            .await
+            .ok()?;
+        // 404 是稳定的按名事实（清单里没有这个名字），按"未声明"负缓存；
+        // 其余非 2xx 视为瞬态。
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Some(None);
+        }
+        if !resp.status().is_success() {
+            return None;
+        }
+        let v = resp.json::<serde_json::Value>().await.ok()?;
+        Some(parse_ollama_show_context(v))
+    };
+    match probe.await {
+        Some(Some(ctx)) => OllamaShowProbe::Declared(ctx),
+        Some(None) => OllamaShowProbe::NoDeclaration,
+        None => OllamaShowProbe::Unreachable,
+    }
+}
+
+/// `/api/show` 查询缓存（60s TTL，按 upstream + 模型名）：`/api/show` 每次调用
+/// 都重读 GGUF 元数据，monitor 1 Hz 轮询与引擎 spawn / 单发旁路调用共享本缓存，
+/// 只有 `/api/ps` 生效值每次现查（一个小本地 GET，跟随加载状态与服务端配置）。
+/// 命中与未命中 alike 缓存同一 TTL：无 `num_ctx` 的 show 应答（已下载未加载
+/// 模型的默认形态）与声明一样稳定，不缓存则每秒重读 GGUF 直到首次加载。
+/// 只缓存合形应答（[`OllamaShowProbe::Declared`] / [`OllamaShowProbe::
+/// NoDeclaration`]）；[`OllamaShowProbe::Unreachable`] 是瞬态，不缓存——
+/// "服务端正忙"不得在 TTL 内被钉成"无窗口"，代价是 show 持续 5xx/挂起期间
+/// 每次轮询都会重发一次 show（一次 GGUF 重读），直到服务端恢复。声明中途
+/// 新增 60s 内可见。
+///
+/// 缓存键刻意只含 URL 不含凭证（与 [`PROBE_KIND_CACHE`] 同一理由）：
+/// `num_ctx` 是同一服务端的部署事实，与调用方凭证无关；凭证错误的调用得到
+/// 401 → `Unreachable` → 不入缓存，因此跨凭证共享键不会投毒。键取
+/// `trim_end_matches('/')` 后的 upstream（与 [`probe_local_server_kind`]
+/// 同一口径）：同一 base_url 的带斜杠 / 不带斜杠拼写在请求层等价，不该
+/// 在缓存里裂成两个条目。
+static OLLAMA_SHOW_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<(String, String), (std::time::Instant, Option<u32>)>,
+    >,
+> = std::sync::OnceLock::new();
+
+const OLLAMA_SHOW_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// 缓存化的 `/api/show` 查询：瞬态失败不缓存（也不计入 TTL 钉死），
+/// 合形的命中 / 未命中共享 60s TTL。
+pub(crate) async fn cached_ollama_show_context(
+    upstream: &str,
+    api_key: Option<&str>,
+    name: &str,
+) -> Option<u32> {
+    let upstream = upstream.trim_end_matches('/');
+    let cache = OLLAMA_SHOW_CACHE.get_or_init(Default::default);
+    {
+        let guard = cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((at, ctx)) = guard.get(&(upstream.to_string(), name.to_string())) {
+            if at.elapsed() < OLLAMA_SHOW_CACHE_TTL {
+                return *ctx;
+            }
+        }
+    }
+    let ctx = match probe_ollama_show_context(upstream, api_key, name).await {
+        // 合形应答（命中 / 未命中 alike）缓存 60s；瞬态失败不缓存。
+        probe @ (OllamaShowProbe::Declared(_) | OllamaShowProbe::NoDeclaration) => {
+            let ctx = match probe {
+                OllamaShowProbe::Declared(ctx) => Some(ctx),
+                _ => None,
+            };
+            cache.lock().unwrap_or_else(|p| p.into_inner()).insert(
+                (upstream.to_string(), name.to_string()),
+                (std::time::Instant::now(), ctx),
+            );
+            ctx
+        }
+        OllamaShowProbe::Unreachable => None,
+    };
+    ctx
+}
+
+/// 仅测试用：清空 show 缓存，避免 TTL 命中污染 mock 调用计数 / 跨用例状态
+/// （与 [`clear_probe_kind_cache`] 同位）。
+#[cfg(test)]
+pub(crate) fn clear_ollama_show_cache() {
+    if let Some(cache) = OLLAMA_SHOW_CACHE.get() {
+        let mut guard = cache.lock().unwrap_or_else(|p| p.into_inner());
+        guard.clear();
+    }
+}
+
+/// 仅测试用：把 show 缓存中的现有条目回拨到 TTL 之外，让"到期后必须真正
+/// 重查"可以在不 sleep 的情况下断言（删除 `elapsed < TTL` 检查 = 缓存
+/// 永不过期、改过的 `num_ctx` 到重启前都不再重读——该回归只能由本助手
+/// 揭红）。
+#[cfg(test)]
+pub(crate) fn age_ollama_show_cache_beyond_ttl() {
+    let Some(cache) = OLLAMA_SHOW_CACHE.get() else {
+        return;
+    };
+    let mut guard = cache.lock().unwrap_or_else(|p| p.into_inner());
+    let past = std::time::Instant::now()
+        .checked_sub(OLLAMA_SHOW_CACHE_TTL + Duration::from_secs(1))
+        .expect("monotonic clock far enough past boot to backdate a 60s TTL");
+    for entry in guard.values_mut() {
+        entry.0 = past;
+    }
+}
+
+/// 单模型上下文事实，按可信度排序：`/api/ps` 的生效值（模型已加载时即部署
+/// 真相，[`ollama_ps_context_lookup`] 容忍裸名省略 tag）→ `/api/show` 的
+/// Modelfile `num_ctx` 显式声明（60s 缓存，monitor 与引擎共享；GGUF 重读是
+/// 缓存的全部理由）。全部失败返回 None，调用方保留既有兜底。Ollama 的
+/// OpenAI 兼容 `/v1/models` 从不携带窗口事实，这是唯一的事实来源；缺失时
+/// foundation 对 unknown ollama 模型按 8192 兜底窗口推导预算（压缩阈值打到
+/// 4096 地板、压缩后输入预算只剩 1024，见 2026-09-30 用户报告）。
+pub(crate) async fn fetch_ollama_model_context(
+    base_url: &str,
+    bearer: Option<&str>,
+    model: &str,
+) -> Option<u32> {
+    if let Some(ctx) = fetch_ollama_contexts(base_url, bearer)
+        .await
+        .and_then(|contexts| ollama_ps_context_lookup(&contexts, model))
+    {
+        return Some(ctx);
+    }
+    cached_ollama_show_context(base_url, bearer, model).await
+}
+
+/// LM Studio 已加载条目的 served window（`/api/v0/models` 的
+/// `loaded_context_length`，lmstudio-bug-tracker #726：与能力上限
+/// `max_context_length` 在缩窗加载时真实分歧——131072 vs 12918）。未加载 /
+/// 列表中无此名（精确匹配）返回 None；能力上限拒绝口径见
+/// [`parse_lmstudio_v0_models`]。
+pub async fn fetch_lmstudio_served_context(
+    base_url: &str,
+    bearer: Option<&str>,
+    model: &str,
+) -> Option<u32> {
+    // 与判别探测共用同一 v0 取数路径（同一 URL / bearer / 合形口径），
+    // 避免两处实现漂移后"判别是 LM Studio、取数却不认"的分歧。
+    probe_lmstudio_v0_only(base_url, bearer)
+        .await?
+        .models
+        .into_iter()
+        .find(|entry| entry.id == model)?
+        .max_model_len
+}
+
+/// 按 server kind 取原生 served window 的统一分发（引擎两处调用——spawn
+/// 采纳与复用重查——共用）：外层 `Some` = 该 kind 有原生 API 可问
+/// （Ollama / LM Studio），内层 = 它是否给出了事实；`None` = 该 kind 没有
+/// 原生 API（vLLM 等的窗口事实在 listing 里，原生跟进只会是每轮一次注定
+/// 404 的 `/api/ps`）。monitor 的展示跟进保留自己的分发：从未判别过的
+/// monitor-only 目标要求 `/api/ps` 应答非 Ollama 形状即止（不付 show
+/// 兜底 POST），与引擎的"已确认 Ollama kind"语义不同，见
+/// `features::monitor::model_probe::local_native_display_window`。
+pub(crate) async fn fetch_native_served_context(
+    kind: Option<LocalServerKind>,
+    base_url: &str,
+    bearer: Option<&str>,
+    model: &str,
+) -> Option<Option<u32>> {
+    match kind {
+        Some(LocalServerKind::Ollama) => {
+            Some(fetch_ollama_model_context(base_url, bearer, model).await)
+        }
+        Some(LocalServerKind::LmStudio) => {
+            Some(fetch_lmstudio_served_context(base_url, bearer, model).await)
+        }
+        _ => None,
+    }
+}
+
+/// 已缓存的本地服务判别（只读窥视，不发请求）：TTL 内的正向判别结果；
+/// 从未探测过（或上次探测失败——Generic 不入长缓存）返回 None。monitor
+/// 的原生窗口展示用它决定是否值得跟进：引擎已判别过的非 Ollama / 非
+/// LM Studio 端点直接跳过，免掉每轮一次注定 404 的 `/api/ps`。
+pub(crate) fn cached_local_server_kind(base_url: &str) -> Option<LocalServerKind> {
+    probe_kind_cache_get(base_url.trim_end_matches('/'))
 }
 
 /// 探测 LM Studio：优先原生 `/api/v0/models`（带 loaded 状态），
@@ -287,6 +630,57 @@ pub fn is_anthropic_endpoint(base_url: &str) -> bool {
     reqwest::Url::parse(base_url.trim())
         .ok()
         .is_some_and(|url| is_anthropic_api_url(&url))
+}
+
+/// Whether to treat this base_url as a "local inference service": loopback
+/// (localhost / 127.0.0.0/8 / ::1), RFC1918 private ranges (10/8, 172.16/12,
+/// 192.168/16), or Docker-specific hostnames (host.docker.internal, etc.).
+/// These endpoints usually run on the user's own machine/intranet; probing
+/// them is cheap so real thinking tiers can be offered (defaulting to the
+/// lowest thinking tier — see `request_reasoning_effort`); public
+/// OpenAI-compatible endpoints are excluded (keep the default high).
+/// Difference from `base_url_uses_loopback`: the latter is only for the
+/// "allow unauthenticated" decision (api_key required), while this decision
+/// covers probing and thinking control (LAN vLLM/Ollama also defaults to
+/// the lowest thinking tier). Lives in core so the engine bridge, the pool,
+/// and the monitor's native-window display gate share one classification
+/// (a public base_url saved under a local preset must not receive native
+/// probes on either path).
+pub(crate) fn base_url_uses_local_or_private(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| {
+            let host = host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim_end_matches('.');
+            if host.eq_ignore_ascii_case("localhost") {
+                return true;
+            }
+            // Docker Desktop host alias: the common way to reach the host from
+            // inside a container.
+            if host.eq_ignore_ascii_case("host.docker.internal")
+                || host.eq_ignore_ascii_case("host.lima.internal")
+                || host.eq_ignore_ascii_case("host.orbstack.internal")
+                || host.ends_with(".docker.internal")
+            {
+                return true;
+            }
+            let Ok(address) = host.parse::<std::net::IpAddr>() else {
+                return false;
+            };
+            if address.is_loopback() {
+                return true;
+            }
+            // RFC1918 private ranges (10/8, 172.16/12, 192.168/16): std's
+            // `Ipv4Addr::is_private` has exactly equivalent semantics, so
+            // reuse it directly.
+            match address {
+                std::net::IpAddr::V4(v4) => v4.is_private(),
+                std::net::IpAddr::V6(_) => false,
+            }
+        })
 }
 
 /// OpenCode gateway endpoint detection (opencode.ai/zen/...).
@@ -1038,6 +1432,117 @@ pub struct AnthropicCompletion {
     pub stop_reason: Option<String>,
 }
 
+/// Characters of an error response body kept in the surfaced message before
+/// the ellipsis: large enough to carry a gateway's field-level reason (the
+/// Kimi Coding Plan 400 named the exact field and allowed value), small
+/// enough for a one-line toast.
+const ERROR_BODY_SNIPPET_CHARS: usize = 400;
+
+/// Wire-read cap for an error body: the endpoint is user-configurable and
+/// the body it returns with an error is endpoint-controlled, so the read
+/// itself — not just the surfaced snippet — must be bounded; a broken or
+/// hostile 4xx/5xx body can be arbitrarily large or stream forever. Four
+/// bytes per char covers the snippet's worst-case UTF-8 width, and +4
+/// guarantees at least one byte past the snippet cap's chars whenever the
+/// body continues, so "there is more" is decidable without a further read.
+const ERROR_BODY_READ_CAP_BYTES: usize = ERROR_BODY_SNIPPET_CHARS * 4 + 4;
+
+/// Error raised by [`error_for_status_with_body`]: the HTTP status plus a
+/// trimmed snippet of the body the endpoint returned with it. `Display`
+/// carries the full diagnostic message (label, status, snippet); downcast to
+/// this type when a call site needs the bare status without the body — e.g.
+/// the voice lane reduces frontend-facing diagnostics to error class and
+/// status and must not persist endpoint-controlled text.
+#[derive(Debug)]
+pub struct StatusWithBodyError {
+    label: String,
+    status: reqwest::StatusCode,
+    /// First [`ERROR_BODY_SNIPPET_CHARS`] chars of the error body; `None`
+    /// when the body was blank or unreadable.
+    body_snippet: Option<String>,
+}
+
+impl StatusWithBodyError {
+    pub(crate) fn new(
+        label: &str,
+        status: reqwest::StatusCode,
+        body_snippet: Option<String>,
+    ) -> Self {
+        Self {
+            label: label.to_string(),
+            status,
+            body_snippet,
+        }
+    }
+
+    /// The HTTP status, for callers that classify errors without the body
+    /// (the voice lane's frontend-diagnosis redaction).
+    pub(crate) fn status(&self) -> reqwest::StatusCode {
+        self.status
+    }
+}
+
+impl std::fmt::Display for StatusWithBodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.body_snippet {
+            Some(snippet) => write!(f, "{}: HTTP {}: {}", self.label, self.status, snippet),
+            None => write!(f, "{}: HTTP {}", self.label, self.status),
+        }
+    }
+}
+
+impl std::error::Error for StatusWithBodyError {}
+
+/// `error_for_status` that keeps the server's reason. A bare
+/// "HTTP status client error (400 Bad Request)" hides which field the
+/// endpoint rejected — the Kimi Coding Plan temperature 400 named the exact
+/// field and allowed value in its body ("invalid temperature: only 1 is
+/// allowed for this model"), and the one-shot aux callers discarded it, so a
+/// one-line toast gave nothing to act on. Read a bounded prefix of the error
+/// body and surface a trimmed snippet via [`StatusWithBodyError`]; success
+/// responses pass through untouched.
+pub async fn error_for_status_with_body(
+    resp: reqwest::Response,
+    label: &str,
+) -> Result<reqwest::Response> {
+    let status = resp.status();
+    if !status.is_client_error() && !status.is_server_error() {
+        return Ok(resp);
+    }
+    let (body, body_continues) = read_error_body_bounded(resp).await;
+    let mut snippet: String = body.chars().take(ERROR_BODY_SNIPPET_CHARS).collect();
+    if body_continues || body.chars().skip(ERROR_BODY_SNIPPET_CHARS).next().is_some() {
+        snippet.push('…');
+    }
+    let snippet = if snippet.trim().is_empty() {
+        None
+    } else {
+        Some(snippet)
+    };
+    Err(StatusWithBodyError::new(label, status, snippet).into())
+}
+
+/// Bounded error-body read: stop at [`ERROR_BODY_READ_CAP_BYTES`] bytes or
+/// end of stream, whichever comes first, and drop the response — the rest of
+/// the body is abandoned and the connection closed, never drained. Decoding
+/// is lossy UTF-8, the tolerance the wire text read it replaces had for
+/// off-charset bytes. The bool reports that the cap was reached, i.e. the
+/// body certainly carries more than [`ERROR_BODY_SNIPPET_CHARS`] chars.
+async fn read_error_body_bounded(mut resp: reqwest::Response) -> (String, bool) {
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() < ERROR_BODY_READ_CAP_BYTES {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let take = chunk.len().min(ERROR_BODY_READ_CAP_BYTES - buf.len());
+                buf.extend_from_slice(&chunk[..take]);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    let hit_cap = buf.len() >= ERROR_BODY_READ_CAP_BYTES;
+    (String::from_utf8_lossy(&buf).into_owned(), hit_cap)
+}
+
 /// Anthropic Messages 协议直连：x-api-key + anthropic-version 鉴权（官方端点不接受
 /// Bearer），`system` 是独立字段而非 messages 首条。Messages API 没有
 /// `response_format`，JSON 约束靠 prompt 措辞 + 调用方解析兜底（与既有 chat/completions
@@ -1066,12 +1571,8 @@ pub async fn post_anthropic_messages(
         max_tokens,
         conversation_key,
     );
-    let resp = req
-        .send()
-        .await
-        .context("post anthropic messages")?
-        .error_for_status()
-        .context("anthropic messages status")?;
+    let resp = req.send().await.context("post anthropic messages")?;
+    let resp = error_for_status_with_body(resp, "anthropic messages status").await?;
     let value: Value = resp.json().await.context("parse anthropic messages json")?;
     let text =
         anthropic_messages_text(&value).context("no text block in anthropic messages response")?;
@@ -1093,12 +1594,17 @@ fn anthropic_messages_request(
     max_tokens: u32,
     conversation_key: &str,
 ) -> reqwest::RequestBuilder {
+    // No "temperature": the aux bodies match the main-session engine wire,
+    // which sends none (foundation tests pin temperature absence). The
+    // hard-coded 0 400s on gateways that pin sampling server-side — the Kimi
+    // Coding Plan Messages endpoint sits on the same backend as its
+    // chat/completions one, which rejected temperature=0 with "invalid
+    // temperature: only 1 is allowed for this model" (live-probed 2026-09-30).
     let body = serde_json::json!({
         "model": model,
         "max_tokens": max_tokens,
         "system": system,
         "messages": [{ "role": "user", "content": user }],
-        "temperature": 0,
     });
     let mut req = with_opencode_session_header(
         client.post(anthropic_messages_url(base_url)),
@@ -1121,8 +1627,128 @@ fn anthropic_messages_request(
 #[cfg(test)]
 pub(crate) mod models_mock {
     use std::collections::HashMap;
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
+
+    /// The probe POST body may arrive separately from its headers. Closing
+    /// with unread bytes can reset the socket and discard the mock response.
+    /// This test-only server accepts bounded, Content-Length framed requests.
+    fn read_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+        read_request_before(
+            stream,
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+        )
+    }
+
+    fn read_request_before(
+        stream: &mut TcpStream,
+        deadline: std::time::Instant,
+    ) -> std::io::Result<Vec<u8>> {
+        use std::io::{Error, ErrorKind, Read};
+        const MAX_REQUEST_BYTES: usize = 64 * 1024;
+        let mut read = |chunk: &mut [u8]| {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .filter(|duration| !duration.is_zero())
+                .ok_or_else(|| Error::from(ErrorKind::TimedOut))?;
+            stream.set_read_timeout(Some(remaining))?;
+            stream.read(chunk)
+        };
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let header_end = loop {
+            let available = MAX_REQUEST_BYTES - buf.len();
+            if available == 0 {
+                return Err(Error::from(ErrorKind::InvalidData));
+            }
+            let amount = available.min(chunk.len());
+            let n = read(&mut chunk[..amount])?;
+            if n == 0 {
+                return Err(Error::from(ErrorKind::UnexpectedEof));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(end) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                break end + 4;
+            }
+        };
+        let headers = std::str::from_utf8(&buf[..header_end])
+            .map_err(|_| Error::from(ErrorKind::InvalidData))?;
+        let content_length = headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .map(|(_, value)| value.trim().parse::<usize>())
+            .transpose()
+            .map_err(|_| Error::from(ErrorKind::InvalidData))?
+            .unwrap_or(0);
+        let total = header_end
+            .checked_add(content_length)
+            .filter(|size| *size <= MAX_REQUEST_BYTES)
+            .ok_or_else(|| Error::from(ErrorKind::InvalidData))?;
+        while buf.len() < total {
+            let amount = (total - buf.len()).min(chunk.len());
+            let n = read(&mut chunk[..amount])?;
+            if n == 0 {
+                return Err(Error::from(ErrorKind::UnexpectedEof));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        buf.truncate(total);
+        Ok(buf)
+    }
+
+    #[test]
+    fn request_reader_rejects_truncation_invalid_lengths_and_expired_budget() {
+        use std::io::{ErrorKind, Write};
+        use std::net::Shutdown;
+
+        for (request, expected) in [
+            (
+                b"POST /api/show HTTP/1.1\r\n".as_slice(),
+                ErrorKind::UnexpectedEof,
+            ),
+            (
+                b"POST /api/show HTTP/1.1\r\nContent-Length: invalid\r\n\r\n".as_slice(),
+                ErrorKind::InvalidData,
+            ),
+            (
+                b"POST /api/show HTTP/1.1\r\nContent-Length: 65536\r\n\r\n".as_slice(),
+                ErrorKind::InvalidData,
+            ),
+            (
+                b"POST /api/show HTTP/1.1\r\nContent-Length: 3\r\n\r\nab".as_slice(),
+                ErrorKind::UnexpectedEof,
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut server, _) = listener.accept().unwrap();
+            client.write_all(request).unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            assert_eq!(read_request(&mut server).unwrap_err().kind(), expected);
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client
+            .write_all(b"POST /api/show HTTP/1.1\r\nContent-Length: 1\r\n\r\n")
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+        assert!(matches!(
+            read_request_before(&mut server, deadline)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::WouldBlock | ErrorKind::TimedOut
+        ));
+        assert_eq!(
+            read_request_before(&mut server, deadline)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::TimedOut,
+            "the same request budget must not restart after a read timeout"
+        );
+    }
 
     pub(crate) struct ModelsMock {
         pub base_url: String,
@@ -1151,6 +1777,42 @@ pub(crate) mod models_mock {
         }
     }
 
+    #[test]
+    fn delayed_post_body_is_consumed_before_response() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let mock = spawn(&[("/api/show", 200, r#"{"parameters":"num_ctx 4096"}"#.into())]);
+        let mut stream = TcpStream::connect(mock.base_url.trim_start_matches("http://")).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        let body = br#"{"model":"my-model"}"#;
+        write!(
+            stream,
+            "POST /api/show HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        let mut byte = [0];
+        let early_read = stream.read(&mut byte);
+        assert!(
+            matches!(early_read, Err(ref error) if matches!(
+                error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )),
+            "the mock must not respond or close before the POST body arrives: {early_read:?}"
+        );
+        stream.write_all(body).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with(r#"{"parameters":"num_ctx 4096"}"#));
+        assert_eq!(mock.hits_for("/api/show"), 1);
+    }
+
     pub(crate) fn spawn(routes: &[(&str, u16, String)]) -> ModelsMock {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock listener");
         let addr = listener.local_addr().expect("mock listener addr");
@@ -1169,20 +1831,9 @@ pub(crate) mod models_mock {
             // bounds thread leaks.
             for stream in listener.incoming().take(32) {
                 let Ok(mut stream) = stream else { continue };
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 1024];
-                loop {
-                    let Ok(n) = std::io::Read::read(&mut stream, &mut chunk) else {
-                        break;
-                    };
-                    if n == 0 {
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                    if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
+                let Ok(buf) = read_request(&mut stream) else {
+                    continue;
+                };
                 let request = String::from_utf8_lossy(&buf);
                 let path = request
                     .split_whitespace()
@@ -1241,8 +1892,9 @@ pub(crate) mod models_mock {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::platform::paths::tests::ENV_LOCK;
 
     #[test]
     fn parse_models_response_list_keeps_all_model_ids() {
@@ -1372,12 +2024,464 @@ mod tests {
             r#"{"models":[{"name":"qwen3:8b","model":"qwen3:8b","size_vram":5000000000},{"model":"deepseek-r1:14b"}]}"#,
         )
         .unwrap();
-        let names = parse_ollama_ps_names(json);
+        let names = parse_ollama_ps_names(&json);
         assert!(names.contains("qwen3:8b"));
         assert!(names.contains("deepseek-r1:14b")); // 缺 name 时回退 model 字段
         assert!(!names.contains("llama3.2:3b"));
         // 坏形状按空集（宁全标未加载，不错标已加载）
-        assert!(parse_ollama_ps_names(serde_json::json!({})).is_empty());
+        assert!(parse_ollama_ps_names(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn ollama_ps_contexts_maps_effective_context_per_loaded_model() {
+        // Real /api/ps shape (ollama ≥0.6, api/types.go ProcessModelResponse):
+        // context_length is the effective runtime context after num_ctx /
+        // OLLAMA_CONTEXT_LENGTH / server default composition.
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"models":[
+                {"name":"qwen3:32b","model":"qwen3:32b","size_vram":1,"context_length":131072},
+                {"name":"mproj:7b","model":"mproj:7b-instruct","context_length":8192},
+                {"name":"legacy","context_length":0},
+                {"name":"huge","context_length":4294967296},
+                {"name":"no-field"}
+            ]}"#,
+        )
+        .unwrap();
+        let contexts = parse_ollama_ps_contexts(&json);
+        assert_eq!(contexts.get("qwen3:32b"), Some(&131_072));
+        // Both name and model keys are registered when they differ.
+        assert_eq!(contexts.get("mproj:7b"), Some(&8192));
+        assert_eq!(contexts.get("mproj:7b-instruct"), Some(&8192));
+        // 0 / out-of-u32-range / missing are undeclared, never fabricated.
+        assert!(!contexts.contains_key("legacy"));
+        assert!(!contexts.contains_key("huge"));
+        assert!(!contexts.contains_key("no-field"));
+        // Bad shape → empty map (callers fall through to /api/show).
+        assert!(parse_ollama_ps_contexts(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn ollama_show_context_is_num_ctx_declaration_only() {
+        // A Modelfile num_ctx declaration is the effective value once the
+        // model loads — it outranks the GGUF trained context.
+        let declared: serde_json::Value = serde_json::from_str(
+            r#"{"parameters":"stop <|im_end|>\nnum_ctx 131072\ntop_p 0.9",
+                "model_info":{"general.architecture":"qwen3","qwen3.context_length":40960}}"#,
+        )
+        .unwrap();
+        assert_eq!(parse_ollama_show_context(declared), Some(131_072));
+        // Without a num_ctx declaration the response yields no fact at all:
+        // `model_info`'s `<arch>.context_length` is the GGUF *trained* cap
+        // (a capability ceiling), while an unloaded model actually serves at
+        // the server default (OLLAMA_CONTEXT_LENGTH, 4096-class) — a value no
+        // API exposes. Adopting the cap would loosen compaction budgets
+        // beyond what the server accepts, so it is refused; callers keep
+        // their conservative fallback. Arch-matched, unrelated, and
+        // minimal-key variants are all refused alike.
+        let trained: serde_json::Value = serde_json::from_str(
+            r#"{"model_info":{"general.architecture":"llama",
+                "llama.context_length":131072,"llama2.context_length":4096}}"#,
+        )
+        .unwrap();
+        assert_eq!(parse_ollama_show_context(trained), None);
+        let ambiguous: serde_json::Value = serde_json::from_str(
+            r#"{"model_info":{"a.context_length":8192,"b.context_length":4096}}"#,
+        )
+        .unwrap();
+        assert_eq!(parse_ollama_show_context(ambiguous), None);
+        // A malformed num_ctx declaration is not a provable runtime config —
+        // undeclared, not "fall back to the trained cap". The FIRST num_ctx
+        // line decides (ollama generates `parameters` from a map, one line
+        // per key): a later valid line does not rehabilitate it, and an
+        // out-of-range one is not traded down for a later in-range one.
+        let bad_decl: serde_json::Value = serde_json::from_str(
+            r#"{"parameters":"num_ctx not-a-number",
+                "model_info":{"qwen3.context_length":40960}}"#,
+        )
+        .unwrap();
+        assert_eq!(parse_ollama_show_context(bad_decl), None);
+        let bad_then_good: serde_json::Value =
+            serde_json::from_str(r#"{"parameters":"num_ctx not-a-number\nnum_ctx 4096"}"#).unwrap();
+        assert_eq!(parse_ollama_show_context(bad_then_good), None);
+        let overflow_then_good: serde_json::Value =
+            serde_json::from_str(r#"{"parameters":"num_ctx 99999999999\nnum_ctx 4096"}"#).unwrap();
+        assert_eq!(parse_ollama_show_context(overflow_then_good), None);
+        // Two valid lines: the first one decides (a mutation taking the
+        // last / max valid line must turn this red).
+        let good_then_good: serde_json::Value =
+            serde_json::from_str(r#"{"parameters":"num_ctx 4096\nnum_ctx 131072"}"#).unwrap();
+        assert_eq!(parse_ollama_show_context(good_then_good), Some(4_096));
+        // Absent / invalid shapes → None.
+        assert_eq!(parse_ollama_show_context(serde_json::json!({})), None);
+        assert_eq!(
+            parse_ollama_show_context(serde_json::json!({"model_info":{}})),
+            None
+        );
+        assert_eq!(
+            parse_ollama_show_context(serde_json::json!({"model_info":{"x.context_length":0}})),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_ollama_model_context_prefers_ps_then_show() {
+        // Loaded model: the /api/ps effective value wins and /api/show is not
+        // consulted.
+        let mock = models_mock::spawn(&[
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        assert_eq!(
+            fetch_ollama_model_context(&mock.base_url, None, "my-model").await,
+            Some(131_072)
+        );
+        assert_eq!(mock.hits_for("/api/show"), 0);
+        // Not loaded (or pre-0.6 server without the field): the /api/show
+        // fact is queried — a Modelfile num_ctx declaration here.
+        let mock = models_mock::spawn(&[
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            (
+                "/api/show",
+                200,
+                r#"{"parameters":"num_ctx 32768","model_info":{"general.architecture":"qwen3","qwen3.context_length":40960}}"#.into(),
+            ),
+        ]);
+        assert_eq!(
+            fetch_ollama_model_context(&mock.base_url, None, "my-model").await,
+            Some(32_768)
+        );
+        // Not loaded and no num_ctx declaration (the model_info entry is
+        // only the trained cap) → None (callers keep their existing
+        // conservative fallbacks).
+        let mock = models_mock::spawn(&[
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        assert_eq!(
+            fetch_ollama_model_context(&mock.base_url, None, "gone").await,
+            None
+        );
+        // The bearer credential rides the native probes the same as
+        // real inference (authenticated gateways 401 without it).
+        let mock = models_mock::spawn(&[
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let _ = fetch_ollama_model_context(&mock.base_url, Some("secret"), "m").await;
+        assert_eq!(mock.auth_for("/api/ps").as_deref(), Some("Bearer secret"));
+        assert_eq!(mock.auth_for("/api/show").as_deref(), Some("Bearer secret"));
+    }
+
+    #[tokio::test]
+    async fn probe_ollama_models_fills_window_for_loaded_entries() {
+        // The same /api/ps response that yields the loaded set also carries
+        // the effective context; loaded entries get their own window, the
+        // downloaded-only ones stay undeclared (no per-model /api/show
+        // fan-out in the list probe).
+        let mock = models_mock::spawn(&[
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"loaded-131k","context_length":131072}]}"#.into(),
+            ),
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"loaded-131k"},{"name":"jit-only"}]}"#.into(),
+            ),
+        ]);
+        let probe = probe_ollama_models(&mock.base_url, None).await.unwrap();
+        let window_of = |id: &str| {
+            probe
+                .models
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap()
+                .max_model_len
+        };
+        assert_eq!(window_of("loaded-131k"), Some(131_072));
+        assert_eq!(window_of("jit-only"), None);
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            0,
+            "the list probe reuses its own /api/ps response — no per-model /api/show fan-out"
+        );
+    }
+
+    /// The `/api/show` cache only caches well-formed responses: transport
+    /// failures / non-success statuses are transient and must not pin "no
+    /// window" into the 60s TTL (each call re-tries; 404 excepted — a
+    /// stable per-name miss, see the next test), while a well-formed miss
+    /// is as stable as a declaration and caches for the TTL. Fresh
+    /// names + fresh ports per segment keep the shared static cache from
+    /// colliding with parallel tests; the clears themselves run under the
+    /// crate ENV_LOCK so a concurrent cache-state test (same lock) can
+    /// never wipe an entry between this test's count-pinned calls.
+    #[tokio::test]
+    async fn cached_ollama_show_context_caches_only_well_formed() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = clear_ollama_show_cache();
+        // Server error → Unreachable → not cached.
+        let mock = models_mock::spawn(&[("/api/show", 500, "{}".into())]);
+        assert_eq!(
+            cached_ollama_show_context(&mock.base_url, None, "unreachable-x").await,
+            None
+        );
+        assert_eq!(
+            cached_ollama_show_context(&mock.base_url, None, "unreachable-x").await,
+            None
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            2,
+            "an unreachable show must not be cached — every call re-tries"
+        );
+        // Well-formed miss → cached for the TTL (one hit across two calls).
+        let mock = models_mock::spawn(&[("/api/show", 200, r#"{"model_info":{}}"#.into())]);
+        assert_eq!(
+            cached_ollama_show_context(&mock.base_url, None, "well-formed-miss-y").await,
+            None
+        );
+        assert_eq!(
+            cached_ollama_show_context(&mock.base_url, None, "well-formed-miss-y").await,
+            None
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            1,
+            "well-formed misses cache for the TTL"
+        );
+        let _ = clear_ollama_show_cache();
+    }
+
+    /// A 404 `/api/show` is a stable per-name fact (the manifest does not
+    /// list this name): cached like a well-formed miss, so a permanently
+    /// wrong name does not re-POST once per monitor poll; other non-2xx
+    /// stay transient (the 500 segment above). Runs under ENV_LOCK for the
+    /// same cross-test reason as the previous test.
+    #[tokio::test]
+    async fn show_404_is_a_stable_per_name_miss_cached_for_ttl() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = clear_ollama_show_cache();
+        let mock = models_mock::spawn(&[(
+            "/api/show",
+            404,
+            r#"{"error":"model 'x' not found"}"#.into(),
+        )]);
+        assert_eq!(
+            cached_ollama_show_context(&mock.base_url, None, "absent-model-z").await,
+            None
+        );
+        assert_eq!(
+            cached_ollama_show_context(&mock.base_url, None, "absent-model-z").await,
+            None
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            1,
+            "a 404 is stable per name — served from the TTL cache, not re-POSTed per poll"
+        );
+        let _ = clear_ollama_show_cache();
+    }
+
+    /// TTL 到期必须真正重查：删掉 `elapsed < TTL` 检查（缓存永不过期，
+    /// 服务端改过的 `num_ctx` 到重启前都不再重读）时本测试必须变红。
+    /// Runs under ENV_LOCK for the same cross-test reason as the count
+    /// pins above; aging replaces a sleep so the assertion is exact.
+    #[tokio::test]
+    async fn cached_ollama_show_context_re_fetches_after_ttl() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = clear_ollama_show_cache();
+        let mock =
+            models_mock::spawn(&[("/api/show", 200, r#"{"parameters":"num_ctx 8192"}"#.into())]);
+        assert_eq!(
+            cached_ollama_show_context(&mock.base_url, None, "ttl-expiry-x").await,
+            Some(8_192)
+        );
+        age_ollama_show_cache_beyond_ttl();
+        assert_eq!(
+            cached_ollama_show_context(&mock.base_url, None, "ttl-expiry-x").await,
+            Some(8_192),
+            "the value must come back fresh, not from the aged entry"
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            2,
+            "an expired entry must re-fetch, not serve stale forever"
+        );
+        let _ = clear_ollama_show_cache();
+    }
+
+    /// 缓存键刻意不含凭证（同一服务端的部署事实；错误凭证得到 401 →
+    /// `Unreachable` → 不入缓存，跨凭证共享键不会投毒）：换凭证 / 去掉
+    /// 凭证都不得裂出第二个缓存条目。
+    #[tokio::test]
+    async fn cached_ollama_show_context_shares_key_across_credentials() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = clear_ollama_show_cache();
+        let mock =
+            models_mock::spawn(&[("/api/show", 200, r#"{"parameters":"num_ctx 4096"}"#.into())]);
+        assert_eq!(
+            cached_ollama_show_context(&mock.base_url, Some("k1"), "cred-share-x").await,
+            Some(4_096)
+        );
+        assert_eq!(
+            cached_ollama_show_context(&mock.base_url, None, "cred-share-x").await,
+            Some(4_096),
+            "the credential-free entry must serve the credential-less caller too"
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            1,
+            "the cache key must not fork per credential"
+        );
+        let _ = clear_ollama_show_cache();
+    }
+
+    /// 裸名与规范化名同时在 `/api/ps` 表中（服务器同时加载了两个 ref）时
+    /// 必须精确命中配置名自己的条目——`:latest` 补查只是裸名的兜底，不是
+    /// 优先路径。
+    #[test]
+    fn ollama_ps_lookup_prefers_exact_over_canonical() {
+        let mut contexts = std::collections::HashMap::new();
+        contexts.insert("llama3".to_string(), 4_096);
+        contexts.insert("llama3:latest".to_string(), 131_072);
+        assert_eq!(
+            ollama_ps_context_lookup(&contexts, "llama3"),
+            Some(4_096),
+            "the exact configured-name entry wins over the canonical fallback"
+        );
+        assert_eq!(
+            ollama_ps_context_lookup(&contexts, "llama3:latest"),
+            Some(131_072)
+        );
+    }
+
+    /// Ollama canonicalizes a bare model name to `name:latest` in `/api/ps`
+    /// (`ollama run llama3` reports `llama3:latest`), so a hand-typed
+    /// tagless configured name must still find its own entry — the exact
+    /// shape where a global `OLLAMA_CONTEXT_LENGTH` (the 2026-09-30
+    /// report's fatality) only ever shows up under the canonical key and
+    /// the first-load self-heal would otherwise never land. A tagged name
+    /// matches only itself (a different tag is a different model), and a
+    /// registry-path name canonicalizes its model segment only.
+    #[tokio::test]
+    async fn ollama_ps_lookup_tolerates_tagless_names() {
+        // Tagless configured name → canonical ps entry, no show fallback.
+        let mock = models_mock::spawn(&[
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"llama3:latest","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        assert_eq!(
+            fetch_ollama_model_context(&mock.base_url, None, "llama3").await,
+            Some(131_072),
+            "the canonical entry answers the tagless configured name"
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            0,
+            "the ps fact wins — no show fallback needed"
+        );
+        // A tagged configured name matches only itself: `llama3:8b` is not
+        // `llama3:latest`.
+        let mock = models_mock::spawn(&[
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"llama3:latest","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        assert_eq!(
+            fetch_ollama_model_context(&mock.base_url, None, "llama3:8b").await,
+            None,
+            "a different tag is a different model — no cross-entry borrow"
+        );
+        // Registry-style path: the model segment (after the last `/`) is
+        // what gets the `:latest` canonicalization, not the whole string.
+        let mock = models_mock::spawn(&[
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"example.com/library/qwen3:latest","context_length":40960}]}"#
+                    .into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        assert_eq!(
+            fetch_ollama_model_context(&mock.base_url, None, "example.com/library/qwen3").await,
+            Some(40_960),
+            "registry-path names canonicalize the model segment only"
+        );
+    }
+
+    /// The show-cache key normalizes the upstream spelling
+    /// (`trim_end_matches('/')`, same as the kind cache): both spellings of
+    /// one base_url must share a single TTL entry instead of forking the
+    /// GGUF re-reads.
+    #[tokio::test]
+    async fn show_cache_key_ignores_trailing_slash() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = clear_ollama_show_cache();
+        let mock =
+            models_mock::spawn(&[("/api/show", 200, r#"{"parameters":"num_ctx 8192"}"#.into())]);
+        let slashed = format!("{}/", mock.base_url);
+        assert_eq!(
+            cached_ollama_show_context(&slashed, None, "slash-key-a").await,
+            Some(8_192)
+        );
+        assert_eq!(
+            cached_ollama_show_context(&mock.base_url, None, "slash-key-a").await,
+            Some(8_192),
+            "the bare spelling hits the entry the slashed spelling cached"
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            1,
+            "both spellings of one base_url share one TTL entry"
+        );
+        let _ = clear_ollama_show_cache();
+    }
+
+    /// LM Studio served window (the `loaded_context_length` of the loaded
+    /// entry, exact-id match): the real #726 divergence shape adopts the
+    /// served 12918, not the 131072 capability cap; a non-loaded entry does
+    /// not lend its `loaded_context_length`, and an absent id is no fact.
+    #[tokio::test]
+    async fn fetch_lmstudio_served_context_adopts_loaded_entry() {
+        let mock = models_mock::spawn(&[(
+            "/api/v0/models",
+            200,
+            r#"{"data":[
+                {"id":"loaded-model","state":"loaded","max_context_length":131072,"loaded_context_length":12918},
+                {"id":"stale","state":"not-loaded","max_context_length":131072,"loaded_context_length":40960},
+                {"id":"plain","state":"loaded"}
+            ]}"#
+                .into(),
+        )]);
+        assert_eq!(
+            fetch_lmstudio_served_context(&mock.base_url, None, "loaded-model").await,
+            Some(12_918),
+            "the served window (12918), not the capability cap (131072)"
+        );
+        assert_eq!(
+            fetch_lmstudio_served_context(&mock.base_url, None, "stale").await,
+            None,
+            "a non-loaded entry must not lend its loaded_context_length"
+        );
+        assert_eq!(
+            fetch_lmstudio_served_context(&mock.base_url, None, "absent").await,
+            None,
+            "an id the server does not list is no fact"
+        );
     }
 
     #[test]
@@ -1394,22 +2498,75 @@ mod tests {
 
     #[test]
     fn lmstudio_v0_models_parse_loaded_state() {
+        // Real v0 shape (lmstudio.ai REST docs + lmstudio-bug-tracker #726):
+        // every model entry carries `max_context_length` — the model's
+        // *capability* ("maximum context length supported by the model"),
+        // embeddings included — while only a loaded entry carries the
+        // served window `loaded_context_length`, and the two diverge when
+        // the model was loaded with a reduced context override.
         let json: serde_json::Value = serde_json::from_str(
             r#"{"object":"list","data":[
-                {"id":"qwen3-8b","state":"loaded"},
-                {"id":"deepseek-r1-14b","state":"not-loaded"},
-                {"id":"legacy-model"}
+                {"id":"qwen3-8b","state":"loaded","max_context_length":131072,"loaded_context_length":40960},
+                {"id":"gemma3-4b","type":"vlm","state":"loaded","max_context_length":131072,"loaded_context_length":12918},
+                {"id":"deepseek-r1-14b","state":"not-loaded","max_context_length":65536},
+                {"id":"stale-window","state":"not-loaded","max_context_length":131072,"loaded_context_length":40960},
+                {"id":"legacy-model"},
+                {"id":"nomic-embed","type":"embeddings","state":"loaded","max_context_length":2048},
+                {"id":"no-loaded-field","state":"loaded","max_context_length":8192}
             ]}"#,
         )
         .unwrap();
         let models = parse_lmstudio_v0_models(&json).unwrap();
-        assert_eq!(models.len(), 3);
+        assert_eq!(models.len(), 7);
         assert_eq!(models[0].loaded, Some(true));
-        assert_eq!(models[1].loaded, Some(false));
-        // 缺 state 字段 = 未知；空列表 / 坏形状返回 None，调用方回退 OpenAI 兼容探测。
-        assert_eq!(models[2].loaded, None);
+        assert_eq!(models[0].max_model_len, Some(40_960));
+        // The cap must never win over the served window: a 131072-capable
+        // model loaded at 12918 reports 12918 (bug #726's real shape).
+        assert_eq!(models[1].loaded, Some(true));
+        assert_eq!(models[1].max_model_len, Some(12_918));
+        // Unloaded: only the capability cap is available — undeclared.
+        assert_eq!(models[2].loaded, Some(false));
+        assert_eq!(models[2].max_model_len, None);
+        // An unloaded entry leaking a stale `loaded_context_length` (schema
+        // drift is exactly what #726 showed) must stay undeclared: the
+        // state=="loaded" gate is load-bearing.
+        assert_eq!(models[3].loaded, Some(false));
+        assert_eq!(models[3].max_model_len, None);
+        // 缺 state 字段 = 未知；窗口同样未声明。
+        assert_eq!(models[4].loaded, None);
+        assert_eq!(models[4].max_model_len, None);
+        // Embedding entries carry the capability cap too → still undeclared.
+        assert_eq!(models[5].max_model_len, None);
+        // A loaded entry without `loaded_context_length` (older server):
+        // the cap is not a fallback — undeclared.
+        assert_eq!(models[6].max_model_len, None);
+        // 空列表 / 坏形状返回 None，调用方回退 OpenAI 兼容探测。
         assert!(parse_lmstudio_v0_models(&serde_json::json!({"data":[]})).is_none());
         assert!(parse_lmstudio_v0_models(&serde_json::json!({})).is_none());
+    }
+
+    /// `max_context_length` is LM Studio's capability ceiling, not a served
+    /// window (see `parse_lmstudio_v0_models`): the generic `/v1/models`
+    /// parser must not adopt it as `max_model_len` — that field feeds route
+    /// limits and saved declarations as a deployment fact, a trust class the
+    /// cap does not belong to. Only a true served-window key qualifies.
+    #[test]
+    fn parse_models_response_list_refuses_lmstudio_cap_alias() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"object":"list","data":[
+                {"id":"cap-alias","max_context_length":131072},
+                {"id":"served-key","max_model_len":4096,"max_context_length":131072}
+            ]}"#,
+        )
+        .unwrap();
+        let models = parse_models_response_list(json).unwrap();
+        let window_of = |id: &str| models.iter().find(|m| m.id == id).unwrap().max_model_len;
+        assert_eq!(
+            window_of("cap-alias"),
+            None,
+            "a capability ceiling must not become a route-limit fact"
+        );
+        assert_eq!(window_of("served-key"), Some(4_096));
     }
 
     /// Anthropic 地址走 x-api-key + anthropic-version，非 Anthropic 地址走 Bearer。
@@ -1544,8 +2701,12 @@ mod tests {
     /// PROBE_KIND_INFLIGHT) and each resets it via clear_probe_kind_cache():
     /// in parallel they would tear down each other's in-flight registrations
     /// (the merged run double-probes and the abort test's registration misses
-    /// its window). These tests must run serially.
-    static PROBE_STATE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// its window). These tests must run serially. `pub(crate)` so the
+    /// engine-pool wiring tests that drive a real classification battery and
+    /// clear the state afterwards take the same serializer — their clear
+    /// lands mid-poll of the in-flight tests otherwise.
+    pub(crate) static PROBE_STATE_TEST_MUTEX: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
 
     /// 极简本地 HTTP server：按请求路径前缀返回固定 JSON，未注册路径返回 404。
     /// 给 probe_local_server_kind / fetch_v1_models 提供真实 HTTP 往返，
@@ -2594,5 +3755,339 @@ mod tests {
             request.headers().get("x-opencode-session").is_none(),
             "off-gateway /v1/messages request must stay clean"
         );
+    }
+
+    #[test]
+    fn anthropic_messages_body_omits_temperature() {
+        let client = reqwest::Client::new();
+        let request = anthropic_messages_request(
+            &client,
+            "https://api.anthropic.com/v1",
+            "key",
+            "claude-x",
+            "sys",
+            "user",
+            64,
+            "memory-review",
+        )
+        .build()
+        .expect("request builds");
+        let bytes = request
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .expect("json body is buffered");
+        let body: Value = serde_json::from_slice(bytes).expect("body is json");
+        assert!(
+            body.get("temperature").is_none(),
+            "aux bodies must mirror the engine wire (no temperature): a hard-coded \
+             0 400s on sampling-pinned gateways (Kimi Coding Plan, 2026-09-30)"
+        );
+        assert_eq!(body["model"], "claude-x");
+        assert_eq!(body["max_tokens"], 64);
+        assert_eq!(body["system"], "sys");
+    }
+
+    /// Pin the call site, not just the builder: the pin above goes red when
+    /// `anthropic_messages_request` itself changes, but a re-inlined body
+    /// inside `post_anthropic_messages` would bypass it silently. The
+    /// request region must build through the shared builder and must not
+    /// carry a sampling parameter.
+    #[test]
+    fn post_anthropic_messages_call_site_builds_body_through_builder() {
+        let source = include_str!("model_endpoint.rs");
+        let start = source
+            .find("pub async fn post_anthropic_messages")
+            .expect("post_anthropic_messages definition present");
+        let region = &source[start
+            ..source[start..]
+                .find("fn anthropic_messages_request")
+                .expect("anthropic_messages_request definition present")
+                + start];
+        assert!(
+            region.contains("anthropic_messages_request("),
+            "post_anthropic_messages must build its body via \
+             anthropic_messages_request"
+        );
+        assert!(
+            !region.contains("\"temperature\""),
+            "the Messages request region must not re-inline a temperature field"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_error_surfaces_response_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let payload = r#"{"error":{"message":"invalid temperature: only 1 is allowed for this model","type":"invalid_request_error"}}"#;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/chat/completions"))
+            .json(&serde_json::json!({"model": "k3"}))
+            .send()
+            .await
+            .expect("request sends");
+        let err = error_for_status_with_body(resp, "chat/completions status")
+            .await
+            .expect_err("400 must error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.starts_with("chat/completions status: HTTP 400 Bad Request: "),
+            "unexpected error shape: {msg}"
+        );
+        assert!(
+            msg.contains("invalid temperature: only 1 is allowed"),
+            "error must carry the server's reason: {msg}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_success_passes_response_through() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let payload = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/chat/completions"))
+            .json(&serde_json::json!({"model": "k3"}))
+            .send()
+            .await
+            .expect("request sends");
+        let resp = error_for_status_with_body(resp, "chat/completions status")
+            .await
+            .expect("2xx passes through");
+        let value: Value = resp.json().await.expect("body still readable");
+        assert_eq!(value["choices"][0]["message"]["content"], "ok");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_error_without_body_reports_status_only() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let resp = "HTTP/1.1 500 Internal Server Error\r\n\
+                        Content-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/chat/completions"))
+            .json(&serde_json::json!({"model": "k3"}))
+            .send()
+            .await
+            .expect("request sends");
+        let err = error_for_status_with_body(resp, "anthropic messages status")
+            .await
+            .expect_err("500 must error");
+        let msg = format!("{err:#}");
+        assert_eq!(
+            msg,
+            "anthropic messages status: HTTP 500 Internal Server Error"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_error_snippet_is_capped_with_ellipsis() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        // The tail marker sits past the snippet cap, so surfacing it (or
+        // dropping the ellipsis) means the cap or its branch regressed.
+        let payload = format!("{}TAIL_MARKER", "x".repeat(ERROR_BODY_SNIPPET_CHARS + 100));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/chat/completions"))
+            .json(&serde_json::json!({"model": "k3"}))
+            .send()
+            .await
+            .expect("request sends");
+        let err = error_for_status_with_body(resp, "chat/completions status")
+            .await
+            .expect_err("400 must error");
+        let msg = err.to_string();
+        let snippet = msg
+            .strip_prefix("chat/completions status: HTTP 400 Bad Request: ")
+            .expect("message keeps the label/status prefix");
+        assert!(
+            snippet.ends_with('…'),
+            "capped snippet must carry the ellipsis: {snippet}"
+        );
+        assert_eq!(
+            snippet.chars().count(),
+            // Literal, not ERROR_BODY_SNIPPET_CHARS + 1: this pin exists to
+            // make the snippet cap's value a reviewed change, so the test
+            // must not inherit whatever the constant currently says.
+            401,
+            "snippet = 400 body chars + ellipsis"
+        );
+        assert!(
+            !msg.contains("TAIL_MARKER"),
+            "body past the cap must not leak into the message: {msg}"
+        );
+        server.await.unwrap();
+    }
+
+    /// The wire read itself must be bounded, not just the surfaced snippet:
+    /// the endpoint is user-configurable and the error body is
+    /// endpoint-controlled, so a broken or hostile 4xx/5xx may declare a
+    /// huge body. The server writes far more than the snippet cap needs; the
+    /// helper must stop reading early enough that the server's writes fail
+    /// behind the closed socket. An unbounded read would drain the whole
+    /// body, the write loop would run to completion, and the final assert
+    /// would go red.
+    #[tokio::test]
+    async fn status_error_read_stops_well_before_oversized_body_ends() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        const TOTAL_BYTES: usize = 64 * 1024 * 1024;
+        const CHUNK_BYTES: usize = 64 * 1024;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let head = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\
+                 Content-Length: {TOTAL_BYTES}\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(head.as_bytes()).await;
+            let chunk = vec![b'a'; CHUNK_BYTES];
+            let mut client_went_away = false;
+            for _ in 0..TOTAL_BYTES / CHUNK_BYTES {
+                if stream.write_all(&chunk).await.is_err() {
+                    client_went_away = true;
+                    break;
+                }
+            }
+            client_went_away
+        });
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/chat/completions"))
+            .json(&serde_json::json!({"model": "k3"}))
+            .send()
+            .await
+            .expect("request sends");
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            error_for_status_with_body(resp, "chat/completions status"),
+        )
+        .await
+        .expect("helper must not wait out the oversized body")
+        .expect_err("500 must error");
+        let snippet = err
+            .to_string()
+            .strip_prefix("chat/completions status: HTTP 500 Internal Server Error: ")
+            .expect("message keeps the label/status prefix")
+            .to_string();
+        assert_eq!(snippet.chars().count(), 401, "snippet stays at the cap");
+        let client_went_away = tokio::time::timeout(Duration::from_secs(30), server)
+            .await
+            .expect("server finishes instead of blocking on a full body")
+            .expect("server task joins");
+        assert!(
+            client_went_away,
+            "client must stop reading well before the declared body ends"
+        );
+    }
+
+    /// Same bound for the undeclared-length case: a chunked error body that
+    /// never ends must not hang the helper or keep the read going past the
+    /// snippet cap. The server keeps chunking until its writes fail, so a
+    /// client that drains the body would hang until the helper's timeout
+    /// below and the test would go red there.
+    #[tokio::test]
+    async fn status_error_read_is_bounded_on_endless_chunked_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let head = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\
+                        Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(head.as_bytes()).await;
+            let chunk_body = vec![b'b'; 64 * 1024];
+            let mut frame = format!("{:x}\r\n", chunk_body.len()).into_bytes();
+            frame.extend_from_slice(&chunk_body);
+            frame.extend_from_slice(b"\r\n");
+            loop {
+                if stream.write_all(&frame).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/chat/completions"))
+            .json(&serde_json::json!({"model": "k3"}))
+            .send()
+            .await
+            .expect("request sends");
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            error_for_status_with_body(resp, "chat/completions status"),
+        )
+        .await
+        .expect("helper must not wait out the endless body")
+        .expect_err("500 must error");
+        let msg = err.to_string();
+        assert!(
+            msg.ends_with('…'),
+            "capped snippet must carry the ellipsis: {msg}"
+        );
+        server.await.unwrap();
     }
 }

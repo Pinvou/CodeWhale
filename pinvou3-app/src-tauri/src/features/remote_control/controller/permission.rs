@@ -45,12 +45,17 @@ pub(crate) fn permission_monotonic_millis() -> u64 {
 }
 
 fn next_sequence(sequence: &AtomicU64) -> Result<u64> {
-    sequence
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            value.checked_add(1)
-        })
-        .map(|previous| previous + 1)
-        .map_err(|_| error("permission_id_exhausted"))
+    // Keep the MSRV without the deprecated fetch_update/newer try_update API.
+    let mut previous = sequence.load(Ordering::Relaxed);
+    loop {
+        let next = previous
+            .checked_add(1)
+            .ok_or_else(|| error("permission_id_exhausted"))?;
+        match sequence.compare_exchange_weak(previous, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Ok(next),
+            Err(current) => previous = current,
+        }
+    }
 }
 
 fn mint_permission_id() -> Result<String> {
@@ -1189,6 +1194,27 @@ mod tests {
             "permission_id_exhausted"
         );
         assert_eq!(exhausted.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn concurrent_sequence_claims_are_unique_and_exhaustion_is_permanent() {
+        let sequence = AtomicU64::new(u64::MAX - 32);
+        let mut claims = std::thread::scope(|scope| {
+            let handles = (0..64)
+                .map(|_| scope.spawn(|| next_sequence(&sequence)))
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .filter_map(|handle| handle.join().unwrap().ok())
+                .collect::<Vec<_>>()
+        });
+        claims.sort_unstable();
+        assert_eq!(claims, ((u64::MAX - 31)..=u64::MAX).collect::<Vec<_>>());
+        assert_eq!(sequence.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(
+            next_sequence(&sequence).unwrap_err().code,
+            "permission_id_exhausted"
+        );
     }
 
     #[test]

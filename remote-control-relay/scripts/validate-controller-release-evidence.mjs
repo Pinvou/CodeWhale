@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDirectCliEntry } from "../cli-entrypoint.js";
 import validateEvidenceSchema from "../docs/schemas/remote-control-release-evidence.v1.validator.mjs";
 import { verifyProviderAttestation } from "./verify-provider-attestation.mjs";
 import { validateSpdx } from "./verify-installer-supply-chain.mjs";
@@ -654,8 +655,7 @@ export async function validateReleaseEvidenceFile(path, options = {}) {
   return validateReleaseEvidence(document, { evidenceRoot: dirname(resolve(path)), ...options });
 }
 
-const invokedPath = process.argv[1] ? resolve(process.argv[1]) : null;
-if (invokedPath === fileURLToPath(import.meta.url)) {
+if (isDirectCliEntry(import.meta.url)) {
   const deadlineFixture = process.argv[2] === "--deadline-observation-base64";
   const operation = deadlineFixture
     ? Promise.resolve().then(() => validateMonotonicDeadlineObservation(JSON.parse(Buffer.from(process.argv[3] || "", "base64").toString("utf8"))))

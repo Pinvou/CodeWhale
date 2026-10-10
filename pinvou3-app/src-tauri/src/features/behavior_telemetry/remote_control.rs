@@ -300,8 +300,20 @@ pub(super) fn validate_event_fields(event: &BehaviorEvent) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::{
+        RemoteControlEvent, RemoteModelSource, RemoteOutcome, RemotePermissionStep, RemoteReason,
+        RemoteStage, track_remote_control, track_remote_control_with_event_id,
+    };
+    use super::{
+        BehaviorEvent, RemoteSizeBucket, classify_error, size_bucket, validate_event_fields,
+    };
     use serde_json::json;
+
+    // Exercise the same facade as production consumers in the standalone
+    // harness, which has no application/controller callers. These checks
+    // verify callable signatures; they do not invoke Tauri or send telemetry.
+    const _: fn(&tauri::AppHandle, RemoteControlEvent) = track_remote_control;
+    const _: fn(&tauri::AppHandle, RemoteControlEvent, String) = track_remote_control_with_event_id;
 
     #[test]
     fn controlled_record_accepts_only_fixed_categories_and_buckets() {

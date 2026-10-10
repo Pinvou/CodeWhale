@@ -132,7 +132,7 @@ test("unsafe identity ancestors fail before writing or repairing permissions", {
 });
 
 test("corrupt, duplicate, partial or conflicting identity fails without overwriting", (t) => {
-  for (const kind of ["corrupt-key", "duplicate", "missing-hmac", "conflicting-public", "wrong-deployment"]) {
+  for (const kind of ["corrupt-key", "duplicate", "missing-hmac", "conflicting-public", "wrong-deployment", "wrong-signing-key-id"]) {
     const f = fixture(t);
     passed(f);
     let content = readFileSync(f.env, "utf8");
@@ -141,6 +141,7 @@ test("corrupt, duplicate, partial or conflicting identity fails without overwrit
     if (kind === "missing-hmac") content = content.replace(/^PINVOU_REMOTE_PAIRING_HMAC_KEY=.+\n/m, "");
     if (kind === "conflicting-public") writeFileSync(f.pub, "INVALID_TEST_ONLY\n");
     if (kind === "wrong-deployment") content = content.replace("NODE_ENV=development", "NODE_ENV=production");
+    if (kind === "wrong-signing-key-id") content = content.replace("PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1", "PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=wrong-test-key");
     writeFileSync(f.env, content);
     const beforeEnv = readFileSync(f.env);
     const beforePublic = readFileSync(f.pub);

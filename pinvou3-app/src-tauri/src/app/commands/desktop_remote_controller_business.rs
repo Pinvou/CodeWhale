@@ -4,6 +4,7 @@
 //! 任务接纳、任务取消）在这里落到既有的命令层实现上：三条路径都复用
 //! `desktop_remote_task` / `desktop_remote_capabilities` 的同一套逻辑，避免
 //! 「命令入口」与「wire 入口」两份实现漂移。
+// architecture-guard: allow-target-cfg -- Tests of anchored private publication require Windows sharing leases; unsupported hosts get a separate fail-closed test, while runtime OS selection stays in platform::filesystem.
 
 use crate::features::codex_acp::{AcpPool, RemotePermissionOwner};
 use serde_json::{Value, json};
@@ -39,10 +40,11 @@ use crate::features::remote_control::controller::transfer::core::{
 use crate::features::remote_control::controller::transfer::upload::{
     UploadProgress, decode_upload_chunk,
 };
-use crate::features::sessions::application::ports::{UseCaseError, UseCaseFuture};
+use crate::features::remote_control::controller::turn_budget::TurnBudget;
+use crate::features::sessions::application::ports::UseCaseError;
 use crate::features::sessions::application::submit_controlled::{
     ControlledInput, ControlledSubmission, ControlledSubmissionPort, ControlledSubmissionResult,
-    LocalControlledInput, PreparedControlledTask, RemoteControlledInput, SubmitControlledUseCase,
+    LocalControlledInput, PreparedControlledTask, RemoteControlledInput,
 };
 use crate::features::sessions::remote_proxy::outbox::remote_task_input_digest;
 use crate::features::sessions::remote_proxy::schema::valid_remote_identifier;
@@ -163,11 +165,7 @@ impl DesktopControlledExecutionAdapter {
         &self,
         request: LocalControlledInput,
     ) -> Result<ControlledSubmissionResult, RemotePortError> {
-        let use_case = ControlledSubmission::new(DesktopControlledSubmitBackend {
-            app: self.app.clone(),
-        });
-        use_case
-            .submit(ControlledInput::Local(request))
+        submit_controlled_on_worker(self.app.clone(), ControlledInput::Local(request))
             .await
             .map_err(|error| RemotePortError::new(error.code(), error.is_retryable()))
     }
@@ -176,6 +174,10 @@ impl DesktopControlledExecutionAdapter {
 fn submit_error(code: &str) -> UseCaseError {
     match code {
         "task_session_busy" => UseCaseError::new("task_session_busy", true),
+        "task_turn_timeout" => UseCaseError::new("task_turn_timeout", false),
+        "task_turn_timeout_config_invalid" => {
+            UseCaseError::new("task_turn_timeout_config_invalid", false)
+        }
         "task_session_not_found" => UseCaseError::new("task_session_not_found", false),
         "task_session_generation_stale" => UseCaseError::new("task_session_generation_stale", true),
         "task_session_generation_conflict" => {
@@ -369,6 +371,7 @@ fn log_task_submit_boundary(stage: &str) {
 
 struct DesktopControlledSubmitBackend {
     app: AppHandle,
+    budget: TurnBudget,
 }
 
 impl DesktopControlledSubmitBackend {
@@ -693,31 +696,31 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
         })
     }
 
-    fn admit_and_dispatch(&self, prepared: PreparedControlledTask) -> UseCaseFuture<'_, Value> {
-        Box::pin(async move {
-            log_task_submit_boundary("controlled_submission_admission_entered");
-            route_prepared_controlled_task(
-                prepared,
-                |prepared| {
-                    super::desktop_remote_task::submit_prepared_bound_task(
-                        &self.app,
-                        &prepared.b_session_id,
-                        &prepared.remote_ref,
-                        &prepared.payload,
-                    )
-                },
-                |prepared, attachments| {
-                    super::desktop_remote_task::submit_prepared_local_bound_task(
-                        &self.app,
-                        &prepared.b_session_id,
-                        &prepared.remote_ref,
-                        &prepared.payload,
-                        attachments,
-                    )
-                },
-            )
-            .map_err(|code| submit_error(&code))
-        })
+    fn admit_and_dispatch(&self, prepared: PreparedControlledTask) -> Result<Value, UseCaseError> {
+        log_task_submit_boundary("controlled_submission_admission_entered");
+        route_prepared_controlled_task(
+            prepared,
+            |prepared| {
+                super::desktop_remote_task::submit_prepared_bound_task(
+                    &self.app,
+                    &prepared.b_session_id,
+                    &prepared.remote_ref,
+                    &prepared.payload,
+                    self.budget,
+                )
+            },
+            |prepared, attachments| {
+                super::desktop_remote_task::submit_prepared_local_bound_task(
+                    &self.app,
+                    &prepared.b_session_id,
+                    &prepared.remote_ref,
+                    &prepared.payload,
+                    attachments,
+                    self.budget,
+                )
+            },
+        )
+        .map_err(|code| submit_error(&code))
     }
 }
 
@@ -740,7 +743,7 @@ fn route_prepared_controlled_task<T>(
 /// Finish the A-side preflight before a port is allowed to create a mapping.
 /// The frozen DEV-13 request parser checks mode/workspace and digest shape in
 /// addition to the wire grammar; the original IDs and digest stay immutable.
-async fn submit_prevalidated_remote<P: ControlledSubmissionPort>(
+fn submit_prevalidated_remote<P: ControlledSubmissionPort>(
     port: P,
     mut input: RemoteControlledInput,
     validated: Value,
@@ -757,9 +760,62 @@ async fn submit_prevalidated_remote<P: ControlledSubmissionPort>(
     }
     log_task_submit_boundary("task_submit_identity_validated");
     input.payload = validated;
-    ControlledSubmission::new(port)
-        .submit(ControlledInput::Remote(input))
-        .await
+    ControlledSubmission::new(port).submit_sync(ControlledInput::Remote(input))
+}
+
+/// A queued worker retains request ownership if its response future is
+/// dropped. Do not wrap the JoinHandle in a timeout and then claim that
+/// admission did not happen; authenticated retries query the durable request.
+async fn run_controlled_submission_worker<T: Send + 'static>(
+    budget: TurnBudget,
+    work: impl FnOnce(TurnBudget) -> Result<T, UseCaseError> + Send + 'static,
+) -> Result<T, UseCaseError> {
+    tokio::task::spawn_blocking(move || {
+        crate::features::remote_control::controller::panic_scope::run(|| {
+            budget
+                .checkpoint(&tokio_util::sync::CancellationToken::new())
+                .map_err(|code| submit_error(&code))?;
+            work(budget)
+        })
+    })
+    .await
+    .map_err(|_| UseCaseError::new("controlled_submission_worker_failed", false))?
+}
+
+async fn submit_controlled_on_worker(
+    app: AppHandle,
+    request: ControlledInput,
+) -> Result<ControlledSubmissionResult, UseCaseError> {
+    let attachment_cleanup = match &request {
+        ControlledInput::Local(input) => {
+            super::desktop_remote_task::LocalAttachmentCleanup::new(Some(&input.attachments))
+        }
+        ControlledInput::Remote(_) => super::desktop_remote_task::LocalAttachmentCleanup::new(None),
+    };
+    // Blocking workers do not inherit task-local budgets. Freeze this deadline
+    // before queueing and pass it explicitly through admission to the ticket.
+    let budget = TurnBudget::from_environment().map_err(|code| submit_error(&code))?;
+    run_controlled_submission_worker(budget, move |budget| {
+        let _attachment_cleanup = attachment_cleanup;
+        let backend = DesktopControlledSubmitBackend { app, budget };
+        match request {
+            ControlledInput::Local(request) => {
+                ControlledSubmission::new(backend).submit_sync(ControlledInput::Local(request))
+            }
+            ControlledInput::Remote(request) => {
+                // A malformed frame must not allocate a B session.
+                let (lease, caps) = backend.live_context()?;
+                if lease.remote_control_generation != request.generation {
+                    return Err(UseCaseError::new("task_session_generation_stale", true));
+                }
+                log_task_submit_boundary("task_submit_context_validated");
+                let validated = backend.validate_payload(&request.payload, &lease, &caps)?;
+                log_task_submit_boundary("task_submit_payload_validated");
+                submit_prevalidated_remote(backend, request, validated)
+            }
+        }
+    })
+    .await
 }
 
 impl ControlledExecutionPort for DesktopControlledExecutionAdapter {
@@ -768,24 +824,7 @@ impl ControlledExecutionPort for DesktopControlledExecutionAdapter {
 
     fn execute_controlled(&self, request: Self::Request) -> RemotePortFuture<'_, Self::Response> {
         Box::pin(async move {
-            let backend = DesktopControlledSubmitBackend {
-                app: self.app.clone(),
-            };
-            // A malformed frame must not allocate a B session or choose its
-            // mode. This is protocol validation, not capability preparation;
-            // the latter runs only after the idempotent mapping is established.
-            let (lease, caps) = backend
-                .live_context()
-                .map_err(|error| RemotePortError::new(error.code(), error.is_retryable()))?;
-            if lease.remote_control_generation != request.generation {
-                return Err(RemotePortError::new("task_session_generation_stale", true));
-            }
-            log_task_submit_boundary("task_submit_context_validated");
-            let validated = backend
-                .validate_payload(&request.payload, &lease, &caps)
-                .map_err(|error| RemotePortError::new(error.code(), error.is_retryable()))?;
-            log_task_submit_boundary("task_submit_payload_validated");
-            submit_prevalidated_remote(backend, request, validated)
+            submit_controlled_on_worker(self.app.clone(), ControlledInput::Remote(request))
                 .await
                 .map_err(|error| RemotePortError::new(error.code(), error.is_retryable()))
         })
@@ -843,6 +882,7 @@ impl DesktopControlledBusiness {
                 commit_effective_permission_allow(&authority, request_id, &outcome)?;
                 Ok((
                     RemotePermissionOwner {
+                        task_sequence: record.sequence,
                         session_id,
                         task_id: task_id.to_owned(),
                         lease: lease.clone(),
@@ -871,7 +911,8 @@ impl DesktopControlledBusiness {
                     .state::<Arc<RemoteTaskLedger>>()
                     .record(&owner.task_id)
                     .map_err(|error| error.code.to_owned())?;
-                if record.session_id != owner.session_id
+                if record.sequence != owner.task_sequence
+                    || record.session_id != owner.session_id
                     || record.lease != TaskLeaseBinding::from_context(lease)
                     || !matches!(
                         record.state,
@@ -1363,6 +1404,65 @@ mod dev19_replay_tests {
     use serde_json::json;
 
     #[test]
+    fn prepared_local_empty_input_does_not_consume_wire_receipts() {
+        let prepared = PreparedControlledTask {
+            remote_ref: "ref-1".into(),
+            b_session_id: "session-1".into(),
+            task_id: "task-1".into(),
+            client_request_id: "request-1".into(),
+            input_digest: "digest-1".into(),
+            payload: json!({"input":{"attachment_ids":["not-a-local-receipt"]}}),
+            local_attachments: Some(Vec::new()),
+        };
+        let local = route_prepared_controlled_task(
+            prepared,
+            |_| panic!("empty B-local descriptors must not consume remote receipts"),
+            |_, attachments| Ok(attachments),
+        )
+        .unwrap();
+        assert!(local.is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn prepared_remote_input_rejects_unsupported_private_publication_without_accounting() {
+        use crate::features::remote_control::controller::transfer::{
+            core::TransferRegistry, staging::SessionIsolationStaging, upload::AttachmentUploads,
+        };
+        assert!(!crate::platform::filesystem::supports_private_read_path_publication());
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let registry = Arc::new(TransferRegistry::default());
+        let uploads = AttachmentUploads::new(
+            registry.clone(),
+            Arc::new(SessionIsolationStaging::new(Arc::new(move |_| {
+                Ok(root.clone())
+            }))),
+        );
+        let live = lease();
+        assert_eq!(
+            uploads
+                .begin(
+                    TransferContext::new(&live, "session-1", "task-1", TransferDirection::Upload)
+                        .unwrap(),
+                    TransferMetadata {
+                        file_name: "wire.txt".into(),
+                        mime_type: "text/plain".into(),
+                        total_bytes: 1,
+                        sha256: "00".repeat(32),
+                    },
+                    1_000,
+                )
+                .err()
+                .expect("unsupported publication must fail closed"),
+            "unsupported"
+        );
+        assert_eq!(registry.connection_bytes(&live.connection_id), 0);
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn prepared_remote_input_consumes_real_completed_upload_and_local_empty_stays_local() {
         use crate::features::remote_control::controller::transfer::{
             core::TransferRegistry, limits::TransferLimits, staging::SessionIsolationStaging,
@@ -1437,7 +1537,12 @@ mod dev19_replay_tests {
         );
         assert!(
             uploads
-                .consume_completed(&[begun.handle_id.clone()], &live, "session-1", "task-1")
+                .consume_completed(
+                    std::slice::from_ref(&begun.handle_id),
+                    &live,
+                    "session-1",
+                    "task-1"
+                )
                 .is_err()
         );
         let local = route_prepared_controlled_task(
@@ -1451,6 +1556,7 @@ mod dev19_replay_tests {
         uploads.cleanup_for_task("task-1");
     }
 
+    #[cfg(windows)]
     #[test]
     fn remote_admission_source_consumes_a_completed_receipt_exactly_once() {
         use crate::features::remote_control::controller::transfer::{
@@ -1657,8 +1763,9 @@ mod submit_boundary_tests {
 
     use super::{
         ControlledSubmissionPort, LocalControlledInput, MAX_TASK_INPUT_TEXT_BYTES,
-        PreparedControlledTask, RemoteControlledInput, SenderRole, UseCaseError, UseCaseFuture,
-        payload_error, submit_error, submit_prevalidated_remote, validated_local_text,
+        PreparedControlledTask, RemoteControlledInput, SenderRole, TurnBudget, UseCaseError,
+        payload_error, run_controlled_submission_worker, submit_error, submit_prevalidated_remote,
+        validated_local_text,
     };
     use crate::features::remote_control::controller::controlling_session::task_input_digest;
     use crate::features::remote_control::controller::protocol::validate_controller_payload_json;
@@ -1874,20 +1981,21 @@ mod submit_boundary_tests {
             panic!("remote preflight must not prepare a local input")
         }
 
-        fn admit_and_dispatch(&self, prepared: PreparedControlledTask) -> UseCaseFuture<'_, Value> {
+        fn admit_and_dispatch(
+            &self,
+            prepared: PreparedControlledTask,
+        ) -> Result<Value, UseCaseError> {
             self.0.admitted.fetch_add(1, Ordering::SeqCst);
             *self.0.identity.lock() = Some((
                 prepared.task_id.clone(),
                 prepared.client_request_id.clone(),
                 prepared.input_digest.clone(),
             ));
-            Box::pin(async move {
-                Ok(json!({
-                    "task_id": prepared.task_id,
-                    "session_id": prepared.b_session_id,
-                    "task_status": "admitted",
-                }))
-            })
+            Ok(json!({
+                "task_id": prepared.task_id,
+                "session_id": prepared.b_session_id,
+                "task_status": "admitted",
+            }))
         }
     }
 
@@ -1918,6 +2026,102 @@ mod submit_boundary_tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn submission_worker_does_not_block_async_heartbeat() {
+        use std::time::Duration;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tokio::spawn(run_controlled_submission_worker(
+            TurnBudget::for_test(Duration::from_secs(5)),
+            move |_| {
+                let _ = entered_tx.send(());
+                release_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|_| UseCaseError::new("test_async_heartbeat_blocked", false))?;
+                Ok(())
+            },
+        ));
+        entered_rx.await.unwrap();
+        // This heartbeat shares the single async thread with the submission.
+        tokio::task::yield_now().await;
+        release_tx.send(()).unwrap();
+        worker.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn submission_worker_rejects_expired_queue_without_running_admission() {
+        use std::time::Duration;
+        let clock = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        clock.block_on(async {
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = entered_tx.send(());
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            });
+            entered_rx.await.unwrap();
+            let called = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&called);
+            let budget = TurnBudget::for_test(Duration::from_millis(10));
+            let request = tokio::spawn(run_controlled_submission_worker(budget, move |_| {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }));
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            release_tx.send(()).unwrap();
+            let error = request.await.unwrap().unwrap_err();
+            assert_eq!(error.code(), "task_turn_timeout");
+            assert!(!error.is_retryable());
+            assert_eq!(called.load(Ordering::SeqCst), 0);
+            blocker.await.unwrap();
+        });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn submission_worker_keeps_owned_work_when_response_is_dropped() {
+        use std::time::Duration;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let called = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&called);
+        let response = tokio::spawn(run_controlled_submission_worker(
+            TurnBudget::for_test(Duration::from_secs(5)),
+            move |_| {
+                let _ = entered_tx.send(());
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                count.fetch_add(1, Ordering::SeqCst);
+                let _ = done_tx.send(());
+                Ok(())
+            },
+        ));
+        entered_rx.await.unwrap();
+        response.abort();
+        assert!(response.await.unwrap_err().is_cancelled());
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn submission_worker_panic_returns_only_fixed_safe_code() {
+        let error = run_controlled_submission_worker::<()>(
+            TurnBudget::for_test(std::time::Duration::from_secs(5)),
+            |_| panic!("test worker panic"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), "controlled_submission_worker_failed");
+        assert!(!error.is_retryable());
+    }
+
     #[tokio::test]
     async fn a_mode_shape_preflight_rejects_before_mapping_or_admission() {
         for (frame, code) in [
@@ -1937,7 +2141,6 @@ mod submit_boundary_tests {
                 remote_input(&frame),
                 frame,
             )
-            .await
             .unwrap_err();
             assert_eq!(error.code(), code);
             assert!(!error.is_retryable());
@@ -1956,7 +2159,6 @@ mod submit_boundary_tests {
             remote_input(&frame),
             frame,
         )
-        .await
         .unwrap();
         assert_eq!(result.b_session_id, "b-session");
         assert_eq!(result.task_id, "task-a");
