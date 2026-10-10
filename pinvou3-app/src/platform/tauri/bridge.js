@@ -424,6 +424,7 @@
     scheduledTaskPendingGuide: null,
   };
   var initPromise = null;
+  var uiDictionary = null;
 
   // 卡片池 1078 张卡的前端缓存。只读,通过 getPersonas() 取引用,不走 notify 快照。
 
@@ -789,6 +790,11 @@
   };
   function bt(key) {
     var lang = state.settings && state.settings.language;
+    // Shared UI copy is loaded before render; normalize the backend Chinese tag too.
+    if (key === "steerFailedLost" && uiDictionary) {
+      var copy = uiDictionary[lang === "en" ? "en" : lang === "ja" ? "ja" : "zh"];
+      if (copy && copy[key] !== undefined) return copy[key];
+    }
     var m = lang === "en" ? BT_TABLE.en : lang === "ja" ? BT_TABLE.ja : BT_TABLE.zh;
     return m[key] !== undefined ? m[key] : BT_TABLE.zh[key];
   }
@@ -2816,7 +2822,8 @@
   var revealTeamRelayPreparedMaterial = teamRelayFeature.revealPreparedMaterial;
   var disconnectTeamRelay = teamRelayFeature.disconnect;
   // ── Init ─────────────────────────────────────────────────────────
-  async function init() {
+  async function init(options) {
+    if (options && options.uiDictionary) uiDictionary = options.uiDictionary;
     if (initPromise) return initPromise;
     initPromise = (async function () {
     startupMark("bridge:init_start");
