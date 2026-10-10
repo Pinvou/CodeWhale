@@ -1223,6 +1223,44 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("WINDOWS_RUST_RESULT", required_gate)
         self.assertIn('"windows-rust-test:$WINDOWS_RUST_RESULT"', required_gate)
 
+    def test_windows_reader_resume_runs_in_the_nonzero_regression_loop(self):
+        windows_job = _without_yaml_comments(
+            self.pr_workflow.split("\n  windows-rust-test:", maxsplit=1)[1].split(
+                "\n  windows-rustup-repair-test:", maxsplit=1
+            )[0]
+        )
+        regression = windows_job.split(
+            "- name: Windows 原子替换状态机回归", maxsplit=1
+        )[1]
+
+        def assert_reader_execution(block):
+            loop = block.split("for filter in ", maxsplit=1)[1].split(
+                "done", maxsplit=1
+            )[0]
+            filters, commands = loop.split("; do", maxsplit=1)
+            self.assertEqual(
+                filters.count("'app::commands::remote_control::reader_resume_tests::'"),
+                1,
+            )
+            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn("running [1-9][0-9]* tests?", commands)
+            self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
+            self.assertIn("set -euo pipefail", block)
+            self.assertNotIn("continue-on-error", block)
+
+        assert_reader_execution(regression)
+        # Static guard negatives: a compile-only or broad/zero-match replacement
+        # cannot satisfy this wiring contract. These are not Wry runtime evidence.
+        for old, new in (
+            ("'app::commands::remote_control::reader_resume_tests::'", "'features::remote_control::'"),
+            ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),
+            ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
+            ("exit 1", "exit 0"),
+        ):
+            with self.subTest(mutation=old):
+                with self.assertRaises(AssertionError):
+                    assert_reader_execution(regression.replace(old, new))
+
     def test_windows_rust_split_matches_the_declared_feature_graph(self):
         with TAURI_MANIFEST.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)

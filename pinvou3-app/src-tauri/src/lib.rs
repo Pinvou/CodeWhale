@@ -1265,12 +1265,15 @@ pub fn run() {
                     eprintln!("[pinvou3-app] engine pool ready (lazy spawn per session)");
                     // ── Windows 桌面双端远程控制（DEV-20 单一注册点） ──
                     let desktop_boot = (|| -> Result<(), String> {
+                        if !crate::platform::capabilities::current().desktop_remote_control_supported {
+                            return Ok(());
+                        }
                         // A corrupt/unwritable remote ledger disables this domain;
                         // it must not prevent the released Legacy Web from resuming.
                         let ledger = std::sync::Arc::new(
                             crate::features::remote_control::controller::task::RemoteTaskLedger::open_recovered(
                                 crate::platform::paths::sessions_root().join("_remote_control_tasks.json"),
-                                0,
+                                crate::features::remote_control::controller::clock::monotonic_millis(),
                             ).map_err(|error| error.code.to_owned())?,
                         );
                         // E2E-06：B 端清理端口必须在任何终态（stop/refresh/远端断开/
@@ -1422,6 +1425,8 @@ pub fn run() {
                                 ),
                             ),
                         );
+                        // Publish readiness after all domain states and host ports exist.
+                        handle.manage(commands::desktop_remote_state::DesktopRemoteReady);
                         eprintln!("[pinvou3-app] Windows desktop remote control ready");
                         Ok(())
                     })();

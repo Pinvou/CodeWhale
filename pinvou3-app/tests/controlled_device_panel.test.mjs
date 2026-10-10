@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { dict } from './helpers/i18n-all.js';
 import {
@@ -54,6 +55,21 @@ test('workspace preauthorization is deduplicated and passed only to authenticate
   assert.match(panel, /if \(!Array\.isArray\(list\)\)/);
   assert.ok(!panel.includes('controlledAuthorizeWorkspace('), 'cannot grant new scope after pairing');
   assert.ok(!panel.includes('localStorage'));
+});
+
+test('empty workspace selection does not disable chat-only B start', () => {
+  assert.deepEqual(normalizeSelectedWorkspaces([]), []);
+  const panel = read('features/remote-control/ControlledDevicePanel.jsx');
+  const toggle = panel.slice(panel.indexOf('data-testid="controlled-device-toggle"'));
+  const disabled = toggle.match(/disabled=\{([^\n]+)\}/)?.[1];
+  assert.ok(disabled, 'evaluate the actual Toggle disabled expression');
+  for (const [busy, uiState, expected] of [
+    [null, 'stopped', false], ['toggle', 'stopped', true],
+    [null, 'registering', true], [null, 'retiring_generation', true], [null, 'stopping', true],
+  ]) {
+    assert.equal(vm.runInNewContext(disabled, { busy, uiState, stagedWorkspaces: [] }), expected);
+  }
+  assert.match(toggle, /controlledStart\(null, stagedWorkspaces\)/);
 });
 
 test('task and permission cards use only the B authoritative session and generation', () => {
