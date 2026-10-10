@@ -151,7 +151,10 @@ const pctLevel = (pct, warnAt, critAt) => {
 };
 
 // Largest temperature across all sensor groups, parsed from the formatted
-// value text (the bridge only exposes display strings).
+// value text (the bridge only exposes display strings). Rendered as
+// Rendered as "Top sensor temp": the snapshot has no dedicated GPU temperature
+// source; this is the max across ALL temperature channels (NVMe, board, ...),
+// and a GPU-specific label would mislead the fix.
 const maxSensorTemperature = (sensors) => {
   let max = null;
   for (const group of Array.isArray(sensors) ? sensors : []) {
@@ -255,12 +258,17 @@ const DiskRow = ({ disk, copy }) => {
           {known ? `${disk.availableText} / ${disk.totalText}` : '\u2014'}
         </span>
       </div>
-      <div className="h-2 overflow-hidden rounded-full bg-black/5 dark:bg-white/10">
-        <div
-          className="h-full rounded-full transition-all duration-500"
-          style={{ width: `${Math.max(0, Math.min(100, disk.usedPct))}%`, backgroundColor: LEVEL_COLOR[level] }}
-        />
-      </div>
+      {known ? (
+        <div className="h-2 overflow-hidden rounded-full bg-black/5 dark:bg-white/10">
+          <div
+            className="h-full rounded-full transition-all duration-500"
+            style={{ width: `${Math.max(0, Math.min(100, disk.usedPct))}%`, backgroundColor: LEVEL_COLOR[level] }}
+          />
+        </div>
+      ) : (
+        // Unknown capacity: no usage bar at all — a 0-width green bar reads as "empty disk".
+        <div className="h-2 rounded-full bg-black/5 dark:bg-white/10" data-testid="device-manager-disk-capacity-unknown" />
+      )}
       {level !== 'ok' && (
         <div
           className={`mt-2 text-[11px] ${
@@ -353,15 +361,6 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // { key, running, detail } per service.
   const deviceServices = Array.isArray(bs?.deviceServices) ? bs.deviceServices : null;
 
-  // The bridge suppresses notify for display-equal snapshots (including the
-  // updatedAt clock field), so the "updated at" label needs its own slow tick
-  // to stay fresh.
-  const [nowTick, setNowTick] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNowTick(Date.now()), 10000);
-    return () => clearInterval(timer);
-  }, []);
-
   // Polling lifecycle mirrors MonitorView: start on mount (with one immediate
   // services probe + external-model fetch), stop on unmount. The services
   // probe keeps its slow 10s cadence for as long as the page stays mounted.
@@ -409,36 +408,48 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
 
   const refreshExternal = useCallback(() => {
     const dev = (window.TauriBridge || bridge)?.device;
-    if (dev?.fetchExternalModels) dev.fetchExternalModels().catch(() => {});
-  }, []);
+    if (!dev?.fetchExternalModels) return;
+    // Swallowing the rejection makes Refresh look dead: surface a human-readable failure.
+    dev.fetchExternalModels().catch((error) => {
+      showToast(copy.refreshFailed(String(error?.message || error)));
+    });
+  }, [copy, showToast]);
 
   // ── Model store (read-only here) ─────────────────────────────────
   // The store is a pure Linux feature; on targets without it this page hides
   // the store group silently and still manages external models.
   const [storeState, setStoreState] = useState('loading');
+  const [storeError, setStoreError] = useState(null);
+  const [storeReloadKey, setStoreReloadKey] = useState(0);
   const [library, setLibrary] = useState([]);
   useEffect(() => {
     let alive = true;
-    storeAvailability()
-      .then(async (status) => {
-        if (!alive) return null;
+    (async () => {
+      try {
+        const status = await storeAvailability();
+        if (!alive) return;
         if (!status?.available) {
+          // The platform genuinely has no store: hiding the whole group is correct.
           setStoreState('unavailable');
-          return null;
+          return;
         }
+        const lib = await fetchLibrary();
+        if (!alive) return;
+        setLibrary(Array.isArray(lib.models) ? lib.models : []);
         setStoreState('available');
-        return fetchLibrary();
-      })
-      .then((lib) => {
-        if (alive && lib) setLibrary(Array.isArray(lib.models) ? lib.models : []);
-      })
-      .catch(() => {
-        if (alive) setStoreState('unavailable');
-      });
+      } catch (error) {
+        // "Store exists but the read failed" must stay distinct from unavailable:
+        // human-readable failure + retry + a standalone store entry, instead of
+        // silently dropping the whole store group (same as the store page).
+        if (!alive) return;
+        setStoreError(String(error?.message || error));
+        setStoreState('error');
+      }
+    })();
     return () => {
       alive = false;
     };
-  }, []);
+  }, [storeReloadKey]);
   const storeRows = storeState === 'available' ? library : [];
 
   // ── External models: link into Pinvou / guarded removal ──────────
@@ -511,9 +522,40 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
         deleteWeights,
         confirmName: row.name,
       });
+      // Recycle rows linked into Pinvou (same contract as
+      // ModelStoreView.cleanLinkedRows): the backend deletes ollama models from
+      // the daemon unconditionally, so a leftover Pinvou row (possibly the
+      // default model for new chats) silently breaks the next conversation.
+      // Distinguish "could not check" from "nothing to clean": without the
+      // snapshot/delete capability, treat cleanup as failed — better an
+      // explicit "please delete manually" than a false all-clear.
+      let cleanupOk = true;
+      let cleanupErrorText = null;
+      if (Array.isArray(bs?.savedModels)) {
+        const linkedRows = findLinkedRows(bs.savedModels, row.model, row.name);
+        const liveBridge = window.TauriBridge || bridge;
+        let cleanupErrorText = liveBridge?.models?.deleteModel ? null : 'bridge unavailable';
+        for (const linked of cleanupErrorText ? [] : linkedRows) {
+          try {
+            await liveBridge.models.deleteModel(linked.id);
+          } catch (error) {
+            cleanupErrorText = String(error?.message || error);
+            break;
+          }
+        }
+        if (cleanupErrorText) cleanupOk = false;
+      } else {
+        cleanupErrorText = 'bridge unavailable';
+        cleanupOk = false;
+      }
       setArmedRemoveId(null);
       setDeleteWeights(false);
-      showToast(copy.removeDone(row.name));
+      if (cleanupOk) {
+        showToast(copy.removeDone(row.name));
+      } else {
+        // Cleanup failure must be surfaced, not drowned by a plain success toast.
+        showToast(copy.linkRowStale(row.name, cleanupErrorText || 'unknown'));
+      }
       const warnings = Array.isArray(outcome?.warnings) ? outcome.warnings : [];
       for (const warning of warnings) showToast(copy.warn(warning));
     } catch (error) {
@@ -522,7 +564,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     } finally {
       setBusyKey(null);
     }
-  }, [copy, deleteWeights, showToast]);
+  }, [bs, copy, deleteWeights, showToast]);
 
   // ── AI doctor actions ────────────────────────────────────────────
   const [doctorBusy, setDoctorBusy] = useState(null);
@@ -533,14 +575,21 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     setDoctorBusy(kind);
     try {
       const prompt = await dev.buildDoctorPrompt(kind, questionText);
-      await onOpenChat(prompt);
+      const sent = await onOpenChat(prompt);
+      // onOpenChat returns a boolean by contract: false = not sent (bridge
+      // unavailable / navigated away / send failed). Surface it and skip onDone —
+      // the custom question stays in the input instead of being silently cleared.
+      if (sent === false) {
+        showToast(copy.doctorSendFailed);
+        return;
+      }
       if (onDone) onDone();
     } catch (error) {
       showToast(String(error?.message || error));
     } finally {
       setDoctorBusy(null);
     }
-  }, [onOpenChat, showToast]);
+  }, [copy, onOpenChat, showToast]);
   const questionInvalid = question.trim().length === 0 || question.length > QUESTION_MAX;
   const sendCustom = useCallback(() => {
     const text = question.trim();
@@ -555,8 +604,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const ramPct = typeof monitorFmt?.ramPct === 'number' ? monitorFmt.ramPct : null;
   const gpuTemp = maxSensorTemperature(deviceFmt?.sensors);
   const locale = CLOCK_LOCALE[t.langTag] || 'zh-CN';
-  const updatedAtText = deviceFmt
-    ? new Date(deviceFmt.updatedAt || nowTick).toLocaleTimeString(locale, { hour12: false })
+  // updatedAt is when the data last changed (frozen under display-equivalence
+  // suppression) — exactly what the label should say. No more 10s tick that
+  // re-renders the whole tree without changing a single displayed value.
+  const updatedAtText = deviceFmt && Number.isFinite(deviceFmt.updatedAt)
+    ? new Date(deviceFmt.updatedAt).toLocaleTimeString(locale, { hour12: false })
     : null;
 
   const gotoSection = useCallback((id) => {
@@ -581,7 +633,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
               {subtitleParts.length > 0 ? subtitleParts.join(' \u00B7 ') : copy.loading}
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              {rootDisk && (
+              {rootDisk && rootDisk.totalText !== '\u2014' && (
                 <HealthChip
                   label={copy.chipDisk}
                   value={`${rootDisk.usedPct}%`}
@@ -597,7 +649,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
               )}
               {gpuTemp != null && (
                 <HealthChip
-                  label={copy.chipGpuTemp}
+                  label={copy.chipMaxTemp}
                   value={`${gpuTemp}\u00B0C`}
                   level={pctLevel(gpuTemp, GPU_TEMP_WARN_C, GPU_TEMP_CRIT_C)}
                 />
@@ -789,6 +841,26 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                 </div>
               )}
 
+              {/* Store reachable but read failed: human-readable failure +
+                  retry + a standalone path to the store (the per-row jump
+                  buttons only exist inside store rows). */}
+              {storeState === 'error' && (
+                <div
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-amber-50 px-4 py-3 dark:bg-amber-400/10"
+                  data-testid="device-manager-store-error"
+                >
+                  <span className="min-w-0 break-words text-[12px] text-[#A15C07] dark:text-[#FDD663]">
+                    {t.uiModelStore.storeLoadFailed(storeError || '')}
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2">
+                    <MsButton tone="ghost" onClick={() => setStoreReloadKey((key) => key + 1)}>
+                      {copy.retry}
+                    </MsButton>
+                    <MsButton tone="ghost" onClick={onOpenModelStore}>{copy.gotoModelStore}</MsButton>
+                  </span>
+                </div>
+              )}
+
               {/* Store models: locked management + jump to the store. */}
               {storeRows.length > 0 && (
                 <div className="space-y-2" data-testid="device-manager-store-rows">
@@ -866,7 +938,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                           </div>
                         )}
                         {armed && (
-                          <p className={`mt-2 text-[12px] leading-5 ${MUTED_TEXT}`}>{copy.removeConfirmIntro(row.name)}</p>
+                          <div className="mt-2 space-y-1">
+                            <p className={`text-[12px] leading-5 ${MUTED_TEXT}`}>{copy.removeConfirmIntro(row.name)}</p>
+                            {row.weights_path && (
+                              <p className={`break-all font-mono text-[11px] ${MUTED_TEXT}`} data-testid="device-manager-remove-weights-path">
+                                {copy.removeWeightsPath(row.weights_path)}
+                              </p>
+                            )}
+                          </div>
                         )}
                         <div className="mt-2 flex flex-wrap items-center gap-2">
                           {linked ? (
@@ -880,7 +959,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                             <MsButton
                               tone="ghost"
                               busy={busyKey === `link:${row.id}`}
-                              disabled={rowBusy}
+                              // Never link an unreachable model: linking also
+                              // makes it the default model, and an unreachable
+                              // default breaks every new chat (same reasoning
+                              // as pinvou-model-link.checkLinkable).
+                              disabled={rowBusy || row.status === 'unreachable'}
+                              title={row.status === 'unreachable' ? copy.linkDisabledUnreachable : undefined}
                               onClick={() => linkExternal(row)}
                               data-testid="device-manager-link"
                             >
@@ -889,16 +973,28 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                           ))}
                           {armed ? (
                             <>
-                              <label className="flex items-center gap-1.5 text-[12px] text-black/60 dark:text-white/60">
-                                <input
-                                  type="checkbox"
-                                  className="accent-[#0B57D0]"
-                                  data-testid="device-manager-delete-weights"
-                                  checked={deleteWeights}
-                                  onChange={(event) => setDeleteWeights(event.target.checked)}
-                                />
-                                {copy.deleteWeights}
-                              </label>
+                              {/* No weights checkbox on ollama rows: the
+                                  backend deletes ollama models from the daemon
+                                  unconditionally — the checkbox would imply
+                                  "uncheck keeps the files", which is false
+                                  (no local weights dir on record). */}
+                              {row.kind !== 'ollama' && (
+                                <label className="flex items-center gap-1.5 text-[12px] text-black/60 dark:text-white/60">
+                                  <input
+                                    type="checkbox"
+                                    className="accent-[#0B57D0]"
+                                    data-testid="device-manager-delete-weights"
+                                    checked={deleteWeights}
+                                    onChange={(event) => setDeleteWeights(event.target.checked)}
+                                  />
+                                  {copy.deleteWeights}
+                                </label>
+                              )}
+                              {deleteWeights && (
+                                <span className={`text-[11px] ${'text-[#A15C07] dark:text-[#FDD663]'}`}>
+                                  {copy.removeIrreversible}
+                                </span>
+                              )}
                               <MsButton
                                 tone="danger"
                                 busy={busyKey === `remove:${row.id}`}
@@ -974,6 +1070,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                   value={question}
                   onChange={(event) => setQuestion(event.target.value)}
                   placeholder={copy.doctorCustomPlaceholder}
+                  aria-label={copy.doctorCustomPlaceholder}
                   rows={3}
                   className="w-full resize-none rounded-[14px] border border-black/[0.08] bg-white/70 px-3.5 py-2.5 text-[13px] outline-none transition-colors placeholder:text-black/30 focus:border-[#0B57D0] dark:border-white/[0.08] dark:bg-white/[0.04] dark:placeholder:text-white/30 dark:focus:border-[#A8C7FA]"
                 />

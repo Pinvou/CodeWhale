@@ -147,17 +147,20 @@
     scheduled: domain(["loadScheduledTasks", "readScheduledTask", "loadScheduledTaskRuns", "loadScheduledTaskRecentRuns", "selectScheduledTask", "refreshScheduledTaskData", "clearScheduledTaskSelection", "dismissScheduledTaskError", "createScheduledTask", "updateScheduledTask", "pauseScheduledTask", "resumeScheduledTask", "toggleScheduledTaskPinned", "deleteScheduledTask", "runScheduledTaskNow", "startScheduledTaskChat", "openScheduledRunChat", "exitScheduledRunChat"]),
     sessions: domain(["createNewSession", "materializeSession", "switchToSession", "deleteSession", "renameSession", "toggleSessionPinned", "archiveSession", "restoreArchivedSession", "onSessionDeleted", "getSessionWorkspaceBinding"]),
     monitor: domain(["startMonitorPolling", "stopMonitorPolling", "clearMonitorStats"]),
-    // MegaCube 设备管理桌面专属；Web 恒无 MegaCube，方法面以 no-op 桩保持
-    // 双端域面一致（megacubeDevice 恒 false，共享 UI 不会在 Web 上真正调用）。
-    device: {
-      startDevicePolling: function () {},
-      stopDevicePolling: function () {},
-      pollDeviceServices: function () { return Promise.resolve(null); },
-      fetchExternalModels: function () { return Promise.resolve(null); },
-      registerExternalModel: function () { return Promise.resolve(null); },
-      removeExternalModel: function () { return Promise.resolve(null); },
-      buildDoctorPrompt: function () { return Promise.resolve(null); },
-    },
+    // MegaCube 设备管理桌面专属；Web 恒无 MegaCube（megacubeDevice 恒 false，
+    // 共享 UI 不会在 Web 上真正调用），方法面以**拒绝式**桩保持双端域面一致。
+    // 与 computerUse 的桩同一取舍：仓库公约要求不支持的能力显式 unsupported，
+    // resolve(null) 会让门控一旦回归时变成"永久 skeleton + 读取中"而不是清晰报错。
+    device: (function () {
+      function deviceUnsupported() {
+        return Promise.reject(new Error("device management is only available on the MegaCube desktop app"));
+      }
+      var stubs = {};
+      ["startDevicePolling", "stopDevicePolling", "pollDeviceServices", "fetchExternalModels",
+        "registerExternalModel", "removeExternalModel", "buildDoctorPrompt"]
+        .forEach(function (name) { stubs[name] = deviceUnsupported; });
+      return stubs;
+    })(),
     settings: domain(["loadBehaviorTelemetryStatus", "setBehaviorTelemetryEnabled", "setSelectedPet", "saveSettings", "saveSettingsAndRestart", "saveSearchSettings", "saveSearchSettingsAndRestart", "testSearchProvider", "listBuiltinFeatures"]),
     feedback: Object.assign(domain(["submitFeedback"]), Object.fromEntries(
       ["listFailureDiagnostics", "previewFailureDiagnostic", "submitFailureDiagnostic", "pickDiagnosticFiles"].map(function (name) {

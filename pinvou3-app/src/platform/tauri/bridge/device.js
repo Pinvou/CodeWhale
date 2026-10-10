@@ -8,9 +8,11 @@
   registry["device"] = function (context) {
     var state = context.state;
     var notify = context.notify;
+    var notifyDomains = context.notifyDomains || notify;
     var invoke = context.invoke;
     var deviceIntervalId = null;
     var devicePollInFlight = false;
+    var deviceServicesInFlight = false;
 
   // ── Device snapshot ──────────────────────────────────────────────
 
@@ -24,17 +26,19 @@
   }
 
   // 速率人性化：十进制 KB/s / MB/s / GB/s（1 位小数），负值/非法值按 0 处理。
-  function fmtRate(bps) {
-    var v = typeof bps === "number" && isFinite(bps) && bps > 0 ? bps : 0;
+  // 入参是后端的 *_bytes_per_sec（字节/秒，字段名不用 "bps" 正是为避免按 bit 误读）。
+  function fmtRate(bytesPerSec) {
+    var v = typeof bytesPerSec === "number" && isFinite(bytesPerSec) && bytesPerSec > 0 ? bytesPerSec : 0;
     if (v >= 1e9) return (v / 1e9).toFixed(1) + " GB/s";
     if (v >= 1e6) return (v / 1e6).toFixed(1) + " MB/s";
     return (v / 1e3).toFixed(1) + " KB/s";
   }
 
-  // 百分比：截到 0-100 再取整（与 monitor 利用率口径一致）。
+  // 百分比：向下截 0、不封顶取整——多核机器上单进程 CPU% 可超 100，封顶会把
+  // 真实占用藏成 "100%"；需要 0-100 封顶的场合（磁盘占用条宽）由调用方自行截。
   function fmtPct(pct) {
     var v = typeof pct === "number" && isFinite(pct) ? pct : 0;
-    return Math.round(Math.max(0, Math.min(100, v)));
+    return Math.round(Math.max(0, v));
   }
 
   // 传感器 chip 名规约成视图侧本地化映射键（zh/en/ja 文案在视图的 i18n，
@@ -117,7 +121,7 @@
         availableText: fmtBytes(available),
         // 缺任一实测值不给百分比（宁缺勿把未知渲染成「已满/已空」）。
         usedPct: total != null && total > 0 && available != null
-          ? fmtPct((total - available) / total * 100) : 0,
+          ? Math.min(100, fmtPct((total - available) / total * 100)) : 0,
         isRoot: d.mount_point === "/",
       };
     });
@@ -134,8 +138,8 @@
         mac: n.mac ? String(n.mac) : null,
         rxTotalText: fmtBytes(n.rx_bytes),
         txTotalText: fmtBytes(n.tx_bytes),
-        rxRateText: fmtRate(n.rx_rate_bps),
-        txRateText: fmtRate(n.tx_rate_bps),
+        rxRateText: fmtRate(n.rx_bytes_per_sec),
+        txRateText: fmtRate(n.tx_bytes_per_sec),
       };
     });
   }
@@ -262,12 +266,14 @@
       var prevFmt = state.device && state.device._fmt;
       if (hadDeviceError || !prevFmt || !deviceFmtEqual(prevFmt, snap._fmt)) {
         state.device = snap;
-        notify();
+        // 精确域发布(与 monitor 同款):快照速率文本几乎每拍都变,全域 notify 会让
+        // 设备页打开期间每 2s 触发一次全 21 域的结构化重投影(含整个 chat 树)。
+        notifyDomains(["device"]);
       }
     } catch (e) {
       state.deviceError = e && e.message ? e.message : String(e || "device poll failed");
       console.warn("[pinvou3][device] poll failed", e);
-      notify();
+      notifyDomains(["device"]);
     } finally {
       devicePollInFlight = false;
     }
@@ -288,21 +294,31 @@
   // ── Model services (slow path) ───────────────────────────────────
   // 服务探测独立于 2s 快照：视图按 10s 慢轮询或手动刷新时调用。
   async function pollDeviceServices() {
+    // 与快照轮询同一 in-flight 纪律：10s 定时 + 手动刷新可并发，docker 探测最坏
+    // 3s+，上一拍未返回时本拍直接跳过，避免响应乱序把旧探测结果倒灌回来。
+    if (deviceServicesInFlight) return;
+    deviceServicesInFlight = true;
     try {
       var services = await invoke("get_device_services");
-      state.deviceServices = Array.isArray(services) ? services : [];
+      var next = Array.isArray(services) ? services : [];
+      // 内容没变不下发（与快照的显示等价抑制同一目标）；失败路径零变化也不 notify。
+      if (JSON.stringify(next) !== JSON.stringify(state.deviceServices || [])) {
+        state.deviceServices = next;
+        notifyDomains(["device"]);
+      }
     } catch (e) {
       // 探测失败保留上一份结果：瞬时抖动不该被渲染成「全部停止」。
       console.warn("[pinvou3][device] services poll failed", e);
+    } finally {
+      deviceServicesInFlight = false;
     }
-    notify();
   }
 
   // ── External models ──────────────────────────────────────────────
   async function fetchExternalModels() {
     var view = await invoke("get_external_models");
     state.externalModels = view || null;
-    notify();
+    notifyDomains(["device"]);
     return state.externalModels;
   }
 
