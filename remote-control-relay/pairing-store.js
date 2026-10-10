@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { validateControllerMessage } from "./protocol-controller.js";
+import { isControllerIdentifier } from "./identifier-contract.js";
 
 export const PAIRING_NAMESPACE = "desktop_pairing";
 export const PAIRING_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
@@ -8,7 +9,6 @@ export const PAIRING_CODE_ISSUE_QUARANTINE_MS = 10 * 60_000;
 export const PAIRING_CODE_TERMINAL_QUARANTINE_MS = 2 * 60_000;
 const MAX_GENERATION_ATTEMPTS = 32;
 const MAX_RECORDS = 100_000;
-const ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
 const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const HEX = /^[a-f0-9]{64}$/u;
 const OPEN_TOKEN = Symbol("PairingStore.open");
@@ -32,7 +32,7 @@ function exact(value, keys, code) {
 }
 
 function id(value, label) {
-  if (typeof value !== "string" || !ID.test(value)) fail(`${label}_invalid`);
+  if (!isControllerIdentifier(value)) fail(`${label}_invalid`);
   return value;
 }
 

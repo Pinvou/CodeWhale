@@ -47,7 +47,16 @@ REMOTE_CONTROL_HOST_API_INITIAL_CEILING = {
     "pinvou3-app/src-tauri/src/features/remote_control/relay_client.rs:tauri_path": 3,
 }
 RUST_DEPENDENCY_MIGRATION = "rust_dependency_resolution_v1"
-RUST_DEPENDENCY_MIGRATION_ANCHOR = "5bedd1ba3c4eb6534821e293bea408470155f69a"
+RUST_DEPENDENCY_MIGRATION_ANCHOR = "061032e02b60366a8b9a09af134bb8ba4c7a2e19"
+READER_TEST_HOST_PATH = (
+    "pinvou3-app/src-tauri/src/features/remote_control/controller/"
+    "relay_runtime/reader_resume_tests.rs"
+)
+READER_TEST_HOST_REASON = (
+    "// architecture-guard: allow-reader-test-host-type -- Windows test-only real "
+    "reader regression accepts AppHandle from the app-owned Wry factory; "
+    "no host construction or event/command API exception."
+)
 ROOT_MODULE = "<root>"
 def normalize(path: Path, root: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
@@ -1032,13 +1041,46 @@ def session_application_export_surface_is_frozen(text: str) -> bool:
     return True
 
 
-def remote_control_host_api_counts(text: str) -> Counter[str]:
+def reader_test_host_type_allowed(relative: str, text: str) -> bool:
+    """Permit one exact factory type, never a file-wide host API allowance."""
+    if relative != READER_TEST_HOST_PATH:
+        return False
+    spans = rust_syntax_token_spans(text)
+    if not spans or READER_TEST_HOST_REASON not in [
+        line.strip() for line in text[:spans[0][1]].splitlines()[:20]
+    ]:
+        return False
+    tokens = tuple(token for token, _, _ in spans)
+    cfg = rust_syntax_tokens('#![cfg(all(test, target_os = "windows"))]')
+    if tokens[:len(cfg)] != cfg:
+        return False
+    literals = [text[start:end] for token, start, end in spans[:len(cfg)] if token == "<literal>"]
+    if literals != ['"windows"']:
+        return False
+    signature = rust_syntax_tokens(
+        "pub(crate) async fn resume_round_trip<T>"
+        "(build_host: impl FnOnce() -> (tauri::AppHandle, T)) {"
+    )
+    depth = 0
+    signatures = 0
+    for index, token in enumerate(tokens):
+        if depth == 0 and tokens[index:index + len(signature)] == signature:
+            signatures += 1
+        depth += (token in {"{", "(", "["}) - (token in {"}", ")", "]"})
+    # Emitter can be inherited through super::*, so static trait calls must
+    # not slip through merely because this file has no direct trait import.
+    return signatures == 1 and tokens.count("AppHandle") == 1 and "Emitter" not in tokens and remote_control_host_api_counts(
+        text, inherited_emitter=True
+    ) == Counter({"tauri_path": 1})
+
+
+def remote_control_host_api_counts(text: str, *, inherited_emitter: bool = False) -> Counter[str]:
     """Count direct host references by mode for the legacy remote feature."""
     counts: Counter[str] = Counter()
     if not any(marker in text for marker in ("tauri", "platform", "app_events", "emit")):
         return counts
     tokens = rust_syntax_tokens(text)
-    emitter_import = False
+    emitter_import = inherited_emitter
     for index, token in enumerate(tokens):
         path = tokens[index + 1 : index + 3] == (":", ":")
         if re.fullmatch(r"tauri(?:_[A-Za-z0-9_]+)?", token) and path:
@@ -1117,6 +1159,11 @@ def remote_control_host_api_counts(text: str) -> Counter[str]:
             generic_call = tail[:3] == (":", ":", "<")
             if direct_call or generic_call:
                 counts["host_emit"] += 1
+        if inherited_emitter and token in {"emit", "emit_to", "emit_all"}:
+            if tokens[max(0, index - 2):index] == (":", ":"):
+                tail = tokens[index + 1:]
+                if tail[:1] == ("(",) or tail[:3] == (":", ":", "<"):
+                    counts["host_emit"] += 1
     if not emitter_import:
         counts.pop("host_emit", None)
     return +counts
@@ -1317,6 +1364,13 @@ def scan_rust(
             ):
                 rules["rust_session_application_export_drift"][relative] += 1
             if source_feature == "remote_control":
+                reader_fixture = relative == READER_TEST_HOST_PATH
+                if reader_fixture:
+                    host_api_counts = remote_control_host_api_counts(text, inherited_emitter=True)
+                if reader_test_host_type_allowed(relative, text):
+                    host_api_counts.pop("tauri_path")
+                elif reader_fixture or file_exception_allowed(text, "reader-test-host-type"):
+                    rules.setdefault("rust_reader_test_host_exception", Counter())[relative] += 1
                 for mode, count in host_api_counts.items():
                     rules["rust_remote_control_host_api"][f"{relative}:{mode}"] += count
             for layer, target in references:

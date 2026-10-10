@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isControllerIdentifier, isEnrollmentEndpointIdentifier, isMigrationRequestIdentifier } from "./identifier-contract.js";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export const ENROLLMENT_NAMESPACE = "endpoint_enrollment";
@@ -6,7 +7,6 @@ export const ENROLLMENT_REGISTRY_SCHEMA = "pinvou-endpoint-enrollment-registry";
 export const ENROLLMENT_REGISTRY_VERSION = 3;
 
 const CONFIG = new WeakMap();
-const ENDPOINT_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
 const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const HEX_64 = /^[a-f0-9]{64}$/u;
 const REVISION = /^(?:0|[1-9][0-9]{0,19})$/u;
@@ -16,7 +16,6 @@ const CREDENTIAL_MAX_BYTES = 4096;
 const MAX_ENTRIES = 100_000;
 const MAX_MIGRATION_REQUESTS = 100_000;
 const MAX_BATCH_OPERATIONS = 10_000;
-const MIGRATION_REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/u;
 const MIGRATION_ERROR_CODE = /^[a-z][a-z0-9_]{0,127}$/u;
 const DEPLOYMENTS = new Set(["official", "self_hosted", "development"]);
 
@@ -48,7 +47,7 @@ function parseBoolean(value, label) {
 }
 
 function validateEndpointId(endpointId) {
-  if (typeof endpointId !== "string" || !ENDPOINT_ID.test(endpointId)) fail("endpoint_id_invalid");
+  if (!isEnrollmentEndpointIdentifier(endpointId)) fail("endpoint_id_invalid");
   return endpointId;
 }
 
@@ -198,7 +197,7 @@ function validateMigrationRequest(raw) {
     "request_id", "operation", "endpoint_ids", "parameters", "status",
     "created_at", "completed_at", "outcome",
   ], "migration_request");
-  if (typeof request.request_id !== "string" || !MIGRATION_REQUEST_ID.test(request.request_id)) {
+  if (!isMigrationRequestIdentifier(request.request_id)) {
     fail("migration_request_malformed");
   }
   if (request.operation !== "batch" && request.operation !== "restore") fail("migration_request_malformed");
@@ -340,7 +339,7 @@ function publicMigrationRequest(request) {
 }
 
 function validateMigrationRequestId(value) {
-  if (typeof value !== "string" || !MIGRATION_REQUEST_ID.test(value)) fail("migration_request_id_invalid");
+  if (!isMigrationRequestIdentifier(value)) fail("migration_request_id_invalid");
   return value;
 }
 
@@ -970,6 +969,7 @@ export class EnrollmentRegistry {
   }
 
   async authorizePairingRegistration({ endpointId, desktopSecret } = {}) {
+    if (!isControllerIdentifier(endpointId)) fail("endpoint_id_invalid");
     return this.#authorize({ endpointId, credential: desktopSecret, role: "desktop" });
   }
 

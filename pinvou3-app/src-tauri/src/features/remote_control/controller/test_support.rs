@@ -17,6 +17,33 @@ use super::crypto::{
 };
 use super::protocol::build_pairing_transcript_preimage;
 
+/// The upstream Callback trait fixes the ErrorResponse ABI. Use its named
+/// implementation rather than an oversized-Err closure in strict lint tests.
+pub(crate) struct ControllerReaderProtocol;
+
+impl tokio_tungstenite::tungstenite::handshake::server::Callback for ControllerReaderProtocol {
+    fn on_request(
+        self,
+        request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+        mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+    ) -> std::result::Result<
+        tokio_tungstenite::tungstenite::handshake::server::Response,
+        tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+    > {
+        assert_eq!(
+            request.headers()["Sec-WebSocket-Protocol"],
+            super::protocol::CONTROLLER_SUBPROTOCOL
+        );
+        response.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_static(
+                super::protocol::CONTROLLER_SUBPROTOCOL,
+            ),
+        );
+        Ok(response)
+    }
+}
+
 pub(crate) struct SignedRelay {
     pub(crate) trust: AuthenticatedRelayTrustConfig,
     pub(crate) key_id: String,
@@ -184,4 +211,44 @@ pub(crate) fn lease_context(reserved: &Value) -> super::protocol::LeaseContext {
             .unwrap()
             .to_owned(),
     }
+}
+
+pub(crate) fn resume_reader_transport(
+    role: super::relay_transport::ControllerRole,
+    context: super::protocol::LeaseContext,
+    negotiated_capabilities: Vec<String>,
+) -> super::relay_transport::ControllerTransportSender {
+    let (sender, _receiver) = super::relay_transport::transport_channels(
+        role,
+        &context.remote_control_generation,
+        8,
+        2,
+        8192,
+        1024,
+    );
+    sender
+        .install_authenticated_lease(super::relay_transport::AuthenticatedLease {
+            context,
+            negotiated_capabilities,
+        })
+        .unwrap();
+    sender
+}
+
+pub(crate) fn resume_final_frame(
+    context: &super::protocol::LeaseContext,
+    activation_id: &str,
+    request_id: &str,
+) -> Value {
+    json!({
+        "v":1, "type":"controller_resumed", "request_id":request_id,
+        "activation_id":activation_id,
+        "connection_id":context.connection_id,
+        "controller_lease_id":context.controller_lease_id,
+        "lease_epoch":context.lease_epoch, "relay_epoch":context.relay_epoch,
+        "remote_control_generation":context.remote_control_generation,
+        "liveness_epoch_a":"live:a-2", "liveness_epoch_b":"live-b-2",
+        "new_resume_token_b64":base64::engine::general_purpose::STANDARD.encode([3u8;32]),
+        "resume_deadline_ms":"60000",
+    })
 }

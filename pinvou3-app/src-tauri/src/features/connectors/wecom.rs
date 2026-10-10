@@ -439,12 +439,30 @@ pub async fn wecom_apply_skills() -> Result<Value, String> {
     })??;
     // scope 门禁同步：见 feishu_apply_skills 同名注释（code 默认关语义对齐）。
     if show {
-        crate::features::marketplace::sync_deny_all_scopes_after_install("wecom");
+        // Fail-visible persist (review #455 R13-B3): swallowing the error would
+        // let the connector go live with zero consent; the error text carries
+        // recovery guidance and the shared consent marker (pinned on both
+        // sides), and the raw cause is logged.
+        crate::features::connectors::skill_gate::apply_skills_consent_sync("wecom")?;
     }
     Ok(json!({ "visible": show }))
 }
 
 /// 给前端渲染开关态:`{connected, enabled(=未停用), visible}`。
+/// 启动期门控刷新的单连接器步骤（`refresh_connector_auth_gates` 调）：
+/// 实时探测应否可见，按结果写 / 删技能目录；转为可见时跑 LEDGER-GATED
+/// 同步（review #455 round-31 BLOCKER：只补写从未同步过的默认关行，
+/// 用户显式开启不会被开机刷新回退）。
+pub(crate) fn wecom_gate_step() -> Result<bool, String> {
+    let show = wecom_skills_should_show();
+    GATE.apply_skills(show)
+        .map_err(|e| format!("更新企业微信技能失败: {e}"))?;
+    if show {
+        crate::features::connectors::skill_gate::refresh_gate_consent_sync("wecom", "企业微信")?;
+    }
+    Ok(show)
+}
+
 pub async fn wecom_skills_state() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         let disabled = is_wecom_disabled();

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import vm from 'node:vm';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const browserView = readFileSync(
@@ -208,6 +209,20 @@ test('normal mode uses one Right Dock switcher for artifact and browser entries'
   assert.match(nativeHost, /pub fn prepare_unclaimed/);
 });
 
+test('remote connection modal waits for its native surface hide publication', () => {
+  const intent = main.match(/const browserOverlayIntent = (\[[\s\S]*?\]\.filter\(Boolean\)\.join\('\|'\));/);
+  assert.ok(intent, 'the real overlay intent expression must be available');
+  const context = { archiveConfirm: false, searchOverlayOpen: false, personaEditor: false,
+    savedConfirm: false, webAccessOpen: false, apiKeyGateOpen: false, bs: {},
+    isCompactShell: false, isSidebarOpen: false, mobileMoreOpen: false,
+    moveToProjectSession: null, rebindDraft: null, remoteConversationOpen: true,
+    can: (capability) => capability === 'desktopRemoteControl' };
+  assert.equal(vm.runInNewContext(intent[1], context), 'remote-connection');
+  assert.equal(vm.runInNewContext(intent[1], { ...context, remoteConversationOpen: false }), '');
+  assert.equal(vm.runInNewContext(intent[1], { ...context, can: () => false }), '');
+  assert.match(main, /can\('desktopRemoteControl'\) && remoteConversationOpen && browserOverlayPublicationReady && \(/);
+});
+
 test('native surface suspension is centrally derived for every occlusion path', () => {
   assert.match(main, /const browserSurfaceSuspended = browserResizeActive/);
   assert.match(main, /rightDockState\.activePanelId !== 'browser'/);
@@ -238,6 +253,11 @@ test('native surface suspension is centrally derived for every occlusion path', 
     // The state name alone appears at every picker touchpoint; only the
     // intent entry suspends the dock, so assert that exact fragment.
     "moveToProjectSession ? 'move-picker' : ''",
+    // The rebind confirm dialog is the move picker's sibling and needs its own
+    // intent entry (review #463 round-10 T1): with only the state name present
+    // the dock stays live under the modal, and in the partial state that modal
+    // is the sole retry entry.
+    "rebindDraft ? 'rebind' : ''",
   ]) {
     assert.ok(main.includes(blocker), `missing native-surface blocker: ${blocker}`);
   }
