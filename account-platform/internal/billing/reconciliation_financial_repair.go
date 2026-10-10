@@ -59,24 +59,25 @@ type ReconciliationFinancialRepairCommandInput struct {
 // ReconciliationFinancialRepairPlan is the closed, recomputable owner
 // projection of one approved reconciliation closure.
 type ReconciliationFinancialRepairPlan struct {
-	CaseID                 uuid.UUID
-	RunID                  uuid.UUID
-	Channel                string
-	BusinessDate           string
-	MerchantOrderNo        string
-	AmountFen              int64
-	Currency               string
-	ProviderTransactionID  string
-	PaymentEvidenceID      uuid.UUID
-	ProviderSnapshotDigest string
-	RecheckCaseCount       int64
-	FactsDigest            string
+	PolicyVersion, CaseVersion int64
+	ManualReviewCaseID         *uuid.UUID
+	CaseID                     uuid.UUID
+	RunID                      uuid.UUID
+	Channel                    string
+	BusinessDate               string
+	MerchantOrderNo            string
+	AmountFen                  int64
+	Currency                   string
+	ProviderTransactionID      string
+	PaymentEvidenceID          uuid.UUID
+	ProviderSnapshotDigest     string
+	RecheckCaseCount           int64
+	FactsDigest                string
 }
 
 // ReconciliationFinancialRepairFrozenFacts is the wire-visible owner projection
-// an approval froze. FactsDigest is an owner-only recomputation input; a consumed
-// authorization leaves it empty and the execution transaction recomputes it,
-// while a presented digest must match exactly.
+// an approval froze. Fresh execution requires the exact nonempty owner digest;
+// matching committed identity is returned before fresh gates.
 type ReconciliationFinancialRepairFrozenFacts struct {
 	RunID                  uuid.UUID
 	AmountFen              int64
@@ -134,18 +135,18 @@ func reconciliationFinancialRepairPlanFrom(ctx context.Context, source reconcili
 	input ReconciliationFinancialRepairCommandInput, policyVersion, schemaVersion, activationVersion int64) (ReconciliationFinancialRepairPlan, error) {
 	businessDate, err := time.Parse("2006-01-02", strings.TrimSpace(input.BusinessDate))
 	if input.ReconciliationCaseID == uuid.Nil || input.PaymentEvidenceID == uuid.Nil || err != nil ||
-		policyVersion < 1 || schemaVersion < 1 || activationVersion < 1 {
+		policyVersion != 1 || schemaVersion != 1 || activationVersion < 1 {
 		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	plan := ReconciliationFinancialRepairPlan{CaseID: input.ReconciliationCaseID,
-		PaymentEvidenceID: input.PaymentEvidenceID, BusinessDate: businessDate.UTC().Format("2006-01-02")}
+		PaymentEvidenceID: input.PaymentEvidenceID, PolicyVersion: policyVersion, BusinessDate: businessDate.UTC().Format("2006-01-02")}
 	var snapshotRaw []byte
 	var caseType, caseStatus, merchantOrderNo string
 	var caseOrderID *uuid.UUID
 	var resolvedAt *time.Time
 	if err := source.QueryRow(ctx, `SELECT reconciliation_run_id,payment_order_id,merchant_order_no,case_type,status,
-provider_snapshot,resolved_at FROM reconciliation_cases WHERE id=$1`, input.ReconciliationCaseID).
-		Scan(&plan.RunID, &caseOrderID, &merchantOrderNo, &caseType, &caseStatus, &snapshotRaw, &resolvedAt); err != nil {
+provider_snapshot,resolved_at,version,manual_review_case_id FROM reconciliation_cases WHERE id=$1`, input.ReconciliationCaseID).
+		Scan(&plan.RunID, &caseOrderID, &merchantOrderNo, &caseType, &caseStatus, &snapshotRaw, &resolvedAt, &plan.CaseVersion, &plan.ManualReviewCaseID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ReconciliationFinancialRepairPlan{}, ErrNotFound
 		}
@@ -168,20 +169,20 @@ provider_snapshot,resolved_at FROM reconciliation_cases WHERE id=$1`, input.Reco
 	if entryType != "PAYMENT" || snapshot.MerchantOrderNo != merchantOrderNo ||
 		snapshot.ChannelTransactionID == "" || snapshot.ChannelTransactionID != strings.TrimSpace(snapshot.ChannelTransactionID) ||
 		snapshot.AmountFen <= 0 || strings.TrimSpace(snapshot.Currency) == "" ||
-		!refundExceptionProviderStatusAccepted(snapshot.Status) {
+		!successfulBillEntryStatus(ProviderBillEntry{EntryType: "PAYMENT", Status: snapshot.Status}) {
 		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	plan.AmountFen, plan.Currency, plan.ProviderTransactionID = snapshot.AmountFen, snapshot.Currency, snapshot.ChannelTransactionID
-	var runChannel, runStatus string
+	var runChannel, runStatus, providerID, providerVersion string
 	var runDate time.Time
-	if err := source.QueryRow(ctx, `SELECT channel,status,business_date FROM reconciliation_runs WHERE id=$1`, plan.RunID).
-		Scan(&runChannel, &runStatus, &runDate); err != nil {
+	if err := source.QueryRow(ctx, `SELECT channel,status,business_date,provider_id,provider_version FROM reconciliation_runs WHERE id=$1`, plan.RunID).
+		Scan(&runChannel, &runStatus, &runDate, &providerID, &providerVersion); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ReconciliationFinancialRepairPlan{}, ErrNotFound
 		}
 		return ReconciliationFinancialRepairPlan{}, err
 	}
-	if runStatus != "COMPLETED" || runChannel != snapshot.Channel || runDate.UTC().Format("2006-01-02") != plan.BusinessDate {
+	if providerID == "" || providerVersion == "" || plan.CaseVersion < 1 || runStatus != "COMPLETED" || runChannel != snapshot.Channel || runDate.UTC().Format("2006-01-02") != plan.BusinessDate {
 		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	plan.Channel = runChannel
@@ -192,20 +193,36 @@ provider_snapshot,resolved_at FROM reconciliation_cases WHERE id=$1`, input.Reco
 	var providerRefundID *string
 	var evidenceMerchant, evidenceTransaction, evidenceCurrency, evidenceDigest string
 	var evidenceAmount int64
-	if err := source.QueryRow(ctx, `SELECT merchant_order_no,provider_transaction_id,provider_refund_id,amount_fen,currency,
-COALESCE(provider_status,''),payload_digest FROM payment_evidence WHERE id=$1`, input.PaymentEvidenceID).
+	var evidenceProvider, evidenceVersion, evidenceType string
+	var evidenceRaw []byte
+	if err := source.QueryRow(ctx, `SELECT merchant_order_no,COALESCE(provider_transaction_id,''),provider_refund_id,amount_fen,currency,
+COALESCE(provider_status,''),payload_digest,provider_id,provider_version,evidence_type,payload_snapshot FROM payment_evidence WHERE id=$1`, input.PaymentEvidenceID).
 		Scan(&evidenceMerchant, &evidenceTransaction, &providerRefundID, &evidenceAmount, &evidenceCurrency,
-			&evidenceStatus, &evidenceDigest); err != nil {
+			&evidenceStatus, &evidenceDigest, &evidenceProvider, &evidenceVersion, &evidenceType, &evidenceRaw); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ReconciliationFinancialRepairPlan{}, ErrNotFound
 		}
 		return ReconciliationFinancialRepairPlan{}, err
 	}
 	if evidenceMerchant != merchantOrderNo || evidenceTransaction != plan.ProviderTransactionID ||
-		providerRefundID == nil || strings.TrimSpace(*providerRefundID) == "" ||
+		providerRefundID == nil || strings.TrimSpace(*providerRefundID) == "" || *providerRefundID != strings.TrimSpace(*providerRefundID) ||
 		evidenceAmount != plan.AmountFen || evidenceCurrency != plan.Currency ||
-		!refundExceptionProviderStatusAccepted(evidenceStatus) || !validHexDigest(evidenceDigest) {
+		!successfulBillEntryStatus(ProviderBillEntry{EntryType: "REFUND", Status: evidenceStatus}) || !validHexDigest(evidenceDigest) || evidenceProvider != providerID || evidenceVersion != providerVersion || evidenceType != "BILL" {
 		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	var refundBill ProviderBillEntry
+	if json.Unmarshal(evidenceRaw, &refundBill) != nil || normalizedBillEntryType(refundBill) != "REFUND" || !successfulBillEntryStatus(refundBill) || billReference(refundBill) != *providerRefundID || refundBill.Channel != runChannel || refundBill.MerchantOrderNo != merchantOrderNo || strings.TrimSpace(refundBill.ChannelTransactionID) != plan.ProviderTransactionID || refundBill.AmountFen != plan.AmountFen || refundBill.Currency != plan.Currency || refundBill.Status != evidenceStatus {
+		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	if plan.ManualReviewCaseID != nil {
+		var domain, resourceType, status string
+		var resourceID uuid.UUID
+		if err := source.QueryRow(ctx, `SELECT domain,resource_type,resource_id,status FROM manual_review_cases WHERE id=$1`, *plan.ManualReviewCaseID).Scan(&domain, &resourceType, &resourceID, &status); err != nil {
+			return ReconciliationFinancialRepairPlan{}, err
+		}
+		if domain != "BILLING" || resourceType != "RECONCILIATION_CASE" || resourceID != plan.CaseID || (status != "OPEN" && status != "IN_REVIEW") {
+			return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+		}
 	}
 	// The difference must still have no internal attribution at all: no order and
 	// no transaction may claim this merchant order or channel transaction.
@@ -228,17 +245,42 @@ COALESCE(provider_status,''),payload_digest FROM payment_evidence WHERE id=$1`, 
 		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	// Repair-then-recheck: closing one case must not leave another OPEN
-	// difference for the same merchant order in the frozen run.
-	if err := source.QueryRow(ctx, `SELECT count(*) FROM reconciliation_cases
-WHERE reconciliation_run_id=$1 AND merchant_order_no=$2 AND case_type='PROVIDER_PAID_INTERNAL_MISSING'
-AND status='OPEN' AND id<>$3`, plan.RunID, merchantOrderNo, plan.CaseID).Scan(&plan.RecheckCaseCount); err != nil {
+	// difference for the same merchant order/channel/business date across runs.
+	if err := source.QueryRow(ctx, `SELECT count(*) FROM reconciliation_cases c JOIN reconciliation_runs r ON r.id=c.reconciliation_run_id
+WHERE r.channel=$1 AND r.business_date=$2::date AND c.merchant_order_no=$3 AND c.case_type='PROVIDER_PAID_INTERNAL_MISSING'
+AND c.status IN ('OPEN','IN_REVIEW') AND c.id<>$4`, plan.Channel, plan.BusinessDate, merchantOrderNo, plan.CaseID).Scan(&plan.RecheckCaseCount); err != nil {
 		return ReconciliationFinancialRepairPlan{}, err
 	}
+
 	if plan.RecheckCaseCount != 0 {
 		return ReconciliationFinancialRepairPlan{}, ErrConflict
 	}
+	var ownerRaw []byte
+	if err := source.QueryRow(ctx, `SELECT jsonb_build_object('case',(SELECT to_jsonb(c) FROM reconciliation_cases c WHERE id=$1),'run',(SELECT to_jsonb(r) FROM reconciliation_runs r WHERE id=$2),'evidence',(SELECT to_jsonb(e) FROM payment_evidence e WHERE id=$3),'manual_review',(SELECT to_jsonb(m) FROM manual_review_cases m WHERE id=$4))`, plan.CaseID, plan.RunID, plan.PaymentEvidenceID, plan.ManualReviewCaseID).Scan(&ownerRaw); err != nil {
+		return ReconciliationFinancialRepairPlan{}, err
+	}
+	ownerSnapshot, err := paymentRepairJSONSnapshot(ownerRaw)
+	if err != nil {
+		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	// Freeze the existing zero-accounting baseline without accepting caller amounts.
+	var zeroRaw []byte
+	if err := source.QueryRow(ctx, `SELECT jsonb_build_object(
+ 'journal_entries',(SELECT count(*) FROM journal_entries),'ledger_postings',(SELECT count(*) FROM ledger_postings),
+ 'wallets',(SELECT count(*) FROM wallets),'wallet_versions',(SELECT COALESCE(string_agg(id::text||':'||version::text,',' ORDER BY id),'') FROM wallets),
+ 'receivables',(SELECT count(*) FROM receivables),'receivable_balances',(SELECT COALESCE(string_agg(id::text||':'||original_microcredits::text||':'||settled_microcredits::text||':'||outstanding_microcredits::text,',' ORDER BY id),'') FROM receivables),
+ 'credit_lots',(SELECT count(*) FROM credit_lots),'entitlement_packages',(SELECT count(*) FROM entitlement_packages),'entitlement_components',(SELECT count(*) FROM entitlement_components),
+ 'payment_orders',(SELECT count(*) FROM payment_orders),'payment_transactions',(SELECT count(*) FROM payment_transactions),'payment_evidence',(SELECT count(*) FROM payment_evidence),
+ 'refunds',(SELECT count(*) FROM refunds),'chargeback_cases',(SELECT count(*) FROM chargeback_cases),'forced_refund_cases',(SELECT count(*) FROM forced_refund_cases),'usage_holds',(SELECT count(*) FROM usage_holds))`).Scan(&zeroRaw); err != nil {
+		return ReconciliationFinancialRepairPlan{}, err
+	}
+	zeroSnapshot, err := paymentRepairJSONSnapshot(zeroRaw)
+	if err != nil {
+		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+
 	encoded, err := json.Marshal(map[string]any{
-		"command_type": reconciliationFinancialRepairCommand, "case_id": plan.CaseID.String(),
+		"command_type": reconciliationFinancialRepairCommand, "owner_snapshot": ownerSnapshot, "zero_accounting_baseline": zeroSnapshot, "repair_case_exists": caseExists, "case_id": plan.CaseID.String(),
 		"run_id": plan.RunID.String(), "channel": plan.Channel, "business_date": plan.BusinessDate,
 		"merchant_order_no": plan.MerchantOrderNo, "case_type": caseType, "case_status": caseStatus,
 		"amount_fen": plan.AmountFen, "currency": plan.Currency,
@@ -263,7 +305,7 @@ AND status='OPEN' AND id<>$3`, plan.RunID, merchantOrderNo, plan.CaseID).Scan(&p
 func reconciliationFinancialRepairProofProjection(plan ReconciliationFinancialRepairPlan) ([]byte, []byte) {
 	critical, _ := json.Marshal(map[string]any{
 		"run_id": plan.RunID.String(), "case_id": plan.CaseID.String(),
-		"provider_snapshot_digest": plan.ProviderSnapshotDigest, "facts_digest": plan.FactsDigest, "policy_version": 1,
+		"provider_snapshot_digest": plan.ProviderSnapshotDigest, "facts_digest": plan.FactsDigest, "policy_version": plan.PolicyVersion,
 	})
 	financial, _ := json.Marshal(map[string]any{
 		"amount_fen": plan.AmountFen, "currency": plan.Currency,
@@ -327,7 +369,7 @@ func (r *PostgresRepository) ApplyReconciliationFinancialRepair(ctx context.Cont
 	executionKey := strings.TrimSpace(input.ExecutionKey)
 	if r == nil || r.pool == nil || input.ApprovalRequestID == uuid.Nil || input.AuthorizationEventID == uuid.Nil ||
 		input.ApprovalEpoch < 1 || executionKey == "" || executionKey != input.ExecutionKey ||
-		input.PolicyVersion < 1 || input.SchemaVersion < 1 || input.ActivationVersion < 1 {
+		input.PolicyVersion != 1 || input.SchemaVersion != 1 || input.ActivationVersion < 1 {
 		return ReconciliationFinancialRepairResult{}, ErrConflict
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -340,6 +382,39 @@ func (r *PostgresRepository) ApplyReconciliationFinancialRepair(ctx context.Cont
 	} else if found {
 		return stored, tx.Commit(ctx)
 	}
+	var channel, businessDate, merchant string
+	if err := tx.QueryRow(ctx, `SELECT r.channel,r.business_date::text,c.merchant_order_no FROM reconciliation_cases c JOIN reconciliation_runs r ON r.id=c.reconciliation_run_id WHERE c.id=$1`, input.Command.ReconciliationCaseID).Scan(&channel, &businessDate, &merchant); err != nil {
+		return ReconciliationFinancialRepairResult{}, err
+	}
+	if err := lockTransactionKey(ctx, tx, "reconciliation-repair-source", channel+":"+businessDate+":"+merchant); err != nil {
+		return ReconciliationFinancialRepairResult{}, err
+	}
+	if err := lockTransactionKey(ctx, tx, reconciliationRepairLockScope, input.Command.ReconciliationCaseID.String()); err != nil {
+		return ReconciliationFinancialRepairResult{}, err
+	}
+	var lockedID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM reconciliation_cases WHERE id=$1 FOR UPDATE`, input.Command.ReconciliationCaseID).Scan(&lockedID); err != nil {
+		return ReconciliationFinancialRepairResult{}, err
+	}
+	rows, err := tx.Query(ctx, `SELECT m.id FROM manual_review_cases m JOIN reconciliation_cases c ON c.manual_review_case_id=m.id WHERE c.id=$1 FOR UPDATE OF m`, input.Command.ReconciliationCaseID)
+	if err != nil {
+		return ReconciliationFinancialRepairResult{}, err
+	}
+	for rows.Next() {
+		if err := rows.Scan(&lockedID); err != nil {
+			rows.Close()
+			return ReconciliationFinancialRepairResult{}, err
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return ReconciliationFinancialRepairResult{}, err
+	}
+	now := r.now()
+	if err := reconciliationFinancialRepairExecutionActivation(ctx, tx, input, now); err != nil {
+		return ReconciliationFinancialRepairResult{}, err
+	}
 	plan, err := reconciliationFinancialRepairPlanFrom(ctx, tx, input.Command, input.PolicyVersion, input.SchemaVersion, input.ActivationVersion)
 	if err != nil {
 		return ReconciliationFinancialRepairResult{}, err
@@ -347,15 +422,21 @@ func (r *PostgresRepository) ApplyReconciliationFinancialRepair(ctx context.Cont
 	if mismatch := reconciliationFinancialRepairFrozenMismatch(plan, input.Frozen); mismatch != "" {
 		return ReconciliationFinancialRepairResult{}, wrapSnapshotMismatch(mismatch)
 	}
-	if err := lockTransactionKey(ctx, tx, reconciliationRepairLockScope, plan.CaseID.String()); err != nil {
-		return ReconciliationFinancialRepairResult{}, err
-	}
-	now := r.now()
-	tag, err := tx.Exec(ctx, `UPDATE reconciliation_cases SET status='RESOLVED',resolution=$2,resolved_at=$3,updated_at=$3
-WHERE id=$1 AND status='OPEN' AND resolved_at IS NULL AND case_type='PROVIDER_PAID_INTERNAL_MISSING'`,
-		plan.CaseID, reconciliationRepairResolutionCode, now)
+
+	tag, err := tx.Exec(ctx, `UPDATE reconciliation_cases SET status='RESOLVED',resolution=$2,resolved_at=$3,updated_at=$3,version=version+1
+WHERE id=$1 AND status='OPEN' AND resolved_at IS NULL AND case_type='PROVIDER_PAID_INTERNAL_MISSING' AND version=$4`,
+		plan.CaseID, reconciliationRepairResolutionCode, now, plan.CaseVersion)
 	if err != nil || tag.RowsAffected() != 1 {
 		return ReconciliationFinancialRepairResult{}, reconciliationRepairConflict("reconciliation_case_cas", err)
+	}
+	if plan.ManualReviewCaseID != nil {
+		tag, err := tx.Exec(ctx, `UPDATE manual_review_cases SET status='RESOLVED',resolved_at=$2,updated_at=$2 WHERE id=$1 AND status IN ('OPEN','IN_REVIEW')`, *plan.ManualReviewCaseID, now)
+		if err != nil || tag.RowsAffected() != 1 {
+			return ReconciliationFinancialRepairResult{}, reconciliationRepairConflict("manual_review_cas", err)
+		}
+		if err := appendManualReviewEvent(ctx, tx, *plan.ManualReviewCaseID, "RESOLVED", nil, map[string]any{"resolution_code": reconciliationRepairResolutionCode, "approval_request_id": input.ApprovalRequestID}, now); err != nil {
+			return ReconciliationFinancialRepairResult{}, err
+		}
 	}
 	caseID := uuid.Must(uuid.NewV7())
 	if _, err := tx.Exec(ctx, `INSERT INTO reconciliation_repair_cases(id,approval_request_id,authorization_event_id,
@@ -363,7 +444,7 @@ approval_epoch,execution_key_digest,reconciliation_run_id,reconciliation_case_id
 amount_fen,currency,payment_evidence_id,provider_snapshot_digest,facts_digest,resolution_code,recheck_case_count,state,created_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'EXECUTED',$18)`,
 		caseID, input.ApprovalRequestID, input.AuthorizationEventID, input.ApprovalEpoch,
-		ledgerRepairExecutionKeyDigest(executionKey), plan.RunID, plan.CaseID, plan.Channel, plan.BusinessDate,
+		legacyFinancialExecutionKeyDigestV1(executionKey), plan.RunID, plan.CaseID, plan.Channel, plan.BusinessDate,
 		plan.MerchantOrderNo, plan.AmountFen, plan.Currency, plan.PaymentEvidenceID, plan.ProviderSnapshotDigest,
 		plan.FactsDigest, reconciliationRepairResolutionCode, plan.RecheckCaseCount, now); err != nil {
 		return ReconciliationFinancialRepairResult{}, err
@@ -450,7 +531,7 @@ FROM reconciliation_repair_cases WHERE reconciliation_case_id=$1`, input.Command
 		return ReconciliationFinancialRepairResult{}, false, err
 	}
 	if storedRequestID != input.ApprovalRequestID || storedEventID != input.AuthorizationEventID ||
-		storedEpoch != input.ApprovalEpoch || storedDigest != ledgerRepairExecutionKeyDigest(executionKey) {
+		storedEpoch != input.ApprovalEpoch || storedDigest != legacyFinancialExecutionKeyDigestV1(executionKey) {
 		return ReconciliationFinancialRepairResult{}, false, ErrConflict
 	}
 	stored, err := readReconciliationFinancialRepair(ctx, source, input.ApprovalRequestID)
@@ -464,9 +545,7 @@ FROM reconciliation_repair_cases WHERE reconciliation_case_id=$1`, input.Command
 }
 
 // reconciliationFinancialRepairFrozenMismatch compares the frozen wire
-// projection with the owner-recomputed plan. The consumed authorization freezes
-// only the wire-visible projection, so an empty facts digest is not a caller
-// claim.
+// projection with the owner-recomputed plan; fresh execution rejects empty facts.
 func reconciliationFinancialRepairFrozenMismatch(plan ReconciliationFinancialRepairPlan, frozen ReconciliationFinancialRepairFrozenFacts) string {
 	switch {
 	case plan.RunID != frozen.RunID:
@@ -479,10 +558,28 @@ func reconciliationFinancialRepairFrozenMismatch(plan ReconciliationFinancialRep
 		return "provider_transaction_id"
 	case plan.ProviderSnapshotDigest != frozen.ProviderSnapshotDigest:
 		return "provider_snapshot_digest"
-	case frozen.FactsDigest == "":
-		return ""
 	case plan.FactsDigest != frozen.FactsDigest:
 		return "facts_digest"
 	}
 	return ""
+}
+
+func reconciliationFinancialRepairExecutionActivation(ctx context.Context, source reconciliationRepairReader, input ReconciliationFinancialRepairExecutionInput, now time.Time) error {
+	active := ApprovalCommandActivation{CommandType: reconciliationFinancialRepairCommand, PolicyVersion: 1, SnapshotSchemaVersion: 1, State: "INACTIVE"}
+	var enabled bool
+	err := source.QueryRow(ctx, `SELECT active,activation_version,updated_at FROM billing_approval_execution.lock_reconciliation_activation()`).Scan(&enabled, &active.Version, &active.UpdatedAt)
+	if enabled {
+		active.State = "ACTIVE"
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrApprovalSnapshotMismatch
+	}
+	if err != nil {
+		return err
+	}
+	if !validActivationItem(active, reconciliationFinancialRepairCommand, billingApprovalActivationSpecs[reconciliationFinancialRepairCommand], now) ||
+		active.State != "ACTIVE" || active.PolicyVersion != input.PolicyVersion || int64(active.SnapshotSchemaVersion) != input.SchemaVersion || active.Version != input.ActivationVersion {
+		return ErrApprovalSnapshotMismatch
+	}
+	return nil
 }

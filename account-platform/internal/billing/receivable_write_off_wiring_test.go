@@ -404,6 +404,14 @@ func TestReceivableWriteOffFreshActivationIsClosed(t *testing.T) {
 			snapshot.Activations[i].State = "ACTIVE"
 		}
 	}
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); err != nil {
+		t.Fatalf("installed reconciliation activation rejected: %v", err)
+	}
+	for i := range snapshot.Activations {
+		if snapshot.Activations[i].CommandType == "USAGE_SETTLEMENT_REPAIR" {
+			snapshot.Activations[i].State = "ACTIVE"
+		}
+	}
 	if err := validateApprovalCommandActivationSnapshot(snapshot, now); !errors.Is(err, ErrApprovalActivationUnavailable) {
 		t.Fatal("future activation allowed")
 	}

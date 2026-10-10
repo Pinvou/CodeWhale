@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/google/uuid"
@@ -308,6 +309,41 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 			plan.CaseVersion != command.ExpectedCaseVersion {
 			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
+	case reconciliationFinancialRepairCommand:
+		var command struct {
+			ReconciliationCaseID uuid.UUID `json:"reconciliation_case_id"`
+			PaymentEvidenceID    uuid.UUID `json:"payment_evidence_id"`
+			BusinessDate         string    `json:"business_date"`
+			ResolutionCode       string    `json:"resolution_code"`
+		}
+		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.ReconciliationCaseID == uuid.Nil ||
+			command.PaymentEvidenceID == uuid.Nil || strings.TrimSpace(command.BusinessDate) == "" ||
+			command.ResolutionCode != reconciliationRepairResolutionCode {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		owner, ok := repository.(interface {
+			reconciliationFinancialRepairPlan(context.Context, ReconciliationFinancialRepairCommandInput) (ReconciliationFinancialRepairPlan, error)
+		})
+		if !ok {
+			return current, "", "", errBillingApprovalProofUnavailable
+		}
+		plan, err := owner.reconciliationFinancialRepairPlan(ctx, ReconciliationFinancialRepairCommandInput{
+			ReconciliationCaseID: command.ReconciliationCaseID, PaymentEvidenceID: command.PaymentEvidenceID,
+			BusinessDate: command.BusinessDate,
+		})
+		if errors.Is(err, ErrApprovalSnapshotMismatch) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrConflict) {
+			return current, "DOMAIN_INVARIANT_FAILED", ownerState, nil
+		}
+		if err != nil {
+			return current, "", "", err
+		}
+		ownerState = plan.CaseID.String() + ":" + reconciliationRepairLedgerEffect
+		critical, financial := reconciliationFinancialRepairProofProjection(plan)
+		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
+		if plan.CaseID != command.ReconciliationCaseID || plan.PaymentEvidenceID != command.PaymentEvidenceID ||
+			plan.BusinessDate != strings.TrimSpace(command.BusinessDate) {
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
+		}
 	default:
 		return current, "", "", errors.New("unsupported Billing proof command")
 	}
@@ -422,6 +458,30 @@ func (r *PostgresRepository) chargebackFinancialRepairPlan(ctx context.Context, 
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return ChargebackFinancialRepairPlan{}, err
+	}
+	return plan, nil
+}
+
+func (r *PostgresRepository) reconciliationFinancialRepairPlan(ctx context.Context, input ReconciliationFinancialRepairCommandInput) (ReconciliationFinancialRepairPlan, error) {
+	snapshot, err := r.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return ReconciliationFinancialRepairPlan{}, err
+	}
+	active, err := activeBillingProofCommand(snapshot, reconciliationFinancialRepairCommand, r.now())
+	if err != nil {
+		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return ReconciliationFinancialRepairPlan{}, err
+	}
+	defer tx.Rollback(ctx)
+	plan, err := reconciliationFinancialRepairPlanFrom(ctx, tx, input, active.PolicyVersion, int64(active.SnapshotSchemaVersion), active.Version)
+	if err != nil {
+		return ReconciliationFinancialRepairPlan{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ReconciliationFinancialRepairPlan{}, err
 	}
 	return plan, nil
 }

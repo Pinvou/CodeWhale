@@ -324,6 +324,9 @@ func reconciliationRetry(ctx context.Context, action func() error) error {
 }
 
 func (p *PaymentCoordinator) persistStableReconciliationCase(ctx context.Context, tx pgx.Tx, run ReconciliationRun, difference ReconciliationDifference, observedVersions map[string]int64) error {
+	if err := lockTransactionKey(ctx, tx, "reconciliation-repair-source", run.Channel+":"+run.BusinessDate+":"+difference.MerchantOrderNo); err != nil {
+		return err
+	}
 	providerJSON := json.RawMessage(`{}`)
 	if difference.Provider != nil {
 		providerJSON, _ = json.Marshal(difference.Provider)
@@ -447,8 +450,8 @@ func (p *PaymentCoordinator) persistReadOnlyBillEvidence(ctx context.Context, ru
  WHERE row.reconciliation_run_id=$1 AND row.row_number BETWEEN $2 AND $3 AND progress.processed_at IS NULL
  AND (row.entry_type<>'PAYMENT' OR upper(trim(row.status)) NOT IN ('SUCCESS','PAID','COMPLETED') OR payment.id IS NULL OR payment.provider_id<>$4 OR payment.provider_version<>$5 OR payment.fulfillment_status='CREDITED')
  ), evidence AS (
- INSERT INTO payment_evidence(id,payment_order_id,payment_transaction_id,evidence_type,provider_id,provider_version,evidence_key,merchant_order_no,provider_transaction_id,amount_fen,currency,provider_status,provider_event_at,received_at,payload_digest,payload_snapshot,merge_result)
- SELECT gen_random_uuid(),matched_order_id,matched_transaction_id,'BILL',$4,$5,pipeline_evidence_key,merchant_order_no,NULLIF(channel_transaction_id,''),amount_fen,currency,status,paid_at,$6,pipeline_payload_digest,raw_snapshot,
+ INSERT INTO payment_evidence(id,payment_order_id,payment_transaction_id,evidence_type,provider_id,provider_version,evidence_key,merchant_order_no,provider_transaction_id,provider_refund_id,amount_fen,currency,provider_status,provider_event_at,received_at,payload_digest,payload_snapshot,merge_result)
+ SELECT gen_random_uuid(),matched_order_id,matched_transaction_id,'BILL',$4,$5,pipeline_evidence_key,merchant_order_no,NULLIF(channel_transaction_id,''),CASE WHEN entry_type='REFUND' THEN NULLIF(provider_reference_id,'') END,amount_fen,currency,status,paid_at,$6,pipeline_payload_digest,raw_snapshot,
  CASE WHEN entry_type='PAYMENT' AND matched_transaction_id IS NOT NULL THEN 'DUPLICATE' ELSE 'REVIEW_REQUIRED' END FROM eligible
  ON CONFLICT(provider_id,provider_version,evidence_type,evidence_key,payload_digest) DO NOTHING RETURNING id
  )

@@ -29,6 +29,7 @@ type billingApprovalPrecheckRepository interface {
 // send. The decoder rejects unknown fields, so a caller cannot smuggle extra
 // facts into the owner read.
 type billingApprovalPrecheckRequest struct {
+	BusinessDate           string `json:"business_date,omitempty"`
 	AnomalyCaseID          string `json:"anomaly_case_id,omitempty"`
 	PaymentEvidenceID      string `json:"payment_evidence_id,omitempty"`
 	CommandType            string `json:"command_type"`
@@ -78,6 +79,9 @@ func validPrecheckUUID(value string) (uuid.UUID, bool) {
 // branch uses the same ProofInput the proof authority uses, so the two can never
 // disagree about the frozen facts.
 func precheckBillingApprovalCommand(ctx context.Context, repository billingApprovalPrecheckRepository, request billingApprovalPrecheckRequest) (approvalencoding.LegacyProofInput, error) {
+	if request.CommandType != reconciliationFinancialRepairCommand && request.BusinessDate != "" {
+		return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+	}
 	switch request.CommandType {
 	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 		packageID, packageOK := validPrecheckUUID(request.TargetResourceID)
@@ -158,6 +162,21 @@ func precheckBillingApprovalCommand(ctx context.Context, repository billingAppro
 		}
 		return owner.ChargebackFinancialRepairProofInput(ctx, ChargebackFinancialRepairCommandInput{
 			ChargebackCaseID: caseID, PaymentEvidenceID: evidenceID,
+		})
+	case reconciliationFinancialRepairCommand:
+		caseID, caseOK := validPrecheckUUID(request.TargetResourceID)
+		evidenceID, evidenceOK := validPrecheckUUID(request.PaymentEvidenceID)
+		if !caseOK || !evidenceOK || request.BusinessDate == "" || request.BusinessDate != strings.TrimSpace(request.BusinessDate) || request.ReasonCode != reconciliationRepairResolutionCode || request.AnomalyCaseID != "" || request.PaymentOrderID != "" || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		owner, ok := repository.(interface {
+			ReconciliationFinancialRepairProofInput(context.Context, ReconciliationFinancialRepairCommandInput) (approvalencoding.LegacyProofInput, error)
+		})
+		if !ok {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		return owner.ReconciliationFinancialRepairProofInput(ctx, ReconciliationFinancialRepairCommandInput{
+			ReconciliationCaseID: caseID, PaymentEvidenceID: evidenceID, BusinessDate: request.BusinessDate,
 		})
 	}
 	return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable

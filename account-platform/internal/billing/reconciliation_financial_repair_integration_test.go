@@ -62,23 +62,33 @@ func seedProviderPaidInternalMissing(t *testing.T, ctx context.Context, reposito
 provider_id,provider_version,source_mode)
 VALUES($1,'ALIPAY',$2::date,'COMPLETED',1,1,$3,$3,'test-provider','v1','MANUAL_API')`,
 			[]any{fixture.RunID, fixture.BusinessDate, now}},
+		{`INSERT INTO manual_review_cases(id,domain,case_type,resource_type,resource_id,severity,status,created_at,claim_due_at,first_response_due_at,mitigation_due_at,resolution_due_at,updated_at) VALUES($1,'BILLING','RECONCILIATION_DIFFERENCE','RECONCILIATION_CASE',$1,'P1','OPEN',$2,$2::timestamptz+interval '1 hour',$2::timestamptz+interval '2 hours',$2::timestamptz+interval '3 hours',$2::timestamptz+interval '4 hours',$2)`, []any{fixture.CaseID, now}},
 		{`INSERT INTO reconciliation_cases(id,reconciliation_run_id,payment_order_id,merchant_order_no,case_type,status,
-severity,provider_snapshot,internal_snapshot,refund_snapshot,ledger_snapshot,created_at,updated_at)
-VALUES($1,$2,NULL,$3,'PROVIDER_PAID_INTERNAL_MISSING','OPEN','P1',$4,NULL,NULL,NULL,$5,$5)`,
+severity,provider_snapshot,internal_snapshot,refund_snapshot,ledger_snapshot,manual_review_case_id,created_at,updated_at)
+VALUES($1,$2,NULL,$3,'PROVIDER_PAID_INTERNAL_MISSING','OPEN','P1',$4,NULL,NULL,NULL,$1,$5,$5)`,
 			[]any{fixture.CaseID, fixture.RunID, fixture.MerchantOrderNo, snapshot, now}},
-		{`INSERT INTO payment_evidence(id,payment_order_id,payment_transaction_id,evidence_type,provider_id,provider_version,
-evidence_key,merchant_order_no,provider_transaction_id,provider_refund_id,amount_fen,currency,provider_status,
-provider_event_at,received_at,payload_digest,payload_snapshot,merge_result)
-VALUES($1,NULL,NULL,'BILL','test-provider','v1',$2,$3,$4,$5,$6,'CNY','REFUND_SUCCESS',$7,$7,$8,'{}','REVIEW_REQUIRED')`,
-			[]any{fixture.EvidenceID, "bill|REFUND|" + fixture.MerchantOrderNo + "|" + now.Format(time.RFC3339Nano),
-				fixture.MerchantOrderNo, fixture.ChannelTransactionID, fixture.ProviderRefundID,
-				fixture.AmountFen, now, strings.Repeat("ab", 32)}},
 	} {
 		if _, err := tx.Exec(ctx, statement.sql, statement.args...); err != nil {
 			t.Fatalf("reconciliation repair statement %d: %v", index, err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	refundBill := ProviderBillEntry{EntryType: "REFUND", ProviderReferenceID: fixture.ProviderRefundID, MerchantOrderNo: fixture.MerchantOrderNo, ChannelTransactionID: fixture.ChannelTransactionID, Channel: "ALIPAY", AmountFen: fixture.AmountFen, Currency: fixture.Currency, Status: "SUCCESS", PaidAt: now}
+	raw, _ := json.Marshal(refundBill)
+	key := "REFUND|" + fixture.ProviderRefundID + "|" + fixture.MerchantOrderNo + "|" + now.Format(time.RFC3339Nano)
+	if _, err := pool.Exec(ctx, `INSERT INTO reconciliation_provider_rows(reconciliation_run_id,row_number,entry_type,provider_reference_id,channel_transaction_id,merchant_order_no,channel,amount_fen,currency,status,paid_at,raw_snapshot,created_at,pipeline_evidence_key,pipeline_payload_digest) VALUES($1,1,'REFUND',$2,$3,$4,'ALIPAY',$5,'CNY','SUCCESS',$6,$7,$6,$8,$9)`, fixture.RunID, fixture.ProviderRefundID, fixture.ChannelTransactionID, fixture.MerchantOrderNo, fixture.AmountFen, now, raw, key, digestHex(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO reconciliation_row_progress(run_id,row_number) VALUES($1,1)`, fixture.RunID); err != nil {
+		t.Fatal(err)
+	}
+	p := &PaymentCoordinator{repository: repository, now: time.Now}
+	if err := p.persistReadOnlyBillEvidence(ctx, ReconciliationRun{ID: fixture.RunID, ProviderID: "test-provider", ProviderVersion: "v1", ProviderRowCount: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT id FROM payment_evidence WHERE provider_id='test-provider' AND provider_version='v1' AND evidence_type='BILL' AND evidence_key=$1`, key).Scan(&fixture.EvidenceID); err != nil {
 		t.Fatal(err)
 	}
 	return fixture
@@ -96,7 +106,8 @@ func TestReconciliationFinancialRepairPostgresIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	t.Cleanup(cancel)
-	repository, _ := newAdminPaginationIntegrationRepository(t, ctx, databaseURL)
+	repository, ctx := retainedFinanceRepository(t)
+	version := reconciliationFixtureActivation(t, ctx, repository.pool)("ACTIVE")
 	pool := repository.pool
 
 	// The frozen zero-accounting baseline: any change of these counters during the
@@ -111,7 +122,7 @@ func TestReconciliationFinancialRepairPostgresIntegration(t *testing.T) {
 	fixture := seedProviderPaidInternalMissing(t, ctx, repository, "main")
 	command := ReconciliationFinancialRepairCommandInput{ReconciliationCaseID: fixture.CaseID,
 		PaymentEvidenceID: fixture.EvidenceID, BusinessDate: fixture.BusinessDate}
-	plan, err := reconciliationFinancialRepairPlanFrom(ctx, pool, command, 1, 1, 1)
+	plan, err := reconciliationFinancialRepairPlanFrom(ctx, pool, command, 1, 1, version)
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -123,13 +134,13 @@ func TestReconciliationFinancialRepairPostgresIntegration(t *testing.T) {
 	execute := func(requestID, eventID uuid.UUID, command ReconciliationFinancialRepairCommandInput, frozen ReconciliationFinancialRepairFrozenFacts) (ReconciliationFinancialRepairResult, error) {
 		return repository.ApplyReconciliationFinancialRepair(ctx, ReconciliationFinancialRepairExecutionInput{
 			ApprovalRequestID: requestID, AuthorizationEventID: eventID, ApprovalEpoch: 4,
-			ExecutionKey: "reconciliation-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+			ExecutionKey: "reconciliation-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: version,
 			Command: command, Frozen: frozen,
 		})
 	}
 	frozen := ReconciliationFinancialRepairFrozenFacts{RunID: plan.RunID, AmountFen: plan.AmountFen,
 		Currency: plan.Currency, ProviderTransactionID: plan.ProviderTransactionID,
-		ProviderSnapshotDigest: plan.ProviderSnapshotDigest}
+		ProviderSnapshotDigest: plan.ProviderSnapshotDigest, FactsDigest: plan.FactsDigest}
 	requestID, eventID := uuid.New(), uuid.New()
 	applied, err := execute(requestID, eventID, command, frozen)
 	if err != nil {
@@ -181,7 +192,7 @@ func TestReconciliationFinancialRepairPostgresIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO payment_evidence(id,payment_order_id,payment_transaction_id,evidence_type,provider_id,provider_version,
 evidence_key,merchant_order_no,provider_transaction_id,provider_refund_id,amount_fen,currency,provider_status,
 provider_event_at,received_at,payload_digest,payload_snapshot,merge_result)
-VALUES($1,NULL,NULL,'BILL','test-provider','v1',$2,$3,$4,$5,$6,'CNY','REFUND_SUCCESS',now(),now(),$7,'{}','REVIEW_REQUIRED')`,
+VALUES($1,NULL,NULL,'BILL','test-provider','v1',$2,$3,$4,$5,$6,'CNY','SUCCESS',now(),now(),$7,'{}','REVIEW_REQUIRED')`,
 		mismatchedEvidenceID, "bill|REFUND|mismatch|"+uuid.NewString(), mismatched.MerchantOrderNo,
 		mismatched.ChannelTransactionID, "refund-"+uuid.NewString(), mismatched.AmountFen+1, strings.Repeat("cd", 32)); err != nil {
 		t.Fatalf("mismatched evidence seed: %v", err)

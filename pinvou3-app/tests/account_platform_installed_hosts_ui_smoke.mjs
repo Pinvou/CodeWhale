@@ -18,6 +18,7 @@ try{
   await page.evaluate(()=>[...document.querySelectorAll('main > nav button')].find(b=>b.textContent===window.installed.adminPlatformCopy[window.installed.language].nav.approvals).click());
   await page.waitForFunction(()=>document.querySelector('table')?.textContent.includes('ENTITLEMENT_COMPONENT_ADJUSTMENT'));
   assert.equal(await page.evaluate(()=>document.querySelector('table').textContent.includes('RECEIVABLE_WRITE_OFF')),false);
+  assert.equal(await page.evaluate(()=>document.querySelector('table').textContent.includes('USAGE_SETTLEMENT_REPAIR')),false);
  });
  await run('ENT real form submits and center EDIT obtains fresh original-intent proof','mode=ent',async page=>{
   const clickText=async(expression)=>page.evaluate(expression);

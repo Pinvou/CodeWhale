@@ -11,8 +11,8 @@ const projection = { command_type: command, policy_version: 1, snapshot_schema_v
  financial_snapshot: { base_shortfall_microcredits: '9007199254740993', wallet_id: '33333333-3333-4333-8333-333333333333', wallet_version: '9223372036854775807', package_id: '44444444-4444-4444-8444-444444444444', component_digest: 'b'.repeat(64), provider_chargeback_id: 'controlled-provider-chargeback' } };
 
 test('F14 financial descriptor set exposes only delivered operations', () => {
- assert.deepEqual(Object.keys(financialRepairCommands).sort(), ["LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "PAYMENT_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR"].sort());
- assert.deepEqual(Object.keys(financialRepairInputs).sort(), ["LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "PAYMENT_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR"].sort());
+ assert.deepEqual(Object.keys(financialRepairCommands).sort(), ["LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "PAYMENT_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR"].sort());
+ assert.deepEqual(Object.keys(financialRepairInputs).sort(), ["LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "PAYMENT_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR"].sort());
  assert.equal(financialRepairPrecheck({ ...projection, command_type: 'UNKNOWN_REPAIR' }), null);
 });
 
@@ -64,7 +64,7 @@ test('F14 fresh EDIT retains original two UUIDs and refuses changed frozen CAS',
  for(const change of [{payment_evidence_id:'bad'},{expected_case_version:'0'},{reason_code:'OTHER'}])await assert.rejects(currentApprovalEditDraft({approvalCommandPrecheck:()=>assert.fail('invalid original intent reached authority')},{...detail(),command:{...normalized,...change}},'Controlled original chargeback reason'));
 });
 test('F14 directory/filter/drilldown and three-language targets expose only installed Chargeback', () => {
- assert.ok(approvalCommands.includes(command));assert.equal(approvalCommands.includes('RECONCILIATION_FINANCIAL_REPAIR'),false);assert.equal(readApprovalRoute('?approval_command_type='+command).commandType,command);
+ assert.ok(approvalCommands.includes(command));assert.equal(approvalCommands.includes('USAGE_SETTLEMENT_REPAIR'),false);assert.equal(readApprovalRoute('?approval_command_type='+command).commandType,command);
  const d={...detail(),detail_availability:'AVAILABLE'};assert.deepEqual(approvalBusinessRoute(d),{section:'finance',tab:'chargebackrepair'});for(const patch of [{target:{resource_type:'REFUND',resource_id:target}},{command:{chargeback_case_id:normalized.payment_evidence_id}},{detail_availability:'DETAIL_PRESENTATION_UNAVAILABLE'},{command_type:'RECONCILIATION_FINANCIAL_REPAIR'}])assert.equal(approvalBusinessRoute({...d,...patch}),null);
  for(const lang of ['zh','en','ja']){assert.ok(ledgerRepairCopy[lang].chargebackRepairTitle);assert.ok(ledgerRepairCopy[lang].targets[command]);for(const key of ['chargeback_case_id','payment_evidence_id','expected_case_version','chargeback_case_version','base_shortfall_microcredits','component_digest','provider_chargeback_id'])assert.ok(ledgerRepairCopy[lang].fields[key]);}
  for(const key of ['a'.repeat(111),'中'.repeat(37)])assert.equal(financialRepairApprovalDraft(projection,'Controlled Chargeback reason',key).idempotency_key,'approval:'+key);for(const key of ['a'.repeat(112),'中'.repeat(38)])assert.throws(()=>financialRepairApprovalDraft(projection,'Controlled Chargeback reason',key));

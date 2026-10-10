@@ -85,6 +85,21 @@ export async function currentApprovalEditDraft(client, detail, reason) {
       projection.reasonCode !== command.reason_code) throw unavailable();
     return entitlementCorrectionApprovalDraft(facts, command.reason_code, reason, `edit:${detail.approval_request_id}`);
   }
+  if (detail.command_type === 'RECONCILIATION_FINANCIAL_REPAIR') {
+    const target = detail.target || { resource_type: detail.target_resource_type, resource_id: detail.target_resource_id };
+    if (!command || target.resource_type !== 'RECONCILIATION_CASE' || !approvalIDPattern.test(target.resource_id) ||
+      command.reconciliation_case_id !== target.resource_id || !approvalIDPattern.test(command.payment_evidence_id) ||
+      typeof command.business_date !== 'string' || command.resolution_code !== 'PROVIDER_REFUND_CONFIRMED') throw unavailable();
+    const facts = await client.approvalCommandPrecheck({ command_type: detail.command_type,
+      target_resource_id: command.reconciliation_case_id, payment_evidence_id: command.payment_evidence_id,
+      business_date: command.business_date, reason_code: command.resolution_code });
+    const draft = financialRepairApprovalDraft(facts, reason, `edit:${detail.approval_request_id}`);
+    if (draft.command_type !== detail.command_type || draft.target_resource_id !== target.resource_id ||
+      draft.normalized_command.reconciliation_case_id !== command.reconciliation_case_id ||
+      draft.normalized_command.payment_evidence_id !== command.payment_evidence_id ||
+      draft.normalized_command.business_date !== command.business_date) throw unavailable();
+    return draft;
+  }
   if (detail.command_type === 'CHARGEBACK_FINANCIAL_REPAIR') {
     const target = detail.target || { resource_type: detail.target_resource_type, resource_id: detail.target_resource_id };
     if (!command || target.resource_type !== 'CHARGEBACK_CASE' || !approvalIDPattern.test(target.resource_id) ||

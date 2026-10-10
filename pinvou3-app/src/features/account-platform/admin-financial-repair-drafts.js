@@ -54,6 +54,11 @@ export const financialRepairCommands = Object.freeze({
     ],
   },
 
+  RECONCILIATION_FINANCIAL_REPAIR: {
+    targetResourceType: 'RECONCILIATION_CASE', reasonKey: 'resolution_code',
+    reasonCode: 'PROVIDER_REFUND_CONFIRMED', targetKey: 'reconciliation_case_id',
+    fields: [{ key: 'reconciliation_case_id', kind: 'uuid' }, { key: 'payment_evidence_id', kind: 'uuid' }, { key: 'business_date', kind: 'date' }],
+  },
 });
 
 function closedObject(value) {
@@ -78,7 +83,13 @@ function validField(value, field) {
     return false;
   }
   if (field.kind === 'uuid') return uuidPattern.test(text);
-  if (field.kind === 'date') return datePattern.test(text);
+  if (field.kind === 'date') {
+    if (!datePattern.test(text)) return false;
+    const [year, month, day] = text.split('-').map(Number);
+    const date = new Date(0);
+    date.setUTCFullYear(year, month - 1, day);
+    return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+  }
   return field.kind === 'enum' && field.allowed.includes(text);
 }
 
@@ -104,6 +115,19 @@ export function financialRepairPrecheck(value) {
     if (!validField(normalized[field.key], field)) {
       return null;
     }
+  }
+  if (value.command_type === 'RECONCILIATION_FINANCIAL_REPAIR') {
+    const exactKeys = (object, keys) => Object.keys(object).length === keys.length && keys.every(key => Object.prototype.hasOwnProperty.call(object, key));
+    const canonicalText = text => typeof text === 'string' && text.length > 0 && text.trim() === text;
+    try {
+      if (normalized.resolution_code !== command.reasonCode || critical.policy_version !== 1 ||
+        !exactKeys(critical, ['run_id', 'case_id', 'provider_snapshot_digest', 'facts_digest', 'policy_version']) ||
+        !exactKeys(financial, ['amount_fen', 'currency', 'provider_transaction_id', 'ledger_effect']) ||
+        !uuidPattern.test(critical.run_id || '') || critical.case_id !== targetResourceID ||
+        !/^[0-9a-f]{64}$/.test(critical.provider_snapshot_digest || '') || !/^[0-9a-f]{64}$/.test(critical.facts_digest || '') ||
+        integerMoney(financial.amount_fen) <= 0n || !canonicalText(financial.currency) ||
+        !canonicalText(financial.provider_transaction_id) || financial.ledger_effect !== 'NONE') return null;
+    } catch { return null; }
   }
   if (value.command_type === 'CHARGEBACK_FINANCIAL_REPAIR') {
     try {

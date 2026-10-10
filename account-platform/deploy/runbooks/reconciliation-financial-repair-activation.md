@@ -1,6 +1,16 @@
-# 当前实现说明
+# 当前实现与本轮修复
 
-本波已安装 RECONCILIATION_FINANCIAL_REPAIR v1/s1 的完整私有功能组合，激活默认 INACTIVE；审批、签发、消费与执行仍遵守既有五道激活及身份门禁。下文原设计冻结阶段记录是历史依据，不代表当前实现或整链验收。实际迁移为 Billing 000072/000073 与 Account 000076；原 owner 有限 PG 证据按既有范围继承，部署与完整 E2E 未执行。
+本轮追加 Billing `900020_reconciliation_activation_execution_lock`，固定锁定本命令 v1/s1 激活行。新结案在同一事务内取得 owner 提供的 `FOR SHARE` 锁并核对冻结激活版本；operator 停用须等待已取得该锁的事务结束。原不可变回执优先只读重放，不因后续停用失效。运行身份只获私有 schema USAGE 和无参数函数 EXECUTE，不获 activation UPDATE、schema CREATE 或 owner 身份；新迁移明确拒绝 Down。运维停止通过 activation `INACTIVE`，不删除既有案件、回执或账务事实。
+
+`reconciliation_repair_cases` 收尾保留 SELECT/INSERT 并撤销 UPDATE/DELETE（#1720）；原 `000072` 不可变触发器和已发布 Up 字节保持。执行键使用明确的通用 legacy 兼容 helper，保留历史 `LEDGER_REPAIR` JSON wire 与摘要；命令、案件和审批上下文隔离依靠实际绑定校验，不宣称摘要算法增强隔离（#1678）。
+
+跨域装配改用官方 owned UUID Account/Billing 安装夹具（#1721），保持原角色、安装与清理保护。受控 HTTP proof/relay/registered consumer 验证采用种子后完整财务行 JSONB 对照，覆盖三类付款表并保留案件、手审、版本和同 event 回放判据。原 actor 前置失败及钱包/包基线假设失败均保留；这些装配验证不等同部署真实 issuer/NATS 全链验收，#1683 仍待后续证据。前序 F14 readiness 首次失败原因仍未知，#1719 不因本轮通过而关闭。
+
+本波安装 `RECONCILIATION_FINANCIAL_REPAIR` v1/s1：独立三语申请表、原意编辑与新鲜预检、Account closed policy/encoding/presenter/recovery、Portal BFF、Billing 权威 proof/claim/执行、专属 consumer 与精确 NATS ACL。只处理 `PROVIDER_PAID_INTERNAL_MISSING` 的零账务效果结案；不推断内部订单、用户或钱包归属。激活默认 `INACTIVE`，消费者资源与实时 activation 门禁继续生效。
+
+本轮修复在结案事务内推进关联手审单及案件 `version`，按渠道/业务日期跨 run 复核同商户单号的未结差异，校验退款 BILL 与 run 的 provider 身份及持久 payload。既有两条 BILL 导入路径仅在真实 REFUND 条目上保存其退款参考号，不改变支付/拒付参考语义。原 Billing `000072/000073`、Account `000076` 及历史迁移身份不改。
+
+验证由本轮 PR 正文及固定提交证据记录说明；有限 owner PG、受控 React 与默认套件分别披露。完整 Account/outbox/relay/真实 issuer/资源/OS E2E、部署和生产激活未执行。下文“历史设计阶段”保留原阶段记录，当前行为以本节及修正后的事实描述为准。
 
 # 对账财务修复（`RECONCILIATION_FINANCIAL_REPAIR`）受控激活手册
 
@@ -27,7 +37,7 @@ SELECT (SELECT count(*) FROM reconciliation_repair_cases WHERE approval_request_
        (SELECT count(*) FROM billing_approval_proof_claims) AS proof_claims;
 
 -- Billing：存量清单——“Provider 已收款、内部无归属”且已有 Provider 侧退款/冲正证据的差异
--- （in_scope=true 的差异才在首版范围内；复核门禁要求同一商户单号在冻结 run 内不再有其它 OPEN 差异。）
+-- （in_scope=true 的差异才在首版范围内；复核门禁要求同一商户单号在同渠道/业务日期的全部 run 不再有其它 OPEN/IN_REVIEW 差异。）
 SELECT reconciliation_case.id,
        reconciliation_case.reconciliation_run_id,
        reconciliation_run.channel,
@@ -40,14 +50,21 @@ SELECT reconciliation_case.id,
        (SELECT count(*) FROM payment_transactions payment_transaction
          WHERE payment_transaction.provider_transaction_id = reconciliation_case.provider_snapshot->>'channel_transaction_id') AS internal_transactions,
        (SELECT count(*) FROM reconciliation_cases other
-         WHERE other.reconciliation_run_id = reconciliation_case.reconciliation_run_id
+         JOIN reconciliation_runs other_run ON other_run.id = other.reconciliation_run_id
+         WHERE other_run.channel = reconciliation_run.channel
+           AND other_run.business_date = reconciliation_run.business_date
            AND other.merchant_order_no = reconciliation_case.merchant_order_no
            AND other.case_type = 'PROVIDER_PAID_INTERNAL_MISSING'
-           AND other.status = 'OPEN' AND other.id <> reconciliation_case.id) AS recheck_open_cases,
+           AND other.status IN ('OPEN','IN_REVIEW') AND other.id <> reconciliation_case.id) AS recheck_open_cases,
        EXISTS(SELECT 1 FROM payment_evidence evidence
-              WHERE evidence.merchant_order_no = reconciliation_case.merchant_order_no
+              WHERE evidence.evidence_type = 'BILL'
+                AND evidence.provider_id = reconciliation_run.provider_id
+                AND evidence.provider_version = reconciliation_run.provider_version
+                AND evidence.merchant_order_no = reconciliation_case.merchant_order_no
                 AND evidence.provider_transaction_id = reconciliation_case.provider_snapshot->>'channel_transaction_id'
-                AND evidence.provider_refund_id IS NOT NULL
+                AND NULLIF(trim(evidence.provider_refund_id),'') IS NOT NULL
+                AND upper(trim(evidence.provider_status)) IN ('SUCCESS','SUCCEEDED','REFUNDED','COMPLETED')
+                AND upper(trim(evidence.payload_snapshot->>'entry_type')) = 'REFUND'
                 AND evidence.amount_fen = (reconciliation_case.provider_snapshot->>'amount_fen')::bigint
                 AND evidence.currency = reconciliation_case.provider_snapshot->>'currency') AS disposal_evidence
 FROM reconciliation_cases reconciliation_case
@@ -59,6 +76,8 @@ WHERE reconciliation_case.case_type = 'PROVIDER_PAID_INTERNAL_MISSING'
   AND NOT EXISTS(SELECT 1 FROM reconciliation_repair_cases repair
                  WHERE repair.reconciliation_case_id = reconciliation_case.id);
 ```
+
+上述 SQL 只作候选清单，不是权威 proof：最终还须由 owner 校验持久 REFUND payload 与列身份、状态、渠道、退款参考及金额逐项一致，绑定完整 frozen facts，不能用该清单代替 proof。
 
 判据：只有 `internal_orders = 0`、`internal_transactions = 0`、`recheck_open_cases = 0` 且 `disposal_evidence` 为真时，该差异才是首版范围（`in_scope`）。`recheck_open_cases > 0` 说明同一商户单号仍有未处置差异，必须先按既有对账流程收敛；不得用本命令掩盖差异。
 
@@ -84,7 +103,7 @@ WHERE command_type = 'RECONCILIATION_FINANCIAL_REPAIR'
 3. Proof：以真实 Account 身份调用 Billing proof endpoint，对一件 `in_scope=true` 的差异返回 `PROOF_VALID`/`ALLOW` 且投影含 `ledger_effect=NONE`；对仍有内部归属、缺处置证据、run 非 `COMPLETED`、案件已结案或复核仍有 OPEN 差异的候选返回对应 DENY。
 4. 消费者：durable `billing-reconciliation-financial-repair-executor-p1-v1` 处于消费状态，DLQ/重试计数为 0。
 5. 受控演练：以一条一次性审批完成端到端执行，核对：
-   - `reconciliation_cases` 由 `OPEN` 推进为 `RESOLVED`、`resolution='PROVIDER_REFUND_CONFIRMED'`、`resolved_at` 非空，其它字段逐字段不变；
+   - `reconciliation_cases` 由 `OPEN` 推进为 `RESOLVED`、`resolution='PROVIDER_REFUND_CONFIRMED'`、`resolved_at` 非空，`updated_at`、`version` 正常推进，其余来源字段逐字段不变；关联手审单同事务 `RESOLVED` 并追加结案事件；
    - 写入一条不可改写的 `reconciliation_repair_cases` 行（含审批联动列与 `recheck_case_count=0`）；
    - **零账务效果**：`journal_entries`/`ledger_postings`/`receivables`/`wallets`/`entitlement_packages`/`entitlement_components`/`credit_lots`/`payment_orders`/`payment_transactions`/`payment_evidence` 逐行一致（演练前后计数与钱包 `version` 均不变）；
    - result-first 幂等重放不产生第二条 case；

@@ -63,7 +63,7 @@ try {
   });
   await run('PaymentRepair directory/filter/typed EDIT/current proof/drilldown preserves original order and evidence', 'existing=1', async page => {
     await center(page, 'directory'); await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes('PAYMENT_FINANCIAL_REPAIR'));
-    assert.equal(await page.evaluate(() => document.querySelector('tbody').textContent.includes('RECONCILIATION_FINANCIAL_REPAIR')), false);
+    assert.equal(await page.evaluate(() => document.querySelector('tbody').textContent.includes('USAGE_SETTLEMENT_REPAIR')), false);
     await page.evaluate(() => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f12.adminPlatformCopy.zh.approvalCenter.mine).click());
     await page.waitForSelector('.adm-approval-toolbar select'); await page.select('.adm-approval-toolbar select', 'PAYMENT_FINANCIAL_REPAIR');
     await page.type('.adm-approval-toolbar input', await page.evaluate(() => window.f12.id(1))); await page.click('.adm-approval-toolbar button');

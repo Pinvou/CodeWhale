@@ -39,8 +39,9 @@ func TestReconciliationFinancialRepairCrossDomainActivationPostgresIntegration(t
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	t.Cleanup(cancel)
 
-	repository, accountConnection, relay, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, accountURL, 0)
+	repository, accountConnection, relay, _ := newEntitlementApprovalFixture(t, ctx, accountURL)
 	billingRepository, billingPool, billingConnection, difference := newReconciliationRepairCrossDomainBillingFixture(t, ctx, billingURL)
+	financialBaseline := reconciliationCrossDomainFinancialSnapshot(t, ctx, billingPool)
 	proofToken, executorToken := configureEntitlementProofIdentity(t)
 	billingServer := httptest.NewServer(billingdomain.NewService(billingRepository).Handler("account-proof-test"))
 	t.Cleanup(billingServer.Close)
@@ -109,7 +110,7 @@ func TestReconciliationFinancialRepairCrossDomainActivationPostgresIntegration(t
 		!approvalPaginationHexDigest(presentedCommand.FactsDigest) {
 		t.Fatalf("cross-domain presenter command=%#v", detail.Command)
 	}
-	proofSource, err := NewHTTPApprovalProofSource("http://127.0.0.1", billingServer.URL, proofToken)
+	proofSource, err := NewHTTPApprovalProofSource(billingServer.URL, proofToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,8 +121,8 @@ func TestReconciliationFinancialRepairCrossDomainActivationPostgresIntegration(t
 	if err := repository.requireApprovalAdvancement(ctx, policy); !errors.Is(err, ErrBillingGovernanceInactive) {
 		t.Fatalf("inactive cross-domain advancement: %v", err)
 	}
-	requester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "reconciliation-repair-activation-requester")
-	approver := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "reconciliation-repair-activation-approver")
+	requester := seedPaymentApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "reconciliation-repair-activation-requester")
+	approver := seedPaymentApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "reconciliation-repair-activation-approver")
 	requesterPrincipal, approverPrincipal := approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
 	createDraft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "reconciliation-repair-activation-create",
@@ -134,7 +135,7 @@ func TestReconciliationFinancialRepairCrossDomainActivationPostgresIntegration(t
 		t.Fatal("inactive cross-domain create unexpectedly succeeded")
 	}
 	assertApprovalRequestAbsent(t, ctx, repository, requester.ID, createDraft.IdempotencyKey)
-	submitID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT")
+	submitID := seedReconciliationAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.SubmitApprovalRequest(ctx, requesterPrincipal, submitID, 1)
 		return err
@@ -142,7 +143,7 @@ func TestReconciliationFinancialRepairCrossDomainActivationPostgresIntegration(t
 		t.Fatalf("inactive cross-domain submit: %v", err)
 	}
 	assertApprovalRequestState(t, ctx, repository, submitID, "DRAFT", 1)
-	approveID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED")
+	approveID := seedReconciliationAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.DecideApprovalRequest(ctx, approverPrincipal, approveID, 1, "APPROVED", "closed cross-domain gate", frozen.CriticalResourceVersions)
 		return err
@@ -189,9 +190,12 @@ WHERE command_type='RECONCILIATION_FINANCIAL_REPAIR' AND policy_version=1 AND sn
 		t.Fatalf("activated cross-domain proof=%+v err=%v", proof.Response, err)
 	}
 
-	transitionEntitlementCrossDomainAccountControl(t, ctx, accountConnection)
-	requester = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "reconciliation-repair-chain-requester")
-	approver = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "reconciliation-repair-chain-approver")
+	control, controlErr := repository.ApprovalActionControl(ctx)
+	if controlErr != nil || control.Mode != "PROOF_REQUIRED" {
+		t.Fatal("official Account fixture must already be PROOF_REQUIRED")
+	}
+	requester = seedPaymentApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "reconciliation-repair-chain-requester")
+	approver = seedPaymentApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "reconciliation-repair-chain-approver")
 	requesterPrincipal, approverPrincipal = approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
 	draft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "reconciliation-repair-cross-domain-chain",
@@ -254,7 +258,8 @@ WHERE o.aggregate_id=$1 AND o.event_type='account.approval-command.authorized.v1
 	if err != nil || route.CanonicalDurable != descriptor.Durable {
 		t.Fatalf("authorization route=%+v err=%v", route, err)
 	}
-	if _, err := gate.ResolveAuthorizationBinding(ctx, eventID, descriptor.Durable); err != nil {
+	binding, err := gate.ResolveAuthorizationBinding(ctx, eventID, descriptor.Durable)
+	if err != nil {
 		t.Fatalf("authorization binding err=%v", err)
 	}
 	decoded, err := approvalencoding.DecodeAuthorizationEvent(raw, approvalencoding.ExpectedAuthorizationBinding{
@@ -321,8 +326,8 @@ WHERE repair.approval_request_id=$1`, requestID).Scan(&caseStatus, &resolution, 
 		caseStatus != "RESOLVED" || resolution != "PROVIDER_REFUND_CONFIRMED" || resolvedAt == nil || recheck != 0 {
 		t.Fatalf("case=%s/%s/%v recheck=%d err=%v", caseStatus, resolution, resolvedAt, recheck, err)
 	}
-	// Zero accounting effect: no journal, posting, receivable, wallet, package or
-	// lot fact exists for this closure at all.
+	// Closure-specific journal/posting/receivable counts stay zero; all complete
+	// financial rows, including legitimate fixture wallets/packages, stay identical.
 	var journals, postings, receivables, wallets, packages int64
 	if err := billingPool.QueryRow(ctx, `SELECT (SELECT count(*) FROM journal_entries WHERE business_reference LIKE 'reconciliation-repair:%'),
 		(SELECT count(*) FROM ledger_postings posting JOIN journal_entries journal ON journal.id=posting.journal_entry_id
@@ -330,7 +335,7 @@ WHERE repair.approval_request_id=$1`, requestID).Scan(&caseStatus, &resolution, 
 		(SELECT count(*) FROM receivables WHERE source_reference LIKE 'reconciliation-repair:%'),
 		(SELECT count(*) FROM wallets), (SELECT count(*) FROM entitlement_packages)`).
 		Scan(&journals, &postings, &receivables, &wallets, &packages); err != nil ||
-		journals != 0 || postings != 0 || receivables != 0 || wallets != 0 || packages != 0 {
+		journals != 0 || postings != 0 || receivables != 0 || reconciliationCrossDomainFinancialSnapshot(t, ctx, billingPool) != financialBaseline {
 		t.Fatalf("closure wrote accounting facts: journals=%d postings=%d receivables=%d wallets=%d packages=%d err=%v",
 			journals, postings, receivables, wallets, packages, err)
 	}
@@ -361,6 +366,20 @@ JOIN account_approval_authorization.approval_delivery_states d ON d.approval_req
 UPDATE billing_approval_command_activations SET state='INACTIVE',version=version+1
 WHERE command_type='RECONCILIATION_FINANCIAL_REPAIR' AND policy_version=1 AND snapshot_schema_version=1 AND state='ACTIVE'`); err != nil {
 		t.Fatal(err)
+	}
+	wrongCommandBinding := binding
+	wrongCommandBinding.CommandType = "LEDGER_REPAIR"
+	if err := billingRepository.ClaimBillingApprovalProof(ctx, wrongCommandBinding, decoded.Payload); !errors.Is(err, billingdomain.ErrApprovalSnapshotMismatch) {
+		t.Fatal("foreign command claim must reject frozen authorization")
+	}
+	wrongTargetEvent := decoded.Payload
+	wrongTargetEvent.TargetResourceID = uuid.NewString()
+	if err := billingRepository.ClaimBillingApprovalProof(ctx, binding, wrongTargetEvent); !errors.Is(err, billingdomain.ErrApprovalSnapshotMismatch) {
+		t.Fatal("foreign target claim must reject frozen authorization")
+	}
+	var contextCases, contextClaims int64
+	if err := billingPool.QueryRow(ctx, `SELECT (SELECT count(*) FROM reconciliation_repair_cases), (SELECT count(*) FROM billing_approval_proof_claims)`).Scan(&contextCases, &contextClaims); err != nil || contextCases != replayCases || contextClaims != replayClaims || reconciliationCrossDomainFinancialSnapshot(t, ctx, billingPool) != financialBaseline {
+		t.Fatal("foreign context changed financial or immutable claim facts")
 	}
 	if err := repository.requireApprovalAdvancement(ctx, policy); !errors.Is(err, ErrBillingGovernanceInactive) {
 		t.Fatalf("rolled-back cross-domain advancement: %v", err)

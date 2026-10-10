@@ -29,12 +29,12 @@ func TestReconciliationFinancialRepairProofProjectionIsClosedAndActivationGated(
 		}),
 	}
 	plan := ReconciliationFinancialRepairPlan{
-		CaseID: caseID, RunID: runID, Channel: "ALIPAY", BusinessDate: businessDate,
+		CaseID: caseID, RunID: runID, PolicyVersion: 1, Channel: "ALIPAY", BusinessDate: businessDate,
 		MerchantOrderNo: "unmatched-1", AmountFen: 1500, Currency: "CNY",
 		ProviderTransactionID: "channel-tx-1", PaymentEvidenceID: evidenceID,
 		ProviderSnapshotDigest: strings.Repeat("a", 64), FactsDigest: strings.Repeat("b", 64),
 	}
-	repository := &billingProofFactsStub{reconciliationRepair: plan}
+	repository := &reconciliationRepairProofFactsStub{reconciliationRepair: plan}
 	current, reason, ownerState, err := currentBillingProofInput(context.Background(), repository, frozen)
 	if err != nil || reason != "" {
 		t.Fatalf("reconciliation repair proof reason=%s err=%v", reason, err)
@@ -60,11 +60,11 @@ func TestReconciliationFinancialRepairProofProjectionIsClosedAndActivationGated(
 		t.Fatalf("unexpected financial projection %+v", financial)
 	}
 
-	rejected := &billingProofFactsStub{reconciliationRepairErr: ErrApprovalSnapshotMismatch}
+	rejected := &reconciliationRepairProofFactsStub{reconciliationRepairErr: ErrApprovalSnapshotMismatch}
 	if _, reason, _, err := currentBillingProofInput(context.Background(), rejected, frozen); err != nil || reason != "DOMAIN_INVARIANT_FAILED" {
 		t.Fatalf("rejected closure reason=%s err=%v", reason, err)
 	}
-	foreign := &billingProofFactsStub{reconciliationRepair: plan}
+	foreign := &reconciliationRepairProofFactsStub{reconciliationRepair: plan}
 	foreign.reconciliationRepair.CaseID = uuid.New()
 	if _, reason, _, err := currentBillingProofInput(context.Background(), foreign, frozen); err != nil || reason != "SNAPSHOT_MISMATCH" {
 		t.Fatalf("foreign case reason=%s err=%v", reason, err)
@@ -81,7 +81,7 @@ func TestReconciliationFinancialRepairProofProjectionIsClosedAndActivationGated(
 	}
 
 	now := time.Now().UTC()
-	reader := &billingApprovalProofStub{billingProofFactsStub: repository, activation: validBillingApprovalActivationSnapshot(now)}
+	reader := &reconciliationRepairApprovalProofStub{reconciliationRepairProofFactsStub: repository, activation: validBillingApprovalActivationSnapshot(now)}
 	service := NewService(reader)
 	if _, err := service.billingApprovalProof(context.Background(), approvalencoding.ProofRequest{
 		ApprovalRequestID: uuid.New(),
@@ -91,10 +91,9 @@ func TestReconciliationFinancialRepairProofProjectionIsClosedAndActivationGated(
 	}
 }
 
-// The consumed authorization freezes only the wire-visible owner projection, so
-// an empty facts digest means "the execution transaction recomputes it" while a
-// presented digest must still match the owner revision exactly.
-func TestReconciliationFinancialRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(t *testing.T) {
+// Fresh execution requires the frozen owner digest; matching receipt replay
+// precedes fresh snapshot validation.
+func TestReconciliationFinancialRepairFrozenFactsDigestIsRequired(t *testing.T) {
 	plan := ReconciliationFinancialRepairPlan{
 		CaseID: uuid.New(), RunID: uuid.New(), AmountFen: 900, Currency: "CNY",
 		ProviderTransactionID: "channel-tx-2", ProviderSnapshotDigest: strings.Repeat("1", 64),
@@ -103,8 +102,8 @@ func TestReconciliationFinancialRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(
 	frozen := ReconciliationFinancialRepairFrozenFacts{RunID: plan.RunID, AmountFen: plan.AmountFen,
 		Currency: plan.Currency, ProviderTransactionID: plan.ProviderTransactionID,
 		ProviderSnapshotDigest: plan.ProviderSnapshotDigest}
-	if mismatch := reconciliationFinancialRepairFrozenMismatch(plan, frozen); mismatch != "" {
-		t.Fatalf("owner-recomputed digest rejected: %s", mismatch)
+	if mismatch := reconciliationFinancialRepairFrozenMismatch(plan, frozen); mismatch != "facts_digest" {
+		t.Fatalf("empty digest accepted: %s", mismatch)
 	}
 	frozen.FactsDigest = strings.Repeat("3", 64)
 	if mismatch := reconciliationFinancialRepairFrozenMismatch(plan, frozen); mismatch != "facts_digest" {
@@ -118,4 +117,24 @@ func TestReconciliationFinancialRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(
 	if mismatch := reconciliationFinancialRepairFrozenMismatch(plan, frozen); mismatch != "provider_snapshot_digest" {
 		t.Fatalf("provider snapshot digest mismatch=%q", mismatch)
 	}
+}
+
+type reconciliationRepairProofFactsStub struct {
+	billingProofFactsStub
+	reconciliationRepair    ReconciliationFinancialRepairPlan
+	reconciliationRepairErr error
+}
+
+func (s *reconciliationRepairProofFactsStub) reconciliationFinancialRepairPlan(context.Context, ReconciliationFinancialRepairCommandInput) (ReconciliationFinancialRepairPlan, error) {
+	return s.reconciliationRepair, s.reconciliationRepairErr
+}
+
+type reconciliationRepairApprovalProofStub struct {
+	Repository
+	*reconciliationRepairProofFactsStub
+	activation ApprovalCommandActivationSnapshot
+}
+
+func (s *reconciliationRepairApprovalProofStub) ApprovalCommandActivations(context.Context) (ApprovalCommandActivationSnapshot, error) {
+	return s.activation, nil
 }
