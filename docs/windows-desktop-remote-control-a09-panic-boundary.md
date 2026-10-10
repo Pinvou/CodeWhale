@@ -33,3 +33,19 @@ CodeWhale #97 尚未合并，不改变宿主 gitlink，也不接入未通过的�
 本地 GNU/LLVM 诊断不能替代 MSVC、真实 Tauri IPC、在线模型、部署或双机公网验收。
 适用 CI 的最终成功仍必需，不因条件 skip 或获准跳过 CodeWhale 合并等待而豁免。
 已决审批在快速终态时漏写 resolution journal 的 P2 另由 Issue #1670 跟踪，未在本轮修复。
+
+## R15 相邻传播与就绪接缝
+
+A08 R15 修复经普通合并传入，保留 guarded State、完整宿主端口安装后才发布 ready、
+流式脱敏、唯一时钟、20MiB B 上传 admission、稳定前端轮询及审批单飞刷新。
+ACP 瞬时 task_cleanup_busy 继续有界等待，A09 的精确运行时/回合 owner 与 panic
+收容不退回旧接口；旧 history 退役及 CodeWhale #97 未合入边界不变。
+
+A09 新增的 B 本地能力读取命令使用三个受保护状态参数，在命令体执行前统一拒绝
+缺就绪标记或任一缺失依赖。真实 mock IPC 覆盖标记单独存在、仅安装受控 manager、
+再安装能力 manager 三种不完整状态，均返回稳定 unavailable；不创建伪 runtime，
+不把测试断言当真实 Wry/双端成功验收。完整会话/租约/能力 revision 校验保留。
+
+最新审核 P3 分别核实后登记或精确澄清：display 原文与 trim 计数边界、ACP registry
+锁内同步 transcript 写入、主动 evict 与空闲回收的不同语义、异步释放异常与恢复窗
+心跳观测点。未实测延迟、未证明实际泄漏，不把历史 Approve 当所有待办已修。
