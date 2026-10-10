@@ -511,6 +511,15 @@ pinvou3-app/src/platform/tauri/bridge/scheduled.js
 
 ### 已定位现象
 
+> **【已废弃】** 从本节起至“### 范围边界”止，是问题 3 定稿前的“行级任务
+> 操作”（行级更多菜单/置顶分组）旧方案，已被上文问题 3 的结论取代——
+> 行级不提供更多菜单、不按置顶/普通任务分组、详情底部操作组保留。以下
+> 仅作决策留档，不要按此实施（例外：其中“后端数据设计”一节的
+> `task-ui-metadata.json` sidecar 与 `set_scheduled_task_pinned` 后端命令
+> 已落地，仍为现行实现；废弃仅指行级菜单/置顶分组的前端交互方案）。
+> 块内已带【已废弃】小节标记；问题 3 结论中
+> “侧边栏空间不足”仍是唯一未解决的开放项。
+
 当前定时任务列表主要支持：
 
 - 点击任务行打开编辑弹窗。
@@ -843,7 +852,9 @@ const regularTasks = filteredTasks.filter(task => !task.pinned);
 <TaskGroup title={pinnedTasks.length ? "普通任务" : null} tasks={regularTasks} />
 ```
 
-#### 3. 行级菜单组件
+#### 3. 行级菜单组件【已废弃：行级菜单方案未采纳，见问题3结论与 §五.1 标注】
+
+> 以下为原始设计叙述，仅作历史留痕。
 
 建议在 `ScheduledTasksView.jsx` 内部先实现局部组件，不急着抽全局组件：
 
@@ -1195,8 +1206,10 @@ pinvou3-app/tests/scheduled_tasks_unit.test.js
    - `data-testid="scheduled-task-actions"`
    - `data-testid="scheduled-task-action-menu"`
    - `data-testid="scheduled-detail-actions"`
-3. 行级操作按钮都调用 `event.stopPropagation()`，避免误打开编辑弹窗。
-4. 删除确认组件被行级菜单和详情菜单复用，而不是两套删除弹窗。
+
+   【已被问题3结论取代】行级菜单方案已废弃，现行断言为这些 testid 不存在（见上文问题3“自动化测试补充”与 `pinvou3-app/tests/scheduled_tasks_unit.test.js`）。
+3. 【已废弃】行级操作按钮都调用 `event.stopPropagation()`，避免误打开编辑弹窗。（行级菜单方案已废弃，同上。）
+4. 【已废弃】删除确认组件被行级菜单和详情菜单复用，而不是两套删除弹窗。（行级菜单方案已废弃，同上。）
 5. `pinvou3-app/src/platform/tauri/bridge/scheduled.js` 暴露：
    - `toggleScheduledTaskPinned`
    - `deleteScheduledTask`
@@ -1210,8 +1223,12 @@ pinvou3-app/tests/scheduled_tasks_unit.test.js
 示例断言：
 
 ```js
-assert.ok(/data-testid="scheduled-task-pin"/.test(indexHtml));
-assert.ok(/data-testid="scheduled-task-actions"/.test(indexHtml));
+// 前四条对应问题3结论：行级菜单方案已废弃，现行断言为 testid 不存在
+// （见 tests/scheduled_tasks_unit.test.js）：
+assert.ok(!/data-testid="scheduled-task-pin"/.test(indexHtml));
+assert.ok(!/data-testid="scheduled-task-actions"/.test(indexHtml));
+assert.ok(!/data-testid="scheduled-task-action-menu"/.test(indexHtml));
+assert.ok(!/data-testid="scheduled-detail-actions"/.test(indexHtml));
 assert.ok(/function toggleScheduledTaskPinned/.test(tauriBridge));
 assert.ok(/set_scheduled_task_pinned/.test(tauriBridge));
 assert.ok(/task-ui-metadata\.json/.test(scheduledTasksRust));
@@ -1308,6 +1325,8 @@ pinvou3-app/tests/scheduled_tasks_smoke.js
 ```
 
 新增场景：
+
+> 【已废弃】场景 D–G 基于已废弃的行级菜单方案，已被问题3结论取代：主列表行级不显示置顶按钮和更多菜单，现行断言为相应 testid 不存在（见上文问题3“自动化测试补充”与 `pinvou3-app/tests/scheduled_tasks_unit.test.js`）。以下保留作为历史叙述。
 
 ##### 场景 D：行级置顶与排序
 
@@ -1494,6 +1513,9 @@ set_scheduled_task_pinned("missing", true)
 
 #### 5. 视觉与可访问性检查
 
+> 【已废弃】本小节的行级置顶/菜单检查项随行级菜单方案废弃（见问题 3 结论），
+> 现行 UI 无这些控件；可访问性要求以 `ScheduledTasksView.jsx` 现行实现为准。
+
 Smoke 或 Playwright 检查：
 
 - 行级按钮有 `aria-label`：
@@ -1510,6 +1532,8 @@ Smoke 或 Playwright 检查：
 
 ### 六、手工验证清单
 
+> 注：清单 17–19 所述任务行 `...` 行级菜单交互已随行级菜单方案废弃（见问题3结论与 §五.1 的【已被问题3结论取代】标注），现行删除入口以 `ScheduledTasksView.jsx` 现行实现为准；任务置顶为后端已落地能力（sidecar + `set_scheduled_task_pinned`），当前 UI 暂无置顶入口。
+
 修复后按顺序验证：
 
 1. 启动 app。
@@ -1525,9 +1549,10 @@ Smoke 或 Playwright 检查：
 11. 让 AI 创建“每小时推送 AI 新闻”。
 12. 任务出现在定时任务列表。
 13. Windows 任务计划程序中不应新增由该流程创建的 `schtasks` 任务。
-14. 在定时任务列表中置顶一个任务。
-15. 重启 app，确认置顶仍保留。
-16. 取消置顶，确认任务回到普通分组。
+14. （暂不可手动执行：置顶后端已落地，但当前 UI 无置顶入口，能力由
+    `scheduled_session_metadata_dispatch` 单测覆盖。）
+15. （待置顶入口落地后回归：重启 app，确认置顶仍保留。）
+16. （待置顶入口落地后回归：取消置顶，确认任务回到普通分组。）
 17. 通过任务行 `...` 删除任务，确认不需要先打开编辑弹窗。
 18. 通过详情弹窗 `...` 删除任务，确认与行级删除弹窗一致。
 19. 在 390px 宽度下检查菜单和删除确认不被裁剪、不溢出。
