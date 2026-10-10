@@ -31,7 +31,7 @@ function loadDeviceFeature() {
     setInterval(fn, ms) { intervalFn = fn; intervalMs = ms; startedCount += 1; return 42; },
     clearInterval(id) { if (id === 42) clearedCount += 1; intervalFn = null; },
   });
-  const state = { device: null, deviceError: null, deviceServices: null, externalModels: null };
+  const state = { device: null, deviceError: null, deviceServices: null, deviceServicesError: null, externalModels: null };
   let notifyCount = 0;
   const domainCalls = [];
   const invokes = [];
@@ -135,6 +135,9 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   // 字节：1610612736 → '1.5 GiB'；768 MiB 以下保持 MiB；非法值回退 —。
   assert.equal(fmt.disks[0].totalText, '1.5 GiB');
   assert.equal(fmt.disks[0].availableText, '768.0 MiB');
+  // 用量百分比的 50% 路径必须钉死：公式算反（分母换成 available）或封顶丢失
+  // 这类显示回归此前全绿通过（变异存活，第三轮评审 P2）。
+  assert.equal(fmt.disks[0].usedPct, 50);
   assert.equal(fmt.disks[1].totalText, '3.0 GiB');
   assert.equal(fmt.disks[1].usedPct, 0);
   assert.equal(fmt.disks[2].totalText, '—');
@@ -283,26 +286,52 @@ assert.doesNotMatch(
   assert.notEqual(env.state.device, first);
   assert.equal(env.state.device._fmt.disks[0].availableText, '764.0 MiB');
   assert.equal(env.notifyCount(), notifiesAfterFirst + 1);
+
+  // 封顶：异常负的 available（损坏的盘报数）不得把占用推过 100。
+  const capped = fixtureSnapshot();
+  capped.disks[0].available_bytes = -1610612736;
+  env.setRespond(async () => capped);
+  await env.api.pollDevice();
+  assert.equal(env.state.device._fmt.disks[0].usedPct, 100, 'usedPct must cap at 100');
+
+  // null 读数：文本回退 —、档位 ok——绝不能渲染成 0°C（第三轮评审 P2）。
+  const nulled = fixtureSnapshot();
+  nulled.sensors[0].entries.push({ kind: 'temperature', name: 'null-chan', value: null, critical: null, max: null });
+  env.setRespond(async () => nulled);
+  await env.api.pollDevice();
+  const nullEntry = env.state.device._fmt.sensors[0].entries.at(-1);
+  assert.equal(nullEntry.valueText, '—');
+  assert.equal(nullEntry.level, 'ok');
 }
 
 // ── 错误轮与 in-flight 守卫 ───────────────────────────────────────
 {
   const env = loadDeviceFeature();
+  // 先落一拍成功快照再进错误轮：恢复轮的强制 notify 才真正走到 hadDeviceError
+  // 臂——首轮 !prevFmt 本来就必 notify，旧顺序（错误轮先行）对"删掉强制臂"的
+  // 突变照样放行（第三轮评审 P2）。
+  env.setRespond(async () => fixtureSnapshot());
+  await env.api.pollDevice();
+  assert.equal(env.state.deviceError, null);
+  assert.ok(env.state.device._fmt);
+  assert.equal(env.notifyCount(), 1);
+
   env.setRespond(async command => {
     if (command === 'get_device_snapshot') throw new Error('snapshot backend down');
     return null;
   });
   await env.api.pollDevice();
-  assert.equal(env.state.device, null, 'failed first round must not fabricate a snapshot');
   assert.equal(env.state.deviceError, 'snapshot backend down');
-  assert.equal(env.notifyCount(), 1);
+  assert.equal(env.notifyCount(), 2);
+  // 失败轮同样精确域发布（全域 notify 会连带 21 域重投影）。
+  assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
 
   // 恢复轮必须强制 notify 一次（横幅切回正常面板），即便显示等价。
   env.setRespond(async () => fixtureSnapshot());
   await env.api.pollDevice();
   assert.equal(env.state.deviceError, null);
   assert.ok(env.state.device._fmt);
-  assert.equal(env.notifyCount(), 2);
+  assert.equal(env.notifyCount(), 3, 'recovery round must force a notify even when display-equal');
 
   // in-flight 守卫：未决轮次期间的重入 pollDevice 直接丢弃。
   let release;
@@ -312,8 +341,8 @@ assert.doesNotMatch(
   release(fixtureSnapshot());
   await pending;
   const snapshotInvokes = env.invokes.filter(([command]) => command === 'get_device_snapshot');
-  // 本 env 已有错误轮 + 恢复轮两次,加上本组未决轮一次 = 3;重入 tick 被吞掉不新增。
-  assert.equal(snapshotInvokes.length, 3, 'in-flight poll must swallow reentrant ticks');
+  // 成功轮 + 错误轮 + 恢复轮 + 本组未决轮 = 4;重入 tick 被吞掉不新增。
+  assert.equal(snapshotInvokes.length, 4, 'in-flight poll must swallow reentrant ticks');
 }
 
 // ── 轮询生命周期 ─────────────────────────────────────────────────
@@ -370,6 +399,8 @@ assert.doesNotMatch(
   });
   await env.api.pollDeviceServices();
   assert.equal(env.state.deviceServices.length, 2, 'failed probe must keep the last known services');
+  // 已有结果的失败轮：保留旧值且不立错误旗（瞬时抖动 ≠ 探测已坏）。
+  assert.equal(env.state.deviceServicesError, null);
   assert.equal(env.notifyCount(), 1);
 
   // in-flight 守卫：未决轮次期间的重入直接丢弃（10s 定时 + 手动刷新可并发，
@@ -390,6 +421,47 @@ assert.doesNotMatch(
   assert.equal(serviceInvokes.length, 4, 'in-flight services poll must swallow reentrant ticks');
   // 决算结果与保留值内容相同 → 不 notify。
   assert.equal(env.notifyCount(), 1);
+}
+
+// ── 服务探测首拍：空结果与失败必须可见 ──────────────────────────
+{
+  const env = loadDeviceFeature();
+  // 首拍即空数组也必须落地：抑制基线若是 "null || []"，首个空结果会被吞掉、
+  // 视图的 loading 永远不退（第三轮评审 P2）。
+  env.setRespond(async command => (command === 'get_device_services' ? [] : null));
+  await env.api.pollDeviceServices();
+  assert.deepEqual(env.state.deviceServices, [], 'first empty probe must land (no eternal loading)');
+  assert.equal(env.notifyCount(), 1);
+  // 已有结果（含空数组）后的失败轮保持静默：瞬时抖动 ≠ 探测已坏。
+  env.setRespond(async command => {
+    if (command === 'get_device_services') throw new Error('later probe down');
+    return null;
+  });
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, null);
+  assert.equal(env.notifyCount(), 1);
+}
+
+// ── 服务探测首拍即失败：deviceServicesError 必须可见 ────────────
+{
+  const env = loadDeviceFeature();
+  env.setRespond(async command => {
+    if (command === 'get_device_services') throw new Error('first probe down');
+    return null;
+  });
+  await env.api.pollDeviceServices();
+  // null 悬着只会让视图的"探测中"无限驻留；首拍失败必须立旗。
+  assert.equal(env.state.deviceServices, null);
+  assert.equal(env.state.deviceServicesError, 'first probe down');
+  assert.equal(env.notifyCount(), 1);
+  assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
+
+  // 恢复轮清掉错误旗并落地结果。
+  env.setRespond(async command => (command === 'get_device_services' ? [] : null));
+  await env.api.pollDeviceServices();
+  assert.equal(env.state.deviceServicesError, null);
+  assert.deepEqual(env.state.deviceServices, []);
+  assert.equal(env.notifyCount(), 2);
 }
 
 {

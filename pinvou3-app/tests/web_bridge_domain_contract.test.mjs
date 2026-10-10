@@ -108,6 +108,16 @@ for (const method of Object.keys(api.computerUse)) {
     `web computerUse.${method} stub must reject, never fake success`,
   );
 }
+// Same for the device domain (round-3 review P2): the surface lock above would
+// not catch a device stub turning into a resolve(null) no-op, which the
+// domain-adapter comments call out as the "permanent skeleton" failure mode.
+for (const method of Object.keys(api.device)) {
+  await assert.rejects(
+    api.device[method](),
+    /not supported on the web client|MegaCube/,
+    `web device.${method} stub must reject, never fake success`,
+  );
+}
 assert.equal(api.sendMessage, undefined, 'Web flat command facade must stay private');
 
 snapshotReads = 0;

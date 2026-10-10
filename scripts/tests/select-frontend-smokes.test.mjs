@@ -291,3 +291,10 @@ test("restored Account and Admin real-entry browsers run once for feature and sh
   }
   assert.equal(fullLabels.filter(value => value === target).length, 1);
 });
+
+test("device-manager changes select its action smoke", () => {
+  assert.deepEqual(
+    labels(selectFrontendSmokes(["pinvou3-app/src/features/device-manager/DeviceManagerView.jsx"])),
+    ["npm:test:ui-smoke", "npm:test:device-manager-ui"],
+  );
+});

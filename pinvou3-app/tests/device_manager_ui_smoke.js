@@ -93,6 +93,7 @@ function externalModelsFixture() {
     models: [
       { id: 'm-ollama-1', name: 'qwen3:30b', kind: 'ollama', base_url: 'http://127.0.0.1:11434/v1', model: 'qwen3:30b', weights_path: null, installed_at: '2026-10-01T00:00:00Z', note: '', status: 'available', registered: false, source: 'ollama' },
       { id: 'm-reg-1', name: 'my-endpoint', kind: 'openai_endpoint', base_url: 'http://127.0.0.1:9999/v1', model: 'my-model', weights_path: '/home/u/models/my-endpoint', installed_at: '2026-10-02T00:00:00Z', note: '', status: 'unreachable', registered: true, source: 'registry' },
+      { id: 'm-reg-2', name: 'lan-endpoint', kind: 'openai_endpoint', base_url: 'http://192.168.1.50:8000/v1', model: 'lan-model', weights_path: null, installed_at: '2026-10-03T00:00:00Z', note: '', status: 'available', registered: true, source: 'registry' },
     ],
     warnings: [],
   };
@@ -189,7 +190,7 @@ function injectSource() {
         });
         // ── MegaCube 设备管理命令 ──
         case 'get_device_snapshot': return Promise.resolve(${JSON.stringify(deviceSnapshotFixture())});
-        case 'get_device_services': return Promise.resolve([]);
+        case 'get_device_services': return Promise.resolve([{ key: 'ollama', running: false, detail: 'probe timeout' }, { key: 'docker', running: true, detail: null }]);
         case 'get_external_models': return Promise.resolve(${JSON.stringify(externalModelsFixture())});
         case 'model_store_availability': return Promise.resolve({ available: true, reason: null });
         case 'model_store_library': return Promise.resolve({
@@ -373,6 +374,20 @@ async function clickTestId(page, testId) {
         const link = externalRows[1]?.querySelector('[data-testid="device-manager-link"]');
         return !!link && link.disabled;
       })(),
+      // 服务探测 chips 真渲染（stub 返回停止的 ollama + 运行的 docker）。
+      serviceChips: (() => {
+        const chips = [...document.querySelectorAll('[data-testid="device-manager-service-chip"]')];
+        return chips.length === 2
+          && (chips[0].innerText || '').includes('Ollama')
+          && (chips[1].innerText || '').includes('Docker')
+          && chips[1].querySelector('.bg-\\[\\#34C759\\]') != null;
+      })(),
+      // 远端端点行：接入被禁用并带说明（回环尺子，第三轮评审 P1）。
+      remoteLinkBlocked: (() => {
+        const remote = externalRows[2];
+        const button = remote?.querySelector('[data-testid="device-manager-link-remote"]');
+        return !!button && button.disabled;
+      })(),
     };
   });
   rec('⑤ 商店行锁定态与外部模型行徽标齐全', Object.values(modelSection).every(Boolean), JSON.stringify(modelSection));
@@ -389,7 +404,9 @@ async function clickTestId(page, testId) {
       weightsToggle: !!row?.querySelector('[data-testid="device-manager-delete-weights"]'),
     };
   });
-  await page.click('[data-testid="device-manager-remove-confirm"]');
+  await page.evaluate(() => {
+    document.querySelector('[data-testid="device-manager-remove-confirm"]')?.click();
+  });
   await page.waitForFunction(() => window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model').length > 0, { timeout: 8000 });
   const removeCalls = await page.evaluate(() => ({
     registered: window.__DEVICE_MGR_TEST__.callsOf('device_register_external_model')[0]?.args,
@@ -440,9 +457,24 @@ async function clickTestId(page, testId) {
     rows.find(candidate => (candidate.innerText || '').includes('my-endpoint'))
       ?.querySelector('[data-testid="device-manager-remove-cancel"]')?.click();
   });
+  // 取消必须真的收起 armed 面板且不发起删除命令——此前取消按钮没有 testid，
+  // 这一步是静默空转的死步骤，取消路径零覆盖（第三轮评审 P1）。
+  await page.waitForFunction(
+    () => ![...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
+      .some(row => row.querySelector('[data-testid="device-manager-remove-confirm"]')),
+    { timeout: 4000 },
+  );
+  const cancelOutcome = await page.evaluate(() => ({
+    armedClosed: ![...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
+      .some(row => row.querySelector('[data-testid="device-manager-remove-confirm"]')),
+    removeCallsStillOne: window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model').length === 1,
+  }));
   rec('⑥-b 登记行 armed 态回显权重路径+勾选框+不可撤销提示',
     armedEndpoint.pathEcho && armedEndpoint.weightsToggle && armedEndpoint.irreversibleShown,
     JSON.stringify({ armedEndpoint }));
+  rec('⑥-c 取消移除收起 armed 面板且不发起删除命令',
+    cancelOutcome.armedClosed && cancelOutcome.removeCallsStillOne,
+    JSON.stringify({ cancelOutcome }));
 
   // ⑦ 故障排查快捷卡 → device_doctor_prompt + 新建普通会话 + chat 携带提示词。
   const beforeDoctor = await page.evaluate(() => window.__DEVICE_MGR_TEST__.calls.length);
