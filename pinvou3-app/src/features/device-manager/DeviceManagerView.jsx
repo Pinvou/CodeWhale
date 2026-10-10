@@ -38,7 +38,7 @@ import { bridge } from '../../hooks/useBridge.js';
 import { MonitorView } from '../monitor/MonitorView.jsx';
 import { fetchLibrary, storeAvailability } from '../model-store/model-store-api.js';
 import { libraryStatusOf } from '../model-store/model-store-logic.js';
-import { buildSavedModel, findLinkedRows } from '../model-store/pinvou-model-link.js';
+import { buildSavedModel, findLinkedRows, isLocalGatewayUrl } from '../model-store/pinvou-model-link.js';
 import { MsButton, MsPill, MsToast } from '../model-store/model-store-ui.jsx';
 
 const TOAST_MS = 3200;
@@ -361,6 +361,17 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // { key, running, detail } per service.
   const deviceServices = Array.isArray(bs?.deviceServices) ? bs.deviceServices : null;
 
+  const [toast, setToast] = useState(null);
+  const toastTimerRef = useRef(null);
+  const showToast = useCallback((text) => {
+    setToast({ text });
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(null), TOAST_MS);
+  }, []);
+  useEffect(() => () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+  }, []);
+
   // Polling lifecycle mirrors MonitorView: start on mount (with one immediate
   // services probe + external-model fetch), stop on unmount. The services
   // probe keeps its slow 10s cadence for as long as the page stays mounted.
@@ -378,23 +389,19 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     };
     pollServices();
     const servicesTimer = setInterval(pollServices, SERVICES_POLL_MS);
-    if (typeof dev.fetchExternalModels === 'function') dev.fetchExternalModels().catch(() => {});
+    // The first fetch failing silently would land the models area on the
+    // "nothing installed" hint, which reads as a fact instead of the read
+    // failure it is (same surface rule as the manual Refresh button).
+    if (typeof dev.fetchExternalModels === 'function') {
+      dev.fetchExternalModels().catch((error) => {
+        showToast(copy.refreshFailed(String(error?.message || error)));
+      });
+    }
     return () => {
       clearInterval(servicesTimer);
       if (typeof dev.stopDevicePolling === 'function') dev.stopDevicePolling();
     };
-  }, []);
-
-  const [toast, setToast] = useState(null);
-  const toastTimerRef = useRef(null);
-  const showToast = useCallback((text) => {
-    setToast({ text });
-    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = setTimeout(() => setToast(null), TOAST_MS);
-  }, []);
-  useEffect(() => () => {
-    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-  }, []);
+  }, [copy, showToast]);
 
   // Read-failure retry: stop+start makes the facade poll immediately (the raw
   // pollDevice stays feature-internal), then refresh the slow services probe.
@@ -468,9 +475,18 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       showToast(t.uiModelStore.linkBridgeMissing);
       return;
     }
-    setBusyKey(`link:${row.id}`);
+    const target = linkTargetOf(row);
+    // Same loopback ruler as the cleanup side (pinvou-model-link only recycles
+    // local-gateway rows): linking a remote endpoint would make it the default
+    // model — every new chat (and the AI doctor prompts) would go there — and
+    // the row could never be recycled on removal. Remote endpoints must be
+    // configured explicitly in Settings instead (round-3 review P1).
+    if (!target.baseUrl || !isLocalGatewayUrl(target.baseUrl)) {
+      showToast(copy.linkDisabledRemote);
+      return;
+    }
+    setBusyKey(`link:${row.name}`);
     try {
-      const target = linkTargetOf(row);
       // findLinkedRows takes (...names): pass both the registry model and the
       // listing name so a relink updates the already-saved row in place
       // (existingId) instead of duplicating it in Pinvou's model list.
@@ -491,9 +507,15 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     }
   }, [bs, copy, showToast, t]);
 
+  // Identity for busy/armed keys: the row NAME, not the id. Unregistered
+  // Ollama rows swap their synthetic `ollama-*` id for a registry id the
+  // moment confirmRemove's quiet registration refetches the list — id-keyed
+  // state would silently disarm the armed panel and re-enable the buttons
+  // mid-removal (round-3 review P2). The confirm-name flow already makes the
+  // name the user-facing identity of a row.
   const armRemove = useCallback((row) => {
     setDeleteWeights(false);
-    setArmedRemoveId(row.id || row.name);
+    setArmedRemoveId(row.name);
   }, []);
   const cancelRemove = useCallback(() => setArmedRemoveId(null), []);
 
@@ -505,7 +527,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const confirmRemove = useCallback(async (row) => {
     const dev = (window.TauriBridge || bridge)?.device;
     if (!dev?.removeExternalModel) return;
-    setBusyKey(`remove:${row.id}`);
+    setBusyKey(`remove:${row.name}`);
     try {
       let id = row.id;
       if (row.source === 'ollama' && !row.registered) {
@@ -534,7 +556,9 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       if (Array.isArray(bs?.savedModels)) {
         const linkedRows = findLinkedRows(bs.savedModels, row.model, row.name);
         const liveBridge = window.TauriBridge || bridge;
-        let cleanupErrorText = liveBridge?.models?.deleteModel ? null : 'bridge unavailable';
+        // Assign the OUTER variable (an inner `let` here used to shadow it and
+        // every cleanup failure surfaced as "unknown" — round-3 review P2).
+        cleanupErrorText = liveBridge?.models?.deleteModel ? null : 'bridge unavailable';
         for (const linked of cleanupErrorText ? [] : linkedRows) {
           try {
             await liveBridge.models.deleteModel(linked.id);
@@ -550,14 +574,18 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       }
       setArmedRemoveId(null);
       setDeleteWeights(false);
+      // One aggregated toast: the single-slot toast used to show only the LAST
+      // warning, drowning both the backend warnings and the cleanup failure
+      // (round-3 review P2). Outcome + warnings travel together now.
+      const warnings = Array.isArray(outcome?.warnings) ? outcome.warnings : [];
+      const notices = warnings.map((warning) => copy.warn(warning));
       if (cleanupOk) {
-        showToast(copy.removeDone(row.name));
+        notices.push(copy.removeDone(row.name));
       } else {
         // Cleanup failure must be surfaced, not drowned by a plain success toast.
-        showToast(copy.linkRowStale(row.name, cleanupErrorText || 'unknown'));
+        notices.push(copy.linkRowStale(row.name, cleanupErrorText || 'unknown'));
       }
-      const warnings = Array.isArray(outcome?.warnings) ? outcome.warnings : [];
-      for (const warning of warnings) showToast(copy.warn(warning));
+      showToast(notices.join('\n'));
     } catch (error) {
       // Backend guard failures carry a human-readable message already.
       showToast(copy.removeFailed(String(error?.message || error)));
@@ -816,7 +844,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
 
               {/* Model services probe: one subtle line of chips (null = the
                   first probe is still in flight). */}
-              {!deviceServices ? (
+              {bs?.deviceServicesError && !deviceServices ? (
+                <div className={`text-[11px] ${MUTED_TEXT}`} data-testid="device-manager-services-failed">
+                  {copy.servicesFailed(String(bs.deviceServicesError))}
+                </div>
+              ) : !deviceServices ? (
                 <div className={`text-[11px] ${MUTED_TEXT}`} data-testid="device-manager-services-loading">
                   {copy.servicesLoading}
                 </div>
@@ -910,12 +942,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     const linked = isRowLinked(row);
                     // Unregistered Ollama listing rows resolve through the
                     // fixed loopback fallback, so the link button shows for
-                    // them too (see linkTargetOf).
+                    // them too (see linkTargetOf). Remote endpoints are
+                    // neither: linking them is blocked (see linkExternal).
                     const target = linkTargetOf(row);
-                    const linkable = !!(target.model && target.baseUrl);
-                    const armed = armedRemoveId === (row.id || row.name);
+                    const linkable = !!(target.model && target.baseUrl && isLocalGatewayUrl(target.baseUrl));
+                    const remoteOnly = !!(target.model && target.baseUrl && !isLocalGatewayUrl(target.baseUrl));
+                    const armed = armedRemoveId === row.name;
                     const kindLabel = copy[KIND_LABEL_KEYS[row.kind] || 'kindOther'];
-                    const rowBusy = busyKey === `link:${row.id}` || busyKey === `remove:${row.id}`;
+                    const rowBusy = busyKey === `link:${row.name}` || busyKey === `remove:${row.name}`;
                     return (
                       <div
                         key={row.id || row.name}
@@ -955,10 +989,19 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                             >
                               {copy.linked}
                             </span>
+                          ) : remoteOnly ? (
+                            <MsButton
+                              tone="ghost"
+                              disabled
+                              title={copy.linkDisabledRemote}
+                              data-testid="device-manager-link-remote"
+                            >
+                              {copy.link}
+                            </MsButton>
                           ) : (linkable && (
                             <MsButton
                               tone="ghost"
-                              busy={busyKey === `link:${row.id}`}
+                              busy={busyKey === `link:${row.name}`}
                               // Never link an unreachable model: linking also
                               // makes it the default model, and an unreachable
                               // default breaks every new chat (same reasoning
@@ -973,12 +1016,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                           ))}
                           {armed ? (
                             <>
-                              {/* No weights checkbox on ollama rows: the
-                                  backend deletes ollama models from the daemon
-                                  unconditionally — the checkbox would imply
-                                  "uncheck keeps the files", which is false
-                                  (no local weights dir on record). */}
-                              {row.kind !== 'ollama' && (
+                              {/* Checkbox follows the registered weights_path
+                                  (any kind): the backend only deletes the dir
+                                  when this is checked, so hiding it on an
+                                  ollama row that DOES carry weights_path would
+                                  echo a deletion that can never happen. */}
+                              {!!row.weights_path && (
                                 <label className="flex items-center gap-1.5 text-[12px] text-black/60 dark:text-white/60">
                                   <input
                                     type="checkbox"
@@ -997,14 +1040,19 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                               )}
                               <MsButton
                                 tone="danger"
-                                busy={busyKey === `remove:${row.id}`}
+                                busy={busyKey === `remove:${row.name}`}
                                 disabled={rowBusy}
                                 onClick={() => confirmRemove(row)}
                                 data-testid="device-manager-remove-confirm"
                               >
                                 {copy.removeArmed}
                               </MsButton>
-                              <MsButton tone="ghost" disabled={rowBusy} onClick={cancelRemove}>
+                              <MsButton
+                                tone="ghost"
+                                disabled={rowBusy}
+                                onClick={cancelRemove}
+                                data-testid="device-manager-remove-cancel"
+                              >
                                 {copy.removeCancel}
                               </MsButton>
                             </>
@@ -1023,6 +1071,15 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     );
                   })}
                 </div>
+              )}
+
+              {/* The listing comes from the local daemon ports; any local
+                  process can impersonate them (nothing authenticates on
+                  loopback). One quiet caption keeps that honest. */}
+              {externalModels.length > 0 && (
+                <p className={`text-[11px] ${MUTED_TEXT}`} data-testid="device-manager-local-source-hint">
+                  {copy.localSourceHint}
+                </p>
               )}
 
               {/* Empty guidance: nothing installed anywhere. */}

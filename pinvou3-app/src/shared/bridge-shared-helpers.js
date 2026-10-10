@@ -72,7 +72,7 @@
     scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
     monitor: ["monitor", "monitorError"],
     // Registered by the device feature (bridge/device.js, MegaCube 设备管理).
-    device: ["device", "deviceError", "deviceServices", "externalModels"],
+    device: ["device", "deviceError", "deviceServices", "deviceServicesError", "externalModels"],
     settings: ["settings", "selectedPet", "behaviorTelemetry"],
     models: ["activeModelId", "currentSessionModelId", "currentSessionModelRef", "pendingDraftModelRef", "defaultModelRef", "effectiveModelConfig", "savedModels", "modelsLoaded"],
     vllm: [],

@@ -197,6 +197,7 @@ function pinvouSharedweb() {
     device: null,
     deviceError: null,
     deviceServices: null,
+    deviceServicesError: null,
     externalModels: null,
     backendOnline: null, // null=checking, true, false
     settings: null,

@@ -247,6 +247,7 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
     device: null,
     deviceError: null,
     deviceServices: null,
+    deviceServicesError: null,
     externalModels: null,
     backendOnline: null, // null=checking, true, false
     platformCapabilities: {

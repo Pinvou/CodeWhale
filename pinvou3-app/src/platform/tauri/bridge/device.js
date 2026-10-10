@@ -187,7 +187,8 @@
   // extra notify over ever getting stuck); most values are strings after the
   // _fmt formatting above and compare exactly. updatedAt is the snapshot's
   // generation clock: like monitor's page clock it must not break suppression
-  // on its own — the view renders recency from its own timer.
+  // on its own — the view renders that frozen timestamp as a plain "updated
+  // at HH:MM:SS" label (no ticking clock on the device page).
   function deviceFmtEqual(prev, next) {
     if (prev === next) return true;
     if (!prev || !next) return false;
@@ -302,13 +303,24 @@
       var services = await invoke("get_device_services");
       var next = Array.isArray(services) ? services : [];
       // 内容没变不下发（与快照的显示等价抑制同一目标）；失败路径零变化也不 notify。
-      if (JSON.stringify(next) !== JSON.stringify(state.deviceServices || [])) {
+      // 首拍必须落地（state.deviceServices 还是 null）：基线用 null 短路，否则
+      // "null || []" 会把首个空结果吞掉，视图的 loading 永远不退（第三轮评审 P2）。
+      state.deviceServicesError = null;
+      if (!state.deviceServices || JSON.stringify(next) !== JSON.stringify(state.deviceServices)) {
         state.deviceServices = next;
         notifyDomains(["device"]);
       }
     } catch (e) {
-      // 探测失败保留上一份结果：瞬时抖动不该被渲染成「全部停止」。
+      // 探测失败保留上一份结果：瞬时抖动不该被渲染成「全部停止」。但首拍就失败
+      // 必须可见——null 悬着只会让视图的"探测中"无限驻留，用户无从知道探测已坏。
       console.warn("[pinvou3][device] services poll failed", e);
+      if (!state.deviceServices) {
+        var message = e && e.message ? e.message : String(e || "services probe failed");
+        if (state.deviceServicesError !== message) {
+          state.deviceServicesError = message;
+          notifyDomains(["device"]);
+        }
+      }
     } finally {
       deviceServicesInFlight = false;
     }
@@ -317,8 +329,12 @@
   // ── External models ──────────────────────────────────────────────
   async function fetchExternalModels() {
     var view = await invoke("get_external_models");
-    state.externalModels = view || null;
-    notifyDomains(["device"]);
+    // 无变化不下发（登记/移除后的回读常常逐字节一致，不值得一次全域重渲染）。
+    var next = view || null;
+    if (JSON.stringify(next) !== JSON.stringify(state.externalModels || null)) {
+      state.externalModels = next;
+      notifyDomains(["device"]);
+    }
     return state.externalModels;
   }
 
