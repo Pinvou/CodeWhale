@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{human_probe_error, probe_client, OLLAMA_BASE, PROBE_TIMEOUT};
+use super::{OLLAMA_BASE, PROBE_TIMEOUT, human_probe_error, probe_client};
 
 /// 允许登记的模型类别（与注册表 schema 一致）。
 const MODEL_KINDS: &[&str] = &["ollama", "openai_endpoint", "llamacpp", "vllm", "other"];
@@ -84,9 +84,19 @@ pub(crate) fn registry_dir() -> PathBuf {
         .join("external-models.d")
 }
 
-/// 模型商店权重目录：`~/.pinvou3/model-store/`（商店边界，外部模型不得越界）。
-fn model_store_dir() -> PathBuf {
-    crate::platform::paths::pinvou3_home().join("model-store")
+/// 商店边界（路径臂）：权重路径位于**任一**商店权重根之下即命中。根列表由
+/// `model_store::store_weights_roots()` 提供（默认 store 数据根 + 设置里可自定义
+/// 的 `models_dir`）——设备侧不得自行推断默认值，否则商店改了权重根这里就会漂移。
+fn weights_in_store(weights: &str) -> bool {
+    path_under_any(
+        Path::new(weights),
+        &crate::features::model_store::store_weights_roots(),
+    )
+}
+
+/// 路径包含判断（多根版，测试直打）：任一根命中即 true。
+fn path_under_any(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path_is_under(path, root))
 }
 
 // ---------------------------------------------------------------- 视图
@@ -139,12 +149,25 @@ pub async fn get_external_models() -> Result<ExternalModelsView, String> {
             }
         }
     }
-    for model in &mut models {
-        if model.kind != "ollama" {
-            model.status =
-                probe_status_for(&model.kind, model.base_url.as_deref(), model.weights_path.as_deref())
-                    .await;
-        }
+    // 非 Ollama 模型并发探测：每个不可达端点要吃满 1.5s 超时，串行会让 N 个
+    // 失效端点把整次刷新拖到 N×1.5s；join_all 并发后总耗时 ≈ 最慢的一个。
+    let probe_indices: Vec<usize> = models
+        .iter()
+        .enumerate()
+        .filter(|(_, model)| model.kind != "ollama")
+        .map(|(index, _)| index)
+        .collect();
+    let probes = futures_util::future::join_all(probe_indices.iter().map(|&index| {
+        let model = &models[index];
+        probe_status_for(
+            &model.kind,
+            model.base_url.as_deref(),
+            model.weights_path.as_deref(),
+        )
+    }))
+    .await;
+    for (&index, status) in probe_indices.iter().zip(probes) {
+        models[index].status = status;
     }
     models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(ExternalModelsView { models, warnings })
@@ -217,6 +240,16 @@ pub async fn register_external_model(
         ));
     }
 
+    // 商店边界（路径臂）：权重位于任一商店权重根（含自定义 models_dir）之下，
+    // 与名字臂同等拒绝——否则商店权重可被登记成外部模型后经设备管理删除。
+    if let Some(weights) = &weights_path {
+        if weights_in_store(weights) {
+            return Err(format!(
+                "“{weights}”位于模型商店目录之下，由模型商店管理，不能登记为外部模型；请前往模型商店操作"
+            ));
+        }
+    }
+
     // 纯校验（名字/类别/URL/商店边界）已在上方完成；剩下的建目录 → 生成 id →
     // 写文件整段是阻塞文件 IO，放 blocking 池，避免占住 async worker。
     // JoinError 也映射进写失败的同一句人话报错。
@@ -228,7 +261,8 @@ pub async fn register_external_model(
         let model = model.clone();
         let weights_path = weights_path.clone();
         move || -> Result<String, String> {
-            std::fs::create_dir_all(&dir).map_err(|error| format!("注册表目录创建失败：{error}"))?;
+            std::fs::create_dir_all(&dir)
+                .map_err(|error| format!("注册表目录创建失败：{error}"))?;
             let id = fresh_record_id(&dir)?;
             let record = RegistryRecord {
                 schema: 1,
@@ -243,17 +277,20 @@ pub async fn register_external_model(
             };
             let json = serde_json::to_string_pretty(&record)
                 .map_err(|error| format!("注册表序列化失败：{error}"))?;
+            // temp 文件 + rename 原子落盘：进程崩溃不留半截 JSON（半截文件会在
+            // 下次扫描时被跳过并告警，用户看到的是模型凭空消失）。
             let path = dir.join(format!("{id}.json"));
-            std::fs::write(&path, format!("{json}\n"))
+            let tmp = dir.join(format!("{id}.json.tmp"));
+            std::fs::write(&tmp, format!("{json}\n"))
                 .map_err(|error| format!("注册表写入失败：{error}"))?;
+            std::fs::rename(&tmp, &path).map_err(|error| format!("注册表写入失败：{error}"))?;
             Ok(id)
         }
     })
     .await
     .map_err(|error| format!("注册表写入失败：{error}"))??;
 
-    let status =
-        probe_status_for(&kind, base_url.as_deref(), weights_path.as_deref()).await;
+    let status = probe_status_for(&kind, base_url.as_deref(), weights_path.as_deref()).await;
     Ok(ExternalModel {
         id,
         name,
@@ -311,32 +348,24 @@ pub async fn remove_external_model(
         ));
     }
     let record_path = registry_dir().join(format!("{id}.json"));
-    let record = read_record(&record_path)?.ok_or_else(|| {
-        format!("未找到该模型的注册记录（{id}），可能已经被移除；请刷新后重试")
-    })?;
+    // 与本模块其他文件 IO 同一纪律：读盘进 blocking 池，不占 async worker。
+    let record = tokio::task::spawn_blocking({
+        let record_path = record_path.clone();
+        move || read_record(&record_path)
+    })
+    .await
+    .map_err(|error| format!("注册表读取失败（{error}）"))??
+    .ok_or_else(|| format!("未找到该模型的注册记录（{id}），可能已经被移除；请刷新后重试"))?;
 
-    // 守卫 1：确认名必须与记录一致（防误删）。
-    if confirm_name.trim() != record.name {
-        return Err(format!(
-            "确认名不匹配：为防误删，请输入模型名“{}”以确认移除",
-            record.name
-        ));
-    }
-
-    // 守卫 2：商店边界——名字命中商店、或权重位于商店目录之下，一律拒绝。
-    if let Some(store_name) = crate::features::model_store::store_model_name(&record.name) {
-        return Err(format!(
-            "“{store_name}”由模型商店管理，请在模型商店中操作，不能从这里移除"
-        ));
-    }
-    if let Some(weights) = record.weights_path.as_deref() {
-        if path_is_under(Path::new(weights), &model_store_dir()) {
-            return Err(
-                "该模型的权重位于模型商店目录（~/.pinvou3/model-store/）之下，由模型商店管理，请在模型商店中操作"
-                    .to_string(),
-            );
-        }
-    }
+    // 守卫 1 + 守卫 2：确认名一致、名字不在商店名单、权重不在任一商店根之下。
+    // 逻辑抽成纯函数（removal_boundary_error）便于测试矩阵直打，这里只做接线。
+    removal_boundary_error(
+        &record.name,
+        &confirm_name,
+        record.weights_path.as_deref(),
+        &crate::features::model_store::store_model_name,
+        &weights_in_store,
+    )?;
 
     // 守卫 3：权重目录删除（绝对路径 / 家目录之下 / 深度 ≥ 3 / 存在的目录）。
     // 守卫是纯路径计算，留在 async 侧；只有整目录删除进 blocking 池——大权重
@@ -374,9 +403,18 @@ pub async fn remove_external_model(
         }
     }
 
-    // 第 5 步：删注册表文件。
-    let removed_registry = match std::fs::remove_file(&record_path) {
-        Ok(()) => true,
+    // 第 5 步：删注册表文件（文件 IO，进 blocking 池，与读盘同一纪律）。
+    let removed_registry = match tokio::task::spawn_blocking({
+        let record_path = record_path.clone();
+        move || std::fs::remove_file(&record_path)
+    })
+    .await
+    {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            warnings.push(format!("注册表文件删除失败：{error}"));
+            false
+        }
         Err(error) => {
             warnings.push(format!("注册表文件删除失败：{error}"));
             false
@@ -388,6 +426,36 @@ pub async fn remove_external_model(
         ollama_deleted,
         warnings,
     })
+}
+
+/// 守卫 1 + 守卫 2 的纯逻辑（测试矩阵直打）：确认名一致 → 名字未由商店管理 →
+/// 权重不在任一商店权重根之下。商店名单查询与权重根判断以闭包注入，测试可用
+/// 临时目录构造命中/未命中两侧，不依赖真实商店数据库或 `PINVOU3_HOME` 重定向。
+fn removal_boundary_error(
+    record_name: &str,
+    confirm_name: &str,
+    weights_path: Option<&str>,
+    store_name_lookup: &dyn Fn(&str) -> Option<String>,
+    weights_in_store: &dyn Fn(&str) -> bool,
+) -> Result<(), String> {
+    if confirm_name.trim() != record_name {
+        return Err(format!(
+            "确认名不匹配：为防误删，请输入模型名“{record_name}”以确认移除"
+        ));
+    }
+    if let Some(store_name) = store_name_lookup(record_name) {
+        return Err(format!(
+            "“{store_name}”由模型商店管理，请在模型商店中操作，不能从这里移除"
+        ));
+    }
+    if let Some(weights) = weights_path {
+        if weights_in_store(weights) {
+            return Err(
+                "该模型的权重位于模型商店目录之下，由模型商店管理，请在模型商店中操作".to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// 权重删除守卫（纯函数，测试矩阵直打）。全部通过时返回**规范化后**的目标目录，
@@ -405,7 +473,10 @@ fn weights_deletion_guard(home: &Path, weights_path: &Path) -> Result<PathBuf, S
         .canonicalize()
         .map_err(|_| format!("拒绝删除：权重目录不存在（{}）", weights_path.display()))?;
     if !target.is_dir() {
-        return Err(format!("拒绝删除：权重路径不是目录（{}）", target.display()));
+        return Err(format!(
+            "拒绝删除：权重路径不是目录（{}）",
+            target.display()
+        ));
     }
     let home_canonical = home
         .canonicalize()
@@ -456,18 +527,30 @@ fn is_safe_id(id: &str) -> bool {
 
 // ---------------------------------------------------------------- 注册表 IO
 
-/// 读单个注册表文件。文件缺失 → Ok(None)；JSON 损坏/字段缺失 → Err（上层进 warnings）。
+/// 单条注册表文件的大小上限：正常记录不到 1KB，64KB 已放宽两个数量级仍能兜住
+/// 手滑粘贴的超大内容——超限按损坏处理，读进内存前先拒。
+const MAX_RECORD_FILE_BYTES: u64 = 64 * 1024;
+/// 注册表文件数上限：防目录被塞满后扫描与内存无界放大（本地写权限才可触发，纯防御）。
+const MAX_REGISTRY_FILES: usize = 256;
+
+/// 读单个注册表文件。文件缺失 → Ok(None)；JSON 损坏/字段缺失/超大小上限 → Err（上层进 warnings）。
 fn read_record(path: &Path) -> Result<Option<RegistryRecord>, String> {
     if !path.is_file() {
         return Ok(None);
     }
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("文件读取失败：{error}"))?;
+    let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    if size > MAX_RECORD_FILE_BYTES {
+        return Err(format!(
+            "文件异常过大（{size} 字节，上限 {MAX_RECORD_FILE_BYTES}）"
+        ));
+    }
+    let text = std::fs::read_to_string(path).map_err(|error| format!("文件读取失败：{error}"))?;
     parse_record(&text).map(Some)
 }
 
 fn parse_record(text: &str) -> Result<RegistryRecord, String> {
-    let value: Value = serde_json::from_str(text).map_err(|error| format!("JSON 无法解析：{error}"))?;
+    let value: Value =
+        serde_json::from_str(text).map_err(|error| format!("JSON 无法解析：{error}"))?;
     let record: RegistryRecord = serde_json::from_value(value)
         .map_err(|error| format!("字段不符合注册表 schema：{error}"))?;
     if record.name.trim().is_empty() {
@@ -489,6 +572,13 @@ fn read_registry(dir: &Path) -> (Vec<ExternalModel>, Vec<String>) {
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
         .collect();
     paths.sort();
+    if paths.len() > MAX_REGISTRY_FILES {
+        warnings.push(format!(
+            "注册表文件数超过 {MAX_REGISTRY_FILES}，已忽略其余；请检查 {}",
+            dir.display()
+        ));
+        paths.truncate(MAX_REGISTRY_FILES);
+    }
     for path in paths {
         match read_record(&path) {
             Ok(Some(record)) => {
@@ -538,12 +628,23 @@ pub(crate) async fn fetch_ollama_model_names() -> Result<Vec<String>, String> {
         .await
         .map_err(human_probe_error)?;
     if !response.status().is_success() {
-        return Err(format!("服务响应异常（HTTP {}）", response.status().as_u16()));
+        return Err(format!(
+            "服务响应异常（HTTP {}）",
+            response.status().as_u16()
+        ));
     }
-    let value: Value = response
-        .json()
+    // 响应体上限 1MB：正常 /api/tags 是几 KB 的 JSON；回环上的失控进程也可能
+    // 假扮 Ollama 返回巨量内容，解析前先拒收。
+    const MAX_TAGS_BYTES: usize = 1024 * 1024;
+    let text = response
+        .text()
         .await
-        .map_err(|error| format!("Ollama 返回内容无法解析：{error}"))?;
+        .map_err(|error| format!("Ollama 返回内容无法读取：{error}"))?;
+    if text.len() > MAX_TAGS_BYTES {
+        return Err(format!("Ollama 响应过大（{} 字节），拒绝解析", text.len()));
+    }
+    let value: Value =
+        serde_json::from_str(&text).map_err(|error| format!("Ollama 返回内容无法解析：{error}"))?;
     Ok(value
         .get("models")
         .and_then(Value::as_array)
@@ -574,7 +675,10 @@ async fn ollama_delete(model: &str) -> Result<(), String> {
     if response.status().is_success() {
         Ok(())
     } else {
-        Err(format!("服务响应异常（HTTP {}）", response.status().as_u16()))
+        Err(format!(
+            "服务响应异常（HTTP {}）",
+            response.status().as_u16()
+        ))
     }
 }
 
@@ -585,15 +689,13 @@ async fn probe_status_for(
     weights_path: Option<&str>,
 ) -> String {
     match kind {
-        "openai_endpoint" | "vllm" | "llamacpp" => {
-            match base_url.map(endpoint_models_url) {
-                Some(url) => match super::http_get_success(&url).await {
-                    Ok(()) => "available".to_string(),
-                    Err(_) => "unreachable".to_string(),
-                },
-                None => "unreachable".to_string(),
-            }
-        }
+        "openai_endpoint" | "vllm" | "llamacpp" => match base_url.map(endpoint_models_url) {
+            Some(url) => match super::http_get_success(&url).await {
+                Ok(()) => "available".to_string(),
+                Err(_) => "unreachable".to_string(),
+            },
+            None => "unreachable".to_string(),
+        },
         "ollama" => "unreachable".to_string(),
         _ => match weights_path {
             Some(weights) if Path::new(weights).is_dir() => "available".to_string(),
@@ -658,8 +760,7 @@ mod tests {
 
     #[test]
     fn parse_record_defaults_optional_fields() {
-        let record =
-            parse_record(r#"{"name": "tiny", "kind": "other"}"#).expect("minimal record");
+        let record = parse_record(r#"{"name": "tiny", "kind": "other"}"#).expect("minimal record");
         assert_eq!(record.id, "");
         assert_eq!(record.base_url, None);
         assert_eq!(record.weights_path, None);
@@ -679,8 +780,7 @@ mod tests {
         let home = TempDir::new("guard-home");
         let weights = home.path().join(".ollama").join("models").join("qwen3");
         std::fs::create_dir_all(&weights).expect("create weights dir");
-        let target =
-            weights_deletion_guard(home.path(), &weights).expect("guard must pass");
+        let target = weights_deletion_guard(home.path(), &weights).expect("guard must pass");
         assert_eq!(
             target,
             weights.canonicalize().expect("weights canonicalize")
@@ -736,7 +836,12 @@ mod tests {
         // 原样前缀。
         assert!(path_is_under(&inside, store.path()));
         // 规范化后命中（传入 .. 拼接路径）。
-        let dotted = store.path().join("models").join("..").join("models").join("qwen3");
+        let dotted = store
+            .path()
+            .join("models")
+            .join("..")
+            .join("models")
+            .join("qwen3");
         assert!(path_is_under(&dotted, store.path()));
         assert!(!path_is_under(outside.path(), store.path()));
     }
@@ -818,11 +923,20 @@ mod tests {
             registered: true,
             source: "registry".to_string(),
         };
-        assert_eq!(ollama_status(&model, &["qwen3:30b".to_string()]), "available");
-        assert_eq!(ollama_status(&model, &["other:8b".to_string()]), "unreachable");
+        assert_eq!(
+            ollama_status(&model, &["qwen3:30b".to_string()]),
+            "available"
+        );
+        assert_eq!(
+            ollama_status(&model, &["other:8b".to_string()]),
+            "unreachable"
+        );
         model.model = None;
         // 无 model 字段时回退按 name 匹配。
-        assert_eq!(ollama_status(&model, &["qwen3-30b".to_string()]), "available");
+        assert_eq!(
+            ollama_status(&model, &["qwen3-30b".to_string()]),
+            "available"
+        );
     }
 
     #[test]
@@ -840,5 +954,96 @@ mod tests {
         assert_eq!(models[0].id, "m-good");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("m-bad.json"));
+    }
+    #[test]
+    fn removal_boundary_rejects_confirm_mismatch_store_name_and_store_weights() {
+        let no_store = |_name: &str| None;
+        let hit_store = |_name: &str| Some("Qwen3-30B".to_string());
+        let not_in_store = |_weights: &str| false;
+        let in_store = |_weights: &str| true;
+
+        // 守卫 1：确认名不一致（trim 后比较）。
+        let error = removal_boundary_error("qwen3", " qwen3x ", None, &no_store, &not_in_store)
+            .unwrap_err();
+        assert!(error.contains("确认名"));
+        // 守卫 2 名字臂：名字命中商店名单。
+        let error =
+            removal_boundary_error("qwen3", "qwen3", None, &hit_store, &not_in_store).unwrap_err();
+        assert!(error.contains("模型商店"));
+        // 守卫 2 路径臂：权重位于任一商店根之下（别名躲过名字臂时仍被拦）。
+        let error = removal_boundary_error(
+            "qwen3",
+            "qwen3",
+            Some("/home/u/models/qwen3"),
+            &no_store,
+            &in_store,
+        )
+        .unwrap_err();
+        assert!(error.contains("模型商店"));
+        // 三道全过 → Ok。
+        assert!(
+            removal_boundary_error(
+                "qwen3",
+                " qwen3 ",
+                Some("/home/u/models/qwen3"),
+                &no_store,
+                &not_in_store
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn path_under_any_hits_any_root_raw_or_canonical() {
+        let root_a = TempDir::new("roots-a");
+        let root_b = TempDir::new("roots-b");
+        let inside_b = root_b.path().join("models").join("qwen3");
+        std::fs::create_dir_all(&inside_b).expect("create inside");
+        let roots = vec![root_a.path().to_path_buf(), root_b.path().to_path_buf()];
+        assert!(path_under_any(&inside_b, &roots));
+        // `..` 拼接规范化后仍命中；根之外不命中。
+        let dotted = root_b
+            .path()
+            .join("models")
+            .join("..")
+            .join("models")
+            .join("qwen3");
+        assert!(path_under_any(&dotted, &roots));
+        let outside = TempDir::new("roots-outside");
+        assert!(!path_under_any(outside.path(), &roots));
+    }
+
+    #[test]
+    fn read_registry_skips_oversized_record_files() {
+        let dir = TempDir::new("registry-big");
+        std::fs::write(
+            dir.path().join("m-ok.json"),
+            r#"{"id": "m-ok", "name": "ok"}"#,
+        )
+        .expect("write ok record");
+        let blob = format!(
+            "{{\"name\": \"big\", \"note\": \"{}\"}}",
+            "x".repeat(70 * 1024)
+        );
+        std::fs::write(dir.path().join("m-big.json"), blob).expect("write big record");
+        let (models, warnings) = read_registry(dir.path());
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "m-ok");
+        assert!(warnings.iter().any(|warning| warning.contains("异常过大")));
+    }
+
+    #[test]
+    fn read_registry_caps_file_count() {
+        let dir = TempDir::new("registry-many");
+        for i in 0..(MAX_REGISTRY_FILES + 1) {
+            std::fs::write(
+                dir.path().join(format!("m-{i:04}.json")),
+                format!("{{\"id\": \"m-{i:04}\", \"name\": \"n{i}\"}}"),
+            )
+            .expect("write record");
+        }
+        let (models, warnings) = read_registry(dir.path());
+        assert_eq!(models.len(), MAX_REGISTRY_FILES);
+        assert!(warnings.iter().any(|warning| warning.contains("超过")));
     }
 }

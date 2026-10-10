@@ -86,3 +86,4 @@ pub use platform::backend::{
 // 商店边界查询：供其他 feature（设备管理的外部模型登记/移除）判断某个名字
 // 是否已被商店接管。见 platform::store_model_name 的说明。
 pub(crate) use platform::store_model_name;
+pub(crate) use platform::store_weights_roots;

@@ -43,3 +43,28 @@ pub(crate) fn store_model_name(model_name: &str) -> Option<String> {
 pub(crate) fn store_model_name(_model_name: &str) -> Option<String> {
     None
 }
+
+/// 商店权重的**全部**可能根目录。默认根是 store 数据根（`~/.pinvou3/model-store/`，
+/// 默认 `models_dir` 即其下的 `models/`）；用户可在设置里把 `models_dir` 改到别处
+///（几十上百 GB 的权重常被挪去别的盘），那个目录同样是商店管理的权重根。
+///
+/// 设备管理（features/device）的外部模型登记/移除对每个根都做路径边界检查——
+/// 设备侧不得自行推断默认值，否则商店调整权重布局时两边会漂移。
+/// `load_settings()` 之后 `models_dir` 必非空（空值已在加载时回填默认），
+/// 因此这里直接读字符串，不触发 `models_path()` 的建目录副作用。
+#[cfg(target_os = "linux")]
+pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = vec![linux::config::data_dir()];
+    let custom = linux::config::load_settings().models_dir;
+    let custom = std::path::PathBuf::from(custom);
+    if !roots.contains(&custom) {
+        roots.push(custom);
+    }
+    roots
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
+    // 非 Linux 平台没有商店；保留数据根作为兜底边界（外部模型守卫统一走多根检查）。
+    vec![crate::platform::paths::pinvou3_home().join("model-store")]
+}
