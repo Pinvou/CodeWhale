@@ -1,3 +1,6 @@
+import { AdminOperationsWorkspace } from './AdminOperationsWorkspace.jsx';
+import { AdminAccountClosureWorkspace } from './AdminAccountClosureWorkspace.jsx';
+import { AdminEntitlementCorrectionWorkspace } from './AdminEntitlementCorrectionWorkspace.jsx';
 import { OrganizationAdminWorkspace } from './OrganizationAdminWorkspace.jsx';
 import { AdminManagementWorkspace } from './AdminManagementWorkspace.jsx';
 import { requirePersonalAccount } from './personal-contract.js';
@@ -9,7 +12,7 @@ import { AdminApprovalWorkspace } from './AdminApprovalWorkspace.jsx';
 import { approvalCenterVisible } from './admin-approval-actions.js';
 import { AdminFinanceWorkspace } from './AdminFinanceWorkspace.jsx';
 import { AdminReconciliationWorkspace } from './AdminReconciliationWorkspace.jsx';
-import { financeCopy, reconciliationCopy, tokenManagementCopy, organizationCopy } from '../../shared/i18n.js';
+import { financeCopy, reconciliationCopy, tokenManagementCopy, organizationCopy, accountClosureCopy, entitlementCorrectionCopy } from '../../shared/i18n.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import './admin-platform.css';
 
@@ -21,6 +24,8 @@ function Users({ client, copy, canManage }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const generation = useRef(0);
+  const authorizationRefreshGuard = useRef({ generation: 0, active: false, settled: Promise.resolve() });
+  const [authorizationRefreshing, setAuthorizationRefreshing] = useState(false);
   useEffect(() => () => { generation.current++; }, []);
   const load = async (nextCursor = cursor, search = query) => {
     const request = ++generation.current;
@@ -60,6 +65,8 @@ function RepairQueue({ client, copy, profile = false }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const generation = useRef(0);
+  const authorizationRefreshGuard = useRef({ generation: 0, active: false, settled: Promise.resolve() });
+  const [authorizationRefreshing, setAuthorizationRefreshing] = useState(false);
   const load = async () => {
     const request = ++generation.current;
     setBusy(true); setError('');
@@ -98,9 +105,16 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [authorizationOwner, setAuthorizationOwner] = useState(client);
   const [state, setState] = useState('loading');
   const [error, setError] = useState('');
-  const [section, setSection] = useState(() => new URLSearchParams(globalThis.location?.search || '').has('approval_view') ? 'approvals' : 'users');
+  const [section, setSection] = useState(() => {
+    const query = new URLSearchParams(globalThis.location?.search || '');
+    if (query.has('approval_view')) return 'approvals';
+    const requested = query.get('section');
+    return ['operations', 'closures'].includes(requested) ? requested : 'users';
+  });
   const [financeTab, setFinanceTab] = useState('orders');
   const generation = useRef(0);
+  const authorizationRefreshGuard = useRef({ generation: 0, active: false, settled: Promise.resolve() });
+  const [authorizationRefreshing, setAuthorizationRefreshing] = useState(false);
   const load = async () => {
     const request = ++generation.current;
     setAuthorizationOwner(client); setAuthorization(null); setState('loading'); setError('');
@@ -111,15 +125,45 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       const result = requirePersonalAccount(await client.authorization());
       if (request !== generation.current) return;
       if (!result?.user_id || !Array.isArray(result.platform_permissions)) throw new Error('INVALID_AUTHORIZATION');
-      setOverviewFlags(session.feature_flags && typeof session.feature_flags === 'object' ? session.feature_flags : {});
       setCredentialOrigin(typeof session.credential_origin === 'string' ? session.credential_origin : '');
+      setOverviewFlags({ ...(session.feature_flags && typeof session.feature_flags === 'object' ? session.feature_flags : {}), page: session.feature_flags?.admin_model_token_page_overviews === true, aggregate: session.feature_flags?.admin_model_operations_overview === true });
       setAuthorization(result); setState('ready');
     } catch (reason) { if (request === generation.current) { setError(localizedAccountPlatformError(copy, reason)); setState('error'); } }
   };
   useEffect(() => { void load(); return () => { generation.current++; }; }, [client]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const refresh = async () => {
+      const guard = authorizationRefreshGuard.current;
+      if (guard.active) return;
+      const request = ++generation.current;
+      guard.generation++; guard.active = true;
+      let settle;
+      guard.settled = new Promise(resolve => { settle = resolve; });
+      setAuthorizationRefreshing(true);
+      client.invalidateRead('billing', '/admin/v1/registration-bonus-policy');
+      try {
+        const session = await client.session();
+        if (request !== generation.current) return;
+        if (!session.authenticated) { setAuthorization(null); setState('guest'); return; }
+        const result = requirePersonalAccount(await client.authorization());
+        if (request !== generation.current) return;
+        if (!result?.user_id || !Array.isArray(result.platform_permissions)) throw new Error('INVALID_AUTHORIZATION');
+        setAuthorization(result); setState('ready');
+      } catch (reason) {
+        if (request === generation.current) { setState('error'); setError(localizedAccountPlatformError(copy, reason)); }
+      } finally {
+        guard.active = false; settle(); setAuthorizationRefreshing(false);
+      }
+    };
+    globalThis.addEventListener('focus', refresh);
+    return () => globalThis.removeEventListener('focus', refresh);
+  }, [client, copy]);
   const permissions = authorization?.platform_permissions || [];
   const pages = [
     ['users', 'platform.users.read', copy.nav.users],
+    ['operations', 'platform.registration-bonus.read', copy.operations.nav],
+    ['closures', 'platform.account-closures.read', accountClosureCopy[language].title],
+    ['entitlement-correction', 'platform.billing.repairs.request', entitlementCorrectionCopy[language].title],
     ['registration', 'platform.registrations.repair', copy.userManagement.registrationRepair],
     ['profile', 'platform.profile-changes.repair', copy.userManagement.profileRepair],
     ['settings', 'platform.sms-config.read', copy.settings.title],
@@ -142,7 +186,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     {renderedState === 'loading' && <p role="status">{copy.loading}</p>}{error && <div role="alert">{error}<button onClick={load}>{copy.retry}</button></div>}
     {renderedState === 'guest' && <a href="/auth/login?return_to=%2Fadmin.html">{copy.login}</a>}
     {renderedState === 'ready' && <><nav>{pages.map(([key, , label]) => <button key={key} aria-pressed={visibleSection === key} onClick={() => setSection(key)}>{label}</button>)}</nav>{!pages.length && <p role="alert">{copy.permissionDenied}</p>}
-      <div key={authorization.user_id}>{visibleSection === 'organizations' && <OrganizationAdminWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'management' && <AdminManagementWorkspace client={client} copy={copy} language={language} permissions={permissions} owner={authorization.user_id} credentialOrigin={credentialOrigin} overviewFlags={overviewFlags} overviewAuthorizationVersion={authorization.platform_authorization_version || authorization.active_context?.platform_authorization_version || 0} />}{visibleSection === 'reconciliation' && <AdminReconciliationWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'approvals' && <AdminApprovalWorkspace key={`${authorization.user_id}:${authorization.platform_authorization_version || authorization.active_context?.platform_authorization_version || 0}`} client={client} copy={copy} language={language} me={authorization} onNavigate={pages.some(([key]) => key === 'finance') ? route => { setFinanceTab(route.tab); setSection('finance'); } : undefined} />}{visibleSection === 'products' && <RechargeProductWorkspace client={client} me={authorization} copy={financeCopy[language]} language={language} />}{visibleSection === 'finance' && <AdminFinanceWorkspace client={client} me={authorization} language={language} initialTab={financeTab} />}{visibleSection === 'users' && <Users client={client} copy={copy} canManage={permissions.includes('platform.users.status.manage')} />}{visibleSection === 'registration' && <RepairQueue client={client} copy={copy} />}{visibleSection === 'profile' && <RepairQueue key="profile" client={client} copy={copy} profile />}{visibleSection === 'settings' && <SettingsWorkspace client={client} copy={copy} language={language} onLanguageChange={onLanguageChange} permissions={permissions} />}</div>
+      {visibleSection === 'operations' && <AdminOperationsWorkspace client={client} copy={copy} permissions={permissions} currentUserID={authorization.user_id} authorizationRefreshing={authorizationRefreshing} authorizationRefreshGuard={authorizationRefreshGuard} />}<div key={authorization.user_id}>{visibleSection === 'entitlement-correction' && <AdminEntitlementCorrectionWorkspace client={client} copy={financeCopy[language]} language={language} permissions={permissions} owner={authorization.user_id} />}{visibleSection === 'closures' && <AdminAccountClosureWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'management' && <AdminManagementWorkspace client={client} copy={copy} language={language} permissions={permissions} owner={authorization.user_id} credentialOrigin={credentialOrigin} authorizationVersion={authorization.authorization_version} overviewFlags={overviewFlags} overviewAuthorizationVersion={authorization.platform_authorization_version || authorization.active_context?.platform_authorization_version || authorization.authorization_version || 0} />}{visibleSection === 'organizations' && <OrganizationAdminWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'reconciliation' && <AdminReconciliationWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'approvals' && <AdminApprovalWorkspace key={`${authorization.user_id}:${authorization.platform_authorization_version || authorization.active_context?.platform_authorization_version || 0}`} client={client} copy={copy} language={language} me={authorization} onNavigate={pages.some(([key]) => key === 'finance') ? route => { setFinanceTab(route.tab); setSection('finance'); } : undefined} />}{visibleSection === 'products' && <RechargeProductWorkspace client={client} me={authorization} copy={financeCopy[language]} language={language} />}{visibleSection === 'finance' && <AdminFinanceWorkspace client={client} me={authorization} language={language} initialTab={financeTab} />}{visibleSection === 'users' && <Users client={client} copy={copy} canManage={permissions.includes('platform.users.status.manage')} />}{visibleSection === 'registration' && <RepairQueue client={client} copy={copy} />}{visibleSection === 'profile' && <RepairQueue key="profile" client={client} copy={copy} profile />}{visibleSection === 'settings' && <SettingsWorkspace client={client} copy={copy} language={language} onLanguageChange={onLanguageChange} permissions={permissions} />}</div>
     </>}
   </main>;
 }

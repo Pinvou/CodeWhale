@@ -196,6 +196,22 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
         })
     }
 
+    fn capture_model_cancellation_scope(&self, session_id: &str) -> Option<String> {
+        self.model_proxy.cancellation_scope(session_id)
+    }
+    fn cancel_logical_turn(&self, session_id: &str, generation: u64, scope: Option<&str>) {
+        self.model_proxy
+            .cancel_turn_bound(session_id, generation, scope);
+    }
+    fn forget_model_session(&self, session_id: &str) {
+        self.model_proxy.forget_session(session_id);
+    }
+
+    fn reclaim_model_session(&self, session_id: &str, preserved_generation: Option<u64>) {
+        self.model_proxy
+            .reclaim_session(session_id, preserved_generation);
+    }
+
     fn bind_turn_authority(
         &self,
         authority: std::sync::Arc<dyn RuntimeTurnAuthority>,

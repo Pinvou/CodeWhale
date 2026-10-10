@@ -1,6 +1,7 @@
 package billinggovernance
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
@@ -26,22 +27,23 @@ func TestEntitlementFirstDeliveryActivationContract(t *testing.T) {
 	})
 	t.Run("version2-inactive-before-operator", func(t *testing.T) {
 		s := entitlementFirstDeliverySnapshot()
-		s.Activations[1].PolicyVersion = 2
-		s.Activations[1].SnapshotSchemaVersion = 2
+		current := s.Activations[1]
+		current.PolicyVersion, current.SnapshotSchemaVersion = 2, 2
+		s.Activations = slices.Insert(s.Activations, 2, current)
 		if err := ValidateSnapshot(s); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("version2-active-after-operator", func(t *testing.T) {
 		s := entitlementFirstDeliverySnapshot()
-		s.Activations[1].PolicyVersion = 2
-		s.Activations[1].SnapshotSchemaVersion = 2
-		s.Activations[1].State = "ACTIVE"
+		current := s.Activations[1]
+		current.PolicyVersion, current.SnapshotSchemaVersion, current.State = 2, 2, "ACTIVE"
+		s.Activations = slices.Insert(s.Activations, 2, current)
 		if err := ValidateSnapshot(s); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := s.Find("ENTITLEMENT_COMPONENT_ADJUSTMENT", 1, 1); ok {
-			t.Fatal("substituted v2 for frozen v1")
+		if historical, ok := s.Find("ENTITLEMENT_COMPONENT_ADJUSTMENT", 1, 1); !ok || historical.State != "INACTIVE" {
+			t.Fatal("original inactive v1 history was lost")
 		}
 	})
 	for _, tc := range []struct {

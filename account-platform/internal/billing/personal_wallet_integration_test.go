@@ -82,15 +82,24 @@ func TestPersonalWalletPostgresIntegration(t *testing.T) {
 		}
 	})
 	t.Run("liability-failure-rolls-back-wallet", func(t *testing.T) {
-		if _, err := pool.Exec(ctx, `ALTER TABLE ledger_accounts ADD CONSTRAINT fixture_reject_insert CHECK(false) NOT VALID`); err != nil {
+		// Fault injection is deployment-owner setup; the repository keeps its
+		// runtime identity and must not receive table ownership for this test.
+		if _, err := control.Exec(ctx, "SET ROLE billing_schema_owner"); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := control.Exec(ctx, `ALTER TABLE ledger_accounts DROP CONSTRAINT IF EXISTS fixture_reject_insert`); err != nil {
+				t.Error(err)
+			}
+			if _, err := control.Exec(ctx, "SET ROLE billing_service"); err != nil {
+				t.Error(err)
+			}
+		}()
+		if _, err := control.Exec(ctx, `ALTER TABLE ledger_accounts ADD CONSTRAINT fixture_reject_insert CHECK(false) NOT VALID`); err != nil {
 			t.Fatal(err)
 		}
 		badOwner := uuid.New()
 		_, _, ensureErr := repository.EnsureWallet(ctx, "PERSONAL", badOwner)
-		_, cleanupErr := pool.Exec(ctx, `ALTER TABLE ledger_accounts DROP CONSTRAINT fixture_reject_insert`)
-		if cleanupErr != nil {
-			t.Fatal(cleanupErr)
-		}
 		if ensureErr == nil {
 			t.Fatal("wallet accepted without its liability account")
 		}
@@ -117,7 +126,12 @@ func TestPersonalWalletPostgresIntegration(t *testing.T) {
 		if unauthorized.Code != 401 {
 			t.Fatalf("missing service credential status=%d", unauthorized.Code)
 		}
-		for _, path := range []string{"/internal/v1/holds/reserve", "/internal/v1/registration-bonus-grants", "/internal/v1/model-mappings", "/internal/v1/organizations"} {
+		protectedHold := httptest.NewRecorder()
+		handler.ServeHTTP(protectedHold, httptest.NewRequest(http.MethodPost, "/internal/v1/holds/reserve", nil))
+		if protectedHold.Code != http.StatusUnauthorized {
+			t.Fatalf("registered hold route without service credential status=%d", protectedHold.Code)
+		}
+		for _, path := range []string{"/internal/v1/registration-bonus-grants", "/internal/v1/model-mappings", "/internal/v1/organizations"} {
 			out := httptest.NewRecorder()
 			handler.ServeHTTP(out, httptest.NewRequest(http.MethodPost, path, nil))
 			if out.Code != 404 {

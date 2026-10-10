@@ -86,6 +86,29 @@ explicit trusted proxy/header configuration. Without that deployment setup,
 the observed address is the immediate peer. The SPA's device identifier remains
 a separate bounded risk fact.
 
+Password and registration prechecks, CAPTCHA creation, SMS delivery and
+registration all carry that same resolved source and bounded device fact to
+their service calls. A browser-supplied source header never replaces the
+Keycloak connection address.
+
+Only an incorrect, nonempty password for an identified, enabled and unblocked
+user is attributed to Keycloak's password brute-force failure counter.
+Unknown users retain the dummy-password verification and generic response;
+disabled or blocked users, missing credentials, Account denial and service
+failures do not count as incorrect passwords. A new password attempt clears
+the previous attempted-user attribution. A new SMS, registration or reset
+submission clears an authenticated user only when it matches the SPI's prior
+bad-password marker; an unrelated authenticated user is preserved. Rendering
+a mode switch also preserves the existing authentication context. The provider
+identifies a bad-password user through the real
+authentication context as well as the audit event, so the Keycloak failure
+processor can attribute the attempt correctly.
+
+The Maven regression suite exercises the Keycloak 26.7.0 result/failure-flow
+chain with controlled storage and authority ports, plus real local HTTP
+transport checks. Its matching RESTEasy dependency is test-scoped; these
+component checks do not replace a deployed realm/identity-service acceptance.
+
 The Portal service must use the same realm, online/handoff client IDs and
 handoff secret file, together with `PORTAL_OIDC_ISSUER`, `PORTAL_OIDC_JWKS_URL`
 and its authentication/token endpoint URLs. Never substitute the provisioner

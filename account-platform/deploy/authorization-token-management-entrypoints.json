@@ -1,5 +1,5 @@
 {
-  "version": "F05",
+  "version": "F08",
   "description": "Installed entrypoint inventory, not a runtime ACL issuer. Dynamic handler authorization and repository authority checks are preserved; this file does not grant permissions.",
   "routes": [
     {
@@ -830,6 +830,62 @@
         "kind": "workload",
         "all": [
           "internal.token.hold-expiry.prove"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "put",
+      "path": "/internal/v1/organizations/{organization_id}/lifecycle",
+      "handler": "applyOrganizationLifecycle",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.organization.lifecycle"
+        ]
+      },
+      "gates": [],
+      "policy": {
+        "command": "TOKEN_ORGANIZATION_LIFECYCLE_APPLY",
+        "mode": "AuditOnly"
+      }
+    },
+    {
+      "method": "put",
+      "path": "/internal/v1/organizations/{organization_id}/units/{unit_id}/lifecycle",
+      "handler": "organizationUnitDeletionBlockers",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.organization-unit.lifecycle"
+        ]
+      },
+      "gates": [],
+      "policy": {
+        "command": "TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY",
+        "mode": "AuditOnly"
+      }
+    },
+    {
+      "method": "delete",
+      "path": "/internal/v1/users/{user_id}/replay-payloads",
+      "handler": "anonymizeUserReplayPayloads",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.account-closure.replay-clear"
+        ]
+      },
+      "gates": []
+    },
+    {
+      "method": "get",
+      "path": "/internal/v1/users/{user_id}/account-closure-assessment",
+      "handler": "accountClosureAssessment",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.account-closure.assess"
         ]
       },
       "gates": []

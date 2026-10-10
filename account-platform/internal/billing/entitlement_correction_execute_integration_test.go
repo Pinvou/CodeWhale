@@ -25,6 +25,29 @@ func TestEntitlementCorrectionExecuteAndConsumerReadPostgresIntegration(t *testi
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	t.Cleanup(cancel)
 	repository, schema := entitlementRepositoryToVersion(t, ctx, databaseURL, 0)
+	operatorConfig := repository.pool.Config().ConnConfig.Copy()
+	operatorConfig.User = "billing_migrator"
+	operator, err := pgx.ConnectConfig(ctx, operatorConfig)
+	if err != nil {
+		t.Fatal("activation operator connection failed")
+	}
+	defer operator.Close(ctx)
+	setActivation := func(state string) {
+		tx, err := operator.Begin(ctx)
+		if err != nil {
+			t.Fatal("activation operator transaction failed")
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `SET LOCAL ROLE billing_schema_owner`); err != nil {
+			t.Fatal("activation operator qualification failed")
+		}
+		if _, err := tx.Exec(ctx, `UPDATE public.billing_approval_command_activations SET state=$1,version=version+1 WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=2 AND snapshot_schema_version=2`, state); err != nil {
+			t.Fatal("activation operator update failed")
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal("activation operator commit failed")
+		}
+	}
 
 	walletID, ownerID, orderID, transactionID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	lotID, packageID, walletAccountID, clearingAccountID, sourceJournalID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -82,6 +105,72 @@ func TestEntitlementCorrectionExecuteAndConsumerReadPostgresIntegration(t *testi
 	if !frozen.matches(plan) {
 		t.Fatalf("frozen owner facts differ plan=%+v frozen=%+v", plan, frozen)
 	}
+	if _, err := repository.ExecuteEntitlementComponentCorrection(ctx, approvalRequestID, authorizationEventID, 2,
+		packageID, orderID, requesterID, approverID, executionKey, "independent approval completed", reasonCode, frozen); !errors.Is(err, ErrApprovalExecutionUnavailable) {
+		t.Fatal("inactive command accepted fresh financial execution")
+	}
+	var unchanged bool
+	if err := repository.pool.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM entitlement_component_corrections WHERE approval_request_id=$1) AND (SELECT available_microcredits=100 FROM entitlement_components WHERE id=$2)`, approvalRequestID, lotID).Scan(&unchanged); err != nil || !unchanged {
+		t.Fatal("inactive command mutated financial facts")
+	}
+	setActivation("ACTIVE")
+	// Race an actual fresh execution against an operator's uncommitted disable.
+	// Observe the database wait before committing the disable; goroutine startup
+	// alone does not prove the funds transaction reached the activation fence.
+	disableTx, err := operator.Begin(ctx)
+	if err != nil {
+		t.Fatal("disable race transaction failed")
+	}
+	defer disableTx.Rollback(ctx)
+	if _, err := disableTx.Exec(ctx, `SET LOCAL ROLE billing_schema_owner`); err != nil {
+		t.Fatal("disable race owner qualification failed")
+	}
+	if _, err := disableTx.Exec(ctx, `UPDATE public.billing_approval_command_activations SET state='INACTIVE',version=version+1 WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=2 AND snapshot_schema_version=2`); err != nil {
+		t.Fatal("disable race update failed")
+	}
+	var disablingPID int
+	if err := disableTx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&disablingPID); err != nil {
+		t.Fatal("disable race PID failed")
+	}
+	executed := make(chan error, 1)
+	go func() {
+		_, err := repository.ExecuteEntitlementComponentCorrection(ctx, approvalRequestID, authorizationEventID, 2, packageID, orderID, requesterID, approverID, executionKey, "independent approval completed", reasonCode, frozen)
+		executed <- err
+	}()
+	blocked := false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-executed:
+			t.Fatal("fresh execution bypassed pending operator activation update")
+		default:
+		}
+		if err := repository.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))`, disablingPID).Scan(&blocked); err != nil {
+			t.Fatal("disable race observation failed")
+		}
+		if blocked {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !blocked {
+		t.Fatal("fresh execution did not wait on activation update")
+	}
+	if err := disableTx.Commit(ctx); err != nil {
+		t.Fatal("disable race commit failed")
+	}
+	select {
+	case err := <-executed:
+		if !errors.Is(err, ErrApprovalExecutionUnavailable) {
+			t.Fatal("deactivated fresh execution did not fail closed")
+		}
+	case <-ctx.Done():
+		t.Fatal("deactivated execution did not return")
+	}
+	if err := repository.pool.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM entitlement_component_corrections WHERE approval_request_id=$1) AND (SELECT available_microcredits=100 FROM entitlement_components WHERE id=$2)`, approvalRequestID, lotID).Scan(&unchanged); err != nil || !unchanged {
+		t.Fatal("deactivation race mutated financial facts")
+	}
+	setActivation("ACTIVE")
 	result, err := repository.ExecuteEntitlementComponentCorrection(ctx, approvalRequestID, authorizationEventID, 2,
 		packageID, orderID, requesterID, approverID, executionKey, "independent approval completed", reasonCode, frozen)
 	if err != nil || result.Status != "SUCCEEDED" || result.AmountMicrocredits != 20 || result.SourceComponentID != lotID ||
@@ -149,6 +238,7 @@ JOIN entitlement_components c ON c.package_id=p.id WHERE p.id=$1 GROUP BY p.poin
 		t.Fatalf("package effective total changed: total=%d effective=%d err=%v", packageTotal, effectiveTotal, err)
 	}
 
+	setActivation("INACTIVE")
 	replayed, err := repository.ExecuteEntitlementComponentCorrection(ctx, approvalRequestID, authorizationEventID, 2,
 		packageID, orderID, requesterID, approverID, executionKey, "independent approval completed", reasonCode, frozen)
 	if err != nil || replayed != result {
@@ -179,6 +269,19 @@ JOIN entitlement_components c ON c.package_id=p.id WHERE p.id=$1 GROUP BY p.poin
 	if byType["BASE"].EffectiveOriginalMicrocredits != 80 || byType["BONUS"].EffectiveOriginalMicrocredits != 20 ||
 		byType["BASE"].AvailableMicrocredits != 80 || byType["BONUS"].AvailableMicrocredits != 20 {
 		t.Fatalf("effective projection base=%+v bonus=%+v", byType["BASE"], byType["BONUS"])
+	}
+	adminOrder, err := repository.AdminPaymentOrder(ctx, orderID)
+	if err != nil || len(adminOrder.Packages) != 1 || len(adminOrder.Packages[0].Components) != 2 {
+		t.Fatal("admin correction projection missing")
+	}
+	for _, component := range adminOrder.Packages[0].Components {
+		expected := int64(20)
+		if component.ComponentType == "BASE" {
+			expected = 80
+		}
+		if component.EffectiveOriginalMicrocredits != expected {
+			t.Fatal("admin correction projection retained pre-correction effective amount")
+		}
 	}
 
 	qualifiedCorrections := pgx.Identifier{schema, "entitlement_component_corrections"}.Sanitize()
@@ -297,6 +400,9 @@ func entitlementRepositoryToVersion(t *testing.T, ctx context.Context, raw strin
 	}
 	selected := make([]migrations.Migration, 0, len(loaded))
 	for _, migration := range loaded {
+		if migration.Version == 900013 && maximum != 0 && maximum < 59 {
+			continue
+		}
 		if maximum == 0 || migration.Version < 56 || migration.Version > 59 || migration.Version <= maximum {
 			selected = append(selected, migration)
 		}

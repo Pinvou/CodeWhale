@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -104,6 +105,13 @@ func (r *PostgresRepository) CreateAccountClosure(ctx context.Context, principal
 		return AccountClosureRequest{}, err
 	}
 	if existing, err := scanAccountClosure(tx.QueryRow(ctx, accountClosureSelect+` WHERE user_id=$1`, userID)); err == nil {
+		var savedKey, savedFingerprint string
+		if err := tx.QueryRow(ctx, `SELECT idempotency_key_digest,request_fingerprint FROM account_closure_requests WHERE id=$1`, existing.ID).Scan(&savedKey, &savedFingerprint); err != nil {
+			return AccountClosureRequest{}, err
+		}
+		if savedKey != closureDigest(idempotencyKey) || savedFingerprint != closureDigest("account-closure-v1\n"+confirmation) {
+			return AccountClosureRequest{}, ErrConflict
+		}
 		existing.Replayed = true
 		return existing, tx.Commit(ctx)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -146,7 +154,7 @@ func (r *PostgresRepository) CreateAccountClosure(ctx context.Context, principal
 
 func validateAccountClosureRequest(now time.Time, principal identity.Principal, idempotencyKey, confirmation string) error {
 	if utf8.RuneCountInString(idempotencyKey) < 16 || utf8.RuneCountInString(idempotencyKey) > 128 || confirmation != accountClosureConfirmation {
-		return ErrForbidden
+		return ErrInvalidAccountClosureRequest
 	}
 	if principal.AuthenticatedAt.IsZero() || principal.AuthenticatedAt.After(now.Add(time.Minute)) || now.Sub(principal.AuthenticatedAt) > accountClosureRecentAuth {
 		return ErrRecentAuthenticationRequired
@@ -375,7 +383,10 @@ func (r *PostgresRepository) ListAccountClosureRepairs(ctx context.Context, filt
 func (r *PostgresRepository) RetryAccountClosure(ctx context.Context, principal identity.Principal, closureID uuid.UUID, key, reason string) (AccountClosureRequest, error) {
 	key, reason = strings.TrimSpace(key), strings.TrimSpace(reason)
 	if closureID == uuid.Nil || utf8.RuneCountInString(key) < 16 || utf8.RuneCountInString(key) > 128 || reason == "" || utf8.RuneCountInString(reason) > 500 {
-		return AccountClosureRequest{}, ErrConflict
+		return AccountClosureRequest{}, ErrInvalidAccountClosureRequest
+	}
+	if principal.AuthenticatedAt.IsZero() || principal.AuthenticatedAt.After(r.now().Add(time.Minute)) || r.now().Sub(principal.AuthenticatedAt) > accountClosureRecentAuth {
+		return AccountClosureRequest{}, ErrRecentAuthenticationRequired
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
@@ -387,6 +398,13 @@ func (r *PostgresRepository) RetryAccountClosure(ctx context.Context, principal 
 		if err != nil {
 			return AccountClosureRequest{}, err
 		}
+		return AccountClosureRequest{}, ErrForbidden
+	}
+	var permitted bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users u JOIN role_assignments ra ON ra.user_id=u.id JOIN roles ro ON ro.code=ra.role_code JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE u.id=$1 AND u.status='ACTIVE' AND ro.scope='PLATFORM' AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now()) AND rp.permission_code=$2)`, *actorID, PermissionPlatformAccountClosuresRepair).Scan(&permitted); err != nil {
+		return AccountClosureRequest{}, err
+	}
+	if !permitted {
 		return AccountClosureRequest{}, ErrForbidden
 	}
 	keyDigest := closureDigest(key)
@@ -463,45 +481,61 @@ func (w *AccountClosureWorker) Run(ctx context.Context) {
 }
 
 func (w *AccountClosureWorker) runOnce(ctx context.Context) {
-	_, _ = w.repository.PurgeExpiredAccountClosureRetention(ctx, 100)
+	observe := func(err error) {
+		if err != nil && ctx.Err() == nil {
+			log.Print("ACCOUNT_CLOSURE_STAGE_RECORD_FAILED")
+		}
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	if _, err := w.repository.PurgeExpiredAccountClosureRetention(ctx, 100); err != nil {
+		log.Print("ACCOUNT_CLOSURE_RETENTION_UPDATE_FAILED")
+	}
 	for processed := 0; processed < 20; processed++ {
+		if ctx.Err() != nil {
+			return
+		}
 		item, err := w.repository.ClaimAccountClosure(ctx)
 		if err != nil || item == nil {
+			if err != nil {
+				log.Print("ACCOUNT_CLOSURE_CLAIM_FAILED")
+			}
 			return
 		}
 		blockers, gateErr := accountClosureRoleBlockers(w.repository.CheckAccountClosureRoleGate(ctx, item.UserID))
 		if gateErr != nil {
-			_ = w.repository.ScheduleAccountClosureError(ctx, *item, "ACCOUNT_GATE_UNAVAILABLE")
+			observe(w.repository.ScheduleAccountClosureError(ctx, *item, "ACCOUNT_GATE_UNAVAILABLE"))
 			continue
 		}
 		if item.Stage == "CLOSURE_REQUESTED" {
 			if len(blockers) != 0 {
-				_ = w.repository.SaveAccountClosureRequestedBlockers(ctx, *item, blockers)
+				observe(w.repository.SaveAccountClosureRequestedBlockers(ctx, *item, blockers))
 				continue
 			}
 			if err := w.repository.EnterAccountClosureQuiescing(ctx, *item); err != nil {
-				_ = w.repository.ScheduleAccountClosureError(ctx, *item, "QUIET_PERIOD_ENTRY_FAILED")
+				observe(w.repository.ScheduleAccountClosureError(ctx, *item, "QUIET_PERIOD_ENTRY_FAILED"))
 			}
 			continue
 		}
 		if item.Stage == "IDENTITY_CLEANUP" {
 			if w.identities == nil || w.grants == nil || w.replay == nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "CLEANUP_DEPENDENCY_UNAVAILABLE")
+				observe(w.repository.ScheduleAccountClosureCleanupError(ctx, item, "CLEANUP_DEPENDENCY_UNAVAILABLE"))
 				continue
 			}
 			preparation, err := w.repository.PrepareAccountClosureCleanup(ctx, item)
 			if err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "ACCOUNT_CLEANUP_PREPARATION_FAILED")
+				observe(w.repository.ScheduleAccountClosureCleanupError(ctx, item, "ACCOUNT_CLEANUP_PREPARATION_FAILED"))
 				continue
 			}
 			identityFailed := false
 			for _, subject := range preparation.IdentitySubjects {
-				if err := w.repository.RequireAccountClosureClaim(ctx, *item); err != nil {
+				if err := w.repository.RenewAccountClosureClaim(ctx, item); err != nil {
 					identityFailed = true
 					break
 				}
 				if err := w.identities.DeleteUser(ctx, subject); err != nil {
-					_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "IDENTITY_DELETE_UNAVAILABLE")
+					observe(w.repository.ScheduleAccountClosureCleanupError(ctx, item, "IDENTITY_DELETE_UNAVAILABLE"))
 					identityFailed = true
 					break
 				}
@@ -510,47 +544,51 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 				continue
 			}
 			if err := w.repository.MarkAccountClosureIdentityDeleted(ctx, item, preparation.SubjectLifecycleVersion); err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "IDENTITY_DELETE_COMMIT_FAILED")
+				observe(w.repository.ScheduleAccountClosureCleanupError(ctx, item, "IDENTITY_DELETE_COMMIT_FAILED"))
 				continue
 			}
-			if err := w.repository.RequireAccountClosureClaim(ctx, *item); err != nil {
+			if err := w.repository.RenewAccountClosureClaim(ctx, item); err != nil {
 				continue
 			}
 			if err := w.grants.IsolateGrants(ctx, item.UserID, item.ID, preparation.SubjectLifecycleVersion); err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "GRANT_ISOLATION_FAILED")
+				observe(w.repository.ScheduleAccountClosureCleanupError(ctx, item, "GRANT_ISOLATION_FAILED"))
 				continue
 			}
 			if err := w.repository.MarkAccountClosureGrantsIsolated(ctx, item, preparation.SubjectLifecycleVersion); err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "GRANT_ISOLATION_COMMIT_FAILED")
+				observe(w.repository.ScheduleAccountClosureCleanupError(ctx, item, "GRANT_ISOLATION_COMMIT_FAILED"))
 				continue
 			}
-			if err := w.repository.RequireAccountClosureClaim(ctx, *item); err != nil {
+			if err := w.repository.RenewAccountClosureClaim(ctx, item); err != nil {
 				continue
 			}
 			if err := w.replay.ClearReplay(ctx, item.UserID); err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "TOKEN_REPLAY_CLEANUP_FAILED")
+				observe(w.repository.ScheduleAccountClosureCleanupError(ctx, item, "TOKEN_REPLAY_CLEANUP_FAILED"))
 				continue
 			}
 			if err := w.repository.MarkAccountClosureReplayCleared(ctx, item, preparation.SubjectLifecycleVersion); err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "TOKEN_REPLAY_CLEANUP_COMMIT_FAILED")
+				observe(w.repository.ScheduleAccountClosureCleanupError(ctx, item, "TOKEN_REPLAY_CLEANUP_COMMIT_FAILED"))
 				continue
 			}
 			if err := w.repository.AnonymizeAccountClosure(ctx, item, preparation.SubjectLifecycleVersion); err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "ANONYMIZATION_FAILED")
+				observe(w.repository.ScheduleAccountClosureCleanupError(ctx, item, "ANONYMIZATION_FAILED"))
 			}
 			continue
 		}
 		if item.Stage == "ANONYMIZED" {
 			if err := w.repository.CompleteAccountClosure(ctx, item); err != nil {
-				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item, "OUTBOX_CONFIRMATION_PENDING")
+				observe(w.repository.ScheduleAccountClosureCleanupError(ctx, item, "OUTBOX_CONFIRMATION_PENDING"))
 			}
 			continue
 		}
 		failed := false
 		for _, client := range w.clients {
+			if err := w.repository.RenewAccountClosureClaim(ctx, item); err != nil {
+				failed = true
+				break
+			}
 			assessment, err := client.Assess(ctx, item.UserID)
 			if err != nil {
-				_ = w.repository.ScheduleAccountClosureError(ctx, *item, "DOMAIN_ASSESSMENT_UNAVAILABLE")
+				observe(w.repository.ScheduleAccountClosureError(ctx, *item, "DOMAIN_ASSESSMENT_UNAVAILABLE"))
 				failed = true
 				break
 			}
@@ -560,10 +598,10 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 			continue
 		}
 		if len(blockers) != 0 {
-			_ = w.repository.SaveAccountClosureBlockers(ctx, *item, blockers)
+			observe(w.repository.SaveAccountClosureBlockers(ctx, *item, blockers))
 			continue
 		}
-		_ = w.repository.AdvanceAccountClosureToIdentityCleanup(ctx, *item)
+		observe(w.repository.AdvanceAccountClosureToIdentityCleanup(ctx, *item))
 	}
 }
 

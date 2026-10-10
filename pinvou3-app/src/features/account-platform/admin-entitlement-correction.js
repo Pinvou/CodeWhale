@@ -16,7 +16,7 @@ const criticalKeys = ['package_id', 'wallet_id', 'wallet_version', 'payment_orde
 const financialKeys = ['package_total_microcredits', 'source_original_microcredits', 'target_original_microcredits', 'effective_total_microcredits'];
 
 function exactKeys(value, names) {
-  return value && Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name));
+  return value && Object.keys(value).length === names.length && names.every(name => Object.prototype.hasOwnProperty.call(value, name));
 }
 
 function amount(value) {
@@ -85,7 +85,7 @@ export function entitlementCorrectionApprovalDraft(precheck, reasonCode, operato
   const reason = String(operatorReason || '').trim();
   if (!projection || !reasonCodeValid(code) || code !== projection.reasonCode ||
     [...reason].length < 10 || [...reason].length > 2000 || typeof requestKey !== 'string' ||
-    `approval:${requestKey}`.length < 16 || `approval:${requestKey}`.length > 128) {
+    `approval:${requestKey}`.length < 16 || `approval:${requestKey}`.length > 120) {
     throw Object.assign(new Error('entitlement correction precheck is not usable'), {
       code: 'ENTITLEMENT_CORRECTION_PRECHECK_INVALID',
     });

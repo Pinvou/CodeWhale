@@ -76,6 +76,12 @@ type approvalProductSummary struct {
 	ProductControlVersion string `json:"product_control_version"`
 }
 
+type approvalEntitlementCorrectionSummary struct {
+	PackageID      uuid.UUID `json:"package_id"`
+	PaymentOrderID uuid.UUID `json:"payment_order_id"`
+	ReasonCode     string    `json:"reason_code"`
+}
+
 type approvalLifecycleSummary struct {
 	ModelID                 uuid.UUID  `json:"model_id"`
 	TargetLifecycle         string     `json:"target_lifecycle"`
@@ -97,6 +103,8 @@ type approvalCredentialSummary struct {
 
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
 	switch command {
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		return policyVersion == 2 && snapshotVersion == 2
 	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "PAYMENT_PROVIDER_RESUME":
@@ -155,6 +163,12 @@ func approvalV2Command(item ApprovalRequest) any {
 		return nil
 	}
 	switch item.CommandType {
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		id, err := uuid.Parse(value)
+		if err != nil || id.String() != value || item.TargetResourceType != "ENTITLEMENT_PACKAGE" {
+			return nil
+		}
+		return approvalEntitlementCorrectionSummary{PackageID: id}
 	case "WALLET_ADJUSTMENT":
 		if item.TargetResourceType != "MANUAL_ADJUSTMENT" {
 			return nil
@@ -224,6 +238,9 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 	}
 	var proof struct {
 		Normalized struct {
+			PackageID               uuid.UUID  `json:"package_id"`
+			PaymentOrderID          uuid.UUID  `json:"payment_order_id"`
+			ReasonCode              string     `json:"reason_code"`
 			WalletID                uuid.UUID  `json:"wallet_id"`
 			AmountMicrocredits      string     `json:"amount_microcredits"`
 			ProviderID              string     `json:"provider_id"`
@@ -248,6 +265,12 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 	}
 	var command any
 	switch target := approvalV2Command(item).(type) {
+	case approvalEntitlementCorrectionSummary:
+		if proof.Normalized.PackageID != target.PackageID || proof.Normalized.PaymentOrderID == uuid.Nil {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.PaymentOrderID, target.ReasonCode = proof.Normalized.PaymentOrderID, proof.Normalized.ReasonCode
+		command = target
 	case approvalWalletSummary:
 		target.WalletID = proof.Normalized.WalletID
 		target.AmountMicrocredits = proof.Normalized.AmountMicrocredits

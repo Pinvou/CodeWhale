@@ -246,19 +246,16 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 			t.Fatal(e)
 		}
 		stale, e := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", "v1", time.Minute)
-		if e != nil || stale == nil || stale.ID != old.ID || stale.MappingVersion != old.MappingVersion {
-			t.Fatal("old generation retry was not actually leased", e)
-		}
-		if e = r.CompleteCommerceCustomerSyncJob(ctx, *stale, commerce.CustomerProvisionResult{ExternalReferenceRedacted: "***obsolete"}); e != nil {
-			t.Fatal(e)
+		if e != nil || stale != nil {
+			t.Fatal("old generation acquired a new dispatch lease", e)
 		}
 		after, e := r.GetCommerceCustomerMapping(ctx, p)
 		if e != nil || before != after {
 			t.Fatal("stale retry/completion changed current adapter mapping", e)
 		}
 		var outcome string
-		if e = c.QueryRow(ctx, `SELECT outcome FROM commerce_customer_sync_evidence WHERE job_id=$1 AND outcome='STALE'`, old.ID).Scan(&outcome); e != nil || outcome != "STALE" {
-			t.Fatal("stale generation evidence", e)
+		if e = c.QueryRow(ctx, `SELECT outcome FROM commerce_customer_sync_evidence WHERE job_id=$1 AND outcome='FAILED'`, old.ID).Scan(&outcome); e != nil || outcome != "FAILED" {
+			t.Fatal("old generation retry evidence retained", e)
 		}
 		current, e := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", "v2", time.Minute)
 		if e != nil || current == nil || current.MappingVersion <= old.MappingVersion {
@@ -347,10 +344,19 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 				deadline := time.Now().Add(time.Second)
 				for {
 					var expired bool
-					if e = c.QueryRow(ctx, `SELECT clock_timestamp()>lease_until FROM commerce_customer_sync_jobs WHERE id=$1`, first.ID).Scan(&expired); e != nil {
+					var leaseUntil time.Time
+					if e = c.QueryRow(ctx, `SELECT clock_timestamp()>lease_until,lease_until FROM commerce_customer_sync_jobs WHERE id=$1`, first.ID).Scan(&expired, &leaseUntil); e != nil {
 						t.Fatal(e)
 					}
-					if expired {
+					// Claim uses the repository's real Go clock. PostgreSQL's
+					// clock alone can cross this 20ms boundary first on Windows.
+					// Require expiry in both clock domains without changing the
+					// lease or weakening the subsequent reclaim assertion.
+					applicationExpired := time.Now().After(leaseUntil)
+					if expired && !applicationExpired {
+						t.Log("database lease clock passed expiry before the application claim clock")
+					}
+					if expired && applicationExpired {
 						break
 					}
 					if time.Now().After(deadline) {
@@ -521,7 +527,7 @@ func TestF02CommerceOriginal15LateUpgradePreservesFacts(t *testing.T) {
 	}
 	var prior []migrations.Migration
 	for _, m := range all {
-		if m.Version != 15 {
+		if m.Version != 15 && m.Version != 91 {
 			prior = append(prior, m)
 		}
 	}
@@ -550,6 +556,16 @@ func TestF02CommerceOriginal15LateUpgradePreservesFacts(t *testing.T) {
 	}
 	if _, err = migrations.VerifyApplied(ctx, c, all); err != nil {
 		t.Fatal(err)
+	}
+	var indexDefinition string
+	if err = c.QueryRow(ctx, `SELECT pg_get_indexdef('commerce_customer_sync_jobs_leased_idx'::regclass)`).Scan(&indexDefinition); err != nil || !strings.Contains(indexDefinition, "lease_until") || !strings.Contains(indexDefinition, "LEASED") {
+		t.Fatal("late lease index not installed", err)
+	}
+	if err = accountschema.Up(ctx, c, all); err != nil {
+		t.Fatal("late upgrade replay", err)
+	}
+	if _, err = migrations.VerifyApplied(ctx, c, all); err != nil {
+		t.Fatal("late replay checksum", err)
 	}
 	var oldTable *string
 	if err = c.QueryRow(ctx, `SELECT to_regclass('mall_user_sync_jobs')::text`).Scan(&oldTable); err != nil || oldTable != nil {

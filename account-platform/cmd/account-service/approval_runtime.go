@@ -47,6 +47,11 @@ func configureApprovals(ctx context.Context, repository *account.PostgresReposit
 		return errors.New("ACCOUNT_APPROVAL_PROOF_CONFIGURATION_INVALID")
 	}
 	repository.WithApprovalProofSource(proofs)
+	prechecks, err := account.NewHTTPApprovalPrecheckSource(billingURL, credential)
+	if err != nil {
+		return errors.New("ACCOUNT_APPROVAL_PRECHECK_CONFIGURATION_INVALID")
+	}
+	service.WithApprovalPrechecks(prechecks)
 	results, err := account.NewApprovalRecoveryResultClientWithToken(billingURL, tokenURL, credential)
 	if err != nil {
 		return errors.New("ACCOUNT_APPROVAL_RECOVERY_CONFIGURATION_INVALID")

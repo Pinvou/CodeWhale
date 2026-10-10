@@ -13,7 +13,13 @@ import (
 
 func TestF09EntitlementThroughProductionPortal(t *testing.T) {
 	id := uuid.NewString()
-	body := `{"command_type":"ENTITLEMENT_COMPONENT_ADJUSTMENT","idempotency_key":"controlled-correction-key","target_resource_type":"ENTITLEMENT_PACKAGE","target_resource_id":"` + id + `","normalized_command":{"package_id":"` + id + `","payment_order_id":"` + id + `","reason_code":"ORIGINAL_SPLIT_MISMATCH"},"reason":"Controlled correction approval reason","redacted_evidence":[],"expected_impact":{},"critical_resource_versions":{"wallet_version":9007199254740993},"financial_snapshot":{"package_total_microcredits":9223372036854775807}}`
+	body := `{"command_type":"ENTITLEMENT_COMPONENT_ADJUSTMENT","idempotency_key":"controlled-correction-key","target_resource_type":"ENTITLEMENT_PACKAGE","target_resource_id":"` + id + `","normalized_command":{"package_id":"` + id + `","payment_order_id":"` + id + `","reason_code":"ORIGINAL_SPLIT_MISMATCH"},"reason":"Controlled correction approval reason","redacted_evidence":[],"expected_impact":{},"critical_resource_versions":{"package_id":"` + id + `","wallet_id":"` + id + `","wallet_version":9007199254740993,"payment_order_id":"` + id + `","payment_transaction_id":"` + id + `","source_component_id":"` + id + `","source_lot_id":"` + id + `","target_component_id":null,"target_lot_id":null,"source_type":"BASE","target_type":"BONUS","amount_microcredits":1,"source_evidence_digest":"` + strings.Repeat("a", 64) + `","facts_digest":"` + strings.Repeat("b", 64) + `","policy_version":2},"financial_snapshot":{"package_total_microcredits":9223372036854775807,"source_original_microcredits":9223372036854775807,"target_original_microcredits":0,"effective_total_microcredits":9223372036854775807}}`
+	if validApprovalBFFMutation("create", []byte(body), 1, 1, "1") {
+		t.Fatal("entitlement policy2 accepted legacy wire1")
+	}
+	if validApprovalBFFMutation("create", []byte(strings.Replace(body, `"policy_version":2`, `"policy_version":1`, 1)), 2, 1, "1") {
+		t.Fatal("entitlement policy2 accepted mismatched frozen policy")
+	}
 	for _, test := range []struct {
 		name, method, path, body string
 		session, csrf            bool

@@ -21,8 +21,9 @@ func (s *Service) paginatedUsage(w http.ResponseWriter, r *http.Request) bool {
 		writeAdminQueryError(w, r, err)
 		return true
 	}
-	repo, ok := s.paginationRepository()
-	if !ok {
+	_, paginationOK := s.paginationRepository()
+	repo, ok := s.repository.(usageQueryRepository)
+	if !paginationOK || !ok {
 		return false
 	}
 	return s.adminQueryPage(w, r, filter, "usage-requests", "platform", adminUsageSort, 50, 200, source, func(ctx context.Context, ids []string) (any, error) { return repo.adminUsageByIDs(ctx, ids) })
@@ -38,8 +39,9 @@ func (s *Service) adminReconciliationCases(w http.ResponseWriter, r *http.Reques
 		writeAdminQueryError(w, r, err)
 		return
 	}
-	repo, ok := s.paginationRepository()
-	if !ok {
+	_, paginationOK := s.paginationRepository()
+	repo, ok := s.repository.(usageQueryRepository)
+	if !paginationOK || !ok {
 		api.WriteError(w, 503, "ADMIN_UNAVAILABLE", "token administration is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -62,8 +64,9 @@ func (s *Service) adminUsageEvidence(w http.ResponseWriter, r *http.Request) {
 		writeAdminQueryError(w, r, err)
 		return
 	}
-	repo, ok := s.paginationRepository()
-	if !ok {
+	_, paginationOK := s.paginationRepository()
+	repo, ok := s.repository.(usageQueryRepository)
+	if !paginationOK || !ok {
 		api.WriteError(w, 503, "ADMIN_UNAVAILABLE", "token administration is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}

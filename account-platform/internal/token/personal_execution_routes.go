@@ -13,6 +13,7 @@ func (s *Service) registerPersonalExecutionRoutes(router *httpserver.Router, pro
 	protected.GET("/models", httpserver.AdaptFunc(s.listCatalogModels))
 	protected.GET("/model-protocols", httpserver.AdaptFunc(s.modelProtocols))
 	protected.POST("/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
+	protected.GET("/usage-requests/by-idempotency-key", httpserver.AdaptFunc(s.getPersonalUsageByIdempotencyKey))
 	protected.GET("/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
 	protected.POST("/usage-requests/:usage_request_id/cancel", httpserver.AdaptFunc(s.cancelUsageRequest))
 	protected.GET("/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))

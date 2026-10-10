@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Token management current contract",
-    "version": "F05",
+    "version": "F08",
     "description": "Current management API. Personal invocation/usage and signed readiness are specified separately in token-invocation.yaml. This finite document covers every installed management method/path and authority; selected write and receipt DTOs are specified, other read projections are explicitly partial. Platform GET routes also register authenticated HEAD with the same authority."
   },
   "paths": {
@@ -230,7 +230,8 @@
                 "TOKEN_ROUTE_UPSERT",
                 "TOKEN_ROUTE_DELETE",
                 "TOKEN_CREDENTIAL_VALIDATE",
-                "TOKEN_ROUTE_PROVISIONING_REPAIR"
+                "TOKEN_ROUTE_PROVISIONING_REPAIR",
+                "TOKEN_USAGE_RECONCILIATION_RETRY"
               ]
             },
             "description": "Currently registered COMMAND transport only; APPROVED and ISOLATED commands are excluded. Lookup is read-only and scoped to current permissions, actor, command type and the original stable key."
@@ -3928,6 +3929,303 @@
           }
         }
       }
+    },
+    "/internal/v1/organizations/{organization_id}/lifecycle": {
+      "put": {
+        "operationId": "put_internal_v1_organization_lifecycle",
+        "summary": "applyOrganizationLifecycle",
+        "description": "Account workload projection only; exact permission and AuditOnly policy are required. Same version/status is replayable; stale or conflicting version/state is rejected. A blocked assessment returns 409 with the same assessment DTO; preflight_only does not mutate lifecycle state.",
+        "x-go-handler": "applyOrganizationLifecycle",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.organization.lifecycle"
+          ]
+        },
+        "x-governance-gates": [],
+        "x-command-policy": {
+          "command": "TOKEN_ORGANIZATION_LIFECYCLE_APPLY",
+          "mode": "AuditOnly"
+        },
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrganizationLifecycleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current lifecycle assessment; callers must inspect ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationLifecycleAssessment"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Malformed request, missing workload identity/permission or capability uses the stable error envelope. An unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Blocked preflight/deletion returns an assessment; stale/conflicting lifecycle facts return Error with ORGANIZATION_LIFECYCLE_CONFLICT.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/OrganizationLifecycleAssessment"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/organizations/{organization_id}/units/{unit_id}/lifecycle": {
+      "put": {
+        "operationId": "put_internal_v1_organization_unit_lifecycle",
+        "summary": "organizationUnitDeletionBlockers",
+        "description": "Account workload projection only; exact permission and AuditOnly policy are required. Same version/status is replayable; stale or conflicting version/state is rejected. Readiness is part of the 200 assessment and must be checked; false does not prove deletion completed.",
+        "x-go-handler": "organizationUnitDeletionBlockers",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.organization-unit.lifecycle"
+          ]
+        },
+        "x-governance-gates": [],
+        "x-command-policy": {
+          "command": "TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY",
+          "mode": "AuditOnly"
+        },
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "unit_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrganizationUnitLifecycleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current lifecycle assessment; callers must inspect ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationUnitDeletionAssessment"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Malformed request, missing workload identity/permission or capability uses the stable error envelope. An unknown result does not prove no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale/conflicting lifecycle facts return ORGANIZATION_LIFECYCLE_CONFLICT.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/users/{user_id}/replay-payloads": {
+      "delete": {
+        "operationId": "anonymizeUserReplayPayloads",
+        "summary": "anonymizeUserReplayPayloads",
+        "x-go-handler": "anonymizeUserReplayPayloads",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.account-closure.replay-clear"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Invalid target, unavailable repository or authority failure; no successful cleanup acknowledgement."
+          },
+          "204": {
+            "description": "Permanent fence and cleanup committed; safe idempotent replay."
+          }
+        },
+        "description": "Permanent subject fence and permitted replay cleanup commit before 204. Unknown financial settlement blocks cleanup. A workload scope never grants a human mutation permission."
+      }
+    },
+    "/internal/v1/users/{user_id}/account-closure-assessment": {
+      "get": {
+        "operationId": "accountClosureAssessment",
+        "summary": "accountClosureAssessment",
+        "x-go-handler": "accountClosureAssessment",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.account-closure.assess"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Invalid target, unavailable repository or authority failure; no successful cleanup acknowledgement."
+          },
+          "200": {
+            "description": "Assessment, not a cleanup receipt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "user_id",
+                    "ready",
+                    "blockers"
+                  ],
+                  "properties": {
+                    "user_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "ready": {
+                      "type": "boolean"
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "code",
+                          "domain",
+                          "resource_type"
+                        ],
+                        "properties": {
+                          "code": {
+                            "type": "string"
+                          },
+                          "domain": {
+                            "type": "string"
+                          },
+                          "resource_type": {
+                            "type": "string"
+                          },
+                          "resource_id": {
+                            "type": "string"
+                          },
+                          "user_action": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "description": "Read-only assessment of unsettled usage and retained financial review facts."
+      }
     }
   },
   "components": {
@@ -5631,6 +5929,183 @@
             "enum": [
               "LOCAL_CONFIRMED"
             ]
+          }
+        }
+      },
+      "OrganizationLifecycleAssessment": {
+        "type": "object",
+        "x-go-type": "OrganizationLifecycleAssessment",
+        "x-go-source": "internal/token/organization_lifecycle.go",
+        "required": [
+          "organization_id",
+          "status",
+          "account_version",
+          "ready",
+          "blockers"
+        ],
+        "properties": {
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "DISABLED",
+              "DELETED"
+            ]
+          },
+          "account_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrganizationLifecycleBlocker"
+            }
+          }
+        }
+      },
+      "OrganizationLifecycleBlocker": {
+        "type": "object",
+        "x-go-type": "OrganizationLifecycleBlocker",
+        "x-go-source": "internal/token/organization_lifecycle.go",
+        "required": [
+          "code",
+          "resource_type",
+          "resource_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "resource_type": {
+            "type": "string"
+          },
+          "resource_id": {
+            "type": "string"
+          }
+        }
+      },
+      "OrganizationLifecycleRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "account_version"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "DISABLED",
+              "DELETED"
+            ]
+          },
+          "account_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "preflight_only": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "OrganizationUnitDeletionAssessment": {
+        "type": "object",
+        "x-go-type": "OrganizationUnitDeletionAssessment",
+        "x-go-source": "internal/token/organization_unit_blockers.go",
+        "required": [
+          "organization_id",
+          "status",
+          "structure_version",
+          "ready",
+          "blockers",
+          "unit_id"
+        ],
+        "properties": {
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "DELETION_PENDING",
+              "DELETED"
+            ]
+          },
+          "structure_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrganizationUnitBlocker"
+            }
+          },
+          "unit_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "OrganizationUnitBlocker": {
+        "type": "object",
+        "x-go-type": "OrganizationUnitBlocker",
+        "x-go-source": "internal/token/organization_unit_blockers.go",
+        "required": [
+          "code",
+          "resource_type",
+          "resource_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "resource_type": {
+            "type": "string"
+          },
+          "resource_id": {
+            "type": "string"
+          }
+        }
+      },
+      "OrganizationUnitLifecycleRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "structure_version"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "DELETION_PENDING",
+              "DELETED"
+            ]
+          },
+          "structure_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
           }
         }
       }

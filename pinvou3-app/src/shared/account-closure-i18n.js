@@ -23,6 +23,7 @@ export const accountClosureCopy = {
       "PAYMENT_PROCESSING": "仍有支付流程未结束",
       "REFUND_UNRESOLVED": "仍有退款未结束",
       "CHARGEBACK_UNRESOLVED": "仍有拒付未解决",
+      "FORCED_REFUND_UNRESOLVED": "仍有强制退款待核实",
       "FINANCIAL_RECONCILIATION_OPEN": "仍有财务对账差异",
       "LATE_PAYMENT_REVIEW_OPEN": "仍有晚到支付复核",
       "PAYMENT_ANOMALY_OPEN": "仍有支付异常",
@@ -71,6 +72,7 @@ export const accountClosureCopy = {
       "PAYMENT_PROCESSING": "A payment is still processing",
       "REFUND_UNRESOLVED": "A refund is unresolved",
       "CHARGEBACK_UNRESOLVED": "A chargeback is unresolved",
+      "FORCED_REFUND_UNRESOLVED": "A forced refund requires review",
       "FINANCIAL_RECONCILIATION_OPEN": "Financial reconciliation is open",
       "LATE_PAYMENT_REVIEW_OPEN": "A late-payment review is open",
       "PAYMENT_ANOMALY_OPEN": "A payment anomaly is open",
@@ -119,6 +121,7 @@ export const accountClosureCopy = {
       "PAYMENT_PROCESSING": "支払い処理が完了していません",
       "REFUND_UNRESOLVED": "返金が未解決です",
       "CHARGEBACK_UNRESOLVED": "チャージバックが未解決です",
+      "FORCED_REFUND_UNRESOLVED": "強制返金の確認が必要です",
       "FINANCIAL_RECONCILIATION_OPEN": "財務照合が未解決です",
       "LATE_PAYMENT_REVIEW_OPEN": "遅延支払い確認が未解決です",
       "PAYMENT_ANOMALY_OPEN": "支払い異常が未解決です",
@@ -144,3 +147,25 @@ export const accountClosureCopy = {
     "updated": "最終更新日時"
   }
 };
+
+Object.assign(accountClosureCopy.zh, {
+  reauthenticate: '重新认证',
+  recoveryUnavailable: '无法安全读取或保存原操作凭据，已停止发送请求。请恢复此浏览器的会话存储后再试。',
+  recoveryPending: '原操作结果尚未确认；只能使用原请求凭据重试。',
+  statuses: { IN_PROGRESS: '处理中', BLOCKED: '存在阻断', RETRY: '等待重试', REPAIR_REQUIRED: '需要人工修复', COMPLETED: '已完成' },
+  stages: { CLOSURE_REQUESTED: '已申请注销', QUIESCING: '停止新业务', FINANCIAL_CLEARANCE: '账务结清', IDENTITY_CLEANUP: '身份清理', ANONYMIZED: '已匿名化', COMPLETED: '注销完成' },
+});
+Object.assign(accountClosureCopy.en, {
+  reauthenticate: 'Reauthenticate',
+  recoveryUnavailable: 'The original operation proof cannot be read or saved safely. Requests are blocked; restore this browser’s session storage before retrying.',
+  recoveryPending: 'The original result is unconfirmed. Retry only with the original operation proof.',
+  statuses: { IN_PROGRESS: 'In progress', BLOCKED: 'Blocked', RETRY: 'Awaiting retry', REPAIR_REQUIRED: 'Manual repair required', COMPLETED: 'Completed' },
+  stages: { CLOSURE_REQUESTED: 'Closure requested', QUIESCING: 'Stopping new activity', FINANCIAL_CLEARANCE: 'Financial clearance', IDENTITY_CLEANUP: 'Identity cleanup', ANONYMIZED: 'Anonymized', COMPLETED: 'Closure completed' },
+});
+Object.assign(accountClosureCopy.ja, {
+  reauthenticate: '再認証',
+  recoveryUnavailable: '元の操作証跡を安全に読み取り・保存できないため、送信を停止しました。このブラウザーのセッション保存を復旧してから再試行してください。',
+  recoveryPending: '元の操作結果は未確認です。元の要求証跡でのみ再試行できます。',
+  statuses: { IN_PROGRESS: '処理中', BLOCKED: '阻止要因あり', RETRY: '再試行待ち', REPAIR_REQUIRED: '手動修復が必要', COMPLETED: '完了' },
+  stages: { CLOSURE_REQUESTED: '退会申請済み', QUIESCING: '新規処理の停止', FINANCIAL_CLEARANCE: '会計精算', IDENTITY_CLEANUP: '認証情報の削除', ANONYMIZED: '匿名化済み', COMPLETED: '退会完了' },
+});

@@ -11,7 +11,10 @@
     "account-platform/internal/token/credential_origin.go",
     "account-platform/internal/token/management_routes.go",
     "account-platform/internal/token/personal_execution_routes.go",
-    "account-platform/internal/token/service.go"
+    "account-platform/internal/token/service.go",
+    "account-platform/internal/account/organization_routes.go",
+    "account-platform/internal/billing/organization_routes.go",
+    "account-platform/internal/token/organization_finance_routes.go"
   ],
   "http_policies": [
     {
@@ -173,6 +176,15 @@
       "path": "/approval-directory",
       "scope": "platform",
       "strategy": "domain.approval-policy-v2-directory"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
+      "method": "POST",
+      "path": "/approval-command-prechecks",
+      "scope": "platform",
+      "strategy": "domain.entitlement-precheck-recent-auth-read-only-owner",
+      "permissions": ["platform.billing.repairs.request"]
     },
     {
       "source": "account-platform/internal/account/service.go",
@@ -609,6 +621,17 @@
     {
       "source": "account-platform/internal/token/personal_execution_routes.go",
       "receiver": "protected",
+      "method": "GET",
+      "path": "/usage-requests/by-idempotency-key",
+      "scope": "personal",
+      "strategy": "domain.personal-permission-and-subject-owned-cancellation",
+      "permissions": [
+        "personal.usage.cancel"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/personal_execution_routes.go",
+      "receiver": "protected",
       "method": "POST",
       "path": "/usage-requests/:usage_request_id/cancel",
       "scope": "personal",
@@ -756,6 +779,569 @@
       "permissions": [
         "personal.billing.read"
       ]
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/v1/sessions/current/active-context",
+      "scope": "personal",
+      "permissions": [
+        "personal.context.switch"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/v1/organizations/:organization_id/units",
+      "scope": "organization",
+      "permissions": [
+        "org.units.read"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/v1/organizations/:organization_id/units",
+      "scope": "organization",
+      "permissions": [
+        "org.units.manage"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/v1/organizations/:organization_id/members",
+      "scope": "organization",
+      "permissions": [
+        "org.members.read"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/v1/organizations/:organization_id/quota-members",
+      "scope": "organization",
+      "permissions": [
+        "org.quota.allocate"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/v1/organizations/:organization_id/role-bindings",
+      "scope": "organization",
+      "permissions": [
+        "org.roles.read"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/v1/organizations/:organization_id/role-bindings",
+      "scope": "organization",
+      "permissions": [
+        "org.roles.assign"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "DELETE",
+      "path": "/v1/organizations/:organization_id/role-bindings/:binding_id",
+      "scope": "organization",
+      "permissions": [
+        "org.roles.assign"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "PUT",
+      "path": "/v1/organizations/:organization_id/members/:user_id/units",
+      "scope": "organization",
+      "permissions": [
+        "org.members.manage"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "PUT",
+      "path": "/v1/organizations/:organization_id/members/:user_id/roles",
+      "scope": "organization",
+      "permissions": [
+        "org.roles.assign"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "PATCH",
+      "path": "/v1/organizations/:organization_id/units/:unit_id/parent",
+      "scope": "organization",
+      "permissions": [
+        "org.units.manage"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/v1/organizations/:organization_id/invitations",
+      "scope": "organization",
+      "permissions": [
+        "org.members.manage",
+        "org.roles.assign"
+      ],
+      "strategy": "domain.organization-scoped-member-management-nonmember-role-assignment-and-unit-coverage"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/v1/me/invitations",
+      "scope": "personal",
+      "permissions": [
+        "personal.invitations.read"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "DELETE",
+      "path": "/v1/organizations/:organization_id/invitations/:invitation_id",
+      "scope": "organization",
+      "permissions": [
+        "org.members.manage"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/v1/invitations/accept",
+      "scope": "personal",
+      "permissions": [
+        "personal.invitations.accept"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "DELETE",
+      "path": "/v1/organizations/:organization_id/members/:user_id",
+      "scope": "organization",
+      "permissions": [
+        "org.members.manage"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/v1/organizations/:organization_id/ownership",
+      "scope": "organization",
+      "permissions": [
+        "org.owner.transfer"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/organizations",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.read"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/organizations",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.create"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-organization-create"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "PATCH",
+      "path": "/organizations/:organization_id",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.profile.manage"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-organization-rename"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "PATCH",
+      "path": "/organizations/:organization_id/status",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.status.manage"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-organization-status-change"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/organizations/:organization_id/deletion-readiness",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.delete"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "DELETE",
+      "path": "/organizations/:organization_id",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.delete"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-organization-delete"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/organizations/:organization_id/units",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.read"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/organizations/:organization_id/members",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.read"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/organizations/:organization_id/members",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.members.manage"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-member-add"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "PUT",
+      "path": "/organizations/:organization_id/members/:user_id/units",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.members.manage"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-member-units-replace"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "PUT",
+      "path": "/organizations/:organization_id/members/:user_id/roles",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.members.manage"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-member-roles-replace"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "DELETE",
+      "path": "/organizations/:organization_id/members/:user_id",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.members.manage"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-member-remove"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/organizations/:organization_id/ownership",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.owner.transfer"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-ownership-transfer"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/organizations/:organization_id/units",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.units.manage"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-unit-create"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "PATCH",
+      "path": "/organizations/:organization_id/units/:unit_id",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.units.manage"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-unit-rename"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "PATCH",
+      "path": "/organizations/:organization_id/units/:unit_id/parent",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.units.manage"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-unit-move"
+    },
+    {
+      "source": "account-platform/internal/account/organization_routes.go",
+      "receiver": "admin",
+      "method": "DELETE",
+      "path": "/organizations/:organization_id/units/:unit_id",
+      "scope": "platform",
+      "permissions": [
+        "platform.organizations.units.manage"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-account-unit-delete"
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "GET",
+      "path": "/organizations/:organization_id/model-policy",
+      "scope": "organization",
+      "permissions": [
+        "org.models.read"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "PUT",
+      "path": "/organizations/:organization_id/model-policy",
+      "scope": "organization",
+      "permissions": [
+        "org.models.manage"
+      ],
+      "strategy": "domain.organization-scoped-audit-only-token-organization-model-policy-update"
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "GET",
+      "path": "/organizations/:organization_id/balance",
+      "scope": "organization",
+      "permissions": [
+        "org.wallet.read"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "GET",
+      "path": "/organizations/:organization_id/entitlement-packages",
+      "scope": "organization",
+      "permissions": [
+        "org.wallet.read"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "GET",
+      "path": "/organizations/:organization_id/recharge/products",
+      "scope": "organization",
+      "permissions": [
+        "org.entitlements.purchase"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "GET",
+      "path": "/organizations/:organization_id/payment-capabilities",
+      "scope": "organization",
+      "permissions": [
+        "org.entitlements.purchase"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "POST",
+      "path": "/organizations/:organization_id/recharge/orders",
+      "scope": "organization",
+      "permissions": [
+        "org.entitlements.purchase"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "GET",
+      "path": "/organizations/:organization_id/recharge/orders/:order_id",
+      "scope": "organization",
+      "permissions": [
+        "org.entitlements.purchase"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "GET",
+      "path": "/organizations/:organization_id/quota-grants",
+      "scope": "organization",
+      "permissions": [
+        "org.quota.read.self",
+        "org.quota.read.all"
+      ],
+      "strategy": "domain.organization-self-quota-required-all-quota-optional-expands-read-scope"
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "POST",
+      "path": "/organizations/:organization_id/quota-grants:batch",
+      "scope": "organization",
+      "permissions": [
+        "org.quota.allocate"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "POST",
+      "path": "/organizations/:organization_id/quota-grants/:grant_id/revoke",
+      "scope": "organization",
+      "permissions": [
+        "org.quota.revoke"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/v1/me/account-closure-request",
+      "scope": "personal",
+      "strategy": "domain.account-closure-owned-receipt",
+      "permissions": [
+        "personal.account.close.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/v1/me/account-closure-requests",
+      "scope": "personal",
+      "strategy": "domain.account-closure-owned-receipt",
+      "permissions": [
+        "personal.account.close.request"
+      ]
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/account-closure-requests",
+      "scope": "platform",
+      "strategy": "domain.account-closure-owned-receipt",
+      "permissions": [
+        "platform.account-closures.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/account-closure-requests/:closure_request_id/actions/retry",
+      "scope": "platform",
+      "strategy": "domain.account-closure-owned-receipt",
+      "permissions": [
+        "platform.account-closures.repair"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "POST",
+      "path": "/organizations/:organization_id/account-closed-grants/:grant_id/reclaim",
+      "scope": "organization",
+      "strategy": "domain.account-closure-owned-receipt",
+      "permissions": [
+        "org.grants.reclaim_closed"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
+      "method": "POST",
+      "path": "/organizations/:organization_id/account-closed-grants:reclaim-batch",
+      "scope": "organization",
+      "strategy": "domain.account-closure-owned-receipt",
+      "permissions": [
+        "org.grants.reclaim_closed"
+      ]
     }
   ],
   "tasks": [
@@ -876,8 +1462,13 @@
     },
     {
       "source": "account-platform/cmd/billing-service/main.go",
-      "name": "personal-hold-expiry",
-      "permission": "internal.job.personal-hold-expiry"
+      "name": "expired-hold-recovery",
+      "permission": "internal.job.expired-hold-recovery"
+    },
+    {
+      "source": "account-platform/cmd/account-service/main.go",
+      "name": "mobile-retention",
+      "permission": "internal.job.mobile-retention"
     },
     {
       "source": "account-platform/cmd/token-gateway/personal_execution.go",
@@ -898,6 +1489,16 @@
       "source": "account-platform/cmd/token-gateway/personal_execution.go",
       "name": "token-manual-review-sla",
       "permission": "internal.job.token-manual-review-sla"
+    },
+    {
+      "source": "account-platform/cmd/account-service/main.go",
+      "name": "role-binding-expiry",
+      "permission": "internal.job.role-binding-expiry"
+    },
+    {
+      "source": "account-platform/cmd/account-service/main.go",
+      "name": "account-closure",
+      "permission": "internal.job.account-closure"
     }
   ],
   "events": [
@@ -936,6 +1537,12 @@
       "durable": "account-approval-relay",
       "subject": "account.approval-command.authorized.v1",
       "permission": "internal.event.publish.account-approval-command-authorized"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "durable": "billing-member-lifecycle-v1",
+      "subject": "account.membership.changed.v1",
+      "permission": "internal.event.consume.account-membership-changed"
     }
   ],
   "cli": [
@@ -1028,6 +1635,16 @@
       "name": "approval-resources",
       "source": "account-platform/cmd/approval-resources/main.go",
       "strategy": "workload.bounded-provisioned-approval-resource-administration"
+    },
+    {
+      "name": "newapi-tls",
+      "source": "account-platform/cmd/newapi-tls/main.go",
+      "strategy": "workload.isolated-newapi-tls-proxy-host"
+    },
+    {
+      "name": "account-approval-recovery",
+      "source": "account-platform/cmd/account-approval-recovery/main.go",
+      "strategy": "workload.dedicated-account-approval-recovery-role"
     }
   ]
 }

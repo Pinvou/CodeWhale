@@ -21,6 +21,7 @@ func TestClosureActualSessionProxy(t *testing.T) {
 		{"upstream-forbidden", "POST", "/api/account/v1/me/account-closure-requests", `{"confirmation":"CLOSE_MY_ACCOUNT"}`, 403},
 		{"head", "HEAD", "/api/account/v1/me/account-closure-request", "", 200},
 		{"list", "GET", "/api/admin/account/admin/v1/account-closure-requests", "", 200},
+		{"admin-head", "HEAD", "/api/admin/account/admin/v1/account-closure-requests", "", 200},
 		{"retry", "POST", "/api/admin/account/admin/v1/account-closure-requests/" + id + "/actions/retry", `{"reason":"owned repair reason"}`, 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -5,6 +5,8 @@ import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
 import { requireReconciliationDate, requireReconciliationRun } from './reconciliation-contract.js';
 import { responseRetryAfter } from './auth-error.js';
+import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON } from './registration-bonus-contract.js';
+import { parseEntitlementCorrectionJSON, encodeEntitlementCorrectionJSON, ENTITLEMENT_CORRECTION_COMMAND } from './admin-entitlement-correction.js';
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
   error.code = payload?.code || 'REQUEST_FAILED';
@@ -146,6 +148,22 @@ export class AdminPlatformClient {
     if (!entry) return;
     entry.abandon();
     entry.controller.abort();
+  }
+
+  accountClosures(signal) { return this.request('account', '/admin/v1/account-closure-requests', signal); }
+  retryAccountClosure(id, reason, key, signal) {
+    requireFinanceID(id);
+    return this.mutate('account', `/admin/v1/account-closure-requests/${id}/actions/retry`, 'POST', { reason }, key, signal, 200);
+  }
+  registrationBonusPolicy(signal, { fresh = false } = {}) {
+    const resource = '/admin/v1/registration-bonus-policy';
+    if (fresh) this.invalidateRead('billing', resource);
+    return this.request('billing', resource, signal, parseRegistrationBonusJSON);
+  }
+
+  updateRegistrationBonusPolicy(body, idempotencyKey, signal) {
+    if (typeof idempotencyKey !== 'string' || idempotencyKey.length < 16 || idempotencyKey.length > 128) throw new Error('INVALID_REGISTRATION_BONUS_REQUEST');
+    return this.mutate('billing', '/admin/v1/registration-bonus-policy', 'PUT', body, idempotencyKey, signal, 200, { decode: parseRegistrationBonusJSON, encode: encodeRegistrationBonusJSON });
   }
 
   async mutate(area, resource, method, body, idempotencyKey = '', signal, expectedStatus = 0, codec = null) {
@@ -338,7 +356,12 @@ export class AdminPlatformClient {
       const response = await fetch(`${this.baseURL}/api/admin/approvals/requests${path}`, {
         headers: { Accept: 'application/json' }, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
       });
-      const payload = response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
+      let payload;
+      if (response.ok) {
+        const raw = await response.text();
+        payload = parseFinanceJSON(raw);
+        if (payload?.command_type === ENTITLEMENT_CORRECTION_COMMAND) payload = parseEntitlementCorrectionJSON(raw);
+      } else payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         if (payload?.code === 'APPROVAL_ACTION_CONTROL_CHANGED' || payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE') {
           this.approvalControl = null;
@@ -455,7 +478,7 @@ export class AdminPlatformClient {
         method: kind === 'update' ? 'PUT' : 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json',
           'X-CSRF-Token': this.csrfToken, 'X-Pinvou-Approval-Action-Control-Version': String(version) },
-        credentials: 'same-origin', cache: 'no-store', body: encodeFinanceJSON(body), signal: controller.signal,
+        credentials: 'same-origin', cache: 'no-store', body: (draft?.command_type === ENTITLEMENT_CORRECTION_COMMAND ? encodeEntitlementCorrectionJSON : encodeFinanceJSON)(body), signal: controller.signal,
       });
       const payload = response.status === 204 ? {} : await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -578,6 +601,15 @@ export class AdminPlatformClient {
     const result = await this.mutate('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(id)}/commands`, 'POST', facts, key, signal, 200);
     if (result?.case_id !== id) throw new Error('INVALID_FINANCE_ACK');
     return result;
+  }
+
+  entitlementCorrectionPrecheck(packageID, orderID, reasonCode, signal) {
+    requireFinanceID(packageID); requireFinanceID(orderID);
+    if (typeof reasonCode !== 'string' || !reasonCode.trim() || new TextEncoder().encode(reasonCode.trim()).length > 80) throw new Error('INVALID_ENTITLEMENT_PRECHECK');
+    return this.mutate('account', '/admin/v2/approval-command-prechecks', 'POST', {
+      command_type: ENTITLEMENT_CORRECTION_COMMAND, target_resource_id: packageID,
+      payment_order_id: orderID, reason_code: reasonCode.trim(),
+    }, '', signal, 200, { encode: encodeEntitlementCorrectionJSON, decode: parseEntitlementCorrectionJSON });
   }
 
   async logout() {
@@ -787,6 +819,14 @@ catalogRollbackImpact(sourceCatalogVersion, signal) {
     return this.request('token', `/admin/v1/model-catalog/impact/rollback?${query}`, signal);
   }
 
+tokenOperationsOverview(window = '24h', signal) {
+  if (!['24h', '7d', '30d'].includes(window)) throw new Error('INVALID_OVERVIEW_WINDOW');
+  return this.request('token', `/admin/v1/operations-overview?${new URLSearchParams({ window })}`, signal);
+}
+tokenModelOperationsPageOverview(window = '', signal) {
+  if (window && !['24h', '7d', '30d'].includes(window)) throw new Error('INVALID_OVERVIEW_WINDOW');
+  return this.request('token', `/admin/v1/overviews/model-operations${window ? `?${new URLSearchParams({ window })}` : ''}`, signal);
+}
 usageRequests(filters = {}, signal) {
     // F05 advertises personal execution, not an organization producer/filter.
     const personalFilters = { ...filters };

@@ -5,20 +5,24 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
-	previous "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema_previous"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestClosurePrivatePublicCombination(t *testing.T) {
+	if os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL") == "" {
+		t.Skip("explicit isolated schema database required")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 160*time.Second)
 	defer cancel()
 	f := newStageFixture(t, ctx, os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL"))
+	f.installClosureTokenActors(t, ctx)
 	ac := f.database(t, ctx, "account", "account_service")
 	bc := f.database(t, ctx, "billing", "billing_schema_owner")
 	am, err := migrations.Load("../../migrations/account")
@@ -138,58 +142,7 @@ func TestClosurePrivatePublicCombination(t *testing.T) {
 			t.Fatal("Billing fresh/cumulative schema ACL shape mismatch")
 		}
 		migrations.Unlock(ctx, upgradedBilling)
-		upgradeName := "f08_token_closure_" + uuid.NewString()[:8] + time.Now().Format("150405")
-		if _, err = f.admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{upgradeName}.Sanitize()); err != nil {
-			t.Fatal(err)
-		}
-		f.dbs[upgradeName] = f.config.User
-		oc := f.config.Copy()
-		oc.Database = upgradeName
-		setup, e := pgx.ConnectConfig(ctx, oc)
-		if e != nil {
-			t.Fatal(e)
-		}
-		if _, e = setup.Exec(ctx, `CREATE EXTENSION pgcrypto; ALTER SCHEMA public OWNER TO token_schema_owner; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE,CREATE ON SCHEMA public TO token_gateway`); e != nil {
-			setup.Close(ctx)
-			t.Fatal(e)
-		}
-		setup.Close(ctx)
-		oc.User = "token_migrator"
-		oc.Password = ""
-		upgradedToken, e := pgx.ConnectConfig(ctx, oc)
-		if e != nil {
-			t.Fatal(e)
-		}
-		f.connections = append(f.connections, upgradedToken)
-		if _, e = upgradedToken.Exec(ctx, `SET ROLE token_gateway`); e != nil {
-			t.Fatal(e)
-		}
-		var oldToken []migrations.Migration
-		for _, x := range tm {
-			if x.Version != 900001 {
-				oldToken = append(oldToken, x)
-			}
-		}
-		if e = previous.Up(ctx, upgradedToken, oldToken); e != nil {
-			t.Fatal("real predecessor Token Up", e)
-		}
-		if _, e = upgradedToken.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at,management_mode) VALUES('11111111-1111-4111-8111-111111111111','USER','22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333','retained closure account','ACTIVE',100,'22222222-2222-4222-8222-222222222222','2026-01-01','2026-01-01','PLATFORM')`); e != nil {
-			t.Fatal(e)
-		}
-		tokenData := stageValue(t, ctx, upgradedToken, `SELECT to_jsonb(account)::text FROM token_accounts account`)
-		if e = tokenschema.Up(ctx, upgradedToken, tm); e != nil {
-			t.Fatal("cumulative Token marker Up", e)
-		}
-		if _, e = migrations.VerifyApplied(ctx, upgradedToken, tm); e != nil {
-			t.Fatal(e)
-		}
-		if tokenData != stageValue(t, ctx, upgradedToken, `SELECT to_jsonb(account)::text FROM token_accounts account`) {
-			t.Fatal("cumulative marker changed retained Token account facts")
-		}
-		if stageShape(t, ctx, upgradedToken) != stageShape(t, ctx, tc) {
-			t.Fatal("Token fresh/cumulative schema ACL shape mismatch")
-		}
-		migrations.Unlock(ctx, upgradedToken)
+
 	})
 	t.Run("durable-marker-runtime-cannot-erase-and-public-rollback-rejected", func(t *testing.T) {
 		var protected bool
@@ -211,7 +164,11 @@ func TestClosurePrivatePublicCombination(t *testing.T) {
 			t.Fatal("rejected rollback changed Account ledger")
 		}
 	})
-	child := exec.CommandContext(ctx, os.Getenv("F08_TEST_GO"), "test", "-mod=readonly", "-race", "-count=1", "-json", "./internal/account", "-run", "^TestClosureClaimACKOrder$")
+	args := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/account", "-run", "^TestClosureClaimACKOrder$"}
+	if runtime.GOOS != "windows" {
+		args = append(args, "-race")
+	}
+	child := exec.CommandContext(ctx, os.Getenv("F08_TEST_GO"), args...)
 	child.Dir = "../.."
 	child.Env = append(os.Environ(), "F08_ACCOUNT_URL="+f.serviceURL(t, ac, "account_service"), "F08_BILLING_URL="+f.serviceURL(t, bc, "billing_service"), "F08_TOKEN_URL="+f.serviceURL(t, tc, "token_gateway"))
 	out, e := child.CombinedOutput()

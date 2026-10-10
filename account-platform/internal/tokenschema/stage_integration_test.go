@@ -16,11 +16,14 @@ import (
 )
 
 func TestManagementPublicMigrationInstallation(t *testing.T) {
-	t.Run("fresh", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, false) })
-	t.Run("legacy-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, true, false) })
-	t.Run("installed-29-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, true) })
+	t.Run("fresh", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 0) })
+	t.Run("legacy-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, true, 0) })
+	t.Run("installed-29-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 29) })
+	t.Run("installed-30-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 30) })
+	t.Run("installed-f05-34-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 34) })
+	t.Run("installed-f07-36-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 36) })
 }
-func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool) {
+func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previousStage int) {
 	dsn := os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("PINVOU_TEST_TOKEN_DATABASE_URL is not configured")
@@ -98,7 +101,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool)
 		t.Fatal(err)
 	}
 	config.Database = database
-	owner, err := pgx.ConnectConfig(ctx, config)
+	owner, err := connectManagementFixture(t, ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +131,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool)
 	owner.Close(context.Background())
 	config.User = "token_migrator"
 	config.Password = ""
-	connection, err := pgx.ConnectConfig(ctx, config)
+	connection, err := connectManagementFixture(t, ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,26 +144,35 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if old29 {
+	var previousAccountFacts string
+	if previousStage > 0 {
 		previous := []migrations.Migration{}
 		for _, m := range loaded {
-			if m.Version != 900002 {
+			if m.Version != 900004 && (previousStage == 36 || (m.Version != 8 && m.Version != 9 && (previousStage == 34 || ((m.Version < 900002 || (previousStage == 30 && m.Version == 900002)) && m.Version != 16 && m.Version != 17 && m.Version != 34)))) {
 				previous = append(previous, m)
 			}
 		}
 		if err = migrations.UpWithHooks(ctx, connection, previous, migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); err != nil {
-			t.Fatal("installed 29 fixture", err)
+			t.Fatal("installed previous stage fixture", err)
 		}
 		migrations.Unlock(ctx, connection)
 		verified, e := migrations.VerifyApplied(ctx, connection, previous)
-		if e != nil || verified.AppliedCount != 32 {
-			t.Fatal("installed 29 fixture verification", verified, e)
+		if e != nil || verified.AppliedCount != previousStage {
+			t.Fatal("installed previous stage fixture verification", verified, e)
+		}
+		if previousStage == 36 {
+			if _, e = connection.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at,management_mode) VALUES('11111111-1111-4111-8111-111111111111','USER','22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333','retained closure account','ACTIVE',100,'22222222-2222-4222-8222-222222222222','2026-01-01','2026-01-01','PLATFORM')`); e != nil {
+				t.Fatal("preclosure runtime account fixture", e)
+			}
+			if e = connection.QueryRow(ctx, `SELECT to_jsonb(account)::text FROM token_accounts account WHERE id='11111111-1111-4111-8111-111111111111'`).Scan(&previousAccountFacts); e != nil {
+				t.Fatal(e)
+			}
 		}
 	}
 	if legacy {
 		operatorConfig := config.Copy()
 		operatorConfig.User = admin.Config().User
-		op, e := pgx.ConnectConfig(ctx, operatorConfig)
+		op, e := connectManagementFixture(t, ctx, operatorConfig)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -170,11 +182,11 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool)
 		}
 		old := []migrations.Migration{}
 		for _, m := range loaded {
-			if m.Version < 900001 {
+			if m.Version < 900001 && m.Version != 8 && m.Version != 9 && m.Version != 16 && m.Version != 17 && m.Version != 34 {
 				old = append(old, m)
 			}
 		}
-		if e = migrations.UpWithHooks(ctx, connection, old, migrations.UpHooks{BeforeApply: lendOverviewIndexDDL, AfterApply: revokeOverviewIndexDDL}); e != nil {
+		if e = migrations.UpWithHooks(ctx, connection, old, migrations.UpHooks{BeforeApply: lendPinnedMigrationDDL, AfterApply: revokePinnedMigrationDDL}); e != nil {
 			t.Fatal("legacy installation", e)
 		}
 		migrations.Unlock(ctx, connection)
@@ -184,7 +196,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool)
 		migrations.Unlock(ctx, connection)
 		var count int
 		var marker bool
-		if e = connection.QueryRow(ctx, `SELECT (SELECT count(*) FROM schema_migrations),to_regclass('public.token_runtime_hardening') IS NOT NULL`).Scan(&count, &marker); e != nil || count != 31 || marker {
+		if e = connection.QueryRow(ctx, `SELECT (SELECT count(*) FROM schema_migrations),to_regclass('public.token_runtime_hardening') IS NOT NULL`).Scan(&count, &marker); e != nil || count != 28 || count != len(old) || marker {
 			t.Fatal("failed upgrade changed history", count, marker, e)
 		}
 		artifact, e := os.ReadFile("../../deploy/production/token-storage-hardening-bootstrap.sql")
@@ -200,12 +212,52 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool)
 		if _, e = op.Exec(ctx, string(artifact)); e != nil {
 			t.Fatal("legacy operator provisioning", e)
 		}
+
+		t.Run("failed-organization-DDL-rolls-back-temporary-create", func(t *testing.T) {
+			tx, e := connection.Begin(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer tx.Rollback(context.Background())
+			var selected migrations.Migration
+			for _, m := range loaded {
+				if m.Version == 8 {
+					selected = m
+				}
+			}
+			if e = lendPinnedMigrationDDL(ctx, tx, selected); e != nil {
+				t.Fatal(e)
+			}
+			var allowed bool
+			if e = tx.QueryRow(ctx, `SELECT has_schema_privilege('token_gateway','public','CREATE')`).Scan(&allowed); e != nil || !allowed {
+				t.Fatal("temporary DDL privilege missing", e)
+			}
+			if _, e = tx.Exec(ctx, `SELECT public.controlled_missing_organization_ddl_function()`); e == nil {
+				t.Fatal("controlled migration failure expected")
+			}
+			if e = tx.Rollback(ctx); e != nil {
+				t.Fatal(e)
+			}
+			if e = connection.QueryRow(ctx, `SELECT has_schema_privilege('token_gateway','public','CREATE')`).Scan(&allowed); e != nil || allowed {
+				t.Fatal("failed migration leaked schema CREATE", e)
+			}
+			var absent bool
+			if e = connection.QueryRow(ctx, `SELECT to_regclass('public.organization_lifecycle_states') IS NULL AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=8)`).Scan(&absent); e != nil || !absent {
+				t.Fatal("failed migration changed organization history", e)
+			}
+		})
 	}
 	if err = Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
+	if previousAccountFacts != "" {
+		var current string
+		if err = connection.QueryRow(ctx, `SELECT to_jsonb(account)::text FROM token_accounts account WHERE id='11111111-1111-4111-8111-111111111111'`).Scan(&current); err != nil || current != previousAccountFacts {
+			t.Fatal("closure upgrade changed existing account facts", err)
+		}
+	}
 	verification, err := migrations.VerifyApplied(ctx, connection, loaded)
-	if err != nil || verification.AppliedCount != 33 {
+	if err != nil || verification.AppliedCount != len(installed) {
 		t.Fatalf("public migration verification: %+v err=%v", verification, err)
 	}
 	var runtimeCanCreate bool
@@ -217,7 +269,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool)
 	migrations.Unlock(ctx, connection)
 	probeConfig := config.Copy()
 	probeConfig.User = admin.Config().User
-	probe, err := pgx.ConnectConfig(ctx, probeConfig)
+	probe, err := connectManagementFixture(t, ctx, probeConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,13 +289,13 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool)
 	if err = connection.QueryRow(ctx, `SELECT state FROM public.token_command_governance_activation WHERE singleton`).Scan(&activation); err != nil || activation != "PRE_ACTIVATION" {
 		t.Fatalf("migration must not fabricate runtime authority: %q err=%v", activation, err)
 	}
-	var readiness, usageHistory, future bool
-	if err = connection.QueryRow(ctx, `SELECT to_regclass('client_readiness_attestations') IS NOT NULL,to_regclass('usage_history_groups') IS NOT NULL,to_regclass('organization_lifecycle_states') IS NOT NULL`).Scan(&readiness, &usageHistory, &future); err != nil || !readiness || !usageHistory || future {
+	var readiness, usageHistory, organization, units, future bool
+	if err = connection.QueryRow(ctx, `SELECT to_regclass('client_readiness_attestations') IS NOT NULL,to_regclass('usage_history_groups') IS NOT NULL,to_regclass('organization_lifecycle_states') IS NOT NULL,to_regclass('organization_unit_lifecycle_states') IS NOT NULL,to_regclass('usage_request_anonymization_commands') IS NOT NULL`).Scan(&readiness, &usageHistory, &organization, &units, &future); err != nil || !readiness || !usageHistory || !organization || !units || future {
 		t.Fatalf("propagated F06 stages or future boundary mismatch: readiness=%v usage=%v future=%v err=%v", readiness, usageHistory, future, err)
 	}
 	migrations.Unlock(ctx, connection)
 	config.User = admin.Config().User
-	operator, err := pgx.ConnectConfig(ctx, config)
+	operator, err := connectManagementFixture(t, ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,14 +318,14 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool)
 		runtimeConfig := config.Copy()
 		runtimeConfig.User = "token_gateway"
 		runtimeConfig.Password = ""
-		runtime, err := pgx.ConnectConfig(ctx, runtimeConfig)
+		runtime, err := connectManagementFixture(t, ctx, runtimeConfig)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer runtime.Close(context.Background())
 		assertTokenRuntimeStorage(t, ctx, runtime)
 		verified, e := migrations.VerifyApplied(ctx, runtime, loaded)
-		if e != nil || verified.AppliedCount != 33 {
+		if e != nil || verified.AppliedCount != len(installed) {
 			t.Fatal("independent runtime migration verification", verified, e)
 		}
 		var unguarded int
@@ -304,6 +356,48 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool)
 			t.Fatal(err)
 		}
 	})
+	t.Run("history-projection-authority", func(t *testing.T) {
+		assertTokenHistoryAuthority(t, ctx, connection)
+		tx, e := connection.Begin(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer tx.Rollback(context.Background())
+		if _, e = tx.Exec(ctx, `SET ROLE token_schema_owner; SELECT public.harden_token_runtime_objects(); SET ROLE token_gateway`); e != nil {
+			t.Fatal("approved definers rejected by forward hardener", e)
+		}
+		if e = tx.Commit(ctx); e != nil {
+			t.Fatal(e)
+		}
+		assertTokenHistoryAuthority(t, ctx, connection)
+	})
+	t.Run("reject-unreviewed-history-definers", func(t *testing.T) {
+		for _, mutation := range []string{
+			`CREATE FUNCTION public.unreviewed_projection() RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$ BEGIN RETURN; END $$`,
+			`ALTER FUNCTION public.project_usage_history_request(uuid,uuid,uuid,jsonb,timestamptz) SET search_path=public`,
+			`CREATE OR REPLACE FUNCTION public.project_usage_history_request(projected_id uuid,projected_user_id uuid,projected_organization_id uuid,projected_request_snapshot jsonb,projected_started_at timestamptz) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$ BEGIN RETURN; END $$`,
+		} {
+			tx, e := connection.Begin(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			func() {
+				defer tx.Rollback(context.Background())
+				if _, e = tx.Exec(ctx, `SET ROLE token_schema_owner; `+mutation+`; SET ROLE token_gateway`); e != nil {
+					t.Fatal(e)
+				}
+				if strings.Contains(mutation, "unreviewed_projection") {
+					_, e = tx.Exec(ctx, `SET ROLE token_schema_owner; SELECT public.harden_token_runtime_objects()`)
+				} else {
+					e = prepareTokenMigration(ctx, tx, migrations.Migration{Version: 35})
+				}
+				if e == nil {
+					t.Fatal("unreviewed definer accepted", mutation)
+				}
+			}()
+		}
+		assertTokenHistoryAuthority(t, ctx, connection)
+	})
 	t.Run("subsequent-low-version-migration-rehardens-storage", func(t *testing.T) {
 		// The generic migration engine is exercised with a synthetic next-stage DDL;
 		// Ordered still rejects this unsupported version after the F06 stage union.
@@ -329,12 +423,13 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy, old29 bool)
 		runtimeConfig := config.Copy()
 		runtimeConfig.User = "token_gateway"
 		runtimeConfig.Password = ""
-		runtime, err := pgx.ConnectConfig(ctx, runtimeConfig)
+		runtime, err := connectManagementFixture(t, ctx, runtimeConfig)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer runtime.Close(context.Background())
 		assertTokenRuntimeStorage(t, ctx, runtime)
+		assertTokenHistoryAuthority(t, ctx, runtime)
 		for _, statement := range []string{`UPDATE token_audit_logs SET action='REWRITTEN'`, `DELETE FROM token_audit_logs`, `TRUNCATE controlled_future_storage`, `TRUNCATE controlled_future_policy`, `CREATE TABLE public.future_leaked_ddl(id integer)`, `INSERT INTO schema_migrations(version,name,checksum) VALUES(998,'forged','forged')`} {
 			if _, err = runtime.Exec(ctx, statement); err == nil {
 				t.Fatal("future hardening authority leaked", statement)
@@ -352,4 +447,40 @@ func assertTokenRuntimeStorage(t *testing.T, ctx context.Context, c *pgx.Conn) {
 	if err := c.QueryRow(ctx, `SELECT current_user,(SELECT rolsuper FROM pg_roles WHERE rolname=current_user),pg_has_role(current_user,'token_schema_owner','MEMBER') OR pg_has_role(current_user,'token_cap_policy_deployer','MEMBER'),has_schema_privilege(current_user,'public','CREATE'),(SELECT count(*) FROM pg_class object JOIN pg_namespace n ON n.oid=object.relnamespace WHERE n.nspname='public' AND pg_get_userbyid(object.relowner)=current_user)`).Scan(&current, &super, &unsafeMembership, &create, &owned); err != nil || current != "token_gateway" || super || unsafeMembership || create || owned != 0 {
 		t.Fatal("runtime is not independently restricted", current, super, unsafeMembership, create, owned, err)
 	}
+}
+
+func assertTokenHistoryAuthority(t *testing.T, ctx context.Context, c *pgx.Conn) {
+	t.Helper()
+	for _, table := range []string{"usage_history_projection_state", "usage_history_members", "usage_history_groups"} {
+		var read, write bool
+		if e := c.QueryRow(ctx, `SELECT has_table_privilege('token_gateway',$1,'SELECT'),has_table_privilege('token_gateway',$1,'INSERT,UPDATE,DELETE')`, "public."+table).Scan(&read, &write); e != nil || !read || write {
+			t.Fatal("history authority", table, read, write, e)
+		}
+	}
+	for _, expected := range historyDefiners {
+		var definer, execute bool
+		var owner string
+		if e := c.QueryRow(ctx, `SELECT p.prosecdef,pg_get_userbyid(p.proowner),has_function_privilege('token_gateway',p.oid,'EXECUTE') FROM pg_proc p WHERE p.oid=to_regprocedure($1)`, expected.signature).Scan(&definer, &owner, &execute); e != nil || !definer || owner != "token_schema_owner" || execute != strings.Contains(expected.signature, "backfill_") {
+			t.Fatal("history definer authority", expected.signature, definer, owner, execute, e)
+		}
+	}
+	var processed int
+	var complete bool
+	if e := c.QueryRow(ctx, `SELECT processed,complete FROM public.backfill_usage_history_projection(100)`).Scan(&processed, &complete); e != nil || processed != 0 || !complete {
+		t.Fatal("bounded history worker authority", processed, complete, e)
+	}
+}
+
+// Fixture-only timings distinguish an exhausted prior DDL budget from a slow
+// connection. They expose no endpoint, credential or persisted business data.
+func connectManagementFixture(t *testing.T, ctx context.Context, config *pgx.ConnConfig) (*pgx.Conn, error) {
+	t.Helper()
+	deadline, bounded := ctx.Deadline()
+	if bounded {
+		t.Logf("fixture connection budget remaining: %s", time.Until(deadline).Round(time.Millisecond))
+	}
+	started := time.Now()
+	c, err := pgx.ConnectConfig(ctx, config)
+	t.Logf("fixture connection elapsed: %s", time.Since(started).Round(time.Millisecond))
+	return c, err
 }

@@ -63,6 +63,47 @@ try {
     await page.evaluate(() => { window.f02.unknownRefund = false; }); await click('retry'); await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
     assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); const body = JSON.parse(calls[0].body); return calls[0].key === calls[1].key && calls[0].body === calls[1].body && body.payment_transaction_id === window.f02.id && body.entitlement_package_id === window.f02.id && !('amount_fen' in body); }));
   });
+  for (const rejection of [401, 403]) await caseRun(`Unknown refund survives replay ${rejection} and remount until the original receipt is confirmed`, async () => {
+    await fresh('admin'); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled retained refund reason');
+    await page.evaluate(rejection => { window.f02.refundResponses = [503, rejection, 201]; }, rejection);
+    await click('refunds'); await page.waitForSelector('[role=alert]'); await settled();
+    await click('retry'); await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
+    assert.equal(await page.evaluate(() => document.querySelector('[role=alert]').textContent), await page.evaluate(() => window.f02.languageCopy().unknown));
+    assert.equal(await page.$eval('article textarea', element => element.disabled), true, 'uncertain invocation facts stay frozen after denied replay');
+    await click('wallet'); await page.waitForSelector('form textarea'); await settled(); await click('orders');
+    await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === window.f02.languageCopy().retry && !button.disabled));
+    await click('retry'); await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 3); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); return calls.every(call => call.key === calls[0].key && call.body === calls[0].body) && window.f02.refundEffects === 1; }), 'same frozen HTTP body/key recovers exactly one controlled mutation');
+  });
+  await caseRun('First denied refund releases its unused key and accepts a new invocation', async () => {
+    await fresh('admin'); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled first denial reason');
+    await page.evaluate(() => { window.f02.refundResponses = [403, 201]; });
+    await click('refunds'); await page.waitForSelector('[role=alert]'); await settled();
+    assert.equal(await page.$eval('article textarea', element => element.disabled), false);
+    await click('refunds'); await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); return calls[0].key !== calls[1].key && window.f02.refundEffects === 1; }));
+  });
+  await caseRun('An unknown refund is isolated from a new session epoch and restored only to its original epoch', async () => {
+    await fresh('admin'); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled original epoch reason');
+    await page.evaluate(() => { window.f02.refundResponses = [503, 201]; }); await click('refunds'); await page.waitForSelector('[role=alert]'); await settled();
+    await page.evaluate(() => { window.f02.setAdminEpoch(1); }); await settled();
+    assert.equal(await page.$eval('article textarea', element => element.disabled), false);
+    assert.equal(await page.evaluate(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length), 1, 'session change does not dispatch recovery');
+    await page.evaluate(() => { window.f02.setAdminEpoch(0); }); await settled(); await click('retry');
+    await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); return calls[0].key === calls[1].key && calls[0].body === calls[1].body && window.f02.refundEffects === 1; }));
+  });
+  await caseRun('An unknown refund is never inherited by another actor', async () => {
+    await fresh('admin'); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled original actor reason');
+    await page.evaluate(() => { window.f02.refundResponses = [503, 201]; }); await click('refunds'); await page.waitForSelector('[role=alert]'); await settled();
+    await page.evaluate(() => { window.f02.switchIdentity(); }); await settled();
+    assert.equal(await page.$('article textarea'), null, 'retired actor detail is unmounted');
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === window.f02.languageCopy().retry)), false, 'foreign actor has no original invocation to replay');
+    assert.equal(await page.evaluate(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length), 1, 'a foreign actor never automatically replays the original key');
+    await page.evaluate(() => { window.f02.user = window.f02.id; window.f02.render('admin'); }); await settled(); await click('retry');
+    await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); return calls[0].key === calls[1].key && calls[0].body === calls[1].body && window.f02.refundEffects === 1; }));
+  });
   await caseRun('Mismatched refund amount is unknown and retry uses the same invocation', async () => {
     await fresh('admin'); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled whole refund reason');
     await page.evaluate(() => { window.f02.wrongRefund = true; }); await click('refunds'); await page.waitForSelector('[role=alert]'); await settled();

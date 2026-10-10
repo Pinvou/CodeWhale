@@ -91,12 +91,15 @@ func Require(commandType string, expected Mode) gin.HandlerFunc {
 func buildPolicies() map[string]Policy {
 	result := make(map[string]Policy)
 	for commandType, permission := range map[string]string{
+		"TOKEN_ORGANIZATION_LIFECYCLE_APPLY":            "internal.token.organization.lifecycle",
+		"TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY":       "internal.token.organization-unit.lifecycle",
 		"BILLING_ORGANIZATION_LIFECYCLE_APPLY":          "internal.billing.organization.lifecycle",
 		"BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY":   "internal.billing.organization-member.lifecycle",
 		"BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY":     "internal.billing.organization-unit.lifecycle",
 		"ACCOUNT_MEMBER_ADD":                            "platform.organizations.members.manage",
 		"ACCOUNT_MEMBER_REMOVE":                         "platform.organizations.members.manage",
 		"ACCOUNT_MEMBER_ROLES_REPLACE":                  "platform.organizations.members.manage",
+		"ACCOUNT_MEMBER_UNITS_REPLACE":                  "platform.organizations.members.manage",
 		"ACCOUNT_ORGANIZATION_CREATE":                   "platform.organizations.create",
 		"ACCOUNT_ORGANIZATION_DELETE":                   "platform.organizations.delete",
 		"ACCOUNT_ORGANIZATION_RENAME":                   "platform.organizations.profile.manage",
@@ -153,7 +156,9 @@ func buildPolicies() map[string]Policy {
 		"ACCOUNT_REGISTRATION_RETRY":                    "platform.registrations.repair",
 		"ACCOUNT_REGISTRATION_COMPENSATE":               "platform.registrations.repair",
 		"ACCOUNT_PROFILE_CHANGE_RETRY":                  "platform.profile-changes.repair",
+		"ACCOUNT_CLOSURE_RETRY":                         "platform.account-closures.repair",
 		"ACCOUNT_SMS_CONFIGURATION_UPDATE":              "platform.sms-config.manage",
+		"BILLING_REGISTRATION_BONUS_POLICY_UPDATE":      "platform.registration-bonus.manage",
 	} {
 		result[commandType] = Policy{CommandType: commandType, PolicyVersion: Version, Mode: AuditOnly,
 			RequesterPermission: permission, RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE",
@@ -188,13 +193,20 @@ func buildPolicies() map[string]Policy {
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 	}
 	addTokenGovernancePolicies(result)
+	result["ENTITLEMENT_COMPONENT_ADJUSTMENT"] = Policy{
+		CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, Mode: ApprovalRequired,
+		RequesterPermission: "platform.billing.repairs.request", ApproverPermission: "platform.billing.repairs.approve",
+		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true, SnapshotSchemaVersion: 2,
+		CriticalResourceFields: []string{"package_id", "wallet_id", "payment_order_id", "payment_transaction_id", "source_component_id", "source_lot_id", "source_type", "target_type", "amount_microcredits", "reason_code", "source_evidence_digest", "facts_digest", "policy_version"},
+		ExpiresAfter:           24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
+	}
 	return result
 }
 
 // Executable is the installed, closed approval command set.
 func Executable(command string) bool {
 	switch strings.ToUpper(strings.TrimSpace(command)) {
-	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
+	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "ENTITLEMENT_COMPONENT_ADJUSTMENT", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
 		return true
 	}
 	return false

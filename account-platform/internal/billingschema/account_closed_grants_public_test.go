@@ -5,11 +5,15 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 	"time"
 )
 
 func TestClosedGrantPublicOwnerHarness(t *testing.T) {
+	if os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL") == "" {
+		t.Skip("explicit isolated schema database required")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
 	f := newStageFixture(t, ctx, os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL"))
@@ -25,7 +29,11 @@ func TestClosedGrantPublicOwnerHarness(t *testing.T) {
 		t.Fatal(e)
 	}
 	migrations.Unlock(ctx, bc)
-	child := exec.CommandContext(ctx, os.Getenv("F08_TEST_GO"), "test", "-mod=readonly", "-race", "-count=1", "-json", "./internal/billing", "-run", "^TestClosedGrantPublishedOwnerEffects$")
+	args := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/billing", "-run", "^TestClosedGrantPublishedOwnerEffects$"}
+	if runtime.GOOS != "windows" {
+		args = append(args, "-race")
+	}
+	child := exec.CommandContext(ctx, os.Getenv("F08_TEST_GO"), args...)
 	child.Dir = "../.."
 	child.Env = append(os.Environ(), "F08_BILLING_URL="+f.serviceURL(t, bc, "billing_service"))
 	out, e := child.CombinedOutput()

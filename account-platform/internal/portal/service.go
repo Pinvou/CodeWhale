@@ -718,6 +718,12 @@ func publicAccountPathAllowed(method, resource string) bool {
 	return method == http.MethodGet && strings.HasPrefix(resource, prefix) && pathUUID(strings.TrimPrefix(resource, prefix))
 }
 func accountPathAllowed(method, resource string) bool {
+	if resource == "/v1/me/account-closure-request" {
+		return method == http.MethodGet || method == http.MethodHead
+	}
+	if resource == "/v1/me/account-closure-requests" {
+		return method == http.MethodPost
+	}
 	if organizationAccountPathAllowed(method, resource) {
 		return true
 	}
@@ -765,6 +771,16 @@ func tokenPathAllowed(method, resource string) bool {
 	return method == http.MethodGet && len(parts) == 4 || method == http.MethodPost && len(parts) == 5 && (parts[4] == "close" || parts[4] == "payment-claims")
 }
 func accountAdminPathAllowed(method, resource string) bool {
+	if resource == "/admin/v2/approval-command-prechecks" {
+		return method == http.MethodPost
+	}
+	if resource == "/admin/v1/account-closure-requests" {
+		return method == http.MethodGet || method == http.MethodHead
+	}
+	closure := strings.Split(strings.TrimPrefix(resource, "/"), "/")
+	if len(closure) == 6 && closure[0] == "admin" && closure[1] == "v1" && closure[2] == "account-closure-requests" && pathUUID(closure[3]) && closure[4] == "actions" && closure[5] == "retry" {
+		return method == http.MethodPost
+	}
 	if organizationAdminPathAllowed(method, resource) {
 		return true
 	}

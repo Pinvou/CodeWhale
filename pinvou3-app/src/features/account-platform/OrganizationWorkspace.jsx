@@ -4,6 +4,7 @@ import { hasPermission } from './authorization-ui.js';
 import { OrganizationClient, organizationID, organizationUnitIDs, organizationVersion } from './organization-client.js';
 import { OrganizationActionForm } from './OrganizationActionForm.jsx';
 import { OrganizationFinanceWorkspace } from './OrganizationFinanceWorkspace.jsx';
+import { OrganizationClosedGrantsWorkspace } from './OrganizationClosedGrantsWorkspace.jsx';
 import { OrganizationModelPolicyWorkspace } from './OrganizationModelPolicyWorkspace.jsx';
 import { PersonalUsageWorkspace } from './PersonalUsageWorkspace.jsx';
 
@@ -46,6 +47,7 @@ export function OrganizationWorkspace({ client, me, language, onChanged }) {
   {can('org.roles.assign') && action('grant-role', copy.grantRole, [{ name: 'user', options: members }, { name: 'role', options: roleOptions }, { name: 'unit', optional: true, options: units }, { name: 'starts', type: 'datetime-local', optional: true }, { name: 'expires', type: 'datetime-local', optional: true }, { name: 'reason' }], values => { if ((values.role === 'UNIT_ADMIN') !== Boolean(values.unit)) throw new Error('INVALID_ORGANIZATION_INPUT'); return { user_id: organizationID(values.user), role_code: text(values.role), unit_id: optionalID(values.unit), starts_at: time(values.starts), expires_at: time(values.expires), reason: text(values.reason) }; }, (facts, key) => api.grantRole(org, facts, key))}
   {can('org.owner.transfer') && action('transfer-owner', copy.transfer, [{ name: 'user', label: 'newOwner', options: members }], values => ({ user: organizationID(values.user) }), (facts, key) => api.transfer(org, facts.user, key), true)}
   <OrganizationFinanceWorkspace client={client} me={me} language={language} />
+  <OrganizationClosedGrantsWorkspace client={client} me={me} language={language} />
   <OrganizationModelPolicyWorkspace client={client} me={me} language={language} />
   <PersonalUsageWorkspace client={client} me={me} language={language} />
  </section>;
