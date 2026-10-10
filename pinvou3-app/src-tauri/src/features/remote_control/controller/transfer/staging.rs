@@ -4,8 +4,8 @@ use super::core::{
     CompletedTransfer, TransferContext, TransferDirection, TransferHandle, TransferMetadata,
     is_safe_publication_file_name,
 };
-use super::limits::MAX_TRANSFER_BYTES;
 use super::upload::UploadStaging;
+use crate::features::files::file_ingest::MAX_FILE_BYTES;
 use crate::platform::filesystem::{
     PrivateFileDirectory, PrivatePublicationCleanup, PublishedPrivateFile,
     open_private_file_directory, publish_private_read_path, supports_private_read_path_publication,
@@ -86,7 +86,7 @@ impl SessionIsolationStaging {
         if sessions.len() >= MAX_STAGED_SESSIONS {
             return Err("transfer_capacity".to_owned());
         }
-        if metadata.total_bytes == 0 || metadata.total_bytes > MAX_TRANSFER_BYTES {
+        if metadata.total_bytes == 0 || metadata.total_bytes > MAX_FILE_BYTES {
             return Err("transfer_staging_failed".to_owned());
         }
         let root_path = (self.resolve_root)(&context.binding.session_id)?;
@@ -173,7 +173,7 @@ impl SessionIsolationStaging {
         if entry.rejected_publication.is_some() {
             return Err("transfer_staging_failed".to_owned());
         }
-        if transfer.bytes != entry.total_bytes || transfer.bytes > MAX_TRANSFER_BYTES {
+        if transfer.bytes != entry.total_bytes || transfer.bytes > MAX_FILE_BYTES {
             return Err("transfer_staging_failed".to_owned());
         }
         let file = entry
@@ -274,6 +274,9 @@ impl SessionIsolationStaging {
 const MAX_STAGED_SESSIONS: usize = 64;
 
 impl UploadStaging for SessionIsolationStaging {
+    fn max_upload_bytes(&self) -> u64 {
+        MAX_FILE_BYTES
+    }
     fn begin(
         &self,
         handle: &TransferHandle,
