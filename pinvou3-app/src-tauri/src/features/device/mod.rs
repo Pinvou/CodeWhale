@@ -22,18 +22,18 @@ mod doctor;
 mod external_models;
 mod platform;
 
-pub use doctor::{build_doctor_prompt, DoctorKind};
+pub use doctor::{DoctorKind, build_doctor_prompt};
 pub use external_models::{
-    get_external_models, register_external_model, remove_external_model, ExternalModel,
-    ExternalModelsView, RemoveOutcome,
+    ExternalModel, ExternalModelsView, RemoveOutcome, get_external_models, register_external_model,
+    remove_external_model,
 };
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use sysinfo::{Components, Disks, Networks, ProcessesToUpdate, System};
+use sysinfo::{Components, Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
 
 // GPU 探测与 monitor 同一套预算与候选：nvidia-smi 在驱动/CUDA 争用下可能挂死。
 use crate::features::monitor::GPU_PROBE_TIMEOUT;
@@ -109,8 +109,10 @@ pub struct NetIfaceSnapshot {
     pub mac: Option<String>,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
-    pub rx_rate_bps: f64,
-    pub tx_rate_bps: f64,
+    /// 速率单位是**字节/秒**（sysinfo received() 为字节增量 / 秒）。字段名不用
+    /// 惯例缩写 "bps"（bits/s），避免后来者按 8 倍误读。
+    pub rx_bytes_per_sec: f64,
+    pub tx_bytes_per_sec: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,15 +149,21 @@ pub struct ServiceStatus {
     /// ollama | vllm | lmstudio | docker
     pub key: String,
     pub running: bool,
-    /// running=false 时给一句人话原因（超时/拒绝连接/命令不存在）。
+    /// 人话补充：running=false 时是失败原因（超时/拒绝连接/命令不存在）；
+    /// docker running 时是版本号。
     pub detail: Option<String>,
 }
 
 // ---------------------------------------------------------------- DeviceState
 
 /// 设备采样状态：只持有**必须跨采样存续**的 sysinfo 实例与上次网络刷新时刻。
+/// 内层装 `Arc` 是为了把整段全量采样放进 blocking 池（spawn_blocking 要求
+/// 'static 闭包），快照命令拿 `&DeviceState` 即可克隆指针入池。
+#[derive(Debug, Clone)]
+pub struct DeviceState(Arc<DeviceStateInner>);
+
 #[derive(Debug)]
-pub struct DeviceState {
+struct DeviceStateInner {
     system: Mutex<System>,
     networks: Mutex<Networks>,
     last_network_poll: Mutex<Option<Instant>>,
@@ -163,11 +171,17 @@ pub struct DeviceState {
 
 impl DeviceState {
     pub fn new() -> Self {
-        Self {
+        // Linux 上 sysinfo 默认会缓存接近一半 FD 上限的 /proc stat 句柄；ACP
+        // ledger（platform/process_resources.rs）以全局 `set_open_files_limit(0)`
+        // 换取有界描述符占用。这是进程级开关，这里显式表达同一立场：本模块的
+        // CPU% 只依赖两次刷新的计数值差，不需要 FD 缓存；谁先初始化谁生效，
+        // 与其让"设备页先采样"悄悄把全局策略定为缓存，不如两边一致关掉。
+        let _ = sysinfo::set_open_files_limit(0);
+        Self(Arc::new(DeviceStateInner {
             system: Mutex::new(System::new()),
             networks: Mutex::new(Networks::new()),
             last_network_poll: Mutex::new(None),
-        }
+        }))
     }
 }
 
@@ -179,16 +193,28 @@ impl Default for DeviceState {
 
 // ---------------------------------------------------------------- 采样
 
-/// 完整设备快照。GPU 扩展（nvidia-smi 子进程）放 blocking 池，避免 2s 轮询
-/// 占住 async worker；其余子项是 sysinfo/procfs 级别的快读，同步完成。
+/// 完整设备快照。全量采样（refresh_processes / Disks / Components）与 GPU 扩展
+/// （nvidia-smi 子进程）都放 blocking 池并并发执行：进程表在慢盘/大进程数时可能
+/// 超过毫秒级，2s 轮询不能周期性占住 async worker（与 ACP ledger 的
+/// spawn_blocking 先例同一取舍）。
 pub async fn sample_snapshot(state: &DeviceState) -> DeviceSnapshot {
-    let mut snapshot = sample_without_gpu(state);
+    let base_task = {
+        let inner = Arc::clone(&state.0);
+        tokio::task::spawn_blocking(move || sample_without_gpu(&inner))
+    };
     let gpu_task = tokio::task::spawn_blocking(gpu_ext_cached);
-    snapshot.gpu_ext = gpu_task.await.unwrap_or(None);
+    let (base, gpu_ext) = tokio::join!(base_task, gpu_task);
+    // 采样闭包 panic（只可能是 bug）时恢复同步版的 panic 语义，不静默降级成空快照；
+    // GPU 侧 JoinError 照旧降级 None（沿用既有口径）。
+    let mut snapshot = match base {
+        Ok(snapshot) => snapshot,
+        Err(join_error) => std::panic::resume_unwind(join_error.into_panic()),
+    };
+    snapshot.gpu_ext = gpu_ext.unwrap_or(None);
     snapshot
 }
 
-fn sample_without_gpu(state: &DeviceState) -> DeviceSnapshot {
+fn sample_without_gpu(state: &DeviceStateInner) -> DeviceSnapshot {
     let os = OsInfo {
         product_name: platform::dmi_product_name(),
         pretty_name: platform::os_pretty_name(),
@@ -216,13 +242,18 @@ fn collect_sensors() -> Vec<SensorGroup> {
     let mut groups: Vec<SensorGroup> = Vec::new();
     let components = Components::new_with_refreshed_list();
     for component in components.list() {
+        // 读失败（None）整条跳过，不伪造 0°C——对分不清真假的用户，编造的 0°C
+        // 比缺数据更糟；与 extra_sensors 读失败即跳过的口径一致。
+        let Some(celsius) = component.temperature() else {
+            continue;
+        };
         let (chip, name) = split_component_label(component.label());
         push_sensor(
             &mut groups,
             chip,
             "temperature",
             name,
-            f64::from(component.temperature().unwrap_or(0.0)),
+            f64::from(celsius),
             component.critical().map(f64::from),
             component.max().map(f64::from),
         );
@@ -274,7 +305,12 @@ fn split_component_label(label: &str) -> (String, String) {
 
 fn collect_disks() -> Vec<DiskSnapshot> {
     let disks = Disks::new_with_refreshed_list();
-    let mut list: Vec<DiskSnapshot> = disks.list().iter().map(disk_snapshot).filter(keep_disk).collect();
+    let mut list: Vec<DiskSnapshot> = disks
+        .list()
+        .iter()
+        .map(disk_snapshot)
+        .filter(keep_disk)
+        .collect();
     sort_disks(&mut list);
     list
 }
@@ -328,7 +364,7 @@ fn disk_sort_key(mount_point: &str) -> u8 {
 
 /// 网络接口：持久 `Networks` 实例刷新一次，`received()/transmitted()` 为相对
 /// 上次刷新的增量，除以真实间隔秒数得速率；首次采样（无上次时刻）速率记 0。
-fn collect_network(state: &DeviceState) -> Vec<NetIfaceSnapshot> {
+fn collect_network(state: &DeviceStateInner) -> Vec<NetIfaceSnapshot> {
     let mut networks = state.networks.lock();
     let mut last_poll = state.last_network_poll.lock();
     let now = Instant::now();
@@ -340,7 +376,7 @@ fn collect_network(state: &DeviceState) -> Vec<NetIfaceSnapshot> {
         .list()
         .iter()
         .map(|(name, data)| {
-            let (rx_rate_bps, tx_rate_bps) = match elapsed_secs {
+            let (rx_bytes_per_sec, tx_bytes_per_sec) = match elapsed_secs {
                 Some(secs) if secs > 0.0 => (
                     data.received() as f64 / secs,
                     data.transmitted() as f64 / secs,
@@ -352,11 +388,15 @@ fn collect_network(state: &DeviceState) -> Vec<NetIfaceSnapshot> {
                 name: name.clone(),
                 iface_type: classify_iface(name, platform::iface_has_wireless(name)).to_string(),
                 is_up: platform::iface_operstate_up(name).unwrap_or(true),
-                mac: if mac == "00:00:00:00:00:00" { None } else { Some(mac) },
+                mac: if mac == "00:00:00:00:00:00" {
+                    None
+                } else {
+                    Some(mac)
+                },
                 rx_bytes: data.total_received(),
                 tx_bytes: data.total_transmitted(),
-                rx_rate_bps,
-                tx_rate_bps,
+                rx_bytes_per_sec,
+                tx_bytes_per_sec,
             }
         })
         .collect();
@@ -391,10 +431,17 @@ fn classify_iface(name: &str, has_wireless_dir: bool) -> &'static str {
 
 /// 进程 top 列表：CPU% 依赖同一个 System 实例两次刷新的差值（DeviceState 持久
 /// 实例保证这一点）；首拍全部为 0 属预期，第二拍起出真实值。
-fn collect_processes(state: &DeviceState) -> ProcessSummary {
+fn collect_processes(state: &DeviceStateInner) -> ProcessSummary {
     let mut system = state.system.lock();
-    system.refresh_processes(ProcessesToUpdate::All, true);
-    system.refresh_memory();
+    // 只需要 CPU%+内存：显式收窄刷新 kind。sysinfo 默认 kind 还会带 disk_usage、
+    // exe、tasks——每个进程每拍多读 /proc/<pid>/io、exe 与 task/ 目录，数百进程
+    // 的机器上是无谓放大。内存字段来自 refresh_processes 的 with_memory，本模块
+    // 不消费系统级内存，refresh_memory() 是死代码（评审确认），不调用。
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cpu().with_memory(),
+    );
     let procs: Vec<ProcInfo> = system
         .processes()
         .values()
@@ -416,7 +463,10 @@ fn collect_processes(state: &DeviceState) -> ProcessSummary {
     let mut top_memory = procs;
     top_memory.sort_by(|a, b| b.memory_bytes.cmp(&a.memory_bytes));
     top_memory.truncate(TOP_N);
-    ProcessSummary { top_cpu, top_memory }
+    ProcessSummary {
+        top_cpu,
+        top_memory,
+    }
 }
 
 /// 按字符（而非字节）截断到 40，避免切开中文/emoji。
@@ -453,16 +503,13 @@ struct GpuExtCache {
 /// 驱动版本：nvidia-smi 查询优先，`/proc/driver/nvidia/version` 兜底；两者皆缺
 /// → 视为本机无 NVIDIA，整块返回 None。
 fn gpu_ext_snapshot() -> Option<GpuExtSnapshot> {
-    let driver_version = run_nvidia_smi(&[
-        "--query-gpu=driver_version",
-        "--format=csv,noheader",
-    ])
-    .and_then(|out| out.lines().next().map(|line| line.trim().to_string()))
-    .filter(|line| !line.is_empty())
-    .or_else(platform::nvidia_driver_version)?;
+    let driver_version = run_nvidia_smi(&["--query-gpu=driver_version", "--format=csv,noheader"])
+        .and_then(|out| out.lines().next().map(|line| line.trim().to_string()))
+        .filter(|line| !line.is_empty())
+        .or_else(platform::nvidia_driver_version)?;
     Some(GpuExtSnapshot {
         driver_version: Some(driver_version),
-        cuda_version: cuda_version_from_toolkit_dirs().or_else(nvidia_smi_cuda_version),
+        cuda_version: platform::cuda_toolkit_version().or_else(nvidia_smi_cuda_version),
         compute_processes: nvidia_compute_processes(),
     })
 }
@@ -481,27 +528,7 @@ fn run_nvidia_smi(args: &[&str]) -> Option<String> {
         })
 }
 
-/// CUDA 版本：`/usr/local/cuda*/version.json` 的 `cuda.version`，取字典序最大的
-/// 版本目录（多套 toolkit 并存时以最新为准）。
-fn cuda_version_from_toolkit_dirs() -> Option<String> {
-    let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir("/usr/local")
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("cuda"))
-        })
-        .collect();
-    dirs.sort();
-    dirs.into_iter().rev().find_map(|dir| {
-        let text = std::fs::read_to_string(dir.join("version.json")).ok()?;
-        parse_cuda_toolkit_version(&text)
-    })
-}
-
-fn parse_cuda_toolkit_version(json_text: &str) -> Option<String> {
+pub(crate) fn parse_cuda_toolkit_version(json_text: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(json_text).ok()?;
     value
         .get("cuda")?
@@ -557,10 +584,7 @@ fn parse_compute_app_line(line: &str) -> Option<GpuProcInfo> {
 pub async fn probe_services() -> Vec<ServiceStatus> {
     let (ollama, vllm, lmstudio) = tokio::join!(
         probe_ollama_service(),
-        probe_openai_ports(
-            "vllm",
-            &[8000, 8001, 8002],
-        ),
+        probe_openai_ports("vllm", &[8000, 8001, 8002],),
         probe_openai_ports("lmstudio", &[1234]),
     );
     let docker = tokio::task::spawn_blocking(probe_docker_service)
@@ -624,7 +648,11 @@ fn probe_docker_service() -> ServiceStatus {
     match crate::platform::process::output_with_timeout(command, Duration::from_secs(3)) {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let detail = if version.is_empty() { None } else { Some(version) };
+            let detail = if version.is_empty() {
+                None
+            } else {
+                Some(version)
+            };
             ServiceStatus {
                 key: "docker".to_string(),
                 running: true,
@@ -672,7 +700,10 @@ pub(crate) async fn http_get_success(url: &str) -> Result<(), String> {
     if response.status().is_success() {
         Ok(())
     } else {
-        Err(format!("服务响应异常（HTTP {}）", response.status().as_u16()))
+        Err(format!(
+            "服务响应异常（HTTP {}）",
+            response.status().as_u16()
+        ))
     }
 }
 
@@ -787,7 +818,10 @@ mod tests {
         ];
         sort_disks(&mut list);
         let mounts: Vec<&str> = list.iter().map(|d| d.mount_point.as_str()).collect();
-        assert_eq!(mounts, vec!["/", "/data", "/home", "/boot/efi", "/boot/efi"]);
+        assert_eq!(
+            mounts,
+            vec!["/", "/data", "/home", "/boot/efi", "/boot/efi"]
+        );
     }
 
     #[test]
@@ -811,11 +845,9 @@ mod tests {
 
     #[test]
     fn parse_cuda_toolkit_version_reads_cuda_field() {
-        let json = r#"{"cuda":{"name":"CUDA SDK","version":"12.3.1"},"nvcc":{"version":"12.3.107"}}"#;
-        assert_eq!(
-            parse_cuda_toolkit_version(json),
-            Some("12.3.1".to_string())
-        );
+        let json =
+            r#"{"cuda":{"name":"CUDA SDK","version":"12.3.1"},"nvcc":{"version":"12.3.107"}}"#;
+        assert_eq!(parse_cuda_toolkit_version(json), Some("12.3.1".to_string()));
         assert_eq!(parse_cuda_toolkit_version("not json"), None);
         assert_eq!(parse_cuda_toolkit_version(r#"{"other":1}"#), None);
     }
@@ -835,8 +867,8 @@ mod tests {
     fn device_state_constructs_and_is_defaultable() {
         // sysinfo 实例在 new() 即创建；两拍之间必须是同一实例（CPU% 差值的前提）。
         let state = DeviceState::default();
-        let first = collect_processes(&state);
-        let second = collect_processes(&state);
+        let first = collect_processes(&state.0);
+        let second = collect_processes(&state.0);
         // 冒烟：结构可序列化，列表各自 ≤ 8。
         assert!(first.top_cpu.len() <= 8 && second.top_memory.len() <= 8);
         let serialized = serde_json::to_string(&second).expect("ProcessSummary serializes");
@@ -884,20 +916,17 @@ mod tests {
         ] {
             assert!(value.get(key).is_some(), "missing contract key: {key}");
         }
-        assert_eq!(
-            value["os"]["product_name"],
-            "LinSeer MegaCube"
-        );
+        assert_eq!(value["os"]["product_name"], "LinSeer MegaCube");
     }
 
     #[test]
     fn network_snapshot_smoke_on_first_poll_has_zero_rates() {
         // 首拍（last_network_poll 为 None）速率必须为 0，累计量可用。
         let state = DeviceState::new();
-        let list = collect_network(&state);
+        let list = collect_network(&state.0);
         for iface in &list {
-            assert_eq!(iface.rx_rate_bps, 0.0);
-            assert_eq!(iface.tx_rate_bps, 0.0);
+            assert_eq!(iface.rx_bytes_per_sec, 0.0);
+            assert_eq!(iface.tx_bytes_per_sec, 0.0);
         }
     }
 

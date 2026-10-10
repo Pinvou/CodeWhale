@@ -223,27 +223,44 @@ pub(crate) fn global_shortcut_session_is_ambiguous(
 }
 
 /// 运行时探测当前设备是否为 MegaCube 一体机（DMI 产品名含 "megacube"）。
-/// 结果按进程缓存；环境变量 `PINVOU3_MEGACUBE_DEVICE=1` 可强制为 true，
-/// 供开发与自动化测试在非 MegaCube 硬件上预览「设备管理」。
+/// 结果按进程缓存；环境变量 `PINVOU3_MEGACUBE_DEVICE` 可覆盖：`1` 强制开启
+/// （开发/自动化测试在非 MegaCube 硬件上预览「设备管理」），`0` 强制关闭
+/// （在误报 DMI 的硬件上的逃生口）；未设或其他值走 DMI 探测。
 pub(crate) fn is_megacube_device() -> bool {
     static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
-        if std::env::var("PINVOU3_MEGACUBE_DEVICE").as_deref() == Ok("1") {
-            return true;
+        if let Some(forced) = forced_megacube_device_override() {
+            return forced;
         }
-        if std::env::consts::OS != "linux" {
-            return false;
-        }
-        ["product_name", "product_family", "board_name"]
-            .into_iter()
-            .any(|field| dmi_field_contains_megacube(field))
+        std::env::consts::OS == "linux"
+            && ["product_name", "product_family", "board_name"]
+                .into_iter()
+                .any(|field| dmi_field_contains_megacube(field))
     })
 }
 
+fn forced_megacube_device_override() -> Option<bool> {
+    parse_megacube_env_override(std::env::var("PINVOU3_MEGACUBE_DEVICE").ok().as_deref())
+}
+
+/// 环境变量取值语义（纯函数，测试直打）：只认字面 "1"/"0"，其余一律不覆盖。
+fn parse_megacube_env_override(value: Option<&str>) -> Option<bool> {
+    match value {
+        Some("1") => Some(true),
+        Some("0") => Some(false),
+        _ => None,
+    }
+}
+
 fn dmi_field_contains_megacube(field: &str) -> bool {
-    std::fs::read_to_string(format!("/sys/class/dmi/id/{field}"))
-        .map(|value| value.to_ascii_lowercase().contains("megacube"))
-        .unwrap_or(false)
+    dmi_value_contains_megacube(
+        &std::fs::read_to_string(format!("/sys/class/dmi/id/{field}")).unwrap_or_default(),
+    )
+}
+
+/// DMI 字段匹配口径（纯函数）：小写化后含 "megacube" 即命中。
+fn dmi_value_contains_megacube(value: &str) -> bool {
+    value.to_ascii_lowercase().contains("megacube")
 }
 
 pub(crate) const fn is_windows() -> bool {
@@ -302,6 +319,24 @@ mod tests {
             cfg!(target_os = "linux")
         );
         assert_eq!(capabilities.megacube_device, is_megacube_device());
+    }
+
+    #[test]
+    fn megacube_env_override_only_accepts_literal_0_and_1() {
+        assert_eq!(parse_megacube_env_override(Some("1")), Some(true));
+        assert_eq!(parse_megacube_env_override(Some("0")), Some(false));
+        // 其他值/未设一律不覆盖，走 DMI 探测（fail-closed，不会误开启）。
+        assert_eq!(parse_megacube_env_override(Some("true")), None);
+        assert_eq!(parse_megacube_env_override(Some("")), None);
+        assert_eq!(parse_megacube_env_override(None), None);
+    }
+
+    #[test]
+    fn dmi_value_match_is_case_insensitive() {
+        assert!(dmi_value_contains_megacube("LinSeer MegaCube"));
+        assert!(dmi_value_contains_megacube("MEGACUBE-GB10"));
+        assert!(!dmi_value_contains_megacube("PowerEdge R750"));
+        assert!(!dmi_value_contains_megacube(""));
     }
 
     #[test]

@@ -18,11 +18,11 @@ mod unsupported;
 
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{
-    dmi_product_name, extra_sensors, iface_has_wireless, iface_operstate_up,
+    cuda_toolkit_version, dmi_product_name, extra_sensors, iface_has_wireless, iface_operstate_up,
     nvidia_driver_version, os_pretty_name,
 };
 #[cfg(not(target_os = "linux"))]
 pub(crate) use unsupported::{
-    dmi_product_name, extra_sensors, iface_has_wireless, iface_operstate_up,
+    cuda_toolkit_version, dmi_product_name, extra_sensors, iface_has_wireless, iface_operstate_up,
     nvidia_driver_version, os_pretty_name,
 };

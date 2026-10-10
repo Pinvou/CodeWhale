@@ -8,11 +8,11 @@
 //! 依赖方向合规：`app/commands → features::device / features::monitor`，features
 //! 内部零 `#[tauri::command]`、零 `crate::app::*` 引用（架构守卫）。
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::State;
 
 use crate::features::device::{
-    self, DeviceState, DeviceSnapshot, ExternalModel, ExternalModelsView, RemoveOutcome,
+    self, DeviceSnapshot, DeviceState, ExternalModel, ExternalModelsView, RemoveOutcome,
     ServiceStatus,
 };
 use crate::features::monitor::MonitorState;
@@ -74,9 +74,13 @@ pub async fn device_doctor_prompt(
 /// 故障排查上下文（设计 §5 第 4 节）：设备快照（传感器/磁盘/网络/进程/GPU 扩展）
 /// + 运行状态（CPU/GPU/内存）+ 服务可达性 + 当前活动模型健康。键名英文 snake_case。
 async fn build_doctor_context(device: &DeviceState, monitor: &MonitorState) -> Value {
-    let device_snapshot = device::sample_snapshot(device).await;
-    let monitor_snapshot = crate::features::monitor::sample_all(monitor).await;
-    let services = device::probe_services().await;
+    // 三路来源互不依赖，并发采样。串行时 vLLM 三端口逐个 1.5s 超时 + docker 3s，
+    // 最坏 8-12s 用户点排查卡才开出会话（评审 P2）；并发后总耗时 ≈ 最慢一路。
+    let (device_snapshot, monitor_snapshot, services) = tokio::join!(
+        device::sample_snapshot(device),
+        crate::features::monitor::sample_all(monitor),
+        device::probe_services(),
+    );
     let active_model = monitor_snapshot.vllm.as_ref().map(|model| {
         json!({
             "model_id": model.model_id,
@@ -88,14 +92,56 @@ async fn build_doctor_context(device: &DeviceState, monitor: &MonitorState) -> V
             "max_model_len": model.max_model_len,
         })
     });
-    json!({
+    let mut context = json!({
         "device": device_snapshot,
         "gpu": monitor_snapshot.gpu,
         "cpu": monitor_snapshot.cpu,
         "ram": monitor_snapshot.ram,
         "services": services,
         "active_model": active_model,
-    })
+    });
+    mask_context_privacy(
+        &mut context,
+        &crate::platform::paths::user_home_dir().to_string_lossy(),
+    );
+    context
+}
+
+/// 隐私收敛：上下文随提示词送往（可能是云端的）模型后端。
+/// ① 网卡 MAC 是稳定硬件指纹，整字段剔除；
+/// ② 磁盘挂载点里的家目录前缀改写为 `~`，不外泄用户名。
+/// 进程名/芯片名等需系统级权限才可伪造，保留（注入面见 doctor.rs 上下文头注记）。
+fn mask_context_privacy(context: &mut Value, home: &str) {
+    if let Some(ifaces) = context
+        .get_mut("device")
+        .and_then(|device| device.get_mut("network"))
+        .and_then(Value::as_array_mut)
+    {
+        for iface in ifaces {
+            if let Some(object) = iface.as_object_mut() {
+                object.remove("mac");
+            }
+        }
+    }
+    if home.is_empty() {
+        return;
+    }
+    if let Some(disks) = context
+        .get_mut("device")
+        .and_then(|device| device.get_mut("disks"))
+        .and_then(Value::as_array_mut)
+    {
+        for disk in disks {
+            if let Some(mount) = disk.get_mut("mount_point") {
+                if let Some(text) = mount.as_str() {
+                    if text.starts_with(home) {
+                        let masked = format!("~{}", &text[home.len()..]);
+                        *mount = Value::String(masked);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -112,5 +158,29 @@ mod tests {
         for key in ["device", "gpu", "cpu", "ram", "services", "active_model"] {
             assert!(value.get(key).is_some(), "missing context key: {key}");
         }
+    }
+
+    #[test]
+    fn doctor_context_masks_mac_and_home_prefix() {
+        let mut context = json!({
+            "device": {
+                "network": [
+                    { "name": "eth0", "mac": "aa:bb:cc:dd:ee:ff" },
+                    { "name": "lo", "mac": null }
+                ],
+                "disks": [
+                    { "mount_point": "/home/zhangsan/usb", "total_bytes": 1 },
+                    { "mount_point": "/mnt/data", "total_bytes": 2 }
+                ]
+            }
+        });
+        mask_context_privacy(&mut context, "/home/zhangsan");
+        let network = context["device"]["network"].as_array().unwrap();
+        assert!(network[0].get("mac").is_none(), "MAC 必须整字段剔除");
+        assert!(network[1].get("mac").is_none());
+        let disks = context["device"]["disks"].as_array().unwrap();
+        assert_eq!(disks[0]["mount_point"], "~/usb");
+        // 家目录之外的挂载点保持原样。
+        assert_eq!(disks[1]["mount_point"], "/mnt/data");
     }
 }

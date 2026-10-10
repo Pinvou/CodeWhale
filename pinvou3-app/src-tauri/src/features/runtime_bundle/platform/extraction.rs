@@ -560,9 +560,8 @@ impl Pinvou3Bundle {
     /// 内置「设备管家」技能（MegaCube 设备管理排查，设计 §7）。编译期内嵌，
     /// 解包到 `bundle/skills/device-doctor/SKILL.md`；目录名与 frontmatter 均为
     /// 安全命令名 `device-doctor`，中文触发词由 description 承载。
-    const DEVICE_DOCTOR_SKILL_MD: &str = include_str!(
-        "../../../../resources/common/bundle/builtin-skills/device-doctor/SKILL.md"
-    );
+    const DEVICE_DOCTOR_SKILL_MD: &str =
+        include_str!("../../../../resources/common/bundle/builtin-skills/device-doctor/SKILL.md");
 
     /// 当前构建内嵌释放到 `bundle/skills/` 的内置技能目录集合——与
     /// [`Self::write_builtin_skills`] 的释放面保持一致。自愈对账

@@ -27,7 +27,8 @@ pub(crate) fn os_pretty_name() -> Option<String> {
 
 fn parse_os_release_pretty_name(text: &str) -> Option<String> {
     for line in text.lines() {
-        if let Some(("PRETTY_NAME", value)) = line.split_once('=').map(|(k, v)| (k.trim(), v.trim()))
+        if let Some(("PRETTY_NAME", value)) =
+            line.split_once('=').map(|(k, v)| (k.trim(), v.trim()))
         {
             let value = value.trim_matches('"').trim_matches('\'').trim();
             if !value.is_empty() {
@@ -38,14 +39,17 @@ fn parse_os_release_pretty_name(text: &str) -> Option<String> {
     None
 }
 
-/// 网口是否 up：`/sys/class/net/<name>/operstate == "up"`。
-/// 读不到该文件返回 None（调用方默认 true）。
+/// 网口是否 up：读 `/sys/class/net/<name>/operstate`。读不到返回 None（调用方
+/// 默认 true）。**"unknown" 不算 down**——回环口恒为 unknown，tun/wg 等 VPN 口
+/// 也多为 unknown，判成 down 会给用户持续的假"断开"信号；只有内核明确报告
+/// down 家族（down/lowerLayerDown/notPresent）或 dormant（无链路）才判断开。
 pub(crate) fn iface_operstate_up(name: &str) -> Option<bool> {
-    let text = std::fs::read_to_string(
-        Path::new("/sys/class/net").join(name).join("operstate"),
-    )
-    .ok()?;
-    Some(text.trim() == "up")
+    let text =
+        std::fs::read_to_string(Path::new("/sys/class/net").join(name).join("operstate")).ok()?;
+    Some(!matches!(
+        text.trim(),
+        "down" | "lowerlayerdown" | "notpresent" | "dormant"
+    ))
 }
 
 /// 网口是否为无线网卡：存在 `wireless` 子目录（/proc/net/wireless 的旧式暴露，
@@ -55,6 +59,42 @@ pub(crate) fn iface_has_wireless(name: &str) -> bool {
         .join(name)
         .join("wireless")
         .exists()
+}
+
+/// CUDA toolkit 版本：`/usr/local/cuda*/version.json` 的 `cuda.version`。多套
+/// toolkit 并存时按 (major, minor) **数值**取最新——字典序会把 "cuda-12.10" 排到
+/// "cuda-12.2" 之后，数值序才符合"最新"直觉。
+pub(crate) fn cuda_toolkit_version() -> Option<String> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir("/usr/local")
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("cuda"))
+        })
+        .collect();
+    dirs.sort_by_key(|dir| cuda_dir_sort_key(dir));
+    dirs.into_iter().rev().find_map(|dir| {
+        let text = std::fs::read_to_string(dir.join("version.json")).ok()?;
+        crate::features::device::parse_cuda_toolkit_version(&text)
+    })
+}
+
+/// 目录名 → (major, minor) 排序键：`cuda-12.10` → (12, 10)；`cuda`、解析失败
+/// 一律 (0, 0)（排最前，被任何带版本号的候选盖过）。
+fn cuda_dir_sort_key(dir: &Path) -> (u32, u32) {
+    let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
+        return (0, 0);
+    };
+    let Some(suffix) = name.strip_prefix("cuda-") else {
+        return (0, 0);
+    };
+    let mut parts = suffix.split('.');
+    let major = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+    (major, minor)
 }
 
 /// NVIDIA 内核驱动版本：`/proc/driver/nvidia/version` 首行。nvidia-smi 不可用时
@@ -131,10 +171,10 @@ fn collect_hwmon_chip(dir: &Path, out: &mut Vec<ExtraSensor>) {
         let label = read_trimmed_non_empty(&dir.join(format!("{hwmon_prefix}{channel}_label")))
             .unwrap_or_else(|| format!("{chip} {channel}"));
         let factor = sensor_unit_factor(kind);
-        let critical = read_f64(&dir.join(format!("{hwmon_prefix}{channel}_crit")))
-            .map(|raw| raw * factor);
-        let max = read_f64(&dir.join(format!("{hwmon_prefix}{channel}_max")))
-            .map(|raw| raw * factor);
+        let critical =
+            read_f64(&dir.join(format!("{hwmon_prefix}{channel}_crit"))).map(|raw| raw * factor);
+        let max =
+            read_f64(&dir.join(format!("{hwmon_prefix}{channel}_max"))).map(|raw| raw * factor);
         out.push((
             chip.clone(),
             kind.to_string(),
@@ -197,6 +237,24 @@ fn read_f64(path: &Path) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cuda_dir_sort_key_orders_numerically_not_lexicographically() {
+        assert_eq!(
+            cuda_dir_sort_key(Path::new("/usr/local/cuda-12.10")),
+            (12, 10)
+        );
+        assert_eq!(
+            cuda_dir_sort_key(Path::new("/usr/local/cuda-12.2")),
+            (12, 2)
+        );
+        // 字典序会判 12.2 更大;数值序正确判 12.10 更新。
+        assert!(
+            cuda_dir_sort_key(Path::new("/usr/local/cuda-12.10"))
+                > cuda_dir_sort_key(Path::new("/usr/local/cuda-12.2"))
+        );
+        assert_eq!(cuda_dir_sort_key(Path::new("/usr/local/cuda")), (0, 0));
+    }
+
     use super::*;
 
     #[test]
@@ -249,14 +307,8 @@ mod tests {
 
     #[test]
     fn parse_hwmon_input_recognizes_the_four_supported_kinds() {
-        assert_eq!(
-            parse_hwmon_input("fan1_input"),
-            Some(("fan", "fan", 1))
-        );
-        assert_eq!(
-            parse_hwmon_input("in0_input"),
-            Some(("voltage", "in", 0))
-        );
+        assert_eq!(parse_hwmon_input("fan1_input"), Some(("fan", "fan", 1)));
+        assert_eq!(parse_hwmon_input("in0_input"), Some(("voltage", "in", 0)));
         assert_eq!(
             parse_hwmon_input("curr12_input"),
             Some(("current", "curr", 12))
@@ -299,7 +351,10 @@ mod tests {
         let sensors = extra_sensors();
         for (chip, kind, name, value, _critical, _max) in &sensors {
             assert!(!chip.is_empty());
-            assert!(matches!(kind.as_str(), "fan" | "voltage" | "current" | "power"));
+            assert!(matches!(
+                kind.as_str(),
+                "fan" | "voltage" | "current" | "power"
+            ));
             assert!(!name.is_empty());
             assert!(value.is_finite());
         }

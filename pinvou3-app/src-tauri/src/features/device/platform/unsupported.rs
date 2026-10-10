@@ -29,6 +29,11 @@ pub(crate) fn iface_has_wireless(_name: &str) -> bool {
     false
 }
 
+/// 非 Linux 平台不探测 CUDA toolkit（`/usr/local` 是 Linux 惯例路径）。
+pub(crate) fn cuda_toolkit_version() -> Option<String> {
+    None
+}
+
 pub(crate) fn nvidia_driver_version() -> Option<String> {
     None
 }
