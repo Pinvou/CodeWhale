@@ -39,14 +39,14 @@ func newEntitlementCrossDomainBillingFixture(t *testing.T, ctx context.Context, 
 	t.Cleanup(func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		var owner string
-		var sessions int
-		if err := admin.QueryRow(cleanup, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&owner, &sessions); err != nil || owner != "billing_schema_owner" || sessions != 0 {
-			t.Error("owned Billing cleanup identity or active-session guard failed")
+		if err := waitOwnedBillingFixtureSessionsClosed(cleanup, admin, database); err != nil {
+			t.Errorf("owned Billing cleanup guard failed: %s", err)
 		} else if _, err := admin.Exec(cleanup, `DROP DATABASE `+identifier); err != nil {
 			t.Error("owned Billing cleanup failed")
 		}
-		_ = admin.Close(context.Background())
+		if err := admin.Close(context.Background()); err != nil {
+			t.Error("owned Billing cleanup control close failed")
+		}
 	})
 	setupConfig := base.Copy()
 	setupConfig.Database = database
@@ -54,7 +54,11 @@ func newEntitlementCrossDomainBillingFixture(t *testing.T, ctx context.Context, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer setup.Close(context.Background())
+	defer func() {
+		if err := setup.Close(context.Background()); err != nil {
+			t.Error("owned Billing setup close failed")
+		}
+	}()
 	// Mirror deploy/compose/init-databases.sh: the schema owner holds public and
 	// the runtime keeps schema CREATE only until migration 53 revokes it.
 	if _, err := setup.Exec(ctx, `ALTER SCHEMA public OWNER TO billing_schema_owner;
@@ -71,7 +75,11 @@ GRANT USAGE,CREATE ON SCHEMA public TO billing_service`); err != nil {
 	if err != nil {
 		t.Fatal("genuine Billing migration connection failed")
 	}
-	t.Cleanup(func() { connection.Close(context.Background()) })
+	t.Cleanup(func() {
+		if err := connection.Close(context.Background()); err != nil {
+			t.Error("owned Billing operator close failed")
+		}
+	})
 	if _, err := connection.Exec(ctx, `SET ROLE billing_service`); err != nil {
 		t.Fatal(err)
 	}
