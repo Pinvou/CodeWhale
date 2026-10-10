@@ -1,5 +1,5 @@
-//! Exact ACP remote-turn custody. The registry lock arbitrates admission only;
-//! no async wait, transcript write, or process shutdown runs under it.
+//! Exact ACP remote-turn custody. The registry lock fences admission and the
+//! synchronous transcript start; no async wait or process shutdown runs under it.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

@@ -3,9 +3,9 @@
 //! Never-attempted request IDs/fingerprints are exposed only for explicit
 //! abandon after a restart. Delete means durable UI soft-hide, not removal.
 
+use super::desktop_remote_state::DesktopRemoteState as State;
 use serde::Serialize;
 use serde_json::{Value, json};
-use tauri::State;
 
 use crate::features::remote_control::controller::controlling::ControllingDeviceManager;
 use crate::features::remote_control::controller::controlling_session::{
