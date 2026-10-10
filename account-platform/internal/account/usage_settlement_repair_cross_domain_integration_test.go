@@ -38,8 +38,9 @@ func TestUsageSettlementRepairCrossDomainActivationPostgresIntegration(t *testin
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	t.Cleanup(cancel)
 
-	repository, accountConnection, relay, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, accountURL, 0)
+	repository, accountConnection, relay, _ := newEntitlementApprovalFixture(t, ctx, accountURL)
 	billingRepository, billingPool, billingConnection, loss := newUsageRepairCrossDomainBillingFixture(t, ctx, billingURL)
+	inactiveFinancialBaseline := reconciliationCrossDomainFinancialSnapshot(t, ctx, billingPool)
 	proofToken, executorToken := configureEntitlementProofIdentity(t)
 	billingServer := httptest.NewServer(billingdomain.NewService(billingRepository).Handler("account-proof-test"))
 	t.Cleanup(billingServer.Close)
@@ -94,6 +95,7 @@ func TestUsageSettlementRepairCrossDomainActivationPostgresIntegration(t *testin
 	precheck, err := precheckSource.Precheck(ctx, ApprovalPrecheckRequest{
 		CommandType: policy.CommandType, TargetResourceID: loss.HoldID.String(),
 		UsageRequestID: loss.UsageRequestID.String(), LossReviewID: loss.LossReviewID.String(),
+		ReasonCode: "MISSING_USAGE_SETTLEMENT",
 	})
 	if err != nil {
 		t.Fatalf("usage settlement repair precheck: %v", err)
@@ -109,6 +111,7 @@ func TestUsageSettlementRepairCrossDomainActivationPostgresIntegration(t *testin
 	if _, err := precheckSource.Precheck(ctx, ApprovalPrecheckRequest{
 		CommandType: policy.CommandType, TargetResourceID: loss.HoldID.String(),
 		UsageRequestID: loss.UsageRequestID.String(), LossReviewID: uuid.NewString(),
+		ReasonCode: "MISSING_USAGE_SETTLEMENT",
 	}); !errors.Is(err, ErrApprovalPrecheckRejected) {
 		t.Fatalf("unprovable usage target must be refused, got %v", err)
 	}
@@ -149,7 +152,7 @@ func TestUsageSettlementRepairCrossDomainActivationPostgresIntegration(t *testin
 		!approvalPaginationHexDigest(presentedCommand.AllocationsDigest) {
 		t.Fatalf("cross-domain presenter command=%#v", detail.Command)
 	}
-	proofSource, err := NewHTTPApprovalProofSource("http://127.0.0.1", billingServer.URL, proofToken)
+	proofSource, err := NewHTTPApprovalProofSource(billingServer.URL, proofToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +177,7 @@ func TestUsageSettlementRepairCrossDomainActivationPostgresIntegration(t *testin
 		t.Fatal("inactive cross-domain create unexpectedly succeeded")
 	}
 	assertApprovalRequestAbsent(t, ctx, repository, requester.ID, createDraft.IdempotencyKey)
-	submitID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT")
+	submitID := seedUsageAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.SubmitApprovalRequest(ctx, requesterPrincipal, submitID, 1)
 		return err
@@ -182,7 +185,7 @@ func TestUsageSettlementRepairCrossDomainActivationPostgresIntegration(t *testin
 		t.Fatalf("inactive cross-domain submit: %v", err)
 	}
 	assertApprovalRequestState(t, ctx, repository, submitID, "DRAFT", 1)
-	approveID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED")
+	approveID := seedUsageAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.DecideApprovalRequest(ctx, approverPrincipal, approveID, 1, "APPROVED", "closed cross-domain gate", frozen.CriticalResourceVersions)
 		return err
@@ -200,6 +203,9 @@ func TestUsageSettlementRepairCrossDomainActivationPostgresIntegration(t *testin
 		cases != 0 || claims != 0 || repairJournals != 0 || reviewStatus != "REVIEW_REQUIRED" {
 		t.Fatalf("closed cross-domain gate wrote Billing effects: cases=%d claims=%d journals=%d review=%s err=%v",
 			cases, claims, repairJournals, reviewStatus, err)
+	}
+	if reconciliationCrossDomainFinancialSnapshot(t, ctx, billingPool) != inactiveFinancialBaseline {
+		t.Fatal("inactive approval attempts changed complete financial facts")
 	}
 
 	if _, err := billingConnection.Exec(ctx, `SET ROLE billing_schema_owner;
@@ -232,7 +238,10 @@ WHERE command_type='USAGE_SETTLEMENT_REPAIR' AND policy_version=1 AND snapshot_s
 		t.Fatalf("activated cross-domain proof=%+v err=%v", proof.Response, err)
 	}
 
-	transitionEntitlementCrossDomainAccountControl(t, ctx, accountConnection)
+	control, controlErr := repository.ApprovalActionControl(ctx)
+	if controlErr != nil || control.Mode != "PROOF_REQUIRED" {
+		t.Fatal("official owned Account control must be PROOF_REQUIRED")
+	}
 	requester = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "usage-repair-chain-requester")
 	approver = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "usage-repair-chain-approver")
 	requesterPrincipal, approverPrincipal = approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
@@ -297,7 +306,8 @@ WHERE o.aggregate_id=$1 AND o.event_type='account.approval-command.authorized.v1
 	if err != nil || route.CanonicalDurable != descriptor.Durable {
 		t.Fatalf("authorization route=%+v err=%v", route, err)
 	}
-	if _, err := gate.ResolveAuthorizationBinding(ctx, eventID, descriptor.Durable); err != nil {
+	binding, err := gate.ResolveAuthorizationBinding(ctx, eventID, descriptor.Durable)
+	if err != nil {
 		t.Fatalf("authorization binding err=%v", err)
 	}
 	decoded, err := approvalencoding.DecodeAuthorizationEvent(raw, approvalencoding.ExpectedAuthorizationBinding{
@@ -449,6 +459,21 @@ JOIN account_approval_authorization.approval_delivery_states d ON d.approval_req
 UPDATE billing_approval_command_activations SET state='INACTIVE',version=version+1
 WHERE command_type='USAGE_SETTLEMENT_REPAIR' AND policy_version=1 AND snapshot_schema_version=1 AND state='ACTIVE'`); err != nil {
 		t.Fatal(err)
+	}
+	contextBaseline := reconciliationCrossDomainFinancialSnapshot(t, ctx, billingPool)
+	wrongCommandBinding := binding
+	wrongCommandBinding.CommandType = "LEDGER_REPAIR"
+	if err := billingRepository.ClaimBillingApprovalProof(ctx, wrongCommandBinding, decoded.Payload); !errors.Is(err, billingdomain.ErrApprovalSnapshotMismatch) {
+		t.Fatal("foreign command claim must reject original frozen authorization")
+	}
+	wrongTargetEvent := decoded.Payload
+	wrongTargetEvent.TargetResourceID = uuid.NewString()
+	if err := billingRepository.ClaimBillingApprovalProof(ctx, binding, wrongTargetEvent); !errors.Is(err, billingdomain.ErrApprovalSnapshotMismatch) {
+		t.Fatal("foreign target claim must reject original frozen authorization")
+	}
+	var contextCases, contextClaims int64
+	if err := billingPool.QueryRow(ctx, `SELECT (SELECT count(*) FROM usage_settlement_repair_cases), (SELECT count(*) FROM billing_approval_proof_claims)`).Scan(&contextCases, &contextClaims); err != nil || contextCases != replayCases || contextClaims != replayClaims || reconciliationCrossDomainFinancialSnapshot(t, ctx, billingPool) != contextBaseline {
+		t.Fatal("foreign context changed money or immutable proof facts")
 	}
 	if err := repository.requireApprovalAdvancement(ctx, policy); !errors.Is(err, ErrBillingGovernanceInactive) {
 		t.Fatalf("rolled-back cross-domain advancement: %v", err)

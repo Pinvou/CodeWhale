@@ -39,11 +39,18 @@ export const financialRepairInputs = Object.freeze({
     { key: 'payment_evidence_id', kind: 'uuid' },
   ]),
 
+
   RECONCILIATION_FINANCIAL_REPAIR: Object.freeze([
     { key: 'target_resource_id', kind: 'uuid' },
     { key: 'payment_evidence_id', kind: 'uuid' },
     { key: 'business_date', kind: 'date' },
   ]),
+  USAGE_SETTLEMENT_REPAIR: Object.freeze([
+    { key: 'target_resource_id', kind: 'uuid' },
+    { key: 'usage_request_id', kind: 'uuid' },
+    { key: 'loss_review_id', kind: 'uuid' },
+  ]),
+
 });
 
 export const financialRepairCommandTypes = Object.freeze(Object.keys(financialRepairInputs));

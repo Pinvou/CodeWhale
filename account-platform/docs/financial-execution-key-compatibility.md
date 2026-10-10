@@ -1,6 +1,6 @@
 # 财务执行键的历史兼容域
 
-`legacyFinancialExecutionKeyDigestV1` 保留历史 JSON 预像：`command_type` 固定为 `LEDGER_REPAIR`，`execution_key` 经过 `strings.TrimSpace`，再沿用 JSON 编码和 SHA 摘要。该标签是历史 wire 常量，不代表实际命令类型，也不是授权或跨命令隔离边界。Ledger 保留原私有函数签名；应收核销、付款纠错和退款异常修复通过职责明确的通用 helper 使用相同算法。
+`legacyFinancialExecutionKeyDigestV1` 保留历史 JSON 预像：`command_type` 固定为 `LEDGER_REPAIR`，`execution_key` 经过 `strings.TrimSpace`，再沿用 JSON 编码和 SHA 摘要。该标签是历史 wire 常量，不代表实际命令类型，也不是授权或跨命令隔离边界。Ledger 保留原私有函数签名；应收核销、付款纠错、退款异常修复、拒付财务修复、对账结案和用量结算修复通过职责明确的通用 helper 使用相同算法。
 
 本次提取不改变任何已有摘要、不可变回执或只读回放，不引入按真实命令计算的新摘要。实际命令隔离仍依赖各命令的 case、审批请求、授权事件、epoch、目标和冻结事实绑定，以及正式 proof claim 的命令和目标校验。相同执行键跨命令得到相同历史摘要，不能因此宣称 hash 隔离增强。
 

@@ -30,7 +30,7 @@ window.fetch = async (url, options = {}) => {
     { command_type: 'RECEIVABLE_WRITE_OFF', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
     { command_type: 'CHARGEBACK_FINANCIAL_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
     { command_type: 'RECONCILIATION_FINANCIAL_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'USAGE_SETTLEMENT_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
+    { command_type: 'UNKNOWN_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
   ] }, 200, { 'X-Platform-Authorization-Version': '1' });
   if (url === '/api/admin/account/admin/v2/approval-command-prechecks') {
     state.prechecks++;

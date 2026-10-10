@@ -24,6 +24,7 @@ func TestAuthorizationCommandTargetClosedSet(t *testing.T) {
 		{refundExceptionRepairCommand, "REFUND", 1},
 		{chargebackFinancialRepairCommand, "CHARGEBACK_CASE", 1},
 		{reconciliationFinancialRepairCommand, "RECONCILIATION_CASE", 1},
+		{usageSettlementRepairCommand, "USAGE_HOLD", 1},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			event := approvalencoding.AuthorizationEvent{CommandType: tc.command, PolicyVersion: tc.policy, TargetResourceType: tc.target, TargetResourceID: id}
@@ -60,6 +61,10 @@ func TestAuthorizationCommandTargetClosedSet(t *testing.T) {
 		{"reconciliation-wrong-target", reconciliationFinancialRepairCommand, "CHARGEBACK_CASE", id, 1},
 		{"reconciliation-noncanonical", reconciliationFinancialRepairCommand, "RECONCILIATION_CASE", strings.ToUpper(id), 1},
 		{"reconciliation-zero-id", reconciliationFinancialRepairCommand, "RECONCILIATION_CASE", uuid.Nil.String(), 1},
+		{"usage-wrong-policy", usageSettlementRepairCommand, "USAGE_HOLD", id, 2},
+		{"usage-wrong-target", usageSettlementRepairCommand, "RECONCILIATION_CASE", id, 1},
+		{"usage-noncanonical", usageSettlementRepairCommand, "USAGE_HOLD", strings.ToUpper(id), 1},
+		{"usage-zero-id", usageSettlementRepairCommand, "USAGE_HOLD", uuid.Nil.String(), 1},
 		{"unknown-command", "FUTURE_COMMAND", "RECEIVABLE", id, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

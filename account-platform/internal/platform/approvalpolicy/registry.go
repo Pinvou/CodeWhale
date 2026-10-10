@@ -234,6 +234,13 @@ func buildPolicies() map[string]Policy {
 		CriticalResourceFields: []string{"target_id", "resource_version", "financial_snapshot", "policy_version"},
 		ExpiresAfter:           24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 	}
+	result["USAGE_SETTLEMENT_REPAIR"] = Policy{
+		CommandType: "USAGE_SETTLEMENT_REPAIR", PolicyVersion: 1, Mode: ApprovalRequired,
+		RequesterPermission: "platform.billing.repairs.request", ApproverPermission: "platform.billing.repairs.approve",
+		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true, SnapshotSchemaVersion: 1,
+		CriticalResourceFields: []string{"target_id", "resource_version", "financial_snapshot", "policy_version"},
+		ExpiresAfter:           24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
+	}
 	addTokenGovernancePolicies(result)
 	result["ENTITLEMENT_COMPONENT_ADJUSTMENT"] = Policy{
 		CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, Mode: ApprovalRequired,
@@ -248,7 +255,7 @@ func buildPolicies() map[string]Policy {
 // Executable is the installed, closed approval command set.
 func Executable(command string) bool {
 	switch strings.ToUpper(strings.TrimSpace(command)) {
-	case "RECONCILIATION_FINANCIAL_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "PAYMENT_FINANCIAL_REPAIR", "LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "ENTITLEMENT_COMPONENT_ADJUSTMENT", "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
+	case "USAGE_SETTLEMENT_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "PAYMENT_FINANCIAL_REPAIR", "LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "ENTITLEMENT_COMPONENT_ADJUSTMENT", "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
 		return true
 	}
 	return false

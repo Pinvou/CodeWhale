@@ -1,3 +1,13 @@
+# 当前完整实现与审核边界
+
+本波安装 `USAGE_SETTLEMENT_REPAIR` p1/schema1：当前第七类财务修复及独立三语表单、原身份 EDIT、新鲜预检、typed 冻结详情、Account closed policy/encoding/proof/claim/recovery、Billing 实际 owner dispatch、11 个 Billing 与 3 个 Token durable、Portal BFF 和精确 NATS ACL。默认 activation `INACTIVE`；未部署、生产激活或重发模型调用。
+
+首版只处理 `LOSS_REVIEW`：hold 已 RELEASED，原释放原因 ENTITLEMENT_EXPIRED_UNCERTAIN，复核仍 REVIEW_REQUIRED。应结额由 hold 的冻结 pricing_snapshot 与 review 的真实顶层 input_tokens/output_tokens/cached_input_tokens 重算，核对 price_version_id、model、protocol、formula 身份及 claimed；不查询当前价格、不从人工金额构造事实。整数算法沿既有 Token Cost，支持原 legacy 三费率及已解析单位的分母/舍入，字段缺失、溢出或不一致失败关闭。
+
+本轮保留 FROZEN/REVOKED/EXPIRED 的组件和包终态，锁后完整冻结事实、精确实时 activation 与非空 facts_digest 校验；钱包 posted 不足以承担分配计划时提前拒绝，保持原余额不足零效果行为，不增加新的不足余额应收拆分政策。匹配原 request/event/epoch/hold/usage/evidence/key 收据先只读恢复；只有新效果重检实时事实。
+
+原 Account 000077、Billing 000074/000075/000076 up/down 与全部历史迁移身份保留。有限 PG、受控 React、默认套件和标准构建分别以 PR 实际证据为准；完整 issuer/NATS/Account/资源/OS E2E 仍暂缓，编译与条件跳过不是运行通过。下文历史设计中的 COMMITTED_SHORTFALL 不是当前执行能力，须未来独立 policy/schema 与持久修正事实。
+
 # 用量结算修复（`USAGE_SETTLEMENT_REPAIR`）领域设计
 
 状态：领域设计冻结；当前私有完整组合已实现 handler、closed proof、executor、durable consumer、typed presenter 与只读恢复，默认 activation 仍为 `INACTIVE`，未部署或激活。当前首版仅处理 `LOSS_REVIEW`：hold 已 `RELEASED` 且原释放原因是 `ENTITLEMENT_EXPIRED_UNCERTAIN`，复核仍为 `REVIEW_REQUIRED`。`COMMITTED_SHORTFALL` 所需持久修正事实未安装，当前一律拒绝；本文后续含该情形的原设计条款作为历史设计记录保留，不表示当前可执行能力。沿用 `platform.billing.repairs.*` 与 `policy_version=1 / snapshot_schema_version=1`，绝不重发模型请求。
@@ -12,7 +22,7 @@
 
 - **预留与分配**：`usage_holds`（`usage_request_id` 唯一、`wallet_id`、`price_version_id`、`status ∈ {ACTIVE,COMMITTED,RELEASED,EXPIRED,REVIEW}`、`max_microcredits>=0`（`000022` 已由 `>0` 放宽为 `>=0`）、`actual_microcredits>=0`、`usage_snapshot JSONB`、`expires_at`、`terminal_at`）与 `usage_hold_allocations`（`component_id` 非空、`reserved_microcredits>0`、`settled/released>=0`、`CHECK settled+released<=reserved`；主键由 `000012` 的 `(hold_id,package_id)` 在 `000016` 改为 `(hold_id,component_id)`）（`000002`、`000012`、`000016`、`000022`）。
 - **零 delta 腿一律省略**：`ledger_postings.delta_microcredits<>0`（`000002`）是不可违反的既有限制，因此补结算时 `settled=0` 的钱包腿与 `overage=0` 的应收腿必须整条省略（`max_microcredits=0` 的 hold 因此只产生 `USAGE_REVENUE +M` 与 `RECEIVABLE_ASSET −M` 两条平台腿）。
-- **结算落账**（`internal/billing/postgres.go` 的 `Commit`）：同 `usage_request_id` 且 `actual` 相同即幂等返回；`status='COMMITTED'` 之外的终态返回 `ErrUsageAlreadyTerminal`；`RELEASED && actual>0` 且 `usage_snapshot->>'release_reason'='ENTITLEMENT_EXPIRED_UNCERTAIN'` 时写 `usage_loss_reviews`（`reason_code`、`claimed_actual_microcredits`、`usage_snapshot`、`status='REVIEW_REQUIRED'`）并返回 `ErrUsagePlatformLossReview`。ACTIVE 路径：`backedActual=min(actual,max)`、`overage=actual-backedActual`；写 `USAGE` journal（`business_reference='usage:'||usage_request_id`）；按冻结分配顺序（组件过期时间、BONUS 优先、入账时间、ID）扣减 lot 与组件预留/已用、回填 `usage_hold_allocations`、投影 package 状态；`overage>0` 写 `RECEIVABLE_ASSET -overage` 并创建 `source_type='USAGE_OVERAGE'` 且 `source_reference=usage_request_id` 的应收；`USAGE_REVENUE +actual`；钱包 `posted_microcredits-=backedActual`、`reserved_microcredits-=max`、`version+1`；hold 置 `COMMITTED` 并记录 `actual`/`usage_snapshot`。
+- **结算落账**（`internal/billing/usage_holds.go` 的 `Commit`）：同 `usage_request_id` 且 `actual` 相同即幂等返回；`status='COMMITTED'` 之外的终态返回 `ErrUsageAlreadyTerminal`；`RELEASED && actual>0` 且 `usage_snapshot->>'release_reason'='ENTITLEMENT_EXPIRED_UNCERTAIN'` 时写 `usage_loss_reviews`（`reason_code`、`claimed_actual_microcredits`、`usage_snapshot`、`status='REVIEW_REQUIRED'`）并返回 `ErrUsagePlatformLossReview`。ACTIVE 路径：`backedActual=min(actual,max)`、`overage=actual-backedActual`；写 `USAGE` journal（`business_reference='usage:'||usage_request_id`）；按冻结分配顺序（组件过期时间、BONUS 优先、入账时间、ID）扣减 lot 与组件预留/已用、回填 `usage_hold_allocations`、投影 package 状态；`overage>0` 写 `RECEIVABLE_ASSET -overage` 并创建 `source_type='USAGE_OVERAGE'` 且 `source_reference=usage_request_id` 的应收；`USAGE_REVENUE +actual`；钱包 `posted_microcredits-=backedActual`、`reserved_microcredits-=max`、`version+1`；hold 置 `COMMITTED` 并记录 `actual`/`usage_snapshot`。
 - **损失复核模型**：`usage_loss_reviews`（`hold_id` 唯一、`reason_code` 仅 `ENTITLEMENT_EXPIRED_UNCERTAIN`、`claimed_actual_microcredits`、`usage_snapshot`、`status ∈ {REVIEW_REQUIRED,RESOLVED_PLATFORM_LOSS}`、`updated_at`）——既有终态只表达“平台吸收损失”，没有“已补结算”收口（`000016`）。
 - **不变量**：journal/posting 不可改写且必须平衡、`business_reference` 全局唯一；钱包 `posted_microcredits>=0`、lot 上下界、组件守恒；`usage_hold_allocations` 的 `settled+released<=reserved`。
 
@@ -27,7 +37,7 @@
 
 **允许的领域变化**（单次执行恰好产生，同一 Billing Serializable 事务内）：
 
-1. 一条 `USAGE` journal：`business_reference='usage-settlement-repair:'||usage_request_id`，postings = 逐 lot 钱包负债账户 `-settled`（带 lot）、`USAGE_REVENUE +settled`、`overage>0` 时 `RECEIVABLE_ASSET -overage`；`settled+overage=M` 且 journal 合计 0。
+1. 一条 `USAGE` journal：`business_reference='usage-settlement-repair:'||usage_request_id`，postings = 逐 lot 钱包负债账户 `-settled`（带 lot）、`USAGE_REVENUE +M`、`overage>0` 时 `RECEIVABLE_ASSET -overage`；`settled+overage=M` 且 journal 合计 0。
 2. 按冻结分配顺序在当前可用额度内扣减：`credit_lots.remaining_microcredits`、`entitlement_components`（`available`/`used`/`status` 按既有结算语义推进）、成员配额按既有 `settleMemberQuotaComponent` 语义。
 3. 钱包 `posted_microcredits-=settled`、`version+1`、`updated_at`；`overage>0` 时按既有 `createReceivableWithinTransaction` 语义创建 `source_type='USAGE_OVERAGE'`、`source_reference='usage-settlement-repair:'||usage_request_id` 的应收并同步钱包应收投影。
 4. `usage_hold_allocations` 的 `settled_microcredits`/`released_microcredits` 与 `updated_at` 按既有语义回填；`usage_holds` 追加 `usage_snapshot->'settlement_repair'` 子对象（含审批引用、`M`、`settled`、`overage`、前后 `actual`），`actual_microcredits` 更新为 `max(原值, 应结额)`，`terminal_at`/`updated_at` 更新；不得改写 `usage_snapshot` 既有键。
@@ -46,65 +56,66 @@
 
 | 证据 | 要求 |
 |---|---|
-| 应结额 `A` | 由冻结的 `usage_snapshot`（含定价/公式快照与 token 事实）按与既有结算同一整数算法重算；快照缺失、字段不全或与 `price_version_id` 不一致即 `PROOF_DENY` |
+| 应结额 `A` | 由 hold 冻结的 `pricing_snapshot` 与 review.usage_snapshot 顶层三 token 数量按既有整数 Cost 算法重算；快照缺失、字段不全或与 `price_version_id` 不一致即 `PROOF_DENY` |
 | 已结算额 `E` | case ② 取 `usage_holds.actual_microcredits`（`COMMITTED`）；case ① 取 `0`，并要求 hold 为 `RELEASED` 且 `usage_snapshot->>'release_reason'='ENTITLEMENT_EXPIRED_UNCERTAIN'` |
 | 差额 `M` | `M=A-E`，必须 `>0`；若已有 `'usage-settlement-repair:'` 前缀的 journal/应收或既有 `usage_request_id` 应收，其未结部分计入 E，不得二次创建 |
 | 修正用量证据（case ②） | 必须是与该 `usage_request_id` 绑定的持久核对事实（Token 用量记录/损失复核快照），不得是人工输入的数字 |
-| 损失复核（case ①） | `usage_loss_reviews.status='REVIEW_REQUIRED'`，`claimed_actual_microcredits>=0`，其 `usage_snapshot` 与 hold 快照一致 |
+| 损失复核（case ①） | `usage_loss_reviews.status='REVIEW_REQUIRED'`，`claimed_actual_microcredits>=0`，review 的真实 token 用量按 hold 独立冻结的 pricing_snapshot 重算并与 claimed 一致；hold.usage_snapshot 仍保留释放原因，两个 JSON 不要求错误的逐字节相同 |
 | 上限与余额 | `settled<=可用组件额度`、`overage=M-settled>=0`；钱包 `posted_microcredits>=settled`、`status='ACTIVE'` |
 
 判据全部由 Billing 从持久事实重算；proof 不接受浏览器提供的用量、金额、组件或定价，执行期与 proof 均禁止任何外部调用。
 
 ## 6. closed command / snapshot / proof / presenter（冻结）
 
-### 6.1 normalized command（`additionalProperties:false`，RFC 8785，整数为 JSON number）
+### 6.1 当前 normalized command（五字段 closed，整数为 JSON number）
+
+`command_type`、policy/schema 位于审批 envelope；normalized 对象恰含 usage_request_id、hold_id、evidence_kind、loss_review_id、reason_code。预检恰含 command_type、target_resource_id（hold）、usage_request_id、loss_review_id、reason_code 五字段。无新增金额、定价或 expectedVersion 请求字段。
 
 | 字段 | 类型 | 规则 |
 |---|---|---|
-| `command_type` | string | 固定 `USAGE_SETTLEMENT_REPAIR` |
-| `policy_version` / `schema_version` | int | 均为 1 |
 | `usage_request_id` | uuid | 目标用量请求，必须 `usage_holds.usage_request_id` 命中 |
 | `hold_id` | uuid | 必须与 `usage_request_id` 一致 |
-| `evidence_kind` | string | `LOSS_REVIEW`（case ①）或 `COMMITTED_SHORTFALL`（case ②） |
-| `loss_review_id` | uuid（可空） | 仅 `LOSS_REVIEW` 必填 |
+| `evidence_kind` | string | 仅 `LOSS_REVIEW`；case ② 是后续设计 |
+| `loss_review_id` | uuid | 当前首版必填 |
 | `reason_code` | string | 唯一取值 `MISSING_USAGE_SETTLEMENT` |
 
 ### 6.2 critical / financial snapshot（复用 `snapshot_schema_version=1`）
 
 | 键 | 内容 |
 |---|---|
-| `critical_resource_versions.hold_updated_at` / `.loss_review_updated_at` | 冻结时间戳（损失复核可空） |
-| `critical_resource_versions.facts_digest` | 下述事实集合的 closed RFC8785 摘要 |
+| `critical_resource_versions.hold_updated_at` / `.loss_review_updated_at` | 当前首版两个必填冻结时间戳（RFC3339Nano） |
+| `critical_resource_versions.facts_digest` | 下述持久 JSONB（UseNumber 保留 bigint）转换后固定 encoding/json 的 SHA-256；审批 wire 的 RFC8785 摘要另算，不混称 |
 | `critical_resource_versions.policy_version` | 1 |
-| `financial_snapshot.expected_microcredits` / `.settled_microcredits` | `A` 与 `E` |
-| `financial_snapshot.settlement_microcredits` / `.overage_microcredits` | `settled` 与 `overage` |
+| `financial_snapshot.expected_microcredits` | 本次应结额 `A` |
+| `financial_snapshot.settled_microcredits` / `.settlement_microcredits` | 原 p1/schema1 owner 投影两个字段均为计划钱包结算 `S`，不是已经发生的扣款；理论已结额 `E=0` 不另加 wire 字段 |
+| `financial_snapshot.overage_microcredits` | `A-S`，仅形成应收，不产生可用额度 |
 | `financial_snapshot.wallet_id` / `.wallet_version` | 目标钱包与版本 |
 | `financial_snapshot.allocations_digest` | 冻结的分配集合（package/component/lot/预留/已结算）摘要 |
 
-`facts_digest` 覆盖：hold 全字段（含 `usage_snapshot` 的关键子键摘要）、全部 `usage_hold_allocations`、相关组件与 lot 的当前额度/状态、钱包 `posted/reserved/version`、既有应收（含 `usage_request_id` 与 `'usage-settlement-repair:'` 引用）、损失复核行、既有 `USAGE` journal 引用、以及 activation/policy/schema 版本。
+`facts_digest` 覆盖 hold/loss_review/wallet 全 JSONB、全部 allocation/component/package/credit_lot 有序组成及状态/额度、冻结定价与真实用量、时间戳和 policy/schema/activation。既有 journal/应收/receipt 是否存在由原身份与重检门禁核对；不把仅有 SQL 判据说成已进入摘要。
 
 ### 6.3 proof 与 presenter
 
-- Billing 内部证明端点只接受 Account 专属身份，2 秒绝对期限、64 KiB 上限，按 §5 重读并重算 `A/E/M/settled/overage`，返回闭合结果（`PROOF_VALID/PROOF_DENY`、`usage_request_id`、`hold_id`、`M`、`settled`、`overage`、钱包/包版本、`facts_digest`、policy/schema/activation 版本）。执行期与 proof 均禁止任何外部调用。
-- presenter（GSA-37）只显示用量请求摘要（脱敏）、模型/渠道（脱敏）、冻结定价版本与用量数量、`A/E/M` 与拆分、预计应收金额、证据类型（损失复核/少结算）、风险警示；不下发原始请求体、提示词、Provider 原文或个人数据。
+- Billing 内部证明端点只接受 Account 专属身份，2 秒绝对期限、64 KiB 上限，按 §5 重读并重算计划，通过既有 closed proof 响应返回 verdict、绑定及摘要。只读 owner 预检返回 normalized5/critical4/financial7 三个闭合对象，不能把计划字段误称为额外 proof 响应合同。执行期与 proof 均禁止任何外部调用。
+- presenter 使用当前 11 字段 typed owner 摘要：`loss_review_id`、`hold_id`、`usage_request_id`、`wallet_id`、`evidence_kind`、`expected_microcredits`、`settled_microcredits`、`overage_microcredits`、`allocations_digest`、`facts_digest`、`reason_code`；这是本次冻结计划的摘要，不是完整七字段 financial snapshot，不下发 pricing/request 原始 JSON、提示词、Provider 原文或个人数据。
 
 ## 7. 幂等、状态推进与未知结果
 
 ### 7.1 新增不可变审计行（GSA-36 前向迁移）
 
-`usage_settlement_repair_cases`（`billing_schema_owner` 持有，运行期仅最小 `INSERT/SELECT`，UPDATE/DELETE 由触发器与 ACL 双重拒绝）：`id`、`approval_request_id`（唯一）、`authorization_event_id`（唯一）、`approval_epoch`、`execution_key_digest`（唯一、`^[0-9a-f]{64}$`）、`usage_request_id`（唯一）、`hold_id`、`loss_review_id`（可空、唯一）、`wallet_id`、`evidence_kind`、`expected_microcredits`、`settled_microcredits`、`overage_microcredits`（`>=0`）、`allocations_digest`、`facts_digest`、`journal_entry_id`（唯一）、`receivable_id`（可空、唯一）、`state`、`created_at`。
+`usage_settlement_repair_cases`（`billing_schema_owner` 持有，不可变触发器拒绝 UPDATE/DELETE；900003 最终 runtime 对该后加表实际有 UPDATE/DELETE privilege，有限 PG 已验证两项权限及写入拒绝，不能声称 ACL 双重拒绝。保留原迁移身份，不扩大权限）：`id`、`approval_request_id`（唯一）、`authorization_event_id`（唯一）、`approval_epoch`、`execution_key_digest`（唯一、`^[0-9a-f]{64}$`）、`usage_request_id`（唯一）、`hold_id`、`loss_review_id`（可空、唯一）、`wallet_id`、`evidence_kind`、`expected_microcredits`、`settled_microcredits`、`overage_microcredits`（`>=0`）、`allocations_digest`、`facts_digest`、`journal_entry_id`（唯一）、`receivable_id`（可空、唯一）、`state`、`created_at`。
 
 ### 7.2 损失复核状态推进（本命令引入的唯一新状态边）
 
-- `usage_loss_reviews.status` 现有取值只有 `REVIEW_REQUIRED`/`RESOLVED_PLATFORM_LOSS`；GSA-36 的前向迁移必须放宽 CHECK 以加入 `RESOLVED_SETTLED`（guard 校验迁移身份、schema owner 分离与既有取值不变），并以 `WHERE id=$1 AND status='REVIEW_REQUIRED' AND updated_at=$2` 的 CAS 推进（`updated_at=now`）。
+- `usage_loss_reviews.status` 原两值 `REVIEW_REQUIRED`/`RESOLVED_PLATFORM_LOSS` 保留；本波既有 000075 前向迁移加入 `RESOLVED_SETTLED`，并以 `WHERE id=$1 AND status='REVIEW_REQUIRED' AND updated_at=$2` 的 CAS 推进（`updated_at=now`）。
 - 既有 `RESOLVED_PLATFORM_LOSS` 语义（平台吸收损失）与既有写入者保持不变；本命令不改已吸收行。
 
 ### 7.3 幂等与未知结果
 
 - 线性化点：`usage_settlement_repair_cases.usage_request_id` 唯一 + hold/loss-review 行锁与时间戳 CAS + journal `business_reference` 唯一 + 应收 `UNIQUE(source_type,source_reference)`；同一用量请求至多一次补结算。
-- result-first：先按 `usage_request_id`/`hold_id`/`approval_request_id`/`execution_key_digest` 只读读回 case、journal、应收与损失复核状态；命中即返回同一结果。
+- result-first：先严格比对原 request/event/epoch、hold/usage/loss-review 身份与 execution key 摘要，只读恢复已提交 case、journal/应收；匹配原收据即返回同一结果，不重新以可变 live facts 授权已提交事实。
 - 未知结果：提交结果不明时只读查证 case、journal、应收、`usage_hold_allocations` 回填与损失复核状态是否同时一致；缺失或部分事实一律 `UNKNOWN_QUERY_ONLY`，禁止重放、禁止假定零效果。
-- 执行顺序：认领 execution → 校验 activation/policy/schema 与 `facts_digest` → 锁 hold/allocations/组件/lot/钱包 → 复读定价与用量证据 → 计算 `M` 与拆分 → 写 journal 与 posting → 扣减 lot/组件/配额 → 钱包与 package 投影 → 应收（overage）→ 回填 allocations 与 hold 快照 → 推进损失复核 → 写 case → 提交后复读校验。
+- 新效果顺序：hold advisory → wallet 行锁 → hold/loss-review 行锁 → 有序 allocation/component/package/lot 行锁 → 重新校验精确 live activation/policy/schema/version及非空完整冻结事实、定价/用量 → 写同一事务的 journal/postings、lot/组件/配额、钱包/package、可选应收、allocations/hold、损失复核与不可变 case → 提交。不能以锁前快照代替锁后重检。
 
 ## 8. 失败分类与 DLQ 收口（GSA-16 合同）
 
@@ -122,12 +133,12 @@
 - 复用 `platform.billing.repairs.request|approve`、一名非申请人审批、24 小时有效期、5 分钟窗口，不新增权限与 policy/snapshot 版本。
 - 依据：该命令 v1/s1 行从未是可执行合同（静态不可执行、四入口失败关闭），不存在由该版本产生并已执行的领域事实。
 - 激活前只读守卫：该命令必须不存在未终态申请；守卫同时只读列出目标库中 `usage_loss_reviews.status='REVIEW_REQUIRED'` 的存量与 `COMMITTED` hold 的少结算候选统计，存量在激活后逐笔走本命令或既有吸收口径，不得在激活时批量改写。
-- activation 行保持 `INACTIVE`；GSA-36 交付默认关闭的专属 consumer/durable 开关；生产激活只属于取得独立授权的 GSA-40。
+- activation 行保持 `INACTIVE`；消费者来自已安装命令目录和受信 cutover 工件，不存在本命令特有环境开关；生产激活只属于取得独立授权的 GSA-40。
 - 若将来处理“多结算/重复结算冲销”或引入新的用量证据来源，必须新增 policy/schema 版本与独立设计。
 
 ## 10. 迁移、N/N-1 与回滚
 
-- 迁移只前向追加：新增 `usage_settlement_repair_cases` 与 `usage_loss_reviews.status` 的 `RESOLVED_SETTLED` 取值（当前为 `000061`），guard 校验迁移身份与 schema owner 分离；不改 `000002/000012/000016/000054/000060` 既有列、CHECK 语义与历史行。
+- 迁移只前向追加：新增 `usage_settlement_repair_cases` 与 `usage_loss_reviews.status` 的 `RESOLVED_SETTLED` 取值（本波 Billing `000074/000075`；proof-claim allowlist 为 `000076`，Account durable 路由为 `000077`），guard 校验迁移身份与 schema owner 分离；不改 `000002/000012/000016/000054/000060` 既有列、CHECK 语义与历史行。
 - N/N-1：先部署可读新表/新取值的 Billing，再部署 proof 端与执行器/消费者，最后业务页；既有 `Commit` 与损失复核写入者行为不变（不认识新取值时仍按既有两值读取，失败关闭而非误判）。
 - 回滚：只允许停止消费者、把 activation 行翻回 `INACTIVE`；已产生的 case/journal/应收/回填与损失复核状态一律保留可读，禁止破坏性 down。
 - 未通过 GSA-38～40 且未取得独立生产授权前，不部署、不激活。
@@ -137,7 +148,7 @@
 | 验收点 | 期望证据 |
 |---|---|
 | 未结算补记（case ①） | 由 `usage_loss_reviews` + `RELEASED(ENTITLEMENT_EXPIRED_UNCERTAIN)` hold 重算 `A`，写 `USAGE` journal、扣减与回填、损失复核推进 `RESOLVED_SETTLED` |
-| 少结算补记（case ②） | `COMMITTED` hold 且存在冻结修正用量证据时只补差额 `M`，不重复结算已有 `E` |
+| 少结算补记（历史 case ②） | 当前一律拒绝；后续版本才可验收，不以当前LOSS_REVIEW测试冒称覆盖 |
 | 超上限与余额不足 | `overage=M-settled>0` 时形成 `USAGE_OVERAGE` 应收而非可用额度；钱包余额不足时按既有语义失败关闭（不得透支） |
 | 证据门禁 | 定价/用量快照缺失、`price_version_id` 不符、人工输入数字、`M<=0`、hold 状态不符、损失复核非 `REVIEW_REQUIRED` 全部 `PROOF_DENY` |
 | 幂等与并发 | 同一 `usage_request_id` 二次授权/重复投递只命中既有 case；与 Token 用量对账/既有 `Commit` 并发时唯一约束与 CAS 生效、无死锁 |
@@ -150,15 +161,15 @@
 
 ## 12. 本切片不做的事
 
-- 不新增或修改迁移、Go/Node 代码、OpenAPI 合同、activation 行或执行路径。
+- 当前交付原 first-release LOSS_REVIEW 闭环及范围内正确性修复；不重写迁移、定价/用量事实、当前价格或已有 journal，不增加 COMMITTED_SHORTFALL。
 - 不改动既有预留/释放/结算、Token 用量对账、`usage_loss_reviews` 既有吸收口径或支付/退款/拒付/应收的任何行为。
-- 设计冻结不等于实现或激活；GSA-36 未交付前该命令保持不可执行。
+- 本波源码实现不等于外部审核、真实跨域验收或生产激活；默认仍 INACTIVE。
 
 ## 13. 自检与验证
 
 - 每条事实可回溯到 §1/§2 的迁移与源码路径；`A/E/M` 的定义与既有 `Commit` 的 `backedActual/overage` 口径一致。
 - 首版范围与版本复用决策与用户 2026-09-19 确认一致；`RESOLVED_SETTLED` 是显式登记并前向新增的取值，不假装既有能力已具备。
-- 变更范围仅本文件与任务登记；运行 `node scripts/check-account-platform-tasks.mjs`、`node scripts/account-platform-migration-manifest.mjs check`、`git diff --check`，不使用 SKIP 作为通过证据。
+- 验证使用实际存在的项目统一构建、架构/版本/授权 guard、Go race/真实有限PG及受控React；命令与终态由当前PR记录，不引用不存在的历史 manifest/task 脚本，不使用 SKIP 或零用例编译作为通过。
 
 ## 14. 记录
 

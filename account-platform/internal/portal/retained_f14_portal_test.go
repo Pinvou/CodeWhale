@@ -98,7 +98,7 @@ func TestF14ClassifierProductionDirectory(t *testing.T) {
 		want          int
 	}{
 		{"installed-chargeback", "CHARGEBACK_FINANCIAL_REPAIR", 200},
-		{"future-not-installed", "USAGE_SETTLEMENT_REPAIR", 503},
+		{"future-not-installed", "UNINSTALLED_FINANCIAL_REPAIR", 503},
 		{"predecessor-entitlement", "ENTITLEMENT_COMPONENT_ADJUSTMENT", 200},
 	} {
 		t.Run(test.name, func(t *testing.T) {

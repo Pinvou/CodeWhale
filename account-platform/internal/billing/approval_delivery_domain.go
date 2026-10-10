@@ -285,6 +285,29 @@ func (domain *billingAuthorizationDomain) LookupAuthorizationResult(ctx context.
 		// The closure has no accounting effect, so it reports an empty ledger
 		// reference set instead of a journal identity.
 		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: json.RawMessage(`{}`)}, true, nil
+	case usageSettlementRepairCommand:
+		if domain.repository == nil {
+			return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable
+		}
+		owner, ok := domain.repository.(interface {
+			UsageSettlementRepairForRequest(context.Context, uuid.UUID) (UsageSettlementRepairResult, error)
+		})
+		if !ok {
+			return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable
+		}
+		result, err := owner.UsageSettlementRepairForRequest(ctx, binding.ApprovalRequestID)
+		if errors.Is(err, ErrNotFound) {
+			return authorizationDomainResult{}, false, nil
+		}
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
+		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}, true, nil
 	}
 }
 
@@ -337,6 +360,8 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 		return domain.executeChargebackFinancialRepair(ctx, binding, event, command)
 	case reconciliationFinancialRepairCommand:
 		return domain.executeReconciliationFinancialRepair(ctx, binding, event, command)
+	case usageSettlementRepairCommand:
+		return domain.executeUsageSettlementRepair(ctx, binding, event, command)
 	default:
 		return authorizationDomainAttempt{StableFailureCode: "COMMAND_MAPPING_INVALID", FailureIsDefinite: true}
 	}
@@ -532,6 +557,9 @@ func validAuthorizationCommandTarget(event approvalencoding.AuthorizationEvent) 
 	case chargebackFinancialRepairCommand:
 		id, err := uuid.Parse(event.TargetResourceID)
 		return event.PolicyVersion == 1 && err == nil && id != uuid.Nil && id.String() == event.TargetResourceID && event.TargetResourceType == "CHARGEBACK_CASE"
+	case usageSettlementRepairCommand:
+		id, err := uuid.Parse(event.TargetResourceID)
+		return event.PolicyVersion == 1 && err == nil && id != uuid.Nil && id.String() == event.TargetResourceID && event.TargetResourceType == "USAGE_HOLD"
 	case reconciliationFinancialRepairCommand:
 		id, err := uuid.Parse(event.TargetResourceID)
 		return event.PolicyVersion == 1 && err == nil && id != uuid.Nil && id.String() == event.TargetResourceID && event.TargetResourceType == "RECONCILIATION_CASE"
@@ -1188,4 +1216,106 @@ func (domain *billingAuthorizationDomain) executeReconciliationFinancialRepair(c
 		return authorizationDomainAttempt{}
 	}
 	return authorizationDomainAttempt{Result: authorizationDomainResult{DomainResult: encoded, LedgerReferences: json.RawMessage(`{}`)}}
+}
+
+func (domain *billingAuthorizationDomain) executeUsageSettlementRepair(ctx context.Context, binding ApprovalAuthorizationBinding,
+	event approvalencoding.AuthorizationEvent, command ApprovedCommand) authorizationDomainAttempt {
+	if domain.repository == nil {
+		return authorizationDomainAttempt{}
+	}
+	var normalized struct {
+		UsageRequestID uuid.UUID `json:"usage_request_id"`
+		HoldID         uuid.UUID `json:"hold_id"`
+		EvidenceKind   string    `json:"evidence_kind"`
+		LossReviewID   uuid.UUID `json:"loss_review_id"`
+		ReasonCode     string    `json:"reason_code"`
+	}
+	var critical struct {
+		HoldUpdatedAt       string `json:"hold_updated_at"`
+		LossReviewUpdatedAt string `json:"loss_review_updated_at"`
+		FactsDigest         string `json:"facts_digest"`
+		PolicyVersion       int64  `json:"policy_version"`
+	}
+	var financial struct {
+		ExpectedMicrocredits   int64  `json:"expected_microcredits"`
+		SettledMicrocredits    int64  `json:"settled_microcredits"`
+		SettlementMicrocredits int64  `json:"settlement_microcredits"`
+		OverageMicrocredits    int64  `json:"overage_microcredits"`
+		WalletID               string `json:"wallet_id"`
+		WalletVersion          int64  `json:"wallet_version"`
+		AllocationsDigest      string `json:"allocations_digest"`
+	}
+	if json.Unmarshal(event.NormalizedCommand, &normalized) != nil || json.Unmarshal(event.CriticalResourceVersions, &critical) != nil ||
+		json.Unmarshal(event.FinancialSnapshot, &financial) != nil {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	holdUpdatedAt, holdErr := time.Parse(time.RFC3339Nano, critical.HoldUpdatedAt)
+	reviewUpdatedAt, reviewErr := time.Parse(time.RFC3339Nano, critical.LossReviewUpdatedAt)
+	walletID, walletErr := uuid.Parse(strings.TrimSpace(financial.WalletID))
+	if normalized.UsageRequestID == uuid.Nil || normalized.HoldID == uuid.Nil ||
+		strings.TrimSpace(normalized.EvidenceKind) != usageSettlementRepairEvidenceKind ||
+		normalized.LossReviewID == uuid.Nil || normalized.ReasonCode != usageSettlementRepairReason ||
+		critical.PolicyVersion != 1 || !validHexDigest(critical.FactsDigest) ||
+		holdErr != nil || holdUpdatedAt.Location() != time.UTC ||
+		reviewErr != nil || reviewUpdatedAt.Location() != time.UTC ||
+		financial.ExpectedMicrocredits < 1 || financial.SettledMicrocredits < 0 ||
+		financial.SettlementMicrocredits != financial.SettledMicrocredits ||
+		financial.OverageMicrocredits < 0 ||
+		financial.SettledMicrocredits+financial.OverageMicrocredits != financial.ExpectedMicrocredits ||
+		walletErr != nil || walletID == uuid.Nil || financial.WalletVersion < 1 ||
+		!validHexDigest(financial.AllocationsDigest) {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	if event.CommandType != usageSettlementRepairCommand || event.TargetResourceType != "USAGE_HOLD" ||
+		event.TargetResourceID != normalized.HoldID.String() ||
+		command.TargetResourceType != event.TargetResourceType || command.TargetResourceID != event.TargetResourceID ||
+		!sameRawJSON(event.NormalizedCommand, command.NormalizedCommand) ||
+		!sameRawJSON(event.CriticalResourceVersions, command.CriticalResourceVersions) ||
+		!sameRawJSON(event.FinancialSnapshot, command.FinancialSnapshot) ||
+		event.ApprovalRequestID != binding.ApprovalRequestID || command.ApprovalRequestID != binding.ApprovalRequestID ||
+		event.EventID != binding.EventID || event.ApprovalControlEpoch != binding.ApprovalEpoch ||
+		event.ExecutorIdentity != billingApprovalExecutorIdentity || command.ExecutorIdentity != billingApprovalExecutorIdentity ||
+		binding.ExecutorIdentity != billingApprovalExecutorIdentity ||
+		event.PolicyVersion != 1 || command.PolicyVersion != 1 || binding.PolicyVersion != 1 ||
+		!validIndependentApproval(command.RequesterUserID, command.ApproverUserID, command.DecisionReason) {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	snapshot, err := domain.repository.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return authorizationDomainAttempt{}
+	}
+	active, ok := findActiveAuthorizationCommand(snapshot, usageSettlementRepairCommand)
+	if !ok || active.PolicyVersion != 1 || active.SnapshotSchemaVersion != 1 {
+		return definiteAuthorizationFailure("POLICY_OR_SCHEMA_MISMATCH")
+	}
+	owner, ok := domain.repository.(interface {
+		ApplyUsageSettlementRepair(context.Context, UsageSettlementRepairExecutionInput) (UsageSettlementRepairResult, error)
+	})
+	if !ok {
+		return authorizationDomainAttempt{}
+	}
+	result, err := owner.ApplyUsageSettlementRepair(ctx, UsageSettlementRepairExecutionInput{
+		ApprovalRequestID: binding.ApprovalRequestID, AuthorizationEventID: binding.EventID, ApprovalEpoch: binding.ApprovalEpoch,
+		ExecutionKey:  command.ExecutionIdempotencyKey,
+		PolicyVersion: active.PolicyVersion, SchemaVersion: int64(active.SnapshotSchemaVersion), ActivationVersion: active.Version,
+		Command: UsageSettlementRepairCommandInput{
+			UsageRequestID: normalized.UsageRequestID, HoldID: normalized.HoldID,
+			EvidenceKind: normalized.EvidenceKind, LossReviewID: normalized.LossReviewID,
+		},
+		Frozen: UsageSettlementRepairFrozenFacts{
+			HoldUpdatedAt: holdUpdatedAt, LossReviewUpdatedAt: reviewUpdatedAt,
+			ExpectedMicrocredits: financial.ExpectedMicrocredits, SettledMicrocredits: financial.SettledMicrocredits,
+			WalletID: walletID, WalletVersion: financial.WalletVersion,
+			AllocationsDigest: financial.AllocationsDigest, FactsDigest: critical.FactsDigest,
+		},
+	})
+	if err != nil {
+		return classifyAuthorizationDomainFailure(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return authorizationDomainAttempt{}
+	}
+	ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
+	return authorizationDomainAttempt{Result: authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}}
 }

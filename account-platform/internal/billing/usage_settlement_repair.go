@@ -75,6 +75,7 @@ type usageRepairAllocation struct {
 // UsageSettlementRepairPlan is the closed, recomputable owner projection of one
 // approved usage settlement repair.
 type UsageSettlementRepairPlan struct {
+	PolicyVersion        int64
 	UsageRequestID       uuid.UUID
 	HoldID               uuid.UUID
 	LossReviewID         uuid.UUID
@@ -94,9 +95,8 @@ type UsageSettlementRepairPlan struct {
 }
 
 // UsageSettlementRepairFrozenFacts is the wire-visible owner projection an
-// approval froze. FactsDigest is an owner-only recomputation input; a consumed
-// authorization leaves it empty and the execution transaction recomputes it,
-// while a presented digest must match exactly.
+// approval froze. Fresh execution requires the exact nonempty digest; committed
+// matching identity replays before these fresh checks.
 type UsageSettlementRepairFrozenFacts struct {
 	HoldUpdatedAt        time.Time
 	LossReviewUpdatedAt  time.Time
@@ -141,11 +141,11 @@ func usageSettlementRepairPlanFrom(ctx context.Context, source usageRepairReader
 	policyVersion, schemaVersion, activationVersion int64) (UsageSettlementRepairPlan, error) {
 	if input.UsageRequestID == uuid.Nil || input.HoldID == uuid.Nil || input.LossReviewID == uuid.Nil ||
 		strings.TrimSpace(input.EvidenceKind) != usageSettlementRepairEvidenceKind ||
-		policyVersion < 1 || schemaVersion < 1 || activationVersion < 1 {
+		policyVersion != 1 || schemaVersion != 1 || activationVersion < 1 {
 		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	plan := UsageSettlementRepairPlan{UsageRequestID: input.UsageRequestID, HoldID: input.HoldID,
-		LossReviewID: input.LossReviewID, EvidenceKind: usageSettlementRepairEvidenceKind}
+		LossReviewID: input.LossReviewID, EvidenceKind: usageSettlementRepairEvidenceKind, PolicyVersion: policyVersion}
 	var holdStatus, releaseReason string
 	var maxMicrocredits int64
 	var actual *int64
@@ -182,7 +182,22 @@ FROM usage_loss_reviews WHERE id=$1`, input.LossReviewID).
 		claimed == nil || *claimed <= 0 {
 		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
-	plan.ExpectedMicrocredits = *claimed
+
+	var priceID *uuid.UUID
+	var model, protocol string
+	var formulaID *uuid.UUID
+	var pricingJSON, usageJSON []byte
+	if err := source.QueryRow(ctx, `SELECT price_version_id,COALESCE(model_id,''),COALESCE(protocol_code,''),formula_version_id,pricing_snapshot FROM usage_holds WHERE id=$1`, plan.HoldID).Scan(&priceID, &model, &protocol, &formulaID, &pricingJSON); err != nil {
+		return UsageSettlementRepairPlan{}, err
+	}
+	if err := source.QueryRow(ctx, `SELECT usage_snapshot FROM usage_loss_reviews WHERE id=$1`, plan.LossReviewID).Scan(&usageJSON); err != nil {
+		return UsageSettlementRepairPlan{}, err
+	}
+	recomputed, err := usageRepairFrozenPricing(priceID, model, protocol, formulaID, pricingJSON, usageJSON)
+	if err != nil || recomputed != *claimed {
+		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	plan.ExpectedMicrocredits = recomputed
 	var walletStatus string
 	if err := source.QueryRow(ctx, `SELECT status,posted_microcredits,version FROM wallets WHERE id=$1`, plan.WalletID).
 		Scan(&walletStatus, &plan.WalletPosted, &plan.WalletVersion); err != nil {
@@ -257,10 +272,9 @@ ORDER BY component.expires_at,CASE component.component_type WHEN 'BONUS' THEN 0 
 		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	if plan.SettledMicrocredits > plan.WalletPosted {
-		// The wallet can never be overdrawn: the unbacked remainder must be carried
-		// by the overage receivable instead.
-		plan.OverageMicrocredits += plan.SettledMicrocredits - plan.WalletPosted
-		plan.SettledMicrocredits = plan.WalletPosted
+		// Insufficient wallet backing is a definite zero-effect refusal; a plan
+		// cannot shrink totals while leaving its per-lot debits unchanged.
+		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	sort.Slice(allocations, func(i, j int) bool { return allocations[i].ComponentID.String() < allocations[j].ComponentID.String() })
 	type allocationFacts struct {
@@ -285,8 +299,16 @@ ORDER BY component.expires_at,CASE component.component_type WHEN 'BONUS' THEN 0 
 	}
 	plan.AllocationsDigest = digestHex(digest)
 	plan.Allocations = allocations
+	var ownerRaw []byte
+	if err := source.QueryRow(ctx, `SELECT jsonb_build_object('hold',to_jsonb(h),'loss_review',to_jsonb(l),'wallet',to_jsonb(w),'allocations',(SELECT jsonb_agg(jsonb_build_object('allocation',to_jsonb(a),'component',to_jsonb(c),'package',to_jsonb(p),'lot',to_jsonb(cl)) ORDER BY a.component_id) FROM usage_hold_allocations a JOIN entitlement_components c ON c.id=a.component_id JOIN entitlement_packages p ON p.id=a.package_id JOIN credit_lots cl ON cl.id=c.credit_lot_id WHERE a.hold_id=h.id)) FROM usage_holds h JOIN usage_loss_reviews l ON l.id=$2 JOIN wallets w ON w.id=h.wallet_id WHERE h.id=$1`, plan.HoldID, plan.LossReviewID).Scan(&ownerRaw); err != nil {
+		return UsageSettlementRepairPlan{}, err
+	}
+	ownerSnapshot, err := paymentRepairJSONSnapshot(ownerRaw)
+	if err != nil {
+		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
 	encoded, err := json.Marshal(map[string]any{
-		"command_type": usageSettlementRepairCommand, "usage_request_id": plan.UsageRequestID.String(),
+		"owner_snapshot": ownerSnapshot, "command_type": usageSettlementRepairCommand, "usage_request_id": plan.UsageRequestID.String(),
 		"hold_id": plan.HoldID.String(), "hold_status": holdStatus, "release_reason": releaseReason,
 		"hold_updated_at": plan.HoldUpdatedAt.UTC().Format(time.RFC3339Nano), "max_microcredits": maxMicrocredits,
 		"actual_microcredits": actual, "loss_review_id": plan.LossReviewID.String(),
@@ -310,7 +332,7 @@ func usageSettlementRepairProofProjection(plan UsageSettlementRepairPlan) ([]byt
 	critical, _ := json.Marshal(map[string]any{
 		"hold_updated_at":        plan.HoldUpdatedAt.UTC().Format(time.RFC3339Nano),
 		"loss_review_updated_at": plan.LossReviewUpdatedAt.UTC().Format(time.RFC3339Nano),
-		"facts_digest":           plan.FactsDigest, "policy_version": 1,
+		"facts_digest":           plan.FactsDigest, "policy_version": plan.PolicyVersion,
 	})
 	financial, _ := json.Marshal(map[string]any{
 		"expected_microcredits": plan.ExpectedMicrocredits, "settled_microcredits": plan.SettledMicrocredits,
@@ -395,6 +417,39 @@ func (r *PostgresRepository) ApplyUsageSettlementRepair(ctx context.Context, inp
 	if err := lockTransactionKey(ctx, tx, usageSettlementRepairLockScope, input.Command.HoldID.String()); err != nil {
 		return UsageSettlementRepairResult{}, err
 	}
+	var walletID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT wallet_id FROM usage_holds WHERE id=$1 AND usage_request_id=$2`, input.Command.HoldID, input.Command.UsageRequestID).Scan(&walletID); err != nil {
+		return UsageSettlementRepairResult{}, err
+	}
+	if _, err := getWallet(ctx, tx, walletID, true); err != nil {
+		return UsageSettlementRepairResult{}, err
+	}
+	var lockedID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM usage_holds WHERE id=$1 FOR UPDATE`, input.Command.HoldID).Scan(&lockedID); err != nil {
+		return UsageSettlementRepairResult{}, err
+	}
+	if err := tx.QueryRow(ctx, `SELECT id FROM usage_loss_reviews WHERE id=$1 FOR UPDATE`, input.Command.LossReviewID).Scan(&lockedID); err != nil {
+		return UsageSettlementRepairResult{}, err
+	}
+	lockRows, err := tx.Query(ctx, `SELECT a.component_id FROM usage_hold_allocations a JOIN entitlement_components c ON c.id=a.component_id JOIN entitlement_packages p ON p.id=a.package_id JOIN credit_lots l ON l.id=c.credit_lot_id WHERE a.hold_id=$1 ORDER BY a.component_id FOR UPDATE OF a,c,p,l`, input.Command.HoldID)
+	if err != nil {
+		return UsageSettlementRepairResult{}, err
+	}
+	for lockRows.Next() {
+		if err := lockRows.Scan(&lockedID); err != nil {
+			lockRows.Close()
+			return UsageSettlementRepairResult{}, err
+		}
+	}
+	err = lockRows.Err()
+	lockRows.Close()
+	if err != nil {
+		return UsageSettlementRepairResult{}, err
+	}
+	now := r.now()
+	if err := usageSettlementRepairExecutionActivation(ctx, tx, input, now); err != nil {
+		return UsageSettlementRepairResult{}, err
+	}
 	plan, err := usageSettlementRepairPlanFrom(ctx, tx, input.Command, input.PolicyVersion, input.SchemaVersion, input.ActivationVersion)
 	if err != nil {
 		return UsageSettlementRepairResult{}, err
@@ -402,16 +457,7 @@ func (r *PostgresRepository) ApplyUsageSettlementRepair(ctx context.Context, inp
 	if mismatch := usageSettlementRepairFrozenMismatch(plan, input.Frozen); mismatch != "" {
 		return UsageSettlementRepairResult{}, wrapSnapshotMismatch(mismatch)
 	}
-	now := r.now()
-	var lockedStatus string
-	var lockedUpdatedAt time.Time
-	if err := tx.QueryRow(ctx, `SELECT status,updated_at FROM usage_holds WHERE id=$1 FOR UPDATE`, plan.HoldID).
-		Scan(&lockedStatus, &lockedUpdatedAt); err != nil {
-		return UsageSettlementRepairResult{}, err
-	}
-	if lockedStatus != "RELEASED" || !lockedUpdatedAt.UTC().Equal(plan.HoldUpdatedAt.UTC()) {
-		return UsageSettlementRepairResult{}, wrapSnapshotMismatch("hold_updated_at")
-	}
+
 	caseID, entryID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	reference := usageSettlementRepairReferencePrefix + plan.UsageRequestID.String()
 	if err := insertJournal(ctx, tx, entryID, "USAGE", reference, "usage settlement repair", now); err != nil {
@@ -450,7 +496,7 @@ WHERE id=$1 AND remaining_microcredits>=$2`, item.LotID, item.Settleable)
 			}
 		} else {
 			tag, err = tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=available_microcredits-$2,
-used_microcredits=used_microcredits+$2,status=CASE WHEN available_microcredits-$2=0 AND reserved_microcredits=0 THEN 'CONSUMED' ELSE 'ACTIVE' END,updated_at=$3
+used_microcredits=used_microcredits+$2,status=CASE WHEN status IN ('FROZEN','REVOKED','EXPIRED') THEN status WHEN available_microcredits-$2=0 AND reserved_microcredits+active_grant_microcredits+suspended_grant_microcredits=0 THEN 'CONSUMED' ELSE 'ACTIVE' END,updated_at=$3
 WHERE id=$1 AND available_microcredits>=$2`, item.ComponentID, item.Settleable, now)
 			if err != nil || tag.RowsAffected() != 1 {
 				return UsageSettlementRepairResult{}, usageSettlementRepairConflict("component_cas", err)
@@ -483,8 +529,8 @@ WHERE id=$1 AND posted_microcredits>=$2`, plan.WalletID, plan.SettledMicrocredit
 		return UsageSettlementRepairResult{}, usageSettlementRepairConflict("wallet_cas", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE entitlement_packages package
-SET status=CASE WHEN EXISTS(SELECT 1 FROM entitlement_components component WHERE component.package_id=package.id
-        AND (component.available_microcredits>0 OR component.reserved_microcredits>0)) THEN 'ACTIVE' ELSE 'CONSUMED' END,
+SET status=CASE WHEN package.status IN ('FROZEN','REVOKED','EXPIRED') THEN package.status WHEN EXISTS(SELECT 1 FROM entitlement_components component WHERE component.package_id=package.id
+        AND (component.available_microcredits>0 OR component.reserved_microcredits>0 OR component.active_grant_microcredits>0 OR component.suspended_grant_microcredits>0)) THEN 'ACTIVE' ELSE 'CONSUMED' END,
     updated_at=$2
 WHERE package.id IN (SELECT package_id FROM usage_hold_allocations WHERE hold_id=$1)`, plan.HoldID, now); err != nil {
 		return UsageSettlementRepairResult{}, err
@@ -515,7 +561,7 @@ expected_microcredits,settled_microcredits,overage_microcredits,allocations_dige
 receivable_id,state,created_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'EXECUTED',$18)`,
 		caseID, input.ApprovalRequestID, input.AuthorizationEventID, input.ApprovalEpoch,
-		ledgerRepairExecutionKeyDigest(executionKey), plan.UsageRequestID, plan.HoldID, plan.LossReviewID,
+		legacyFinancialExecutionKeyDigestV1(executionKey), plan.UsageRequestID, plan.HoldID, plan.LossReviewID,
 		plan.WalletID, plan.EvidenceKind, plan.ExpectedMicrocredits, plan.SettledMicrocredits,
 		plan.OverageMicrocredits, plan.AllocationsDigest, plan.FactsDigest, entryID, receivableID, now); err != nil {
 		return UsageSettlementRepairResult{}, err
@@ -591,7 +637,7 @@ FROM usage_settlement_repair_cases WHERE usage_request_id=$1`, input.Command.Usa
 		return UsageSettlementRepairResult{}, false, err
 	}
 	if storedRequestID != input.ApprovalRequestID || storedEventID != input.AuthorizationEventID ||
-		storedEpoch != input.ApprovalEpoch || storedDigest != ledgerRepairExecutionKeyDigest(executionKey) {
+		storedEpoch != input.ApprovalEpoch || storedDigest != legacyFinancialExecutionKeyDigestV1(executionKey) {
 		return UsageSettlementRepairResult{}, false, ErrConflict
 	}
 	stored, err := readUsageSettlementRepair(ctx, source, input.ApprovalRequestID)
@@ -605,8 +651,7 @@ FROM usage_settlement_repair_cases WHERE usage_request_id=$1`, input.Command.Usa
 }
 
 // usageSettlementRepairFrozenMismatch compares the frozen wire projection with
-// the owner-recomputed plan. The consumed authorization freezes only the
-// wire-visible projection, so an empty facts digest is not a caller claim.
+// the owner-recomputed plan, including a required nonempty facts digest.
 func usageSettlementRepairFrozenMismatch(plan UsageSettlementRepairPlan, frozen UsageSettlementRepairFrozenFacts) string {
 	switch {
 	case !plan.HoldUpdatedAt.UTC().Equal(frozen.HoldUpdatedAt.UTC()):
@@ -623,10 +668,28 @@ func usageSettlementRepairFrozenMismatch(plan UsageSettlementRepairPlan, frozen 
 		return "wallet_version"
 	case plan.AllocationsDigest != frozen.AllocationsDigest:
 		return "allocations_digest"
-	case frozen.FactsDigest == "":
-		return ""
 	case plan.FactsDigest != frozen.FactsDigest:
 		return "facts_digest"
 	}
 	return ""
+}
+
+func usageSettlementRepairExecutionActivation(ctx context.Context, source usageRepairReader, input UsageSettlementRepairExecutionInput, now time.Time) error {
+	active := ApprovalCommandActivation{CommandType: usageSettlementRepairCommand, PolicyVersion: 1, SnapshotSchemaVersion: 1, State: "INACTIVE"}
+	var enabled bool
+	err := source.QueryRow(ctx, `SELECT active,activation_version,updated_at FROM billing_approval_execution.lock_usage_activation()`).Scan(&enabled, &active.Version, &active.UpdatedAt)
+	if enabled {
+		active.State = "ACTIVE"
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrApprovalSnapshotMismatch
+	}
+	if err != nil {
+		return err
+	}
+	if !validActivationItem(active, usageSettlementRepairCommand, billingApprovalActivationSpecs[usageSettlementRepairCommand], now) ||
+		active.State != "ACTIVE" || active.PolicyVersion != input.PolicyVersion || int64(active.SnapshotSchemaVersion) != input.SchemaVersion || active.Version != input.ActivationVersion {
+		return ErrApprovalSnapshotMismatch
+	}
+	return nil
 }

@@ -3,12 +3,12 @@ package account
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
 	billingdomain "github.com/Pinvou/pinvou3/account-platform/internal/billing"
-	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,65 +30,7 @@ type usageRepairCrossDomainFacts struct {
 // exactly as deployed: the command remains the original INACTIVE v1/s1 row.
 func newUsageRepairCrossDomainBillingFixture(t *testing.T, ctx context.Context, databaseURL string) (*billingdomain.PostgresRepository, *pgxpool.Pool, *pgx.Conn, usageRepairCrossDomainFacts) {
 	t.Helper()
-	base, err := pgx.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgx.ConnectConfig(ctx, base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := "billing_usage_repair_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	identifier := pgx.Identifier{database}.Sanitize()
-	if _, err := admin.Exec(ctx, `CREATE DATABASE `+identifier+` OWNER billing_schema_owner TEMPLATE template0 ENCODING 'UTF8'`); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_, _ = admin.Exec(cleanup, `DROP DATABASE IF EXISTS `+identifier)
-		_ = admin.Close(context.Background())
-	})
-	migrationConfig := base.Copy()
-	migrationConfig.Database = database
-	connection, err := pgx.ConnectConfig(ctx, migrationConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = connection.Close(context.Background()) })
-	if _, err := connection.Exec(ctx, `ALTER SCHEMA public OWNER TO billing_schema_owner;
-REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-GRANT USAGE,CREATE ON SCHEMA public TO billing_service`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := connection.Exec(ctx, `SET SESSION AUTHORIZATION billing_migrator; SET ROLE billing_service`); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := migrations.Load("../../migrations/billing")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := migrations.Up(ctx, connection, loaded); err != nil {
-		t.Fatalf("Billing fixture migrations: %v", err)
-	}
-	migrations.Unlock(ctx, connection)
-
-	configuration, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	configuration.MaxConns = 20
-	configuration.ConnConfig.Database = database
-	configuration.AfterConnect = func(connectContext context.Context, connection *pgx.Conn) error {
-		_, connectErr := connection.Exec(connectContext, `SET SESSION AUTHORIZATION billing_service; SET search_path TO public,pg_temp`)
-		return connectErr
-	}
-	pool, err := pgxpool.NewWithConfig(ctx, configuration)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	repository := billingdomain.NewPostgresRepositoryWithPool(pool)
+	repository, pool, connection := newEntitlementCrossDomainBillingFixture(t, ctx, databaseURL)
 	facts := seedUsageRepairCrossDomainCase(t, ctx, pool)
 	return repository, pool, connection, facts
 }
@@ -104,6 +46,21 @@ func seedUsageRepairCrossDomainCase(t *testing.T, ctx context.Context, pool *pgx
 		PackageID: uuid.New(), ComponentID: uuid.New(), Claimed: 100,
 	}
 	ownerID, lotID, orderID := uuid.New(), uuid.New(), uuid.New()
+	priceID := uuid.New()
+	formulaID := uuid.MustParse("00000000-0000-7000-8200-000000000001")
+	model := "usage-repair-" + priceID.String()
+	priceJSON, err := json.Marshal(billingdomain.PriceVersion{ID: priceID, Model: model,
+		ScopeType: "MODEL", ProtocolCode: "CHAT", FormulaVersionID: formulaID,
+		CreditUnit: "MICROCREDIT", InputPerMillion: 1000000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usageJSON, err := json.Marshal(map[string]int64{"input_tokens": facts.Claimed,
+		"output_tokens": 0, "cached_input_tokens": 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	product, err := json.Marshal(billingdomain.Product{ProductID: "USAGE_REPAIR", AmountFen: 100,
 		CreditMicrocredits: facts.Claimed, BasePoints: facts.Claimed, Currency: "CNY", PlanName: "UsageRepair"})
 	if err != nil {
@@ -140,6 +97,10 @@ VALUES($1,$2,$3,'USAGE_REPAIR','UsageRepair','sku-repair',100,$4,$4,$5,$5,$6,'AC
 credited_at,expires_at,status,created_at,updated_at)
 VALUES($1,$2,'BASE',$3,$4,$4,$5,$6,'ACTIVE',$5,$5)`,
 			[]any{facts.ComponentID, facts.PackageID, lotID, facts.Claimed, now, now.Add(24 * time.Hour)}},
+		{`INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,
+scope_type,scope_id,protocol_code,formula_version_id,credit_unit,lifecycle_status,published_at,effective_from,created_at)
+VALUES($1,$2,1000000,0,0,'MODEL',$2,'CHAT',$3,'MICROCREDIT','ACTIVE',$4,$4,$4)`,
+			[]any{priceID, model, formulaID, now}},
 		{`INSERT INTO usage_holds(id,usage_request_id,wallet_id,status,max_microcredits,actual_microcredits,usage_snapshot,
 expires_at,terminal_at,created_at,updated_at)
 VALUES($1,$2,$3,'RELEASED',$4,NULL,jsonb_build_object('release_reason','ENTITLEMENT_EXPIRED_UNCERTAIN'),$5,$5,$5,$5)`,
@@ -150,15 +111,35 @@ VALUES($1,$2,$3,$4,0,$4,$5,$5)`,
 			[]any{facts.HoldID, facts.PackageID, facts.ComponentID, facts.Claimed, now}},
 		{`INSERT INTO usage_loss_reviews(id,usage_request_id,hold_id,wallet_id,reason_code,claimed_actual_microcredits,
 usage_snapshot,status,created_at,updated_at)
-VALUES($1,$2,$3,$4,'ENTITLEMENT_EXPIRED_UNCERTAIN',$5,'{}','REVIEW_REQUIRED',$6,$6)`,
-			[]any{facts.LossReviewID, facts.UsageRequestID, facts.HoldID, facts.WalletID, facts.Claimed, now}},
+VALUES($1,$2,$3,$4,'ENTITLEMENT_EXPIRED_UNCERTAIN',$5,$7,'REVIEW_REQUIRED',$6,$6)`,
+			[]any{facts.LossReviewID, facts.UsageRequestID, facts.HoldID, facts.WalletID, facts.Claimed, now, usageJSON}},
 	} {
 		if _, err := tx.Exec(ctx, statement.sql, statement.args...); err != nil {
 			t.Fatalf("usage repair fixture statement %d: %v", index, err)
 		}
 	}
+	if _, err := tx.Exec(ctx, `UPDATE usage_holds SET price_version_id=$2,model_id=$3,protocol_code='CHAT',formula_version_id=$4,pricing_snapshot=$5 WHERE id=$1`, facts.HoldID, priceID, model, formulaID, priceJSON); err != nil {
+		t.Fatal(err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	return facts
+}
+
+func seedUsageAdvancementRequest(t *testing.T, ctx context.Context, repo *PostgresRepository, user uuid.UUID, policy approvalpolicy.Policy, status string, frozen approvalencoding.LegacyProofInput) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	binding, authorizationVersion, _, err := strongPlatformAuthorization(ctx, repo.pool, user, policy.RequesterPermission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = repo.pool.Exec(ctx, `INSERT INTO approval_requests(id,command_type,policy_version,requester_user_id,requester_binding_id,requester_authorization_version,idempotency_key,normalized_command,command_fingerprint,target_resource_type,target_resource_id,reason,redacted_evidence,expected_impact,status,expires_at,submitted_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$9,$6,$10,decode(repeat('00',32),'hex'),'USAGE_HOLD',$7,'controlled historical draft','[]','{}',$8,now()+interval '1 hour',CASE WHEN $8='SUBMITTED' THEN now() ELSE NULL END,now(),now())`, id, policy.CommandType, policy.PolicyVersion, user, binding, "historical-"+id.String(), frozen.TargetResourceID, status, authorizationVersion, frozen.NormalizedCommand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `INSERT INTO approval_request_snapshots(approval_request_id,snapshot_schema_version,critical_resource_versions,financial_snapshot,policy_snapshot,requester_authorization_snapshot,created_at) VALUES($1,$2,$3,$4,'{}','{}',now())`, id, policy.SnapshotSchemaVersion, frozen.CriticalResourceVersions, frozen.FinancialSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }

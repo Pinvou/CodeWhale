@@ -11,8 +11,8 @@ const projection = { command_type: command, policy_version: 1, snapshot_schema_v
  financial_snapshot: { amount_fen: '9007199254740993', currency: 'CNY', provider_transaction_id: 'controlled-provider-transaction', ledger_effect: 'NONE' } };
 
 test('F15 financial descriptor set exposes only delivered operations', () => {
- assert.deepEqual(Object.keys(financialRepairCommands).sort(), ["LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "PAYMENT_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR"].sort());
- assert.deepEqual(Object.keys(financialRepairInputs).sort(), ["LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "PAYMENT_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR"].sort());
+ assert.deepEqual(Object.keys(financialRepairCommands).sort(), ["LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "PAYMENT_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR", "USAGE_SETTLEMENT_REPAIR"].sort());
+ assert.deepEqual(Object.keys(financialRepairInputs).sort(), ["LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "PAYMENT_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR", "USAGE_SETTLEMENT_REPAIR"].sort());
  assert.equal(financialRepairPrecheck({ ...projection, command_type: 'UNKNOWN_REPAIR' }), null);
 });
 

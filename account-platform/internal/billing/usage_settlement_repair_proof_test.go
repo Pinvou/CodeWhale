@@ -32,7 +32,7 @@ func TestUsageSettlementRepairProofProjectionIsClosedAndActivationGated(t *testi
 	plan := UsageSettlementRepairPlan{
 		UsageRequestID: usageRequestID, HoldID: holdID, LossReviewID: lossReviewID, WalletID: walletID,
 		WalletVersion: 4, HoldUpdatedAt: holdUpdatedAt, LossReviewUpdatedAt: reviewUpdatedAt,
-		EvidenceKind: usageSettlementRepairEvidenceKind, ExpectedMicrocredits: 150,
+		EvidenceKind: usageSettlementRepairEvidenceKind, PolicyVersion: 1, ExpectedMicrocredits: 150,
 		SettledMicrocredits: 100, OverageMicrocredits: 50,
 		AllocationsDigest: strings.Repeat("a", 64), FactsDigest: strings.Repeat("b", 64),
 	}
@@ -95,10 +95,9 @@ func TestUsageSettlementRepairProofProjectionIsClosedAndActivationGated(t *testi
 	}
 }
 
-// The consumed authorization freezes only the wire-visible owner projection, so
-// an empty facts digest means "the execution transaction recomputes it" while a
-// presented digest must still match the owner revision exactly.
-func TestUsageSettlementRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(t *testing.T) {
+// Fresh authorization requires the nonempty digest; committed result identity
+// is returned separately before fresh facts checks.
+func TestUsageSettlementRepairFrozenFactsDigestIsRequired(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	plan := UsageSettlementRepairPlan{
 		UsageRequestID: uuid.New(), HoldID: uuid.New(), WalletID: uuid.New(), WalletVersion: 2,
@@ -108,8 +107,8 @@ func TestUsageSettlementRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(t *testi
 	frozen := UsageSettlementRepairFrozenFacts{HoldUpdatedAt: now, LossReviewUpdatedAt: now,
 		ExpectedMicrocredits: 40, SettledMicrocredits: 40, WalletID: plan.WalletID, WalletVersion: 2,
 		AllocationsDigest: plan.AllocationsDigest}
-	if mismatch := usageSettlementRepairFrozenMismatch(plan, frozen); mismatch != "" {
-		t.Fatalf("owner-recomputed digest rejected: %s", mismatch)
+	if mismatch := usageSettlementRepairFrozenMismatch(plan, frozen); mismatch != "facts_digest" {
+		t.Fatalf("empty digest accepted: %s", mismatch)
 	}
 	frozen.FactsDigest = strings.Repeat("3", 64)
 	if mismatch := usageSettlementRepairFrozenMismatch(plan, frozen); mismatch != "facts_digest" {

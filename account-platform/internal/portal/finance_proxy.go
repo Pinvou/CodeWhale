@@ -17,7 +17,7 @@ import (
 const reconciliationImportBodyLimit int64 = 64 << 20
 
 func currentGovernedApprovalCommand(command string) bool {
-	return command == "RECONCILIATION_FINANCIAL_REPAIR" || command == "CHARGEBACK_FINANCIAL_REPAIR" || command == "REFUND_EXCEPTION_REPAIR" || command == "PAYMENT_FINANCIAL_REPAIR" || command == "RECEIVABLE_WRITE_OFF" || command == "LEDGER_REPAIR" || command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" || command == "WALLET_ADJUSTMENT" || command == "PAYMENT_PROVIDER_RESUME" || command == "PAYMENT_PRODUCT_RESUME" || command == "TOKEN_MODEL_LIFECYCLE_CHANGE" || command == "TOKEN_MODEL_CATALOG_ROLLBACK" || command == "TOKEN_CREDENTIAL_REVOKE"
+	return command == "USAGE_SETTLEMENT_REPAIR" || command == "RECONCILIATION_FINANCIAL_REPAIR" || command == "CHARGEBACK_FINANCIAL_REPAIR" || command == "REFUND_EXCEPTION_REPAIR" || command == "PAYMENT_FINANCIAL_REPAIR" || command == "RECEIVABLE_WRITE_OFF" || command == "LEDGER_REPAIR" || command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" || command == "WALLET_ADJUSTMENT" || command == "PAYMENT_PROVIDER_RESUME" || command == "PAYMENT_PRODUCT_RESUME" || command == "TOKEN_MODEL_LIFECYCLE_CHANGE" || command == "TOKEN_MODEL_CATALOG_ROLLBACK" || command == "TOKEN_CREDENTIAL_REVOKE"
 }
 
 func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {

@@ -28,7 +28,7 @@ func TestF12PaymentFinancialRepairProductionApprovalBFF(t *testing.T) {
 		{"create-session-required", "POST", "/api/admin/approvals/requests", create, "", false, true, "1", 401},
 		{"create-csrf-required", "POST", "/api/admin/approvals/requests", create, "", true, false, "1", 403},
 		{"stale-control", "POST", "/api/admin/approvals/requests", create, "", true, true, "2", 400},
-		{"future-command-denied", "POST", "/api/admin/approvals/requests", strings.Replace(create, "PAYMENT_FINANCIAL_REPAIR", "USAGE_SETTLEMENT_REPAIR", 1), "", true, true, "1", 400},
+		{"future-command-denied", "POST", "/api/admin/approvals/requests", strings.Replace(create, "PAYMENT_FINANCIAL_REPAIR", "UNINSTALLED_FINANCIAL_REPAIR", 1), "", true, true, "1", 400},
 		{"duplicate-outer-command-denied", "POST", "/api/admin/approvals/requests", strings.TrimSuffix(create, "}") + `,"command_type":"PAYMENT_FINANCIAL_REPAIR"}`, "", true, true, "1", 400},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -100,7 +100,7 @@ func TestF12PaymentFinancialRepairProductionApprovalBFF(t *testing.T) {
 }
 
 func TestF12PaymentFinancialRepairProductionDirectoryBFF(t *testing.T) {
-	for _, command := range []string{"PAYMENT_FINANCIAL_REPAIR", "USAGE_SETTLEMENT_REPAIR"} {
+	for _, command := range []string{"PAYMENT_FINANCIAL_REPAIR", "UNINSTALLED_FINANCIAL_REPAIR"} {
 		t.Run(command, func(t *testing.T) {
 			store := &financeWireStore{memoryStore: newMemoryStore(), wire: map[string]int{}}
 			service := testService(t, store)

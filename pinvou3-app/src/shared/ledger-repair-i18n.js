@@ -1,6 +1,7 @@
 export const ledgerRepairCopy = {
   "zh": {
     "title": "发起财务修复审批",
+    "usageSettlementRepairTitle": "用量结算修复",
     "writeOffTitle": "应收核销",
     "lead": "选择命令并填写目标引用，读取服务端冻结事实后再提交审批草稿。页面不会自行推算任何金额或账务事实。",
     "command": "修复命令",
@@ -10,9 +11,22 @@ export const ledgerRepairCopy = {
       "PAYMENT_FINANCIAL_REPAIR": "支付订单 ID",
       "REFUND_EXCEPTION_REPAIR": "退款 ID",
       "CHARGEBACK_FINANCIAL_REPAIR": "拒付案件 ID",
-      "RECONCILIATION_FINANCIAL_REPAIR": "对账案件 ID"
+      "RECONCILIATION_FINANCIAL_REPAIR": "对账案件 ID",
+      "USAGE_SETTLEMENT_REPAIR": "用量冻结 ID"
     },
     "fields": {
+      "usage_request_id": "用量请求 ID",
+      "hold_id": "用量冻结 ID",
+      "loss_review_id": "用量损失复核 ID",
+      "evidence_kind": "证据类型",
+      "expected_microcredits": "应结算金额（微积分）",
+      "settled_microcredits": "本次计划结算金额（微积分）",
+      "settlement_microcredits": "补结算金额（微积分）",
+      "overage_microcredits": "超额金额（微积分）",
+      "allocations_digest": "分配摘要",
+      "hold_updated_at": "冻结更新时间",
+      "loss_review_updated_at": "损失复核更新时间",
+
       "receivable_id": "应收 ID",
       "write_off_microcredits": "核销金额（微积分）",
       "expected_version": "预期应收版本",
@@ -82,6 +96,7 @@ export const ledgerRepairCopy = {
   },
   "en": {
     "title": "Start a financial repair approval",
+    "usageSettlementRepairTitle": "Usage settlement repair",
     "writeOffTitle": "Receivable write-off",
     "lead": "Choose the command, enter the target references, read the server-frozen facts, then submit the approval draft. The page never derives an amount or an accounting fact.",
     "command": "Repair command",
@@ -91,9 +106,22 @@ export const ledgerRepairCopy = {
       "PAYMENT_FINANCIAL_REPAIR": "Payment order ID",
       "REFUND_EXCEPTION_REPAIR": "Refund ID",
       "CHARGEBACK_FINANCIAL_REPAIR": "Chargeback case ID",
-      "RECONCILIATION_FINANCIAL_REPAIR": "Reconciliation case ID"
+      "RECONCILIATION_FINANCIAL_REPAIR": "Reconciliation case ID",
+      "USAGE_SETTLEMENT_REPAIR": "Usage hold ID"
     },
     "fields": {
+      "usage_request_id": "Usage request ID",
+      "hold_id": "Usage hold ID",
+      "loss_review_id": "Usage loss review ID",
+      "evidence_kind": "Evidence kind",
+      "expected_microcredits": "Expected amount (microcredits)",
+      "settled_microcredits": "Planned settlement amount (microcredits)",
+      "settlement_microcredits": "Settlement amount (microcredits)",
+      "overage_microcredits": "Overage (microcredits)",
+      "allocations_digest": "Allocations digest",
+      "hold_updated_at": "Hold updated at",
+      "loss_review_updated_at": "Loss review updated at",
+
       "receivable_id": "Receivable ID",
       "write_off_microcredits": "Write-off amount (microcredits)",
       "expected_version": "Expected receivable version",
@@ -163,6 +191,7 @@ export const ledgerRepairCopy = {
   },
   "ja": {
     "title": "財務修復の承認を起動",
+    "usageSettlementRepairTitle": "使用量決済修復",
     "writeOffTitle": "売掛金の償却",
     "lead": "コマンドを選び対象参照を入力し、サーバーが固定した事実を読み込んでから承認ドラフトを提出します。画面は金額や会計事実を推計しません。",
     "command": "修復コマンド",
@@ -172,9 +201,22 @@ export const ledgerRepairCopy = {
       "PAYMENT_FINANCIAL_REPAIR": "支払注文 ID",
       "REFUND_EXCEPTION_REPAIR": "返金 ID",
       "CHARGEBACK_FINANCIAL_REPAIR": "チャージバック案件 ID",
-      "RECONCILIATION_FINANCIAL_REPAIR": "照合案件 ID"
+      "RECONCILIATION_FINANCIAL_REPAIR": "照合案件 ID",
+      "USAGE_SETTLEMENT_REPAIR": "使用量保留 ID"
     },
     "fields": {
+      "usage_request_id": "使用量リクエスト ID",
+      "hold_id": "使用量保留 ID",
+      "loss_review_id": "使用量損失審査 ID",
+      "evidence_kind": "証拠種別",
+      "expected_microcredits": "決済予定額（マイクロクレジット）",
+      "settled_microcredits": "今回の予定決済額（マイクロクレジット）",
+      "settlement_microcredits": "追加決済額（マイクロクレジット）",
+      "overage_microcredits": "超過額（マイクロクレジット）",
+      "allocations_digest": "配分ダイジェスト",
+      "hold_updated_at": "保留更新日時",
+      "loss_review_updated_at": "損失審査更新日時",
+
       "receivable_id": "売掛金 ID",
       "write_off_microcredits": "償却額（マイクロクレジット）",
       "expected_version": "予想売掛金版",

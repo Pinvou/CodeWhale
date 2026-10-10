@@ -40,6 +40,10 @@ func seedUnsettledUsageLoss(t *testing.T, ctx context.Context, repository *Postg
 		Claimed: claimed, Backed: backed, Posted: posted,
 	}
 	ownerID := uuid.New()
+	priceID, formulaID := uuid.New(), uuid.MustParse("00000000-0000-7000-8200-000000000001")
+	model := "usage-repair-" + fixture.HoldID.String()
+	priceJSON, _ := json.Marshal(PriceVersion{ID: priceID, Model: model, ProtocolCode: "CHAT", FormulaVersionID: formulaID, CreditUnit: "MICROCREDIT", InputPerMillion: 1000000})
+	usageJSON, _ := json.Marshal(usageRepairUsage{InputTokens: claimed})
 	product, err := json.Marshal(Product{ProductID: "USAGE_REPAIR", AmountFen: 100, CreditMicrocredits: posted,
 		BasePoints: posted, Currency: "CNY", PlanName: "UsageRepair"})
 	if err != nil {
@@ -87,12 +91,18 @@ VALUES($1,$2,$3,$4,0,$4,$5,$5)`,
 			[]any{fixture.HoldID, fixture.PackageID, fixture.ComponentID, backed, now}},
 		{`INSERT INTO usage_loss_reviews(id,usage_request_id,hold_id,wallet_id,reason_code,claimed_actual_microcredits,
 usage_snapshot,status,created_at,updated_at)
-VALUES($1,$2,$3,$4,'ENTITLEMENT_EXPIRED_UNCERTAIN',$5,'{}','REVIEW_REQUIRED',$6,$6)`,
-			[]any{fixture.LossReviewID, fixture.UsageRequestID, fixture.HoldID, fixture.WalletID, claimed, now}},
+VALUES($1,$2,$3,$4,'ENTITLEMENT_EXPIRED_UNCERTAIN',$5,$7,'REVIEW_REQUIRED',$6,$6)`,
+			[]any{fixture.LossReviewID, fixture.UsageRequestID, fixture.HoldID, fixture.WalletID, claimed, now, usageJSON}},
 	} {
 		if _, err := tx.Exec(ctx, statement.sql, statement.args...); err != nil {
 			t.Fatalf("usage repair statement %d (%s): %v", index, suffix, err)
 		}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at,scope_type,scope_id,protocol_code,formula_version_id,credit_unit,lifecycle_status,published_at) VALUES($1,$2,1000000,0,0,$3,$3,'MODEL',$2,'CHAT',$4,'MICROCREDIT','ACTIVE',$3)`, priceID, model, now, formulaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE usage_holds SET price_version_id=$2,model_id=$3,protocol_code=$4,formula_version_id=$5,pricing_snapshot=$6 WHERE id=$1`, fixture.HoldID, priceID, model, "CHAT", formulaID, priceJSON); err != nil {
+		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
@@ -114,11 +124,12 @@ func TestUsageSettlementRepairPostgresIntegration(t *testing.T) {
 	t.Cleanup(cancel)
 	repository, _ := newAdminPaginationIntegrationRepository(t, ctx, databaseURL)
 	pool := repository.pool
+	activationVersion := usageRepairFixtureActivation(t, ctx, pool)("ACTIVE")
 
 	full := seedUnsettledUsageLoss(t, ctx, repository, "full", 100, 100, 100)
 	command := UsageSettlementRepairCommandInput{UsageRequestID: full.UsageRequestID, HoldID: full.HoldID,
 		EvidenceKind: usageSettlementRepairEvidenceKind, LossReviewID: full.LossReviewID}
-	plan, err := usageSettlementRepairPlanFrom(ctx, pool, command, 1, 1, 1)
+	plan, err := usageSettlementRepairPlanFrom(ctx, pool, command, 1, 1, activationVersion)
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -129,13 +140,13 @@ func TestUsageSettlementRepairPostgresIntegration(t *testing.T) {
 	execute := func(requestID, eventID uuid.UUID, command UsageSettlementRepairCommandInput, frozen UsageSettlementRepairFrozenFacts) (UsageSettlementRepairResult, error) {
 		return repository.ApplyUsageSettlementRepair(ctx, UsageSettlementRepairExecutionInput{
 			ApprovalRequestID: requestID, AuthorizationEventID: eventID, ApprovalEpoch: 5,
-			ExecutionKey: "usage-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+			ExecutionKey: "usage-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
 			Command: command, Frozen: frozen,
 		})
 	}
 	frozen := UsageSettlementRepairFrozenFacts{HoldUpdatedAt: plan.HoldUpdatedAt, LossReviewUpdatedAt: plan.LossReviewUpdatedAt,
 		ExpectedMicrocredits: plan.ExpectedMicrocredits, SettledMicrocredits: plan.SettledMicrocredits,
-		WalletID: plan.WalletID, WalletVersion: plan.WalletVersion, AllocationsDigest: plan.AllocationsDigest}
+		WalletID: plan.WalletID, WalletVersion: plan.WalletVersion, AllocationsDigest: plan.AllocationsDigest, FactsDigest: plan.FactsDigest}
 	requestID, eventID := uuid.New(), uuid.New()
 	applied, err := execute(requestID, eventID, command, frozen)
 	if err != nil {
@@ -204,7 +215,7 @@ COALESCE(sum(delta_microcredits) FILTER (WHERE ledger_account_id=$2),0) FROM led
 	partial := seedUnsettledUsageLoss(t, ctx, repository, "partial", 150, 100, 100)
 	partialCommand := UsageSettlementRepairCommandInput{UsageRequestID: partial.UsageRequestID, HoldID: partial.HoldID,
 		EvidenceKind: usageSettlementRepairEvidenceKind, LossReviewID: partial.LossReviewID}
-	partialPlan, err := usageSettlementRepairPlanFrom(ctx, pool, partialCommand, 1, 1, 1)
+	partialPlan, err := usageSettlementRepairPlanFrom(ctx, pool, partialCommand, 1, 1, activationVersion)
 	if err != nil {
 		t.Fatalf("partial plan: %v", err)
 	}
@@ -214,7 +225,7 @@ COALESCE(sum(delta_microcredits) FILTER (WHERE ledger_account_id=$2),0) FROM led
 	partialFrozen := UsageSettlementRepairFrozenFacts{HoldUpdatedAt: partialPlan.HoldUpdatedAt,
 		LossReviewUpdatedAt: partialPlan.LossReviewUpdatedAt, ExpectedMicrocredits: partialPlan.ExpectedMicrocredits,
 		SettledMicrocredits: partialPlan.SettledMicrocredits, WalletID: partialPlan.WalletID,
-		WalletVersion: partialPlan.WalletVersion, AllocationsDigest: partialPlan.AllocationsDigest}
+		WalletVersion: partialPlan.WalletVersion, AllocationsDigest: partialPlan.AllocationsDigest, FactsDigest: partialPlan.FactsDigest}
 	partialResult, err := execute(uuid.New(), uuid.New(), partialCommand, partialFrozen)
 	if err != nil {
 		t.Fatalf("partial apply: %v", err)

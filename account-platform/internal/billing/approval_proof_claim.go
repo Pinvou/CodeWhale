@@ -224,3 +224,20 @@ func (f billingTxProofFacts) reconciliationFinancialRepairPlan(ctx context.Conte
 	}
 	return reconciliationFinancialRepairPlanFrom(ctx, f.tx, input, policyVersion, schemaVersion, version)
 }
+
+func (f billingTxProofFacts) usageSettlementRepairPlan(ctx context.Context, input UsageSettlementRepairCommandInput) (UsageSettlementRepairPlan, error) {
+	var policyVersion, schemaVersion, version int64
+	var state string
+	err := f.tx.QueryRow(ctx, `SELECT policy_version,snapshot_schema_version,state,version FROM billing_approval_command_activations WHERE command_type=$1`, usageSettlementRepairCommand).
+		Scan(&policyVersion, &schemaVersion, &state, &version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	if err != nil {
+		return UsageSettlementRepairPlan{}, err
+	}
+	if state != "ACTIVE" || policyVersion != 1 || schemaVersion != 1 || version < 1 {
+		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	return usageSettlementRepairPlanFrom(ctx, f.tx, input, policyVersion, schemaVersion, version)
+}

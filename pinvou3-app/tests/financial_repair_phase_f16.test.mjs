@@ -1,17 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { parseFinanceJSON } from '../src/features/account-platform/finance-contract.js';
 import { financialRepairCommands, financialRepairApprovalDraft, financialRepairPrecheck } from '../src/features/account-platform/admin-financial-repair-drafts.js';
 import { financialRepairInputs, financialRepairPrecheckBody } from '../src/features/account-platform/admin-financial-repair-form.js';
 const command = "USAGE_SETTLEMENT_REPAIR";
-const target = "11111111-1111-4111-8111-111111111111";
-const normalized = {"usage_request_id": "22222222-2222-4222-8222-222222222222", "hold_id": "11111111-1111-4111-8111-111111111111", "evidence_kind": "LOSS_REVIEW", "loss_review_id": "22222222-2222-4222-8222-222222222222"};
-const projection = { command_type: command, policy_version: 1, snapshot_schema_version: 1,
- target_resource_type: financialRepairCommands[command].targetResourceType, target_resource_id: target,
- normalized_command: normalized, critical_resource_versions: { version: '9007199254740993' },
- financial_snapshot: { original_microcredits: '9007199254740993' } };
+// Exact golden bytes emitted by the retained Account F16 typed/projection test.
+const projection = parseFinanceJSON(fs.readFileSync(new URL('./fixtures/usage-settlement-owner-projection.json', import.meta.url), 'utf8'));
+const target = projection.target_resource_id;
+const normalized = projection.normalized_command;
 
 test('F16 financial descriptor set exposes only delivered operations', () => {
- assert.deepEqual(Object.keys(financialRepairCommands), ["LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "PAYMENT_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR", "USAGE_SETTLEMENT_REPAIR"]);
+ assert.deepEqual(Object.keys(financialRepairCommands), ["LEDGER_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "PAYMENT_FINANCIAL_REPAIR", "RECEIVABLE_WRITE_OFF", "RECONCILIATION_FINANCIAL_REPAIR", "USAGE_SETTLEMENT_REPAIR"]);
  assert.deepEqual(Object.keys(financialRepairInputs), ["LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "PAYMENT_FINANCIAL_REPAIR", "REFUND_EXCEPTION_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR", "USAGE_SETTLEMENT_REPAIR"]);
  assert.equal(financialRepairPrecheck({ ...projection, command_type: 'UNKNOWN_REPAIR' }), null);
 });
@@ -37,7 +37,9 @@ test('F16 draft preserves int64 owner documents and closed authority', () => {
  assert.equal(draft.target_resource_id, target);
  assert.strictEqual(draft.critical_resource_versions, projection.critical_resource_versions);
  assert.strictEqual(draft.financial_snapshot, projection.financial_snapshot);
- assert.equal(draft.financial_snapshot.original_microcredits, '9007199254740993');
+ assert.equal(draft.financial_snapshot.settled_microcredits, '9007199254740993');
+ assert.equal(draft.financial_snapshot.expected_microcredits, '9223372036854775807');
+ assert.equal(draft.financial_snapshot.wallet_version, '9007199254740993');
  assert.equal(draft.normalized_command[financialRepairCommands[command].reasonKey], financialRepairCommands[command].reasonCode);
  assert.ok(!Object.hasOwn(draft.normalized_command, 'attacker_amount'));
  assert.throws(() => financialRepairApprovalDraft(projection, 'short', 'f16-logical-attempt'));

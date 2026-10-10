@@ -64,20 +64,22 @@ func TestEntitlementFirstDeliveryActivationContract(t *testing.T) {
 			}
 		})
 	}
-	t.Run("later-command-stays-inactive", func(t *testing.T) {
+	t.Run("future-usage-version-stays-rejected", func(t *testing.T) {
 		s := entitlementFirstDeliverySnapshot()
 		found := false
 		for i := range s.Activations {
 			if s.Activations[i].CommandType == "USAGE_SETTLEMENT_REPAIR" {
 				s.Activations[i].State = "ACTIVE"
+				s.Activations[i].PolicyVersion = 2
+				s.Activations[i].SnapshotSchemaVersion = 2
 				found = true
 			}
 		}
 		if !found {
-			t.Fatal("missing future Usage negative control")
+			t.Fatal("missing Usage version negative control")
 		}
 		if ValidateSnapshot(s) == nil {
-			t.Fatal("advertised undelivered usage settlement repair")
+			t.Fatal("advertised unknown Usage policy/schema pair")
 		}
 	})
 }

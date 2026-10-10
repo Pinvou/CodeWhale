@@ -16,7 +16,7 @@ func TestObservationClosedCommandAuthority(t *testing.T) {
 	if authority, ok := AuthorityForCommand("TOKEN_CREDENTIAL_REVOKE"); !ok || authority != AuthorityToken {
 		t.Fatal("installed Token command authority missing")
 	}
-	if _, ok := AuthorityForCommand("USAGE_SETTLEMENT_REPAIR"); ok {
+	if _, ok := AuthorityForCommand("UNKNOWN_FINANCIAL_REPAIR"); ok {
 		t.Fatal("future financial repair acquired an authority")
 	}
 
