@@ -410,6 +410,18 @@ mod linux_flag_tests {
         println!("NNP={}", if flag { "1" } else { "0" });
     }
 
+    /// One-way ratchet probe: NoNewPrivs can only be raised, never cleared.
+    /// When the test binary itself already runs with the kernel flag pinned
+    /// (hardened containers pin it across the whole process tree), every
+    /// "expected 0" row below is unsatisfiable regardless of mode or env
+    /// override — the child inherits 1 and cannot drop it. The matrices
+    /// substitute the ratchet outcome (the flag stays 1) for those rows and
+    /// disclose the substitution, so a pinned environment still verifies
+    /// everything observable instead of failing deterministically.
+    fn kernel_pinned_no_new_privs() -> Option<bool> {
+        no_new_privs_active()
+    }
+
     fn run_child(mode: Option<&str>, env_override: Option<&str>) -> String {
         let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args(["no_new_privs_child_reports_kernel_flag", "--nocapture"])
@@ -437,6 +449,7 @@ mod linux_flag_tests {
         if std::env::var_os(CHILD_ENV).is_some() {
             return;
         }
+        let pinned = kernel_pinned_no_new_privs();
         for (mode, expected) in [
             (None, "1"),
             (Some("workspace-write"), "1"),
@@ -444,6 +457,17 @@ mod linux_flag_tests {
             (Some("external-sandbox"), "1"),
             (Some("danger-full-access"), "0"),
         ] {
+            let expected = match (expected, pinned) {
+                ("0", Some(true)) => {
+                    println!(
+                        "NoNewPrivs is already pinned on the test process (one-way \
+                         ratchet); mode {mode:?} cannot be observed reaching NNP=0, \
+                         asserting the flag stays 1 instead"
+                    );
+                    "1"
+                }
+                (plain, _) => plain,
+            };
             let stdout = run_child(mode, None);
             assert!(
                 stdout.contains(&format!("NNP={expected}")),
@@ -457,12 +481,25 @@ mod linux_flag_tests {
         if std::env::var_os(CHILD_ENV).is_some() {
             return;
         }
+        let pinned = kernel_pinned_no_new_privs();
         for (mode, override_value, expected) in [
             // Explicit truthy forces the flag on even under full access.
             ("danger-full-access", "1", "1"),
             // Explicit falsey opts out under a narrow posture (#5413).
             ("workspace-write", "0", "0"),
         ] {
+            let expected = match (expected, pinned) {
+                ("0", Some(true)) => {
+                    println!(
+                        "NoNewPrivs is already pinned on the test process (one-way \
+                         ratchet); {NO_NEW_PRIVS_ENV}={override_value} under {mode:?} \
+                         cannot be observed reaching NNP=0, asserting the flag stays \
+                         1 instead"
+                    );
+                    "1"
+                }
+                (plain, _) => plain,
+            };
             let stdout = run_child(Some(mode), Some(override_value));
             assert!(
                 stdout.contains(&format!("NNP={expected}")),
