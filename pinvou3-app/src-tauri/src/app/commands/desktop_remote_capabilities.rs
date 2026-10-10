@@ -95,7 +95,7 @@ fn enabled_skill_projection(
 pub async fn desktop_remote_capabilities_snapshot(
     app: AppHandle,
 ) -> Result<CapabilitySnapshot, String> {
-    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+    super::desktop_remote_state::ensure_ready(&app)?;
     build_capability_snapshot(&app).await
 }
 
@@ -104,18 +104,21 @@ pub async fn desktop_remote_capabilities_snapshot(
 /// using for the same controlled session.
 #[tauri::command]
 pub async fn desktop_remote_controlled_capabilities_snapshot(
-    app: AppHandle,
+    controlled: super::desktop_remote_state::DesktopRemoteState<'_, ControlledDeviceManager>,
+    manager: super::desktop_remote_state::DesktopRemoteState<'_, CapabilitySnapshotManager>,
+    runtime: super::desktop_remote_state::DesktopRemoteState<
+        '_,
+        std::sync::Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>,
+    >,
     session_id: String,
 ) -> Result<serde_json::Value, String> {
     crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
-    let controlled = app.state::<ControlledDeviceManager>();
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
     }
     let context = controlled
         .live_lease()
         .map_err(|error| error.code.to_owned())?;
-    let manager = app.state::<CapabilitySnapshotManager>();
     let now_b = controlled_monotonic_millis();
     // B observes but never mints a replacement revision here. A's authenticated
     // renewal request is the single writer, preventing two near-expiry readers
@@ -129,8 +132,6 @@ pub async fn desktop_remote_controlled_capabilities_snapshot(
     if still_live != context {
         return Err("session_context_stale".to_owned());
     }
-    let runtime =
-        app.state::<std::sync::Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
     let lane = runtime
         .service()
         .lane_for_session(&session_id, &context.remote_control_generation)
