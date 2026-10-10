@@ -21,15 +21,42 @@ async function rejectedMutation(mutate, expected) {
 }
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 394, tasks: 30, events: 15, cli: 23 });
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  const texts = await Promise.all(catalog.http_sources.map(source => readFile(new URL(`../../../${source}`, import.meta.url), 'utf8')));
+  const routes = texts.reduce((count, source) => count + [...source.matchAll(/\b[A-Za-z][A-Za-z0-9_]*\.(?:GET|POST|PUT|PATCH|DELETE)\("[^"]+"/g)].length, 0);
+  // Coverage discovers the actual production graph and rejects omissions,
+  // stale entries and duplicates before returning these exact inventory sizes.
+  assert.deepEqual(await runAuthorizationCoverage(), { routes, tasks: catalog.tasks.length, events: catalog.events.length, cli: catalog.cli.length });
+  assert.ok(routes > 0 && catalog.tasks.length > 0 && catalog.events.length > 0 && catalog.cli.length > 0);
 });
 
 test('Token proof endpoint requires a dedicated Account-only permission', async () => {
-  const source = await readFile(new URL('../../internal/token/service.go', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../../internal/token/management_routes.go', import.meta.url), 'utf8');
   assert.match(source, /internal\.POST\("\/approval-command-proofs", serviceauth\.Require\("internal\.token\.approval-proof\.read"\)/);
 });
 
-test('approval reconciliation has an exact bounded workload entry', async () => {
+test('installed approval recovery has an exact bounded workload entry', async () => {
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  assert.deepEqual(catalog.cli.filter(item => item.name === 'account-approval-recovery'), [{
+    name: 'account-approval-recovery', source: 'account-platform/cmd/account-approval-recovery/main.go',
+    strategy: 'workload.dedicated-account-approval-recovery-role',
+  }]);
+  const runtime = await readFile(new URL('../../cmd/account-approval-recovery/runtime.go', import.meta.url), 'utf8');
+  assert.match(runtime, /n < 1 \|\| n > 200/);
+  assert.match(runtime, /verifyRecoveryActor\(ctx, pool\)/);
+  assert.match(runtime, /account\.NewApprovalRecoveryRuntime/);
+  await rejectedMutation(catalog => {
+    catalog.cli = catalog.cli.filter(item => item.name !== 'account-approval-recovery');
+  }, /unclassified_cli:account-approval-recovery/);
+});
+
+test('Billing approval activation projection requires its exact workload permission', async () => {
+  const source = await readFile(new URL('../../internal/billing/service.go', import.meta.url), 'utf8');
+  assert.match(source, /protected\.GET\("\/internal\/v1\/approval-command-activations", serviceauth\.Require\("internal\.billing\.approval-activation\.read"\)/);
+  assert.match(source, /protected\.POST\("\/internal\/v1\/approval-command-proofs", serviceauth\.Require\("internal\.billing\.approval-proof\.read"\)/);
+});
+
+test('installed approval reconciliation retains its exact bounded effect-verified workload entry', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
   assert.deepEqual(catalog.cli.filter(item => item.name === 'approval-reconciliation'), [{
     name: 'approval-reconciliation', source: 'account-platform/cmd/approval-reconciliation/main.go',
@@ -38,12 +65,6 @@ test('approval reconciliation has an exact bounded workload entry', async () => 
   await rejectedMutation(catalog => {
     catalog.cli = catalog.cli.filter(item => item.name !== 'approval-reconciliation');
   }, /unclassified_cli:approval-reconciliation/);
-});
-
-test('Billing approval activation projection requires its exact workload permission', async () => {
-  const source = await readFile(new URL('../../internal/billing/service.go', import.meta.url), 'utf8');
-  assert.match(source, /protected\.GET\("\/internal\/v1\/approval-command-activations", serviceauth\.Require\("internal\.billing\.approval-activation\.read"\)/);
-  assert.match(source, /protected\.POST\("\/internal\/v1\/approval-command-proofs", serviceauth\.Require\("internal\.billing\.approval-proof\.read"\)/);
 });
 
 test('fixed NATS resource operator has an exact required authorization entry', async () => {

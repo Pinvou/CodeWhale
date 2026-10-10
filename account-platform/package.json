@@ -1,0 +1,25 @@
+{
+  "name": "pinvou-account-platform-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "npm run test:contracts",
+    "test:contracts": "node --test test/contract/*.test.mjs",
+    "check:i18n-release": "node ../scripts/check-account-platform-i18n.mjs",
+    "check:observability-release": "node ../scripts/check-account-platform-observability.mjs",
+    "check:migration-immutability": "node ../scripts/account-platform-migration-manifest.mjs",
+    "check:recovery-policy": "node ../scripts/account-platform-recovery-gate.mjs",
+    "check:production-recovery": "node ../scripts/account-platform-recovery-gate.mjs --require-evidence",
+    "check:ha-policy": "node ../scripts/account-platform-ha-gate.mjs",
+    "check:production-ha": "node ../scripts/account-platform-ha-gate.mjs --require-evidence",
+    "check:performance-policy": "node ../scripts/account-platform-performance-gate.mjs",
+    "check:production-performance": "node ../scripts/account-platform-performance-gate.mjs --require-evidence"
+  },
+  "devDependencies": {
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1",
+    "yaml": "2.9.0"
+  }
+}

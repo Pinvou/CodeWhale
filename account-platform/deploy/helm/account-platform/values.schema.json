@@ -32,7 +32,7 @@
     },
     "images": {
       "type": "object",
-      "required": ["accountService", "identityService", "billingService", "tokenGateway", "tokenPortal", "eventRelay", "migrate", "newApi", "keycloak", "redis", "nats"],
+      "required": ["accountService", "identityService", "billingService", "tokenGateway", "tokenPortal", "eventRelay", "migrate", "tokenPolicyBootstrap", "newApi", "keycloak", "redis", "nats"],
       "additionalProperties": false,
       "properties": {
         "accountService": { "$ref": "#/definitions/image" },
@@ -45,6 +45,7 @@
         "tokenGovernance": { "$ref": "#/definitions/image" },
         "eventRelay": { "$ref": "#/definitions/image" },
         "migrate": { "$ref": "#/definitions/image" },
+        "tokenPolicyBootstrap": { "$ref": "#/definitions/image" },
         "newApi": { "$ref": "#/definitions/imageWithDigest" },
         "newApiTLS": { "type": "object", "additionalProperties": false, "required": ["repository", "digest", "pullPolicy"], "properties": { "repository": { "type": "string" }, "digest": { "type": "string", "pattern": "^(sha256:[a-f0-9]{64}|)$" }, "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] } } },
         "keycloak": { "$ref": "#/definitions/image" },

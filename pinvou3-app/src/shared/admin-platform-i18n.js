@@ -319,3 +319,145 @@ adminPlatformCopy.ja.operations = {
 };
 
 for (const language of ['zh', 'en', 'ja']) adminPlatformCopy[language].operations = { ...registrationBonusRecoveryCopy[language], ...adminPlatformCopy[language].operations };
+// Existing system status and read-only runbook copy from the complete feature.
+adminPlatformCopy.zh.nav.system = "系统与安全";
+adminPlatformCopy.zh.system = {
+  "services": "服务状态",
+  "relays": "事件投递与积压",
+  "recentErrors": "最近错误",
+  "service": "服务",
+  "latency": "延迟",
+  "message": "诊断信息",
+  "pending": "待投递",
+  "deadLetters": "死信",
+  "oldest": "最老积压",
+  "source": "来源",
+  "resource": "关联资源",
+  "updated": "更新时间",
+  "healthyServices": "健康服务",
+  "pendingReconciliation": "待自动核对",
+  "stoppedReconciliation": "已停止自动核对",
+  "names": {
+    "account": "Account Service",
+    "billing": "Billing Service",
+    "token-gateway": "Token Gateway",
+    "portal": "Portal",
+    "keycloak": "Keycloak",
+    "newapi": "NewAPI",
+    "nats": "NATS",
+    "account-event-relay": "Account Event Relay",
+    "billing-event-relay": "Billing Event Relay",
+    "token-event-relay": "Token Event Relay",
+    "token-reconciliation": "用量自动核对",
+    "identity-provider": "身份提供方",
+    "model-gateway": "模型网关",
+    "event-bus": "事件总线"
+  }
+};
+adminPlatformCopy.zh.runbooks = {
+  "title": "只读运行手册",
+  "lead": "这里仅说明受控恢复边界和前置条件，不提供公网执行代理。",
+  "bootstrap": "平台 Bootstrap",
+  "bootstrapHelp": "仅在初始部署或正式恢复流程中由受控终端执行，并保留审批与审计证据。",
+  "idp": "身份提供方管理",
+  "idpHelp": "身份管理面保持非公网；管理员通过受控网络和本地隧道访问。",
+  "breakGlass": "Break-glass 恢复",
+  "breakGlassHelp": "仅用于管理员异常失联后的恢复，不用于日常管理或绕过双人审批。",
+  "serviceIdentities": "服务身份",
+  "serviceIdentitiesHelp": "仅查看非敏感边界与审计事实；凭据、Token 和可复用验证材料永不显示。",
+  "noExecution": "本页面无执行按钮；请在获批的受控终端按正式运行手册处理。"
+};
+adminPlatformCopy.en.nav.system = "System & security";
+adminPlatformCopy.en.system = {
+  "services": "Service status",
+  "relays": "Event delivery and backlog",
+  "recentErrors": "Recent errors",
+  "service": "Service",
+  "latency": "Latency",
+  "message": "Diagnostic",
+  "pending": "Pending",
+  "deadLetters": "Dead letters",
+  "oldest": "Oldest backlog",
+  "source": "Source",
+  "resource": "Resource",
+  "updated": "Updated at",
+  "healthyServices": "Healthy services",
+  "pendingReconciliation": "Pending reconciliation",
+  "stoppedReconciliation": "Stopped reconciliation",
+  "names": {
+    "account": "Account Service",
+    "billing": "Billing Service",
+    "token-gateway": "Token Gateway",
+    "portal": "Portal",
+    "keycloak": "Keycloak",
+    "newapi": "NewAPI",
+    "nats": "NATS",
+    "account-event-relay": "Account Event Relay",
+    "billing-event-relay": "Billing Event Relay",
+    "token-event-relay": "Token Event Relay",
+    "token-reconciliation": "Usage reconciliation",
+    "identity-provider": "Identity Provider",
+    "model-gateway": "Model Gateway",
+    "event-bus": "Event Bus"
+  }
+};
+adminPlatformCopy.en.runbooks = {
+  "title": "Read-only runbooks",
+  "lead": "These notes describe controlled recovery boundaries and prerequisites; the public portal never executes them.",
+  "bootstrap": "Platform bootstrap",
+  "bootstrapHelp": "Run only from a controlled terminal during initial deployment or an approved recovery, retaining approval and audit evidence.",
+  "idp": "Identity provider administration",
+  "idpHelp": "The identity management plane remains private and is reached only through a controlled network and local tunnel.",
+  "breakGlass": "Break-glass recovery",
+  "breakGlassHelp": "Reserved for recovery after administrator loss of contact, never for routine administration or approval bypass.",
+  "serviceIdentities": "Service identities",
+  "serviceIdentitiesHelp": "Only non-sensitive boundaries and audit facts are shown; credentials, tokens, and reusable verification material never appear.",
+  "noExecution": "This page has no execution action. Follow the approved runbook from a controlled terminal."
+};
+adminPlatformCopy.ja.nav.system = "システムとセキュリティ";
+adminPlatformCopy.ja.system = {
+  "services": "サービス状態",
+  "relays": "イベント配信と滞留",
+  "recentErrors": "最近のエラー",
+  "service": "サービス",
+  "latency": "レイテンシー",
+  "message": "診断情報",
+  "pending": "配信待ち",
+  "deadLetters": "デッドレター",
+  "oldest": "最古の滞留",
+  "source": "発生元",
+  "resource": "関連リソース",
+  "updated": "更新日時",
+  "healthyServices": "正常サービス",
+  "pendingReconciliation": "照合待ち",
+  "stoppedReconciliation": "自動照合停止",
+  "names": {
+    "account": "Account Service",
+    "billing": "Billing Service",
+    "token-gateway": "Token Gateway",
+    "portal": "Portal",
+    "keycloak": "Keycloak",
+    "newapi": "NewAPI",
+    "nats": "NATS",
+    "account-event-relay": "Account Event Relay",
+    "billing-event-relay": "Billing Event Relay",
+    "token-event-relay": "Token Event Relay",
+    "token-reconciliation": "利用量自動照合",
+    "identity-provider": "ID プロバイダー",
+    "model-gateway": "モデルゲートウェイ",
+    "event-bus": "イベントバス"
+  }
+};
+adminPlatformCopy.ja.runbooks = {
+  "title": "読み取り専用ランブック",
+  "lead": "管理された復旧境界と前提条件のみを示し、公開 Portal からは実行しません。",
+  "bootstrap": "プラットフォーム Bootstrap",
+  "bootstrapHelp": "初期導入または承認済み復旧時に管理端末からのみ実行し、承認と監査証跡を保持します。",
+  "idp": "ID プロバイダー管理",
+  "idpHelp": "ID 管理面は非公開を維持し、管理されたネットワークとローカルトンネルからのみ接続します。",
+  "breakGlass": "Break-glass 復旧",
+  "breakGlassHelp": "管理者との連絡断絶後の復旧に限定し、日常管理や二者承認の回避には使用しません。",
+  "serviceIdentities": "サービス ID",
+  "serviceIdentitiesHelp": "非機密の境界と監査事実だけを表示し、認証情報、Token、再利用可能な検証情報は表示しません。",
+  "noExecution": "このページに実行操作はありません。承認済みの管理端末から正式ランブックに従ってください。"
+};

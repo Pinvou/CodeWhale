@@ -162,6 +162,8 @@
     "test:account-platform-management-ui": "node tests/account_platform_f04_management_ui_smoke.mjs",
     "test:account-platform-audit": "node --test ../account-platform/test/contract/admin-audit-export-attempt.test.mjs ../account-platform/test/contract/audit-export-client.test.mjs ../account-platform/test/contract/audit-export-protection.test.mjs tests/account_platform_audit_transport.test.mjs",
     "test:account-platform-audit-ui": "node tests/account_platform_audit_ui_smoke.mjs && node tests/account_platform_audit_boundaries_ui_smoke.mjs",
+    "test:account-platform-system-status": "node --test tests/account_platform_system_status.test.mjs",
+    "test:account-platform-system-status-ui": "node tests/account_platform_system_status_ui_smoke.mjs",
     "test:account-platform-usage-governance": "node --test tests/account_platform_usage_governance.test.mjs",
     "test:account-platform-usage-governance-ui": "node tests/account_platform_f05_usage_governance_ui_smoke.mjs && node tests/account_platform_f05_usage_ui_smoke.mjs && node tests/account_platform_f05_billing_notice_ui_smoke.mjs && node tests/account_platform_f05_model_selection_ui_smoke.mjs && node tests/account_platform_f05_native_code_ui_smoke.mjs",
     "test:account-platform-organization": "node --test tests/account_platform_organization.test.mjs",

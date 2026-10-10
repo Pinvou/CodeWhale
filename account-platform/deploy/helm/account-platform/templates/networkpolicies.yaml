@@ -38,6 +38,22 @@ spec:
         - podSelector: { matchExpressions: [{ key: app.kubernetes.io/component, operator: In, values: [account-service, token-gateway, redis, keycloak] }] }
       ports: [{ protocol: TCP, port: 8080 }, { protocol: TCP, port: 6379 }]
 ---
+# The existing payment callback Ingress terminates TLS and calls Billing's
+# authenticated provider callback route. It does not open internal peers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" . }}-billing-callback }
+spec:
+  podSelector:
+    matchLabels: {{ include "pinvou.selector" . | nindent 6 }}
+    matchExpressions: [{ key: app.kubernetes.io/component, operator: In, values: [billing-service] }]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {{ toYaml .Values.networkPolicy.ingressNamespaceSelector | nindent 12 }}
+          podSelector: {{ toYaml .Values.networkPolicy.ingressPodSelector | nindent 12 }}
+      ports: [{ protocol: TCP, port: 8080 }]
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: { name: {{ include "pinvou.fullname" . }}-metrics }

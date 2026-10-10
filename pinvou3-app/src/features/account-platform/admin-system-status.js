@@ -58,16 +58,20 @@ export function requireSystemStatus(value) {
     !Array.isArray(value.relays) ||
     !Array.isArray(value.recent_errors) ||
     !value.reconciliation ||
-    typeof value.reconciliation !== "object"
+    typeof value.reconciliation !== "object" ||
+    Array.isArray(value.reconciliation)
   ) {
     throw new Error("INVALID_SYSTEM_STATUS");
   }
   for (const item of [...value.services, ...value.relays]) {
-    if (!item || typeof item.key !== "string" || typeof item.status !== "string")
+    if (!item || typeof item.key !== "string" || typeof item.status !== "string" ||
+      (item.message !== undefined && typeof item.message !== "string"))
       throw new Error("INVALID_SYSTEM_STATUS");
   }
   for (const item of value.recent_errors) {
-    if (!item || typeof item.source !== "string" || typeof item.message !== "string")
+    if (!item || typeof item.source !== "string" || typeof item.message !== "string" ||
+      (item.resource !== undefined && typeof item.resource !== "string") ||
+      (item.updated_at !== undefined && typeof item.updated_at !== "string"))
       throw new Error("INVALID_SYSTEM_STATUS");
   }
   return value;

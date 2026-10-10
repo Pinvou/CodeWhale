@@ -3,12 +3,22 @@ import fs from 'node:fs';
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from 'puppeteer-core';
-const server = await createServer({ root: import.meta.dirname + '/..', configFile: false, plugins: [react()], cacheDir: import.meta.dirname + '/../../../vite-status-cache', server: { host: '127.0.0.1', port: 0, fs: { allow: [import.meta.dirname + '/..'], deny: ['**/.env*', '**/*.{pem,crt,key}'] } } });
+const executablePath = process.env.F18_STATUS_BROWSER_EXECUTABLE || process.env.CHROME || [
+  'C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  '/snap/bin/chromium', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+].find(fs.existsSync);
+assert.ok(executablePath, 'Browser unavailable; system status UI validation not performed');
+const server = await createServer({ root: import.meta.dirname + '/..', configFile: false, plugins: [react()], cacheDir: process.env.F18_STATUS_VITE_CACHE || import.meta.dirname + '/../node_modules/.vite-status-test', server: { host: '127.0.0.1', port: 0, fs: { allow: [import.meta.dirname + '/..'], deny: ['**/.env*', '**/*.{pem,crt,key}'] } } });
 await server.listen();
-const browser = await puppeteer.launch({ executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', headless: true, args: ['--no-sandbox', '--disable-gpu'] });
+let browser;
+try { browser = await puppeteer.launch({ executablePath, headless: true, args: ['--no-sandbox', '--disable-gpu'] }); }
+catch (error) { await server.close(); throw error; }
 const results = [];
 const run = async (name, fn) => {
   const page = await browser.newPage(), errors = [];
+  page.setDefaultTimeout(8000);
   page.on('pageerror', error => errors.push(error.message));
   try { await fn(page); assert.deepEqual(errors, []); results.push({ name, pass: true }); }
   catch (error) { results.push({ name, pass: false, error: error.message }); }
@@ -32,6 +42,13 @@ try {
     assert.ok(text.includes(await page.evaluate(() => window.statusFixture.copy.runbooks.noExecution)));
     assert.deepEqual(await page.evaluate(() => window.statusFixture.calls.filter(call => call.url === '/api/admin/system/status').map(call => call.method)), ['GET']);
     assert.equal(await page.evaluate(() => document.querySelectorAll('.adm-runbook-panel button').length), 0);
+    await page.evaluate(() => { window.statusFixture.mode = 'unhealthy'; });
+    await page.click('.adm-system-workspace > button');
+    await page.waitForFunction(() => document.querySelector('.adm-system-workspace')?.textContent.includes('controlled pending error'));
+    const expectedUpdated = await page.evaluate(() => window.statusFixture.copy.system.updated);
+    assert.equal(typeof expectedUpdated, 'string');
+    assert.ok(await page.evaluate(label => [...document.querySelectorAll('.adm-system-workspace th')].some(cell => cell.textContent === label), expectedUpdated));
+    assert.deepEqual(await page.evaluate(() => window.statusFixture.calls.filter(call => call.url === '/api/admin/system/status').map(call => call.method)), ['GET', 'GET']);
   });
   await run('unhealthy, degraded relay and recent errors remain visible', async page => {
     await open(page, 'mode=unhealthy'); await page.waitForSelector('.adm-system-workspace .adm-metrics');

@@ -1,16 +1,15 @@
 #!/usr/bin/env node
 
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { accountPlatformCopy } from '../pinvou3-app/src/shared/account-platform-i18n.js';
 import { adminPlatformCopy } from '../pinvou3-app/src/shared/admin-platform-i18n.js';
 import { supportedLocales } from '../pinvou3-app/src/shared/supported-locales.js';
-import { portalSessionHandoffCopy } from '../account-platform/internal/portal/static/assets/portal-session-handoff-i18n.js';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const portalAssets = path.join(repositoryRoot, 'account-platform', 'internal', 'portal', 'static', 'assets');
+const portalStatic = path.join(repositoryRoot, 'account-platform', 'internal', 'portal', 'static');
 const identityThemeMessages = path.join(repositoryRoot, 'account-platform', 'deploy', 'keycloak', 'themes', 'pinvou', 'login', 'messages');
 const userInterfaceSources = [
   'pinvou3-app/src/features/account-platform/AccountPlatformPopover.jsx',
@@ -18,8 +17,8 @@ const userInterfaceSources = [
   'pinvou3-app/src/features/account-platform/AdminPlatformView.jsx',
   'pinvou3-app/src/app/account-main.jsx',
   'pinvou3-app/src/app/admin-main.jsx',
-  'account-platform/internal/portal/static/portal-session-handoff.html',
-  'account-platform/internal/portal/static/portal-session-handoff.js',
+  'pinvou3-app/src/portal-session-handoff.html',
+  'pinvou3-app/src/app/portal-session-handoff-main.js',
 ];
 
 function kind(value) {
@@ -103,9 +102,25 @@ export function validateUserInterfaceSource(relative, source) {
   }
 }
 
-async function builtJavaScript() {
-  const names = (await readdir(portalAssets)).filter(name => name.endsWith('.js'));
-  return (await Promise.all(names.map(name => readFile(path.join(portalAssets, name), 'utf8')))).join('\n');
+export async function builtJavaScript(root = portalStatic) {
+  const pending = [];
+  for (const entry of ['account.html', 'admin.html', 'portal-session-handoff.html']) {
+    const html = await readFile(path.join(root, entry), 'utf8');
+    for (const match of html.matchAll(/(?:src|href)=["']\/assets\/([^"']+\.js)["']/g)) pending.push(match[1]);
+  }
+  const seen = new Set();
+  const sources = [];
+  while (pending.length) {
+    const name = pending.pop();
+    if (!/^[A-Za-z0-9_.-]+\.js$/.test(name)) throw new Error('i18n_artifact_path_invalid');
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const source = await readFile(path.join(root, 'assets', name), 'utf8');
+    sources.push(source);
+    for (const match of source.matchAll(/["']\.\/([^"']+\.js)["']/g)) pending.push(match[1]);
+  }
+  if (!seen.size) throw new Error('i18n_artifact_entry_missing');
+  return sources.join('\n');
 }
 
 export function validateBuiltCatalog(name, strings, artifact) {
@@ -145,10 +160,13 @@ export async function checkAccountPlatformI18n({ artifacts = true } = {}) {
     ['admin', adminPlatformCopy],
   ];
   const validated = catalogs.map(([name, catalog]) => [name, validateCatalog(name, catalog)]);
-  const expectedHandoffCopy = Object.fromEntries(supportedLocales.map(locale => [locale, accountPlatformCopy[locale].sessionHandoff]));
-  if (JSON.stringify(portalSessionHandoffCopy) !== JSON.stringify(expectedHandoffCopy)) {
-    throw new Error('i18n_handoff_artifact_mismatch');
-  }
+  // The canonical handoff entry consumes this catalog directly. Vite emits
+  // hashed chunks; no separately named handoff translation module exists.
+  validateCatalog('handoff', Object.fromEntries(supportedLocales.map(locale => [locale, accountPlatformCopy[locale].sessionHandoff])));
+  const handoff = await readFile(path.join(repositoryRoot, 'pinvou3-app/src/app/portal-session-handoff-main.js'), 'utf8');
+  if (!handoff.includes("import { accountPlatformCopy } from '../shared/i18n.js'")
+    || !handoff.includes('const copy = accountPlatformCopy[locale]')
+    || !handoff.includes('copy.sessionHandoff.')) throw new Error('i18n_handoff_source_mismatch');
   await validateIdentityTheme();
   for (const relative of userInterfaceSources) {
     validateUserInterfaceSource(relative, await readFile(path.join(repositoryRoot, relative), 'utf8'));

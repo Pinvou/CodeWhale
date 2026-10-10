@@ -6,6 +6,8 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { readTestWorkloadCredential } from '../account-platform/test/integration/workload-credential.mjs';
+import { composeTestConfiguration } from '../account-platform/test/integration/compose-test-configuration.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const platformRoot = path.join(repositoryRoot, 'account-platform');
@@ -13,13 +15,9 @@ const composeFile = path.join(platformRoot, 'deploy', 'compose', 'compose.yaml')
 const composeEnv = path.join(platformRoot, 'deploy', 'compose', '.env');
 
 function executable(name) {
+  if (name === 'go' && process.env.GO) return process.env.GO;
   if (process.platform !== 'win32') return name;
-  if (name === 'go') {
-    const local = process.env.LOCALAPPDATA
-      ? path.join(process.env.LOCALAPPDATA, 'PinvouCodexTools', 'go1.26.5', 'go', 'bin', 'go.exe')
-      : '';
-    return local && existsSync(local) ? local : 'go.exe';
-  }
+  if (name === 'go') return 'go.exe';
   return name;
 }
 
@@ -54,8 +52,13 @@ function commandAvailable(command, args = ['--version']) {
 }
 
 function generatedComposeEnvironment() {
+  // Fail before starting Docker if the operator has not supplied a real
+  // workload credential. Random strings cannot authenticate JWT services.
+  const workloadCredential = readTestWorkloadCredential();
+  const operatorConfiguration = composeTestConfiguration();
   const secret = (bytes = 32) => randomBytes(bytes).toString('base64url');
   return {
+    ...operatorConfiguration,
     COMPOSE_PROJECT_NAME: `pinvou-account-platform-test-${process.pid}`,
     ACCOUNT_PLATFORM_POSTGRES_PASSWORD: secret(),
     ACCOUNT_DB_PASSWORD: secret(),
@@ -76,7 +79,7 @@ function generatedComposeEnvironment() {
     PAYMENT_SIM_HMAC_UNIONPAY: secret(),
     PAYMENT_SIM_HMAC_ALIPAY: secret(),
     PAYMENT_SIM_HMAC_WECHAT: secret(),
-    INTERNAL_SERVICE_TOKEN: secret(48),
+    INTERNAL_SERVICE_TOKEN: workloadCredential,
     PAYMENT_SIM_PAY_TOKEN_SECRET: secret(48),
     TOKEN_LOCAL_KEK_BASE64: randomBytes(32).toString('base64'),
     AUDIT_EXPORT_MASTER_KEY_BASE64: randomBytes(32).toString('base64'),
@@ -106,7 +109,7 @@ function verify() {
   runNpm(['test'], { cwd: platformRoot });
   run(process.execPath, [path.join(repositoryRoot, 'scripts', 'check-account-platform-i18n.mjs')]);
   run(process.execPath, [path.join(repositoryRoot, 'scripts', 'check-account-platform-observability.mjs')]);
-  run('python', ['scripts/architecture-guard.py']);
+  run(process.env.PYTHON || 'python', ['scripts/architecture-guard.py']);
   run('git', ['diff', '--check']);
 }
 
@@ -118,9 +121,9 @@ function compose(action) {
 }
 
 function composeTest(testFiles) {
-  if (!commandAvailable('docker', ['version'])) throw new Error('Docker is required for integration tests');
   const environment = generatedComposeEnvironment();
-  const args = ['compose', '--env-file', `${composeEnv}.example`, '-f', composeFile];
+  if (!commandAvailable('docker', ['version'])) throw new Error('Docker is required for integration tests');
+  const args = ['compose', '--env-file', `${composeEnv}.example`, '-f', composeFile, '--profile', 'real-newapi'];
   let failure;
   try {
     run('docker', [...args, 'up', '--build', '-d', '--wait'], { env: environment });

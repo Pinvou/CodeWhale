@@ -71,6 +71,11 @@ enabled, also require `token-policy-database-url`, `token-policy-max-per-owner`,
 starting; missing/invalid production backup values are rejected by the binary.
 Rendering does not prove that an external Secret exists or is Ready.
 
+The migration image contains `/service` built with `SERVICE=migrate`. Policy bootstrap
+uses the separate `images.tokenPolicyBootstrap` image built with
+`SERVICE=token-policy-bootstrap`; its default `/service` entrypoint receives
+`--mode bootstrap`. Do not point this value at the migration-only image.
+
 The dedicated `-migrations` ServiceAccount is created by a weight -40 prerequisite
 hook and retained through the release; it is separate from the ordinary runtime
 ServiceAccounts. Migration and bootstrap Pods use `global.imagePullSecrets` and
@@ -117,7 +122,7 @@ modify an existing database. Do not reopen old write-capable binaries afterward.
 Before upgrading, close creation admission, drain pending/manual-review work,
 and stop all old writer instances, including system/default-route creators.
 Disable login for write-capable application and deployment roles and drain
-their database sessions. Run `/token-policy-bootstrap --mode quiescence` with
+their database sessions. Run the `SERVICE=token-policy-bootstrap` image with `/service --mode quiescence` with
 an operations connection that can inspect `pg_stat_activity` and lock creation
 tables. The command verifies the database role fence, including inherited table
 privileges and SECURITY DEFINER entry points; an empty queue alone is insufficient.

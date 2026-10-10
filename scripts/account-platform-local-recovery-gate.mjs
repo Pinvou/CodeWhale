@@ -41,6 +41,7 @@ function records(value, names, key) {
   return result;
 }
 
+// FORMAT_ONLY: returned status describes claims, not independently verified restoration.
 export function validateLocalEvidence(policy, evidence, { deploymentId, bootstrap = false, now = Date.now() } = {}) {
   requireValue(typeof deploymentId === 'string' && identifier.test(deploymentId), 'expected deployment ID is required');
   requireValue(evidence?.schema_version === 1 && evidence.environment === 'production-new' && evidence.profile === 'local-only' && evidence.deployment_id === deploymentId, 'local evidence does not match expected production deployment');

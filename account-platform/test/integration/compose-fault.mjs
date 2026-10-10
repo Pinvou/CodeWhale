@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { readTestWorkloadCredential } from './workload-credential.mjs';
 
 const billingOrigin = 'http://127.0.0.1:18102';
-const serviceToken = process.env.INTERNAL_SERVICE_TOKEN;
+readTestWorkloadCredential();
 const composeFile = process.env.PINVOU_TEST_COMPOSE_FILE;
 const composeEnvFile = process.env.PINVOU_TEST_COMPOSE_ENV_FILE;
 const project = process.env.COMPOSE_PROJECT_NAME;
 
-assert.ok(serviceToken, 'the fault runner requires its generated service token');
 assert.match(project || '', /^pinvou-account-platform-test-\d+$/, 'faults may only target an isolated test project');
 assert.ok(composeFile && composeEnvFile, 'the fault runner requires explicit Compose paths');
 const expectedCompose = path.resolve(import.meta.dirname, '../../deploy/compose/compose.yaml');
@@ -30,7 +30,7 @@ async function requestJSON(path, { method = 'GET', body, headers = {}, statuses 
   const response = await fetch(`${billingOrigin}${path}`, {
     method,
     headers: {
-      authorization: `Bearer ${serviceToken}`,
+      authorization: `Bearer ${readTestWorkloadCredential()}`,
       ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       ...headers,
     },

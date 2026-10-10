@@ -150,7 +150,7 @@ services:
       OIDC_JWKS_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs
       OIDC_AUDIENCE: pinvou-desktop-dev
       BILLING_HTTP_URL: http://billing-service:8080
-      TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080
+      TOKEN_HTTP_URL: http://token-gateway:8080
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
       MANUAL_REVIEW_ON_CALL_USER_IDS: ${MANUAL_REVIEW_ON_CALL_USER_IDS:-}
       NATS_URL: nats://nats:4222
@@ -414,6 +414,8 @@ services:
       PORT: 8080
       REDIS_URL: redis://redis:6379/0
       PORTAL_PUBLIC_URL: http://127.0.0.1:18105
+      PORTAL_OIDC_ISSUER: http://127.0.0.1:18080/realms/pinvou
+      PORTAL_OIDC_JWKS_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs
       PORTAL_OIDC_AUTHORIZATION_URL: http://127.0.0.1:18080/realms/pinvou/protocol/openid-connect/auth
       PORTAL_OIDC_TOKEN_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/token
       PORTAL_OIDC_CLIENT_ID: pinvou-desktop-dev
@@ -603,8 +605,7 @@ services:
       <<: *service-build
       args:
         <<: *go-build-args
-        SERVICE: migrate
-    entrypoint: ["/token-policy-bootstrap"]
+        SERVICE: token-policy-bootstrap
     command: ["--mode", "bootstrap"]
     environment:
       TOKEN_POLICY_DATABASE_URL: postgresql://token_policy_operator:${TOKEN_POLICY_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable

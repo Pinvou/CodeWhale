@@ -16,17 +16,22 @@ function digest(value) {
   return createHash('sha256').update(value.replace(/\r\n?/g, '\n')).digest('hex');
 }
 
-async function inventory() {
+export async function inventory(root = migrationsRoot) {
   const domains = {};
-  for (const domain of (await readdir(migrationsRoot, { withFileTypes: true }))
+  for (const domain of (await readdir(root, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()) {
-    const directory = path.join(migrationsRoot, domain);
+    const directory = path.join(root, domain);
     const files = (await readdir(directory)).filter((name) => migrationName.test(name)).sort();
     const pairs = new Map();
+    const namesByVersion = new Map();
     domains[domain] = [];
     for (const file of files) {
       const [, rawVersion, name, direction] = file.match(migrationName);
       const version = Number(rawVersion);
+      if (!Number.isSafeInteger(version) || version < 1) throw new Error(`${domain}/${file} has an invalid migration version`);
+      const versionName = namesByVersion.get(version);
+      if (versionName && versionName !== name) throw new Error(`${domain} has duplicate migration version ${version}`);
+      namesByVersion.set(version, name);
       const key = `${rawVersion}_${name}`;
       const pair = pairs.get(key) || new Set();
       pair.add(direction);

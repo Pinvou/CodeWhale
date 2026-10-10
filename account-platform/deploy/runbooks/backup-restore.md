@@ -1,8 +1,6 @@
 # 账号平台全量备份、PITR 与恢复
 
-本次部署负责人于 2026-09-08 明确接受先做本机备份，执行
-[`local-backup-rollout.md`](local-backup-rollout.md) 的显式本机模式。以下仍为默认完整容灾
-基线；本次不等待采购异机存储，也不能将本机验收报告为异机不可变或整机丢失可恢复。
+本机备份必须显式选择 `--local-only`，由当前部署负责人独立接受同机丢失风险；不能自动继承历史现场授权。默认完整容灾基线保持，本机结果不能报告为异机不可变或整机丢失可恢复。当前入口和工件/审批边界见 [运维证据](operational-evidence.md)。
 
 本流程适用于生产 Account、Billing、Token、Keycloak。Payment Simulator 仅允许存在于隔离开发/测试环境，不是生产备份对象，也不能作为资金事实恢复来源。目标和分类以 [`../recovery-policy.json`](../recovery-policy.json) 为机器可读单一来源：资金事实 RPO 不超过 60 秒、账号与配置 RPO 不超过 300 秒；核心认证、Account、Billing、Gateway 和支付状态查询 RTO 不超过 60 分钟，报表、导出及非关键后台 RTO 不超过 4 小时。
 
@@ -99,11 +97,11 @@ node scripts/account-platform-migration-manifest.mjs check
 3. 恢复站点 Secret/override 的受控副本，核对版本引用和文件权限；恢复独立模型网关，但在 Token Gateway 就绪前不开放真实模型流量。
 4. 依次恢复 Keycloak、Billing、Account、Token。多库不是分布式快照；恢复后必须以支付渠道证据和不可变账本收敛。
 5. 对每库运行当前迁移器；已执行迁移校验和不同或文件缺失时立即停止，禁止修改历史脚本“适配”恢复库。
-6. 运行 `sql/account-restore-audit.sql`、`billing-ledger-audit.sql`、`token-restore-audit.sql`、`outbox-inventory.sql`；任一非零异常先调查。
+6. 执行站点受控只读领域审计，完整核对 Account 权限/余额、Billing 账本/支付、Token 用量及 Outbox/Inbox；任一异常先调查。这四个历史审计 SQL 文件当前不在仓库，不能按虚构路径执行；缺实际审计载体或记录时保持恢复未完成，见 [运维证据](operational-evidence.md)。
 7. 恢复并核对 NATS stream、consumer、ack floor、pending 和 redelivery 后才启动三个 Relay。NATS 不可恢复时进入受审计事件核对流程，不得用空实例直接承接写流量。
 8. Redis 使用空实例启动，明确撤销全部旧 Session、验证码挑战和短期登录事务；不得尝试从日志恢复它们。
 9. 在业务 Deployment 与 Ingress 仍关闭时启动依赖和服务，检查 Readiness、Outbox、Inbox 与死信。Inbox 依赖 `event_id` 去重，不得清空后重放。
-10. 对过期 Hold 先审阅。`UPSTREAM_ACTIVE`、`SETTLEMENT_PENDING`、`REVIEW` 不得按超时直接释放；只运行仓库 `hold-recovery` 受限作业。
+10. 对过期 Hold 先审阅。`UPSTREAM_ACTIVE`、`SETTLEMENT_PENDING`、`REVIEW` 不得按超时直接释放；只使用已存在的 `account-platform/cmd/hold-recovery`，在受控 Billing 运行身份下先核原证据，执行 `go run ./cmd/hold-recovery --confirm --limit=100`（工作目录 `account-platform`，凭据由受控环境注入、不写 argv）；使用同后台 worker 的持久恢复 intent 和可信 Token dispatch fence 处理到期候选（包括既有 MANUAL_REVIEW 的重试）；未知或 in-flight 保持 MANUAL_REVIEW，不按超时直接释放。必须注入现有映射为 `billing-service`、具备 `internal.token.hold-expiry.prove` 权限的短期 workload JWT，以及显式 HTTPS `TOKEN_HOLD_EXPIRY_URL` 和受控 `WORKLOAD_IDENTITY_CA_FILE`；本地 job context 不授予远端权限，`expired_hold_recovery_pass_completed` 仅表示扫描完成，不等于 Hold 已释放。
 11. 主动查询恢复点后仍可能到达的支付订单，取得渠道证据并做四方对账；“渠道已付、恢复库未入账”只能通过验签通知/安全查询归并器补入。
 12. 恢复边缘代理和证书到临时受控入口，验证精确路由、管理路径拒绝、SSE、转发链路以及 MTU/MSS 持久化，再执行正式入口切换。
 13. 验证抽样登录、授权隔离、余额/权益、充值查询、Token 结算、支付状态只读查询和审计，再由事故、财务、安全负责人共同批准流量。
@@ -113,8 +111,12 @@ node scripts/account-platform-migration-manifest.mjs check
 
 ## 生产证据门禁
 
-`npm --prefix account-platform run check:production-recovery -- <evidence.json>` 校验四库 WAL/增量/全量、加密、密钥分离、异地不可变副本、分级 RPO/RTO、月/季/年演练，以及分类删除扫描与收据。证据只能保存不可逆 ID、时间、计数和 SHA-256，不得保存备份 URL、凭据或业务正文。
+`node scripts/account-platform-recovery-gate.mjs`（证据文件及受控绑定参数见 [运维证据](operational-evidence.md)）校验四库 WAL/增量/全量、加密、密钥分离、异地不可变副本、分级 RPO/RTO、月/季/年演练，以及分类删除扫描与收据。证据只能保存不可逆 ID、时间、计数和 SHA-256，不得保存备份 URL、凭据或业务正文。
 
 ## 禁止操作
 
 不得直接修改钱包快照、账本 Posting、支付终态或 Usage 终态；不得删除 Outbox/Inbox“清理积压”；不得让恢复环境和原环境同时接收同一支付回调。回滚应用版本不等于回滚数据库；数据库恢复必须走新隔离实例和完整核验。
+
+## 工件验证限制
+
+命令从仓库根目录执行；策略或字段格式通过、工件摘要绑定和真实演练/发布审批是不同结论。现有可信来源、全部原始工件和独立审批不可省略，详见 [运维证据](operational-evidence.md)。

@@ -19,7 +19,7 @@
 ## 必填验证
 
 - [ ] 所有恢复均在新实例完成，原实例未被覆盖，恢复环境没有真实 Provider 收费、退款或模型调用出口。
-- [ ] 四库 Schema 与 `migrations/manifest.json` 一致，迁移后验证摘要齐全，四份只读审计 SQL 无未解释异常。
+- [ ] 四库 Schema 与 `migrations/manifest.json` 一致，迁移后验证摘要齐全，领域只读审计实际程序与工件齐全且无未解释异常；四个历史固定 SQL 文件当前未提供，不得填写虚假通过。
 - [ ] 账本每个 Journal Entry 平衡；钱包、权益、Hold 可重算；恢复点前后支付均已主动查询和渠道对账且无重复入账。
 - [ ] Outbox 自动投递、Inbox 去重、聚合版本连续；死信有结论，待结算 Usage 未被错误释放。
 - [ ] 登录、组织隔离、授权撤销、余额、充值查询、支付状态和 Token 调用抽样通过。
@@ -32,5 +32,11 @@
 逐条记录时间、操作者、动作、结果和证据摘要。每个偏差必须有等级、负责人、24 小时止损、30 天内整改期限和复测结果；禁止只填写“演练通过”。将最终结构化事实汇总为门禁证据，并运行：
 
 ```sh
-npm --prefix account-platform run check:production-recovery -- recovery-evidence.json
+node scripts/account-platform-recovery-gate.mjs "$EVIDENCE_EXPORT_ROOT/recovery-evidence.json" \
+  --trust-file="$CONTROLLED_TRUST_FILE" --artifact-root="$EVIDENCE_EXPORT_ROOT" \
+  --deployment-id="$EXPECTED_DEPLOYMENT_ID" --expected-release-sha256="$CANDIDATE_RELEASE_SHA256"
 ```
+
+## 工件验证限制
+
+命令从仓库根目录执行；策略或字段格式通过、工件摘要绑定和真实演练/发布审批是不同结论。现有可信来源、全部原始工件和独立审批不可省略，详见 [运维证据](operational-evidence.md)。

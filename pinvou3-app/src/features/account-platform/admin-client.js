@@ -1,3 +1,4 @@
+import { parseSystemStatusJSON } from './admin-system-status.js';
 import { parseUsageJSON, encodeUsageJSON } from './admin-usage-governance.js';
 import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder, integerMoney } from './finance-contract.js';
 import { ENTITLEMENT_CORRECTION_COMMAND, parseEntitlementCorrectionJSON, encodeEntitlementCorrectionJSON, parseApprovalEntitlementJSON } from './admin-entitlement-correction.js';
@@ -159,6 +160,10 @@ export class AdminPlatformClient {
       entry.promise.then(cleanup, cleanup);
     }
     return waitForSharedRead(entry, signal);
+  }
+
+  systemStatus(signal) {
+    return this.request('system', '/status', signal, parseSystemStatusJSON);
   }
 
   invalidateRead(area, resource) {

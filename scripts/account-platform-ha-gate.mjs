@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { artifactGateArguments, verifyArtifactBindings } from './account-platform-artifact-bindings.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const policyPath = path.join(repositoryRoot, 'account-platform', 'deploy', 'ha-policy.json');
@@ -40,6 +41,7 @@ export function validatePolicy(policy) {
   }
 }
 
+// FORMAT_ONLY: field validation does not authenticate evidence or prove an exercise.
 export function validateEvidence(policy, evidence, now = Date.now()) {
   required(evidence.schema_version === 1 && evidence.environment === 'production-new', 'production HA evidence is required');
   const generatedAt = parseTime(evidence.generated_at, 'generated_at');
@@ -74,8 +76,15 @@ export function validateEvidence(policy, evidence, now = Date.now()) {
 async function main() {
   const policy = JSON.parse(await readFile(policyPath, 'utf8'));
   validatePolicy(policy);
-  if (process.argv[2]) validateEvidence(policy, JSON.parse(await readFile(path.resolve(process.argv[2]), 'utf8')));
-  console.log(process.argv[2] ? 'production HA evidence passed' : 'HA policy passed');
+  const rawArgs = process.argv.slice(2);
+  const requireEvidence = rawArgs.includes('--require-evidence');
+  required(rawArgs.filter(value => value === '--require-evidence').length <= 1, 'duplicate --require-evidence');
+  const options = artifactGateArguments(rawArgs.filter(value => value !== '--require-evidence'));
+  required(options.remaining.length <= 1 && !options.remaining[0]?.startsWith('--'), 'unsupported HA arguments');
+  if (!options.remaining.length) { required(!requireEvidence && process.argv.length === 2, 'HA evidence file is required'); console.log('HA policy passed'); return; }
+  const { evidence, result } = await verifyArtifactBindings({ ...options, evidencePath: options.remaining[0], kind: 'HA', environment: 'production-new' });
+  validateEvidence(policy, evidence);
+  console.log(JSON.stringify(result));
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

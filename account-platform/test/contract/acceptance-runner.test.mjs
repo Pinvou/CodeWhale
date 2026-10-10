@@ -13,6 +13,11 @@ test('E2E runner generates secrets and exercises financial idempotency', async (
 
   assert.match(runner, /generatedComposeEnvironment/);
   assert.match(runner, /randomBytes\(32\)/);
+  assert.match(runner, /const workloadCredential = readTestWorkloadCredential\(\)/);
+  assert.match(runner, /INTERNAL_SERVICE_TOKEN: workloadCredential/);
+  assert.doesNotMatch(runner, /INTERNAL_SERVICE_TOKEN: secret/);
+  assert.match(acceptance, /authorization: `Bearer \$\{readTestWorkloadCredential\(\)\}`/);
+  assert.match(fault, /authorization: `Bearer \$\{readTestWorkloadCredential\(\)\}`/);
   assert.match(runner, /compose-smoke\.mjs', 'compose-acceptance\.mjs/);
   assert.match(runner, /action === 'e2e'/);
   assert.match(acceptance, /\['UNIONPAY', 'ALIPAY', 'WECHAT'\]/);

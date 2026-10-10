@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { shanghaiBusinessDate } from './shanghai-business-date.mjs';
+import { readTestWorkloadCredential } from './workload-credential.mjs';
 
 const billingOrigin = process.env.PINVOU_TEST_BILLING_ORIGIN || 'http://127.0.0.1:18102';
 const paymentOrigin = process.env.PINVOU_TEST_PAYMENT_ORIGIN || 'http://127.0.0.1:18104';
@@ -8,17 +9,14 @@ for (const origin of [billingOrigin, paymentOrigin, process.env.PINVOU_TEST_PAYM
   const parsed = new URL(origin);
   assert.ok(parsed.protocol === 'http:' && ['127.0.0.1', '[::1]', 'localhost'].includes(parsed.hostname) && !parsed.username && !parsed.password && parsed.pathname === '/' && !parsed.search && !parsed.hash, 'acceptance origins must be plain local test HTTP origins');
 }
-const serviceToken = process.env.INTERNAL_SERVICE_TOKEN;
-assert.ok(serviceToken, 'the E2E runner must inject a generated internal service token');
-
-const serviceHeaders = { authorization: `Bearer ${serviceToken}` };
+readTestWorkloadCredential();
 
 async function requestJSON(path, { method = 'GET', body, headers = {}, statuses = [200] } = {}) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const response = await fetch(`${billingOrigin}${path}`, {
       method,
       headers: {
-        ...serviceHeaders,
+        authorization: `Bearer ${readTestWorkloadCredential()}`,
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         ...headers,
       },

@@ -204,6 +204,7 @@ jobs:
             account_platform:
               - 'account-platform/**'
               - 'scripts/account-platform*'
+              - 'scripts/check-account-platform*'
               - 'scripts/check-token-management-authorization-coverage.mjs'
               - 'scripts/tests/token-management-authorization-coverage.test.mjs'
               - '.github/workflows/pr-check.yml'
@@ -809,6 +810,20 @@ jobs:
         run: |
           set -euo pipefail
           PINVOU_TEST_BASH="$(command -v bash)" python3 account-platform/deploy/keycloak/test/provision_mobile_auth_test.py
+
+      - name: Install Account Platform contract dependencies
+        working-directory: account-platform
+        run: npm ci --ignore-scripts --prefer-offline --no-audit
+
+      - name: Account Platform Node contracts
+        working-directory: account-platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=tap test/contract/*.test.mjs | tee "$RUNNER_TEMP/f18-account-contracts.tap"
+          # A green process with no matched cases is not a contract validation.
+          grep -Eq '^# pass [1-9][0-9]*$' "$RUNNER_TEMP/f18-account-contracts.tap"
+          grep -Eq '^# fail 0$' "$RUNNER_TEMP/f18-account-contracts.tap"
 
       - name: Test and vet all Account Platform Go modules
         shell: bash

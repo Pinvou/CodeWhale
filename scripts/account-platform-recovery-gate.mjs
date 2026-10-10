@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { artifactGateArguments, verifyArtifactBindings } from './account-platform-artifact-bindings.mjs';
 import { validateLocalEvidence } from './account-platform-local-recovery-gate.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -55,6 +56,7 @@ export function validatePolicy(policy) {
   requireValue(retention.get('ordinary_runtime_logs')?.deletion_sla_days === 30, 'ordinary runtime log deletion SLA must be 30 days');
 }
 
+// FORMAT_ONLY: field validation does not authenticate evidence or prove an exercise.
 export function validateEvidence(policy, evidence, now = Date.now()) {
   requireValue(evidence.schema_version === 1 && evidence.environment === 'production-new', 'production recovery evidence is required');
   const generatedAt = timestamp(evidence.generated_at, 'generated_at');
@@ -97,17 +99,20 @@ export function validateEvidence(policy, evidence, now = Date.now()) {
 async function main() {
   const policy = JSON.parse(await readFile(policyPath, 'utf8'));
   validatePolicy(policy);
-  if (process.argv[2] === '--local-only') {
-    const args = process.argv.slice(3);
-    requireValue(args[0] === '--deployment-id' && (args.length === 3 || (args.length === 4 && args[2] === '--bootstrap')), 'usage: --local-only --deployment-id <expected-id> [--bootstrap] <evidence.json>');
-    const evidence = JSON.parse(await readFile(path.resolve(args.at(-1)), 'utf8'));
-    console.log(validateLocalEvidence(policy, evidence, { deploymentId: args[1], bootstrap: args.length === 4 }));
-    return;
-  }
-  requireValue(process.argv.length <= 3 && !process.argv[2]?.startsWith('--'), 'unsupported recovery arguments');
-  const evidencePath = process.argv[2];
-  if (evidencePath) validateEvidence(policy, JSON.parse(await readFile(path.resolve(evidencePath), 'utf8')));
-  console.log(evidencePath ? 'production recovery evidence passed' : 'recovery policy passed');
+  const rawArgs = process.argv.slice(2);
+  const normalizedArgs = rawArgs.flatMap((value, index) => value === '--deployment-id' && rawArgs[index + 1] ? [`--deployment-id=${rawArgs[index + 1]}`] : rawArgs[index - 1] === '--deployment-id' ? [] : [value]);
+  const requireEvidence = normalizedArgs.includes('--require-evidence');
+  requireValue(normalizedArgs.filter(value => value === '--require-evidence').length <= 1, 'duplicate --require-evidence');
+  const options = artifactGateArguments(normalizedArgs.filter(value => value !== '--require-evidence')); const args = options.remaining;
+  if (!args.length) { requireValue(!requireEvidence && process.argv.length === 2, 'recovery evidence file is required'); console.log('recovery policy passed'); return; }
+  const local = args[0] === '--local-only';
+  requireValue(local ? (args.length === 2 || (args.length === 3 && args[1] === '--bootstrap')) : args.length === 1 && !args[0].startsWith('--'), 'unsupported recovery arguments');
+  const { evidence, result } = await verifyArtifactBindings({ ...options, evidencePath: args.at(-1), kind: local ? 'LOCAL_RECOVERY' : 'RECOVERY', environment: 'production-new' });
+  if (local) {
+    // Artifact binding never turns a local risk declaration into release authorization.
+    const declaredStatus = validateLocalEvidence(policy, evidence, { deploymentId: options.deploymentId, bootstrap: args.length === 3 });
+    console.log(JSON.stringify({ ...result, declared_status: declaredStatus }));
+  } else { validateEvidence(policy, evidence); console.log(JSON.stringify(result)); }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

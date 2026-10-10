@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { formatSystemCount, parseSystemStatusJSON, requireSystemStatus } from '../src/features/account-platform/admin-system-status.js';
-import { adminPlatformCopy } from '../src/shared/admin-platform-i18n.js';
+import { adminPlatformCopy } from '../src/shared/i18n.js';
 
 test('actual client uses same-origin readonly status route, preserves raw int64 and float age', async () => {
   const original = globalThis.fetch;
@@ -44,9 +44,19 @@ test('malformed or missing response shape is rejected', () => {
   for (const value of [null, {}, { services: [], relays: [], reconciliation: {}, recent_errors: [null] }, { services: [{}], relays: [], reconciliation: {}, recent_errors: [] }]) assert.throws(() => requireSystemStatus(value));
   assert.throws(() => parseSystemStatusJSON('{'));
 });
+test('malformed optional display values are rejected before React rendering', () => {
+  const valid = { services: [], relays: [], reconciliation: {}, recent_errors: [] };
+  for (const patch of [
+    { services: [{ key: 'portal', status: 'HEALTHY', message: {} }] },
+    { relays: [{ key: 'token-event-relay', status: 'HEALTHY', message: [] }] },
+    { reconciliation: [] },
+    { recent_errors: [{ source: 'token', message: 'controlled', resource: {} }] },
+    { recent_errors: [{ source: 'token', message: 'controlled', updated_at: 1 }] },
+  ]) assert.throws(() => requireSystemStatus({ ...valid, ...patch }), /INVALID_SYSTEM_STATUS/);
+});
 for (const language of ['zh', 'en', 'ja']) test(`existing system/runbook labels available in ${language}`, () => {
   const copy = adminPlatformCopy[language];
-  for (const key of ['services', 'relays', 'recentErrors', 'pendingReconciliation', 'stoppedReconciliation']) assert.ok(copy.system[key]);
+  for (const key of ['services', 'relays', 'recentErrors', 'service', 'latency', 'message', 'pending', 'deadLetters', 'oldest', 'source', 'resource', 'updated', 'healthyServices', 'pendingReconciliation', 'stoppedReconciliation']) assert.ok(copy.system[key], `missing system label: ${language}.${key}`);
   for (const key of ['title', 'lead', 'bootstrap', 'bootstrapHelp', 'idp', 'idpHelp', 'noExecution']) assert.ok(copy.runbooks[key]);
   assert.ok(copy.nav.system);
 });

@@ -31,6 +31,8 @@ type Store interface {
 	ReleaseRefreshLock(context.Context, string, string) error
 	SaveRefreshedSession(context.Context, Session, Session, string) error
 	DeleteRefreshedSession(context.Context, Session, string) error
+	SaveApprovalClassification(context.Context, ApprovalClassification) error
+	GetApprovalClassification(context.Context, string, string) (ApprovalClassification, error)
 	Ping(context.Context) error
 	Close() error
 }

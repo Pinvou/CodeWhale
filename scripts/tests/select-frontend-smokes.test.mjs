@@ -9,6 +9,12 @@ import {
 const labels = (items) => items.map(({ kind, target }) => `${kind}:${target}`);
 const fullLabels = labels(FULL_FRONTEND_SMOKES);
 
+test("system status participates in full and feature-local Account Platform browser validation", () => {
+  const status = "npm:test:account-platform-system-status-ui";
+  assert.ok(fullLabels.includes(status));
+  assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminSystemStatusWorkspace.jsx"])).includes(status));
+});
+
 test("shared frontend paths fail closed to the full browser suite", () => {
   assert.deepEqual(
     labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])),

@@ -14,7 +14,8 @@
     "account-platform/internal/token/service.go",
     "account-platform/internal/account/organization_routes.go",
     "account-platform/internal/billing/organization_routes.go",
-    "account-platform/internal/token/organization_finance_routes.go"
+    "account-platform/internal/token/organization_finance_routes.go",
+    "account-platform/cmd/mock-newapi/main.go"
   ],
   "http_policies": [
     {
@@ -1298,6 +1299,33 @@
       "permissions": [
         "org.grants.reclaim_closed"
       ]
+    },
+    {
+      "source": "account-platform/cmd/mock-newapi/main.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/v1/models",
+      "scope": "public",
+      "strategy": "protocol.development-only.mock-provider"
+    },
+    {
+      "source": "account-platform/cmd/mock-newapi/main.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "scope": "public",
+      "strategy": "protocol.development-only.mock-provider"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/api/admin/system/status",
+      "strategy": "domain.system-status-bootstrap-authorization",
+      "scope": "platform",
+      "permissions": [
+        "platform.system.status.read"
+      ]
     }
   ],
   "tasks": [
@@ -1601,6 +1629,36 @@
       "name": "newapi-tls",
       "source": "account-platform/cmd/newapi-tls/main.go",
       "strategy": "workload.isolated-newapi-tls-proxy-host"
+    },
+    {
+      "name": "event-replay",
+      "source": "account-platform/cmd/event-replay/main.go",
+      "strategy": "workload.confirmed-digest-bound-replay"
+    },
+    {
+      "name": "hold-recovery",
+      "source": "account-platform/cmd/hold-recovery/main.go",
+      "strategy": "workload.confirmed-expiry-recovery"
+    },
+    {
+      "name": "mock-newapi",
+      "source": "account-platform/cmd/mock-newapi/main.go",
+      "strategy": "protocol.development-only.mock-provider"
+    },
+    {
+      "name": "approval-authorization-backfill",
+      "source": "account-platform/cmd/approval-authorization-backfill/main.go",
+      "strategy": "workload.dedicated-database-approval-authorization-backfill"
+    },
+    {
+      "name": "approval-reconciliation",
+      "source": "account-platform/cmd/approval-reconciliation/main.go",
+      "strategy": "workload.bounded-effect-verified-approval-reconciliation"
+    },
+    {
+      "name": "approval-recovery",
+      "source": "account-platform/cmd/approval-recovery/main.go",
+      "strategy": "workload.dedicated-query-only-approval-recovery"
     },
     {
       "name": "account-approval-recovery",

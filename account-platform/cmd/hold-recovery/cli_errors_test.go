@@ -24,9 +24,9 @@ func TestHoldRecoveryCLIErrors(t *testing.T) {
 		name, dsn, want string
 		args            []string
 	}{
-		{"invalid_url_redacted", "postgres://synthetic_identity:synthetic_password@synthetic_address.invalid/synthetic_database?sslmode=synthetic_invalid", "HOLD_RECOVERY_STORE_UNAVAILABLE", []string{"--confirm", "--limit", "1"}},
-		{"invalid_keywords_redacted", "host=synthetic_address.invalid user=synthetic_identity password=synthetic_password dbname=synthetic_database sslmode=synthetic_invalid", "HOLD_RECOVERY_STORE_UNAVAILABLE", []string{"--confirm", "--limit", "1"}},
-		{"invalid_arguments_preserved", "", "--confirm and --limit between 1 and 1000 are required", []string{"--limit", "0"}},
+		{"invalid_url_redacted", "postgres://synthetic_identity:synthetic_password@synthetic_address.invalid/synthetic_database?sslmode=synthetic_invalid", "HOLD_RECOVERY_FAILED", []string{"--confirm", "--limit", "1"}},
+		{"invalid_keywords_redacted", "host=synthetic_address.invalid user=synthetic_identity password=synthetic_password dbname=synthetic_database sslmode=synthetic_invalid", "HOLD_RECOVERY_FAILED", []string{"--confirm", "--limit", "1"}},
+		{"invalid_arguments_preserved", "", "HOLD_RECOVERY_ARGUMENTS_INVALID", []string{"--limit", "0"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -37,11 +37,13 @@ func TestHoldRecoveryCLIErrors(t *testing.T) {
 			args := append([]string{"-test.run=^TestHoldRecoveryCLIErrors$", "--"}, tc.args...)
 			cmd := exec.Command(exe, args...)
 			for _, e := range os.Environ() {
-				if !strings.HasPrefix(e, "DATABASE_URL=") && !strings.HasPrefix(e, "F18_SYNTHETIC_CLI_PROCESS=") {
+				if !strings.HasPrefix(e, "DATABASE_URL=") && !strings.HasPrefix(e, "F18_SYNTHETIC_CLI_PROCESS=") && !strings.HasPrefix(e, "TOKEN_HOLD_EXPIRY_URL=") && !strings.HasPrefix(e, "INTERNAL_SERVICE_TOKEN=") && !strings.HasPrefix(e, "WORKLOAD_IDENTITY_TOKEN_FILE=") && !strings.HasPrefix(e, "WORKLOAD_IDENTITY_CA_FILE=") {
 					cmd.Env = append(cmd.Env, e)
 				}
 			}
-			cmd.Env = append(cmd.Env, "DATABASE_URL="+tc.dsn, "F18_SYNTHETIC_CLI_PROCESS=1")
+			// Valid synthetic proof configuration permits the malformed DSN to reach
+			// the real store constructor; ParseConfig rejects sslmode before network IO.
+			cmd.Env = append(cmd.Env, "DATABASE_URL="+tc.dsn, "F18_SYNTHETIC_CLI_PROCESS=1", "TOKEN_HOLD_EXPIRY_URL=https://token.example.invalid", "INTERNAL_SERVICE_TOKEN=synthetic-short-lived-workload")
 			output, err := cmd.CombinedOutput()
 			if err == nil {
 				t.Fatal("failed operation exited successfully")

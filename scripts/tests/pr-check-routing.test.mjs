@@ -137,6 +137,7 @@ function assertFiniteAuditPGSetup(job) {
     "        env:", "          F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable",
     "          F17_TEST_DATABASE_PROFILE: github-actions-service",
   ].join("\n"));
+  assert.doesNotMatch(job.replace(pg, ""), /DATABASE_URL|DATABASE_PROFILE|F17_TEST_/);
   const defaultStep = namedStep(job, goStepName);
   const jobEnv = text.match(/^ {4}env:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(jobEnv);
@@ -154,7 +155,7 @@ const bash = process.platform === "win32" && existsSync("C:/Program Files/Git/bi
 
 test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
   const paths = filterPaths(workflow, "account_platform");
-  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
+  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
     assert.ok(paths.includes(path), `Go routing must cover ${path}`);
   }
   assert.match(workflow, /account_platform: \$\{\{ steps\.filter\.outputs\.account_platform \}\}/);
@@ -176,6 +177,27 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
     assert.equal(result.stdout, expectedOutput);
   }
   assertFiniteAuditPGSetup(job);
+});
+
+test("Account Platform Node gate executes its contracts and rejects empty or failed runs", () => {
+  const job = jobBlock("account-platform-test");
+  const install = namedStep(job, "Install Account Platform contract dependencies");
+  assert.match(install, /working-directory: account-platform/);
+  assert.match(install, /npm ci --ignore-scripts --prefer-offline --no-audit/);
+  const nodeStep = namedStep(job, "Account Platform Node contracts");
+  assert.match(nodeStep, /working-directory: account-platform/);
+  const run = stepRun(job, "Account Platform Node contracts");
+  assert.match(run, /node --test --test-reporter=tap test\/contract\/\*\.test\.mjs/);
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-node-gate-"));
+  try {
+    for (const [passed, failed, exit, expected] of [[1, 0, 0, 0], [0, 0, 0, 1], [2, 1, 1, 1], [1, 0, 7, 7]]) {
+      const prefix = `node() { printf '# pass ${passed}\\n# fail ${failed}\\n'; return ${exit}; }; export -f node;\n`;
+      const result = spawnSync(bash, ["-c", prefix + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/") } });
+      assert.equal(result.status, expected, `${passed}/${failed}/${exit}: ${result.stderr}`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("Go gate executes test and vet for root and future nested modules, and fails on errors", () => {

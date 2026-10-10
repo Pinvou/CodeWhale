@@ -44,6 +44,9 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 		api.WriteError(w, http.StatusForbidden, "CSRF_REJECTED", "the request origin or CSRF token is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
+	if mutation && kind != "create" && !s.config.AdminModelTokenActionsEnabled && s.rejectDisabledExistingTokenApprovalAction(w, r, requestID) {
+		return
+	}
 	capability, err := s.readApprovalCapability(r.Context(), session)
 	if err != nil {
 		approvalBFFUnavailable(w, r)
@@ -70,6 +73,9 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 			api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "invalid approval mutation", httpserver.RequestID(r.Context()))
 			return
 		}
+	}
+	if kind == "create" && !s.config.AdminModelTokenActionsEnabled && rejectDisabledBFFTokenDraft(w, r, body) {
+		return
 	}
 	target := *s.config.AccountURL
 	target.Path = strings.TrimRight(target.Path, "/") + "/admin/v" + strconv.Itoa(wire) + "/approval-requests"
@@ -132,6 +138,10 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 			api.WriteError(w, http.StatusConflict, "APPROVAL_ACTION_CONTROL_CHANGED", "approval actions changed; reload the approval detail", httpserver.RequestID(r.Context()))
 			return
 		}
+	}
+	if kind == "detail" && response.StatusCode == http.StatusOK {
+		response.Body = io.NopCloser(bytes.NewReader(data))
+		s.captureApprovalClassification(r.Context(), session, r.Method, "/admin/v"+strconv.Itoa(wire)+"/approval-requests/"+requestID.String(), response)
 	}
 	if mutation && response.StatusCode >= 200 && response.StatusCode < 300 && kind != "create" {
 		if response.StatusCode != http.StatusNoContent {

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
-import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { artifactGateArguments, verifyArtifactBindings } from './account-platform-artifact-bindings.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const policyPath = path.join(root, 'account-platform', 'deploy', 'performance-policy.json');
@@ -24,6 +24,7 @@ export function validatePolicy(policy) {
 function atMost(actual, limit, name) { required(Number.isFinite(actual) && actual >= 0 && actual <= limit, `${name} exceeds ${limit}`); }
 function atLeast(actual, limit, name) { required(Number.isFinite(actual) && actual >= limit, `${name} is below ${limit}`); }
 
+// FORMAT_ONLY: field validation does not authenticate evidence or prove an exercise.
 export function validateEvidence(policy, evidence, now = Date.now(), provenance = {}) {
   required(evidence.schema_version === 1 && evidence.environment === 'production-equivalent', 'production-equivalent evidence is required');
   const generated = Date.parse(evidence.generated_at);
@@ -80,20 +81,20 @@ export function performanceGateArguments(args) {
 async function main() {
   const policy = JSON.parse(await readFile(policyPath, 'utf8'));
   validatePolicy(policy);
-  const arguments_ = performanceGateArguments(process.argv.slice(2));
+  const options = artifactGateArguments(process.argv.slice(2));
+  const arguments_ = performanceGateArguments([...options.remaining, ...(options.expectedReleaseSHA256 ? [`--expected-release-sha256=${options.expectedReleaseSHA256}`] : [])]);
   if (arguments_.evidencePath) {
-    const [evidence, pageTrace, mutationTrace] = await Promise.all([
-      readFile(path.resolve(arguments_.evidencePath), 'utf8').then(JSON.parse),
-      readFile(path.resolve(arguments_.pageTracePath)),
-      readFile(path.resolve(arguments_.mutationTracePath)),
-    ]);
+    const { evidence, result, artifacts } = await verifyArtifactBindings({ ...options, evidencePath: arguments_.evidencePath, kind: 'PERFORMANCE', environment: 'production-equivalent' });
+    const pageTrace = artifacts.get('/admin_pagination/page_trace_sha256');
+    const mutationTrace = artifacts.get('/admin_pagination/mutation_trace_sha256');
+    required(pageTrace && mutationTrace && path.resolve(arguments_.pageTracePath) === pageTrace.path && path.resolve(arguments_.mutationTracePath) === mutationTrace.path, 'admin pagination trace files must match the externally bound artifacts');
     validateEvidence(policy, evidence, Date.now(), {
       expectedReleaseSHA256: arguments_.expectedReleaseSHA256,
-      pageTraceSHA256: createHash('sha256').update(pageTrace).digest('hex'),
-      mutationTraceSHA256: createHash('sha256').update(mutationTrace).digest('hex'),
+      pageTraceSHA256: pageTrace.sha256,
+      mutationTraceSHA256: mutationTrace.sha256,
     });
-  }
-  console.log(arguments_.evidencePath ? 'production performance evidence passed' : 'performance policy passed');
+    console.log(JSON.stringify(result));
+  } else { required(process.argv.length === 2, 'performance evidence file is required'); console.log('performance policy passed'); }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main().catch((error) => { console.error(`[performance-gate] ${error.message}`); process.exitCode = 1; });

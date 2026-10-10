@@ -1,7 +1,6 @@
 # 账号平台完整重部署与现有状态恢复
 
-本次明确采用本机备份上线，范围见 [`local-backup-rollout.md`](local-backup-rollout.md)。
-以下完整重建流程不等于本机模式已具备整机丢失恢复能力；同机备份随主机丢失时无法按此恢复。
+本机备份模式须由当前部署负责人显式选择并独立接受同机风险，见 [运维证据](operational-evidence.md)。完整重建流程不代表本机模式已经具备整机丢失恢复能力。
 
 本 Runbook 用于在应用容器、镜像或整台应用主机不可用时，使用已审核代码、不可变制品和站点私有恢复包重建账号平台。目标是恢复已有用户、身份、权限、订单、余额、权益、用量、支付收敛和模型路由，而不是只启动一组空容器。
 
@@ -191,7 +190,7 @@ docker compose <compose> exec -T postgres \
 
 4. 查询四库 `schema_migrations`，与恢复清单核对数量、最高版本和校验和。任何差异先停止，不得修改历史迁移文件或数据库记录。
 5. 按主部署文档第 8.5 节生成的无环迁移计划依次运行迁移服务；不能仅按 Account/Billing/Token 固定顺序猜测。
-6. 运行 `backup-restore.md` 指定的四库恢复审计 SQL。Billing 账本、权益组成、支付流水和应收任一不平时保持资金写入口关闭。
+6. 按 `backup-restore.md` 执行站点受控只读领域审计并保留真实程序/工件；当前未提供四个历史固定审计 SQL，缺载体不能完成恢复。Billing 账本、权益组成、支付流水和应收任一不平时保持资金写入口关闭。
 
 ### 6.2 NATS JetStream
 
@@ -229,7 +228,7 @@ docker compose <compose> up -d --wait redis
 4. 将稳定的内部健康地址、Provider Base URL、调用 Token 和核对 Token 通过账号平台 Secret 注入。
 5. Token Gateway 不得使用 Mock New API 或空目录作为恢复成功条件。
 
-详细边界见 [`newapi-deployment.md`](newapi-deployment.md)。
+现有独立网关部署载体见 [`../production/README.newapi.md`](../production/README.newapi.md)，恢复必须使用目标站点受控配置和原事实，不将测试模拟器当作生产网关。
 
 ## 7. 导入或构建镜像、迁移与启动应用
 
@@ -269,7 +268,7 @@ docker compose <compose> up -d --no-deps --wait \
   account-event-relay billing-event-relay token-event-relay token-portal
 ```
 
-平台管理员登录身份和 Account 业务角色是两层事实。恢复 Keycloak 数据库后应保留原身份；`EMPTY_BOOTSTRAP` 才使用 `provision-platform-admin.sh` 建立首个登录身份，并继续按 `account-rbac-migration.md` 显式授予 Account 业务角色。禁止把 Keycloak Realm Role 自动提升为平台超级管理员。
+平台管理员登录身份和 Account 业务角色是两层事实。恢复 Keycloak 数据库后应保留原身份；`EMPTY_BOOTSTRAP` 才使用 `provision-platform-admin.sh` 建立首个登录身份，所需 Account 平台角色映射由授权 DBA/安全负责人按 [原 RBAC 映射的当前边界](account-rbac-migration.md) 独立核验；登录身份不等于业务授权，当前缺平台角色公开管理入口时保持未完成，不能自动赋权或以组织角色接口替代。禁止把 Keycloak Realm Role 自动提升为平台超级管理员。
 
 ## 8. 边缘代理、证书与网络恢复
 
@@ -344,3 +343,7 @@ docker compose <compose> up -d --no-deps --wait \
 - 实际 RPO/RTO、偏差、未解决问题、是否允许删除旧环境的明确结论。
 
 证据只保存不可逆 ID、摘要、计数和稳定错误码，不保存 Secret、个人信息、支付报文或模型正文。
+
+## 工件验证限制
+
+命令从仓库根目录执行；策略或字段格式通过、工件摘要绑定和真实演练/发布审批是不同结论。现有可信来源、全部原始工件和独立审批不可省略，详见 [运维证据](operational-evidence.md)。

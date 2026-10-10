@@ -40,7 +40,16 @@ func (w *ExpiredHoldRecoveryWorker) Run(ctx context.Context) {
 	}
 }
 func (w *ExpiredHoldRecoveryWorker) RunOnce(ctx context.Context) error {
-	rows, err := w.repository.pool.Query(ctx, `SELECT h.usage_request_id FROM usage_holds h LEFT JOIN usage_hold_expiry_recovery r ON r.hold_id=h.id WHERE h.expires_at<=clock_timestamp() AND ((h.status IN ('ACTIVE','REVIEW') AND (r.hold_id IS NULL OR (r.state='MANUAL_REVIEW' AND r.next_attempt_at<=clock_timestamp()))) OR (h.status='RELEASED' AND r.state='MANUAL_REVIEW' AND r.next_attempt_at<=clock_timestamp())) ORDER BY COALESCE(r.next_attempt_at,h.expires_at),h.id LIMIT 100`)
+	return w.RunOnceLimit(ctx, 100)
+}
+
+// RunOnceLimit is the bounded operator carrier of the same persistent intent
+// and trusted Token dispatch fence used by the background worker.
+func (w *ExpiredHoldRecoveryWorker) RunOnceLimit(ctx context.Context, limit int) error {
+	if limit < 1 || limit > 1000 {
+		return errors.New("hold recovery limit must be between 1 and 1000")
+	}
+	rows, err := w.repository.pool.Query(ctx, `SELECT h.usage_request_id FROM usage_holds h LEFT JOIN usage_hold_expiry_recovery r ON r.hold_id=h.id WHERE h.expires_at<=clock_timestamp() AND ((h.status IN ('ACTIVE','REVIEW') AND (r.hold_id IS NULL OR (r.state='MANUAL_REVIEW' AND r.next_attempt_at<=clock_timestamp()))) OR (h.status='RELEASED' AND r.state='MANUAL_REVIEW' AND r.next_attempt_at<=clock_timestamp())) ORDER BY COALESCE(r.next_attempt_at,h.expires_at),h.id LIMIT $1`, limit)
 	if err != nil {
 		return err
 	}

@@ -38,6 +38,7 @@ images:
   tokenGovernance: { repository: pinvou/token-governance, tag: dev, pullPolicy: IfNotPresent }
   eventRelay: { repository: pinvou/account-platform-event-relay, tag: dev, pullPolicy: IfNotPresent }
   migrate: { repository: pinvou/account-platform-migrate, tag: dev, pullPolicy: IfNotPresent }
+  tokenPolicyBootstrap: { repository: pinvou/token-policy-bootstrap, tag: dev, pullPolicy: IfNotPresent }
   # Operator builds the approved newapi-tls image and supplies its immutable digest.
   newApiTLS: { repository: "", digest: "", pullPolicy: IfNotPresent }
   newApi: { repository: calciumion/new-api, tag: v1.0.0-rc.26, digest: sha256:7b82c866e9c0fb02faca7d5068e9d1261e47edf52462d63d9db7b614e7f1027d, pullPolicy: IfNotPresent }

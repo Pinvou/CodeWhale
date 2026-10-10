@@ -24,7 +24,13 @@ Identity Adapter 暂维持单副本，因为注册/改密的短期明文密码�
 每个场景保存开始/恢复时间、容量水位、Ready 副本/故障域、Outbox/Inbox/死信、账本与支付核对、实际 Provider 副作用数和不含正文的 SHA-256 证据摘要。执行：
 
 ```sh
-npm --prefix account-platform run check:production-ha -- ha-evidence.json
+node scripts/account-platform-ha-gate.mjs "$EVIDENCE_EXPORT_ROOT/ha-evidence.json" \
+  --trust-file="$CONTROLLED_TRUST_FILE" --artifact-root="$EVIDENCE_EXPORT_ROOT" \
+  --deployment-id="$EXPECTED_DEPLOYMENT_ID" --expected-release-sha256="$CANDIDATE_RELEASE_SHA256"
 ```
 
 Chart、PDB 或门禁脚本存在不代表高可用已经完成；必须取得同一发布候选的真实集群证据。
+
+## 工件验证限制
+
+命令从仓库根目录执行；策略或字段格式通过、工件摘要绑定和真实演练/发布审批是不同结论。现有可信来源、全部原始工件和独立审批不可省略，详见 [运维证据](operational-evidence.md)。

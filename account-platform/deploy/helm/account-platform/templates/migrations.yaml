@@ -72,9 +72,8 @@ spec:
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: bootstrap
-          image: "{{ .Values.images.migrate.repository }}:{{ .Values.images.migrate.tag }}"
-          imagePullPolicy: {{ .Values.images.migrate.pullPolicy }}
-          command: ["/token-policy-bootstrap"]
+          image: "{{ .Values.images.tokenPolicyBootstrap.repository }}:{{ .Values.images.tokenPolicyBootstrap.tag }}"
+          imagePullPolicy: {{ .Values.images.tokenPolicyBootstrap.pullPolicy }}
           args: ["--mode", "bootstrap"]
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
           env:

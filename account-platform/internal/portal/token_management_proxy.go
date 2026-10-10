@@ -1,11 +1,27 @@
 package portal
 
 import (
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"net/http"
 	"strings"
 )
 
 func (s *Service) proxyAdminToken(w http.ResponseWriter, r *http.Request) {
+	resource := "/" + r.PathValue("resource")
+	if !canonicalProxyResource(resource) {
+		api.WriteError(w, 404, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
+		return
+	}
+	credentialCleanup := tokenCredentialRevokeWindowPath(r.Method, resource)
+	if tokenCredentialIsolationPath(r.Method, resource) && !credentialCleanup && (!s.config.AdminTokenDetailsEnabled || s.config.CredentialOrigin == nil) {
+		api.WriteError(w, 404, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !credentialCleanup && !s.config.AdminModelTokenActionsEnabled {
+		api.WriteError(w, 404, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
+		return
+	}
 	s.proxy(w, r, s.config.TokenGatewayURL, "/"+r.PathValue("resource"), tokenAdminPathAllowed)
 }
 
