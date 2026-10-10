@@ -561,7 +561,7 @@ pub async fn desktop_remote_action_a(
         operation,
         "requested",
     );
-    crate::platform::capabilities::ensure_desktop_remote_control_enabled().map_err(|code| {
+    super::desktop_remote_state::ensure_ready(&app).map_err(|code| {
         log_remote_action_event("controller", "remote_action_failed", operation, &code);
         code
     })?;
