@@ -71,6 +71,7 @@ import {
   remoteProxyLeaseIdentity,
   remoteProxyComposerIdentity,
   remoteProxyModelSelectionIdentity,
+  remoteProjectionPollRevision,
   remoteProxyPresentationState,
   remoteProjectionLabelKey,
   newRemoteTaskIntent,
@@ -989,6 +990,10 @@ const openChatExternalUrl = (url) => {
       const remoteModelBindingKey = remoteBinding
         ? remoteProxyModelSelectionIdentity(activeSessionId, scopedRemoteConnection)
         : '';
+      const remoteArtifactPollRevision = remoteProjectionPollRevision(remoteProxyHistory,
+        ['artifact', 'status', 'snapshot_marker']);
+      const remotePermissionPollRevision = remoteProjectionPollRevision(remoteProxyHistory,
+        ['approval', 'status', 'snapshot_marker']);
       const remoteCapabilities = bs?.remoteCapabilities
         && bs.remoteCapabilities.connectionId === scopedRemoteConnection?.connectionId
         && bs.remoteCapabilities.controllerLeaseId === scopedRemoteConnection?.controllerLeaseId
@@ -1053,7 +1058,7 @@ const openChatExternalUrl = (url) => {
             if (!cancelled) setRemoteCapabilityError(String(failure?.code || 'capability_snapshot_unavailable'));
           });
         return () => { cancelled = true; };
-      }, [remoteBinding, scopedRemoteConnection?.capabilityRevision, scopedRemoteConnection?.sessionRef]);
+      }, [remoteModelBindingKey, scopedRemoteConnection?.capabilityRevision, scopedRemoteConnection?.sessionRef]);
       useEffect(() => {
         if (!remoteCapabilities || !scopedRemoteConnection?.sessionRef || !bridge.available) return undefined;
         const expiresAtMs = Number(remoteCapabilities.expiresAtMs);
@@ -1141,7 +1146,7 @@ const openChatExternalUrl = (url) => {
           .then(items => { if (!cancelled) setRemoteArtifacts(Array.isArray(items) ? items : []); })
           .catch(failure => { if (!cancelled) setRemoteActionError(remoteActionFailureCode(failure)); });
         return () => { cancelled = true; };
-      }, [remoteBinding, remoteProxyHistory]);
+      }, [remoteModelBindingKey, remoteArtifactPollRevision]);
       useEffect(() => {
         if (!remoteBinding || !currentRemoteTaskId || !bridge.available) {
           setRemotePermissions([]);
@@ -1156,7 +1161,7 @@ const openChatExternalUrl = (url) => {
           if (!cancelled) setRemoteActionError(remoteActionFailureCode(failure));
         });
         return () => { cancelled = true; };
-      }, [remoteBinding, currentRemoteTaskId, remoteProxyHistory]);
+      }, [remoteModelBindingKey, currentRemoteTaskId, remotePermissionPollRevision]);
       const controlledLinkReady = !!(
         controlledChatActive
         && controlledSession.sessionId
@@ -4012,7 +4017,7 @@ const openChatExternalUrl = (url) => {
                       className="mt-2 rounded-lg bg-black/5 p-3 dark:bg-white/5">
                       <div className="flex items-center gap-2 font-medium">
                         <span id="chat-remote-artifact-preview-title" className="min-w-0 flex-1 truncate">{remoteArtifactPreview.displayName}</span>
-                        <button ref={remoteArtifactPreviewCloseRef} data-testid="chat-remote-artifact-preview-close" type="button" onClick={closeRemoteArtifactPreview} aria-label={t.close}><X size={15} /></button>
+                        <button ref={remoteArtifactPreviewCloseRef} data-testid="chat-remote-artifact-preview-close" type="button" onClick={closeRemoteArtifactPreview} aria-label={t.uiArtifacts.closePreviewAria}><X size={15} /></button>
                       </div>
                       <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words">{remoteArtifactPreview.text || t.remoteConversation.previewUnavailable}</pre>
                     </div>

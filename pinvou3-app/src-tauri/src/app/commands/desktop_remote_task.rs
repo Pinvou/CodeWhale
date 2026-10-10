@@ -7,11 +7,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::desktop_remote_state::DesktopRemoteState as State;
 use deepseek_tui::models::{ContentBlock, Message, Role};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use tauri::{AppHandle, Emitter, Manager as _, State};
+use tauri::{AppHandle, Emitter, Manager as _};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 

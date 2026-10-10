@@ -6973,7 +6973,7 @@ mod tests {
                 TaskLeaseBinding, task_input_digest_for_value,
             },
         };
-        for ending in ["live", "terminal", "reused"] {
+        for ending in ["live", "busy", "terminal", "reused"] {
             let lease = crate::features::remote_control::controller::protocol::LeaseContext {
                 connection_id: "connection-1".into(),
                 controller_lease_id: "lease-1".into(),
@@ -7050,7 +7050,7 @@ mod tests {
                 std::task::Poll::Ready(())
             })
             .await;
-            if ending != "live" {
+            if matches!(ending, "terminal" | "reused") {
                 ledger
                     .complete(&owner.task_id, RemoteTaskTerminal::Failed, None, 3)
                     .unwrap();
@@ -7071,9 +7071,71 @@ mod tests {
                 assert_ne!(replacement.sequence, owner.task_sequence);
             }
             drop(held);
-            let result = mint.await;
+            let result = if ending == "busy" {
+                // The owner gate is reentrant on one thread. Hold it on a
+                // different thread to exercise genuine publication contention.
+                let busy = std::thread::scope(|scope| {
+                    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+                    let (release_tx, release_rx) = std::sync::mpsc::channel();
+                    let gate_ledger = &ledger;
+                    let gate_owner = &owner;
+                    let holder = scope.spawn(move || {
+                        gate_ledger
+                            .with_task_resources(
+                                &gate_owner.task_id,
+                                gate_owner.task_sequence,
+                                || {
+                                    entered_tx.send(()).unwrap();
+                                    release_rx
+                                        .recv_timeout(std::time::Duration::from_secs(5))
+                                        .unwrap();
+                                },
+                            )
+                            .unwrap();
+                    });
+                    entered_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+                    let outcome = match std::future::Future::poll(mint.as_mut(), &mut cx) {
+                        std::task::Poll::Ready(result) => result,
+                        std::task::Poll::Pending => {
+                            release_tx.send(()).unwrap();
+                            holder.join().unwrap();
+                            panic!("uncontended maps must not block");
+                        }
+                    };
+                    release_tx.send(()).unwrap();
+                    holder.join().unwrap();
+                    outcome
+                });
+                assert_eq!(busy.as_ref().unwrap_err().to_string(), "task_cleanup_busy");
+                assert!(
+                    remote_turn::permission_mint_projection(busy)
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(authority.pending_for_task(&owner.task_id).is_empty());
+                assert!(
+                    pending.lock().await["callback-key"]
+                        .remote_approval_id
+                        .is_none()
+                );
+                mint_remote_permission_in_maps(
+                    &pending,
+                    &owners,
+                    &owner,
+                    "private-callback",
+                    &authority,
+                    &ledger,
+                    60_000,
+                )
+                .await
+            } else {
+                mint.await
+            };
             let requests = pending.lock().await;
-            if ending == "live" {
+            if matches!(ending, "live" | "busy") {
                 let view = result.unwrap();
                 assert_eq!(
                     requests["callback-key"].remote_approval_id.as_deref(),
@@ -7082,6 +7144,10 @@ mod tests {
                 assert_eq!(authority.pending_for_task(&owner.task_id).len(), 1);
             } else {
                 assert!(result.is_err(), "{ending}");
+                assert_eq!(
+                    remote_turn::permission_mint_projection(result).unwrap_err(),
+                    "permission_binding_stale"
+                );
                 assert!(requests["callback-key"].remote_approval_id.is_none());
                 assert!(authority.pending_for_task(&owner.task_id).is_empty());
             }

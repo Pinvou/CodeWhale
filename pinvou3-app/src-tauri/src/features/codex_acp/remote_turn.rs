@@ -522,6 +522,17 @@ pub(crate) struct AcpPoolCodeTurnPort {
     artifacts: RwLock<Option<Arc<dyn RemoteCodeArtifactPort>>>,
 }
 
+pub(super) fn permission_mint_projection(
+    result: anyhow::Result<crate::features::remote_control::controller::permission::PermissionView>,
+) -> Result<Option<crate::features::remote_control::controller::permission::PermissionView>, String>
+{
+    match result {
+        Ok(view) => Ok(Some(view)),
+        Err(error) if error.to_string() == "task_cleanup_busy" => Ok(None),
+        Err(_) => Err("permission_binding_stale".to_owned()),
+    }
+}
+
 impl AcpPoolCodeTurnPort {
     pub(crate) fn new(
         app: tauri::AppHandle,
@@ -593,7 +604,7 @@ impl AcpPoolCodeTurnPort {
                 }
                 continue;
             }
-            let view = self
+            let minted = self
                 .pool
                 .mint_remote_permission(
                     owner,
@@ -602,8 +613,12 @@ impl AcpPoolCodeTurnPort {
                     &self.tasks.ledger(),
                     REMOTE_PERMISSION_TTL_MS,
                 )
-                .await
-                .map_err(|_| "permission_binding_stale".to_owned())?;
+                .await;
+            // No approval is minted during the brief journal resource gate.
+            // Retry at the next bounded poll without retiring this runtime.
+            let Some(view) = permission_mint_projection(minted)? else {
+                continue;
+            };
             registered.insert(
                 request.callback_id.clone(),
                 view.permission_request_id.clone(),
