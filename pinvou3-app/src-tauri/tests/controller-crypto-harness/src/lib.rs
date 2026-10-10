@@ -88,10 +88,14 @@ pub mod async_runtime {
 #[path = "../../../src/features/files/published_attachment.rs"]
 mod published_attachment;
 
+#[path = "../../../src/features/files/limits.rs"]
+mod file_limits;
+
 mod features {
     pub(crate) mod files {
         pub(crate) mod file_ingest {
             pub(crate) use crate::published_attachment::*;
+            pub(crate) use crate::file_limits::MAX_FILE_BYTES;
         }
     }
     pub(crate) mod remote_control {
