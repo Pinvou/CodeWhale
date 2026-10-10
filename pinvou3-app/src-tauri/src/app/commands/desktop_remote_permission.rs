@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use tauri::State;
+use super::desktop_remote_state::DesktopRemoteState as State;
 
 use crate::features::codex_acp::{AcpPool, RemotePermissionOwner};
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;

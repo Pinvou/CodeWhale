@@ -1,7 +1,7 @@
 //! A-only, allowlisted capability read and authenticated request send.
 
+use super::desktop_remote_state::DesktopRemoteState as State;
 use serde::Serialize;
-use tauri::State;
 
 use crate::features::remote_control::controller::controlling::ControllingDeviceManager;
 use crate::features::remote_control::controller::controlling_session::{

@@ -2099,6 +2099,7 @@ jobs:
             'features::monitor::platform::windows_memory::tests::' \
             'features::monitor::platform::windows_gpu::tests::' \
             'features::remote_control::platform::windows::tests::' \
+            'app::commands::remote_control::reader_resume_tests::' \
             'features::computer_use::platform::windows::tests::'; do
             index=$((index+1))
             started=$SECONDS

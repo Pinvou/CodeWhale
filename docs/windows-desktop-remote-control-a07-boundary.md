@@ -49,6 +49,28 @@ A08 重新接入时必须逐项验证：
 
 ## 尚未覆盖的验收
 
+### 启动降级与 IPC 合同（R15）
+
+桌面域只有在持久任务恢复、history 恢复、所有状态与钩子装配完整成功后才发布
+`DesktopRemoteReady`。平台能力投影同时要求平台支持和该就绪标记；未就绪命令的
+状态参数经 `try_get` 返回固定 `desktop_remote_control_unavailable`，不构造空可写库。
+非支持平台返回 `desktop_remote_control_unsupported`，不写桌面账本、不启动回收器；
+Legacy Web 的恢复独立继续，损坏或不支持格式的原文件仍保留。
+
+Tauri 2.11.5 自身的命令 `State::CommandArg` 已用 `try_get` 返回 `InvokeError`，
+并不会调用 `StateManager::get` 的 panic 路径；本修复收口的是实际就绪能力和稳定错误合同，
+不是宣称复现了不存在的命令参数 panic。真实 IPC mock-runtime 回归不等于启动真实 WebView。
+
+A-local 内存历史列表严格使用 `RemoteHistoryEntry` 的 `status/bSessionReference`，
+不冒用另一持久副本 DTO 的 `state/lastSequence/lastTerminalStatus`。
+审批采用共享 controller 单调时钟，测试注入时钟仍保留。共享正文脱敏覆盖密码系键、
+有效裸 Basic 凭据及敏感 HTTP header 的缩进续行；普通 Basic 描述、空行后普通文本保留。
+后继 A08 的 unrestricted preview 固定脱敏强合同不能回退。
+
+私有持久 history 仍有锁内整表复制与原子全文件重写的潜伏性能/容量风险；A07 没有装配
+record 写入消费者，不能声称当前任务必然触发大文件重写。未重新开放该路径前必须完成
+总字节预算、预读取边界、增量持久化及锁外 I/O 的所有权验证；不得仅因事件数量有界而当作字节有界。
+
 本地独立 harness 编译真实任务、journal、传输、私有文件和周期回收模块，
 但不代表完整 Tauri/CodeWhale 宿主编译、真实模型供应商调用或部署验收。
 完整宿主检查由对应 CI 门禁验证，不能用 harness 替代。
@@ -93,3 +115,11 @@ P2 登记 #1648（重算子项须在 A08 UI 接线前闭合）；终态墓碑有
 轻量 harness 不链接 history 所需的 CodeWhale 原子写入；history 证据来自另行运行的完整 native 测试。
 本地 native 环境、通过数量、平台限制与尚未完成的 CI 以 PR 本轮修复回复为准，
 不能将轻量 harness 或 GNU/LLVM 测试当作 MSVC、Linux 或真实双端部署验收。
+
+## R15 原生 IPC 夹具的跨平台来源
+
+启动失败/部分启动及原始 State 提取回归使用实际 mock 窗口的 `url()`，不固定
+Windows 的 `http://tauri.localhost`。Tauri 在 Linux/macOS 的本地协议是
+`tauri://localhost`；固定 HTTP 来源会先被远端 ACL 拒绝，使测试未抵达命令提取器。
+保留完整错误码和真实 manager 断言，不放宽 ACL、不跳过非 Windows 测试。
+本地 Windows 回执不能代替 Linux/macOS CI 的实际执行结果。

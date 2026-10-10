@@ -4,7 +4,8 @@
 //! device credential, token, or key, and do not equate window visibility with
 //! disconnection.
 
-use tauri::{AppHandle, Emitter, State};
+use super::desktop_remote_state::DesktopRemoteState as State;
+use tauri::{AppHandle, Emitter};
 
 use crate::features::behavior_telemetry::{RemoteControlEvent, RemoteStage, track_remote_control};
 use crate::features::remote_control::RemoteControlManager;
