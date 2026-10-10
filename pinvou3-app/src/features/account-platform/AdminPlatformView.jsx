@@ -167,7 +167,6 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     ['entitlement-correction', 'platform.billing.repairs.request', entitlementCorrectionCopy[language].title],
     ['registration', 'platform.registrations.repair', copy.userManagement.registrationRepair],
     ['profile', 'platform.profile-changes.repair', copy.userManagement.profileRepair],
-    ['closures', 'platform.account-closures.read', accountClosureCopy[language].title],
     ['settings', 'platform.sms-config.read', copy.settings.title],
     ['finance', ['platform.billing.wallets.read', 'platform.billing.repairs.request', 'platform.billing.repairs.approve'].find(permission => permissions.includes(permission)), financeCopy[language].finance],
     ['products', 'platform.products.read', financeCopy[language].productAdmin],
