@@ -115,6 +115,13 @@ func receivableWriteOffWithDeactivationRace(t *testing.T, ctx context.Context, r
 	if err := operatorTx.Commit(ctx); err != nil {
 		t.Fatal("operator disable did not commit")
 	}
+	// Pin the persisted receipt to the historical literal preimage, independently
+	// of the extracted helper: {"command_type":"LEDGER_REPAIR","execution_key":"race:write-off"}.
+	var historicalDigest string
+	if err := repo.pool.QueryRow(ctx, `SELECT execution_key_digest FROM receivable_write_off_cases WHERE approval_request_id=$1`, input.ApprovalRequestID).Scan(&historicalDigest); err != nil ||
+		historicalDigest != "8a4e72f942661f932ee1e4fdfadfaa47f6d54c484f8514fdeabbb2fd4b6e2dc1" {
+		t.Fatalf("persisted historical execution digest mismatch: %v", err)
+	}
 	got, err := repo.ApplyReceivableWriteOff(ctx, input)
 	if err != nil || got != result {
 		t.Fatal("operator disable invalidated the original immutable receipt")

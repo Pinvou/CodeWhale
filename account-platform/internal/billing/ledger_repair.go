@@ -718,9 +718,5 @@ func ledgerRepairFrozenMismatch(plan LedgerRepairPlan, frozen LedgerRepairFrozen
 }
 
 func ledgerRepairExecutionKeyDigest(key string) string {
-	encoded, err := json.Marshal(map[string]any{"command_type": "LEDGER_REPAIR", "execution_key": strings.TrimSpace(key)})
-	if err != nil {
-		return ""
-	}
-	return digestHex(encoded)
+	return legacyFinancialExecutionKeyDigestV1(key)
 }

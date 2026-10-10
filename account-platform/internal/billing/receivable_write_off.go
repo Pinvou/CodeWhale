@@ -348,7 +348,7 @@ SELECT DISTINCT receivable.payment_order_id FROM receivables receivable WHERE re
 	if _, err := tx.Exec(ctx, `INSERT INTO receivable_write_off_cases(id,approval_request_id,authorization_event_id,approval_epoch,execution_key_digest,
 receivable_id,wallet_id,amount_microcredits,receivable_version_before,receivable_version_after,status_after,facts_digest,journal_entry_id,allocation_id,state,created_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'EXECUTED',$15)`,
-		caseID, input.ApprovalRequestID, input.AuthorizationEventID, input.ApprovalEpoch, ledgerRepairExecutionKeyDigest(executionKey),
+		caseID, input.ApprovalRequestID, input.AuthorizationEventID, input.ApprovalEpoch, legacyFinancialExecutionKeyDigestV1(executionKey),
 		plan.ReceivableID, plan.WalletID, plan.WriteOffMicrocredits, plan.ReceivableVersion, plan.ReceivableVersion+1,
 		statusAfter, plan.FactsDigest, journalID, allocationID, now); err != nil {
 		if receivableWriteOffUniqueViolation(err) {
@@ -408,7 +408,7 @@ type receivableWriteOffCaseRecord struct {
 
 func (record receivableWriteOffCaseRecord) matchesFrozen(input ReceivableWriteOffExecutionInput, executionKey string) bool {
 	return record.ApprovalRequestID == input.ApprovalRequestID && record.AuthorizationEventID == input.AuthorizationEventID &&
-		record.ApprovalEpoch == input.ApprovalEpoch && record.ExecutionKeyDigest == ledgerRepairExecutionKeyDigest(executionKey) &&
+		record.ApprovalEpoch == input.ApprovalEpoch && record.ExecutionKeyDigest == legacyFinancialExecutionKeyDigestV1(executionKey) &&
 		record.ReceivableID == input.Command.ReceivableID && record.AmountMicrocredits == input.Command.WriteOffMicrocredits &&
 		record.ReceivableVersionBefore == input.Command.ExpectedReceivableVersion &&
 		(input.Frozen.FactsDigest == "" || record.FactsDigest == input.Frozen.FactsDigest)

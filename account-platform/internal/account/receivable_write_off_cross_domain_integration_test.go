@@ -386,6 +386,30 @@ UPDATE billing_approval_command_activations SET state='INACTIVE',version=version
 WHERE command_type='RECEIVABLE_WRITE_OFF' AND policy_version=1 AND snapshot_schema_version=1 AND state='ACTIVE'`); err != nil {
 		t.Fatal(err)
 	}
+	// The historical execution-key hash is shared. Actual command and target
+	// binding, not a different hash, must reject foreign authorization contexts.
+	var beforeJournals, beforePostings int64
+	if err := billingPool.QueryRow(ctx, `SELECT (SELECT count(*) FROM journal_entries),
+		(SELECT count(*) FROM ledger_postings)`).Scan(&beforeJournals, &beforePostings); err != nil {
+		t.Fatal(err)
+	}
+	wrongCommandBinding := binding
+	wrongCommandBinding.CommandType = "LEDGER_REPAIR"
+	if err := billingRepository.ClaimBillingApprovalProof(ctx, wrongCommandBinding, decoded.Payload); !errors.Is(err, billingdomain.ErrApprovalSnapshotMismatch) {
+		t.Fatalf("foreign command claim must reject the original authorization: %v", err)
+	}
+	wrongTargetEvent := decoded.Payload
+	wrongTargetEvent.TargetResourceID = uuid.NewString()
+	if err := billingRepository.ClaimBillingApprovalProof(ctx, binding, wrongTargetEvent); !errors.Is(err, billingdomain.ErrApprovalSnapshotMismatch) {
+		t.Fatalf("foreign target claim must reject the frozen authorization: %v", err)
+	}
+	var afterJournals, afterPostings, afterCases, afterClaims int64
+	if err := billingPool.QueryRow(ctx, `SELECT (SELECT count(*) FROM journal_entries),
+		(SELECT count(*) FROM ledger_postings), (SELECT count(*) FROM receivable_write_off_cases),
+		(SELECT count(*) FROM billing_approval_proof_claims)`).Scan(&afterJournals, &afterPostings, &afterCases, &afterClaims); err != nil ||
+		afterJournals != beforeJournals || afterPostings != beforePostings || afterCases != replayCases || afterClaims != replayClaims {
+		t.Fatalf("foreign context changed financial facts journals=%d postings=%d cases=%d claims=%d err=%v", afterJournals, afterPostings, afterCases, afterClaims, err)
+	}
 	if err := repository.requireApprovalAdvancement(ctx, policy); !errors.Is(err, ErrBillingGovernanceInactive) {
 		t.Fatalf("rolled-back cross-domain advancement: %v", err)
 	}
