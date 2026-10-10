@@ -182,6 +182,7 @@ const acpProvidersJa = {
 };
 
 const jaBase = {
+  steerFailedLost: "割り込みに失敗しました（ターン中断）。メッセージは未達のまま復元できません。もう一度送信してください",
   ...browserJa,
         langTag: 'ja',
         acpAgent: 'ACP Agent',

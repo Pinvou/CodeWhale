@@ -235,7 +235,7 @@ assert.ok(
 assert.ok(
   /scheduled_task:run_updated[\s\S]{0,180}scheduleScheduledRunRefresh\(\)/.test(tauriBridge) &&
     /function scheduleScheduledRunRefresh\([\s\S]{0,900}refreshScheduledTaskData\(20\)[\s\S]{0,320}loadScheduledTaskRecentRuns\(\)/.test(tauriBridge) &&
-    /async function init\(\)[\s\S]{0,1200}loadScheduledTasks\(\)\.catch/.test(tauriBridge),
+    /async function init\([^)]*\)[\s\S]{0,1200}loadScheduledTasks\(\)\.catch/.test(tauriBridge),
   'run updates should debounce a global task and run refresh regardless of the current page'
 );
 assert.ok(

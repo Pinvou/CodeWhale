@@ -183,6 +183,7 @@ const acpProvidersEn = {
 };
 
 export const dictEn = {
+  steerFailedLost: "Interrupt failed (turn interrupted); the message was not delivered and could not be restored — send it again",
   ...browserEn,
         langTag: 'en',
         acpAgent: 'ACP Agent',

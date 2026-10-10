@@ -182,6 +182,7 @@ const acpProvidersZh = {
 };
 
 export const dictZh = {
+  steerFailedLost: "插队失败（回合中断），消息未送达且无法恢复；请重新发送",
   ...browserZh,
         langTag: 'zh',
         acpAgent: 'ACP Agent',
