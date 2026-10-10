@@ -226,16 +226,17 @@ pub(crate) fn global_shortcut_session_is_ambiguous(
 /// 结果按进程缓存；环境变量 `PINVOU3_MEGACUBE_DEVICE` 可覆盖：`1` 强制开启
 /// （开发/自动化测试在非 MegaCube 硬件上预览「设备管理」），`0` 强制关闭
 /// （在误报 DMI 的硬件上的逃生口）；未设或其他值走 DMI 探测。
+///
+/// DMI 字段读取收敛在 `platform::dmi`（设备页展示同一份候选表）；这里的运行时
+/// OS 判断而非 `cfg` 是刻意的：探测是纯运行时能力（测试要在任意主机上跑、行为
+/// fail-closed），且读不到文件自然返回 false，架构守卫已放行。
 pub(crate) fn is_megacube_device() -> bool {
     static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
         if let Some(forced) = forced_megacube_device_override() {
             return forced;
         }
-        std::env::consts::OS == "linux"
-            && ["product_name", "product_family", "board_name"]
-                .into_iter()
-                .any(|field| dmi_field_contains_megacube(field))
+        std::env::consts::OS == "linux" && super::dmi::any_field_contains("megacube")
     })
 }
 
@@ -250,12 +251,6 @@ fn parse_megacube_env_override(value: Option<&str>) -> Option<bool> {
         Some("0") => Some(false),
         _ => None,
     }
-}
-
-fn dmi_field_contains_megacube(field: &str) -> bool {
-    dmi_value_contains_megacube(
-        &std::fs::read_to_string(format!("/sys/class/dmi/id/{field}")).unwrap_or_default(),
-    )
 }
 
 /// DMI 字段匹配口径（纯函数）：小写化后含 "megacube" 即命中。

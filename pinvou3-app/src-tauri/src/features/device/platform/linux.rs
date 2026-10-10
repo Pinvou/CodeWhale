@@ -6,23 +6,19 @@ use std::path::{Path, PathBuf};
 
 use super::ExtraSensor;
 
-/// DMI 产品名候选：依次读，取第一个非空值（设计 §1 同款顺序）。
-const DMI_ID_FILES: &[&str] = &[
-    "/sys/class/dmi/id/product_name",
-    "/sys/class/dmi/id/product_family",
-    "/sys/class/dmi/id/board_name",
-];
-
+/// DMI 产品名：候选字段清单与读取收敛在 `platform::dmi`（能力位同一份清单），
+/// 这里取第一个非空字段用于设备页展示。
 pub(crate) fn dmi_product_name() -> Option<String> {
-    DMI_ID_FILES
-        .iter()
-        .find_map(|path| read_trimmed_non_empty(Path::new(path)))
+    crate::platform::dmi::dmi_first_nonempty()
 }
 
-/// `/etc/os-release` 的 `PRETTY_NAME="..."`（引号可省略）。
+/// `/etc/os-release` 的 `PRETTY_NAME="..."`（引号可省略）；`/etc` 没有时按规范
+/// 回退 `/usr/lib/os-release`（usrmerge/部分容器镜像里 /etc 不必有这份文件）。
 pub(crate) fn os_pretty_name() -> Option<String> {
-    let text = std::fs::read_to_string("/etc/os-release").ok()?;
-    parse_os_release_pretty_name(&text)
+    std::fs::read_to_string("/etc/os-release")
+        .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
+        .ok()
+        .and_then(|text| parse_os_release_pretty_name(&text))
 }
 
 fn parse_os_release_pretty_name(text: &str) -> Option<String> {
@@ -129,6 +125,19 @@ fn looks_like_version(token: &str) -> bool {
         }
     }
     count >= 2
+}
+
+/// 注册表目录只留 owner 权限（0700）：外部模型记录含 base_url/weights_path，
+/// 同机其他用户不该读到。
+pub(crate) fn harden_dir_owner_only(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+}
+
+/// 注册表文件只留 owner 权限（0600），rename 落盘前调用。
+pub(crate) fn set_file_owner_only(file: &std::fs::File) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
 }
 
 /// hwmon 风扇/电压/电流/功率采样（温度交给 sysinfo Components，这里跳过温度通道）。

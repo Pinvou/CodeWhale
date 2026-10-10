@@ -461,7 +461,13 @@ fn collect_processes(state: &DeviceStateInner) -> ProcessSummary {
     });
     top_cpu.truncate(TOP_N);
     let mut top_memory = procs;
-    top_memory.sort_by(|a, b| b.memory_bytes.cmp(&a.memory_bytes));
+    // 等值内存追加 name/pid 决胜键：跨拍顺序漂移会让列表行反复跳动（第三轮评审 P3）。
+    top_memory.sort_by(|a, b| {
+        b.memory_bytes
+            .cmp(&a.memory_bytes)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
     top_memory.truncate(TOP_N);
     ProcessSummary {
         top_cpu,
@@ -490,8 +496,13 @@ fn gpu_ext_cached() -> Option<GpuExtSnapshot> {
     }
     let value = gpu_ext_snapshot();
     guard.sampled_at = Some(Instant::now());
-    guard.value = value.clone();
-    value
+    // 采样失败（瞬时超时/驱动忙）保留上一份好值、只刷新时间戳，与 monitor
+    // TtlSnapshotCache 的失败保旧同款——否则一次抖动会让 compute 列表/驱动徽章
+    // 在页面上闪没（第三轮评审 P3）。
+    if value.is_some() || guard.value.is_none() {
+        guard.value = value;
+    }
+    guard.value.clone()
 }
 
 #[derive(Default)]
@@ -500,16 +511,23 @@ struct GpuExtCache {
     value: Option<GpuExtSnapshot>,
 }
 
-/// 驱动版本：nvidia-smi 查询优先，`/proc/driver/nvidia/version` 兜底；两者皆缺
-/// → 视为本机无 NVIDIA，整块返回 None。
+/// 驱动与 CUDA 版本：一次裸跑 `nvidia-smi` 同时取表头里的 `Driver Version:` 与
+/// `CUDA Version:`（原先驱动查询+CUDA 兜底要两次调用；同一挂死的二进制按 3 个
+/// 候选路径重试会把最坏预算三重放大到 60-90s，第三轮评审 P2）。裸跑失败退
+/// `/proc` 的驱动版本；两者皆缺 → 视为本机无 NVIDIA，整块返回 None。
 fn gpu_ext_snapshot() -> Option<GpuExtSnapshot> {
-    let driver_version = run_nvidia_smi(&["--query-gpu=driver_version", "--format=csv,noheader"])
-        .and_then(|out| out.lines().next().map(|line| line.trim().to_string()))
-        .filter(|line| !line.is_empty())
+    let smi_output = run_nvidia_smi(&[]);
+    let driver_version = smi_output
+        .as_deref()
+        .and_then(parse_nvidia_smi_driver_version)
         .or_else(platform::nvidia_driver_version)?;
     Some(GpuExtSnapshot {
         driver_version: Some(driver_version),
-        cuda_version: platform::cuda_toolkit_version().or_else(nvidia_smi_cuda_version),
+        cuda_version: platform::cuda_toolkit_version().or_else(|| {
+            smi_output
+                .as_deref()
+                .and_then(parse_nvidia_smi_cuda_version)
+        }),
         compute_processes: nvidia_compute_processes(),
     })
 }
@@ -538,19 +556,23 @@ pub(crate) fn parse_cuda_toolkit_version(json_text: &str) -> Option<String> {
         .filter(|version| !version.is_empty())
 }
 
-/// 兜底：`nvidia-smi` 表头的 `CUDA Version: N.N`。
-fn nvidia_smi_cuda_version() -> Option<String> {
-    let out = run_nvidia_smi(&[])?;
-    parse_nvidia_smi_cuda_version(&out)
-}
-
-fn parse_nvidia_smi_cuda_version(text: &str) -> Option<String> {
-    let rest = text.split("CUDA Version:").nth(1)?;
+/// 表头键值对的公共解析：定位 `<Key>:` 取首个空白分隔 token（表头列以 `|` 收边）。
+fn parse_nvidia_smi_header_value(text: &str, key: &str) -> Option<String> {
+    let rest = text.split(key).nth(1)?;
     let token = rest.split_whitespace().next()?;
     if token.ends_with('|') {
         return Some(token.trim_end_matches('|').to_string()).filter(|s| !s.is_empty());
     }
     Some(token.to_string())
+}
+
+/// 兜底：`nvidia-smi` 表头的 `CUDA Version: N.N`。
+fn parse_nvidia_smi_cuda_version(text: &str) -> Option<String> {
+    parse_nvidia_smi_header_value(text, "CUDA Version:")
+}
+
+fn parse_nvidia_smi_driver_version(text: &str) -> Option<String> {
+    parse_nvidia_smi_header_value(text, "Driver Version:")
 }
 
 /// 计算进程：`--query-compute-apps=pid,process_name,used_memory`。
@@ -569,37 +591,47 @@ fn parse_compute_app_line(line: &str) -> Option<GpuProcInfo> {
     if parts.len() < 3 {
         return None;
     }
+    // CSV 无引号转义：进程名含逗号时不能按固定下标取（名字会被截断、内存落 0），
+    // 首段是 pid、末段是内存、中间整段归名字（第三轮评审 P3）。
+    let used_mib = parts[parts.len() - 1].parse().unwrap_or(0);
+    let name = parts[1..parts.len() - 1].join(",");
     Some(GpuProcInfo {
         pid: parts[0].parse().ok()?,
         // unified-memory 设备 used_memory 可能是 [N/A]：按 0 处理，不丢整行。
-        used_mib: parts[2].parse().unwrap_or(0),
-        name: truncate_name(parts[1]),
+        used_mib,
+        name: truncate_name(&name),
     })
 }
 
 // ---------------------------------------------------------------- 服务探测
 
 /// 模型服务可达性：ollama / vllm / lmstudio 走 HTTP 端口探测（1.5s 超时），
-/// docker 走 CLI（3s 超时）。失败给一句人话 detail。
+/// docker 走 CLI（3s 超时）。失败给一句人话 detail。四路并发：docker 的
+/// spawn_blocking 提到 join 之前，否则总延迟 = HTTP 探测 + docker 串行和而非
+/// "最慢一路"（第三轮评审 P3）。
 pub async fn probe_services() -> Vec<ServiceStatus> {
-    let (ollama, vllm, lmstudio) = tokio::join!(
+    let docker_task = tokio::task::spawn_blocking(probe_docker_service);
+    let (ollama, vllm, lmstudio, docker) = tokio::join!(
         probe_ollama_service(),
         probe_openai_ports("vllm", &[8000, 8001, 8002],),
         probe_openai_ports("lmstudio", &[1234]),
+        async {
+            docker_task.await.unwrap_or_else(|_| ServiceStatus {
+                key: "docker".to_string(),
+                running: false,
+                detail: Some("docker 探测任务失败".to_string()),
+            })
+        },
     );
-    let docker = tokio::task::spawn_blocking(probe_docker_service)
-        .await
-        .unwrap_or_else(|_| ServiceStatus {
-            key: "docker".to_string(),
-            running: false,
-            detail: Some("docker 探测任务失败".to_string()),
-        });
     vec![ollama, vllm, lmstudio, docker]
 }
 
-/// ollama → `GET 127.0.0.1:11434/api/tags`（1.5s 超时）。
+/// ollama → `GET <ollama_base>/api/tags`（1.5s 超时）。基地址与商店设置
+/// （config.json 的 ollama_host）对齐——改配过的机器上探测、标签、删除必须
+/// 指向同一守护进程。
 async fn probe_ollama_service() -> ServiceStatus {
-    match http_get_success(&format!("{OLLAMA_BASE}/api/tags")).await {
+    let base = ollama_base().await;
+    match http_get_success(&format!("{base}/api/tags")).await {
         Ok(()) => ServiceStatus {
             key: "ollama".to_string(),
             running: true,
@@ -647,7 +679,12 @@ fn probe_docker_service() -> ServiceStatus {
     command.args(["info", "--format", "{{.ServerVersion}}"]);
     match crate::platform::process::output_with_timeout(command, Duration::from_secs(3)) {
         Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // stdout 全量进 detail 有整段涌入上下文/UI 的通道，截到 64 字符足够装版本号。
+            let version: String = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .chars()
+                .take(64)
+                .collect();
             let detail = if version.is_empty() {
                 None
             } else {
@@ -680,11 +717,25 @@ fn probe_docker_service() -> ServiceStatus {
 pub(crate) const OLLAMA_BASE: &str = "http://127.0.0.1:11434";
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// 本机 Ollama 守护进程基地址：商店设置里的 `ollama_host`（config.json 可改）
+/// 优先，未配置时用出厂默认。服务探测、外部模型标签与删除必须与商店的 ollama
+/// 生命周期指向**同一**守护进程，否则改配过的机器上设备页会读写另一个实例
+/// （第三轮评审 P3 对齐项）。settings 读取是阻塞文件 IO，走 blocking 池。
+pub(crate) async fn ollama_base() -> String {
+    tokio::task::spawn_blocking(crate::features::model_store::ollama_base_url)
+        .await
+        .unwrap_or_else(|_| OLLAMA_BASE.to_string())
+}
+
 /// 短超时探测客户端（OnceLock 共享；构建失败降级为每次现建，仍失败返回 None）。
+/// 显式禁用代理：客户端只访问 127.0.0.1，reqwest 0.13 的 `system-proxy` feature
+/// 会吃 `http_proxy` 环境变量且对 loopback 无隐式豁免——宿主设了代理而 no_proxy
+/// 没盖住 127.0.0.1 时，三个服务探测会全部改走代理然后假报"连接被拒绝"
+/// （第三轮评审 P2）。
 pub(crate) fn probe_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     CLIENT
-        .get_or_init(|| reqwest::Client::builder().build().ok())
+        .get_or_init(|| reqwest::Client::builder().no_proxy().build().ok())
         .as_ref()
 }
 

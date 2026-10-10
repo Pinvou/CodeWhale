@@ -87,3 +87,6 @@ pub use platform::backend::{
 // 是否已被商店接管。见 platform::store_model_name 的说明。
 pub(crate) use platform::store_model_name;
 pub(crate) use platform::store_weights_roots;
+// 本机 Ollama 守护进程基地址：设备管理的外部模型探测/标签/删除与商店生命周期
+// 对齐到同一实例。见 platform::ollama_base_url 的说明。
+pub(crate) use platform::ollama_base_url;

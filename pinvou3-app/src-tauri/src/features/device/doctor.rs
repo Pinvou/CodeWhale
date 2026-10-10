@@ -74,7 +74,7 @@ const SAFETY_RULES: &str = "\
 1. 本轮以**只读诊断**为主：优先只跑查询类命令（查看状态、列出清单），不做任何改动。
 2. 任何安装、删除、升级、写文件、结束进程的操作，必须先用大白话解释它会影响什么，并征得用户明确同意后才能执行。
 3. 严禁 `rm -rf` 带通配符或模糊路径（例如 `rm -rf /`、`rm -rf $VAR/`、`rm -rf *`）；删除任何东西前必须先列出确切目标让用户过目。
-4. 严禁触碰 `~/.pinvou3/model-store/` 目录、系统目录（/etc、/usr、/boot、/var/lib）以及磁盘分区（分区、格式化、改挂载表都绝对禁止）。
+4. 严禁触碰 `~/.pinvou3/`（应用自身数据目录：注册表/商店/知识库/技能都在里面，`model-store` 也在其中）以及系统目录（/etc、/usr、/boot、/var/lib）和磁盘分区（分区、格式化、改挂载表都绝对禁止）。
 5. `apt` 只做查询（例如 `apt list --upgradable`）；除非用户明确要求升级系统软件，并且同意后也优先用 `apt upgrade`，禁止 `dist-upgrade`。
 6. 需要 `sudo`（临时管理员权限）时，先解释为什么需要、会做什么，再请求用户授权。
 7. 下载任何文件之前，先检查磁盘剩余空间是否足够。
@@ -127,7 +127,7 @@ const TASK_SERVICES: &str = "\
 
 1. 逐个探测本机模型服务是否在线：Ollama（端口 11434）、vLLM（端口 8000/8001/8002）、LM Studio（端口 1234）。用短超时探测，例如 `curl -m 3 http://127.0.0.1:11434/api/tags`。
 2. 运行 `docker ps` 查看 docker 容器里模型服务的运行状态（如果 docker 可用）。
-3. 结合上下文里的 active_model（应用当前正在使用的模型）检查它指向的服务端点是否健康。
+3. 结合上下文里的 active_model（应用当前正在使用的模型）的 health_status 报告它的健康状态；本地目标再拿 services 里的探测结果交叉验证（上下文刻意不含端点地址，不要编造）。
 4. 汇总成一张\"服务名 / 在不在线 / 干什么用 / 不在线怎么办\"的清单；启动服务的动作先说明影响，等用户确认。";
 
 const TASK_HOGS: &str = "\
@@ -153,12 +153,12 @@ const TASK_INSTALL_MODEL: &str = "\
 3. **网络探测（短超时，只读）**：分别探测 `hf.co`、`hf-mirror.com`、`modelscope.cn` 和 ollama 模型仓库的可达性（例如 `curl -m 3 -sI <地址>`），根据结果**自行决定下载来源**：大陆网络环境优先 hf-mirror.com 或 ModelScope。
 4. **方案与确认**：给出一份推荐方案（运行时 + 模型 + 下载来源 + 预计体积），**必须等用户明确确认后才能动手**。如果用户想要的模型在模型商店里已经有同款，提示直接去模型商店安装，不要重复安装。
 5. **执行约束**：优先用户级安装（不随便 sudo 装系统包，除非用户确认）；下载支持断点续传；有校验和就校验；**绝不删除或覆盖任何既有模型与数据**。
-6. **收尾**：启动服务 → 探测服务端点可用 → 写注册表文件 `~/.pinvou3/device/external-models.d/<slug>.json`（slug 用模型名的小写短横线形式），schema 必须是：
+6. **收尾**：启动服务 → 探测服务端点可用 → 写注册表文件 `~/.pinvou3/device/external-models.d/<id>.json`（**文件名必须与 id 字段完全一致**：id 是 `m-` 加 8 位随机十六进制，文件名就是 `<id>.json`——设备管理页按记录内容里的 id 找文件，文件名对不上，这条记录在页面上就永远删不掉），schema 必须是：
    ```json
    {\"schema\": 1, \"id\": \"m-<8位随机十六进制>\", \"name\": \"<模型名>\", \"kind\": \"ollama|openai_endpoint|llamacpp|vllm|other\", \"base_url\": \"<服务地址或 null>\", \"model\": \"<模型标识或 null>\", \"weights_path\": null, \"installed_at\": \"<RFC3339 时间>\", \"note\": \"\"}
    ```
-   `weights_path` 一律填 `null`：Ollama / vLLM / LM Studio 这类运行时自己管理模型存储，不要把它们的目录登记进来。只有当本流程**自己新建了专用权重目录**（例如为 llama.cpp 建的模型目录）时才填绝对路径，且必须位于家目录下第三层或更深（例如 `~/ai-weights/llamacpp/qwen3`），否则设备管理页的移除守卫会拒绝删除它。
-   然后给用户**一条可以直接复制粘贴执行的完整命令**（用 `mkdir -p` 加 `cat > 文件 <<'EOF' … EOF` 的形式）把注册表写进去。
+   `weights_path` 一律填 `null`：Ollama / vLLM / LM Studio 这类运行时自己管理模型存储，不要把它们的目录登记进来。只有当本流程**自己新建了专用权重目录**（例如为 llama.cpp 建的模型目录）时才填**绝对路径**（把 `~` 展开成真实家目录，例如 `/home/<用户名>/ai-weights/llamacpp/qwen3`），且必须位于家目录下第三层或更深，否则设备管理页的移除守卫会拒绝删除它。
+   注册表文件优先由你自己用文件工具直接写好；如果拿不到文件工具、要给用户一条复制粘贴的命令，那么这条命令**只允许创建并写入这一个注册表文件**（`mkdir -p` 加 `cat > <id>.json <<'EOF' … EOF` 的形式），不得用 `&&`、`;`、`|` 拼接任何其他命令，不得包含下载或执行脚本的内容。
 7. 最后引导用户：回到应用的\"设备管理\"页点\"刷新\"，就能看到新模型，点\"接入品悟\"即可在对话里使用它。";
 
 /// 组装完整的排查提示词。`context` 是命令层采样的设备上下文 JSON。
@@ -248,7 +248,7 @@ mod tests {
                 "只读诊断",
                 "征得用户明确同意",
                 "rm -rf",
-                "~/.pinvou3/model-store/",
+                "~/.pinvou3/",
                 "apt upgrade",
                 "sudo",
                 "磁盘剩余空间",
@@ -283,6 +283,17 @@ mod tests {
         assert!(prompt.contains("ModelScope"));
         assert!(prompt.contains("接入品悟"));
         assert!(prompt.contains("断点续传"));
+        // 注册表文件名契约（第三轮评审 P1）：文件名必须等于 <id>.json——移除按
+        // 内容 id 直取文件，模板若教 slug 文件名，装出的记录在页面上永远删不掉。
+        assert!(prompt.contains("<id>.json"));
+        assert!(prompt.contains("文件名必须与 id 字段完全一致"));
+        assert!(!prompt.contains("slug"), "slug filenames orphan the record");
+        // weights_path 示例必须是展开后的绝对路径（守卫第一条拒绝 `~/...` 字面量）。
+        assert!(prompt.contains("/home/<用户名>/ai-weights/"));
+        assert!(!prompt.contains("~/ai-weights"));
+        // 复制粘贴命令只许写注册表文件本身（不得拼接下载/执行脚本）。
+        assert!(prompt.contains("只允许创建并写入这一个注册表文件"));
+        assert!(prompt.contains("不得用 `&&`、`;`、`|` 拼接"));
     }
 
     #[test]

@@ -4,8 +4,6 @@
 //! 不静默借用其他平台的实现。MegaCube 设备管理本身只面向 Linux 一体机，
 //! 非 Linux 平台上采样降级为：os 信息缺产品名、传感器只有 sysinfo 温度。
 
-use std::path::Path;
-
 use super::ExtraSensor;
 
 pub(crate) fn dmi_product_name() -> Option<String> {
@@ -38,5 +36,6 @@ pub(crate) fn nvidia_driver_version() -> Option<String> {
     None
 }
 
-// 引用 Path 保持签名对称（linux 侧实现用到），避免 unused-import 类告警差异。
-const _: Option<&Path> = None;
+pub(crate) fn harden_dir_owner_only(_path: &std::path::Path) {}
+
+pub(crate) fn set_file_owner_only(_file: &std::fs::File) {}

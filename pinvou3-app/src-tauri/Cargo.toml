@@ -249,8 +249,9 @@ xcap = "0.9.8"
 enigo = "0.6"
 # ACP resource ledger: aggregate RSS + process-tree ownership on Linux/macOS/Windows.
 # Pin 0.36.x for the project's Rust 1.89 toolchain; 0.39 requires Rust 1.95.
-# Default-features off: the ledger (features/assistant) only samples processes, while
-# features/device additionally opts into the component(温度)/disk/network probes below.
+# Default-features off: the ledger (features/codex_acp/resource_ledger.rs) only
+# samples processes, while features/device additionally opts into the
+# component(temperature)/disk/network probes below.
 sysinfo = { version = "=0.36.1", default-features = false, features = [
     "system",
     "component",

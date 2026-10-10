@@ -50,8 +50,11 @@ pub(crate) fn store_model_name(_model_name: &str) -> Option<String> {
 ///
 /// 设备管理（features/device）的外部模型登记/移除对每个根都做路径边界检查——
 /// 设备侧不得自行推断默认值，否则商店调整权重布局时两边会漂移。
-/// `load_settings()` 之后 `models_dir` 必非空（空值已在加载时回填默认），
-/// 因此这里直接读字符串，不触发 `models_path()` 的建目录副作用。
+///
+/// 注意：本函数并非无副作用——`data_dir()` 首次调用会建出商店数据目录，
+/// `load_settings()` 读 config.json（坏配置会触发隔离改名），底层 connect 还会
+/// 建出空库与 WAL 边车。调用方（features/device）已在 blocking 池中调用并接受
+/// 这些副作用；修改副作用语义前先核对这两个调用点。
 #[cfg(target_os = "linux")]
 pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
     let mut roots = vec![linux::config::data_dir()];
@@ -67,4 +70,24 @@ pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
 pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
     // 非 Linux 平台没有商店；保留数据根作为兜底边界（外部模型守卫统一走多根检查）。
     vec![crate::platform::paths::pinvou3_home().join("model-store")]
+}
+
+/// 本机 Ollama 守护进程基地址：默认 `http://127.0.0.1:11434`，可被商店设置里的
+/// `ollama_host`（config.json）覆盖。设备管理（features/device）的外部模型探测、
+/// 标签与删除必须与商店的 ollama 生命周期指向**同一**守护进程，否则改配过的机器
+/// 上设备页会读写另一个实例（第三轮评审 P3 对齐项）。空值回填默认。
+#[cfg(target_os = "linux")]
+pub(crate) fn ollama_base_url() -> String {
+    let host = linux::config::load_settings().ollama_host;
+    let host = host.trim();
+    if host.is_empty() {
+        "http://127.0.0.1:11434".to_string()
+    } else {
+        host.trim_end_matches('/').to_string()
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn ollama_base_url() -> String {
+    "http://127.0.0.1:11434".to_string()
 }

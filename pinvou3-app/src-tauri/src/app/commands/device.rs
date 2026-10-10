@@ -92,14 +92,14 @@ async fn build_doctor_context(device: &DeviceState, monitor: &MonitorState) -> V
             "max_model_len": model.max_model_len,
         })
     });
-    let mut context = json!({
-        "device": device_snapshot,
-        "gpu": monitor_snapshot.gpu,
-        "cpu": monitor_snapshot.cpu,
-        "ram": monitor_snapshot.ram,
-        "services": services,
-        "active_model": active_model,
-    });
+    let mut context = assemble_doctor_context(
+        json!(device_snapshot),
+        json!(monitor_snapshot.gpu),
+        json!(monitor_snapshot.cpu),
+        json!(monitor_snapshot.ram),
+        json!(services),
+        active_model,
+    );
     mask_context_privacy(
         &mut context,
         &crate::platform::paths::user_home_dir().to_string_lossy(),
@@ -107,10 +107,38 @@ async fn build_doctor_context(device: &DeviceState, monitor: &MonitorState) -> V
     context
 }
 
+/// 上下文拼装（纯函数，测试直打键名契约）：提示词模板与前端都按这些键取数，
+/// 拼装与采样解耦后键名漂移才有测试可拦（第三轮评审：原"契约测试"自造字面量
+/// 自证，测不到真实函数）。
+fn assemble_doctor_context(
+    device: Value,
+    gpu: Value,
+    cpu: Value,
+    ram: Value,
+    services: Value,
+    active_model: Option<Value>,
+) -> Value {
+    json!({
+        "device": device,
+        "gpu": gpu,
+        "cpu": cpu,
+        "ram": ram,
+        "services": services,
+        "active_model": active_model,
+    })
+}
+
 /// 隐私收敛：上下文随提示词送往（可能是云端的）模型后端。
 /// ① 网卡 MAC 是稳定硬件指纹，整字段剔除；
-/// ② 磁盘挂载点里的家目录前缀改写为 `~`，不外泄用户名。
-/// 进程名/芯片名等需系统级权限才可伪造，保留（注入面见 doctor.rs 上下文头注记）。
+/// ② 字符串值里的家目录前缀改写为 `~`（带路径分量边界，`/home/u2` 不吃
+///    `/home/u` 的前缀）、`/media/<用户名>/` 自动挂载段的用户名改写为 `~`——
+///    GPU 计算进程名是 nvidia-smi 上报的完整可执行路径，常含家目录，是"家目录
+///    脱敏"声明最容易被漏掉的旁路（第三轮评审 P2）；
+/// ③ 反引号统一替换为单引号：上下文嵌在 ```json 围栏里，值内的反引号序列会让
+///    围栏在视觉上提前闭合，把剩余 JSON 误读为模板正文。
+/// 剩余已知取舍：进程名/芯片标签等环境可控文本仍在（prctl 即可伪造，"需系统级
+/// 权限才可伪造"的旧论断不成立），注入面由 doctor.rs 上下文头的"不可信输入"
+/// 注记防守；本函数只收敛隐私与围栏破坏两个确定面。
 fn mask_context_privacy(context: &mut Value, home: &str) {
     if let Some(ifaces) = context
         .get_mut("device")
@@ -123,25 +151,55 @@ fn mask_context_privacy(context: &mut Value, home: &str) {
             }
         }
     }
-    if home.is_empty() {
-        return;
-    }
-    if let Some(disks) = context
-        .get_mut("device")
-        .and_then(|device| device.get_mut("disks"))
-        .and_then(Value::as_array_mut)
-    {
-        for disk in disks {
-            if let Some(mount) = disk.get_mut("mount_point") {
-                if let Some(text) = mount.as_str() {
-                    if text.starts_with(home) {
-                        let masked = format!("~{}", &text[home.len()..]);
-                        *mount = Value::String(masked);
-                    }
-                }
+    let username = std::path::Path::new(home)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    sanitize_context_strings(context, home, &username);
+}
+
+/// 递归改写所有字符串值：家目录前缀与 `/media/<用户名>/` 段脱敏 + 反引号清洗。
+fn sanitize_context_strings(value: &mut Value, home: &str, username: &str) {
+    match value {
+        Value::String(text) => {
+            let mut masked = mask_path_text(text, home, username);
+            if masked.contains('`') {
+                masked = masked.replace('`', "'");
+            }
+            *value = Value::String(masked);
+        }
+        Value::Array(items) => {
+            for item in items {
+                sanitize_context_strings(item, home, username);
             }
         }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                sanitize_context_strings(item, home, username);
+            }
+        }
+        _ => {}
     }
+}
+
+/// 路径脱敏（纯函数）：家目录前缀（要求分量边界：恰好相等或后随 `/`，避免
+/// `/home/u2` 吃到 `/home/u` 的前缀）→ `~`；`/media/<用户名>/`（Ubuntu 等对
+/// 可移动介质的自动挂载点，卷标还是插盘人可控的自由文本）→ `/media/~/`。
+fn mask_path_text(text: &str, home: &str, username: &str) -> String {
+    if text == home {
+        return "~".to_string();
+    }
+    let home_slash = format!("{home}/");
+    if let Some(rest) = text.strip_prefix(&home_slash) {
+        return format!("~/{rest}");
+    }
+    if !username.is_empty() {
+        let media_prefix = format!("/media/{username}/");
+        if let Some(rest) = text.strip_prefix(&media_prefix) {
+            return format!("/media/~/{rest}");
+        }
+    }
+    text.to_string()
 }
 
 #[cfg(test)]
@@ -149,15 +207,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn doctor_context_json_has_snake_case_contract_keys() {
-        // 上下文键名契约：前端与提示词模板都按这些键取数（设计 §5 第 4 节）。
-        let value = json!({
-            "device": null, "gpu": null, "cpu": null, "ram": null,
-            "services": [], "active_model": null
-        });
+    fn doctor_context_assembles_the_documented_contract_keys() {
+        // 键名契约直打真实拼装函数（设计 §5 第 4 节）：前端与提示词模板都按这些
+        // 键取数。此前这里用 json! 自造字面量自证，测不到 build_doctor_context。
+        let context = assemble_doctor_context(
+            json!({"os": {"arch": "aarch64"}}),
+            json!(null),
+            json!(null),
+            json!(null),
+            json!([{"key": "ollama", "running": false}]),
+            Some(json!({"model_id": "m", "health_status": "healthy"})),
+        );
         for key in ["device", "gpu", "cpu", "ram", "services", "active_model"] {
-            assert!(value.get(key).is_some(), "missing context key: {key}");
+            assert!(context.get(key).is_some(), "missing context key: {key}");
         }
+        assert_eq!(context["device"]["os"]["arch"], "aarch64");
     }
 
     #[test]
@@ -171,7 +235,12 @@ mod tests {
                 "disks": [
                     { "mount_point": "/home/zhangsan/usb", "total_bytes": 1 },
                     { "mount_point": "/mnt/data", "total_bytes": 2 }
-                ]
+                ],
+                "gpu_ext": {
+                    "compute_processes": [
+                        { "pid": 7, "name": "/home/zhangsan/miniconda3/bin/python3", "used_mib": 64 }
+                    ]
+                }
             }
         });
         mask_context_privacy(&mut context, "/home/zhangsan");
@@ -182,5 +251,47 @@ mod tests {
         assert_eq!(disks[0]["mount_point"], "~/usb");
         // 家目录之外的挂载点保持原样。
         assert_eq!(disks[1]["mount_point"], "/mnt/data");
+        // GPU 计算进程完整路径同样脱敏（用户名不随家目录外泄）。
+        let procs = context["device"]["gpu_ext"]["compute_processes"]
+            .as_array()
+            .unwrap();
+        assert_eq!(procs[0]["name"], "~/miniconda3/bin/python3");
+    }
+
+    #[test]
+    fn mask_path_text_respects_component_boundaries_and_media_users() {
+        // 分量边界：/home/u2 不能吃 /home/u 的前缀（旧实现会改写成 ~2/...）。
+        assert_eq!(
+            mask_path_text("/home/u2/data", "/home/u", "u"),
+            "/home/u2/data"
+        );
+        assert_eq!(mask_path_text("/home/u", "/home/u", "u"), "~");
+        assert_eq!(mask_path_text("/home/u/data", "/home/u", "u"), "~/data");
+        // /media/<用户名>/ 自动挂载段：用户名改写为 ~，卷标原样保留。
+        assert_eq!(
+            mask_path_text("/media/zhangsan/USB", "/home/zhangsan", "zhangsan"),
+            "/media/~/USB"
+        );
+        // 别的用户的 /media 段不动。
+        assert_eq!(
+            mask_path_text("/media/other/x", "/home/zhangsan", "zhangsan"),
+            "/media/other/x"
+        );
+    }
+
+    #[test]
+    fn context_strings_strip_backticks_to_protect_the_json_fence() {
+        let mut context = json!({
+            "device": {
+                "disks": [
+                    { "mount_point": "/media/u/```evil```" }
+                ]
+            }
+        });
+        mask_context_privacy(&mut context, "/home/u");
+        assert_eq!(
+            context["device"]["disks"][0]["mount_point"],
+            "/media/~/'''evil'''"
+        );
     }
 }
