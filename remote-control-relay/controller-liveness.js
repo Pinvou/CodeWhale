@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isControllerIdentifier } from "./identifier-contract.js";
 
 import {
   CONTROLLER_PROTOCOL_VERSION,
@@ -19,7 +20,6 @@ const TOTAL_BUDGET_MS = 30_000;
 const MAX_ATTESTATION_AGE_MS = 5_000;
 const MAX_PENDING_CHALLENGES = 8;
 const MAX_USED_CHALLENGES = 64;
-const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
 
 export class ControllerLivenessHookError extends Error {
   constructor(code) {
@@ -58,7 +58,7 @@ function signingConfiguration({ signingKeyId, signingPrivateKeyB64, signingPriva
   if (!signingPrivateKey && !encodedKey && typeof sign !== "function") {
     return { signingKeyId: "", signAttestation: null };
   }
-  if (!KEY_ID.test(keyId)) fail("controller_liveness_signing_key_invalid");
+  if (!isControllerIdentifier(keyId)) fail("controller_liveness_signing_key_invalid");
   if (typeof sign !== "function" && typeof sign !== "undefined") {
     fail("controller_liveness_signing_key_invalid");
   }
@@ -134,13 +134,17 @@ function consumeChallenge(state, message, now) {
 }
 
 export class ControllerLivenessHooks {
-  #clock; #states = new Map(); #signing;
+  #clock; #states = new Map(); #signing; #leaseManager;
 
   constructor(options = {}) {
     if (typeof options.clock !== "function" && options.clock !== undefined) {
       fail("controller_liveness_clock_invalid");
     }
     this.#clock = options.clock ?? Date.now;
+    if (options.leaseManager != null && typeof options.leaseManager.terminateLease !== "function") {
+      fail("controller_liveness_config_invalid");
+    }
+    this.#leaseManager = options.leaseManager ?? null;
     this.#signing = signingConfiguration(options);
   }
 
@@ -159,6 +163,15 @@ export class ControllerLivenessHooks {
     // Validate using the authenticated socket's actual role, not the role a
     // specialized handler expects. A B socket cannot request proof as A.
     validateControllerMessage(message, role, context);
+
+    // Enforce the existing evidence cutoff before any update, proof or forward.
+    // The periodic cleanup tick may run late; a late authenticated heartbeat
+    // must not turn an expired cycle back into a resumable lease.
+    const deadline = Math.min(state.last_liveness_a.at, state.last_liveness_b.at) + TOTAL_BUDGET_MS;
+    if (now >= deadline) {
+      await this.#expireState(context.controller_lease_id, state);
+      fail("controller_liveness_expired");
+    }
 
     if (message.type === "controller_liveness") {
       return this.#acceptTransportHeartbeat({ message, role, context, state, now });
@@ -301,17 +314,22 @@ export class ControllerLivenessHooks {
   async onLeaseCreated(lease) {
     const now = integer(this.#clock(), "now");
     const context = leaseContext(lease);
-    if (!KEY_ID.test(context.controller_lease_id ?? "")
+    if (!isControllerIdentifier(context.controller_lease_id)
       || typeof context.liveness_epoch_a !== "string"
       || typeof context.liveness_epoch_b !== "string") {
       fail("controller_liveness_lease_invalid");
     }
-    this.#states.set(context.controller_lease_id, newState(context, now));
+    if (this.#states.get(context.controller_lease_id)?.leaseOwner === lease) {
+      return Object.freeze({ deliveries: Object.freeze([]) });
+    }
+    this.#states.set(context.controller_lease_id, { ...newState(context, now), leaseOwner: lease });
     return Object.freeze({ deliveries: Object.freeze([]) });
   }
 
   async onSocketClosed({ lease } = {}) {
-    if (lease?.controller_lease_id) this.#states.delete(lease.controller_lease_id);
+    if (lease?.controller_lease_id && this.#states.get(lease.controller_lease_id)?.leaseOwner === lease) {
+      this.#states.delete(lease.controller_lease_id);
+    }
     return Object.freeze({ retain_lease: false });
   }
 
@@ -328,23 +346,33 @@ export class ControllerLivenessHooks {
     return deadline;
   }
 
-  async onLeaseTerminated({ controller_lease_id: controllerLeaseId } = {}) {
-    if (controllerLeaseId) this.#states.delete(controllerLeaseId);
+  async onLeaseTerminated({ controller_lease_id: controllerLeaseId } = {}, leaseOwner) {
+    const state = this.#states.get(controllerLeaseId);
+    if (state && (leaseOwner === undefined || state.leaseOwner === leaseOwner)) this.#states.delete(controllerLeaseId);
   }
 
   async expire() {
     const now = integer(this.#clock(), "now");
     let expired = 0;
     for (const [controllerLeaseId, state] of this.#states) {
-      const latestLiveness = Math.max(state.last_liveness_a.at, state.last_liveness_b.at);
-      const deadline = latestLiveness + TOTAL_BUDGET_MS;
+      const deadline = Math.min(state.last_liveness_a.at, state.last_liveness_b.at) + TOTAL_BUDGET_MS;
       if (now >= deadline) {
-        this.#states.delete(controllerLeaseId);
+        await this.#expireState(controllerLeaseId, state);
         expired += 1;
       } else {
         pruneChallenges(state, now);
       }
     }
     return expired;
+  }
+
+  async #expireState(controllerLeaseId, state) {
+    // Revoke synchronously, before awaiting callbacks, so concurrent late
+    // messages cannot renew evidence. Only retire the captured lease owner;
+    // callbacks may install a replacement with the same lease ID.
+    if (this.#states.get(controllerLeaseId) === state) this.#states.delete(controllerLeaseId);
+    if (this.#leaseManager) await this.#leaseManager.terminateLease({
+      controllerLeaseId, expectedLease: state.leaseOwner, reason: "controller_liveness_expired",
+    });
   }
 }

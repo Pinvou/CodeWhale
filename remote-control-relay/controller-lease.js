@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isControllerIdentifier, isEnrollmentEndpointIdentifier } from "./identifier-contract.js";
 
 import {
   CONTROLLER_PROTOCOL_VERSION,
@@ -10,8 +11,6 @@ import {
   verifyReceiptCommitment,
 } from "./protocol-controller.js";
 
-const ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
-const HANDSHAKE_TIMEOUT_MS = 20_000;
 const RESUME_BUDGET_MS = 30_000;
 
 export class ControllerLeaseError extends Error {
@@ -27,7 +26,7 @@ function fail(code, cause) {
 }
 
 function id(value, label) {
-  if (typeof value !== "string" || !ID.test(value)) fail(`${label}_invalid`);
+  if (!isControllerIdentifier(value)) fail(`${label}_invalid`);
   return value;
 }
 
@@ -96,8 +95,11 @@ function socketsValue(sockets, roleValue) {
 
 export class ControllerLeaseManager {
   #pairings; #reservations; #relayEpoch; #signingKeyId; #sign; #resolveControlled;
-  #clock; #randomBytes; #audit; #onLeaseTerminated; #handshakes = new Map(); #leases = new Map();
+  #clock; #randomBytes; #audit; #onLeaseTerminated; #terminationObserver = null; #previousLeases = new Map(); #handshakes = new Map(); #leases = new Map();
   #pendingLeaseIds = new Set();
+  // Preparation has its own map: published handshakes always have complete
+  // transcript/socket/receipt state. Retries must never become cleanup owners.
+  #claimFlights = new Map();
 
   constructor({
     pairingStore,
@@ -117,9 +119,10 @@ export class ControllerLeaseManager {
       || typeof reservationManager.beginHandshake !== "function"
       || typeof reservationManager.promoteToLease !== "function"
       || typeof reservationManager.release !== "function"
+      || typeof reservationManager.reservationForOwner !== "function"
       || typeof reservationManager.releaseControllerLease !== "function"
-      || typeof relayEpoch !== "string" || !ID.test(relayEpoch)
-      || typeof signingKeyId !== "string" || !ID.test(signingKeyId)
+      || !isControllerIdentifier(relayEpoch)
+      || !isControllerIdentifier(signingKeyId)
       || typeof signTranscript !== "function" || typeof resolveControlledEndpoint !== "function"
       || typeof clock !== "function" || typeof randomBytes !== "function" || typeof audit !== "function"
       || typeof onLeaseTerminated !== "function") {
@@ -160,7 +163,15 @@ export class ControllerLeaseManager {
     fail("controller_lease_id_generation_exhausted");
   }
 
-  async claim({ message, socketIdentity, source } = {}) {
+  async claim(input) {
+    return (await this.#claim(input)).message;
+  }
+
+  async claimForDelivery(input) {
+    return this.#claim(input);
+  }
+
+  async #claim({ message, socketIdentity, source } = {}) {
     socketIdentity = id(socketIdentity, "socket_identity");
     let request;
     try { request = validateControllerMessage(message, "A"); } catch (error) {
@@ -174,30 +185,81 @@ export class ControllerLeaseManager {
       source,
       handshakePublicKeyB64: request.handshake_public_key_b64,
     });
-    const existing = this.#handshakes.get(reservation.reservation_id);
+    const existing = this.#handshakes.get(reservation.reservation_id)
+      || this.#claimFlights.get(reservation.reservation_id);
     if (existing) {
       if (JSON.stringify(existing.requested_capabilities_a)
         !== JSON.stringify([...request.capabilities].sort())) {
         fail("controller_claim_conflict");
       }
-      return validateControllerMessage({
-        ...existing.reserved_message, request_id: request.request_id,
-      }, "relay");
+      const reserved = existing.promise ? await existing.promise : existing.reserved_message;
+      const published = this.#handshakes.get(reservation.reservation_id);
+      if (!published || published.state !== "handshake_pending") fail("controller_claim_conflict");
+      this.#liveReservation(reservation, socketIdentity);
+      return Object.freeze({ message: validateControllerMessage({ ...reserved, request_id: request.request_id }, "relay"),
+        owns_initial_delivery: false });
     }
-
-    try {
-      const pairing = this.#pairings.activePairing(reservation.pairing_id);
-      if (!pairing || pairing.endpoint_id !== reservation.endpoint_id
-        || pairing.remote_control_generation !== reservation.remote_control_generation) {
-        fail("pairing_code_invalid");
+    const flight = {
+      reservation, sockets: { A: socketIdentity }, cancelled: false,
+      requested_capabilities_a: Object.freeze([...request.capabilities].sort()), promise: null,
+    };
+    this.#claimFlights.set(reservation.reservation_id, flight);
+    // Register the promise before a resolver can re-enter claim synchronously.
+    flight.promise = Promise.resolve().then(() => this.#prepareClaim(request, flight));
+    try { return Object.freeze({ message: await flight.promise, owns_initial_delivery: true }); } finally {
+      if (this.#claimFlights.get(reservation.reservation_id) === flight) {
+        this.#claimFlights.delete(reservation.reservation_id);
       }
+    }
+  }
+
+  #liveReservation(reservation, socketIdentity) {
+    const current = this.#reservations.reservationForOwner({
+      reservationId: reservation.reservation_id, socketIdentity,
+    });
+    if (!current || !["reserved", "handshake_pending"].includes(current.state)) {
+      fail("controller_handshake_expired");
+    }
+    const deadline = current.state === "reserved" ? current.reserved_deadline_ms : current.handshake_deadline_ms;
+    if (this.#now() >= Number(deadline)) fail("controller_handshake_expired");
+    return current;
+  }
+
+  #checkFlight(flight) {
+    if (flight.cancelled || this.#claimFlights.get(flight.reservation.reservation_id) !== flight) {
+      fail("controller_claim_cancelled");
+    }
+    this.#liveReservation(flight.reservation, flight.sockets.A);
+    const pairing = this.#pairings.activePairing(flight.reservation.pairing_id);
+    if (!pairing || pairing.endpoint_id !== flight.reservation.endpoint_id
+      || pairing.remote_control_generation !== flight.reservation.remote_control_generation) {
+      fail("pairing_code_invalid");
+    }
+    return pairing;
+  }
+
+  async #releaseReservation(reservation, socketIdentity, reason) {
+    // Concurrent expiry/disconnect may already have completed the exact release.
+    // Never suppress persistence failures or failures for a different owner.
+    if (!this.#reservations.reservationForOwner({ reservationId: reservation.reservation_id, socketIdentity })) return false;
+    return this.#reservations.release({ reservationId: reservation.reservation_id, socketIdentity, reason });
+  }
+
+  async #prepareClaim(request, flight) {
+    const { reservation } = flight;
+    const socketIdentity = flight.sockets.A;
+    try {
+      const pairing = this.#checkFlight(flight);
       const controlled = await this.#resolveControlled(pairing.endpoint_id);
+      this.#checkFlight(flight);
       if (!controlled || typeof controlled !== "object") fail("endpoint_offline");
       const controlledSocketIdentity = id(controlled.socketIdentity, "controlled_socket_identity");
+      flight.sockets.B = controlledSocketIdentity;
       const capabilities = negotiateControllerCapabilities(request.capabilities, pairing.capabilities);
       const pending = this.#reservations.beginHandshake({
         reservationId: reservation.reservation_id, socketIdentity,
       });
+      flight.reservation = pending;
       const controllerConnectionIdentity = randomId(this.#randomBytes, "controller");
       const transcript = Object.freeze({
         schema: "controller_pairing_transcript/v1",
@@ -220,8 +282,13 @@ export class ControllerLeaseManager {
       const preimage = buildPairingTranscriptPreimage(transcript);
       const transcriptHash = crypto.createHash("sha256").update(preimage).digest("hex");
       const signature = await this.#sign(preimage);
+      this.#checkFlight(flight);
       if (!Buffer.isBuffer(signature) || signature.length !== 64) fail("relay_signature_invalid");
-      if (this.#now() >= Number(pending.handshake_deadline_ms)) fail("controller_handshake_expired");
+      // The first lookup may have been suspended while B was removed/replaced.
+      // Re-read the authoritative endpoint binding, not the stale lookup result.
+      const currentControlled = await this.#resolveControlled(pairing.endpoint_id);
+      this.#checkFlight(flight);
+      if (currentControlled?.socketIdentity !== controlledSocketIdentity) fail("endpoint_offline");
       const reserved = validateControllerMessage({
         v: CONTROLLER_PROTOCOL_VERSION,
         type: "controller_pairing_reserved",
@@ -258,11 +325,7 @@ export class ControllerLeaseManager {
       return reserved;
     } catch (error) {
       try {
-        await this.#reservations.release({
-          reservationId: reservation.reservation_id,
-          socketIdentity,
-          reason: "handshake_failed",
-        });
+        await this.#releaseReservation(reservation, socketIdentity, "handshake_failed");
       } catch (cleanupError) {
         throw new AggregateError([error, cleanupError], "controller_claim_cleanup_failed");
       }
@@ -286,7 +349,7 @@ export class ControllerLeaseManager {
       || request.remote_control_generation !== reservation.remote_control_generation
       || request.relay_epoch !== this.#relayEpoch
       || request.transcript_hash !== handshake.transcript_hash) fail("controller_handshake_binding_mismatch");
-    if (this.#now() >= Number(reservation.handshake_deadline_ms)) fail("controller_handshake_expired");
+    this.#liveReservation(reservation, handshake.sockets.A);
     return { request, handshake, senderRole };
   }
 
@@ -423,9 +486,7 @@ export class ControllerLeaseManager {
         reservationId: reservation.reservation_id,
         controllerLeaseId,
       });
-      if (this.#now() >= Number(reservation.handshake_deadline_ms)) {
-        fail("controller_handshake_expired");
-      }
+      this.#liveReservation(reservation, handshake.sockets.A);
       this.#reservations.promoteToLease({
         reservationId: reservation.reservation_id,
         socketIdentity: handshake.sockets.A,
@@ -440,11 +501,7 @@ export class ControllerLeaseManager {
       handshake.state = "failed";
       this.#handshakes.delete(reservation.reservation_id);
       try {
-        await this.#reservations.release({
-          reservationId: reservation.reservation_id,
-          socketIdentity: handshake.sockets.A,
-          reason: "handshake_failed",
-        });
+        await this.#releaseReservation(reservation, handshake.sockets.A, "handshake_failed");
       } catch (cleanupError) {
         throw new AggregateError([error, cleanupError], "controller_lease_commit_cleanup_failed");
       }
@@ -459,6 +516,16 @@ export class ControllerLeaseManager {
   lease(controllerLeaseId) {
     controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
     return this.#leases.get(controllerLeaseId) ?? null;
+  }
+
+  // One lifetime-owned router, installed before any claim. Not an unbounded
+  // event emitter and not replaceable while old callbacks are in flight.
+  setTerminationObserver(observer) {
+    if (typeof observer !== "function" || this.#terminationObserver
+      || this.#leases.size || this.#handshakes.size || this.#claimFlights.size) {
+      fail("controller_termination_observer_invalid");
+    }
+    this.#terminationObserver = observer;
   }
 
   verifyResumeToken({ controllerLeaseId, role: tokenRole, resumeTokenB64 } = {}) {
@@ -489,6 +556,7 @@ export class ControllerLeaseManager {
 
   completeResume({
     controllerLeaseId,
+    expectedLease,
     activationId,
     sockets,
     livenessEpochA,
@@ -502,6 +570,7 @@ export class ControllerLeaseManager {
     activationId = id(activationId, "activation_id");
     const lease = this.#leases.get(controllerLeaseId);
     if (!lease) fail("controller_lease_not_found");
+    if (lease !== expectedLease) fail("controller_lease_owner_changed");
     if (!sockets || typeof sockets !== "object") fail("controller_resume_sockets_invalid");
     const socketA = id(socketsValue(sockets, "A"), "resume_socket_a");
     const socketB = id(socketsValue(sockets, "B"), "resume_socket_b");
@@ -545,6 +614,9 @@ export class ControllerLeaseManager {
         sockets: Object.freeze({ A: socketA, B: socketB }),
       });
       this.#leases.set(controllerLeaseId, updated);
+      // Only the immediate predecessor can still have a hook installation in
+      // flight. One entry per live lease, not an ever-growing resume history.
+      this.#previousLeases.set(controllerLeaseId, lease);
       this.#emit("controller_resume_completed", latencyMs);
       return updated;
     } finally {
@@ -553,41 +625,69 @@ export class ControllerLeaseManager {
     }
   }
 
-  async terminateLease({ controllerLeaseId, reason = "disconnected" } = {}) {
+  async terminateLease({ controllerLeaseId, reason = "disconnected", expectedLease } = {}) {
     controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
     const lease = this.#leases.get(controllerLeaseId);
     if (!lease) return false;
+    if (expectedLease !== undefined && lease !== expectedLease) return false;
     this.#leases.delete(controllerLeaseId);
+    const previousLease = this.#previousLeases.get(controllerLeaseId);
+    this.#previousLeases.delete(controllerLeaseId);
     this.#reservations.releaseControllerLease({
       endpointId: lease.endpoint_id, controllerLeaseId,
     });
-    await this.#onLeaseTerminated({
+    const event = Object.freeze({
       endpoint_id: lease.endpoint_id,
       remote_control_generation: lease.remote_control_generation,
       controller_lease_id: lease.controller_lease_id,
       reason,
     });
+    const callbacks = [() => this.#onLeaseTerminated(event)];
+    if (this.#terminationObserver) callbacks.unshift(() => this.#terminationObserver(event, lease, previousLease));
+    const outcomes = await Promise.allSettled(callbacks.map((callback) => Promise.resolve().then(callback)));
     this.#emit("controller_lease_terminated");
+    const failures = outcomes.filter((outcome) => outcome.status === "rejected").map((outcome) => outcome.reason);
+    if (failures.length) throw new AggregateError(failures, "controller_lease_termination_callback_failed");
     return true;
   }
 
-  async abortHandshakesBySocket({ socketIdentity, reason = "owner_disconnected" } = {}) {
+  isPendingHandshake({ reservationId, socketIdentity, controlledSocketIdentity } = {}) {
+    const handshake = this.#handshakes.get(id(reservationId, "reservation_id"));
+    if (!handshake || !["handshake_pending", "committing"].includes(handshake.state)
+      || handshake.sockets.A !== socketIdentity || handshake.sockets.B !== controlledSocketIdentity) return false;
+    const current = this.#reservations.reservationForOwner({ reservationId, socketIdentity });
+    return Boolean(current?.state === "handshake_pending"
+      && this.#now() < Number(current.handshake_deadline_ms));
+  }
+
+  async abortHandshakesBySocket({ socketIdentity, reason = "owner_disconnected", reservationId, endpointId } = {}) {
     socketIdentity = id(socketIdentity, "socket_identity");
+    if (reservationId !== undefined) reservationId = id(reservationId, "reservation_id");
+    if (endpointId !== undefined && !isEnrollmentEndpointIdentifier(endpointId)) fail("endpoint_id_invalid");
+    const flights = [...this.#claimFlights.values()].filter((flight) => !flight.cancelled
+      && (!reservationId || flight.reservation.reservation_id === reservationId)
+      && (Object.values(flight.sockets).includes(socketIdentity)
+        || (endpointId && flight.reservation.endpoint_id === endpointId)));
     const handshakes = [...this.#handshakes.values()]
       .filter((handshake) => handshake.state !== "committing"
+        && (!reservationId || handshake.reservation.reservation_id === reservationId)
         && Object.values(handshake.sockets).includes(socketIdentity));
-    const results = await Promise.allSettled(handshakes.map(async (handshake) => {
+    const owned = new Map();
+    for (const flight of flights) {
+      flight.cancelled = true;
+      this.#claimFlights.delete(flight.reservation.reservation_id);
+      owned.set(flight.reservation.reservation_id, flight);
+    }
+    for (const handshake of handshakes) {
       handshake.state = "failed";
       this.#handshakes.delete(handshake.reservation.reservation_id);
-      return this.#reservations.release({
-        reservationId: handshake.reservation.reservation_id,
-        socketIdentity: handshake.sockets.A,
-        reason,
-      });
-    }));
+      owned.set(handshake.reservation.reservation_id, handshake);
+    }
+    const results = await Promise.allSettled([...owned.values()].map((item) =>
+      this.#releaseReservation(item.reservation, item.sockets.A, reason)));
     const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason);
     if (failures.length > 0) throw new AggregateError(failures, "controller_handshake_abort_failed");
-    return handshakes.length;
+    return owned.size;
   }
 
   async terminateLeasesBySocket({ socketIdentity, reason = "owner_disconnected" } = {}) {
@@ -603,9 +703,9 @@ export class ControllerLeaseManager {
     return leases.length;
   }
 
-  async abortBySocket({ socketIdentity, reason = "owner_disconnected" } = {}) {
+  async abortBySocket({ socketIdentity, reason = "owner_disconnected", endpointId } = {}) {
     const [handshakes, leases] = await Promise.all([
-      this.abortHandshakesBySocket({ socketIdentity, reason }),
+      this.abortHandshakesBySocket({ socketIdentity, reason, endpointId }),
       this.terminateLeasesBySocket({ socketIdentity, reason }),
     ]);
     return Object.freeze({ handshakes, leases });
@@ -616,17 +716,23 @@ export class ControllerLeaseManager {
     const expired = [...this.#handshakes.values()]
       .filter((handshake) => handshake.state !== "committing"
         && Number(handshake.reservation.handshake_deadline_ms) <= now);
-    const results = await Promise.allSettled(expired.map(async (handshake) => {
+    const flights = [...this.#claimFlights.values()].filter((flight) => !flight.cancelled
+      && Number(flight.reservation.handshake_deadline_ms ?? flight.reservation.reserved_deadline_ms) <= now);
+    const owned = new Map();
+    for (const flight of flights) {
+      flight.cancelled = true;
+      this.#claimFlights.delete(flight.reservation.reservation_id);
+      owned.set(flight.reservation.reservation_id, flight);
+    }
+    for (const handshake of expired) {
       handshake.state = "failed";
       this.#handshakes.delete(handshake.reservation.reservation_id);
-      return this.#reservations.release({
-        reservationId: handshake.reservation.reservation_id,
-        socketIdentity: handshake.sockets.A,
-        reason: "timeout",
-      });
-    }));
+      owned.set(handshake.reservation.reservation_id, handshake);
+    }
+    const results = await Promise.allSettled([...owned.values()].map((item) =>
+      this.#releaseReservation(item.reservation, item.sockets.A, "timeout")));
     const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason);
     if (failures.length > 0) throw new AggregateError(failures, "controller_handshake_expire_failed");
-    return expired.length;
+    return owned.size;
   }
 }

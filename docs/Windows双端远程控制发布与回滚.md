@@ -4,22 +4,41 @@
 
 ## 1. 发布前置门禁
 
-Windows 客户端默认展示桌面远程控制入口；显式设置 `PINVOU_DESKTOP_CONTROLLER_ENABLED=0` 可紧急隐藏入口并拒绝全部远控 Command。Relay 的 controller runtime 仍保持部署侧失败关闭：只有以下门禁全部通过且证据属于待发布 commit，才允许在 Relay 环境把 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 设为精确值 `1`：
+仅构建值为 `1` 的 Windows 客户端允许运行时未设变量时展示桌面远程控制入口；显式设置 `PINVOU_DESKTOP_CONTROLLER_ENABLED=0` 可紧急隐藏入口并拒绝全部远控 Command。构建值为 `0` 的普通发布产物不能在运行时重新开启。启用桌面产物与 Relay 均须取得以下属于待发布 commit 的全部门禁证据，才允许公开发布本功能及在 Relay 环境把 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 设为精确值 `1`：
 
-| 门禁 | 可执行入口 |
-|---|---|
-| Relay 全量、容量与限流 | `npm --prefix remote-control-relay test` |
-| 客户端全量与构建 | `npm --prefix pinvou3-app test`、`npm --prefix pinvou3-app run build:ui`、`npm --prefix pinvou3-app run test:webui` |
-| Rust 远控 | `cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml remote_control:: -- --test-threads=1` |
-| 架构 | `python scripts/architecture-guard.py` |
-| 敏感面和 DEV-24 遥测 | `node --test remote-control-relay/test/controller-sensitive-scan.test.js remote-control-relay/test/controller-telemetry.test.js` |
-| 双 Windows 27 旅程 | `scripts/run-windows-remote-control-e2e.ps1` |
-| 真实 Tauri UI | `npm --prefix pinvou3-app run test:remote-control-ui -- --cdp-url <loopback-cdp> --output <new-file>` |
-| 证据和最终发布门禁 | `npm --prefix remote-control-relay run release:gate` |
+| 门禁 | 命令 / 证据 | 说明 |
+|---|---|---|
+| Relay 全量 | `npm --prefix remote-control-relay test` | 含 enrollment registry、迁移、发码、槽位、握手、liveness、resume、telemetry |
+| 客户端全量 | `cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml remote_control:: -- --test-threads=1` | A/B 状态机、任务台账、传输、审批、模型包、journal |
+| 前端与桥 | `npm --prefix pinvou3-app test`、`npm --prefix pinvou3-app run build:ui`、`npm --prefix pinvou3-app run test:webui` | WebUI v2 行为与旧 fixture 不回归 |
+| 架构守卫 | `python scripts/architecture-guard.py` | 依赖方向与平台边界 |
+| 发布门槛清单 | `node --test remote-control-relay/test/controller-release-gates.test.js` | 本文件的必备章节、回滚约束与残余风险 |
+| 双 Windows 27 旅程 | `scripts/run-windows-remote-control-e2e.ps1` | 必须完整真实双机证据 |
+| 真实 Tauri UI | `npm --prefix pinvou3-app run test:remote-control-ui -- --cdp-url <loopback-cdp> --output <new-file>` | 真实渲染与交互 |
+| 最终发布门禁 | `npm --prefix remote-control-relay run release:gate` | 证据属于待发布 commit，任何失败不放行 |
+| 泄露扫描 | 下述三个真实 Rust 用例、`node --test remote-control-relay/test/controller-sensitive-scan.test.js remote-control-relay/test/controller-telemetry.test.js` | 真实错误投影、Debug 脱敏、受控枚举与哨兵扫描；零匹配视为失败 |
+
+### 1.1 泄露扫描的非空执行证据
+
+已删除的 Rust `controller::telemetry` 不再是验证入口。以下每条必须实际报告 `1 passed; 0 failed`，不能仅用 cargo 退出码 0 或 `0 tests` 作为通过证据：
+
+```bash
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_control::controller::relay_runtime::tests::log_allowlist_rejects_identifier_shaped_values_and_secrets -- --exact --test-threads=1
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_control::controller::relay_runtime::tests::real_remote_failure_projections_do_not_persist_any_sensitive_category -- --exact --test-threads=1
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_control::controller::resume::tests::resume_debug_redacts_current_and_retired_material -- --exact --test-threads=1
+```
+
+发布门槛测试校验这些入口与现有 Rust 源码一致；这项静态合同不能代替上述实际执行，也不能代替真实双机证据。
 
 `release:gate` 在开关开启时要求 `PINVOU_REMOTE_RELEASE_EVIDENCE` 与 `PINVOU_RELEASE_COMMIT_SHA`，重新校验 artifact 哈希、27 条旅程、敏感扫描、registry 覆盖率和旧 Relay 回滚预检；缺任何一项都失败。开关关闭时仍验证值只能为空或 `0`，不会删除 registry、pairing tombstone 或回退 state schema。
 
-开关关闭的普通发布包不包含已启用的桌面远控能力；该组合通过不代表桌面远控发布资格通过。公开发布本功能必须在 A/B/Relay 三端精确设为 `1`，并取得全部开启门禁的真实证据，不能以关闭开关的 CI 结果替代。
+构建关闭的普通发布包固化远控关闭状态；该组合通过不代表桌面远控发布资格通过。公开发布本功能必须使用构建值为 `1` 的 A/B 安装包，Relay 运行值必须精确为 `1`；A/B 演练可显式设为 `1` 固定运行配置，也可不设变量，但不得使用构建关闭产物。全部开启门禁的真实证据不可用关闭开关的 CI 结果替代。
+
+1. **Registry 覆盖率**：在仓库根目录运行 `remote-control-relay/scripts/enrollment-migrate.js` 的 dry-run，统计已迁移 endpoint 比例。未达到 100% 之前不开启公网强制门禁。
+2. **打开桌面控制能力开关**：只打开 `desktop_remote_control` 能力，不动 enrollment registry、pairing tombstone 与 digest keyring。
+3. **自托管升级说明**：自托管 Relay 必须先升级到 registry-aware 版本，或在所有入口前挂 enrollment gateway（无旁路）。
+4. **容量与限流**：确认连接码领取、claim、握手速率限制与告警阈值生效；观察爆破告警与容量水位。
+5. **故障注入**：单边网络隔离、Relay 重启、A/B 单边断线，确认 30 秒预算、resume 与终态清理符合需求。
 
 开关开启的 CI 门禁必须在能读取受保护生产状态的发布 runner 上执行（通过 `PINVOU_REMOTE_RELEASE_RUNNER` 选择），并注入启用/关闭两份受保护环境文件、controller state、旧 endpoint inventory、已部署 gateway 配置、公网入口清单、固定签名证书与受信驱动/安装包哈希。这些生产文件不上传到 evidence artifact；门禁现场重算 inventory/gateway 指纹并与双机证据比对。任一变量、文件或跨 run artifact 不可用时，结果必须为 BLOCKED。
 
@@ -29,9 +48,9 @@ Windows 客户端默认展示桌面远程控制入口；显式设置 `PINVOU_DES
 
 GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程、受保护 secrets/vars，以及环境中配置的 Git、GitHub CLI、Node 工具链构成本发布流程的可信执行基座。workflow 从受保护 checkout 直接执行当前 `github.sha` 的编排器和 verifier；安装证明验证器只接受受保护变量给出的 GitHub CLI 绝对路径，不从 `PATH` 回退。此门禁防御不可信网络/Relay、外部下载产物、用户或部署配置、伪造/过期/错 commit 证据、普通路径逃逸/符号链接和敏感信息泄露，并坚持任何失败都不放行。
 
-本威胁模型明确不防御受信 runner 上的管理员、同一 SID 恶意常驻进程、运行中 junction/TOCTOU 替换或 PID 复用攻击，也不为 Git/GH/Node 自建二次可信启动链。普通路径边界仍以 canonical relative path 校验，所有 staging/证据目标拒绝 reparse point，外部下载产物必须通过 GitHub API 的 workflow/run/head/ref/repository/conclusion 与 artifact digest 校验。JSON Schema 由 Ajv 编译为版本化、可重现核对的单文件 validator；清理在 `always()` 中执行，失败告警并阻断。生产证据与发布门禁不安装 Relay 依赖；PR `release-contract` 如需安装 Relay 测试依赖，必须为 `npm ci` 指定 `--ignore-scripts`。
+本威胁模型明确不防御受信 runner 上的管理员、同一 SID 恶意常驻进程、运行中 junction/TOCTOU 替换或 PID 复用攻击，也不为 Git/GH/Node 自建二次可信启动链。普通路径边界仍以 canonical relative path 校验，所有 staging/证据目标拒绝 reparse point，外部下载产物必须通过 GitHub API 的 workflow/run/head/ref/repository/conclusion 与 artifact digest 校验。JSON Schema 由 Ajv 编译为版本化、可重现核对的单文件 validator；清理在 `always()` 中执行，失败告警并阻断。生产证据编排不安装 Relay 依赖；启用发布门禁与 PR `release-contract` 使用锁定的 Relay 依赖执行敏感扫描，必须为 `npm ci` 指定 `--ignore-scripts`。
 
-旧 Relay 启动时，受信 driver 必须在返回进程信息前把 `run_nonce → pid` 原子写入 durable registry，使响应丢失时仍能按本次 nonce 清理。编排器核对实际进程的可执行路径、SHA-256、loopback listener 与 owner PID；清理时先查 registry、停止本次 owned 进程、确认进程退出且 registry `active=[]`。脱敏 route spec 必须严格解析、敏感扫描、登记 SHA-256，并由 configure/probe 显式接收该摘要；owned route 在 `finally` 中撤销并复核公网路由消失和原配置恢复。任何一步失败均阻断发布。
+旧 Relay 启动时，受信 driver 必须在返回进程信息前把 `run_nonce → pid` 原子写入 durable registry，使响应丢失时仍能按本次 nonce 清理。编排器核对实际进程的可执行路径、SHA-256、loopback listener 与 owner PID；清理时先撤销 owned route 并复核公网路由消失和原配置恢复，再查 registry、停止本次 owned 进程、确认进程退出且 registry `active=[]`。脱敏 route spec 必须严格解析、敏感扫描、登记 SHA-256，并由 configure/probe 显式接收该摘要。任何一步失败均阻断发布。
 
 安装包不能只靠人工填写 SHA-256 关联源码。`windows-remote-control-build-evidence` 在受保护 `windows-release` environment 从当前 SHA 构建安装包，并分别为 installer 与 SPDX 2.3 生成 GitHub artifact attestation；`gh attestation download` 的唯一 `sha256-*.jsonl` 文件才是 bundle。编排器和 release gate 都执行 `gh attestation verify`，以 attestation 中的原始 subject 名称和摘要关联下载后可能重命名的文件。SPDX 必须以最终 NSIS staging manifest 为事实源，逐文件覆盖 package-lock、Cargo.lock、所有公开/私有 runtime 映射、最终 `resources`、生成的配置与 installer hooks、主二进制和 installer，并包含完整 `DEPENDS_ON`/`CONTAINS` 关系；manifest 中任一 staged file 缺失、重复归属或多出都会失败。正式 Windows artifact 必须复用已 qualification 的相同安装包字节。自报布尔值、只填写 hash 或门禁后重建另一个安装包一律失败关闭。
 
@@ -85,13 +104,25 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 - 裸 v2、`localhost` 作为监听证明、无 inventory、TOFU、无法确认全入口或 gateway 可旁路时，回滚必须被拒绝。
 - 回滚演练保存旧二进制哈希、gateway 配置指纹、入口检查和旧 Web 链接结果，不保存任何凭证或业务正文。
 
+当前生产脚本的自动回滚只恢复代码/包/Web/schema/drop-in，不备份或还原部署环境文件、registry 与身份；不能把旧代码配上新 self_hosted/TOFU=false 环境就当作业务恢复，空 registry 仍会拒绝存量端点。回滚健康探针弱于部署侧，HTTP 200 或 unit active 不证明 controller/telemetry/存量注册与旧 Web 可用。上述运维验收与故障矩阵继续受 [#1428](https://github.com/Pinvou/pinvou3/issues/1428)、[#1429](https://github.com/Pinvou/pinvou3/issues/1429) 门禁约束，未取证则不得部署/灰度，不通过恢复 TOFU 或裸 v2 绕过。
+
 ## 6. Feature flag 关闭组合门禁
 
-1. A/B 平台能力返回 `desktopRemoteControl=false`，设置入口不可见。
+当前身份握手基于受信 Relay 和受信认证控制面，不声称抵御恶意 Relay 的主动 MITM；installer/Provider 证据不能替代这项信任前提。
+
+构建与运行开关是两层独立约束：构建时 `PINVOU_DESKTOP_CONTROLLER_ENABLED=0`（以及未明确开启的 release/custom profile）将关闭状态固化到产物，运行时设为 `1` 或不设变量都不能重新开启。启用产物必须以构建值 `1` 生成并取得本节之外的全部发布验收证据；受保护的 installer 证据 workflow 固定构建值 `1`。debug 默认开启只用于本地开发，不提供发布资格。
+
+仅构建值为 `1` 的 Windows A/B 产物允许运行时未设变量或精确 `1` 开启；运行时 `0` 或其他值关闭。非 Windows 平台始终 unsupported。Relay 不使用桌面构建值，仍要求运行时精确 `1`、`self_hosted` 与 TOFU=false；当前 `official` 认证模式未接线，不能作为已支持的生产验收组合。普通 Windows 发布继续构建关闭远控的产物，不以“免验收”隐式开放功能。
+
+遥测快照由受信生产聚合服务提供，并非独立的实际会话取证；门禁预期 commit、URL、token-file 和回滚输入来自受保护配置，部署环境文件不得覆盖这些预期值。真实双机与 Provider 验收仍单独必需。
+
+1. A/B 平台能力返回 `desktopRemoteControlSupported=false`，设置入口不可见。
 2. 即使绕过 UI 调用，A connect 与 B start 等网络入口返回 `desktop_remote_control_unsupported`，不打开 socket、不创建租约。
 3. Relay 不创建 controller runtime，v1 controller 子协议/消息被拒绝，既有 Web v2 行为保持。
 4. 关闭前后 registry、pairing tombstone 与 digest keyring 指纹一致。
-5. 再次开启只恢复新配对入口，不恢复旧连接、旧 lease、旧 token 或旧 generation。
+5. build=0 的产物不能通过运行期开关重新开启；须安装经完整验收的 build=1 产物。build=1 的运行期开关从 0 重新开启时仅恢复新配对入口，不恢复旧连接、旧 lease、旧 token 或旧 generation。
+
+原21条演练与历史36条源码契约不是当前发布收据；真实双机、真实Tauri UI与真机断线验收仍须按当前27条目录取得，不用mock冒烟替代。
 
 ## 7. 证据归档
 
@@ -116,6 +147,12 @@ validator 拒绝额外字段、敏感字段名、绝对/逃逸路径、缺文件
 
 > 以下仅保留前序波次的历史记录，不是当前发布许可、现行功能合同或最新验收结果。当前发布门禁以第 1～7 节的 27 条真实旅程和 evidence validator 为准；旧 21 条旅程、三面冒烟及未完成能力清单不能替代现行要求。未核验或修改线上状态。
 
+| 项 | 处置 |
+|---|---|
+| A 端临时模型、代码模式、附件与成果导出 | UI 按首版开关隐藏；能力未声明时不暴露入口 |
+| 远程普通会话的工具审批 | 未闭环前禁用工具，B 侧不出现 Allow 入口 |
+| 历史登记：Relay WS 子协议与 `controller_capabilities` 首帧 | **子协议限制已被后续实现取代（superseded）**：当前 A 端通过 `relay_client::controller_websocket_request` 声明 `pinvou-desktop-controller-v1`，Relay 通过 `remote-control-relay/server.js` 的 `handleProtocols` 协商。独立 `controller_capabilities` handler 仍未接入，当前能力通过 register/claim 与 `controller_joined` 协商；不再以本历史行声称当前客户端不声明子协议，也不将其视为发布验收。 |
+
 ### 7.3 后续排期（不阻断首版灰度）
 
 | 项 | 说明 |
@@ -128,57 +165,40 @@ validator 拒绝额外字段、敏感字段名、绝对/逃逸路径、缺文件
 | `DesktopControlledCleanup` 适配器测试 | 仓库无 `mock_app` 先例，当前由 manager 侧三条路径用例覆盖触发面，Tauri 级测试列入后续 |
 | remote_control 之外的既有失败 | 全量 `cargo test --lib` 有 6～8 条与本功能无关的既有失败（进程树终止超时、marketplace 工具缺失等），属环境限制，已在任务文档登记 |
 
-## 8. 生产 controller lane 历史启用记录（2026-09-19，当时采用安全降级）
+### 7.4 当前自动化恢复接线回归的证据边界
 
-> 以下为当时环境和操作的历史快照，不是当前生产部署授权或验收证据。A18 已移除生产预检的 development + TOFU 降级门禁：当前必须 `NODE_ENV=production`、`PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=self_hosted`、`PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`。`official` live claim 尚未接线，预检及启动均明确失败关闭；存量端点清单、registry 迁移和不可旁路 gateway 仍为 [#1428](https://github.com/Pinvou/pinvou3/issues/1428) 的发布阻塞。本次只修复代码与文档，未核验或改变线上状态。
+`app/commands/remote_control/reader_resume_tests.rs` 的独立子进程创建真实 Windows Wry 宿主，调用 feature 中的共享恢复夹具，经真实 RelayClient reader、RemoteControlManager 和 ControlledRelayWorker 执行恢复。前序 A08 的宿主分层、断线 prepared 屏障、错误 final liveness 拒绝、retained epoch 非空断言和旧 reader 围栏在 A13 中继续保留；不重新启用旧 feature 内宿主初始化，也不以非 Connected 投影的 `None == None` 声称覆盖内部 epoch。
 
-### 8.1 变更内容
+此用例仅在 Windows 编译与执行，须取得当前提交适用 Windows 原生 CI 的真实执行结果；Linux / macOS 的条件排除或 Draft skip 不是该用例的通过证据。子进程整体 15 秒、父进程 25 秒和局部等待 3 秒均为失败退出的 watchdog，不是平台启动性能承诺；本轮未完成冷启动及高负载 Windows runner 的时限余量验收。
 
-1. 生产 Relay（`pinvou-remote-relay.service`，`/opt/pinvou-remote-relay`，端口 8787）升级到含 controller-v1 的版本（原先为 v2-only 旧代码）。
-2. 新增 drop-in `/etc/systemd/system/pinvou-remote-relay.service.d/40-controller.conf`，`EnvironmentFile=/etc/pinvou-remote-relay-controller.env`（**0600**，私钥不出主机）。
-3. 环境文件要点：`PINVOU_DESKTOP_CONTROLLER_ENABLED=1`、`NODE_ENV=development`、`PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development`、`PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=true`、enrollment/pairing HMAC 各一组、`PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=prod-relay-key-1`、`PINVOU_REMOTE_CONTROLLER_STATE_PATH=/var/lib/pinvou-remote-relay/state/controller-state.json`（目录 0700）、`PINVOU_REMOTE_STATE_PATH=/opt/pinvou-remote-relay/data/relay-state.json`（沿用既有状态，未迁移）。
-4. 当前生产部署脚本必须拒绝环境文件符号链接，校验其为 `root:root`、`0600`，并严格验证本节开头的 production + self_hosted + TOFU=false 配置及两条状态路径，不再接纳第 3 项历史降级配置；脚本原子维护 `40-controller.conf`，在本机执行无状态变更的 controller-v1 路由烟测，并在本机与公网健康检查中确认 `desktop_controller_enabled=true`。任一检查失败都必须整体恢复旧版 JS 模块和 systemd drop-in，禁止以 Web v2 正常但桌面控制不可用或新旧模块混装的状态通过发布。
+它使用真实 loopback WebSocket 与认证测试材料，没有真实 renderer、在线 provider、生产网关或双 Windows 设备，不能替代第 7.1 节的发布验收。测试数量以当前提交实际输出为准。
 
-### 8.2 当时为什么启用 TOFU（历史原因，不再作为生产例外）
+## 8. 生产 controller lane 启用历史记录（2026-09-19，不是当前安全豁免）
 
-- 生产状态文件只有 `version` 与 `revoked_endpoints`，**没有端点清单**：存量端点只存在于内存，无法做「registry 覆盖率 100%」的迁移。
-- 一旦启用 controller runtime，v2 的 `desktop_endpoint_register` 也会先过 registry（`server.js:886`）；在 `official` 且无 TOFU 的模式下，全部存量端点重连会被 `enrollment_required` 拒绝。
-- 因此当时经用户确认，**历史生产配置采用 `development + TOFU`**：未登记客户端可自助注册。这是当时的安全降级记录，不是当前生产例外；正式发布前必须补齐端点清单与 registry 迁移，关闭 TOFU，不能以保留旧配置绕过门禁。
+本节仅保留当次结论，管理入口、登录账号、服务/状态/密钥布局及精确备份定位在不入库的运维清单登记。没有在本轮重新部署或修改线上服务。
 
-### 8.3 信任根（公钥随包内置，私钥只在部署环境）
+A18 已移除生产预检的 development + TOFU 降级门禁：当前必须 `NODE_ENV=production`、`PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=self_hosted`、`PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`；`official` live claim 尚未接线，预检及启动均失败关闭。历史降级没有可沿用的永久豁免：在下次新/重部署或正式发布之前（以先发生者为截止），必须取得端点清单、100% registry 迁移与全入口网关预检证据并关闭 TOFU，仍受 [#1428](https://github.com/Pinvou/pinvou3/issues/1428) 阻断。本次只修复代码与文档，未核验或改变线上状态。
 
-| 项 | 值 |
-|---|---|
-| key id | `prod-relay-key-1` |
-| 公钥（原始 32 字节 ed25519，base64） | `nGlRK79H+YdNVhmZOwkI2T83uhiEBqfZeFbMrJ28LQM=` |
-| 客户端内置位置 | `manager::PRODUCTION_PROFILE`（提交 `225fa4cd`），用户无需再配置 `PINVOU_REMOTE_RELAY_SIGNING_*` |
-| 私钥 | 仅 `/etc/pinvou-remote-relay-controller.env`（0600），不入库、不入日志；轮换时需同步更新内置公钥并随客户端发版 |
+### 8.1 历史变更与信任根
 
-### 8.4 备份与回滚
+当次将旧 v2-only Relay 升级为 controller-v1，使用权限受限的环境文件注入密钥与 HMAC，状态保留到代码目录之外。私钥仅在部署环境，0600 文件、0700 目录，不入库、不入日志。
 
-- 全量备份：`/root/pinvou-prod-backups/pinvou-remote-relay-20260919T134907Z.tgz`（代码 + unit + drop-ins，314 MB）。
-- 部署时快照：`/opt/pinvou-remote-relay/backups/20260919-224624`（旧代码/旧 web/dist/旧 package 文件，脚本自动写入）。
-- **最小回滚（关闭 controller lane，恢复 v2-only 行为）**：
-  ```bash
-  sudo rm -f /etc/systemd/system/pinvou-remote-relay.service.d/40-controller.conf
-  sudo systemctl daemon-reload && sudo systemctl restart pinvou-remote-relay.service
-  curl -fsS https://pinvou.com/pinvou3/remote/healthz   # 期望 200
-  ```
-- **彻底回滚代码**：用 `/opt/pinvou-remote-relay/backups/20260919-224624` 覆盖 `server.js`/`web/dist`/package 文件后重启（或解压全量备份 tarball）。
-- 关闭 controller lane 后，客户端配对会失败关闭为 `invalid_message`/`endpoint_offline`，属预期。
+随客户端公开发布的生产信任根继续为 `prod-relay-key-1` / `nGlRK79H+YdNVhmZOwkI2T83uhiEBqfZeFbMrJ28LQM=`；对应 `manager::PRODUCTION_PROFILE`，原提交 `225fa4cd`。脱敏不改变该公钥或用户公开访问地址；密钥轮换必须随客户端更新并验证。
 
-### 8.5 验收证据（2026-09-19）
+当前脚本的通用托管合同（不是实际线上资产清单）：拒绝 controller 环境文件符号链接，校验 `root:root`、`0600`、production + self_hosted + TOFU=false 以及预检定义的状态路径；原子维护 `40-controller.conf`，本机执行无状态变更的 controller-v1 路由烟测，并在本机与公网健康检查中确认 `desktop_controller_enabled=true`。失败须恢复旧版 JS 模块和 systemd drop-in，不允许新旧模块混装或只以 Web v2 正常作为发布成功。
 
-| 检查 | 结果 |
-|---|---|
-| 服务 | `pinvou-remote-relay.service` active；启动日志 `protocol=v2+controller-v1` |
-| 公网 healthz | `https://pinvou.com/pinvou3/remote/healthz` → 200 `{ok:true}` |
-| 存量 v2 用户 | 重启后桌面端重连，`desktop_open` 由 3 回升到 8，`web_client_open=0` 与变更前一致，无注册被拒 |
-| controller lane（公网） | 从 `wss://pinvou.com/pinvou3/remote/ws` 发 `controller_pairing_claim` → 收到控制器族错误信封 `{"v":1,"type":"error","code":"invalid_message"}` |
-| 回滚路径 | 部署过程中真实触发过一次自动回滚（1s 健康检查误判），成功恢复旧版本；之后脚本已改为 30s 有界重试 |
+### 8.2 历史 TOFU 降级与硬截止
 
-### 8.6 仍未完成（发布门禁）
+当次 legacy 状态只有 version 与 revoked_endpoints，没有完整端点清单，不能证明 registry 覆盖率 100%。历史上经确认临时使用 development + TOFU 接纳未登记客户端；这不是当前部署方案或永久豁免。
 
-- 真实双机 21 条旅程、三面 UI 浏览器冒烟（见 7.1）——在取得证据前不得发布。
-- 端点清单与 registry 迁移、关闭 TOFU（见 8.2）。
-- 设置页「服务端点」下拉（生产/测试切换）尚未实现，当前切换靠 `PINVOU_REMOTE_ENDPOINT_PROFILE` 或 `~/.pinvou3/web-relay.json` 的 `profile` 字段。
+在下次新/重部署或正式发布之前（以先发生者为截止），必须取得端点清单、100% registry 迁移及全入口网关预检证据，使用 official/self_hosted 并关闭 TOFU。未完成就阻断，不因本次文档修改宣称完成迁移。
+
+### 8.3 历史备份、回滚与验收边界
+
+当次有完整备份和脚本版本快照；准确定位与恢复命令仅在受控运维清单保存，不在本文提供能直接针对真实部署执行的删除、停启或覆盖命令。历史曾通过关闭 controller lane 或还原旧代码恢复服务，但不是当前允许沿用的裸 v2 回滚路径。
+
+当前任何回滚必须先按第 2 节证明 enrollment gateway 不可旁路，并通过 `scripts/check-enrollment-gated-v2-rollback.mjs`。关闭 controller、旧裸 v2 或 TOFU 均不能替代此门禁；不能因健康接口成功宣称安全回滚合格。
+
+当次记录包含服务 active、公开 healthz 成功、存量 v2 用户重连、故意不完整 controller claim 返回 invalid_message，以及一次健康误判触发自动回滚。上述是历史观测，不是当前部署、完整配对或发布验收。当前生产脚本执行最多 30 次健康重试，每次请求有超时；这不是总计 30 秒的截止时间或启动性能保证。
+
+仍需真实双 Windows 21 条旅程、三面 UI smoke、端点清单/registry 迁移与关闭 TOFU；未取得证据不得发布。历史设置页 profile 切换尚未实现的记录不作为当前功能范围，当前源码及端点配置才是实际依据。

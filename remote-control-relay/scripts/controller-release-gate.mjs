@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDirectCliEntry } from "../cli-entrypoint.js";
 import { parseControllerEnvironment } from "./deploy-controller-preflight.mjs";
 import { validateReleaseEvidenceFile } from "./validate-controller-release-evidence.mjs";
 
@@ -88,7 +89,7 @@ export async function runControllerReleaseGate(env = process.env) {
     "PINVOU_RELEASE_INSTALLER_SHA256", "PINVOU_RELEASE_VERSION",
   ];
   if (required.some((key) => !env[key])) fail("release_production_configuration_missing");
-  if (!new Set(["official", "self_hosted"]).has(env.PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT)) fail("release_enrollment_deployment_invalid");
+  if (env.PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT !== "self_hosted") fail("release_enrollment_deployment_invalid");
   const productionFiles = await Promise.all([
     stat(resolve(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH)),
     stat(resolve(env.PINVOU_REMOTE_CONTROLLER_ENV_FILE)),
@@ -150,15 +151,16 @@ export async function runControllerReleaseGate(env = process.env) {
     || enabledEntries.get("PINVOU_REMOTE_CONTROLLER_STATE_PATH") !== resolve(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH)) {
     fail("release_production_configuration_mismatch");
   }
-  const productionEnv = { ...env, ...Object.fromEntries(enabledEntries) };
   await run(process.execPath, ["--test", "--test-concurrency=1", join(relayRoot, "test/controller-sensitive-scan.test.js")], buildReleaseSubprocessEnvironment(env, "test"));
   await run(process.execPath, ["--test", "--test-concurrency=1", join(relayRoot, "test/controller-telemetry.test.js")], buildReleaseSubprocessEnvironment(env, "test"));
-  await run(process.execPath, [join(relayRoot, "scripts/query-controller-release-telemetry.mjs")], buildReleaseSubprocessEnvironment(productionEnv, "telemetry"));
-  await run(process.execPath, [join(repoRoot, "scripts/check-enrollment-gated-v2-rollback.mjs")], buildReleaseSubprocessEnvironment(productionEnv, "rollback"));
+  // Expected commit and telemetry/rollback endpoints come only from the
+  // protected gate environment, never from an overlay of a Relay env file.
+  await run(process.execPath, [join(relayRoot, "scripts/query-controller-release-telemetry.mjs")], buildReleaseSubprocessEnvironment(env, "telemetry"));
+  await run(process.execPath, [join(repoRoot, "scripts/check-enrollment-gated-v2-rollback.mjs")], buildReleaseSubprocessEnvironment(env, "rollback"));
   return { ok: true, enabled: true, evidence_required: true, ...validated };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isDirectCliEntry(import.meta.url)) {
   runControllerReleaseGate()
     .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
     .catch((error) => {

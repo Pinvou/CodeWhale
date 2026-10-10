@@ -7,13 +7,17 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
-use crate::features::codex_acp::remote_turn::RemoteCodeArtifactPort;
+use crate::features::codex_acp::remote_turn::{RemoteCodeArtifactPort, RemoteCodeCaptureToken};
+#[cfg(test)]
 use crate::features::remote_control::controller::journal::JournalKind;
 use crate::features::remote_control::controller::protocol::LeaseContext;
 use crate::features::remote_control::controller::task::{
@@ -41,12 +45,16 @@ pub(crate) struct DesktopRemoteArtifactRuntime {
     downloads: ArtifactDownloads,
     tasks: Arc<RemoteTaskService>,
     captures: Mutex<HashMap<String, TaskArtifactCapture>>,
-    code_captures: Mutex<HashMap<String, CodeArtifactCapture>>,
+    code_captures: Mutex<HashMap<String, Arc<CodeArtifactCapture>>>,
     pending_code_artifacts: Mutex<HashMap<String, PendingCodeArtifacts>>,
     /// Serializes visible publication with connection teardown. A teardown
     /// that wins first removes the capture; one that runs second removes every
     /// entry published before it, so artifacts cannot resurrect afterwards.
     publication_lock: Mutex<()>,
+    // Invalidates scans started before teardown, including begin-capture.
+    publication_revision: AtomicU64,
+    #[cfg(test)]
+    before_code_publish: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -56,12 +64,73 @@ struct FileStamp {
 }
 
 struct TaskArtifactCapture {
+    task_sequence: u64,
     session_id: String,
     lease: TaskLeaseBinding,
     before: HashMap<PathBuf, FileStamp>,
 }
 
+struct TaskCaptureAttempt<'a> {
+    runtime: &'a DesktopRemoteArtifactRuntime,
+    task_id: &'a str,
+    sequence: u64,
+}
+
+/// Own one exact chat capture across worker hand-offs and early returns.
+/// Dropping an old attempt must never discard a replacement task's capture.
+pub(super) struct OwnedTaskCapture {
+    runtime: Arc<DesktopRemoteArtifactRuntime>,
+    lease: TaskLeaseBinding,
+    session_id: String,
+    task_id: String,
+    sequence: u64,
+}
+
+impl OwnedTaskCapture {
+    pub(super) fn new(
+        runtime: Arc<DesktopRemoteArtifactRuntime>,
+        lease: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        sequence: u64,
+    ) -> Self {
+        Self {
+            runtime,
+            lease: TaskLeaseBinding::from_context(lease),
+            session_id: session_id.to_owned(),
+            task_id: task_id.to_owned(),
+            sequence,
+        }
+    }
+}
+
+impl Drop for OwnedTaskCapture {
+    fn drop(&mut self) {
+        let mut captures = self.runtime.captures.lock();
+        if captures.get(&self.task_id).is_some_and(|capture| {
+            capture.task_sequence == self.sequence
+                && capture.session_id == self.session_id
+                && capture.lease == self.lease
+        }) {
+            captures.remove(&self.task_id);
+        }
+    }
+}
+
+impl Drop for TaskCaptureAttempt<'_> {
+    fn drop(&mut self) {
+        let mut captures = self.runtime.captures.lock();
+        if captures
+            .get(self.task_id)
+            .is_some_and(|capture| capture.task_sequence == self.sequence)
+        {
+            captures.remove(self.task_id);
+        }
+    }
+}
+
 struct CodeArtifactCapture {
+    token: RemoteCodeCaptureToken,
     session_id: String,
     lease: TaskLeaseBinding,
     workspace_root: PathBuf,
@@ -69,34 +138,23 @@ struct CodeArtifactCapture {
 }
 
 struct PendingCodeArtifacts {
+    task_sequence: u64,
     session_id: String,
     lease: TaskLeaseBinding,
     copied: Vec<PathBuf>,
     events: Arc<dyn ControllerTaskEventSink>,
 }
 
-struct PendingArtifactStage<'a> {
-    runtime: &'a DesktopRemoteArtifactRuntime,
-    lease: LeaseContext,
-    session_id: String,
-    task_id: String,
+// An off-lock candidate owns only its own unique private copies. Never clear
+// the task-wide index here: a concurrent winner may already own that index.
+struct PendingArtifactStage {
     copied: Vec<PathBuf>,
     committed: bool,
 }
 
-impl<'a> PendingArtifactStage<'a> {
-    fn new(
-        runtime: &'a DesktopRemoteArtifactRuntime,
-        lease: &LeaseContext,
-        session_id: &str,
-        task_id: &str,
-        capacity: usize,
-    ) -> Self {
+impl PendingArtifactStage {
+    fn new(capacity: usize) -> Self {
         Self {
-            runtime,
-            lease: lease.clone(),
-            session_id: session_id.to_owned(),
-            task_id: task_id.to_owned(),
             copied: Vec::with_capacity(capacity),
             committed: false,
         }
@@ -108,20 +166,89 @@ impl<'a> PendingArtifactStage<'a> {
     }
 }
 
-impl Drop for PendingArtifactStage<'_> {
+impl Drop for PendingArtifactStage {
     fn drop(&mut self) {
         if self.committed {
             return;
         }
-        self.runtime
-            .downloads
-            .index()
-            .clear_task(&self.session_id, &self.task_id, &self.lease);
         remove_private_copies(&self.copied);
     }
 }
 
+// Failure removes only this attempt's token, never a replacement capture.
+struct CodeCaptureAttempt<'a> {
+    runtime: &'a DesktopRemoteArtifactRuntime,
+    task_id: &'a str,
+    token: Arc<CodeArtifactCapture>,
+}
+
+impl Drop for CodeCaptureAttempt<'_> {
+    fn drop(&mut self) {
+        let mut captures = self.runtime.code_captures.lock();
+        if captures
+            .get(self.task_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.token))
+        {
+            captures.remove(self.task_id);
+        }
+    }
+}
+
 impl DesktopRemoteArtifactRuntime {
+    #[cfg(test)]
+    fn begin_test_code_capture(
+        &self,
+        lease: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        workspace: &Path,
+    ) -> Result<RemoteCodeCaptureToken, String> {
+        let sequence = self
+            .tasks
+            .status(task_id)
+            .map_err(|error| error.code.to_owned())?
+            .sequence;
+        self.begin_code_capture(lease, session_id, task_id, workspace, sequence)
+    }
+
+    #[cfg(test)]
+    fn finish_test_code_capture(
+        &self,
+        lease: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        events: Arc<dyn ControllerTaskEventSink>,
+        publication_allowed: &(dyn Fn() -> Result<(), String> + Sync),
+    ) -> Result<Vec<ArtifactDescriptor>, String> {
+        let token = self
+            .code_captures
+            .lock()
+            .get(task_id)
+            .ok_or_else(|| "artifact_capture_missing".to_owned())?
+            .token
+            .clone();
+        self.finish_code_capture(
+            lease,
+            session_id,
+            task_id,
+            events,
+            &token,
+            publication_allowed,
+        )
+    }
+
+    #[cfg(test)]
+    fn discard_test_code_capture(&self, lease: &LeaseContext, session_id: &str, task_id: &str) {
+        let token = self
+            .code_captures
+            .lock()
+            .get(task_id)
+            .unwrap()
+            .token
+            .clone();
+        self.discard_code_capture(lease, session_id, task_id, &token);
+    }
+
     pub(crate) fn new(downloads: ArtifactDownloads, tasks: Arc<RemoteTaskService>) -> Arc<Self> {
         Arc::new(Self {
             downloads,
@@ -130,28 +257,36 @@ impl DesktopRemoteArtifactRuntime {
             code_captures: Mutex::new(HashMap::new()),
             pending_code_artifacts: Mutex::new(HashMap::new()),
             publication_lock: Mutex::new(()),
+            publication_revision: AtomicU64::new(0),
+            #[cfg(test)]
+            before_code_publish: Mutex::new(None),
         })
     }
 
-    pub(crate) fn with_default_registry(tasks: Arc<RemoteTaskService>) -> Arc<Self> {
+    pub(crate) fn with_registry(
+        tasks: Arc<RemoteTaskService>,
+        registry: Arc<TransferRegistry>,
+    ) -> Arc<Self> {
         let runtime = Self::new(
-            ArtifactDownloads::new(
-                Arc::new(TransferRegistry::default()),
-                Arc::new(ArtifactIndex::default()),
-            ),
+            ArtifactDownloads::new(registry, Arc::new(ArtifactIndex::default())),
             tasks,
         );
         // DEV-18 审核修复：未完成下载同样周期性回收（RC-F-003 下载侧）。
-        let reaper_runtime = Arc::clone(&runtime);
+        let weak = Arc::downgrade(&runtime);
         tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                let expired = reaper_runtime.downloads.expire(monotonic_millis());
-                if expired > 0 {
-                    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
-                        "artifact_downloads_expired",
-                        "expired",
-                    );
+                interval.tick().await;
+                let Some(owner) = weak.upgrade() else {
+                    break;
+                };
+                let now = monotonic_millis();
+                if tokio::task::spawn_blocking(move || owner.downloads.expire(now))
+                    .await
+                    .is_err()
+                {
+                    eprintln!("[remote-control] artifact_reaper_failed");
                 }
             }
         });
@@ -170,12 +305,41 @@ impl DesktopRemoteArtifactRuntime {
         lease: &LeaseContext,
         session_id: &str,
         task_id: &str,
+        task_sequence: u64,
+        publication_allowed: &dyn Fn() -> Result<(), String>,
     ) -> Result<(), String> {
+        publication_allowed()?;
+        let revision = self.publication_revision.load(Ordering::Acquire);
+        if self
+            .tasks
+            .status(task_id)
+            .map_err(|error| error.code.to_owned())?
+            .sequence
+            != task_sequence
+        {
+            return Err("artifact_capture_binding_mismatch".into());
+        }
         self.require_task_record(lease, session_id, task_id, false)?;
         let before = private_artifact_files(store, session_id)?;
+        let _publication = self.publication_lock.lock();
+        if revision == u64::MAX || self.publication_revision.load(Ordering::Acquire) != revision {
+            return Err("artifact_capture_binding_mismatch".to_owned());
+        }
+        self.require_task_record(lease, session_id, task_id, false)?;
         let mut captures = self.captures.lock();
+        publication_allowed()?;
+        if self
+            .tasks
+            .status(task_id)
+            .map_err(|error| error.code.to_owned())?
+            .sequence
+            != task_sequence
+        {
+            return Err("artifact_capture_binding_mismatch".into());
+        }
         if let Some(existing) = captures.get(task_id) {
             if existing.session_id == session_id
+                && existing.task_sequence == task_sequence
                 && existing.lease == TaskLeaseBinding::from_context(lease)
             {
                 return Ok(());
@@ -185,6 +349,7 @@ impl DesktopRemoteArtifactRuntime {
         captures.insert(
             task_id.to_owned(),
             TaskArtifactCapture {
+                task_sequence,
                 session_id: session_id.to_owned(),
                 lease: TaskLeaseBinding::from_context(lease),
                 before,
@@ -201,77 +366,95 @@ impl DesktopRemoteArtifactRuntime {
         lease: &LeaseContext,
         session_id: &str,
         task_id: &str,
+        task_sequence: u64,
+        publication_allowed: &dyn Fn() -> Result<(), String>,
     ) -> Result<Vec<ArtifactDescriptor>, String> {
-        let _publication = self.publication_lock.lock();
-        let record = self
-            .tasks
-            .status(task_id)
-            .map_err(|error| error.code.to_owned())?;
-        if record.session_id != session_id
-            || record.lease != TaskLeaseBinding::from_context(lease)
-            || record.state != RemoteTaskState::Succeeded
-            || record.outcome_unknown
-        {
-            self.captures.lock().remove(task_id);
-            return Err("artifact_capture_binding_mismatch".to_owned());
-        }
-        let after = private_artifact_files(store, session_id)?;
-        let capture = {
-            let mut captures = self.captures.lock();
-            let capture = captures
-                .get(task_id)
-                .ok_or_else(|| "artifact_capture_missing".to_owned())?;
-            if capture.session_id != session_id
-                || capture.lease != TaskLeaseBinding::from_context(lease)
-            {
-                return Err("artifact_capture_binding_mismatch".to_owned());
-            }
-            captures
-                .remove(task_id)
-                .ok_or_else(|| "artifact_capture_missing".to_owned())?
+        let _attempt = TaskCaptureAttempt {
+            runtime: self,
+            task_id,
+            sequence: task_sequence,
         };
-        let mut changed: Vec<_> = after
-            .into_iter()
-            .filter(|(path, stamp)| capture.before.get(path) != Some(stamp))
-            .collect();
-        changed.sort_by(|left, right| left.0.cmp(&right.0));
-        if changed.len() > MAX_TASK_ARTIFACTS
-            || changed.iter().map(|(_, stamp)| stamp.bytes).sum::<u64>() > MAX_TASK_ARTIFACT_BYTES
-        {
-            return Err("artifact_capture_capacity".to_owned());
-        }
-        let mut registered = Vec::with_capacity(changed.len());
-        for (path, stamp) in changed {
-            let result = (|| {
-                let name = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(str::to_owned)
-                    .ok_or_else(|| "artifact_name_invalid".to_owned())?;
-                let id = format!("artifact-{}", uuid::Uuid::new_v4().simple());
-                index_artifact(
-                    self,
-                    lease,
-                    session_id,
-                    task_id,
-                    &id,
-                    &name,
-                    mime_for_artifact(&path),
-                    &stamp.sha256,
-                    path,
-                )
-            })();
-            match result {
-                Ok(descriptor) => registered.push(descriptor),
-                Err(error) => {
-                    self.downloads
-                        .index()
-                        .clear_task(session_id, task_id, lease);
-                    return Err(error);
+        publication_allowed()?;
+        let after = private_artifact_files(store, session_id)?;
+        self.tasks
+            .ledger()
+            .with_task_resources(task_id, task_sequence, || {
+                let _publication = self.publication_lock.lock();
+                publication_allowed()?;
+                let record = self
+                    .tasks
+                    .status(task_id)
+                    .map_err(|error| error.code.to_owned())?;
+                if record.sequence != task_sequence {
+                    return Err("artifact_capture_binding_mismatch".into());
                 }
-            }
-        }
-        Ok(registered)
+                if record.session_id != session_id
+                    || record.lease != TaskLeaseBinding::from_context(lease)
+                    || record.state != RemoteTaskState::Succeeded
+                    || record.outcome_unknown
+                {
+                    self.captures.lock().remove(task_id);
+                    return Err("artifact_capture_binding_mismatch".to_owned());
+                }
+                let capture = {
+                    let mut captures = self.captures.lock();
+                    let capture = captures
+                        .get(task_id)
+                        .ok_or_else(|| "artifact_capture_missing".to_owned())?;
+                    if capture.session_id != session_id
+                        || capture.task_sequence != task_sequence
+                        || capture.lease != TaskLeaseBinding::from_context(lease)
+                    {
+                        return Err("artifact_capture_binding_mismatch".to_owned());
+                    }
+                    captures
+                        .remove(task_id)
+                        .ok_or_else(|| "artifact_capture_missing".to_owned())?
+                };
+                let mut changed: Vec<_> = after
+                    .into_iter()
+                    .filter(|(path, stamp)| capture.before.get(path) != Some(stamp))
+                    .collect();
+                changed.sort_by(|left, right| left.0.cmp(&right.0));
+                if changed.len() > MAX_TASK_ARTIFACTS
+                    || changed.iter().map(|(_, stamp)| stamp.bytes).sum::<u64>()
+                        > MAX_TASK_ARTIFACT_BYTES
+                {
+                    return Err("artifact_capture_capacity".to_owned());
+                }
+                let mut registered = Vec::with_capacity(changed.len());
+                for (path, stamp) in changed {
+                    let result = (|| {
+                        let name = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(str::to_owned)
+                            .ok_or_else(|| "artifact_name_invalid".to_owned())?;
+                        let id = format!("artifact-{}", uuid::Uuid::new_v4().simple());
+                        index_artifact_owned(
+                            self,
+                            lease,
+                            session_id,
+                            task_id,
+                            &id,
+                            &name,
+                            mime_for_artifact(&path),
+                            &stamp.sha256,
+                            path,
+                            task_sequence,
+                        )
+                    })();
+                    match result {
+                        Ok(descriptor) => registered.push(descriptor),
+                        Err(error) => {
+                            self.downloads.index().clear_admission(task_sequence);
+                            return Err(error);
+                        }
+                    }
+                }
+                Ok(registered)
+            })
+            .map_err(|error| error.code.to_owned())?
     }
 
     /// Return only artifacts whose owning task is terminal under the exact
@@ -295,6 +478,9 @@ impl DesktopRemoteArtifactRuntime {
             .filter(|descriptor| {
                 self.require_task_record(lease, session_id, &descriptor.task_id, true)
                     .is_ok()
+                    && self
+                        .require_artifact_admission(&descriptor.artifact_id, &descriptor.task_id)
+                        .is_ok()
             })
             .collect())
     }
@@ -310,6 +496,7 @@ impl DesktopRemoteArtifactRuntime {
                 .index()
                 .descriptor_for_binding(session_id, artifact_id, lease)?;
         self.require_task_record(lease, session_id, &descriptor.task_id, true)?;
+        self.require_artifact_admission(artifact_id, &descriptor.task_id)?;
         self.downloads.index().preview_for_task_binding(
             session_id,
             artifact_id,
@@ -326,9 +513,20 @@ impl DesktopRemoteArtifactRuntime {
         artifact_id: &str,
         now_b: u64,
     ) -> Result<ArtifactDownloadBegin, String> {
-        self.require_task_record(lease, session_id, task_id, true)?;
-        self.downloads
-            .begin(lease, session_id, task_id, artifact_id, now_b)
+        let sequence = self
+            .tasks
+            .status(task_id)
+            .map_err(|error| error.code.to_owned())?
+            .sequence;
+        self.tasks
+            .ledger()
+            .with_task_resources(task_id, sequence, || {
+                self.require_task_record(lease, session_id, task_id, true)?;
+                self.require_artifact_admission(artifact_id, task_id)?;
+                self.downloads
+                    .begin(lease, session_id, task_id, artifact_id, now_b)
+            })
+            .map_err(|error| error.code.to_owned())?
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -342,16 +540,27 @@ impl DesktopRemoteArtifactRuntime {
         chunk_index: u64,
         now_b: u64,
     ) -> Result<Option<DownloadChunk>, String> {
-        self.require_task_record(lease, session_id, task_id, true)?;
-        self.downloads.next_chunk_bound(
-            lease,
-            session_id,
-            task_id,
-            artifact_id,
-            handle_id,
-            chunk_index,
-            now_b,
-        )
+        let sequence = self
+            .tasks
+            .status(task_id)
+            .map_err(|error| error.code.to_owned())?
+            .sequence;
+        self.tasks
+            .ledger()
+            .with_task_resources(task_id, sequence, || {
+                self.require_task_record(lease, session_id, task_id, true)?;
+                self.require_artifact_admission(artifact_id, task_id)?;
+                self.downloads.next_chunk_bound(
+                    lease,
+                    session_id,
+                    task_id,
+                    artifact_id,
+                    handle_id,
+                    chunk_index,
+                    now_b,
+                )
+            })
+            .map_err(|error| error.code.to_owned())?
     }
 
     pub(crate) fn artifact_download_abort(
@@ -362,13 +571,36 @@ impl DesktopRemoteArtifactRuntime {
         artifact_id: &str,
         handle_id: &str,
     ) -> Result<bool, String> {
-        self.require_task_record(lease, session_id, task_id, true)?;
-        self.downloads
-            .abort_bound(lease, session_id, task_id, artifact_id, handle_id)
+        let sequence = self
+            .tasks
+            .status(task_id)
+            .map_err(|error| error.code.to_owned())?
+            .sequence;
+        self.tasks
+            .ledger()
+            .with_task_resources(task_id, sequence, || {
+                self.require_task_record(lease, session_id, task_id, true)?;
+                self.require_artifact_admission(artifact_id, task_id)?;
+                self.downloads
+                    .abort_bound(lease, session_id, task_id, artifact_id, handle_id)
+            })
+            .map_err(|error| error.code.to_owned())?
     }
 
     pub(crate) fn clear_connection(&self, connection_id: &str) {
         let _publication = self.publication_lock.lock();
+        let mut revision = self.publication_revision.load(Ordering::Acquire);
+        loop {
+            match self.publication_revision.compare_exchange_weak(
+                revision,
+                revision.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => revision = current,
+            }
+        }
         self.captures
             .lock()
             .retain(|_, capture| capture.lease.connection_id != connection_id);
@@ -390,6 +622,48 @@ impl DesktopRemoteArtifactRuntime {
             }
         }
         self.downloads.cleanup_for_connection(connection_id);
+    }
+
+    fn require_artifact_admission(&self, artifact_id: &str, task_id: &str) -> Result<(), String> {
+        let record = self
+            .tasks
+            .status(task_id)
+            .map_err(|error| error.code.to_owned())?;
+        let descriptor = self.downloads.index().descriptor_for_binding(
+            &record.session_id,
+            artifact_id,
+            &lease_context_from_binding(&record.lease),
+        )?;
+        if descriptor.task_id != task_id {
+            return Err("artifact_not_found".into());
+        }
+        self.downloads
+            .index()
+            .require_admission(artifact_id, record.sequence)
+    }
+
+    fn require_running_code_capture(
+        &self,
+        lease: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        task_sequence: u64,
+    ) -> Result<(), String> {
+        let record = self
+            .tasks
+            .status(task_id)
+            .map_err(|error| error.code.to_owned())?;
+        if record.sequence != task_sequence
+            || record.session_id != session_id
+            || record.lease != TaskLeaseBinding::from_context(lease)
+            || record.mode != TASK_MODE_CODE
+            || record.state != RemoteTaskState::Running
+            || record.cancel_requested
+            || record.outcome_unknown
+        {
+            return Err("artifact_capture_binding_mismatch".to_owned());
+        }
+        Ok(())
     }
 
     fn require_task_record(
@@ -431,12 +705,15 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
         session_id: &str,
         task_id: &str,
         workspace: &Path,
-    ) -> Result<(), String> {
+        task_sequence: u64,
+    ) -> Result<RemoteCodeCaptureToken, String> {
+        let revision = self.publication_revision.load(Ordering::Acquire);
         let record = self
             .tasks
             .status(task_id)
             .map_err(|error| error.code.to_owned())?;
-        if record.session_id != session_id
+        if record.sequence != task_sequence
+            || record.session_id != session_id
             || record.lease != TaskLeaseBinding::from_context(lease)
             || record.mode != TASK_MODE_CODE
             || record.workspace_id.is_none()
@@ -465,29 +742,40 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
             return Err("artifact_workspace_unavailable".to_owned());
         }
         let before = project_artifact_files(&workspace_root)?;
+        let _publication = self.publication_lock.lock();
+        if revision == u64::MAX || self.publication_revision.load(Ordering::Acquire) != revision {
+            return Err("artifact_capture_binding_mismatch".to_owned());
+        }
+        self.require_running_code_capture(lease, session_id, task_id, task_sequence)?;
+        if self.pending_code_artifacts.lock().contains_key(task_id) {
+            return Err("artifact_capture_binding_mismatch".to_owned());
+        }
         let mut captures = self.code_captures.lock();
         if let Some(existing) = captures.get(task_id) {
             if existing.session_id == session_id
+                && existing.token.task_sequence == task_sequence
                 && existing.lease == TaskLeaseBinding::from_context(lease)
                 && existing.workspace_root == workspace_root
             {
-                return Ok(());
+                return Ok(existing.token.clone());
             }
             return Err("artifact_capture_binding_mismatch".to_owned());
         }
         if captures.len() >= MAX_CODE_CAPTURES {
             return Err("artifact_capture_capacity".to_owned());
         }
+        let token = RemoteCodeCaptureToken::new(task_sequence);
         captures.insert(
             task_id.to_owned(),
-            CodeArtifactCapture {
+            Arc::new(CodeArtifactCapture {
+                token: token.clone(),
                 session_id: session_id.to_owned(),
                 lease: TaskLeaseBinding::from_context(lease),
                 workspace_root,
                 before,
-            },
+            }),
         );
-        Ok(())
+        Ok(token)
     }
 
     fn finish_code_capture(
@@ -496,24 +784,35 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
         session_id: &str,
         task_id: &str,
         events: Arc<dyn ControllerTaskEventSink>,
+        token: &RemoteCodeCaptureToken,
+        publication_allowed: &(dyn Fn() -> Result<(), String> + Sync),
     ) -> Result<Vec<ArtifactDescriptor>, String> {
+        publication_allowed()?;
         let capture = {
-            let mut captures = self.code_captures.lock();
+            let captures = self.code_captures.lock();
             let capture = captures
-                .remove(task_id)
+                .get(task_id)
+                .cloned()
                 .ok_or_else(|| "artifact_capture_missing".to_owned())?;
-            if capture.session_id != session_id
+            if capture.token != *token
+                || capture.session_id != session_id
                 || capture.lease != TaskLeaseBinding::from_context(lease)
             {
                 return Err("artifact_capture_binding_mismatch".to_owned());
             }
             capture
         };
+        let _attempt = CodeCaptureAttempt {
+            runtime: self,
+            task_id,
+            token: Arc::clone(&capture),
+        };
         let record = self
             .tasks
             .status(task_id)
             .map_err(|error| error.code.to_owned())?;
-        if record.session_id != session_id
+        if record.sequence != token.task_sequence
+            || record.session_id != session_id
             || record.lease != TaskLeaseBinding::from_context(lease)
             || record.mode != TASK_MODE_CODE
             || record.state != RemoteTaskState::Running
@@ -532,7 +831,8 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
             .tasks
             .status(task_id)
             .map_err(|error| error.code.to_owned())?;
-        if after_scan.session_id != session_id
+        if after_scan.sequence != token.task_sequence
+            || after_scan.session_id != session_id
             || after_scan.lease != TaskLeaseBinding::from_context(lease)
             || after_scan.state != RemoteTaskState::Running
             || after_scan.cancel_requested
@@ -555,7 +855,8 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
 
         let artifact_root = private_artifact_root(session_id)?;
         let mut registered = Vec::with_capacity(changed.len());
-        let mut stage = PendingArtifactStage::new(self, lease, session_id, task_id, changed.len());
+        let mut stage = PendingArtifactStage::new(changed.len());
+        let mut candidates = Vec::with_capacity(changed.len());
         for (relative, stamp) in changed {
             let result = (|| {
                 let source = current_root.join(&relative);
@@ -575,45 +876,95 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
                     &stamp,
                 )?;
                 stage.copied.push(private_copy.clone());
-                index_pending_artifact(
-                    self,
-                    lease,
-                    session_id,
-                    task_id,
-                    &artifact_id,
-                    &display_name,
+                Ok::<_, String>((
+                    artifact_id,
+                    display_name,
                     mime_type,
-                    &stamp.sha256,
+                    stamp.sha256,
                     private_copy,
-                )
+                ))
             })();
             match result {
-                Ok(descriptor) => registered.push(descriptor),
+                Ok(candidate) => candidates.push(candidate),
                 Err(error) => return Err(error),
             }
         }
-        if !registered.is_empty() {
-            let copied = stage.commit();
-            self.pending_code_artifacts.lock().insert(
-                task_id.to_owned(),
-                PendingCodeArtifacts {
-                    session_id: session_id.to_owned(),
-                    lease: TaskLeaseBinding::from_context(lease),
-                    copied,
-                    events,
-                },
-            );
+        #[cfg(test)]
+        {
+            let hook = self.before_code_publish.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
         }
-        Ok(registered)
+        self.tasks
+            .ledger()
+            .with_task_resources(task_id, token.task_sequence, || {
+                let _publication = self.publication_lock.lock();
+                publication_allowed()?;
+                self.require_running_code_capture(lease, session_id, task_id, token.task_sequence)?;
+                let mut captures = self.code_captures.lock();
+                if !captures
+                    .get(task_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &capture))
+                    || self.pending_code_artifacts.lock().contains_key(task_id)
+                {
+                    return Err("artifact_capture_binding_mismatch".to_owned());
+                }
+                // Exact token validation, index registration and pending ownership
+                // commit share teardown/terminal's publication lock.
+                captures.remove(task_id);
+                drop(captures);
+                for (artifact_id, display_name, mime_type, sha256, private_copy) in candidates {
+                    match index_pending_artifact(
+                        self,
+                        lease,
+                        session_id,
+                        task_id,
+                        &artifact_id,
+                        &display_name,
+                        mime_type,
+                        &sha256,
+                        private_copy,
+                        token.task_sequence,
+                    ) {
+                        Ok(descriptor) => registered.push(descriptor),
+                        Err(error) => {
+                            self.downloads.index().clear_admission(token.task_sequence);
+                            return Err(error);
+                        }
+                    }
+                }
+                if !registered.is_empty() {
+                    let copied = stage.commit();
+                    self.pending_code_artifacts.lock().insert(
+                        task_id.to_owned(),
+                        PendingCodeArtifacts {
+                            task_sequence: token.task_sequence,
+                            session_id: session_id.to_owned(),
+                            lease: TaskLeaseBinding::from_context(lease),
+                            copied,
+                            events,
+                        },
+                    );
+                }
+                Ok(registered)
+            })
+            .map_err(|error| error.code.to_owned())?
     }
 
-    fn discard_code_capture(&self, lease: &LeaseContext, session_id: &str, task_id: &str) {
+    fn discard_code_capture(
+        &self,
+        lease: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        token: &RemoteCodeCaptureToken,
+    ) {
+        let _publication = self.publication_lock.lock();
         let binding = TaskLeaseBinding::from_context(lease);
         let mut captures = self.code_captures.lock();
-        if captures
-            .get(task_id)
-            .is_some_and(|capture| capture.session_id == session_id && capture.lease == binding)
-        {
+        if captures.get(task_id).is_some_and(|capture| {
+            capture.token == *token && capture.session_id == session_id && capture.lease == binding
+        }) {
             captures.remove(task_id);
         }
     }
@@ -623,47 +974,75 @@ impl RemoteTaskArtifactScope for DesktopRemoteArtifactRuntime {
     fn commit_task_artifacts(&self, record: &RemoteTaskRecord) {
         let _publication = self.publication_lock.lock();
         let mut pending = self.pending_code_artifacts.lock();
+        let Some(staged) = pending.get(&record.task_id) else {
+            return;
+        };
+        if staged.task_sequence != record.sequence
+            || staged.session_id != record.session_id
+            || staged.lease != record.lease
+        {
+            return;
+        }
         let Some(staged) = pending.remove(&record.task_id) else {
             return;
         };
-        if staged.session_id != record.session_id || staged.lease != record.lease {
-            let lease = lease_context_from_binding(&staged.lease);
-            self.downloads
-                .index()
-                .clear_task(&staged.session_id, &record.task_id, &lease);
+        if staged
+            .events
+            .check_artifact_budget(record.sequence)
+            .is_err()
+        {
+            self.downloads.index().clear_admission(record.sequence);
             remove_private_copies(&staged.copied);
             return;
         }
         let lease = lease_context_from_binding(&record.lease);
-        let descriptors =
-            self.downloads
-                .index()
-                .publish_task(&record.session_id, &record.task_id, &lease);
+        let descriptors = self.downloads.index().publish_admission(
+            &record.session_id,
+            &record.task_id,
+            &lease,
+            record.sequence,
+        );
         if descriptors.len() != staged.copied.len() {
-            self.downloads
-                .index()
-                .clear_task(&record.session_id, &record.task_id, &lease);
+            self.downloads.index().clear_admission(record.sequence);
             remove_private_copies(&staged.copied);
             return;
         }
+        // The trusted event sink takes the per-admission resource gate.
+        // Direct scope calls must not hold publication/pending locks while
+        // entering it (service cleanup acquires these in the opposite order).
+        drop(pending);
+        drop(_publication);
         for descriptor in descriptors {
-            staged.events.emit_journal(
-                JournalKind::Artifact,
+            staged.events.emit_committed_artifact(
+                record.sequence,
                 &record.session_id,
-                Some(&record.task_id),
+                &record.task_id,
                 artifact_journal_payload(descriptor),
             );
         }
     }
 
-    fn discard_task_artifacts(&self, task_id: &str) {
+    fn discard_task_artifacts(&self, record: &RemoteTaskRecord) {
         let _publication = self.publication_lock.lock();
+        let mut captures = self.code_captures.lock();
+        if captures.get(&record.task_id).is_some_and(|capture| {
+            capture.token.task_sequence == record.sequence
+                && capture.session_id == record.session_id
+                && capture.lease == record.lease
+        }) {
+            captures.remove(&record.task_id);
+        }
+        drop(captures);
         let mut pending = self.pending_code_artifacts.lock();
-        if let Some(staged) = pending.remove(task_id) {
-            let lease = lease_context_from_binding(&staged.lease);
-            self.downloads
-                .index()
-                .clear_task(&staged.session_id, task_id, &lease);
+        if !pending.get(&record.task_id).is_some_and(|staged| {
+            staged.task_sequence == record.sequence
+                && staged.session_id == record.session_id
+                && staged.lease == record.lease
+        }) {
+            return;
+        }
+        if let Some(staged) = pending.remove(&record.task_id) {
+            self.downloads.index().clear_admission(record.sequence);
             remove_private_copies(&staged.copied);
         }
     }
@@ -1039,7 +1418,38 @@ fn mime_for_artifact(path: &Path) -> &'static str {
 
 /// Indexes one session artifact. The caller supplies the authoritative file
 /// location; it stays in B's index and is never projected.
-pub(crate) fn index_artifact(
+#[cfg(test)]
+fn index_artifact(
+    runtime: &DesktopRemoteArtifactRuntime,
+    lease: &LeaseContext,
+    session_id: &str,
+    task_id: &str,
+    artifact_id: &str,
+    display_name: &str,
+    mime_type: &str,
+    sha256: &str,
+    path: PathBuf,
+) -> Result<ArtifactDescriptor, String> {
+    let sequence = runtime
+        .tasks
+        .status(task_id)
+        .map_err(|error| error.code.to_owned())?
+        .sequence;
+    index_artifact_owned(
+        runtime,
+        lease,
+        session_id,
+        task_id,
+        artifact_id,
+        display_name,
+        mime_type,
+        sha256,
+        path,
+        sequence,
+    )
+}
+
+fn index_artifact_owned(
     runtime: &DesktopRemoteArtifactRuntime,
     lease: &LeaseContext,
     session_id: &str,
@@ -1049,17 +1459,26 @@ pub(crate) fn index_artifact(
     mime_type: &str,
     sha256: &str,
     path: std::path::PathBuf,
+    sequence: u64,
 ) -> Result<ArtifactDescriptor, String> {
-    runtime.downloads.index().register(
-        lease,
-        session_id,
-        task_id,
-        artifact_id,
-        display_name,
-        mime_type,
-        sha256,
-        Arc::new(FileArtifactSource::new(path)),
-    )
+    runtime
+        .tasks
+        .ledger()
+        .with_task_resources(task_id, sequence, || {
+            runtime.downloads.index().register_owned(
+                lease,
+                session_id,
+                task_id,
+                artifact_id,
+                display_name,
+                mime_type,
+                sha256,
+                Arc::new(FileArtifactSource::new(path)),
+                sequence,
+                true,
+            )
+        })
+        .map_err(|error| error.code.to_owned())?
 }
 
 fn index_pending_artifact(
@@ -1072,8 +1491,9 @@ fn index_pending_artifact(
     mime_type: &str,
     sha256: &str,
     path: PathBuf,
+    sequence: u64,
 ) -> Result<ArtifactDescriptor, String> {
-    runtime.downloads.index().register_pending(
+    runtime.downloads.index().register_owned(
         lease,
         session_id,
         task_id,
@@ -1082,6 +1502,8 @@ fn index_pending_artifact(
         mime_type,
         sha256,
         Arc::new(FileArtifactSource::new(path)),
+        sequence,
+        false,
     )
 }
 
@@ -1130,10 +1552,102 @@ mod tests {
         }
     }
 
+    fn runtime_with_tasks(tasks: Arc<RemoteTaskService>) -> Arc<DesktopRemoteArtifactRuntime> {
+        DesktopRemoteArtifactRuntime::new(
+            ArtifactDownloads::new(
+                Arc::new(TransferRegistry::new(Default::default()).unwrap()),
+                Arc::new(ArtifactIndex::default()),
+            ),
+            tasks,
+        )
+    }
+
     fn runtime() -> Arc<DesktopRemoteArtifactRuntime> {
-        DesktopRemoteArtifactRuntime::with_default_registry(Arc::new(RemoteTaskService::new(
-            Arc::new(RemoteTaskLedger::in_memory()),
-        )))
+        runtime_with_tasks(Arc::new(RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::in_memory(),
+        ))))
+    }
+
+    #[test]
+    fn owned_chat_capture_cleanup_is_exact_and_unwind_safe() {
+        let runtime = runtime();
+        let lease = test_lease();
+        let task = "task-capture-owned";
+        for variant in 0..4 {
+            let cleanup = OwnedTaskCapture::new(Arc::clone(&runtime), &lease, "session-1", task, 1);
+            let mut binding = TaskLeaseBinding::from_context(&lease);
+            if variant == 3 {
+                binding.remote_control_generation = "replacement-generation".into();
+            }
+            runtime.captures.lock().insert(
+                task.into(),
+                TaskArtifactCapture {
+                    task_sequence: if variant == 1 { 2 } else { 1 },
+                    session_id: if variant == 2 {
+                        "session-2"
+                    } else {
+                        "session-1"
+                    }
+                    .into(),
+                    lease: binding,
+                    before: HashMap::new(),
+                },
+            );
+            drop(cleanup);
+            assert_eq!(runtime.captures.lock().contains_key(task), variant != 0);
+            runtime.captures.lock().clear();
+        }
+        let cleanup = OwnedTaskCapture::new(Arc::clone(&runtime), &lease, "session-1", task, 1);
+        runtime.captures.lock().insert(
+            task.into(),
+            TaskArtifactCapture {
+                task_sequence: 1,
+                session_id: "session-1".into(),
+                lease: TaskLeaseBinding::from_context(&lease),
+                before: HashMap::new(),
+            },
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _cleanup = cleanup;
+            panic!("test capture unwind");
+        }));
+        assert!(result.is_err());
+        assert!(runtime.captures.lock().is_empty());
+    }
+
+    #[test]
+    fn concurrent_connection_cleanup_does_not_lose_publication_revisions() {
+        let runtime = runtime();
+        std::thread::scope(|scope| {
+            for _ in 0..64 {
+                let runtime = Arc::clone(&runtime);
+                scope.spawn(move || runtime.clear_connection("connection-0001"));
+            }
+        });
+        assert_eq!(runtime.publication_revision.load(Ordering::Acquire), 64);
+    }
+
+    #[test]
+    fn connection_cleanup_saturates_publication_revision_without_wrapping() {
+        let runtime = runtime();
+        runtime
+            .publication_revision
+            .store(u64::MAX - 1, Ordering::Release);
+        std::thread::scope(|scope| {
+            for _ in 0..64 {
+                let runtime = Arc::clone(&runtime);
+                scope.spawn(move || runtime.clear_connection("connection-0001"));
+            }
+        });
+        assert_eq!(
+            runtime.publication_revision.load(Ordering::Acquire),
+            u64::MAX
+        );
+        runtime.clear_connection("connection-0001");
+        assert_eq!(
+            runtime.publication_revision.load(Ordering::Acquire),
+            u64::MAX
+        );
     }
 
     struct ExistingSession(String);
@@ -1164,7 +1678,7 @@ mod tests {
                 &test_lease().remote_control_generation,
             )
             .unwrap();
-        let runtime = DesktopRemoteArtifactRuntime::with_default_registry(Arc::clone(&tasks));
+        let runtime = runtime_with_tasks(Arc::clone(&tasks));
         tasks.hooks().set_artifact_scope(runtime.clone());
         runtime
     }
@@ -1227,13 +1741,26 @@ mod tests {
         session_id: &str,
         task_id: &str,
     ) {
+        let _ticket = admit_code_ticket(runtime, session_id, task_id);
+        runtime
+            .tasks
+            .ledger()
+            .begin_dispatch(task_id, 1_001)
+            .unwrap();
+    }
+
+    fn admit_code_ticket(
+        runtime: &DesktopRemoteArtifactRuntime,
+        session_id: &str,
+        task_id: &str,
+    ) -> crate::features::remote_control::controller::task::RemoteTaskTicket {
         let input = json!({
             "text": "create a report",
             "attachment_ids": [],
             "skill_ids": [],
             "workspace_id": "workspace-0001",
         });
-        runtime
+        let outcome = runtime
             .tasks
             .ledger()
             .admit(
@@ -1253,16 +1780,18 @@ mod tests {
                 1_000,
             )
             .unwrap();
-        runtime
-            .tasks
-            .ledger()
-            .begin_dispatch(task_id, 1_001)
-            .unwrap();
+        match outcome {
+            crate::features::remote_control::controller::task::AdmissionOutcome::Admitted(
+                ticket,
+            ) => ticket,
+            _ => panic!("fresh code admission expected"),
+        }
     }
 
     #[test]
     fn indexing_a_missing_file_fails_closed() {
-        let runtime = runtime();
+        let runtime = bound_runtime("session-0001");
+        admit_task(&runtime, "session-0001", "task-0001");
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("missing.txt");
         assert_eq!(
@@ -1283,8 +1812,698 @@ mod tests {
     }
 
     #[test]
+    fn retired_capture_token_cannot_touch_same_task_id_after_real_ledger_pruning() {
+        let runtime = bound_runtime("session-reused-capture");
+        let workspace = tempfile::tempdir().unwrap();
+        let task_id = "task-reused-capture";
+        admit_running_code_task(&runtime, "session-reused-capture", task_id);
+        let old = runtime
+            .begin_test_code_capture(
+                &test_lease(),
+                "session-reused-capture",
+                task_id,
+                workspace.path(),
+            )
+            .unwrap();
+        runtime
+            .tasks
+            .ledger()
+            .complete(task_id, RemoteTaskTerminal::Failed, None, 1_010)
+            .unwrap();
+        runtime.discard_code_capture(&test_lease(), "session-reused-capture", task_id, &old);
+        for index in 0..256 {
+            let filler = format!("task-prune-{index}");
+            admit_task(&runtime, "session-reused-capture", &filler);
+            runtime
+                .tasks
+                .ledger()
+                .complete(&filler, RemoteTaskTerminal::Succeeded, None, 1_020)
+                .unwrap();
+        }
+        assert!(runtime.tasks.status(task_id).is_err());
+        admit_running_code_task(&runtime, "session-reused-capture", task_id);
+        let new = runtime
+            .begin_test_code_capture(
+                &test_lease(),
+                "session-reused-capture",
+                task_id,
+                workspace.path(),
+            )
+            .unwrap();
+        assert_ne!(old.task_sequence, new.task_sequence);
+        runtime.discard_code_capture(&test_lease(), "session-reused-capture", task_id, &old);
+        assert_eq!(runtime.code_captures.lock()[task_id].token, new);
+        assert_eq!(
+            runtime
+                .finish_code_capture(
+                    &test_lease(),
+                    "session-reused-capture",
+                    task_id,
+                    null_events(),
+                    &old,
+                    &|| Ok(()),
+                )
+                .unwrap_err(),
+            "artifact_capture_binding_mismatch"
+        );
+        assert_eq!(
+            runtime
+                .begin_code_capture(
+                    &test_lease(),
+                    "session-reused-capture",
+                    task_id,
+                    workspace.path(),
+                    old.task_sequence,
+                )
+                .unwrap_err(),
+            "artifact_capture_binding_mismatch"
+        );
+        assert_eq!(runtime.code_captures.lock()[task_id].token, new);
+    }
+
+    #[test]
+    fn deadline_recheck_after_real_code_copy_prevents_late_publication() {
+        crate::platform::test_support::with_temp_home("pinvou3-code-deadline", || {
+            let project = tempfile::tempdir().unwrap();
+            let store =
+                SessionStore::boot_at_test_dir(&crate::platform::paths::pinvou3_home()).unwrap();
+            let session_id = store
+                .create_new("model".into(), None, project.path().to_path_buf())
+                .unwrap()
+                .metadata
+                .id;
+            let runtime = bound_runtime(&session_id);
+            admit_running_code_task(&runtime, &session_id, "task-deadline");
+            let token = runtime
+                .begin_test_code_capture(
+                    &test_lease(),
+                    &session_id,
+                    "task-deadline",
+                    project.path(),
+                )
+                .unwrap();
+            let source = project.path().join("output.md");
+            std::fs::write(&source, "original output").unwrap();
+            let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let at_publication = expired.clone();
+            *runtime.before_code_publish.lock() = Some(Box::new(move || {
+                at_publication.store(true, Ordering::SeqCst);
+            }));
+            let publication = || {
+                if expired.load(Ordering::SeqCst) {
+                    Err("task_turn_timeout".to_owned())
+                } else {
+                    Ok(())
+                }
+            };
+            assert_eq!(
+                runtime
+                    .finish_code_capture(
+                        &test_lease(),
+                        &session_id,
+                        "task-deadline",
+                        null_events(),
+                        &token,
+                        &publication,
+                    )
+                    .unwrap_err(),
+                "task_turn_timeout"
+            );
+            assert_eq!(runtime.downloads.index().len(), 0);
+            assert!(runtime.pending_code_artifacts.lock().is_empty());
+            assert!(runtime.code_captures.lock().is_empty());
+            assert_eq!(
+                std::fs::read_dir(private_artifact_root(&session_id).unwrap())
+                    .unwrap()
+                    .count(),
+                0
+            );
+            assert_eq!(std::fs::read_to_string(source).unwrap(), "original output");
+        });
+    }
+
+    #[test]
+    fn real_dispatch_commits_one_code_artifact_and_fences_late_executor_events() {
+        use crate::features::remote_control::controller::task::ControllerTaskExecutor;
+        struct Output {
+            artifacts: AtomicU64,
+            errors: AtomicU64,
+        }
+        impl ControllerTaskEventSink for Output {
+            fn emit(&self, _: serde_json::Value) {}
+            fn emit_journal(
+                &self,
+                kind: JournalKind,
+                _: &str,
+                _: Option<&str>,
+                _: serde_json::Value,
+            ) {
+                match kind {
+                    JournalKind::Artifact => {
+                        self.artifacts.fetch_add(1, Ordering::SeqCst);
+                    }
+                    JournalKind::Error => {
+                        self.errors.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        struct Executor {
+            artifacts: Arc<DesktopRemoteArtifactRuntime>,
+            workspace: PathBuf,
+            late: Mutex<Option<Arc<dyn ControllerTaskEventSink>>>,
+        }
+        #[async_trait::async_trait]
+        impl ControllerTaskExecutor for Executor {
+            async fn execute(
+                &self,
+                request: serde_json::Value,
+                events: Arc<dyn ControllerTaskEventSink>,
+                _: tokio_util::sync::CancellationToken,
+            ) -> Result<(), String> {
+                let task = request["task_id"].as_str().unwrap();
+                let session = request["session_id"].as_str().unwrap();
+                let sequence = self.artifacts.tasks.status(task).unwrap().sequence;
+                let token = self.artifacts.begin_code_capture(
+                    &test_lease(),
+                    session,
+                    task,
+                    &self.workspace,
+                    sequence,
+                )?;
+                std::fs::write(self.workspace.join("output.md"), "new code result").unwrap();
+                self.artifacts.finish_code_capture(
+                    &test_lease(),
+                    session,
+                    task,
+                    events.clone(),
+                    &token,
+                    &|| Ok(()),
+                )?;
+                *self.late.lock() = Some(events);
+                Ok(())
+            }
+        }
+        crate::platform::test_support::with_temp_home("pinvou3-code-dispatch", || {
+            let project = tempfile::tempdir().unwrap();
+            let store =
+                SessionStore::boot_at_test_dir(&crate::platform::paths::pinvou3_home()).unwrap();
+            let session = store
+                .create_new("model".into(), None, project.path().into())
+                .unwrap()
+                .metadata
+                .id;
+            let artifacts = bound_runtime(&session);
+            let ticket = admit_code_ticket(&artifacts, &session, "task-code-dispatch");
+            let executor = Arc::new(Executor {
+                artifacts: artifacts.clone(),
+                workspace: project.path().into(),
+                late: Mutex::new(None),
+            });
+            artifacts
+                .tasks
+                .register_executor(TASK_MODE_CODE, executor.clone());
+            let output = Arc::new(Output {
+                artifacts: AtomicU64::new(0),
+                errors: AtomicU64::new(0),
+            });
+            let record = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(artifacts.tasks.dispatch(
+                    ticket,
+                    output.clone(),
+                    tokio_util::sync::CancellationToken::new(),
+                    1_001,
+                ))
+                .unwrap();
+            assert_eq!(record.state, RemoteTaskState::Succeeded);
+            assert_eq!(output.artifacts.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                artifacts
+                    .artifact_index(&test_lease(), &session)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            artifacts.commit_task_artifacts(&record);
+            assert_eq!(output.artifacts.load(Ordering::SeqCst), 1);
+            executor.late.lock().as_ref().unwrap().emit_journal(
+                JournalKind::Error,
+                &session,
+                Some("task-code-dispatch"),
+                serde_json::json!({"code":"late_error"}),
+            );
+            assert_eq!(output.errors.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn old_terminal_hooks_cannot_touch_new_real_pending_copies_or_downloads_after_pruning() {
+        crate::platform::test_support::with_temp_home("pinvou3-code-reused-pending", || {
+            let project = tempfile::tempdir().unwrap();
+            let store =
+                SessionStore::boot_at_test_dir(&crate::platform::paths::pinvou3_home()).unwrap();
+            let session = store
+                .create_new("model".into(), None, project.path().into())
+                .unwrap()
+                .metadata
+                .id;
+            let runtime = bound_runtime(&session);
+            let task = "task-pending-reused";
+            admit_running_code_task(&runtime, &session, task);
+            let old_sequence = runtime.tasks.status(task).unwrap().sequence;
+            let old_file = project.path().join("old.md");
+            std::fs::write(&old_file, "old artifact").unwrap();
+            index_artifact_owned(
+                &runtime,
+                &test_lease(),
+                &session,
+                task,
+                "artifact-old-instance",
+                "old.md",
+                "text/markdown",
+                &sha256_file(&old_file, 12).unwrap(),
+                old_file,
+                old_sequence,
+            )
+            .unwrap();
+            let old = runtime
+                .tasks
+                .ledger()
+                .complete(task, RemoteTaskTerminal::Succeeded, None, 1_010)
+                .unwrap();
+            let old_download = runtime
+                .artifact_download_begin(
+                    &test_lease(),
+                    &session,
+                    task,
+                    "artifact-old-instance",
+                    1_011,
+                )
+                .unwrap();
+            for index in 0..256 {
+                let filler = format!("task-pending-prune-{index}");
+                admit_task(&runtime, &session, &filler);
+                runtime
+                    .tasks
+                    .ledger()
+                    .complete(&filler, RemoteTaskTerminal::Succeeded, None, 1_020)
+                    .unwrap();
+            }
+            assert!(runtime.tasks.status(task).is_err());
+            admit_running_code_task(&runtime, &session, task);
+            let token = runtime
+                .begin_test_code_capture(&test_lease(), &session, task, project.path())
+                .unwrap();
+            std::fs::write(project.path().join("new.md"), "new artifact").unwrap();
+            let descriptors = runtime
+                .finish_code_capture(
+                    &test_lease(),
+                    &session,
+                    task,
+                    null_events(),
+                    &token,
+                    &|| Ok(()),
+                )
+                .unwrap();
+            assert_eq!(descriptors.len(), 1);
+            let copies = runtime.pending_code_artifacts.lock()[task].copied.clone();
+            assert_eq!(copies.len(), 1);
+            runtime.commit_task_artifacts(&old);
+            runtime.discard_task_artifacts(&old);
+            assert_eq!(
+                runtime.pending_code_artifacts.lock()[task].task_sequence,
+                token.task_sequence
+            );
+            assert!(copies.iter().all(|path| path.is_file()));
+            let new = runtime
+                .tasks
+                .ledger()
+                .complete(task, RemoteTaskTerminal::Succeeded, None, 2_000)
+                .unwrap();
+            runtime.commit_task_artifacts(&new);
+            let visible = runtime.artifact_index(&test_lease(), &session).unwrap();
+            assert_eq!(visible.len(), 1);
+            assert_eq!(visible[0].artifact_id, descriptors[0].artifact_id);
+            assert_eq!(
+                runtime
+                    .artifact_preview(&test_lease(), &session, "artifact-old-instance")
+                    .unwrap_err(),
+                "artifact_binding_stale"
+            );
+            assert_eq!(
+                runtime
+                    .artifact_download_begin(
+                        &test_lease(),
+                        &session,
+                        task,
+                        "artifact-old-instance",
+                        2_001
+                    )
+                    .unwrap_err(),
+                "artifact_binding_stale"
+            );
+            assert_eq!(
+                runtime
+                    .artifact_download_chunk(
+                        &test_lease(),
+                        &session,
+                        task,
+                        "artifact-old-instance",
+                        &old_download.handle_id,
+                        0,
+                        2_001
+                    )
+                    .unwrap_err(),
+                "artifact_binding_stale"
+            );
+            let download = runtime
+                .artifact_download_begin(
+                    &test_lease(),
+                    &session,
+                    task,
+                    &descriptors[0].artifact_id,
+                    2_002,
+                )
+                .unwrap();
+            runtime.commit_task_artifacts(&old);
+            runtime.discard_task_artifacts(&old);
+            assert_eq!(runtime.downloads.cleanup_for_admission(old.sequence), 1);
+            assert!(copies.iter().all(|path| path.is_file()));
+            let chunk = runtime
+                .artifact_download_chunk(
+                    &test_lease(),
+                    &session,
+                    task,
+                    &descriptors[0].artifact_id,
+                    &download.handle_id,
+                    0,
+                    2_003,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(chunk.bytes, b"new artifact");
+            assert!(chunk.completed.is_some());
+            assert_eq!(
+                runtime
+                    .artifact_index(&test_lease(), &session)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn owned_chat_capture_releases_real_begin_on_pre_dispatch_timeout() {
+        crate::platform::test_support::with_temp_home("pinvou3-chat-owned-timeout", || {
+            let project = tempfile::tempdir().unwrap();
+            let store =
+                SessionStore::boot_at_test_dir(&crate::platform::paths::pinvou3_home()).unwrap();
+            let session = store
+                .create_new("model".into(), None, project.path().into())
+                .unwrap()
+                .metadata
+                .id;
+            let runtime = bound_runtime(&session);
+            let task = "task-chat-owned-timeout";
+            admit_task(&runtime, &session, task);
+            let sequence = runtime.tasks.status(task).unwrap().sequence;
+            let result = (|| -> Result<(), String> {
+                let _cleanup = OwnedTaskCapture::new(
+                    Arc::clone(&runtime),
+                    &test_lease(),
+                    &session,
+                    task,
+                    sequence,
+                );
+                runtime.begin_task_capture(
+                    &store,
+                    &test_lease(),
+                    &session,
+                    task,
+                    sequence,
+                    &|| Ok(()),
+                )?;
+                assert!(runtime.captures.lock().contains_key(task));
+                crate::features::remote_control::controller::turn_budget::TurnBudget::for_test(
+                    std::time::Duration::ZERO,
+                )
+                .checkpoint(&tokio_util::sync::CancellationToken::new())
+            })();
+            assert_eq!(result.unwrap_err(), "task_turn_timeout");
+            assert!(runtime.captures.lock().is_empty());
+            assert_eq!(runtime.downloads.index().len(), 0);
+            runtime
+                .tasks
+                .fail_admitted(task, sequence, "task_turn_timeout", 1_100)
+                .unwrap();
+            assert_eq!(
+                runtime.tasks.status(task).unwrap().state,
+                RemoteTaskState::Failed
+            );
+        });
+    }
+
+    #[test]
+    fn chat_capture_rechecks_frozen_deadline_after_real_scan_and_releases_only_its_attempt() {
+        crate::platform::test_support::with_temp_home("pinvou3-chat-capture-budget", || {
+            let project = tempfile::tempdir().unwrap();
+            let store =
+                SessionStore::boot_at_test_dir(&crate::platform::paths::pinvou3_home()).unwrap();
+            let session = store
+                .create_new("model".into(), None, project.path().into())
+                .unwrap()
+                .metadata
+                .id;
+            let runtime = bound_runtime(&session);
+            let task = "task-chat-deadline";
+            admit_task(&runtime, &session, task);
+            let sequence = runtime.tasks.status(task).unwrap().sequence;
+            runtime
+                .begin_task_capture(&store, &test_lease(), &session, task, sequence, &|| Ok(()))
+                .unwrap();
+            let ledger = store.session_roots(&session).unwrap().ledger;
+            std::fs::create_dir_all(&ledger).unwrap();
+            let output = ledger.join("result.md");
+            std::fs::write(&output, "completed chat output").unwrap();
+            runtime
+                .tasks
+                .complete(task, RemoteTaskTerminal::Succeeded, None, 1_100)
+                .unwrap();
+            let clock = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            let _clock_context = clock.enter();
+            let budget =
+                crate::features::remote_control::controller::turn_budget::TurnBudget::for_test(
+                    std::time::Duration::from_secs(1),
+                );
+            let checkpoints = AtomicU64::new(0);
+            let publication = || {
+                if checkpoints.fetch_add(1, Ordering::SeqCst) == 1 {
+                    clock.block_on(tokio::time::advance(std::time::Duration::from_secs(2)));
+                }
+                budget.checkpoint(&tokio_util::sync::CancellationToken::new())
+            };
+            assert_eq!(
+                runtime
+                    .finish_task_capture(
+                        &store,
+                        &test_lease(),
+                        &session,
+                        task,
+                        sequence,
+                        &publication
+                    )
+                    .unwrap_err(),
+                "task_turn_timeout"
+            );
+            assert_eq!(checkpoints.load(Ordering::SeqCst), 2);
+            assert!(runtime.captures.lock().is_empty());
+            assert_eq!(runtime.downloads.index().len(), 0);
+            assert_eq!(
+                std::fs::read_to_string(output).unwrap(),
+                "completed chat output"
+            );
+        });
+    }
+
+    #[test]
+    fn direct_artifact_commit_does_not_hold_publication_while_waiting_for_service_gate() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        struct Output(AtomicU64);
+        impl ControllerTaskEventSink for Output {
+            fn emit(&self, _: serde_json::Value) {}
+            fn emit_journal(
+                &self,
+                kind: JournalKind,
+                _: &str,
+                _: Option<&str>,
+                _: serde_json::Value,
+            ) {
+                if kind == JournalKind::Artifact {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        struct BeforeGate {
+            entered: mpsc::Sender<()>,
+            inner: Arc<dyn ControllerTaskEventSink>,
+        }
+        impl ControllerTaskEventSink for BeforeGate {
+            fn emit(&self, _: serde_json::Value) {}
+            fn emit_committed_artifact(
+                &self,
+                sequence: u64,
+                session: &str,
+                task: &str,
+                payload: serde_json::Value,
+            ) {
+                self.entered.send(()).unwrap();
+                self.inner
+                    .emit_committed_artifact(sequence, session, task, payload);
+            }
+        }
+        crate::platform::test_support::with_temp_home("pinvou3-direct-code-commit", || {
+            let project = tempfile::tempdir().unwrap();
+            let store =
+                SessionStore::boot_at_test_dir(&crate::platform::paths::pinvou3_home()).unwrap();
+            let session = store
+                .create_new("model".into(), None, project.path().into())
+                .unwrap()
+                .metadata
+                .id;
+            let runtime = bound_runtime(&session);
+            let task = "task-direct-code-commit";
+            admit_running_code_task(&runtime, &session, task);
+            let running = runtime.tasks.status(task).unwrap();
+            let output = Arc::new(Output(AtomicU64::new(0)));
+            let bounded = runtime
+                .tasks
+                .events_for_record(&running, output.clone(), None);
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let events = Arc::new(BeforeGate {
+                entered: entered_tx,
+                inner: bounded,
+            });
+            let token = runtime
+                .begin_test_code_capture(&test_lease(), &session, task, project.path())
+                .unwrap();
+            std::fs::write(project.path().join("output.md"), "bounded commit").unwrap();
+            runtime
+                .finish_code_capture(&test_lease(), &session, task, events, &token, &|| Ok(()))
+                .unwrap();
+            let terminal = runtime
+                .tasks
+                .ledger()
+                .complete(task, RemoteTaskTerminal::Succeeded, None, 1_100)
+                .unwrap();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let service = runtime.tasks.clone();
+            let sequence = terminal.sequence;
+            let cleanup_done = done_tx.clone();
+            let cleanup = std::thread::spawn(move || {
+                service
+                    .ledger()
+                    .with_task_resources(task, sequence, || {
+                        ready_tx.send(()).unwrap();
+                        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        service
+                            .complete(task, RemoteTaskTerminal::Succeeded, None, 1_101)
+                            .unwrap();
+                    })
+                    .unwrap();
+                cleanup_done.send(()).unwrap();
+            });
+            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let direct_runtime = runtime.clone();
+            let direct = std::thread::spawn(move || {
+                direct_runtime.commit_task_artifacts(&terminal);
+                done_tx.send(()).unwrap();
+            });
+            done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            cleanup.join().unwrap();
+            direct.join().unwrap();
+            assert_eq!(output.0.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                runtime
+                    .artifact_index(&test_lease(), &session)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn code_terminal_commit_after_frozen_deadline_revokes_staged_index_and_private_copies() {
+        crate::platform::test_support::with_temp_home("pinvou3-code-terminal-budget", || {
+            let project = tempfile::tempdir().unwrap();
+            let store =
+                SessionStore::boot_at_test_dir(&crate::platform::paths::pinvou3_home()).unwrap();
+            let session = store
+                .create_new("model".into(), None, project.path().into())
+                .unwrap()
+                .metadata
+                .id;
+            let runtime = bound_runtime(&session);
+            let task = "task-code-terminal-deadline";
+            admit_running_code_task(&runtime, &session, task);
+            let record = runtime.tasks.status(task).unwrap();
+            let clock = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            let _clock_context = clock.enter();
+            let budget =
+                crate::features::remote_control::controller::turn_budget::TurnBudget::for_test(
+                    std::time::Duration::from_secs(1),
+                );
+            let events = runtime
+                .tasks
+                .events_for_record(&record, null_events(), Some(budget));
+            let token = runtime
+                .begin_test_code_capture(&test_lease(), &session, task, project.path())
+                .unwrap();
+            let source = project.path().join("output.md");
+            std::fs::write(&source, "on-time staged output").unwrap();
+            let descriptors = runtime
+                .finish_code_capture(&test_lease(), &session, task, events, &token, &|| {
+                    budget.checkpoint(&tokio_util::sync::CancellationToken::new())
+                })
+                .unwrap();
+            assert_eq!(descriptors.len(), 1);
+            let copies = runtime.pending_code_artifacts.lock()[task].copied.clone();
+            assert!(copies.iter().all(|path| path.is_file()));
+            clock.block_on(tokio::time::advance(std::time::Duration::from_secs(2)));
+            runtime
+                .tasks
+                .complete(task, RemoteTaskTerminal::Succeeded, None, 1_100)
+                .unwrap();
+            assert_eq!(runtime.downloads.index().len(), 0);
+            assert!(runtime.pending_code_artifacts.lock().is_empty());
+            assert!(copies.iter().all(|path| !path.exists()));
+            assert_eq!(
+                std::fs::read_to_string(source).unwrap(),
+                "on-time staged output"
+            );
+        });
+    }
+
+    #[test]
     fn indexing_an_existing_file_exposes_no_path() {
-        let runtime = runtime();
+        let runtime = bound_runtime("session-0001");
+        admit_task(&runtime, "session-0001", "task-0001");
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("report.md");
         std::fs::write(&path, b"# report").unwrap();
@@ -1410,7 +2629,14 @@ mod tests {
         let runtime = bound_runtime(&session_id);
         admit_task(&runtime, &session_id, "task-0001");
         runtime
-            .begin_task_capture(&store, &test_lease(), &session_id, "task-0001")
+            .begin_task_capture(
+                &store,
+                &test_lease(),
+                &session_id,
+                "task-0001",
+                runtime.tasks.status("task-0001").unwrap().sequence,
+                &|| Ok(()),
+            )
             .unwrap();
 
         std::fs::write(&existing, b"world").unwrap();
@@ -1421,7 +2647,14 @@ mod tests {
             .complete("task-0001", RemoteTaskTerminal::Succeeded, None, 1_100)
             .unwrap();
         let descriptors = runtime
-            .finish_task_capture(&store, &test_lease(), &session_id, "task-0001")
+            .finish_task_capture(
+                &store,
+                &test_lease(),
+                &session_id,
+                "task-0001",
+                runtime.tasks.status("task-0001").unwrap().sequence,
+                &|| Ok(()),
+            )
             .unwrap();
         let mut names = descriptors
             .iter()
@@ -1471,7 +2704,7 @@ mod tests {
         let runtime = bound_runtime(&session_id);
         admit_running_code_task(&runtime, &session_id, "task-code-0001");
         runtime
-            .begin_code_capture(&test_lease(), &session_id, "task-code-0001", project.path())
+            .begin_test_code_capture(&test_lease(), &session_id, "task-code-0001", project.path())
             .unwrap();
 
         std::fs::write(&modified, b"new modified").unwrap();
@@ -1481,7 +2714,13 @@ mod tests {
         let events = Arc::new(RecordingEvents::default());
         let event_port: Arc<dyn ControllerTaskEventSink> = events.clone();
         let descriptors = runtime
-            .finish_code_capture(&test_lease(), &session_id, "task-code-0001", event_port)
+            .finish_test_code_capture(
+                &test_lease(),
+                &session_id,
+                "task-code-0001",
+                event_port,
+                &|| Ok(()),
+            )
             .unwrap();
         let mut names = descriptors
             .iter()
@@ -1559,7 +2798,7 @@ mod tests {
         let runtime = bound_runtime(&session_id);
         admit_running_code_task(&runtime, &session_id, "task-code-limit");
         runtime
-            .begin_code_capture(
+            .begin_test_code_capture(
                 &test_lease(),
                 &session_id,
                 "task-code-limit",
@@ -1570,7 +2809,13 @@ mod tests {
         oversized.set_len(MAX_CAPTURE_FILE_BYTES + 1).unwrap();
         assert_eq!(
             runtime
-                .finish_code_capture(&test_lease(), &session_id, "task-code-limit", null_events(),)
+                .finish_test_code_capture(
+                    &test_lease(),
+                    &session_id,
+                    "task-code-limit",
+                    null_events(),
+                    &|| Ok(())
+                )
                 .unwrap_err(),
             "artifact_capture_capacity"
         );
@@ -1586,11 +2831,11 @@ mod tests {
 
         admit_running_code_task(&runtime, &session_id, "task-code-fail");
         runtime
-            .begin_code_capture(&test_lease(), &session_id, "task-code-fail", project.path())
+            .begin_test_code_capture(&test_lease(), &session_id, "task-code-fail", project.path())
             .unwrap();
         let failed_output = project.path().join("failed.md");
         std::fs::write(&failed_output, b"must not be indexed").unwrap();
-        runtime.discard_code_capture(&test_lease(), &session_id, "task-code-fail");
+        runtime.discard_test_code_capture(&test_lease(), &session_id, "task-code-fail");
         runtime
             .tasks
             .complete("task-code-fail", RemoteTaskTerminal::Failed, None, 1_150)
@@ -1600,7 +2845,7 @@ mod tests {
 
         admit_running_code_task(&runtime, &session_id, "task-code-cancel");
         runtime
-            .begin_code_capture(
+            .begin_test_code_capture(
                 &test_lease(),
                 &session_id,
                 "task-code-cancel",
@@ -1615,11 +2860,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             runtime
-                .finish_code_capture(
+                .finish_test_code_capture(
                     &test_lease(),
                     &session_id,
                     "task-code-cancel",
                     null_events(),
+                    &|| Ok(()),
                 )
                 .unwrap_err(),
             "artifact_capture_binding_mismatch"
@@ -1656,7 +2902,7 @@ mod tests {
         ] {
             admit_running_code_task(&runtime, &session_id, task_id);
             runtime
-                .begin_code_capture(&test_lease(), &session_id, task_id, project.path())
+                .begin_test_code_capture(&test_lease(), &session_id, task_id, project.path())
                 .unwrap();
             std::fs::write(
                 project.path().join(format!("{task_id}.md")),
@@ -1666,7 +2912,9 @@ mod tests {
             let events = Arc::new(RecordingEvents::default());
             let event_port: Arc<dyn ControllerTaskEventSink> = events.clone();
             let staged = runtime
-                .finish_code_capture(&test_lease(), &session_id, task_id, event_port)
+                .finish_test_code_capture(&test_lease(), &session_id, task_id, event_port, &|| {
+                    Ok(())
+                })
                 .unwrap();
             assert_eq!(staged.len(), 1);
             assert!(
@@ -1720,19 +2968,20 @@ mod tests {
             for index in 0..MAX_CODE_CAPTURES {
                 captures.insert(
                     format!("occupied-{index}"),
-                    CodeArtifactCapture {
+                    Arc::new(CodeArtifactCapture {
+                        token: RemoteCodeCaptureToken::new(0),
                         session_id: "session-capacity".to_owned(),
                         lease: binding.clone(),
                         workspace_root: root.clone(),
                         before: HashMap::new(),
-                    },
+                    }),
                 );
             }
         }
         admit_running_code_task(&runtime, "session-capacity", "task-code-over-capacity");
         assert_eq!(
             runtime
-                .begin_code_capture(
+                .begin_test_code_capture(
                     &test_lease(),
                     "session-capacity",
                     "task-code-over-capacity",
@@ -1742,6 +2991,99 @@ mod tests {
             "artifact_capture_capacity"
         );
         assert_eq!(runtime.code_captures.lock().len(), MAX_CODE_CAPTURES);
+    }
+
+    #[test]
+    fn off_lock_code_copy_cannot_resurrect_after_clear_or_erase_a_concurrent_winner() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("PINVOU3_HOME");
+        // SAFETY: the shared paths test lock serializes process env writes.
+        unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
+        let store = SessionStore::boot_at_test_dir(home.path()).unwrap();
+        for disconnect in [true, false] {
+            let project = tempfile::tempdir().unwrap();
+            let session_id = store
+                .create_new("model".into(), None, project.path().to_path_buf())
+                .unwrap()
+                .metadata
+                .id;
+            let runtime = bound_runtime(&session_id);
+            let task_id = if disconnect {
+                "task-copy-clear"
+            } else {
+                "task-copy-winner"
+            };
+            admit_running_code_task(&runtime, &session_id, task_id);
+            runtime
+                .begin_test_code_capture(&test_lease(), &session_id, task_id, project.path())
+                .unwrap();
+            let source = project.path().join("output.md");
+            std::fs::write(&source, b"real private code output").unwrap();
+            let copied = Arc::new(std::sync::Barrier::new(2));
+            let resume = Arc::new(std::sync::Barrier::new(2));
+            let copied_hook = Arc::clone(&copied);
+            let resume_hook = Arc::clone(&resume);
+            *runtime.before_code_publish.lock() = Some(Box::new(move || {
+                copied_hook.wait();
+                resume_hook.wait();
+            }));
+            let worker_runtime = Arc::clone(&runtime);
+            let worker_session = session_id.clone();
+            let worker = std::thread::spawn(move || {
+                worker_runtime.finish_test_code_capture(
+                    &test_lease(),
+                    &worker_session,
+                    task_id,
+                    null_events(),
+                    &|| Ok(()),
+                )
+            });
+            copied.wait(); // actual copies exist, but no index ownership yet
+            assert_eq!(runtime.downloads.index().len(), 0);
+            if disconnect {
+                runtime.clear_connection(&test_lease().connection_id);
+            } else {
+                // A second attempt wins the SAME capture token. The losing
+                // candidate must clean only its own unique files, not this index.
+                assert_eq!(
+                    runtime
+                        .finish_test_code_capture(
+                            &test_lease(),
+                            &session_id,
+                            task_id,
+                            null_events(),
+                            &|| Ok(())
+                        )
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+            resume.wait();
+            assert_eq!(
+                worker.join().unwrap().unwrap_err(),
+                "artifact_capture_binding_mismatch"
+            );
+            assert!(runtime.code_captures.lock().is_empty());
+            let count = if disconnect { 0 } else { 1 };
+            assert_eq!(runtime.downloads.index().len(), count);
+            assert_eq!(runtime.pending_code_artifacts.lock().len(), count);
+            assert_eq!(
+                std::fs::read_dir(private_artifact_root(&session_id).unwrap())
+                    .unwrap()
+                    .count(),
+                count
+            );
+            assert_eq!(std::fs::read(&source).unwrap(), b"real private code output");
+            runtime.clear_connection(&test_lease().connection_id);
+        }
+        match previous {
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
     }
 
     #[test]

@@ -8,16 +8,13 @@
  * is gated by the intent sequence and generation/lease epoch held in
  * `features/remote-control/remote-control-state.js`.
  *
- * No API key, credential reference or `SavedModel` body ever crosses this file:
- * model listing returns opaque descriptors and task submission only passes the
- * selected model ID plus the task binding.
- *
- * Status DTOs are projected unchanged through the same state functions for
- * invoke responses and events. A07 is an adapter/state-machine stage, not an
- * end-to-end task delivery: ACP approval dispatch, temporary model credentials,
- * artifact indexing and task/model/permission wire integration remain A08's
- * responsibility. In particular selectedModelId/permissionRequest forwarding
- * alone does not mean the current Rust submit command consumes those fields.
+ * A07 exposes lifecycle/status, A-local in-memory history and B-local stop adapters. Model export,
+ * permission decisions and authenticated B-history mutation are absent from the
+ * renderer surface until A08 binds them to authenticated Rust transport.
+ * Transfer inputs also stay closed until a bounded task/receipt consumer owns
+ * completed files; a successful staging write alone is not task delivery.
+ * Task/session admission is also closed until authenticated Rust dispatch.
+ * These kernels are not claimed as end-to-end product functionality here.
  */
 (function (root) {
   "use strict";

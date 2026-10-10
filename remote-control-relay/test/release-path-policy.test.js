@@ -53,6 +53,8 @@ const criticalPaths = [
   "pinvou3-app/src-tauri/src/app/commands/mod.rs",
   "pinvou3-app/src-tauri/src/features/remote_control/controller/task.rs",
   "pinvou3-app/src-tauri/src/platform/capabilities.rs",
+  "pinvou3-app/src-tauri/build.rs",
+  "pinvou3-app/src-tauri/build_support/desktop_controller.rs",
   "pinvou3-app/src-tauri/capabilities/default.json",
   "pinvou3-app/src-tauri/src/app/desktop_remote_composition.rs",
   "pinvou3-app/src-tauri/src/features/sessions/remote_proxy/mod.rs",
@@ -93,9 +95,21 @@ test("PR and release workflows execute or route every policy-sensitive change", 
   const releaseWorkflow = parse(release);
   const prWorkflow = parse(pr);
   const remoteGateSteps = releaseWorkflow.jobs["remote-control-release-gate"].steps;
+  assert.equal(remoteGateSteps.find((step) => step?.uses?.startsWith("actions/checkout@"))?.with?.["persist-credentials"], false);
+  const buildEvidence = parse(await readFile(new URL("../../.github/workflows/windows-remote-control-build-evidence.yml", import.meta.url), "utf8"));
+  assert.equal(buildEvidence.jobs["protected-windows-installer"].env.PINVOU_DESKTOP_CONTROLLER_ENABLED, "1");
+  assert.doesNotMatch(JSON.stringify(buildEvidence), /WriteAllBytes|resources\/bge-m3/u);
+  const windowsSteps = releaseWorkflow.jobs["build-windows-x64"].steps;
+  assert.equal(windowsSteps.find((step) => step?.run === "npm run build:nsis:local")?.if, "env.PINVOU_DESKTOP_CONTROLLER_ENABLED != '1'");
+  assert.match(windowsSteps.find((step) => step?.name === "Reuse the exact qualified signed installer").run, /New-Item -ItemType Directory/u);
   const remoteGateRendered = JSON.stringify(remoteGateSteps);
-  assert.equal(remoteGateSteps.some((step) => step?.uses?.startsWith("actions/setup-node@")), false);
-  assert.doesNotMatch(remoteGateRendered, /npm(?:\s+--prefix\s+remote-control-relay)?\s+ci/u);
+  const setupIndex = remoteGateSteps.findIndex((step) => step?.uses?.startsWith("actions/setup-node@"));
+  const installIndex = remoteGateSteps.findIndex((step) => step?.run?.includes('npm --prefix remote-control-relay ci'));
+  const gateIndex = remoteGateSteps.findIndex((step) => step?.run?.includes('node remote-control-relay/scripts/controller-release-gate.mjs'));
+  assert.ok(setupIndex >= 0 && installIndex > setupIndex && gateIndex > installIndex);
+  assert.equal(remoteGateSteps[setupIndex].if, "env.PINVOU_DESKTOP_CONTROLLER_ENABLED == '1'");
+  assert.equal(remoteGateSteps[installIndex].if, "env.PINVOU_DESKTOP_CONTROLLER_ENABLED == '1'");
+  assert.match(remoteGateSteps[installIndex].run, /npm --prefix remote-control-relay ci --prefer-offline --no-audit --ignore-scripts/u);
   assert.match(remoteGateRendered, /node remote-control-relay\/scripts\/controller-release-gate\.mjs/u);
   const prContractRendered = JSON.stringify(prWorkflow.jobs["release-contract-test"].steps);
   assert.match(prContractRendered, /npm --prefix remote-control-relay ci --prefer-offline --no-audit --ignore-scripts/u);

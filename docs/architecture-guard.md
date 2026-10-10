@@ -79,7 +79,26 @@ python scripts/architecture-guard.py
 模块迁移而添加的标记不会被接受。`include!` 和 `#[path]` 本身不再作为架构违规；是否
 合理由实际职责、依赖方向和生成代码边界判断。
 
+另有一个精确的测试类型例外：feature 内
+`features/remote_control/controller/relay_runtime/reader_resume_tests.rs`
+文件头使用守卫登记的 `allow-reader-test-host-type` 理由，并自行限定
+`#![cfg(all(test, target_os = "windows"))]`。只允许顶层
+`resume_round_trip<T>(build_host: impl FnOnce() -> (tauri::AppHandle, T))`
+签名中的一个类型路径，Wry 工厂仍由 `app/commands/remote_control/` 测试构建。
+该例外不增加宿主 API 基线，也不是文件级放行；增加类型、以等数量宿主调用替代类型、
+新增事件调用（含 `super::*` 继承的 Emitter）、Command、反向 app 依赖、移除 test/Windows
+条件或复制到其他文件均失败。真实 reader/manager/worker 回归不得改成纯状态 mock。
+
 ## 历史基线
+
+crate/layer root 的 use 别名按真实词法块隔离：块内 item use 不依赖声明顺序，
+普通块可继承所属模块的导入，子模块不能用裸名继承父模块导入；显式 self/super
+按模块解析。父、子、兄弟块同名别名互不覆盖；同一作用域冲突或别名循环按
+rust_crate_root_alias_ambiguous 失败关闭，不允许用后置测试模块隐去 feature → app 引用。
+根 extern crate self 别名单独作为 extern prelude 解析，不与普通 use 的可见性混用。
+具体模块/条目别名的成员引用由原始 import 记录依赖，不重复增加调用计数；
+cfg 选出的多个具体模块若属于同一门禁目的地（同一 layer/feature），仅按该目的地
+归类，不替代 Rust 编译器的名字解析或条件互斥检查。跨目的地冲突仍失败关闭。
 
 `scripts/architecture-baseline.json` 记录启用门禁时已经存在的架构债务。门禁不允许：
 
@@ -97,7 +116,7 @@ PR CI 还会通过 `--base-ref` 对比目标分支中的基线。当前分支不
 远控宿主 API 规则仅在目标基线缺少该规则键时可按已核定的历史调用额度首次登记；
 已存在但为空的规则表示债务清零，不能重新放宽。Rust 依赖解析升级使用一次性
 `rust_dependency_resolution_v1` 标记和固定迁移锚点
-`5bedd1ba3c4eb6534821e293bea408470155f69a`（DEV-26 开工前、已审任务之后的提交）。
+`061032e02b60366a8b9a09af134bb8ba4c7a2e19`（本轮独立审核通过的固定 A19 提交）。
 `--base-ref` 检查锚点确属候选分支历史，以当前解析器只读扫描目标分支 T、
 锚点 A 和两者的共同祖先 M。首次迁移每条依赖引用的上限为
 `max(0, T + (A - M))`：保留本任务之前已审分支提交的净变化，同时计入目标分支
@@ -107,19 +126,17 @@ PR CI 还会通过 `--base-ref` 对比目标分支中的基线。当前分支不
 须重新审计并更新迁移锚点，不能静默放行。迁移标记落地后，清零债务不能恢复，
 也不能改动锚点重放迁移。无 `--base-ref` 不授予迁移额度。
 
-本次主线同步以固定目标 `0841a2d04dcd9aff9eba57c29525a8854694090b`
-重新核算同一迁移，不改变标记、锚点或门禁政策。`assistant->marketplace` 在
-共同祖先 M 与锚点 A 均为 45 次，目标 T 为 58 次，额度为 58；
-`runtime_bundle->marketplace` 的 M/A 均为 38 次、T 为 50 次，额度为 50。
-原分支记录的 57/47 已不包含目标主线的内置插件变更，故仅将这两项登记为
-既有公式的精确结果，并保全主线功能；其余额度及环保持不变。
-必须运行 `--base-ref 0841a2d04dcd9aff9eba57c29525a8854694090b`
-验证首次迁移上限，后续目标落地此迁移后仍受普通棘轮约束，不能再次提高。
-
-本任务的独立评审以任务起点锚点为基准。当前 `origin/main` 已将
-`connectors->marketplace` 的旧引用从 14 次减少到 10 次；本分支锚点该边为 14 次，
-并无本任务之前的净新增。与该主线集成时须继承其清理、把本分支实际引用及基线
-一同降至不超过 10 次，再重跑 `--base-ref origin/main`；不能放宽迁移门禁以保留 14 次。
+本轮在迁移尚未落入目标分支时，经明确架构审批将过期锚点更新为上述已审 A19，
+并以固定集成目标 `006c9ce7130e7e35c9871b03ff5d4b26a3ecd822` 严格重新定标。
+共同祖先 M 就是该目标 T，因此额度等于当前扫描器从 A19 源码算出的次数：
+`assistant->marketplace` 为 65，`assistant->remote_control` 为 33，
+`connectors->marketplace` 为 12，`connectors->runtime_bundle` 为 7，
+`runtime_bundle->marketplace` 为 59。A20 测试适配器进一步消除一次 marketplace 引用，
+故实际基线登记为 64/33/12/7/59，不保留多余额度；六 feature 依赖环不扩张。
+这记录了前序已审的预算与中文技能回归依赖，不表示已经清除这些耦合。
+必须运行 `--base-ref 006c9ce7130e7e35c9871b03ff5d4b26a3ecd822`
+验证首次迁移上限。若目标继续清债，合成额度也必须随之下降；目标落地迁移后仍受
+普通棘轮约束，不得再次移动锚点、重放迁移或恢复已经清零的债务。
 
 查看当前扫描结果：
 

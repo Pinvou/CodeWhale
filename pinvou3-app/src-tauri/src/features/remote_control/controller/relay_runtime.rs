@@ -768,9 +768,7 @@ const RELAY_TRUST_UNCONFIGURED: &str = "relay_trust_unconfigured";
 /// B 端单调时钟。注册、握手、watchdog 与状态投影必须共用同一个原点，否则
 /// deadline 会由不同基准推导。
 pub(crate) fn controlled_monotonic_millis() -> u64 {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    super::clock::monotonic_millis()
 }
 
 pub(crate) struct ControlledRelayWorker {
@@ -787,6 +785,25 @@ pub(crate) struct ControlledRelayWorker {
     /// Dropping the generation owner clears them; every hit is fingerprint-bound.
     action_results: std::sync::Arc<RemoteActionResultCache>,
     business_epoch: std::sync::Arc<AtomicU64>,
+    #[cfg(test)]
+    processed_frames: Option<tokio::sync::mpsc::Sender<Value>>,
+}
+
+/// Test-only completion observation: follows the exact production branch,
+/// including its continue/return paths, without injecting a routing shortcut.
+#[cfg(test)]
+struct ProcessedControllerFrame {
+    sink: Option<tokio::sync::mpsc::Sender<Value>>,
+    frame: Value,
+}
+
+#[cfg(test)]
+impl Drop for ProcessedControllerFrame {
+    fn drop(&mut self) {
+        if let Some(sink) = &self.sink {
+            let _ = sink.try_send(self.frame.clone());
+        }
+    }
 }
 
 /// Narrow port over the generation-bound Relay lane. Keeps the registration
@@ -982,6 +999,28 @@ pub(crate) async fn wait_for_registration<P: ControlledRelayPort>(
     }
 }
 
+/// A rejected registration owns no serving lifecycle. Release the worker and
+/// its generation-bound channel before completing the command, including when
+/// an already-stopped generation reaches registration after its stop signal.
+async fn finish_controlled_registration<W, S, F>(
+    worker: W,
+    result: Result<S, String>,
+    done: oneshot::Sender<Result<S, String>>,
+    fail: impl FnOnce(&W, &str),
+    serve: impl FnOnce(W) -> F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    if let Err(error) = &result {
+        fail(&worker, error);
+        drop(worker);
+        let _ = done.send(result);
+        return;
+    }
+    let _ = done.send(result);
+    serve(worker).await;
+}
+
 impl ControlledRelayWorker {
     pub(crate) async fn start(
         app: AppHandle,
@@ -1004,16 +1043,19 @@ impl ControlledRelayWorker {
             business,
             action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
             business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            processed_frames: None,
         };
         tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
-            if let Err(error) = &result {
-                worker.fail_registration(error);
-            }
-            let _ = done_tx.send(result);
-            // Keep the generation-bound receiver alive after registration. Later
-            // E2E tasks install handshake and encrypted business dispatch here.
-            worker.serve().await;
+            finish_controlled_registration(
+                worker,
+                result,
+                done_tx,
+                |worker, error| worker.fail_registration(error),
+                |worker| worker.serve(),
+            )
+            .await;
         });
         Ok(done_rx)
     }
@@ -1130,6 +1172,19 @@ impl ControlledRelayWorker {
             tokio::select! {
                 biased;
                 _ = poll.tick() => {
+                    if joined {
+                        let manager = self.app.state::<ControlledDeviceManager>();
+                        let before = manager.status().kind();
+                        let Ok(status) = manager.poll_watchdog_for(&self.operation, controlled_monotonic_millis()) else {
+                            break 'serve;
+                        };
+                        if status.kind() != before {
+                            emit_controlled_status(&self.app, &status);
+                        }
+                        if matches!(status.kind(), ControlledStatusKind::Error | ControlledStatusKind::Stopped) {
+                            break 'serve;
+                        }
+                    }
                     if joined && !resume.is_active() {
                         if let Err(code) = heartbeat.pump(
                             self.app.state::<ControlledDeviceManager>().inner(),
@@ -1144,6 +1199,11 @@ impl ControlledRelayWorker {
                 }
                 message = self.channel.recv() => {
                     let Some(message) = message else { break 'serve };
+                    #[cfg(test)]
+                    let _processed = ProcessedControllerFrame {
+                        sink: self.processed_frames.clone(),
+                        frame: message.clone(),
+                    };
                     if message.get("type").and_then(Value::as_str) == Some("desktop_controller_stop") {
                         break 'serve;
                     }
@@ -1160,7 +1220,10 @@ impl ControlledRelayWorker {
                                 &mut resume,
                                 &message,
                             ) {
-                                ControlledResumeOutcome::Failed => break 'serve,
+                                ControlledResumeOutcome::Failed => {
+                                    self.fail_runtime("desktop_remote_resume_rejected");
+                                    break 'serve;
+                                },
                                 ControlledResumeOutcome::Completed => {
                                     let epoch = message.get("liveness_epoch_b").and_then(Value::as_str).unwrap_or_default();
                                     let Ok((lease, _)) = manager.liveness_runtime_context() else { break 'serve };
@@ -1169,11 +1232,11 @@ impl ControlledRelayWorker {
                                         break 'serve;
                                     }
                                     evidence = LivenessEvidenceState::default();
-                                    let status = manager.poll_watchdog(controlled_monotonic_millis());
+                                    let Ok(status) = manager.poll_watchdog_for(&self.operation, controlled_monotonic_millis()) else { break 'serve };
                                     emit_controlled_status(&self.app, &status);
                                 }
                                 ControlledResumeOutcome::Progressed => {
-                                    let status = manager.poll_watchdog(controlled_monotonic_millis());
+                                    let Ok(status) = manager.poll_watchdog_for(&self.operation, controlled_monotonic_millis()) else { break 'serve };
                                     emit_controlled_status(&self.app, &status);
                                 }
                                 ControlledResumeOutcome::Ignored => {}
@@ -1522,6 +1585,13 @@ impl ControlledRelayWorker {
         }
         // 出站旁路（journal 事件回传）与通道一起就位。
         let outbound = self.app.state::<ControlledOutboundState>();
+        let transport = self
+            .channel
+            .authenticated_transport(&lease.context, lease.negotiated_capabilities.clone())
+            .map_err(|_| self.fail_completed_handshake(&manager))?;
+        manager
+            .replace_authenticated_transport(self.operation.clone(), transport)
+            .map_err(|_| self.fail_completed_handshake(&manager))?;
         outbound.install(self.channel.sender());
         let status = manager
             .complete_connected(self.operation.clone(), lease)
@@ -2197,6 +2267,9 @@ impl ControlledOutboundState {
 /// E2E-06：B 端恢复尝试状态（`challenge_b64` 非空即代表一次进行中的恢复）。
 #[derive(Default)]
 pub(crate) struct ControlledResumeAttempt {
+    operation: Option<ControlledOperation>,
+    // Five actual send points in the frozen resume exchange, never peer IDs.
+    request_ids: Vec<String>,
     lease: Option<LeaseContext>,
     activation_id: Option<String>,
     challenge_b64: String,
@@ -2231,7 +2304,9 @@ pub(crate) enum ControlledResumeOutcome {
 /// E2E-06：`desktop socket` 掉线后启动 B 端恢复：投影 reconnecting、取恢复材料，
 /// 并按冻结协议发出 `controller_resume_prepare`。任一步失败返回 false，调用方
 /// 必须结束本代通道。管理器内部的恢复失败会立即清理租约与本代凭证；构造或
-/// 入队等管理器外失败由已冻结的 watchdog 截止及独立每秒 reaper 有界收口，
+/// 入队等管理器外失败由已冻结的 watchdog 截止及命令层
+/// `desktop_remote_controlled::spawn_watchdog_reaper`（应用 setup 注册、独立每秒轮询）
+/// 有界收口；它独立于本 worker 的两秒 poll，不随本 worker 退出而停止。
 /// 不表示所有返回 false 的路径都已经完成清理，也不会因恢复而延长截止。
 pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
     port: &P,
@@ -2243,7 +2318,7 @@ pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
     };
     let now_b = controlled_monotonic_millis();
     let _ = manager.mark_transport_disconnected(now_b);
-    let Ok(material) = manager.begin_resume(operation, now_b) else {
+    let Ok(material) = manager.begin_resume(operation.clone(), now_b) else {
         return false;
     };
     let Ok(challenge) = new_resume_challenge() else {
@@ -2263,6 +2338,8 @@ pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
     if port.try_send(frame).is_err() {
         return false;
     }
+    resume.operation = Some(operation);
+    resume.request_ids = vec![request_id];
     resume.lease = Some(material.lease);
     resume.challenge_b64 = challenge;
     resume.relay_deadline_identity_ms = material.relay_deadline_identity_ms;
@@ -2295,6 +2372,22 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
     let Some(lease) = resume.lease.clone() else {
         return ControlledResumeOutcome::Failed;
     };
+    if resume.operation.as_ref() != Some(&operation) {
+        return ControlledResumeOutcome::Ignored;
+    }
+    // Relay errors deliberately have no lease tuple. Authority comes from
+    // strict protocol validation and this operation's locally sent request.
+    if kind == "error" {
+        if validate_controller_message_json(&message.to_string(), SenderRole::Relay).is_err()
+            || !message
+                .get("request_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| resume.request_ids.iter().any(|sent| sent == id))
+        {
+            return ControlledResumeOutcome::Ignored;
+        }
+        return ControlledResumeOutcome::Failed;
+    }
     // 审核修复：Relay/A 的恢复帧必须绑定当前租约；旧代际或旧租约的残留帧一律
     // 丢弃，既不推进相位也不终止候选。
     if !resume_frame_matches_lease(&lease, message) {
@@ -2321,12 +2414,14 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             {
                 return ControlledResumeOutcome::Failed;
             }
-            let Ok(confirm) = lane.seal_resume_confirm(&request_id(), activation_id) else {
+            let sent_id = request_id();
+            let Ok(confirm) = lane.seal_resume_confirm(&sent_id, activation_id) else {
                 return ControlledResumeOutcome::Failed;
             };
             if port.try_send(confirm).is_err() {
                 return ControlledResumeOutcome::Failed;
             }
+            resume.request_ids.push(sent_id);
             resume.activation_id = Some(activation_id.to_owned());
             ControlledResumeOutcome::Progressed
         }
@@ -2358,9 +2453,10 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
                 }
                 resume.confirmed = true;
             }
+            let sent_id = request_id();
             let Ok(ack) = build_controller_resume_activation_ack(
                 &lease,
-                &request_id(),
+                &sent_id,
                 activation_id,
                 resume.relay_deadline_identity_ms,
             ) else {
@@ -2379,6 +2475,7 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             if port.try_send(ack).is_err() {
                 return ControlledResumeOutcome::Failed;
             }
+            resume.request_ids.push(sent_id);
             resume.ack_sent = true;
             ControlledResumeOutcome::Progressed
         }
@@ -2402,9 +2499,10 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             {
                 return ControlledResumeOutcome::Failed;
             }
+            let sent_id = request_id();
             let Ok(liveness) = build_controller_post_activation_liveness(
                 &lease,
-                &request_id(),
+                &sent_id,
                 activation_id,
                 &resume.liveness_epoch_b,
             ) else {
@@ -2413,6 +2511,7 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             if port.try_send(liveness).is_err() {
                 return ControlledResumeOutcome::Failed;
             }
+            resume.request_ids.push(sent_id);
             resume.liveness_sent = true;
             ControlledResumeOutcome::Progressed
         }
@@ -2432,10 +2531,11 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             if !resume.liveness_sent || resume.ready_sent {
                 return ControlledResumeOutcome::Ignored;
             }
+            let sent_id = request_id();
             let Ok(ready) = build_controller_resume_ready_ack(
                 &lease,
                 role,
-                &request_id(),
+                &sent_id,
                 activation_id,
                 liveness_epoch_b,
                 heartbeat_sequence_b,
@@ -2455,6 +2555,7 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             if port.try_send(ready).is_err() {
                 return ControlledResumeOutcome::Failed;
             }
+            resume.request_ids.push(sent_id);
             resume.ready_sent = true;
             ControlledResumeOutcome::Progressed
         }
@@ -2490,10 +2591,14 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             let Ok(fingerprint) = lane.resume_fingerprint(activation_id) else {
                 return ControlledResumeOutcome::Failed;
             };
+            let Some(resume_request_id) = message.get("request_id").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
             if manager
                 .complete_resumed(
                     operation,
                     activation_id,
+                    resume_request_id,
                     now_b,
                     liveness_epoch_a,
                     token,
@@ -2508,7 +2613,6 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             resume.reset();
             ControlledResumeOutcome::Completed
         }
-        "error" => ControlledResumeOutcome::Failed,
         _ => ControlledResumeOutcome::Ignored,
     }
 }
@@ -2632,9 +2736,102 @@ fn sanitize_error(value: &str) -> String {
     }
 }
 
+// This integration uses the real Windows Wry host without creating windows;
+// unsupported desktop-control platforms do not run a simulated Wry adapter.
+#[cfg(test)]
+pub(crate) mod reader_resume_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RegistrationDropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for RegistrationDropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    struct RegistrationCompletionProbe {
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        observed: std::sync::atomic::AtomicUsize,
+    }
+
+    impl std::task::Wake for RegistrationCompletionProbe {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            let dropped = self.dropped.load(std::sync::atomic::Ordering::SeqCst);
+            self.observed.store(
+                if dropped { 1 } else { 2 },
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_registration_drops_worker_before_reply_and_never_serves() {
+        for error in ["pairing_registration_failed", "desktop_remote_stale_result"] {
+            let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let completion = std::sync::Arc::new(RegistrationCompletionProbe {
+                dropped: dropped.clone(),
+                observed: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let waker = std::task::Waker::from(completion.clone());
+            let (done_tx, done_rx) = oneshot::channel::<Result<(), String>>();
+            let mut done_rx = Box::pin(done_rx);
+            assert!(
+                std::future::Future::poll(
+                    done_rx.as_mut(),
+                    &mut std::task::Context::from_waker(&waker),
+                )
+                .is_pending()
+            );
+            finish_controlled_registration(
+                RegistrationDropProbe(dropped.clone()),
+                Err(error.to_owned()),
+                done_tx,
+                |worker, failure| {
+                    assert_eq!(failure, error);
+                    assert!(!worker.0.load(std::sync::atomic::Ordering::SeqCst));
+                },
+                |_| async { panic!("failed registration has no serving lifecycle") },
+            )
+            .await;
+            assert_eq!(done_rx.await.unwrap().unwrap_err(), error);
+            assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+            // The actual oneshot wakes synchronously at completion: a mutation
+            // that sends before dropping would observe 2 instead of 1.
+            assert_eq!(
+                completion
+                    .observed
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_registration_replies_before_serving_and_retains_worker() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (done_tx, mut done_rx) = oneshot::channel::<Result<u8, String>>();
+        finish_controlled_registration(
+            RegistrationDropProbe(dropped.clone()),
+            Ok(7),
+            done_tx,
+            |_, _| panic!("successful registration must not fail"),
+            |worker| async move {
+                assert_eq!(done_rx.try_recv().unwrap().unwrap(), 7);
+                assert!(!worker.0.load(std::sync::atomic::Ordering::SeqCst));
+                drop(worker);
+            },
+        )
+        .await;
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[test]
     fn compact_value_fingerprint_preserves_the_original_serialized_bytes() {
@@ -4031,6 +4228,18 @@ mod tests {
                 },
             )
             .unwrap();
+        let transport = super::super::test_support::resume_reader_transport(
+            super::super::relay_transport::ControllerRole::ControlledB,
+            lease_context.clone(),
+            vec![
+                "encrypted_frames_v1".into(),
+                "resume_v1".into(),
+                "role_liveness_v1".into(),
+            ],
+        );
+        manager
+            .replace_authenticated_transport(operation.clone(), transport.clone())
+            .unwrap();
         let lane = ControlledLaneState::default();
         lane.install(HandshakeRole::B, &lease_context, b_session)
             .unwrap();
@@ -4051,6 +4260,7 @@ mod tests {
         assert_eq!(heartbeat_port.frames.lock()[0]["heartbeat_sequence"], "1");
         let mut resume = ControlledResumeAttempt::default();
         lane.suspend();
+        super::super::relay_transport::disconnect_test_transport(&transport);
         assert!(begin_controlled_resume(&port, &manager, &mut resume));
         heartbeat
             .pump(&manager, &operation, resume.is_active(), &heartbeat_port)
@@ -4061,6 +4271,37 @@ mod tests {
             "recovery never emits role evidence"
         );
         assert!(resume.is_active(), "恢复尝试必须处于进行中");
+        let sent_request = port.sent.lock().unwrap()[0]["request_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let before_error = manager.status();
+        for error in [
+            json!({"v":1,"type":"error","request_id":"request-foreign-0001",
+                "code":"invalid_message","message":"resume rejected"}),
+            json!({"v":2,"type":"error","request_id":sent_request,
+                "code":"invalid_message","message":"legacy rejected"}),
+            json!({"v":1,"type":"error","request_id":sent_request,"message":"missing code"}),
+        ] {
+            assert_eq!(
+                handle_controlled_resume_frame(&port, &manager, &lane, &mut resume, &error),
+                ControlledResumeOutcome::Ignored
+            );
+            assert_eq!(manager.status(), before_error);
+        }
+        // The worker consumes Failed synchronously with fail_operation before
+        // ending the lane; tuple-less Relay rejection must not wait for TTL.
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &json!({"v":1,"type":"error","request_id":sent_request,
+                "code":"invalid_message","message":"resume rejected"})
+            ),
+            ControlledResumeOutcome::Failed
+        );
         let activation = "activation-0001";
 
         // provisional → B 回 confirm。
@@ -4210,6 +4451,7 @@ mod tests {
             ControlledResumeOutcome::Ignored
         );
         assert!(resume.is_active());
+        super::super::relay_transport::dispatch_test_transport_frame(&transport, &final_frame);
         assert!(
             lane.is_suspended(),
             "foreign B epoch cannot reopen the lane or install heartbeat state"

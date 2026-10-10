@@ -14,9 +14,9 @@
 #     3) fail2ban:启动隧道前对 relay 主机 IP unbanip(未封时为无害 no-op)
 #
 # 架构(详见 docs/remote-e2e-test-endpoint.md):
-#   手机/桌面端 → 前端代理(admin@8.218.49.20, nginx pinvou.com)
-#     → 127.0.0.1:8788(SSH 反向隧道,relay-tunnel 账号)→ relay 主机(root@47.120.8.237)
-#     → pinvou-remote-relay-test.service(node, 端口 8788)
+#   手机/桌面端 → 配置的前端代理（nginx）
+#     → 127.0.0.1:8788（SSH 反向隧道，专用低权限账号）→ 配置的 Relay 主机
+#     → 独立测试服务（node，端口 8788）
 #   云安全组只放行代理→relay 主机的 8787(生产),所以测试实例走反向隧道。
 #
 # 用法:
@@ -28,10 +28,12 @@
 #   - TEST_DIR 必须精确等于 /opt/pinvou-remote-relay-test(--teardown 的 rm -rf 依赖此);
 #   - TEST_PORT 必须是 1024-65535 且不得为生产端口 8787;BASE_PATH 必须以 /pinvou3/remote-test 开头。
 #
-# 可用环境变量覆盖(默认值即当前线上布局):
-#   SSH_KEY        ~/.ssh/id_ed25519_pinvou8
-#   PROXY_SSH_JUMP  (可选) 本机无法直连前端代理时用的 SSH 跳板,例如 root@47.120.8.237;
-#                   跳板只做 TCP 转发,认证仍使用本机 SSH_KEY。仅允许登记值。
+# 必填环境变量（仅由本地受控配置或 secret 管理器提供）：
+#   RELAY_SERVER / EXPECTED_RELAY_SERVER：实际与独立确认的 Relay SSH 目标。
+#   PROXY_SERVER / EXPECTED_PROXY_SERVER：实际与独立确认的代理 SSH 目标。
+#   SSH_KEY：本地部署私钥路径，不使用个人文件默认值。
+# 可选：PROXY_SSH_JUMP / EXPECTED_PROXY_SSH_JUMP（跳板非空时必须成对登记）。
+# 默认测试隔离布局：
 #   TEST_DIR       /opt/pinvou-remote-relay-test
 #   TEST_PORT      8788
 #   BASE_PATH      /pinvou3/remote-test
@@ -39,7 +41,7 @@
 #   SKIP_LOCAL_TESTS=1                   跳过本地 npm test(默认会跑)
 #   SKIP_WEB_BUILD=1                     使用已经构建并验证的 web/dist
 #   ENABLE_DESKTOP_CONTROLLER=1          同时启用 Windows 双端远控的 controller-v1 lane:
-#                                        部署时在 $TEST_DIR/controller.env(0600) 生成并复用
+#                                        部署时在 /var/lib/pinvou-remote-relay-test/identity/(0700) 生成并复用
 #                                        一套 enrollment/pairing HMAC 与 Relay 签名密钥，
 #                                        服务单元改用 EnvironmentFile 加载；脚本结束时打印
 #                                        客户端需要 pin 的签名公钥。默认 0 = 只服务 WebUI v2。
@@ -49,9 +51,9 @@ set -eEuo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELAY_DIR="$ROOT/remote-control-relay"
-RELAY_SERVER="${RELAY_SERVER:-root@47.120.8.237}"
-PROXY_SERVER="${PROXY_SERVER:-admin@8.218.49.20}"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519_pinvou8}"
+RELAY_SERVER="${RELAY_SERVER:-}"
+PROXY_SERVER="${PROXY_SERVER:-}"
+SSH_KEY="${SSH_KEY:-}"
 TEST_DIR="${TEST_DIR:-/opt/pinvou-remote-relay-test}"
 TEST_PORT="${TEST_PORT:-8788}"
 BASE_PATH="${BASE_PATH:-/pinvou3/remote-test}"
@@ -68,11 +70,10 @@ SSHD_BLOCK_END="# END PINVOU3 REMOTE TEST TUNNEL"
 TUNNEL_KEY_COMMENT="relay-test-tunnel"
 TUNNEL_USER="relay-tunnel"
 
-# 登记主机:脚本的一切远端操作只允许落在这两台机器上。
-EXPECTED_RELAY_SERVER="root@47.120.8.237"
-EXPECTED_PROXY_SERVER="admin@8.218.49.20"
-# 允许的前端代理跳板(为空表示直连)。
-EXPECTED_PROXY_SSH_JUMP="root@47.120.8.237"
+# 独立登记值不得从实际目标推导，防止一次误设同时改掉确认值。
+EXPECTED_RELAY_SERVER="${EXPECTED_RELAY_SERVER:-}"
+EXPECTED_PROXY_SERVER="${EXPECTED_PROXY_SERVER:-}"
+EXPECTED_PROXY_SSH_JUMP="${EXPECTED_PROXY_SSH_JUMP:-}"
 PROD_PORT=8787
 RELAY_HOST_IP="${RELAY_SERVER#*@}"
 
@@ -87,16 +88,33 @@ trap on_err ERR
 
 # 在任何远端变更之前校验目标与路径,防止 env 覆盖把部署/teardown 指到错误目标。
 validate_config() {
-  local err=0
+  local err=0 target octet address
+  if [[ -z "$RELAY_SERVER" || -z "$EXPECTED_RELAY_SERVER" || -z "$PROXY_SERVER" || -z "$EXPECTED_PROXY_SERVER" || -z "$SSH_KEY" ]]; then
+    echo "拒绝执行: 必须显式提供两个 SSH 目标、独立登记目标和 SSH_KEY" >&2; err=1
+  fi
   if [ "$RELAY_SERVER" != "$EXPECTED_RELAY_SERVER" ]; then
-    echo "拒绝执行: RELAY_SERVER=$RELAY_SERVER 不是登记的 relay 主机($EXPECTED_RELAY_SERVER)" >&2; err=1
+    echo "拒绝执行: Relay 目标与独立登记目标不一致" >&2; err=1
   fi
   if [ "$PROXY_SERVER" != "$EXPECTED_PROXY_SERVER" ]; then
-    echo "拒绝执行: PROXY_SERVER=$PROXY_SERVER 不是登记的前端代理($EXPECTED_PROXY_SERVER)" >&2; err=1
+    echo "拒绝执行: 代理目标与独立登记目标不一致" >&2; err=1
   fi
-  if [ -n "$PROXY_SSH_JUMP" ] && [ "$PROXY_SSH_JUMP" != "$EXPECTED_PROXY_SSH_JUMP" ]; then
-    echo "拒绝执行: PROXY_SSH_JUMP=$PROXY_SSH_JUMP 不是登记的跳板($EXPECTED_PROXY_SSH_JUMP)" >&2; err=1
+  if [ "$PROXY_SSH_JUMP" != "$EXPECTED_PROXY_SSH_JUMP" ]; then
+    echo "拒绝执行: 跳板目标与独立登记目标不一致" >&2; err=1
   fi
+  # 后续代理白名单和隧道使用字面 IPv4；禁止 SSH 选项、shell 元字符和别名。
+  for target in "$RELAY_SERVER" "$PROXY_SERVER" "$PROXY_SSH_JUMP"; do
+    [ -n "$target" ] || continue
+    if [[ ! "$target" =~ ^[A-Za-z_][A-Za-z0-9_-]*@([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+      echo "拒绝执行: SSH 目标必须是账号与字面 IPv4" >&2; err=1
+      continue
+    fi
+    address="${target#*@}"
+    while IFS= read -r octet; do
+      if (( 10#$octet > 255 )); then
+        echo "拒绝执行: SSH 目标 IPv4 无效" >&2; err=1
+      fi
+    done < <(printf '%s\n' "$address" | tr '.' '\n')
+  done
   if ! [[ "$TEST_PORT" =~ ^[0-9]+$ ]] || [ "$TEST_PORT" -lt 1024 ] || [ "$TEST_PORT" -gt 65535 ]; then
     echo "拒绝执行: TEST_PORT=$TEST_PORT 必须是 1024-65535 的数字" >&2; err=1
   elif [ "$TEST_PORT" = "$PROD_PORT" ]; then
@@ -131,7 +149,7 @@ relay_ssh() { ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$RELAY_SE
 proxy_ssh() {
   if [ -n "$PROXY_SSH_JUMP" ]; then
     ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 \
-      -o "ProxyCommand=ssh -i $SSH_KEY -W %h:%p $PROXY_SSH_JUMP" \
+      -o "ProxyCommand=ssh -i $(shq "$SSH_KEY") -W %h:%p $(shq "$PROXY_SSH_JUMP")" \
       "$PROXY_SERVER" "$@"
   else
     ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$PROXY_SERVER" "$@"
@@ -141,7 +159,7 @@ proxy_ssh() {
 # ssh 会把所有命令参数用空格拼接成一个字符串,交给远端登录 shell 重新分词——
 # 含空格的参数(如公钥)若不按远端 shell 语法二次引用,会被拆散(2026-07-21 实测踩坑:
 # 公钥被拆成 3 个参数,authorized_keys 写入错位行)。shq 做 POSIX 安全单引号引用。
-shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+shq() { local value="$1" escaped="'\\''"; printf "'%s'" "${value//\'/$escaped}"; }
 shq_all() { local out="" a; for a in "$@"; do out="$out $(shq "$a")"; done; printf '%s' "${out# }"; }
 
 teardown() {
@@ -197,7 +215,7 @@ if id "$tunnel_user" >/dev/null 2>&1; then
     echo "⚠ 未能删除 $tunnel_user 账号(仍有进程占用),nginx 清理继续;可重跑 --teardown 收敛" >&2
   fi
 fi
-# 兼容旧版脚本:清理 admin 自己 authorized_keys 里的历史隧道 key 条目(原子替换)。
+# 兼容旧版脚本:清理 部署登录账号 自己 authorized_keys 里的历史隧道 key 条目(原子替换)。
 if [ -f "$HOME/.ssh/authorized_keys" ] && grep -q " $key_comment\$" "$HOME/.ssh/authorized_keys"; then
   tmp="$(mktemp)"
   grep -v " $key_comment\$" "$HOME/.ssh/authorized_keys" > "$tmp" || true
@@ -233,6 +251,7 @@ sudo systemctl reload nginx
 echo "前端代理:已移除 location、隧道账号与历史 key 并 reload nginx"
 REMOTE
   echo "拆除完成。生产 relay 实例与 /pinvou3/remote 路由未改动;共享代理的 nginx 已 reload(变更面见脚本头注释)。"
+  echo "持久 controller 身份与状态仍保留，未删除私钥或 tombstone；彻底回收需运维另行确认并授权。"
   exit 0
 }
 
@@ -258,15 +277,13 @@ if [[ "${SKIP_WEB_BUILD:-0}" != "1" ]]; then
 else
   echo "使用已构建并验证的共享 WebUI 产物"
 fi
-test -f "$RELAY_DIR/web/dist/index.html"
-test -f "$RELAY_DIR/web/dist/platform/tauri/bridge.js"
-grep -Fq "$BASE_PATH/" "$RELAY_DIR/web/dist/index.html"
+node "$RELAY_DIR/verify-web-dist-cli.js" "$RELAY_DIR/web/dist" "$BASE_PATH"
 if [[ "${SKIP_LOCAL_TESTS:-0}" != "1" ]]; then
   (cd "$RELAY_DIR" && npm test)
 fi
 
 STAGE="打包并上传 relay 代码(tarball 暂存)"
-echo "── 上传 relay 代码到 $RELAY_SERVER:$TEST_DIR(暂存 + 整体替换)──"
+echo "── 上传 Relay 代码到已确认测试目标（暂存 + 整体替换）──"
 # 打成单个 tarball 流式上传,.tmp 落盘后原子 mv——scp 逐文件覆盖若中断会留下半新半旧的目录,
 # 服务一旦因故重启就会加载混合版本(与评审「暂存+原子替换」同类的隐患)。
 # 注意:清单必须覆盖 relay 根目录的全部运行期模块——controller-*.js / enrollment-*.js /
@@ -298,55 +315,131 @@ tar -xzf "$test_dir.staging.tar.gz" -C "$test_dir.extract"
 rm -f "$test_dir.staging.tar.gz"
 (cd "$test_dir.extract" && npm ci --omit=dev --no-audit --no-fund > /dev/null)
 (cd "$test_dir.extract" && node --input-type=module -e "await import('./telemetry-service.js')")
-# 整体替换:旧版保留为 .bak 供回滚。
-rm -rf "$test_dir.bak"
-[ ! -d "$test_dir" ] || mv "$test_dir" "$test_dir.bak"
-mv "$test_dir.extract" "$test_dir"
 mkdir -p /var/lib/pinvou-telemetry-test
-# ENABLE_DESKTOP_CONTROLLER=1:幂等生成/复用 controller 运行时环境(0600)。
-# 私钥只写入该环境文件,不进 unit、不进日志;公钥另存一份供调用方取回。
+# ENABLE_DESKTOP_CONTROLLER=1:身份与状态一样必须独立于整包替换目录。
+# 旧代码目录中的身份只作一次性运维迁移来源，不保留双轨配置或重新生成旧身份。
+controller_identity_dir=/var/lib/pinvou-remote-relay-test/identity
 if [ "$controller" = "1" ]; then
   # relay-state-store 要求专用目录 mode 0700 且属主为运行用户(relay_state_permissions_unsafe),
   # 且状态必须放在会被整体替换的代码目录之外,重新部署不会丢掉 tombstone/keyring 状态。
-  mkdir -p /var/lib/pinvou-remote-relay-test/state
-  chmod 700 /var/lib/pinvou-remote-relay-test /var/lib/pinvou-remote-relay-test/state
-  if [ ! -f "$test_dir/controller.env" ]; then
-    node -e "
-      const crypto = require('node:crypto');
-      const fs = require('node:fs');
-      const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
-      const pkcs8 = privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64');
-      const spki = publicKey.export({ type: 'spki', format: 'der' });
-      const raw = spki.subarray(spki.length - 32).toString('base64');
-      const hex = (n) => crypto.randomBytes(n).toString('hex');
-      const dir = process.argv[1];
-      const lines = [
-        'NODE_ENV=development',
-        'PINVOU_DESKTOP_CONTROLLER_ENABLED=1',
-        'PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development',
-        'PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=true',
-        'PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID=relay-test-enrollment-hmac-1',
-        'PINVOU_REMOTE_ENROLLMENT_HMAC_KEY=' + hex(32),
-        'PINVOU_REMOTE_PAIRING_HMAC_KEY_ID=relay-test-pairing-hmac-1',
-        'PINVOU_REMOTE_PAIRING_HMAC_KEY=' + hex(32),
-        'PINVOU_REMOTE_CONTROLLER_STATE_PATH=/var/lib/pinvou-remote-relay-test/state/controller-state.json',
-        // legacy 状态文件不能位于 controller 状态目录内(loadEnrollmentRegistryConfig 会
-        // 以 legacy_state_path_inside_controller_directory 失败关闭),因此放在同级。
-        'PINVOU_REMOTE_STATE_PATH=/var/lib/pinvou-remote-relay-test/legacy-web-state.json',
-        'PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1',
-        'PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64=' + pkcs8,
-      ];
-      fs.writeFileSync(process.argv[2], lines.join('\n') + '\n', { mode: 0o600 });
-      fs.writeFileSync(process.argv[3], raw + '\n', { mode: 0o600 });
-    " "$test_dir" "$test_dir/controller.env" "$test_dir/controller-public-key.b64"
-    chmod 600 "$test_dir/controller.env" "$test_dir/controller-public-key.b64"
-  fi
+  node - "$controller_identity_dir" "$test_dir/controller.env" /var/lib/pinvou-remote-relay-test/state/controller-state.json <<'CONTROLLER_IDENTITY'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const [identityDir, legacyEnv, stateFile] = process.argv.slice(2);
+const fail = () => { throw new Error('test_controller_identity_invalid_or_missing'); };
+const stat = (file) => { try { return fs.lstatSync(file); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
+const managedRoot = path.dirname(identityDir);
+const stateDir = path.dirname(stateFile);
+const privateDirs = new Set([managedRoot, identityDir, stateDir].map((dir) => path.resolve(dir)));
+const checkAncestors = (target) => {
+  for (let dir = path.dirname(path.resolve(target)); ; dir = path.dirname(dir)) {
+    const info = stat(dir);
+    if (info) {
+      if (!info.isDirectory() || info.isSymbolicLink()) fail();
+      if (process.platform !== 'win32') {
+        if (info.uid !== 0 && info.uid !== process.geteuid()) fail();
+        if (privateDirs.has(dir) && (info.uid !== process.geteuid() || (info.mode & 0o777) !== 0o700)) fail();
+      }
+    }
+    if (path.dirname(dir) === dir) break;
+  }
+};
+// Do not follow or chmod an unsafe existing root/state/identity ancestor.
+// Code-directory migration is read-only, but its ancestors must be genuine too.
+for (const target of [path.join(identityDir, 'controller.env'), stateFile, legacyEnv]) checkAncestors(target);
+fs.mkdirSync(managedRoot, { recursive: true, mode: 0o700 });
+fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+const readRegular = (file) => {
+  const info = stat(file);
+  if (!info?.isFile() || info.isSymbolicLink() || info.size > 16 * 1024) fail();
+  if (process.platform !== 'win32' && (info.uid !== process.geteuid() || (info.mode & 0o777) !== 0o600)) fail();
+  return fs.readFileSync(file, 'utf8');
+};
+const envPath = path.join(identityDir, 'controller.env');
+const publicPath = path.join(identityDir, 'controller-public-key.b64');
+const dirInfo = stat(identityDir);
+if (dirInfo && (!dirInfo.isDirectory() || dirInfo.isSymbolicLink())) fail();
+if (dirInfo && process.platform !== 'win32' && (dirInfo.uid !== process.geteuid() || (dirInfo.mode & 0o777) !== 0o700)) fail();
+fs.mkdirSync(identityDir, { recursive: true, mode: 0o700 });
+fs.chmodSync(identityDir, 0o700);
+let content;
+let createEnv = false;
+if (stat(envPath)) {
+  content = readRegular(envPath);
+} else if (stat(legacyEnv)) {
+  content = readRegular(legacyEnv);
+  createEnv = true;
+} else {
+  // Losing an existing store's HMAC/signing identity is not a fresh installation.
+  const stateDirInfo = stat(stateDir);
+  if (stateDirInfo && (!stateDirInfo.isDirectory() || stateDirInfo.isSymbolicLink())) fail();
+  // Primary loss is recoverable from backup/marker/other managed state; none
+  // of those traces is permission to mint a different deployment identity.
+  if (stat(stateFile) || stat(publicPath) || (stateDirInfo && fs.readdirSync(stateDir).length > 0)) fail();
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  content = [
+    'NODE_ENV=development',
+    'PINVOU_DESKTOP_CONTROLLER_ENABLED=1',
+    'PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development',
+    'PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=true',
+    'PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID=relay-test-enrollment-hmac-1',
+    'PINVOU_REMOTE_ENROLLMENT_HMAC_KEY=' + crypto.randomBytes(32).toString('hex'),
+    'PINVOU_REMOTE_PAIRING_HMAC_KEY_ID=relay-test-pairing-hmac-1',
+    'PINVOU_REMOTE_PAIRING_HMAC_KEY=' + crypto.randomBytes(32).toString('hex'),
+    'PINVOU_REMOTE_CONTROLLER_STATE_PATH=/var/lib/pinvou-remote-relay-test/state/controller-state.json',
+    'PINVOU_REMOTE_STATE_PATH=/var/lib/pinvou-remote-relay-test/legacy-web-state.json',
+    'PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1',
+    'PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64=' + privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64'),
+    '',
+  ].join('\n');
+  createEnv = true;
+}
+const values = new Map();
+for (const line of content.split(/\r?\n/)) {
+  if (!line || line.startsWith('#')) continue;
+  const item = /^([A-Z0-9_]+)=([^\r\n]*)$/.exec(line);
+  if (!item || values.has(item[1])) fail();
+  values.set(item[1], item[2]);
+}
+for (const role of ['ENROLLMENT', 'PAIRING']) {
+  const id = values.get('PINVOU_REMOTE_' + role + '_HMAC_KEY_ID');
+  const key = values.get('PINVOU_REMOTE_' + role + '_HMAC_KEY');
+  if (!id || !/^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/.test(id) || !key || key.length < 32) fail();
+}
+if (values.get('PINVOU_REMOTE_RELAY_SIGNING_KEY_ID') !== 'relay-test-key-1') fail();
+for (const [name, expected] of [
+  ['NODE_ENV', 'development'],
+  ['PINVOU_DESKTOP_CONTROLLER_ENABLED', '1'],
+  ['PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT', 'development'],
+  ['PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU', 'true'],
+  ['PINVOU_REMOTE_CONTROLLER_STATE_PATH', '/var/lib/pinvou-remote-relay-test/state/controller-state.json'],
+  ['PINVOU_REMOTE_STATE_PATH', '/var/lib/pinvou-remote-relay-test/legacy-web-state.json'],
+]) { if (values.get(name) !== expected) fail(); }
+const encoded = values.get('PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64');
+if (!encoded || Buffer.from(encoded, 'base64').toString('base64') !== encoded) fail();
+let privateKey;
+try { privateKey = crypto.createPrivateKey({ key: Buffer.from(encoded, 'base64'), format: 'der', type: 'pkcs8' }); } catch { fail(); }
+if (privateKey.asymmetricKeyType !== 'ed25519') fail();
+const spki = crypto.createPublicKey(privateKey).export({ type: 'spki', format: 'der' });
+const publicValue = spki.subarray(spki.length - 32).toString('base64') + '\n';
+if (stat(publicPath) && readRegular(publicPath) !== publicValue) fail();
+// Exclusive, complete writes: a retry derives a missing public file from the
+// persisted private key; malformed/conflicting identity never rotates silently.
+if (createEnv) fs.writeFileSync(envPath, content, { flag: 'wx', mode: 0o600 });
+if (!stat(publicPath)) fs.writeFileSync(publicPath, publicValue, { flag: 'wx', mode: 0o600 });
+fs.chmodSync(envPath, 0o600);
+fs.chmodSync(publicPath, 0o600);
+CONTROLLER_IDENTITY
 fi
+# 身份验证失败时不得触碰现役代码；验证成功后才整体替换，旧版供回滚。
+rm -rf "$test_dir.bak"
+[ ! -d "$test_dir" ] || mv "$test_dir" "$test_dir.bak"
+mv "$test_dir.extract" "$test_dir"
 controller_unit_line=""
 if [ "$controller" = "1" ]; then
-  # 用 "-" 前缀声明为可选:回滚到不含 controller.env 的旧版本时,服务仍能启动(退化为 v2-only),
-  # 不会因 systemd 加载环境文件失败而崩溃重启(2026-09-19 实测踩坑)。
-  controller_unit_line="EnvironmentFile=-$test_dir/controller.env"
+  # Controller 模式必须有已验证的持久身份；不能静默退化为裸 v2。
+  controller_unit_line="EnvironmentFile=$controller_identity_dir/controller.env"
 fi
 cp -a "/etc/systemd/system/$service" "/etc/systemd/system/$service.bak" 2>/dev/null || true
 cat > "/etc/systemd/system/$service" <<EOF
@@ -499,13 +592,13 @@ sudo bash -c '
   chown "$owner" "$tmp"
   mv "$tmp" "$ak"
 ' _ "$ak" "$new_line" "$tunnel_user:$tunnel_group"
-# 兼容旧版脚本:该 key 若曾放在 admin 自己的 authorized_keys,移除(权限收敛)。
+# 兼容旧版脚本:该 key 若曾放在 部署登录账号 自己的 authorized_keys,移除(权限收敛)。
 if [ -f "$HOME/.ssh/authorized_keys" ] && grep -q " $key_comment\$" "$HOME/.ssh/authorized_keys"; then
   tmp="$(mktemp)"
   grep -v " $key_comment\$" "$HOME/.ssh/authorized_keys" > "$tmp" || true
   chmod 600 "$tmp"
   mv "$tmp" "$HOME/.ssh/authorized_keys"
-  echo "已从 admin 的 authorized_keys 移除历史隧道 key(收敛到 $tunnel_user)"
+  echo "已从 部署登录账号 的 authorized_keys 移除历史隧道 key(收敛到 $tunnel_user)"
 fi
 REMOTE
 
@@ -638,8 +731,9 @@ public_verify() {
   health="$(curl -fsS --max-time 10 "$PUBLIC_URL/healthz")" || return 1
   echo "$health" | node -e 'const h=JSON.parse(require("fs").readFileSync(0,"utf8")); if(!h.ok||!("room_count" in h)) process.exit(1)' || return 1
   page="$(curl -fsSL --max-time 10 "$PUBLIC_URL/r/deploy-check")" || return 1
+  # Web 构建移除 Tauri 内联脚本；与生产校验一致，检查当前 base 的构建资源。
   [[ "$page" == *'<title>PINVOU 智能助手'* \
-    && "$page" == *"$BASE_PATH/platform/tauri/bridge.js"* ]] || return 1
+    && "$page" == *"$BASE_PATH/assets/"* ]] || return 1
   prod_health="$(curl -fsS --max-time 10 "https://pinvou.com/pinvou3/remote/healthz")" || return 1
   echo "$prod_health" | node -e 'const h=JSON.parse(require("fs").readFileSync(0,"utf8")); if(!h.ok) process.exit(1)' || return 1
 }
@@ -676,9 +770,9 @@ echo "桌面端指向测试端点:"
 echo "  PINVOU_REMOTE_PUBLIC_URL=\"$PUBLIC_URL\" PINVOU_REMOTE_RELAY_WS_URL=\"wss://pinvou.com$BASE_PATH/ws\" pinvou3-tauri"
 if [ "$ENABLE_DESKTOP_CONTROLLER" = "1" ]; then
   STAGE="读取 controller 公钥"
-  controller_public_key="$(relay_ssh "cat '$TEST_DIR/controller-public-key.b64'" | tr -d '\r\n')"
+  controller_public_key="$(relay_ssh "cat '/var/lib/pinvou-remote-relay-test/identity/controller-public-key.b64'" | tr -d '\r\n')"
   if [ -z "$controller_public_key" ]; then
-    echo "✗ 未取到 controller 签名公钥($TEST_DIR/controller-public-key.b64),无法为客户端提供信任根" >&2
+    echo "✗ 未取到持久 controller 签名公钥，无法为客户端提供信任根" >&2
     exit 1
   fi
   echo "Windows 双端远控(controller-v1)已启用:"

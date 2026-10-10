@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { isDirectCliEntry } from "../cli-entrypoint.js";
 
 function fail(code) { const error = new Error(code); error.code = code; throw error; }
 function sha256(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
@@ -148,7 +148,7 @@ export async function verifyInstallerSupplyChain({ installerPath, bundlePath, sb
   return result;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (isDirectCliEntry(import.meta.url)) {
   verifyInstallerSupplyChain({ installerPath: arg("--installer"), bundlePath: arg("--bundle"), sbomPath: arg("--sbom"), sbomBundlePath: arg("--sbom-bundle"),
     repository: arg("--repository"), workflow: arg("--workflow"), runId: arg("--run-id"), sourceCommit: arg("--source-commit"), outputPath: arg("--output"),
     ghBinary: arg("--gh-binary") })

@@ -438,6 +438,11 @@ function fileIdentity(metadata) {
 }
 
 function exactLock(value) {
+  // A future writer may add fields. Never classify its lock as recoverable corruption.
+  if (value?.schema === LOCK_SCHEMA && Number.isSafeInteger(value.version)
+    && value.version > 0 && value.version !== LOCK_VERSION) {
+    fail("relay_state_lock_unsupported");
+  }
   const lock = exactObject(value, ["schema", "version", "pid", "process_identity", "owner_id"], "relay_state_lock");
   if (lock.schema !== LOCK_SCHEMA || lock.version !== LOCK_VERSION
     || !Number.isSafeInteger(lock.pid) || lock.pid <= 0
@@ -1025,19 +1030,18 @@ export class RelayStateStore {
 
   async #inspectLock() {
     try {
-      const text = await this.#readBoundedFile(this.#lockPath, 4096, "relay_state_lock_malformed", false);
+      // An unreadable/bounded-out file may belong to a future lock protocol.
+      // Only fully read, valid UTF-8 corruption is eligible for stale recovery.
+      const text = await this.#readBoundedFile(this.#lockPath, 4096, "relay_state_lock_unreadable", false);
       let owner;
       try { owner = exactLock(JSON.parse(text)); } catch (error) {
-        if (error instanceof RelayStateStoreError) return { kind: "malformed", text };
+        if (error?.code === "relay_state_lock_unsupported") throw error;
         return { kind: "malformed", text };
       }
       await this.#verifyFilesystemPath(this.#lockPath, "file");
       return { kind: "valid", owner, text, identity: await this.#pathIdentity(this.#lockPath) };
     } catch (error) {
       if (error?.code === "ENOENT") return { kind: "missing" };
-      if (error instanceof RelayStateStoreError && error.code === "relay_state_lock_malformed") {
-        return { kind: "malformed", text: null };
-      }
       throw error;
     }
   }
@@ -1328,11 +1332,11 @@ export class RelayStateStore {
   async close() {
     if (this.#closed) return;
     if (this.#closeInFlight) return this.#closeInFlight;
+    // Fence admission synchronously, before any queue-draining await. A CAS
+    // already inside persist finishes under the lock; queued/later CAS reject.
+    this.#closing = true;
     const attempt = (async () => {
-      if (!this.#closing) {
-        await this.#mutation.catch(() => {});
-        this.#closing = true;
-      }
+      await this.#mutation.catch(() => {});
       await this.#releaseLock();
       this.#closed = true;
     })();

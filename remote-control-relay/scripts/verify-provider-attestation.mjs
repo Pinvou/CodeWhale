@@ -2,7 +2,7 @@
 import crypto, { X509Certificate } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { isDirectCliEntry } from "../cli-entrypoint.js";
 
 function fail(code) { const error = new Error(code); error.code = code; throw error; }
 function exact(value, keys, code) {
@@ -71,7 +71,7 @@ export async function verifyProviderAttestationFile(input, output, expected) {
   return value;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (isDirectCliEntry(import.meta.url)) {
   verifyProviderAttestationFile(arg("--input"), arg("--output"), {
     role: arg("--role"), rolePolicySha256: arg("--role-policy-sha256"), provider: arg("--provider"), keyId: arg("--key-id"), runNonce: arg("--run-nonce"),
     aclSha256: arg("--acl-sha256"), measurementSha256: arg("--measurement-sha256"), driverSha256: arg("--driver-sha256"),

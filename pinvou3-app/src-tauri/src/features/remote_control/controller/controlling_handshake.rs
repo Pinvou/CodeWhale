@@ -15,7 +15,8 @@ use super::crypto::{
     authenticate_relay_transcript,
 };
 use super::protocol::{
-    SenderRole, parse_controller_pairing_transcript, validate_controller_message_json,
+    LeaseInstallValidationContext, SenderRole, parse_controller_pairing_transcript,
+    validate_controller_lease_install_message_json, validate_controller_message_json,
 };
 
 /// A 端 claim 声明的能力集合（与冻结协议常量保持一致的最小集）。
@@ -108,25 +109,23 @@ pub(crate) const RESUME_TOKEN_BYTES: usize = 32;
 /// 租约材料。
 pub(crate) fn validate_joined_lease(
     message: &Value,
-    pairing_id: &str,
-    reservation_id: &str,
-    relay_epoch: &str,
-    transcript_hash_hex: &str,
+    context: &LeaseInstallValidationContext,
 ) -> std::result::Result<JoinedLease, &'static str> {
-    let validated = validate_controller_message_json(&message.to_string(), SenderRole::Relay)
-        .map_err(|_| "controller_joined_invalid")?;
+    let validated = validate_controller_lease_install_message_json(
+        &message.to_string(),
+        SenderRole::Relay,
+        context,
+    )
+    .map_err(|error| {
+        if error.code == "stale_context" {
+            "controller_joined_binding_mismatch"
+        } else {
+            "controller_joined_invalid"
+        }
+    })?
+    .message;
     if validated.get("type").and_then(Value::as_str) != Some("controller_joined") {
         return Err("controller_joined_invalid");
-    }
-    for (field, expected) in [
-        ("pairing_id", pairing_id),
-        ("reservation_id", reservation_id),
-        ("relay_epoch", relay_epoch),
-        ("transcript_hash", transcript_hash_hex),
-    ] {
-        if validated.get(field).and_then(Value::as_str) != Some(expected) {
-            return Err("controller_joined_binding_mismatch");
-        }
     }
     let string = |field: &'static str| -> std::result::Result<String, &'static str> {
         validated
@@ -175,6 +174,7 @@ pub(crate) struct ControllingHandshake {
     handshake: Option<HandshakeKeyPair>,
     trust: AuthenticatedRelayTrustConfig,
     binding: Option<HandshakeBinding>,
+    install_context: Option<LeaseInstallValidationContext>,
     transcript_hash_hex: String,
     transcript_hash: Option<[u8; 32]>,
     negotiated_capabilities: Vec<String>,
@@ -206,6 +206,7 @@ impl ControllingHandshake {
             handshake: Some(handshake),
             trust,
             binding: None,
+            install_context: None,
             transcript_hash_hex: String::new(),
             transcript_hash: None,
             negotiated_capabilities: Vec::new(),
@@ -261,6 +262,20 @@ impl ControllingHandshake {
             .map_err(|_| HandshakeError::new("controller_transcript_invalid"))?;
         let context = authenticate_relay_transcript(&self.trust, parsed)
             .map_err(|_| HandshakeError::new("controller_transcript_untrusted"))?;
+        let local_key = self
+            .handshake
+            .as_ref()
+            .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
+        let signed_local = decode_public_key(context.local_handshake_public_key())
+            .ok_or_else(|| HandshakeError::new("controller_transcript_invalid"))?;
+        if signed_local.to_bytes() != local_key.public_key().to_bytes() {
+            return Err(HandshakeError::new(
+                "controller_transcript_self_key_mismatch",
+            ));
+        }
+        if context.request_id() != self.request_id {
+            return Err(HandshakeError::new("controller_handshake_binding_mismatch"));
+        }
         let transcript_hash = context
             .transcript_hash_bytes()
             .map_err(|_| HandshakeError::new("controller_transcript_invalid"))?;
@@ -299,6 +314,7 @@ impl ControllingHandshake {
             json!({ "sender_role": "A", "commitment": hex_lower(&commitment) }),
         )?;
         self.binding = Some(binding);
+        self.install_context = Some(context);
         self.session = Some(session);
         self.finished_sender = Some(finished_sender);
         self.finished_receiver = Some(finished_receiver);
@@ -397,10 +413,9 @@ impl ControllingHandshake {
         self.require_stage(HandshakeStage::FinishedSent)?;
         let lease = validate_joined_lease(
             message,
-            &self.pairing_id,
-            &self.reservation_id,
-            &self.relay_epoch,
-            &self.transcript_hash_hex,
+            self.install_context
+                .as_ref()
+                .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?,
         )
         .map_err(HandshakeError::new)?;
         self.stage = HandshakeStage::Joined;
@@ -621,6 +636,74 @@ mod tests {
         )
     }
 
+    fn signed_handshake() -> (ControllingHandshake, Value) {
+        let relay = signed_relay();
+        let keys = HandshakeKeyPair::generate().unwrap();
+        let peer = HandshakeKeyPair::generate().unwrap();
+        let reserved = signed_reservation(
+            &relay,
+            &base64::engine::general_purpose::STANDARD.encode(keys.public_key().to_bytes()),
+            &base64::engine::general_purpose::STANDARD.encode(peer.public_key().to_bytes()),
+        );
+        let handshake = ControllingHandshake::new(
+            field(&reserved, "request_id"),
+            "claim-0001",
+            "2345678",
+            keys,
+            relay.trust,
+        );
+        (handshake, reserved)
+    }
+
+    #[test]
+    fn signed_transcript_cannot_substitute_either_endpoints_local_key() {
+        use super::super::controlled_handshake::ControlledHandshake;
+        let relay = signed_relay();
+        let attacker = HandshakeKeyPair::generate().unwrap();
+        let encoded = |key: &HandshakeKeyPair| {
+            base64::engine::general_purpose::STANDARD.encode(key.public_key().to_bytes())
+        };
+        for substituted_role in [ControllerRole::A, ControllerRole::B] {
+            let a_keys = HandshakeKeyPair::generate().unwrap();
+            let b_keys = HandshakeKeyPair::generate().unwrap();
+            let (signed_a, signed_b) = match substituted_role {
+                ControllerRole::A => (encoded(&attacker), encoded(&b_keys)),
+                ControllerRole::B => (encoded(&a_keys), encoded(&attacker)),
+            };
+            let reserved = signed_reservation(&relay, &signed_a, &signed_b);
+            // This is a valid trusted Relay signature, not a corrupt signature
+            // test: each endpoint must independently confirm its own key.
+            authenticate_relay_transcript(
+                &relay.trust,
+                parse_controller_pairing_transcript(&reserved.to_string()).unwrap(),
+            )
+            .unwrap();
+            if substituted_role == ControllerRole::A {
+                let mut a = ControllingHandshake::new(
+                    field(&reserved, "request_id"),
+                    "claim-0001",
+                    "2345678",
+                    a_keys,
+                    relay.trust.clone(),
+                );
+                assert_eq!(
+                    a.accept_reserved(&reserved).unwrap_err().code,
+                    "controller_transcript_self_key_mismatch"
+                );
+                assert_eq!(a.stage(), HandshakeStage::Claimed);
+                assert!(a.session.is_none() && a.receipt.is_none() && a.install_context.is_none());
+            } else {
+                assert_eq!(
+                    ControlledHandshake::new(&reserved, b_keys, &relay.trust)
+                        .err()
+                        .unwrap()
+                        .code,
+                    "controller_transcript_self_key_mismatch"
+                );
+            }
+        }
+    }
+
     #[test]
     fn claim_is_protocol_valid_and_carries_the_local_handshake_key() {
         let (trust, _) = trust_fixture();
@@ -695,8 +778,7 @@ mod tests {
 
     #[test]
     fn trusted_reservation_derives_a_commit_without_any_lease_material() {
-        let (trust, reserved) = trust_fixture();
-        let mut handshake = new_handshake(trust);
+        let (mut handshake, reserved) = signed_handshake();
         let commit = handshake.accept_reserved(&reserved).unwrap();
         validate_controller_message_json(&commit.to_string(), SenderRole::ControllerA).unwrap();
         assert_eq!(commit["type"], json!("finished_receipt_commit"));
@@ -839,6 +921,20 @@ mod tests {
             "resume_token_b64": base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
             "resume_deadline_ms": "30000",
         });
+        for name in [
+            "request_id",
+            "controller_connection_identity",
+            "remote_control_generation",
+        ] {
+            let mut stale = joined.clone();
+            stale[name] = json!("different-valid-identity");
+            assert_eq!(
+                a.accept_joined(&stale).unwrap_err().code,
+                "controller_joined_binding_mismatch"
+            );
+            assert_eq!(a.stage(), HandshakeStage::FinishedSent);
+            assert!(a.session.is_some());
+        }
         let lease = a.accept_joined(&joined).unwrap();
         assert_eq!(lease.controller_lease_id, "controller-lease-0001");
         assert_eq!(lease.lease_epoch, 1);
@@ -863,8 +959,7 @@ mod tests {
 
     #[test]
     fn peer_commitment_must_match_before_any_ack_is_produced() {
-        let (trust, reserved) = trust_fixture();
-        let mut handshake = new_handshake(trust);
+        let (mut handshake, reserved) = signed_handshake();
         handshake.accept_reserved(&reserved).unwrap();
         let forged = json!({
             "v": 1,

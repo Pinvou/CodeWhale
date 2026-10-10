@@ -6,6 +6,8 @@
 //! defaults a local turn uses.
 
 use std::sync::Arc;
+
+use super::skill_materialization::RemoteTurnOwner;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -38,11 +40,10 @@ use crate::features::remote_control::controller::temporary_model::SharedTemporar
 
 use super::engine::TurnReservation;
 use super::engine_pool::{EnginePool, RemoteRuntimeModelBundle};
-use super::skill_materialization::RemoteSkillFreezeGuard;
 
 pub(crate) struct RemoteChatReservation {
     turn: Option<TurnReservation>,
-    skills: RemoteSkillFreezeGuard,
+    generation: u64,
 }
 
 impl RemoteChatReservation {
@@ -55,15 +56,19 @@ fn reserve_remote_chat_turn(
     session_id: &str,
     reserve: impl FnOnce() -> std::result::Result<TurnReservation, String>,
 ) -> std::result::Result<RemoteChatReservation, String> {
-    // Acquire the real turn gate first: a local reservation must never be
-    // poisoned or cancelled merely because a remote freeze was attempted.
+    crate::features::sessions::validate_session_id(session_id)
+        .map_err(|_| "task_session_invalid".to_owned())?;
+    // Occupy the real turn gate before any model, Skills or attachment work.
     let turn = reserve()?;
-    let skills = RemoteSkillFreezeGuard::acquire(session_id)?;
+    let generation = turn.generation();
     Ok(RemoteChatReservation {
         turn: Some(turn),
-        skills,
+        generation,
     })
 }
+use crate::features::remote_control::controller::turn_budget::{
+    CANCEL_SETTLE_BUDGET, TURN_TIMEOUT_CODE, TurnBudget,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const BUSY_GRACE: Duration = Duration::from_secs(5);
@@ -96,6 +101,7 @@ pub(crate) trait RemoteChatEnginePort: Send + Sync {
         content: String,
         skill_ids: Vec<String>,
         relay: Option<&TurnEventRelayHandle>,
+        owner: Arc<RemoteTurnOwner>,
         reserved: &mut Option<RemoteChatReservation>,
     ) -> std::result::Result<(), String>;
 
@@ -109,6 +115,7 @@ pub(crate) trait RemoteChatEnginePort: Send + Sync {
         skill_ids: Vec<String>,
         attachments: Vec<PublishedAttachment>,
         relay: Option<&TurnEventRelayHandle>,
+        owner: Arc<RemoteTurnOwner>,
         reserved: &mut Option<RemoteChatReservation>,
     ) -> std::result::Result<(), String> {
         if !attachments.is_empty() {
@@ -122,12 +129,13 @@ pub(crate) trait RemoteChatEnginePort: Send + Sync {
             content,
             skill_ids,
             relay,
+            owner,
             reserved,
         )
         .await
     }
 
-    fn is_turn_active(&self, session_id: &str) -> bool;
+    fn is_turn_active(&self, session_id: &str, generation: Option<u64>) -> bool;
 
     /// Only the authoritative terminal for this reservation can complete a
     /// remote task. An inactive engine is not proof of success.
@@ -137,15 +145,9 @@ pub(crate) trait RemoteChatEnginePort: Send + Sync {
         relay: Option<&TurnEventRelayHandle>,
     ) -> Option<std::result::Result<(), String>>;
 
-    async fn cancel_turn(&self, session_id: &str);
+    async fn cancel_turn(&self, session_id: &str, generation: Option<u64>);
 
-    async fn release_task_model(&self, session_id: &str, model_source: &str);
-
-    async fn restore_session_skills(
-        &self,
-        session_id: &str,
-        relay: Option<&TurnEventRelayHandle>,
-    ) -> std::result::Result<(), String>;
+    async fn release_task_model(&self, session_id: &str, owner: &Arc<RemoteTurnOwner>);
 
     fn start_turn_relay(
         &self,
@@ -201,6 +203,8 @@ impl TurnEventRelayState {
 
     fn push_reasoning(&mut self, generation: Option<u64>, text: &str) -> Option<(bool, bool)> {
         if self.stopped
+            || self.terminal.is_some()
+            || self.generation.is_none()
             || generation != self.generation
             || self.emitted_events >= MAX_REASONING_EVENTS_PER_TURN
             || self.emitted_chars >= MAX_REASONING_CHARS_PER_TURN
@@ -219,6 +223,7 @@ impl TurnEventRelayState {
 
     fn push_assistant(&mut self, text: &str) -> Option<String> {
         if self.stopped
+            || self.terminal.is_some()
             || self.generation.is_none()
             || self.assistant_events >= MAX_ASSISTANT_EVENTS_PER_TURN
             || self.assistant_chars >= MAX_ASSISTANT_CHARS_PER_TURN
@@ -229,13 +234,39 @@ impl TurnEventRelayState {
         self.bound_assistant(sanitized)
     }
 
-    fn finish_assistant_token(&mut self) -> Option<String> {
-        let tail = self.assistant_sanitizer.finish();
+    fn finish_assistant_token(&mut self, completed: bool) -> Option<String> {
+        let tail = if completed {
+            self.assistant_sanitizer.finish_completed()
+        } else {
+            self.assistant_sanitizer.abort_pending()
+        };
         self.bound_assistant(tail)
     }
 
+    fn close_streams(&mut self, completed: bool) -> (Vec<String>, Option<String>) {
+        if self.stopped {
+            return (Vec::new(), None);
+        }
+        self.stopped = true;
+        let completed = completed && matches!(self.terminal, Some(Ok(())));
+        let tail = if completed {
+            self.reasoning_sanitizer.finish_completed()
+        } else {
+            self.reasoning_sanitizer.abort_pending()
+        };
+        self.reasoning_ready.push_str(&tail);
+        let mut batches = Vec::new();
+        while let Some(batch) = take_reasoning_batch(self, true) {
+            batches.push(batch);
+        }
+        (batches, self.finish_assistant_token(completed))
+    }
+
     fn bound_assistant(&mut self, text: String) -> Option<String> {
-        if text.is_empty() {
+        if text.is_empty()
+            || self.assistant_events >= MAX_ASSISTANT_EVENTS_PER_TURN
+            || self.assistant_chars >= MAX_ASSISTANT_CHARS_PER_TURN
+        {
             return None;
         }
         let remaining = MAX_ASSISTANT_CHARS_PER_TURN.saturating_sub(self.assistant_chars);
@@ -259,7 +290,6 @@ pub(crate) struct TurnEventRelayHandle {
     events: Arc<dyn ControllerTaskEventSink>,
     session_id: String,
     task_id: String,
-    skill_owner: Option<uuid::Uuid>,
 }
 
 impl TurnEventRelayHandle {
@@ -267,25 +297,13 @@ impl TurnEventRelayHandle {
         self.state.lock().generation = Some(generation);
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, completed: bool) {
         for listener_id in self.listener_ids.drain(..) {
             self.app.unlisten(listener_id);
         }
-        let (reasoning_batches, assistant_tail) = {
-            let mut state = self.state.lock();
-            if state.stopped {
-                return;
-            }
-            state.stopped = true;
-            let tail = state.reasoning_sanitizer.finish();
-            state.reasoning_ready.push_str(&tail);
-            let mut reasoning_batches = Vec::new();
-            while let Some(batch) = take_reasoning_batch(&mut state, true) {
-                reasoning_batches.push(batch);
-            }
-            let assistant_tail = state.finish_assistant_token();
-            (reasoning_batches, assistant_tail)
-        };
+        // The same lock fences callback delivery, terminal acceptance and close.
+        let mut state = self.state.lock();
+        let (reasoning_batches, assistant_tail) = state.close_streams(completed);
         for text in reasoning_batches {
             self.events.emit_journal(
                 JournalKind::Reasoning,
@@ -307,7 +325,7 @@ impl TurnEventRelayHandle {
 
 impl Drop for TurnEventRelayHandle {
     fn drop(&mut self) {
-        self.finish();
+        self.finish(false);
     }
 }
 
@@ -350,11 +368,21 @@ fn flush_reasoning(
     // unlistening, so a timer that already removed a batch cannot publish it
     // after the final assistant event has been journaled.
     let mut state = state.lock();
+    flush_reasoning_locked(&mut state, events, session_id, task_id, force);
+}
+
+fn flush_reasoning_locked(
+    state: &mut TurnEventRelayState,
+    events: &Arc<dyn ControllerTaskEventSink>,
+    session_id: &str,
+    task_id: &str,
+    force: bool,
+) {
     state.flush_scheduled = false;
-    let batch = if state.stopped && !force {
+    let batch = if state.stopped {
         None
     } else {
-        take_reasoning_batch(&mut state, force)
+        take_reasoning_batch(state, force)
     };
     if let Some(text) = batch {
         events.emit_journal(
@@ -364,6 +392,53 @@ fn flush_reasoning(
             json!({ "text": text }),
         );
     }
+}
+
+/// Delivery is synchronous: the production sink journals/enqueues and emits
+/// distinct desktop-remote events; it never calls this chat relay. Keep the
+/// lock until delivery finishes so close cannot overtake prepared output.
+fn with_open_chat_relay(
+    state: &Mutex<TurnEventRelayState>,
+    deliver: impl FnOnce(&mut TurnEventRelayState),
+) {
+    let mut state = state.lock();
+    if state.stopped || state.terminal.is_some() || state.generation.is_none() {
+        return;
+    }
+    deliver(&mut state);
+}
+
+fn relay_chat_assistant(
+    state: &Mutex<TurnEventRelayState>,
+    events: &Arc<dyn ControllerTaskEventSink>,
+    session_id: &str,
+    task_id: &str,
+    text: &str,
+) {
+    with_open_chat_relay(state, |state| {
+        flush_reasoning_locked(state, events, session_id, task_id, true);
+        if let Some(text) = state.push_assistant(text) {
+            events.emit_journal(
+                JournalKind::AssistantDelta,
+                session_id,
+                Some(task_id),
+                json!({ "text": text }),
+            );
+        }
+    });
+}
+
+fn relay_chat_tool(
+    state: &Mutex<TurnEventRelayState>,
+    events: &Arc<dyn ControllerTaskEventSink>,
+    session_id: &str,
+    task_id: &str,
+    payload: Value,
+) {
+    with_open_chat_relay(state, |state| {
+        flush_reasoning_locked(state, events, session_id, task_id, true);
+        events.emit_journal(JournalKind::Tool, session_id, Some(task_id), payload);
+    });
 }
 
 pub(crate) struct EnginePoolChatEngine {
@@ -436,7 +511,8 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
         lease: &LeaseContext,
         content: String,
         skill_ids: Vec<String>,
-        relay: Option<&TurnEventRelayHandle>,
+        _relay: Option<&TurnEventRelayHandle>,
+        owner: Arc<RemoteTurnOwner>,
         reserved: &mut Option<RemoteChatReservation>,
     ) -> std::result::Result<(), String> {
         let model_override = match model_source {
@@ -460,9 +536,7 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                 content,
                 skill_ids,
                 model_override,
-                relay
-                    .and_then(|relay| relay.skill_owner)
-                    .ok_or_else(|| "task_skill_freeze_required".to_owned())?,
+                owner,
                 reserved
                     .as_mut()
                     .and_then(RemoteChatReservation::take_turn)
@@ -482,6 +556,7 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
         skill_ids: Vec<String>,
         attachments: Vec<PublishedAttachment>,
         relay: Option<&TurnEventRelayHandle>,
+        owner: Arc<RemoteTurnOwner>,
         reserved: &mut Option<RemoteChatReservation>,
     ) -> std::result::Result<(), String> {
         if attachments.is_empty() {
@@ -494,6 +569,7 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                     content,
                     skill_ids,
                     relay,
+                    owner,
                     reserved,
                 )
                 .await;
@@ -534,9 +610,7 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                 ingested,
                 skill_ids,
                 model_override,
-                relay
-                    .and_then(|relay| relay.skill_owner)
-                    .ok_or_else(|| "task_skill_freeze_required".to_owned())?,
+                owner,
                 reserved
                     .as_mut()
                     .and_then(RemoteChatReservation::take_turn)
@@ -546,8 +620,11 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             .map_err(|error| remote_engine_error_code(&error).to_owned())
     }
 
-    fn is_turn_active(&self, session_id: &str) -> bool {
-        self.pool.is_turn_active(session_id)
+    fn is_turn_active(&self, session_id: &str, generation: Option<u64>) -> bool {
+        generation.is_some_and(|generation| {
+            self.pool
+                .is_turn_active_for_generation(session_id, generation)
+        })
     }
 
     fn terminal_result(
@@ -561,40 +638,22 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
         }
     }
 
-    async fn cancel_turn(&self, session_id: &str) {
-        let _ = self.pool.cancel(session_id, false).await;
-        // Cancelling only queues interruption. Do not restore a broader skill
-        // set while the cancelled engine is still draining tools/provider IO.
+    async fn cancel_turn(&self, session_id: &str, generation: Option<u64>) {
+        let Some(generation) = generation else { return };
+        let _ = self.pool.cancel_remote_turn(session_id, generation).await;
+        // Wait only for this fixed generation, never a newer local reservation.
         let started = Instant::now();
-        while self.pool.is_turn_active(session_id) && started.elapsed() < BUSY_GRACE {
+        while self
+            .pool
+            .is_turn_active_for_generation(session_id, generation)
+            && started.elapsed() < BUSY_GRACE
+        {
             tokio::time::sleep(POLL_INTERVAL).await;
         }
     }
 
-    async fn release_task_model(&self, session_id: &str, model_source: &str) {
-        if model_source == TASK_MODEL_SOURCE_TEMPORARY {
-            self.pool.evict(session_id).await;
-        }
-    }
-
-    async fn restore_session_skills(
-        &self,
-        session_id: &str,
-        relay: Option<&TurnEventRelayHandle>,
-    ) -> std::result::Result<(), String> {
-        if self.pool.is_turn_active(session_id) {
-            return Err("task_skill_restore_failed".to_owned());
-        }
-        let owner = relay
-            .and_then(|relay| relay.skill_owner)
-            .ok_or_else(|| "task_skill_freeze_required".to_owned())?;
-        let session_id = session_id.to_owned();
-        tokio::task::spawn_blocking(move || {
-            super::skill_materialization::restore_plain_session_skills(&session_id, owner)
-        })
-        .await
-        .map_err(|_| "task_skill_restore_failed".to_owned())?
-        .map_err(|_| "task_skill_restore_failed".to_owned())
+    async fn release_task_model(&self, session_id: &str, owner: &Arc<RemoteTurnOwner>) {
+        self.pool.evict_remote_owner(session_id, owner).await;
     }
 
     fn start_turn_relay(
@@ -672,25 +731,16 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             else {
                 return;
             };
-            // A reasoning token that preceded this assistant delta must reach
-            // the authoritative journal first, even when its batching timer
-            // has not fired yet.
-            flush_reasoning(
+            // Already-classified reasoning is delivered first. An ambiguous
+            // block waits for its own boundary rather than leaking a prefix
+            // merely to preserve cross-channel arrival order.
+            relay_chat_assistant(
                 &assistant_state,
                 &assistant_events,
                 &assistant_session_id,
                 &assistant_task_id,
-                true,
+                text,
             );
-            let text = assistant_state.lock().push_assistant(text);
-            if let Some(text) = text {
-                assistant_events.emit_journal(
-                    JournalKind::AssistantDelta,
-                    &assistant_session_id,
-                    Some(&assistant_task_id),
-                    json!({ "text": text }),
-                );
-            }
         });
 
         let tool_start_state = Arc::clone(&state);
@@ -703,24 +753,8 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             };
             if payload.get("session_id").and_then(Value::as_str)
                 != Some(tool_start_session_id.as_str())
-                || tool_start_state.lock().generation.is_none()
             {
                 return;
-            }
-            flush_reasoning(
-                &tool_start_state,
-                &tool_start_events,
-                &tool_start_session_id,
-                &tool_start_task_id,
-                true,
-            );
-            if let Some(text) = tool_start_state.lock().finish_assistant_token() {
-                tool_start_events.emit_journal(
-                    JournalKind::AssistantDelta,
-                    &tool_start_session_id,
-                    Some(&tool_start_task_id),
-                    json!({ "text": text }),
-                );
             }
             let Some(tool_id) = payload.get("id").and_then(Value::as_str) else {
                 return;
@@ -730,10 +764,11 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             };
             // Never project `args`: tool arguments can contain credentials,
             // signed URLs, or B-local host paths.
-            tool_start_events.emit_journal(
-                JournalKind::Tool,
+            relay_chat_tool(
+                &tool_start_state,
+                &tool_start_events,
                 &tool_start_session_id,
-                Some(&tool_start_task_id),
+                &tool_start_task_id,
                 json!({
                     "tool_id": tool_id,
                     "tool_name": tool_name,
@@ -752,24 +787,8 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             };
             if payload.get("session_id").and_then(Value::as_str)
                 != Some(tool_end_session_id.as_str())
-                || tool_end_state.lock().generation.is_none()
             {
                 return;
-            }
-            flush_reasoning(
-                &tool_end_state,
-                &tool_end_events,
-                &tool_end_session_id,
-                &tool_end_task_id,
-                true,
-            );
-            if let Some(text) = tool_end_state.lock().finish_assistant_token() {
-                tool_end_events.emit_journal(
-                    JournalKind::AssistantDelta,
-                    &tool_end_session_id,
-                    Some(&tool_end_task_id),
-                    json!({ "text": text }),
-                );
             }
             let Some(tool_id) = payload.get("id").and_then(Value::as_str) else {
                 return;
@@ -786,10 +805,11 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                 .and_then(Value::as_str)
                 .map(sanitize_text)
                 .filter(|text| !text.is_empty());
-            tool_end_events.emit_journal(
-                JournalKind::Tool,
+            relay_chat_tool(
+                &tool_end_state,
+                &tool_end_events,
                 &tool_end_session_id,
-                Some(&tool_end_task_id),
+                &tool_end_task_id,
                 json!({
                     "tool_id": tool_id,
                     "tool_name": tool_name,
@@ -822,7 +842,6 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             events,
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
-            skill_owner: None,
         })
     }
 }
@@ -841,29 +860,122 @@ impl EnginePoolChatTurnPort {
         session_id: &str,
         cancel: &CancellationToken,
         relay: Option<&TurnEventRelayHandle>,
+        generation: Option<u64>,
     ) -> std::result::Result<(), String> {
         let mut inactive_since = None;
         loop {
             if cancel.is_cancelled() {
-                self.engine.cancel_turn(session_id).await;
+                self.engine.cancel_turn(session_id, generation).await;
                 return Err(TASK_CANCELLED_CODE.to_owned());
             }
             if let Some(result) = self.engine.terminal_result(session_id, relay) {
                 return result;
             }
-            if self.engine.is_turn_active(session_id) {
+            if self.engine.is_turn_active(session_id, generation) {
                 inactive_since = None;
             } else if inactive_since.get_or_insert_with(Instant::now).elapsed() >= BUSY_GRACE {
                 return Err("task_turn_terminal_missing".to_owned());
             }
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    self.engine.cancel_turn(session_id).await;
+                    self.engine.cancel_turn(session_id, generation).await;
                     return Err(TASK_CANCELLED_CODE.to_owned());
                 }
                 _ = tokio::time::sleep(POLL_INTERVAL) => {}
             }
         }
+    }
+}
+
+impl EnginePoolChatTurnPort {
+    async fn run_chat_turn_with_attachments_budget(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        model_source: &str,
+        lease: &LeaseContext,
+        content: String,
+        skill_ids: Vec<String>,
+        attachments: Vec<PublishedAttachment>,
+        events: Arc<dyn ControllerTaskEventSink>,
+        cancel: CancellationToken,
+        budget: TurnBudget,
+    ) -> std::result::Result<Option<String>, String> {
+        if cancel.is_cancelled() {
+            return Err(TASK_CANCELLED_CODE.to_owned());
+        }
+        // Submission only queues the engine turn. Receipt revocation during
+        // disconnect must not release paths still used by later tool reads.
+        let _attachment_read_owners: Vec<_> = attachments
+            .iter()
+            .filter_map(|attachment| attachment.read_owner.clone())
+            .collect();
+        let owner = Arc::new(RemoteTurnOwner::default());
+        let mut reserved = self.engine.reserve_remote_turn(session_id)?;
+        let generation = reserved.as_ref().map(|reserved| reserved.generation);
+        let mut turn_relay = self.engine.start_turn_relay(session_id, task_id, events);
+        if let Some(relay) = turn_relay.as_mut() {
+            if let Some(reserved) = reserved.as_ref() {
+                if let Some(turn) = reserved.turn.as_ref() {
+                    relay.arm(turn.generation());
+                }
+            }
+        }
+        let result = budget
+            .run(&cancel, async {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Err(TASK_CANCELLED_CODE.to_owned());
+                    }
+                    result = self.engine.send_user_message_with_attachments(
+                        session_id,
+                        task_id,
+                        model_source,
+                        lease,
+                        content,
+                        skill_ids,
+                        attachments,
+                        turn_relay.as_ref(),
+                        owner.clone(),
+                        &mut reserved,
+                    ) => result?,
+                }
+                self.wait_for_terminal(session_id, &cancel, turn_relay.as_ref(), generation)
+                    .await?;
+                Ok(())
+            })
+            .await;
+        if matches!(
+            result.as_ref().err().map(String::as_str),
+            Some(TASK_CANCELLED_CODE | TURN_TIMEOUT_CODE)
+        ) {
+            let _ = tokio::time::timeout(
+                CANCEL_SETTLE_BUDGET,
+                self.engine.cancel_turn(session_id, generation),
+            )
+            .await;
+        }
+        // Only a successful, accepted terminal can classify the final block.
+        // Cancellation, failure and Drop mask pending text instead.
+        // Assistant content is journaled from real `chat:delta` callbacks,
+        // never synthesized as one final response here.
+        if let Some(relay) = turn_relay.as_mut() {
+            relay.finish(result.is_ok());
+        }
+        // All remote model sources own a private skills root. Retire only this
+        // attempt's entry before releasing credentials; never rewrite shared B
+        // skills here, especially when a replacement already owns the session.
+        let engine = self.engine.clone();
+        let session_id = session_id.to_owned();
+        crate::features::remote_control::controller::turn_budget::settle_owned(async move {
+            engine.release_task_model(&session_id, &owner).await;
+        })
+        .await;
+        if result.is_ok() {
+            budget.checkpoint(&cancel)?;
+        }
+        result.map(|()| None)
     }
 }
 
@@ -906,70 +1018,20 @@ impl RemoteChatTurnPort for EnginePoolChatTurnPort {
         events: Arc<dyn ControllerTaskEventSink>,
         cancel: CancellationToken,
     ) -> std::result::Result<Option<String>, String> {
-        // Submission only queues the engine turn. Receipt revocation during
-        // disconnect must not release paths still used by later tool reads.
-        let _attachment_read_owners: Vec<_> = attachments
-            .iter()
-            .filter_map(|attachment| attachment.read_owner.clone())
-            .collect();
-        let mut reserved = self.engine.reserve_remote_turn(session_id)?;
-        let mut turn_relay = self.engine.start_turn_relay(session_id, task_id, events);
-        if let Some(relay) = turn_relay.as_mut() {
-            if let Some(reserved) = reserved.as_ref() {
-                relay.skill_owner = Some(reserved.skills.owner());
-                if let Some(turn) = reserved.turn.as_ref() {
-                    relay.arm(turn.generation());
-                }
-            }
-        }
-        let result = async {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    self.engine.cancel_turn(session_id).await;
-                    return Err(TASK_CANCELLED_CODE.to_owned());
-                }
-                result = self.engine.send_user_message_with_attachments(
-                    session_id,
-                    task_id,
-                    model_source,
-                    lease,
-                    content,
-                    skill_ids,
-                    attachments,
-                    turn_relay.as_ref(),
-                    &mut reserved,
-                ) => result?,
-            }
-            self.wait_for_terminal(session_id, &cancel, turn_relay.as_ref())
-                .await?;
-            Ok(())
-        }
-        .await;
-        // Flush the last redaction-safe token before the task terminal event.
-        // Assistant content is journaled from real `chat:delta` callbacks,
-        // never synthesized as one final response here.
-        if let Some(relay) = turn_relay.as_mut() {
-            relay.finish();
-        }
-        // EnginePool entries retain their prepared runtime credential. A
-        // task-scoped A credential must evict the engine while the skill freeze
-        // still rejects local sends. Unfreezing first would allow a new local
-        // turn that this old task's eviction could then cancel.
-        self.engine
-            .release_task_model(session_id, model_source)
-            .await;
-        // Restore B's latest authoritative set only after task-owned eviction
-        // completes, and before releasing the shared remote task lock.
-        let restore_result = self
-            .engine
-            .restore_session_skills(session_id, turn_relay.as_ref())
-            .await;
-        match (result, restore_result) {
-            (Ok(()), Ok(())) => Ok(None),
-            (Ok(()), Err(error)) => Err(error),
-            (Err(error), _) => Err(error),
-        }
+        let budget = TurnBudget::current_or_new()?;
+        self.run_chat_turn_with_attachments_budget(
+            session_id,
+            task_id,
+            model_source,
+            lease,
+            content,
+            skill_ids,
+            attachments,
+            events,
+            cancel,
+            budget,
+        )
+        .await
     }
 }
 
@@ -1001,36 +1063,26 @@ mod tests {
         };
         let local = lifecycle.reserve().unwrap();
         assert!(reserve_remote_chat_turn(&sid, reserve).is_err());
-        // The rejected remote request must not poison the local session's skills.
-        drop(RemoteSkillFreezeGuard::acquire(&sid).unwrap());
         assert!(local.ensure_active().is_ok());
         drop(local);
 
-        let occupied = RemoteSkillFreezeGuard::acquire(&sid).unwrap();
-        assert!(reserve_remote_chat_turn(&sid, reserve).is_err());
-        // Failed skill acquisition releases its already-acquired real turn gate.
-        drop(lifecycle.reserve().unwrap());
-        drop(occupied);
-
         let mut remote = reserve_remote_chat_turn(&sid, reserve).unwrap();
-        let generation = remote.turn.as_ref().unwrap().generation();
+        let generation = remote.generation;
         let turn = remote.take_turn().unwrap();
         assert_eq!(turn.generation(), generation);
         assert!(remote.take_turn().is_none());
+        assert_eq!(
+            remote.generation, generation,
+            "cancel identity survives take_turn"
+        );
         drop(turn);
-        assert!(
-            super::super::skill_materialization::reserve_unfrozen_session_turn(&sid, || {
-                lifecycle.reserve()
-            })
-            .is_err(),
-            "local sends and reconfiguration cannot occupy the terminal-to-restore window"
-        );
-        assert!(
-            RemoteSkillFreezeGuard::acquire(&sid).is_err(),
-            "terminal turn gate release does not release skill ownership before restore"
-        );
+        let successor = lifecycle.reserve().unwrap();
+        assert_ne!(successor.generation(), remote.generation);
         drop(remote);
-        drop(RemoteSkillFreezeGuard::acquire(&sid).unwrap());
+        assert!(
+            successor.ensure_active().is_ok(),
+            "old reservation Drop cannot retire its successor"
+        );
     }
 
     struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -1163,6 +1215,7 @@ mod tests {
             _content: String,
             _skill_ids: Vec<String>,
             _relay: Option<&TurnEventRelayHandle>,
+            _owner: Arc<RemoteTurnOwner>,
             _reserved: &mut Option<RemoteChatReservation>,
         ) -> std::result::Result<(), String> {
             let reservation = self
@@ -1221,7 +1274,7 @@ mod tests {
             Ok(())
         }
 
-        fn is_turn_active(&self, _session_id: &str) -> bool {
+        fn is_turn_active(&self, _session_id: &str, _generation: Option<u64>) -> bool {
             self.active.swap(false, Ordering::SeqCst)
         }
 
@@ -1233,17 +1286,9 @@ mod tests {
             (!self.active.load(Ordering::SeqCst)).then_some(Ok(()))
         }
 
-        async fn cancel_turn(&self, _session_id: &str) {}
+        async fn cancel_turn(&self, _session_id: &str, _generation: Option<u64>) {}
 
-        async fn release_task_model(&self, _session_id: &str, _model_source: &str) {}
-
-        async fn restore_session_skills(
-            &self,
-            _session_id: &str,
-            _relay: Option<&TurnEventRelayHandle>,
-        ) -> std::result::Result<(), String> {
-            Ok(())
-        }
+        async fn release_task_model(&self, _session_id: &str, _owner: &Arc<RemoteTurnOwner>) {}
     }
 
     fn remote_task_payload(task_id: &str, client_request_id: &str) -> Value {
@@ -1354,7 +1399,7 @@ mod tests {
         terminal_outcome: Option<std::result::Result<(), String>>,
         missing_terminal: bool,
         real_lifecycle: Option<Arc<TurnLifecycle>>,
-        skill_owner: Mutex<Option<uuid::Uuid>>,
+        private_skills: Mutex<Option<Arc<super::super::skill_materialization::RemoteTurnSkills>>>,
         eviction_started: Option<Arc<tokio::sync::Notify>>,
         eviction_release: Option<Arc<tokio::sync::Notify>>,
     }
@@ -1402,7 +1447,6 @@ mod tests {
                 })
                 .transpose()
         }
-
         async fn send_user_message(
             &self,
             _session_id: &str,
@@ -1412,16 +1456,17 @@ mod tests {
             content: String,
             _skill_ids: Vec<String>,
             _relay: Option<&TurnEventRelayHandle>,
+            _owner: Arc<RemoteTurnOwner>,
             reserved: &mut Option<RemoteChatReservation>,
         ) -> std::result::Result<(), String> {
             if let Some(reserved) = reserved.as_mut() {
-                let owner = reserved.skills.owner();
-                super::super::skill_materialization::materialize_plain_remote_turn_skills(
-                    _session_id,
-                    &[],
-                    owner,
-                )?;
-                *self.skill_owner.lock().unwrap() = Some(owner);
+                let skills =
+                    super::super::skill_materialization::materialize_plain_remote_turn_skills(
+                        _session_id,
+                        &[],
+                        _owner,
+                    )?;
+                *self.private_skills.lock().unwrap() = Some(Arc::new(skills));
                 drop(reserved.take_turn().expect("single reserved turn"));
             }
             if let Some(started) = self.send_started.as_ref() {
@@ -1436,8 +1481,14 @@ mod tests {
             Ok(())
         }
 
-        fn is_turn_active(&self, _session_id: &str) -> bool {
+        fn is_turn_active(&self, _session_id: &str, generation: Option<u64>) -> bool {
             self.assert_attachment_lease();
+            if let Some(lifecycle) = &self.real_lifecycle {
+                self.flips.fetch_add(1, Ordering::SeqCst);
+                return generation.is_some_and(|generation| {
+                    !lifecycle.is_reserve_gate_open_for(Some(generation))
+                });
+            }
             // The first observation reports busy, the second one completes the
             // turn so the adapter can prove it waits for a real transition.
             if !self.completes_after_first_poll {
@@ -1460,37 +1511,21 @@ mod tests {
                 .then(|| self.terminal_outcome.clone().unwrap_or(Ok(())))
         }
 
-        async fn cancel_turn(&self, session_id: &str) {
+        async fn cancel_turn(&self, session_id: &str, _generation: Option<u64>) {
             self.assert_attachment_lease();
             self.cancelled.lock().unwrap().push(session_id.to_owned());
         }
 
-        async fn release_task_model(&self, session_id: &str, model_source: &str) {
+        async fn release_task_model(&self, session_id: &str, _owner: &Arc<RemoteTurnOwner>) {
             self.assert_attachment_lease();
-            if model_source == TASK_MODEL_SOURCE_TEMPORARY {
-                if let Some(started) = &self.eviction_started {
-                    started.notify_one();
-                }
-                if let Some(release) = &self.eviction_release {
-                    release.notified().await;
-                }
-                self.released.lock().unwrap().push(session_id.to_owned());
+            if let Some(started) = &self.eviction_started {
+                started.notify_one();
             }
-        }
-
-        async fn restore_session_skills(
-            &self,
-            _session_id: &str,
-            _relay: Option<&TurnEventRelayHandle>,
-        ) -> std::result::Result<(), String> {
-            self.assert_attachment_lease();
-            if let Some(owner) = *self.skill_owner.lock().unwrap() {
-                super::super::skill_materialization::restore_plain_session_skills(
-                    _session_id,
-                    owner,
-                )?;
+            if let Some(release) = &self.eviction_release {
+                release.notified().await;
             }
-            Ok(())
+            self.released.lock().unwrap().push(session_id.to_owned());
+            self.private_skills.lock().unwrap().take();
         }
 
         async fn send_user_message_with_attachments(
@@ -1503,11 +1538,15 @@ mod tests {
             skill_ids: Vec<String>,
             attachments: Vec<PublishedAttachment>,
             relay: Option<&TurnEventRelayHandle>,
+            owner: Arc<RemoteTurnOwner>,
             reserved: &mut Option<RemoteChatReservation>,
         ) -> std::result::Result<(), String> {
             if self.protected_attachment.is_none() && !attachments.is_empty() {
                 return Err("task_attachments_unavailable".to_owned());
             }
+            // Observe ownership at submission and at exact-owner teardown.
+            // Failed submission has no busy polling or shared-Skills restore.
+            self.assert_attachment_lease();
             let result = self
                 .send_user_message(
                     session_id,
@@ -1517,6 +1556,7 @@ mod tests {
                     content,
                     skill_ids,
                     relay,
+                    owner,
                     reserved,
                 )
                 .await;
@@ -1604,7 +1644,18 @@ mod tests {
                 "submission_failed" => assert_eq!(result.unwrap_err(), "task_engine_unavailable"),
                 _ => assert_eq!(result.unwrap_err(), TASK_CANCELLED_CODE),
             }
-            assert!(fake.lease_checks.load(Ordering::SeqCst) >= 2);
+            if outcome == "cancel_before_send" {
+                assert_eq!(fake.lease_checks.load(Ordering::SeqCst), 0);
+                assert!(fake.sent.lock().unwrap().is_empty());
+                assert!(fake.released.lock().unwrap().is_empty());
+            } else {
+                assert!(fake.lease_checks.load(Ordering::SeqCst) >= 2, "{outcome}");
+                assert_eq!(
+                    *fake.released.lock().unwrap(),
+                    vec!["session-0001".to_owned()],
+                    "{outcome}: attachment remains protected through exact-owner teardown"
+                );
+            }
             assert!(
                 !path.exists(),
                 "cleanup waits for the turn port's last owner"
@@ -1865,75 +1916,102 @@ mod tests {
     }
 
     #[test]
-    fn temporary_engine_eviction_finishes_before_skill_unfreeze() {
+    fn old_remote_cleanup_preserves_new_local_reservation_and_shared_skills() {
         let _guard = crate::platform::paths::tests::ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let (_bridge, _home, _env) = isolated_remote_bridge();
+        let (_bridge, home, _env) = isolated_remote_bridge();
         runtime().block_on(async {
-            let started = Arc::new(tokio::sync::Notify::new());
-            let release = Arc::new(tokio::sync::Notify::new());
-            let lifecycle = Arc::new(TurnLifecycle::default());
-            let engine = Arc::new(FakeEngine {
-                completes_after_first_poll: true,
-                real_lifecycle: Some(lifecycle.clone()),
-                eviction_started: Some(started.clone()),
-                eviction_release: Some(release.clone()),
-                ..FakeEngine::default()
-            });
-            let task = tokio::spawn(async move {
-                EnginePoolChatTurnPort::new(engine)
-                    .run_chat_turn(
-                        "eviction-before-unfreeze",
-                        "task-0001",
-                        TASK_MODEL_SOURCE_TEMPORARY,
-                        &lease(),
-                        "hello".to_owned(),
-                        vec![],
-                        events(),
-                        CancellationToken::new(),
-                    )
+            for source in [TASK_MODEL_SOURCE_TEMPORARY, TASK_MODEL_SOURCE_CONTROLLED] {
+                let sid = "remote-cleanup-replacement";
+                let started = Arc::new(tokio::sync::Notify::new());
+                let release = Arc::new(tokio::sync::Notify::new());
+                let lifecycle = Arc::new(TurnLifecycle::default());
+                let engine = Arc::new(FakeEngine {
+                    completes_after_first_poll: true,
+                    real_lifecycle: Some(lifecycle.clone()),
+                    eviction_started: Some(started.clone()),
+                    eviction_release: Some(release.clone()),
+                    ..FakeEngine::default()
+                });
+                let old = engine.clone();
+                let task = tokio::spawn(async move {
+                    EnginePoolChatTurnPort::new(old)
+                        .run_chat_turn(
+                            sid,
+                            "task-0001",
+                            source,
+                            &lease(),
+                            "hello".to_owned(),
+                            vec![],
+                            events(),
+                            CancellationToken::new(),
+                        )
+                        .await
+                });
+                tokio::time::timeout(Duration::from_secs(2), started.notified())
                     .await
-            });
-            tokio::time::timeout(Duration::from_secs(2), started.notified())
-                .await
-                .unwrap();
-            // The real terminal turn gate is open, but old task cleanup still
-            // owns the skill freeze. A local send must remain fail-closed.
-            assert!(
-                super::super::skill_materialization::reserve_unfrozen_session_turn(
-                    "eviction-before-unfreeze",
-                    || lifecycle.reserve(),
-                )
-                .is_err()
-            );
-            assert!(
-                super::super::skill_materialization::ensure_plain_session_skills_for_test(
-                    "eviction-before-unfreeze",
-                )
-                .is_err()
-            );
-            release.notify_one();
-            assert!(
-                tokio::time::timeout(Duration::from_secs(2), task)
-                    .await
+                    .unwrap();
+                let private = engine
+                    .private_skills
+                    .lock()
                     .unwrap()
+                    .as_ref()
                     .unwrap()
-                    .is_ok()
-            );
-            super::super::skill_materialization::ensure_plain_session_skills_for_test(
-                "eviction-before-unfreeze",
-            )
-            .unwrap();
-            drop(
-                super::super::skill_materialization::reserve_unfrozen_session_turn(
-                    "eviction-before-unfreeze",
-                    || lifecycle.reserve(),
-                )
-                .unwrap()
-                .unwrap(),
-            );
+                    .path()
+                    .to_owned();
+                assert!(private.starts_with(&home));
+                assert!(private.is_dir());
+                let successor = lifecycle.reserve().unwrap();
+                super::super::skill_materialization::ensure_plain_session_skills_for_test(sid);
+                let shared = crate::platform::paths::session_skills_dir(sid);
+                std::fs::write(shared.join("new-local-marker"), b"new local").unwrap();
+                assert!(std::fs::read_dir(&private).unwrap().next().is_none());
+                release.notify_one();
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(2), task)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .is_ok()
+                );
+                assert!(successor.ensure_active().is_ok());
+                assert_eq!(
+                    std::fs::read(shared.join("new-local-marker")).unwrap(),
+                    b"new local"
+                );
+                assert!(!private.exists());
+                assert_eq!(*engine.released.lock().unwrap(), vec![sid.to_owned()]);
+            }
         });
+    }
+
+    #[tokio::test]
+    async fn successor_activity_cannot_extend_old_remote_terminal_budget() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let old = lifecycle.reserve().unwrap();
+        let generation = old.generation();
+        drop(old);
+        let successor = lifecycle.reserve().unwrap();
+        let engine = Arc::new(FakeEngine {
+            missing_terminal: true,
+            real_lifecycle: Some(lifecycle),
+            ..FakeEngine::default()
+        });
+        let port = EnginePoolChatTurnPort::new(engine);
+        let result = tokio::time::timeout(
+            BUSY_GRACE + Duration::from_secs(2),
+            port.wait_for_terminal(
+                "session-0001",
+                &CancellationToken::new(),
+                None,
+                Some(generation),
+            ),
+        )
+        .await
+        .expect("new local activity must not renew old terminal budget");
+        assert_eq!(result.unwrap_err(), "task_turn_terminal_missing");
+        assert!(successor.ensure_active().is_ok());
     }
 
     #[test]
@@ -2132,6 +2210,54 @@ mod tests {
         assert_eq!(fake.released.lock().unwrap().as_slice(), ["session-0001"]);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn busy_remote_chat_uses_one_frozen_submission_and_terminal_budget() {
+        let fake = FakeEngine::always_busy();
+        let port = EnginePoolChatTurnPort::new(fake.clone());
+        let result = port
+            .run_chat_turn_with_attachments_budget(
+                "session-0001",
+                "task-0001",
+                TASK_MODEL_SOURCE_CONTROLLED,
+                &lease(),
+                "hello".into(),
+                Vec::new(),
+                Vec::new(),
+                events(),
+                CancellationToken::new(),
+                TurnBudget::for_test(Duration::from_secs(1800)),
+            )
+            .await;
+        assert_eq!(result.unwrap_err(), TURN_TIMEOUT_CODE);
+        assert_eq!(fake.sent.lock().unwrap().as_slice(), ["hello"]);
+        assert_eq!(fake.cancelled.lock().unwrap().as_slice(), ["session-0001"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn precancelled_remote_chat_never_reserves_or_submits() {
+        let fake = FakeEngine::always_busy();
+        let port = EnginePoolChatTurnPort::new(fake.clone());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = port
+            .run_chat_turn_with_attachments_budget(
+                "session-0001",
+                "task-0001",
+                TASK_MODEL_SOURCE_CONTROLLED,
+                &lease(),
+                "hello".into(),
+                Vec::new(),
+                Vec::new(),
+                events(),
+                cancel,
+                TurnBudget::for_test(Duration::from_secs(1)),
+            )
+            .await;
+        assert_eq!(result.unwrap_err(), TASK_CANCELLED_CODE);
+        assert!(fake.sent.lock().unwrap().is_empty());
+        assert!(fake.cancelled.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn reasoning_state_rejects_foreign_generations() {
         let mut state = TurnEventRelayState {
@@ -2176,7 +2302,172 @@ mod tests {
             state.push_assistant("secret-value after "),
             Some("[REDACTED] after ".into())
         );
-        assert_eq!(state.finish_assistant_token(), None);
+        assert_eq!(state.finish_assistant_token(true), None);
+    }
+
+    #[test]
+    fn pending_projection_waits_while_other_safe_channel_batches_are_delivered() {
+        let mut state = TurnEventRelayState {
+            generation: Some(7),
+            ..TurnEventRelayState::default()
+        };
+        assert_eq!(state.push_assistant("目录"), None);
+        assert!(state.push_reasoning(Some(7), "推理 ").is_some());
+        assert_eq!(take_reasoning_batch(&mut state, true), Some("推理 ".into()));
+        assert_eq!(
+            state.push_assistant("/秘密/file.txt "),
+            Some("[PATH] ".into())
+        );
+        assert!(state.push_reasoning(Some(7), "推理目录").is_some());
+        assert_eq!(take_reasoning_batch(&mut state, true), None);
+        assert_eq!(state.push_assistant("正文 "), Some("正文 ".into()));
+        assert!(state.push_reasoning(Some(7), "/秘密/file.txt ").is_some());
+        assert_eq!(
+            take_reasoning_batch(&mut state, true),
+            Some("[PATH] ".into())
+        );
+        state.terminal = Some(Ok(()));
+        assert_eq!(state.close_streams(true), (Vec::new(), None));
+    }
+
+    #[test]
+    fn remote_projection_success_abort_and_duplicate_close_are_bounded() {
+        for completed in [false, true] {
+            for terminal in [
+                None,
+                Some(Ok(())),
+                Some(Err(TASK_CANCELLED_CODE.to_owned())),
+                Some(Err(TURN_TIMEOUT_CODE.to_owned())),
+            ] {
+                let mut state = TurnEventRelayState {
+                    generation: Some(7),
+                    ..TurnEventRelayState::default()
+                };
+                assert_eq!(state.push_assistant("普通正文"), None);
+                assert!(state.push_reasoning(Some(7), "普通推理").is_some());
+                state.terminal = terminal;
+                let successful = completed && matches!(state.terminal, Some(Ok(())));
+                let (reasoning, assistant) = state.close_streams(completed);
+                assert_eq!(
+                    reasoning,
+                    vec![
+                        if successful {
+                            "普通推理"
+                        } else {
+                            "[REDACTED]"
+                        }
+                        .to_owned()
+                    ]
+                );
+                assert_eq!(
+                    assistant,
+                    Some(
+                        if successful {
+                            "普通正文"
+                        } else {
+                            "[REDACTED]"
+                        }
+                        .to_owned()
+                    )
+                );
+                assert_eq!(state.close_streams(true), (Vec::new(), None));
+                assert_eq!(state.push_assistant("late "), None);
+                assert_eq!(state.push_reasoning(Some(7), "late "), None);
+            }
+        }
+        let mut state = TurnEventRelayState {
+            generation: Some(7),
+            terminal: Some(Ok(())),
+            ..TurnEventRelayState::default()
+        };
+        assert_eq!(state.push_assistant("late "), None);
+        let mut state = TurnEventRelayState {
+            generation: Some(7),
+            ..TurnEventRelayState::default()
+        };
+        assert_eq!(state.push_assistant("pending"), None);
+        assert!(state.push_reasoning(Some(7), "pending").is_some());
+        state.assistant_events = MAX_ASSISTANT_EVENTS_PER_TURN;
+        state.emitted_events = MAX_REASONING_EVENTS_PER_TURN;
+        assert_eq!(state.close_streams(false), (Vec::new(), None));
+        let mut unarmed = TurnEventRelayState::default();
+        assert_eq!(unarmed.push_reasoning(None, "must not leak "), None);
+    }
+
+    #[test]
+    fn chat_delivery_cannot_be_overtaken_by_close_and_late_tools_are_rejected() {
+        use parking_lot::Mutex;
+
+        struct BarrierSink {
+            prepared: std::sync::mpsc::Sender<()>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+            delivered: Mutex<Vec<(JournalKind, Value)>>,
+        }
+        impl ControllerTaskEventSink for BarrierSink {
+            fn emit(&self, _: Value) {}
+            fn emit_journal(&self, kind: JournalKind, _: &str, _: Option<&str>, payload: Value) {
+                self.prepared.send(()).unwrap();
+                self.release
+                    .lock()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                self.delivered.lock().push((kind, payload));
+            }
+        }
+        let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let sink = Arc::new(BarrierSink {
+            prepared: prepared_tx,
+            release: Mutex::new(release_rx),
+            delivered: Mutex::new(Vec::new()),
+        });
+        let events: Arc<dyn ControllerTaskEventSink> = sink.clone();
+        let state = Arc::new(Mutex::new(TurnEventRelayState {
+            generation: Some(7),
+            ..TurnEventRelayState::default()
+        }));
+        let worker_state = Arc::clone(&state);
+        let worker_events = Arc::clone(&events);
+        let worker = std::thread::spawn(move || {
+            relay_chat_assistant(
+                &worker_state,
+                &worker_events,
+                "session-1",
+                "task-1",
+                "safe ",
+            );
+        });
+        prepared_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Output has been prepared but the sink has not delivered it. Close
+        // must acquire this same lock, so it cannot cross this barrier.
+        assert!(state.try_lock().is_none());
+        assert!(sink.delivered.lock().is_empty());
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(state.lock().close_streams(false), (Vec::new(), None));
+        for tool_state in ["running", "completed"] {
+            relay_chat_tool(
+                &state,
+                &events,
+                "session-1",
+                "task-1",
+                json!({"tool_state":tool_state}),
+            );
+        }
+        relay_chat_assistant(&state, &events, "session-1", "task-1", "late ");
+        assert_eq!(sink.delivered.lock().len(), 1);
+        assert_eq!(
+            sink.delivered.lock()[0],
+            (JournalKind::AssistantDelta, json!({"text":"safe "}))
+        );
+
+        // A terminal is itself a fence, even before the handle closes.
+        let mut guard = state.lock();
+        guard.stopped = false;
+        guard.terminal = Some(Ok(()));
+        drop(guard);
+        relay_chat_tool(&state, &events, "session-1", "task-1", json!({}));
+        assert_eq!(sink.delivered.lock().len(), 1);
     }
 
     #[test]

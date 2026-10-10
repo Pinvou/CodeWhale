@@ -21,6 +21,9 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
+use super::controller::shared_transport::{
+    ControllerOutboundScope, ControllerReadReceipt, SharedControllerAuthority,
+};
 use super::protocol::{PROTOCOL_VERSION, WebAccessConfig};
 
 pub(crate) const RECONNECT_BASE_DELAY_MS: u64 = 500;
@@ -96,6 +99,11 @@ pub enum RelayInbound {
     /// makes its memory ceiling proportional to wire bytes rather than the
     /// potentially much larger `serde_json::Value` representation.
     Message(String),
+    /// Strictly validated join/final metadata minted on the receiving socket.
+    ControllerMessage {
+        text: String,
+        receipt: ControllerReadReceipt,
+    },
     Connection {
         endpoint_id: String,
         connected: bool,
@@ -106,6 +114,7 @@ pub enum RelayInbound {
 struct OutboundFrame {
     text: String,
     controller_v1: bool,
+    controller_scope: Option<ControllerOutboundScope>,
     // The permit follows the serialized frame from the channel into the
     // reconnect queue and is released only after send or intentional discard.
     _byte_permit: OwnedSemaphorePermit,
@@ -115,6 +124,7 @@ struct SerializedFrame {
     text: String,
     permits: u32,
     controller_v1: bool,
+    controller_scope: Option<ControllerOutboundScope>,
 }
 
 const SOCKET_MODE_NEGOTIATING: u8 = 0;
@@ -135,6 +145,7 @@ pub enum RelayTrySendError {
     ChannelFull,
     ChannelClosed,
     ControllerProtocolUnavailable,
+    ControllerAuthorityUnavailable,
 }
 
 impl fmt::Display for RelayTrySendError {
@@ -152,6 +163,9 @@ impl fmt::Display for RelayTrySendError {
             Self::ControllerProtocolUnavailable => {
                 formatter.write_str("desktop_controller_relay_unavailable")
             }
+            Self::ControllerAuthorityUnavailable => {
+                formatter.write_str("desktop_controller_authority_unavailable")
+            }
         }
     }
 }
@@ -166,14 +180,39 @@ pub struct RelaySender {
     shutdown: CancellationToken,
     coalesced_control: Arc<Mutex<CoalescedControlState>>,
     socket_mode: Arc<AtomicU8>,
+    pub(crate) controller_authority: SharedControllerAuthority,
 }
 
 impl RelaySender {
+    pub(crate) fn same_channel(&self, other: &Self) -> bool {
+        self.tx.same_channel(&other.tx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel_owner() -> Self {
+        outbound_channel(1, 1024, 1024).0
+    }
+
     fn serialize_message(&self, value: Value) -> Result<SerializedFrame, RelayTrySendError> {
+        self.serialize_message_owned(value, None)
+    }
+
+    fn serialize_message_owned(
+        &self,
+        value: Value,
+        owner: Option<(&str, u64)>,
+    ) -> Result<SerializedFrame, RelayTrySendError> {
         let controller_v1 = value.get("v").and_then(Value::as_u64) == Some(1);
         if controller_v1 && self.socket_mode.load(Ordering::Acquire) == SOCKET_MODE_LEGACY_V2 {
             return Err(RelayTrySendError::ControllerProtocolUnavailable);
         }
+        let controller_scope = if controller_v1 {
+            self.controller_authority
+                .outbound_scope_owned(&value, owner)
+                .map_err(|_| RelayTrySendError::ControllerAuthorityUnavailable)?
+        } else {
+            None
+        };
         let text = serde_json::to_string(&value)
             .map_err(|error| RelayTrySendError::Serialization(error.to_string()))?;
         let bytes = text.len();
@@ -191,10 +230,12 @@ impl RelaySender {
             text,
             permits,
             controller_v1,
+            controller_scope,
         })
     }
 
     fn cancel(&self) {
+        self.controller_authority.shutdown();
         self.shutdown.cancel();
         self.coalesced_control.lock().latest = None;
     }
@@ -208,6 +249,7 @@ impl RelaySender {
         let queued = OutboundFrame {
             text: frame.text,
             controller_v1: frame.controller_v1,
+            controller_scope: frame.controller_scope,
             _byte_permit: byte_permit,
         };
         self.tx.try_send(queued).map_err(|error| match error {
@@ -227,6 +269,7 @@ impl RelaySender {
         let queued = OutboundFrame {
             text: frame.text,
             controller_v1: frame.controller_v1,
+            controller_scope: frame.controller_scope,
             _byte_permit: byte_permit,
         };
         tokio::select! {
@@ -252,6 +295,19 @@ impl RelaySender {
                 self.try_send_serialized(self.serialize_message(value)?)
             }
         }
+    }
+
+    pub(crate) fn try_send_controller_owned(
+        &self,
+        generation: &str,
+        binding: u64,
+        value: Value,
+    ) -> Result<(), RelayTrySendError> {
+        if value["v"].as_u64() != Some(1) {
+            return Err(RelayTrySendError::ControllerAuthorityUnavailable);
+        }
+        let frame = self.serialize_message_owned(value, Some((generation, binding)))?;
+        self.try_send_serialized(frame)
     }
 
     /// Queue a stream-reset barrier without spawning one waiter per failure.
@@ -336,6 +392,7 @@ fn outbound_channel(
             shutdown: CancellationToken::new(),
             coalesced_control: Arc::new(Mutex::new(CoalescedControlState::default())),
             socket_mode: Arc::new(AtomicU8::new(SOCKET_MODE_NEGOTIATING)),
+            controller_authority: SharedControllerAuthority::default(),
         },
         rx,
     )
@@ -349,9 +406,18 @@ pub fn spawn(config: WebAccessConfig) -> (RelaySender, RelayReceiver) {
     );
     let shutdown = tx_out.shutdown.clone();
     let socket_mode = tx_out.socket_mode.clone();
+    let controller_authority = tx_out.controller_authority.clone();
     let (tx_in, rx_in) = mpsc::channel::<RelayInbound>(INBOUND_CHANNEL_CAPACITY);
     tauri::async_runtime::spawn(async move {
-        run_loop(config, tx_in, rx_out, shutdown, socket_mode).await;
+        run_loop(
+            config,
+            tx_in,
+            rx_out,
+            shutdown,
+            socket_mode,
+            controller_authority,
+        )
+        .await;
     });
     (tx_out, rx_in)
 }
@@ -590,6 +656,7 @@ async fn run_loop(
     mut rx_out: mpsc::Receiver<OutboundFrame>,
     shutdown: CancellationToken,
     socket_mode: Arc<AtomicU8>,
+    controller_authority: SharedControllerAuthority,
 ) {
     let mut pending = VecDeque::<OutboundFrame>::new();
     let mut reconnect_backoff = ReconnectBackoff::default();
@@ -706,6 +773,9 @@ async fn run_loop(
             }
             continue;
         }
+        let Some(socket_authority) = controller_authority.open_socket(!legacy_v2_only) else {
+            return;
+        };
         if !send_inbound_until_shutdown(
             &tx_in,
             RelayInbound::Connection {
@@ -731,6 +801,13 @@ async fn run_loop(
                 }
                 continue;
             }
+            if frame
+                .controller_scope
+                .as_ref()
+                .is_some_and(|scope| !controller_authority.frame_is_current(scope))
+            {
+                continue;
+            }
             let send_result = tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => return,
@@ -738,6 +815,7 @@ async fn run_loop(
             };
             if let Err(error) = send_result {
                 push_pending_front(&mut pending, frame);
+                drop(socket_authority);
                 if !send_inbound_until_shutdown(
                     &tx_in,
                     RelayInbound::Connection {
@@ -795,6 +873,8 @@ async fn run_loop(
                                 }
                                 continue;
                             }
+                            if frame.controller_scope.as_ref().is_some_and(|scope|
+                                !controller_authority.frame_is_current(scope)) { continue; }
                             let send_result = tokio::select! {
                                 biased;
                                 _ = shutdown.cancelled() => return,
@@ -832,13 +912,21 @@ async fn run_loop(
                             match serde_json::from_str::<Value>(&text) {
                                 Ok(value) => {
                                     let terminal = terminal_message(&value, &config.endpoint_id);
+                                    if terminal.is_some() { socket_authority.invalidate(); }
                                     if registration_acknowledges_endpoint(&value, &config.endpoint_id) {
                                         reconnect_backoff.reset();
                                     }
+                                    let receipt = socket_authority.receipt(&value);
                                     drop(value);
+                                    let inbound = match receipt {
+                                        Some(receipt) => RelayInbound::ControllerMessage {
+                                            text: text.to_string(), receipt,
+                                        },
+                                        None => RelayInbound::Message(text.to_string()),
+                                    };
                                     if !send_inbound_until_shutdown(
                                         &tx_in,
-                                        RelayInbound::Message(text.to_string()),
+                                        inbound,
                                         &shutdown,
                                     ).await {
                                         return;
@@ -891,6 +979,9 @@ async fn run_loop(
             }
         }
 
+        // Revoke before queueing a disconnect or sleeping for reconnect. The
+        // queue/worker may be delayed, but cannot consume an old final proof.
+        drop(socket_authority);
         if !send_inbound_until_shutdown(
             &tx_in,
             RelayInbound::Connection {
@@ -994,6 +1085,10 @@ fn revoke_message_parts(endpoint_id: &str, desktop_secret: &str) -> Value {
 }
 
 #[cfg(test)]
+#[path = "relay_client/shared_controller_tests.rs"]
+mod shared_controller_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
@@ -1081,6 +1176,7 @@ mod tests {
             rx_out,
             sender.shutdown.clone(),
             sender.socket_mode.clone(),
+            sender.controller_authority.clone(),
         ));
         let (register, forwarded) = tokio::time::timeout(Duration::from_secs(4), seen_rx)
             .await

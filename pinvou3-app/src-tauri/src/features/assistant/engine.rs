@@ -30,6 +30,7 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::broadcast;
 
+use crate::features::assistant::engine_pool::turn_tool_restrict::TurnToolRestrict;
 pub(crate) use crate::features::assistant::engine_support::EngineTurnSignal;
 use crate::features::assistant::engine_support::{
     TurnCompletionTracker, apply_scheduled_turn_policy, maybe_notify_task_completed,
@@ -522,6 +523,19 @@ pub(crate) fn dispatch_turn_bound_cancel<E: TurnBoundCancelOps + ?Sized>(
     }
 }
 
+/// A remote deadline is not the user's session-wide Stop action. Never latch
+/// a disposition on an unobserved/replaced slot, or cancel unrelated children.
+/// The foundation settles the exact cancelled turn's owned child mailbox.
+pub(crate) fn dispatch_remote_turn_cancel<E: TurnBoundCancelOps + ?Sized>(
+    engine: &E,
+    identity: Option<&TurnIdentity>,
+    mode: deepseek_tui::core::engine::CancelMode,
+) {
+    if let TurnBoundCancelAction::BoundTurn(turn_id) = turn_bound_cancel_action(identity) {
+        engine.cancel_bound_turn(&turn_id, mode);
+    }
+}
+
 /// Session-scoped turn state shared by the command path and the event
 /// forwarder. Every terminal path competes here, so the frontend receives
 /// exactly one `chat:done` for a submitted turn.
@@ -653,6 +667,22 @@ impl TurnLifecycle {
         } else {
             None
         }
+    }
+
+    /// Run a synchronous side effect only for this still-active generation.
+    /// The callback must not re-enter this lifecycle or await. Holding the
+    /// state lock prevents a forwarder-created successor between validation
+    /// and capturing the old turn's shell scope.
+    pub(crate) fn with_active_generation<T>(
+        &self,
+        generation: u64,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.state.lock();
+        if state.turn_epoch != generation || (!state.active && !state.terminal_closing) {
+            return None;
+        }
+        Some(action())
     }
 
     /// 当前活动轮是否已提交（`SendMessage` 已入队 / `TurnStarted` 已抵达）。
@@ -1612,7 +1642,7 @@ impl AppEngine {
     ///
     /// [`build_engine_config_for_session`]: crate::features::assistant::platform::bridge::Pinvou3Bridge::build_engine_config_for_session
     /// [`EnginePool`]: crate::features::assistant::engine_pool::EnginePool
-    pub(crate) async fn spawn_for_session(
+    pub(crate) fn spawn_for_session(
         app: AppHandle,
         store: SessionStore,
         bridge: Pinvou3Bridge,
@@ -1812,6 +1842,12 @@ impl AppEngine {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn bind_test_session(&mut self, session_id: &str, lifecycle: Arc<TurnLifecycle>) {
+        self.session_id = session_id.to_owned();
+        self.turn_lifecycle = lifecycle;
+    }
+
     /// Turn submission for headless harnesses (L1 integration harness, live
     /// tests). Mirrors the production path: reserve the turn slot first, then
     /// submit through `Self::send_reserved_user_message`, the same shape as
@@ -1847,14 +1883,29 @@ impl AppEngine {
             .as_ref()
             .map(|snapshot| snapshot.available_role_lines(&content))
             .unwrap_or_default();
-        self.send_reserved_user_message(
-            content,
-            mode,
-            persona_reminder,
+        // The per-turn restriction crosses this seam as the pool's
+        // `TurnToolRestrict` token, not the caller's `bool` (main #596 added
+        // this wrapper against the pre-token signature; the rebase union
+        // adapted it). Minting here keeps the wrapper's public `bool`
+        // signature for the external harnesses while the last-mile policy —
+        // and the aux zero-tool reminder merge, a no-op for headless ids —
+        // stays in the one place it is enforced.
+        super::engine_pool::forward_forced_turn_restrict(
+            &self.session_id,
+            false,
             restrict_tools,
-            expert_snapshot,
-            expert_candidates,
-            reservation,
+            persona_reminder,
+            |restrict_tools, persona_reminder| {
+                self.send_reserved_user_message(
+                    content,
+                    mode,
+                    persona_reminder,
+                    restrict_tools,
+                    expert_snapshot,
+                    expert_candidates,
+                    reservation,
+                )
+            },
         )
         .await
     }
@@ -1865,7 +1916,11 @@ impl AppEngine {
         content: String,
         mode: AppMode,
         persona_reminder: Option<String>,
-        restrict_tools: bool,
+        // Proof token, not the caller's `bool`: only the pool's policy
+        // (`turn_restrict_tools`) can mint it (PR #433 review S2(b)). The value
+        // is re-checked against THIS engine's session id, so a bogus token can
+        // never un-restrict an aux session.
+        restrict_tools: TurnToolRestrict,
         expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
         expert_candidates: Vec<String>,
         reservation: TurnReservation,
@@ -1874,7 +1929,7 @@ impl AppEngine {
             content,
             mode,
             persona_reminder,
-            restrict_tools,
+            restrict_tools.restricts_tools_for(&self.session_id),
             expert_snapshot,
             expert_candidates,
         )?;
@@ -2208,17 +2263,31 @@ impl AppEngine {
     /// 都是 disk-API-限制的副作用,现在彻底走掉。
     pub async fn sync_session(&self, session_id: String, messages: Vec<Message>) -> Result<()> {
         self.handle
-            .send(Op::SyncSession {
-                session_id: Some(session_id),
-                messages,
-                system_prompt: None,
-                system_prompt_override: false,
-                model: self.bridge.model(),
-                workspace: self.workspace.clone(),
-                mode: AppMode::Agent,
-            })
+            .send(self.sync_session_op(session_id, messages))
             .await?;
         Ok(())
+    }
+
+    /// Queue mandatory identity/history in a fresh mailbox before publication.
+    pub(crate) fn try_sync_new_session(
+        &self,
+        session_id: String,
+        messages: Vec<Message>,
+    ) -> Result<()> {
+        self.handle
+            .try_send(self.sync_session_op(session_id, messages))
+    }
+
+    fn sync_session_op(&self, session_id: String, messages: Vec<Message>) -> Op {
+        Op::SyncSession {
+            session_id: Some(session_id),
+            messages,
+            system_prompt: None,
+            system_prompt_override: false,
+            model: self.bridge.model(),
+            workspace: self.workspace.clone(),
+            mode: AppMode::Agent,
+        }
     }
 }
 
@@ -2715,6 +2784,28 @@ mod turn_lifecycle_tests {
 
         // 防 Drop 副作用。
         reservation2.mark_submitted(None);
+    }
+
+    #[test]
+    fn generation_guard_holds_state_lock_and_rejects_a_successor() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let old = lifecycle.reserve().unwrap();
+        let old_generation = old.generation();
+        assert_eq!(
+            lifecycle.with_active_generation(old_generation, || {
+                assert!(lifecycle.state.try_lock().is_none());
+                "captured under lock"
+            }),
+            Some("captured under lock")
+        );
+        drop(old);
+        let successor = lifecycle.reserve().unwrap();
+        assert!(
+            lifecycle
+                .with_active_generation(old_generation, || panic!("must not cancel new scope"))
+                .is_none()
+        );
+        assert!(successor.ensure_active().is_ok());
     }
 
     #[test]

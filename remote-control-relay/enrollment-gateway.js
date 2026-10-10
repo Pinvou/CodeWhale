@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { URL } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { CONTROLLER_SUBPROTOCOL, parseLegacyWebWireJson } from "./protocol-controller.js";
+import { closeClientFromUpstream } from "./websocket-close.js";
 
 const MAX_FIRST_FRAME_BYTES = 16 * 1024;
 const DEFAULT_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
@@ -181,12 +182,14 @@ export function createEnrollmentGateway({
   });
   const connectionBuckets = new Map();
   let negotiatingUpstreams = 0;
+  const instanceId = crypto.randomBytes(32).toString("hex");
   const server = http.createServer((request, response) => {
     if (request.url === `${basePath}/healthz` || request.url === "/healthz") {
       response.writeHead(200, {
         "content-type": "application/json; charset=utf-8",
         "cache-control": "no-store",
         "x-pinvou-enrollment-gateway": "v1",
+        "x-pinvou-enrollment-gateway-instance": instanceId,
       });
       response.end(JSON.stringify({ ok: true, enrollment_gateway: "v1", legacy_v2_guarded: true }));
       return;
@@ -200,7 +203,8 @@ export function createEnrollmentGateway({
     handleProtocols: (_protocols, request) => request.enrollmentUpstream?.protocol === CONTROLLER_SUBPROTOCOL
       ? CONTROLLER_SUBPROTOCOL : false,
   });
-  wss.on("headers", (headers) => headers.push("X-Pinvou-Enrollment-Gateway: v1"));
+  wss.on("headers", (headers) => headers.push("X-Pinvou-Enrollment-Gateway: v1",
+    `X-Pinvou-Enrollment-Gateway-Instance: ${instanceId}`));
 
   server.on("upgrade", (request, socket, head) => {
     let path;
@@ -306,7 +310,7 @@ export function createEnrollmentGateway({
         else if (client.readyState === WebSocket.OPEN) client.close(1011, "upstream unavailable");
       });
       upstream.once("close", (code, reason) => {
-        if (client.readyState === WebSocket.OPEN) client.close(code || 1011, reason.toString().slice(0, 123));
+        closeClientFromUpstream(client, code, reason);
       });
     };
     const ingress = { started_at: Date.now(), messages: 0, bytes: 0 };
@@ -419,6 +423,7 @@ export function createEnrollmentGateway({
   });
 
   return Object.freeze({
+    instanceId,
     server,
     listen(options) {
       return new Promise((resolve, reject) => {
@@ -440,11 +445,14 @@ export async function validateLegacyRollbackTopology({
   publicEntrypoints,
   legacyRelayUrl,
   legacyRelayBindHost,
+  expectedGatewayInstance,
   fetchImpl = fetch,
   webSocketProbe = probeEnrollmentGateway,
   listenerInspector = inspectLegacyListeners,
 } = {}) {
   if (!Array.isArray(publicEntrypoints) || publicEntrypoints.length === 0) fail("gateway_public_entrypoints_invalid");
+  if (expectedGatewayInstance !== undefined && (typeof expectedGatewayInstance !== "string"
+    || !/^[a-f0-9]{64}$/u.test(expectedGatewayInstance))) fail("gateway_instance_invalid");
   let direct;
   try { direct = new URL(legacyRelayUrl); } catch { fail("gateway_upstream_invalid"); }
   if (!["ws:", "wss:"].includes(direct.protocol) || direct.username || direct.password
@@ -475,12 +483,16 @@ export async function validateLegacyRollbackTopology({
     if (!response.ok || response.headers.get("x-pinvou-enrollment-gateway") !== "v1") {
       fail("gateway_preflight_unverified");
     }
+    if (expectedGatewayInstance !== undefined
+      && response.headers.get("x-pinvou-enrollment-gateway-instance") !== expectedGatewayInstance) {
+      fail("gateway_instance_mismatch");
+    }
     let body;
     try { body = await response.json(); } catch { fail("gateway_preflight_unverified"); }
     if (body?.enrollment_gateway !== "v1" || body?.legacy_v2_guarded !== true) fail("gateway_preflight_unverified");
     const wsUrl = new URL(`${url.pathname.replace(/\/$/u, "")}/ws`, url);
     wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-    if (!(await webSocketProbe(wsUrl))) fail("gateway_websocket_route_unverified");
+    if (!(await webSocketProbe(wsUrl, expectedGatewayInstance))) fail("gateway_websocket_route_unverified");
     checked.push(url.origin + url.pathname);
   }
   return Object.freeze({ safe_to_run_legacy_v2: true, checked_public_entrypoints: checked.sort() });
@@ -515,7 +527,7 @@ export async function inspectLegacyListeners(url, { platform = process.platform,
     .map((entry) => normalizeIp(entry.host)))];
 }
 
-function probeEnrollmentGateway(url) {
+function probeEnrollmentGateway(url, expectedGatewayInstance) {
   return new Promise((resolve) => {
     const socket = new WebSocket(url, { handshakeTimeout: 5000 });
     let marked = false;
@@ -533,7 +545,9 @@ function probeEnrollmentGateway(url) {
       finish(false);
     }, 5500);
     socket.once("upgrade", (response) => {
-      marked = response.headers["x-pinvou-enrollment-gateway"] === "v1";
+      marked = response.headers["x-pinvou-enrollment-gateway"] === "v1"
+        && (expectedGatewayInstance === undefined
+          || response.headers["x-pinvou-enrollment-gateway-instance"] === expectedGatewayInstance);
     });
     socket.once("open", () => {
       const suffix = crypto.randomBytes(12).toString("hex");

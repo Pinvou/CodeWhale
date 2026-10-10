@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use parking_lot::RwLock;
 use serde::Serialize;
 use serde_json::Value;
@@ -30,7 +30,11 @@ const CONTROL_QUEUE_CAPACITY: usize = 64;
 const BUSINESS_QUEUE_CAPACITY: usize = 256;
 const TOTAL_OUTBOUND_BYTE_BUDGET: usize = 8 * 1024 * 1024;
 const CONTROL_RESERVED_BYTES: usize = 128 * 1024;
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+// Two unanswered transport heartbeat windows must leave time inside the
+// independent 30s authenticated-evidence budget. Pongs never extend it.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const CLOSE_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_CONTROLLER_INBOUND_TEXT_BYTES: usize = if MAX_ENCRYPTED_WIRE_BYTES < MAX_RELAY_FRAME_BYTES
 {
     MAX_ENCRYPTED_WIRE_BYTES
@@ -243,21 +247,38 @@ struct QueuedFrame {
     priority: FramePriority,
     transport_epoch: u64,
     lease_context: Option<LeaseContext>,
+    resume_only: bool,
     payload: WirePayload,
     _total_permit: OwnedSemaphorePermit,
     _business_permit: Option<OwnedSemaphorePermit>,
+}
+
+struct ResumeInstallAuthority {
+    activation_id: String,
+    request_id: String,
+    role: ControllerRole,
+    transport_epoch: u64,
+    context: LeaseContext,
+}
+
+fn is_resume_inbound(kind: Option<&str>) -> bool {
+    matches!(
+        kind,
+        Some(
+            "controller_resume_provisional"
+                | "encrypted_resume_confirm"
+                | "controller_resume_activation_pending"
+                | "controller_post_activation_liveness_confirmed"
+                | "controller_resume_ready_ack"
+                | "controller_resumed"
+        )
+    )
 }
 
 impl QueuedFrame {
     fn text(&self) -> &str {
         self.payload.as_str()
     }
-}
-
-struct ResumeInstallAuthority {
-    activation_id: String,
-    transport_epoch: u64,
-    context: LeaseContext,
 }
 
 #[derive(Clone)]
@@ -329,6 +350,7 @@ impl ControllerTransportSender {
         &self,
         lease: AuthenticatedLease,
         activation_id: &str,
+        request_id: &str,
     ) -> Result<(), ControllerSendError> {
         let bound = self.generation();
         if bound.is_empty() || lease.context.remote_control_generation != bound {
@@ -345,11 +367,13 @@ impl ControllerTransportSender {
         if current.is_some()
             || !saved
                 .as_ref()
-                .is_some_and(|previous| previous.context == lease.context)
+                .is_some_and(|old| old.context == lease.context)
             || !authority.as_ref().is_some_and(|proof| {
-                proof.activation_id == activation_id
+                proof.context == lease.context
+                    && proof.activation_id == activation_id
+                    && proof.request_id == request_id
+                    && proof.role == self.role
                     && proof.transport_epoch == self.transport_epoch.load(Ordering::Acquire)
-                    && proof.context == lease.context
             })
         {
             return Err(ControllerSendError::Unauthenticated);
@@ -366,24 +390,46 @@ impl ControllerTransportSender {
         if self.is_stopped()
             || current.is_some()
             || inbound_epoch != self.transport_epoch.load(Ordering::Acquire)
+            || !saved
+                .as_ref()
+                .is_some_and(|lease| inbound_context_matches(frame, Some(lease)))
         {
-            return false;
-        }
-        let Some(saved) = saved.as_ref() else {
-            return false;
-        };
-        if !super::resume::resume_frame_matches_lease(&saved.context, frame) {
             return false;
         }
         let Some(activation_id) = frame.get("activation_id").and_then(Value::as_str) else {
             return false;
         };
+        let Some(request_id) = frame.get("request_id").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(saved) = saved.as_ref() else {
+            return false;
+        };
         *self.resume_install.write() = Some(ResumeInstallAuthority {
             activation_id: activation_id.to_owned(),
             transport_epoch: inbound_epoch,
+            request_id: request_id.to_owned(),
+            role: self.role,
             context: saved.context.clone(),
         });
         true
+    }
+
+    /// Restore only the saved lease (including its negotiated capabilities).
+    /// The existing one-shot reader proof still authorizes installation.
+    pub(crate) fn restore_authenticated_lease_after_resume(
+        &self,
+        context: &LeaseContext,
+        activation_id: &str,
+        request_id: &str,
+    ) -> Result<(), ControllerSendError> {
+        let saved = self
+            .resume_lease
+            .read()
+            .clone()
+            .filter(|saved| &saved.context == context)
+            .ok_or(ControllerSendError::Unauthenticated)?;
+        self.install_authenticated_lease_after_resume(saved, activation_id, request_id)
     }
 
     pub(crate) fn clear_authenticated_lease(&self) {
@@ -471,6 +517,7 @@ impl ControllerTransportSender {
             WirePayload::Plain(text),
             Some(lease_context),
             flushed,
+            false,
         )
     }
 
@@ -493,11 +540,8 @@ impl ControllerTransportSender {
     }
 
     /// Resume starts without an installed runtime lease. Only its explicit
-    /// handshake frames may bypass lease admission; the resume state machine
-    /// remains responsible for binding the old context and token to the peer.
-    ///
-    /// E2E-06：`controller_resume_ready_ack` 是同一族里的第三个出站帧
-    /// （B 由 Relay 驱动确认，A 需要独立 ack 才能让 Relay 提交轮换）。
+    /// handshake frames use the frozen recovery binding, never runtime authority.
+    /// The resume state machine additionally binds the token and activation.
     pub(crate) fn try_send_sensitive_resume_control<T: Serialize>(
         &self,
         value: &T,
@@ -512,12 +556,29 @@ impl ControllerTransportSender {
             Some(
                 "controller_resume_prepare"
                     | "encrypted_resume_confirm"
+                    | "controller_resume_activation_ack"
+                    | "controller_post_activation_liveness"
                     | "controller_resume_ready_ack"
             )
         ) {
             return Err(ControllerSendError::InvalidFrame("message.type".into()));
         }
-        self.try_enqueue(FramePriority::Control, WirePayload::Sensitive(text), None)
+        let current = self.lease.read();
+        let saved = self.resume_lease.read();
+        if current.is_some() {
+            return Err(ControllerSendError::Unauthenticated);
+        }
+        let lease = saved.as_ref().ok_or(ControllerSendError::Unauthenticated)?;
+        if !inbound_context_matches(&validated, Some(lease)) {
+            return Err(ControllerSendError::InvalidFrame("lease_context".into()));
+        }
+        self.try_enqueue_with_receipt(
+            FramePriority::Control,
+            WirePayload::Sensitive(text),
+            Some(lease.context.clone()),
+            None,
+            true,
+        )
     }
 
     pub(crate) fn try_send_business<T: Serialize>(
@@ -571,7 +632,7 @@ impl ControllerTransportSender {
         payload: WirePayload,
         lease_context: Option<LeaseContext>,
     ) -> Result<(), ControllerSendError> {
-        self.try_enqueue_with_receipt(priority, payload, lease_context, None)
+        self.try_enqueue_with_receipt(priority, payload, lease_context, None, false)
     }
 
     fn try_enqueue_with_receipt(
@@ -580,6 +641,7 @@ impl ControllerTransportSender {
         payload: WirePayload,
         lease_context: Option<LeaseContext>,
         flushed: Option<tokio::sync::oneshot::Sender<()>>,
+        resume_only: bool,
     ) -> Result<(), ControllerSendError> {
         if self.shutdown.is_cancelled() {
             return Err(ControllerSendError::Closed);
@@ -614,6 +676,7 @@ impl ControllerTransportSender {
             priority,
             transport_epoch: self.transport_epoch.load(Ordering::Acquire),
             lease_context,
+            resume_only,
             payload,
             _total_permit: total_permit,
             _business_permit: business_permit,
@@ -729,9 +792,19 @@ async fn run_transport(
     config: ControllerTransportConfig,
     sink: Arc<dyn ControllerEventSink>,
     sender: ControllerTransportSender,
-    mut receiver: ControllerTransportReceiver,
+    receiver: ControllerTransportReceiver,
 ) {
-    let mut reconnect = ReconnectBackoff::default();
+    run_transport_with_heartbeat(config, sink, sender, receiver, HEARTBEAT_INTERVAL).await;
+}
+
+async fn run_transport_with_heartbeat(
+    config: ControllerTransportConfig,
+    sink: Arc<dyn ControllerEventSink>,
+    sender: ControllerTransportSender,
+    mut receiver: ControllerTransportReceiver,
+    heartbeat_period: Duration,
+) {
+    let mut liveness = ConnectedTransportLiveness::new(heartbeat_period);
     loop {
         let connection = async {
             let request = controller_websocket_request(&config.relay_url)?;
@@ -758,103 +831,33 @@ async fn run_transport(
                     lease_epoch: current_lease_epoch(&sender),
                     error: format!("connect Relay: {error}"),
                 });
-                if !wait_reconnect(&sender.shutdown, &mut reconnect).await {
+                if !wait_reconnect(&sender.shutdown, &mut liveness.reconnect).await {
                     return;
                 }
                 continue;
             }
         };
         let (mut write, mut read) = socket.split();
-        reconnect.reset();
         sink.emit(ControllerTransportEvent::Connected {
             remote_control_generation: config.generation(),
             lease_epoch: current_lease_epoch(&sender),
         });
 
-        let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        heartbeat.tick().await;
-        let disconnected = loop {
-            tokio::select! {
-                biased;
-                _ = sender.shutdown.cancelled() => {
-                    let _ = write.send(Message::Close(None)).await;
-                    return;
-                }
-                frame = receiver.recv_prioritized() => {
-                    let Some(frame) = frame else { return; };
-                    if !frame_is_current(&sender, &frame) {
-                        continue;
-                    }
-                    let result = tokio::select! {
-                        biased;
-                        _ = sender.shutdown.cancelled() => return,
-                        result = write.send(Message::Text(frame.text().to_owned().into())) => result,
-                    };
-                    match result {
-                        Ok(()) => {
-                            if frame_is_task_submit(frame.text()) {
-                                super::relay_runtime::log_controller_event(
-                                    "task_submit_socket_written",
-                                    "sent",
-                                );
-                            }
-                            if let Some(flushed) = frame.flushed {
-                                let _ = flushed.send(());
-                            }
-                        }
-                        Err(error) => {
-                            if frame_is_task_submit(frame.text()) {
-                                super::relay_runtime::log_controller_event(
-                                    "task_submit_socket_write_failed",
-                                    "transport_error",
-                                );
-                            }
-                            break format!("send Relay frame: {error}");
-                        }
-                    }
-                }
-                message = read.next() => {
-                    let Some(message) = message else {
-                        break "Relay connection closed".to_string();
-                    };
-                    match message {
-                        Ok(Message::Text(text)) => {
-                            if text.len() > MAX_CONTROLLER_INBOUND_TEXT_BYTES {
-                                break format!(
-                                    "Relay frame exceeds {MAX_CONTROLLER_INBOUND_TEXT_BYTES} bytes"
-                                );
-                            }
-                            dispatch_inbound(&config, &sender, sink.as_ref(), text.as_str());
-                        }
-                        Ok(Message::Ping(payload)) => {
-                            if let Err(error) = write.send(Message::Pong(payload)).await {
-                                break format!("send Relay pong: {error}");
-                            }
-                        }
-                        Ok(Message::Pong(payload)) => {
-                            if let Some(millis) = rtt_sample(config.clock.as_ref(), payload.as_ref()) {
-                                sink.emit(ControllerTransportEvent::RttSample {
-                                    remote_control_generation: config.generation(),
-                                    millis,
-                                });
-                            }
-                        }
-                        Ok(Message::Close(_)) => break "Relay connection closed".to_string(),
-                        Ok(_) => {}
-                        Err(error) => break format!("read Relay frame: {error}"),
-                    }
-                }
-                _ = heartbeat.tick() => {
-                    let payload = config.clock.now_millis().to_be_bytes().to_vec();
-                    if let Err(error) = write.send(Message::Ping(payload.into())).await {
-                        break format!("send Relay heartbeat: {error}");
-                    }
-                }
-            }
+        let disconnected = run_connected_transport(
+            &config,
+            sink.as_ref(),
+            &sender,
+            &mut receiver,
+            &mut write,
+            &mut read,
+            &mut liveness,
+        )
+        .await;
+        let Some(disconnected) = disconnected else {
+            return;
         };
         emit_disconnected(&config, &sender, sink.as_ref(), disconnected);
-        if !wait_reconnect(&sender.shutdown, &mut reconnect).await {
+        if !wait_reconnect(&sender.shutdown, &mut liveness.reconnect).await {
             return;
         }
     }
@@ -863,14 +866,199 @@ async fn run_transport(
 fn frame_is_task_submit(text: &str) -> bool {
     serde_json::from_str::<Value>(text)
         .ok()
-        .and_then(|frame| {
-            frame
-                .get("payload_kind")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
+        .is_some_and(|frame| {
+            frame.get("type").and_then(Value::as_str) == Some("encrypted_frame")
+                && frame.get("payload_kind").and_then(Value::as_str) == Some("task_submit")
         })
-        .as_deref()
-        == Some("task_submit")
+}
+
+/// One absolute limit covers readiness, enqueue and flush; progress cannot
+/// reset it. Cancellation drops the pending write rather than waiting on TCP.
+async fn bounded_write<S>(
+    write: &mut S,
+    message: Message,
+    shutdown: &CancellationToken,
+    timeout: Duration,
+) -> Result<(), String>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: fmt::Display,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    bounded_write_until(write, message, shutdown, deadline).await
+}
+
+async fn bounded_write_until<S>(
+    write: &mut S,
+    message: Message,
+    shutdown: &CancellationToken,
+    deadline: tokio::time::Instant,
+) -> Result<(), String>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: fmt::Display,
+{
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => Err("controller_transport_stopped".into()),
+        result = tokio::time::timeout_at(deadline, write.send(message)) => match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(_) => Err("controller_transport_write_timeout".into()),
+        },
+    }
+}
+
+struct ConnectedTransportLiveness {
+    heartbeat_period: Duration,
+    reconnect: ReconnectBackoff,
+}
+
+impl ConnectedTransportLiveness {
+    fn new(heartbeat_period: Duration) -> Self {
+        Self {
+            heartbeat_period,
+            reconnect: ReconnectBackoff::default(),
+        }
+    }
+}
+
+/// Neither an in-flight write nor its progress may postpone inbound silence.
+async fn bounded_connected_write<S>(
+    write: &mut S,
+    message: Message,
+    shutdown: &CancellationToken,
+    inbound_deadline: tokio::time::Instant,
+) -> Result<(), String>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: fmt::Display,
+{
+    let write_deadline = tokio::time::Instant::now() + WRITE_TIMEOUT;
+    let result = bounded_write_until(
+        write,
+        message,
+        shutdown,
+        write_deadline.min(inbound_deadline),
+    )
+    .await;
+    if matches!(&result, Err(error) if error == "controller_transport_write_timeout")
+        && inbound_deadline < write_deadline
+    {
+        return Err("Relay inbound silence deadline expired".to_owned());
+    }
+    result
+}
+
+async fn run_connected_transport<S, R, E>(
+    config: &ControllerTransportConfig,
+    sink: &dyn ControllerEventSink,
+    sender: &ControllerTransportSender,
+    receiver: &mut ControllerTransportReceiver,
+    write: &mut S,
+    read: &mut R,
+    liveness: &mut ConnectedTransportLiveness,
+) -> Option<String>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: fmt::Display,
+    R: Stream<Item = Result<Message, E>> + Unpin,
+    E: fmt::Display,
+{
+    let heartbeat_period = liveness.heartbeat_period;
+    let mut last_inbound = tokio::time::Instant::now();
+    let mut heartbeat = tokio::time::interval(heartbeat_period);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat.tick().await;
+    let disconnected = loop {
+        tokio::select! {
+            biased;
+            _ = sender.shutdown.cancelled() => {
+                // Stop is authoritative. Close gets its own short budget,
+                // never the already-cancelled token or an unbounded flush.
+                let _ = bounded_write(write, Message::Close(None), &CancellationToken::new(), CLOSE_TIMEOUT).await;
+                return None;
+            }
+            _ = tokio::time::sleep_until(last_inbound + heartbeat_period * 2) => {
+                break "Relay inbound silence deadline expired".to_owned();
+            }
+            frame = receiver.recv_prioritized() => {
+                let Some(frame) = frame else { return None; };
+                if !frame_is_current(&sender, &frame) {
+                    continue;
+                }
+                let result = bounded_connected_write(write, Message::Text(frame.text().to_owned().into()), &sender.shutdown, last_inbound + heartbeat_period * 2).await;
+                if sender.is_stopped() { return None; }
+                match result {
+                    Ok(()) => {
+                        if frame_is_task_submit(frame.text()) {
+                            crate::features::remote_control::controller::relay_runtime::log_controller_event(
+                                "task_submit_socket_written",
+                                "sent",
+                            );
+                        }
+                        if let Some(flushed) = frame.flushed {
+                            let _ = flushed.send(());
+                        }
+                    }
+                    Err(error) => {
+                        if frame_is_task_submit(frame.text()) {
+                            crate::features::remote_control::controller::relay_runtime::log_controller_event(
+                                "task_submit_socket_write_failed",
+                                "write_failed",
+                            );
+                        }
+                        break format!("send Relay frame: {error}");
+                    }
+                }
+            }
+            message = read.next() => {
+                let Some(message) = message else {
+                    break "Relay connection closed".to_string();
+                };
+                last_inbound = tokio::time::Instant::now();
+                match message {
+                    Ok(Message::Text(text)) => {
+                        if text.len() > MAX_CONTROLLER_INBOUND_TEXT_BYTES {
+                            break format!(
+                                "Relay frame exceeds {MAX_CONTROLLER_INBOUND_TEXT_BYTES} bytes"
+                            );
+                        }
+                        // Only current positive controller admission resets backoff;
+                        // transport pongs and bare handshakes are not admission.
+                        if dispatch_inbound(config, sender, sink, text.as_str()) {
+                            liveness.reconnect.reset();
+                        }
+                    }
+                    Ok(Message::Ping(payload)) => {
+                        if let Err(error) = bounded_connected_write(write, Message::Pong(payload), &sender.shutdown, last_inbound + heartbeat_period * 2).await {
+                            if sender.is_stopped() { return None; }
+                            break format!("send Relay pong: {error}");
+                        }
+                    }
+                    Ok(Message::Pong(payload)) => {
+                        if let Some(millis) = rtt_sample(config.clock.as_ref(), payload.as_ref()) {
+                            sink.emit(ControllerTransportEvent::RttSample {
+                                remote_control_generation: config.generation(),
+                                millis,
+                            });
+                        }
+                    }
+                    Ok(Message::Close(_)) => break "Relay connection closed".to_string(),
+                    Ok(_) => {}
+                    Err(error) => break format!("read Relay frame: {error}"),
+                }
+            }
+            _ = heartbeat.tick() => {
+                let payload = config.clock.now_millis().to_be_bytes().to_vec();
+                if let Err(error) = bounded_connected_write(write, Message::Ping(payload.into()), &sender.shutdown, last_inbound + heartbeat_period * 2).await {
+                    if sender.is_stopped() { return None; }
+                    break format!("send Relay heartbeat: {error}");
+                }
+            }
+        }
+    };
+    Some(disconnected)
 }
 
 fn frame_is_current(sender: &ControllerTransportSender, frame: &QueuedFrame) -> bool {
@@ -878,6 +1066,15 @@ fn frame_is_current(sender: &ControllerTransportSender, frame: &QueuedFrame) -> 
         return false;
     }
     frame.lease_context.as_ref().is_none_or(|expected| {
+        if frame.resume_only {
+            let current = sender.lease.read();
+            return current.is_none()
+                && sender
+                    .resume_lease
+                    .read()
+                    .as_ref()
+                    .is_some_and(|actual| &actual.context == expected);
+        }
         sender
             .lease
             .read()
@@ -923,13 +1120,16 @@ fn dispatch_inbound(
     sender: &ControllerTransportSender,
     sink: &dyn ControllerEventSink,
     text: &str,
-) {
+) -> bool {
+    if sender.is_stopped() {
+        return false;
+    }
     let inbound_epoch = sender.transport_epoch.load(Ordering::Acquire);
     let Ok(shape) = serde_json::from_str::<Value>(text) else {
-        return;
+        return false;
     };
     if !generation_admits(&config.generation(), &shape) {
-        return;
+        return false;
     }
     let kind = shape.get("type").and_then(Value::as_str);
     let priority = if kind == Some("encrypted_frame") {
@@ -938,9 +1138,14 @@ fn dispatch_inbound(
         FramePriority::Control
     };
     let lease = sender.lease.read().clone();
+    let resume_lease = if lease.is_none() && is_resume_inbound(kind) {
+        sender.resume_lease.read().clone()
+    } else {
+        None
+    };
     let validated = if priority == FramePriority::Business {
         let Some(lease) = lease.as_ref() else {
-            return;
+            return false;
         };
         let context = RuntimeValidationContext {
             lease: Some(lease.context.clone()),
@@ -959,22 +1164,37 @@ fn dispatch_inbound(
                 super::resume::resume_frame_matches_lease(&saved.context, &shape)
             }));
     if !validated || !context_matches {
-        return;
+        return false;
     }
-    if kind == Some("controller_resumed")
-        && config.role == ControllerRole::ControllerA
-        && !sender.record_resume_install(&shape, inbound_epoch)
-    {
-        return;
+    if kind == Some("controller_resumed") && !sender.record_resume_install(&shape, inbound_epoch) {
+        return false;
     }
     sink.emit(ControllerTransportEvent::Frame {
         priority,
         remote_control_generation: config.generation(),
         lease_epoch: lease
             .as_ref()
+            .or(resume_lease.as_ref())
             .map(|value| value.context.lease_epoch.clone()),
         json: text.to_owned(),
     });
+    kind != Some("error")
+}
+
+/// Test adapters exercise the real suspension and reader validation paths;
+/// they never manufacture or directly install reader authority.
+#[cfg(test)]
+pub(super) fn disconnect_test_transport(sender: &ControllerTransportSender) {
+    let config =
+        ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
+    emit_disconnected(&config, sender, &|_| {}, "test socket closed".into());
+}
+
+#[cfg(test)]
+pub(super) fn dispatch_test_transport_frame(sender: &ControllerTransportSender, frame: &Value) {
+    let config =
+        ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
+    dispatch_inbound(&config, sender, &|_| {}, &frame.to_string());
 }
 
 /// 未绑定 generation 的 transport（A 端 claim 之前）只按类型准入，绑定之后
@@ -1003,7 +1223,7 @@ fn is_inbound_resume_frame(kind: Option<&str>, role: ControllerRole) -> bool {
             Some("controller_post_activation_liveness_confirmed"),
             ControllerRole::ControllerA
         ) | (
-            Some("controller_post_activation_liveness"),
+            Some("controller_post_activation_liveness" | "controller_resume_ready_ack"),
             ControllerRole::ControlledB
         )
     )
@@ -1021,6 +1241,15 @@ fn inbound_context_matches(value: &Value, lease: Option<&AuthenticatedLease>) ->
         return false;
     };
     let context = &lease.context;
+    if value.get("type").and_then(Value::as_str) == Some("encrypted_controller_liveness_a") {
+        return [
+            ("connection_id", context.connection_id.as_str()),
+            ("controller_lease_id", context.controller_lease_id.as_str()),
+            ("lease_epoch", context.lease_epoch.as_str()),
+        ]
+        .into_iter()
+        .all(|(field, expected)| value.get(field).and_then(Value::as_str) == Some(expected));
+    }
     [
         ("connection_id", context.connection_id.as_str()),
         ("controller_lease_id", context.controller_lease_id.as_str()),
@@ -1062,6 +1291,732 @@ mod tests {
     use crate::features::remote_control::controller::{
         controlled::ControlledDeviceManager, controlling::ControllingDeviceManager,
     };
+
+    #[test]
+    fn task_submit_write_telemetry_uses_encrypted_envelope_kind() {
+        assert!(frame_is_task_submit(
+            &json!({"type":"encrypted_frame", "payload_kind":"task_submit"}).to_string()
+        ));
+        for frame in [
+            json!({"type":"encrypted_frame", "payload_kind":"task_status"}),
+            json!({"type":"task_submit", "message_type":"task_submit"}),
+            json!({"payload_kind":"task_submit"}),
+        ] {
+            assert!(!frame_is_task_submit(&frame.to_string()));
+        }
+        assert!(!frame_is_task_submit("not JSON"));
+    }
+
+    struct PendingSink {
+        block_ready: bool,
+        sent: usize,
+    }
+
+    struct ReceiptSink {
+        flush_state: Arc<AtomicU64>,
+        sent: Arc<AtomicU64>,
+    }
+
+    impl Sink<Message> for ReceiptSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn start_send(self: std::pin::Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+            self.sent.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            match self.flush_state.load(Ordering::SeqCst) {
+                1 => std::task::Poll::Ready(Ok(())),
+                2 => std::task::Poll::Ready(Err(std::io::Error::other("test flush failure"))),
+                _ => std::task::Poll::Pending,
+            }
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flush_receipt_requires_success_and_is_never_sent_on_error_timeout_or_stop() {
+        for case in ["success", "error", "timeout", "stop"] {
+            let (sender, mut receiver) = transport_channels(
+                ControllerRole::ControllerA,
+                "generation-0001",
+                2,
+                1,
+                8192,
+                1024,
+            );
+            sender
+                .install_authenticated_lease(lease("7", "generation-0001"))
+                .unwrap();
+            let mut receipt = sender
+                .send_control_with_receipt(&json!({
+                    "v":1, "type":"controller_liveness", "sender_role":"A",
+                    "connection_id":"connection-0001", "controller_lease_id":"lease-0001",
+                    "lease_epoch":"7", "relay_epoch":"relay-epoch-0001",
+                    "remote_control_generation":"generation-0001",
+                    "liveness_epoch":"liveness-0001", "heartbeat_sequence":"1",
+                }))
+                .unwrap();
+            let flush_state = Arc::new(AtomicU64::new(0));
+            let sent = Arc::new(AtomicU64::new(0));
+            let mut write = ReceiptSink {
+                flush_state: flush_state.clone(),
+                sent: sent.clone(),
+            };
+            let mut read = futures_util::stream::pending::<Result<Message, std::io::Error>>();
+            let config = ControllerTransportConfig::new(
+                "ws://127.0.0.1:1",
+                ControllerRole::ControllerA,
+                "generation-0001",
+            );
+            let sink = |_: ControllerTransportEvent| {};
+            let mut liveness = ConnectedTransportLiveness::new(Duration::from_secs(20));
+            let connected = run_connected_transport(
+                &config,
+                &sink,
+                &sender,
+                &mut receiver,
+                &mut write,
+                &mut read,
+                &mut liveness,
+            );
+            futures_util::pin_mut!(connected);
+            assert!(futures_util::poll!(connected.as_mut()).is_pending());
+            assert_eq!(sent.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                receipt.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            );
+            match case {
+                "success" => {
+                    flush_state.store(1, Ordering::SeqCst);
+                    assert!(futures_util::poll!(connected.as_mut()).is_pending());
+                    assert_eq!(receipt.try_recv(), Ok(()));
+                    sender.stop();
+                    assert!(connected.await.is_none());
+                }
+                "error" => {
+                    flush_state.store(2, Ordering::SeqCst);
+                    assert!(connected.await.unwrap().contains("test flush failure"));
+                }
+                "timeout" => {
+                    tokio::time::advance(WRITE_TIMEOUT).await;
+                    assert!(
+                        connected
+                            .await
+                            .unwrap()
+                            .contains("controller_transport_write_timeout")
+                    );
+                }
+                _ => {
+                    sender.stop();
+                    assert!(connected.await.is_none());
+                }
+            }
+            if case != "success" {
+                assert_eq!(
+                    receipt.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed),
+                    "{case}"
+                );
+            }
+            assert_eq!(sender.total_budget.available_permits(), 8192);
+        }
+    }
+
+    impl Sink<Message> for PendingSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            if self.block_ready {
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        fn start_send(mut self: std::pin::Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+            self.sent += 1;
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            self.poll_flush(cx)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_ready_or_flush_cannot_wedge_frame_pong_or_heartbeat() {
+        for route in ["frame", "pong", "heartbeat"] {
+            for block_ready in [true, false] {
+                let (sender, mut receiver) = transport_channels(
+                    ControllerRole::ControllerA,
+                    "generation-0001",
+                    2,
+                    2,
+                    8192,
+                    1024,
+                );
+                sender
+                    .install_authenticated_lease(lease("7", "generation-0001"))
+                    .unwrap();
+                if route == "frame" {
+                    sender
+                        .try_send_control(&control("request-stalled"))
+                        .unwrap();
+                }
+                let inbound = (route == "pong")
+                    .then(|| Ok::<_, std::io::Error>(Message::Ping(vec![1].into())));
+                let mut read =
+                    futures_util::stream::iter(inbound).chain(futures_util::stream::pending());
+                let mut write = PendingSink {
+                    block_ready,
+                    sent: 0,
+                };
+                let config = ControllerTransportConfig::new(
+                    "wss://example.test/ws",
+                    ControllerRole::ControllerA,
+                    "generation-0001",
+                );
+                let before = tokio::time::Instant::now();
+                // Isolate the inherited write budget; the combined production
+                // silence/write minimum has its own regression below.
+                let heartbeat_period = Duration::from_secs(20);
+                let mut liveness = ConnectedTransportLiveness::new(heartbeat_period);
+                let failure = tokio::time::timeout(
+                    heartbeat_period + WRITE_TIMEOUT + Duration::from_secs(1),
+                    run_connected_transport(
+                        &config,
+                        &|_| {},
+                        &sender,
+                        &mut receiver,
+                        &mut write,
+                        &mut read,
+                        &mut liveness,
+                    ),
+                )
+                .await
+                .expect("connection loop must terminate")
+                .expect("write timeout must disconnect");
+                assert!(
+                    failure.contains("controller_transport_write_timeout"),
+                    "{route}: {failure}"
+                );
+                let expected = if route == "heartbeat" {
+                    heartbeat_period + WRITE_TIMEOUT
+                } else {
+                    WRITE_TIMEOUT
+                };
+                assert_eq!(before.elapsed(), expected);
+                assert_eq!(write.sent, usize::from(!block_ready));
+                assert_eq!(sender.total_budget.available_permits(), 8192);
+                emit_disconnected(&config, &sender, &|_| {}, failure);
+                assert!(sender.authenticated_lease().is_none());
+                assert!(sender.resume_lease.read().is_some());
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_writes_keep_the_earlier_absolute_inbound_silence_deadline() {
+        for route in ["frame", "pong", "heartbeat"] {
+            for block_ready in [true, false] {
+                let (sender, mut receiver) = transport_channels(
+                    ControllerRole::ControllerA,
+                    "generation-0001",
+                    2,
+                    2,
+                    8192,
+                    1024,
+                );
+                sender
+                    .install_authenticated_lease(lease("7", "generation-0001"))
+                    .unwrap();
+                if route == "frame" {
+                    sender
+                        .try_send_control(&control("request-stalled"))
+                        .unwrap();
+                }
+                let inbound = (route == "pong")
+                    .then(|| Ok::<_, std::io::Error>(Message::Ping(vec![1].into())));
+                let mut read =
+                    futures_util::stream::iter(inbound).chain(futures_util::stream::pending());
+                let mut write = PendingSink {
+                    block_ready,
+                    sent: 0,
+                };
+                let config = ControllerTransportConfig::new(
+                    "wss://example.test/ws",
+                    ControllerRole::ControllerA,
+                    "generation-0001",
+                );
+                let heartbeat_period = Duration::from_millis(100);
+                let mut liveness = ConnectedTransportLiveness::new(heartbeat_period);
+                let before = tokio::time::Instant::now();
+                let failure = run_connected_transport(
+                    &config,
+                    &|_| {},
+                    &sender,
+                    &mut receiver,
+                    &mut write,
+                    &mut read,
+                    &mut liveness,
+                )
+                .await
+                .expect("silence must disconnect despite a pending write");
+                assert!(
+                    failure.contains("inbound silence deadline"),
+                    "{route}: {failure}"
+                );
+                assert_eq!(before.elapsed(), heartbeat_period * 2);
+                assert_eq!(write.sent, usize::from(!block_ready));
+                assert_eq!(sender.total_budget.available_permits(), 8192);
+                emit_disconnected(&config, &sender, &|_| {}, failure);
+                assert!(sender.authenticated_lease().is_none());
+                assert!(sender.resume_lease.read().is_some());
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_interrupts_each_inflight_write_and_bounds_idle_close() {
+        for route in ["frame", "pong", "heartbeat", "close"] {
+            let (sender, mut receiver) = transport_channels(
+                ControllerRole::ControllerA,
+                "generation-0001",
+                2,
+                2,
+                8192,
+                1024,
+            );
+            sender
+                .install_authenticated_lease(lease("7", "generation-0001"))
+                .unwrap();
+            if route == "frame" {
+                sender
+                    .try_send_control(&control("request-stalled"))
+                    .unwrap();
+            }
+            let inbound =
+                (route == "pong").then(|| Ok::<_, std::io::Error>(Message::Ping(vec![1].into())));
+            let mut read =
+                futures_util::stream::iter(inbound).chain(futures_util::stream::pending());
+            let mut write = PendingSink {
+                block_ready: false,
+                sent: 0,
+            };
+            let config = ControllerTransportConfig::new(
+                "wss://example.test/ws",
+                ControllerRole::ControllerA,
+                "generation-0001",
+            );
+            let delay = if route == "heartbeat" {
+                HEARTBEAT_INTERVAL + Duration::from_secs(1)
+            } else {
+                Duration::from_secs(1)
+            };
+            let before = tokio::time::Instant::now();
+            let mut liveness = ConnectedTransportLiveness::new(HEARTBEAT_INTERVAL);
+            let connected = run_connected_transport(
+                &config,
+                &|_| {},
+                &sender,
+                &mut receiver,
+                &mut write,
+                &mut read,
+                &mut liveness,
+            );
+            let stopping = async {
+                tokio::time::sleep(delay).await;
+                sender.stop();
+            };
+            let (result, ()) =
+                tokio::time::timeout(delay + CLOSE_TIMEOUT + Duration::from_secs(1), async {
+                    tokio::join!(connected, stopping)
+                })
+                .await
+                .expect("stop must not await an unbounded write");
+            assert!(result.is_none(), "Stop must not authorize reconnect");
+            assert!(sender.authenticated_lease().is_none());
+            assert!(sender.resume_lease.read().is_none());
+            assert_eq!(sender.total_budget.available_permits(), 8192);
+            assert!(before.elapsed() <= delay + CLOSE_TIMEOUT);
+            assert_eq!(write.sent, 1);
+        }
+    }
+
+    #[test]
+    fn controlling_resume_requires_frozen_gate_and_exact_reader_proof() {
+        use crate::features::remote_control::controller::controlling::{
+            ControllerLease, ResumeStep,
+        };
+        for case in [
+            "valid",
+            "expired",
+            "activation",
+            "token",
+            "key",
+            "no-reader",
+            "request",
+            "no-ready",
+            "deadline-zero",
+            "epoch-empty",
+            "epoch-space",
+            "epoch-tilde",
+        ] {
+            let manager = ControllingDeviceManager::default();
+            let operation = manager.connect("234-4567").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            let current = lease("7", "generation-0001");
+            manager
+                .complete_connected(
+                    operation.clone(),
+                    ControllerLease {
+                        context: current.context.clone(),
+                        peer_endpoint_id: "endpoint-0001".into(),
+                        reservation_id: "reservation-0001".into(),
+                        device_display_name: "B".into(),
+                        liveness_epoch_a: "live-a-1".into(),
+                        liveness_epoch_b: "live-b-1".into(),
+                        negotiated_capabilities: current.negotiated_capabilities.clone(),
+                        resume_deadline_b: 30_000,
+                        resume_token: [1; 32],
+                        transport_key_fingerprint: [2; 32],
+                    },
+                )
+                .unwrap();
+            let (sender, _receiver) = transport_channels(
+                ControllerRole::ControllerA,
+                "generation-0001",
+                8,
+                2,
+                8192,
+                1024,
+            );
+            sender.install_authenticated_lease(current.clone()).unwrap();
+            manager.replace_transport(sender.clone());
+            let config = ControllerTransportConfig::new(
+                "wss://example.test/ws",
+                ControllerRole::ControllerA,
+                "generation-0001",
+            );
+            emit_disconnected(&config, &sender, &|_| {}, "lost".into());
+            manager.mark_transport_disconnected(5_000, Some(30_000));
+            manager.begin_resume(operation.clone(), 6_000).unwrap();
+            for (at, step) in [
+                (
+                    7_000,
+                    ResumeStep::Provisional {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    8_000,
+                    ResumeStep::Confirmed {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    9_000,
+                    ResumeStep::ActivationPending {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    10_000,
+                    ResumeStep::LivenessConfirmed {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    11_000,
+                    ResumeStep::ReadyAcknowledged {
+                        activation_id: "activation-0001",
+                    },
+                ),
+            ] {
+                if case == "no-ready" && at == 11_000 {
+                    continue;
+                }
+                manager.advance_resume(operation.clone(), step, at).unwrap();
+            }
+            if case != "no-reader" {
+                let mut final_frame = resume_control("controller_resumed");
+                final_frame["liveness_epoch_a"] = json!("live-a-2");
+                final_frame["resume_deadline_ms"] = json!("60000");
+                final_frame["new_resume_token_b64"] = json!(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    [3; 32]
+                ));
+                dispatch_inbound(&config, &sender, &|_| {}, &final_frame.to_string());
+            }
+            let result = manager.complete_resumed(
+                operation.clone(),
+                if case == "activation" {
+                    "activation-wrong"
+                } else {
+                    "activation-0001"
+                },
+                if case == "request" {
+                    "request-wrong"
+                } else {
+                    "request-resume-0001"
+                },
+                if case == "expired" { 30_000 } else { 12_000 },
+                (
+                    match case {
+                        "epoch-empty" => "",
+                        "epoch-space" => "invalid epoch",
+                        "epoch-tilde" => "live~a-2",
+                        _ => "live-a-2",
+                    },
+                    "live-b-2",
+                ),
+                if case == "token" { [1; 32] } else { [3; 32] },
+                if case == "key" { [2; 32] } else { [4; 32] },
+                if case == "deadline-zero" { 0 } else { 60_000 },
+            );
+            if case == "valid" {
+                assert_eq!(
+                    serde_json::to_value(result.unwrap()).unwrap()["status"],
+                    "connected"
+                );
+                assert_eq!(sender.authenticated_lease(), Some(current));
+                assert!(
+                    manager
+                        .complete_resumed(
+                            operation,
+                            "activation-0001",
+                            "request-resume-0001",
+                            13_000,
+                            ("live-a-2", "live-b-2"),
+                            [3; 32],
+                            [4; 32],
+                            60_000
+                        )
+                        .is_err()
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    "controller_resume_failed",
+                    "{case}"
+                );
+                assert!(sender.is_stopped());
+                assert!(sender.authenticated_lease().is_none());
+                assert!(manager.live_lease().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn controlled_resume_restores_only_the_exact_reader_authorized_lease() {
+        use crate::features::remote_control::controller::controlled::{
+            ControlledLease, ControlledRegistration, ControlledResumeStep, ControlledStatusKind,
+        };
+        for case in [
+            "valid",
+            "expired",
+            "activation",
+            "token",
+            "key",
+            "no-reader",
+            "request",
+            "no-ready",
+            "deadline-zero",
+            "epoch-empty",
+            "epoch-space",
+            "epoch-tilde",
+            "stale-reader",
+        ] {
+            let manager = ControlledDeviceManager::default();
+            let operation = manager.start(None, Vec::new()).unwrap();
+            let status = serde_json::to_value(manager.status()).unwrap();
+            let generation = status["generation"].as_str().unwrap().to_owned();
+            manager
+                .complete_registration(
+                    operation.clone(),
+                    ControlledRegistration {
+                        pairing_code: "2345678".into(),
+                        sealed_code_b64: "sealed".into(),
+                        expires_at_ms: 30_000,
+                    },
+                    1_000,
+                )
+                .unwrap();
+            manager.mark_pairing_reserved(operation.clone()).unwrap();
+            manager.mark_handshake_pending(operation.clone()).unwrap();
+            let current = lease("7", &generation);
+            manager
+                .complete_connected(
+                    operation.clone(),
+                    ControlledLease {
+                        context: current.context.clone(),
+                        negotiated_capabilities: current.negotiated_capabilities.clone(),
+                        controller_device_name: "A".into(),
+                        liveness_epoch_a: "live-a-1".into(),
+                        resume_deadline_b: 30_000,
+                        resume_token: [1; 32],
+                        transport_key_fingerprint: [2; 32],
+                        connected_at_b: 3_000,
+                    },
+                )
+                .unwrap();
+            let (sender, _receiver) =
+                transport_channels(ControllerRole::ControlledB, &generation, 8, 2, 8192, 1024);
+            sender.install_authenticated_lease(current.clone()).unwrap();
+            manager
+                .replace_authenticated_transport(operation.clone(), sender.clone())
+                .unwrap();
+            let config = ControllerTransportConfig::new(
+                "wss://example.test/ws",
+                ControllerRole::ControlledB,
+                &generation,
+            );
+            emit_disconnected(&config, &sender, &|_| {}, "lost".into());
+            manager.mark_transport_disconnected(5_000);
+            manager.begin_resume(operation.clone(), 6_000).unwrap();
+            for (at, step) in [
+                (
+                    7_000,
+                    ControlledResumeStep::Provisional {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    8_000,
+                    ControlledResumeStep::Confirmed {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    9_000,
+                    ControlledResumeStep::ActivationAcknowledged {
+                        activation_id: "activation-0001",
+                    },
+                ),
+                (
+                    10_000,
+                    ControlledResumeStep::PostActivationLiveness {
+                        activation_id: "activation-0001",
+                        liveness_epoch_b: "live-b-2",
+                    },
+                ),
+                (
+                    11_000,
+                    ControlledResumeStep::ReadyAcknowledged {
+                        activation_id: "activation-0001",
+                    },
+                ),
+            ] {
+                if case == "no-ready" && at == 11_000 {
+                    continue;
+                }
+                manager.advance_resume(operation.clone(), step, at).unwrap();
+            }
+            if case != "no-reader" {
+                let mut final_frame = resume_control("controller_resumed");
+                final_frame["remote_control_generation"] = json!(generation);
+                final_frame["liveness_epoch_a"] = json!("live-a-2");
+                final_frame["resume_deadline_ms"] = json!("60000");
+                final_frame["new_resume_token_b64"] = json!(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    [3; 32]
+                ));
+                dispatch_inbound(&config, &sender, &|_| {}, &final_frame.to_string());
+            }
+            if case == "stale-reader" {
+                emit_disconnected(&config, &sender, &|_| {}, "lost-again".into());
+            }
+            let result = manager.complete_resumed(
+                operation.clone(),
+                if case == "activation" {
+                    "activation-wrong"
+                } else {
+                    "activation-0001"
+                },
+                if case == "request" {
+                    "request-wrong"
+                } else {
+                    "request-resume-0001"
+                },
+                if case == "expired" { 33_000 } else { 12_000 },
+                match case {
+                    "epoch-empty" => "",
+                    "epoch-space" => "invalid epoch",
+                    "epoch-tilde" => "live~a-2",
+                    _ => "live-a-2",
+                },
+                if case == "token" { [1; 32] } else { [3; 32] },
+                if case == "key" { [2; 32] } else { [4; 32] },
+                if case == "deadline-zero" { 0 } else { 60_000 },
+            );
+            if case == "valid" {
+                let resumed = serde_json::to_value(result.unwrap()).unwrap();
+                assert_eq!(resumed["status"], "connected");
+                assert!(resumed.get("watchdogDeadlineB").is_none());
+                assert_eq!(sender.authenticated_lease(), Some(current));
+                assert!(
+                    manager
+                        .complete_resumed(
+                            operation,
+                            "activation-0001",
+                            "request-resume-0001",
+                            13_000,
+                            "live-a-2",
+                            [3; 32],
+                            [4; 32],
+                            60_000
+                        )
+                        .is_err()
+                );
+                assert_eq!(
+                    manager.poll_watchdog(41_999).unwrap().kind(),
+                    ControlledStatusKind::Reconnecting
+                );
+                assert_eq!(
+                    manager.poll_watchdog(42_000).unwrap().kind(),
+                    ControlledStatusKind::Error
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    "desktop_remote_resume_failed",
+                    "{case}"
+                );
+                assert!(sender.is_stopped());
+                assert!(sender.authenticated_lease().is_none());
+                assert_eq!(
+                    serde_json::to_value(manager.status()).unwrap()["status"],
+                    "error"
+                );
+            }
+        }
+    }
 
     fn lease(epoch: &str, generation: &str) -> AuthenticatedLease {
         AuthenticatedLease {
@@ -1147,24 +2102,39 @@ mod tests {
                 "final must really pass RX admission"
             );
             assert_eq!(
-                sender
-                    .install_authenticated_lease_after_resume(expected.clone(), "activation-other"),
+                sender.install_authenticated_lease_after_resume(
+                    expected.clone(),
+                    "activation-other",
+                    "request-resume-final"
+                ),
                 Err(ControllerSendError::Unauthenticated)
             );
             if lose_socket {
                 emit_disconnected(&config, &sender, &sink, "closed".into());
                 assert_eq!(
-                    sender.install_authenticated_lease_after_resume(expected, "activation-0001"),
+                    sender.install_authenticated_lease_after_resume(
+                        expected,
+                        "activation-0001",
+                        "request-resume-final"
+                    ),
                     Err(ControllerSendError::Unauthenticated)
                 );
                 assert!(sender.authenticated_lease().is_none());
             } else {
                 sender
-                    .install_authenticated_lease_after_resume(expected.clone(), "activation-0001")
+                    .install_authenticated_lease_after_resume(
+                        expected.clone(),
+                        "activation-0001",
+                        "request-resume-final",
+                    )
                     .unwrap();
                 assert!(sender.authenticated_lease().is_some());
                 assert_eq!(
-                    sender.install_authenticated_lease_after_resume(expected, "activation-0001"),
+                    sender.install_authenticated_lease_after_resume(
+                        expected,
+                        "activation-0001",
+                        "request-resume-final"
+                    ),
                     Err(ControllerSendError::Unauthenticated)
                 );
             }
@@ -1283,6 +2253,7 @@ mod tests {
             let result = manager.complete_resumed(
                 operation,
                 activation,
+                "request-resume-final",
                 8_000,
                 ("live-a-2", "live-b-2"),
                 [3; 32],
@@ -1717,6 +2688,280 @@ mod tests {
         assert!(inbound_context_matches(&stale_generation, Some(&current)));
     }
 
+    #[test]
+    fn direct_encrypted_liveness_uses_its_frozen_three_field_context() {
+        let (sender, _receiver) = transport_channels(
+            ControllerRole::ControlledB,
+            "generation-0001",
+            8,
+            2,
+            8192,
+            1024,
+        );
+        sender
+            .install_authenticated_lease(lease("7", "generation-0001"))
+            .unwrap();
+        let config = ControllerTransportConfig::new(
+            "wss://example.test/ws",
+            ControllerRole::ControlledB,
+            "generation-0001",
+        );
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink_events = events.clone();
+        let sink = move |event| sink_events.lock().push(event);
+        let frame = json!({
+            "v": 1, "type": "encrypted_controller_liveness_a",
+            "connection_id": "connection-0001", "controller_lease_id": "lease-0001",
+            "lease_epoch": "7", "ciphertext_b64": "AQID", "ciphertext_bytes": "3"
+        });
+        dispatch_inbound(&config, &sender, &sink, &frame.to_string());
+        assert_eq!(events.lock().len(), 1);
+        for field in ["connection_id", "controller_lease_id", "lease_epoch"] {
+            let mut wrong = frame.clone();
+            wrong[field] = json!("wrong-0001");
+            dispatch_inbound(&config, &sender, &sink, &wrong.to_string());
+        }
+        assert_eq!(events.lock().len(), 1);
+        let mut extra = frame.clone();
+        extra["relay_epoch"] = json!("relay-epoch-0001");
+        dispatch_inbound(&config, &sender, &sink, &extra.to_string());
+        assert_eq!(events.lock().len(), 1);
+        let full = resume_control("controller_resume_provisional");
+        for field in [
+            "connection_id",
+            "controller_lease_id",
+            "lease_epoch",
+            "relay_epoch",
+            "remote_control_generation",
+        ] {
+            let mut incomplete = full.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            dispatch_inbound(&config, &sender, &sink, &incomplete.to_string());
+        }
+        assert_eq!(events.lock().len(), 1);
+    }
+
+    fn resume_control(kind: &str) -> Value {
+        let mut frame = json!({
+            "v": 1, "type": kind, "request_id": "request-resume-0001",
+            "connection_id": "connection-0001", "controller_lease_id": "lease-0001",
+            "lease_epoch": "7", "relay_epoch": "relay-epoch-0001",
+            "remote_control_generation": "generation-0001", "activation_id": "activation-0001"
+        });
+        match kind {
+            "controller_resume_activation_ack"
+            | "controller_resume_provisional"
+            | "controller_resume_activation_pending" => {
+                frame["original_deadline_ms"] = json!("31000");
+            }
+            "controller_post_activation_liveness"
+            | "controller_post_activation_liveness_confirmed"
+            | "controller_resume_ready_ack" => {
+                frame["liveness_epoch_b"] = json!("liveness-b-new-0001");
+                frame["heartbeat_sequence_b"] = json!("1");
+                if kind == "controller_resume_ready_ack" {
+                    frame["sender_role"] = json!("B");
+                }
+            }
+            "encrypted_resume_confirm" => {
+                frame["sender_role"] = json!("A");
+                frame["ciphertext_b64"] = json!("AQID");
+                frame["ciphertext_bytes"] = json!("3");
+            }
+            "controller_resumed" => {
+                frame["liveness_epoch_a"] = json!("liveness-a-new-0001");
+                frame["liveness_epoch_b"] = json!("liveness-b-new-0001");
+                frame["new_resume_token_b64"] =
+                    json!("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=");
+                frame["resume_deadline_ms"] = json!("35000");
+            }
+            _ => panic!("test frame kind"),
+        }
+        frame
+    }
+
+    #[test]
+    fn disconnected_transport_admits_only_context_bound_resume_controls() {
+        let (sender, mut receiver) = transport_channels(
+            ControllerRole::ControlledB,
+            "generation-0001",
+            8,
+            2,
+            8192,
+            1024,
+        );
+        let config = ControllerTransportConfig::new(
+            "wss://example.test/ws",
+            ControllerRole::ControlledB,
+            "generation-0001",
+        );
+        let ack = resume_control("controller_resume_activation_ack");
+        assert!(sender.try_send_sensitive_resume_control(&ack).is_err());
+        sender
+            .install_authenticated_lease(lease("7", "generation-0001"))
+            .unwrap();
+        emit_disconnected(&config, &sender, &|_| {}, "lost".into());
+        emit_disconnected(&config, &sender, &|_| {}, "retry-lost".into());
+        assert!(sender.authenticated_lease().is_none());
+        for kind in [
+            "controller_resume_activation_ack",
+            "controller_post_activation_liveness",
+            "controller_resume_ready_ack",
+        ] {
+            sender
+                .try_send_sensitive_resume_control(&resume_control(kind))
+                .unwrap();
+            let queued = receiver.control_rx.try_recv().unwrap();
+            assert!(frame_is_current(&sender, &queued));
+            assert!(format!("{queued:?}").contains("[REDACTED]"));
+        }
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink_events = events.clone();
+        let sink = move |event| sink_events.lock().push(event);
+        for kind in [
+            "controller_resume_provisional",
+            "controller_resume_activation_pending",
+            "controller_resume_ready_ack",
+            "encrypted_resume_confirm",
+            "controller_resumed",
+        ] {
+            let mut incoming = resume_control(kind);
+            if kind == "controller_resume_ready_ack" {
+                incoming["sender_role"] = json!("A");
+            }
+            dispatch_inbound(&config, &sender, &sink, &incoming.to_string());
+        }
+        assert_eq!(events.lock().len(), 5);
+        dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &resume_control("controller_post_activation_liveness_confirmed").to_string(),
+        );
+        assert_eq!(
+            events.lock().len(),
+            5,
+            "A-only liveness confirmation is rejected by B"
+        );
+        let mut wrong = ack.clone();
+        wrong["lease_epoch"] = json!("6");
+        assert!(sender.try_send_sensitive_resume_control(&wrong).is_err());
+        let mut wrong_inbound = resume_control("controller_resume_provisional");
+        wrong_inbound["controller_lease_id"] = json!("lease-wrong-0001");
+        dispatch_inbound(&config, &sender, &sink, &wrong_inbound.to_string());
+        assert_eq!(events.lock().len(), 5);
+        assert_eq!(
+            sender.try_send_business(&control("request-business")),
+            Err(ControllerSendError::Unauthenticated)
+        );
+        assert!(sender.try_send_authenticated_control(&ack).is_err());
+        sender.try_send_sensitive_resume_control(&ack).unwrap();
+        let queued = receiver.control_rx.try_recv().unwrap();
+        sender
+            .install_authenticated_lease(lease("7", "generation-0001"))
+            .unwrap();
+        assert!(!frame_is_current(&sender, &queued));
+        assert!(sender.try_send_sensitive_resume_control(&ack).is_err());
+        sender.stop();
+        dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &resume_control("controller_resumed").to_string(),
+        );
+        assert_eq!(events.lock().len(), 5);
+    }
+
+    #[test]
+    fn resume_final_authority_is_one_shot_and_bound_to_socket_epoch_and_request() {
+        let (sender, _receiver) = transport_channels(
+            ControllerRole::ControlledB,
+            "generation-0001",
+            8,
+            2,
+            8192,
+            1024,
+        );
+        let config = ControllerTransportConfig::new(
+            "wss://example.test/ws",
+            ControllerRole::ControlledB,
+            "generation-0001",
+        );
+        let current = lease("7", "generation-0001");
+        let final_frame = resume_control("controller_resumed");
+        sender.install_authenticated_lease(current.clone()).unwrap();
+        emit_disconnected(&config, &sender, &|_| {}, "lost".into());
+        dispatch_inbound(&config, &sender, &|_| {}, &final_frame.to_string());
+        assert!(
+            sender
+                .install_authenticated_lease_after_resume(
+                    current.clone(),
+                    "wrong-activation",
+                    "request-resume-0001"
+                )
+                .is_err()
+        );
+        assert!(
+            sender
+                .install_authenticated_lease_after_resume(
+                    current.clone(),
+                    "activation-0001",
+                    "wrong-request"
+                )
+                .is_err()
+        );
+        emit_disconnected(&config, &sender, &|_| {}, "lost-again".into());
+        assert!(
+            sender
+                .install_authenticated_lease_after_resume(
+                    current.clone(),
+                    "activation-0001",
+                    "request-resume-0001"
+                )
+                .is_err()
+        );
+        assert!(!sender.record_resume_install(&final_frame, 1));
+        dispatch_inbound(&config, &sender, &|_| {}, &final_frame.to_string());
+        sender
+            .install_authenticated_lease_after_resume(
+                current.clone(),
+                "activation-0001",
+                "request-resume-0001",
+            )
+            .unwrap();
+        assert!(
+            sender
+                .install_authenticated_lease_after_resume(
+                    current.clone(),
+                    "activation-0001",
+                    "request-resume-0001"
+                )
+                .is_err()
+        );
+        assert_eq!(sender.authenticated_lease(), Some(current.clone()));
+        emit_disconnected(&config, &sender, &|_| {}, "third-loss".into());
+        dispatch_inbound(&config, &sender, &|_| {}, &final_frame.to_string());
+        sender.clear_authenticated_lease();
+        assert!(
+            sender
+                .install_authenticated_lease_after_resume(
+                    current.clone(),
+                    "activation-0001",
+                    "request-resume-0001"
+                )
+                .is_err()
+        );
+        sender.stop();
+        assert_eq!(
+            sender.install_authenticated_lease_after_resume(
+                current,
+                "activation-0001",
+                "request-resume-0001"
+            ),
+            Err(ControllerSendError::Closed)
+        );
+    }
+
     struct FakeClock(AtomicU64);
 
     impl TransportClock for FakeClock {
@@ -1766,6 +3011,150 @@ mod tests {
             );
             Ok(response)
         }
+    }
+
+    #[test]
+    fn only_positive_current_admission_is_a_backoff_reset_signal() {
+        let config = ControllerTransportConfig::new(
+            "ws://127.0.0.1:1",
+            ControllerRole::ControlledB,
+            "generation-0001",
+        );
+        let (sender, _) = transport_channels(
+            ControllerRole::ControlledB,
+            "generation-0001",
+            2,
+            2,
+            8192,
+            1024,
+        );
+        let sink = |_| {};
+        assert!(!dispatch_inbound(&config, &sender, &sink, "invalid JSON"));
+        let error = json!({ "v": 1, "type": "error", "request_id": "request-0001",
+            "code": "controller_busy", "message": "busy" });
+        validate_controller_message_json(&error.to_string(), SenderRole::Relay).unwrap();
+        assert!(!dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &error.to_string()
+        ));
+        let mut invalid = control("request-0002");
+        invalid["unknown"] = json!(true);
+        assert!(!dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &invalid.to_string()
+        ));
+        assert!(dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &control("request-0003").to_string()
+        ));
+        sender.stop();
+        assert!(!dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &control("request-0004").to_string()
+        ));
+    }
+
+    #[tokio::test]
+    async fn repeated_websocket_accept_close_keeps_exponential_backoff() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let mut server = tokio::spawn(async move {
+            let mut accepted = Vec::new();
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_hdr_async(stream, ControllerSubprotocolCallback)
+                    .await
+                    .unwrap();
+                accepted.push(Instant::now());
+                // A transport pong is life, but never controller admission.
+                socket.send(Message::Pong(Vec::new().into())).await.unwrap();
+                socket.send(Message::Close(None)).await.unwrap();
+            }
+            accepted
+        });
+        let sender = spawn_controller_transport(
+            ControllerTransportConfig::new(url, ControllerRole::ControllerA, "generation-0001"),
+            Arc::new(|_| {}),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(8), &mut server).await;
+        sender.stop();
+        server.abort();
+        let accepted = result.expect("three bounded attempts").unwrap();
+        // Second failure is attempt 2: base500 *2 *jitter[.8,1.2].
+        assert!(
+            accepted[2].duration_since(accepted[1]) >= Duration::from_millis(790),
+            "bare accept/close must not continually reset to the 400-600ms first delay"
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_open_websocket_clears_installed_lease_before_reconnecting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _socket = accept_hdr_async(stream, ControllerSubprotocolCallback)
+                .await
+                .unwrap();
+            // Keep TCP open without reading/writing WS frames; no automatic pong.
+            std::future::pending::<()>().await;
+        });
+        let config =
+            ControllerTransportConfig::new(url, ControllerRole::ControllerA, "generation-0001");
+        let (sender, receiver) = transport_channels_shared(
+            config.role,
+            config.remote_control_generation.clone(),
+            2,
+            2,
+            8192,
+            1024,
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let task_sender = sender.clone();
+        let worker = tokio::spawn(async move {
+            run_transport_with_heartbeat(
+                config,
+                Arc::new(move |event| {
+                    let _ = tx.send(event);
+                }),
+                task_sender,
+                receiver,
+                Duration::from_millis(20),
+            )
+            .await;
+        });
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            while !matches!(
+                rx.recv().await.unwrap(),
+                ControllerTransportEvent::Connected { .. }
+            ) {}
+            sender
+                .install_authenticated_lease(lease("7", "generation-0001"))
+                .unwrap();
+            loop {
+                if let ControllerTransportEvent::Disconnected { error, .. } =
+                    rx.recv().await.unwrap()
+                {
+                    assert!(error.contains("inbound silence deadline"));
+                    assert!(sender.authenticated_lease().is_none());
+                    assert!(sender.resume_lease.read().is_some());
+                    break;
+                }
+            }
+        })
+        .await;
+        sender.stop();
+        server.abort();
+        worker.abort();
+        result.expect("silent but open socket must trigger the actual disconnect path");
     }
 
     #[tokio::test]

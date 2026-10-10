@@ -21,10 +21,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-
-use parking_lot::Mutex;
-use uuid::Uuid;
 
 use crate::features::marketplace::ConnectorScope;
 use crate::platform::paths;
@@ -36,84 +32,6 @@ use crate::platform::paths;
 // 持久化层在 `features/marketplace/skill_scope.rs`（与连接器开关同领域、避免
 // connectors → assistant 依赖环），这里 re-export 保持调用路径不变。
 pub use crate::features::marketplace::skill_scope::*;
-
-#[derive(Default)]
-struct RemoteSkillState {
-    owner: Option<Uuid>,
-    prepared: bool,
-    abandoned: bool,
-}
-
-fn remote_skill_states() -> &'static Mutex<HashMap<String, RemoteSkillState>> {
-    static STATES: OnceLock<Mutex<HashMap<String, RemoteSkillState>>> = OnceLock::new();
-    STATES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Keep the local turn gate closed until remote cleanup removes its freeze.
-/// The callback must only occupy the lifecycle slot, never perform IO or await.
-pub(crate) fn reserve_unfrozen_session_turn<T>(
-    session_id: &str,
-    reserve: impl FnOnce() -> T,
-) -> Result<T, String> {
-    let states = remote_skill_states().lock();
-    if states.contains_key(session_id) {
-        return Err("task_skills_busy".to_owned());
-    }
-    Ok(reserve())
-}
-
-/// Held by the remote turn adapter through the authoritative terminal. Every
-/// materialization entry serializes against this owner; UI refreshes cannot
-/// widen the accepted selection. Aborted futures leave a dirty, least-privilege
-/// directory. An abandoned submitted turn must not regain wider authority;
-/// ordinary refresh/heal cannot clear that fail-closed state.
-pub(crate) struct RemoteSkillFreezeGuard {
-    session_id: String,
-    owner: Uuid,
-}
-
-impl RemoteSkillFreezeGuard {
-    pub(crate) fn acquire(session_id: &str) -> Result<Self, String> {
-        let mut states = remote_skill_states().lock();
-        if states.contains_key(session_id) {
-            return Err("task_skills_busy".to_owned());
-        }
-        let owner = Uuid::new_v4();
-        states.insert(
-            session_id.to_owned(),
-            RemoteSkillState {
-                owner: Some(owner),
-                prepared: false,
-                abandoned: false,
-            },
-        );
-        Ok(Self {
-            session_id: session_id.to_owned(),
-            owner,
-        })
-    }
-
-    pub(crate) fn owner(&self) -> Uuid {
-        self.owner
-    }
-}
-
-impl Drop for RemoteSkillFreezeGuard {
-    fn drop(&mut self) {
-        let mut states = remote_skill_states().lock();
-        if let Some(state) = states.get_mut(&self.session_id)
-            && state.owner == Some(self.owner)
-        {
-            // A dropped submitted future may leave its engine running. Do not
-            // allow refresh/local self-heal/a successor to expand its authority.
-            if state.prepared {
-                state.abandoned = true;
-            } else {
-                states.remove(&self.session_id);
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // 组合目录物化
@@ -129,6 +47,14 @@ fn skill_source_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![paths::user_skills_dir()];
     if let Ok(rd) = std::fs::read_dir(paths::bundles_root()) {
         for entry in rd.flatten() {
+            // Round-24 minor 3: import staging (`<id>.tmp`) and landing
+            // backup (`<id>.old`) dirs are not packs — admitting their skills
+            // under the suffix owner id would render ungated content into
+            // initialized scopes during the import window.
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".tmp") || name.ends_with(".old") {
+                continue;
+            }
             let skills = entry.path().join("skills");
             if skills.is_dir() {
                 dirs.push(skills);
@@ -232,9 +158,13 @@ fn collect_source_skills(
 /// 禁用集的技能**目录名**（execpolicy 硬拦截与物化排除共用口径）。
 ///
 /// scope 收敛后：单一禁用集是**包 id**（`disabled_bundles.json`），companion 联动
-/// 不再借道 `companion_skills` 跨查询——包模型（`bundle::skill_owner_package`）按
-/// 条件认领把 companion 技能归属到其 MCP/CLI 包（所属包已装才归包，否则归技能
-/// 自身；与迁移层同口径，见 skill_marketplace），禁用包即排除其全部技能目录。
+/// no longer routes through `companion_skills` cross-queries — disabled/hidden
+/// entries are normalized via `to_package_id` on both write and read (the
+/// gating mapping `bundle::skill_gating_owner` since R17-MAJOR1: conditional
+/// claim plus physical-layout fallback; an undeclared nested skill must
+/// resolve to its physical owner pack, else it enters every scope with zero
+/// consent and no row to turn it off). A disabled pack excludes its full
+/// skill-dir set.
 /// 因此这里枚举所有技能来源目录，凡属主包在禁用集内的目录名纳入排除集。
 pub(crate) fn disabled_skill_names_for(scope: ConnectorScope) -> HashSet<String> {
     // 不可用集 = 开关关(disabled) + 不可见(hidden)：两套门控对物化/execpolicy 都是排除。
@@ -243,6 +173,16 @@ pub(crate) fn disabled_skill_names_for(scope: ConnectorScope) -> HashSet<String>
             .into_iter()
             .collect();
     let mut names: HashSet<String> = HashSet::new();
+    // Round-24 MAJOR 3: nothing can be excluded against an empty deny set —
+    // skip the per-entry owner resolution entirely (this runs ~2x per session
+    // spawn and per toggle/hot-refresh).
+    if disabled_packages.is_empty() {
+        return names;
+    }
+    // Round-24 MAJOR 3: one manifest walk for the whole pass —
+    // `skill_gating_owner` parses every manifest under bundles_root per call,
+    // so the per-entry resolution was O(dirs × packs) per invocation.
+    let tools = crate::features::marketplace::MarketplaceManager::new().available_tools();
     for src in skill_source_dirs() {
         let Ok(rd) = std::fs::read_dir(&src) else {
             continue;
@@ -254,7 +194,8 @@ pub(crate) fn disabled_skill_names_for(scope: ConnectorScope) -> HashSet<String>
             let Some(name) = entry.file_name().to_str().map(str::to_string) else {
                 continue;
             };
-            let owner = crate::features::marketplace::bundle::skill_owner_package(&name);
+            let owner =
+                crate::features::marketplace::bundle::skill_gating_owner_with(&tools, &name);
             if disabled_packages.contains(&owner) {
                 names.insert(name);
             }
@@ -299,56 +240,62 @@ pub fn materialize_session_skills(
     scope: ConnectorScope,
     project_workspace: Option<&Path>,
 ) -> Result<(), String> {
-    let mut states = remote_skill_states().lock();
-    if states.contains_key(session_id) {
-        return Err("task_skills_busy".to_owned());
-    }
     let enabled = enabled_skills_for(scope, project_workspace);
     materialize_skill_set(session_id, &enabled)?;
-    states.remove(session_id);
     Ok(())
 }
 
-/// A remote caller has already materialized its authenticated selection while
-/// holding the turn reservation. Cold spawn and model rebuild must not replace
-/// that directory with B's full enabled set. Missing preparation fails closed.
-pub(crate) fn prepare_engine_spawn_skills(
-    session_id: &str,
-    scope: ConnectorScope,
-    project_workspace: Option<&Path>,
-    remote_owner: Option<Uuid>,
-) -> Result<(), String> {
-    if let Some(owner) = remote_owner {
-        let states = remote_skill_states().lock();
-        if !states
-            .get(session_id)
-            .is_some_and(|state| state.owner == Some(owner) && !state.abandoned && state.prepared)
-            || !paths::session_skills_dir(session_id).is_dir()
-        {
-            return Err("task_skill_unavailable".to_owned());
-        }
-        Ok(())
-    } else {
-        materialize_session_skills(session_id, scope, project_workspace)
+/// A remote turn's immutable, uniquely owned discovery root. Ordinary B-local
+/// materialize/rewrite/self-heal writers never target this directory.
+#[derive(Debug, Default)]
+pub(crate) struct RemoteTurnOwner {
+    snapshot_claimed: std::sync::atomic::AtomicBool,
+}
+
+impl RemoteTurnOwner {
+    fn claim_snapshot(&self) -> Result<(), String> {
+        self.snapshot_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| "task_skill_snapshot_reused".to_owned())
     }
 }
 
-/// Freeze a remote turn to exactly the skills selected in its authenticated
-/// input. An empty selection deliberately produces an empty discovery root;
-/// unselected B skills are therefore unavailable to `load_skill` for this
-/// turn instead of merely being omitted from an audit field.
+#[derive(Debug)]
+pub(crate) struct RemoteTurnSkills {
+    directory: tempfile::TempDir,
+    owner: std::sync::Arc<RemoteTurnOwner>,
+}
+
+impl RemoteTurnSkills {
+    pub(crate) fn owner(&self) -> &std::sync::Arc<RemoteTurnOwner> {
+        &self.owner
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+/// Resolve the authenticated selection against B's enabled set and copy into
+/// a private root, including an empty directory for an empty selection. A
+/// cancelled spawn_blocking waiter cannot publish into shared session skills:
+/// when its result is dropped, only this attempt's owned directory is removed.
 pub(crate) fn materialize_remote_turn_skills(
     session_id: &str,
     scope: ConnectorScope,
     project_workspace: Option<&Path>,
     skill_ids: &[String],
-    owner: Uuid,
-) -> Result<(), String> {
-    let mut states = remote_skill_states().lock();
-    let state = states
-        .get_mut(session_id)
-        .filter(|state| state.owner == Some(owner) && !state.abandoned)
-        .ok_or_else(|| "task_skill_freeze_required".to_owned())?;
+    owner: std::sync::Arc<RemoteTurnOwner>,
+) -> Result<RemoteTurnSkills, String> {
+    crate::features::sessions::validate_session_id(session_id)
+        .map_err(|_| "task_session_invalid".to_owned())?;
+    owner.claim_snapshot()?;
     if skill_ids.len() > 32 {
         return Err("task_skills_invalid".to_owned());
     }
@@ -367,9 +314,20 @@ pub(crate) fn materialize_remote_turn_skills(
             .ok_or_else(|| "task_skill_not_authorized".to_owned())?;
         selected.push((skill_id.clone(), path));
     }
-    materialize_skill_set(session_id, &selected)?;
-    state.prepared = true;
-    Ok(())
+    let shared = paths::session_skills_dir(session_id);
+    let parent = shared
+        .parent()
+        .ok_or_else(|| "task_session_invalid".to_owned())?;
+    std::fs::create_dir_all(parent).map_err(|_| "task_skill_unavailable".to_owned())?;
+    let directory = tempfile::Builder::new()
+        .prefix("remote-turn-skills-")
+        .tempdir_in(parent)
+        .map_err(|_| "task_skill_unavailable".to_owned())?;
+    for (name, source) in selected {
+        copy_skill_dir(&source, &directory.path().join(name))
+            .map_err(|_| "task_skill_unavailable".to_owned())?;
+    }
+    Ok(RemoteTurnSkills { directory, owner })
 }
 
 /// Plain-chat wrappers keep the assistant runtime independent of the
@@ -377,23 +335,9 @@ pub(crate) fn materialize_remote_turn_skills(
 pub(crate) fn materialize_plain_remote_turn_skills(
     session_id: &str,
     skill_ids: &[String],
-    owner: Uuid,
-) -> Result<(), String> {
+    owner: std::sync::Arc<RemoteTurnOwner>,
+) -> Result<RemoteTurnSkills, String> {
     materialize_remote_turn_skills(session_id, ConnectorScope::Plain, None, skill_ids, owner)
-}
-
-pub(crate) fn restore_plain_session_skills(session_id: &str, owner: Uuid) -> Result<(), String> {
-    let mut states = remote_skill_states().lock();
-    if !states
-        .get(session_id)
-        .is_some_and(|state| state.owner == Some(owner) && !state.abandoned)
-    {
-        return Err("task_skill_owner_stale".to_owned());
-    }
-    let enabled = enabled_skills_for(ConnectorScope::Plain, None);
-    materialize_skill_set(session_id, &enabled)?;
-    states.remove(session_id);
-    Ok(())
 }
 
 /// Build the private prompt prefix used by ACP, whose protocol has no
@@ -488,10 +432,6 @@ pub fn rewrite_session_skills(
     scope: ConnectorScope,
     project_workspace: Option<&Path>,
 ) {
-    let states = remote_skill_states().lock();
-    if states.contains_key(session_id) {
-        return;
-    }
     let target = paths::session_skills_dir(session_id);
     let enabled: HashMap<String, PathBuf> = enabled_skills_for(scope, project_workspace)
         .into_iter()
@@ -535,27 +475,18 @@ pub fn ensure_session_skills(
     session_id: &str,
     scope: ConnectorScope,
     project_workspace: Option<&Path>,
-    remote_owner: Option<Uuid>,
-) -> Result<(), String> {
-    let states = remote_skill_states().lock();
-    let target_exists = paths::session_skills_dir(session_id).is_dir();
-    if let Some(state) = states.get(session_id) {
-        return if !state.abandoned && state.owner == remote_owner && state.prepared && target_exists
-        {
-            Ok(())
-        } else {
-            Err("task_skill_unavailable".to_owned())
-        };
-    } else if !target_exists {
-        materialize_skill_set(session_id, &enabled_skills_for(scope, project_workspace))?;
+) {
+    if !paths::session_skills_dir(session_id).is_dir() {
+        if let Err(e) = materialize_session_skills(session_id, scope, project_workspace) {
+            eprintln!("[skill-scope] self-heal {session_id} failed: {e}");
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
-pub(super) fn ensure_plain_session_skills_for_test(session_id: &str) -> Result<(), String> {
+pub(super) fn ensure_plain_session_skills_for_test(session_id: &str) {
     // Keep scope selection in this adapter, including cross-runtime regressions.
-    ensure_session_skills(session_id, ConnectorScope::Plain, None, None)
+    ensure_session_skills(session_id, ConnectorScope::Plain, None)
 }
 
 /// 判定（策略用）：该会话组合目录是否为空（目录不存在或无数）。code 会话据此
@@ -571,28 +502,11 @@ pub fn session_skills_is_empty(session_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 把 PINVOU3_HOME 指到干净临时目录跑闭包，跑完恢复并清理。
-    /// 借 `platform::paths::tests::ENV_LOCK` 与其它 mutate PINVOU3_HOME 的测试串行。
-    fn with_temp_home<F: FnOnce()>(f: F) {
-        let _g = crate::platform::paths::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let dir = std::env::temp_dir().join(format!("pinvou3-skillscope-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let prev = std::env::var("PINVOU3_HOME").ok();
-        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-        unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
-        f();
-        match prev {
-            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
-            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    use crate::features::marketplace::scope::{
+        save_disabled_bundles_for, set_project_skills_enabled,
+    };
+    use crate::platform::test_support::with_temp_home;
+    use std::sync::Arc;
 
     fn write_skill(root: &Path, name: &str, content: &str) {
         let dir = root.join(name);
@@ -620,7 +534,7 @@ mod tests {
     /// `## Skills` 隐藏"这条链路（过滤职责现由组合目录计算承担）。
     #[test]
     fn companion_skill_excluded_when_connector_disabled() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             write_tool_manifest(
                 "gongwen",
                 r#"{"id":"gongwen","name":"公文写作","description":"d","version":"1.0.0","icon":"file-text","category":"办公","mcp_tools":["mcp_gongwen_make_gongwen"],"command":"python","args":["server.py"],"companion_skills":["government-writing"]}"#,
@@ -668,7 +582,12 @@ mod tests {
     /// 直接并入排除集的回归都会让本测试变红。
     #[test]
     fn standalone_companion_named_skill_survives_uninstalled_connector() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
+            // With every mode DenyAll a fresh home is default-all-off; this
+            // test pins the conditional-claim shape (a companion whose
+            // connector is not installed stays a standalone pure-skill pack),
+            // so plain is explicitly initialized to all-on.
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
             write_tool_manifest(
                 "gongwen",
                 r#"{"id":"gongwen","name":"公文写作","description":"d","version":"1.0.0","icon":"file-text","category":"办公","mcp_tools":["mcp_gongwen_make_gongwen"],"command":"python","args":["server.py"],"companion_skills":["government-writing"]}"#,
@@ -686,6 +605,7 @@ mod tests {
             assert!(
                 crate::features::marketplace::MarketplaceManager::new()
                     .unavailable_companion_skills()
+                    .unwrap()
                     .contains(&"government-writing".to_string())
             );
 
@@ -702,7 +622,7 @@ mod tests {
     /// 开回来 → 恢复。
     #[test]
     fn cli_connector_companion_skills_excluded_when_disabled() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             for name in crate::features::marketplace::bundle::LARK_SKILL_DIRS {
                 write_skill(&paths::bundle_skills_dir(), name, "# Lark\n");
             }
@@ -727,14 +647,53 @@ mod tests {
         });
     }
 
-    /// code scope 未初始化「默认全禁」覆盖 CLI 连接器技能：lark-* 不注册在
-    /// 技能市场清单（连接门控直接解包），仍被 code 默认禁用兜住；plain 不受影响。
+    /// With neither plain nor code scope initialized, the deny-all default
+    /// (the every-mode DenyAll convergence) covers CLI connector skills too:
+    /// lark-* are not registered in the skill-marketplace listing (the
+    /// connection gate unpacks them directly) yet are still held by the
+    /// default-disable fallback; explicitly initializing the scope restores them.
     #[test]
-    fn code_scope_default_disables_cli_connector_skills() {
-        with_temp_home(|| {
+    fn uninitialized_scopes_default_disable_cli_connector_skills() {
+        with_temp_home("pinvou3-skillscope", || {
             for name in crate::features::marketplace::bundle::LARK_SKILL_DIRS {
                 write_skill(&paths::bundle_skills_dir(), name, "# Lark\n");
             }
+
+            for scope in [ConnectorScope::Code, ConnectorScope::Plain] {
+                let enabled = enabled_skills_for(scope, None);
+                assert!(
+                    !enabled.iter().any(|(n, _)| n.starts_with("lark-")),
+                    "lark-* skills must be fully denied by default while {scope:?} is uninitialized"
+                );
+            }
+            // plain explicitly initialized to all-on → lark-* restored.
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
+            let enabled_plain = enabled_skills_for(ConnectorScope::Plain, None);
+            assert_eq!(
+                enabled_plain
+                    .iter()
+                    .filter(|(n, _)| n.starts_with("lark-"))
+                    .count(),
+                crate::features::marketplace::bundle::LARK_SKILL_DIRS.len(),
+                "the plain scope must be unaffected"
+            );
+        });
+    }
+
+    /// Main's #563 test, adapted to the DenyAll default (round-17 merge): the
+    /// code scope uninitialized disables the CLI connector skills; plain
+    /// admits them once the user opts in (empty disable list). On the
+    /// pre-DenyAll tree plain needed no opt-in; here the contrast is
+    /// explicit-opt-in vs default-off.
+    #[test]
+    fn code_scope_default_disables_cli_connector_skills() {
+        with_temp_home("pinvou3-skillscope", || {
+            for name in crate::features::marketplace::bundle::LARK_SKILL_DIRS {
+                write_skill(&paths::bundle_skills_dir(), name, "# Lark\n");
+            }
+            // The user opts plain in (empty disable list); code stays
+            // uninitialized (DenyAll default).
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
 
             let enabled = enabled_skills_for(ConnectorScope::Code, None);
             assert!(
@@ -748,7 +707,7 @@ mod tests {
                     .filter(|(n, _)| n.starts_with("lark-"))
                     .count(),
                 crate::features::marketplace::bundle::LARK_SKILL_DIRS.len(),
-                "plain scope 不应受影响"
+                "all lark-* skills must be included once plain is explicitly enabled"
             );
         });
     }
@@ -758,7 +717,7 @@ mod tests {
     /// （不再借道连接器文件的 skill: 前缀）。
     #[test]
     fn disabling_direct_skill_id_hides_skill() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new()
                 .install("visualizer")
                 .unwrap();
@@ -785,7 +744,7 @@ mod tests {
     /// 语义相反，是 scope 收敛（todo A 节）的既定行为变更。
     #[test]
     fn disabling_package_hides_same_named_skill_unified() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             write_tool_manifest(
                 "weather",
                 r#"{"id":"weather","name":"天气","description":"d","version":"1.0.0","icon":"cloud","category":"查询","mcp_tools":["mcp_weather_query"],"command":"python","args":["server.py"]}"#,
@@ -835,28 +794,13 @@ mod tests {
     }
 
     #[test]
-    fn unfrozen_turn_reservation_keeps_state_lock_through_slot_occupation() {
-        let sid = format!("skill-reserve-gate-{}", Uuid::new_v4());
-        reserve_unfrozen_session_turn(&sid, || {
-            assert!(
-                remote_skill_states().try_lock().is_none(),
-                "checking freeze and occupying a turn must be one critical section"
-            );
-        })
-        .unwrap();
-        let guard = RemoteSkillFreezeGuard::acquire(&sid).unwrap();
-        let mut called = false;
-        assert!(reserve_unfrozen_session_turn(&sid, || called = true).is_err());
-        assert!(!called, "busy refusal cannot occupy any lifecycle slot");
-        drop(guard);
-        reserve_unfrozen_session_turn(&sid, || called = true).unwrap();
-        assert!(called);
-    }
-
-    #[test]
     fn enabled_skills_respect_first_wins_and_scope_disabled() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             seed_sources();
+            // With every mode DenyAll a fresh home is default-all-off; this
+            // test focuses on first-wins and switch semantics, so plain is
+            // explicitly initialized to all-on.
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
             // 默认（无禁用）：user 覆盖 bundle 同名 + 手放技能入集
             let enabled = enabled_skills_for(ConnectorScope::Plain, None);
             let names: HashSet<&str> = enabled.iter().map(|(n, _)| n.as_str()).collect();
@@ -882,8 +826,12 @@ mod tests {
 
     #[test]
     fn materialize_then_rewrite_is_idempotent() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             seed_sources();
+            // With every mode DenyAll a fresh home is default-all-off; this
+            // test focuses on materialization idempotence, so plain is
+            // explicitly initialized to all-on.
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
             let sid = "session-test-1";
             materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
             let dir = paths::session_skills_dir(sid);
@@ -918,7 +866,7 @@ mod tests {
 
     #[test]
     fn empty_scope_leaves_empty_dir_and_is_empty_detection() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             // 干净的 home（无任何技能来源）→ 全禁场景等价：组合目录为空目录
             let sid = "session-test-2";
             materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
@@ -935,7 +883,7 @@ mod tests {
 
             // 自愈：手动删目录 → ensure 重建
             std::fs::remove_dir_all(&dir).unwrap();
-            ensure_session_skills(sid, ConnectorScope::Plain, None, None).unwrap();
+            ensure_session_skills(sid, ConnectorScope::Plain, None);
             assert!(dir.is_dir(), "自愈应重建组合目录");
             assert!(session_skills_is_empty(sid));
         });
@@ -943,7 +891,7 @@ mod tests {
 
     #[test]
     fn project_skills_follow_gate_and_priority() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             // bundle 基线：市场装 visualizer
             let bundle = paths::bundle_skills_dir();
             std::fs::create_dir_all(&bundle).unwrap();
@@ -1038,19 +986,22 @@ mod tests {
 
     #[test]
     fn remote_turn_materializes_only_the_frozen_authorized_selection() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             seed_sources();
+            // A fresh home is default-all-off per scope (round-31 M8); enable
+            // the whole Plain scope so the frozen-selection assertion below is
+            // driven by the authorized list, not by the default-deny baseline.
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
             let sid = "remote-session-skills";
-            let guard = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-            materialize_remote_turn_skills(
+            let selected = materialize_remote_turn_skills(
                 sid,
                 ConnectorScope::Plain,
                 None,
                 &["user-custom".to_owned(), "visualizer".to_owned()],
-                guard.owner(),
+                std::sync::Arc::new(RemoteTurnOwner::default()),
             )
             .unwrap();
-            let dir = paths::session_skills_dir(sid);
+            let dir = selected.path().to_owned();
             let names: HashSet<String> = std::fs::read_dir(&dir)
                 .unwrap()
                 .flatten()
@@ -1073,7 +1024,7 @@ mod tests {
                     ConnectorScope::Plain,
                     None,
                     &["not-authorized".to_owned()],
-                    guard.owner(),
+                    std::sync::Arc::new(RemoteTurnOwner::default()),
                 )
                 .unwrap_err(),
                 "task_skill_not_authorized"
@@ -1081,134 +1032,206 @@ mod tests {
             assert!(dir.join("user-custom").is_dir());
             assert!(dir.join("visualizer").is_dir());
 
-            materialize_remote_turn_skills(sid, ConnectorScope::Plain, None, &[], guard.owner())
-                .unwrap();
-            assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
-            restore_plain_session_skills(sid, guard.owner()).unwrap();
-            assert_eq!(
-                std::fs::read_dir(dir).unwrap().flatten().count(),
-                4,
-                "the next B-local turn regains B's full authoritative enabled set"
-            );
-        });
-    }
-
-    #[test]
-    fn remote_freeze_blocks_refresh_self_heal_local_send_and_stale_owners() {
-        with_temp_home(|| {
-            seed_sources();
-            let sid = "remote-freeze-lifecycle";
-            let guard = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-            let owner = guard.owner();
-            materialize_plain_remote_turn_skills(sid, &["user-custom".to_owned()], owner).unwrap();
-            for _ in 0..3 {
-                rewrite_session_skills(sid, ConnectorScope::Plain, None);
-                assert!(materialize_session_skills(sid, ConnectorScope::Plain, None).is_err());
-                ensure_session_skills(sid, ConnectorScope::Plain, None, Some(owner)).unwrap();
-                assert_eq!(
-                    std::fs::read_dir(paths::session_skills_dir(sid))
-                        .unwrap()
-                        .count(),
-                    1
-                );
-            }
+            let empty = materialize_remote_turn_skills(
+                sid,
+                ConnectorScope::Plain,
+                None,
+                &[],
+                std::sync::Arc::new(RemoteTurnOwner::default()),
+            )
+            .unwrap();
+            assert!(std::fs::read_dir(empty.path()).unwrap().next().is_none());
             assert!(
-                ensure_session_skills(sid, ConnectorScope::Plain, None, None).is_err(),
-                "a local send cannot inherit the remote task's narrower set before restore"
+                dir.join("user-custom").is_dir(),
+                "a newer empty snapshot must not replace its predecessor"
             );
-            assert!(RemoteSkillFreezeGuard::acquire(sid).is_err());
-            let stale = Uuid::new_v4();
-            assert!(restore_plain_session_skills(sid, stale).is_err());
-            assert!(materialize_plain_remote_turn_skills(sid, &[], stale).is_err());
-            let target = paths::session_skills_dir(sid);
-            std::fs::remove_dir_all(&target).unwrap();
-            assert!(ensure_session_skills(sid, ConnectorScope::Plain, None, Some(owner)).is_err());
-            rewrite_session_skills(sid, ConnectorScope::Plain, None);
-            assert!(
-                !target.exists(),
-                "missing frozen directory cannot heal to B's full set"
-            );
-            materialize_plain_remote_turn_skills(sid, &[], owner).unwrap();
-            restore_plain_session_skills(sid, owner).unwrap();
-            ensure_session_skills(sid, ConnectorScope::Plain, None, None).unwrap();
-            assert_eq!(std::fs::read_dir(&target).unwrap().count(), 4);
-            let successor = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-            materialize_plain_remote_turn_skills(sid, &[], successor.owner()).unwrap();
-            drop(guard);
-            assert!(
-                prepare_engine_spawn_skills(
-                    sid,
-                    ConnectorScope::Plain,
-                    None,
-                    Some(successor.owner())
-                )
-                .is_ok(),
-                "stale Drop cannot retire the successor's freeze"
-            );
-            restore_plain_session_skills(sid, successor.owner()).unwrap();
-        });
-    }
-
-    #[test]
-    fn abandoned_prepared_turn_stays_frozen_and_late_materialization_cannot_take_over() {
-        with_temp_home(|| {
-            seed_sources();
-            let sid = "remote-abandoned-freeze";
-            let guard = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-            let owner = guard.owner();
-            materialize_plain_remote_turn_skills(sid, &[], owner).unwrap();
-            drop(guard);
-            rewrite_session_skills(sid, ConnectorScope::Plain, None);
-            assert!(materialize_session_skills(sid, ConnectorScope::Plain, None).is_err());
-            assert!(ensure_session_skills(sid, ConnectorScope::Plain, None, None).is_err());
-            assert!(RemoteSkillFreezeGuard::acquire(sid).is_err());
-            assert!(restore_plain_session_skills(sid, owner).is_err());
-            assert!(
-                materialize_plain_remote_turn_skills(sid, &["user-custom".to_owned()], owner)
-                    .is_err()
-            );
+            assert_ne!(dir, empty.path());
+            materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
             assert_eq!(
                 std::fs::read_dir(paths::session_skills_dir(sid))
                     .unwrap()
+                    .flatten()
                     .count(),
-                0
+                4,
+                "the next B-local turn regains B's full authoritative enabled set"
             );
-            // Test-only isolated process-state disposal, not a production heal.
-            remote_skill_states().lock().remove(sid);
-
-            let unprepared = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-            let old_owner = unprepared.owner();
-            drop(unprepared);
-            let successor = RemoteSkillFreezeGuard::acquire(sid).unwrap();
+            let before = std::fs::read_to_string(dir.join("visualizer/SKILL.md")).unwrap();
+            rewrite_session_skills(sid, ConnectorScope::Plain, None);
+            let shared = paths::session_skills_dir(sid);
+            // Only this fixture's exact managed shared directory is removed.
+            std::fs::remove_dir_all(&shared).unwrap();
+            ensure_session_skills(sid, ConnectorScope::Plain, None);
+            assert!(shared.is_dir());
+            assert_eq!(
+                before,
+                std::fs::read_to_string(dir.join("visualizer/SKILL.md")).unwrap()
+            );
+            assert!(!dir.join("bundle-skill").exists());
+            assert!(std::fs::read_dir(empty.path()).unwrap().next().is_none());
+            let snapshot = std::sync::Arc::new(selected);
+            let clone = snapshot.clone();
+            drop(snapshot);
+            assert!(dir.is_dir());
+            drop(clone);
             assert!(
-                materialize_plain_remote_turn_skills(sid, &["user-custom".to_owned()], old_owner)
-                    .is_err(),
-                "a cancelled spawn_blocking worker cannot materialize under its successor"
+                !dir.exists(),
+                "last snapshot owner cleans only its private directory"
             );
-            materialize_plain_remote_turn_skills(sid, &[], successor.owner()).unwrap();
-            restore_plain_session_skills(sid, successor.owner()).unwrap();
+            assert!(shared.is_dir());
+            assert!(empty.path().is_dir());
         });
     }
 
     #[test]
-    fn remote_restore_uses_latest_b_toggle_install_and_uninstall_state() {
-        with_temp_home(|| {
+    fn unicode_remote_selection_reaches_real_chat_and_acp_skill_consumers() {
+        use crate::features::remote_control::controller::capabilities::{
+            CapabilityDescriptor, CapabilitySnapshotManager, CapabilitySource, opaque_skill_id,
+        };
+        use crate::features::remote_control::controller::controlled::ControlledWorkspaceInfo;
+        use crate::features::remote_control::controller::protocol::LeaseContext;
+        with_temp_home("pinvou3-unicode-remote-skills", || {
+            let name = "我的技能";
+            write_skill(&paths::bundle_skills_dir(), name, "中文正文：仅选中技能");
+            std::fs::write(
+                paths::bundle_skills_dir()
+                    .join(name)
+                    .join(".installed-from"),
+                "upload:skill.zip",
+            )
+            .unwrap();
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
+            save_disabled_bundles_for(ConnectorScope::Code, &[]).unwrap();
+            let lease = LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            };
+            let descriptors = vec![CapabilityDescriptor {
+                id: name.into(),
+                display_name: "中文技能".into(),
+            }];
+            let capabilities = CapabilitySnapshotManager::default();
+            capabilities
+                .build(
+                    lease.clone(),
+                    CapabilitySource {
+                        code_agent_ready: true,
+                        tools: vec![],
+                        plain_skills: descriptors.clone(),
+                        code_skills: descriptors,
+                        workspaces: vec![ControlledWorkspaceInfo {
+                            workspace_id: "workspace-1".into(),
+                            display_name: "Project".into(),
+                            code_allowed: true,
+                        }],
+                    },
+                    1_000,
+                )
+                .unwrap();
+            let ids = vec![opaque_skill_id(name)];
+            let chat_names = capabilities
+                .skills_for_task("1", &lease, "chat", &ids, 2_000)
+                .unwrap();
+            let code_names = capabilities
+                .skills_for_task("1", &lease, "code", &ids, 2_000)
+                .unwrap();
+            // Refresh and expiry invalidate further admission, not the exact
+            // selection already captured for these admitted turns.
+            capabilities
+                .build(lease.clone(), CapabilitySource::default(), 40_000)
+                .unwrap();
+            assert!(
+                capabilities
+                    .skills_for_task("1", &lease, "chat", &ids, 50_000)
+                    .is_err()
+            );
+            let skills = materialize_plain_remote_turn_skills(
+                "remote-unicode-skills",
+                &chat_names,
+                Arc::new(RemoteTurnOwner::default()),
+            )
+            .unwrap();
+            assert!(
+                std::fs::read_to_string(skills.path().join(name).join("SKILL.md"))
+                    .unwrap()
+                    .contains("中文正文")
+            );
+            let prompt = remote_turn_skill_prompt(ConnectorScope::Code, None, &code_names).unwrap();
+            assert!(prompt.contains("中文正文"));
+            assert!(
+                !prompt.contains(&ids[0]),
+                "opaque wire IDs are not filesystem identities"
+            );
+            save_disabled_bundles_for(ConnectorScope::Code, &[name.into()]).unwrap();
+            assert_eq!(
+                remote_turn_skill_prompt(ConnectorScope::Code, None, &code_names).unwrap_err(),
+                "task_skill_not_authorized"
+            );
+            save_disabled_bundles_for(ConnectorScope::Plain, &[name.into()]).unwrap();
+            assert_eq!(
+                materialize_plain_remote_turn_skills(
+                    "remote-unicode-disabled",
+                    &chat_names,
+                    Arc::new(RemoteTurnOwner::default()),
+                )
+                .unwrap_err(),
+                "task_skill_not_authorized"
+            );
+            save_disabled_bundles_for(ConnectorScope::Code, &[]).unwrap();
+            std::fs::remove_dir_all(paths::bundle_skills_dir().join(name)).unwrap();
+            assert_eq!(
+                remote_turn_skill_prompt(ConnectorScope::Code, None, &code_names).unwrap_err(),
+                "task_skill_not_authorized"
+            );
+        });
+    }
+
+    #[test]
+    fn remote_snapshot_owner_is_one_shot_and_invalid_ids_fail_before_claim() {
+        with_temp_home("pinvou3-skillscope", || {
+            let owner = std::sync::Arc::new(RemoteTurnOwner::default());
+            for invalid in [
+                "",
+                ".",
+                "..",
+                "trailing.",
+                "trailing ",
+                "a/b",
+                "a\\b",
+                "a:b",
+            ] {
+                assert_eq!(
+                    materialize_plain_remote_turn_skills(invalid, &[], owner.clone()).unwrap_err(),
+                    "task_session_invalid"
+                );
+            }
+            let first =
+                materialize_plain_remote_turn_skills("snapshot-owner", &[], owner.clone()).unwrap();
+            assert_eq!(
+                materialize_plain_remote_turn_skills("snapshot-owner", &[], owner).unwrap_err(),
+                "task_skill_snapshot_reused"
+            );
+            assert!(first.path().is_dir());
+        });
+    }
+
+    #[test]
+    fn private_remote_selection_survives_latest_b_toggle_install_and_uninstall() {
+        with_temp_home("remote-latest-b-skills", || {
             seed_sources();
             let sid = "remote-latest-b-skills";
-            let guard = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-            materialize_plain_remote_turn_skills(sid, &["user-custom".to_owned()], guard.owner())
-                .unwrap();
+            let snapshot = materialize_plain_remote_turn_skills(
+                sid,
+                &["user-custom".to_owned()],
+                std::sync::Arc::new(RemoteTurnOwner::default()),
+            )
+            .unwrap();
             save_disabled_skills_for(ConnectorScope::Plain, &["visualizer".to_owned()]).unwrap();
             write_skill(&paths::user_skills_dir(), "newly-installed", "new skill");
             std::fs::remove_dir_all(paths::bundle_skills_dir().join("ima-skills")).unwrap();
             rewrite_session_skills(sid, ConnectorScope::Plain, None);
-            assert_eq!(
-                std::fs::read_dir(paths::session_skills_dir(sid))
-                    .unwrap()
-                    .count(),
-                1
-            );
-            restore_plain_session_skills(sid, guard.owner()).unwrap();
             let names: HashSet<_> = std::fs::read_dir(paths::session_skills_dir(sid))
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -1221,56 +1244,89 @@ mod tests {
                     "newly-installed".to_owned(),
                 ])
             );
+            let frozen: Vec<_> = std::fs::read_dir(snapshot.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(frozen, vec![std::ffi::OsString::from("user-custom")]);
         });
     }
 
-    #[test]
-    fn frozen_remote_selection_survives_cold_spawn_and_model_rebuild() {
-        with_temp_home(|| {
-            seed_sources();
-            let sid = "remote-cold-spawn";
-            for selection in [vec!["user-custom".to_owned()], Vec::new()] {
-                let guard = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-                materialize_plain_remote_turn_skills(sid, &selection, guard.owner()).unwrap();
-                // Same production preparation runs for cold spawn and rebuild.
-                for _ in 0..2 {
-                    prepare_engine_spawn_skills(
-                        sid,
-                        ConnectorScope::Plain,
-                        None,
-                        Some(guard.owner()),
-                    )
-                    .unwrap();
-                    let names: HashSet<_> = std::fs::read_dir(paths::session_skills_dir(sid))
-                        .unwrap()
-                        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-                        .collect();
-                    assert_eq!(names, selection.iter().cloned().collect());
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_blocking_snapshot_cannot_publish_over_a_newer_shared_root() {
+        let _env_lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: ENV_LOCK is held for the complete test.
+                unsafe {
+                    match &self.0 {
+                        Some(value) => std::env::set_var("PINVOU3_HOME", value),
+                        None => std::env::remove_var("PINVOU3_HOME"),
+                    }
                 }
-                restore_plain_session_skills(sid, guard.owner()).unwrap();
-                prepare_engine_spawn_skills(sid, ConnectorScope::Plain, None, None).unwrap();
-                assert_eq!(
-                    std::fs::read_dir(paths::session_skills_dir(sid))
-                        .unwrap()
-                        .count(),
-                    4
-                );
             }
-            assert_eq!(
-                prepare_engine_spawn_skills(
-                    "not-prepared",
-                    ConnectorScope::Plain,
-                    None,
-                    Some(Uuid::new_v4())
-                ),
-                Err("task_skill_unavailable".to_owned())
-            );
+        }
+        let _restore = Restore(std::env::var_os("PINVOU3_HOME"));
+        // SAFETY: ENV_LOCK is held.
+        unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
+        let sid = "cancelled-snapshot";
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        struct BlockingResult {
+            snapshot: Option<RemoteTurnSkills>,
+            done: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Drop for BlockingResult {
+            fn drop(&mut self) {
+                drop(self.snapshot.take());
+                if let Some(done) = self.done.take() {
+                    let _ = done.send(());
+                }
+            }
+        }
+        let waiter = tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let snapshot = materialize_plain_remote_turn_skills(
+                    sid,
+                    &[],
+                    std::sync::Arc::new(RemoteTurnOwner::default()),
+                )
+                .unwrap();
+                ready_tx.send(snapshot.path().to_path_buf()).unwrap();
+                release_rx.recv().unwrap();
+                // The blocking task completes AFTER its async waiter was
+                // cancelled. Tokio drops this undelivered owned result.
+                BlockingResult {
+                    snapshot: Some(snapshot),
+                    done: Some(done_tx),
+                }
+            })
+            .await;
+            drop(result.unwrap());
         });
+        let private = ready_rx.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
+        let shared = paths::session_skills_dir(sid);
+        std::fs::write(shared.join("newer-owner-marker"), "newer").unwrap();
+        release_tx.send(()).unwrap();
+        done_rx.await.unwrap();
+        assert!(!private.exists());
+        assert_eq!(
+            std::fs::read_to_string(shared.join("newer-owner-marker")).unwrap(),
+            "newer"
+        );
     }
 
     #[test]
     fn code_remote_prompt_contains_only_selected_authorized_skill_bodies() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             seed_sources();
             save_disabled_skills_for(ConnectorScope::Code, &[]).unwrap();
             let prompt =
@@ -1305,9 +1361,40 @@ mod tests {
         // 等式两侧都是 PINVOU3_HOME 的派生值:并行测试翻 home 时两次读取可能落进
         // 不同快照,等式随机打红(2026-09-16 高负载下偶现)——锁 ENV_LOCK 钉干净
         // home,两次读取串行且确定。
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             let dir = paths::session_skills_dir("abc-123");
             assert_eq!(dir, paths::sessions_root().join("abc-123").join("skills"));
+        });
+    }
+
+    /// Round-29 m3 (review #455): the staging exclusion in
+    /// `skill_source_dirs` (round-24 minor 3) is consent-load-bearing —
+    /// pin it. Import staging (`<id>.tmp`) and landing-backup (`<id>.old`)
+    /// dirs are not packs; admitting their skills would render ungated
+    /// content into initialized scopes under a suffix owner id during the
+    /// import window. Only a real pack's skills dir is a source.
+    #[test]
+    fn staging_residue_dirs_are_not_skill_sources() {
+        with_temp_home("pinvou3-skillscope", || {
+            let bundles = paths::bundles_root();
+            for residue in ["stage-pack.tmp", "stage-pack.old"] {
+                let dir = bundles.join(residue).join("skills").join("leak");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("SKILL.md"), "---\nname: leak\n---\n").unwrap();
+            }
+            let real = bundles.join("real-pack").join("skills");
+            std::fs::create_dir_all(&real).unwrap();
+
+            let dirs = skill_source_dirs();
+            assert!(
+                !dirs.iter().any(|d| d.to_string_lossy().contains(".tmp")
+                    || d.to_string_lossy().contains(".old")),
+                "staging residue must not become a skill source: {dirs:?}"
+            );
+            assert!(
+                dirs.iter().any(|d| d == &real),
+                "the real pack's skills dir stays a source: {dirs:?}"
+            );
         });
     }
 }

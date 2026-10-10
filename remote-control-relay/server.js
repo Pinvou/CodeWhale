@@ -19,6 +19,7 @@ import {
   parseControllerWireJson, parseLegacyWebWireJson,
 } from "./protocol-controller.js";
 import { RelayStateStore } from "./relay-state-store.js";
+import { isControllerIdentifier, isLegacyWebEndpointIdentifier } from "./identifier-contract.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIB = 1024 * 1024;
@@ -213,7 +214,7 @@ async function createControllerRuntime() {
       throw new Error("pairing_digest_key_invalid");
     }
     const signingKeyId = process.env.PINVOU_REMOTE_RELAY_SIGNING_KEY_ID || "";
-    if (!/^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u.test(signingKeyId)) {
+    if (!isControllerIdentifier(signingKeyId)) {
       throw new Error("relay_signing_key_id_invalid");
     }
     const signingKeyB64 = process.env.PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64 || "";
@@ -548,10 +549,7 @@ function hasLegacyTokenAlias(message) {
 }
 
 function validEndpointId(value) {
-  return typeof value === "string"
-    && value.length >= 4
-    && value.length <= 128
-    && /^[A-Za-z0-9_-]+$/.test(value);
+  return isLegacyWebEndpointIdentifier(value);
 }
 
 function relayStateContents(entries) {
@@ -956,6 +954,14 @@ async function registerDesktop(ws, msg) {
     }
   }
 
+  // Authentication may yield: another registration can claim this socket, or
+  // its close handler can run, before the validated credentials return.
+  if (!socketOpen(ws)) return;
+  if (ws.role !== "unknown") {
+    rejectSocket(ws, "bad_desktop_endpoint_register", "bad desktop endpoint registration");
+    return;
+  }
+
   pruneExpiredEndpoints();
   if (revokedEndpoints.has(endpointId)) {
     rejectSocket(ws, "endpoint_revoked", "endpoint was permanently revoked");
@@ -1009,7 +1015,6 @@ async function registerDesktop(ws, msg) {
   endpoint.desktop_offline_since = null;
   authenticateSocket(ws, "desktop", endpointId);
   if (controllerRuntime && ws.protocol === CONTROLLER_SUBPROTOCOL) {
-    ws.controllerEnrollmentCredential = desktopSecret;
     controllerRuntime.router.authenticateControlled({
       socketIdentity: ws.controllerSocketIdentity,
       endpointId,
@@ -1203,7 +1208,6 @@ wss.on("connection", (ws, req) => {
   ws.policyClosing = false;
   ws.revokePending = false;
   ws.controllerAuthenticated = false;
-  ws.controllerEnrollmentCredential = null;
   ws.controllerSocketIdentity = `socket-${crypto.randomBytes(18).toString("base64url")}`;
   if (ws.protocol === CONTROLLER_SUBPROTOCOL) {
     try {
@@ -1338,7 +1342,6 @@ wss.on("connection", (ws, req) => {
   ws.on("close", () => {
     clearTimeout(ws.authTimer);
     ws.authTimer = null;
-    ws.controllerEnrollmentCredential = null;
     if (controllerRuntime && ws.protocol === CONTROLLER_SUBPROTOCOL) {
       void controllerRuntime.router.removeSocket(ws.controllerSocketIdentity).catch(() => {});
     }

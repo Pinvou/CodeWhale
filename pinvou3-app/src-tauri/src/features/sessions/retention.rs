@@ -45,6 +45,89 @@ use std::path::PathBuf;
 static SCHEDULED_RUNTIME_DELETE_FAULTS: LazyLock<parking_lot::Mutex<HashMap<String, ErrorKind>>> =
     LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
+/// Eviction record the store hands the headless retention observer: the
+/// newest window of evicted session ids plus the total eviction count. The
+/// ids are windowed because a long-lived process that never arms an observer
+/// must not grow the record without bound; the total is what the runner's
+/// warning reports, so trimming the window never under-reports real data
+/// loss.
+#[cfg(feature = "benchmark-hooks")]
+#[derive(Default)]
+pub(crate) struct RetentionEvictionRecord {
+    pub(crate) ids: Vec<String>,
+    pub(crate) total: usize,
+}
+
+#[cfg(feature = "benchmark-hooks")]
+impl RetentionEvictionRecord {
+    /// Record one sweep's deletions.
+    fn record(&mut self, evicted: &[String]) {
+        self.total += evicted.len();
+        self.extend_ids(evicted.iter().cloned());
+    }
+
+    /// Merge a buffered record into an installed one (flush-on-arm). The
+    /// totals add — merging must not lose evictions the buffer trimmed away.
+    /// The ids append after the target's: the only production target is the
+    /// freshly created arm record, so the surviving window stays in eviction
+    /// order; a merge into a record that already holds newer evictions would
+    /// keep the appended (older) ids at the window's tail instead — the
+    /// total, which is all the warning reads, is unaffected.
+    fn merge(&mut self, other: RetentionEvictionRecord) {
+        self.total += other.total;
+        self.extend_ids(other.ids.into_iter());
+    }
+
+    fn extend_ids(&mut self, add: impl Iterator<Item = String>) {
+        const RETENTION_EVICTION_IDS_WINDOW: usize = 256;
+        self.ids.extend(add);
+        let overflow = self.ids.len().saturating_sub(RETENTION_EVICTION_IDS_WINDOW);
+        self.ids.drain(0..overflow);
+    }
+}
+
+#[cfg(all(test, feature = "benchmark-hooks"))]
+mod eviction_record_tests {
+    use super::RetentionEvictionRecord;
+
+    /// The id window is a hard 256 newest-kept bound, but the total survives
+    /// every trim: the runner's warning reports `total`, so a trimmed record
+    /// must still carry the full data loss — through incremental `record`
+    /// calls, a single bulk sweep, and a `merge` of a buffer that had already
+    /// trimmed its own ids.
+    #[test]
+    fn ids_window_at_256_while_the_total_survives_every_trim() {
+        let mut incremental = RetentionEvictionRecord::default();
+        for index in 0..300 {
+            incremental.record(&[format!("id_{index:04}")]);
+        }
+        assert_eq!(incremental.total, 300);
+        assert_eq!(incremental.ids.len(), 256);
+        assert_eq!(
+            incremental.ids.first().unwrap(),
+            "id_0044",
+            "oldest trimmed"
+        );
+        assert_eq!(incremental.ids.last().unwrap(), "id_0299", "newest kept");
+
+        let mut bulk = RetentionEvictionRecord::default();
+        bulk.record(
+            &(0..300)
+                .map(|index| format!("bulk_{index:04}"))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(bulk.total, 300);
+        assert_eq!(bulk.ids.len(), 256);
+        assert_eq!(bulk.ids.first().unwrap(), "bulk_0044");
+
+        let mut merged = RetentionEvictionRecord::default();
+        merged.merge(incremental);
+        assert_eq!(merged.total, 300, "merge must carry the trimmed-away count");
+        assert_eq!(merged.ids.len(), 256);
+        assert_eq!(merged.ids.last().unwrap(), "id_0299");
+    }
+}
+
 /// Shared fabrication for tool-output artifact records appended by the
 /// transcript writers in [`super::store`] and this module: same
 /// `p3art_<session>_<index>` / `p3_<index>` id scheme, same `"write_file"`
@@ -102,14 +185,31 @@ impl SessionStore {
     #[cfg(feature = "benchmark-hooks")]
     pub(crate) fn set_retention_eviction_observer(
         &self,
-        observer: Option<Arc<Mutex<Vec<String>>>>,
-    ) -> Option<Arc<Mutex<Vec<String>>>> {
-        std::mem::replace(&mut self.retention_eviction_observer.lock(), observer)
+        observer: Option<Arc<Mutex<RetentionEvictionRecord>>>,
+    ) -> Option<Arc<Mutex<RetentionEvictionRecord>>> {
+        let previous = std::mem::replace(&mut *self.retention_eviction_observer.lock(), observer);
+        // Flush evictions recorded before the observer existed: the headless
+        // host boots its store (and runs the boot-time retention sweep)
+        // before `run_agentic_task` arms the observer, so without this the
+        // boot sweep's deletions would be silently dropped and the run's
+        // warning would under-report real data loss. A disarm request
+        // (None) installs nothing and keeps the buffer for the next arm.
+        // The slot is cloned out before the buffer is locked, so the merge
+        // runs outside the slot's critical section and no future code path
+        // holding a contents/pending guard can invert the lock order.
+        let installed = self.retention_eviction_observer.lock().clone();
+        if let Some(installed) = installed {
+            let pending = std::mem::take(&mut *self.pending_retention_evictions.lock());
+            installed.lock().merge(pending);
+        }
+        previous
     }
 
     /// Disarm and hand back the installed observer, if any.
     #[cfg(feature = "benchmark-hooks")]
-    pub(crate) fn take_retention_eviction_observer(&self) -> Option<Arc<Mutex<Vec<String>>>> {
+    pub(crate) fn take_retention_eviction_observer(
+        &self,
+    ) -> Option<Arc<Mutex<RetentionEvictionRecord>>> {
         self.retention_eviction_observer.lock().take()
     }
 
@@ -124,7 +224,14 @@ impl SessionStore {
     /// enforcement (it can only fire when the chat bucket was already over
     /// its cap — e.g. a caller-provided session id without the
     /// [`HEADLESS_SESSION_PREFIX`] counting against it). No observer
-    /// installed (every GUI process) is a no-op.
+    /// installed (every GUI process) buffers the headless ids for a later
+    /// arming instead (bounded; the GUI never arms, so it stays scratch).
+    ///
+    /// The slot read and the buffer write are not one atomic step: a sweep
+    /// interleaved with an arm can strand its batch in the buffer until the
+    /// next arm — delayed, never lost or doubled. The runner is single-flight
+    /// per store and the boot sweep precedes the first arm, so production
+    /// never interleaves them.
     #[cfg(feature = "benchmark-hooks")]
     fn record_retention_evictions(&self, evicted: &[String]) {
         let headless: Vec<String> = evicted
@@ -136,7 +243,16 @@ impl SessionStore {
             return;
         }
         if let Some(observer) = self.retention_eviction_observer.lock().clone() {
-            observer.lock().extend(headless);
+            observer.lock().record(&headless);
+        } else {
+            // No observer yet (the GUI never installs one; the headless run
+            // arms it only after the store booted): buffer the headless ids
+            // so the boot-time sweep's deletions surface once the runner
+            // arms (set_retention_eviction_observer flushes this buffer
+            // into the fresh observer). The record windows its ids but
+            // keeps the total, so even a buffer that outlives the process
+            // still reports the true count on flush.
+            self.pending_retention_evictions.lock().record(&headless);
         }
     }
 
@@ -146,22 +262,9 @@ impl SessionStore {
             .context("list sessions for retention")?
             .as_ref()
             .clone();
-        let mut chat_count = 0usize;
-        let mut headless_count = 0usize;
-        let mut deleted_ids = Vec::new();
-        let mut delete_error = None;
-        // Pinned sessions are the user's explicit "keep forever" mark: they
-        // count against neither the cap nor eviction. The sweep consults the
-        // durable pin file, not the boot-time map: a GUI pinning sessions
-        // while a headless batch is alive only shows up in the file.
-        //
-        // Unknown exemption set (the pin file is unreadable or absent in a
-        // state this process cannot attribute to a legitimate save — e.g. a
-        // mutation quarantined an unusable file — AND the boot load failed the
-        // same way, so the in-memory map is empty because of the fault rather
-        // than because there are no pins): refuse to evict. Sitting over the
-        // cap is recoverable; deleting the sessions the user marked
-        // keep-forever is not.
+        // Keep-forever fail-safe (#504): consulted before anything destructive
+        // below — the orphan-aux reclaim included, which is a destructive
+        // delete in its own right. Unknown pin state ⇒ no evictions at all.
         let Some(mut pinned) = self.durable_pinned_sessions() else {
             // stderr, not `log::warn!`: the sweep's operator is the headless
             // CLI process, which installs no logger — a log-framework line
@@ -173,13 +276,155 @@ impl SessionStore {
             );
             return Ok(());
         };
-        for metadata in sessions {
+        // Aux records ride the same snapshot for the pair-liveness ordering
+        // below — the one derived-id (round-30 B8) consumer that needs
+        // `updated_at`; the orphan reclaim reads the raw directory instead
+        // (see below), and the eviction cascade probes each record directly.
+        let aux_freshness: std::collections::HashMap<&str, chrono::DateTime<chrono::Utc>> =
+            sessions
+                .iter()
+                .filter(|metadata| super::validators::is_aux_session_id(&metadata.id))
+                .map(|metadata| (metadata.id.as_str(), metadata.updated_at))
+                .collect();
+        let mut deleted_ids = Vec::new();
+        let mut delete_error = None;
+        // Orphan reclaim ("aux records die with their main", the derived-id
+        // half): an aux record whose main record is genuinely gone can only
+        // arise from an out-of-band main deletion, an interrupted cascade —
+        // the aux-first eviction commits the aux delete and aborts the main
+        // on a post-record fault, and the delete path's cascade has the same
+        // window (see the eviction leg below) — or a benign ensure-vs-delete
+        // race. No in-band path orphans an aux on its happy path, but
+        // "all-or-nothing" only holds before the aux record commits.
+        // Reclaim it here; the boot sweep is what collects it after a crash.
+        // Identity comes from the FILENAME, never from parsing the record
+        // (round-31 M3): the metadata listing silently drops any record it
+        // cannot read (truncated, momentarily unopenable), so an orphan pass
+        // driven off that listing would leave exactly those records
+        // unreclaimable — invisible to every list, exempt from the budget,
+        // still holding the user's side-chat text. NotFound-only: a
+        // transient stat fault on the main record counts as "unknown", and
+        // unknown is never "absent" in a destructive path.
+        let aux_record_ids: Vec<String> = std::fs::read_dir(self.manager.sessions_dir())
+            .context("scan session records for orphan aux reclaim")?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let id = name.to_str()?.strip_suffix(".json")?;
+                // Only the exact lowercase prefix a derived id carries is
+                // classified; a case-variant alias file is not a record this
+                // pass can classify, so it is left alone.
+                id.starts_with("aux-").then(|| id.to_string())
+            })
+            .collect();
+        for aux_id in aux_record_ids {
+            // `get(4..)` instead of slicing: ids reach here from filenames,
+            // and a multibyte char at the boundary must not panic (the
+            // is_aux_session_id boundary argument).
+            let Some(main_id) = aux_id.get(4..) else {
+                continue;
+            };
+            if !self.durable_session_record_is_absent(main_id) {
+                continue;
+            }
+            let (committed, result) = self.delete_session_record(&aux_id);
+            if committed {
+                // Push even when the result is an error: a partial commit
+                // (record gone, workspace cleanup failed) must still purge the
+                // record's side maps and invalidate the list snapshot.
+                deleted_ids.push(aux_id.clone());
+            }
+            if let Err(error) = result {
+                // NotFound: the record was already gone (benign). InvalidInput:
+                // a charset-invalid id the validated delete API can never
+                // address — the file stays quarantined on disk, invisible to
+                // every store entry point. That must not fail the sweep, and
+                // the upstream message embeds the raw id, so it must not enter
+                // the boot-log-reachable chain either (round-20 minor-8).
+                if error.kind() != ErrorKind::NotFound
+                    && error.kind() != ErrorKind::InvalidInput
+                    && delete_error.is_none()
+                {
+                    // No raw ids in log-reachable chains (the cleartext-logging
+                    // stance): this context ends up in the boot eprintln
+                    // through `{error:#}`, so the step identifies the failure
+                    // and the id stays out.
+                    delete_error = Some(
+                        anyhow::anyhow!(error).context("delete the orphan aux session record"),
+                    );
+                }
+            }
+        }
+        // Liveness protection (round-26 MAJOR-1): an aux turn refreshes only
+        // the aux record's `updated_at` — the main record is never touched by
+        // aux activity, so ordering victims by the main record alone would let
+        // a user's own aux send evict the very main session whose side chat is
+        // in active use (the aux turn's save triggers this sweep). Order
+        // eviction candidates by max(main.updated_at, aux.updated_at): activity
+        // on either half of the pair keeps the pair alive, restoring the
+        // pre-aux invariant "in use ⇒ not evicted".
+        // Stable sort: pairs without aux activity keep the snapshot's
+        // main-`updated_at` descending order, so behavior is unchanged where
+        // no aux session exists. The ordering key is PRECOMPUTED once per
+        // candidate (round-34 MAJOR-1): `sort_by_key` re-evaluates the key
+        // for both arguments of every comparison, so the blind-spot stat
+        // below — one per freshness-map miss — would otherwise cost up to
+        // two `fs::metadata` syscalls per comparison (O(n log n) stats per
+        // sweep, under the store write lock, on every transcript persist).
+        let mut candidates: Vec<(&SessionMetadata, chrono::DateTime<chrono::Utc>)> = sessions
+            .iter()
             // Scheduled sessions own additional records outside sessions/.
             // Generic chat cleanup must not delete only the transcript and
             // strand the other half of their history.
-            if metadata.id.starts_with("sched-") {
-                continue;
-            }
+            // The lifecycle of an auxiliary conversation (aux-) is owned by the
+            // main session's cascade/discard (same precedent as sched-): it is
+            // never an eviction candidate and does not consume the retention
+            // budget of visible sessions.
+            .filter(|metadata| {
+                !super::validators::is_sched_session_id(&metadata.id)
+                    && !super::validators::is_aux_session_id(&metadata.id)
+            })
+            .map(|metadata| {
+                let aux_id = Self::aux_session_id_for(&metadata.id);
+                let aux_at = match aux_freshness.get(aux_id.as_str()).copied() {
+                    Some(aux_at) => Some(aux_at),
+                    // Listing blind spot (round-33 MAJOR-7): the snapshot
+                    // silently drops a record it cannot read, so an in-use
+                    // pair whose aux momentarily fails to parse would sort
+                    // by the stale main `updated_at` alone, drift past the
+                    // line, and the fail-closed delete-side probe — which
+                    // does NOT trust the listing — would cascade-evict the
+                    // live pair. A freshness-map miss stats the record
+                    // directly: a real mtime feeds the same max(), so an
+                    // alive-but-unparseable record still protects its pair.
+                    // A stat that cannot read the record at all (NotFound
+                    // or any other fault) degrades this ordering leg to the
+                    // main timestamp alone — the round-31 M3 contract (an
+                    // unreadable stale aux is still reclaimable by the
+                    // cascade) lives on the delete-side probe, which stays
+                    // the fail-closed authority.
+                    None => match std::fs::metadata(
+                        self.manager.sessions_dir().join(format!("{aux_id}.json")),
+                    ) {
+                        Ok(stat) => stat.modified().ok().map(chrono::DateTime::from),
+                        Err(_) => None,
+                    },
+                };
+                let key = match aux_at {
+                    Some(aux_at) => std::cmp::max(metadata.updated_at, aux_at),
+                    None => metadata.updated_at,
+                };
+                (metadata, key)
+            })
+            .collect();
+        candidates.sort_by_key(|(_, key)| std::cmp::Reverse(*key));
+        let mut chat_count = 0usize;
+        let mut headless_count = 0usize;
+        for (metadata, _) in candidates {
+            // Pinned sessions are the user's explicit "keep forever" mark: they
+            // count against neither the cap nor eviction. The initial set came
+            // from the durable pin file (fail-closed above); a pinned session
+            // is skipped before it can consume any budget slot.
             if pinned.contains(&metadata.id) {
                 continue;
             }
@@ -247,7 +492,52 @@ impl SessionStore {
                         break;
                     }
                 }
-                let id = metadata.id;
+                let id = metadata.id.clone();
+                // Evicting a main session cascade-evicts its aux session,
+                // all-or-nothing (round-30 D7): the aux record is deleted
+                // FIRST, and a failed aux delete aborts the main eviction —
+                // a visible main whose side chat was destroyed while its
+                // record stayed would silently lose the pair's other half.
+                // Presence comes from the fail-closed derived-id probe
+                // (`SessionStore::aux_session_id`), never from the listing
+                // snapshot (round-31 M3): the metadata listing silently
+                // drops records it cannot read, so gating on the snapshot
+                // would evict the main while stranding an unreadable
+                // `aux-<main>.json` — invisible to every list, exempt from
+                // the budget, and missed by the orphan pass's own former
+                // snapshot source. The probe counts only a genuine NotFound
+                // as absent, so a transient stat fault reads as "present"
+                // and the pair stays together. The store layer cannot reach
+                // the pool (dependency direction), so deleting the aux
+                // record here reclaims no engine and emits no
+                // session:deleted — a still running aux engine is reclaimed
+                // by id as a fallback by the pool's idle-eviction sweep.
+                if let Some(aux_id) = self.aux_session_id(&id) {
+                    let (aux_committed, aux_result) = self.delete_session_record(&aux_id);
+                    if aux_committed {
+                        // Push even on a partial commit (record gone, cleanup
+                        // error): the record's side maps must still be purged.
+                        deleted_ids.push(aux_id.clone());
+                    }
+                    match aux_result {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == ErrorKind::NotFound => {}
+                        Err(error) => {
+                            if delete_error.is_none() {
+                                delete_error = Some(
+                                    anyhow::anyhow!(error)
+                                        .context("delete the evicted session's aux record"),
+                                );
+                            }
+                            // Abort this pair's eviction: the main record
+                            // stays (all-or-nothing). If the aux deletion had
+                            // already partially committed, the error still
+                            // surfaces and the next sweep evicts the main
+                            // alone — proceeding now would hide the failure.
+                            continue;
+                        }
+                    }
+                }
                 let (committed, result) = self.delete_session_record(&id);
                 if committed {
                     deleted_ids.push(id.clone());
@@ -296,11 +586,39 @@ impl SessionStore {
         save_context: impl FnOnce() -> String,
         event: &'static str,
     ) -> Result<PathBuf> {
+        self.persist_then_reconcile_impl(session, save_context, event, true)
+    }
+
+    /// Retention-free persist (review #463 round-18 MAJOR-4): an in-place
+    /// metadata rewrite never creates or removes a session, so the post-persist
+    /// retention reconciliation — which re-reads every on-disk session JSON's
+    /// 64 KB prefix — is pure amplification for the rebind's bulk loop
+    /// (O(affected × on-disk sessions) full-directory rescans, all while the
+    /// process-wide rebind gate is held). The session population the policy
+    /// reasons about is unchanged by such a write, and the next arbitrary
+    /// save reconciles as usual.
+    pub(crate) fn persist_in_place(
+        &self,
+        session: &SavedSession,
+        event: &'static str,
+    ) -> Result<PathBuf> {
+        self.persist_then_reconcile_impl(session, || format!("{event} in place"), event, false)
+    }
+
+    fn persist_then_reconcile_impl(
+        &self,
+        session: &SavedSession,
+        save_context: impl FnOnce() -> String,
+        event: &'static str,
+        reconcile_retention: bool,
+    ) -> Result<PathBuf> {
         let path = self
             .save_session_atomic(session)
             .with_context(save_context)?;
-        if let Err(error) = self.enforce_session_retention_locked() {
-            eprintln!("[sessions] retention reconciliation failed after {event}: {error:#}");
+        if reconcile_retention {
+            if let Err(error) = self.enforce_session_retention_locked() {
+                eprintln!("[sessions] retention reconciliation failed after {event}: {error:#}");
+            }
         }
         Ok(path)
     }
@@ -542,7 +860,12 @@ impl SessionStore {
         if self.scheduled_profiles.read().contains_key(id) {
             return Ok(true);
         }
-        if !id.starts_with("sched-") {
+        // The prefix leg is alias-defeating (round-36 minor 2): on a
+        // case-insensitive filesystem a hand-copied `SCHED-<id>.json` IS the
+        // automation's record file, so an exact `sched-` prefix here would
+        // let a case-variant alias skip every gate built on this predicate
+        // (the delete refusal among them).
+        if !super::validators::is_sched_session_id(id) {
             return Ok(false);
         }
         Ok(scheduled_session_file(&self.manager, id)?.exists())

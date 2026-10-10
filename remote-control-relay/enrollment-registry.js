@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isControllerIdentifier, isEnrollmentEndpointIdentifier, isMigrationRequestIdentifier } from "./identifier-contract.js";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export const ENROLLMENT_NAMESPACE = "endpoint_enrollment";
@@ -6,7 +7,6 @@ export const ENROLLMENT_REGISTRY_SCHEMA = "pinvou-endpoint-enrollment-registry";
 export const ENROLLMENT_REGISTRY_VERSION = 3;
 
 const CONFIG = new WeakMap();
-const ENDPOINT_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
 const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const HEX_64 = /^[a-f0-9]{64}$/u;
 const REVISION = /^(?:0|[1-9][0-9]{0,19})$/u;
@@ -16,7 +16,6 @@ const CREDENTIAL_MAX_BYTES = 4096;
 const MAX_ENTRIES = 100_000;
 const MAX_MIGRATION_REQUESTS = 100_000;
 const MAX_BATCH_OPERATIONS = 10_000;
-const MIGRATION_REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/u;
 const MIGRATION_ERROR_CODE = /^[a-z][a-z0-9_]{0,127}$/u;
 const DEPLOYMENTS = new Set(["official", "self_hosted", "development"]);
 
@@ -48,7 +47,7 @@ function parseBoolean(value, label) {
 }
 
 function validateEndpointId(endpointId) {
-  if (typeof endpointId !== "string" || !ENDPOINT_ID.test(endpointId)) fail("endpoint_id_invalid");
+  if (!isEnrollmentEndpointIdentifier(endpointId)) fail("endpoint_id_invalid");
   return endpointId;
 }
 
@@ -162,7 +161,7 @@ function validateEntry(raw) {
   validateTimestamp(entry.rotated_at, true, "rotated_at");
   validateTimestamp(entry.revoked_at, true, "revoked_at");
   const audit = exactObject(entry.audit, ["source", "last_action"], "enrollment_audit");
-  if (!["official", "self_hosted", "development_tofu"].includes(audit.source)
+  if (!["official", "self_hosted", "development", "development_tofu"].includes(audit.source)
     || !["enrolled", "rotated", "revoked"].includes(audit.last_action)) {
     fail("enrollment_audit_malformed");
   }
@@ -198,7 +197,7 @@ function validateMigrationRequest(raw) {
     "request_id", "operation", "endpoint_ids", "parameters", "status",
     "created_at", "completed_at", "outcome",
   ], "migration_request");
-  if (typeof request.request_id !== "string" || !MIGRATION_REQUEST_ID.test(request.request_id)) {
+  if (!isMigrationRequestIdentifier(request.request_id)) {
     fail("migration_request_malformed");
   }
   if (request.operation !== "batch" && request.operation !== "restore") fail("migration_request_malformed");
@@ -275,9 +274,10 @@ function validateRegistry(raw) {
     ["schema", "version", "entries", "migration_requests"],
     "enrollment_registry",
   );
-  if (!Array.isArray(registry.entries) || registry.entries.length > MAX_ENTRIES) {
+  if (!Array.isArray(registry.entries)) {
     fail("enrollment_registry_malformed");
   }
+  if (registry.entries.length > MAX_ENTRIES) fail("enrollment_registry_capacity_reached");
   const entries = registry.entries.map(validateEntry);
   for (let index = 0; index < entries.length; index += 1) {
     if (index > 0
@@ -339,7 +339,7 @@ function publicMigrationRequest(request) {
 }
 
 function validateMigrationRequestId(value) {
-  if (typeof value !== "string" || !MIGRATION_REQUEST_ID.test(value)) fail("migration_request_id_invalid");
+  if (!isMigrationRequestIdentifier(value)) fail("migration_request_id_invalid");
   return value;
 }
 
@@ -550,10 +550,10 @@ function applyPreparedOperations(registry, prepared, config, clock) {
   };
 }
 
-function sourceForDeployment(deployment) {
+function sourceForDeployment(deployment, tofu) {
   if (deployment === "official") return "official";
   if (deployment === "self_hosted") return "self_hosted";
-  return "development_tofu";
+  return tofu ? "development_tofu" : "development";
 }
 
 function configuredAbsolutePath(value, label) {
@@ -738,7 +738,9 @@ export class EnrollmentRegistry {
       return { ...result, registry: validateRegistry(result.value) };
     } catch (error) {
       this.#cache = null;
+      if (error instanceof EnrollmentRegistryError) throw error;
       if (error?.code === "namespace_revision_conflict") fail("enrollment_revision_conflict", error);
+      if (error?.code === "relay_state_capacity_reached") fail("enrollment_registry_capacity_reached", error);
       fail("enrollment_registry_unavailable", error);
     }
   }
@@ -906,7 +908,11 @@ export class EnrollmentRegistry {
     return publicEntry(this.#find(this.#read().registry, endpointId));
   }
 
-  async enroll({ endpointId, credential, desktopCredential, expectedNamespaceRevision } = {}) {
+  async enroll(options = {}) {
+    return this.#enroll(options, false);
+  }
+
+  async #enroll({ endpointId, credential, desktopCredential, expectedNamespaceRevision }, tofu) {
     endpointId = validateEndpointId(endpointId);
     validateCredential(credential);
     if (desktopCredential !== undefined) validateCredential(desktopCredential, "desktop_credential");
@@ -929,7 +935,7 @@ export class EnrollmentRegistry {
       enrolled_at: timestamp,
       rotated_at: null,
       revoked_at: null,
-      audit: { source: sourceForDeployment(this.#config.deployment), last_action: "enrolled" },
+      audit: { source: sourceForDeployment(this.#config.deployment, tofu), last_action: "enrolled" },
     };
     const registry = {
       ...snapshot.registry,
@@ -963,6 +969,7 @@ export class EnrollmentRegistry {
   }
 
   async authorizePairingRegistration({ endpointId, desktopSecret } = {}) {
+    if (!isControllerIdentifier(endpointId)) fail("endpoint_id_invalid");
     return this.#authorize({ endpointId, credential: desktopSecret, role: "desktop" });
   }
 
@@ -975,8 +982,8 @@ export class EnrollmentRegistry {
       const entry = this.#find(snapshot.registry, endpointId);
       if (!entry && this.#config.development_tofu) {
         try {
-          await this.enroll({ endpointId, credential: accessToken, desktopCredential: desktopSecret,
-            expectedNamespaceRevision: snapshot.namespace_revision });
+          await this.#enroll({ endpointId, credential: accessToken, desktopCredential: desktopSecret,
+            expectedNamespaceRevision: snapshot.namespace_revision }, true);
           continue;
         } catch (error) {
           if (error?.code === "enrollment_revision_conflict") continue;
@@ -998,7 +1005,7 @@ export class EnrollmentRegistry {
       let entry = this.#find(snapshot.registry, endpointId);
       if (!entry && this.#config.development_tofu && role === "access") {
         try {
-          await this.enroll({ endpointId, credential, expectedNamespaceRevision: snapshot.namespace_revision });
+          await this.#enroll({ endpointId, credential, expectedNamespaceRevision: snapshot.namespace_revision }, true);
           continue;
         } catch (error) {
           if (error?.code === "enrollment_revision_conflict") continue;

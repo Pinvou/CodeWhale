@@ -9,6 +9,15 @@ is not a production enrollment flow and must not be advertised as one.
 
 ## Deployment configuration
 
+Desktop/controller identifiers use the frozen wire grammar: 1–128 ASCII
+characters, an alphanumeric first character, then alphanumerics or `._:-`.
+Tilde is not accepted. Existing Web v2 endpoint IDs keep their released
+`[A-Za-z0-9_-]{4,128}` grammar, including leading `_` or `-`; registry and
+legacy gateway lookup preserve those exact IDs without normalization. New
+desktop pairing cannot use a legacy-only endpoint ID. Administrator migration
+request IDs use the desktop character set with their own 8–128 length bound.
+Credential/HMAC digest and official proof-key grammars are separate and unchanged.
+
 Set these variables before opening the registry:
 
 | Variable | Meaning |
@@ -76,6 +85,14 @@ Failures before verified publication close the handle and remove only matching
 owned inodes; cleanup failures remain attached to the original primary error.
 Failures after verified publication use the same owner-checked release and
 abandoned-owner recovery path as initialization failures.
+
+Calling `close()` synchronously closes read/write admission. A CAS already
+performing its durable writes finishes under the owner lock; queued and later
+CAS reject with `relay_state_unavailable` during closing and
+`relay_state_closed` after successful close. The captured queue drains before
+lock release; later queued rejections do not perform persistence. No durable
+replacement can overlap owner-lock removal. Concurrent close calls
+share the same release attempt.
 
 Lock unlink and directory sync retry bounded Windows sharing failures. `close()`
 does not report success until release completes. After an exhausted failure the
@@ -271,6 +288,46 @@ cannot register a desktop or pair. Development TOFU may create an access-only
 record for a Web request, or both roles atomically for a desktop request; a
 pairing request can never invent a desktop digest from a single credential.
 
+Digest-key rotation is not endpoint credential rotation. Replacing the deployment
+HMAC key (including replacing bytes under the same key ID) invalidates existing
+digests; the registry cannot recover them without the previous key. Existing
+endpoint IDs cannot be re-enrolled: active conflicting entries are rejected and
+revoked entries remain terminal. Do not change the HMAC key as routine maintenance.
+An intentional HMAC-key replacement requires re-enrollment of all affected
+clients with fresh endpoint IDs and new credentials through the authenticated
+admin flow, followed by new pairing and configuration on both peers. Revoke the
+old entries through the admin flow; never delete or hand-edit shared state or
+reset other namespaces/Legacy Web data. A new key ID must identify new key
+material. Before revocation or new enrollments, restoring the previous key and
+key ID restores authorization; it does not undo later registry transitions.
+
+`enrollment_registry_capacity_reached` identifies entry-count or shared byte-budget
+rejection, not an infrastructure outage. Capacity validation runs before durable
+writes: primary/backup bytes and revisions stay unchanged, and the store remains
+usable for smaller writes. Actual persistence failures still degrade the store
+and fail closed. Other typed registry validation errors retain their codes.
+Batch operation entry-count rejection retains its explicit
+`enrollment_capacity_reached` code; it is not an infrastructure outage either.
+
+Audit sources describe admission: explicit development enrollment records
+`development`, even with TOFU enabled; only automatic first-registration admission
+records `development_tofu`. Rotation and revocation preserve that source.
+Endpoint IDs are identifiers, not secrets: unknown, revoked and invalid-credential
+errors can reveal enrollment status. Official/self-hosted registration and
+development registration with TOFU disabled require an existing active enrollment
+and a valid credential. Only explicitly enabled non-production development TOFU
+may admit a first registration; callers must apply the protocol layer's rate
+limits before exposure.
+
+Recognized lock schemas with an unsupported positive version fail closed with
+`relay_state_lock_unsupported`, even with added fields or an apparently dead PID.
+They are never quarantined or stolen; use a compatible Relay version or an
+operator-controlled offline upgrade. Locks exceeding the 4096-byte read bound,
+invalid UTF-8 or a file/identity safety check fail with
+`relay_state_lock_unreadable`; other read errors also propagate without stealing
+the lock. These files are never quarantined or removed by recovery. Fully read
+empty/truncated UTF-8 crash-lock recovery is unchanged.
+
 For `revoke`, the expected endpoint revision is syntax-checked for every call
 and compared before an active-to-revoked transition. An already revoked entry
 is a read-only idempotent result even if a retry supplies an old or future
@@ -322,6 +379,11 @@ under the same ID conflicts. A failed request may persist a secret-free failed
 ledger row, but no endpoint-operation prefix can persist. Backup restore accepts
 only the current strict registry format and executes as a stable migration
 request while preserving the monotonic request ledger.
+The ledger has a separate 100,000-request safety ceiling and shares the store's
+16 MiB default byte budget with other namespaces; byte capacity can be reached
+first. There is no automatic ledger pruning. Never delete terminal IDs merely
+to free space: that would permit old operations to execute again. Capacity,
+safe archival and warning policy are tracked in #1371.
 `--restore --input PRIVATE_BACKUP --request-id RESTORE_OPERATION_ID` requires an
 explicit operation ID. A first applied restore returns `applied: true`,
 `restored: true`, `replayed: false`; response-loss retries with the same ID return
@@ -330,6 +392,12 @@ If records subsequently change, the old ID still only replays its sealed outcome
 and does not restore those changed records. Use a new explicit operation ID to
 intentionally apply the same backup again. Reusing an ID with another backup is
 a conflict. Do not generate a fresh ID automatically on each retry.
+Restore intentionally replaces endpoint records, not just missing entries.
+It currently has no backup/current-revision fence: a stale backup can remove
+enrollments created since that backup. Review that destructive scope explicitly
+before a maintenance restore; the durable request ledger alone does not protect
+newer endpoint records. A reused-ID conflict is currently exposed as
+`migration_restore_failed` with its original conflict retained as the cause.
 `re_enroll` rotates the access token and therefore explicitly invalidates old
 Web links. Backup files contain keyed digests, not credentials, and still need
 mode 0600/private ACL storage. The CLI rejects symlink/reparse-point ancestors,
@@ -354,13 +422,49 @@ anonymous active-denial probe is not rejected, the Relay URL is not literal
 loopback, or OS listener inspection finds a wildcard/non-loopback bind. A bare
 v2 rollback is never a safe fallback.
 `scripts/check-enrollment-gated-v2-rollback.mjs` combines the private endpoint
-inventory coverage report and gateway check; deployment automation must require
-its zero exit status before starting an old v2 binary. Coverage must have a
+inventory coverage report and gateway check. Stage the legacy binary on its
+private literal-loopback listener behind the already running gateway first:
+the preflight inspects an actual OS listener, not a proposed configuration.
+Deployment automation must require the check's zero exit status before declaring
+rollback traffic ready; a bare public v2 listener is never permitted. The check
+does not stop, restart or otherwise manage deployment services. Coverage must have a
 positive integer total, all entries migrated, no unmigrated entries and exactly
 100 percent coverage; an empty inventory is not evidence of safe rollback.
+The rollback checker, migration CLI and gateway preflight compare canonical
+filesystem entry paths, so invoking them through a directory symlink or Windows
+junction still executes the checks. Importing them as libraries does not execute
+the CLI. This does not relax private inventory/state-path or permission checks.
 The gateway holds the controller-state writer lock. During rollback, stop the
 controller dispatcher before opening that gateway; two independent processes
 must not open the same store as concurrent writers.
+
+For this online gate, explicitly configure the same gateway process and checker
+with `PINVOU_REMOTE_GATEWAY_CONTROL_HOST` (`127.0.0.1` or `::1`),
+`PINVOU_REMOTE_GATEWAY_CONTROL_PORT` (1024–65535, separate from the public
+gateway listener), and `PINVOU_REMOTE_GATEWAY_CONTROL_KEY` (32–4096 UTF-8 bytes).
+Use a new random secret from a protected deployment environment/secret manager,
+distinct from the enrollment and pairing HMAC keys. Never commit or log it.
+All three unset leaves this management listener disabled; incomplete configuration
+fails startup and the online checker fails closed without it. Do not forward
+this private management port through nginx or expose it publicly.
+
+The live lock-owning gateway reads its actual enrollment registry; no second
+store open, unlocked replica or bypass of the writer lock is used. Requests and
+responses carry domain-separated HMACs, fresh nonces, a 15-second clock window,
+an opaque store/configuration binding and bounded messages. Only aggregate
+coverage and revisions are returned, not endpoint IDs or credentials. Each public
+health/WS probe must identify this same gateway instance. The instance marker
+detects routing mistakes in the trusted deployment perimeter; it is not a
+cryptographic attestation against a malicious reverse proxy.
+
+After all public probes, the checker requests a fresh authenticated coverage
+snapshot. A changed owner/store binding, incomplete final coverage or any changed
+enrollment namespace revision fails the check; unrelated namespace writes do not
+invalidate it. A zero exit is point-in-time evidence, not a reusable approval:
+rerun after registry, deployment configuration or routing changes. Keep the
+gateway in the traffic path for ongoing authorization. Offline migration CLI
+`--coverage` remains a maintenance tool for a stopped store owner; it is not
+invoked by this online gate. Operators remain responsible for service sequencing.
 The preflight checks the health marker, WebSocket upgrade marker and an
 anonymous registration denial on every declared public route. The declared
 bind host remains a required assertion, but does not replace OS listener

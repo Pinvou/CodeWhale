@@ -51,13 +51,21 @@ impl std::error::Error for ResumeStateError {}
 
 type Result<T> = std::result::Result<T, ResumeStateError>;
 
-#[derive(Debug)]
 struct ResumeMaterial {
     token: Zeroizing<[u8; RESUME_TOKEN_BYTES]>,
     key_fingerprint: [u8; FINGERPRINT_BYTES],
 }
 
-#[derive(Debug)]
+impl std::fmt::Debug for ResumeMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResumeMaterial")
+            .field("token", &"[REDACTED]")
+            .field("key_fingerprint", &"[REDACTED]")
+            .finish()
+    }
+}
+
 pub(crate) struct ControllerResumeGate {
     role: ControllerRole,
     lease: LeaseContext,
@@ -68,6 +76,18 @@ pub(crate) struct ControllerResumeGate {
     current: ResumeMaterial,
     retired: Option<ResumeMaterial>,
     resumed_liveness_epoch: Option<String>,
+}
+
+impl std::fmt::Debug for ControllerResumeGate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ControllerResumeGate")
+            .field("role", &self.role)
+            .field("phase", &self.phase)
+            .field("current", &self.current)
+            .field("has_retired_material", &self.retired.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ControllerResumeGate {
@@ -578,6 +598,41 @@ mod tests {
     use super::*;
     use crate::features::remote_control::controller::liveness::ControllerLivenessWatchdog;
 
+    #[test]
+    fn resume_debug_redacts_current_and_retired_material() {
+        let mut gate = ControllerResumeGate::new(
+            ControllerRole::ControlledB,
+            lease(),
+            [113; 32],
+            [127; 32],
+            30_000,
+        );
+        gate.retired = Some(ResumeMaterial {
+            token: Zeroizing::new([149; 32]),
+            key_fingerprint: [163; 32],
+        });
+        gate.activation_id = Some("private-activation-sentinel".into());
+        for debug in [
+            format!("{gate:?}"),
+            format!("{:?}", gate.current),
+            format!("{:?}", gate.retired),
+        ] {
+            assert!(debug.contains("[REDACTED]"));
+            for bytes in [[113u8; 32], [127; 32], [149; 32], [163; 32]] {
+                assert!(!debug.contains(&format!("{bytes:?}")));
+                assert!(!debug.contains(&base64::engine::general_purpose::STANDARD.encode(bytes)));
+                let hex = bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                assert!(!debug.contains(&hex));
+            }
+            assert!(!debug.contains("private-activation-sentinel"));
+            assert!(!debug.contains("connection-0001"));
+        }
+        assert_eq!(gate.current_token(), [113; 32]);
+    }
+
     fn lease() -> LeaseContext {
         LeaseContext {
             connection_id: "connection-0001".into(),
@@ -616,6 +671,46 @@ mod tests {
             .unwrap();
         assert!(watchdog.shorten_deadline(deadline));
         watchdog
+    }
+
+    #[test]
+    fn resume_material_debug_redacts_current_and_retired_secrets() {
+        let mut gate = ControllerResumeGate::new(
+            ControllerRole::ControlledB,
+            lease(),
+            [0xa5; 32],
+            [0xb6; 32],
+            30_000,
+        );
+        gate.retired = Some(ResumeMaterial {
+            token: Zeroizing::new([0xc7; 32]),
+            key_fingerprint: [0xd8; 32],
+        });
+        let material_debug = format!("{:?}", gate.current);
+        assert_eq!(
+            material_debug,
+            "ResumeMaterial { token: \"[REDACTED]\", key_fingerprint: \"[REDACTED]\" }"
+        );
+        let gate_debug = format!("{gate:?}");
+        // A09 deliberately omits retired material from the gate projection.
+        // Its own formatter must still redact it if formatted directly.
+        assert_eq!(gate_debug.matches("[REDACTED]").count(), 2);
+        assert!(gate_debug.contains("has_retired_material: true"));
+        assert_eq!(
+            format!("{:?}", gate.retired.as_ref().unwrap()),
+            material_debug
+        );
+        for bytes in [[0xa5_u8; 32], [0xb6; 32], [0xc7; 32], [0xd8; 32]] {
+            assert!(!gate_debug.contains(&format!("{bytes:?}")));
+        }
+        assert!(
+            gate.token_matches(ControllerRole::ControlledB, &[0xa5; 32])
+                .unwrap()
+        );
+        assert!(
+            gate.key_fingerprint_matches(ControllerRole::ControlledB, &[0xb6; 32])
+                .unwrap()
+        );
     }
 
     #[test]

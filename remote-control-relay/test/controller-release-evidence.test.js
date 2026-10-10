@@ -63,6 +63,8 @@ function artifactRole(path) {
   if (path === "flag-off/B.json") return "B";
   if (path === "checks/RC-E2E-008-controlled_attachment_received.json") return "B";
   if (path === "rollback/legacy-route-spec.json") return "orchestrator";
+  if (["sensitive_scan", "telemetry_thresholds", "registry_coverage", "rollback_preflight"]
+    .some((gate) => path === `gates/${gate}.json`)) return "A";
   if (path.startsWith("ui/A-") || path.startsWith("traces/") || path.startsWith("checks/RC-E2E-") || path.startsWith("rollback/") || path === "flag-off/A.json") return "A";
   return "orchestrator";
 }
@@ -293,7 +295,7 @@ async function materializeEvidence(evidence, root) {
       const resourceEntries = stagedFiles.map((fileName, stagedIndex) => ({ SPDXID: `SPDXRef-Staged-${stagedIndex}`, fileName, checksums: [{ algorithm: "SHA256", checksumValue: hash(fileName) }], ...(fileName.startsWith("nsis-stage/resources/") ? { fileComment: "pinvou_stage_category=staged-resource;mapping_source=private-runtime;mapping_destination=runtime" } : {}) }));
       content = `${JSON.stringify({ spdxVersion: "SPDX-2.3", dataLicense: "CC0-1.0", SPDXID: "SPDXRef-DOCUMENT", name: "Pinvou Agent", documentNamespace: `https://github.com/pinvou/pinvou3/spdx/${commit}`, documentComment: `source_commit_sha=${commit};dependency_inventory_sha256=${hash("deps")};staging_manifest_sha256=${hash("manifest")};staged_file_set_sha256=${hash("staged-files")};mapping_inventory_sha256=${hash("mappings")};dependency_count=1;staged_file_count=${stagedFiles.length}`, creationInfo: { created: testStartedAt, creators: ["Tool: pinvou-test"] }, packages: [{ SPDXID: "SPDXRef-Package-Pinvou", name: "Pinvou Agent" }, { SPDXID: "SPDXRef-Dependency-Test", name: "test-dependency" }], files: [{ SPDXID: "SPDXRef-Installer", fileName: installerSubjectName, checksums: [{ algorithm: "SHA256", checksumValue: replacements.get(evidence.installers[0].sha256) }] }, ...resourceEntries], relationships: [{ spdxElementId: "SPDXRef-DOCUMENT", relationshipType: "DESCRIBES", relatedSpdxElement: "SPDXRef-Package-Pinvou" }, { spdxElementId: "SPDXRef-Package-Pinvou", relationshipType: "CONTAINS", relatedSpdxElement: "SPDXRef-Installer" }, { spdxElementId: "SPDXRef-Package-Pinvou", relationshipType: "DEPENDS_ON", relatedSpdxElement: "SPDXRef-Dependency-Test" }, ...resourceEntries.map((resource) => ({ spdxElementId: "SPDXRef-Package-Pinvou", relationshipType: "CONTAINS", relatedSpdxElement: resource.SPDXID }))] })}\n`;
     }
-    if (artifact.path === "build/installer-attestation.sigstore.jsonl" || artifact.path === "build/installer-sbom-attestation.sigstore.jsonl") content = `${JSON.stringify({ mediaType: "application/vnd.dev.sigstore.bundle.v0.3+json", verificationMaterial: {}, dsseEnvelope: { payloadType: "application/vnd.in-toto+json", payload: Buffer.from(JSON.stringify({ _type: "https://in-toto.io/Statement/v1", subject: [{ name: artifact.path.includes("sbom-attestation") ? "installer-sbom.spdx.json" : installerSubjectName, digest: { sha256: replacements.get(artifact.sha256) } }], predicate: { buildDefinition: { buildType: "https://actions.github.io/buildtypes/workflow/v1", externalParameters: { workflow: { repository: "https://github.com/pinvou/pinvou3", path: ".github/workflows/windows-remote-control-build-evidence.yml" } }, resolvedDependencies: [{ uri: "git+https://github.com/pinvou/pinvou3@refs/heads/main", digest: { gitCommit: commit } }] }, runDetails: { metadata: { invocationId: "https://github.com/pinvou/pinvou3/actions/runs/12345/attempts/1" } } } })).toString("base64"), signatures: [] } })}\n`;
+if (artifact.path === "build/installer-attestation.sigstore.jsonl" || artifact.path === "build/installer-sbom-attestation.sigstore.jsonl") content = `${JSON.stringify({ mediaType: "application/vnd.dev.sigstore.bundle.v0.3+json", verificationMaterial: {}, dsseEnvelope: { payloadType: "application/vnd.in-toto+json", payload: Buffer.from(JSON.stringify({ _type: "https://in-toto.io/Statement/v1", subject: [{ name: artifact.path.includes("sbom-attestation") ? "installer-sbom.spdx.json" : installerSubjectName, digest: { sha256: replacements.get(artifact.path.includes("sbom-attestation") ? evidence.installers[0].sbom_artifact_sha256 : evidence.installers[0].sha256) } }], predicate: { buildDefinition: { buildType: "https://actions.github.io/buildtypes/workflow/v1", externalParameters: { workflow: { repository: "https://github.com/pinvou/pinvou3", path: ".github/workflows/windows-remote-control-build-evidence.yml" } }, resolvedDependencies: [{ uri: "git+https://github.com/pinvou/pinvou3@refs/heads/main", digest: { gitCommit: commit } }] }, runDetails: { metadata: { invocationId: "https://github.com/pinvou/pinvou3/actions/runs/12345/attempts/1" } } } })).toString("base64"), signatures: [] } })}\n`;
     if (artifact.path === "build/installer-provenance.json") content = `${JSON.stringify({ schema: "pinvou-installer-supply-chain-verification", version: 1, source_commit_sha: commit, installer_sha256: replacements.get(evidence.installers[0].sha256), attestation_bundle_sha256: replacements.get(evidence.installers[0].build_attestation_bundle_artifact_sha256), sbom_sha256: replacements.get(evidence.installers[0].sbom_artifact_sha256), sbom_attestation_bundle_sha256: replacements.get(evidence.installers[0].sbom_attestation_bundle_artifact_sha256), installer_subject_name: installerSubjectName, sbom_subject_name: "installer-sbom.spdx.json", repository: "pinvou/pinvou3", workflow: ".github/workflows/windows-remote-control-build-evidence.yml", build_run_id: 12345, protected_environment: "windows-release", verification_tool: "gh-attestation-verify", mock: false })}\n`;
     const path = join(root, ...artifact.path.split("/"));
     await mkdir(dirname(path), { recursive: true });
@@ -513,6 +515,16 @@ test("validator re-hashes evidence files and rejects sensitive trace content", a
   t.after(() => rm(root, { recursive: true, force: true }));
   const evidence = await validEvidence();
   await materializeEvidence(evidence, root);
+  // Structural fixture only: digest bindings are real; the unsigned test bundles
+  // are not proof of GitHub attestation cryptographic verification.
+  for (const [path, digest, subject] of [
+    ["build/installer-attestation.sigstore.jsonl", evidence.installers[0].sha256, installerSubjectName],
+    ["build/installer-sbom-attestation.sigstore.jsonl", evidence.installers[0].sbom_artifact_sha256, "installer-sbom.spdx.json"],
+  ]) {
+    const statement = uniqueStatementForDigest(parseSigstoreJsonl(await readFile(join(root, ...path.split("/")))), digest);
+    assert.equal(statement.subject[0].name, subject);
+    assert.equal(statement.subject[0].digest.sha256, digest);
+  }
   await assert.doesNotReject(() => validateReleaseEvidence(evidence, validationOptions({
     evidenceRoot: root,
     expectedBuildRepository: "pinvou/pinvou3",
@@ -554,6 +566,61 @@ test("validator rejects a self-reported UI gate unless all seven direct CDP phas
     () => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root })),
     (error) => error?.code === "evidence_ui_smoke_invalid",
   );
+});
+
+test("valid signatures cannot substitute the wrong producer for UI phases or combination gates", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-release-role-binding-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const evidence = await validEvidence();
+  await materializeEvidence(evidence, root);
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
+  const targets = evidence.artifacts.filter((item) => item.path.startsWith("ui/") || item.path.startsWith("gates/"));
+  assert.equal(targets.length, 13, "seven phases and all six gates");
+  for (const artifact of targets) {
+    const originalRole = artifact.machine_role;
+    const originalSignature = artifact.signature;
+    // Deliberately sign with the actual wrong-role key. An invalid signature
+    // would test signature verification, not the missing producer binding.
+    artifact.machine_role = originalRole === "B" ? "A" : "B";
+    signArtifact(artifact);
+    const payload = Buffer.from(JSON.stringify(["pinvou-remote-control-artifact-v1", artifact.path, artifact.kind, artifact.sha256,
+      artifact.machine_role, commit, runNonce]), "utf8");
+    assert.equal(crypto.verify(null, payload, testKeysByRole.get(artifact.machine_role).publicKey,
+      Buffer.from(artifact.signature, "base64")), true);
+    await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root })),
+      (error) => ["evidence_ui_smoke_invalid", "evidence_gate_artifact_invalid"].includes(error?.code), artifact.path);
+    artifact.machine_role = originalRole;
+    artifact.signature = originalSignature;
+  }
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
+});
+
+test("all 27 journey traces and checks bind both kind and actual signed producer", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-journey-producers-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const evidence = await validEvidence();
+  await materializeEvidence(evidence, root);
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
+  assert.equal(evidence.journeys.length, 27);
+  const references = evidence.journeys.flatMap((journey) => [journey.trace_sha256, ...journey.checks.map((check) => check.artifact_sha256)]);
+  for (const digest of references) {
+    const artifact = evidence.artifacts.find((item) => item.sha256 === digest);
+    for (const field of ["machine_role", "kind"]) {
+      const original = artifact[field];
+      const originalSignature = artifact.signature;
+      artifact[field] = field === "machine_role" ? (original === "B" ? "A" : "B") : (original === "trace" ? "check" : "trace");
+      signArtifact(artifact);
+      const payload = Buffer.from(JSON.stringify(["pinvou-remote-control-artifact-v1", artifact.path, artifact.kind, artifact.sha256,
+        artifact.machine_role, commit, runNonce]), "utf8");
+      assert.equal(crypto.verify(null, payload, testKeysByRole.get(artifact.machine_role).publicKey,
+        Buffer.from(artifact.signature, "base64")), true);
+      await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root })),
+        (error) => error?.code === "evidence_journey_artifact_invalid", `${artifact.path}:${field}`);
+      artifact[field] = original;
+      artifact.signature = originalSignature;
+    }
+  }
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
 });
 
 test("validator rejects an artifact path that escapes through a symlink or junction", async (t) => {

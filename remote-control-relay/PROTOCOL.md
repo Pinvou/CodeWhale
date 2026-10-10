@@ -903,11 +903,22 @@ The pairing store uses exactly
 `23456789ABCDEFGHJKMNPQRSTUVWXYZ`, rejection sampling from the OS CSPRNG and at
 most 32 collision retries. It compares a candidate under every retained digest
 key. A code is quarantined for ten minutes after issue and at least two minutes
-after a terminal transition. Pairing IDs remain tombstoned permanently; expired
-code digests and registration results are compacted so an old digest key may be
-removed only after its last reference expires. Active claim records are memory
-only and are reconstructed from still-valid sealed registration rows after a
-Relay restart.
+after a terminal transition. Pairing tombstones are retained through
+`reuse_after_ms` and while a retained registration or live reservation references
+them; compaction then removes unreferenced rows, not merely their code digests.
+An old digest key may be removed only after its last reference expires. Library
+open can reconstruct still-valid pairing registrations; live Relay startup calls
+`invalidateForRelayRestart()` before serving requests, so pre-restart codes and
+memory-only claim/reservation/lease ownership do not resume across a restart.
+
+Stable claim retries on the same owner/code/public key/capabilities share one
+in-flight preparation, with a separate transport `request_id` on each response.
+Changed retry parameters and late/replayed handshake frames are rejected without
+canceling an incumbent handshake or established lease. Disconnect, timeout and
+failure to deliver an accepted handshake operation invalidate only its owned
+reservation; actual socket closure retains the explicit lease/resume-hook rules.
+Each asynchronous preparation/commit boundary rechecks ownership and deadlines;
+no callback may publish a reservation released during its await.
 
 `code_wrap_keypair` and `handshake_keypair` are distinct Rust types and are
 generated independently; their public-key wrapper types are also distinct, and
@@ -1021,6 +1032,36 @@ ready ACKs. Only then are tokens atomically consumed and rotated and business
 frames reopened. Any timeout, missing ACK, Relay restart or ambiguous result
 terminates the candidate and prevents reuse of both old and proposed material.
 
+On transport loss, clients revoke runtime/TX authority and retain the old full
+lease tuple only as a recovery binding. Only the explicit resume-control family
+may use that binding; ordinary liveness and business frames remain closed.
+The strictly validated final `controller_resumed` grants one local installation
+proof bound to the receiving socket epoch, role, request ID, activation ID and
+old tuple. A further disconnect, stop or ordinary lease installation invalidates
+that proof. The domain resume state machine must independently validate the
+E2E activation before consuming it; the transport proof is not E2E trust.
+Only `encrypted_controller_liveness_a` uses the frozen three-field routing
+exception, and only with an active authenticated lease.
+
+Relay retains one completed-attempt tombstone per live lease: at most eight
+canonical accepted-message digests bound to type, role, request and socket.
+No old token or ciphertext is retained in the tombstone. Exact retries on the
+current role's socket are empty no-ops, not a second activation or a timer
+extension; changed or cross-socket retired traffic is rejected and has no
+cleanup authority over the new revision. New resume attempts replace the
+tombstone only after successful commit.
+
+Final deliveries precede the Relay's atomic token/epoch rotation so a failed
+delivery can still abort the old revision. This is not an atomic distributed
+commit: one peer may have seen a final before the other delivery fails. Any such
+uncertainty terminates the lease rather than opening business on the Relay.
+Accepted-result cleanup is fenced to the exact immutable lease revision; once
+router post-processing finishes, that result's abort authority is retired.
+Authoritative termination releases the interaction slot, clears all lease peer
+links and notifies stateful hooks even if replacement notification fails. Hook
+cleanup is owner-fenced, including a bounded immediate predecessor during a
+partial post-rotation hook installation.
+
 ### Errors, legacy Web conflict and logging
 
 Controller error envelopes use only these codes: `pairing_code_invalid`,
@@ -1064,3 +1105,52 @@ public or private key material, enrollment proofs, credential references,
 tasks, prompts, tool arguments/results, filenames, attachment/artifact bytes,
 snapshots or journal contents. Validation errors identify only the bounded field
 name, not its supplied value.
+
+## B-local turn budget and capability identities
+
+The remote chat and ACP adapters share one total deadline, starting before
+admission/submission and including the subsequent busy wait. The B process
+reads `PINVOU_REMOTE_TASK_TURN_TIMEOUT_SECS`: absent means 1800 seconds (30
+minutes), and an explicit value must be decimal digits in 1..86400. Invalid or
+non-Unicode configuration rejects admission with
+`task_turn_timeout_config_invalid`. A cannot set or extend this budget through
+the wire protocol. Progress, busy observations and retries do not refresh it.
+Expiry reports `task_turn_timeout`, not successful completion.
+
+Chat cleanup targets the captured reservation generation and, where observed,
+the exact foundation turn identity. It never uses the session-wide subagent
+cancel operation or latches a stop disposition on an unobserved/replaced slot;
+the foundation's existing cancelled-turn mailbox settlement owns that turn's
+children. Local user Stop retains its existing session-wide semantics.
+
+ACP cleanup seals only the captured runtime and turn: subsequent admissions,
+notifications, permission/elicitation insertion, answers and event publication
+on that instance are rejected. The pool finalizes and flushes its old terminal
+under the instance-identity check before a replacement bridge initializes its
+journal sequence. Termination uses the captured runtime, never a fresh lookup
+by session ID. Same-key card callbacks use one-shot identities, so a late old
+callback cannot delete a new request. A stale turn on a reused live instance
+cannot retire its successor. Terminal claim, shared timing finalization and
+busy release share the same instance fence. An upgrade-required terminal also
+seals admission atomically; its delayed handler can remove only the captured
+registered runtime and cannot publish upgrade errors for a replacement.
+Dead-instance reclamation seals and flushes before its first asynchronous
+cleanup, so abandoning cleanup cannot leave an open old event bridge.
+Asynchronous cleanup awaits have a five-second
+bound, without changing the original deadline. This does not preempt a
+synchronously executing host I/O operation or lock wait. Captured ACP shutdown
+continues independently, and a sealed entry is never
+reopened when cleanup is cancelled. This is an asynchronous total budget, not
+a hard real-time preemption guarantee for synchronous host I/O: overdue Ready
+results are rejected when control returns.
+
+Capability publication converts each local Skill directory identity into a
+stable opaque ASCII `skill-` plus SHA-256 ID, with a versioned domain and
+length-prefixed exact UTF-8 source identity. Display names remain Unicode; no
+source path or Skill body is exported. B publishes the private source/mode
+mapping atomically with the snapshot revision and resolves task selections
+against that exact revision, lease, expiry and mode, then checks the live
+enabled local Skills. Foreign/raw IDs, duplicates and scope mismatches fail
+closed. This wave covers publication and command admission, not the later
+execution-specific selected-Skill materialization/wiring; it does not claim a
+real-provider end-to-end selected-Skill run.

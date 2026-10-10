@@ -12,9 +12,12 @@
 | 软件 | A/B 使用同一已签名安装包；记录版本、SHA-256、Authenticode 证书指纹和匿名机器身份摘要；受保护构建 provenance/SBOM 必须把安装包绑定当前 commit |
 | Enrollment | 当前生产使用 `self_hosted`，完成 dry-run/批量 allowlist 或 re-enroll，覆盖率为 100% 且 TOFU=false；`official` live claim 尚未接线，预检与启动失败关闭，不作为现成可用部署方式 |
 | 回滚 | 提供真实旧 Relay 二进制；只允许在 registry-aware gateway 后、loopback 监听；裸 v2 必须被预检拒绝 |
-| 功能开关 | Windows A/B 客户端默认开启，显式设为 `0` 时入口隐藏且底层拒绝；非法值失败关闭。Relay 仍须由部署环境将 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 精确设为 `1` 才接受桌面控制流量。关闭任一侧均保留 registry/tombstone |
+| 功能开关 | Windows A/B 必须使用构建开关 `PINVOU_DESKTOP_CONTROLLER_ENABLED=1` 的验收产物；运行时未设变量或精确 `1` 开启，`0` 或非法值失败关闭。构建值为 `0` 的产物不能在运行时重新开启。Relay 部署环境仍须精确 `1` 才接受桌面控制流量。关闭任一侧均保留 registry/tombstone |
 | 自动化 | 使用 `scripts/run-windows-remote-control-e2e.ps1`；驱动器必须是有效签名的真实应用驱动，不接受 mock Relay、假状态或手填 pass |
 | UI | 已启动的真实 Tauri WebView2 开启仅 loopback CDP，通过 `npm --prefix pinvou3-app run test:remote-control-ui -- --cdp-url ... --output ...` 执行真实渲染/交互冒烟 |
+| 密钥 | Relay 侧 `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `..._PRIVATE_KEY_B64` 与两端客户端 pin 的 `..._PUBLIC_KEY_B64` 是同一对密钥；两端都设 `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID`（缺失即 `relay_trust_unconfigured` 失败关闭） |
+| 私钥纪律 | 私钥只存在于 Relay 部署环境；不得写入仓库、日志、工单或 trace |
+| 记录目录 | 每台机器一个 trace 目录（建议 `%LOCALAPPDATA%\Pinvou3\remote-control-drill\<日期>\<角色>\`），只放脱敏 JSON Lines |
 
 ## 1. 证据规则
 
@@ -23,8 +26,8 @@
 - trace 只允许状态枚举、匿名 SHA-256 摘要、单调时间、序列号、计数、RTT 和固定错误码。禁止连接码、令牌、密钥、Cookie、endpoint/lease/connection 原值、IP/主机名、设备名、prompt/回复、文件名/路径和业务正文。
 - 证据目录中的每个 artifact 都必须在 manifest 中登记相对路径、类型和 SHA-256；validator 会重新读取并校验，截图或口头说明不能替代结构化 trace。
 - qualification workflow 运行在 GitHub 受保护 environment 的受控 self-hosted runner 上；runner OS、同一 SID 进程、受保护 secrets/vars 以及预配置 Git/GH/Node 绝对路径属于可信执行基座。编排器使用这些固定路径，不从临时 `PATH` 猜测工具；不再为管理员、同 SID 恶意常驻进程、运行中 junction/TOCTOU 替换或 PID 复用自建第二套可信启动链。
-- 对不可信边界仍须失败关闭：GitHub API 必须核对 build workflow、run、head/ref、repository、conclusion 与 artifact digest；installer、SBOM、driver/provider 及证据签名必须绑定当前 commit。JSON Schema 使用由 Ajv 生成、版本化且可重现核对的独立 validator；PR `release-contract` 如需安装 Relay 测试依赖，`npm ci` 必须使用 `--ignore-scripts`；生产证据与发布门禁不安装 Relay 依赖。`always()` 中任一清理失败必须告警并阻断。
-- 旧 Relay driver 启动后必须以 `run_nonce → PID` 写入 durable registry；编排器独立复核实际进程路径和 SHA-256、loopback listener owner、公网 gateway 命中计数与裸 v2 拒绝。清理不依赖启动响应是否成功返回 PID，而是按 nonce 查询全部 owned PID，停止并确认进程退出、registry `active=[]`，随后撤销 route 并验证完整 gateway 状态恢复。脱敏 route spec 的摘要必须在配置、探测和证据中一致。
+- 对不可信边界仍须失败关闭：GitHub API 必须核对 build workflow、run、head/ref、repository、conclusion 与 artifact digest；installer、SBOM、driver/provider 及证据签名必须绑定当前 commit。JSON Schema 使用由 Ajv 生成、版本化且可重现核对的独立 validator；启用发布门禁与 PR `release-contract` 安装锁定的 Relay 测试依赖时，`npm ci` 必须使用 `--ignore-scripts`；生产证据编排不安装 Relay 依赖。`always()` 中任一清理失败必须告警并阻断。
+- 旧 Relay driver 启动后必须以 `run_nonce → PID` 写入 durable registry；编排器独立复核实际进程路径和 SHA-256、loopback listener owner、公网 gateway 命中计数与裸 v2 拒绝。清理不依赖启动响应是否成功返回 PID：先撤销 route 并验证完整 gateway 状态恢复，再按 nonce 查询全部 owned PID，停止并确认进程退出、registry `active=[]`。脱敏 route spec 的摘要必须在配置、探测和证据中一致。
 
 ## 2. 27 条稳定旅程
 
@@ -106,7 +109,7 @@
   -EvidenceDirectory <new-empty-directory>
 ```
 
-脚本要求 `-ExpectedSourceCommit` 与当前 `git HEAD` 一致，CI 还核对 `GITHUB_SHA`；受保护 Node/GH 路径和信任参数不可省略。当前服务端仅支持生产 `self_hosted` 且关闭 TOFU，`official` live claim 尚未接线，预检及启动明确失败关闭。A/B 必须是不同机器身份，驱动器和安装包必须由参数指定的固定发布证书签名；两台机器都会独立启动应用和受信驱动，任一缺失即中止，不生成 PASS manifest。
+脚本要求 `-ExpectedSourceCommit` 为完整 40 位小写十六进制提交 ID，并在存在 `GITHUB_SHA` 时核对两者一致；它不自行查询本地 `git HEAD` 或核对 checkout 文件与提交 blob。本地操作者须将参数绑定到受保护、无未提交改动的目标 checkout，CI 使用固定 SHA checkout 并注入对应 `GITHUB_SHA`；受保护 Node/GH 路径和信任参数不可省略。当前服务端仅支持生产 `self_hosted` 且关闭 TOFU，`official` live claim 尚未接线，预检及启动明确失败关闭。A/B 必须是不同机器身份，驱动器和安装包必须由参数指定的固定发布证书签名；两台机器都会独立启动应用和受信驱动，任一缺失即中止，不生成 PASS manifest。
 
 旧 Relay 输入是受保护配置而不是说明性附件：inventory 与 gateway config 都采用 `additionalProperties=false` 的严格结构，各有且仅有一个启用项，并以同一 `route_id`、`target=legacy_relay`、`no_bypass=true` 和目标公网 URL 摘要对应。编排器只生成经敏感扫描的最小 route spec 传给 A，绝不复制完整受保护配置；driver 激活的 owned route 必须绑定 run nonce、route ID、两份配置摘要和原状态摘要。无论后续成功或失败，`finally` 都必须撤销公网 route、恢复原状态并主动复核，清理失败阻断发布。
 
@@ -119,3 +122,5 @@ provider 证明由独立、签名且受保护的 verifier 在 run nonce 生成�
 正式证据由受保护的 `windows-remote-control-evidence` workflow 运行并上传；发布 workflow 会通过 GitHub API 复核证据 run 的 `head_sha`、workflow 路径/ID、成功结论以及选中 artifact 的 GitHub SHA-256 digest，不信任 manifest 自报的 run 身份。
 
 当前工作站没有两台隔离 Windows、生产等价公网 Relay、签名安装包和真实旧 Relay 二进制时，预期结果是门禁失败/blocked；不得创建替代 manifest 或把本地单元测试写成双机 pass。
+
+旧21条部分能力豁免草案已被本文件的27条完整验收目录替代；原记录保留于提交历史，不作为当前发布或隐藏能力的依据。

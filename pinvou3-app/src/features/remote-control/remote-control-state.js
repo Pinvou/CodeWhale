@@ -925,6 +925,12 @@
     if (tasksField === "tasks" && connection.connectionId && connectionId && String(connectionId) !== String(connection.connectionId)) {
       return state;
     }
+    // The local status DTO carries the whole binding. Legacy internal task
+    // events may omit lease fields; they are not authenticated wire authority.
+    if (tasksField === "tasks" && ["controllerLeaseId", "leaseEpoch", "relayEpoch", "remoteControlGeneration"].some(function (key) {
+      var current = key === "remoteControlGeneration" ? connection.generation : connection[key];
+      return payload[key] !== undefined && String(payload[key]) !== String(current);
+    })) return state;
     var tasks = (state[tasksField] || []).slice();
     var index = -1;
     for (var i = 0; i < tasks.length; i += 1) {
@@ -959,6 +965,8 @@
       promptUpdated.revision = state.revision + 1;
       return promptUpdated;
     }
+    if (index >= 0 && tasks[index].status === "cancel_requested" &&
+        status !== "cancel_requested" && !TASK_TERMINAL[status]) return state;
     var entry = {
       taskId: taskId,
       sessionId: (payload.sessionId || payload.session_id)

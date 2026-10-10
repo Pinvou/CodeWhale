@@ -28,8 +28,19 @@ for (const block of String(cargoLockBytes).split(/\r?\n\[\[package\]\]\r?\n/u).s
 }
 if (npmPackages.length === 0 || cargoPackages.length === 0) throw new Error("installer_spdx_dependency_inventory_empty");
 
-const stagingRoot = await realpath(resolve(stagingRootPath)); const resourcesRoot = await realpath(resolve(stagingRoot, "resources"));
-const manifestPath = await realpath(resolve(stagingManifestPath));
+const stagingPath = resolve(stagingRootPath);
+if (!(await lstat(stagingPath)).isDirectory() || (await lstat(stagingPath)).isSymbolicLink()) throw new Error("installer_spdx_staging_file_invalid");
+const stagingRoot = await realpath(stagingPath);
+const resourcesPath = resolve(stagingRoot, "resources");
+const resourceMetadata = await lstat(resourcesPath);
+if (!resourceMetadata.isDirectory() || resourceMetadata.isSymbolicLink()) throw new Error("installer_spdx_resource_symlink_forbidden");
+const resourcesRoot = await realpath(resourcesPath);
+// Validate the supplied path before canonicalization; otherwise a symlink is
+// silently replaced by its regular target and bypasses the no-reparse policy.
+const suppliedManifestPath = resolve(stagingManifestPath);
+const manifestMetadata = await lstat(suppliedManifestPath);
+if (!manifestMetadata.isFile() || manifestMetadata.isSymbolicLink()) throw new Error("installer_spdx_staging_file_invalid");
+const manifestPath = await realpath(suppliedManifestPath);
 if (!ensureInside(stagingRoot, resourcesRoot) || !ensureInside(stagingRoot, manifestPath) || dirname(manifestPath) !== stagingRoot) throw new Error("installer_spdx_staging_escape");
 let stagingManifest; const stagingManifestBytes = await readRegularInside(stagingRoot, manifestPath);
 try { stagingManifest = JSON.parse(stagingManifestBytes); } catch { throw new Error("installer_spdx_staging_manifest_invalid"); }
@@ -78,7 +89,7 @@ if (new Set(stagedFiles.map((item) => item.path)).size !== stagedFiles.length) t
 const fileId = "SPDXRef-File-Pinvou-Installer"; const packageId = "SPDXRef-Package-Pinvou";
 const dependencyPackages = [...npmPackages, ...cargoPackages].map((item) => ({ SPDXID: cleanId("Dependency", `${item.ecosystem}:${item.name}@${item.version}:${item.source}`), name: item.name,
   versionInfo: item.version, downloadLocation: "NOASSERTION", filesAnalyzed: false,
-  externalRefs: [{ referenceCategory: "PACKAGE-MANAGER", referenceType: "purl", referenceLocator: `pkg:${item.ecosystem}/${encodeURIComponent(item.name)}@${encodeURIComponent(item.version)}` }],
+  externalRefs: [{ referenceCategory: "PACKAGE-MANAGER", referenceType: "purl", referenceLocator: `pkg:${item.ecosystem}/${item.name.split("/").map(encodeURIComponent).join("/")}@${encodeURIComponent(item.version)}` }],
   ...(item.checksum ? { checksums: [{ algorithm: "SHA256", checksumValue: item.checksum }] } : {}) }));
 const spdxStagedFiles = stagedFiles.map((item) => ({ SPDXID: cleanId("StagedFile", item.path), fileName: item.path,
   checksums: [{ algorithm: "SHA256", checksumValue: item.sha256 }], fileComment: `pinvou_stage_category=${item.category}${item.mappingSource ? `;mapping_source=${item.mappingSource};mapping_destination=${item.mappingDestination}` : ""}`,

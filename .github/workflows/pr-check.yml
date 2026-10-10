@@ -306,6 +306,8 @@ jobs:
               - 'pinvou3-app/src-tauri/src/app/remote_projection_adapter.rs'
               - 'pinvou3-app/src-tauri/src/app/commands/remote_control.rs'
               - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
+              - 'pinvou3-app/src-tauri/build.rs'
+              - 'pinvou3-app/src-tauri/build_support/desktop_controller.rs'
               - 'pinvou3-app/src-tauri/capabilities/default.json'
               - 'pinvou3-app/tests/remote_*'
               - 'pinvou3-app/tests/remote_*/**'
@@ -954,6 +956,9 @@ jobs:
       - name: 安装 Relay 发布门禁依赖
         if: ${{ runner.os == 'Windows' }}
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit --ignore-scripts
+
+      - name: Rust（构建期开关的实际产物回归）
+        uses: dtolnay/rust-toolchain@stable
 
       # 版本一致性校验(--check)由 version-consistency job 无路径门全事件覆盖,
       # 此处不重复;仅跑 Tauri overlay、各平台打包与知识宿主契约。
@@ -2085,6 +2090,7 @@ jobs:
             'features::memory::tests::topic_migration_' \
             'connector_introspection_guard_matches_complete_names_only' \
             'features::projects::tests::' \
+            'features::sessions::' \
             'run_with_timeout_reaps_and_stays_bounded' \
             'reap_killed_child_' \
             'features::browser::platform::windows::tests::' \

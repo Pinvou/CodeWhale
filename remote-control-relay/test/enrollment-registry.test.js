@@ -113,6 +113,31 @@ async function rejectsCode(promise, code) {
   await assert.rejects(promise, (error) => error?.code === code);
 }
 
+test("identifier contract: registry preserves wire colon and released Web endpoint identities", async (t) => {
+  const { registry } = await openRegistry(t);
+  for (const endpointId of ["endpoint:0001", "_old", "-old"]) {
+    await registry.enroll({ endpointId, credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL });
+    assert.equal((await registry.authorizeWebRegistration({ endpointId, accessToken: FIRST_CREDENTIAL })).endpoint_id, endpointId);
+    assert.equal((await registry.authorizeDesktopRegistration({ endpointId, accessToken: FIRST_CREDENTIAL,
+      desktopSecret: SECOND_CREDENTIAL })).endpoint_id, endpointId);
+    if (endpointId.startsWith("_") || endpointId.startsWith("-")) {
+      await rejectsCode(registry.authorizePairingRegistration({ endpointId, desktopSecret: SECOND_CREDENTIAL }), "endpoint_id_invalid");
+    }
+  }
+  await rejectsCode(registry.enroll({ endpointId: "endpoint~invalid", credential: FIRST_CREDENTIAL }), "endpoint_id_invalid");
+});
+
+test("identifier contract: administrative request IDs accept colon and keep exact replay identity", async (t) => {
+  const { registry } = await openRegistry(t, { env: { PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted" } });
+  const request = { requestId: "migration:request:0001", operations: [{ operation: "allowlist",
+    endpoint_id: "legacy-endpoint", credential: FIRST_CREDENTIAL }] };
+  const first = await registry.executeMigrationRequest(request);
+  const snapshot = registry.exportSnapshot();
+  assert.deepEqual(await registry.executeMigrationRequest(request), first);
+  assert.deepEqual(registry.exportSnapshot(), snapshot);
+  await rejectsCode(registry.executeMigrationRequest({ ...request, requestId: "migration~request~0001" }), "migration_request_id_invalid");
+});
+
 function lockPath(statePath) {
   return `${statePath}.lock`;
 }
@@ -266,6 +291,136 @@ test("a warm authorization cache fails closed after persistence degradation", as
   await rejectsCode(registry.authorizeWebRegistration({ endpointId: "warm-degraded", accessToken: FIRST_CREDENTIAL }), "enrollment_registry_unavailable");
 });
 
+test("manual development enrollment never claims TOFU admission", async (t) => {
+  for (const tofu of ["false", "true"]) {
+    const { registry, store } = await openRegistry(t, {
+      env: environment({
+        PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
+        PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: tofu,
+      }),
+    });
+    await registry.enroll({ endpointId: "manual-development", credential: FIRST_CREDENTIAL });
+    assert.equal(store.readNamespace(ENROLLMENT_NAMESPACE).value.entries[0].audit.source, "development");
+    await registry.rotateAccessCredential({ endpointId: "manual-development", currentCredential: FIRST_CREDENTIAL,
+      newCredential: SECOND_CREDENTIAL, expectedEndpointRevision: "1" });
+    await registry.revoke({ endpointId: "manual-development", expectedEndpointRevision: "2" });
+    assert.equal(store.readNamespace(ENROLLMENT_NAMESPACE).value.entries[0].audit.source, "development");
+  }
+});
+
+test("public enrollment bounds and repeated enrollment reject without mutating state", async (t) => {
+  let now = 0;
+  const { registry, store, statePath } = await openRegistry(t, { clock: () => now });
+  await registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) });
+  const before = store.readNamespace(ENROLLMENT_NAMESPACE);
+  const primary = await fs.readFile(statePath);
+  for (const endpointId of ["", ".bad", "a".repeat(129), "a/b", "a~bad", "端点"]) {
+    await rejectsCode(registry.enroll({ endpointId, credential: FIRST_CREDENTIAL }), "endpoint_id_invalid");
+  }
+  for (const credential of [null, "x".repeat(31), "x".repeat(4097), "x".repeat(32) + "\ud800"]) {
+    await rejectsCode(registry.enroll({ endpointId: "new-bounds", credential }), "enrollment_credential_invalid");
+  }
+  await rejectsCode(registry.enroll({ endpointId: "bounds", credential: SECOND_CREDENTIAL }), "endpoint_already_enrolled");
+  await rejectsCode(registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) }), "endpoint_already_enrolled");
+  for (now of [-1, NaN, 0.5, 8_640_000_000_000_001]) {
+    await rejectsCode(registry.enroll({ endpointId: "clock-bounds", credential: FIRST_CREDENTIAL }), "enrollment_clock_invalid");
+  }
+  assert.deepEqual(store.readNamespace(ENROLLMENT_NAMESPACE), before);
+  assert.deepEqual(await fs.readFile(statePath), primary);
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), primary);
+  now = 0;
+  await registry.enroll({ endpointId: "a".repeat(128), credential: "x".repeat(4096) });
+  const registryValue = store.readNamespace(ENROLLMENT_NAMESPACE);
+  registryValue.value.entries.find((entry) => entry.endpoint_id === "bounds").revision = "18446744073709551615";
+  await store.compareAndSwap(ENROLLMENT_NAMESPACE, registryValue.namespace_revision, registryValue.value);
+  const exhausted = store.readNamespace(ENROLLMENT_NAMESPACE);
+  await rejectsCode(registry.revoke({ endpointId: "bounds", expectedEndpointRevision: "18446744073709551615" }),
+    "endpoint_revision_exhausted");
+  assert.deepEqual(store.readNamespace(ENROLLMENT_NAMESPACE), exhausted);
+});
+
+test("byte-cap rejection leaves durable bytes, revisions and later smaller CAS usable", async (t) => {
+  const { store, statePath, registry } = await openRegistry(t, { storeOptions: { maxBytes: 1024 } });
+  await registry.enroll({ endpointId: "capacity-existing", credential: FIRST_CREDENTIAL });
+  await store.compareAndSwap("shared_budget", "0", { payload: "x".repeat(200) });
+  const before = store.readNamespace(ENROLLMENT_NAMESPACE);
+  const primary = await fs.readFile(statePath);
+  const backup = await fs.readFile(`${statePath}.bak`);
+  await rejectsCode(store.compareAndSwap("byte_cap", "0", { payload: "x".repeat(1024) }),
+    "relay_state_capacity_reached");
+  await rejectsCode(registry.enroll({ endpointId: "capacity-new-" + "x".repeat(110), credential: FIRST_CREDENTIAL }),
+    "enrollment_registry_capacity_reached");
+  assert.deepEqual(store.readNamespace(ENROLLMENT_NAMESPACE), before);
+  assert.equal(registry.getStatus("capacity-existing").revision, "1");
+  assert.deepEqual(await fs.readFile(statePath), primary);
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+  assert.equal(store.readNamespace("byte_cap").value, null);
+  await store.compareAndSwap("byte_cap", "0", {});
+  assert.equal(store.readNamespace("byte_cap").namespace_revision, "1");
+});
+
+test("registry write retains typed validation and capacity failures", async (t) => {
+  const { store, statePath, registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "template", credential: FIRST_CREDENTIAL });
+  const template = store.readNamespace(ENROLLMENT_NAMESPACE).value.entries[0];
+  const entries = Array.from({ length: 100_000 }, (_, index) => ({ ...template,
+    endpoint_id: `endpoint-${String(index).padStart(6, "0")}` }));
+  let writes = 0;
+  const boundedStore = {
+    getPathPolicy: () => store.getPathPolicy(),
+    readNamespaceRevision: () => ({ namespace_revision: "1", store_revision: "1" }),
+    readNamespace: () => ({ namespace_revision: "1", value: {
+      ...registry.exportSnapshot().registry, entries,
+    } }),
+    compareAndSwap: async () => { writes += 1; throw new Error("must not write"); },
+  };
+  const bounded = EnrollmentRegistry.open({ stateStore: boundedStore, config: configForState(statePath) });
+  await rejectsCode(bounded.enroll({ endpointId: "new-endpoint", credential: FIRST_CREDENTIAL }),
+    "enrollment_registry_capacity_reached");
+  assert.equal(writes, 0);
+  assert.equal(bounded.getStatus("endpoint-000000").revision, "1");
+});
+
+test("unsupported lock versions are never stolen even with future fields or a dead PID", async (t) => {
+  const statePath = await temporaryState(t);
+  const store = await openStateStore(statePath);
+  await store.close();
+  const primary = await fs.readFile(statePath);
+  const backup = await fs.readFile(`${statePath}.bak`);
+  for (const extra of [{}, { future_field: "future-owner" }]) {
+    const contents = JSON.stringify({ ...lockRecord({ pid: 2147483647 }), version: 2, ...extra });
+    await fs.writeFile(lockPath(statePath), contents, { mode: 0o600 });
+    const identity = await fs.stat(lockPath(statePath), { bigint: true });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await rejectsCode(openStateStore(statePath, { sleep: async () => {},
+        processIdentity: async (pid) => pid === process.pid ? `test-process:${pid}` : null }),
+        "relay_state_lock_unsupported");
+      assert.equal(await fs.readFile(lockPath(statePath), "utf8"), contents);
+      assert.equal((await fs.stat(lockPath(statePath), { bigint: true })).ino, identity.ino);
+      assert.deepEqual(await fs.readFile(statePath), primary);
+      assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+    }
+    await fs.unlink(lockPath(statePath));
+  }
+});
+
+test("development dual-role automatic admission alone records TOFU source", async (t) => {
+  const { registry } = await openRegistry(t, { env: environment({
+    PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
+    PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "true",
+  }) });
+  await registry.authorizeDesktopRegistration({ endpointId: "automatic-dual", accessToken: FIRST_CREDENTIAL,
+    desktopSecret: SECOND_CREDENTIAL });
+  const entry = registry.exportSnapshot().registry.entries[0];
+  assert.equal(entry.audit.source, "development_tofu");
+  assert.ok(entry.access_credential);
+  assert.ok(entry.desktop_credential);
+  await registry.executeMigrationRequest({ requestId: "manual-source-0001", operations: [{ operation: "allowlist",
+    endpoint_id: "manual-migration", credential: FIRST_CREDENTIAL }] });
+  assert.equal(registry.exportSnapshot().registry.entries.find((row) => row.endpoint_id === "manual-migration").audit.source,
+    "development");
+});
+
 test("explicit non-production mode can opt into temporary TOFU", async (t) => {
   const { registry, store } = await openRegistry(t, {
     env: environment({
@@ -378,6 +533,54 @@ test("a registry opened without the persisted digest key fails closed", async (t
     endpointId: "endpoint-keyring",
     accessToken: FIRST_CREDENTIAL,
   }), "credential_key_unavailable");
+});
+
+test("HMAC replacement requires fresh endpoint IDs, while key rollback alone preserves authorization", async (t) => {
+  for (const keyId of ["replacement-key", "test-key-1"]) {
+    await t.test(keyId, async () => {
+      const { statePath, store, registry: original } = await openRegistry(t);
+      await original.enroll({
+        endpointId: "endpoint-old-key", credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL,
+      });
+      const primary = await fs.readFile(statePath);
+      const backup = await fs.readFile(`${statePath}.bak`);
+      const replacement = EnrollmentRegistry.open({
+        stateStore: store,
+        config: configForState(statePath, {
+          PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID: keyId,
+          PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "replacement-hmac-key-material-at-least-32-bytes",
+        }),
+      });
+      await rejectsCode(replacement.authorizeWebRegistration({
+        endpointId: "endpoint-old-key", accessToken: FIRST_CREDENTIAL,
+      }), keyId === "test-key-1" ? "invalid_enrollment_credential" : "credential_key_unavailable");
+      await rejectsCode(replacement.authorizeDesktopRegistration({
+        endpointId: "endpoint-old-key", accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL,
+      }), keyId === "test-key-1" ? "invalid_enrollment_credential" : "credential_key_unavailable");
+      await rejectsCode(replacement.enroll({
+        endpointId: "endpoint-old-key", credential: SECOND_CREDENTIAL,
+      }), "endpoint_already_enrolled");
+      await rejectsCode(replacement.rotateAccessCredential({
+        endpointId: "endpoint-old-key", currentCredential: FIRST_CREDENTIAL,
+        newCredential: SECOND_CREDENTIAL, expectedEndpointRevision: "1",
+      }), keyId === "test-key-1" ? "invalid_enrollment_credential" : "credential_key_unavailable");
+      assert.deepEqual(await fs.readFile(statePath), primary);
+      assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+      assert.equal((await original.authorizeWebRegistration({
+        endpointId: "endpoint-old-key", accessToken: FIRST_CREDENTIAL,
+      })).status, "active");
+      await replacement.revoke({ endpointId: "endpoint-old-key", expectedEndpointRevision: "1" });
+      await rejectsCode(replacement.enroll({
+        endpointId: "endpoint-old-key", credential: SECOND_CREDENTIAL,
+      }), "endpoint_revoked");
+      await replacement.enroll({
+        endpointId: "endpoint-new-key", credential: SECOND_CREDENTIAL, desktopCredential: FIRST_CREDENTIAL,
+      });
+      assert.equal((await replacement.authorizeDesktopRegistration({
+        endpointId: "endpoint-new-key", accessToken: SECOND_CREDENTIAL, desktopSecret: FIRST_CREDENTIAL,
+      })).status, "active");
+    });
+  }
 });
 
 test("endpoint and namespace revisions reject stale concurrent mutations", async (t) => {
@@ -900,6 +1103,99 @@ test("Windows never repairs an existing caller-created directory ACL", {
     verifyAncestors: async () => {},
   }), "relay_state_acl_unverified");
   assert.equal(protectionCalls, 0);
+});
+
+test("close synchronously fences queued and later CAS while draining the active durable write", async (t) => {
+  const statePath = await temporaryState(t);
+  let armed = false;
+  let lockReleased = false;
+  let durableWrites = 0;
+  let enter;
+  let release;
+  const entered = new Promise((resolve) => { enter = resolve; });
+  const blocked = new Promise((resolve) => { release = resolve; });
+  const injectedFs = {
+    ...fs,
+    async rename(source, target) {
+      if (armed && (target === statePath || target === `${statePath}.bak`)) {
+        assert.equal(lockReleased, false, "no durable replacement after releasing the owner lock");
+        durableWrites += 1;
+        if (durableWrites === 1) {
+          enter();
+          await blocked;
+        }
+      }
+      return fs.rename(source, target);
+    },
+    async rm(target, options) {
+      if (armed && target === lockPath(statePath)) {
+        assert.equal(durableWrites, 2, "only the already active CAS reaches both durable copies");
+        lockReleased = true;
+      }
+      return fs.rm(target, options);
+    },
+  };
+  const store = await openStateStore(statePath, { fs: injectedFs });
+  resourcesFor(t).stores.push(store);
+  armed = true;
+  const active = store.compareAndSwap("shutdown", "0", { value: "active" });
+  await entered;
+  const queued = rejectsCode(store.compareAndSwap("queued", "0", { value: "queued" }),
+    "relay_state_unavailable");
+  const closing = store.close();
+  const concurrentClose = store.close();
+  const late = rejectsCode(store.compareAndSwap("late", "0", { value: "late" }),
+    "relay_state_unavailable");
+  try {
+    assert.throws(() => store.readNamespace("shutdown"),
+      (error) => error?.code === "relay_state_unavailable");
+    assert.equal(lockReleased, false);
+  } finally {
+    release();
+    await Promise.all([active, queued, late, closing, concurrentClose]);
+  }
+  assert.equal(durableWrites, 2);
+  assert.equal(lockReleased, true);
+  await rejectsCode(store.compareAndSwap("closed", "0", { value: "closed" }), "relay_state_closed");
+  const reopened = await openStateStore(statePath);
+  resourcesFor(t).stores.push(reopened);
+  assert.deepEqual(reopened.readNamespace("shutdown").value, { value: "active" });
+  assert.equal(reopened.readNamespace("queued").value, null);
+  assert.equal(reopened.readNamespace("late").value, null);
+});
+
+test("oversized and invalid UTF-8 owner locks are never stolen before parsing", async (t) => {
+  const statePath = await temporaryState(t);
+  const store = await openStateStore(statePath);
+  await store.close();
+  const primary = await fs.readFile(statePath);
+  const backup = await fs.readFile(`${statePath}.bak`);
+  const cases = [
+    Buffer.from(JSON.stringify({ ...lockRecord({ pid: 2147483647 }), version: 2,
+      future_field: "x".repeat(4096) })),
+    Buffer.from("x".repeat(4097)),
+    Buffer.from([0xff, 0xfe]),
+  ];
+  for (const contents of cases) {
+    await fs.writeFile(lockPath(statePath), contents, { mode: 0o600 });
+    const identity = await fs.stat(lockPath(statePath), { bigint: true });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await rejectsCode(openStateStore(statePath, { sleep: async () => {},
+        processIdentity: async (pid) => pid === process.pid ? `test-process:${pid}` : null })
+        .then((unexpected) => {
+          resourcesFor(t).stores.push(unexpected);
+          return unexpected;
+        }),
+        "relay_state_lock_unreadable");
+      assert.deepEqual(await fs.readFile(lockPath(statePath)), contents);
+      assert.equal((await fs.stat(lockPath(statePath), { bigint: true })).ino, identity.ino);
+      assert.deepEqual(await fs.readFile(statePath), primary);
+      assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+      assert.equal((await fs.readdir(path.dirname(statePath)))
+        .some((name) => name.includes(".stale.")), false);
+    }
+    await fs.unlink(lockPath(statePath));
+  }
 });
 
 test("live process lock prevents a second writer and is released on close", async (t) => {
@@ -1500,12 +1796,12 @@ test("registry and migration ledgers use locale-independent identifier ordering"
       { operation: "allowlist", endpoint_id: "a", credential: FIRST_CREDENTIAL },
       { operation: "allowlist", endpoint_id: "B", credential: SECOND_CREDENTIAL },
       { operation: "allowlist", endpoint_id: "0", credential: THIRD_CREDENTIAL },
-      { operation: "allowlist", endpoint_id: "A._~-", credential: `${FIRST_CREDENTIAL}-mixed` },
+      { operation: "allowlist", endpoint_id: "A._:-", credential: `${FIRST_CREDENTIAL}-mixed` },
     ],
   });
   assert.deepEqual(
     registry.exportSnapshot().registry.entries.map((entry) => entry.endpoint_id),
-    ["0", "A._~-", "B", "a"],
+    ["0", "A._:-", "B", "a"],
   );
 
   await registry.executeMigrationRequest({

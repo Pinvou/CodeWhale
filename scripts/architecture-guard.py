@@ -47,7 +47,16 @@ REMOTE_CONTROL_HOST_API_INITIAL_CEILING = {
     "pinvou3-app/src-tauri/src/features/remote_control/relay_client.rs:tauri_path": 3,
 }
 RUST_DEPENDENCY_MIGRATION = "rust_dependency_resolution_v1"
-RUST_DEPENDENCY_MIGRATION_ANCHOR = "5bedd1ba3c4eb6534821e293bea408470155f69a"
+RUST_DEPENDENCY_MIGRATION_ANCHOR = "061032e02b60366a8b9a09af134bb8ba4c7a2e19"
+READER_TEST_HOST_PATH = (
+    "pinvou3-app/src-tauri/src/features/remote_control/controller/"
+    "relay_runtime/reader_resume_tests.rs"
+)
+READER_TEST_HOST_REASON = (
+    "// architecture-guard: allow-reader-test-host-type -- Windows test-only real "
+    "reader regression accepts AppHandle from the app-owned Wry factory; "
+    "no host construction or event/command API exception."
+)
 ROOT_MODULE = "<root>"
 def normalize(path: Path, root: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
@@ -429,6 +438,7 @@ def crate_references(
     text: str,
     aliases: dict[str, tuple[str, ...]],
     module_path: tuple[str, ...] = (),
+    extern_aliases: dict[str, tuple[str, ...]] | None = None,
 ) -> list[tuple[str, str]]:
     """Find crate-layer references after lexical normalization of Rust paths."""
     refs: list[tuple[str, str]] = []
@@ -482,7 +492,7 @@ def crate_references(
         ):
             refs.append((first[0], tokens[index + 6]))
 
-    refs.extend(crate_root_alias_references(text, aliases, module_path))
+    refs.extend(crate_root_alias_references(text, aliases, module_path, extern_aliases=extern_aliases))
     return refs
 
 
@@ -491,21 +501,44 @@ def crate_root_alias_references(
     aliases: dict[str, tuple[str, ...]] | None = None,
     module_path: tuple[str, ...] = (),
     exported_aliases: dict[str, tuple[str, ...]] | None = None,
+    extern_aliases: dict[str, tuple[str, ...]] | None = None,
 ) -> list[tuple[str, str]]:
-    """Resolve `use` trees and local aliases of crate roots.
+    """Resolve root aliases by lexical block and Rust module ownership.
 
-    Direct paths are counted by ``crate_references``. Grouped imports and
-    imported root aliases need their own pass because the module name can be
-    separated from ``crate::`` or subsequently hidden behind ``self``/``super``.
+    Item imports are visible throughout their own block, regardless of order.
+    Blocks inherit names, but child modules do not inherit a parent's bare use.
+    Explicit self/super paths resolve from the corresponding module scope.
+    Conflicting bindings and cycles are reported rather than guessed.
     """
     aliases = aliases or {}
+    extern_aliases = extern_aliases or {}
     tokens = rust_syntax_tokens(text)
-    scopes = rust_inline_module_paths(tokens, module_path)
-    brace_depths = rust_brace_depths(tokens)
-    root_aliases: dict[str, tuple[str, ...]] = {}
-    refs: list[tuple[str, str]] = []
+    modules = rust_inline_module_paths(tokens, module_path)
     import_spans = rust_use_token_spans(tokens)
     root_layers = {"app", "features", "platform", "core"}
+    refs: list[tuple[str, str]] = []
+    token_scope: list[int] = []
+    parents: dict[int, int | None] = {0: None}
+    module_scopes = {0}
+    scope_modules = {0: module_path}
+    stack = [0]
+    for index, token in enumerate(tokens):
+        token_scope.append(stack[-1])
+        if token == "{":
+            child = len(parents)
+            parents[child] = stack[-1]
+            is_module = index >= 2 and tokens[index - 2] == "mod"
+            if is_module:
+                module_scopes.add(child)
+                scope_modules[child] = modules[index] + (tokens[index - 1],)
+            stack.append(child)
+        elif token == "}" and len(stack) > 1:
+            stack.pop()
+
+    def module_scope(scope: int) -> int:
+        while scope not in module_scopes:
+            scope = parents[scope]
+        return scope
 
     def names(parts: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(part for part in parts if re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", part))
@@ -547,117 +580,197 @@ def crate_root_alias_references(
         local = parts[alias_at + 1] if alias_at < len(parts) and alias_at + 1 < len(parts) else path[-1]
         return [(path, local)]
 
-    def canonical_path(
-        path: tuple[str, ...], scope: tuple[str, ...]
-    ) -> tuple[str, ...] | None:
-        if path[:1] == ("crate",):
+
+    # Each declaration is retained: a second use must not overwrite the first.
+    declarations: dict[tuple[int, str], list[tuple[str, ...]]] = defaultdict(list)
+    imports: list[tuple[int, int, tuple[str, ...], str]] = []
+    for start, finish in import_spans:
+        scope = token_scope[start]
+        if exported_aliases is not None and scope != 0:
+            continue
+        for path, local in use_items(tokens[start + 1:finish]):
+            imports.append((start, finish, path, local))
+            if local not in {"*", "_"}:
+                declarations[(scope, local)].append(path)
+    for index in range(len(tokens) - 4):
+        if tokens[index:index + 4] == ("extern", "crate", "self", "as"):
+            scope = token_scope[index]
+            if exported_aliases is None or scope == 0:
+                declarations[(scope, tokens[index + 4])].append(("crate",))
+
+    ambiguous: set[tuple[int, str]] = set()
+    cache: dict[tuple[int, str], tuple[str, ...] | None] = {}
+
+    def lookup(name: str, scope: int) -> tuple[int, str] | None:
+        while True:
+            key = (scope, name)
+            if key in declarations:
+                return key
+            if scope in module_scopes or parents[scope] is None:
+                return None
+            scope = parents[scope]
+
+    def binding(key: tuple[int, str], visiting: set[tuple[int, str]]) -> tuple[str, ...] | None:
+        if key in cache:
+            return cache[key]
+        if key in visiting:
+            ambiguous.update(visiting | {key})
+            return None
+        values = {canonical_path(path, key[0], visiting | {key}, declaring=key) for path in declarations[key]}
+        if len(values) != 1:
+            destinations = {value[:2] for value in values if value is not None and len(value) >= 2}
+            if len(destinations) == 1 and all(value is not None and len(value) >= 2 for value in values):
+                # cfg-selected members of one dependency destination are
+                # equivalent to this layer/feature guard, not to the compiler.
+                result = next(iter(destinations))
+            else:
+                ambiguous.add(key)
+                result = None
+        else:
+            result = next(iter(values))
+        cache[key] = result
+        return result
+
+    def qualified_alias_key(path: tuple[str, ...], scope: int) -> tuple[int, str] | None:
+        owner = module_scope(scope)
+        offset = 1
+        if path[0] == "super":
+            offset = 0
+            while offset < len(path) and path[offset] == "super":
+                parent = parents[owner]
+                if parent is None:
+                    return None
+                owner = module_scope(parent)
+                offset += 1
+        return lookup(path[offset], owner) if offset < len(path) else None
+
+    def canonical_path(path: tuple[str, ...], scope: int,
+                       visiting: set[tuple[int, str]],
+                       declaring: tuple[int, str] | None = None) -> tuple[str, ...] | None:
+        if not path:
+            return None
+        if path[0] == "crate":
             rest = path[1:]
             return aliases[rest[0]] + rest[1:] if rest and rest[0] in aliases else rest
-        if path[0] in root_aliases:
-            return root_aliases[path[0]] + path[1:]
-        if not scope and path[0] in root_layers:
-            return path
-        if not scope and path[0] in aliases:
-            return aliases[path[0]] + path[1:]
-        if path[0] == "self" and len(path) > 1 and path[1] in root_aliases:
-            return root_aliases[path[1]] + path[2:]
         if path[0] in {"self", "super"}:
-            resolved = relative_rust_path(path, scope)
-            return canonical_crate_module_path(resolved, aliases) if resolved else None
+            owner = module_scope(scope)
+            offset = 1
+            if path[0] == "super":
+                offset = 0
+                while offset < len(path) and path[offset] == "super":
+                    parent = parents[owner]
+                    if parent is None:
+                        resolved = relative_rust_path(path, scope_modules[owner])
+                        return canonical_crate_module_path(resolved, aliases) if resolved else None
+                    owner = module_scope(parent)
+                    offset += 1
+            rest = path[offset:]
+            if rest:
+                key = lookup(rest[0], owner)
+                if key:
+                    prefix = binding(key, visiting)
+                    return prefix + rest[1:] if prefix is not None else None
+            resolved = scope_modules[owner] + rest
+            return canonical_crate_module_path(resolved, aliases)
+        key = lookup(path[0], scope)
+        if key:
+            # A bare import from the extern prelude (e.g. use anyhow::anyhow)
+            # does not resolve its own newly declared local binding.
+            if key == declaring:
+                prefix = extern_aliases.get(path[0])
+                return prefix + path[1:] if prefix is not None else None
+            prefix = binding(key, visiting)
+            return prefix + path[1:] if prefix is not None else None
+        if path[0] in extern_aliases:
+            return extern_aliases[path[0]] + path[1:]
+        if not scope_modules[module_scope(scope)]:
+            if path[0] in root_layers:
+                return path
+            if path[0] in aliases:
+                return aliases[path[0]] + path[1:]
         return None
 
-    index = 0
-    while index < len(tokens):
-        if tokens[index : index + 3] == ("extern", "crate", "self"):
-            if exported_aliases is not None and brace_depths[index] != 0:
-                index += 3
-                continue
-            if tokens[index + 3 : index + 4] == ("as",):
-                local = tokens[index + 4 : index + 5]
-                if local and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", local[0]):
-                    root_aliases[local[0]] = ()
-                    if exported_aliases is not None and brace_depths[index] == 0:
-                        exported_aliases[local[0]] = ()
-            index += 3
+    for key in declarations:
+        binding(key, set())
+    for start, finish, path, local in imports:
+        scope = token_scope[start]
+        canonical = canonical_path(path, scope, set())
+        if canonical is None:
             continue
-        if tokens[index] != "use":
-            index += 1
-            continue
-        end = index + 1
-        depth = 0
-        while end < len(tokens):
-            depth += (tokens[end] == "{") - (tokens[end] == "}")
-            if tokens[end] == ";" and depth == 0:
-                break
-            end += 1
-        if exported_aliases is not None and brace_depths[index] != 0:
-            index = end + 1
-            continue
-        declaration = tokens[index + 1 : end]
-        for path, local in use_items(tokens[index + 1 : end]):
-            canonical = canonical_path(path, scopes[index])
-            if canonical is None:
-                continue
-            if (
-                exported_aliases is not None
-                and brace_depths[index] == 0
-                and local not in {"*", "_"}
-                and canonical
-                and canonical[0] in root_layers
-            ):
+        if exported_aliases is not None and scope == 0 and local not in {"*", "_"}:
+            if canonical and canonical[0] in root_layers:
                 exported_aliases[local] = canonical
-            direct_import = (
-                "crate", ":", ":", canonical[0], ":", ":", canonical[1]
-            ) if len(canonical) >= 2 else ()
-            already_counted = bool(direct_import) and any(
-                declaration[offset : offset + len(direct_import)] == direct_import
-                for offset in range(len(declaration))
-            )
-            if (
-                len(canonical) >= 2
-                and canonical[0] in root_layers
-                and not already_counted
-            ):
-                refs.append((canonical[0], canonical[1]))
-            elif local != "*" and len(canonical) == 1 and canonical[0] in root_layers:
-                # Importing the parent module is a dependency even when its
-                # local alias is never used in this source file. Children may
-                # inherit the import, and its contents are not statically
-                # bounded here (notably for the feature registry).
-                refs.append((canonical[0], ROOT_MODULE))
-            if (
-                local == "*"
-                and (not canonical or len(canonical) == 1)
-                and (
-                    path[0] == "crate"
-                    or path[0] in root_aliases
-                    or canonical in {(layer,) for layer in root_layers}
-                )
-            ):
-                refs.append((canonical[0] if canonical else "crate", "*"))
-                continue
-            if local != "_" and (not canonical or (len(canonical) == 1 and canonical[0] in root_layers)):
-                root_aliases[local] = canonical
-        index = end + 1
+            elif not canonical:
+                exported_aliases[local] = ()
+        direct = ("crate", ":", ":", canonical[0], ":", ":", canonical[1]) if len(canonical) >= 2 else ()
+        declaration = tokens[start + 1:finish]
+        counted = bool(direct) and any(
+            declaration[offset:offset + len(direct)] == direct for offset in range(len(declaration))
+        )
+        # A concrete module/item import already contributes its dependency
+        # at the origin. Only crate/layer aliases add downstream callsites;
+        # re-importing members of a concrete alias must not count them twice.
+        prefix = None
+        if path[0] in {"self", "super"}:
+            key = qualified_alias_key(path, scope)
+            if key:
+                prefix = binding(key, set())
+        else:
+            key = lookup(path[0], scope)
+            if key:
+                prefix = binding(key, set())
+        if prefix and len(prefix) >= 2 and prefix[0] in root_layers:
+            counted = True
+        if len(canonical) >= 2 and canonical[0] in root_layers and not counted:
+            refs.append((canonical[0], canonical[1]))
+        elif local != "*" and len(canonical) == 1 and canonical[0] in root_layers:
+            refs.append((canonical[0], ROOT_MODULE))
+        if local == "*" and len(canonical) <= 1:
+            refs.append((canonical[0] if canonical else "crate", "*"))
+    if exported_aliases is not None:
+        for (scope, name), value in cache.items():
+            if scope == 0 and value == ():
+                exported_aliases[name] = ()
 
     for index, token in enumerate(tokens):
-        if any(start <= index <= end for start, end in import_spans):
+        if any(start <= index <= finish for start, finish in import_spans):
             continue
-        if tokens[index - 2 : index] == (":", ":") and tokens[index - 3 : index - 2] == ("super",):
+        if tokens[index + 1:index + 3] != (":", ":") or tokens[max(0, index - 2):index] == (":", ":"):
             continue
-        prefix = root_aliases.get(token)
-        if prefix is None or tokens[index + 1 : index + 3] != (":", ":"):
-            continue
-        path = list(prefix)
+        scope = token_scope[index]
+        if token in {"self", "super"}:
+            # Direct module paths were already counted; handle local root aliases only.
+            cursor = index
+            while tokens[cursor:cursor + 1] in {("self",), ("super",)}:
+                cursor += 3
+            if cursor >= len(tokens):
+                continue
+            if not any(name == tokens[cursor] for _, name in declarations):
+                continue
+        else:
+            key = lookup(token, scope)
+            if key is None and token not in extern_aliases:
+                continue
+            prefix = binding(key, set()) if key else extern_aliases[token]
+            if prefix is None or (prefix and (len(prefix) != 1 or prefix[0] not in root_layers)):
+                continue
+        parts = [token]
         cursor = index + 3
         while cursor < len(tokens) and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", tokens[cursor]):
-            path.append(tokens[cursor])
+            parts.append(tokens[cursor])
             cursor += 1
-            if tokens[cursor : cursor + 2] != (":", ":"):
+            if tokens[cursor:cursor + 2] != (":", ":"):
                 break
             cursor += 2
-        if len(path) >= 2 and path[0] in root_layers:
-            refs.append((path[0], path[1]))
+        canonical = canonical_path(tuple(parts), scope, set())
+        if token in {"self", "super"}:
+            key = qualified_alias_key(tuple(parts), scope)
+            prefix = binding(key, set()) if key else None
+            if prefix is None or (prefix and (len(prefix) != 1 or prefix[0] not in root_layers)):
+                continue
+        if canonical and len(canonical) >= 2 and canonical[0] in root_layers:
+            refs.append((canonical[0], canonical[1]))
+    refs.extend(("crate", "<alias-ambiguous>") for _ in ambiguous)
     return refs
 
 
@@ -928,13 +1041,46 @@ def session_application_export_surface_is_frozen(text: str) -> bool:
     return True
 
 
-def remote_control_host_api_counts(text: str) -> Counter[str]:
+def reader_test_host_type_allowed(relative: str, text: str) -> bool:
+    """Permit one exact factory type, never a file-wide host API allowance."""
+    if relative != READER_TEST_HOST_PATH:
+        return False
+    spans = rust_syntax_token_spans(text)
+    if not spans or READER_TEST_HOST_REASON not in [
+        line.strip() for line in text[:spans[0][1]].splitlines()[:20]
+    ]:
+        return False
+    tokens = tuple(token for token, _, _ in spans)
+    cfg = rust_syntax_tokens('#![cfg(all(test, target_os = "windows"))]')
+    if tokens[:len(cfg)] != cfg:
+        return False
+    literals = [text[start:end] for token, start, end in spans[:len(cfg)] if token == "<literal>"]
+    if literals != ['"windows"']:
+        return False
+    signature = rust_syntax_tokens(
+        "pub(crate) async fn resume_round_trip<T>"
+        "(build_host: impl FnOnce() -> (tauri::AppHandle, T)) {"
+    )
+    depth = 0
+    signatures = 0
+    for index, token in enumerate(tokens):
+        if depth == 0 and tokens[index:index + len(signature)] == signature:
+            signatures += 1
+        depth += (token in {"{", "(", "["}) - (token in {"}", ")", "]"})
+    # Emitter can be inherited through super::*, so static trait calls must
+    # not slip through merely because this file has no direct trait import.
+    return signatures == 1 and tokens.count("AppHandle") == 1 and "Emitter" not in tokens and remote_control_host_api_counts(
+        text, inherited_emitter=True
+    ) == Counter({"tauri_path": 1})
+
+
+def remote_control_host_api_counts(text: str, *, inherited_emitter: bool = False) -> Counter[str]:
     """Count direct host references by mode for the legacy remote feature."""
     counts: Counter[str] = Counter()
     if not any(marker in text for marker in ("tauri", "platform", "app_events", "emit")):
         return counts
     tokens = rust_syntax_tokens(text)
-    emitter_import = False
+    emitter_import = inherited_emitter
     for index, token in enumerate(tokens):
         path = tokens[index + 1 : index + 3] == (":", ":")
         if re.fullmatch(r"tauri(?:_[A-Za-z0-9_]+)?", token) and path:
@@ -1013,6 +1159,11 @@ def remote_control_host_api_counts(text: str) -> Counter[str]:
             generic_call = tail[:3] == (":", ":", "<")
             if direct_call or generic_call:
                 counts["host_emit"] += 1
+        if inherited_emitter and token in {"emit", "emit_to", "emit_all"}:
+            if tokens[max(0, index - 2):index] == (":", ":"):
+                tail = tokens[index + 1:]
+                if tail[:1] == ("(",) or tail[:3] == (":", ":", "<"):
+                    counts["host_emit"] += 1
     if not emitter_import:
         counts.pop("host_emit", None)
     return +counts
@@ -1138,9 +1289,15 @@ def scan_rust(
     rust_files = list(source_files(root, "pinvou3-app/src-tauri/src", {".rs"}))
     module_paths, ambiguous_module_paths, aliases = rust_module_paths(rust_files, rust_root)
     lib_rs = (rust_root / "lib.rs").resolve()
+    extern_aliases: dict[str, tuple[str, ...]] = {}
     if lib_rs in module_paths:
         exported: dict[str, tuple[str, ...]] = {}
         lib_text = read_text(lib_rs)
+        lib_tokens = rust_syntax_tokens(lib_text)
+        lib_depths = rust_brace_depths(lib_tokens)
+        for index in range(len(lib_tokens) - 4):
+            if lib_depths[index] == 0 and lib_tokens[index:index + 4] == ("extern", "crate", "self", "as"):
+                extern_aliases[lib_tokens[index + 4]] = ()
         crate_root_alias_references(lib_text, aliases, (), exported)
         macro_risk = rust_root_macro_alias_risk(lib_text)
         if macro_risk:
@@ -1182,9 +1339,11 @@ def scan_rust(
         layer_path = canonical_crate_module_path(module_path, aliases)
         if resolved in ambiguous_module_paths:
             rules["rust_module_path_ambiguous"][relative] += 1
-        references = crate_references(text, aliases, module_path)
+        references = crate_references(text, aliases, module_path, extern_aliases)
         for layer, target in references:
-            if target == "*":
+            if target == "<alias-ambiguous>":
+                rules["rust_crate_root_alias_ambiguous"][relative] += 1
+            elif target == "*":
                 rules["rust_crate_root_glob_imports"][relative] += 1
             elif layer == "features" and target == ROOT_MODULE:
                 rules["rust_crate_root_glob_imports"][relative] += 1
@@ -1205,6 +1364,13 @@ def scan_rust(
             ):
                 rules["rust_session_application_export_drift"][relative] += 1
             if source_feature == "remote_control":
+                reader_fixture = relative == READER_TEST_HOST_PATH
+                if reader_fixture:
+                    host_api_counts = remote_control_host_api_counts(text, inherited_emitter=True)
+                if reader_test_host_type_allowed(relative, text):
+                    host_api_counts.pop("tauri_path")
+                elif reader_fixture or file_exception_allowed(text, "reader-test-host-type"):
+                    rules.setdefault("rust_reader_test_host_exception", Counter())[relative] += 1
                 for mode, count in host_api_counts.items():
                     rules["rust_remote_control_host_api"][f"{relative}:{mode}"] += count
             for layer, target in references:
