@@ -1806,7 +1806,7 @@
     if (buf) buf.artifacts = arts;
     else state.artifacts = arts;
     try {
-      try { await invoke("save_session_artifacts", { id: sid, paths: arts.map(function (a) { return a.path; }) }); } catch (_) {}
+      try { await invoke("save_session_artifacts", { id: sid, paths: rebaseArtifactPathsForRebind(sid, arts.map(function (a) { return a.path; })) }); } catch (_) {}
       if (isDefaultChatTitle(meta.title) || personaPlaceholderTitles[sid]) {
         var firstUser = msgs.find(function (m) { return m.role === "user"; });
         // 自动标题复用展示层过滤：内部信封/子智能体交接不参与命名，避免 XML 痕迹进
@@ -3145,7 +3145,12 @@
             state.sessions = await invoke(IS_WEB ? "web_access_list_sessions" : "list_sessions");
           } catch (e) {
             console.warn("list_sessions failed", e);
-            state.sessions = [];
+            // Keep the previously observed list on a transient refresh
+            // failure: an empty snapshot would read as "every task deleted"
+            // to the aux-chat purge reconcile (wireAuxSessionPurge), which
+            // would purge every task's unsent drafts and staged quotes. The
+            // archived leg below keeps its previous list for the same reason.
+            state.sessions = state.sessions || [];
           }
           try {
             state.archivedSessions = await invoke(
@@ -3876,6 +3881,17 @@
   // owns a separate presentation index. Apply the committed deletion event
   // idempotently in either client so a remote delete cannot leave an ENOENT
   // sidebar row behind in the other one.
+  // session:deleted fan-out: applyDeletedSession is the ONE path that
+  // observes every deleted id — the session list excludes code-mode sessions
+  // (they are listed by the code-session list command), so a slice-diff
+  // consumer never learns a code task was deleted. Feature code (the aux-chat
+  // purge wiring) registers a listener here instead of the bridge pushing.
+  var sessionDeletedListeners = new Set();
+  function onSessionDeleted(listener) {
+    if (typeof listener !== "function") return function () {};
+    sessionDeletedListeners.add(listener);
+    return function () { sessionDeletedListeners.delete(listener); };
+  }
   function applyDeletedSession(id) {
     if (typeof id !== "string" || !id) return false;
     invalidateScheduledRecentRunsForSession(id);
@@ -3890,6 +3906,9 @@
     state.scheduledTaskRuns = (state.scheduledTaskRuns || []).filter(function (run) {
       return !run || run.sessionId !== id;
     });
+    for (const listener of sessionDeletedListeners) {
+      try { listener(id); } catch (error) { console.warn("session:deleted listener failed", error); }
+    }
     notify();
     return true;
   }
@@ -4705,10 +4724,164 @@
     return parts[parts.length - 1] || p;
   }
   function isAbsPath(p) {
-    return typeof p === "string" && (p.charAt(0) === "/" || /^[A-Za-z]:[\\/]/.test(p));
+    // UNC network-share paths (\\server\\share\...) are absolute too —
+    // validate_codex_project_workspace stores them after platform_compat_path,
+    // and without this arm the rebase transform returned them unmapped
+    // (review #463 round-20 minor 6; Windows network-share workspaces only).
+    return (
+      typeof p === "string"
+        && (p.charAt(0) === "/" || /^[A-Za-z]:[\\/]/.test(p) || /^\\\\[^\\]/.test(p))
+    );
   }
   function normalizedPath(p) {
     return String(p || "").replace(/\\/g, "/");
+  }
+  // Stamps the workspace_rebound mark the rebind command emits for the
+  // sessions whose persisted artifact paths its lanes rebased (rebound,
+  // failed AND post-busy ids — review #463 round-10 Major 2 + round-B
+  // Major 1). The mark carries the rebind geometry as an ordered SEGMENT
+  // CHAIN: the artifact reconcile's stale-absolute rebase arm is gated on it
+  // (view healing, freshness window), and the wholesale artifact saves
+  // rebase along the chain while the mark exists — a chat turn's buffer
+  // save must not durably revert the backend rebase. Chained rebinds
+  // APPEND a segment (A→B then B→C): the transform resolves in order, so
+  // an A-era path maps A→B→C while a buffer re-vintaged from the durable
+  // JSON between the two rebinds (B-era) still maps B→C — a composed
+  // single segment {A→C} would strand the B-era vintage (review #463
+  // round-D Major 1). Marks are memory-only and never pruned: the save
+  // transform is prefix-exact and must outlive the reconcile window for
+  // the whole process lifetime (a restart starts from the already-rebased
+  // JSON with no marks). Consumed by rebaseArtifactPathsForRebind /
+  // sessionRecentlyRebound below.
+  function applyWorkspaceReboundMark(payload) {
+    if (!payload || payload.action !== "workspace_rebound" || !payload.id || !payload.from || !payload.to) {
+      return;
+    }
+    state.reboundSessionIds = state.reboundSessionIds || {};
+    const existing = state.reboundSessionIds[payload.id];
+    const last = existing && existing.chain && existing.chain[existing.chain.length - 1];
+    if (existing && last && last.from === payload.from && last.to === payload.to) {
+      // Identical retry of the last segment: refresh the view-heal window
+      // only (an older vintage may still be buffered; the chain must
+      // survive).
+      existing.at = Date.now();
+    } else if (existing) {
+      // Chained (last.to === payload.from) or non-contiguous: append. A
+      // non-matching segment is inert for the ordered prefix transform, and
+      // appending keeps every older vintage resolvable (review #463 round-E
+      // minor — the previous replace branch dropped them).
+      existing.chain.push({ from: payload.from, to: payload.to });
+      existing.at = Date.now();
+    } else {
+      state.reboundSessionIds[payload.id] = {
+        at: Date.now(),
+        chain: [{ from: payload.from, to: payload.to }],
+      };
+    }
+  }
+  // Freshness window for the workspace_rebound mark's VIEW heal (the
+  // basename-based reconcile arm): generous enough to cover the rebind
+  // dialog's retry flow, short enough that an old mark cannot misfire the
+  // arm on an unrelated later basename collision. Deliberately does NOT
+  // delete the mark on expiry (review #463 round-C Major 2): the save-path
+  // transform (rebaseArtifactPathsForRebind) is prefix-exact and shares the
+  // mark, and its "whole process lifetime" contract requires the mark to
+  // survive while the session's buffer may still hold stale paths — pruning
+  // here re-armed the durable revert the transform exists to prevent.
+  var REBIND_RECONCILE_WINDOW_MS = 10 * 60 * 1000;
+  function sessionRecentlyRebound(sid) {
+    var marks = state.reboundSessionIds;
+    if (!marks || !sid) return false;
+    var mark = marks[sid];
+    if (!mark || !mark.at) return false;
+    return Date.now() - mark.at <= REBIND_RECONCILE_WINDOW_MS;
+  }
+  // Rebases absolute artifact paths along the session's rebind SEGMENT CHAIN
+  // while a workspace_rebound mark exists (review #463 round-B Major 1 + the
+  // round-D vintage fix): a post-rebind wholesale save of a chat turn's
+  // buffer would otherwise durably revert the backend lane's rebase of
+  // SavedSession.artifacts[].storage_path. Segments apply in order — an
+  // A-era path resolves A→B→C, a buffer re-vintaged from the durable JSON
+  // between chained rebinds (B-era) resolves B→C, a C-era path matches
+  // nothing. Prefix-exact on the folded normalized form; the suffix keeps
+  // the original casing. Relative paths already resolve against the CURRENT
+  // workspace and are untouched; marks are memory-only, so a restart starts
+  // from the already-rebased JSON with no marks and this is a no-op. Strips
+  // trailing separators without a regex (the ESLint deny gate flags the
+  // previous /\/+$/ form as super-linear).
+  function trimTrailingSlashes(p) {
+    var s = normalizedPath(p);
+    while (s.endsWith("/")) s = s.slice(0, -1);
+    return s;
+  }
+  // Locates the folded prefix match in the ORIGINAL string and returns the
+  // code-unit length to cut there, or -1 when no prefix of `original` folds
+  // to `foldedKey`. The fold is for the comparison only — the cut must NOT
+  // use the folded prefix's length: expanding case mappings (U+0130 "İ"
+  // lowercases to "i" + U+0307, two code units for one) make the folded form
+  // longer than the original prefix, and slicing the original at the folded
+  // length eats a character of the saved suffix (review #463 round-13:
+  // "/data/İstanbul/a.txt" used to save as "<to>a.txt"). Lowercasing never
+  // shrinks a string, so the scan can stop once the folded prefix outgrows
+  // the key.
+  function foldedPrefixCutLength(original, foldedKey) {
+    for (var cut = 0; cut <= original.length; cut++) {
+      var folded = original.slice(0, cut).toLowerCase();
+      if (folded === foldedKey) return cut;
+      if (folded.length >= foldedKey.length) return -1;
+    }
+    return -1;
+  }
+  function rebaseArtifactPathsForRebind(sid, paths) {
+    var marks = state.reboundSessionIds;
+    var mark = marks && sid ? marks[sid] : null;
+    if (!mark || !Array.isArray(mark.chain) || !mark.chain.length || !Array.isArray(paths)) {
+      return paths;
+    }
+    var segments = mark.chain
+      .map(function (segment) {
+        return {
+          // The case fold is unconditional (review #463 round-13): the
+          // bridges have no filesystem-case-sensitivity capability to gate
+          // it on — adding one would span the Rust capability surface, both
+          // lanes' platform wiring and this factory's deps, which is not a
+          // small change. On a case-sensitive filesystem two roots differing
+          // only in case are indistinguishable HERE while the POSIX backend
+          // identity key stays case-sensitive — the fold is this transform's
+          // own trade-off (the backend folds unconditionally only on
+          // Windows); reworded per round-24 minor 15, capability-gating
+          // stays the recorded later option.
+          fromKey: trimTrailingSlashes(segment.from).toLowerCase(),
+          toKey: trimTrailingSlashes(segment.to),
+        };
+      })
+      .filter(function (segment) { return segment.fromKey; });
+    if (!segments.length) return paths;
+    return paths.map(function (p) {
+      if (typeof p !== "string" || !isAbsPath(p)) return p;
+      var norm = normalizedPath(p);
+      var mapped = false;
+      for (var i = 0; i < segments.length; i++) {
+        var cut = foldedPrefixCutLength(norm, segments[i].fromKey);
+        if (cut >= 0 && (cut === norm.length || norm.charAt(cut) === "/")) {
+          norm = segments[i].toKey + norm.slice(cut);
+          mapped = true;
+        }
+      }
+      return mapped ? norm : p;
+    });
+  }
+  // Whether the path still points at a PRE-rebind location on this
+  // session's rebind chain (review #463 round-24 minor 3): the reconcile's
+  // stale-absolute heal arm is gated on it, so an unrelated live absolute
+  // entry whose basename collides cannot be taken over and the wrong path
+  // persisted.
+  function pathIsRebindStale(sid, path) {
+    var marks = state.reboundSessionIds;
+    var mark = marks && sid ? marks[sid] : null;
+    if (!mark || !Array.isArray(mark.chain) || !mark.chain.length) return false;
+    var mapped = rebaseArtifactPathsForRebind(sid, [path]);
+    return Array.isArray(mapped) && normalizedPath(mapped[0]) !== normalizedPath(path);
   }
   function noteArtifactChange(path, event, sessionId) {
     if (!path) return;
@@ -4891,11 +5064,19 @@
           if (!isDeliverable(p)) return;
           var na = { path: p, basename: bn }; state.artifacts.push(na); byName[bn] = na; added = true;
         }
-        else if (isAbsPath(p) && !isAbsPath(ex.path)) { ex.path = p; added = true; } // 相对→绝对,open 可靠
+        // Relative→absolute opens reliably; an absolute stale entry may
+        // take over the same-basename live workspace file ONLY inside the
+        // sessionRecentlyRebound window AND only when the stored entry is
+        // real stale rebind geometry (pathIsRebindStale — round-24 minor 3,
+        // the tauri artifact-tracker's identical heal arm: the mark alone
+        // let an unrelated live absolute entry whose basename collides be
+        // taken over and the wrong path persisted; review #463 round-20
+        // minor 9 records the never-called-condition history).
+        else if (isAbsPath(p) && (!isAbsPath(ex.path) || (normalizedPath(ex.path) !== normalizedPath(p) && sessionRecentlyRebound(sid) && pathIsRebindStale(sid, ex.path)))) { ex.path = p; added = true; }
       });
       if (added) {
         notify();
-        try { await invoke("save_session_artifacts", { id: sid, paths: state.artifacts.map(function (a) { return a.path; }) }); } catch (_) {}
+        try { await invoke("save_session_artifacts", { id: sid, paths: rebaseArtifactPathsForRebind(sid, state.artifacts.map(function (a) { return a.path; })) }); } catch (_) {}
       }
     } catch (e) { /* workspace 不存在(新 session)等,忽略 */ }
   }
@@ -5269,6 +5450,130 @@
         function (error) { return { ok: false, error: error }; }
       );
     return { accepted: true, queued: false, completion: completion };
+  }
+
+  // ── Aux chat ─────────────────────────────────────────────────────
+  // Community #433 port note: upstream's M7 refactor moved these domain
+  // bodies into the shared cluster "auxChat" of
+  // src/shared/bridge-shared-helpers.js (window.PinvouBridgeShared); Official
+  // has no shared-cluster mechanism, so the bodies live verbatim in this
+  // lane. Aux sessions are filtered out of the session list by the backend
+  // (they never enter state.sessions), so sendMessageToSession cannot be
+  // reused; turn events are still routed into the per-session buffer by the
+  // existing chat:* listeners keyed on session_id. This lane keeps its genuine
+  // difference — the send dispatch (command parity with doSendFor: Web goes
+  // through web_access_chat, the attachment-handle channel; a desktop host
+  // of this file goes through chat). The web-only session_turn_in_progress
+  // translation wrapper is gone (M7): both lanes hit the same backend turn
+  // gate, and the aux-chat controller only console.warns send errors while
+  // the panel renders the static localized sendFailed copy — the translated
+  // text never reached the user on either lane.
+  function auxChatSendDispatch(sid, message) {
+    return IS_WEB
+      ? invoke("web_access_chat", { message, attachmentHandles: [], sessionId: sid, restrictTools: true })
+      : invoke("chat", { message, attachments: [], sessionId: sid, restrictTools: true });
+  }
+  // Display-only and case-sensitive ON PURPOSE: it only gates ensure/send
+  // inputs on ids the backend itself minted (always lowercase `aux-`);
+  // identity and destructive paths decide in Rust, whose
+  // is_aux_session_id is deliberately case-insensitive. Never reuse this
+  // predicate for a security or destructive decision.
+  function auxChatIsAuxSession(id) {
+    return typeof id === "string" && id.indexOf("aux-") === 0;
+  }
+  function auxChatEmptySnapshot() {
+    return { chatItems: [], busy: false, queued: [] };
+  }
+  async function auxChatEnsure(taskId) {
+    const task = String(taskId || "").trim();
+    if (!task) throw new Error(bt("targetSessionMissing"));
+    const metadata = await invoke("get_or_create_aux_session", { sessionId: task });
+    const auxId = metadata && typeof metadata.id === "string" ? metadata.id : "";
+    if (!auxChatIsAuxSession(auxId)) throw new Error(bt("sessionDataInvalid"));
+    // Aux sessions never become active: they use the background-buffer
+    // load_session(setActive:false) path.
+    await ensureSessionBufferLoaded(auxId);
+    return auxId;
+  }
+  async function auxChatSend(auxId, text) {
+    const sid = String(auxId || "").trim();
+    const message = String(text || "").trim();
+    if (!auxChatIsAuxSession(sid)) throw new Error(bt("targetSessionMissing"));
+    if (!message) throw new Error(bt("replyContentEmpty"));
+    await ensureSessionBufferLoaded(sid);
+    const buf = sessionStates[sid];
+    // Aux sessions never queue (queue is user-input semantics): reject
+    // outright when busy or queued messages exist; the caller retries.
+    if (isBusyFor(sid) || (buf && Array.isArray(buf.queued) && buf.queued.length > 0)) {
+      throw new Error(bt("turnAlreadyInProgress"));
+    }
+    // 发送命令是 lane 真实差异（desktop: chat + attachments;Web:
+    // web_access_chat + attachmentHandles）,本 lane 以 auxChatSendDispatch 分派。
+    return auxChatSendDispatch(sid, message);
+  }
+  // Synchronous snapshot: when not loaded (no buffer) returns an empty
+  // structure — never throws and never triggers a load. Items are shallow-
+  // copied one by one: streaming deltas mutate buffer items in place (the
+  // item.text/html assignments in chat-events), so copying only the array
+  // would share object references and a caller comparing field by field
+  // could not detect changes; after copying, every poll gets fresh
+  // references, making field comparison a true content comparison.
+  function auxChatSnapshotItems(items) {
+    return (Array.isArray(items) ? items : []).map(function (item) {
+      return item && typeof item === "object" ? Object.assign({}, item) : item;
+    });
+  }
+  function auxChatSnapshot(auxId) {
+    const sid = String(auxId || "").trim();
+    if (!sid) return auxChatEmptySnapshot();
+    if (sid === state.activeSessionId) {
+      return {
+        chatItems: auxChatSnapshotItems(state.chatItems),
+        busy: !!state.busy,
+        queued: auxChatSnapshotItems(state.queued),
+      };
+    }
+    const buf = sessionStates[sid];
+    if (!buf) return auxChatEmptySnapshot();
+    // An always-open panel polling snapshot() counts as "reading": refresh
+    // LRU recency consistently with the getBuffer read paths, otherwise
+    // after 32+ session switches the buffer is evicted by capacity and the
+    // panel wrongly shows the empty state.
+    touchSessionBuffer(sid, buf, false);
+    return {
+      chatItems: auxChatSnapshotItems(buf.chatItems),
+      busy: !!buf.busy,
+      queued: auxChatSnapshotItems(buf.queued),
+    };
+  }
+  async function auxChatDiscard(taskId) {
+    const task = String(taskId || "").trim();
+    if (!task) throw new Error(bt("targetSessionMissing"));
+    await invoke("discard_aux_session", { sessionId: task });
+    // The aux id is a pure function of the task id (aux-<taskId>, round-30
+    // B8), so the buffer purge derives it — the old per-task id map was
+    // redundant state that was never pruned (M5). The session:deleted event
+    // fired by backend deletion is handled by the sessions domain as a
+    // fallback — belt and suspenders, and idempotent.
+    purgeSessionBuffer(`aux-${task}`);
+  }
+  // Atomic restart (M6): one backend command discards the old aux session
+  // (gated against its turns) and creates the fresh one — no two-invoke
+  // window for an orphaned discard to land in. The aux id is derived
+  // (aux-<taskId>, round-30 B8), so the stale buffer purge needs no
+  // per-task id map; the backend's session:deleted also purges through
+  // the sessions domain as a fallback.
+  async function auxChatReset(taskId) {
+    const task = String(taskId || "").trim();
+    if (!task) throw new Error(bt("targetSessionMissing"));
+    const metadata = await invoke("reset_aux_session", { sessionId: task });
+    const auxId = metadata && typeof metadata.id === "string" ? metadata.id : "";
+    if (!auxChatIsAuxSession(auxId)) throw new Error(bt("sessionDataInvalid"));
+    purgeSessionBuffer(auxId);
+    // Aux sessions never become active: they use the background-buffer
+    // load_session(setActive:false) path.
+    await ensureSessionBufferLoaded(auxId);
+    return auxId;
   }
 
   function findFirstTurnItem(clientMessageId) {
@@ -5973,10 +6278,49 @@
   listen("session:deleted", function (e) {
     applyDeletedSession(e && e.payload && e.payload.id);
   });
-  listen("session:list_changed", function () {
-    refreshHistoryList().catch(function (error) {
-      console.error("[sessions] session:list_changed refresh failed", error);
-    });
+  // Burst coalescing (review #463 round-20 R3): the rebind command emits one
+  // session:list_changed per affected id, and each undebounced refresh costs
+  // an IPC round trip + an O(n) backend list_sessions + a React commit — a
+  // large rebind burst translated into hundreds of full history refreshes
+  // exactly while the report dialog opens. Leading + trailing: the first
+  // event refreshes immediately (single-event semantics unchanged), events
+  // inside the window set a pending flag collapsed into ONE trailing
+  // refresh. Harnesses without timers fall back to the immediate refresh.
+  var historyRefreshTimer = null;
+  var historyRefreshPending = false;
+  function scheduleHistoryRefresh() {
+    function runRefresh() {
+      refreshHistoryList().catch(function (error) {
+        console.error("[sessions] session:list_changed refresh failed", error);
+      });
+    }
+    if (typeof setTimeout !== "function") {
+      runRefresh();
+      return;
+    }
+    if (historyRefreshTimer) {
+      historyRefreshPending = true;
+      return;
+    }
+    runRefresh();
+    historyRefreshTimer = setTimeout(function () {
+      historyRefreshTimer = null;
+      if (historyRefreshPending) {
+        historyRefreshPending = false;
+        scheduleHistoryRefresh();
+      }
+    }, 200);
+  }
+  listen("session:list_changed", function (e) {
+    var payload = e && e.payload || {};
+    // The rebind command's mark (review #463 round-B Major 1 + round-C
+    // Major 1): consumed by rebaseArtifactPathsForRebind so the wholesale
+    // artifact saves of THIS host cannot durably revert the backend lane's
+    // rebase while a resident web-client buffer holds stale paths. Segment
+    // chain with append-on-chain / refresh-on-identical-retry semantics,
+    // memory-only and never pruned.
+    applyWorkspaceReboundMark(payload);
+    scheduleHistoryRefresh();
   });
   listen("session:model_changed", function (e) {
     var payload = e && e.payload || {};
@@ -10612,6 +10956,12 @@
     init: init,
     sendMessage: sendMessage,
     sendMessageToSession: sendMessageToSession,
+    auxChatEnsure: auxChatEnsure,
+    auxChatSend: auxChatSend,
+    auxChatSnapshot: auxChatSnapshot,
+    auxChatDiscard: auxChatDiscard,
+    auxChatReset: auxChatReset,
+    onSessionDeleted: onSessionDeleted,
     getComposerDraft: getComposerDraft,
     setComposerDraft: setComposerDraft,
     retryFirstTurn: retryFirstTurn,

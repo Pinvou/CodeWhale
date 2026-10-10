@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   parseControllerEnvironment,
   validateControllerEnvironment,
@@ -177,6 +179,70 @@ async function directoryFixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
+
+test("production CLI never skips validation through a directory link", async (t) => {
+  const root = await directoryFixture(t);
+  const relay = fileURLToPath(new URL("../", import.meta.url));
+  const alias = join(root, "linked relay");
+  await symlink(relay, alias, process.platform === "win32" ? "junction" : "dir");
+  const direct = join(relay, "scripts", "deploy-controller-preflight.mjs");
+  const linked = join(alias, "scripts", "deploy-controller-preflight.mjs");
+  for (const [entry, label] of [[direct, "real"], [linked, "linked"]]) {
+    for (const args of [[join(root, "missing-controller.env")], []]) {
+      const result = spawnSync(process.execPath, [entry, ...args], {
+        cwd: root, encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "" },
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status, 1, `${label} must reject invalid or missing env arguments`);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr.trim(), /^(?:ENOENT|controller_env_file_type_invalid)$/u);
+      assert.ok(!result.stderr.includes(root), "failure output must not expose host paths");
+    }
+  }
+});
+
+test("importing the production preflight does not run the CLI", () => {
+  const url = new URL("../scripts/deploy-controller-preflight.mjs", import.meta.url).href;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e",
+    `await import(${JSON.stringify(url)}); console.log('imported');`,
+  ], { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "" } });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "imported");
+  assert.equal(result.stderr, "");
+});
+
+test("route smoke CLI never skips its gate through a directory link", async (t) => {
+  const root = await directoryFixture(t);
+  const relay = fileURLToPath(new URL("../", import.meta.url));
+  const alias = join(root, "linked relay smoke");
+  await symlink(relay, alias, process.platform === "win32" ? "junction" : "dir");
+  for (const entry of [
+    join(relay, "scripts", "controller-route-smoke.mjs"),
+    join(alias, "scripts", "controller-route-smoke.mjs"),
+  ]) {
+    const sentinel = "REVIEW_SYNTHETIC_SENTINEL";
+    const result = spawnSync(process.execPath, [entry, `invalid-url/${sentinel}?secret=${sentinel}`], {
+      cwd: root, encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "" },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1, "invalid smoke input must never pass the deployment gate");
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr.trim(), "controller_route_smoke_failed");
+    assert.ok(!result.stderr.includes(sentinel), "smoke failure must not echo URL or credentials");
+  }
+});
+
+test("importing the route smoke does not open a WebSocket", () => {
+  const url = new URL("../scripts/controller-route-smoke.mjs", import.meta.url).href;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e",
+    `await import(${JSON.stringify(url)}); console.log('imported');`,
+  ], { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "" }, timeout: 3000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "imported");
+  assert.equal(result.stderr, "");
+});
 
 test("state preflight does not create absent directories", async (t) => {
   const root = await directoryFixture(t);

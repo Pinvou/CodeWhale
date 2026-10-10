@@ -58,7 +58,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::features::assistant::engine::{
     AppEngine, EngineTurnSignal, TranscriptOperation, TurnIdentity, TurnLifecycle, TurnReservation,
-    dispatch_turn_bound_cancel,
+    dispatch_remote_turn_cancel, dispatch_turn_bound_cancel,
 };
 #[cfg(any(feature = "benchmark-hooks", test))]
 use crate::features::assistant::eval::{EvalModelSelection, EvalSuiteModelSnapshot, ModelIdentity};
@@ -103,6 +103,86 @@ impl RemoteTurnRuntimePolicy {
             require_model_credentials: true,
         }
     }
+}
+
+// Private, owned preparation: credentials and skill bindings never enter Debug.
+struct TurnRuntimeOptions {
+    policy: RemoteTurnRuntimePolicy,
+    model: Option<SavedModel>,
+    credential: Option<RuntimeModelCredential>,
+    bundle: Option<RemoteRuntimeModelBundle>,
+    skills: Option<Arc<super::skill_materialization::RemoteTurnSkills>>,
+}
+
+async fn prepare_remote_send(
+    session_id: &str,
+    skill_ids: Vec<String>,
+    bundle: Option<RemoteRuntimeModelBundle>,
+    owner: Arc<super::skill_materialization::RemoteTurnOwner>,
+) -> Result<TurnRuntimeOptions> {
+    let skill_session_id = session_id.to_owned();
+    let skills = tokio::task::spawn_blocking(move || {
+        super::skill_materialization::materialize_plain_remote_turn_skills(
+            &skill_session_id,
+            &skill_ids,
+            owner,
+        )
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("task_skill_unavailable"))?
+    .map_err(anyhow::Error::msg)?;
+    Ok(TurnRuntimeOptions {
+        policy: RemoteTurnRuntimePolicy::remote(),
+        model: None,
+        credential: None,
+        bundle,
+        skills: Some(Arc::new(skills)),
+    })
+}
+
+struct ReservedTurnSubmission {
+    content: String,
+    mode: AppMode,
+    persona_conversational: bool,
+    caller_restrict: bool,
+    persona_reminder: Option<String>,
+    expert_snapshot: Option<Arc<ExpertRosterSnapshot>>,
+    expert_candidates: Vec<String>,
+    reservation: TurnReservation,
+}
+
+/// The actual joint acquire -> policy token -> reserved engine-send path.
+/// Pool locks and transcript admission stay at the caller; tests substitute
+/// only acquisition, not the credential preparation or final send policy.
+async fn submit_prepared_turn<F, Fut>(
+    session_id: &str,
+    submission: ReservedTurnSubmission,
+    options: TurnRuntimeOptions,
+    acquire: F,
+) -> Result<()>
+where
+    F: FnOnce(TurnRuntimeOptions) -> Fut,
+    Fut: Future<Output = Result<AppEngine>>,
+{
+    let engine = acquire(options).await?;
+    forward_forced_turn_restrict(
+        session_id,
+        submission.persona_conversational,
+        submission.caller_restrict,
+        submission.persona_reminder,
+        |restrict_tools, reminder| {
+            engine.send_reserved_user_message(
+                submission.content,
+                submission.mode,
+                reminder,
+                restrict_tools,
+                submission.expert_snapshot,
+                submission.expert_candidates,
+                submission.reservation,
+            )
+        },
+    )
+    .await
 }
 
 impl RemoteRuntimeModelBundle {
@@ -386,6 +466,157 @@ impl SessionTurnLifecycles {
     }
 }
 
+/// Whether this turn is forced to zero tools: pure-conversation meta card /
+/// caller per-turn request / an `aux-` auxiliary conversation — any one
+/// forces it.
+/// `aux-` is server-side enforced (same idea as the `sched-` prefix guard):
+/// the bridge layer always passes `restrictTools: true`, but `restrict_tools`
+/// is only an optional call parameter of `chat` / `web_access_chat` — a
+/// browser passing false, or any caller bypassing the first-party bridge,
+/// could get a full-tool turn in an aux session; hence it is pinned at the
+/// pool send chokepoint regardless of the caller's value.
+/// edit_last_turn resends do not go through this function (the foundation's
+/// Op::EditLastTurn carries no tool surface and reuses the engine config);
+/// their zero-tool state is backstopped by the spawn config — see the `aux-`
+/// branch of `bridge::build_engine_config_for_session_roots` — and the
+/// zero-tool *reminder* is merged into the resent message by
+/// `edit_last_turn_reserved` (round-14 minor-1).
+pub(crate) fn turn_restrict_tools(
+    session_id: &str,
+    persona_conversational: bool,
+    caller_restrict: bool,
+) -> bool {
+    persona_conversational
+        || caller_restrict
+        || crate::features::sessions::is_aux_session_id(session_id)
+}
+
+/// Zero-tool leakage guard for aux turns. The empty tool table removes the
+/// tool *declarations* from the request, but tool-trained models (DeepSeek
+/// emits its native DSML invoke markup) still "call" the removed tools by
+/// writing the call syntax into the answer as plain text — the user then sees
+/// raw tool-call markup in the aux panel. The per-turn reminder channel (the
+/// same one persona anchors ride; the reservation's host-side
+/// TranscriptSanitizationRule swaps it for the display copy before the
+/// transcript is persisted) tells the model the turn is tool-less up front. The zero-tool
+/// guarantee itself is unchanged: this only makes the model aware of it.
+/// Kept as defense-in-depth after round-31 M8 isolated the aux engine
+/// configuration (minimal instructions, no MCP/subagents/memory/vision):
+/// markup emission is trained behavior that no prompt change fully removes,
+/// and the reminder restates the boundary next to the user message at a
+/// small fixed per-turn cost.
+pub(crate) const AUX_ZERO_TOOL_REMINDER: &str = "You are answering in an auxiliary Q&A session. This turn has NO tools: the tool list is empty. Do not attempt to call tools or run commands, and never emit tool-call markup or invoke blocks as text. Answer directly in plain text from the conversation and your own knowledge; if an action is truly needed, explain how the user can do it instead.";
+
+/// Merge the aux zero-tool boundary into the per-turn reminder (aux sessions
+/// only; persona anchors, when present, keep their text ahead of it).
+pub(crate) fn merge_aux_zero_tool_reminder(
+    session_id: &str,
+    persona_reminder: Option<String>,
+) -> Option<String> {
+    if !crate::features::sessions::is_aux_session_id(session_id) {
+        return persona_reminder;
+    }
+    Some(match persona_reminder {
+        Some(existing) => format!("{existing}\n\n{AUX_ZERO_TOOL_REMINDER}"),
+        None => AUX_ZERO_TOOL_REMINDER.to_string(),
+    })
+}
+
+/// Per-turn tool restriction, mintable only through the policy above.
+///
+/// PR #433 review round-10 (S2(b)): `AppEngine::send_reserved_user_message`'s
+/// per-turn restriction used to be a bare `bool`, so replacing this composition
+/// with the caller's `restrict_tools_for_turn` kept the whole suite green while
+/// aux sessions regained full tools — the headline zero-tool wiring rested on
+/// review alone. The engine's per-turn send entry now takes this token: the
+/// field is private to this module, so outside it a token can only be obtained
+/// from [`TurnToolRestrict::forced`], which folds in `turn_restrict_tools`.
+/// Handing the caller's `bool` straight to the engine is therefore a compile
+/// error, not a silent regression.
+pub(crate) mod turn_tool_restrict {
+    /// See the module documentation.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct TurnToolRestrict(bool);
+
+    impl TurnToolRestrict {
+        /// Sole constructor: no path from raw flags skips the policy.
+        pub(super) fn forced(
+            session_id: &str,
+            persona_conversational: bool,
+            caller_restrict: bool,
+        ) -> Self {
+            Self(super::turn_restrict_tools(
+                session_id,
+                persona_conversational,
+                caller_restrict,
+            ))
+        }
+
+        /// The composed per-turn decision (`turn_restrict_tools`: caller
+        /// request | pure-conversation meta card | `aux-` prefix).
+        pub(crate) fn restricts_tools(self) -> bool {
+            self.0
+        }
+
+        /// The restriction to apply on the engine that owns `engine_session_id`.
+        ///
+        /// The `aux-` test runs again against the engine's own id, so a token
+        /// minted with an unrelated (or empty) session id can never hand an
+        /// aux session a full-tool turn — the headless wrapper mints with the
+        /// engine's own id through [`forward_forced_turn_restrict`].
+        pub(crate) fn restricts_tools_for(self, engine_session_id: &str) -> bool {
+            self.restricts_tools()
+                || crate::features::sessions::is_aux_session_id(engine_session_id)
+        }
+    }
+}
+
+/// The "last mile" from decision to dispatch is folded into one function: the
+/// forced result computed by `send_reserved_user_message` is handed to the
+/// engine's per-turn send entry as a [`turn_tool_restrict::TurnToolRestrict`],
+/// whose only constructor is this path, and the outgoing per-turn reminder is
+/// produced here by [`merge_aux_zero_tool_reminder`]. The doc comment above
+/// records why the parameter is a token instead of the caller's `bool`; the
+/// reminder rides the same seam because a bare `Option<String>` assembled at
+/// the call site was exactly as unpinned (round-31 M9-rust: deleting the
+/// merge call kept the whole suite green) — through this function, removing
+/// either the token policy or the reminder merge turns an executing test red.
+pub(crate) fn forward_forced_turn_restrict<F>(
+    session_id: &str,
+    persona_conversational: bool,
+    caller_restrict: bool,
+    persona_reminder: Option<String>,
+    send: impl FnOnce(turn_tool_restrict::TurnToolRestrict, Option<String>) -> F,
+) -> F {
+    send(
+        turn_tool_restrict::TurnToolRestrict::forced(
+            session_id,
+            persona_conversational,
+            caller_restrict,
+        ),
+        merge_aux_zero_tool_reminder(session_id, persona_reminder),
+    )
+}
+
+/// The edit-resend counterpart of [`forward_forced_turn_restrict`]'s last
+/// mile: `edit_last_turn_reserved` bypasses the send path, so its aux
+/// zero-tool reminder is merged into the resent message here — the merge and
+/// the engine dispatch are folded into one function so the wiring (not only
+/// the pure helper) is covered by an executing test (round-31 M9-rust: this
+/// was the second unpinned `merge_aux_zero_tool_reminder` call site).
+pub(crate) fn forward_edit_resend_with_reminder<F>(
+    session_id: &str,
+    new_message: String,
+    send: impl FnOnce(String) -> F,
+) -> F {
+    send(match merge_aux_zero_tool_reminder(session_id, None) {
+        Some(reminder) => {
+            format!("<system-reminder>\n{reminder}\n</system-reminder>\n\n{new_message}")
+        }
+        None => new_message,
+    })
+}
+
 fn scheduled_profile_after_turn_gate(
     store: &SessionStore,
     session_id: &str,
@@ -486,6 +717,72 @@ where
     // hook cleanup fired from store.delete; no duplicated side effects.
     crate::features::assistant::timing::clear_session(session_id);
     Ok(true)
+}
+
+/// Aux-aware chat delete: deleting a main chat first deletes its aux session
+/// through the same supplied gated delete (depth 1 — aux sessions never own
+/// another aux, so no recursion guard is needed beyond the prefix check).
+/// `SessionStore::delete`'s record-level cascade alone cannot reach the
+/// engine/forwarder and would leave a still-running aux engine as a
+/// handle-less orphan, so every deletion of a chat session must go through
+/// this wrapper rather than bare `store.delete` (round-13 M-B: the eval
+/// close path and the web-session rollback both bypassed the command-layer
+/// cascade before this wrapper existed).
+async fn delete_chat_session_with_aux_cascade<De, DeFut>(
+    store: &SessionStore,
+    session_id: &str,
+    mut delete: De,
+) -> Result<bool>
+where
+    De: FnMut(&str) -> DeFut,
+    DeFut: Future<Output = Result<bool>>,
+{
+    if !crate::features::sessions::is_aux_session_id(session_id) {
+        if let Some(aux_id) = store.aux_session_id(session_id) {
+            delete(&aux_id)
+                .await
+                .map(|_| ())
+                .context("delete the aux session before its main session")?;
+        }
+    }
+    delete(session_id).await
+}
+
+/// The gated delete half of the atomic aux reset (M6): resolve the task's
+/// derived aux id and delete it through the exact turn gate used by lazy
+/// spawn and send (`delete_chat_session_with_gate`), so a queued sender
+/// observes the completed delete instead of resurrecting the session. Returns
+/// the deleted aux id, or `None` when no aux record exists (idempotent —
+/// the create half then simply makes the fresh session). Never substitute a
+/// bare `store.delete`: the mutation test
+/// `aux_reset_delete_waits_for_the_turn_gate` holds the gate and goes red if
+/// this body proceeds without it.
+async fn reset_aux_session_delete_with_gate<F, Fut, G>(
+    turn_locks: &SessionTurnLocks,
+    store: &SessionStore,
+    main_id: &str,
+    evict_locked: F,
+    forget: G,
+) -> Result<Option<String>>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = ()>,
+    G: FnOnce(&str),
+{
+    let Some(aux_id) = store.aux_session_id(main_id) else {
+        return Ok(None);
+    };
+    let evict_id = aux_id.clone();
+    delete_chat_session_with_gate(
+        turn_locks,
+        store,
+        &aux_id,
+        false,
+        || evict_locked(evict_id),
+        || forget(aux_id.as_str()),
+    )
+    .await?;
+    Ok(Some(aux_id))
 }
 
 #[cfg(test)]
@@ -1142,7 +1439,7 @@ where
                         steer_mode,
                         |identity| cancel_current(&engine, identity),
                     );
-                    if armed {
+                    if armed && requested_generation.is_none() {
                         // The cascade cancel must finish enqueueing before
                         // the turn gate is released (reviewer point 4): the
                         // next turn's SendMessage needs the same turn_lock,
@@ -1251,10 +1548,8 @@ impl ColdEngineCustody {
         }
     }
 
-    fn adopt(mut self) -> (AppEngine, JoinHandle<()>) {
-        self.resources
-            .take()
-            .expect("cold engine custody already adopted")
+    fn adopt(mut self) -> Result<(AppEngine, JoinHandle<()>)> {
+        self.resources.take().context("task_engine_custody_missing")
     }
 }
 
@@ -1306,21 +1601,20 @@ async fn publish_cold_entry<F>(
     session_id: &str,
     custody: ColdEngineCustody,
     build: F,
-) -> AppEngine
+) -> Result<AppEngine>
 where
     F: FnOnce(AppEngine, JoinHandle<()>) -> EngineEntry,
 {
     let mut entries = entries.lock().await;
     // Per-session runtime locking excludes replacements at publication. Keep
     // custody armed if a future bypass violates that invariant.
-    assert!(
-        !entries.contains_key(session_id),
-        "cold publication would replace an owned entry"
-    );
-    let (engine, forwarder) = custody.adopt();
+    if entries.contains_key(session_id) {
+        bail!("task_engine_publication_conflict");
+    }
+    let (engine, forwarder) = custody.adopt()?;
     let result = engine.clone();
     entries.insert(session_id.to_owned(), build(engine, forwarder));
-    result
+    Ok(result)
 }
 
 fn take_remote_owned_entry(
@@ -1338,7 +1632,60 @@ fn take_remote_owned_entry(
     }
 }
 
-/// A session's resident entry: engine plus its own event forwarder.
+/// A reused engine's pending native-window re-check (see
+/// `EngineEntry::native_window_pending`): which server kind to ask and for
+/// which model name. No URL or credential — the re-probe runs against the
+/// freshly prepared bridge's base_url/key, which for a fresh entry is the
+/// same model config the engine was spawned from.
+#[derive(Clone, Debug, PartialEq)]
+struct PendingNativeWindow {
+    model_name: String,
+    kind: crate::core::model_endpoint::LocalServerKind,
+}
+
+impl PendingNativeWindow {
+    /// Captured from the finalized spawn bridge: only routes that are
+    /// native-probeable (Ollama / LM Studio), ended the spawn without a
+    /// served-window fact, and had the adoption path arm the re-check
+    /// (`bridge.native_window_recheck` — true exactly when that route's own
+    /// native fetch ran and served no fact). Arming is part of the
+    /// construction so a fact the route can never adopt (a borrowed roster
+    /// name, a non-operator-owned endpoint) or a declared route (whose own
+    /// fetch is skipped, so it never produces a fact to re-check) can never
+    /// mark the entry: an
+    /// armed re-probe that keeps serving a fact the rebuild path refuses to
+    /// adopt would drop and respawn the engine on every send, forever. A
+    /// fact present at spawn means the normal frozen-until-rebuild
+    /// discipline applies (no re-checking).
+    fn from_finalized(bridge: &Pinvou3Bridge) -> Option<Self> {
+        use crate::core::model_endpoint::LocalServerKind;
+        if !bridge.native_window_recheck || bridge.probed_context_tokens.is_some() {
+            return None;
+        }
+        let kind = bridge.probed_local_kind?;
+        if !matches!(kind, LocalServerKind::Ollama | LocalServerKind::LmStudio) {
+            return None;
+        }
+        let model_name = bridge.effective_model_owned()?.model;
+        Some(Self { model_name, kind })
+    }
+}
+
+/// The reuse-vs-self-heal outcome for a fresh cached entry (see
+/// `EngineEntry::native_window_pending`). Standalone so the decision is
+/// unit-testable without an AppHandle-backed pool (same idiom as
+/// `require_live_engine_for_steer` / `delegate_steer_withdrawal`).
+#[derive(Debug, PartialEq, Eq)]
+enum CachedEntryReuse {
+    /// Keep the cached engine for this turn.
+    Keep,
+    /// The pending window fact materialized since spawn: reclaim the entry
+    /// and fall through to the rebuild path so the fact is adopted.
+    RebuildForWindowFact,
+}
+
+/// A session's resident entry in the pool: the engine + its own event
+/// forwarder task.
 struct EngineEntry {
     engine: AppEngine,
     /// This engine's event forwarder; aborted on evict so a zombie task does
@@ -1353,6 +1700,18 @@ struct EngineEntry {
     /// instance and lazily rebuilds, so new dependencies/startup parameters
     /// take effect without an app restart.
     mcp_config_revision: u64,
+    /// Set at spawn when the route is native-probeable (kind Ollama / LM
+    /// Studio, local) but no served-window fact could be adopted — the
+    /// common shape of a model that was never JIT-loaded yet. While this is
+    /// Some, engine reuse re-checks the native API once per turn
+    /// (`reprobe_missing_native_window`): the first post-load check finds
+    /// `/api/ps` / `/api/v0/models` serving the real window and the entry is
+    /// dropped for a rebuild that adopts it — instead of the collapsed
+    /// 8192-fallback budget surviving the whole first engine lifetime
+    /// (2026-09-30 user report). Holds only the model name and server kind
+    /// (no credentials — the re-probe resolves the key from the freshly
+    /// prepared bridge, which for a fresh entry is the same model config).
+    native_window_pending: Option<PendingNativeWindow>,
     /// Engine epoch (UNIX ms): on the worker ledger, a "still running" record
     /// counts as truly alive only if it had activity within this epoch. The
     /// foundation's restart-load only flips in-memory state and does not
@@ -1830,6 +2189,12 @@ impl EnginePool {
             entries.keys().cloned().collect()
         };
         for sid in sids {
+            // Aux engines are isolated (no skill surface); recreating the
+            // composed directory here would make a `## Skills` block appear
+            // on the next aux turn (round-31 M8).
+            if crate::features::sessions::is_aux_session_id(&sid) {
+                continue;
+            }
             let scope = self.bridge.session_policy(&sid).mode();
             let project_workspace = self.project_workspace_for(&sid);
             let sid_for_log = sid.clone();
@@ -2016,11 +2381,21 @@ impl EnginePool {
         prepared: &PreparedRuntimeModel,
         pins_scheduled_model: bool,
     ) -> Pinvou3Bridge {
+        // Local endpoints (OpenAI-compatible presets and LocalVllm presets
+        // pointing at local/intranet services): probe the service type
+        // (Ollama / vLLM / LM Studio / generic). An OpenaiCompatible route's
+        // thinking control follows the detected foundation wire protocol; a
+        // LocalVllm preset resolves provider from the preset arm instead, so
+        // for those routes the kind feeds only the native served-window
+        // follow-up below. LocalVllm presets must probe too: discovery saves
+        // Ollama/LM Studio endpoints under that preset, and `/v1/models`
+        // there never carries a window fact — without the kind probe the
+        // native fetch below can never fire and the route keeps the 128K
+        // fallback while the monitor shows the real window. The probe result
+        // cannot flip the wire route for these presets (`provider()` resolves
+        // LocalVllm to "vllm" from the preset arm before ever consulting the
+        // probed kind), so a real vLLM classified `Vllm` is inert here.
         apply_prepared_runtime_model(&mut bridge, prepared);
-        // Local endpoints (OpenAI-compatible presets pointing at local/intranet
-        // services): probe the service type (Ollama / vLLM / LM Studio /
-        // generic) so thinking control follows the corresponding foundation
-        // wire protocol.
         // A probe failure (service not started/timeout/auth failure) is
         // classified as generic, keeping the existing openai wire route. The
         // probe request carries a credential from the same origin as real
@@ -2031,7 +2406,7 @@ impl EnginePool {
         // key). A task-scoped remote route is authoritative and must not be
         // rewritten by endpoint probing.
         if !bridge.runtime_route_is_locked()
-            && bridge.provider() == "openai"
+            && (bridge.provider() == "openai" || bridge.provider() == "vllm")
             && base_url_uses_local_or_private(&bridge.base_url())
         {
             let api_key = bridge.api_key();
@@ -2109,15 +2484,51 @@ impl EnginePool {
     /// and `probed_output_tokens` are written. On probe failure (endpoint
     /// unreachable / name not matched) both facts are None and the route
     /// falls back to configured values / window tiers.
+    ///
+    /// Ollama / LM Studio exception: their OpenAI-compatible `/v1/models`
+    /// never carries a window fact, so an endpoint probed as one of them
+    /// gets a native follow-up for the name actually sent — Ollama's
+    /// `/api/ps` effective context → `/api/show` Modelfile `num_ctx`
+    /// declaration, LM Studio's `/api/v0/models` served window
+    /// (`loaded_context_length` on a loaded entry). Only provable runtime
+    /// facts are adopted: a model that was never loaded and declares no
+    /// `num_ctx` stays without a window (the GGUF trained cap is a
+    /// capability ceiling — the server actually serves its 4096-class
+    /// default, which no API exposes — and adopting it would loosen budgets
+    /// into silent upstream truncation). Without any fact the route declares
+    /// no window and the foundation derives its budget from the 8192
+    /// unknown-Ollama fallback — compaction floors at 4096 and the
+    /// post-compaction input budget collapses to 1024 (2026-09-30 user
+    /// report: Ollama actually serving 131072); engine reuse re-checks the
+    /// missing fact (`native_window_pending`), so the first JIT load is
+    /// picked up on the next send instead of at the idle reap.
+    ///
+    /// Arms the reuse re-check (`bridge.native_window_recheck`) exactly when
+    /// this route's own native fetch ran and served no fact. A route whose
+    /// fact can never be adopted (`adopts` false on a borrowed roster name,
+    /// or not operator-owned) never runs the fetch and never arms — the
+    /// re-probe would keep serving a fact the rebuild refuses to adopt and
+    /// respawn the engine on every send; a declared route skips the fetch
+    /// entirely — its budget is the declaration by construction, and the
+    /// per-turn re-check plus an adopting rebuild must not second-guess an
+    /// explicit declaration (the monitor display still shows the smaller
+    /// native fact where one exists; a stale declaration is the user's to
+    /// fix).
     async fn adopt_probed_endpoint_facts(
         bridge: &mut Pinvou3Bridge,
         mut model: SavedModel,
         is_vllm_route: bool,
         pins_scheduled_model: bool,
     ) {
+        // Only the route's own missed native fetch sets this below; every
+        // other path (adopt-less, adopted, declared) leaves it cleared, so
+        // reusing a bridge never inherits a stale arming.
+        bridge.native_window_recheck = false;
         if !(is_vllm_route || model.is_operator_owned_endpoint()) {
             return;
         }
+        // Read before `renamed` below moves `model` into `session_model`.
+        let declared_window = model.context_window_tokens;
         // The probe carries the same credential as real inference
         // (authenticated endpoints 401 on `/v1/models` without credentials;
         // on probe failure the configured values are kept).
@@ -2130,13 +2541,143 @@ impl EnginePool {
         .await;
         let adopts =
             crate::features::monitor::adopts_probed_facts(is_vllm_route, &model.model, &served);
-        if is_vllm_route && served != model.model && !pins_scheduled_model {
+        let renamed = is_vllm_route && served != model.model && !pins_scheduled_model;
+        let sent_name = if renamed {
+            served.clone()
+        } else {
+            model.model.clone()
+        };
+        if renamed {
             model.model = served;
             bridge.session_model = Some(model);
         }
         if adopts {
             bridge.probed_context_tokens = max_len;
             bridge.probed_output_tokens = max_output;
+            // Native window fact for probed-Ollama / probed-LM Studio
+            // endpoints, only when the list probe had none and the facts are
+            // adoptable (the queried name is the one actually sent, so the
+            // fact belongs to this route by construction). Ollama's
+            // `/api/ps`→`/api/show` cascade and LM Studio's
+            // `/api/v0/models` served window are the only native facts these
+            // servers expose; every other kind keeps the listing (vLLM and
+            // friends list `max_model_len`) or no fact (generic). A model
+            // that was never loaded and declares no `num_ctx` stays without
+            // an Ollama window (the GGUF trained cap is a capability
+            // ceiling — the server actually serves its 4096-class default,
+            // which no API exposes — and adopting it would loosen budgets
+            // into silent upstream truncation); engine reuse re-checks the
+            // missing fact once per turn (`native_window_pending`), so the
+            // first load is picked up by the next send without waiting for
+            // the idle reap. For non-vLLM routes the `adopts` gate is an
+            // exact-name match on the sent name; a tagless configured name
+            // still resolves its own `/api/ps` entry via Ollama's
+            // `name:latest` canonicalization, while a genuinely different
+            // name (case- or tag-different) on a multi-entry list fires the
+            // native fetch and safely misses the keyed native maps
+            // (conservative, already a Mismatch display state). Adopted
+            // native values carry no sanity band — deliberately the same
+            // trust class as user declarations and vLLM `max_model_len`: a
+            // tiny honest value (a Modelfile `num_ctx 512` typo, a small
+            // global default) is adopted as-is and preflight fails per turn
+            // with the visible context-recovery error — loud-and-true
+            // instead of the 8192-pretense silently truncating upstream.
+            // There is no in-app override for local presets (the
+            // declaration field is hidden and declarations only min-clamp),
+            // so the escape is the real fix — the server-side context
+            // configuration; the adopted value stays visible on the monitor
+            // card / progress denominator.
+            if max_len.is_none() && declared_window.is_none() {
+                let native = crate::core::model_endpoint::fetch_native_served_context(
+                    bridge.probed_local_kind,
+                    &bridge.base_url(),
+                    Some(api_key.as_str()),
+                    &sent_name,
+                )
+                .await;
+                match native {
+                    Some(Some(ctx)) => bridge.probed_context_tokens = Some(ctx),
+                    Some(None) => {
+                        // The route asked its own native API and got no fact
+                        // — exactly the shape the reuse re-check exists for.
+                        bridge.native_window_recheck = true;
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
+    /// Re-check for a reused engine whose spawn ended without a native
+    /// served-window fact (`EngineEntry::native_window_pending`):
+    /// re-classify the endpoint (cache-peeked; the battery re-runs at most
+    /// once per TTL) and ask the native API that classification selects.
+    /// Returns the window once the server can actually serve it (model
+    /// JIT-loaded since), None while it still can't (unloaded / endpoint
+    /// down / no declaration) — the caller keeps the engine in that case.
+    /// `bridge` is the freshly prepared (unfinalized) bridge of this same
+    /// model config; the fact is deliberately not written here — adoption
+    /// goes through the normal finalize so the route limits derive in one
+    /// place.
+    ///
+    /// The marker's frozen kind is deliberately not trusted for dispatch:
+    /// the stack behind the port can swap while the engine lives (dev
+    /// restart onto a different server class), and re-dialing the stale
+    /// kind's API would 404 on every send without ever arming a fact — the
+    /// 8192-fallback budget would persist past the point where the new
+    /// server could serve the real window. A re-classification to a
+    /// non-probeable kind lands on the helper's `None` arm and keeps (a
+    /// Generic result is never cached, so that shape re-runs the battery
+    /// per send — small local GETs, bounded, and the marker heals or drops
+    /// at the next rebuild).
+    ///
+    /// Native probes are local-only by construction (the marker is armed
+    /// inside the locality-gated finalize block, and a config edit that
+    /// changes the base_url reclaims the entry via whole-struct equality).
+    /// The direct guard below keeps that property local to this function —
+    /// a weakening of the provenance chain upstream cannot silently turn
+    /// the reuse path into a native prober of remote endpoints.
+    async fn reprobe_missing_native_window(
+        bridge: &Pinvou3Bridge,
+        pending: &PendingNativeWindow,
+    ) -> Option<u32> {
+        if !base_url_uses_local_or_private(&bridge.base_url()) {
+            return None;
+        }
+        let api_key = bridge.api_key();
+        let kind = crate::core::model_endpoint::probe_local_server_kind(
+            &bridge.base_url(),
+            Some(api_key.as_str()),
+        )
+        .await;
+        crate::core::model_endpoint::fetch_native_served_context(
+            Some(kind),
+            &bridge.base_url(),
+            Some(api_key.as_str()),
+            &pending.model_name,
+        )
+        .await
+        .unwrap_or(None)
+    }
+
+    /// The reuse-path self-heal decision (see `EngineEntry::
+    /// native_window_pending`): no pending marker → keep without probing;
+    /// pending but the native API still serves no fact → keep (the engine
+    /// stays, the next turn re-asks); pending and the fact materialized →
+    /// rebuild so the fact is adopted. Extracted from `get_or_spawn_with_policy`
+    /// verbatim so the decision — dropping it would let the collapsed
+    /// 8192-fallback budget survive the engine's whole lifetime — is pinned
+    /// by `pending_window_reuse_decision_rebuilds_once_fact_materializes`.
+    async fn cached_entry_reuse_decision(
+        pending: Option<&PendingNativeWindow>,
+        bridge: &Pinvou3Bridge,
+    ) -> CachedEntryReuse {
+        match pending {
+            None => CachedEntryReuse::Keep,
+            Some(pending) => match Self::reprobe_missing_native_window(bridge, pending).await {
+                Some(_) => CachedEntryReuse::RebuildForWindowFact,
+                None => CachedEntryReuse::Keep,
+            },
         }
     }
 
@@ -2199,7 +2740,7 @@ impl EnginePool {
         );
         let mcp_config_revision = self.mcp_config_revision.load(Ordering::Acquire);
 
-        let (fresh_engine, stale) = {
+        let (fresh_engine, pending_window, stale) = {
             let mut entries = self.entries.lock().await;
             if let Some(entry) = entries.get(session_id) {
                 if entry_is_fresh(
@@ -2210,34 +2751,86 @@ impl EnginePool {
                     entry.remote_owner.as_ref(),
                     remote_skills.as_ref().map(|skills| skills.owner()),
                 ) {
-                    (Some(entry.engine.clone()), None)
+                    (
+                        Some(entry.engine.clone()),
+                        entry.native_window_pending.clone(),
+                        None,
+                    )
                 } else {
-                    (None, entries.remove(session_id))
+                    (None, None, entries.remove(session_id))
                 }
             } else {
-                (None, None)
+                (None, None, None)
             }
         };
+        let mut self_healed = false;
         if let Some(engine) = fresh_engine {
-            crate::features::assistant::timing::record_engine_ready(
-                session_id,
-                crate::features::assistant::timing::EngineAcquireTiming {
-                    kind: "reused",
-                    total_ms: elapsed_ms(acquisition_started),
-                    runtime_lock_ms,
-                    prepare_model_ms,
-                    reclaim_ms: 0,
-                    finalize_bridge_ms: 0,
-                    tool_setup_ms: 0,
-                    materialize_skills_ms: 0,
-                    spawn_engine_ms: 0,
-                    load_session_ms: 0,
-                    sync_session_ms: 0,
-                },
-            );
-            return Ok(engine);
+            // Missing-native-window re-adoption (see
+            // `EngineEntry::native_window_pending`): while the spawn ended
+            // without a served-window fact — the shape of a model that was
+            // never JIT-loaded yet — every reuse re-classifies the endpoint
+            // (cache-peeked, so the 7-probe battery re-runs at most once per
+            // 60s TTL) and re-asks the selected native API once (the
+            // `/api/show` leg is 60s-cached in core, `/api/ps` /
+            // `/api/v0/models` are one small local GET each). Worst case
+            // while pending is ~9s inline on this send path — a cold kind
+            // cache against a hung-but-accepting server (3s battery + 3s ps
+            // timeout +, when ps answered Ollama-shaped-but-missing, an
+            // uncached 3s show; `Unreachable` is never cached); with the
+            // kind cached this is ~6s. The re-check ends
+            // once the fact materializes — and only then, not at the idle
+            // reap: an entry in active use never goes idle (every send
+            // refreshes `last_active`), so on a shape that can never prove
+            // a fact (the model unloads between turns on a keep_alive=0
+            // server, or a pre-0.6 Ollama whose `/api/ps` carries no
+            // `context_length`) the re-check rides each send for the
+            // engine's lifetime until an unrelated rebuild drops the
+            // marker (disclosed residual; healthy servers pay ~ms). The
+            // first post-load
+            // check finds the real window and the entry is dropped for the
+            // rebuild below, which re-finalizes with the fact adopted —
+            // instead of the collapsed 8192-fallback budget surviving the
+            // whole first engine lifetime (2026-09-30 user report). Runs
+            // outside the entries lock.
+            if matches!(
+                Self::cached_entry_reuse_decision(pending_window.as_ref(), &bridge).await,
+                CachedEntryReuse::Keep
+            ) {
+                crate::features::assistant::timing::record_engine_ready(
+                    session_id,
+                    crate::features::assistant::timing::EngineAcquireTiming {
+                        kind: "reused",
+                        total_ms: elapsed_ms(acquisition_started),
+                        runtime_lock_ms,
+                        prepare_model_ms,
+                        reclaim_ms: 0,
+                        finalize_bridge_ms: 0,
+                        tool_setup_ms: 0,
+                        materialize_skills_ms: 0,
+                        spawn_engine_ms: 0,
+                        load_session_ms: 0,
+                        sync_session_ms: 0,
+                    },
+                );
+                return Ok(engine);
+            }
+            // The model loaded since this engine spawned: reclaim and fall
+            // through to the rebuild path (mirrors the revision-mismatch
+            // reclaim; a mid-session rebuild is the same path a model edit
+            // takes, including history hydration).
+            self_healed = true;
+            let removed = self.entries.lock().await.remove(session_id);
+            if let Some(entry) = removed {
+                self.reclaim_engine_entry(session_id, entry).await;
+            }
         }
-        let acquire_kind = if stale.is_some() { "rebuilt" } else { "cold" };
+        // A pending-window self-heal drops the entry inline above (so
+        // `stale` is None) but is a mid-session rebuild, not a cold spawn.
+        let acquire_kind = if stale.is_some() || self_healed {
+            "rebuilt"
+        } else {
+            "cold"
+        };
         let reclaim_started = Instant::now();
         if let Some(entry) = stale {
             self.reclaim_engine_entry(session_id, entry).await;
@@ -2249,6 +2842,13 @@ impl EnginePool {
             Self::finalize_runtime_bridge(bridge, &prepared.prepared, pins_scheduled_model).await;
         bridge.remote_turn_skills = remote_skills.clone();
         let finalize_bridge_ms = elapsed_ms(finalize_bridge_started);
+        // Pending re-adoption marker for engine reuse (see
+        // `EngineEntry::native_window_pending`): armed by the adoption inside
+        // finalize only when this route's native fetch actually ran and
+        // served no fact — adopt-less routes (`adopts` false / not
+        // operator-owned) and declared routes never arm, so a served fact
+        // that can never be adopted cannot trigger a rebuild on every send.
+        let native_window_pending = PendingNativeWindow::from_finalized(&bridge);
         let tool_setup_started = Instant::now();
         // The shell execution directory and the engine cwd share one source:
         // resolved uniformly via SessionStore::session_roots
@@ -2279,7 +2879,12 @@ impl EnginePool {
         // exist before spawn, otherwise the first turn's prompt has no
         // `## Skills` block.
         let materialize_skills_started = Instant::now();
-        if remote_skills.is_none() {
+        // Aux sessions are isolated pure-Q&A engines (zero tools, minimal
+        // instructions): they get no skill surface, so no composed directory
+        // is materialized — the send path and the toggle hot refresh skip aux
+        // on the same rule (round-31 M8). The #608 timing bracket stays
+        // outside the guard: for aux it simply reports a near-zero span.
+        if remote_skills.is_none() && !crate::features::sessions::is_aux_session_id(session_id) {
             let sid = session_id.to_string();
             let scope = self.bridge.session_policy(&sid).mode();
             let project_workspace = self.project_workspace_for(&sid);
@@ -2330,7 +2935,11 @@ impl EnginePool {
             steer_incarnation,
         )?;
         let custody = ColdEngineCustody::new(engine, forwarder);
-        let engine = &custody.resources.as_ref().expect("owned cold engine").0;
+        let engine = &custody
+            .resources
+            .as_ref()
+            .context("task_engine_custody_missing")?
+            .0;
         let spawn_engine_ms = elapsed_ms(spawn_engine_started);
 
         // Sync is mandatory even when messages is empty: SyncSession not only
@@ -2353,12 +2962,13 @@ impl EnginePool {
                 runtime_model: prepared,
                 remote_owner: remote_skills.as_ref().map(|skills| skills.owner().clone()),
                 mcp_config_revision,
+                native_window_pending,
                 spawned_at_ms,
                 steer_incarnation,
                 last_active_epoch_ms: AtomicU64::new(Self::now_epoch_ms()),
             }
         })
-        .await;
+        .await?;
         crate::features::assistant::timing::record_engine_ready(
             session_id,
             crate::features::assistant::timing::EngineAcquireTiming {
@@ -2502,9 +3112,10 @@ impl EnginePool {
     /// The take yields `Some(None)` for an idle session with no resident
     /// engine: there is nothing to reclaim, but the shell state may still
     /// exist from an earlier turn and must be reset. Returns false when the
-    /// session was busy at recheck OR when its turn gate could not be
-    /// acquired within [`REBIND_EVICT_GATE_TIMEOUT`] — in both cases nothing
-    /// was touched and the command reports the session as post-busy.
+    /// session was busy at recheck, when its turn gate could not be
+    /// acquired within [`REBIND_EVICT_GATE_TIMEOUT`], or when the runtime
+    /// lock itself timed out (the bounded-take third arm) — in every case
+    /// nothing was touched and the command reports the session as post-busy.
     pub async fn evict_if_idle_for_rebind(&self, session_id: &str) -> bool {
         rebind_evict_with_gates(
             &self.turn_locks,
@@ -2533,15 +3144,27 @@ impl EnginePool {
     /// Delete an ordinary chat under the exact turn gate used by lazy spawn
     /// and send. No queued sender can slip between engine reclaim, disk delete,
     /// and lifecycle cleanup to resurrect the session.
+    ///
+    /// Aux-aware: deleting a main chat first deletes its aux session through
+    /// this same gated path (depth 1 — aux sessions never own another aux), so
+    /// callers that bypass the command-layer cascade (`delete_session`) still
+    /// reclaim the aux engine instead of orphaning it. Never substitute a bare
+    /// `store.delete` for this method on a chat session.
     pub(crate) async fn delete_chat_session(&self, session_id: &str) -> Result<()> {
-        let deleted = delete_chat_session_with_gate(
-            &self.turn_locks,
-            &self.store,
-            session_id,
-            false,
-            || self.evict_locked(session_id),
-            || self.forget_session(session_id),
-        )
+        let deleted = delete_chat_session_with_aux_cascade(&self.store, session_id, |id| {
+            let id = id.to_string();
+            async move {
+                delete_chat_session_with_gate(
+                    &self.turn_locks,
+                    &self.store,
+                    &id,
+                    false,
+                    || self.evict_locked(&id),
+                    || self.forget_session(&id),
+                )
+                .await
+            }
+        })
         .await?;
         // The bare `agent` is available to **all** sessions (not only those
         // with the multi-agent toggle on), and the background ledger write
@@ -2549,7 +3172,14 @@ impl EnginePool {
         // the parent directory) can resurrect the just-deleted sessions/<id>/.
         // A missing directory is the common case and costs nothing; once
         // Shutdown is processed no new writes happen, so it always converges.
-        if deleted {
+        // Aux sessions skip the sweep (round-30 B8): their id is derived
+        // (`aux-{parent_id}`), so a reset (reopen-topic) recreate within the
+        // 2s/6s delay window reuses the same directory the stale sweep would
+        // remove — and the sweep's premise is structurally false for aux
+        // anyway (zero tools ⇒ no subagents, no shell, no background ledger
+        // writer that could resurrect the directory). The `deleted` leg
+        // (#504) also keeps a keep-disposition (stub cleanup) from sweeping.
+        if deleted && !crate::features::sessions::is_aux_session_id(session_id) {
             Self::schedule_late_sweep(
                 crate::platform::paths::sessions_root().join(session_id),
                 "late sweep of deleted chat",
@@ -2595,6 +3225,63 @@ impl EnginePool {
             );
         }
         Ok(())
+    }
+
+    /// Atomically reset a task's auxiliary conversation (M6): delete the
+    /// existing aux session through the same turn gate as
+    /// `discard_aux_session` / chat delete, then create a fresh one and
+    /// return its metadata together with the deleted aux id (so the caller
+    /// can emit `session:deleted`). One primitive, one outcome — the
+    /// frontend's old two-invoke restart (discard, then ensure) had no
+    /// server-side ordering, and under the web relay's non-FIFO premise an
+    /// orphaned discard could execute after the recreate and destroy the
+    /// fresh transcript.
+    ///
+    /// Critical section: the aux session's turn gate, held across engine
+    /// reclaim + disk delete (inside `delete_chat_session_with_gate`). The
+    /// create half deliberately runs outside the gate:
+    /// `SessionStore::get_or_create_aux_session` is commutative — concurrent
+    /// creators converge on the same derived id with the same content
+    /// (store.rs documents why no creation lock is needed) — so a concurrent
+    /// `ensure` landing between the two halves yields the same end state as
+    /// any serialized order: exactly one fresh aux session. Deadlock-freedom:
+    /// the only graph lock this method acquires is the aux id's turn_lock
+    /// (taken and released inside the delete half); the create half takes no
+    /// turn lock, and the store-internal locks it touches are leaf locks
+    /// downstream of `turn_lock` in the documented order (turn_lock → pool →
+    /// scheduled_mutation → sidecar writes). A concurrent `ensure` takes no
+    /// locks at all, and a concurrent `discard` contends for the same single
+    /// turn_lock without holding a second lock, so no wait-cycle can form.
+    pub(crate) async fn reset_aux_chat_session(
+        &self,
+        main_id: &str,
+    ) -> Result<(
+        Option<String>,
+        Result<deepseek_tui::session_manager::SessionMetadata>,
+    )> {
+        // The outer Result covers the delete half only: its failure means
+        // nothing committed and there is nothing to report. The inner one
+        // carries the create half, whose failure must still let the caller
+        // emit session:deleted for the committed delete (see below).
+        let deleted_aux = reset_aux_session_delete_with_gate(
+            &self.turn_locks,
+            &self.store,
+            main_id,
+            |aux_id| async move {
+                self.evict_locked(&aux_id).await;
+            },
+            |aux_id| self.forget_session(aux_id),
+        )
+        .await?;
+        // The create result rides next to `deleted_aux` instead of behind
+        // one outer Result (round-32 review minor 8): when the delete half
+        // committed and the create half then failed (e.g. a concurrent
+        // parent deletion), the aux record is durably gone and the command
+        // must still emit session:deleted — gating the event on overall
+        // success left clients buffering a stale transcript for a session
+        // that no longer exists.
+        let created = self.store.get_or_create_aux_session(main_id);
+        Ok((deleted_aux, created))
     }
 
     /// Eval-only deletion keeps ordinary delete semantics, but also schedules the existing
@@ -3187,6 +3874,25 @@ impl EnginePool {
         restrict_tools_for_turn: bool,
     ) -> Result<()> {
         let reservation = self.reserve_turn(session_id)?;
+        self.send_admitted_user_message(
+            session_id,
+            content,
+            mode,
+            restrict_tools_for_turn,
+            reservation,
+        )
+        .await
+    }
+
+    /// Same plain-turn preparation, with a reservation retained by the remote owner.
+    pub(crate) async fn send_admitted_user_message(
+        &self,
+        session_id: &str,
+        content: String,
+        mode: AppMode,
+        restrict_tools_for_turn: bool,
+        reservation: TurnReservation,
+    ) -> Result<()> {
         let display_message = user_display_message(content.clone());
         let expert_snapshot = (self.store.mode_state(session_id).multi_agent
             && self.swarm_mode_available(session_id))
@@ -3224,17 +3930,7 @@ impl EnginePool {
         owner: Arc<super::skill_materialization::RemoteTurnOwner>,
         reservation: TurnReservation,
     ) -> Result<()> {
-        let skill_session_id = session_id.to_owned();
-        let skills = tokio::task::spawn_blocking(move || {
-            crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
-                &skill_session_id,
-                &skill_ids,
-                owner,
-            )
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("task_skill_unavailable"))?
-        .map_err(anyhow::Error::msg)?;
+        let prepared = prepare_remote_send(session_id, skill_ids, model_override, owner).await?;
         let display_message = user_display_message(content.clone());
         self.send_reserved_user_message_with_model_override(
             session_id,
@@ -3245,10 +3941,10 @@ impl EnginePool {
             None,
             Vec::new(),
             reservation,
-            RemoteTurnRuntimePolicy::remote(),
+            prepared.policy,
             None,
-            model_override,
-            Some(Arc::new(skills)),
+            prepared.bundle,
+            prepared.skills,
         )
         .await
     }
@@ -3283,21 +3979,11 @@ impl EnginePool {
                 )
                 .await;
         }
-        let skill_session_id = session_id.to_owned();
-        let skills = tokio::task::spawn_blocking(move || {
-            crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
-                &skill_session_id,
-                &skill_ids,
-                owner,
-            )
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("task_skill_unavailable"))?
-        .map_err(anyhow::Error::msg)?;
+        let prepared = prepare_remote_send(session_id, skill_ids, model_override, owner).await?;
         let roots = self.store.session_roots(session_id)?;
         let has_images = attachments.iter().any(|item| item.kind == "image");
         let image_mode = if has_images {
-            match model_override.as_ref() {
+            match prepared.bundle.as_ref() {
                 Some(bundle) => bundle.image_input_mode(),
                 None => self.fresh_bridge_for(session_id).await?.image_input_mode(),
             }
@@ -3343,10 +4029,10 @@ impl EnginePool {
             None,
             Vec::new(),
             reservation,
-            RemoteTurnRuntimePolicy::remote(),
+            prepared.policy,
             None,
-            model_override,
-            Some(Arc::new(skills)),
+            prepared.bundle,
+            prepared.skills,
         )
         .await
     }
@@ -3462,7 +4148,8 @@ impl EnginePool {
             baseline_revision,
         )?;
         let scheduled_profile = self.store.scheduled_profile(session_id);
-        if scheduled_profile.is_none() && session_id.starts_with("sched-") {
+        if scheduled_profile.is_none() && crate::features::sessions::is_sched_session_id(session_id)
+        {
             bail!("Scheduled session '{session_id}' no longer exists");
         }
         let turn_lock = self.turn_locks.for_session(session_id).await;
@@ -3500,32 +4187,41 @@ impl EnginePool {
         let persona_reminder = active_card
             .as_ref()
             .map(crate::features::personas::equip_anchor);
-        let restrict_tools = active_card
-            .as_ref()
-            .map_or(false, |c| c.conversational_only);
-        let restrict_tools = restrict_tools || restrict_tools_for_turn;
+        let persona_conversational = active_card.as_ref().is_some_and(|c| c.conversational_only);
         let explicit_credential = model_override
             .as_ref()
             .map(|model| RuntimeModelCredential::api_key(model.api_key.clone()))
             .transpose()?;
-        self.get_or_spawn_with_policy(
+        submit_prepared_turn(
             session_id,
-            false,
-            remote_policy,
-            model_override,
-            explicit_credential,
-            remote_bundle,
-            remote_skills,
-        )
-        .await?
-        .send_reserved_user_message(
-            content,
-            mode,
-            persona_reminder,
-            restrict_tools,
-            expert_snapshot,
-            expert_candidates,
-            reservation,
+            ReservedTurnSubmission {
+                content,
+                mode,
+                persona_conversational,
+                caller_restrict: restrict_tools_for_turn,
+                persona_reminder,
+                expert_snapshot,
+                expert_candidates,
+                reservation,
+            },
+            TurnRuntimeOptions {
+                policy: remote_policy,
+                model: model_override,
+                credential: explicit_credential,
+                bundle: remote_bundle,
+                skills: remote_skills,
+            },
+            |options| {
+                self.get_or_spawn_with_policy(
+                    session_id,
+                    false,
+                    options.policy,
+                    options.model,
+                    options.credential,
+                    options.bundle,
+                    options.skills,
+                )
+            },
         )
         .await
     }
@@ -3809,8 +4505,12 @@ impl EnginePool {
                 // N's leftover subagents is the stop contract and N+1's
                 // just-spawned subagents are indistinguishable app-side; see
                 // the fork registration docs.
-                dispatch_turn_bound_cancel(engine, identity.as_ref(), steer_mode);
-                let _ = engine.handle.try_send(Op::CancelSubAgents);
+                if requested_generation.is_some() {
+                    dispatch_remote_turn_cancel(engine, identity.as_ref(), steer_mode);
+                } else {
+                    dispatch_turn_bound_cancel(engine, identity.as_ref(), steer_mode);
+                    let _ = engine.handle.try_send(Op::CancelSubAgents);
+                }
             },
             // cascade_cancel: awaited in phase two while holding turn_lock,
             // guaranteeing the enqueue completes before the turn gate is
@@ -4027,7 +4727,8 @@ impl EnginePool {
             baseline_revision,
         )?;
         let scheduled_profile = self.store.scheduled_profile(session_id);
-        if scheduled_profile.is_none() && session_id.starts_with("sched-") {
+        if scheduled_profile.is_none() && crate::features::sessions::is_sched_session_id(session_id)
+        {
             bail!("Scheduled session '{session_id}' no longer exists");
         }
         let turn_lock = self.turn_locks.for_session(session_id).await;
@@ -4043,10 +4744,22 @@ impl EnginePool {
         // A resend is also a turn submission: refresh the idle clock (same
         // reason as send_reserved_user_message).
         self.touch_engine_activity(session_id).await;
-        self.get_or_spawn(session_id)
-            .await?
-            .edit_last_turn_reserved(new_message, reservation)
-            .await
+        // Aux zero-tool reminder for edit resends (round-14 minor-1): this
+        // path bypasses send_reserved_user_message, so the reminder is merged
+        // into the resent message by forward_edit_resend_with_reminder —
+        // otherwise an aux edit-resend can regress to literal tool-call
+        // markup in the answer. The block is stripped from the stored
+        // context host-side — the reservation's TranscriptSanitizationRule
+        // swaps the raw prompt for the display copy before the transcript is
+        // persisted, same as on the send path. The tool *surface* stays zero
+        // via the spawn config; persona anchors share the pre-existing gap
+        // and are unchanged. Folding the merge into the dispatch seam keeps
+        // the wiring itself pinned by an executing test (round-31 M9-rust).
+        let engine = self.get_or_spawn(session_id).await?;
+        forward_edit_resend_with_reminder(session_id, new_message, |message| {
+            engine.edit_last_turn_reserved(message, reservation)
+        })
+        .await
     }
 
     /// Manually compacts one session. Engines are spawned lazily, so a session
@@ -4586,19 +5299,22 @@ mod scheduled_model_tests {
     }
     const TEST_SUBMISSION: &str = "sub-test";
     use super::{
-        BoundedJoinOutcome, EvalModelSnapshots, ModelIdentity, ModelUpdateRevisions, Op,
-        Pinvou3Bridge, PreparedRuntimeState, REBIND_EVICT_GATE_TIMEOUT,
+        AUX_ZERO_TOOL_REMINDER, BoundedJoinOutcome, EvalModelSnapshots, ModelIdentity,
+        ModelUpdateRevisions, Op, Pinvou3Bridge, PreparedRuntimeState, REBIND_EVICT_GATE_TIMEOUT,
         SESSION_MODEL_BINDING_STALE_ERROR, ScheduledUnattendedGuard, SessionShellManagers,
         SessionTurnLifecycles, SessionTurnLocks, SessionTurnShellTasks, TURN_GATE_AWAIT_TIMEOUT,
         TranscriptOperation, TurnIdentity, bounded_join_while_holding_turn_gate,
         bounded_shutdown_sends, cancel_turn_with_gates, default_model_for_new_session_from,
-        delete_chat_session_with_gate, delete_scheduled_run_with_gate, delete_then_forget,
-        dispatch_turn_bound_cancel, entry_is_fresh, evict_if_idle_with_gates, generation_matches,
-        identity_for_active_model, identity_for_saved_model, prepare_selected_runtime_model,
-        quiesce_engine_before_reclaim, rebind_evict_with_gates, rebind_evictable,
-        resolve_eval_model_selection_from, resolve_runtime_model_override, resolve_scheduled_model,
-        resolve_spawn_model, retry_shutdown_sends, scheduled_profile_after_turn_gate,
-        should_still_reap_after_snapshot, user_display_message, validate_prepared_runtime_route,
+        delete_chat_session_with_aux_cascade, delete_chat_session_with_gate,
+        delete_scheduled_run_with_gate, delete_then_forget, dispatch_remote_turn_cancel,
+        dispatch_turn_bound_cancel, entry_is_fresh, evict_if_idle_with_gates,
+        forward_edit_resend_with_reminder, forward_forced_turn_restrict, generation_matches,
+        identity_for_active_model, identity_for_saved_model, merge_aux_zero_tool_reminder,
+        prepare_selected_runtime_model, quiesce_engine_before_reclaim, rebind_evict_with_gates,
+        rebind_evictable, reset_aux_session_delete_with_gate, resolve_eval_model_selection_from,
+        resolve_runtime_model_override, resolve_scheduled_model, resolve_spawn_model,
+        retry_shutdown_sends, scheduled_profile_after_turn_gate, should_still_reap_after_snapshot,
+        turn_restrict_tools, user_display_message, validate_prepared_runtime_route,
     };
     use crate::features::assistant::engine::TurnBoundCancelOps;
     use crate::features::assistant::runtime_model::{
@@ -4670,6 +5386,371 @@ mod scheduled_model_tests {
         unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
         let bridge = Pinvou3Bridge::boot().expect("boot isolated test bridge");
         (bridge, home, restore)
+    }
+
+    /// Round-32 review minor 8: the reset's delete half can commit and the
+    /// create half then fail (a concurrent parent deletion between the
+    /// command layer's existence check and the create leg). The gate must
+    /// still report the deleted aux id, and the store's create leg must
+    /// error — the exact `(Some, Err)` shape the command layer needs to
+    /// emit `session:deleted` for the committed delete before failing.
+    #[tokio::test]
+    async fn reset_reports_the_deleted_aux_when_the_create_half_fails() {
+        let guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-reset-create-fault-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        // SAFETY: the test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        let store = SessionStore::boot_with_scheduled_root(tmp.join("scheduled"))
+            .expect("boot isolated store");
+        let main = store
+            .create_new("/model".into(), None, std::env::temp_dir())
+            .expect("create main");
+        let aux = store
+            .create_aux_session(&main.metadata.id)
+            .expect("create aux");
+        // The concurrent parent deletion: the main record leaves the disk
+        // after the command layer checked it, before the create leg runs.
+        std::fs::remove_file(
+            crate::platform::paths::sessions_root().join(format!("{}.json", main.metadata.id)),
+        )
+        .expect("remove the parent record out of band");
+
+        let turn_locks = super::SessionTurnLocks::default();
+        let deleted = reset_aux_session_delete_with_gate(
+            &turn_locks,
+            &store,
+            &main.metadata.id,
+            |_aux_id| async move {},
+            |_aux_id| {},
+        )
+        .await
+        .expect("the delete half commits: the gate does not require the parent");
+        assert_eq!(
+            deleted.as_deref(),
+            Some(aux.id.as_str()),
+            "the gate reports the committed delete's aux id"
+        );
+        let created = store.get_or_create_aux_session(&main.metadata.id);
+        assert!(
+            created.is_err(),
+            "the create half must fail: the parent record is gone"
+        );
+        assert!(
+            store.durable_session_record_is_absent(&aux.id),
+            "the old aux record is durably gone once the delete half committed"
+        );
+        drop(guard);
+    }
+
+    /// PR #433 review (MAJOR): `restrict_tools` is only an optional call
+    /// parameter of `chat` / `web_access_chat`, so an aux session's tool
+    /// restriction cannot rely on caller discipline — the `aux-` prefix
+    /// forces zero tools at the pool send chokepoint, and a caller passing
+    /// false is restricted all the same; ordinary sessions are unchanged.
+    #[test]
+    fn aux_session_turn_is_tool_free_regardless_of_caller() {
+        // aux session: caller passes false / true, with or without a meta
+        // card — always zero tools.
+        assert!(turn_restrict_tools("aux-1", false, false));
+        assert!(turn_restrict_tools("aux-1", false, true));
+        assert!(turn_restrict_tools("aux-1", true, false));
+        // ordinary session: keep the existing semantics (restricted only by
+        // a caller per-turn request / a pure-conversation meta card).
+        assert!(!turn_restrict_tools("sess-plain", false, false));
+        assert!(turn_restrict_tools("sess-plain", false, true));
+        assert!(turn_restrict_tools("sess-plain", true, false));
+        // sched- and other prefixed sessions do not take the aux rule.
+        assert!(!turn_restrict_tools("sched-1", false, false));
+    }
+
+    /// The zero-tool table alone does not stop tool-trained models from
+    /// emitting their native tool-call markup as answer text (live repro: a
+    /// DeepSeek aux turn answered with a literal DSML invoke block). Aux
+    /// turns must therefore carry the zero-tool boundary in the per-turn
+    /// reminder, merged after any persona anchor; non-aux sessions must not
+    /// gain a reminder they never had.
+    #[test]
+    fn aux_turn_carries_zero_tool_boundary_reminder() {
+        // Plain session: reminder untouched (None stays None, persona text
+        // passes through verbatim — no aux boundary appended).
+        assert_eq!(merge_aux_zero_tool_reminder("sess-plain", None), None);
+        let persona = "persona anchor".to_string();
+        assert_eq!(
+            merge_aux_zero_tool_reminder("sess-plain", Some(persona.clone())),
+            Some(persona)
+        );
+        // Aux session without a persona: boundary alone.
+        assert_eq!(
+            merge_aux_zero_tool_reminder("aux-1", None),
+            Some(AUX_ZERO_TOOL_REMINDER.to_string())
+        );
+        // Aux session with a persona: anchor first, boundary second.
+        let merged =
+            merge_aux_zero_tool_reminder("aux-1", Some("persona anchor".to_string())).unwrap();
+        assert!(merged.starts_with("persona anchor\n\n"));
+        assert!(merged.ends_with(AUX_ZERO_TOOL_REMINDER));
+        // Case-insensitive aux prefix, same as the tool gate.
+        assert!(merge_aux_zero_tool_reminder("AUX-1", None).is_some());
+        assert!(merge_aux_zero_tool_reminder("sched-1", None).is_none());
+    }
+
+    /// PR #433 review round-8 (M-1): the is-aux decision is a prefix test on
+    /// the client-supplied id string, but id validation allows uppercase and
+    /// ids resolve to files without case canonicalization — on
+    /// case-insensitive filesystems an `AUX-<suffix>` alias loads the real
+    /// aux record. The gate must therefore be case-insensitive, or the alias
+    /// runs a full-tool turn over the aux session.
+    #[test]
+    fn aux_tool_gate_is_case_insensitive_against_id_aliases() {
+        assert!(turn_restrict_tools("AUX-1", false, false));
+        assert!(turn_restrict_tools("Aux-1", false, false));
+        assert!(turn_restrict_tools("aUx-1", false, false));
+        // A normal id can never collide: the generator emits lowercase
+        // base36, and a non-prefixed id stays caller-driven either way.
+        assert!(!turn_restrict_tools("SESS-plain", false, false));
+        assert!(!turn_restrict_tools("AUXILIARY-1", false, false));
+        // Round-9 MAJOR-1: multibyte ids must not panic the prefix helpers
+        // (byte slicing at a non-char boundary panics; these guards run on
+        // client-supplied ids before charset validation).
+        assert!(!turn_restrict_tools("aux帮", false, false));
+        assert!(!turn_restrict_tools("sched计划", false, false));
+    }
+
+    /// Round-9 MAJOR-1 regression pin: the case-insensitive helpers must be
+    /// boundary-safe — byte slicing panics inside a multibyte char, and the
+    /// guards run on client-supplied ids before any charset validation.
+    #[test]
+    fn aux_sched_prefix_helpers_never_panic_on_multibyte_ids() {
+        use crate::features::sessions::{is_aux_session_id, is_sched_session_id};
+        for id in ["aux帮", "sched计划", "au€", "sched-", "aux-é", "日", ""] {
+            // The assertion is the absence of a panic; ASCII-correct results
+            // are covered by the gate truth table above.
+            let _ = is_aux_session_id(id);
+            let _ = is_sched_session_id(id);
+        }
+        assert!(is_aux_session_id("AUX-1"));
+        assert!(!is_aux_session_id("aux帮"));
+        assert!(!is_sched_session_id("sched计划"));
+    }
+
+    /// PR #433 review round-6 (MAJOR) + round-10 (S2(b)): the "last mile" from
+    /// decision to dispatch — `send_reserved_user_message` hands the forced
+    /// result of `turn_restrict_tools` to the engine's per-turn send entry.
+    /// Round-6 pinned the value with this capture closure but left the caller's
+    /// `bool` an equally valid argument type, so passing it straight through
+    /// kept every test green. The entry now takes
+    /// [`TurnToolRestrict`](super::turn_tool_restrict::TurnToolRestrict), which
+    /// only `forward_forced_turn_restrict` can mint: this test pins the value
+    /// the engine reads, and the type makes "hand the caller's `bool` to the
+    /// engine" a compile error instead of a silent regression.
+    #[test]
+    fn send_dispatch_forwards_forced_restrict_to_engine_entry() {
+        let captured = std::cell::Cell::new(None);
+        {
+            let captured = &captured;
+            forward_forced_turn_restrict(
+                "aux-1",
+                false,
+                false,
+                None,
+                |turn_tool_restrict, _reminder| {
+                    captured.set(Some(turn_tool_restrict));
+                },
+            );
+        }
+        let aux = captured
+            .get()
+            .expect("aux session must yield a restrict token");
+        assert!(
+            aux.restricts_tools(),
+            "for an aux session the combined result must restrict (zero tools) even when the caller passes false"
+        );
+        assert!(
+            aux.restricts_tools_for("aux-1"),
+            "the per-turn restrict reaching the engine for an aux session must be true (zero tools)"
+        );
+
+        captured.set(None);
+        {
+            let captured = &captured;
+            forward_forced_turn_restrict(
+                "sess-plain",
+                false,
+                false,
+                None,
+                |turn_tool_restrict, _reminder| {
+                    captured.set(Some(turn_tool_restrict));
+                },
+            );
+        }
+        let plain = captured.get().expect("a plain session must yield a token");
+        assert!(
+            !plain.restricts_tools(),
+            "control: a plain session with no caller restriction and no meta card stays unrestricted in the combined result"
+        );
+        assert!(
+            !plain.restricts_tools_for("sess-plain"),
+            "control: a plain session with no caller restriction and no meta card keeps restrict=false at the engine"
+        );
+
+        captured.set(None);
+        {
+            let captured = &captured;
+            forward_forced_turn_restrict(
+                "sess-plain",
+                false,
+                true,
+                None,
+                |turn_tool_restrict, _reminder| {
+                    captured.set(Some(turn_tool_restrict));
+                },
+            );
+        }
+        let caller_forced = captured
+            .get()
+            .expect("caller-forced restriction must yield a token");
+        assert!(
+            caller_forced.restricts_tools(),
+            "control: a caller's per-turn restriction request is passed through as-is"
+        );
+        assert!(caller_forced.restricts_tools_for("sess-plain"));
+
+        // A pure-conversation meta card forces the restriction on its own.
+        captured.set(None);
+        {
+            let captured = &captured;
+            forward_forced_turn_restrict(
+                "sess-plain",
+                true,
+                false,
+                None,
+                |turn_tool_restrict, _reminder| {
+                    captured.set(Some(turn_tool_restrict));
+                },
+            );
+        }
+        assert!(
+            captured
+                .get()
+                .expect("a conversational-only meta card must yield a token")
+                .restricts_tools(),
+            "the combined result must restrict while a conversational-only meta card is in effect"
+        );
+
+        // Even a token minted for another session (wrong/empty id — the
+        // headless harness uses "") cannot un-restrict the aux session: the
+        // engine entry re-checks the aux prefix against its OWN session id.
+        let mismatched =
+            super::turn_tool_restrict::TurnToolRestrict::forced("sess-plain", false, false);
+        assert!(
+            !mismatched.restricts_tools(),
+            "the token's own combined value comes from the session it was minted for and does not change with the engine id"
+        );
+        assert!(
+            mismatched.restricts_tools_for("aux-1"),
+            "the engine-side aux prefix re-check must catch tokens whose session id does not match"
+        );
+        assert!(
+            !mismatched.restricts_tools_for(""),
+            "an empty id (headless engine) is not an aux session; the token's own value applies"
+        );
+    }
+
+    /// PR #433 review round-31 (M9-rust): the reminder leg of the send "last
+    /// mile". The pure `merge_aux_zero_tool_reminder` helper had test
+    /// coverage, but its CALL at the send dispatch did not — deleting the
+    /// merge left the whole suite green while aux turns lost the zero-tool
+    /// reminder and regressed to literal tool-call markup in the answer. The
+    /// merge now lives inside `forward_forced_turn_restrict`, the only path
+    /// to the engine's per-turn send entry: this capture closure pins the
+    /// reminder the engine actually receives, for aux and non-aux ids.
+    #[test]
+    fn send_dispatch_merges_aux_zero_tool_reminder_into_outgoing_reminder() {
+        // Aux id: the outgoing reminder carries the persona anchor first and
+        // the zero-tool boundary after it.
+        let reminder = forward_forced_turn_restrict(
+            "aux-reminder-wire",
+            false,
+            false,
+            Some("persona anchor".to_string()),
+            |_token, reminder| reminder,
+        )
+        .expect("an aux turn must always carry a reminder");
+        assert!(
+            reminder.starts_with("persona anchor\n\n"),
+            "the persona anchor keeps its lead position: {reminder}"
+        );
+        assert!(
+            reminder.contains(AUX_ZERO_TOOL_REMINDER),
+            "the zero-tool reminder must reach the outgoing aux turn"
+        );
+
+        // Aux id without a persona anchor: the reminder is the boundary alone.
+        let reminder =
+            forward_forced_turn_restrict("aux-reminder-wire", false, false, None, |_t, r| r);
+        assert_eq!(
+            reminder.as_deref(),
+            Some(AUX_ZERO_TOOL_REMINDER),
+            "with no persona anchor the aux reminder is the zero-tool boundary itself"
+        );
+
+        // Control: a plain session's reminder passes through untouched —
+        // no zero-tool block is ever attached to a normal turn.
+        let reminder = forward_forced_turn_restrict(
+            "sess-plain",
+            false,
+            false,
+            Some("persona anchor".to_string()),
+            |_t, r| r,
+        );
+        assert_eq!(reminder.as_deref(), Some("persona anchor"));
+        let reminder = forward_forced_turn_restrict("sess-plain", false, false, None, |_t, r| r);
+        assert!(
+            reminder.is_none(),
+            "a plain session with no persona anchor sends no reminder"
+        );
+    }
+
+    /// PR #433 review round-31 (M9-rust): the second call site.
+    /// `edit_last_turn_reserved` bypasses the send path, so its reminder is
+    /// merged into the resent message — a call that was likewise unpinned
+    /// (deleting it kept the suite green). The merge now lives inside
+    /// `forward_edit_resend_with_reminder`, the only path from the pool's
+    /// edit-resend entry to the engine: this capture closure pins the exact
+    /// message the engine receives, for aux and non-aux ids.
+    #[test]
+    fn edit_resend_dispatch_merges_aux_zero_tool_reminder_into_outgoing_message() {
+        let message = forward_edit_resend_with_reminder(
+            "aux-reminder-wire",
+            "edited question".to_string(),
+            |message| message,
+        );
+        assert!(
+            message.starts_with("<system-reminder>\n"),
+            "the aux edit resend must carry the reminder block: {message}"
+        );
+        assert!(
+            message.contains(AUX_ZERO_TOOL_REMINDER),
+            "the zero-tool reminder must reach the outgoing aux edit resend"
+        );
+        assert!(
+            message.ends_with("\n</system-reminder>\n\nedited question"),
+            "the user text rides after the reminder block: {message}"
+        );
+
+        // Control: a plain session's resent message is forwarded verbatim.
+        let message = forward_edit_resend_with_reminder(
+            "sess-plain",
+            "edited question".to_string(),
+            |message| message,
+        );
+        assert_eq!(message, "edited question");
     }
 
     /// The spawn funnel installs the session id as the OpenCode gateway
@@ -5224,6 +6305,66 @@ mod scheduled_model_tests {
         assert!(
             turn_shell_tasks.has_registry(sid),
             "turn-scope registry survives a timed-out eviction"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rebind_eviction_runtime_lock_timeout_leaves_session_untouched() {
+        // Round-24 minor 6 (the previously untested sibling arm): the
+        // runtime lock is held across a cold spawn for many seconds — far
+        // beyond any turn-gate wait — so it carries its own bounded
+        // timeout. A runtime lock held past REBIND_EVICT_GATE_TIMEOUT must
+        // give the eviction up exactly like the turn-gate arm: not idle
+        // (post-busy), no take, no reclaim, no shell-state reset.
+        let turn_locks = SessionTurnLocks::default();
+        let runtime_locks = SessionTurnLocks::default();
+        let shell_managers = SessionShellManagers::default();
+        let turn_shell_tasks = SessionTurnShellTasks::default();
+        let sid = "session-rebind-evict-runtime-timeout";
+        let manager = shell_managers.for_session(sid, PathBuf::from("D:/old-root"));
+        turn_shell_tasks.for_session(sid, manager);
+
+        // The turn gate is free (the eviction acquires it immediately); a
+        // cold spawn holds the runtime lock for its whole duration.
+        let runtime = runtime_locks.for_session(sid).await;
+        let _cold_spawn = runtime.lock().await;
+
+        let take_ran = Arc::new(AtomicBool::new(false));
+        let probe_take = take_ran.clone();
+        let started = tokio::time::Instant::now();
+        let evicted = rebind_evict_with_gates(
+            &turn_locks,
+            &runtime_locks,
+            &shell_managers,
+            &turn_shell_tasks,
+            sid,
+            move || {
+                probe_take.store(true, Ordering::Release);
+                async { Some(()) }
+            },
+            |_| async {},
+        )
+        .await;
+
+        assert!(
+            !evicted,
+            "a runtime lock held past the timeout counts as not idle (reported post-busy)"
+        );
+        assert!(
+            started.elapsed() >= REBIND_EVICT_GATE_TIMEOUT,
+            "the eviction waited the bounded timeout on the runtime lock"
+        );
+        assert!(
+            !take_ran.load(Ordering::Acquire),
+            "the take closure must not run without the runtime lock"
+        );
+        assert!(
+            shell_managers.get(sid).is_some(),
+            "shell state survives a runtime-lock timeout"
+        );
+        assert!(
+            turn_shell_tasks.has_registry(sid),
+            "turn-scope registry survives a runtime-lock timeout"
         );
     }
 
@@ -6245,6 +7386,91 @@ mod scheduled_model_tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
+    /// PR #433 review round-13 (M-B): the pool-level chat delete must cascade
+    /// to the aux session through the gated delete *first* (depth 1), so
+    /// callers that bypass the command-layer cascade (eval close, web-session
+    /// rollback) cannot leave a running aux engine as a handle-less orphan.
+    /// Reordering the wrapper (main before aux) or dropping the aux leg must
+    /// fail this test.
+    #[tokio::test]
+    async fn chat_delete_cascades_to_aux_before_main() {
+        let _env_guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-engine-pool-aux-cascade-{}",
+            std::process::id()
+        ));
+        let previous_home = std::env::var("PINVOU3_HOME").ok();
+        let _ = std::fs::remove_dir_all(&home);
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+
+        let store = SessionStore::boot().expect("session store");
+        let main = store
+            .create_new("/model".into(), None, std::env::temp_dir())
+            .expect("create main");
+        let aux = store
+            .get_or_create_aux_session(&main.metadata.id)
+            .expect("create aux");
+
+        let deleted = Arc::new(StdMutex::new(Vec::new()));
+        let recording_delete = |id: &str| {
+            let id = id.to_string();
+            let store = store.clone();
+            let deleted = deleted.clone();
+            async move {
+                deleted.lock().unwrap().push(id.clone());
+                store.delete(&id).map(|_| true)
+            }
+        };
+        delete_chat_session_with_aux_cascade(&store, &main.metadata.id, recording_delete)
+            .await
+            .expect("cascaded delete");
+
+        assert_eq!(
+            deleted.lock().unwrap().as_slice(),
+            &[aux.id.clone(), main.metadata.id.clone()],
+            "the aux session must be deleted strictly before its main session"
+        );
+        assert!(store.load(&aux.id).is_err());
+        assert!(store.load(&main.metadata.id).is_err());
+
+        // Depth 1: deleting an aux session directly must not look up a mapping
+        // (aux sessions never own another aux) — a single delete, no cascade.
+        let main_b = store
+            .create_new("/model".into(), None, std::env::temp_dir())
+            .expect("create main B");
+        let aux_b = store
+            .get_or_create_aux_session(&main_b.metadata.id)
+            .expect("create aux B");
+        let deleted_b = Arc::new(StdMutex::new(Vec::new()));
+        let recording_delete_b = |id: &str| {
+            let id = id.to_string();
+            let store = store.clone();
+            let deleted = deleted_b.clone();
+            async move {
+                deleted.lock().unwrap().push(id.clone());
+                store.delete(&id).map(|_| true)
+            }
+        };
+        delete_chat_session_with_aux_cascade(&store, &aux_b.id, recording_delete_b)
+            .await
+            .expect("direct aux delete");
+        assert_eq!(
+            deleted_b.lock().unwrap().as_slice(),
+            std::slice::from_ref(&aux_b.id)
+        );
+
+        match previous_home {
+            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
     #[tokio::test]
     async fn engine_reclaim_quiesces_event_producer_before_persistence() {
         let order = Arc::new(StdMutex::new(Vec::new()));
@@ -6359,6 +7585,258 @@ mod scheduled_model_tests {
         assert!(!fake_engine_present.load(Ordering::Acquire));
         assert!(forgotten.load(Ordering::Acquire));
         assert!(store.load(&session_id).is_err());
+
+        match previous_home {
+            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// M6 mutation pin: the aux reset's delete half must run under the aux
+    /// session's turn gate — replacing the gated delete with a bare
+    /// `store.delete` lets the body complete while a turn (the blocker below)
+    /// still owns the gate, and the "must wait" assertions go red.
+    #[tokio::test]
+    async fn aux_reset_delete_waits_for_the_turn_gate() {
+        let _env_guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-engine-pool-aux-reset-gate-{}",
+            std::process::id()
+        ));
+        let previous_home = std::env::var("PINVOU3_HOME").ok();
+        let _ = std::fs::remove_dir_all(&home);
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+
+        let store = SessionStore::boot().expect("session store");
+        let main_id = store
+            .create_new("wire-model".to_string(), None, home.join("workspace"))
+            .expect("chat session")
+            .metadata
+            .id;
+        let aux_id = store
+            .get_or_create_aux_session(&main_id)
+            .expect("aux session")
+            .id;
+        let locks = SessionTurnLocks::default();
+        let gate = locks.for_session(&aux_id).await;
+        // A running aux turn owns the gate; the reset's delete half must queue behind it.
+        let blocker = gate.lock().await;
+        let evicted = Arc::new(AtomicBool::new(false));
+        let forgotten = Arc::new(AtomicBool::new(false));
+
+        let reset_locks = locks.clone();
+        let reset_store = store.clone();
+        let reset_main = main_id.clone();
+        let reset_evicted = evicted.clone();
+        let reset_forgotten = forgotten.clone();
+        let reset_aux = aux_id.clone();
+        let reset = tokio::spawn(async move {
+            reset_aux_session_delete_with_gate(
+                &reset_locks,
+                &reset_store,
+                &reset_main,
+                |evict_id| {
+                    assert_eq!(
+                        evict_id, reset_aux,
+                        "the gated delete must target the derived aux id"
+                    );
+                    let flag = reset_evicted.clone();
+                    async move {
+                        flag.store(true, Ordering::Release);
+                    }
+                },
+                move |_forget_id| {
+                    reset_forgotten.store(true, Ordering::Release);
+                },
+            )
+            .await
+        });
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !evicted.load(Ordering::Acquire),
+            "the reset's engine reclaim must wait for the aux turn gate"
+        );
+        assert!(
+            store.load(&aux_id).is_ok(),
+            "the aux record must survive while the turn gate is held"
+        );
+        drop(blocker);
+        drop(gate);
+
+        let deleted = reset
+            .await
+            .expect("reset task joins")
+            .expect("gated delete");
+        assert_eq!(deleted.as_deref(), Some(aux_id.as_str()));
+        assert!(evicted.load(Ordering::Acquire));
+        assert!(forgotten.load(Ordering::Acquire));
+        assert!(
+            store.load(&aux_id).is_err(),
+            "the aux record must be deleted once the gate frees"
+        );
+
+        match previous_home {
+            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// M6: with no aux record the reset's delete half is an idempotent no-op
+    /// (the create half then simply makes the fresh session).
+    #[tokio::test]
+    async fn aux_reset_delete_is_a_no_op_without_an_aux() {
+        let _env_guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-engine-pool-aux-reset-absent-{}",
+            std::process::id()
+        ));
+        let previous_home = std::env::var("PINVOU3_HOME").ok();
+        let _ = std::fs::remove_dir_all(&home);
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+
+        let store = SessionStore::boot().expect("session store");
+        let main_id = store
+            .create_new("wire-model".to_string(), None, home.join("workspace"))
+            .expect("chat session")
+            .metadata
+            .id;
+        let locks = SessionTurnLocks::default();
+        let deleted = reset_aux_session_delete_with_gate(
+            &locks,
+            &store,
+            &main_id,
+            |_evict_id| async { panic!("no aux engine to reclaim") },
+            |_forget_id| panic!("no aux session to forget"),
+        )
+        .await
+        .expect("no-op reset delete");
+        assert_eq!(deleted, None);
+
+        match previous_home {
+            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// PR #433 review regression: `delete_session`'s Chat branch cascades the
+    /// auxiliary session through the gate (same pipeline as
+    /// `discard_aux_session`) — first `pool.delete_chat_session(aux)`
+    /// (reclaim the engine + store.delete + late sweep inside the turn gate),
+    /// then delete the main session; `store.delete`'s on-disk cascade only
+    /// removes the record and would leave a running aux engine as a
+    /// handle-less orphan.
+    /// The command body itself is now covered directly: the extracted,
+    /// Tauri-free `delete_chat_session_cascade` pins the command's exact
+    /// order at the command layer. This test keeps its own value: it drives
+    /// the pool side (`delete_chat_session_with_gate`) over a real store and
+    /// engine, verifying the pool delete path reclaims the aux engine and
+    /// deletes the aux record, strictly before the main session's deletion.
+    #[tokio::test]
+    async fn chat_delete_cascades_aux_engine_reclaim_before_main_delete() {
+        let _env_guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-engine-pool-aux-cascade-{}",
+            std::process::id()
+        ));
+        let previous_home = std::env::var("PINVOU3_HOME").ok();
+        let _ = std::fs::remove_dir_all(&home);
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+
+        let store = SessionStore::boot().expect("session store");
+        let main_id = store
+            .create_new("wire-model".to_string(), None, home.join("workspace"))
+            .expect("chat session")
+            .metadata
+            .id;
+        let aux_id = store
+            .get_or_create_aux_session(&main_id)
+            .expect("aux session")
+            .id;
+        let locks = SessionTurnLocks::default();
+        let aux_engine_present = Arc::new(AtomicBool::new(true));
+        let main_engine_present = Arc::new(AtomicBool::new(true));
+        let order = Arc::new(StdMutex::new(Vec::new()));
+
+        // An in-order replay of the delete_session command's Chat branch
+        // (app/commands/sessions.rs): resolve the mapping first, gated-delete
+        // the aux (reclaim engine + delete record), then gated-delete the
+        // main session.
+        let resolved_aux = store.aux_session_id(&main_id).expect("aux mapping");
+        assert_eq!(resolved_aux, aux_id);
+        {
+            let engine = aux_engine_present.clone();
+            let steps = order.clone();
+            delete_chat_session_with_gate(
+                &locks,
+                &store,
+                &resolved_aux,
+                false,
+                || async move {
+                    engine.store(false, Ordering::Release);
+                    steps.lock().unwrap().push("evict-aux");
+                },
+                || {},
+            )
+            .await
+            .expect("delete aux session");
+        }
+        {
+            let engine = main_engine_present.clone();
+            let steps = order.clone();
+            delete_chat_session_with_gate(
+                &locks,
+                &store,
+                &main_id,
+                false,
+                || async move {
+                    engine.store(false, Ordering::Release);
+                    steps.lock().unwrap().push("evict-main");
+                },
+                || {},
+            )
+            .await
+            .expect("delete main session");
+        }
+
+        assert!(
+            !aux_engine_present.load(Ordering::Acquire),
+            "the cascade delete must reclaim the aux engine and must not leave a handle-less orphan"
+        );
+        assert!(!main_engine_present.load(Ordering::Acquire));
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["evict-aux", "evict-main"],
+            "aux engine reclamation must happen strictly before the main session delete"
+        );
+        assert!(
+            store.load(&aux_id).is_err(),
+            "the aux session record must be deleted"
+        );
+        assert!(store.load(&main_id).is_err());
+        assert!(
+            store.aux_session_id(&main_id).is_none(),
+            "the main -> aux mapping must not remain after the cascade delete"
+        );
 
         match previous_home {
             // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
@@ -7712,6 +9190,141 @@ mod scheduled_model_tests {
     }
 
     #[tokio::test]
+    async fn remote_stale_generation_never_claims_or_cascades_into_replacement() {
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "remote-stale-generation";
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some("old-submission".into())));
+        let old = lifecycle.current_turn_generation().unwrap();
+        assert!(lifecycle.finish_once(|| {}).is_some());
+        let replacement = lifecycle.reserve().unwrap();
+        let result = cancel_turn_with_gates(
+            &locks,
+            &lifecycles,
+            &shell_tasks,
+            sid,
+            Some(old),
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            || async { Some(()) },
+            |_, _| panic!("new turn cancellation"),
+            |_: &()| async { panic!("session-wide cascade") },
+            |_, _| panic!("new reservation claim"),
+        )
+        .await;
+        assert_eq!(result, (Some(old), false));
+        assert!(replacement.ensure_active().is_ok());
+    }
+
+    #[tokio::test]
+    async fn remote_generation_is_rechecked_after_engine_lookup_await() {
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "remote-lookup-generation";
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some("old-submission".into())));
+        let old = lifecycle.current_turn_generation().unwrap();
+        let lookups = AtomicU64::new(0);
+        let result = cancel_turn_with_gates(
+            &locks,
+            &lifecycles,
+            &shell_tasks,
+            sid,
+            Some(old),
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            || async {
+                if lookups.fetch_add(1, Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                    assert!(lifecycle.finish_once(|| {}).is_some());
+                    assert!(lifecycle.on_submitted(Some("new-submission".into())));
+                }
+                Some(())
+            },
+            |_, _| panic!("new turn cancellation after await"),
+            |_: &()| async { panic!("session-wide cascade") },
+            |_, _| panic!("new turn claim"),
+        )
+        .await;
+        assert_eq!(result, (Some(old), false));
+        assert_ne!(lifecycle.current_turn_generation(), Some(old));
+    }
+
+    #[tokio::test]
+    async fn remote_delayed_forwarder_does_not_latch_disposition_or_cascade() {
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "remote-delayed-forwarder";
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        let old = lifecycle.current_turn_generation().unwrap();
+        let engine = FakeTurnSlotEngine::installed_on("autonomous-new-turn");
+        cancel_turn_with_gates(
+            &locks,
+            &lifecycles,
+            &shell_tasks,
+            sid,
+            Some(old),
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            || async { Some(engine.clone()) },
+            |engine, identity| {
+                dispatch_remote_turn_cancel(
+                    engine.as_ref(),
+                    identity.as_ref(),
+                    deepseek_tui::core::engine::CancelMode::StopDropInbox,
+                )
+            },
+            |_: &Arc<FakeTurnSlotEngine>| async { panic!("session-wide cascade") },
+            |_, _| false,
+        )
+        .await;
+        assert!(engine.fired_turns().is_empty());
+        assert_eq!(engine.disposition_count(), 0);
+        assert!(
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_bound_turn_cancels_only_the_named_slot() {
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "remote-bound-turn";
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        lifecycle.on_started("owned-turn".into());
+        let old = lifecycle.current_turn_generation().unwrap();
+        let engine = FakeTurnSlotEngine::installed_on("owned-turn");
+        cancel_turn_with_gates(
+            &locks,
+            &lifecycles,
+            &shell_tasks,
+            sid,
+            Some(old),
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            || async { Some(engine.clone()) },
+            |engine, identity| {
+                dispatch_remote_turn_cancel(
+                    engine.as_ref(),
+                    identity.as_ref(),
+                    deepseek_tui::core::engine::CancelMode::StopDropInbox,
+                )
+            },
+            |_: &Arc<FakeTurnSlotEngine>| async { panic!("session-wide cascade") },
+            |_, _| false,
+        )
+        .await;
+        let fired = engine.fired_turns();
+        assert!(!fired.is_empty());
+        assert!(fired.iter().all(|turn| turn == "owned-turn"));
+    }
+
+    #[tokio::test]
     async fn pending_stop_replay_cancels_the_genuinely_pending_turn() {
         // The other half of the submit→TurnStarted window (review round:
         // "keep coverage that a genuinely pending target is eventually
@@ -8301,6 +9914,72 @@ mod scheduled_model_tests {
             assert!(lifecycle.finish_once(|| {}).is_some());
         }
     }
+
+    /// Production-wiring probe (review #463 round-14 R2): every behavioral
+    /// test of `rebind_evict_with_gates` injects a hand-copied take closure
+    /// that hard-codes the scheduled arm away (`rebind_evictable(active,
+    /// false)`), so deleting `scheduled_running_sessions` from the PRODUCTION
+    /// closure in `evict_if_idle_for_rebind` shipped green. The pool itself
+    /// needs an AppHandle and cannot be unit-constructed, so pin the reads
+    /// in the production body — the layer the pure-predicate tests cannot
+    /// cover.
+    fn production_body<'a>(src: &'a str, signature: &str) -> &'a str {
+        let start = src.find(signature).expect("production fn must exist");
+        let rest = &src[start + signature.len()..];
+        // End at the next fn ITEM, not the next `pub ` token (review #463
+        // round-17 SF-3): a `pub(crate)`/`pub(super)` item would otherwise
+        // extend the span past the function under test, silently diluting
+        // (and eventually neutralizing) the contains-assertions.
+        let end = [
+            "\n    pub ",
+            "\n    pub(crate) ",
+            "\n    pub(super) ",
+            "\n    ///",
+        ]
+        .iter()
+        .filter_map(|marker| rest.find(marker))
+        .min()
+        .map_or(src.len(), |offset| start + signature.len() + offset);
+        &src[start..end]
+    }
+
+    #[test]
+    fn rebind_engine_take_production_closure_reads_turn_and_scheduled_state() {
+        // Git may materialize CRLF on Windows; preserve the exact test-module
+        // cutoff and production assertions without making checkout EOL semantic.
+        let src = include_str!("engine_pool.rs").replace("\r\n", "\n");
+        // Round-26 MAJOR-3: cut at the test module exactly like projects.rs's
+        // `production_source` (round-18) — an unanchored find over the WHOLE
+        // file lands on this probe's own string argument once the production
+        // function is deleted or renamed, and the span then contains the
+        // probe's own assertion text, which can never fail.
+        let src = &src[..src
+            .find("#[allow(clippy::await_holding_lock)]\nmod scheduled_model_tests {")
+            .expect("the test module marker must exist")];
+        let body = production_body(src, "pub async fn evict_if_idle_for_rebind");
+        assert!(
+            body.contains("is_turn_active(session_id)"),
+            "the take must recheck the turn state before reclaiming",
+        );
+        assert!(
+            body.contains("scheduled_running_sessions"),
+            "the take must refuse eviction while a scheduled turn is running",
+        );
+        // review #463 round-19 SF-4: contains-only is order-insensitive —
+        // moving the entry removal BEFORE the evictability recheck would
+        // evict a session that just turned busy. Pin the order: the
+        // rebind_evictable gate must precede the removal.
+        let gate_at = body
+            .find("rebind_evictable(")
+            .expect("the take must gate on rebind_evictable");
+        let remove_at = body
+            .find("entries.lock().await.remove(session_id)")
+            .expect("the take must remove the pool entry");
+        assert!(
+            gate_at < remove_at,
+            "the evictability recheck must precede the entry removal"
+        );
+    }
 }
 
 /// Wiring tests for spawn-time probe adoption, in two layers:
@@ -8319,7 +9998,9 @@ mod scheduled_model_tests {
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
 mod probed_facts_wiring_tests {
-    use super::{EnginePool, Pinvou3Bridge, PreparedRuntimeModel};
+    use super::{
+        CachedEntryReuse, EnginePool, PendingNativeWindow, Pinvou3Bridge, PreparedRuntimeModel,
+    };
     use crate::core::model_endpoint::{LocalServerKind, models_mock};
     use crate::features::runtime_bundle::platform::Pinvou3Bundle;
     use crate::platform::credential_store::CredentialState;
@@ -8408,6 +10089,7 @@ mod probed_facts_wiring_tests {
             code_session_predicate: None,
             external_acp_session_predicate: None,
             image_analyze_always: false,
+            native_window_recheck: false,
         }
     }
 
@@ -8453,6 +10135,269 @@ mod probed_facts_wiring_tests {
         assert_eq!(bridge.probed_context_tokens, Some(262_144));
         assert_eq!(bridge.probed_output_tokens, Some(4_096));
         assert_eq!(bridge.session_model.as_ref().unwrap().model, "my-model");
+    }
+
+    /// Ollama's `/v1/models` never carries a window fact; an endpoint probed
+    /// as Ollama must follow up on the native API. The loaded model's
+    /// `/api/ps` effective context (the deployment ground truth, e.g. a
+    /// 131072 OLLAMA_CONTEXT_LENGTH serving) fills `probed_context_tokens`,
+    /// so route limits no longer fall to the foundation's 8192
+    /// unknown-Ollama fallback (compaction floor 4096 / input budget 1024).
+    #[tokio::test]
+    async fn ollama_probed_route_adopts_native_ps_context() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(131_072),
+            "the native effective context must ride the probed facts"
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            0,
+            "the /api/ps fact wins; /api/show stays unqueried"
+        );
+        assert_eq!(bridge.session_model.as_ref().unwrap().model, "my-model");
+    }
+
+    /// A hand-typed tagless configured name (`ollama run llama3` shape)
+    /// against a canonical roster: Ollama reports the entry as
+    /// `llama3:latest` in `/api/ps`, so the route's own native fetch must
+    /// still resolve it — otherwise the first-load self-heal never lands
+    /// and the 8192-fallback collapse (a global `OLLAMA_CONTEXT_LENGTH`,
+    /// the 2026-09-30 report's fatality) survives the engine's whole
+    /// lifetime with the marker armed forever. This is the pin whose
+    /// absence let that shape slip through round 5: dropping the
+    /// `:latest` fallback turns all three assertions red.
+    #[tokio::test]
+    async fn tagless_configured_name_adopts_canonical_ps_window() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            (
+                "/v1/models",
+                200,
+                r#"{"data":[{"id":"llama3:latest"},{"id":"deepseek-r1:14b"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"llama3:latest","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "llama3", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(131_072),
+            "the tagless configured name resolves its own canonical /api/ps entry"
+        );
+        assert!(
+            !bridge.native_window_recheck,
+            "a fact was adopted — the reuse re-check must not arm"
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            0,
+            "the ps fact wins; /api/show stays unqueried"
+        );
+    }
+
+    /// Same tagless shape on a single-model server (a fresh install with
+    /// one downloaded model): `resolve_served_model_from_entries` follows
+    /// the single listed id, so served is the canonical `llama3:latest`
+    /// while the route stays the hand-typed `llama3` — the adoption gate
+    /// must fold the Ollama canonical form. Without the fold the whole
+    /// native block is skipped (no adoption AND no arming, since the
+    /// fetch and the re-check marker share the gate) and the
+    /// 8192-fallback collapse survives the engine's whole lifetime with
+    /// no self-heal.
+    #[tokio::test]
+    async fn tagless_single_entry_roster_adopts_canonical_ps_window() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            (
+                "/v1/models",
+                200,
+                r#"{"data":[{"id":"llama3:latest"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"llama3:latest","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "llama3", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(131_072),
+            "the tagless configured name adopts its canonical entry even on a single-entry roster"
+        );
+        assert!(
+            !bridge.native_window_recheck,
+            "a fact was adopted — the reuse re-check must not arm"
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            0,
+            "the ps fact wins; /api/show stays unqueried"
+        );
+    }
+
+    /// Model downloaded but not loaded (no /api/ps entry) with a Modelfile
+    /// num_ctx declaration: the declared value is the window fact (it is the
+    /// effective value once the model loads).
+    #[tokio::test]
+    async fn ollama_probed_route_falls_back_to_show_context() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            (
+                "/api/show",
+                200,
+                r#"{"parameters":"num_ctx 32768","model_info":{"general.architecture":"qwen3","qwen3.context_length":40960}}"#.into(),
+            ),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(bridge.probed_context_tokens, Some(32_768));
+    }
+
+    /// Never loaded and no num_ctx declaration: `/api/show` only carries the
+    /// GGUF *trained* context (a capability ceiling — an unloaded model
+    /// actually serves at the server default, e.g. 4096, which no API
+    /// exposes). The trained cap must not become the route limit: adopting
+    /// it would loosen compaction budgets beyond what the server accepts and
+    /// let upstream silently truncate, and the value is frozen for the
+    /// pooled engine's lifetime (no refresh after the first load). The route
+    /// keeps no probed window instead, i.e. the conservative foundation
+    /// fallback, until a respawn after the model has loaded (`/api/ps` then
+    /// reports the effective value).
+    #[tokio::test]
+    async fn ollama_probed_route_refuses_trained_context_without_num_ctx() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            (
+                "/api/show",
+                200,
+                r#"{"model_info":{"general.architecture":"qwen3","qwen3.context_length":131072}}"#
+                    .into(),
+            ),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            1,
+            "the /api/show follow-up ran and still must refuse the trained cap"
+        );
+        assert_eq!(
+            bridge.probed_context_tokens, None,
+            "a 128K trained cap with no runtime declaration must not become the route limit"
+        );
+    }
+
+    /// The native follow-up is gated on the endpoint being probed as Ollama:
+    /// any other kind (Generic / vLLM / LM Studio / unprobed) never issues
+    /// the native requests.
+    #[tokio::test]
+    async fn non_ollama_kind_skips_native_context_fetch() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Generic);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(bridge.probed_context_tokens, None);
+        assert_eq!(
+            mock.hits_for("/api/ps"),
+            0,
+            "non-Ollama kinds must not receive Ollama native probes"
+        );
+        assert_eq!(mock.hits_for("/api/show"), 0);
+    }
+
+    /// Facts never borrow across names: the configured name missing from the
+    /// list is *kept* (served == configured → adopts holds), so the native
+    /// follow-up fires — but it queries `/api/ps` + `/api/show` **by that
+    /// name**, and another loaded model's context ("a" here) cannot be
+    /// misattributed to it.
+    #[tokio::test]
+    async fn kept_unlisted_name_fetches_only_its_own_native_fact() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            (
+                "/v1/models",
+                200,
+                r#"{"data":[{"id":"a"},{"id":"b"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"a","context_length":131072}]}"#.into(),
+            ),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "gone", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            mock.hits_for("/api/ps"),
+            1,
+            "the native follow-up fires for the kept name"
+        );
+        assert_eq!(
+            bridge.probed_context_tokens, None,
+            "another model's /api/ps fact must not be lent to the unlisted name"
+        );
+        assert_eq!(
+            bridge.session_model.as_ref().unwrap().model,
+            "gone",
+            "non-vLLM routes keep the configured name"
+        );
     }
 
     #[tokio::test]
@@ -8543,9 +10488,623 @@ mod probed_facts_wiring_tests {
         );
     }
 
+    /// The real finalize_runtime_bridge injection block (Ollama side):
+    /// the kind probe completes as Ollama from the live `/api/tags`
+    /// signature (no hand-set `probed_local_kind`), and the adoption
+    /// follow-up then fetches the native window for the name actually sent
+    /// — pinning the production ordering "kind probe before adopt" that
+    /// the whole feature depends on: reordering those two blocks must turn
+    /// this red.
+    #[tokio::test]
+    async fn finalize_runtime_bridge_adopts_native_window_for_ollama_kind() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            // Ollama's OpenAI shim shape: the listing carries no window fact.
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            // The kind signature that classifies the endpoint as Ollama.
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            // The native effective context the follow-up must adopt.
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let bridge = wiring_bridge(model.clone());
+        let prepared = PreparedRuntimeModel::unchanged(model);
+        let bridge = EnginePool::finalize_runtime_bridge(bridge, &prepared, false).await;
+        assert_eq!(
+            bridge.probed_local_kind,
+            Some(LocalServerKind::Ollama),
+            "the live /api/tags signature must classify the endpoint before adoption"
+        );
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(131_072),
+            "the native effective context must ride the probed facts"
+        );
+        assert_eq!(
+            mock.hits_for("/api/show"),
+            0,
+            "the /api/ps fact wins; /api/show stays unqueried"
+        );
+        assert_eq!(
+            bridge.session_model.as_ref().unwrap().model,
+            "my-model",
+            "non-vLLM routes do no served-name correction"
+        );
+    }
+
+    /// Round-3 R1: a discovery-added Ollama endpoint is saved under the
+    /// LocalVllm preset (provider "vllm"). The kind probe must run for
+    /// vllm-provider local routes too, so the native follow-up fires and
+    /// the route carries the real window — instead of the 128K fallback
+    /// while the monitor shows the truth. Driven through the real finalize
+    /// block (no hand-set kind): the live `/api/tags` signature classifies
+    /// the endpoint, then the adoption adopts the `/api/ps` fact.
+    #[tokio::test]
+    async fn finalize_runtime_bridge_probes_local_vllm_route_for_ollama_window() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            // Ollama's OpenAI shim shape: the listing carries no window fact.
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            // The kind signature that classifies the endpoint as Ollama.
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::LocalVllm, "my-model", None);
+        model.base_url = mock.base_url.clone();
+        let bridge = wiring_bridge(model.clone());
+        let prepared = PreparedRuntimeModel::unchanged(model);
+        let bridge = EnginePool::finalize_runtime_bridge(bridge, &prepared, false).await;
+        assert_eq!(
+            bridge.probed_local_kind,
+            Some(LocalServerKind::Ollama),
+            "a local vllm-provider route must be kind-probed (discovery saves Ollama under this preset)"
+        );
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(131_072),
+            "the native effective context must reach the route instead of the 128K fallback"
+        );
+        assert_eq!(mock.hits_for("/api/show"), 0, "the /api/ps fact wins");
+    }
+
+    /// Adoption-level pin for the same path: a hand-set Ollama kind on a
+    /// vllm-provider route adopts the `/api/ps` effective context for the
+    /// name actually sent.
+    #[tokio::test]
+    async fn local_vllm_preset_ollama_kind_adopts_native_ps_context() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::LocalVllm, "my-model", None);
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, true, false).await;
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(131_072),
+            "a vllm-preset route with an Ollama kind must adopt the native window"
+        );
+        assert_eq!(mock.hits_for("/api/show"), 0);
+    }
+
+    /// Round-3 R1 (LM Studio side): a probed-LM Studio endpoint adopts the
+    /// native `/api/v0/models` served window (`loaded_context_length` of
+    /// the loaded entry — bug #726's 131072-vs-12918 divergence), never the
+    /// capability cap, and never the Ollama native APIs.
+    #[tokio::test]
+    async fn lmstudio_kind_adopts_v0_served_window() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            // The listing carries no window fact.
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            (
+                "/api/v0/models",
+                200,
+                r#"{"data":[{"id":"my-model","state":"loaded","max_context_length":131072,"loaded_context_length":12918}]}"#
+                    .into(),
+            ),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::LmStudio);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(12_918),
+            "the served window (12918), not the capability cap (131072)"
+        );
+        assert_eq!(
+            mock.hits_for("/api/ps"),
+            0,
+            "an LM Studio endpoint must not be asked the Ollama native API"
+        );
+        assert_eq!(mock.hits_for("/api/show"), 0);
+    }
+
+    /// Round-3 R3: the reuse-path re-adoption marker. `from_finalized`
+    /// captures only native-probeable routes that ended the spawn without a
+    /// served-window fact (a fact at spawn means the normal
+    /// frozen-until-rebuild discipline applies; non-native kinds never
+    /// re-check), and only when the adoption path armed the re-check (see
+    /// `pending_window_not_armed_when_fact_cannot_be_adopted` /
+    /// `pending_window_not_armed_for_declared_route` — a fact the route can
+    /// never adopt, or a declaration that min-clamps any fact, must never
+    /// mark the entry). `reprobe_missing_native_window` returns the window
+    /// once the server can actually serve it (model JIT-loaded since) and
+    /// None while it can't. The get_or_spawn glue applies the extracted
+    /// `cached_entry_reuse_decision` to drop the entry, reclaim, and let
+    /// the rebuild path re-finalize and adopt — the decision itself is
+    /// pinned by `pending_window_reuse_decision_rebuilds_once_fact_
+    /// materializes`; the surrounding pool plumbing (EnginePool needs an
+    /// AppHandle) stays the unit-test boundary of the rest of the spawn
+    /// wiring.
+    #[tokio::test]
+    async fn pending_native_window_marks_factless_native_routes() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        // Ollama route, model never loaded, no num_ctx → pending.
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let bridge = wiring_bridge(model.clone());
+        let prepared = PreparedRuntimeModel::unchanged(model);
+        let bridge = EnginePool::finalize_runtime_bridge(bridge, &prepared, false).await;
+        let pending = PendingNativeWindow::from_finalized(&bridge)
+            .expect("a factless Ollama route must be marked pending");
+        assert_eq!(pending.model_name, "my-model");
+        // Arming is part of the construction: without it nothing is marked,
+        // so a route that never asked its native API can never mark itself.
+        let mut unarmed = bridge.clone();
+        unarmed.native_window_recheck = false;
+        assert_eq!(
+            PendingNativeWindow::from_finalized(&unarmed),
+            None,
+            "an unarmed spawn must never mark the entry, however factless it is"
+        );
+        // The re-probe against the still-unloaded server: no fact (engine
+        // stays).
+        assert_eq!(
+            EnginePool::reprobe_missing_native_window(&bridge, &pending).await,
+            None
+        );
+        // After the model loads, the re-probe finds the effective window.
+        // The re-probe re-classifies the endpoint first, so the mock must
+        // carry the Ollama signature the battery looks for.
+        let loaded = models_mock::spawn(&[
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut loaded_model =
+            saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        loaded_model.base_url = loaded.base_url.clone();
+        let loaded_bridge = wiring_bridge(loaded_model);
+        assert_eq!(
+            EnginePool::reprobe_missing_native_window(&loaded_bridge, &pending).await,
+            Some(131_072),
+            "the post-load fact must be found so the caller can drop the entry for a rebuild"
+        );
+        // A route that ended the spawn WITH a fact is not pending.
+        let loaded_finalize = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut with_fact_model =
+            saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        with_fact_model.base_url = loaded_finalize.base_url.clone();
+        let with_fact_bridge = wiring_bridge(with_fact_model.clone());
+        let with_fact_bridge = EnginePool::finalize_runtime_bridge(
+            with_fact_bridge,
+            &PreparedRuntimeModel::unchanged(with_fact_model),
+            false,
+        )
+        .await;
+        assert_eq!(
+            PendingNativeWindow::from_finalized(&with_fact_bridge),
+            None,
+            "a fact adopted at spawn means the normal rebuild discipline applies"
+        );
+        // A Generic (no-signature) route is never pending.
+        let generic =
+            models_mock::spawn(&[("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into())]);
+        let mut generic_model =
+            saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        generic_model.base_url = generic.base_url.clone();
+        let generic_bridge = wiring_bridge(generic_model.clone());
+        let generic_bridge = EnginePool::finalize_runtime_bridge(
+            generic_bridge,
+            &PreparedRuntimeModel::unchanged(generic_model),
+            false,
+        )
+        .await;
+        assert_eq!(
+            bridge.probed_local_kind,
+            Some(LocalServerKind::Ollama),
+            "sanity: the first fixture classified Ollama"
+        );
+        assert_eq!(
+            PendingNativeWindow::from_finalized(&generic_bridge),
+            None,
+            "non-native kinds have no native API to re-check"
+        );
+    }
+
+    /// Round-5 MAJOR pin: a route whose fact can materialize but can never
+    /// be adopted must not arm the reuse re-check. The roster lists only
+    /// `server-name` while the route is configured `my-model`, so `adopts`
+    /// is false and the spawn never runs the native fetch — but `/api/show`
+    /// resolves the loose name server-side and would serve `num_ctx` on
+    /// every re-probe. Arming here would drop and respawn the engine on
+    /// every send, forever, with the window never landing (the rebuild hits
+    /// the same `adopts=false`); the arming flag is what keeps the
+    /// reuse path on `Keep`.
+    #[tokio::test]
+    async fn pending_window_not_armed_when_fact_cannot_be_adopted() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            (
+                "/v1/models",
+                200,
+                r#"{"data":[{"id":"server-name"}]}"#.into(),
+            ),
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"server-name"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"server-name","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"parameters":"num_ctx 4096"}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        // The kind probe lives in finalize (unit boundary, see the module
+        // doc); the direct adoption call hand-sets the classified kind like
+        // every sibling test.
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert!(
+            !bridge.native_window_recheck,
+            "a route whose native fact can never be adopted must not arm the re-check"
+        );
+        // The trap itself: the native API serves a fact for the configured
+        // name on every re-probe — which is exactly why an armed marker
+        // would have looped rebuilds (adoption refuses the borrowed roster
+        // name on the rebuild too).
+        let pending = PendingNativeWindow {
+            model_name: "my-model".into(),
+            kind: LocalServerKind::Ollama,
+        };
+        assert_eq!(
+            EnginePool::reprobe_missing_native_window(&bridge, &pending).await,
+            Some(4096),
+            "sanity: the server resolves the loose name — arming this shape is the bug"
+        );
+    }
+
+    /// A user declaration min-clamps any adopted fact, so the native leg
+    /// cannot change a declared route: it must not even run, and nothing
+    /// arms (otherwise the route would pay a per-turn native GET plus one
+    /// rebuild whose outcome the declaration clamps right back).
+    #[tokio::test]
+    async fn pending_window_not_armed_for_declared_route() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            ("/api/show", 200, r#"{"parameters":"num_ctx 4096"}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        model.context_window_tokens = Some(8192);
+        let mut bridge = wiring_bridge(model.clone());
+        bridge.probed_local_kind = Some(LocalServerKind::Ollama);
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert!(
+            !bridge.native_window_recheck,
+            "a declared route never arms the reuse re-check"
+        );
+        assert_eq!(
+            mock.hits_for("/api/ps"),
+            0,
+            "the declaration min-clamps every adopted fact — the native leg must not even run"
+        );
+        assert_eq!(mock.hits_for("/api/show"), 0);
+        assert_eq!(
+            bridge.probed_context_tokens, None,
+            "no fact is adopted over the declaration's head"
+        );
+    }
+
+    /// The reuse-path self-heal decision (`cached_entry_reuse_decision`,
+    /// extracted verbatim from the `get_or_spawn_with_policy` glue —
+    /// EnginePool itself needs an AppHandle, the same unit-test boundary as
+    /// `require_live_engine_for_steer`): no pending marker → keep without
+    /// probing; pending but still no fact → keep (re-ask next turn); the
+    /// fact materialized → rebuild so it is adopted. A mutation that always
+    /// keeps the entry would let the collapsed 8192-fallback budget survive
+    /// the engine's whole lifetime — the reported fatality — and must turn
+    /// this red.
+    #[tokio::test]
+    async fn pending_window_reuse_decision_rebuilds_once_fact_materializes() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        // No pending marker: keep, without dialing anything (the bridge has
+        // no base_url to reach).
+        let no_pending_bridge = wiring_bridge(saved_model(
+            ModelPreset::OpenaiCompatible,
+            "my-model",
+            Some("custom"),
+        ));
+        assert_eq!(
+            EnginePool::cached_entry_reuse_decision(None, &no_pending_bridge).await,
+            CachedEntryReuse::Keep,
+            "a factless non-pending route must keep its engine without any re-probe"
+        );
+        let pending = PendingNativeWindow {
+            model_name: "my-model".into(),
+            kind: LocalServerKind::Ollama,
+        };
+        // Pending, model still unloaded: keep (the next turn re-asks).
+        // The re-probe re-classifies first, so the mock carries the Ollama
+        // signature.
+        let mock = models_mock::spawn(&[
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            ("/api/ps", 200, r#"{"models":[]}"#.into()),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let unloaded_bridge = wiring_bridge(model);
+        assert_eq!(
+            EnginePool::cached_entry_reuse_decision(Some(&pending), &unloaded_bridge).await,
+            CachedEntryReuse::Keep,
+            "no post-load fact yet — the engine stays and the next turn re-asks"
+        );
+        // The model loaded since spawn: the decision must demand a rebuild
+        // so the rebuild path adopts the fact.
+        let loaded = models_mock::spawn(&[
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"model_info":{}}"#.into()),
+        ]);
+        let mut loaded_model =
+            saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        loaded_model.base_url = loaded.base_url.clone();
+        let loaded_bridge = wiring_bridge(loaded_model);
+        assert_eq!(
+            EnginePool::cached_entry_reuse_decision(Some(&pending), &loaded_bridge).await,
+            CachedEntryReuse::RebuildForWindowFact,
+            "the post-load fact must drop the entry for the adopting rebuild"
+        );
+    }
+
+    /// The marker's frozen kind must not drive the re-probe dispatch: the
+    /// stack behind the port can swap while the engine lives (dev restart
+    /// onto a different server class), and dispatching on the stale kind
+    /// would re-dial the wrong native API on every send — a 404 that never
+    /// arms a fact — so the real served window would never land until an
+    /// unrelated rebuild. The re-probe must re-classify (cache-peeked
+    /// battery) and follow the fresh kind. Deleting the re-classification
+    /// lands the frozen-Ollama dispatch on the doomed `/api/ps` (hits > 0,
+    /// window None) and turns both assertions red.
+    #[tokio::test]
+    async fn reprobe_reclassifies_swapped_server_kind() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        // The re-classification below runs the real battery and the
+        // hygiene clear at the end resets the shared probe state, both of
+        // which must run serially against the core probe tests (their
+        // in-flight registrations live in the same process-global registry;
+        // see PROBE_STATE_TEST_MUTEX's doc).
+        let _probe_state = crate::core::model_endpoint::tests::PROBE_STATE_TEST_MUTEX
+            .lock()
+            .await;
+        // The port now serves LM Studio's v0 API; the Ollama ps endpoint the
+        // stale marker would dial is a registered 404 so the miss is
+        // countable.
+        let mock = models_mock::spawn(&[
+            (
+                "/api/v0/models",
+                200,
+                r#"{"data":[{"id":"my-model","state":"loaded","max_context_length":131072,"loaded_context_length":12918}]}"#
+                    .into(),
+            ),
+            ("/api/ps", 404, "not found".into()),
+        ]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let bridge = wiring_bridge(model);
+        // A marker frozen by the pre-swap spawn: kind Ollama.
+        let pending = PendingNativeWindow {
+            model_name: "my-model".into(),
+            kind: LocalServerKind::Ollama,
+        };
+        assert_eq!(
+            EnginePool::reprobe_missing_native_window(&bridge, &pending).await,
+            Some(12_918),
+            "the re-probe must follow the swapped-in LM Studio served window"
+        );
+        assert_eq!(
+            mock.hits_for("/api/ps"),
+            0,
+            "the frozen Ollama kind must not re-dial the doomed /api/ps"
+        );
+        // Cross-test hygiene: the re-classification cached this mock's live
+        // port for the TTL; clear it under ENV_LOCK so a port-reusing later
+        // test cannot inherit the stale kind.
+        crate::core::model_endpoint::clear_probe_kind_cache();
+    }
+
+    /// The reuse re-probe is locality-gated in its own right. Pinned without
+    /// touching the network via the v4-mapped loopback trick: the URL
+    /// classifies non-local while routing to the same mock, so deleting the
+    /// guard lets the fetch land on the mock (which serves a loaded fact →
+    /// `RebuildForWindowFact`) and turns both assertions red.
+    #[tokio::test]
+    async fn reprobe_refuses_non_local_base_url() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            (
+                "/api/ps",
+                200,
+                r#"{"models":[{"name":"my-model","context_length":131072}]}"#.into(),
+            ),
+            ("/api/show", 200, r#"{"parameters":"num_ctx 4096"}"#.into()),
+        ]);
+        let port = mock
+            .base_url
+            .rsplit(':')
+            .next()
+            .expect("mock base_url carries a port")
+            .to_string();
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = format!("http://[::ffff:127.0.0.1]:{port}");
+        let bridge = wiring_bridge(model);
+        let pending = PendingNativeWindow {
+            model_name: "my-model".into(),
+            kind: LocalServerKind::Ollama,
+        };
+        assert_eq!(
+            EnginePool::cached_entry_reuse_decision(Some(&pending), &bridge).await,
+            CachedEntryReuse::Keep,
+            "a non-local base_url must not be natively re-probed"
+        );
+        assert_eq!(
+            mock.hits_for("/api/ps"),
+            0,
+            "the locality guard must run before any request"
+        );
+    }
+
+    /// The finalize kind probe is locality-gated. Pinned without touching
+    /// the network via a v4-mapped loopback URL: `::ffff:127.0.0.1`
+    /// classifies as a non-local IPv6 literal (the conservative arm of
+    /// `base_url_uses_local_or_private`) while still routing to the same
+    /// loopback mock — so a hit on the mock proves the gate ran, and
+    /// deleting the gate turns both assertions red (the battery classifies
+    /// the live `/api/tags` signature and `probed_local_kind` stops being
+    /// None).
+    #[tokio::test]
+    async fn finalize_skips_kind_probe_for_public_host() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[
+            ("/v1/models", 200, r#"{"data":[{"id":"my-model"}]}"#.into()),
+            (
+                "/api/tags",
+                200,
+                r#"{"models":[{"name":"my-model"}]}"#.into(),
+            ),
+        ]);
+        let port = mock
+            .base_url
+            .rsplit(':')
+            .next()
+            .expect("mock base_url carries a port")
+            .to_string();
+        let mut model = saved_model(ModelPreset::LocalVllm, "my-model", None);
+        model.base_url = format!("http://[::ffff:127.0.0.1]:{port}");
+        let bridge = wiring_bridge(model.clone());
+        let prepared = PreparedRuntimeModel::unchanged(model);
+        let bridge = EnginePool::finalize_runtime_bridge(bridge, &prepared, false).await;
+        assert_eq!(
+            bridge.probed_local_kind, None,
+            "a non-local base_url must not be kind-probed"
+        );
+        assert_eq!(
+            mock.hits_for("/api/tags"),
+            0,
+            "the signature battery must not reach the host the gate refuses"
+        );
+    }
+
     /// The real finalize_runtime_bridge injection block (vLLM side):
-    /// provider() derives "vllm" (skipping the kind probe) and a single
-    /// entry renames to the served name and adopts facts.
+    /// provider() derives "vllm" and a single entry renames to the served
+    /// name and adopts facts. The kind probe now also runs for vllm-provider
+    /// routes (see `finalize_runtime_bridge_probes_local_vllm_route_for_
+    /// ollama_window`); this mock carries no kind signature, so the probe
+    /// lands Generic — inert for the listing-facts path.
     #[tokio::test]
     async fn finalize_runtime_bridge_renames_and_injects_vllm_route() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
