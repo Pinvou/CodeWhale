@@ -7,7 +7,7 @@ Their original licenses remain in effect.
 
 | Component | Version or baseline | Included form | License | Upstream |
 |---|---|---|---|---|
-| CodeWhale | `pinjou-v0.9.12-r3` (CodeWhale commit `44921cf02`) | Public Git submodule and linked Rust crates | MIT | https://github.com/Pinvou/CodeWhale |
+| CodeWhale | `pinvou-v0.9.12-r3` (immutable tag pinned at `61cb769be`; the submodule follows the `pinvou3-clean` maintenance head ahead of the tag during the transition period — see `docs/fork-policy.md`) | Public Git submodule and linked Rust crates | MIT | https://github.com/Pinvou/CodeWhale |
 | DingTalk Workspace CLI (`dws`) and skills | 1.0.61 | Apache-2.0 skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | Apache-2.0 | https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli |
 | Lark CLI and skills | 1.0.95 | MIT skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | MIT | https://github.com/larksuite/cli |
 | WeCom CLI and skills | 1.2.1 | MIT skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | MIT | https://github.com/WecomTeam/wecom-cli |
