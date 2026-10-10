@@ -12,7 +12,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
-import { dict } from './helpers/i18n-all.js';
+import { dictEn } from '../src/shared/i18n/en.js';
+import { dictJa } from '../src/shared/i18n/ja.js';
+import { dictZh } from '../src/shared/i18n/zh.js';
+const dict = { en: dictEn, ja: dictJa, zh: dictZh };
+import { CHAT_RECOVERY_COPY, dict as lazyDict } from '../src/shared/i18n.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.join(here, '..');
@@ -229,14 +233,15 @@ test('a background-session drop restores its own draft and leaves the active ses
     api.clearOutcomeReconcileWatchdog('B', 'st-bg');
   }
 });
-test('lost-message notices use explicit shared translations for each language and the backend Chinese tag', () => {
+test('lost-message notices stay translated before backend language chunks load', () => {
+  assert.equal(Object.hasOwn(lazyDict, 'ja'), false, 'the backend Japanese language chunk is not loaded yet');
   const source = fs.readFileSync(path.join(appRoot, 'src', 'platform', 'tauri', 'bridge.js'), 'utf8');
   const start = source.indexOf('function bt(key)');
   const end = source.indexOf('function textMatchesBtKey', start);
   assert.ok(start >= 0 && end > start);
   for (const [language, expectedLanguage] of [['en', 'en'], ['ja', 'ja'], ['zh', 'zh'], ['zh-Hans', 'zh']]) {
     const context = vm.createContext({
-      state: { settings: { language } }, uiDictionary: dict,
+      state: { settings: { language } }, uiDictionary: CHAT_RECOVERY_COPY,
       BT_TABLE: { en: {}, ja: {}, zh: {} },
     });
     vm.runInContext(source.slice(start, end), context);

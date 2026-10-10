@@ -6,6 +6,7 @@
 
 /* eslint-disable sonarjs/no-nested-template-literals, sonarjs/no-unenclosed-multiline-block -- compact i18n dictionary: nested templates mirror the copy structure one-to-one; credential field names are false-positive secrets */
 import { browserEn } from './browser.js';
+import { CHAT_RECOVERY_COPY } from './chat-recovery.js';
 
 const conversationEn = {
   completed:'Completed', failed:'Failed', interrupted:'Interrupted', cancelled:'Cancelled', limitReached:'Limit reached', processing:'Processing', processingActive:'Processing',
@@ -183,7 +184,7 @@ const acpProvidersEn = {
 };
 
 export const dictEn = {
-  steerFailedLost: "Interrupt failed (turn interrupted); the message was not delivered and could not be restored — send it again",
+  steerFailedLost: CHAT_RECOVERY_COPY.en.steerFailedLost,
   ...browserEn,
         langTag: 'en',
         acpAgent: 'ACP Agent',

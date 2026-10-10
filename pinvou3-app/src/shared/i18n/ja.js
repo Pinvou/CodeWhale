@@ -5,6 +5,7 @@
 
 import { dictEn } from './en.js';
 import { browserJa } from './browser.js';
+import { CHAT_RECOVERY_COPY } from './chat-recovery.js';
 
 const conversationJa = {
   completed:'完了', failed:'失敗', interrupted:'中断', cancelled:'キャンセル済み', limitReached:'上限に到達', processing:'処理中', processingActive:'処理中',
@@ -182,7 +183,7 @@ const acpProvidersJa = {
 };
 
 const jaBase = {
-  steerFailedLost: "割り込みに失敗しました（ターン中断）。メッセージは未達のまま復元できません。もう一度送信してください",
+  steerFailedLost: CHAT_RECOVERY_COPY.ja.steerFailedLost,
   ...browserJa,
         langTag: 'ja',
         acpAgent: 'ACP Agent',

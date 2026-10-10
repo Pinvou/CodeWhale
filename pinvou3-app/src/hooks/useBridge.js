@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { can, isWeb } from '../shared/platform.js';
-import { dict } from '../shared/i18n.js';
+import { CHAT_RECOVERY_COPY } from '../shared/i18n.js';
 
 const bridge = window.TauriBridge || { available: false };
 
@@ -14,7 +14,7 @@ function useBridgeState(domains) {
   const [bridgeState, setBridgeState] = useState(() => mergeSlices(domains));
   useEffect(() => {
     if (!bridge.available) return undefined;
-    bridge.lifecycle.init({ uiDictionary: dict }).catch(e => console.warn('[TauriBridge] init failed', e));
+    bridge.lifecycle.init({ uiDictionary: CHAT_RECOVERY_COPY }).catch(e => console.warn('[TauriBridge] init failed', e));
     return bridge.state.subscribeMany(domains, setBridgeState);
   }, [domainKey]);
   return bridgeState;

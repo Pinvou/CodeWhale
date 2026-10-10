@@ -5,6 +5,7 @@
 
 /* eslint-disable sonarjs/no-nested-template-literals, sonarjs/no-unenclosed-multiline-block -- compact i18n dictionary: nested templates mirror the copy structure one-to-one; credential field names are false-positive secrets */
 import { browserZh } from './browser.js';
+import { CHAT_RECOVERY_COPY } from './chat-recovery.js';
 
 const conversationZh = {
   completed:'已完成', failed:'失败', interrupted:'已中断', cancelled:'已取消', limitReached:'达到限制', processing:'处理中', processingActive:'正在处理',
@@ -182,7 +183,7 @@ const acpProvidersZh = {
 };
 
 export const dictZh = {
-  steerFailedLost: "插队失败（回合中断），消息未送达且无法恢复；请重新发送",
+  steerFailedLost: CHAT_RECOVERY_COPY.zh.steerFailedLost,
   ...browserZh,
         langTag: 'zh',
         acpAgent: 'ACP Agent',
