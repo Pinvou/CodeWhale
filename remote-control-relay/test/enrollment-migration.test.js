@@ -99,6 +99,25 @@ async function rejectsCode(promise, code) {
   await assert.rejects(promise, (error) => error?.code === code);
 }
 
+test("identifier contract: migration handler accepts colon request and endpoint IDs atomically", async (t) => {
+  const { registry } = await fixture(t, "self_hosted");
+  const result = await runEnrollmentBatch({ registry, dryRun: false, requestId: "batch:allowlist:0001",
+    operations: [{ operation: "allowlist", endpoint_id: "endpoint:0001", credential: ACCESS_A }] });
+  assert.equal(result.applied, 1);
+  assert.equal(result.results[0].endpoint_id, "endpoint:0001");
+  assert.equal(new EnrollmentMigrationHandler({ registry }).coverage(["endpoint:0001"]).web_migrated, 1);
+});
+
+test("identifier contract: migration preserves legacy Web IDs without replacing identity bytes", async (t) => {
+  const { registry } = await fixture(t, "self_hosted");
+  const result = await runEnrollmentBatch({ registry, dryRun: false, requestId: "batch-legacy-0001",
+    operations: ["_old", "-old"].map((endpoint_id) => ({ operation: "allowlist", endpoint_id, credential: ACCESS_A })) });
+  assert.equal(result.applied, 2);
+  for (const endpointId of ["_old", "-old"]) {
+    assert.equal((await registry.authorizeWebRegistration({ endpointId, accessToken: ACCESS_A })).endpoint_id, endpointId);
+  }
+});
+
 test("official claim is socket-bound, stable, conflicting-safe and keeps the Web token", async (t) => {
   const { store, registry } = await fixture(t);
   const identity = officialIdentity();

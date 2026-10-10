@@ -14,9 +14,9 @@
 #     3) fail2ban:启动隧道前对 relay 主机 IP unbanip(未封时为无害 no-op)
 #
 # 架构(详见 docs/remote-e2e-test-endpoint.md):
-#   手机/桌面端 → 前端代理(admin@8.218.49.20, nginx pinvou.com)
-#     → 127.0.0.1:8788(SSH 反向隧道,relay-tunnel 账号)→ relay 主机(root@47.120.8.237)
-#     → pinvou-remote-relay-test.service(node, 端口 8788)
+#   手机/桌面端 → 配置的前端代理（nginx）
+#     → 127.0.0.1:8788（SSH 反向隧道，专用低权限账号）→ 配置的 Relay 主机
+#     → 独立测试服务（node，端口 8788）
 #   云安全组只放行代理→relay 主机的 8787(生产),所以测试实例走反向隧道。
 #
 # 用法:
@@ -28,10 +28,12 @@
 #   - TEST_DIR 必须精确等于 /opt/pinvou-remote-relay-test(--teardown 的 rm -rf 依赖此);
 #   - TEST_PORT 必须是 1024-65535 且不得为生产端口 8787;BASE_PATH 必须以 /pinvou3/remote-test 开头。
 #
-# 可用环境变量覆盖(默认值即当前线上布局):
-#   SSH_KEY        ~/.ssh/id_ed25519_pinvou8
-#   PROXY_SSH_JUMP  (可选) 本机无法直连前端代理时用的 SSH 跳板,例如 root@47.120.8.237;
-#                   跳板只做 TCP 转发,认证仍使用本机 SSH_KEY。仅允许登记值。
+# 必填环境变量（仅由本地受控配置或 secret 管理器提供）：
+#   RELAY_SERVER / EXPECTED_RELAY_SERVER：实际与独立确认的 Relay SSH 目标。
+#   PROXY_SERVER / EXPECTED_PROXY_SERVER：实际与独立确认的代理 SSH 目标。
+#   SSH_KEY：本地部署私钥路径，不使用个人文件默认值。
+# 可选：PROXY_SSH_JUMP / EXPECTED_PROXY_SSH_JUMP（跳板非空时必须成对登记）。
+# 默认测试隔离布局：
 #   TEST_DIR       /opt/pinvou-remote-relay-test
 #   TEST_PORT      8788
 #   BASE_PATH      /pinvou3/remote-test
@@ -49,9 +51,9 @@ set -eEuo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELAY_DIR="$ROOT/remote-control-relay"
-RELAY_SERVER="${RELAY_SERVER:-root@47.120.8.237}"
-PROXY_SERVER="${PROXY_SERVER:-admin@8.218.49.20}"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519_pinvou8}"
+RELAY_SERVER="${RELAY_SERVER:-}"
+PROXY_SERVER="${PROXY_SERVER:-}"
+SSH_KEY="${SSH_KEY:-}"
 TEST_DIR="${TEST_DIR:-/opt/pinvou-remote-relay-test}"
 TEST_PORT="${TEST_PORT:-8788}"
 BASE_PATH="${BASE_PATH:-/pinvou3/remote-test}"
@@ -68,11 +70,10 @@ SSHD_BLOCK_END="# END PINVOU3 REMOTE TEST TUNNEL"
 TUNNEL_KEY_COMMENT="relay-test-tunnel"
 TUNNEL_USER="relay-tunnel"
 
-# 登记主机:脚本的一切远端操作只允许落在这两台机器上。
-EXPECTED_RELAY_SERVER="root@47.120.8.237"
-EXPECTED_PROXY_SERVER="admin@8.218.49.20"
-# 允许的前端代理跳板(为空表示直连)。
-EXPECTED_PROXY_SSH_JUMP="root@47.120.8.237"
+# 独立登记值不得从实际目标推导，防止一次误设同时改掉确认值。
+EXPECTED_RELAY_SERVER="${EXPECTED_RELAY_SERVER:-}"
+EXPECTED_PROXY_SERVER="${EXPECTED_PROXY_SERVER:-}"
+EXPECTED_PROXY_SSH_JUMP="${EXPECTED_PROXY_SSH_JUMP:-}"
 PROD_PORT=8787
 RELAY_HOST_IP="${RELAY_SERVER#*@}"
 
@@ -87,16 +88,33 @@ trap on_err ERR
 
 # 在任何远端变更之前校验目标与路径,防止 env 覆盖把部署/teardown 指到错误目标。
 validate_config() {
-  local err=0
+  local err=0 target octet address
+  if [[ -z "$RELAY_SERVER" || -z "$EXPECTED_RELAY_SERVER" || -z "$PROXY_SERVER" || -z "$EXPECTED_PROXY_SERVER" || -z "$SSH_KEY" ]]; then
+    echo "拒绝执行: 必须显式提供两个 SSH 目标、独立登记目标和 SSH_KEY" >&2; err=1
+  fi
   if [ "$RELAY_SERVER" != "$EXPECTED_RELAY_SERVER" ]; then
-    echo "拒绝执行: RELAY_SERVER=$RELAY_SERVER 不是登记的 relay 主机($EXPECTED_RELAY_SERVER)" >&2; err=1
+    echo "拒绝执行: Relay 目标与独立登记目标不一致" >&2; err=1
   fi
   if [ "$PROXY_SERVER" != "$EXPECTED_PROXY_SERVER" ]; then
-    echo "拒绝执行: PROXY_SERVER=$PROXY_SERVER 不是登记的前端代理($EXPECTED_PROXY_SERVER)" >&2; err=1
+    echo "拒绝执行: 代理目标与独立登记目标不一致" >&2; err=1
   fi
-  if [ -n "$PROXY_SSH_JUMP" ] && [ "$PROXY_SSH_JUMP" != "$EXPECTED_PROXY_SSH_JUMP" ]; then
-    echo "拒绝执行: PROXY_SSH_JUMP=$PROXY_SSH_JUMP 不是登记的跳板($EXPECTED_PROXY_SSH_JUMP)" >&2; err=1
+  if [ "$PROXY_SSH_JUMP" != "$EXPECTED_PROXY_SSH_JUMP" ]; then
+    echo "拒绝执行: 跳板目标与独立登记目标不一致" >&2; err=1
   fi
+  # 后续代理白名单和隧道使用字面 IPv4；禁止 SSH 选项、shell 元字符和别名。
+  for target in "$RELAY_SERVER" "$PROXY_SERVER" "$PROXY_SSH_JUMP"; do
+    [ -n "$target" ] || continue
+    if [[ ! "$target" =~ ^[A-Za-z_][A-Za-z0-9_-]*@([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+      echo "拒绝执行: SSH 目标必须是账号与字面 IPv4" >&2; err=1
+      continue
+    fi
+    address="${target#*@}"
+    while IFS= read -r octet; do
+      if (( 10#$octet > 255 )); then
+        echo "拒绝执行: SSH 目标 IPv4 无效" >&2; err=1
+      fi
+    done < <(printf '%s\n' "$address" | tr '.' '\n')
+  done
   if ! [[ "$TEST_PORT" =~ ^[0-9]+$ ]] || [ "$TEST_PORT" -lt 1024 ] || [ "$TEST_PORT" -gt 65535 ]; then
     echo "拒绝执行: TEST_PORT=$TEST_PORT 必须是 1024-65535 的数字" >&2; err=1
   elif [ "$TEST_PORT" = "$PROD_PORT" ]; then
@@ -131,7 +149,7 @@ relay_ssh() { ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$RELAY_SE
 proxy_ssh() {
   if [ -n "$PROXY_SSH_JUMP" ]; then
     ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 \
-      -o "ProxyCommand=ssh -i $SSH_KEY -W %h:%p $PROXY_SSH_JUMP" \
+      -o "ProxyCommand=ssh -i $(shq "$SSH_KEY") -W %h:%p $(shq "$PROXY_SSH_JUMP")" \
       "$PROXY_SERVER" "$@"
   else
     ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$PROXY_SERVER" "$@"
@@ -141,7 +159,7 @@ proxy_ssh() {
 # ssh 会把所有命令参数用空格拼接成一个字符串,交给远端登录 shell 重新分词——
 # 含空格的参数(如公钥)若不按远端 shell 语法二次引用,会被拆散(2026-07-21 实测踩坑:
 # 公钥被拆成 3 个参数,authorized_keys 写入错位行)。shq 做 POSIX 安全单引号引用。
-shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+shq() { local value="$1" escaped="'\\''"; printf "'%s'" "${value//\'/$escaped}"; }
 shq_all() { local out="" a; for a in "$@"; do out="$out $(shq "$a")"; done; printf '%s' "${out# }"; }
 
 teardown() {
@@ -197,7 +215,7 @@ if id "$tunnel_user" >/dev/null 2>&1; then
     echo "⚠ 未能删除 $tunnel_user 账号(仍有进程占用),nginx 清理继续;可重跑 --teardown 收敛" >&2
   fi
 fi
-# 兼容旧版脚本:清理 admin 自己 authorized_keys 里的历史隧道 key 条目(原子替换)。
+# 兼容旧版脚本:清理 部署登录账号 自己 authorized_keys 里的历史隧道 key 条目(原子替换)。
 if [ -f "$HOME/.ssh/authorized_keys" ] && grep -q " $key_comment\$" "$HOME/.ssh/authorized_keys"; then
   tmp="$(mktemp)"
   grep -v " $key_comment\$" "$HOME/.ssh/authorized_keys" > "$tmp" || true
@@ -233,6 +251,7 @@ sudo systemctl reload nginx
 echo "前端代理:已移除 location、隧道账号与历史 key 并 reload nginx"
 REMOTE
   echo "拆除完成。生产 relay 实例与 /pinvou3/remote 路由未改动;共享代理的 nginx 已 reload(变更面见脚本头注释)。"
+  echo "持久 controller 身份与状态仍保留，未删除私钥或 tombstone；彻底回收需运维另行确认并授权。"
   exit 0
 }
 
@@ -258,15 +277,13 @@ if [[ "${SKIP_WEB_BUILD:-0}" != "1" ]]; then
 else
   echo "使用已构建并验证的共享 WebUI 产物"
 fi
-test -f "$RELAY_DIR/web/dist/index.html"
-test -f "$RELAY_DIR/web/dist/platform/tauri/bridge.js"
-grep -Fq "$BASE_PATH/" "$RELAY_DIR/web/dist/index.html"
+node "$RELAY_DIR/verify-web-dist-cli.js" "$RELAY_DIR/web/dist" "$BASE_PATH"
 if [[ "${SKIP_LOCAL_TESTS:-0}" != "1" ]]; then
   (cd "$RELAY_DIR" && npm test)
 fi
 
 STAGE="打包并上传 relay 代码(tarball 暂存)"
-echo "── 上传 relay 代码到 $RELAY_SERVER:$TEST_DIR(暂存 + 整体替换)──"
+echo "── 上传 Relay 代码到已确认测试目标（暂存 + 整体替换）──"
 # 打成单个 tarball 流式上传,.tmp 落盘后原子 mv——scp 逐文件覆盖若中断会留下半新半旧的目录,
 # 服务一旦因故重启就会加载混合版本(与评审「暂存+原子替换」同类的隐患)。
 # 注意:清单必须覆盖 relay 根目录的全部运行期模块——controller-*.js / enrollment-*.js /
@@ -575,13 +592,13 @@ sudo bash -c '
   chown "$owner" "$tmp"
   mv "$tmp" "$ak"
 ' _ "$ak" "$new_line" "$tunnel_user:$tunnel_group"
-# 兼容旧版脚本:该 key 若曾放在 admin 自己的 authorized_keys,移除(权限收敛)。
+# 兼容旧版脚本:该 key 若曾放在 部署登录账号 自己的 authorized_keys,移除(权限收敛)。
 if [ -f "$HOME/.ssh/authorized_keys" ] && grep -q " $key_comment\$" "$HOME/.ssh/authorized_keys"; then
   tmp="$(mktemp)"
   grep -v " $key_comment\$" "$HOME/.ssh/authorized_keys" > "$tmp" || true
   chmod 600 "$tmp"
   mv "$tmp" "$HOME/.ssh/authorized_keys"
-  echo "已从 admin 的 authorized_keys 移除历史隧道 key(收敛到 $tunnel_user)"
+  echo "已从 部署登录账号 的 authorized_keys 移除历史隧道 key(收敛到 $tunnel_user)"
 fi
 REMOTE
 
@@ -714,8 +731,9 @@ public_verify() {
   health="$(curl -fsS --max-time 10 "$PUBLIC_URL/healthz")" || return 1
   echo "$health" | node -e 'const h=JSON.parse(require("fs").readFileSync(0,"utf8")); if(!h.ok||!("room_count" in h)) process.exit(1)' || return 1
   page="$(curl -fsSL --max-time 10 "$PUBLIC_URL/r/deploy-check")" || return 1
+  # Web 构建移除 Tauri 内联脚本；与生产校验一致，检查当前 base 的构建资源。
   [[ "$page" == *'<title>PINVOU 智能助手'* \
-    && "$page" == *"$BASE_PATH/platform/tauri/bridge.js"* ]] || return 1
+    && "$page" == *"$BASE_PATH/assets/"* ]] || return 1
   prod_health="$(curl -fsS --max-time 10 "https://pinvou.com/pinvou3/remote/healthz")" || return 1
   echo "$prod_health" | node -e 'const h=JSON.parse(require("fs").readFileSync(0,"utf8")); if(!h.ok) process.exit(1)' || return 1
 }

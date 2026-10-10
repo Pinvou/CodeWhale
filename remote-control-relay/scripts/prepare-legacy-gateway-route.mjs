@@ -2,7 +2,7 @@
 import crypto from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { isDirectCliEntry } from "../cli-entrypoint.js";
 
 function fail(code) {
   const error = new Error(code);
@@ -87,7 +87,7 @@ export async function prepareLegacyGatewayRoute({ inventoryPath, configPath, gat
   return result;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (isDirectCliEntry(import.meta.url)) {
   prepareLegacyGatewayRoute({
     inventoryPath: argument("--inventory"), configPath: argument("--config"), gatewayUrl: argument("--gateway-url"),
     runNonce: argument("--run-nonce"), outputPath: argument("--output"),

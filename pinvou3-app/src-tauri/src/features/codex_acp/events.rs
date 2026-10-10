@@ -691,6 +691,7 @@ pub struct EventBridge {
     seq: Arc<AtomicU64>,
     turn_serial: Arc<AtomicU64>,
     current_turn: Arc<RwLock<Option<String>>>,
+    retirement: Arc<super::lifecycle::RuntimeRetirementGate>,
     event_order: Arc<Mutex<()>>,
     retired: Arc<AtomicBool>,
     web_delivery: OrderedWebDelivery,
@@ -765,6 +766,7 @@ impl EventBridge {
             seq: Arc::new(AtomicU64::new(last_seq)),
             turn_serial: Arc::new(AtomicU64::new(0)),
             current_turn: Arc::new(RwLock::new(None)),
+            retirement: Arc::new(super::lifecycle::RuntimeRetirementGate::default()),
             event_order: Arc::new(Mutex::new(())),
             retired: Arc::new(AtomicBool::new(false)),
             web_delivery: OrderedWebDelivery::new(last_seq),
@@ -788,6 +790,68 @@ impl EventBridge {
         self.current_turn.read().clone()
     }
 
+    pub(super) fn with_active_runtime<T>(&self, action: impl FnOnce() -> T) -> Option<T> {
+        self.retirement.with_active(action)
+    }
+
+    /// A successful terminal claimant and closure must share the admission
+    /// fence: releasing busy first must not admit a successor on this Arc.
+    pub(super) fn close_runtime_if(&self, claim: impl FnOnce() -> bool) -> bool {
+        self.retirement.close_if(claim)
+    }
+
+    pub(super) fn settle_runtime_turn(
+        &self,
+        busy: &AtomicBool,
+        claim: impl FnOnce() -> bool,
+        close_timing: impl FnOnce(),
+    ) -> bool {
+        self.retirement.settle_turn(busy, claim, close_timing)
+    }
+
+    /// Pool-owned reclamation has no successor on this registered instance.
+    /// Seal before any async cleanup, even if that cleanup is later dropped.
+    pub(super) fn reclaim_runtime(&self, claimed: impl FnOnce(Option<String>)) {
+        self.retirement.close_if(|| {
+            claimed(self.current_turn.write().take());
+            self.tools.lock().clear();
+            true
+        });
+    }
+
+    /// Claim and seal only the captured turn. No terminal publication here:
+    /// the pool must first serialize finalization with replacement creation.
+    pub(super) fn retire_current_turn(&self, turn_id: &str, claimed: impl FnOnce()) -> bool {
+        self.retirement.close_if(|| {
+            if !super::stall::claim_current_turn(&self.current_turn, turn_id) {
+                return false;
+            }
+            claimed();
+            self.tools.lock().clear();
+            true
+        })
+    }
+
+    /// Called once under the pool lock, before a replacement bridge can seed
+    /// its sequence. Ordinary late events cannot use this private bypass.
+    pub(super) fn finish_retired_turn(&self, turn_id: &str, reason: &str) {
+        self.emit_active(
+            Some(turn_id.to_owned()),
+            "turn_completed",
+            json!({"status":"Interrupted", "error":null, "recoveryReason":reason}),
+        );
+        crate::features::behavior_telemetry::finish_task(
+            &self.app,
+            &self.pinvou_session_id,
+            turn_id,
+            "interrupted",
+            Some(crate::features::behavior_telemetry::error_category(Some(
+                reason,
+            ))),
+        );
+        self.flush_journal();
+    }
+
     /// Only a synchronous, non-reentrant action may run here. Holding the
     /// current-turn read guard makes verification and cancellation one action;
     /// it must not emit events, persist data, or await while holding the guard.
@@ -809,6 +873,19 @@ impl EventBridge {
     /// Prompt response and watchdog settlement are independent paths. The late
     /// path must yield or the same turn would get two terminal events.
     pub fn finish_turn_once(
+        &self,
+        turn_id: &str,
+        status: &str,
+        error: Option<&str>,
+        recovery_reason: Option<&str>,
+    ) -> bool {
+        self.with_active_runtime(|| {
+            self.finish_active_turn_once(turn_id, status, error, recovery_reason)
+        })
+        .unwrap_or(false)
+    }
+
+    fn finish_active_turn_once(
         &self,
         turn_id: &str,
         status: &str,
@@ -842,9 +919,20 @@ impl EventBridge {
     }
 
     pub fn begin_turn(&self, content: &str, attachments: &[CodexDisplayAttachment]) -> String {
+        self.begin_turn_bound(content, attachments, |_| {})
+    }
+
+    /// Bind a private remote observer before publishing this exact turn's
+    /// first event. A session-level first-event race cannot choose its owner.
+    pub(super) fn begin_turn_bound(
+        &self,
+        content: &str,
+        attachments: &[CodexDisplayAttachment],
+        bind: impl FnOnce(&str),
+    ) -> String {
         let serial = self.turn_serial.fetch_add(1, Ordering::AcqRel) + 1;
         let turn_id = format!("turn-{}-{serial}", Utc::now().timestamp_millis());
-        self.begin_turn_with_id(turn_id, content, attachments)
+        self.begin_turn_with_id_bound(turn_id, content, attachments, bind)
     }
 
     pub(super) fn begin_turn_with_id(
@@ -853,7 +941,18 @@ impl EventBridge {
         content: &str,
         attachments: &[CodexDisplayAttachment],
     ) -> String {
+        self.begin_turn_with_id_bound(turn_id, content, attachments, |_| {})
+    }
+
+    fn begin_turn_with_id_bound(
+        &self,
+        turn_id: String,
+        content: &str,
+        attachments: &[CodexDisplayAttachment],
+        bind: impl FnOnce(&str),
+    ) -> String {
         *self.current_turn.write() = Some(turn_id.clone());
+        bind(&turn_id);
         self.emit_with_turn(
             Some(turn_id.clone()),
             "user_message",
@@ -876,14 +975,16 @@ impl EventBridge {
     }
 
     pub fn track_model_used(&self, turn_id: &str, provider: &str, model: &str) {
-        crate::features::behavior_telemetry::track_model_used_keys(
-            &self.app,
-            &self.pinvou_session_id,
-            turn_id,
-            provider,
-            model,
-            "session_default",
-        );
+        self.with_active_runtime(|| {
+            crate::features::behavior_telemetry::track_model_used_keys(
+                &self.app,
+                &self.pinvou_session_id,
+                turn_id,
+                provider,
+                model,
+                "session_default",
+            )
+        });
     }
 
     /// Settle timeline turns that started but never finished as interrupted.
@@ -929,6 +1030,10 @@ impl EventBridge {
     }
 
     pub fn handle(&self, notification: SessionNotification) {
+        self.with_active_runtime(|| self.handle_active(notification));
+    }
+
+    fn handle_active(&self, notification: SessionNotification) {
         // Every inbound session update proves the agent is alive for the silence watchdog.
         self.note_agent_activity();
         let meta = serde_json::to_value(notification.meta).unwrap_or(Value::Null);
@@ -1056,11 +1161,23 @@ impl EventBridge {
         }
     }
 
-    pub fn emit(&self, event_type: &str, data: Value) -> AcpEventEnvelope {
-        self.emit_with_turn(self.current_turn.read().clone(), event_type, data)
+    pub fn emit(&self, event_type: &str, data: Value) -> Option<AcpEventEnvelope> {
+        // Drop the identity read guard before entering the retirement fence;
+        // retirement takes that fence before claiming the identity write lock.
+        let turn_id = self.current_turn_id();
+        self.emit_with_turn(turn_id, event_type, data)
     }
 
     fn emit_with_turn(
+        &self,
+        turn_id: Option<String>,
+        event_type: &str,
+        data: Value,
+    ) -> Option<AcpEventEnvelope> {
+        self.with_active_runtime(|| self.emit_active(turn_id, event_type, data))
+    }
+
+    fn emit_active(
         &self,
         turn_id: Option<String>,
         event_type: &str,
@@ -1259,6 +1376,66 @@ pub fn patch_acp_state(session_id: &str, patch: Value) -> Result<()> {
         }
     }
     persist_acp_state(session_id, state)
+}
+
+/// Rebind support (review #463 round-14 B2): translate the persisted
+/// `workspace.path` of a session's acp-state.json through the caller's
+/// mapping. `acp-state.json` is a persisted workspace-path lane of its own:
+/// the boot recovery (`load_acp_recovery_record`) reads this field FIRST and
+/// only falls back to `codex-workspace-baseline.json` when it is absent or
+/// empty — so an untranslated state file preempts even a successfully
+/// recaptured baseline and, if the agent index is later lost or corrupted,
+/// re-inserts the record at the vanished root (the resurrection class the
+/// other lanes close). Same load→patch→persist shape as
+/// `SessionStore::rebase_workspace_artifact_paths`: a missing state file, a
+/// missing/empty field, an unmapped path and an already-converged value all
+/// persist nothing and report `false`; the path math (from→to) lives with
+/// the caller, single-sourced with the other lanes.
+pub fn translate_acp_state_workspace(
+    session_id: &str,
+    translate: &dyn Fn(&Path) -> Option<PathBuf>,
+) -> Result<bool> {
+    let path = state_path(session_id)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let raw = match fs::read(&path) {
+        Ok(raw) => raw,
+        // Round-20 minor 11: a session deleted between the exists() probe
+        // and this read is a benign race, not a failed session.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context("read acp-state for workspace rebind"));
+        }
+    };
+    let mut state: Value = serde_json::from_slice(&raw)
+        .with_context(|| "parse acp-state for workspace rebind".to_string())?;
+    let Some(current) = state["workspace"]["path"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    else {
+        return Ok(false);
+    };
+    let Some(next) = translate(&current) else {
+        return Ok(false);
+    };
+    if next == current {
+        return Ok(false);
+    }
+    // Round-22 minor 5: wrong-shape JSON (a non-object root or workspace)
+    // must degrade to a `failed` entry via the error path, not panic through
+    // IndexMut — same guard as the sibling patch_acp_state. Scope note
+    // (round-24 minor 7): the no-op-equals-converged arm above means a
+    // non-object ROOT returns Ok(false) (nothing to translate, treated as
+    // converged), not failed — the "must degrade to failed" promise holds
+    // for the workspace key, not for a non-object root.
+    let Some(workspace) = state.get_mut("workspace").and_then(|w| w.as_object_mut()) else {
+        return Err(anyhow::anyhow!("acp-state workspace is not an object"));
+    };
+    workspace["path"] = json!(next.to_string_lossy().to_string());
+    persist_acp_state(session_id, state)?;
+    Ok(true)
 }
 
 /// Cached append handle for one session's ACP timeline journal.
@@ -2504,5 +2681,57 @@ mod tests {
             .map(|line| serde_json::from_str::<AcpEventEnvelope>(line).unwrap().seq)
             .collect();
         assert_eq!(seqs, vec![3, 4]);
+    }
+
+    /// Review #463 round-14 B2: acp-state.json is a persisted workspace lane
+    /// of its own — the boot recovery reads workspace.path BEFORE the
+    /// baseline, so the rebind's metadata pass translates it. Only the
+    /// caller-mapped path moves; unrelated fields, unrelated sessions and an
+    /// already-converged value persist nothing.
+    #[test]
+    fn translate_acp_state_workspace_rewrites_only_mapped_paths() {
+        let _root = TempSessionsRoot::new("acp-state-rebind");
+        let session_id = "acp-state-rebind-session";
+        let unique = format!("pinvou3-acp-state-{}", std::process::id());
+        let from = std::env::temp_dir().join(format!("{unique}-from"));
+        let to = std::env::temp_dir().join(format!("{unique}-to"));
+        persist_acp_state(
+            session_id,
+            json!({
+                "workspace": { "path": from.to_string_lossy() },
+                "other": "untouched"
+            }),
+        )
+        .expect("persist initial state");
+
+        let translate = |path: &Path| -> Option<PathBuf> { (path == from).then(|| to.clone()) };
+        assert!(
+            translate_acp_state_workspace(session_id, &translate).expect("translate"),
+            "a mapped path reports the translation"
+        );
+        let state: Value = serde_json::from_slice(
+            &fs::read(state_path(session_id).expect("state path")).expect("read state"),
+        )
+        .expect("parse state");
+        assert_eq!(
+            state["workspace"]["path"],
+            json!(to.to_string_lossy().to_string())
+        );
+        assert_eq!(state["other"], json!("untouched"));
+        // Already converged: persists nothing, reports false.
+        assert!(
+            !translate_acp_state_workspace(session_id, &translate).expect("idempotent"),
+            "an already-converged value persists nothing"
+        );
+        // No state file at all: false, no error, no file fabricated.
+        assert!(
+            !translate_acp_state_workspace("acp-state-rebind-absent", &translate)
+                .expect("absent state file"),
+        );
+        assert!(
+            !state_path("acp-state-rebind-absent")
+                .expect("state path")
+                .exists()
+        );
     }
 }
