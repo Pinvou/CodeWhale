@@ -216,6 +216,43 @@ for (const language of ['zh', 'en', 'ja']) {
     23,
     `${language}.uiAuxChat must hold exactly the 23 pinned keys`,
   );
+    // All 94 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
+    // key 时 parity 检查全绿、视图渲染 undefined——uiAuxChat round-14 事故的同款
+    // 洞；chipGpuTemp→chipMaxTemp 与 7 个评审新增键随本清单一起钉死。任何键面
+    // 变更必须同提交更新此清单与计数)。
+    for (const key of [
+      'loading', 'bridgeNotReady', 'errorBanner', 'retry', 'updatedAtLabel',
+      'chipDisk', 'chipMemory', 'chipMaxTemp', 'chipDriver', 'chipCuda',
+      'sectionOverview', 'sectionSensors', 'sectionStorage', 'sectionNetwork',
+      'sectionProcesses', 'sectionModels', 'sectionDoctor',
+      'sensorEmpty', 'chipNvme', 'chipWifi', 'chipFan', 'chipBoard', 'chipPower',
+      'sensorWarnAdvice', 'sensorCritAdvice', 'critLimit',
+      'storageEmpty', 'diskSystemBadge', 'diskWarnAdvice', 'diskCritAdvice',
+      'networkEmpty', 'netTypeEthernet', 'netTypeWifi', 'netTypeLoopback',
+      'netTypeBridge', 'netTypeVirtual', 'netTypeOther',
+      'procCpuTitle', 'procMemTitle', 'procGpuTitle', 'procNote',
+      'modelsTitle', 'storeSubtitle', 'externalSubtitle', 'refresh', 'install',
+      'servicesLoading', 'svcOllama', 'svcVllm', 'svcLmStudio', 'svcDocker',
+      'storeManaged', 'gotoModelStore', 'statusRunning', 'statusDeployed', 'statusPending',
+      'kindOllama', 'kindEndpoint', 'kindWeights', 'kindOther',
+      'registeredBadge', 'statusAvailable', 'statusUnreachable',
+      'linked', 'link', 'linkDone',
+      'remove', 'removeArmed', 'removeCancel', 'removeConfirmIntro', 'deleteWeights',
+      'removeWeightsPath', 'removeIrreversible', 'linkDisabledUnreachable',
+      'doctorSendFailed', 'refreshFailed', 'linkRowStale', 'removeDone', 'removeFailed', 'warn',
+      'ollamaOfflineHint',
+      'doctorPackages', 'doctorPackagesDesc', 'doctorDependencies', 'doctorDependenciesDesc',
+      'doctorCuda', 'doctorCudaDesc', 'doctorServices', 'doctorServicesDesc',
+      'doctorHogs', 'doctorHogsDesc', 'doctorCustomPlaceholder', 'doctorCharCounter', 'doctorSend',
+    ]) {
+      assert.ok(dict[language].uiDeviceMgr[key], `${language}.uiDeviceMgr.${key} must exist`);
+    }
+    // Count guard：清单看不到新增——加键必须同步更新计数（见 uiAuxChat round-36 同款）。
+    assert.equal(
+      Object.keys(dict[language].uiDeviceMgr).length,
+      94,
+      `${language}.uiDeviceMgr must hold exactly the 94 pinned keys`,
+    );
   assert.ok(dict[language].uiSettings.providers, `${language}.uiSettings.providers must exist`);
   for (const key of [
     'addProvider', 'switch', 'official', 'current', 'export', 'import',

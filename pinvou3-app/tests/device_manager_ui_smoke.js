@@ -73,8 +73,8 @@ function deviceSnapshotFixture() {
       { name: 'sda1', mount_point: '/media/usb', fs_type: 'vfat', kind: 'hdd', total_bytes: 32212254720, available_bytes: 32212254720, is_removable: true },
     ],
     network: [
-      { name: 'lo', iface_type: 'loopback', is_up: true, mac: null, rx_bytes: 1610612736, tx_bytes: 1610612736, rx_rate_bps: 2500000, tx_rate_bps: 0 },
-      { name: 'wlP1s0', iface_type: 'wifi', is_up: true, mac: 'aa:bb:cc:dd:ee:ff', rx_bytes: 104857600, tx_bytes: 1048576, rx_rate_bps: 15000000, tx_rate_bps: 500000 },
+      { name: 'lo', iface_type: 'loopback', is_up: true, mac: null, rx_bytes: 1610612736, tx_bytes: 1610612736, rx_bytes_per_sec: 2500000, tx_bytes_per_sec: 0 },
+      { name: 'wlP1s0', iface_type: 'wifi', is_up: true, mac: 'aa:bb:cc:dd:ee:ff', rx_bytes: 104857600, tx_bytes: 1048576, rx_bytes_per_sec: 15000000, tx_bytes_per_sec: 500000 },
     ],
     processes: {
       top_cpu: [{ pid: 1234, name: 'ollama serve', cpu_pct: 91.6, memory_bytes: 1610612736 }],
@@ -92,7 +92,7 @@ function externalModelsFixture() {
   return {
     models: [
       { id: 'm-ollama-1', name: 'qwen3:30b', kind: 'ollama', base_url: 'http://127.0.0.1:11434/v1', model: 'qwen3:30b', weights_path: null, installed_at: '2026-10-01T00:00:00Z', note: '', status: 'available', registered: false, source: 'ollama' },
-      { id: 'm-reg-1', name: 'my-endpoint', kind: 'openai_endpoint', base_url: 'http://127.0.0.1:9999/v1', model: 'my-model', weights_path: null, installed_at: '2026-10-02T00:00:00Z', note: '', status: 'unreachable', registered: true, source: 'registry' },
+      { id: 'm-reg-1', name: 'my-endpoint', kind: 'openai_endpoint', base_url: 'http://127.0.0.1:9999/v1', model: 'my-model', weights_path: '/home/u/models/my-endpoint', installed_at: '2026-10-02T00:00:00Z', note: '', status: 'unreachable', registered: true, source: 'registry' },
     ],
     warnings: [],
   };
@@ -368,6 +368,11 @@ async function clickTestId(page, testId) {
       endpointRow: (externalRows[1]?.innerText || '').includes('my-endpoint')
         && (externalRows[1]?.innerText || '').includes('不可达')
         && (externalRows[1]?.innerText || '').includes('已登记'),
+      // 探测不可达的行不允许接入：接入会顺手把它设为默认模型（评审 P2）。
+      unreachableLinkDisabled: (() => {
+        const link = externalRows[1]?.querySelector('[data-testid="device-manager-link"]');
+        return !!link && link.disabled;
+      })(),
     };
   });
   rec('⑤ 商店行锁定态与外部模型行徽标齐全', Object.values(modelSection).every(Boolean), JSON.stringify(modelSection));
@@ -379,6 +384,8 @@ async function clickTestId(page, testId) {
     const row = document.querySelector('[data-testid="device-manager-external-row"]');
     return {
       intro: (row?.innerText || '').includes('登记信息'),
+      // Ollama 行不再显示"同时删除模型文件"勾选框：后端对 Ollama 无条件从端点
+      // 删除，勾选框暗示"不勾就保留文件"是假的（评审 P2）。
       weightsToggle: !!row?.querySelector('[data-testid="device-manager-delete-weights"]'),
     };
   });
@@ -388,13 +395,54 @@ async function clickTestId(page, testId) {
     registered: window.__DEVICE_MGR_TEST__.callsOf('device_register_external_model')[0]?.args,
     removed: window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model')[0]?.args,
   }));
-  rec('⑥ ollama 行移除先登记再走守卫命令且带二次确认',
-    armedState.intro && armedState.weightsToggle
+  rec('⑥ ollama 行移除先登记再走守卫命令且带二次确认（无权重勾选框）',
+    armedState.intro && !armedState.weightsToggle
     && removeCalls.registered && removeCalls.registered.name === 'qwen3:30b' && removeCalls.registered.kind === 'ollama'
     && removeCalls.removed && removeCalls.removed.id === 'm-registered-new'
     && removeCalls.removed.confirmName === 'qwen3:30b'
     && removeCalls.removed.deleteWeights === false,
     JSON.stringify({ armedState, removeCalls }));
+
+  // ⑥-b 带权重的登记行：armed 态回显权重目录完整路径 + 显示删除勾选框 +
+  //     勾选后出现不可撤销提示（删除后果必须让用户看见，评审 P2）。
+  await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')];
+    const target = rows.find(candidate => (candidate.innerText || '').includes('my-endpoint'));
+    target?.querySelector('[data-testid="device-manager-remove"]')?.click();
+  });
+  await page.waitForFunction(
+    () => !!document.querySelector('[data-testid="device-manager-remove-weights-path"]'),
+    { timeout: 4000 },
+  );
+  await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')];
+    const target = rows.find(candidate => (candidate.innerText || '').includes('my-endpoint'));
+    target?.querySelector('[data-testid="device-manager-delete-weights"]')?.click();
+  });
+  // 勾选后的"不可撤销"提示是 React 状态渲染，等它出现再读。
+  await page.waitForFunction(
+    () => [...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
+      .some(row => row.querySelector('[data-testid="device-manager-remove-weights-path"]')
+        && (row.innerText || '').includes('不可恢复')),
+    { timeout: 4000 },
+  );
+  const armedEndpoint = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')];
+    const target = rows.find(candidate => (candidate.innerText || '').includes('my-endpoint'));
+    return {
+      pathEcho: (target?.querySelector('[data-testid="device-manager-remove-weights-path"]')?.innerText || '').includes('/home/u/models/my-endpoint'),
+      weightsToggle: !!target?.querySelector('[data-testid="device-manager-delete-weights"]'),
+      irreversibleShown: (target?.innerText || '').includes('不可恢复'),
+    };
+  });
+  await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('[data-testid="device-manager-external-row"]')];
+    rows.find(candidate => (candidate.innerText || '').includes('my-endpoint'))
+      ?.querySelector('[data-testid="device-manager-remove-cancel"]')?.click();
+  });
+  rec('⑥-b 登记行 armed 态回显权重路径+勾选框+不可撤销提示',
+    armedEndpoint.pathEcho && armedEndpoint.weightsToggle && armedEndpoint.irreversibleShown,
+    JSON.stringify({ armedEndpoint }));
 
   // ⑦ 故障排查快捷卡 → device_doctor_prompt + 新建普通会话 + chat 携带提示词。
   const beforeDoctor = await page.evaluate(() => window.__DEVICE_MGR_TEST__.calls.length);

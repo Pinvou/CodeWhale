@@ -33,6 +33,7 @@ function loadDeviceFeature() {
   });
   const state = { device: null, deviceError: null, deviceServices: null, externalModels: null };
   let notifyCount = 0;
+  const domainCalls = [];
   const invokes = [];
   let respond = async () => null;
   const invoke = async (command, args) => {
@@ -41,11 +42,21 @@ function loadDeviceFeature() {
   };
   const factory = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__.device;
   assert.equal(typeof factory, 'function', 'device.js must register a bridge feature factory');
-  const api = factory({ state, notify() { notifyCount += 1; }, invoke });
+  const api = factory({
+    state,
+    notify() { notifyCount += 1; },
+    // 精确域发布spy:device 域只允许 ["device"],全域 notify 是评审指出的回归。
+    notifyDomains(domains) {
+      notifyCount += 1;
+      domainCalls.push(domains);
+    },
+    invoke,
+  });
   return {
     api, state, invokes,
     setRespond(fn) { respond = fn; },
     notifyCount: () => notifyCount,
+    domainCalls: () => domainCalls,
     interval: () => ({ fn: intervalFn, ms: intervalMs, started: startedCount, cleared: clearedCount }),
   };
 }
@@ -82,12 +93,15 @@ const fixtureSnapshot = () => ({
     { name: null, mount_point: '/snap/core', fs_type: 'squashfs', kind: 'unknown', total_bytes: null, available_bytes: null, is_removable: false },
   ],
   network: [
-    { name: 'lo', iface_type: 'loopback', is_up: true, mac: null, rx_bytes: 1610612736, tx_bytes: 1610612736, rx_rate_bps: 2500000, tx_rate_bps: 0 },
-    { name: 'wlP1s0', iface_type: 'wifi', is_up: true, mac: 'aa:bb:cc:dd:ee:ff', rx_bytes: 0, tx_bytes: 1048576, rx_rate_bps: 1500000000, tx_rate_bps: -5 },
-    { name: 'docker0', iface_type: 'weird', is_up: false, mac: '00:11:22:33:44:55', rx_bytes: null, tx_bytes: null, rx_rate_bps: null, tx_rate_bps: null },
+    { name: 'lo', iface_type: 'loopback', is_up: true, mac: null, rx_bytes: 1610612736, tx_bytes: 1610612736, rx_bytes_per_sec: 2500000, tx_bytes_per_sec: 0 },
+    { name: 'wlP1s0', iface_type: 'wifi', is_up: true, mac: 'aa:bb:cc:dd:ee:ff', rx_bytes: 0, tx_bytes: 1048576, rx_bytes_per_sec: 1500000000, tx_bytes_per_sec: -5 },
+    { name: 'docker0', iface_type: 'weird', is_up: false, mac: '00:11:22:33:44:55', rx_bytes: null, tx_bytes: null, rx_bytes_per_sec: null, tx_bytes_per_sec: null },
   ],
   processes: {
-    top_cpu: [{ pid: 1234, name: 'ollama serve', cpu_pct: 91.6, memory_bytes: 1610612736 }],
+    top_cpu: [
+      { pid: 1235, name: 'build', cpu_pct: 250, memory_bytes: 1024 },
+      { pid: 1234, name: 'ollama serve', cpu_pct: 91.6, memory_bytes: 1610612736 },
+    ],
     top_memory: [{ pid: 99, name: 'x'.repeat(50), cpu_pct: 0.2, memory_bytes: 1073741824 }],
   },
   gpu_ext: {
@@ -184,9 +198,12 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(fmt.network[0].mac, null);
 
   // 进程：CPU 取整百分比 + 内存字节；超长名兜底截断。
-  assert.equal(fmt.processes.topCpu[0].pid, 1234);
-  assert.equal(fmt.processes.topCpu[0].cpuPctText, '92%');
-  assert.equal(fmt.processes.topCpu[0].memText, '1.5 GiB');
+  // 多核 >100% 不封顶：封顶会把真实占用藏成 "100%"（fmtPct 只截 0 不封顶）。
+  assert.equal(fmt.processes.topCpu[0].pid, 1235);
+  assert.equal(fmt.processes.topCpu[0].cpuPctText, '250%');
+  assert.equal(fmt.processes.topCpu[1].pid, 1234);
+  assert.equal(fmt.processes.topCpu[1].cpuPctText, '92%');
+  assert.equal(fmt.processes.topCpu[1].memText, '1.5 GiB');
   assert.equal(fmt.processes.topMemory[0].name.length, 41);
   assert.ok(fmt.processes.topMemory[0].name.endsWith('…'));
 
@@ -228,11 +245,12 @@ assert.doesNotMatch(
   const eq = env.api.deviceFmtEqual;
   const base = { a: 'x', usedPct: 50, nested: { v: 1 }, list: [{ k: 'a', n: 1 }] };
   assert.equal(eq(base, { ...base }), true);
-  // 数值容差 0.5：抖动不触发；超过容差不等于。
+  // 数值容差 0.5（含等号边界）：抖动不触发；超过容差不等于。
   assert.equal(eq(base, { ...base, usedPct: 50.4 }), true);
+  assert.equal(eq(base, { ...base, usedPct: 50.5 }), true);
   assert.equal(eq(base, { ...base, usedPct: 51 }), false);
   // updatedAt 是时钟字段：不因前进而打破抑制。
-  assert.equal(eq(base, { ...base, updatedAt: base.updatedAt === undefined ? 2 : 1 }), true);
+  assert.equal(eq(base, { ...base, updatedAt: 2 }), true);
   assert.equal(eq({ ...base, updatedAt: 1 }, { ...base, updatedAt: 2 }), true);
   assert.equal(eq({ ...base, updatedAt: 1 }, { ...base, a: 'y', updatedAt: 2 }), false);
   // 嵌套对象/数组逐项比较；长度变化必须判定不等。
@@ -250,6 +268,9 @@ assert.doesNotMatch(
   const first = env.state.device;
   const notifiesAfterFirst = env.notifyCount();
   assert.equal(notifiesAfterFirst, 1);
+  // 必须是精确域发布(["device"])而不是全域 notify。
+  // domainCalls 内层数组产自 vm 域:展开成宿主域副本再比较(同文件既有纪律)。
+  assert.deepEqual(env.domainCalls().map(call => [...call]), [['device']]);
   await env.api.pollDevice();
   assert.equal(env.state.device, first, 'display-equal snapshot must not replace state.device');
   assert.equal(env.notifyCount(), notifiesAfterFirst, 'display-equal snapshot must not notify');
@@ -336,15 +357,39 @@ assert.doesNotMatch(
     { key: 'docker', running: false, detail: 'command not found' },
   ]);
   assert.equal(env.notifyCount(), 1);
+  assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
 
-  // 探测失败保留上一份结果：瞬时抖动不渲染成「全部停止」。
+  // 内容完全没变 → 不重复下发（与快照的显示等价抑制同一目标）。
+  await env.api.pollDeviceServices();
+  assert.equal(env.notifyCount(), 1);
+
+  // 探测失败保留上一份结果：瞬时抖动不渲染成「全部停止」；且失败轮零变化不 notify。
   env.setRespond(async command => {
     if (command === 'get_device_services') throw new Error('probe timeout');
     return null;
   });
   await env.api.pollDeviceServices();
   assert.equal(env.state.deviceServices.length, 2, 'failed probe must keep the last known services');
-  assert.equal(env.notifyCount(), 2);
+  assert.equal(env.notifyCount(), 1);
+
+  // in-flight 守卫：未决轮次期间的重入直接丢弃（10s 定时 + 手动刷新可并发，
+  // docker 探测最坏 3s+，乱序回填会把旧探测结果倒灌回来）。
+  let releaseServices;
+  env.setRespond(command => command === 'get_device_services'
+    ? new Promise(resolve => { releaseServices = resolve; })
+    : null);
+  const pendingServices = env.api.pollDeviceServices();
+  await env.api.pollDeviceServices();
+  releaseServices([
+    { key: 'ollama', running: true, detail: null },
+    { key: 'docker', running: false, detail: 'command not found' },
+  ]);
+  await pendingServices;
+  const serviceInvokes = env.invokes.filter(([command]) => command === 'get_device_services');
+  // 成功轮 + 内容等价轮 + 失败轮 + 未决轮 = 4；重入 tick 被吞掉不新增。
+  assert.equal(serviceInvokes.length, 4, 'in-flight services poll must swallow reentrant ticks');
+  // 决算结果与保留值内容相同 → 不 notify。
+  assert.equal(env.notifyCount(), 1);
 }
 
 {
@@ -358,6 +403,7 @@ assert.doesNotMatch(
   assert.equal(fetched, modelsView);
   assert.equal(env.state.externalModels, modelsView);
   assert.equal(env.notifyCount(), 1);
+  assert.deepEqual([...env.domainCalls().at(-1)], ['device']);
 
   // 注册成功后必须回读注册表刷新 externalModels。
   const record = { id: 'm-9', name: 'qwen3-30b' };
