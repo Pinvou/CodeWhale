@@ -1906,6 +1906,31 @@ mod tests {
     }
 
     #[test]
+    fn empty_workspace_start_can_pair_but_never_advertises_or_resolves_code_scope() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        assert_eq!(manager.status().status, ControlledStatusKind::Registering);
+        assert_eq!(manager.status().workspace_count, 0);
+        assert!(!manager.status().code_mode_allowed);
+        register(&manager, &operation);
+        enter_handshake(&manager, &operation);
+        let connected = manager
+            .complete_connected(operation.clone(), lease(operation.generation()))
+            .unwrap();
+        assert_eq!(connected.status, ControlledStatusKind::Connected);
+        assert_eq!(connected.workspace_count, 0);
+        assert!(!connected.code_mode_allowed);
+        assert!(manager.workspaces().is_empty());
+        assert_eq!(
+            manager
+                .resolve_code_workspace("ungranted")
+                .unwrap_err()
+                .code,
+            "workspace_not_authorized"
+        );
+    }
+
+    #[test]
     fn opaque_workspace_resolves_only_while_the_b_authorized_directory_identity_is_live() {
         let workspace = tempfile::tempdir().unwrap();
         let authorized_path = workspace.path().to_path_buf();

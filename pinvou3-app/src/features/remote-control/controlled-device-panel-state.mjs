@@ -1,6 +1,31 @@
 // Presentation-only selectors for the B panel. The authoritative generation,
 // session and task lifecycle remain in the Rust-backed remote-control domain.
 const ACTIVE_TASK_STATES = new Set(['admitted', 'running', 'waiting_permission']);
+export function permissionPollingTaskIds(tasks) {
+  return JSON.stringify((Array.isArray(tasks) ? tasks : [])
+    .filter(task => task.status === 'waiting_permission').map(task => task.taskId).sort());
+}
+
+// One read in flight; teardown suppresses late replies. A stable waiting task
+// can receive more approvals, so membership alone is not a refresh trigger.
+export function startPermissionPolling({ read, onSuccess, onError,
+  schedule = setInterval, cancel = clearInterval, intervalMs = 2000 }) {
+  let closed = false;
+  let reading = false;
+  const refresh = async () => {
+    if (closed || reading) return;
+    reading = true;
+    try {
+      const result = await read();
+      if (!closed) onSuccess(result);
+    } catch (error) {
+      if (!closed) onError(error);
+    } finally { reading = false; }
+  };
+  void refresh();
+  const timer = schedule(() => { void refresh(); }, intervalMs);
+  return () => { closed = true; cancel(timer); };
+}
 export const CONTROLLED_BOUND_STATUSES = new Set([
   'connected', 'reconnecting', 'resume_provisional', 'resume_activated_pending_liveness',
 ]);
