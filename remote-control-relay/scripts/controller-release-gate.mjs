@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDirectCliEntry } from "../cli-entrypoint.js";
 import { parseControllerEnvironment } from "./deploy-controller-preflight.mjs";
 import { validateReleaseEvidenceFile } from "./validate-controller-release-evidence.mjs";
 
@@ -159,7 +160,7 @@ export async function runControllerReleaseGate(env = process.env) {
   return { ok: true, enabled: true, evidence_required: true, ...validated };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isDirectCliEntry(import.meta.url)) {
   runControllerReleaseGate()
     .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
     .catch((error) => {

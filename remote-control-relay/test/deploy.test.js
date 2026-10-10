@@ -19,12 +19,39 @@ test("production hardening keeps deployment-specific proxy addresses out of the 
   assert.match(preflight, /controller_env_proxy_ips_mismatch/);
 });
 
+test("production deployment requires explicit confirmed targets before network or upload", async () => {
+  const source = await readFile(deployScript, "utf8");
+  const config = source.match(/^SERVER=[^]*?(?=^BASE_PATH=)/m)?.[0];
+  assert.ok(config, "execute the actual production configuration gate");
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const valid = {
+    PINVOU_REMOTE_DEPLOY_SERVER: "fixture@relay.invalid",
+    PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER: "fixture@relay.invalid",
+    SSH_KEY: "fixture-key", PINVOU_REMOTE_DIRECT_URL: "http://direct.invalid/pinvou3/remote",
+  };
+  const cases = [valid,
+    ...Object.keys(valid).map((key) => ({ ...valid, [key]: "" })),
+    { ...valid, PINVOU_REMOTE_DEPLOY_SERVER: "other@relay.invalid" },
+    { ...valid, PINVOU_REMOTE_DEPLOY_SERVER: "-oProxyCommand=bad", PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER: "-oProxyCommand=bad" },
+  ];
+  for (let i = 0; i < cases.length; i++) {
+    const result = spawnSync(bash, ["-c", "set -euo pipefail\n" + config + '\nprintf "validated\\n"'],
+      { env: { ...process.env, ...cases[i] }, encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, i === 0 ? 0 : 64);
+    assert.equal(result.stdout, i === 0 ? "validated\n" : "");
+    for (const value of Object.values(cases[i]).filter(Boolean)) assert.equal(result.stderr.includes(value), false);
+  }
+});
+
 test("production deploy builds and replaces the complete shared WebUI dist", async () => {
   const source = await readFile(deployScript, "utf8");
   assert.match(source, /PINVOU_REMOTE_PUBLIC_BASE_PATH="\$BASE_PATH" npm run build:web/);
   assert.match(source, /tar -czf - -C "\$RELAY_DIR\/web\/dist" \./);
   assert.match(source, /behavior-telemetry-schema\.js/);
-  assert.match(source, /mapfile -t relay_modules/);
+  assert.doesNotMatch(source, /\bmapfile\b/);
+  assert.match(source, /while IFS= read -r relay_module; do/);
+  assert.match(source, /relay_modules\+=\("\$relay_module"\)/);
   assert.match(source, /"\$\{relay_modules\[@\]\}"/);
   assert.match(source, /mkdir -p "\$backup\/code-js"/);
   assert.match(source, /for module in "\$code_stage"\/\*\.js/);
@@ -53,7 +80,7 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   assert.match(source, /install -d -o root -g root -m 700 "\$controller_state_dir"/);
   assert.match(source, /scripts\/controller-route-smoke\.mjs/);
   assert.equal((source.match(/for _ in \$\(seq 1 30\); do/g) || []).length, 2);
-  assert.match(source, /if curl -fsS http:\/\/127\.0\.0\.1:8787\/pinvou3\/remote\/healthz >\/dev\/null 2>&1/);
+  assert.match(source, /if curl -fsS --connect-timeout 3 --max-time 5 http:\/\/127\.0\.0\.1:8787\/pinvou3\/remote\/healthz >\/dev\/null 2>&1/);
   assert.match(source, /controller-v1 路由烟测失败/);
   assert.equal((source.match(/cp -a "\$module" "\$remote_dir\/"/g) || []).length, 3);
   assert.doesNotMatch(source, /PINVOU_ALLOW_LEGACY_REMOTE_DEPLOY/);
@@ -101,20 +128,54 @@ test("staged controller smoke resolves its protocol after the real module instal
   for (const name of (await readdir(relayDir)).filter((entry) => entry.endsWith(".js"))) {
     await copyFile(join(relayDir, name), join(stage, name));
   }
-  await copyFile(join(relayDir, "scripts", "controller-route-smoke.mjs"), join(stage, "scripts", "controller-route-smoke.mjs"));
+  for (const name of ["controller-route-smoke.mjs", "deploy-controller-preflight.mjs"]) {
+    await copyFile(join(relayDir, "scripts", name), join(stage, "scripts", name));
+  }
   // Replay the install loop from the actual deployment script, not a test copy.
   const source = await readFile(deployScript, "utf8");
   const loop = source.match(/for module in "\$code_stage"\/\*\.js; do[\s\S]*?\r?\ndone/);
   assert.ok(loop, "the deployment must install the complete root module set");
-  const copied = spawnSync("bash", ["-c", `set -euo pipefail\ncode_stage=stage\nremote_dir=installed\n${loop[0]}`], { cwd: root, encoding: "utf8" });
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const copied = spawnSync(bash, ["-c", `set -euo pipefail\ncode_stage=stage\nremote_dir=installed\n${loop[0]}`], { cwd: root, encoding: "utf8" });
   assert.equal(copied.status, 0, copied.stderr || String(copied.error));
   const loaded = spawnSync(process.execPath, [
     "--input-type=module",
     "-e",
-    "await import('./stage/scripts/controller-route-smoke.mjs')",
+    "await import('./stage/scripts/controller-route-smoke.mjs'); await import('./stage/scripts/deploy-controller-preflight.mjs')",
   ], { cwd: root, encoding: "utf8" });
   assert.equal(loaded.status, 0, loaded.stderr);
   assert.equal(await readFile(join(installed, "protocol-controller.js"), "utf8"), await readFile(join(stage, "protocol-controller.js"), "utf8"));
+  assert.equal(await readFile(join(installed, "cli-entrypoint.js"), "utf8"), await readFile(join(stage, "cli-entrypoint.js"), "utf8"));
+  // Replay the deployment's preflight command with invalid input. Its staged
+  // helper dependency must resolve, and the gate must execute before mutation.
+  const command = source.match(/^node "\$code_stage\/scripts\/deploy-controller-preflight\.mjs" "\$controller_env"$/m);
+  assert.ok(command, "exercise the actual staged CLI invocation");
+  const rejected = spawnSync(bash, ["-c", `set -euo pipefail\ncode_stage=stage\ncontroller_env=missing-controller.env\n${command[0]}`], { cwd: root, encoding: "utf8" });
+  assert.equal(rejected.status, 1, rejected.error?.message || rejected.stderr);
+  assert.equal(rejected.stderr.trim(), "ENOENT");
+});
+
+test("deploy module collection does not require mapfile and preserves relative names", async (t) => {
+  const source = await readFile(deployScript, "utf8");
+  const collection = source.match(/^relay_modules=\(\)[\s\S]*?^done < <\(cd "\$RELAY_DIR" && printf '%s\\n' \.\/\*\.js\)/m);
+  assert.ok(collection, "exercise the actual deployment module collection");
+  const root = await mkdtemp(join(tmpdir(), "pinvou-relay-modules-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const relayDir = join(root, "relay with spaces");
+  await mkdir(relayDir);
+  for (const name of ["server.js", "extra module.js", "ignored.txt"]) {
+    await writeFile(join(relayDir, name), "");
+  }
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const collected = spawnSync(bash, ["-c", [
+    "set -euo pipefail",
+    "enable -n mapfile 2>/dev/null || true",
+    'RELAY_DIR="$1"',
+    collection[0],
+    'printf \'%s\\n\' "${relay_modules[@]}"',
+  ].join("\n"), "collect", relayDir.replaceAll("\\", "/")], { encoding: "utf8" });
+  assert.equal(collected.status, 0, collected.error?.message || collected.stderr);
+  assert.deepEqual(collected.stdout.trim().split(/\r?\n/), ["./extra module.js", "./server.js"]);
 });
 
 async function executable(path, content) {
@@ -134,7 +195,8 @@ async function pathExists(path) {
 async function ensureMinimalWebDist(t) {
   const dist = join(repoRoot, "remote-control-relay", "web", "dist");
   const index = join(dist, "index.html");
-  const bridge = join(dist, "platform", "tauri", "bridge.js");
+  const app = join(dist, "assets", "app.js");
+  const startup = join(dist, "startup", "fixture.js");
   const distExisted = await pathExists(dist);
   const createdFiles = [];
 
@@ -142,15 +204,19 @@ async function ensureMinimalWebDist(t) {
   if (!(await pathExists(index))) {
     await writeFile(index, [
       "<!doctype html>",
+      '<title>PINVOU 智能助手</title>',
       '<base href="/pinvou3/remote/">',
+      '<script src="/pinvou3/remote/startup/fixture.js"></script>',
       '<script type="module" src="/pinvou3/remote/assets/app.js"></script>',
     ].join("\n"));
     createdFiles.push(index);
   }
-  if (!(await pathExists(bridge))) {
-    await mkdir(dirname(bridge), { recursive: true });
-    await writeFile(bridge, "");
-    createdFiles.push(bridge);
+  if (createdFiles.includes(index)) {
+    for (const asset of [app, startup]) {
+      await mkdir(dirname(asset), { recursive: true });
+      await writeFile(asset, "/* isolated deployment fixture */");
+      createdFiles.push(asset);
+    }
   }
 
   t.after(async () => {
@@ -259,6 +325,9 @@ esac
       PATH: `${bin}:${process.env.PATH}`,
       XDG_CACHE_HOME: join(root, "cache"),
       PINVOU_REMOTE_PUBLIC_URL: "https://public.invalid/pinvou3/remote",
+      PINVOU_REMOTE_DEPLOY_SERVER: "fixture@relay.invalid",
+      PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER: "fixture@relay.invalid",
+      SSH_KEY: "fixture-key",
       PINVOU_REMOTE_DIRECT_URL: "http://direct.invalid/pinvou3/remote",
       PINVOU_CONFIRM_PRODUCTION_DEPLOY: "1",
       SKIP_WEB_BUILD: "1",

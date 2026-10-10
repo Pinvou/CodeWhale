@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isControllerIdentifier, isEnrollmentEndpointIdentifier } from "./identifier-contract.js";
 
 import {
   CONTROLLER_PROTOCOL_VERSION,
@@ -10,7 +11,6 @@ import {
   verifyReceiptCommitment,
 } from "./protocol-controller.js";
 
-const ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
 const RESUME_BUDGET_MS = 30_000;
 
 export class ControllerLeaseError extends Error {
@@ -26,7 +26,7 @@ function fail(code, cause) {
 }
 
 function id(value, label) {
-  if (typeof value !== "string" || !ID.test(value)) fail(`${label}_invalid`);
+  if (!isControllerIdentifier(value)) fail(`${label}_invalid`);
   return value;
 }
 
@@ -121,8 +121,8 @@ export class ControllerLeaseManager {
       || typeof reservationManager.release !== "function"
       || typeof reservationManager.reservationForOwner !== "function"
       || typeof reservationManager.releaseControllerLease !== "function"
-      || typeof relayEpoch !== "string" || !ID.test(relayEpoch)
-      || typeof signingKeyId !== "string" || !ID.test(signingKeyId)
+      || !isControllerIdentifier(relayEpoch)
+      || !isControllerIdentifier(signingKeyId)
       || typeof signTranscript !== "function" || typeof resolveControlledEndpoint !== "function"
       || typeof clock !== "function" || typeof randomBytes !== "function" || typeof audit !== "function"
       || typeof onLeaseTerminated !== "function") {
@@ -663,7 +663,7 @@ export class ControllerLeaseManager {
   async abortHandshakesBySocket({ socketIdentity, reason = "owner_disconnected", reservationId, endpointId } = {}) {
     socketIdentity = id(socketIdentity, "socket_identity");
     if (reservationId !== undefined) reservationId = id(reservationId, "reservation_id");
-    if (endpointId !== undefined) endpointId = id(endpointId, "endpoint_id");
+    if (endpointId !== undefined && !isEnrollmentEndpointIdentifier(endpointId)) fail("endpoint_id_invalid");
     const flights = [...this.#claimFlights.values()].filter((flight) => !flight.cancelled
       && (!reservationId || flight.reservation.reservation_id === reservationId)
       && (Object.values(flight.sockets).includes(socketIdentity)

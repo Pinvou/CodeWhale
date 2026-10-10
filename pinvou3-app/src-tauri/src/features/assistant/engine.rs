@@ -30,6 +30,7 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::broadcast;
 
+use crate::features::assistant::engine_pool::turn_tool_restrict::TurnToolRestrict;
 pub(crate) use crate::features::assistant::engine_support::EngineTurnSignal;
 use crate::features::assistant::engine_support::{
     TurnCompletionTracker, apply_scheduled_turn_policy, maybe_notify_task_completed,
@@ -519,6 +520,19 @@ pub(crate) fn dispatch_turn_bound_cancel<E: TurnBoundCancelOps + ?Sized>(
         TurnBoundCancelAction::Unbound | TurnBoundCancelAction::DispositionOnly => {
             engine.publish_stop_disposition_only(mode);
         }
+    }
+}
+
+/// A remote deadline is not the user's session-wide Stop action. Never latch
+/// a disposition on an unobserved/replaced slot, or cancel unrelated children.
+/// The foundation settles the exact cancelled turn's owned child mailbox.
+pub(crate) fn dispatch_remote_turn_cancel<E: TurnBoundCancelOps + ?Sized>(
+    engine: &E,
+    identity: Option<&TurnIdentity>,
+    mode: deepseek_tui::core::engine::CancelMode,
+) {
+    if let TurnBoundCancelAction::BoundTurn(turn_id) = turn_bound_cancel_action(identity) {
+        engine.cancel_bound_turn(&turn_id, mode);
     }
 }
 
@@ -1828,6 +1842,12 @@ impl AppEngine {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn bind_test_session(&mut self, session_id: &str, lifecycle: Arc<TurnLifecycle>) {
+        self.session_id = session_id.to_owned();
+        self.turn_lifecycle = lifecycle;
+    }
+
     /// Turn submission for headless harnesses (L1 integration harness, live
     /// tests). Mirrors the production path: reserve the turn slot first, then
     /// submit through `Self::send_reserved_user_message`, the same shape as
@@ -1863,14 +1883,29 @@ impl AppEngine {
             .as_ref()
             .map(|snapshot| snapshot.available_role_lines(&content))
             .unwrap_or_default();
-        self.send_reserved_user_message(
-            content,
-            mode,
-            persona_reminder,
+        // The per-turn restriction crosses this seam as the pool's
+        // `TurnToolRestrict` token, not the caller's `bool` (main #596 added
+        // this wrapper against the pre-token signature; the rebase union
+        // adapted it). Minting here keeps the wrapper's public `bool`
+        // signature for the external harnesses while the last-mile policy —
+        // and the aux zero-tool reminder merge, a no-op for headless ids —
+        // stays in the one place it is enforced.
+        super::engine_pool::forward_forced_turn_restrict(
+            &self.session_id,
+            false,
             restrict_tools,
-            expert_snapshot,
-            expert_candidates,
-            reservation,
+            persona_reminder,
+            |restrict_tools, persona_reminder| {
+                self.send_reserved_user_message(
+                    content,
+                    mode,
+                    persona_reminder,
+                    restrict_tools,
+                    expert_snapshot,
+                    expert_candidates,
+                    reservation,
+                )
+            },
         )
         .await
     }
@@ -1881,7 +1916,11 @@ impl AppEngine {
         content: String,
         mode: AppMode,
         persona_reminder: Option<String>,
-        restrict_tools: bool,
+        // Proof token, not the caller's `bool`: only the pool's policy
+        // (`turn_restrict_tools`) can mint it (PR #433 review S2(b)). The value
+        // is re-checked against THIS engine's session id, so a bogus token can
+        // never un-restrict an aux session.
+        restrict_tools: TurnToolRestrict,
         expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
         expert_candidates: Vec<String>,
         reservation: TurnReservation,
@@ -1890,7 +1929,7 @@ impl AppEngine {
             content,
             mode,
             persona_reminder,
-            restrict_tools,
+            restrict_tools.restricts_tools_for(&self.session_id),
             expert_snapshot,
             expert_candidates,
         )?;
