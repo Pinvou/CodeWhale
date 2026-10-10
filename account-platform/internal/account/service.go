@@ -23,7 +23,7 @@ import (
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
 
 type Service struct {
-	approvalPrechecks           ApprovalPrecheckSource
+	auditExports                *AuditExportService
 	organizationLifecycle       []OrganizationLifecycleClient
 	organizationUnitLifecycle   []OrganizationUnitLifecycleClient
 	organizationMemberLifecycle []OrganizationMemberLifecycleClient
@@ -34,12 +34,18 @@ type Service struct {
 	humanDelegations            *humandelegation.Signer
 	recoveryResults             ApprovalRecoveryResultReader
 	recoveryEffects             approvaleffect.Reader
+	approvalPrechecks           ApprovalPrecheckSource
 	wallets                     WalletProvisioner
 	mobileAuth                  *MobileAuthService
 	profiles                    *ProfileChangeService
 	serviceToken                string
 	now                         func() time.Time
 	smsConfiguration            *VersionedSMSProviderResolver
+}
+
+func (s *Service) WithAuditExports(exports *AuditExportService) *Service {
+	s.auditExports = exports
+	return s
 }
 
 func (s *Service) WithSMSConfiguration(configuration *VersionedSMSProviderResolver) *Service {
@@ -80,9 +86,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
-	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account.closure.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.GET("/client-compatibility", serviceauth.Require("internal.client-compatibility.read"), httpserver.AdaptFunc(s.internalClientCompatibility))
-	internal.GET("/registration-bonus-eligibility/readiness", serviceauth.Require("internal.registration-bonus-eligibility.read"), httpserver.AdaptFunc(s.internalRegistrationBonusEligibilityReadiness))
+	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account-closure-state.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.POST("/token-owner-authority", serviceauth.Require("internal.token-owner-authority.read"), httpserver.AdaptFunc(s.internalTokenOwnerAuthority))
 	internal.GET("/token-owner-candidates", serviceauth.Require("internal.token-owner-candidates.read"), httpserver.AdaptFunc(s.internalTokenOwnerCandidates))
 	internal.POST("/authorization/check", serviceauth.Require("internal.authorization.check"), httpserver.AdaptFunc(s.checkPermission))
@@ -128,6 +133,14 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 		protected.GET("/v1/me/profile-change-requests/:request_id", s.requirePermission(PermissionPersonalProfileUpdate), httpserver.AdaptFunc(s.getProfileChange))
 	}
 	admin := protected.Group("/admin/v1")
+	admin.GET("/audit-logs", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLogs))
+	admin.GET("/audit-logs/:audit_id", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLog))
+	if s.auditExports != nil {
+		admin.POST("/audit-exports", s.requirePermission(PermissionPlatformAuditExport), approvalpolicy.Require("ACCOUNT_AUDIT_EXPORT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.createAuditExport))
+		admin.GET("/audit-exports/:export_id", s.requirePermission(PermissionPlatformAuditExport), httpserver.AdaptFunc(s.getAuditExport))
+		admin.POST("/audit-exports/:export_id/download-tickets", s.requirePermission(PermissionPlatformAuditExport), approvalpolicy.Require("ACCOUNT_AUDIT_EXPORT_DOWNLOAD_TICKET", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.issueAuditExportDownloadTicket))
+		admin.GET("/audit-exports/:export_id/download", s.requirePermission(PermissionPlatformAuditExport), httpserver.AdaptFunc(s.downloadAuditExport))
+	}
 	admin.GET("/users", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUsers))
 	admin.PATCH("/users/:user_id/status", s.requirePermission(PermissionPlatformUsersStatusManage), approvalpolicy.Require("ACCOUNT_USER_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetUserStatus))
 	admin.GET("/account-closure-requests", s.requirePermission(PermissionPlatformAccountClosuresRead), httpserver.AdaptFunc(s.adminAccountClosures))
@@ -205,14 +218,18 @@ func (s *Service) getAuthorizationContext(w http.ResponseWriter, r *http.Request
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the request could not be completed"
 	switch {
-	case errors.Is(err, ErrInvalidAccountClosureRequest):
-		status, code, message = http.StatusBadRequest, "INVALID_REQUEST", "invalid account closure command"
 	case errors.Is(err, ErrNotFound):
 		status, code, message = http.StatusNotFound, "NOT_FOUND", "the requested account resource was not found"
 	case errors.Is(err, ErrForbidden):
 		status, code, message = http.StatusForbidden, "ACCOUNT_FORBIDDEN", "the account action is not permitted"
 	case errors.Is(err, ErrAccountClosing):
 		status, code, message = http.StatusForbidden, "ACCOUNT_CLOSING", "account closure is in progress"
+	case errors.Is(err, ErrInvalidAuditExportRequest):
+		status, code, message = http.StatusBadRequest, "INVALID_AUDIT_EXPORT_REQUEST", "the audit export request is invalid"
+	case errors.Is(err, ErrAuditExportAuthorizationUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable"
+	case errors.Is(err, ErrAuditExportQuota):
+		status, code, message = http.StatusTooManyRequests, "AUDIT_EXPORT_QUOTA_EXCEEDED", "the audit export limit was exceeded"
 	case errors.Is(err, ErrConflict):
 		status, code, message = http.StatusConflict, "ACCOUNT_CONFLICT", "the account resource changed or conflicts with existing data"
 	case errors.Is(err, ErrLastOwner):

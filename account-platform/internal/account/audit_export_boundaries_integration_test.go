@@ -56,6 +56,9 @@ func TestAuditExportPersistedBoundaries(t *testing.T) {
 	if err = accountschema.Up(ctx, c, loaded); err != nil {
 		t.Fatalf("SETUP_UP_%s", auditExportBoundaryErrorClass(err))
 	}
+	if _, verifyErr := migrations.VerifyApplied(ctx, c, loaded); verifyErr != nil {
+		t.Fatal("SETUP_VERIFY")
+	}
 	migrations.Unlock(ctx, c)
 	repo, err := NewPostgresRepository(ctx, f.serviceURL(t, c, "account_service"))
 	if err != nil {
@@ -117,7 +120,7 @@ func TestAuditExportPersistedBoundaries(t *testing.T) {
 	t.Run("reason_characters", func(t *testing.T) {
 		now := time.Now().UTC()
 		_, e := exports.Create(ctx, principal, AuditExportRequest{Reason: "中文五字啊", IdempotencyKey: uuid.NewString(), Filter: AuditExportFilter{From: now.Add(-time.Minute), To: now}})
-		if !errors.Is(e, ErrConflict) {
+		if !errors.Is(e, ErrInvalidAuditExportRequest) {
 			t.Errorf("EXPECTED_VALIDATION_ACTUAL_%s", auditExportBoundaryErrorClass(e))
 		}
 	})
@@ -287,6 +290,21 @@ type auditExportBoundaryFixture struct {
 
 func newAuditExportBoundaryFixture(t *testing.T, ctx context.Context, raw string) *auditExportBoundaryFixture {
 	t.Helper()
+	expectedPort, expectedUser, expectedDirectory := uint16(55504), "pinvou_wave_test", "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data"
+	switch os.Getenv("F17_TEST_DATABASE_PROFILE") {
+	case "":
+	case "github-actions-service":
+		if os.Getenv("GITHUB_ACTIONS") != "true" {
+			t.Fatal("CI fixture profile requires GitHub Actions")
+		}
+		expectedPort, expectedUser, expectedDirectory = 5432, "postgres", "/var/lib/postgresql/data"
+	default:
+		t.Fatal("unknown isolated PostgreSQL profile")
+	}
+	config, err := pgx.ParseConfig(raw)
+	if err != nil || config.Host != "127.0.0.1" || config.Port != expectedPort || config.User != expectedUser || config.Database != "postgres" || config.TLSConfig != nil || len(config.Fallbacks) != 0 {
+		t.Fatal("only the explicitly owned local PostgreSQL fixture is allowed")
+	}
 	admin, err := pgx.Connect(ctx, raw)
 	if err != nil {
 		t.Fatal("connect schema setup identity")
@@ -297,10 +315,10 @@ func newAuditExportBoundaryFixture(t *testing.T, ctx context.Context, raw string
 	if _, err := admin.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou.f17.audit-export.boundary.fixture'))`); err != nil {
 		t.Fatal("exclusive fixture lock failed")
 	}
-	config, err := pgx.ParseConfig(raw)
-	if err != nil {
-		admin.Close(context.Background())
-		t.Fatal("parse schema fixture")
+	var session, current, directory string
+	var port, otherSessions, otherDBs int
+	if err := admin.QueryRow(ctx, `SELECT session_user,current_user,inet_server_port(),current_setting('data_directory'),(SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend'),(SELECT count(*) FROM pg_database WHERE NOT datistemplate AND datname<>'postgres')`).Scan(&session, &current, &port, &directory, &otherSessions, &otherDBs); err != nil || session != expectedUser || current != expectedUser || port != int(expectedPort) || strings.ReplaceAll(directory, "\\", "/") != expectedDirectory || otherSessions != 0 || otherDBs != 0 {
+		t.Fatal("owned server/identity/exclusive session/database guard failed")
 	}
 	f := &auditExportBoundaryFixture{admin: admin, config: config, dbs: make(map[string]string), roles: []string{"account_service", "account_migrator", "account_approval_control_owner", "account_approval_authorization_owner", "account_approval_writer", "account_approval_backfill", "account_approval_relay", "account_approval_recovery", "billing_service", "billing_schema_owner", "billing_migrator"}}
 	var count int

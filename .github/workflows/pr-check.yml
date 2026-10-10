@@ -766,6 +766,18 @@ jobs:
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 45
+    services:
+      audit-export-postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       GOTOOLCHAIN: local
       CGO_ENABLED: "1"
@@ -814,6 +826,32 @@ jobs:
               go vet -tags=nomsgpack -mod=readonly ./...
             )
           done < <(find account-platform -name vendor -prune -o -name go.mod -print0 | sort -z)
+
+      - name: Audit export finite PostgreSQL rollback and persisted boundaries
+        working-directory: account-platform
+        env:
+          F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable
+          F17_TEST_DATABASE_PROFILE: github-actions-service
+        run: |
+          set -euo pipefail
+          # Fixed actor names are exclusive to this ephemeral service. Keep
+          # package execution serial and run only the bounded audit fixtures.
+          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/accountschema -run '^TestAuditExport(RollbackRoleStorageGuard|PublicDownRetainsOriginalHistory|GuardedRollbackTransactions)$' | tee "$RUNNER_TEMP/f17-audit-schema.jsonl"
+          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/account -run '^TestAuditExportPersistedBoundaries$' | tee "$RUNNER_TEMP/f17-audit-account.jsonl"
+          python3 - "$RUNNER_TEMP/f17-audit-schema.jsonl" "$RUNNER_TEMP/f17-audit-account.jsonl" <<'PY'
+          import json, pathlib, sys
+          expected = [
+              {"TestAuditExportRollbackRoleStorageGuard", "TestAuditExportPublicDownRetainsOriginalHistory", "TestAuditExportGuardedRollbackTransactions"},
+              {"TestAuditExportPersistedBoundaries"},
+          ]
+          for filename, required in zip(sys.argv[1:], expected, strict=True):
+              events = [json.loads(line) for line in pathlib.Path(filename).read_text().splitlines() if line.strip()]
+              terminal = [event for event in events if event.get("Test") and event.get("Action") in ("pass", "fail", "skip")]
+              assert terminal and len(terminal) > len(required), "finite PostgreSQL test cases did not execute"
+              assert all(event["Action"] == "pass" for event in terminal), "finite PostgreSQL tests failed or skipped"
+              roots = {event["Test"] for event in terminal if "/" not in event["Test"]}
+              assert roots == required, "required finite PostgreSQL test selection did not execute"
+          PY
 
   team-relay-hub-test:
     name: team-relay-hub-test

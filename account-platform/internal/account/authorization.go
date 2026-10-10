@@ -17,6 +17,9 @@ import (
 )
 
 const (
+	PermissionPlatformAuditRead             = "platform.audit.read"
+	PermissionPlatformAuditExport           = "platform.audit.export"
+	PermissionPlatformAuditPIIExport        = "platform.audit.pii.export"
 	PermissionPersonalAccountClosureRead    = "personal.account.close.read"
 	PermissionPersonalAccountClosureRequest = "personal.account.close.request"
 	PermissionPlatformAccountClosuresRead   = "platform.account-closures.read"
@@ -294,7 +297,12 @@ func (s *Service) requirePermission(permission string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		repository, ok := s.repository.(authorizationRepository)
 		principal, authenticated := identity.FromContext(c.Request.Context())
-		if !ok || !authenticated {
+		if !ok {
+			api.WriteError(c.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		if !authenticated {
 			api.WriteError(c.Writer, http.StatusForbidden, "PERMISSION_DENIED", "the requested permission is not granted", httpserver.RequestID(c.Request.Context()))
 			c.Abort()
 			return

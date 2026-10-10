@@ -139,9 +139,12 @@ function Audit({ copy, data, client, setData, permissions }) {
   const [exportReason, setExportReason] = useState('');
   const [exportAttempted, setExportAttempted] = useState(false);
   const [ticketIssueUnknown, setTicketIssueUnknown] = useState(false);
+  const liveRef = useRef(true);
+  useEffect(() => { liveRef.current = true; return () => { liveRef.current = false; }; }, []);
   const exportAttemptRef = useRef(null);
   const exportOutcomeUnknownRef = useRef(false);
   const exportTicketRef = useRef(null);
+  const canRead = (permissions || []).includes('platform.audit.read');
   const canExport = (permissions || []).includes('platform.audit.export');
   const canExportPII = (permissions || []).includes('platform.audit.pii.export');
   const items = data.audits || [];
@@ -152,27 +155,32 @@ function Audit({ copy, data, client, setData, permissions }) {
   });
   const search = async (event) => {
     event?.preventDefault();
+    if (!canRead) return;
     setBusy(true);
     setError('');
     try {
       const result = await client.audits(queryFilters());
+      if (!liveRef.current) return;
       if (!Array.isArray(result?.items)) throw new Error('INVALID_AUDIT_LOGS_ACK');
       setData((current) => ({ ...current, audits: result.items }));
     } catch {
-      setError(copy.audit.actionFailed);
+      if (liveRef.current) setError(copy.audit.actionFailed);
     } finally {
-      setBusy(false);
+      if (liveRef.current) setBusy(false);
     }
   };
   const showDetail = async (item) => {
+    if (!canRead) return;
     setBusy(true);
     setError('');
     try {
-      setDetail(await client.audit(item.audit_id));
+      const itemDetail = await client.audit(item.audit_id);
+      if (!liveRef.current) return;
+      setDetail(itemDetail);
     } catch {
-      setError(copy.audit.actionFailed);
+      if (liveRef.current) setError(copy.audit.actionFailed);
     } finally {
-      setBusy(false);
+      if (liveRef.current) setBusy(false);
     }
   };
   const createExport = async () => {
@@ -190,10 +198,12 @@ function Audit({ copy, data, client, setData, permissions }) {
     setError('');
     try {
       const job = await submitAuditExportAttempt(client, exportAttemptRef.current);
+      if (!liveRef.current) return;
       exportOutcomeUnknownRef.current = false;
       setExportJob(job);
       setExportKey(job.decryption_key || '');
     } catch (cause) {
+      if (!liveRef.current) return;
       // A first definite rejection permits correction. After any unknown
       // outcome, a later authorization/path rejection does not prove that the
       // first call created no job; retain the original facts and key until an
@@ -205,9 +215,9 @@ function Audit({ copy, data, client, setData, permissions }) {
       } else {
         exportOutcomeUnknownRef.current = true;
       }
-      setError(copy.audit.exportFailed);
+      if (liveRef.current) setError(copy.audit.exportFailed);
     } finally {
-      setBusy(false);
+      if (liveRef.current) setBusy(false);
     }
   };
   const refreshExport = async () => {
@@ -216,12 +226,13 @@ function Audit({ copy, data, client, setData, permissions }) {
     setError('');
     try {
       const job = await client.auditExport(exportJob.export_id);
+      if (!liveRef.current) return;
       setExportJob(job);
       if (!job.download_ticket_issued_at) setTicketIssueUnknown(false);
     } catch {
-      setError(copy.audit.exportFailed);
+      if (liveRef.current) setError(copy.audit.exportFailed);
     } finally {
-      setBusy(false);
+      if (liveRef.current) setBusy(false);
     }
   };
   const downloadExport = async () => {
@@ -237,7 +248,9 @@ function Audit({ copy, data, client, setData, permissions }) {
           throw error;
         }
       }
+      if (!liveRef.current) return;
       const blob = await client.downloadAuditExport(exportJob.export_id, exportTicketRef.current.download_token);
+      if (!liveRef.current) return;
       const href = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = href;
@@ -251,9 +264,9 @@ function Audit({ copy, data, client, setData, permissions }) {
       }
       setExportJob((current) => ({ ...current, status: 'DOWNLOADED' }));
     } catch {
-      setError(copy.audit.exportFailed);
+      if (liveRef.current) setError(copy.audit.exportFailed);
     } finally {
-      setBusy(false);
+      if (liveRef.current) setBusy(false);
     }
   };
   if (detail) return <AuditDetail copy={copy} item={detail} onBack={() => setDetail(null)} />;
@@ -309,7 +322,7 @@ function Audit({ copy, data, client, setData, permissions }) {
     <>
     <section className="adm-panel">
       <SectionHeader title={copy.audit.title} count={items.length} copy={copy} />
-      <form className="adm-ops-form" onSubmit={search}>
+      <form className="adm-ops-form" onSubmit={search}><fieldset disabled={busy || exportAttempted || Boolean(exportJob)}>
         <input aria-label={copy.audit.actorFilter} placeholder={copy.audit.actorFilter} value={filters.actor} onChange={(event) => setFilters((current) => ({ ...current, actor: event.target.value }))} />
         <input
           aria-label={copy.audit.actionFilter}
@@ -365,7 +378,7 @@ function Audit({ copy, data, client, setData, permissions }) {
           <span>{copy.audit.to}</span>
           <input type="datetime-local" value={filters.to} onChange={(event) => setFilters((current) => ({ ...current, to: event.target.value }))} />
         </label>
-        <button disabled={busy}>{copy.searchAction}</button>
+        <button disabled={busy || !canRead}>{copy.searchAction}</button></fieldset>
       </form>
       <p>{copy.audit.exportLimits}</p>
       {canExport && <form className="adm-ops-form" onSubmit={(event) => { event.preventDefault(); void createExport(); }}>
@@ -448,14 +461,16 @@ export function AuditWorkspace({client,copy,permissions}){
  const [loading,setLoading]=useState(true);
  const [loadError,setLoadError]=useState(false);
  const [retry,setRetry]=useState(0);
+ const canRead=(permissions || []).includes('platform.audit.read');
  useEffect(()=>{
   let live=true;setLoading(true);setLoadError(false);
+  if(!canRead){setData({audits:[]});setLoading(false);return()=>{live=false};}
   client.audits().then(result=>{
    if(!Array.isArray(result?.items))throw new Error('INVALID_AUDIT_LOGS_ACK');
    if(live)setData({audits:result.items});
   }).catch(()=>{if(live)setLoadError(true)}).finally(()=>{if(live)setLoading(false)});
   return()=>{live=false};
- },[client,retry]);
+ },[client,retry,canRead]);
  if(loading)return <p role="status">{copy.loading}</p>;
  if(loadError)return <div role="alert">{copy.audit.actionFailed}<button onClick={()=>setRetry(value=>value+1)}>{copy.refresh}</button></div>;
  return <Audit copy={copy} data={data} client={client} setData={setData} permissions={permissions}/>;

@@ -79,7 +79,11 @@ type auditExportGuardFixture struct {
 
 func newAuditExportGuardFixture(t *testing.T, ctx context.Context, raw string) *auditExportGuardFixture {
 	t.Helper()
-	admin, err := pgx.Connect(ctx, raw)
+	config, err := pgx.ParseConfig(raw)
+	if err != nil || !auditExportFixtureConfigurationAllowed(config, os.Getenv("F17_TEST_DATABASE_PROFILE"), os.Getenv("GITHUB_ACTIONS") == "true") {
+		t.Fatal("dedicated isolated fixture configuration required")
+	}
+	admin, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
 		t.Fatal("connect schema setup identity")
 	}
@@ -89,10 +93,25 @@ func newAuditExportGuardFixture(t *testing.T, ctx context.Context, raw string) *
 	if _, err := admin.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou.f17.audit-export.boundary.fixture'))`); err != nil {
 		t.Fatal("exclusive fixture lock failed")
 	}
-	config, err := pgx.ParseConfig(raw)
-	if err != nil {
-		admin.Close(context.Background())
-		t.Fatal("parse schema fixture")
+	var directory, session, database string
+	var port int
+	var super bool
+	if err := admin.QueryRow(ctx, `SELECT current_setting('data_directory'),session_user,current_database(),current_setting('port')::int,(SELECT rolsuper FROM pg_roles WHERE rolname=session_user)`).Scan(&directory, &session, &database, &port, &super); err != nil || session != config.User || database != "postgres" || port != int(config.Port) || !super {
+		t.Fatal("isolated coordinator identity rejected")
+	}
+	if os.Getenv("F17_TEST_DATABASE_PROFILE") == "github-actions-service" {
+		if directory != "/var/lib/postgresql/data" {
+			t.Fatal("isolated CI service directory rejected")
+		}
+	} else if strings.ReplaceAll(directory, "\\", "/") != "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data" {
+		t.Fatal("owned local runtime directory rejected")
+	}
+	var outsideDatabases, outsideActors int
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres','template0','template1')`).Scan(&outsideDatabases); err != nil || outsideDatabases != 0 {
+		t.Fatal("outside databases prohibit fixture writes")
+	}
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>$1`, session).Scan(&outsideActors); err != nil || outsideActors != 0 {
+		t.Fatal("outside actors prohibit fixture writes")
 	}
 	f := &auditExportGuardFixture{admin: admin, config: config, dbs: make(map[string]string), roles: []string{"account_service", "account_migrator", "account_approval_control_owner", "account_approval_authorization_owner", "account_approval_writer", "account_approval_backfill", "account_approval_relay", "account_approval_recovery", "billing_service", "billing_schema_owner", "billing_migrator"}}
 	var count int
@@ -174,6 +193,18 @@ func newAuditExportGuardFixture(t *testing.T, ctx context.Context, raw string) *
 		}
 	})
 	return f
+}
+
+// CI is a separate ephemeral service profile, never a bypass for an arbitrary
+// deployment URL. Local runs additionally verify their exact owned directory.
+func auditExportFixtureConfigurationAllowed(config *pgx.ConnConfig, profile string, githubActions bool) bool {
+	if config == nil || (config.Host != "127.0.0.1" && config.Host != "localhost") || config.Database != "postgres" || len(config.Fallbacks) != 0 {
+		return false
+	}
+	if profile == "github-actions-service" {
+		return githubActions && config.Port == 5432 && config.User == "postgres"
+	}
+	return profile == "" && config.Port == 55504 && config.User == "pinvou_wave_test"
 }
 
 func (f *auditExportGuardFixture) database(t *testing.T, ctx context.Context, domain, owner string) *pgx.Conn {

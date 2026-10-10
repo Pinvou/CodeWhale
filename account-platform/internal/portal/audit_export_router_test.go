@@ -1,11 +1,13 @@
 package portal
 
 import (
+	"bytes"
 	"context"
 	"github.com/google/uuid"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 )
@@ -78,6 +80,48 @@ func TestF17AuditPortalOpaqueDownloadAndAuthority(t *testing.T) {
 		service.Handler(nil).ServeHTTP(w, r)
 		if w.Code != 403 || calls.Load() != before {
 			t.Fatal("CSRF reached owner")
+		}
+	})
+}
+
+func TestF17AuditDownloadStreamsBeyondOrdinaryAPILimit(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	session := validSession(uuid.NewString())
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.NewString()
+	payload := bytes.Repeat([]byte("x"), (33<<20)+17)
+	payload[len(payload)-1] = 'z'
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		w.Header().Set("Content-Disposition", `attachment; filename="large.pae"`)
+		if r.URL.Path == "/admin/v1/audit-exports/"+id+"/download" {
+			if r.Header.Get("X-Pinvou-Download-Token") != "single-use-proof" {
+				t.Error("download proof missing")
+			}
+			w.Header().Set("Content-Type", "application/vnd.pinvou.audit-envelope+json")
+		}
+		_, _ = w.Write(payload)
+	}))
+	defer upstream.Close()
+	service.config.AccountURL = parseTestURL(t, upstream.URL)
+	t.Run("whole one-use payload", func(t *testing.T) {
+		r := financeBrowserRequest(service, session, "GET", "/api/admin/account/admin/v1/audit-exports/"+id+"/download", "")
+		r.Header.Set("X-Pinvou-Download-Token", "single-use-proof")
+		w := httptest.NewRecorder()
+		service.Handler(nil).ServeHTTP(w, r)
+		if w.Code != http.StatusOK || !bytes.Equal(w.Body.Bytes(), payload) || w.Header().Get("Content-Length") != strconv.Itoa(len(payload)) || w.Header().Get("Content-Disposition") != `attachment; filename="large.pae"` || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("one-use payload or download metadata was truncated")
+		}
+	})
+	t.Run("ordinary API limit unchanged", func(t *testing.T) {
+		r := financeBrowserRequest(service, session, "GET", "/api/admin/account/admin/v1/users", "")
+		w := httptest.NewRecorder()
+		service.Handler(nil).ServeHTTP(w, r)
+		if w.Code != http.StatusOK || w.Body.Len() != 32<<20 || w.Header().Get("Content-Disposition") != "" || w.Header().Get("Content-Length") != "" {
+			t.Fatal("audit download exception escaped its exact route")
 		}
 	})
 }

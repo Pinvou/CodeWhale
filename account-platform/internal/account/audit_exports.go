@@ -35,7 +35,9 @@ const (
 	auditExportFileTTL      = 24 * time.Hour
 )
 
+var ErrAuditExportAuthorizationUnavailable = errors.New("audit export authorization unavailable")
 var ErrAuditExportQuota = errors.New("audit export quota exceeded")
+var ErrInvalidAuditExportRequest = errors.New("audit export request is invalid")
 
 type AuditExportFilter struct {
 	Actor    string    `json:"actor,omitempty"`
@@ -185,14 +187,20 @@ func (s *AuditExportService) Create(ctx context.Context, principal identity.Prin
 	request.Filter.From = request.Filter.From.UTC()
 	request.Filter.To = request.Filter.To.UTC()
 	if !utf8.ValidString(request.Reason) || utf8.RuneCountInString(request.Reason) < 10 || utf8.RuneCountInString(request.Reason) > 500 || len(request.IdempotencyKey) < 8 || len(request.IdempotencyKey) > 120 || request.Filter.From.IsZero() || request.Filter.To.IsZero() || !request.Filter.To.After(request.Filter.From) || request.Filter.To.Sub(request.Filter.From) > auditExportMaximumRange || request.Filter.To.After(now.Add(time.Minute)) {
-		return AuditExportJob{}, ErrConflict
+		return AuditExportJob{}, ErrInvalidAuditExportRequest
 	}
 	if len(request.Filter.Actor) > 320 || len(request.Filter.Action) > 160 || len(request.Filter.Resource) > 320 || (request.Filter.Result != "" && request.Filter.Result != "SUCCEEDED" && request.Filter.Result != "DENIED" && request.Filter.Result != "FAILED") {
-		return AuditExportJob{}, ErrConflict
+		return AuditExportJob{}, ErrInvalidAuditExportRequest
 	}
 	if request.IncludePII {
 		decision, err := s.repository.Authorize(ctx, principal, PermissionPlatformAuditPIIExport, nil, nil)
-		if err != nil || !decision.Allowed {
+		if err != nil {
+			if errors.Is(err, ErrForbidden) {
+				return AuditExportJob{}, ErrForbidden
+			}
+			return AuditExportJob{}, fmt.Errorf("%w: %w", ErrAuditExportAuthorizationUnavailable, err)
+		}
+		if !decision.Allowed {
 			return AuditExportJob{}, ErrForbidden
 		}
 	}

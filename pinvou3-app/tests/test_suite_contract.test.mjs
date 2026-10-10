@@ -74,7 +74,7 @@ test("every JavaScript test file belongs to one explicit layer", () => {
 
 test("the default test command uses Node automatic discovery", () => {
   assert.equal(packageJson.scripts["test:node"], "node --test --test-concurrency=4");
-  assert.equal(packageJson.scripts.test, "npm run test:node && npm run validate:pet-assets");
+  assert.equal(packageJson.scripts.test, "npm run test:node && npm run test:account-platform-audit && npm run validate:pet-assets");
   assert.ok(nodeTests.length > 0);
 });
 

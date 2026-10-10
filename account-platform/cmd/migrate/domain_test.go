@@ -17,6 +17,9 @@ func TestProtectedMigrationIdentityUsesFrozenFacts(t *testing.T) {
 		version                int64
 		name, checksum, domain string
 	}{
+		{32, "audit_export_protection", "changed", "account"},
+		{32, "renamed", "d60a688ed9ee49014725543dbe458ac4386940033f09549877491f8f835be5ad", "account"},
+		{32, "custom_business", "custom_checksum", ""},
 		{900001, "first_delivery_permission_metadata", "", "account"},
 		{900001, "outbox_publication_generation", "changed", "billing"},
 		{900002, "payment_anomaly_resolution_intents", "changed", "billing"},

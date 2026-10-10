@@ -13,11 +13,13 @@ window.fetch=async(url,options={})=>{
  if(!String(url).startsWith('/api/'))return original(url,options);
  state.calls.push({url:String(url),method:options.method||'GET',body:options.body,headers:options.headers,credentials:options.credentials,cache:options.cache});
  if(url==='/api/session')return response({authenticated:true,csrf_token:'controlled-csrf'});
- if(url==='/api/account/v1/account/bootstrap')return response({user_id:id,status:'ACTIVE',personal_permissions:[],platform_permissions:params.has('deny')?[]:params.has('readOnly')?['platform.audit.read']:['platform.audit.read','platform.audit.export']});
- if(String(url).includes('/audit-logs?'))return response({items:[{audit_id:id,action:'CONTROLLED_AUDIT_ACTION',result:'SUCCEEDED',request_id:'controlled-request',resource_type:'USER',resource_id:id}]});
+ if(url==='/api/account/v1/account/bootstrap')return response({user_id:id,status:'ACTIVE',personal_permissions:[],platform_permissions:params.has('deny')?[]:params.has('readOnly')?['platform.audit.read']:params.has('exportOnly')?['platform.audit.export']:params.has('piiOnly')?['platform.audit.pii.export']:params.has('pii')?['platform.audit.read','platform.audit.export','platform.audit.pii.export']:['platform.audit.read','platform.audit.export']});
+ if(String(url).includes('/audit-logs')&&params.has('exportOnly'))return response({code:'PERMISSION_DENIED'},403);
+ if(String(url).includes('/audit-logs?')||String(url).endsWith('/audit-logs'))return response({items:[{audit_id:id,action:'CONTROLLED_AUDIT_ACTION',result:'SUCCEEDED',request_id:'controlled-request',resource_type:'USER',resource_id:id}]});
  if(String(url).endsWith('/audit-logs/'+id))return response({audit_id:id,action:'CONTROLLED_AUDIT_ACTION',result:'SUCCEEDED',change_summary:{status:'ACTIVE'}});
  if(String(url).endsWith('/audit-exports')&&options.method==='POST'){
   state.createCount++;
+  if(state.createCount===1&&['400','429','409'].includes(params.get('initialReject')))return response({code:'CONTROLLED_CREATE_REJECTION'},Number(params.get('initialReject')));
   if(state.definiteForbidden&&state.createCount===1)return response({code:'PERMISSION_DENIED'},403);
   if(state.createUnknownForbidden){if(state.createCount===1){state.committedJob=true;return response({code:'UPSTREAM_UNAVAILABLE'},503);}if(state.createCount===2)return response({code:'PERMISSION_DENIED'},403);}
   if(state.lostCreate){state.lostCreate=false;throw new TypeError('controlled lost create ACK');}

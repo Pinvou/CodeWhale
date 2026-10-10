@@ -1455,6 +1455,11 @@
       "source": "account-platform/cmd/account-service/main.go",
       "name": "account-closure",
       "permission": "internal.job.account-closure"
+    },
+    {
+      "source": "account-platform/cmd/account-service/main.go",
+      "name": "audit-export",
+      "permission": "internal.job.audit-export"
     }
   ],
   "events": [

@@ -784,6 +784,10 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if organizationAdminPathAllowed(method, resource) {
 		return true
 	}
+	// A HEAD request must never consume a single-use audit download.
+	if auditExportDownloadPath(http.MethodGet, resource) {
+		return method == http.MethodGet
+	}
 	if method == http.MethodHead {
 		method = http.MethodGet
 	}
@@ -800,6 +804,20 @@ func accountAdminPathAllowed(method, resource string) bool {
 		return true
 	}
 	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")
+	if resource == "/admin/v1/audit-logs" {
+		return method == http.MethodGet
+	}
+	if resource == "/admin/v1/audit-exports" {
+		return method == http.MethodPost
+	}
+	if len(parts) >= 4 && parts[0] == "admin" && parts[1] == "v1" && pathUUID(parts[3]) {
+		if parts[2] == "audit-logs" {
+			return len(parts) == 4 && method == http.MethodGet
+		}
+		if parts[2] == "audit-exports" {
+			return len(parts) == 4 && method == http.MethodGet || len(parts) == 5 && parts[4] == "download-tickets" && method == http.MethodPost
+		}
+	}
 	if method == http.MethodPost && len(parts) == 6 && parts[0] == "admin" && parts[1] == "v1" && pathUUID(parts[3]) && parts[4] == "actions" {
 		return parts[2] == "registration-operations" && (parts[5] == "retry" || parts[5] == "compensate") || parts[2] == "profile-change-requests" && parts[5] == "retry" || parts[2] == "account-closure-requests" && parts[5] == "retry"
 	}
@@ -870,13 +888,16 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		s.setSessionCookies(w, session)
 	}
 	request.Header.Set("Accept", "application/json")
+	if upstream == s.config.AccountURL && auditExportDownloadPath(r.Method, resource) {
+		request.Header.Set("Accept", "application/vnd.pinvou.audit-envelope+json")
+	}
 	for _, name := range []string{"Content-Type", "Idempotency-Key"} {
 		if value := r.Header.Get(name); value != "" {
 			request.Header.Set(name, value)
 		}
 	}
 	if upstream == s.config.AccountURL {
-		for _, name := range []string{"X-Registration-Query-Token", "X-Device-ID"} {
+		for _, name := range []string{"X-Registration-Query-Token", "X-Device-ID", "X-Pinvou-Download-Token"} {
 			if accountProofHeaderAllowed(r.Method, resource, name) {
 				request.Header.Set(name, r.Header.Get(name))
 			}
@@ -921,6 +942,19 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	if upstream == s.config.AccountURL && auditExportDownloadPath(r.Method, resource) {
+		for _, name := range []string{"Content-Disposition", "Content-Length"} {
+			if value := response.Header.Get(name); value != "" {
+				w.Header().Set(name, value)
+			}
+		}
+		w.WriteHeader(response.StatusCode)
+		// Account bounds the encrypted envelope to 500 MiB before storing it.
+		// Stream it whole: applying the ordinary API limit would destroy a
+		// one-use payload after Account has already committed its consumption.
+		_, _ = io.Copy(w, response.Body)
+		return
+	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, io.LimitReader(response.Body, 32<<20))
 }
@@ -934,6 +968,9 @@ func accountRiskSourceAllowed(method, resource string) bool {
 // These proofs belong to the individual registration or SMS operation, not to
 // the browser's authentication authority. All other request headers stay stripped.
 func accountProofHeaderAllowed(method, resource, name string) bool {
+	if name == "X-Pinvou-Download-Token" {
+		return auditExportDownloadPath(method, resource)
+	}
 	if name == "X-Registration-Query-Token" {
 		parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")
 		return (method == http.MethodGet || method == http.MethodHead) && len(parts) == 4 && parts[0] == "v1" && parts[1] == "auth" && parts[2] == "registration-operations" && pathUUID(parts[3])
@@ -946,4 +983,9 @@ func accountProofHeaderAllowed(method, resource, name string) bool {
 	}
 	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")
 	return len(parts) >= 5 && parts[0] == "v1" && parts[1] == "me" && parts[2] == "profile-change-requests" && pathUUID(parts[3]) && (len(parts) == 5 && parts[4] == "mobile-challenges" || len(parts) == 6 && parts[4] == "actions" && parts[5] == "complete")
+}
+
+func auditExportDownloadPath(method, resource string) bool {
+	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")
+	return method == http.MethodGet && len(parts) == 5 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "audit-exports" && pathUUID(parts[3]) && parts[4] == "download"
 }

@@ -33,7 +33,20 @@ func DownOne(ctx context.Context, conn *pgx.Conn, input []migrations.Migration) 
 	if err != nil {
 		return err
 	}
-	return migrations.DownOneWithGuard(ctx, conn, ordered, auditExportRollbackGuard)
+	return migrations.DownOneWithGuard(ctx, conn, ordered, auditExportDownGuard)
+}
+
+func auditExportDownGuard(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {
+	if err := auditExportRollbackGuard(ctx, tx, m); err != nil {
+		return err
+	}
+	if m.Version == 32 {
+		// The frozen Down does not reconstruct the prior PII permission edge.
+		// Later authorization migrations explicitly remove that edge too, so
+		// granting it here would not be a proven inverse of retained history.
+		return errors.New("audit export migration rollback is incomplete and forbidden")
+	}
+	return nil
 }
 
 func auditExportRollbackGuard(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {

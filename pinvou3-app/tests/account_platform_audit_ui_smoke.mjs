@@ -3,8 +3,15 @@ import fs from 'node:fs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from 'puppeteer-core';
-const server=await createServer({root:import.meta.dirname+'/..',configFile:false,plugins:[react()],cacheDir:import.meta.dirname+'/../node_modules/.vite-audit-test',server:{host:'127.0.0.1',port:0,fs:{allow:[import.meta.dirname+'/..'],deny:['**/.env*','**/*.{pem,crt,key}']}}});await server.listen();
-const browser=await puppeteer.launch({executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',headless:true,args:['--no-sandbox','--disable-gpu']});
+const server=await createServer({root:import.meta.dirname+'/..',configFile:false,plugins:[react()],cacheDir:process.env.F17_VITE_CACHE||import.meta.dirname+'/../node_modules/.vite-audit-test',server:{host:'127.0.0.1',port:0,fs:{allow:[import.meta.dirname+'/..'],deny:['**/.env*','**/*.{pem,crt,key}']}}});await server.listen();
+const executablePath=process.env.F17_BROWSER_EXECUTABLE||process.env.CHROME||[
+ 'C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+ 'C:/Program Files/Microsoft/Edge/Application/msedge.exe','C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+ '/snap/bin/chromium','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome','/usr/bin/google-chrome-stable',
+ '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+].find(fs.existsSync);
+assert.ok(executablePath,'Browser unavailable; audit UI validation not performed');
+const browser=await puppeteer.launch({executablePath,headless:true,args:['--no-sandbox','--disable-gpu']});
 const results=[];
 const run=async(name,fn)=>{const page=await browser.newPage();page.setDefaultTimeout(8000);const errors=[];page.on('pageerror',e=>errors.push(e.message));try{await fn(page);assert.deepEqual(errors,[]);results.push({name,pass:true});}catch(e){results.push({name,pass:false,error:e.message});}finally{await page.close();}};
 const open=async(page,query='')=>{await page.goto(server.resolvedUrls.local[0]+'tests/account_platform_audit_fixture.html?section=audit&'+query);await page.waitForFunction(()=>window.f17&&document.querySelector('.adm-panel'));};
