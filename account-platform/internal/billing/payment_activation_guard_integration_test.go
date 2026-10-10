@@ -99,7 +99,7 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 	frozen := func(plan PaymentFinancialRepairPlan) PaymentFinancialRepairFrozenFacts {
 		return PaymentFinancialRepairFrozenFacts{OrderUpdatedAt: plan.OrderUpdatedAt, AmountFen: plan.AmountFen, CreditMicrocredits: plan.CreditMicrocredits, ProviderTransactionID: plan.ProviderTransactionID, WalletID: plan.WalletID, WalletVersion: plan.WalletVersion, AppliedToReceivables: plan.AppliedToReceivables, FactsDigest: plan.FactsDigest}
 	}
-	input := PaymentFinancialRepairExecutionInput{ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 2, ApproverUserID: approvingUserID, RequesterUserID: requestingUserID, ExecutionKey: "payment-race:" + uuid.NewString(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion, Command: command, Frozen: frozen(plan)}
+	input := PaymentFinancialRepairExecutionInput{ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 2, ApproverUserID: approvingUserID, RequesterUserID: requestingUserID, ExecutionKey: "payment-race:legacy-compat", PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion, Command: command, Frozen: frozen(plan)}
 	result, err := paymentRepairWithDeactivationRace(t, ctx, coordinator, input)
 	if err != nil || result.Status != "SUCCEEDED" || result.CreditMicrocredits != 100 || provider.calls != 0 {
 		t.Fatal("qualified payment race failed", err)

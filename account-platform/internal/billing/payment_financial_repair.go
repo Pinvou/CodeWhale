@@ -499,7 +499,7 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 		repairID, plan.OrderID, transactionID, plan.EvidenceID, input.ApproverUserID, paymentFinancialRepairReason,
 		snapshot, packageID, plan.CreditMicrocredits, balanceBefore, balanceBefore+plan.CreditMicrocredits-plan.AppliedToReceivables,
 		now, input.ApprovalRequestID, input.AuthorizationEventID, input.ApprovalEpoch,
-		ledgerRepairExecutionKeyDigest(executionKey), plan.FactsDigest, input.RequesterUserID); err != nil {
+		legacyFinancialExecutionKeyDigestV1(executionKey), plan.FactsDigest, input.RequesterUserID); err != nil {
 		return PaymentFinancialRepairResult{}, err
 	}
 	var journalID uuid.UUID
@@ -604,7 +604,7 @@ FROM payment_order_repairs WHERE approval_request_id=$1`, input.ApprovalRequestI
 		return PaymentFinancialRepairResult{}, false, err
 	}
 	matches := authorizationEventID == input.AuthorizationEventID && approvalEpoch == input.ApprovalEpoch &&
-		executionKeyDigest == ledgerRepairExecutionKeyDigest(executionKey) && storedOrderID == input.Command.PaymentOrderID
+		executionKeyDigest == legacyFinancialExecutionKeyDigestV1(executionKey) && storedOrderID == input.Command.PaymentOrderID
 	if !matches {
 		return PaymentFinancialRepairResult{}, false, nil
 	}

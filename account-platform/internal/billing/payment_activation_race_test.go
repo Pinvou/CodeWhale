@@ -119,6 +119,12 @@ func paymentRepairWithDeactivationRace(t *testing.T, ctx context.Context, coordi
 	if err := operatorTx.Commit(ctx); err != nil {
 		t.Fatal("operator disable did not commit")
 	}
+	// Literal historical preimage: {"command_type":"LEDGER_REPAIR","execution_key":"payment-race:legacy-compat"}.
+	var historicalDigest string
+	if err := coordinator.repository.pool.QueryRow(ctx, `SELECT execution_key_digest FROM payment_order_repairs WHERE approval_request_id=$1`, input.ApprovalRequestID).Scan(&historicalDigest); err != nil ||
+		historicalDigest != "66c63b3ee35c9ee54183a6b8f5791974bd88669511c09ab9c0db408323f84524" {
+		t.Fatalf("persisted Payment historical digest mismatch: %v", err)
+	}
 	got, err := coordinator.ApplyPaymentFinancialRepair(ctx, input)
 	if err != nil || got != result {
 		t.Fatal("operator disable invalidated the original immutable receipt")
