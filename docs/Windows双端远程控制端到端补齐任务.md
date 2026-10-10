@@ -93,7 +93,7 @@
 | `serve()` 暂只保活通道 | 预期 | 握手与加密业务帧派发分别在 E2E-02 / E2E-04 安装到该服务循环；当前对未知消息只做丢弃，绝不转发到 legacy WebUI 事件流。 |
 | A 端 `device_display_name` 用有界占位 `remote-device` | 保守默认，登记 | 冻结协议 v1 的 `controller_joined` 不携带被控设备显示名（已核对 PROTOCOL.md 与 fixture）；首版用占位，真实来源需协议扩展或 E2E-03 的能力快照补充。 |
 | B 端 `controller_device_name` 留空 | 保守默认，登记 | 同上：`controller_pairing_register` / `controller_joined` 都不含主控设备名；留空让 E2E-07 的 UI 用 i18n 兜底文案（`deviceUnknown`）显示，不为数据层硬编码单语名称。RC-B-006「展示主控设备名称」需协议扩展后才能真正满足。 |
-| A 端不在 WebSocket 层声明 controller 子协议 | 历史限制，已修复 | **已被后续波次修复**：当前客户端通过 `relay_client::controller_websocket_request` 声明 `pinvou-desktop-controller-v1`，Relay 通过 `remote-control-relay/server.js` 的 `handleProtocols` 显式协商；以下保留当时决策。PROTOCOL.md:598 要求 controller-v1 客户端选择 `pinvou-desktop-controller-v1`，但当时 Relay（remote-control-relay/server.js 的历史配置 `noServer: true`，无 `handleProtocols`）不回投该头部，而客户端库（tungstenite 0.30 `handshake/client.rs 的历史子协议校验`）在请求了子协议却未收到时必须失败关闭 —— 声明子协议会让 A 端完全无法连接。当时决定待 Relay 侧补齐子协议协商后再接入；当时 Relay 以 `v=1 + controller_*` 类型路由 controller lane（remote-control-relay/server.js 的历史 controller 路由）。 |
+| A 端不在 WebSocket 层声明 controller 子协议 | 历史限制，已修复 | **已被后续波次修复**：当前客户端通过 `relay_client::controller_websocket_request` 声明 `pinvou-desktop-controller-v1`，Relay 通过 `remote-control-relay/server.js` 的 `handleProtocols` 显式协商；以下保留当时决策。PROTOCOL.md:597–599 要求 controller-v1 客户端选择 `pinvou-desktop-controller-v1`，但当时 Relay（remote-control-relay/server.js 的历史配置 `noServer: true`，无 `handleProtocols`）不回投该头部，而客户端库（tungstenite 0.30 `handshake/client.rs 的历史子协议校验`）在请求了子协议却未收到时必须失败关闭 —— 声明子协议会让 A 端完全无法连接。当时决定待 Relay 侧补齐子协议协商后再接入；当时 Relay 以 `v=1 + controller_*` 类型路由 controller lane（remote-control-relay/server.js 的历史 controller 路由）。 |
 | A 端不发送 `controller_capabilities` 首帧 | 保守默认，登记 | 同上：router 没有该类型的 handler（`controller-router.js` 只有 register/claim/handshake/disconnect 与 liveness/resume hooks），发送会收到 `controller_message_unsupported` 并打断握手；E2E-01 的 B 端同样未发送。Relay 补齐后两侧一并接入。 |
 | 握手期间 transport 断线 | 预期 | A 端把断线统一映射为 `endpoint_offline` 并失败关闭；transport 在断线时会作废已排队帧（`transport_epoch` 递增），因此不会用旧 claim 重连，重新 claim 属 E2E-06 的恢复链路。 |
 | 连接完成后断线只投影 `reconnecting` | 预期 | `serve_controlling_lane` 在断线时调用 `mark_transport_disconnected()` 保证界面不再声称 connected；自动 resume / liveness 属 E2E-06。 |
@@ -165,8 +165,10 @@
 
 | 提交 | 内容 |
 |---|---|
-| `debf3aa1c` | A 端远程会话与任务请求构造：`controlling_session.rs`（会话意图 + 三个冻结 payload builder + 输入摘要 + 失败门）、7 个 `desktop_remote_controller_session_*` 命令、`ControllerLease` 记录协商能力与 `live_runtime_context`、A/B 两侧补 `task_v1` 能力声明、前端状态与 bridge 接线、node 契约测试 |
+| `debf3aa1c` | A 端远程会话与任务请求构造：`controlling_session.rs`（会话意图 + 三个冻结 payload builder + 输入摘要 + 失败门）、7 个会话/能力/任务意图命令（历史名称见下）、`ControllerLease` 记录协商能力与 `live_runtime_context`、A/B 两侧补 `task_v1` 能力声明、前端状态与 bridge 接线、node 契约测试 |
 | `8858dfe48` | 审核修复：会话重开复用 `sessionRef`（幂等）、wire 快照映射进 UI 能力域（`capabilitySnapshotForUi`），并锁定「UI 路径不出现协议字段名」 |
+
+上述 7 条命令是 `debf3aa1c` 阶段的历史 IPC 名称：`desktop_remote_controller_session_open`、`desktop_remote_controller_session_state`、`desktop_remote_controller_session_close`、`desktop_remote_controller_capability_request`、`desktop_remote_controller_apply_capability_snapshot`、`desktop_remote_controller_task_intent`、`desktop_remote_controller_task_cancel_intent`；仅前三条属于 `session_*`。当前命令面已更名并收敛，实际注册列表以 `pinvou3-app/src-tauri/src/lib.rs` 为准；旧名称不作为调用当前 head 的依据。
 
 ### 6.2 审核要点
 
@@ -196,6 +198,8 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 | `88832f0f3` | E2E-05 第 1 步：A 端解密 `journal_event`（明文字段与事件本体逐项一致才接受）经 `ControllingJournalSink` 落库到 A 独立历史并广播 `desktop-remote-controller-journal`；能力声明补 `snapshot_journal_v1` |
 
 验证基线：`cargo test remote_control::` 295 通过 / 0 失败；architecture-guard 通过。
+
+历史口径注记：第 3 节 E2E-04 摘要的 298 与本节的 295 存在计数差异，本文件没有两次完整输出及精确采样提交，原因尚未核实；不把“期间传入其他测试”的猜测当作事实。两项原记录保留，均不作为当前验收证据；非阻塞 P3 由 Issue #1673 跟踪可追溯口径。
 
 ### 7.2 审核要点（E2E-04 轮次 1）
 
@@ -343,10 +347,16 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 
 ## 11. E2E-08 待做清单（集成回归与发布审核）
 
-- 已执行证据（E2E-06 收口后复跑）：Relay 契约套件 `node --test test/controller-protocol|controller-handshake|controller-reservation|controller-liveness|controller-resume|controller-router` **58 通过 / 0 失败**，`test/relay.test.js` **25 通过 / 0 失败**；Rust `cargo test remote_control::` **322 通过 / 0 失败**、`cargo test remote_control::controller::` **229 通过 / 0 失败**；前端 6 个契约文件 **36 通过 / 0 失败**、`npm run build:ui` 通过、`npm run lint:ui` 0 error；`python scripts/architecture-guard.py` 通过；敏感信息扫描（`sk-*` / `vault://` / `Bearer` / `-----BEGIN`）在 controller 与前端文件中仅命中**刻意的脱敏测试夹具/哨兵**（`journal.rs` 断言投影剥离 `vault://secret`、`telemetry.rs` 哨兵表、`temporary_model.rs` 反向用例），无真实凭证。
+本节测试数量与待做项是该历史轮次的快照，不是当前提交的验收结果；当前覆盖率以对应提交的实际测试输出与 CI 为准。
+
+- 较早历史快照（A12 留存）：Relay 契约套件 `node --test test/controller-protocol|controller-handshake|controller-reservation|controller-liveness|controller-resume|controller-router` 58 通过 / 0 失败，`test/relay.test.js` 25 通过 / 0 失败；Rust `cargo test remote_control::` 312 通过 / 0 失败；前端 6 个契约文件 36 通过 / 0 失败、`npm run build:ui` 通过、`npm run lint:ui|lint:node` 0 error；`python scripts/architecture-guard.py` 通过；敏感信息扫描（`sk-*` / `vault://` / `Bearer`）在新增的 controller 与前端文件中零命中。
+
+- 历史复跑证据（E2E-06 收口后）：Relay 契约套件 `node --test test/controller-protocol|controller-handshake|controller-reservation|controller-liveness|controller-resume|controller-router` **58 通过 / 0 失败**，`test/relay.test.js` **25 通过 / 0 失败**；Rust `cargo test remote_control::` **322 通过 / 0 失败**、`cargo test remote_control::controller::` **229 通过 / 0 失败**；前端 6 个契约文件 **36 通过 / 0 失败**、`npm run build:ui` 通过、`npm run lint:ui` 0 error；`python scripts/architecture-guard.py` 通过；敏感信息扫描（`sk-*` / `vault://` / `Bearer` / `-----BEGIN`）在 controller 与前端文件中仅命中**刻意的脱敏测试夹具/哨兵**（`journal.rs` 断言投影剥离 `vault://secret`、`telemetry.rs` 哨兵表、`temporary_model.rs` 反向用例），无真实凭证。
 - 发布缺口登记（已完成）：`docs/Windows双端远程控制发布与回滚.md` 新增第 7 节，把第 4 节全部登记项与本节缺口按「本轮 blocker（真实双机旅程、三面 UI 冒烟、真机断线恢复演练）/ 已隐藏（临时模型·代码模式·附件·成果、工具审批、Relay 子协议与 `controller_capabilities`）/ 后续排期（设备显示名、非流式回复、快照引导、附件事件、跨 lease 清理、清理适配器测试、无关既有失败）」分类。
 
 ### 11.1 E2E-08 审核记录（轮次 1，结论 PASS，发布 blocker 已登记）
+
+本节 `controller-release-gates` 的 6 条是 `be913049` 历史提交中的实际 `test()` 数量；当前文件有 7 条，不用历史计数代替当前执行证据。
 
 - 已落地提交：`be913049`（门禁证据复跑 + 发布缺口分类）、`5a246985`（完整旅程集成测试）。
 - 目标差异核对：出口「普通文本会话端到端测试通过」由 `full_journey_connect_snapshot_task_text_and_disconnect_drops_stale_frames` 覆盖——连接 → 能力快照（revision 4 落进会话状态）→ A 构造并封帧的普通文本任务（B 解封校验 payload 与正文 `hello from A`）→ B 的 `task_status` 与 `journal_event` 回流并投影为任务/正文事件（`succeeded` + `hello from B`）→ 显式断开（`disconnected` + 业务通道清空）→ 断开后旧 generation 的残留帧不再产生任何投影。分段用例另覆盖 A↔B 真实端口派发（`dual_end_task_round_trip_lands_in_a_side_state`）、缺口回放与快照替换、恢复序列与显式断开。
@@ -430,7 +440,7 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
 
 ## 13. 生产打通与端上排障记录（2026-09-20）
 
-> 历史排障快照：下述线上状态、临时诊断接口、旧包与 328～331 条测试数字仅记录当时阶段，不是当前 head 验证或最新部署证据。当前恢复链路、B 面板边界与正式发布要求以现行拆分文档及后续审核修复为准；未发布桌面协议随 A/B/Relay 一起升级，不保留旧开发接口兼容路径。production 的 development+TOFU 迁移与关闭仍须在正式发布前取得实际证据。
+> 历史排障快照：下述线上状态、临时诊断接口、旧包与 328～331 条测试数字仅记录当时阶段，不是当前 head 验证或最新部署证据。当前恢复链路、B 面板边界与正式发布要求以现行拆分文档及后续审核修复为准；未发布桌面协议随 A/B/Relay 一起升级，不保留旧开发接口兼容路径。production 的 development+TOFU 迁移与关闭须遵守现行发布与回滚文档的硬截止：下一次新部署、重部署或发布前，取得 registry 100% 覆盖与全部公共入口关闭 TOFU 的实际证据。
 
 ### 13.1 生产 controller lane 已启用
 
@@ -488,7 +498,7 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
   production 信任根去验 remote-test 的 transcript，必然失败关闭；同时这与
   `docs/PINVOU-开源执行代办.md` 中「移除生产远控默认地址」的登记项同源。
 - **修复**：改为选中内置 `test` profile（`PINVOU_REMOTE_ENDPOINT_PROFILE=test`），地址与信任根同源；
-  切回生产只需 `PINVOU_REMOTE_ENDPOINT_PROFILE=production`；地址级覆盖仍保留给自建 Relay，
+  在无更高优先级 runtime/URL/pin 环境覆盖或持久自定义地址时，可用 `PINVOU_REMOTE_ENDPOINT_PROFILE=production` 切回生产；仅切 profile 不清除这些来源。地址级覆盖仍保留给自建 Relay，
   并在脚本注释与 `docs/remote-e2e-test-endpoint.md` 中写明「只覆盖地址不会同步换信任根」。
 - **验证**：`node --test pinvou3-app/tests/tauri_platform_layout.test.js` 通过；
   `node --test pinvou3-app/tests/knowledge_host_packaging.test.mjs` 通过；`python scripts/architecture-guard.py` 通过。
@@ -568,10 +578,13 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
   再 drop worker 释放其 generation-bound channel，最后完成命令结果。已停止的旧代即使迟到建通道且注册失败，也不进入未 joined 的长期接收循环。
 - 回归实际执行生产 manager/启动失败 helper，以及生产注册完成分派 helper 的成功/失败分支；oneshot 唤醒探针验证释放先于失败回复。
   入口绑定同时有源码接线断言。它们不是完整 Tauri/worker/TCP 端到端运行，真实宿主与并发交错覆盖仍按对应 Issue 验收。
+### 13.12 当前非阻塞跟进（不算已完成）
+
+早期断线合成帧的重试分类与 B 面板错误投影已由后续修复覆盖；跨 Relay epoch 的注册复用/迟到响应合同仍由 [#1405](https://github.com/Pinvou/pinvou3/issues/1405#issuecomment-5972681019) 跟踪，不能接受旧 epoch 来恢复注册。[#1431](https://github.com/Pinvou/pinvou3/issues/1431)（P2）保留日志容量、同步 IO、跨进程与权限验收；不恢复自由文本 clientLog。[#1430](https://github.com/Pinvou/pinvou3/issues/1430#issuecomment-6089621468)（P3）补充空 URL 环境变量的选择/来源标记不一致，连接仍失败关闭，不是认证绕过；未知 profile 合同仍开放。这些跟进不代表正式发布或双机验收通过。
 
 全量 `cargo test` 一次编译约 1.5–5 分钟：同一模块的多处改动应攒成一次编译，任务边界才跑全量回归。
 
-### 13.12 A/B 双向输入统一进入 B 权威 Session（2026-09-22，历史补录）
+### 13.13 A/B 双向输入统一进入 B 权威 Session（2026-09-22，历史补录）
 
 - **需求结论**：连接和能力准备完成后，A、B 两端输入框都必须向同一个 B 权威 Session 提交任务；B 端不得沿用普通本地聊天发送链路，否则会形成 UI 看似同屏、实际上下文分叉的第二条 Session。
 - **会话准备**：`capability_snapshot_request.session_id` 继续表示 A 的稳定会话引用。B 在生成或复用能力快照时先通过幂等临界区创建/查找权威 Session，再把 `sessionRef + sessionId + remote_control_generation` 投影给 B UI，因此 B 可以成为首个发言方，重试也不会重复建 Session。

@@ -12,13 +12,22 @@ if [[ "${PINVOU_CONFIRM_PRODUCTION_DEPLOY:-0}" != "1" ]]; then
 fi
 
 RELAY_DIR="$ROOT/remote-control-relay"
-SERVER="${PINVOU_REMOTE_DEPLOY_SERVER:-root@47.120.8.237}"
-# 与测试端点部署脚本保持同一约定：默认使用本机部署私钥，且全程 BatchMode。
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519_pinvou8}"
+# 运维目标与私钥只来自本地受控配置，不在仓库登记实例值。
+SERVER="${PINVOU_REMOTE_DEPLOY_SERVER:-}"
+EXPECTED_SERVER="${PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER:-}"
+SSH_KEY="${SSH_KEY:-}"
 REMOTE_DIR="${PINVOU_REMOTE_DEPLOY_DIR:-/opt/pinvou-remote-relay}"
 SERVICE="${PINVOU_REMOTE_DEPLOY_SERVICE:-pinvou-remote-relay.service}"
 PUBLIC_URL="${PINVOU_REMOTE_PUBLIC_URL:-https://pinvou.com/pinvou3/remote}"
-DIRECT_URL="${PINVOU_REMOTE_DIRECT_URL:-http://47.120.8.237:8787/pinvou3/remote}"
+DIRECT_URL="${PINVOU_REMOTE_DIRECT_URL:-}"
+if [[ -z "$SERVER" || -z "$EXPECTED_SERVER" || -z "$SSH_KEY" || -z "$DIRECT_URL" ]]; then
+  echo "拒绝执行：必须显式提供部署目标、独立确认目标、SSH_KEY 与直连预检地址。" >&2
+  exit 64
+fi
+if [[ "$SERVER" != "$EXPECTED_SERVER" || ! "$SERVER" =~ ^[A-Za-z_][A-Za-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
+  echo "拒绝执行：部署目标格式无效或与独立确认目标不一致。" >&2
+  exit 64
+fi
 BASE_PATH="${PINVOU_REMOTE_PUBLIC_BASE_PATH:-/pinvou3/remote}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 REMOTE_CODE_TMP="/tmp/pinvou-remote-code-$STAMP.tar.gz"
@@ -62,7 +71,7 @@ ensure_cached_db() {
 verify_public() {
   local expected="$1"
   local health page
-  if ! health="$(curl -fsS "$PUBLIC_URL/healthz")"; then
+  if ! health="$(curl -fsS --connect-timeout 10 --max-time 30 "$PUBLIC_URL/healthz")"; then
     VERIFY_ERROR="公网健康检查失败：$PUBLIC_URL/healthz"
     return 1
   fi
@@ -70,7 +79,7 @@ verify_public() {
     VERIFY_ERROR="公网健康检查返回格式不符合预期"
     return 1
   fi
-  if ! page="$(curl -fsSL "$PUBLIC_URL/r/deploy-check")"; then
+  if ! page="$(curl -fsSL --connect-timeout 10 --max-time 30 "$PUBLIC_URL/r/deploy-check")"; then
     VERIFY_ERROR="手机页面检查失败：$PUBLIC_URL/r/deploy-check"
     return 1
   fi
@@ -107,19 +116,17 @@ if [[ "${SKIP_WEB_BUILD:-0}" != "1" ]]; then
 else
   echo "使用已构建并验证的共享 WebUI 产物"
 fi
-test -f "$RELAY_DIR/web/dist/index.html"
-test -f "$RELAY_DIR/web/dist/platform/tauri/bridge.js"
-grep -Fq '<base href="/pinvou3/remote/">' "$RELAY_DIR/web/dist/index.html"
-# 当前 WebUI 由入口 JS 动态加载 bridge，index.html 不再内联该路径；改为校验
-# 「入口引用生产 base path 且 bridge 资源随包存在」，避免把构建方式变化误判成部署失败。
-grep -Fq '/pinvou3/remote/assets/' "$RELAY_DIR/web/dist/index.html"
+node "$RELAY_DIR/verify-web-dist-cli.js" "$RELAY_DIR/web/dist" "$BASE_PATH"
 if [[ "${SKIP_LOCAL_TESTS:-0}" != "1" ]]; then
   (cd "$RELAY_DIR" && npm test)
 fi
 ensure_cached_db "$IPV4_DB_CACHE" "$IPV4_DB_URL" "$IPV4_DB_SHA256"
 ensure_cached_db "$IPV6_DB_CACHE" "$IPV6_DB_URL" "$IPV6_DB_SHA256"
 
-mapfile -t relay_modules < <(cd "$RELAY_DIR" && printf '%s\n' ./*.js)
+relay_modules=()
+while IFS= read -r relay_module; do
+  relay_modules+=("$relay_module")
+done < <(cd "$RELAY_DIR" && printf '%s\n' ./*.js)
 tar -czf - -C "$RELAY_DIR" \
   "${relay_modules[@]}" \
   scripts/deploy-controller-preflight.mjs \
@@ -128,7 +135,7 @@ tar -czf - -C "$RELAY_DIR" \
   docs/schemas/behavior-telemetry-v1.schema.json \
   docs/schemas/behavior-telemetry-registries.json \
   | ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" "cat > '$REMOTE_CODE_TMP'"
-# dist 内包含带哈希的 JS/CSS、桥接脚本和本地 vendor，必须作为一个版本整体上传。
+# dist 包含带哈希的 JS/CSS、启动脚本和本地 vendor，必须作为一个版本整体上传。
 tar -czf - -C "$RELAY_DIR/web/dist" . | ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" "cat > '$REMOTE_WEB_TMP'"
 scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/web/stats.html" "$SERVER:$REMOTE_STATS_TMP"
 scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/10-hardening.conf" "$SERVER:$REMOTE_HARDENING_TMP"
@@ -169,6 +176,8 @@ rm -rf "$code_stage"
 mkdir -p "$code_stage"
 tar --no-same-owner --no-same-permissions -xzf "$code_tmp" -C "$code_stage"
 rm -f "$code_tmp"
+# 暂存验证使用本次上传的 ESM 声明，不依赖现役 package 或 Node 语法探测。
+cp "$package_tmp" "$code_stage/package.json"
 node --check "$code_stage/server.js"
 node --check "$code_stage/telemetry-service.js"
 node --check "$code_stage/behavior-telemetry-schema.js"
@@ -192,12 +201,7 @@ chown -R root:root "$web_stage"
 find "$web_stage" -type d -exec chmod 755 {} +
 find "$web_stage" -type f -exec chmod 644 {} +
 rm -f "$web_tmp"
-test -f "$web_stage/index.html"
-test -f "$web_stage/platform/tauri/bridge.js"
-grep -Fq '<base href="/pinvou3/remote/">' "$web_stage/index.html"
-# 当前 WebUI 由入口 JS 动态加载 bridge，index.html 不再内联该路径（2026-09-19 实测）；
-# 校验「入口引用生产 base path 且 bridge 资源随包存在」即可保持本意。
-grep -Fq '/pinvou3/remote/assets/' "$web_stage/index.html"
+node "$code_stage/verify-web-dist-cli.js" "$web_stage" "/pinvou3/remote"
 mkdir -p "$backup"
 if [[ -f "$remote_dir/server.js" ]]; then cp -a "$remote_dir/server.js" "$backup/server.js"; else touch "$backup/no-server"; fi
 if [[ -d "$remote_dir/web/dist" ]]; then cp -a "$remote_dir/web/dist" "$backup/web-dist"; else touch "$backup/no-web-dist"; fi
@@ -346,9 +350,9 @@ fi
 # 「启动稍慢」误判成失败并触发回滚（2026-09-19 实测踩坑）。
 healthy=0
 for _ in $(seq 1 30); do
-  health="$(curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz 2>/dev/null || true)"
+  health="$(curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8787/pinvou3/remote/healthz 2>/dev/null || true)"
   if node -e 'const h=JSON.parse(process.argv[1]); if(!h.ok || h.desktop_controller_enabled !== true) process.exit(1)' "$health" 2>/dev/null \
-    && curl -fsS http://127.0.0.1:8787/pinvou3/telemetry/healthz >/dev/null; then
+    && curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8787/pinvou3/telemetry/healthz >/dev/null; then
     healthy=1
     break
   fi
@@ -371,7 +375,7 @@ rm -rf "$code_stage"
 trap - ERR
 echo "backup=$backup"
 REMOTE
-) " || {
+)" || {
   # 远程步骤失败时把它的 stdout 一并回显，否则 set -e 会在赋值处静默退出，
   # 现场只剩一个 exit code（2026-09-19 实测踩坑）。
   printf '%s\n' "$deploy_output" >&2
@@ -430,7 +434,7 @@ systemctl restart "$service"
 systemctl is-active --quiet "$service"
 healthy=0
 for _ in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null 2>&1; then
+  if curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null 2>&1; then
     healthy=1
     break
   fi

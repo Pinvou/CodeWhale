@@ -11,18 +11,19 @@ use super::{AcpPool, AcpSession, RemotePermissionOwner, operation_gate};
 
 /// A tool/elicitation ID can be reused. An old responder's post-await cleanup
 /// must not erase a successor card, even on the same connection.
-pub(super) fn remove_callback<T>(
+pub(super) fn finish_callback<T>(
     pending: &mut HashMap<String, T>,
     key: &str,
     callback: &Arc<()>,
     identity_of: impl Fn(&T) -> &Arc<()>,
-) {
-    if pending
-        .get(key)
-        .is_some_and(|request| Arc::ptr_eq(identity_of(request), callback))
-    {
-        pending.remove(key);
-    }
+    finish: impl FnOnce(),
+) -> bool {
+    super::lifecycle::finish_owned_callback(
+        pending,
+        key,
+        |request| Arc::ptr_eq(identity_of(request), callback),
+        finish,
+    )
 }
 
 #[derive(Default)]
@@ -72,9 +73,8 @@ impl RemoteTurnRegistry {
         session_id: &str,
         current: Option<&Arc<AcpSession>>,
     ) -> Result<()> {
-        if current.is_some_and(|runtime| runtime.identity.retired.load(Ordering::Acquire)) {
-            bail!("remote_turn_runtime_retired");
-        }
+        // With no custody, get_or_spawn must be allowed to reclaim a retired
+        // entry. Its reusable predicate rejects the identity before spawning.
         if let Some(binding) = self.0.get(session_id) {
             if matches!(binding.phase, Phase::Closing(_))
                 || binding.identity.retired.load(Ordering::Acquire)
@@ -298,13 +298,25 @@ impl AcpPool {
         {
             bail!("remote_turn_runtime_stale");
         }
-        self.remote_permission_owners.lock().reserve(
-            owner.clone(),
-            &runtime.identity,
-            Arc::downgrade(&runtime),
-            &runtime.busy,
-            &runtime.configuring,
-        )?;
+        let mut owners = self.remote_permission_owners.lock();
+        runtime
+            .bridge
+            .with_active_runtime(|| -> Result<()> {
+                if !runtime.lifecycle.is_running()
+                    || runtime.restart_requested.load(Ordering::Acquire)
+                {
+                    bail!("remote_turn_runtime_retired");
+                }
+                owners.reserve(
+                    owner.clone(),
+                    &runtime.identity,
+                    Arc::downgrade(&runtime),
+                    &runtime.busy,
+                    &runtime.configuring,
+                )
+            })
+            .context("remote_turn_runtime_retired")??;
+        drop(owners);
         drop(sessions);
         Ok(RemoteTurnReservation {
             pool: self.clone(),
@@ -338,6 +350,7 @@ impl RemoteTurnReservation {
         display_content: &str,
         attachments: &[crate::features::files::file_ingest::IngestResult],
         cancel: &tokio_util::sync::CancellationToken,
+        budget: crate::features::remote_control::controller::turn_budget::TurnBudget,
     ) -> Result<()> {
         let prepared = super::prepare_codex_prompt(
             content,
@@ -354,35 +367,52 @@ impl RemoteTurnReservation {
         // so binding alone cannot expose a not-yet-started approval owner.
         let flight = {
             let mut owners = self.pool.remote_permission_owners.lock();
-            owners.bind(&self.owner, &self.runtime.identity, &self.turn_id, cancel)
+            self.runtime
+                .bridge
+                .with_active_runtime(|| -> Result<_> {
+                    budget.checkpoint(cancel).map_err(anyhow::Error::msg)?;
+                    let flight = owners
+                        .bind(&self.owner, &self.runtime.identity, &self.turn_id, cancel)
+                        .context("remote_turn_reservation_stale")?;
+                    self.submitted = true;
+                    crate::features::assistant::timing::start_turn(&self.owner.session_id);
+                    self.runtime.bridge.begin_turn_with_id(
+                        self.turn_id.clone(),
+                        display_content,
+                        &prepared.display_attachments,
+                    );
+                    super::stall::mark_activity(&self.runtime.activity);
+                    Ok(flight)
+                })
+                .context("remote_turn_runtime_retired")??
         };
-        let flight = flight.context("remote_turn_reservation_stale")?;
-        self.submitted = true;
-        crate::features::assistant::timing::start_turn(&self.owner.session_id);
-        let turn_id = self.runtime.bridge.begin_turn_with_id(
-            self.turn_id.clone(),
-            display_content,
-            &prepared.display_attachments,
-        );
-        super::stall::mark_activity(&self.runtime.activity);
+        let turn_id = self.turn_id.clone();
         let runtime = Arc::clone(&self.runtime);
         let pool = self.pool.clone();
         tokio::spawn(async move {
             let _flight = flight;
             if Arc::clone(&runtime).prompt(turn_id, prepared.blocks).await {
-                // Do not evict by session: a respawn may already own that key.
-                pool.codex_upgrade_required.store(true, Ordering::Release);
-                pool.runtime_probe.write().initialized = false;
+                // The captured-Arc gate also fences global upgrade state.
+                pool.handle_outdated_codex_runtime(runtime).await;
             }
         });
         Ok(())
     }
 
     pub(super) fn is_active(&self) -> bool {
-        self.pool
-            .remote_permission_owners
-            .lock()
-            .active(&self.owner)
+        super::remote_turn::OwnedAcpTurn::new(Arc::clone(&self.runtime), self.turn_id.clone())
+            .is_active()
+            && self
+                .pool
+                .remote_permission_owners
+                .lock()
+                .active(&self.owner)
+    }
+
+    pub(super) async fn retire(&self, reason: &str) {
+        super::remote_turn::OwnedAcpTurn::new(Arc::clone(&self.runtime), self.turn_id.clone())
+            .retire(&self.pool, reason)
+            .await;
     }
 
     pub(super) async fn release(mut self) {
@@ -410,6 +440,8 @@ impl Drop for RemoteTurnReservation {
             // callback classified as local. Retired is checked by the actual
             // connection callbacks even after its registry entry is removed.
             self.runtime.identity.retired.store(true, Ordering::Release);
+            self.runtime
+                .seal_remote_turn(&self.turn_id, "remote_turn_dropped");
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
                     let _runtime = runtime;
@@ -427,17 +459,37 @@ mod tests {
 
     #[test]
     fn stale_callback_cleanup_cannot_erase_a_reused_tool_or_elicitation_id() {
+        let finishes = std::cell::Cell::new(0);
         let old = Arc::new(());
         let successor = Arc::new(());
         let mut pending = HashMap::from([("reused-id".to_owned(), Arc::clone(&successor))]);
-        remove_callback(&mut pending, "reused-id", &old, |request| request);
-        assert!(Arc::ptr_eq(pending.get("reused-id").unwrap(), &successor));
-        remove_callback(&mut pending, "reused-id", &successor, |request| request);
+        assert!(!finish_callback(
+            &mut pending,
+            "reused-id",
+            &old,
+            |request| request,
+            || finishes.set(finishes.get() + 1)
+        ));
+        assert!(Arc::ptr_eq(&pending["reused-id"], &successor));
+        assert_eq!(
+            finishes.get(),
+            0,
+            "late callbacks cannot reset successor activity"
+        );
+        assert!(finish_callback(
+            &mut pending,
+            "reused-id",
+            &successor,
+            |request| request,
+            || finishes.set(finishes.get() + 1)
+        ));
         assert!(pending.is_empty());
+        assert_eq!(finishes.get(), 1);
     }
 
     fn owner(task: &str) -> RemotePermissionOwner {
         RemotePermissionOwner {
+            task_sequence: 1,
             session_id: "session-custody".into(),
             task_id: task.into(),
             lease: crate::features::remote_control::controller::protocol::LeaseContext {
@@ -585,6 +637,12 @@ mod tests {
         registry.remove_exact(&owner, &identity);
         assert!(
             registry
+                .check_runtime_access(&owner.session_id, None)
+                .is_ok(),
+            "released custody must permit dead-entry reclamation"
+        );
+        assert!(
+            registry
                 .callback_owner(&owner.session_id, &identity)
                 .is_err(),
             "retirement survives registry removal"
@@ -683,7 +741,7 @@ mod tests {
         );
         assert_eq!(identity.flights.load(Ordering::Acquire), 0);
         assert!(matches!(
-            registry.0.get(&owner.session_id).unwrap().phase,
+            registry.0[&owner.session_id].phase,
             Phase::Reserved
         ));
         registry.rollback_reserved(&owner, &identity, &busy);
