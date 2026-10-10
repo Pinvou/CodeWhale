@@ -72,7 +72,7 @@ bash scripts/deploy-remote-relay-test.sh --teardown
   v1 jsdom 页面测试只由 `npm run test:legacy-v1-ui` 显式运行，不进入 v2 默认门禁。
 - 旧 desktop 回路 e2e 条目引用的 `new_headless()` / `e2e_tests` 已不在当前源码中，
   不能作为当前真实 Node Relay + mobile 回路的测试或 CI 执行证据。
-- 当前 Windows B 端恢复接线回归位于 `pinvou3-app/src-tauri/src/features/remote_control/controller/relay_runtime/reader_resume_tests.rs` 的 `real_reader_manager_worker_resume_round_trip()`：
+- 当前 Windows B 端恢复接线回归的宿主入口是 `pinvou3-app/src-tauri/src/app/commands/remote_control/reader_resume_tests.rs` 的 `real_reader_manager_worker_resume_round_trip()`；它调用 `features/remote_control/controller/relay_runtime/reader_resume_tests.rs` 的共享 `resume_round_trip()` 夹具：
   走真实 WebSocket reader、manager 与 worker，但 Relay 是本地协议模拟端；不替代 Web v2 mobile、真实三角色或双 Windows 验收。
 
 Windows 本机还需取得 PowerShell 属主、身份与 launcher 的实际执行结果，平台 skip 不算通过。以上检查不执行真实 SSH、生产部署、线上回滚或双 Windows 验收。

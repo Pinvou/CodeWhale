@@ -4,7 +4,7 @@ import { Toggle } from '../../components/Toggle.jsx';
 import { bridge } from '../../hooks/useBridge.js';
 import { copyClipboardText } from '../../shared/clipboard.js';
 import { CODE_ALPHABET, controlledAuthorityKey, controlledDeviceUiState, createAsyncOperationGuard } from './remote-control-logic.mjs';
-import { CONTROLLED_BOUND_STATUSES, countdownAnnouncement, currentControlledTasks, normalizeSelectedWorkspaces, permissionOperationCopyKey, permissionRedactionCopyKey } from './controlled-device-panel-state.mjs';
+import { CONTROLLED_BOUND_STATUSES, countdownAnnouncement, currentControlledTasks, normalizeSelectedWorkspaces, permissionOperationCopyKey, permissionPollingTaskIds, permissionRedactionCopyKey, startPermissionPolling } from './controlled-device-panel-state.mjs';
 
 const ACTIVE_STATUSES = [
   'registering', 'waiting_for_pairing', 'pairing_reserved', 'handshake_pending',
@@ -125,6 +125,7 @@ export default function ControlledDevicePanel({
   const progress = Math.max(0, Math.min(100, (seconds / 300) * 100));
   const workspaces = active ? authorizedWorkspaces : stagedWorkspaces;
   const currentTasks = currentControlledTasks(device, bs?.controlledSession, bs?.controlledTasks);
+  const waitingPermissionTaskIds = permissionPollingTaskIds(currentTasks);
   const visibleError = uiState === 'error' ? device.lastError : null;
   const announce = useMemo(() => Number.isSafeInteger(device.pairingRemainingMs) ? countdownAnnouncement(seconds) : null,
     [device.pairingRemainingMs, seconds]);
@@ -191,7 +192,7 @@ export default function ControlledDevicePanel({
 
   useEffect(() => {
     const remote = bridge?.available && bridge.desktopRemoteControl;
-    const waiting = currentTasks.filter(task => task.status === 'waiting_permission');
+    const waiting = JSON.parse(waitingPermissionTaskIds).map(taskId => ({ taskId }));
     if (!remote?.controlledPermissionList || waiting.length === 0) {
       setPermissions([]);
       setPermissionReadStatus(waiting.length > 0 ? 'error' : 'idle');
@@ -201,7 +202,9 @@ export default function ControlledDevicePanel({
     const startingAuthority = authority.current;
     setPermissions([]);
     setPermissionReadStatus('loading');
-    Promise.all(waiting.map(task => remote.controlledPermissionList(task.taskId))).then(results => {
+    const stopPolling = startPermissionPolling({
+      read: () => Promise.all(waiting.map(task => remote.controlledPermissionList(task.taskId))),
+      onSuccess: results => {
       if (cancelled || authority.current !== startingAuthority) return;
       if (results.some(result => !Array.isArray(result))) {
         setPermissionReadStatus('error');
@@ -218,9 +221,11 @@ export default function ControlledDevicePanel({
           previewCopyKey: permissionRedactionCopyKey(item.preview),
         }))));
       setPermissionReadStatus('ready');
-    }).catch(() => { if (!cancelled && authority.current === startingAuthority) setPermissionReadStatus('error'); });
-    return () => { cancelled = true; };
-  }, [device.generation, bs?.controlledSession?.sessionId, bs?.controlledTasks]);
+      },
+      onError: () => { if (!cancelled && authority.current === startingAuthority) setPermissionReadStatus('error'); },
+    });
+    return () => { cancelled = true; stopPolling(); };
+  }, [device.generation, bs?.controlledSession?.sessionId, waitingPermissionTaskIds]);
 
   const run = async (name, action, focusOnCompletion = false) => {
     const remote = bridge?.available && bridge.desktopRemoteControl;

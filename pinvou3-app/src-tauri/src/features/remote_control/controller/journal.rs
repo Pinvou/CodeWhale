@@ -1242,6 +1242,10 @@ pub(crate) struct StreamingTextSanitizer {
     token: zeroize::Zeroizing<String>,
     discarding_token: bool,
     awaiting_separator: bool,
+    awaiting_basic: bool,
+    previous_sensitive_line: bool,
+    line_start: bool,
+    last_was_cr: bool,
     redact_line: bool,
 }
 
@@ -1253,10 +1257,20 @@ impl StreamingTextSanitizer {
                 self.flush_token(&mut out);
                 out.push(ch);
                 if matches!(ch, '\n' | '\r') {
-                    self.awaiting_separator = false;
-                    self.redact_line = false;
+                    if !(ch == '\n' && self.last_was_cr) {
+                        self.previous_sensitive_line = self.redact_line;
+                        self.line_start = true;
+                        self.awaiting_separator = false;
+                        self.awaiting_basic = false;
+                        self.redact_line = false;
+                    }
+                    self.last_was_cr = ch == '\r';
+                } else if self.line_start && self.previous_sensitive_line {
+                    self.redact_line = true;
                 }
             } else if !self.discarding_token {
+                self.line_start = false;
+                self.last_was_cr = false;
                 if self.token.is_empty() && self.awaiting_separator {
                     self.redact_line |= matches!(ch, ':' | '=');
                     self.awaiting_separator = false;
@@ -1284,6 +1298,10 @@ impl StreamingTextSanitizer {
         let mut out = String::new();
         self.flush_token(&mut out);
         self.awaiting_separator = false;
+        self.awaiting_basic = false;
+        self.previous_sensitive_line = false;
+        self.line_start = false;
+        self.last_was_cr = false;
         self.redact_line = false;
         out
     }
@@ -1300,6 +1318,10 @@ impl StreamingTextSanitizer {
         self.token.zeroize();
         self.discarding_token = false;
         self.awaiting_separator = false;
+        self.awaiting_basic = false;
+        self.previous_sensitive_line = false;
+        self.line_start = false;
+        self.last_was_cr = false;
         self.redact_line = false;
         out
     }
@@ -1318,6 +1340,11 @@ impl StreamingTextSanitizer {
         let bearer_marker = lowered
             .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
             .eq("bearer");
+        self.redact_line |=
+            self.awaiting_basic && super::redaction::is_basic_credential(&self.token);
+        self.awaiting_basic = lowered
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
+            .eq("basic");
         self.awaiting_separator = credential_field && !field_syntax;
         self.redact_line |= bearer_marker || (credential_field && field_syntax);
 
@@ -1391,6 +1418,47 @@ fn looks_like_path(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn credential_values_and_folded_headers_stay_redacted_at_every_stream_split() {
+        for raw in [
+            "password: plain-fixture",
+            "PASSWORD = plain fixture phrase",
+            r#"{"client_secret" : "plain-fixture"}"#,
+            "refresh-token: plain-fixture",
+            "Basic dXNlcjpwbGFpbi1maXh0dXJl",
+            "Authorization: Basic\r\n dXNlcjpwbGFpbi1maXh0dXJl",
+            "Proxy-Authorization:\n\tplain-fixture",
+            "Set-Cookie:\r\n\tplain-fixture\r\n another-fixture",
+        ] {
+            for split in 0..=raw.len() {
+                let mut sanitizer = super::StreamingTextSanitizer::default();
+                let mut out = sanitizer.push(&raw[..split]);
+                out.push_str(&sanitizer.push(&raw[split..]));
+                out.push_str(&sanitizer.finish_completed());
+                assert!(!out.contains("fixture"), "{split}: {out}");
+                assert!(!out.contains("dXNlcjpwbGFpbi1maXh0dXJl"), "{split}: {out}");
+                assert!(out.contains("[REDACTED]"));
+            }
+        }
+        for raw in [
+            "basic alphabet and basic algebra",
+            "Authorization: fixture\r\n\r\n indented normal text",
+        ] {
+            let expected = super::sanitize_text(raw);
+            assert!(expected.contains(if raw.starts_with("basic") {
+                "basic alphabet"
+            } else {
+                "indented normal text"
+            }));
+            for split in 0..=raw.len() {
+                let mut sanitizer = super::StreamingTextSanitizer::default();
+                let mut out = sanitizer.push(&raw[..split]);
+                out.push_str(&sanitizer.push(&raw[split..]));
+                out.push_str(&sanitizer.finish_completed());
+                assert_eq!(out, expected);
+            }
+        }
+    }
     use super::*;
 
     #[test]
