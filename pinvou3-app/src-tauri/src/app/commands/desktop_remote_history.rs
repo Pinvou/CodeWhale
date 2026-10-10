@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
+use super::desktop_remote_state::DesktopRemoteState as State;
 use serde::Serialize;
-use tauri::State;
 
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::history::RemoteHistoryStore;

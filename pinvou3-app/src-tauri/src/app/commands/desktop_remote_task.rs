@@ -6,8 +6,9 @@
 
 use std::sync::Arc;
 
+use super::desktop_remote_state::DesktopRemoteState as State;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter};
 
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};

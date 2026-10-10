@@ -66,6 +66,19 @@ test('A-local history creation matches the real Rust request envelope', async ()
   });
 });
 
+test('A-local history listing preserves the real Rust DTO and excludes persistent-copy fields', async () => {
+  const host = makeBridge({ desktop_remote_controller_list_history: fixtures.controllerHistories });
+  await host.bridge.controllerListHistory();
+  assert.deepEqual(JSON.parse(JSON.stringify(host.state.remoteHistories)), fixtures.controllerHistories);
+  for (const status of ['active', 'completed', 'failed', 'cancelled', 'interrupted']) {
+    const record = { ...fixtures.controllerHistories[0], status, bSessionReference: null,
+      state: 'wrong-store', lastSequence: 123, lastTerminalStatus: 'wrong-store', secret: 'fixture' };
+    const projected = logic.applyHistories(logic.createState(), [record]).remoteHistories[0];
+    assert.deepEqual(JSON.parse(JSON.stringify(projected)), { ...fixtures.controllerHistories[0], status, bSessionReference: null });
+  }
+  host.bridge.stop();
+});
+
 test('real Rust local task status and cancellation fixtures reach the reducer without losing binding', async () => {
   const host = makeBridge({
     desktop_remote_controller_connect: fixtures.controllerConnected,

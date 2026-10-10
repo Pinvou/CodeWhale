@@ -2,6 +2,9 @@
 // state tests independently of the full product graph.
 pub(crate) use crate::{crypto, liveness, protocol, relay_transport, resume};
 
+#[path = "../../../src/features/remote_control/controller/clock.rs"]
+pub(crate) mod clock;
+
 #[path = "../../../src/features/remote_control/controller/controlled.rs"]
 pub(crate) mod controlled;
 

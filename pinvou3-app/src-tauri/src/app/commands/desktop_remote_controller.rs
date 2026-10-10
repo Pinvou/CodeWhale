@@ -4,8 +4,9 @@
 //! device credential, token, or key, and do not equate window visibility with
 //! disconnection.
 
+use super::desktop_remote_state::DesktopRemoteState as State;
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter};
 
 use crate::features::remote_control::controller::controlling::{
     ControllingDeviceManager, ControllingLeaseInfo, ControllingStateError, ControllingStatus,

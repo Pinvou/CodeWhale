@@ -270,9 +270,8 @@
         historyId: String(record && record.historyId ? record.historyId : ""),
         title: String(record && record.title ? record.title : ""),
         deviceDisplayName: String(record && record.deviceDisplayName ? record.deviceDisplayName : ""),
-        state: String(record && record.state ? record.state : "offline_copy"),
-        lastSequence: Number(record && record.lastSequence ? record.lastSequence : 0),
-        lastTerminalStatus: record && record.lastTerminalStatus ? String(record.lastTerminalStatus) : null,
+        status: String(record && record.status ? record.status : "interrupted"),
+        bSessionReference: record && record.bSessionReference ? String(record.bSessionReference) : null,
       };
     });
     next.revision = state.revision + 1;

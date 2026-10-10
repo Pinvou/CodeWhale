@@ -4,8 +4,11 @@
 
 pub(crate) fn sanitize_text(text: &str, max_chars: usize) -> String {
     let mut out = String::with_capacity(text.len().min(max_chars));
+    let mut sensitive_previous_line = false;
     for line in text.lines() {
-        let mut redact_line = false;
+        // HTTP obsolete line folding keeps credential values in indented
+        // continuation lines. Never reset redaction at that boundary.
+        let mut redact_line = sensitive_previous_line && line.starts_with([' ', '\t']);
         let mut tokens = line.split_whitespace().peekable();
         while let Some(token) = tokens.next() {
             let trimmed = token.trim_matches(|ch: char| {
@@ -15,7 +18,11 @@ pub(crate) fn sanitize_text(text: &str, max_chars: usize) -> String {
                 )
             });
             let lowered = trimmed.to_ascii_lowercase();
-            let bearer = lowered == "bearer";
+            let credential_scheme = lowered == "bearer"
+                || (lowered == "basic"
+                    && tokens
+                        .peek()
+                        .is_some_and(|value| is_basic_credential(value)));
             let field = lowered.trim_start_matches(|ch: char| {
                 !ch.is_ascii_alphanumeric() && !matches!(ch, '_' | '-')
             });
@@ -40,6 +47,13 @@ pub(crate) fn sanitize_text(text: &str, max_chars: usize) -> String {
                         | "api-key"
                         | "x-api-key"
                         | "secret"
+                        | "password"
+                        | "passwd"
+                        | "pwd"
+                        | "client_secret"
+                        | "client-secret"
+                        | "refresh_token"
+                        | "refresh-token"
                         | "signature"
                         | "sig"
                         | "x-amz-signature"
@@ -47,8 +61,12 @@ pub(crate) fn sanitize_text(text: &str, max_chars: usize) -> String {
             // A clearly identified credential value may contain whitespace or
             // quoted JSON/shell syntax. Its end is not safely inferable from
             // tokens: fail closed for the remainder of this line.
-            redact_line |= bearer || sensitive_key;
-            redact_line |= key_value_syntax && matches!(key, "authorization" | "cookie");
+            redact_line |= credential_scheme || sensitive_key;
+            redact_line |= key_value_syntax
+                && matches!(
+                    key,
+                    "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+                );
             let piece = if looks_like_path(trimmed) {
                 "[PATH]".to_owned()
             } else if redact_line || looks_like_secret(&lowered) {
@@ -66,6 +84,7 @@ pub(crate) fn sanitize_text(text: &str, max_chars: usize) -> String {
                 return out.chars().take(max_chars).collect();
             }
         }
+        sensitive_previous_line = redact_line;
     }
     out
 }
@@ -83,6 +102,20 @@ fn looks_like_secret(lowered: &str) -> bool {
         "api-key",
         "secret=",
         "secret:",
+        "password=",
+        "password:",
+        "passwd=",
+        "passwd:",
+        "pwd=",
+        "pwd:",
+        "client_secret=",
+        "client_secret:",
+        "client-secret=",
+        "client-secret:",
+        "refresh_token=",
+        "refresh_token:",
+        "refresh-token=",
+        "refresh-token:",
         "signature=",
         "signature:",
         "x-amz-signature=",
@@ -91,6 +124,26 @@ fn looks_like_secret(lowered: &str) -> bool {
     ]
     .iter()
     .any(|marker| lowered.contains(marker))
+}
+
+fn is_basic_credential(value: &str) -> bool {
+    use base64::Engine as _;
+    let value = value.trim_matches(['\'', '"', '`', ',', ';']);
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+    {
+        return false;
+    }
+    // Bound the temporary decode without passing through an oversized value.
+    if value.len() > 4096 {
+        return true;
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .ok()
+        .map(zeroize::Zeroizing::new)
+        .is_some_and(|decoded| decoded.contains(&b':'))
 }
 
 fn sanitize_url_token(token: &str) -> Option<String> {
@@ -169,14 +222,36 @@ mod tests {
             r#"{"api_key" : "plain fixture phrase"}"#,
             "Authorization:Bearer plain-fixture",
             "Cookie:a=fixture b=fixture",
+            "password: plain-fixture",
+            "PASSWORD = plain fixture phrase",
+            r#"{"password" : "plain fixture phrase"}"#,
+            "passwd=plain-fixture",
+            "pwd : plain-fixture",
+            "client_secret=plain-fixture",
+            "refresh-token: plain-fixture",
+            "Basic dXNlcjpwbGFpbi1maXh0dXJl",
+            "Authorization: Basic\n cGxhaW4tZml4dHVyZQ==",
+            "Proxy-Authorization: Basic\r\n dXNlcjpwbGFpbi1maXh0dXJl",
+            "Set-Cookie:\r\n\tplain-fixture",
+            "Cookie:\n\tplain-fixture\n another-fixture",
         ] {
             let sanitized = sanitize_text(raw, 4096);
             assert!(!sanitized.contains("fixture"));
+            assert!(!sanitized.contains("cGxhaW4tZml4dHVyZQ"));
+            assert!(!sanitized.contains("dXNlcjpwbGFpbi1maXh0dXJl"));
             assert!(sanitized.contains("[REDACTED]"));
         }
         assert_eq!(
             sanitize_text("Authorization: fixture\nnormal text", 4096),
             "[REDACTED] [REDACTED] normal text"
+        );
+        assert_eq!(
+            sanitize_text("basic alphabet and basic algebra", 4096),
+            "basic alphabet and basic algebra"
+        );
+        assert_eq!(
+            sanitize_text("Authorization: fixture\r\n\r\n indented normal text", 4096),
+            "[REDACTED] [REDACTED] indented normal text"
         );
     }
 

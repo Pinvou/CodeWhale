@@ -1,4 +1,8 @@
 {
+  "controllerHistories": [
+    { "historyId": "history_00000000000000000000000000000001", "title": "Report", "deviceDisplayName": "Studio PC",
+      "status": "active", "bSessionReference": "session-0001" }
+  ],
   "historyCreateArgs": {
     "request": { "title": "Report", "bSessionReference": "session-0001" }
   },

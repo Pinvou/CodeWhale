@@ -680,6 +680,39 @@ mod tests {
     }
 
     #[test]
+    fn history_list_matches_the_shared_renderer_fixture() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/desktop_remote_status.json"
+        ))
+        .unwrap();
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager.complete_connected(operation, lease()).unwrap();
+        let record = manager
+            .create_history("Report", Some("session-0001"))
+            .unwrap();
+        let mut expected = fixtures["controllerHistories"].clone();
+        // IDs are intentionally random; only substitute that one dynamic value.
+        expected[0]["historyId"] = record.history_id.clone().into();
+        assert_eq!(serde_json::to_value(manager.history()).unwrap(), expected);
+        for status in [
+            RemoteHistoryStatus::Completed,
+            RemoteHistoryStatus::Failed,
+            RemoteHistoryStatus::Cancelled,
+            RemoteHistoryStatus::Interrupted,
+        ] {
+            let finished = manager.finish_history(&record.history_id, status).unwrap();
+            expected[0]["status"] = serde_json::to_value(status).unwrap();
+            assert_eq!(serde_json::to_value(manager.history()).unwrap(), expected);
+            assert_eq!(
+                finished.b_session_reference.as_deref(),
+                Some("session-0001")
+            );
+        }
+    }
+
+    #[test]
     fn pairing_code_normalization_and_invalid_characters_fail_closed() {
         assert_eq!(normalize_pairing_code(" 234-567 8 \t").unwrap(), "2345678");
         assert_eq!(normalize_pairing_code("abc-defg").unwrap(), "ABCDEFG");

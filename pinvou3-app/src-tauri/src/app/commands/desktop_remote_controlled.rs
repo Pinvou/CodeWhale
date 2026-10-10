@@ -4,8 +4,9 @@
 //! the feature state machine and emit only its allowlisted, generation-bearing
 //! projection; no pairing, lease, token, key, or host-path value is persisted.
 
+use super::desktop_remote_state::DesktopRemoteState as State;
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter};
 
 use crate::features::files::file_ingest::validate_browsable_path;
 pub(crate) use crate::features::remote_control::controller::clock::monotonic_millis;

@@ -38,6 +38,7 @@ pub(crate) mod desktop_remote_controller;
 pub(crate) mod desktop_remote_history;
 pub(crate) mod desktop_remote_model;
 pub(crate) mod desktop_remote_permission;
+pub(crate) mod desktop_remote_state;
 pub(crate) mod desktop_remote_task;
 pub(crate) mod diagnostics;
 pub(crate) mod files;

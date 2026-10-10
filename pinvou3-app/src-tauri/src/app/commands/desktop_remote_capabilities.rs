@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tauri::State;
+use super::desktop_remote_state::DesktopRemoteState as State;
 
 use crate::features::assistant::skill_materialization::enabled_skills_for;
 use crate::features::codex_acp::AcpPool;

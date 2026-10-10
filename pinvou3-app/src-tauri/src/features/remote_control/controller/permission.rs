@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -40,8 +39,7 @@ pub(crate) const TERMINAL_RETENTION_MS: u64 = MAX_EXPIRY_HORIZON_MS;
 pub(crate) const MAX_RETAINED_PERMISSIONS: usize = 256;
 
 pub(crate) fn permission_monotonic_millis() -> u64 {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+    super::clock::monotonic_millis()
 }
 
 fn next_sequence(sequence: &AtomicU64) -> Result<u64> {
@@ -680,6 +678,36 @@ fn bounded_reason(reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_permission_clock_uses_the_shared_domain() {
+        let before = super::super::clock::monotonic_millis();
+        let permission = PermissionAuthority::default().now_ms();
+        let after = super::super::clock::monotonic_millis();
+        assert!((before..=after).contains(&permission));
+        assert!(!include_str!("permission.rs").contains(&["OnceLock<", "Instant>"].concat()));
+    }
+
+    #[test]
+    fn real_permission_view_scrubs_password_and_folded_basic_credentials() {
+        for preview in [
+            "password: plain-fixture",
+            "Basic dXNlcjpwbGFpbi1maXh0dXJl",
+            "Proxy-Authorization: Basic\r\n dXNlcjpwbGFpbi1maXh0dXJl",
+            "Set-Cookie:\n plain-fixture",
+        ] {
+            let authority = PermissionAuthority::with_clock(Arc::new(|| 1_000));
+            let mut input = request(60_000);
+            input.preview = preview.into();
+            let view = authority
+                .request(&lease(), "task-0001", input, 1_000)
+                .unwrap();
+            let projected = serde_json::to_string(&view).unwrap();
+            assert!(!projected.contains("plain-fixture"));
+            assert!(!projected.contains("dXNlcjpwbGFpbi1maXh0dXJl"));
+            assert!(view.preview.contains("[REDACTED]"));
+        }
+    }
     use std::sync::Arc;
 
     #[test]

@@ -833,6 +833,11 @@ mod tests {
             r#"{"api_key" : "plain fixture phrase"}"#,
             "Authorization:Bearer plain-fixture",
             "Cookie:a=fixture b=fixture",
+            "password: plain-fixture",
+            r#"{"password" : "plain fixture phrase"}"#,
+            "Basic dXNlcjpwbGFpbi1maXh0dXJl",
+            "Authorization: Basic\n cGxhaW4tZml4dHVyZQ==",
+            "Cookie:\n\tplain-fixture",
         ]
         .iter()
         .enumerate()
@@ -861,11 +866,21 @@ mod tests {
         store.apply_snapshot(&id, &journal.snapshot(), 3).unwrap();
         assert!(!serde_json::to_string(&replay).unwrap().contains("fixture"));
         assert!(
+            !serde_json::to_string(&replay)
+                .unwrap()
+                .contains("dXNlcjpwbGFpbi1maXh0dXJl")
+        );
+        assert!(
             !serde_json::to_string(&journal.snapshot())
                 .unwrap()
                 .contains("fixture")
         );
         assert!(!std::fs::read_to_string(&path).unwrap().contains("fixture"));
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("cGxhaW4tZml4dHVyZQ")
+        );
         assert_eq!(
             RemoteHistoryStore::persistent(path)
                 .unwrap()
@@ -873,7 +888,7 @@ mod tests {
                 .unwrap()
                 .events
                 .len(),
-            18
+            23
         );
     }
 
