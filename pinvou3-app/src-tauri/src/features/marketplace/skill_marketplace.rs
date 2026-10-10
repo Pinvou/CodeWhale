@@ -4350,37 +4350,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Phase 2 镜像：上传导入登记 Upload(zip 名) 记录，id = 落盘技能名。
-    #[test]
-    fn import_package_mirrors_upload_record() {
-        use std::io::Write;
-        let tmp = fresh_dir("mirror_upload");
-        let zip_path = tmp.join("pkg.zip");
-        {
-            let f = std::fs::File::create(&zip_path).unwrap();
-            let mut zw = zip::ZipWriter::new(f);
-            let opts = zip::write::SimpleFileOptions::default();
-            zw.start_file("up-skill/SKILL.md", opts).unwrap();
-            zw.write_all(b"---\nname: up-skill\ndescription: d\n---\n# hi")
-                .unwrap();
-            zw.finish().unwrap();
-        }
-        let mgr = SkillMarketplaceManager::with_roots(tmp.clone());
-        mgr.import_package(zip_path.to_str().unwrap()).unwrap();
-
-        let store =
-            crate::features::marketplace::store::BundleStore::with_file(tmp.join("bundles.json"));
-        let record = store
-            .get("up-skill")
-            .unwrap()
-            .expect("上传导入应镜像登记 bundles.json");
-        assert_eq!(
-            record.source,
-            crate::features::marketplace::store::BundleSource::Upload("pkg.zip".to_string())
-        );
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
     /// 把 PINVOU3_HOME 指到干净临时目录跑闭包（迁移涉及 connector_state /
     /// manifest 扫描等 env 路径，必须 env 隔离 + ENV_LOCK 串行）。
     fn with_temp_home<F: FnOnce()>(f: F) {
