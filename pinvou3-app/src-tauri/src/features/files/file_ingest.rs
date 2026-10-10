@@ -60,7 +60,7 @@ pub(crate) use published_attachment::{AttachmentReadOwner, PublishedAttachment};
 /// 单文件硬上限 20 MB —— 超大文件就算转 md 后 token 数也炸上下文。
 /// `pub` 供 remote_control 上传链路对齐硬上限(PR #213 审查 #5:mobile upload cap 必须
 /// ≤ 此值,否则 20-64MiB 文件会被 mobile 接受但 file_ingest 静默降级为 oversize 兜底)。
-pub const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
+pub use super::limits::MAX_FILE_BYTES;
 
 pub const ATTACHMENT_FILE_TOO_LARGE: &str = "attachment_file_too_large";
 pub const ATTACHMENT_ARCHIVE_TOO_MANY_ENTRIES: &str = "attachment_archive_too_many_entries";

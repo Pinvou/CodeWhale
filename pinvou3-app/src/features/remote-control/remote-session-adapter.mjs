@@ -128,6 +128,13 @@ const PROJECTION_LABEL_KEYS = Object.freeze({
   snapshot_marker: 'projectionSnapshot',
 });
 
+// Poll only on relevant journal changes, never on streamed message identity.
+export function remoteProjectionPollRevision(history, kinds) {
+  return JSON.stringify((Array.isArray(history?.entries) ? history.entries : [])
+    .filter(entry => kinds.includes(entry?.kind))
+    .map(entry => [entry.journalEpoch, entry.sequence, entry.eventId, entry.taskId, entry.body]));
+}
+
 export function remoteProjectionLabelKey(kind) {
   return PROJECTION_LABEL_KEYS[kind] || 'projectionEvent';
 }
