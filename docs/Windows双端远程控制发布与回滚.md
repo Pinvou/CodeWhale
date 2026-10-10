@@ -113,6 +113,10 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_con
 
 此用例仅在 Windows 编译与执行，须取得当前提交适用 Windows 原生 CI 的真实执行结果；Linux / macOS 的条件排除或 Draft skip 不是该用例的通过证据。子进程整体 15 秒、父进程 25 秒和局部等待 3 秒均为失败退出的 watchdog，不是平台启动性能承诺；本轮未完成冷启动及高负载 Windows runner 的时限余量验收。
 
+R15 核实此前 `windows-rust-test` 的 `--no-run` 只编译此用例，回归列表未包含宿主 driver；本轮补入精确 `app::commands::remote_control::reader_resume_tests::` 筛选，复用已嵌清单的 exe、pipefail 和非零命中断言。静态门禁及其负向变异只证明 CI 接线，不代替 Windows 实际执行；Draft 路由不变，仍须在适用的 Ready 原生 CI 取得证据。
+
+R15 本地 Windows-gnullvm 另外实际执行该 Wry driver 1 项通过（独立子进程及非零匹配证明），影响范围 `features::remote_control::` 588 项通过；这是本地固定树回归，不是 MSVC CI、冷启动压力、renderer/provider 或双 Windows 发布验收。
+
 它使用真实 loopback WebSocket 与认证测试材料，没有真实 renderer、在线 provider、生产网关或双 Windows 设备，不能替代第 7.1 节的发布验收。测试数量以当前提交实际输出为准。
 
 ## 8. 生产 controller lane 启用历史记录（2026-09-19，不是当前安全豁免）
