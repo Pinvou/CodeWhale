@@ -23,7 +23,7 @@ test('every registered desktop-remote Tauri command crosses the unified release 
     const body = source.slice(start, next === -1 ? source.length : next);
     assert.match(
       body,
-      /ensure_desktop_remote_control_enabled\(\)|ensure_supported\(/u,
+      /ensure_desktop_remote_control_enabled\(\)|ensure_supported\(|desktop_remote_state::ensure_ready\(&app\)/u,
       `${command} must fail closed through the shared release switch`,
     );
   }
@@ -77,4 +77,16 @@ test('compiled production gate is immutable under runtime environment overrides'
       assert.equal(run(binary, runtime).trim(), `${enabled} ${enabled}`);
     }
   }
+});
+
+test('the readiness helper includes the release switch and never supplies default state', () => {
+  const source = readFileSync(new URL('desktop_remote_state.rs', commandRoot), 'utf8');
+  const start = source.indexOf('pub(crate) fn ensure_ready');
+  const end = source.indexOf('pub(crate) struct DesktopRemoteState', start);
+  assert.match(source.slice(start, end), /ensure_desktop_remote_control_enabled\(\)\?/u);
+  assert.match(source.slice(start, end), /is_ready\(app\)/u);
+  assert.match(source.slice(start, end), /UNAVAILABLE/u);
+  assert.match(source, /try_get::<DesktopRemoteReady>\(\)/u);
+  assert.match(source, /try_get::<T>\(\)/u);
+  assert.doesNotMatch(source.slice(0, source.indexOf('#[cfg(test)]')), /unwrap_or_default|\.manage\(/u);
 });

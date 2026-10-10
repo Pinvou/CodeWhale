@@ -7,9 +7,9 @@
 
 use std::sync::Arc;
 
+use super::desktop_remote_state::DesktopRemoteState as State;
 use serde::Serialize;
 use serde_json::Value;
-use tauri::State;
 
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::protocol::LeaseContext;
@@ -155,6 +155,7 @@ pub(crate) struct PreparedActiveTaskPackage {
     pub(crate) package: Value,
 }
 
+#[cfg(test)]
 fn prepare_task_package_from_snapshot(
     prefs: &UserPrefs,
     credentials: &impl CredentialStore,
@@ -220,20 +221,7 @@ fn prepare_selected_task_package_with_store(
     prepare_model_package_from_snapshot(&prefs, primary, credentials, live, task_id, package_id)
 }
 
-/// Fail closed on legacy plaintext credentials; run the normal settings
-/// migration separately before retrying. Preparing a remote task must not
-/// write settings or keychain before DEV-29's durable pending reservation.
-pub(crate) fn prepare_active_task_package_snapshot(
-    live: &LeaseContext,
-    task_id: &str,
-) -> Result<PreparedActiveTaskPackage, TemporaryModelError> {
-    prepare_active_task_package_with_store(
-        live,
-        task_id,
-        &SystemCredentialStore::new(),
-        &format!("package-{}", uuid::Uuid::new_v4().simple()),
-    )
-}
+#[cfg(test)]
 
 fn prepare_active_task_package_with_store(
     live: &LeaseContext,
@@ -246,29 +234,6 @@ fn prepare_active_task_package_with_store(
     prepare_task_package_from_snapshot(&prefs, credentials, live, task_id, package_id)
 }
 
-/// Resolve A's current active model and build the task-bound package entirely
-/// in Rust. The returned value goes straight into the encrypted business
-/// payload; it is never projected through the WebView.
-pub(crate) fn build_active_task_package(
-    live: &LeaseContext,
-    task_id: &str,
-) -> Result<Value, TemporaryModelError> {
-    let prefs = UserPrefs::load();
-    let primary = prefs.active_model().cloned().ok_or(TemporaryModelError {
-        code: "model_not_configured",
-    })?;
-    let credentials = SystemCredentialStore::new();
-    let (primary, vision) = prepare_export_models(&prefs, primary, &credentials)?;
-    build_task_package(
-        live,
-        &primary,
-        vision.as_ref(),
-        task_id,
-        &format!("package-{}", uuid::Uuid::new_v4().simple()),
-    )
-    .map(|package| package.to_wire_value())
-}
-
 #[tauri::command]
 pub async fn desktop_remote_model_list_exportable(
     controlled: State<'_, ControlledDeviceManager>,
@@ -277,9 +242,15 @@ pub async fn desktop_remote_model_list_exportable(
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
     }
+    tokio::task::spawn_blocking(list_exportable_models)
+        .await
+        .map_err(|_| "model_list_unavailable".to_owned())
+}
+
+fn list_exportable_models() -> Vec<RemoteModelDescriptor> {
     let prefs = UserPrefs::load();
     let credentials = SystemCredentialStore::new();
-    Ok(prefs
+    prefs
         .advanced
         .saved_models
         .iter()
@@ -294,7 +265,7 @@ pub async fn desktop_remote_model_list_exportable(
                     vision_model_id: None,
                 })
         })
-        .collect())
+        .collect()
 }
 
 pub(crate) fn shared_model_store() -> SharedTemporaryModelStore {

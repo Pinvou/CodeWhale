@@ -5,6 +5,9 @@ pub(crate) use crate::{
     crypto, encrypted_lane, liveness, panic_scope, protocol, relay_transport, resume,
 };
 
+#[path = "../../../src/features/remote_control/controller/clock.rs"]
+pub(crate) mod clock;
+
 #[path = "../../../src/features/remote_control/controller/controlled.rs"]
 pub(crate) mod controlled;
 

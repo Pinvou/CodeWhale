@@ -15,6 +15,20 @@ pub(super) fn looks_like_secret(lowered: &str) -> bool {
         "api-key",
         "secret=",
         "secret:",
+        "password=",
+        "password:",
+        "passwd=",
+        "passwd:",
+        "pwd=",
+        "pwd:",
+        "client_secret=",
+        "client_secret:",
+        "client-secret=",
+        "client-secret:",
+        "refresh_token=",
+        "refresh_token:",
+        "refresh-token=",
+        "refresh-token:",
         "signature=",
         "signature:",
         "x-amz-signature=",
@@ -44,12 +58,40 @@ pub(super) fn is_credential_field(lowered: &str) -> bool {
             | "api-key"
             | "x-api-key"
             | "secret"
+            | "password"
+            | "passwd"
+            | "pwd"
+            | "client_secret"
+            | "client-secret"
+            | "refresh_token"
+            | "refresh-token"
+            | "proxy-authorization"
+            | "set-cookie"
             | "signature"
             | "sig"
             | "x-amz-signature"
             | "authorization"
             | "cookie"
     )
+}
+
+pub(super) fn is_basic_credential(value: &str) -> bool {
+    use base64::Engine as _;
+    let value = value.trim_matches(['\'', '"', '`', ',', ';']);
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+    {
+        return false;
+    }
+    if value.len() > 4096 {
+        return true;
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .ok()
+        .map(zeroize::Zeroizing::new)
+        .is_some_and(|decoded| decoded.contains(&b':'))
 }
 
 #[cfg(test)]
