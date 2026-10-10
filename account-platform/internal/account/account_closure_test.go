@@ -40,8 +40,8 @@ func TestAccountClosureValidationClassifiesRecentAuthentication(t *testing.T) {
 		{name: "stale authentication", principal: identity.Principal{AuthenticatedAt: now.Add(-accountClosureRecentAuth - time.Second)}, key: "account-closure-key", confirmation: accountClosureConfirmation, want: ErrRecentAuthenticationRequired},
 		{name: "missing authentication time", principal: identity.Principal{}, key: "account-closure-key", confirmation: accountClosureConfirmation, want: ErrRecentAuthenticationRequired},
 		{name: "future authentication time", principal: identity.Principal{AuthenticatedAt: now.Add(time.Minute + time.Second)}, key: "account-closure-key", confirmation: accountClosureConfirmation, want: ErrRecentAuthenticationRequired},
-		{name: "invalid confirmation", principal: valid, key: "account-closure-key", confirmation: "CLOSE_MY_ORGANIZATION", want: ErrForbidden},
-		{name: "invalid idempotency key", principal: valid, key: "short", confirmation: accountClosureConfirmation, want: ErrForbidden},
+		{name: "invalid confirmation", principal: valid, key: "account-closure-key", confirmation: "CLOSE_MY_ORGANIZATION", want: ErrInvalidAccountClosureRequest},
+		{name: "invalid idempotency key", principal: valid, key: "short", confirmation: accountClosureConfirmation, want: ErrInvalidAccountClosureRequest},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

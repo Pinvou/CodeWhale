@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Token management current contract",
-    "version": "F06",
+    "version": "F08",
     "description": "Current management API. Personal invocation/usage and signed readiness are specified separately in token-invocation.yaml. This finite document covers every installed management method/path and authority; selected write and receipt DTOs are specified, other read projections are explicitly partial. Platform GET routes also register authenticated HEAD with the same authority."
   },
   "paths": {
@@ -4098,6 +4098,133 @@
             }
           }
         }
+      }
+    },
+    "/internal/v1/users/{user_id}/replay-payloads": {
+      "delete": {
+        "operationId": "anonymizeUserReplayPayloads",
+        "summary": "anonymizeUserReplayPayloads",
+        "x-go-handler": "anonymizeUserReplayPayloads",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.account-closure.replay-clear"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Invalid target, unavailable repository or authority failure; no successful cleanup acknowledgement."
+          },
+          "204": {
+            "description": "Permanent fence and cleanup committed; safe idempotent replay."
+          }
+        },
+        "description": "Permanent subject fence and permitted replay cleanup commit before 204. Unknown financial settlement blocks cleanup. A workload scope never grants a human mutation permission."
+      }
+    },
+    "/internal/v1/users/{user_id}/account-closure-assessment": {
+      "get": {
+        "operationId": "accountClosureAssessment",
+        "summary": "accountClosureAssessment",
+        "x-go-handler": "accountClosureAssessment",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.account-closure.assess"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "Invalid target, unavailable repository or authority failure; no successful cleanup acknowledgement."
+          },
+          "200": {
+            "description": "Assessment, not a cleanup receipt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "user_id",
+                    "ready",
+                    "blockers"
+                  ],
+                  "properties": {
+                    "user_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "ready": {
+                      "type": "boolean"
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "code",
+                          "domain",
+                          "resource_type"
+                        ],
+                        "properties": {
+                          "code": {
+                            "type": "string"
+                          },
+                          "domain": {
+                            "type": "string"
+                          },
+                          "resource_type": {
+                            "type": "string"
+                          },
+                          "resource_id": {
+                            "type": "string"
+                          },
+                          "user_action": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "description": "Read-only assessment of unsettled usage and retained financial review facts."
       }
     }
   },

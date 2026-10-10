@@ -52,14 +52,16 @@ type HTTPAccountClosureClient struct {
 
 func NewHTTPAccountClosureClient(rawURL, serviceToken, domain string) (*HTTPAccountClosureClient, error) {
 	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(rawURL), "/"))
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.RawPath != "" || parsed.Opaque != "" || parsed.Fragment != "" {
 		return nil, errors.New("account closure service URL must be absolute")
 	}
 	domain = strings.ToUpper(strings.TrimSpace(domain))
 	if strings.TrimSpace(serviceToken) == "" || (domain != "BILLING" && domain != "TOKEN") {
 		return nil, errors.New("account closure client requires a service token and BILLING or TOKEN domain")
 	}
-	return &HTTPAccountClosureClient{baseURL: parsed, serviceToken: strings.TrimSpace(serviceToken), domain: domain, client: observability.NewHTTPClient(5 * time.Second)}, nil
+	client := observability.NewHTTPClient(5 * time.Second)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &HTTPAccountClosureClient{baseURL: parsed, serviceToken: strings.TrimSpace(serviceToken), domain: domain, client: client}, nil
 }
 
 func (c *HTTPAccountClosureClient) Assess(ctx context.Context, userID uuid.UUID) (AccountClosureAssessment, error) {

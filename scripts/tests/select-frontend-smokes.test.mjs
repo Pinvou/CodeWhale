@@ -123,3 +123,10 @@ test("registration bonus compiled browsers are kept in full and feature suites",
   assert.ok(fullLabels.includes(target));
   assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminOperationsWorkspace.jsx"])).includes(target));
 });
+
+test("closure production and recovery browser command is selected in full and feature suites", () => {
+  const target = "npm:test:account-platform-closure-ui";
+  assert.ok(fullLabels.includes(target));
+  assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AccountClosureWorkspace.jsx"])).includes(target));
+  assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])).includes(target));
+});

@@ -46,3 +46,55 @@ Windows 全量 Node 测试另有取消夹具超时；原用例独立执行在原
 已回溯修复共享未知写入恢复合同；F02 精确 f7e73bbb 的完整 CI 37975194818 和 required-gate 113975301317 成功。F03–F06 逐相邻普通合并，保留读取错误分类、原功能和迁移。当前 F07 组合承接这些修复与已独立复核的测试夹具改动，重新标准构建，仍须核验新 head CI，不能沿用旧结果。F08 未验证改动暂存保留；Issue #1663 明确匿名主体保留期到期标记不等于实体销毁，不删除永久资格和财务证据。
 
 上述组合末版在本机原 npm test 完整命令实际退出 0：1477 项中 1473 通过、0 失败、4 条件跳过（141.196 秒），跳过项不计通过。原 Windows 取消用例也在这次全量中通过；首次超时与单场景通过日志继续保留，不能由末版通过推断已定位历史延迟根因。新 GitHub CI 仍须按推送后的精确提交核验。
+
+## F03：相邻继承用户锁与客户同步代际修复
+
+从原 F03 `24bb16fff1376d8626c339178ecfe91d6d95a043` 普通相邻合并已签名 F02 `4f7ae4ac9cb6d042b6c0933e76a7e2550c0328f0`，承接 F00 固定镜像来源、F01 USER 锁及观测前连接准备、F02 USER→mapping→job 锁序、锁后租约和用户批准的旧代际禁止重新派发规则。有效在途回调、STALE/失败证据和历史任务保留，不迁移 SQL、不处置资金；F03 对账、nullable completed_at 与财务读错误分类原逻辑保持。
+
+独立完整迁移组合真实 PostgreSQL 验证：Commerce 六组 22 子例 41.750 秒、Profile 两组 20 子例 9.690 秒，均零失败、零跳过；影响包默认测试和 vet 退出 0。独立 routing 14、CI policy 37、部署合同 5、对账 Node 7 通过，actionlint、架构和 diffcheck 退出 0。UI/Native 源码及资产无变动，不将旧浏览器或 Native 结果重新计为本轮执行。
+
+原 routing 首轮一项在 30.025 秒返回空状态，原预算定向及最终完整套件随后通过；原失败和中断记录保留至 #1681，不因最终绿断言耗时原因已根治；它与 #1594 的取消/派发用例不同，不混同根因。#1624 底层偶发连接启动及外部环境验收仍未完成。当前相邻组合的新 head 远端 CI 待验，不沿用旧 head 成功；暂不合入主线，CodeWhale 公开维护祖先链的已知阻断仍按用户指示暂缓且不放宽门禁。
+
+## F04：保留 Token 治理门禁的普通相邻承接
+
+从原 F04 `712f3acad860b2cf497e4c802962be9b94b1999e` 普通相邻合并签名 F03 `d252f3a6c42c5b5d92946f02fe32d591716f8ad5`。三个 CI 文件自动联合，保留 F04 Token 专用授权检查、Node setup 与路由断言，同时承接固定镜像、Keycloak 和 Go 门禁；原 Token 合同、registry、F03 读错误分类及既有 UI/Native 源码和生成资产不变。
+
+非作者独立适用检查：routing 14、CI policy 37、F04 overview Node 9、部署合同 5 均通过且 Node 无跳过；Token 管理授权 checker、actionlint、架构和 diffcheck 退出 0。另一非作者确认 Account 默认测试 2.796 秒、BillingSchema 默认测试 3.637 秒和 vet 退出 0。本轮没有新增真实 PG、完整浏览器或 Native 执行，不将前波 PG 或历史验收冒称当前组合实测。
+
+验证计划曾误选当前 F04 不存在的 `token-management-phase-coverage.test.mjs`，调用实际退出 1，未执行测试且不计通过；记录保留，不引入后波文件或放宽门禁。F03 夹具未知耗时仍由 #1681 跟踪；新签名 head 的远端 CI 待验，CodeWhale 公开维护链仍按用户指示暂缓。
+
+## F05：保全个人调用与回执合同的相邻承接
+
+从原 F05 `524d809e4e44b578660de90bf4c55e53f21cdf7f` 普通相邻合并签名 F04 `291cd79f467d300a5dfbbccef28d757607596ff3`，十五个 incoming 文件逐字节保全。F05 原 Token 合同、审批 registry、共享未知写入恢复、phase 测试和 CodeWhale gitlink 不变，既有个人调用/取消与 overview 功能没有被前序覆盖。
+
+独立适用 CI 检查：routing 14、CI policy 37、Token phase 6、usage overview Node 4、部署合同 5 全部通过，Node 无跳过；Token 授权 checker、actionlint、架构和 diffcheck 退出 0。另一非作者 Account 默认测试 4.770 秒、BillingSchema 默认测试 3.669 秒、Token 默认测试 5.109 秒及 vet 实际退出 0；未配置 PG 环境，没有本轮真实 PG，默认非 verbose 输出不提供跳过数量，不宣称零跳过。
+
+UI、Native 和资产源码无增量，不重复完整浏览器/Native 或将历史结果冒称本轮执行。F03 当前精确提交 CI 与 required-gate 已成功，但不能沿用给 F05 新 head；其远端 CI 待验，严格公开 CodeWhale 维护祖先门禁的已知阻断继续保留，按用户指示暂缓，不能宣称整个 F05 通过。#1681 的原夹具未知耗时原因仍未确认。
+
+## F06：保全组织与成员单元边界的相邻承接
+
+从原 F06 `828290a391b98830a6562782c9d9e00d508d05e5` 普通相邻合并签名 F05 `655f68d12a86c8b4e5264e3a8d550af003f5da07`。CI policy 联合保留 F06 组织和成员单元真实 smoke 注册检查；其余 incoming 原字节来自 F05。原组织权限、成员治理、未知组织钱包拒建与财务冻结恢复保护、共享未知写入恢复、UI/Native/资产及 CodeWhale gitlink 均未被覆盖。
+
+独立适用检查：routing 14、CI policy 38、Token phase 8、组织 Node 17、成员单元 Node 18、部署合同 5 全部通过，Node 零跳过；Token checker 为 67 个管理、7 个凭据端点与 19 个命令，actionlint、架构及 diffcheck 退出 0。另一非作者确认 Account 默认测试 3.717 秒、BillingSchema 默认测试 3.987 秒、Token 默认测试 10.472 秒和 vet 实际退出 0；没有本轮 PG，默认测试跳过数量未知，不宣称零跳过。
+
+本次不重复完整 npm、浏览器或 Native，不冒称历史验收为本轮执行。新签名 head 远端 CI 待验，CodeWhale 严格公开维护祖先门禁已知失败仍按用户指示暂缓，不能宣称整个 F06 通过；#1681 的原 Go Bash 夹具未知耗时原因仍保留。
+
+## F07：保全注册赠礼资格与精度合同的相邻承接
+
+从原 F07 `075f20677ddf46c4745f96b8df7eace062bae7ae` 普通相邻合并签名 F06 `a2f66909fb4c22101cac3bbe0aa29bd35eb1ba48`。文档冲突保留 F07 原全部历史及 incoming F03–F06 段；policy 保留 bonus smoke 门禁，原 registry、迁移 87/Billing 79/900004、精确金额与 revision、UI/资产及 CodeWhale 源不变。
+
+非作者 CI 检查 routing 14、policy 39、Token phase 8、bonus 合同 Node 8、部署合同 5 全部通过，Node 无跳过；Token checker 为 67/7/19，actionlint、架构和 diffcheck 退出 0。继承 producer 夹具首轮 registration 因未配置 HMAC 失败（11.379 秒，另四态通过）；仅测试补合成指纹与正式 eligibility readiness 前置，原生产、断言及预算不改，故不称全部 incoming 与前序原字节一致。首失败保留。
+
+另一非作者最终真实 PG：gift 一组六子例 19.113 秒、修正 producer 一组五子例 10.883 秒，均退出 0、零跳过，使用 Account/Billing 完整 Up 与 Verify、真实 actor 和受控 HTTP；不是生产 SMS/Identity 或 Token 三域验收。默认 Account 4.241 秒、BillingSchema 2.709 秒、Token 5.531 秒及 vet 退出 0，默认跳过数量未知。新 head CI 待验，CodeWhale 严格公开维护祖先门禁已知失败按用户指示暂缓；不宣称整个 F07 通过，不重复浏览器/Native 或消除 #1681 未知原因。
+
+## F08：保全在途证据与注销接管的相邻承接
+
+从原 F08 本地父 `936834681e1c8af510598eb034844cac4f07e55d` 普通合并签名 F07 `8f8a2acac319843a088cacf0958543111dd0d43f`，同时纳入此前经独立验证、尚未推送的 F08 完整功能修复。109 项原工作区内容与十五项 incoming 的交集仅 Commerce、Profile 与 CI policy；保留 scoped 备份、原失败和独立冻结记录，未用整文件覆盖其他波次功能。
+
+真实注册 PROVISIONING 和已确认 MOBILE 的四种合法状态允许入队，Claim 仍仅 ACTIVE、当前完整 mapping 代际及主体生命周期。旧代际任务禁止重新派发；原有效在途回调与历史证据保留。资料会话撤销采用 USER→profile→sessions 锁序；迟到完成不得覆盖注销取消状态及原因，已完成事实也不重复改写。原锁环和历史覆盖证据已确认；历史覆盖登记 #1682，不能由测试绿冒称外部系统已删除数据。
+
+非作者最终真实 PostgreSQL 组合退出 0、158.842 秒：父七组、二十二子例零失败/零跳过；赠礼父使用三域正式 Up/Verify 和真实运行身份，内部 Account 五子例、Billing 八子例也实际通过且零跳过。资料九例真实并发发生一次 40001，首事务回滚后核同 claim/version/live lease 有效，以原 claim 仅重试一次成功；40P01 和其他错误仍直接失败，未扩超时或放宽资金断言。原观察分类和测试前置失败保留，与产品原缺陷分开记录。
+
+冻结后的主 Go 默认测试及 vet 退出 0；未配置数据库的默认 opt-in 跳过不计 PostgreSQL 验收。独立 routing 14、policy 40、部署合同 5、Token phase 8 均通过且 Node 无跳过；Token checker 69/7/19、actionlint、架构和 diffcheck 退出 0。已冻结未变的前端受控浏览器二十例、客户/恢复合同十四例、完整 Node 1493 通过/四条件跳过及 Native 七十一例沿精确字节保留；本次相邻传播未重复执行，不冒称新的生产 E2E。Token 36→37 与其他未变三域升级证据同样明确为历史正式执行。
+
+新签名 head 远端 CI 待验；严格 CodeWhale 公开维护祖先链阻断继续按用户决定暂缓，门禁不放宽、暂不合入主线。#1663 的实体销毁和外部保留、#1672 的原赠礼丢 ACK 未定位首次失败、#1624/#1681 的历史夹具环境问题继续跟踪；真实 Keycloak/NATS、线上部署和完整桌面 E2E 未执行。前序未合入 PR 已完整刷新审核与评论，未发现新增外部审核问题。

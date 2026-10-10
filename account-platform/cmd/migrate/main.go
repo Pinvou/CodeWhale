@@ -212,6 +212,8 @@ func protectedMigrationDomain(version int64, name, checksum string) string {
 		{"account", 900002, "approval_execution_frozen_facts", "019fd548cf79e833fd53ef60591a4f714a40268dceb8d1237c53e69b0162215a"},
 		{"account", 87, "registration_bonus_fingerprint", "1d76a6e9aa6b5fcee84e2eabe8912cbfb8fa53c79ba29ce2bb4c29852be070e1"},
 		{"account", 900004, "registration_bonus_required_facts", "ddfdb70370c3900c113efc918fb5586ab1a2cb977337b8df35e565e1a250772f"},
+		{"account", 900005, "account_closure_replay_ack", "2d0a1bb1f24fd37fa10b69f9ca4da3835f8d2619666afba0a692088361937adb"},
+		{"token", 900004, "account_closure_replay_fence", "1e662dda9e4b27674da7bda3949d8fefef10c18f84c0d626d4093271d46a5a30"},
 		{"billing", 900001, "outbox_publication_generation", "7e36e103ad25620dd7a882792fcd0d942f6208038aeaa966eb44b367cea27f05"},
 		{"billing", 900002, "payment_anomaly_resolution_intents", "68df09f526088b981c992d0c9912cab8f4ac2c6f5567fdb6351cfdc2b905d2a2"},
 		{"billing", 79, "registration_bonus", "27802b2d3e76e6a42c809d620d3d9833cfaa529d7d5517982318236a56719deb"},

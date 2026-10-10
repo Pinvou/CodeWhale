@@ -33,7 +33,7 @@ func (r *PostgresRepository) IsolateAccountClosedGrants(ctx context.Context, clo
 			return AccountClosureGrantIsolation{}, ErrIdempotencyConflict
 		}
 		result.Replayed = true
-		return result, tx.Commit(ctx)
+		return r.commitAccountClosureIsolation(ctx, tx, result)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return AccountClosureGrantIsolation{}, err
@@ -120,5 +120,18 @@ func (r *PostgresRepository) IsolateAccountClosedGrants(ctx context.Context, clo
 	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_grant_isolations(closure_request_id,member_user_id,subject_lifecycle_version,isolated_grant_count,response_snapshot,created_at) VALUES($1,$2,$3,$4,$5,$6)`, closureID, userID, lifecycleVersion, len(ids), snapshot, now); err != nil {
 		return AccountClosureGrantIsolation{}, err
 	}
-	return result, tx.Commit(ctx)
+	return r.commitAccountClosureIsolation(ctx, tx, result)
+}
+
+func (r *PostgresRepository) commitAccountClosureIsolation(ctx context.Context, tx pgx.Tx, result AccountClosureGrantIsolation) (AccountClosureGrantIsolation, error) {
+	if err := tx.Commit(ctx); err != nil {
+		return AccountClosureGrantIsolation{}, err
+	}
+	// Scrub contact metadata outside the financial wallet/row-lock transaction:
+	// payer orders can belong to other wallets. The immutable isolation receipt
+	// is durable first; a missing scrub ACK retries it without re-isolating money.
+	if _, err := r.pool.Exec(ctx, `UPDATE payment_orders SET mobile_e164=NULL WHERE payer_user_id=$1 AND mobile_e164 IS NOT NULL`, result.MemberUserID); err != nil {
+		return AccountClosureGrantIsolation{}, err
+	}
+	return result, nil
 }

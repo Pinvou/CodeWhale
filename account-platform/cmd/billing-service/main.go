@@ -84,6 +84,11 @@ func main() {
 		log.Fatal("BILLING_REGISTRATION_BONUS_CONFIGURATION_INVALID")
 	}
 	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(gate).WithAdminModelPriceProjection(modelPriceProjectionEnabled).WithRegistrationBonusEligibilityVerifier(bonusEligibility)
+	closureStates, err := billing.NewHTTPAccountClosureStateVerifier(os.Getenv("ACCOUNT_HTTP_URL"), credential)
+	if err != nil {
+		log.Fatal("BILLING_ACCOUNT_CLOSURE_CONFIGURATION_INVALID")
+	}
+	service.WithAccountClosureStateVerifier(closureStates)
 	keys, err := humandelegation.DecodeVerificationKeysJSON(os.Getenv("HUMAN_DELEGATION_VERIFICATION_KEYS_JSON"))
 	if err != nil {
 		log.Fatal("BILLING_HUMAN_DELEGATION_KEYS_INVALID")

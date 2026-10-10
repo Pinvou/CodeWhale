@@ -78,11 +78,15 @@ func TestGiftClosureProducerBoundaries(t *testing.T) {
 	verifier, e := billing.NewHTTPRegistrationBonusEligibilityVerifier(as.URL, fixtureToken)
 	check("readiness authority", e)
 	actualBilling := billing.NewService(br).WithRegistrationBonusEligibilityVerifier(verifier).Handler(fixtureToken)
+	var lastGiftStatus atomic.Int64
 	var lost atomic.Bool
 	lost.Store(true)
 	bs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
 		out := httptest.NewRecorder()
 		actualBilling.ServeHTTP(out, q)
+		if q.URL.Path == "/internal/v1/registration-bonus-grants" {
+			lastGiftStatus.Store(int64(out.Code))
+		}
 		if q.URL.Path == "/internal/v1/registration-bonus-grants" && out.Code >= 200 && out.Code < 300 && lost.Swap(false) {
 			w.WriteHeader(503)
 			return
@@ -148,7 +152,9 @@ func TestGiftClosureProducerBoundaries(t *testing.T) {
 		var n int
 		check("actual committed disabled receipt", bp.QueryRow(ctx, `SELECT count(*) FROM registration_bonus_receipts WHERE registration_operation_id=$1 AND outcome='NOT_GRANTED_DISABLED' AND granted_microcredits=0`, op.ID).Scan(&n))
 		if n != 1 {
-			t.Fatal("lost ACK did not commit actual zero receipt")
+			var diagnostic string
+			check("safe provisioning diagnostic", r.pool.QueryRow(ctx, `SELECT COALESCE(last_error_code,'NONE') FROM wallet_provisioning_jobs WHERE user_id=$1`, op.CandidateUserID).Scan(&diagnostic))
+			t.Fatalf("lost ACK did not commit actual zero receipt; gift_http_status=%d safe_job_code=%v", lastGiftStatus.Load(), diagnostic)
 		}
 		_, e := r.CreateAccountClosure(ctx, p, uuid.NewString(), accountClosureConfirmation)
 		if !errors.Is(e, ErrConflict) {
