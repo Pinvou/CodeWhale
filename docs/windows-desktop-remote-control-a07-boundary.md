@@ -115,3 +115,11 @@ P2 登记 #1648（重算子项须在 A08 UI 接线前闭合）；终态墓碑有
 轻量 harness 不链接 history 所需的 CodeWhale 原子写入；history 证据来自另行运行的完整 native 测试。
 本地 native 环境、通过数量、平台限制与尚未完成的 CI 以 PR 本轮修复回复为准，
 不能将轻量 harness 或 GNU/LLVM 测试当作 MSVC、Linux 或真实双端部署验收。
+
+## R15 原生 IPC 夹具的跨平台来源
+
+启动失败/部分启动及原始 State 提取回归使用实际 mock 窗口的 `url()`，不固定
+Windows 的 `http://tauri.localhost`。Tauri 在 Linux/macOS 的本地协议是
+`tauri://localhost`；固定 HTTP 来源会先被远端 ACL 拒绝，使测试未抵达命令提取器。
+保留完整错误码和真实 manager 断言，不放宽 ACL、不跳过非 Windows 测试。
+本地 Windows 回执不能代替 Linux/macOS CI 的实际执行结果。
