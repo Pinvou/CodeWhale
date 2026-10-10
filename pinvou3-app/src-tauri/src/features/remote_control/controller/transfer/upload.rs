@@ -41,6 +41,10 @@ struct UploadState {
 const MAX_COMPLETED_RECEIPTS: usize = 64;
 
 pub(crate) trait UploadStaging: Send + Sync {
+    /// Host ingest limits may be narrower than the shared upload/download core.
+    fn max_upload_bytes(&self) -> u64 {
+        super::limits::MAX_TRANSFER_BYTES
+    }
     /// Allocates the staging target for the registry-issued upload handle.
     /// Allocation failures must release registry accounting and abort this
     /// same target; host paths never become transfer identities.
@@ -142,6 +146,9 @@ impl AttachmentUploads {
         metadata: TransferMetadata,
         now_b: u64,
     ) -> std::result::Result<UploadBegin, String> {
+        if metadata.total_bytes > self.staging.max_upload_bytes() {
+            return Err("transfer_size_invalid".to_owned());
+        }
         let mut state = self.state.lock();
         if context.direction != super::core::TransferDirection::Upload {
             return Err("transfer_direction_mismatch".to_owned());
@@ -648,6 +655,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingStaging {
+        maximum_bytes: Option<u64>,
         calls: Mutex<Vec<String>>,
         targets: Mutex<HashMap<String, Target>>,
         fail_allocation: bool,
@@ -673,6 +681,10 @@ mod tests {
     }
 
     impl UploadStaging for RecordingStaging {
+        fn max_upload_bytes(&self) -> u64 {
+            self.maximum_bytes
+                .unwrap_or(super::super::limits::MAX_TRANSFER_BYTES)
+        }
         fn begin(
             &self,
             handle: &TransferHandle,
@@ -807,6 +819,34 @@ mod tests {
             TransferDirection::Upload,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn host_ingest_budget_rejects_before_reservation_or_staging() {
+        let maximum = crate::features::files::file_ingest::MAX_FILE_BYTES;
+        let staging = Arc::new(RecordingStaging {
+            maximum_bytes: Some(maximum),
+            ..Default::default()
+        });
+        let uploads = uploads(staging.clone(), TransferLimits::default());
+        let mut metadata = metadata_for(b"x");
+        metadata.total_bytes = maximum + 1;
+        assert_eq!(
+            uploads
+                .begin(upload_context(), metadata.clone(), 1)
+                .unwrap_err(),
+            "transfer_size_invalid"
+        );
+        assert_eq!(uploads.registry.connection_bytes("connection-0001"), 0);
+        assert!(staging.calls.lock().unwrap().is_empty());
+        metadata.total_bytes = maximum;
+        assert_eq!(
+            uploads
+                .begin(upload_context(), metadata, 2)
+                .unwrap()
+                .total_bytes,
+            maximum
+        );
     }
 
     #[test]

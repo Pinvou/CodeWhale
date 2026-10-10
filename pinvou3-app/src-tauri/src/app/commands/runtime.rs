@@ -111,8 +111,12 @@ impl PlatformCapabilities {
 /// The frontend consumes these flags instead of inferring the operating
 /// system from WebView user-agent strings, which differ across runtimes.
 #[tauri::command]
-pub fn get_platform_capabilities() -> PlatformCapabilities {
-    PlatformCapabilities::current()
+pub fn get_platform_capabilities<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> PlatformCapabilities {
+    let mut capabilities = PlatformCapabilities::current();
+    capabilities.desktop_remote_control_supported &= super::desktop_remote_state::is_ready(&app);
+    capabilities
 }
 
 /// Return the app-owned snapshot of shell jobs for one session. Polling this
@@ -144,8 +148,21 @@ mod platform_capability_tests {
     use super::*;
 
     #[test]
+    fn desktop_capability_requires_completed_boot_but_other_flags_are_unchanged() {
+        let app = tauri::test::mock_app();
+        let unavailable = get_platform_capabilities(app.handle().clone());
+        assert!(!unavailable.desktop_remote_control_supported);
+        app.manage(super::super::desktop_remote_state::DesktopRemoteReady);
+        let ready = get_platform_capabilities(app.handle().clone());
+        let mut expected = unavailable;
+        expected.desktop_remote_control_supported =
+            crate::platform::capabilities::current().desktop_remote_control_supported;
+        assert_eq!(ready, expected);
+    }
+
+    #[test]
     fn semantic_capabilities_match_the_compiled_target() {
-        let capabilities = get_platform_capabilities();
+        let capabilities = PlatformCapabilities::current();
         let expected = crate::platform::capabilities::current();
         assert_eq!(capabilities.os, expected.os);
         assert_eq!(
