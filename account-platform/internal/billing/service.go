@@ -25,8 +25,6 @@ import (
 )
 
 type Service struct {
-	registrationBonuses          registrationBonusRepository
-	registrationBonusEligibility RegistrationBonusEligibilityVerifier
 	closureStates                AccountClosureStateVerifier
 	impactPricing                impactPriceRepository
 	modelPriceProjectionEnabled  bool
@@ -41,7 +39,14 @@ type Service struct {
 	catalog                      RechargeProductCatalogRepository
 	catalogCreateOptions         RechargeProductCreateOptionsRepository
 	approvalEffects              ApprovalEffectReader
+	registrationBonuses          registrationBonusRepository
+	registrationBonusEligibility RegistrationBonusEligibilityVerifier
 	now                          func() time.Time
+}
+
+func (s *Service) WithAccountClosureStateVerifier(verifier AccountClosureStateVerifier) *Service {
+	s.closureStates = verifier
+	return s
 }
 
 func (s *Service) WithRechargeProductCatalog(catalog RechargeProductCatalogRepository) *Service {
@@ -56,6 +61,11 @@ func NewService(repository Repository) *Service {
 	service.registrationBonuses, _ = repository.(registrationBonusRepository)
 	service.approvalEffects, _ = repository.(ApprovalEffectReader)
 	return service
+}
+
+func (s *Service) WithRegistrationBonusEligibilityVerifier(verifier RegistrationBonusEligibilityVerifier) *Service {
+	s.registrationBonusEligibility = verifier
+	return s
 }
 
 func (s *Service) WithImpactPriceRepository(repository impactPriceRepository) *Service {
@@ -93,6 +103,8 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	router := httpserver.NewRouter()
 	protected := router.Group("")
 	protected.Use(serviceauth.GinMiddleware(serviceToken))
+	protected.GET("/internal/v1/users/:user_id/account-closure-assessment", serviceauth.Require("internal.billing.account-closure.assess"), httpserver.AdaptFunc(s.accountClosureAssessment))
+	protected.POST("/internal/v1/users/:user_id/account-closure-grants/isolate", serviceauth.Require("internal.billing.account-closure.isolate"), httpserver.AdaptFunc(s.isolateAccountClosedGrants))
 	if s.payments != nil {
 		protected.POST("/internal/v1/reconciliation/runs", serviceauth.Require("internal.billing.reconciliation.run"), httpserver.AdaptFunc(s.runReconciliation))
 	}
@@ -796,14 +808,4 @@ func (s *Service) runReconciliation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, run)
-}
-
-func (s *Service) WithRegistrationBonusEligibilityVerifier(verifier RegistrationBonusEligibilityVerifier) *Service {
-	s.registrationBonusEligibility = verifier
-	return s
-}
-
-func (s *Service) WithAccountClosureStateVerifier(verifier AccountClosureStateVerifier) *Service {
-	s.closureStates = verifier
-	return s
 }

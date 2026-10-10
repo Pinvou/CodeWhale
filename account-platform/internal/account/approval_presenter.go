@@ -76,6 +76,12 @@ type approvalProductSummary struct {
 	ProductControlVersion string `json:"product_control_version"`
 }
 
+type approvalEntitlementCorrectionSummary struct {
+	PackageID      uuid.UUID `json:"package_id"`
+	PaymentOrderID uuid.UUID `json:"payment_order_id"`
+	ReasonCode     string    `json:"reason_code"`
+}
+
 type approvalLifecycleSummary struct {
 	ModelID                 uuid.UUID  `json:"model_id"`
 	TargetLifecycle         string     `json:"target_lifecycle"`
@@ -93,12 +99,6 @@ type approvalCredentialSummary struct {
 	TokenAccountID         uuid.UUID `json:"token_account_id"`
 	ExpectedAccountVersion string    `json:"expected_account_version"`
 	CredentialVersion      string    `json:"credential_version"`
-}
-
-type approvalEntitlementCorrectionSummary struct {
-	PackageID      uuid.UUID `json:"package_id"`
-	PaymentOrderID uuid.UUID `json:"payment_order_id"`
-	ReasonCode     string    `json:"reason_code"`
 }
 
 type approvalLedgerRepairSummary struct {
@@ -174,6 +174,12 @@ func approvalV2Command(item ApprovalRequest) any {
 		return nil
 	}
 	switch item.CommandType {
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		id, err := uuid.Parse(value)
+		if err != nil || id.String() != value || item.TargetResourceType != "ENTITLEMENT_PACKAGE" {
+			return nil
+		}
+		return approvalEntitlementCorrectionSummary{PackageID: id}
 	case "WALLET_ADJUSTMENT":
 		if item.TargetResourceType != "MANUAL_ADJUSTMENT" {
 			return nil
@@ -203,15 +209,6 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		return approvalLedgerRepairSummary{TargetPostingID: id}
-	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
-		if item.TargetResourceType != "ENTITLEMENT_PACKAGE" {
-			return nil
-		}
-		id, err := uuid.Parse(value)
-		if err != nil || id == uuid.Nil || id.String() != value {
-			return nil
-		}
-		return approvalEntitlementCorrectionSummary{PackageID: id}
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
 		if item.TargetResourceType != "MODEL" {
 			return nil
@@ -296,6 +293,7 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			TargetPostingID           uuid.UUID  `json:"target_posting_id"`
 			WrongLedgerAccountID      uuid.UUID  `json:"wrong_ledger_account_id"`
 			CorrectLedgerAccountID    uuid.UUID  `json:"correct_ledger_account_id"`
+			PackageID                 uuid.UUID  `json:"package_id"`
 		} `json:"normalized_command"`
 		Critical struct {
 			FactsDigest      string `json:"facts_digest"`
@@ -317,6 +315,12 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 	}
 	var command any
 	switch target := approvalV2Command(item).(type) {
+	case approvalEntitlementCorrectionSummary:
+		if proof.Normalized.PackageID != target.PackageID || proof.Normalized.PaymentOrderID == uuid.Nil {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.PaymentOrderID, target.ReasonCode = proof.Normalized.PaymentOrderID, proof.Normalized.ReasonCode
+		command = target
 	case approvalWalletSummary:
 		target.WalletID = proof.Normalized.WalletID
 		target.AmountMicrocredits = proof.Normalized.AmountMicrocredits
@@ -340,10 +344,6 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		target.AmountMicrocredits = proof.Normalized.AmountMicrocredits
 		target.PostingSetDigest = proof.Critical.PostingSetDigest
 		target.ReasonCode = proof.Normalized.ReasonCode
-		command = target
-	case approvalEntitlementCorrectionSummary:
-		target.ReasonCode = proof.Normalized.ReasonCode
-		target.PaymentOrderID = proof.Normalized.PaymentOrderID
 		command = target
 	case approvalLifecycleSummary:
 		if proof.Normalized.ModelID != target.ModelID {

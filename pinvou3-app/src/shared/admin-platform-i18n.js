@@ -1,3 +1,4 @@
+import { registrationBonusRecoveryCopy } from './registration-bonus-i18n.js';
 export const adminPlatformCopy = {"zh":{"approvalCenter":{"views":"审批中心视图","mine":"我的申请","pending":"待我审批","execution":"执行与失败","directory":"审批策略目录","commandType":"命令类型","target":"目标","status":"状态","risk":"风险","requestable":"可申请","yes":"是","no":"否","allStatuses":"全部状态","refresh":"刷新","loading":"正在加载审批数据…","listUnavailable":"审批列表暂时不可用，请稍后重试。","openBusinessArea":"前往业务区域","requester":"申请人","updated":"更新时间","allCommands":"全部命令"},"nav":{"users":"用户管理","approvals":"审批中心"},
 "search":"搜索用户名、名称或 ID，或输入完整用户编码精确查询",
 "refresh":"刷新",
@@ -316,3 +317,5 @@ adminPlatformCopy.ja.operations = {
   "eligibilityBlocked": "有効化できません。資格のバックフィルが未完了、または匿名化済み登録 {count} 件を安全に復元できません。",
   "eligibilityNotReady": "過去の携帯番号資格が準備できるまで特典を有効化できません。上記の阻害理由を確認してください。"
 };
+
+for (const language of ['zh', 'en', 'ja']) adminPlatformCopy[language].operations = { ...registrationBonusRecoveryCopy[language], ...adminPlatformCopy[language].operations };

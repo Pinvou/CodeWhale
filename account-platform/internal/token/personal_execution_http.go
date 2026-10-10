@@ -3,6 +3,7 @@ package token
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 
 	"net/http"
 
@@ -56,6 +57,31 @@ func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// A lost response header is recovered by a read of the original invocation
+// identity. Missing facts never authorize a new invocation or release funds.
+func (s *Service) getPersonalUsageByIdempotencyKey(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	userID, ok := s.authorizePersonalUsageUser(w, r, "personal.usage.cancel")
+	if !ok {
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(key) < 16 || len(key) > 128 {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must contain 16 to 128 characters", httpserver.RequestID(r.Context()))
+		return
+	}
+	usage, err := s.repository.FindUsageByIdempotency(r.Context(), userID, digestString([]byte(key)))
+	if err != nil || usage.UserID != userID || usage.OrganizationID != nil {
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			s.writeError(w, r, err)
+			return
+		}
+		s.writeError(w, r, ErrNotFound)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"usage_request_id": usage.ID, "execution_status": usage.ExecutionStatus, "delivery_status": usage.DeliveryStatus, "cancel_status": usage.CancelStatus, "settlement_status": usage.SettlementStatus})
+}
+
 func (s *Service) cancelUsageRequest(w http.ResponseWriter, r *http.Request) {
 	userID, ok := s.authorizePersonalUsageUser(w, r, "personal.usage.cancel")
 	if !ok {
@@ -71,6 +97,7 @@ func (s *Service) cancelUsageRequest(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must contain 16 to 128 characters", httpserver.RequestID(r.Context()))
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	result, preDispatch, err := s.repository.RequestCancellation(r.Context(), usageID, userID, digestString([]byte(key)), cancellationFingerprint(usageID), s.executionUpstream.AdapterVersion())
 	if err != nil {
 		s.writeError(w, r, err)
@@ -250,7 +277,7 @@ func decodeUsageCursor(raw string) (UsageHistoryCursor, error) {
 }
 
 func usageContextMatches(context AuthorizationContext, usage UsageRequest) bool {
-	if usage.UserID != context.UserID || usage.SessionID != context.SessionID {
+	if usage.UserID != context.UserID {
 		return false
 	}
 	if context.ContextType == "PERSONAL" {

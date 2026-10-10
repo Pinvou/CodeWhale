@@ -14,6 +14,10 @@ copyFileSync(path.join(here, '..', 'src', 'features', 'pet', 'pet-scheduled-noti
 copyFileSync(path.join(here, '..', 'src', 'shared', 'i18n.js'), path.join(dir, 'shared', 'i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'connector-i18n.js'), path.join(dir, 'shared', 'connector-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'account-platform-i18n.js'), path.join(dir, 'shared', 'account-platform-i18n.js')); copyFileSync(path.join(here, '..', 'src', 'shared', 'admin-platform-i18n.js'), path.join(dir, 'shared', 'admin-platform-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'registration-bonus-i18n.js'), path.join(dir, 'shared', 'registration-bonus-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closure-i18n.js'), path.join(dir, 'shared', 'account-closure-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closed-grants-i18n.js'), path.join(dir, 'shared', 'account-closed-grants-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'entitlement-correction-i18n.js'), path.join(dir, 'shared', 'entitlement-correction-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'finance-i18n.js'), path.join(dir, 'shared', 'finance-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'reconciliation-i18n.js'), path.join(dir, 'shared', 'reconciliation-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'token-management-i18n.js'), path.join(dir, 'shared', 'token-management-i18n.js'));

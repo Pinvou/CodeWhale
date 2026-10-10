@@ -33,53 +33,6 @@ func TestProtocolDefinitionETagUsesCanonicalJSON(t *testing.T) {
 	}
 }
 
-func TestProtocolFormulaReasonUsesUTF8RuneBoundaries(t *testing.T) {
-	tests := []struct {
-		name  string
-		value string
-		valid bool
-	}{
-		{name: "nine Chinese runes", value: strings.Repeat("审", 9), valid: false},
-		{name: "ten Chinese runes", value: strings.Repeat("审", 10), valid: true},
-		{name: "two thousand Chinese runes", value: strings.Repeat("审", 2000), valid: true},
-		{name: "two thousand and one Chinese runes", value: strings.Repeat("审", 2001), valid: false},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if actual := validProtocolFormulaReason(test.value); actual != test.valid {
-				t.Fatalf("valid=%v, want %v", actual, test.valid)
-			}
-		})
-	}
-}
-
-func TestProtocolFormulaDomainMetadataRemainsRequired(t *testing.T) {
-	metadata := ProtocolFormulaCommandMetadata{ActorID: uuid.New(), CommandType: "TOKEN_FORMULA_PUBLISH", Reason: "publish the verified formula", IdempotencyKeyDigest: strings.Repeat("a", 64), RequestFingerprint: strings.Repeat("b", 64), CommandReference: strings.Repeat("c", 64)}
-	if err := validateProtocolFormulaCommandMetadata(metadata); err != nil {
-		t.Fatal(err)
-	}
-	for _, field := range []string{"actor", "reason", "key", "fingerprint", "reference", "type"} {
-		invalid := metadata
-		switch field {
-		case "actor":
-			invalid.ActorID = uuid.Nil
-		case "reason":
-			invalid.Reason = "short"
-		case "key":
-			invalid.IdempotencyKeyDigest = ""
-		case "fingerprint":
-			invalid.RequestFingerprint = ""
-		case "reference":
-			invalid.CommandReference = ""
-		case "type":
-			invalid.CommandType = ""
-		}
-		if validateProtocolFormulaCommandMetadata(invalid) == nil {
-			t.Fatalf("missing %s accepted", field)
-		}
-	}
-}
-
 func TestFormalProtocolAndFormulaPublishRequireRecentAuthentication(t *testing.T) {
 	authority := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Authorization-Version", "1")

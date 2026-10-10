@@ -29,7 +29,7 @@ func TestInstalledBillingConsumptionAndRecoveryFences(t *testing.T) {
 		}
 		otherWorkload := TokenWorkload
 		if d.Workload == BillingWorkload {
-			if !MatchRoute(LegacyBilling(), d.CommandType, d.PolicyVersion, d.ExecutorIdentity) {
+			if MatchRoute(LegacyBilling(), d.CommandType, d.PolicyVersion, d.ExecutorIdentity) != (d.CommandType != "ENTITLEMENT_COMPONENT_ADJUSTMENT") {
 				t.Fatal("legacy Billing routing lost")
 			}
 		} else {

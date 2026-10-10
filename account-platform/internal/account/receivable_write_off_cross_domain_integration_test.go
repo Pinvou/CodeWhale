@@ -39,7 +39,7 @@ func TestReceivableWriteOffCrossDomainActivationPostgresIntegration(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	t.Cleanup(cancel)
 
-	repository, accountConnection, relay, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, accountURL, 0)
+	repository, accountConnection, relay, _ := newEntitlementApprovalFixture(t, ctx, accountURL)
 	billingRepository, billingPool, billingConnection, writeOff := newReceivableWriteOffCrossDomainBillingFixture(t, ctx, billingURL)
 	proofToken, executorToken := configureEntitlementProofIdentity(t)
 	billingServer := httptest.NewServer(billingdomain.NewService(billingRepository).Handler("account-proof-test"))
@@ -119,8 +119,8 @@ func TestReceivableWriteOffCrossDomainActivationPostgresIntegration(t *testing.T
 	if err := repository.requireApprovalAdvancement(ctx, policy); !errors.Is(err, ErrBillingGovernanceInactive) {
 		t.Fatalf("inactive cross-domain advancement: %v", err)
 	}
-	requester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "write-off-activation-requester")
-	approver := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "write-off-activation-approver")
+	requester := seedReceivableApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "write-off-activation-requester")
+	approver := seedReceivableApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "write-off-activation-approver")
 	requesterPrincipal, approverPrincipal := approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
 	createDraft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "write-off-activation-create",
@@ -133,7 +133,7 @@ func TestReceivableWriteOffCrossDomainActivationPostgresIntegration(t *testing.T
 		t.Fatal("inactive cross-domain create unexpectedly succeeded")
 	}
 	assertApprovalRequestAbsent(t, ctx, repository, requester.ID, createDraft.IdempotencyKey)
-	submitID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT")
+	submitID := seedReceivableAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.SubmitApprovalRequest(ctx, requesterPrincipal, submitID, 1)
 		return err
@@ -141,7 +141,7 @@ func TestReceivableWriteOffCrossDomainActivationPostgresIntegration(t *testing.T
 		t.Fatalf("inactive cross-domain submit: %v", err)
 	}
 	assertApprovalRequestState(t, ctx, repository, submitID, "DRAFT", 1)
-	approveID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED")
+	approveID := seedReceivableAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.DecideApprovalRequest(ctx, approverPrincipal, approveID, 1, "APPROVED", "closed cross-domain gate", frozen.CriticalResourceVersions)
 		return err
@@ -195,9 +195,14 @@ WHERE command_type='RECEIVABLE_WRITE_OFF' AND policy_version=1 AND snapshot_sche
 		t.Fatalf("activated cross-domain proof=%+v err=%v", proof.Response, err)
 	}
 
-	transitionEntitlementCrossDomainAccountControl(t, ctx, accountConnection)
-	requester = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "write-off-chain-requester")
-	approver = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "write-off-chain-approver")
+	// The official owned fixture already ran the complete fresh-control sequence.
+	// Re-entering QUIESCING from PROOF_REQUIRED is not a legal mode transition.
+	control, err := repository.ApprovalActionControl(ctx)
+	if err != nil || control.Mode != "PROOF_REQUIRED" {
+		t.Fatalf("official approval control readiness: mode=%s err=%v", control.Mode, err)
+	}
+	requester = seedReceivableApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "write-off-chain-requester")
+	approver = seedReceivableApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "write-off-chain-approver")
 	requesterPrincipal, approverPrincipal = approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
 	draft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "write-off-cross-domain-chain",

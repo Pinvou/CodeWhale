@@ -26,7 +26,7 @@ func TestRetainedRelayFenceMigrationBoundary(t *testing.T) {
 		t.Fatal("relay fence not installed directly after its real lease prerequisite")
 	}
 	j := slices.Index(versions, intentVersion)
-	if j < 1 || versions[j-1] != 29 || j == len(versions)-1 || versions[j+1] != 30 {
+	if j < 1 || versions[j-1] != 29 || j == len(versions)-1 || versions[j+1] != 30 || j+2 >= len(versions) || versions[j+2] != 31 {
 		t.Fatal("immutable anomaly intent not installed directly after its real schema prerequisite")
 	}
 	t.Run("intent-fixed-pins-and-prerequisite", func(t *testing.T) {

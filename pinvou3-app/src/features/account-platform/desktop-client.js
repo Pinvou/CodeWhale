@@ -1,4 +1,5 @@
 import { parseFinanceJSON, requirePaymentOrder } from './finance-contract.js';
+import { parseClosedGrantsJSON } from './account-closed-grants-contract.js';
 import { requireSession, requireProfileChange } from './personal-contract.js';
 import { parseBalanceJSON } from './balance-view.js';
 import { mergeObservedVersions } from './authorization-ui.js';
@@ -196,7 +197,7 @@ export class AccountPlatformDesktopClient {
       }
       return parseBalanceJSON(JSON.stringify(response.body));
     }
-    if (area === 'token' && typeof response.bodyText === 'string') return parseFinanceJSON(response.bodyText);
+    if (area === 'token' && typeof response.bodyText === 'string') return resource.includes('/account-closed-grants') ? parseClosedGrantsJSON(response.bodyText) : parseFinanceJSON(response.bodyText);
     return response.body;
   }
 

@@ -3,6 +3,7 @@ package events
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
 	"reflect"
 	"strings"
 	"testing"
@@ -63,7 +64,7 @@ func TestNATSFixedAuthorizationAndOverlap(t *testing.T) {
 		}
 	}
 	operator := fixedNATSPermissions("event-resource-operator")
-	if len(operator.Publish) != 19 || !reflect.DeepEqual(operator.Subscribe, []string{"_INBOX.event-resource-operator.>"}) {
+	if len(operator.Publish) != 3+2*len(provisionedConsumers())+2*len(approvalconsumer.BillingCommands()) || !reflect.DeepEqual(operator.Subscribe, []string{"_INBOX.event-resource-operator.>"}) {
 		t.Fatal("operator permissions")
 	}
 	// F11 adds exactly the INFO and CREATE grants for the dedicated write-off
@@ -95,6 +96,22 @@ func TestNATSFixedAuthorizationAndOverlap(t *testing.T) {
 		}
 		if !found {
 			t.Fatal("consumer specification not reused")
+		}
+	}
+	for _, descriptor := range approvalconsumer.BillingCommands() {
+		for _, want := range []string{"$JS.API.CONSUMER.INFO." + platformStream + "." + descriptor.Durable, "$JS.API.CONSUMER.CREATE." + platformStream + "." + descriptor.Durable + "." + approvalconsumer.AuthorizationSubject} {
+			found := false
+			for _, subject := range operator.Publish {
+				if subject == want {
+					if found {
+						t.Fatal("duplicate governed consumer permission")
+					}
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("exact governed consumer permission missing")
+			}
 		}
 	}
 	if _, err := RenderNATSAuthorization(current, current); err != ErrNATSResources {

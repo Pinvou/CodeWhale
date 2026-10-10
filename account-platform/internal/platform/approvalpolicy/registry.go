@@ -91,6 +91,8 @@ func Require(commandType string, expected Mode) gin.HandlerFunc {
 func buildPolicies() map[string]Policy {
 	result := make(map[string]Policy)
 	for commandType, permission := range map[string]string{
+		"TOKEN_ORGANIZATION_LIFECYCLE_APPLY":            "internal.token.organization.lifecycle",
+		"TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY":       "internal.token.organization-unit.lifecycle",
 		"BILLING_ORGANIZATION_LIFECYCLE_APPLY":          "internal.billing.organization.lifecycle",
 		"BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY":   "internal.billing.organization-member.lifecycle",
 		"BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY":     "internal.billing.organization-unit.lifecycle",
@@ -190,16 +192,6 @@ func buildPolicies() map[string]Policy {
 		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "product_id", "provider_control_version", "product_control_version", "catalog_item_id", "catalog_version", "admission_version", "mapping_id", "mapping_version", "probe_order_id", "policy_version", "observation_high_watermark", "evaluation_high_watermark"},
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 	}
-	result["ENTITLEMENT_COMPONENT_ADJUSTMENT"] = Policy{
-		CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, Mode: ApprovalRequired,
-		RequesterPermission: "platform.billing.repairs.request", ApproverPermission: "platform.billing.repairs.approve",
-		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true,
-		SnapshotSchemaVersion: 2, CriticalResourceFields: []string{
-			"package_id", "wallet_id", "payment_order_id", "payment_transaction_id", "source_component_id", "source_lot_id",
-			"source_type", "target_type", "amount_microcredits", "reason_code", "source_evidence_digest", "facts_digest", "policy_version",
-		},
-		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
-	}
 	result["LEDGER_REPAIR"] = Policy{
 		CommandType: "LEDGER_REPAIR", PolicyVersion: 1, Mode: ApprovalRequired,
 		RequesterPermission: "platform.billing.repairs.request", ApproverPermission: "platform.billing.repairs.approve",
@@ -215,6 +207,13 @@ func buildPolicies() map[string]Policy {
 		ExpiresAfter:           24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 	}
 	addTokenGovernancePolicies(result)
+	result["ENTITLEMENT_COMPONENT_ADJUSTMENT"] = Policy{
+		CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, Mode: ApprovalRequired,
+		RequesterPermission: "platform.billing.repairs.request", ApproverPermission: "platform.billing.repairs.approve",
+		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true, SnapshotSchemaVersion: 2,
+		CriticalResourceFields: []string{"package_id", "wallet_id", "payment_order_id", "payment_transaction_id", "source_component_id", "source_lot_id", "source_type", "target_type", "amount_microcredits", "reason_code", "source_evidence_digest", "facts_digest", "policy_version"},
+		ExpiresAfter:           24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
+	}
 	return result
 }
 

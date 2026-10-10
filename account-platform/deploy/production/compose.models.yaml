@@ -62,7 +62,7 @@ services:
     environment:
       TOKEN_HTTP_URL: http://token-gateway:8080
       TOKEN_GOVERNANCE_POLICY_SET_DIGEST: ${TOKEN_GOVERNANCE_POLICY_SET_DIGEST:?set independently approved current policy digest}
-      TOKEN_GOVERNANCE_HANDLER_SET_DIGEST: ${TOKEN_GOVERNANCE_HANDLER_SET_DIGEST:?set independently approved eighteen-handler digest}
+      TOKEN_GOVERNANCE_HANDLER_SET_DIGEST: ${TOKEN_GOVERNANCE_HANDLER_SET_DIGEST:?set independently approved nineteen-handler digest}
   billing-service:
     environment:
       BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED: "true"
@@ -139,7 +139,7 @@ services:
       token-credential-portal-workload-agent: {condition: service_healthy}
   token-command-executor:
     <<: *runtime
-    image: ${TOKEN_COMMAND_EXECUTOR_IMAGE:?set reviewed same-source eighteen-policy executor image}
+    image: ${TOKEN_COMMAND_EXECUTOR_IMAGE:?set reviewed same-source nineteen-policy executor image}
     restart: unless-stopped
     env_file:
       - {path: "${TOKEN_EXECUTOR_PRIVATE_ENV_FILE:?set only executor receiver rules file}", required: true, format: raw}

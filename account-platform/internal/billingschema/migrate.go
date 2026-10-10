@@ -37,6 +37,15 @@ const memberIdentityDownChecksum = "051eae7b8cf15c7708fbfe88aa096c4d85a284e35465
 // numeric versions remains possible after the high-numbered fence is recorded.
 // The same validation is required before DownOne to prevent rollback-file edits.
 func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
+	if err := validateReceivableActivationLock(input); err != nil {
+		return nil, err
+	}
+	if err := validateLedgerActivationLock(input); err != nil {
+		return nil, err
+	}
+	if err := validateEntitlementActivationLock(input); err != nil {
+		return nil, err
+	}
 	if err := validateMemberFinancialReviewReason(input); err != nil {
 		return nil, err
 	}
@@ -65,10 +74,6 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 		if migration.Version == intentVersion {
 			copy := migration
 			intent = &copy
-		}
-		if migration.Version == memberIdentityVersion {
-			copy := migration
-			memberIdentity = &copy
 		}
 	}
 	if fence == nil || !seen[1] || !seen[6] {

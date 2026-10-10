@@ -27,6 +27,7 @@ paths:
         '401': {description: Authentication required}
         '403': {description: Current organization authorization denied}
         '409': {description: Anonymous-state authority unavailable, not anonymized, expired, frozen, reserved or changed command facts}
+        '503': {description: Transport or canonical receipt not confirmed; retry only the same actor, target, facts and Idempotency-Key}
   /v1/organizations/{organization_id}/account-closed-grants:reclaim-batch:
     post:
       operationId: reclaimAccountClosedGrantsBatch
@@ -68,4 +69,4 @@ components:
         grant_id: {type: string, format: uuid}
         status: {type: string, enum: [SUCCEEDED, FAILED]}
         result: {$ref: '#/components/schemas/Reclaim'}
-        code: {type: string, enum: [ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED]}
+        code: {type: string, enum: [ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED, COMMAND_RESULT_UNKNOWN], description: Unknown preserves the original batch key and facts; FAILED is not proof that no financial effect committed}

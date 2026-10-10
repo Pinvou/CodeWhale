@@ -22,14 +22,14 @@ type closedGrantInputClient struct {
 	reasons []string
 }
 
-func (c *closedGrantInputClient) ReclaimAccountClosedGrant(_ context.Context, _, id, _ uuid.UUID, reason, key string) (json.RawMessage, error) {
+func (c *closedGrantInputClient) ReclaimAccountClosedGrant(_ context.Context, org, id, _ uuid.UUID, reason, key string) (json.RawMessage, error) {
 	c.ids = append(c.ids, id)
 	c.keys = append(c.keys, key)
 	c.reasons = append(c.reasons, reason)
 	if id == uuid.Nil {
 		return nil, ErrNotFound
 	}
-	return json.RawMessage(`{"replayed":false}`), nil
+	return json.RawMessage(fmt.Sprintf(`{"grant":{"grant_id":%q,"organization_id":%q,"status":"RECLAIMED_ACCOUNT_CLOSED"},"amount_microcredits":1,"subject_lifecycle_version":2,"replayed":false}`, id, org)), nil
 }
 func TestClosedGrantInputsThroughInstalledTokenRoutes(t *testing.T) {
 	org, user, id, other := uuid.New(), uuid.New(), uuid.New(), uuid.New()

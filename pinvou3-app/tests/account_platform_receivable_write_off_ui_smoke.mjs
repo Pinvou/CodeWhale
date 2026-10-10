@@ -15,6 +15,7 @@ async function run(name, query, action) {
   finally { await page.close(); }
 }
 async function openForm(page) {
+  await page.evaluate(() => [...document.querySelectorAll('main > nav button')].find(button => button.textContent === window.f11.financeCopy[window.f11.language].finance).click());
   await page.waitForFunction(() => [...document.querySelectorAll('nav button')].some(button => button.textContent === window.f11.ledgerRepairCopy[window.f11.language].writeOffTitle));
   await page.evaluate(() => [...document.querySelectorAll('nav button')].find(button => button.textContent === window.f11.ledgerRepairCopy[window.f11.language].writeOffTitle).click());
   await page.waitForSelector('.adm-financial-repair-target input');

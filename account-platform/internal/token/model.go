@@ -6,11 +6,11 @@ import (
 )
 
 var (
-	ErrOrganizationLifecycleConflict = errors.New("organization lifecycle conflicts with current state")
 	ErrForbidden                     = errors.New("token account is not authorized")
 	ErrAccountProvisioning           = errors.New("account is provisioning")
 	ErrAccountRepairRequired         = errors.New("account provisioning requires repair")
 	ErrAccountAuthorityUnavailable   = errors.New("account authority is unavailable")
+	ErrOrganizationLifecycleConflict = errors.New("organization lifecycle facts conflict")
 )
 
 type AuthorizationContext struct {

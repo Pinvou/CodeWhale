@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -9,13 +10,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // TestLedgerRepairCaseImmutableAuditPostgresIntegration covers the GSA-24
 // slice-1 contract of migration 000061: the immutable ledger repair case table
 // exists with the designed closed value set, only minimal privileges are
 // granted to the runtime role, and every mutation path (UPDATE/DELETE/TRUNCATE)
-// is refused with the forward-only 55000 signal.
+// is denied by runtime ACLs, with immutable owner mutations returning 55000.
 func TestLedgerRepairCaseImmutableAuditPostgresIntegration(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("PINVOU_TEST_BILLING_DATABASE_URL"))
 	if databaseURL == "" {
@@ -90,20 +92,41 @@ VALUES($1,$2,$3,1,$4,$5,$6,$7,$8,'USAGE',25,$9,$9,$10,'EXECUTED',$11)`,
 		t.Fatalf("stored case type=%s state=%s amount=%d err=%v", storedEntryType, storedState, storedAmount, err)
 	}
 
-	if _, err := pool.Exec(ctx, `UPDATE ledger_repair_cases SET amount_microcredits=26 WHERE id=$1`, caseID); err == nil {
-		t.Fatal("immutable ledger repair case accepted UPDATE")
-	} else if !strings.Contains(err.Error(), "ledger repair case is immutable") {
-		t.Fatalf("unexpected UPDATE error: %v", err)
+	operator := ledgerActivationFixtureOperator(t, ctx, pool)
+	for _, statement := range []string{
+		`UPDATE public.ledger_repair_cases SET amount_microcredits=26 WHERE id=$1`,
+		`DELETE FROM public.ledger_repair_cases WHERE id=$1`,
+	} {
+		_, err := pool.Exec(ctx, statement, caseID)
+		var pgError *pgconn.PgError
+		if !errors.As(err, &pgError) || pgError.Code != "42501" {
+			t.Fatal("runtime mutation must be denied by narrow ACL")
+		}
+		ownerTx, err := operator.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ownerTx.Exec(ctx, `SET LOCAL ROLE billing_schema_owner`); err != nil {
+			t.Fatal(err)
+		}
+		_, err = ownerTx.Exec(ctx, statement, caseID)
+		_ = ownerTx.Rollback(ctx)
+		if !errors.As(err, &pgError) || pgError.Code != "55000" {
+			t.Fatal("owner mutation must be denied by immutable trigger")
+		}
 	}
-	if _, err := pool.Exec(ctx, `DELETE FROM ledger_repair_cases WHERE id=$1`, caseID); err == nil {
-		t.Fatal("immutable ledger repair case accepted DELETE")
-	} else if !strings.Contains(err.Error(), "ledger repair case is immutable") {
-		t.Fatalf("unexpected DELETE error: %v", err)
+	ownerTx, err := operator.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE ledger_repair_cases`); err == nil {
-		t.Fatal("immutable ledger repair case accepted TRUNCATE")
-	} else if !strings.Contains(err.Error(), "ledger repair case is immutable") {
-		t.Fatalf("unexpected TRUNCATE error: %v", err)
+	if _, err := ownerTx.Exec(ctx, `SET LOCAL ROLE billing_schema_owner`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ownerTx.Exec(ctx, `TRUNCATE public.ledger_repair_cases`)
+	_ = ownerTx.Rollback(ctx)
+	var pgError *pgconn.PgError
+	if !errors.As(err, &pgError) || pgError.Code != "55000" {
+		t.Fatal("owner truncate must be denied by immutable statement trigger")
 	}
 	if err := insertCase(uuid.Must(uuid.NewV7()), targetPostingID); err == nil {
 		t.Fatal("second case for the same target posting was accepted")

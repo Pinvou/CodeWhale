@@ -24,6 +24,8 @@ func TestLedgerRepairPostgresIntegration(t *testing.T) {
 	t.Cleanup(cancel)
 	repository, schema := newAdminPaginationIntegrationRepository(t, ctx, databaseURL)
 	pool := repository.pool
+	operator := ledgerActivationFixtureOperator(t, ctx, pool)
+	activationVersion := setLedgerActivationFixtureState(t, ctx, operator, "ACTIVE")
 	_ = schema
 	now := time.Now().UTC()
 
@@ -62,7 +64,7 @@ VALUES($1,'PERSONAL',$2,'ACTIVE',100,0,3,$3,$3)`, walletID, ownerID, now); err !
 		TargetJournalEntryID: targetJournalID, TargetPostingID: wrongPostingID,
 		WrongLedgerAccountID: adjustmentAccount, CorrectLedgerAccountID: usageRevenueAccount, AmountMicrocredits: 30,
 	}
-	plan, err := repository.LedgerRepairPlanForCommand(ctx, command, 1, 1, 1)
+	plan, err := repository.LedgerRepairPlanForCommand(ctx, command, 1, 1, activationVersion)
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -99,7 +101,7 @@ VALUES($1,'PERSONAL',$2,'ACTIVE',100,0,3,$3,$3)`, walletID, ownerID, now); err !
 	before := ledgerRepairZeroChangeSnapshot(t, ctx, pool)
 	execution := LedgerRepairExecutionInput{
 		ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 4,
-		ExecutionKey: "ledger-repair-" + targetJournalID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+		ExecutionKey: "ledger-repair-" + targetJournalID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
 		Command: command,
 		Frozen: LedgerRepairFrozenFacts{
 			TargetJournalEntryID: targetJournalID, TargetPostingID: wrongPostingID,
@@ -148,7 +150,7 @@ VALUES($1,'PERSONAL',$2,'ACTIVE',100,0,3,$3,$3)`, walletID, ownerID, now); err !
 		t.Fatal("second approval created a second correction")
 	}
 	// Once corrected, the same posting can no longer be planned again.
-	if _, err := repository.LedgerRepairPlanForCommand(ctx, command, 1, 1, 1); err == nil {
+	if _, err := repository.LedgerRepairPlanForCommand(ctx, command, 1, 1, activationVersion); err == nil {
 		t.Fatal("plan accepted an already corrected target posting")
 	}
 	stored, err := repository.LedgerRepairForRequest(ctx, execution.ApprovalRequestID)
@@ -172,6 +174,8 @@ func TestLedgerRepairPlatformOnlyShapePostgresIntegration(t *testing.T) {
 	t.Cleanup(cancel)
 	repository, _ := newAdminPaginationIntegrationRepository(t, ctx, databaseURL)
 	pool := repository.pool
+	operator := ledgerActivationFixtureOperator(t, ctx, pool)
+	activationVersion := setLedgerActivationFixtureState(t, ctx, operator, "ACTIVE")
 	now := time.Now().UTC()
 
 	// The chargeback's receivable leg was attributed to the adjustment account:
@@ -202,7 +206,7 @@ func TestLedgerRepairPlatformOnlyShapePostgresIntegration(t *testing.T) {
 		TargetJournalEntryID: targetJournalID, TargetPostingID: wrongPostingID,
 		WrongLedgerAccountID: adjustmentAccount, CorrectLedgerAccountID: receivableAccount, AmountMicrocredits: 30,
 	}
-	plan, err := repository.LedgerRepairPlanForCommand(ctx, command, 1, 1, 1)
+	plan, err := repository.LedgerRepairPlanForCommand(ctx, command, 1, 1, activationVersion)
 	if err != nil {
 		t.Fatalf("platform-only shape was refused: %v", err)
 	}
@@ -213,7 +217,7 @@ func TestLedgerRepairPlatformOnlyShapePostgresIntegration(t *testing.T) {
 	before := ledgerRepairZeroChangeSnapshot(t, ctx, pool)
 	result, err := repository.ApplyLedgerRepair(ctx, LedgerRepairExecutionInput{
 		ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 5,
-		ExecutionKey: "ledger-repair-" + targetJournalID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+		ExecutionKey: "ledger-repair-" + targetJournalID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
 		Command: command,
 		Frozen: LedgerRepairFrozenFacts{
 			TargetJournalEntryID: targetJournalID, TargetPostingID: wrongPostingID,

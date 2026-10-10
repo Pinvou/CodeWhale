@@ -170,6 +170,12 @@ func (r *PostgresRepository) ExecuteEntitlementComponentCorrection(ctx context.C
 	} else if !errors.Is(err, ErrNotFound) {
 		return EntitlementCorrectionResult{}, err
 	}
+	// Receipt replay above is read-only. Every fresh correction holds the owner
+	// activation row until commit, so concurrent operator deactivation fences it.
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT billing_approval_execution.lock_entitlement_activation()`).Scan(&active); err != nil || !active {
+		return EntitlementCorrectionResult{}, ErrApprovalExecutionUnavailable
+	}
 	now := r.now()
 	plan, err := entitlementCorrectionPlanFrom(ctx, tx, now, packageID, paymentOrderID)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -27,6 +28,31 @@ var (
 )
 
 const registrationBonusMicrocreditsPerPoint int64 = 10000
+
+// The policy revision is an exact integer on the admin wire. Accept the old
+// JSON number form as well as the lossless decimal string used by browsers.
+type registrationBonusRevision int64
+
+func (v *registrationBonusRevision) UnmarshalJSON(raw []byte) error {
+	text := string(raw)
+	if strings.HasPrefix(text, `"`) {
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return ErrRegistrationBonusInvalid
+		}
+	}
+	parsed, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || parsed < 1 || strconv.FormatInt(parsed, 10) != text {
+		return ErrRegistrationBonusInvalid
+	}
+	*v = registrationBonusRevision(parsed)
+	return nil
+}
+
+func writeRegistrationBonusPolicy(w http.ResponseWriter, policy RegistrationBonusPolicy) {
+	// Preserve original numeric tokens; browsers consume the lossless policy
+	// codec rather than first rounding them through JavaScript Number.
+	api.WriteJSON(w, http.StatusOK, policy)
+}
 
 type RegistrationBonusPolicy struct {
 	Revision                       int64     `json:"revision"`
@@ -284,7 +310,9 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(mobile_fingerprint) DO NOTHIN
 		}
 	}
 	receipt = RegistrationBonusReceipt{RegistrationOperationID: request.RegistrationOperationID, UserID: request.UserID, WalletID: wallet.ID, ClaimID: claimID, PolicyRevision: policy.Revision, Outcome: outcome, GrantedMicrocredits: granted, CreatedAt: now}
-	if _, err = tx.Exec(ctx, `INSERT INTO registration_bonus_receipts(registration_operation_id,user_id,request_hash,wallet_id,claim_id,policy_revision,outcome,granted_microcredits,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, receipt.RegistrationOperationID, receipt.UserID, hash[:], receipt.WalletID, receipt.ClaimID, receipt.PolicyRevision, receipt.Outcome, receipt.GrantedMicrocredits, receipt.CreatedAt); err != nil {
+	// Return the persisted PostgreSQL timestamp so first response and immutable
+	// replay have identical precision and location, rather than a Go-only instant.
+	if err = tx.QueryRow(ctx, `INSERT INTO registration_bonus_receipts(registration_operation_id,user_id,request_hash,wallet_id,claim_id,policy_revision,outcome,granted_microcredits,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING created_at`, receipt.RegistrationOperationID, receipt.UserID, hash[:], receipt.WalletID, receipt.ClaimID, receipt.PolicyRevision, receipt.Outcome, receipt.GrantedMicrocredits, receipt.CreatedAt).Scan(&receipt.CreatedAt); err != nil {
 		return RegistrationBonusReceipt{}, false, err
 	}
 	return receipt, true, tx.Commit(ctx)
@@ -390,16 +418,16 @@ func (s *Service) adminRegistrationBonusPolicy(w http.ResponseWriter, r *http.Re
 	policy.EligibilityStatus = readiness.Status
 	policy.RecoverableRegistrationCount = readiness.RecoverableRegistrationCount
 	policy.UnrecoverableRegistrationCount = readiness.UnrecoverableRegistrationCount
-	api.WriteJSON(w, http.StatusOK, policy)
+	writeRegistrationBonusPolicy(w, policy)
 }
 
 func (s *Service) adminUpdateRegistrationBonusPolicy(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Enabled          bool   `json:"enabled"`
-		AmountPoints     int64  `json:"amount_points"`
-		ValidityDays     int    `json:"validity_days"`
-		ExpectedRevision int64  `json:"expected_revision"`
-		Reason           string `json:"reason"`
+		Enabled          bool                      `json:"enabled"`
+		AmountPoints     int64                     `json:"amount_points"`
+		ValidityDays     int                       `json:"validity_days"`
+		ExpectedRevision registrationBonusRevision `json:"expected_revision"`
+		Reason           string                    `json:"reason"`
 	}
 	if s.registrationBonuses == nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "REGISTRATION_BONUS_UNAVAILABLE", "registration bonus policy is unavailable", httpserver.RequestID(r.Context()))
@@ -415,14 +443,14 @@ func (s *Service) adminUpdateRegistrationBonusPolicy(w http.ResponseWriter, r *h
 		return
 	}
 	amountMicrocredits := body.AmountPoints * registrationBonusMicrocreditsPerPoint
-	replayedPolicy, replayed, replayErr := s.registrationBonuses.ReplayRegistrationBonusPolicy(r.Context(), actor, body.Enabled, amountMicrocredits, body.ValidityDays, body.ExpectedRevision, body.Reason, r.Header.Get("Idempotency-Key"))
+	replayedPolicy, replayed, replayErr := s.registrationBonuses.ReplayRegistrationBonusPolicy(r.Context(), actor, body.Enabled, amountMicrocredits, body.ValidityDays, int64(body.ExpectedRevision), body.Reason, r.Header.Get("Idempotency-Key"))
 	if replayErr != nil {
 		s.writeRegistrationBonusError(w, r, replayErr)
 		return
 	}
 	if replayed {
 		s.enrichRegistrationBonusPolicyReadiness(r.Context(), &replayedPolicy)
-		api.WriteJSON(w, http.StatusOK, replayedPolicy)
+		writeRegistrationBonusPolicy(w, replayedPolicy)
 		return
 	}
 	if body.Enabled {
@@ -435,13 +463,13 @@ func (s *Service) adminUpdateRegistrationBonusPolicy(w http.ResponseWriter, r *h
 			return
 		}
 	}
-	policy, _, err := s.registrationBonuses.UpdateRegistrationBonusPolicy(r.Context(), actor, body.Enabled, amountMicrocredits, body.ValidityDays, body.ExpectedRevision, body.Reason, r.Header.Get("Idempotency-Key"))
+	policy, _, err := s.registrationBonuses.UpdateRegistrationBonusPolicy(r.Context(), actor, body.Enabled, amountMicrocredits, body.ValidityDays, int64(body.ExpectedRevision), body.Reason, r.Header.Get("Idempotency-Key"))
 	if err != nil {
 		s.writeRegistrationBonusError(w, r, err)
 		return
 	}
 	s.enrichRegistrationBonusPolicyReadiness(r.Context(), &policy)
-	api.WriteJSON(w, http.StatusOK, policy)
+	writeRegistrationBonusPolicy(w, policy)
 }
 
 func (s *Service) enrichRegistrationBonusPolicyReadiness(ctx context.Context, policy *RegistrationBonusPolicy) {

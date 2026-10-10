@@ -76,6 +76,18 @@ func (r *PostgresRepository) ConfigureWalletProvisioning(policyVersion string, s
 
 func (r *PostgresRepository) Ping(ctx context.Context) error { return r.pool.Ping(ctx) }
 
+// Configure before starting registration workers or accepting mobile requests.
+func (r *PostgresRepository) ConfigureRegistrationBonusFingerprint(keyID string, key []byte) error {
+	keyID = strings.TrimSpace(keyID)
+	if !registrationBonusKeyIDValid(keyID) || len(key) != 32 {
+		return errors.New("registration bonus fingerprint requires a valid key id and exactly 32 random bytes")
+	}
+	clear(r.registrationBonusFingerprintKey)
+	r.registrationBonusFingerprintKeyID = keyID
+	r.registrationBonusFingerprintKey = append([]byte(nil), key...)
+	return nil
+}
+
 func (r *PostgresRepository) userIDByPrincipal(ctx context.Context, principal identity.Principal) (uuid.UUID, error) {
 	var userID uuid.UUID
 	err := r.pool.QueryRow(ctx, `SELECT u.id FROM identities i JOIN users u ON u.id=i.user_id AND u.status='ACTIVE' WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject).Scan(&userID)
@@ -85,6 +97,7 @@ func (r *PostgresRepository) userIDByPrincipal(ctx context.Context, principal id
 	return userID, err
 }
 func (r *PostgresRepository) Close() {
+	clear(r.registrationBonusFingerprintKey)
 	if r.approvalWriterPool != nil && r.approvalWriterPool != r.pool {
 		r.approvalWriterPool.Close()
 	}
@@ -498,14 +511,4 @@ func mapConstraintError(err error) error {
 func (r *PostgresRepository) WithApprovalProofSource(source ApprovalProofSource) *PostgresRepository {
 	r.approvalProofSource = source
 	return r
-}
-
-func (r *PostgresRepository) ConfigureRegistrationBonusFingerprint(keyID string, key []byte) error {
-	keyID = strings.TrimSpace(keyID)
-	if keyID == "" || len(keyID) > 100 || len(key) != 32 {
-		return errors.New("registration bonus fingerprint requires a key id and exactly 32 random bytes")
-	}
-	r.registrationBonusFingerprintKeyID = keyID
-	r.registrationBonusFingerprintKey = append(r.registrationBonusFingerprintKey[:0], key...)
-	return nil
 }

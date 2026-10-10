@@ -77,8 +77,8 @@ test('new lazy global mounts contain chunk failures without exposing protected c
     'the model access gate backdrop must wrap the error boundary and Suspense, so it survives chunk failures',
   );
   assert.ok(
-    gateMount.includes('aria-modal="true"'),
-    'the model access gate backdrop must announce its modal state',
+    gateMount.includes('role="dialog"') && gateMount.includes('aria-modal="true"'),
+    'the API key gate backdrop must remain an accessible blocking dialog during loading and chunk failure',
   );
 });
 

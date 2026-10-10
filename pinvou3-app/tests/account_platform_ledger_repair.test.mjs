@@ -5,6 +5,7 @@ import { financialRepairApprovalDraft } from '../src/features/account-platform/a
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { currentApprovalEditDraft } from '../src/features/account-platform/admin-finance.js';
 import { ledgerRepairCopy } from '../src/shared/ledger-repair-i18n.js';
+import { ledgerIntentStorage, readLedgerIntent, saveLedgerIntent, clearLedgerIntent } from '../src/features/account-platform/ledger-repair-intent.js';
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const values = { target_resource_id: id(1), target_journal_entry_id: id(2), wrong_ledger_account_id: id(3), correct_ledger_account_id: id(4), amount_microcredits: '9223372036854775807' };
 const projection = () => ({ command_type: 'LEDGER_REPAIR', policy_version: 1, snapshot_schema_version: 1,
@@ -12,6 +13,42 @@ const projection = () => ({ command_type: 'LEDGER_REPAIR', policy_version: 1, sn
   normalized_command: { target_posting_id: id(1), target_journal_entry_id: id(2), wrong_ledger_account_id: id(3), correct_ledger_account_id: id(4), amount_microcredits: values.amount_microcredits, reason_code: 'ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT' },
   critical_resource_versions: { policy_version: 1, posting_set_digest: 'a'.repeat(64) },
   financial_snapshot: { amount_microcredits: values.amount_microcredits, wallet_id: null } });
+
+test('Ledger durable invocation preserves operator key, exact facts and actor across reload', () => {
+  const memory = new Map();
+  const storage = { getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value), removeItem: key => memory.delete(key) };
+  const facts = { projection: projection(), reason: 'Controlled attribution correction reason', requestKey: 'k'.repeat(111) };
+  const record = ledgerIntentStorage.createIntent(id(8), 'ledger-repair-draft', facts);
+  assert.equal(record.key, facts.requestKey);
+  saveLedgerIntent(record, storage);
+  const restored = readLedgerIntent(id(8), 'ledger-repair-draft', storage);
+  assert.deepEqual(restored, record);
+  assert.equal(financialRepairApprovalDraft(restored.facts.projection, restored.facts.reason, restored.key).idempotency_key.length, 120);
+  assert.equal(readLedgerIntent(id(7), 'ledger-repair-draft', storage), null);
+  assert.throws(() => ledgerIntentStorage.createIntent(id(8), 'ledger-repair-draft', { ...facts, requestKey: 'k'.repeat(112) }));
+  assert.equal(ledgerIntentStorage.createIntent(id(8), 'ledger-repair-draft', { ...facts, requestKey: '键'.repeat(37) }).key, '键'.repeat(37));
+  assert.throws(() => ledgerIntentStorage.createIntent(id(8), 'ledger-repair-draft', { ...facts, requestKey: '键'.repeat(38) }));
+  assert.throws(() => saveLedgerIntent({ ...record, facts: { ...facts, reason: 'Changed unknown request reason' } }, storage));
+  clearLedgerIntent(id(8), 'ledger-repair-draft', 'different-key', storage);
+  assert.deepEqual(readLedgerIntent(id(8), 'ledger-repair-draft', storage), record);
+  clearLedgerIntent(id(8), 'ledger-repair-draft', record.key, storage);
+  assert.equal(readLedgerIntent(id(8), 'ledger-repair-draft', storage), null);
+  const replacement = { ...record, facts: { ...record.facts, reason: 'New facts using the original operator key' } };
+  saveLedgerIntent(replacement, storage);
+  assert.throws(() => ledgerIntentStorage.clearRecord(record, storage));
+  assert.deepEqual(readLedgerIntent(id(8), 'ledger-repair-draft', storage), replacement);
+  ledgerIntentStorage.clearRecord(replacement, storage);
+  assert.equal(readLedgerIntent(id(8), 'ledger-repair-draft', storage), null);
+});
+
+test('Ledger invalid, unwritable and mismatched storage cannot save a sendable invocation', () => {
+  const facts = { projection: projection(), reason: 'Controlled attribution correction reason', requestKey: 'ledger-stable-key' };
+  const record = ledgerIntentStorage.createIntent(id(8), 'ledger-repair-draft', facts);
+  assert.throws(() => saveLedgerIntent(record, { getItem: () => null, setItem: () => { throw new Error('unwritable'); } }));
+  assert.throws(() => saveLedgerIntent(record, { getItem: () => null, setItem: () => {} }));
+  assert.throws(() => readLedgerIntent(id(8), 'ledger-repair-draft', { getItem: () => '{corrupt' }));
+  assert.throws(() => ledgerIntentStorage.createIntent(id(8), 'other-operation', facts));
+});
 test('installed form sends owner-required fixed reason and full positive int64', () => {
   assert.deepEqual(financialRepairCommandTypes, ['LEDGER_REPAIR', 'RECEIVABLE_WRITE_OFF']);
   assert.deepEqual(financialRepairPrecheckBody('LEDGER_REPAIR', values).body, { command_type: 'LEDGER_REPAIR', ...values, reason_code: 'ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT' });

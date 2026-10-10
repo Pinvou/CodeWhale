@@ -65,7 +65,7 @@ func TestEntitlementCorrectionReadPlanUsesPaymentEvidenceAndRejectsUsePostgresIn
 	packages, _, err := repository.ListPackages(ctx, ownerID, walletID, 10)
 	if err != nil || len(packages) != 1 || len(packages[0].Components) != 1 ||
 		packages[0].Components[0].OriginalMicrocredits != 100 ||
-		packages[0].Components[0].ReclassifiedOutMicrocredits != 0 ||
+		packages[0].Components[0].OriginalMicrocredits-packages[0].Components[0].EffectiveOriginalMicrocredits != 0 ||
 		packages[0].Components[0].EffectiveOriginalMicrocredits != 100 {
 		t.Fatalf("backward-compatible component projection=%+v err=%v", packages, err)
 	}

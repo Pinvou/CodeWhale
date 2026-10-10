@@ -78,7 +78,7 @@ func TestBillingOwnerLegacyAndIncrementalMigrations(t *testing.T) {
 	}
 	var before []migrations.Migration
 	for _, m := range loaded {
-		if m.Version <= 28 || m.Version == generationVersion {
+		if m.Version <= 28 || m.Version == generationVersion || m.Version == memberIdentityVersion || m.Version == memberFinancialReasonVersion {
 			before = append(before, m)
 		}
 	}

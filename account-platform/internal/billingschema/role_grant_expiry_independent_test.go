@@ -17,7 +17,7 @@ import (
 func TestIndependentRoleGrantAuthorizationAfterTargetWait(t *testing.T) {
 	raw := os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL")
 	if raw == "" {
-		t.Skip("explicit isolated PostgreSQL configuration is required")
+		t.Skip("PINVOU_TEST_SCHEMA_DATABASE_URL is required for actual dedicated PostgreSQL")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
