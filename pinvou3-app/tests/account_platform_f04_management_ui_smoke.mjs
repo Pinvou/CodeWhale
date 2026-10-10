@@ -98,6 +98,84 @@ try{
   assert.ok(await page.$eval('.adm-model-detail .adm-source-missing-policy',el=>el.textContent===window.f04.sourceMissingPolicyLabel()));
   assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);
  });
+
+ const governanceFresh=async(permissions)=>{await fresh();await page.evaluate(permissions=>{history.replaceState({},'',`${location.pathname}?token_account_id=${window.f04.id}&token_detail_tab=routes`);window.f04.surface='governance';window.f04.governancePermissions=permissions;window.f04.render();},permissions);await page.waitForSelector('#token-routes-heading');};
+ const governanceClick=async key=>page.waitForFunction(key=>{const label=window.f04.governanceWords()[key];const button=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===label&&!b.disabled);if(!button)return false;button.click();return true;},{},key);
+ for(const [command,button] of [['TOKEN_ACCOUNT_STATUS_CHANGE','disableTokenAccount'],['TOKEN_ROUTE_UPSERT','configureStableRoute'],['TOKEN_ROUTE_DELETE','deleteRoute']])await caseRun(`${command}: production detail preserves routes and recovers the original invocation`,async()=>{
+  await governanceFresh();await page.waitForSelector('.adm-model-detail tbody tr');
+  assert.ok(await page.$('.adm-model-detail .adm-model-token-filters') || await page.$('.adm-model-detail select'));
+  await governanceClick(button);await page.waitForSelector('.adm-high-risk-dialog');
+  if(command==='TOKEN_ROUTE_UPSERT'){
+   await page.waitForFunction(()=>[...document.querySelectorAll('.adm-high-risk-fields select option')].some(o=>o.value===window.f04.id));
+   await page.select('.adm-high-risk-fields select',await page.evaluate(()=>window.f04.id));
+   const selects=await page.$$('.adm-high-risk-fields select');await selects[1].select(await page.evaluate(()=>window.f04.id));
+  }
+  await page.waitForFunction(()=>!document.querySelector('.adm-high-risk-dialog .adm-source-state'));
+  await page.type('.adm-high-risk-dialog textarea','Controlled route governance reason');
+  if(command!=='TOKEN_ROUTE_UPSERT')await page.click('.adm-high-risk-dialog input[type=checkbox]');
+  await page.evaluate(()=>{window.f04.unknownOnce=true;});await submit('.adm-high-risk-dialog');await page.waitForSelector('.adm-command-unknown');
+  assert.ok(await page.$eval('.adm-high-risk-dialog header button',el=>el.disabled));
+  await submit('.adm-high-risk-dialog');await page.waitForSelector('.adm-high-risk-dialog .adm-inline-message.success');await page.click('.adm-high-risk-dialog header button');await page.waitForFunction(()=>!document.querySelector('.adm-high-risk-dialog'));
+  assert.ok(await page.$('#token-routes-heading'));
+  assert.ok(await page.evaluate(command=>{const writes=window.f04.calls.filter(c=>c.method==='POST'&&c.path==='commands');const reads=window.f04.calls.filter(c=>c.path==='by-key');return writes.length===1&&JSON.parse(writes[0].body).command_type===command&&reads.length===1&&reads[0].key===writes[0].key&&reads[0].type===command;},command));
+  assert.ok(await page.evaluate(()=>{const w=window.f04.httpCalls.find(c=>c.method==='POST'&&c.path.endsWith('/commands'));const r=window.f04.httpCalls.find(c=>c.path.endsWith('/commands/by-idempotency-key'));return w.headers['X-CSRF-Token']==='CONTROLLED_SYNTHETIC_CSRF'&&w.headers['Idempotency-Key']===r.headers['Idempotency-Key'];}));
+  await governanceClick('next');await page.waitForFunction(()=>window.f04.calls.some(c=>c.path==='routes'&&c.filters.cursor==='controlled-next'));
+  await page.select('.adm-model-token-filters select','HEALTHY');await submit('.adm-model-token-filters');await page.waitForFunction(()=>window.f04.calls.some(c=>c.path==='routes'&&c.filters.health_status==='HEALTHY'&&!c.filters.cursor));
+ });
+
+ const openRouteSelection=async(mode,model)=>{
+  await governanceFresh();await page.evaluate(mode=>{window.f04.lookupMode=mode;window.f04.lookupStarted=false;},mode);await governanceClick('configureStableRoute');await page.waitForSelector('.adm-high-risk-fields select');
+  await page.waitForFunction(()=>[...document.querySelectorAll('.adm-high-risk-fields select option')].some(o=>o.value===window.f04.id));
+  await page.select('.adm-high-risk-fields select',model||await page.evaluate(()=>window.f04.id));const selects=await page.$$('.adm-high-risk-fields select');await selects[1].select(await page.evaluate(()=>window.f04.id));
+ };
+ await caseRun('Existing route outside the displayed page and health filter retains 77/UNIT',async()=>{
+  await governanceFresh();await page.evaluate(()=>{window.f04.lookupMode='outside';});await page.select('.adm-model-token-filters select','HEALTHY');await submit('.adm-model-token-filters');await governanceClick('next');
+  await governanceClick('configureStableRoute');await page.waitForFunction(()=>[...document.querySelectorAll('.adm-high-risk-fields select option')].some(o=>o.value===window.f04.id));await page.select('.adm-high-risk-fields select',await page.evaluate(()=>window.f04.id));const selects=await page.$$('.adm-high-risk-fields select');await selects[1].select(await page.evaluate(()=>window.f04.id));
+  await page.waitForFunction(()=>document.querySelector('.adm-high-risk-fields input[type=number]')?.value==='77');
+  assert.equal(await page.$$eval('.adm-high-risk-fields select',ss=>ss[2].value),'UNIT');
+  await page.type('.adm-high-risk-dialog textarea','Keep existing routing policy');await submit('.adm-high-risk-dialog');await page.waitForSelector('.adm-high-risk-dialog .adm-inline-message.success');
+  assert.ok(await page.evaluate(()=>{const w=window.f04.calls.find(c=>c.method==='POST'&&c.path==='commands');const b=JSON.parse(w.body);return b.command.priority===77&&b.command.default_scope==='UNIT'&&b.expected_versions.expected_route_version===1;}));
+  await page.click('.adm-high-risk-dialog header button');await page.waitForSelector('.adm-model-detail tbody tr');
+  assert.ok(await page.evaluate(()=>{const reads=window.f04.calls.filter(c=>c.path==='routes');return reads.some(c=>Object.keys(c.filters).length===1&&c.filters.cursor==='lookup-second')&&reads.at(-1).filters.health_status==='HEALTHY'&&reads.at(-1).filters.cursor==='controlled-next';}));
+ });
+ for(const mode of ['error','cycle','asof','foreign'])await caseRun(`Incomplete ${mode} route evidence never permits an upsert`,async()=>{
+  await openRouteSelection(mode);await page.waitForSelector('.adm-high-risk-fields .adm-source-error');await page.type('.adm-high-risk-dialog textarea','Controlled reason for no dispatch');await submit('.adm-high-risk-dialog');
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='PRE'&&c.command_type==='TOKEN_ROUTE_UPSERT').length),0);
+  if(mode==='error'){await page.evaluate(()=>{window.f04.lookupMode='outside';});await page.click('.adm-high-risk-fields .adm-source-error button');await page.waitForFunction(()=>document.querySelector('.adm-high-risk-fields input[type=number]').value==='77');assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);}
+ });
+ await caseRun('Complete absent route evidence permits new defaults',async()=>{
+  await openRouteSelection('absent');await page.waitForFunction(()=>!document.querySelector('.adm-high-risk-fields input[type=number]').disabled);assert.equal(await page.$eval('.adm-high-risk-fields input[type=number]',el=>el.value),'100');
+  await page.type('.adm-high-risk-dialog textarea','Controlled new route reason');await submit('.adm-high-risk-dialog');await page.waitForSelector('.adm-high-risk-dialog .adm-inline-message.success');
+  assert.ok(await page.evaluate(()=>{const w=window.f04.calls.find(c=>c.method==='POST');const b=JSON.parse(w.body);return b.command.priority===100&&b.command.default_scope==='NONE'&&b.expected_versions.expected_route_version===0;}));
+ });
+ await caseRun('Late old selection evidence cannot overwrite the next model route',async()=>{
+  await openRouteSelection('late');await page.waitForFunction(()=>typeof window.f04.releaseLookup==='function');await page.select('.adm-high-risk-fields select',await page.evaluate(()=>window.f04.other));const selects=await page.$$('.adm-high-risk-fields select');await selects[1].select(await page.evaluate(()=>window.f04.id));
+  await page.waitForFunction(()=>document.querySelector('.adm-high-risk-fields input[type=number]').value==='23');
+  await page.evaluate(async()=>{window.f04.releaseLookup();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
+  assert.ok(await page.evaluate(()=>{const ss=[...document.querySelectorAll('.adm-high-risk-fields select')];return ss[0].value===window.f04.other&&ss[2].value==='ORG'&&document.querySelector('.adm-high-risk-fields input[type=number]').value==='23';}));
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='PRE'&&c.command?.model_id===window.f04.id).length),0);
+ });
+ for(const permissions of [['platform.tokens.read'],['platform.tokens.read','platform.tokens.manage']])await caseRun(`Detail permission boundary ${permissions.join(',')}`,async()=>{
+  await governanceFresh(permissions);await page.waitForSelector('.adm-model-detail tbody tr');
+  assert.ok(await page.evaluate(()=>![...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f04.governanceWords().configureStableRoute)));
+  if(!permissions.includes('platform.tokens.manage'))assert.ok(await page.evaluate(()=>!['disableTokenAccount','deleteRoute'].some(key=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f04.governanceWords()[key]))));
+  else assert.ok(await page.evaluate(()=>document.body.textContent.includes(window.f04.governanceWords().modelPermissionRequired)));
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);
+ });
+ await caseRun('Disabled action rollout preserves the production detail read surface',async()=>{
+  await fresh();await page.evaluate(()=>{history.replaceState({},'',`${location.pathname}?token_account_id=${window.f04.id}&token_detail_tab=routes`);window.f04.surface='governance-disabled';window.f04.render();});await page.waitForSelector('.adm-model-detail tbody tr');
+  assert.ok(await page.evaluate(()=>!['configureStableRoute','disableTokenAccount','deleteRoute'].some(key=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f04.governanceWords()[key]))));
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);
+ });
+ for(const language of ['zh','en','ja'])await caseRun(`${language}: pricing controls render translated save, cancel, reason and update labels`,async()=>{
+  await fresh();await page.evaluate(language=>{window.f04.language=language;window.f04.render();},language);await click('createDraft');await page.waitForSelector('.adm-pricing-editor');
+  for(const key of ['save','cancel'])assert.ok(await page.evaluate(key=>{const label=window.f04.labels()[key];return typeof label==='string'&&label.length>0&&[...document.querySelectorAll('.adm-pricing-editor button')].some(b=>b.textContent===label);},key));
+  await page.evaluate(()=>[...document.querySelectorAll('.adm-pricing-editor button')].find(b=>b.textContent===window.f04.labels().cancel).click());
+  await page.evaluate(()=>{window.f04.prices=[{...window.f04.price,lifecycle_status:'PUBLISHED',derived_status:'PUBLISHED'}];document.querySelector('.adm-pricing-panel-head button').click();});await page.waitForFunction(()=>document.querySelector('tbody')?.textContent.includes('CONTROLLED'));await click('cancelFuture');await page.waitForSelector('.adm-pricing-action textarea');
+  assert.ok(await page.evaluate(()=>document.querySelector('.adm-pricing-action textarea').closest('label').textContent===window.f04.labels().reason));
+  assert.ok(await page.evaluate(()=>document.querySelector('.adm-pricing-panel-head small').textContent.includes(window.f04.labels().lastUpdated)));
+ });
  console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 }catch(error){console.error(`FAIL after ${passed} PASS: ${error.stack}`);if(page)console.error(JSON.stringify(await page.evaluate(()=>({text:document.body.textContent.slice(0,1200),paths:window.f04?.calls.map(c=>c.path)})).catch(()=>({}))));process.exitCode=1;}
 finally{if(browser)await browser.close();if(vite)await vite.close();if(fs.existsSync(profile)){assert.equal(fs.realpathSync(profile),ownedProfile);assert.equal(path.dirname(ownedProfile),fs.realpathSync(os.tmpdir()));assert.ok(path.basename(ownedProfile).startsWith('pinvou-f04-management-'));fs.rmSync(ownedProfile,{recursive:true});}}

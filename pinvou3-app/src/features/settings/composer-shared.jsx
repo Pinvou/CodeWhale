@@ -76,10 +76,13 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
       const [platformModels, setPlatformModels] = useState([]);
       const [platformState, setPlatformState] = useState('idle');
       const [modelSwitchError, setModelSwitchError] = useState(false);
+      const modelSwitchPending = useRef(false);
       const triggerRef = useRef(null);
       const canManageModels = can('modelManagement');
       const canSwitchModels = can('sessionModelSwitch');
       const activeSessionId = sessionIdProp !== undefined ? sessionIdProp : (bs ? bs.activeSessionId : null);
+      const modelSelectionOwner = useRef(activeSessionId);
+      modelSelectionOwner.current = activeSessionId;
       // 多智能体模式 = 模型列表下方的会话级开关（ADR-0006）。状态权威在
       // 后端 mode_state，这里只读 bs 镜像；翻转后 bridge 回写权威状态。
       // 可用性由调用方以 multiAgentAvailable 显式传入（定时会话在后端被
@@ -205,11 +208,12 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
           });
       }
       async function pick(modelRef) {
-        if (busy || !canSwitchModels) return;
-        setOpen(false);
+        if (busy || !canSwitchModels || modelSwitchPending.current) return;
+        const owner = activeSessionId;
         setModelSwitchError(false);
         const alreadySelected = sameModelSelectionRef(modelRef, effectiveRef);
-        if (alreadySelected) return;
+        if (alreadySelected) { setOpen(false); return; }
+        modelSwitchPending.current = true;
         try {
           if (onSwitchModelRef) {
             await onSwitchModelRef(activeSessionId, modelRef);
@@ -218,8 +222,11 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
           } else if (bridge.available) {
             await bridge.models.switchModelRef(activeSessionId, modelRef);
           }
+          if (owner === modelSelectionOwner.current) setOpen(false);
         } catch (_) {
-          setModelSwitchError(true);
+          if (owner === modelSelectionOwner.current) setModelSwitchError(true);
+        } finally {
+          modelSwitchPending.current = false;
         }
       }
       return (
@@ -291,7 +298,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                       {platformState === 'error' && <div className="px-3 py-2 text-[12px] text-[#FF3B30]">{t.uiSettingsDetail.platformModelsUnavailable}</div>}
                       {renderGroup(t.modelGroupPreset, preset, platformModels.length > 0)}
                       {renderGroup(t.modelGroupCustom, custom, preset.length > 0 || platformModels.length > 0)}
-                      {modelSwitchError && <div className="px-3 py-2 text-[12px] text-[#FF3B30]">{t.uiSettingsDetail.modelSwitchFailed}</div>}
+                      {modelSwitchError && <div role="alert" className="px-3 py-2 text-[12px] text-[#FF3B30]">{t.uiSettingsDetail.modelSwitchFailed}</div>}
                     </>
                   );
                 })()}

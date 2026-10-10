@@ -113,7 +113,14 @@ func TestClosedGrantPublishedOwnerEffects(t *testing.T) {
 				before = snapshot()
 			}
 			if name == "reconciliation" {
-				if _, e = coordinator.persistReconciliation(ctx, order.Channel, normalizedReconciliationBusinessDate(r.now()), nil, "MANUAL_API", &actor); e != nil {
+				// The bill contract uses Shanghai business days. Repository clocks
+				// are UTC, so their calendar day differs before 08:00 local time.
+				var paidAt time.Time
+				if e = r.pool.QueryRow(ctx, `SELECT provider_paid_at FROM payment_transactions WHERE id=$1`, transaction).Scan(&paidAt); e != nil {
+					t.Fatal(e)
+				}
+				businessDate := normalizedReconciliationBusinessDate(paidAt.In(time.FixedZone("Asia/Shanghai", 8*60*60)))
+				if _, e = coordinator.persistReconciliation(ctx, order.Channel, businessDate, nil, "MANUAL_API", &actor); e != nil {
 					t.Fatal(e)
 				}
 				var n int

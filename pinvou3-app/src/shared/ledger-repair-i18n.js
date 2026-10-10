@@ -105,3 +105,20 @@ export const ledgerRepairCopy = {
     "controlChanged": "承認制御が変更されました。固定事実を再読み込みしてください。"
   }
 };
+
+const recoveryCopy = {
+  zh: { retry: '使用原请求重试', unknown: '创建草稿的结果尚未确认，请保留原事实和请求键。', permissions: '当前权限不足；未确认的原请求仍保留。', sourceChanged: '请求被拒绝，请检查冻结事实和审批条件。', recoveryUnavailable: '恢复记录无法可靠读取或保存；未发送新请求。', recoveryPending: '刷新或重新认证后仍仅重放原草稿请求，不会自动提交审批。', saved: '草稿已确认创建。', requestKeyHint: '本地请求键最多 111 个 ASCII 可见字符；加 approval: 后的公开审批键最多 120 个字符。' },
+  en: { retry: 'Retry the original request', unknown: 'Draft creation is unconfirmed. Keep the original facts and request key.', permissions: 'Current permission is insufficient. The unconfirmed original request is retained.', sourceChanged: 'The request was rejected. Check the frozen facts and approval conditions.', recoveryUnavailable: 'The recovery record cannot be reliably read or saved. No new request was sent.', recoveryPending: 'After refresh or authentication, only the original draft request is replayed; approval is never submitted automatically.', saved: 'Draft creation is confirmed.', requestKeyHint: 'The local key allows up to 111 visible ASCII characters; the public approval key including approval: allows up to 120.' },
+  ja: { retry: '元のリクエストで再試行', unknown: 'ドラフト作成の結果は未確認です。元の事実とリクエストキーを保持してください。', permissions: '現在の権限が不足しています。未確認の元のリクエストは保持されます。', sourceChanged: 'リクエストが拒否されました。固定事実と承認条件を確認してください。', recoveryUnavailable: '復元記録を確実に読み書きできないため、新しいリクエストは送信していません。', recoveryPending: '再読み込みや再認証後も元のドラフト要求のみを再実行し、承認を自動提出しません。', saved: 'ドラフトの作成を確認しました。', requestKeyHint: 'ローカルキーは表示可能な ASCII 111 文字以内です。approval: を含む公開承認キーは 120 文字以内です。' },
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], recoveryCopy[language]);
+ledgerRepairCopy.zh.requestKeyHint = '本地请求键最多 111 个 UTF-8 字节；加 approval: 后的公开审批键最多 120 个字节。';
+ledgerRepairCopy.en.requestKeyHint = 'The local key allows up to 111 UTF-8 bytes; the public approval key including approval: allows up to 120 bytes.';
+ledgerRepairCopy.ja.requestKeyHint = 'ローカルキーは UTF-8 で 111 バイト以内です。approval: を含む公開承認キーは 120 バイト以内です。';
+
+const authenticationCopy = {
+  zh: { recentAuthenticationRequired: '\u9700\u8981\u91cd\u65b0\u8ba4\u8bc1\u540e\u7ee7\u7eed\u539f\u8349\u7a3f\u8bf7\u6c42\u3002', reauthenticate: '\u91cd\u65b0\u8ba4\u8bc1' },
+  en: { recentAuthenticationRequired: 'Authenticate again to continue the original draft request.', reauthenticate: 'Authenticate again' },
+  ja: { recentAuthenticationRequired: '\u518d\u8a8d\u8a3c\u3057\u3066\u5143\u306e\u30c9\u30e9\u30d5\u30c8\u8981\u6c42\u3092\u7d9a\u884c\u3057\u3066\u304f\u3060\u3055\u3044\u3002', reauthenticate: '\u518d\u8a8d\u8a3c' },
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], authenticationCopy[language]);

@@ -177,3 +177,9 @@ func assertApprovalRequestState(t *testing.T, ctx context.Context, repository *P
 		t.Fatalf("request state changed: %s/%d want %s/%d err=%v", actualStatus, actualVersion, status, version, err)
 	}
 }
+
+// The Ledger fixture reuses the installed Account role and identity producers.
+func seedLedgerApprovalActor(t *testing.T, ctx context.Context, pool *pgxpool.Pool, role, label string) integrationActor {
+	actor := seedEntitlementApprovalActor(t, ctx, pool, role, label)
+	return integrationActor{ID: actor.ID, Issuer: "https://entitlement-owned.invalid", Subject: actor.Subject}
+}

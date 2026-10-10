@@ -103,23 +103,32 @@ export class OrganizationClient {
  }
  async revokeGrant(org, id, reason, key) { return requireQuotaGrant(await this.request('token', `${orgPath(org)}/quota-grants/${organizationID(id)}/revoke`, 'POST', { reason }, key), org, { grant_id: id }); }
  async reclaimClosedGrant(org, id, reason, key) {
-  const value = await this.request('token', `${orgPath(org)}/account-closed-grants/${organizationID(id)}/reclaim`, 'POST', { reason }, key);
-  requireQuotaGrant(value?.grant, org, { grant_id: id });
-  if (value.grant.status !== 'RECLAIMED_ACCOUNT_CLOSED' || integerMoney(value.amount_microcredits) <= 0n || !Number.isSafeInteger(value.subject_lifecycle_version) || value.subject_lifecycle_version < 2 || value.replayed !== undefined && typeof value.replayed !== 'boolean') invalid();
-  return value;
+  const result = await this.request('token', `${orgPath(org)}/account-closed-grants/${organizationID(id)}/reclaim`, 'POST', { reason }, key);
+  requireQuotaGrant(result?.grant, org, { grant_id: id });
+  if (result.grant.status !== 'RECLAIMED_ACCOUNT_CLOSED' || integerMoney(result.amount_microcredits) <= 0n || integerMoney(result.subject_lifecycle_version) < 2n || typeof result.replayed !== 'boolean') invalid();
+  return result;
  }
- async reclaimClosedGrantsBatch(org, ids, reason, key) {
-  if (!Array.isArray(ids) || !ids.length || ids.length > 200 || new Set(ids).size !== ids.length) throw new Error('INVALID_ORGANIZATION_INPUT');
+ async reclaimClosedGrants(org, ids, reason, key) {
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 200 || new Set(ids).size !== ids.length) throw new Error('INVALID_ORGANIZATION_INPUT');
   ids.forEach(organizationID);
-  const value = await this.request('token', `${orgPath(org)}/account-closed-grants:reclaim-batch`, 'POST', { grant_ids: ids, reason }, key, [207]);
-  const items = collection(value, item => item);
-  if (items.length !== ids.length) invalid();
-  items.forEach((item, index) => {
-   if (item.grant_id !== ids[index] || !['SUCCEEDED', 'FAILED'].includes(item.status)) invalid();
-   if (item.status === 'SUCCEEDED') { requireQuotaGrant(item.result?.grant, org, { grant_id: ids[index] }); if (item.result.grant.status !== 'RECLAIMED_ACCOUNT_CLOSED' || integerMoney(item.result.amount_microcredits) <= 0n) invalid(); }
-   else if (item.code !== 'ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED' || item.result !== undefined) invalid();
-  });
-  return { items };
+  const result = await this.request('token', `${orgPath(org)}/account-closed-grants:reclaim-batch`, 'POST', { grant_ids: ids, reason }, key, [207]);
+  if (!Array.isArray(result?.items) || result.items.length !== ids.length) invalid();
+  for (const [index, item] of result.items.entries()) {
+   if (item?.grant_id !== ids[index] || !['SUCCEEDED', 'FAILED'].includes(item.status)) invalid();
+   if (item.status === 'FAILED') {
+    if (item.result !== undefined) invalid();
+    if (item.code === 'COMMAND_RESULT_UNKNOWN') throw Object.assign(new Error('COMMAND_RESULT_UNKNOWN'), { code: 'COMMAND_RESULT_UNKNOWN', status: 503 });
+    if (item.code !== 'ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED') invalid();
+    continue;
+   }
+   const receipt = item.result;
+   requireQuotaGrant(receipt?.grant, org, { grant_id: ids[index] });
+   if (receipt.grant.status !== 'RECLAIMED_ACCOUNT_CLOSED' || integerMoney(receipt.amount_microcredits) <= 0n || integerMoney(receipt.subject_lifecycle_version) < 2n || typeof receipt.replayed !== 'boolean') invalid();
+  }
+  return result;
+ }
+ reclaimClosedGrantsBatch(org, ids, reason, key) {
+  return this.reclaimClosedGrants(org, ids, reason, key);
  }
 }
 

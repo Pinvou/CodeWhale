@@ -36,20 +36,28 @@ func (r *PostgresRepository) PrepareDispatch(ctx context.Context, usageID uuid.U
 	if err != nil {
 		return err
 	}
-	command, err := r.pool.Exec(ctx, `INSERT INTO usage_dispatch_preparations(usage_request_id,encrypted_envelope,key_id,envelope_integrity,created_at) SELECT $1,$2,$3,$4,$5 FROM usage_requests WHERE id=$1 AND execution_status='RECEIVED' ON CONFLICT(usage_request_id) DO NOTHING`, usageID, ciphertext, r.secrets.KeyID(), replayDigest(ciphertext), r.now())
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockReplayUsageTx(ctx, tx, usageID); err != nil {
+		return err
+	}
+	command, err := tx.Exec(ctx, `INSERT INTO usage_dispatch_preparations(usage_request_id,encrypted_envelope,key_id,envelope_integrity,created_at) SELECT $1,$2,$3,$4,$5 FROM usage_requests WHERE id=$1 AND execution_status='RECEIVED' ON CONFLICT(usage_request_id) DO NOTHING`, usageID, ciphertext, r.secrets.KeyID(), replayDigest(ciphertext), r.now())
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() == 0 {
 		var exists bool
-		if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM usage_dispatch_preparations WHERE usage_request_id=$1)`, usageID).Scan(&exists); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM usage_dispatch_preparations WHERE usage_request_id=$1)`, usageID).Scan(&exists); err != nil {
 			return err
 		}
 		if !exists {
 			return ErrForbidden
 		}
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) CompleteHoldAndDispatch(ctx context.Context, usageID, holdID, priceVersionID uuid.UUID) error {
@@ -61,6 +69,9 @@ func (r *PostgresRepository) CompleteHoldAndDispatch(ctx context.Context, usageI
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockReplayUsageTx(ctx, tx, usageID); err != nil {
+		return err
+	}
 	now := r.now()
 	var status, cancelStatus string
 	if err := tx.QueryRow(ctx, `SELECT execution_status,cancel_status FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&status, &cancelStatus); errors.Is(err, pgx.ErrNoRows) {
@@ -124,6 +135,9 @@ func (r *PostgresRepository) PersistDispatchIntent(ctx context.Context, usageID 
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockReplayUsageTx(ctx, tx, usageID); err != nil {
+		return err
+	}
 	command, err := tx.Exec(ctx, `INSERT INTO usage_dispatch_intents(usage_request_id,encrypted_envelope,key_id,envelope_integrity,upstream_idempotency_key,adapter_supports_idempotency,created_at) VALUES($1,$2,$3,$4,$5,false,$6) ON CONFLICT(usage_request_id) DO NOTHING`, usageID, ciphertext, r.secrets.KeyID(), replayDigest(ciphertext), "pinvou-"+usageID.String(), now)
 	if err != nil {
 		return err
@@ -209,6 +223,9 @@ func (r *PostgresRepository) AppendReplayEvent(ctx context.Context, usageID uuid
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockReplayUsageTx(ctx, tx, usageID); err != nil {
+		return 0, err
+	}
 	var status string
 	if err := tx.QueryRow(ctx, `SELECT execution_status FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&status); err != nil {
 		return 0, err
@@ -285,7 +302,7 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 	if err := tx.QueryRow(ctx, `SELECT user_id FROM usage_requests WHERE id=$1`, usageID).Scan(&userID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))`, "token.replay.user:"+userID.String()); err != nil {
+	if err := lockReplayUserTx(ctx, tx, userID); err != nil {
 		return err
 	}
 	var status string
@@ -525,6 +542,9 @@ func (r *PostgresRepository) CreateReplayRetentionCase(ctx context.Context, usag
 		return uuid.Nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockReplayUsageTx(ctx, tx, usageID); err != nil {
+		return uuid.Nil, err
+	}
 	caseID := uuid.Must(uuid.NewV7())
 	if _, err := tx.Exec(ctx, `INSERT INTO usage_replay_retention_cases(id,usage_request_id,reason,scope,owner_id,review_at,expires_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, caseID, usageID, reason, scope, ownerID, reviewAt.UTC(), expiresAt.UTC(), now); err != nil {
 		return uuid.Nil, err
@@ -595,6 +615,19 @@ func (r *PostgresRepository) AnonymizeUsageReplay(ctx context.Context, userID uu
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "token.replay.user:"+userID.String()); err != nil {
+		return err
+	}
+	var unsafe bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM usage_requests request WHERE request.user_id=$1 AND NOT (request.status IN ('COMMITTED','RELEASED') AND request.settlement_status IN ('SETTLED','RELEASED')) AND NOT (request.status='RELEASED' AND request.settlement_status='REVIEW' AND request.cancel_requested_at IS NOT NULL AND EXISTS(SELECT 1 FROM usage_cancel_commands c WHERE c.usage_request_id=request.id AND c.user_id=request.user_id) AND EXISTS(SELECT 1 FROM usage_platform_loss_reviews loss WHERE loss.usage_request_id=request.id AND loss.cause_code='CANCELLATION_RECONCILIATION_DEADLINE' AND loss.customer_debit_prohibited AND loss.provider_cost_evidence->>'customer_hold_released'='true' AND loss.provider_cost_evidence->>'late_usage_customer_debit_prohibited'='true')))`, userID).Scan(&unsafe); err != nil {
+		return err
+	}
+	if unsafe {
+		return ErrForbidden
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO usage_replay_anonymized_users(user_id,cleared_at) VALUES($1,$2) ON CONFLICT(user_id) DO NOTHING`, userID, r.now()); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM usage_stream_events event USING usage_requests request WHERE event.usage_request_id=request.id AND request.user_id=$1`, userID); err != nil {
 		return err
 	}

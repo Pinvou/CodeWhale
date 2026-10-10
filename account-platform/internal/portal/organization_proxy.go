@@ -35,6 +35,13 @@ func organizationAccountPathAllowed(method, resource string) bool {
 }
 
 func organizationTokenPathAllowed(method, resource string) bool {
+	closed := strings.Split(strings.TrimPrefix(resource, "/"), "/")
+	if len(closed) == 4 && closed[0] == "v1" && closed[1] == "organizations" && pathUUID(closed[2]) && closed[3] == "account-closed-grants:reclaim-batch" {
+		return method == http.MethodPost
+	}
+	if len(closed) == 6 && closed[0] == "v1" && closed[1] == "organizations" && pathUUID(closed[2]) && closed[3] == "account-closed-grants" && pathUUID(closed[4]) && closed[5] == "reclaim" {
+		return method == http.MethodPost
+	}
 	if method == http.MethodHead {
 		method = http.MethodGet
 	}

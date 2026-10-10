@@ -45,8 +45,3 @@ func (c *HTTPBillingClient) RevokeOrganizationQuota(ctx context.Context, organiz
 type AccountClosedGrantBillingClient interface {
 	ReclaimAccountClosedGrant(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) (json.RawMessage, error)
 }
-
-func (c *HTTPBillingClient) ReclaimAccountClosedGrant(ctx context.Context, organizationID, grantID, _ uuid.UUID, reason, idempotencyKey string) (json.RawMessage, error) {
-	path := "/internal/v1/organizations/" + organizationID.String() + "/account-closed-grants/" + grantID.String() + "/reclaim"
-	return c.rawDelegated(ctx, http.MethodPost, path, map[string]any{"reason": reason}, idempotencyKey, authorization.DelegationRequest{Audience: "billing-service", Permission: "org.grants.reclaim_closed", OrganizationID: &organizationID, TargetResourceType: "member-quota-grant", TargetResourceID: grantID.String(), HTTPMethod: http.MethodPost, HTTPPath: path})
-}

@@ -58,6 +58,11 @@ type ApprovalPrecheckRequest struct {
 	AmountMicrocredits     int64  `json:"amount_microcredits,omitempty"`
 }
 
+func (s *Service) WithApprovalPrechecks(source ApprovalPrecheckSource) *Service {
+	s.approvalPrechecks = source
+	return s
+}
+
 // ApprovalPrecheckProjection is the closed owner answer: exactly the documents
 // the Portal needs to render the business page, never Provider text, prompts or
 // personal data.
@@ -308,6 +313,10 @@ func approvalPrecheckNetworkError(err error, ctx context.Context) error {
 // domain read of its own, writes nothing and never caches the answer.
 func (s *Service) adminApprovalCommandPrecheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	if !recentlyAuthenticated(mustPrincipal(r.Context()).AuthenticatedAt, s.now()) {
+		s.writeError(w, r, ErrRecentAuthenticationRequired)
+		return
+	}
 	if s.approvalPrechecks == nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_PRECHECK_UNAVAILABLE",
 			"the read-only precheck authority is not configured", httpserver.RequestID(r.Context()))

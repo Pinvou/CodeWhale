@@ -100,7 +100,7 @@ export function financialRepairApprovalDraft(precheck, operatorReason, requestKe
   const projection = financialRepairPrecheck(precheck);
   const reason = closedString(operatorReason);
   const key = closedString(requestKey);
-  if (!projection || reason.length < 10 || reason.length > 2000 || !key || key.length > 200) {
+  if (!projection || reason.length < 10 || reason.length > 2000 || !key || new TextEncoder().encode(key).length > 111) {
     throw Object.assign(new Error('financial repair precheck is not usable'), { code: PRECHECK_INVALID });
   }
   const normalized = {};

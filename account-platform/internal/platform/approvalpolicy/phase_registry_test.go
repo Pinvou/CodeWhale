@@ -1,6 +1,12 @@
 package approvalpolicy
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+)
 
 func TestInstalledBillingPolicySetAndFutureDeny(t *testing.T) {
 	billing := map[string]int64{"ENTITLEMENT_COMPONENT_ADJUSTMENT": 2, "LEDGER_REPAIR": 1, "WALLET_ADJUSTMENT": 1, "PAYMENT_PROVIDER_RESUME": 2, "PAYMENT_PRODUCT_RESUME": 1}
@@ -29,6 +35,12 @@ func TestInstalledBillingPolicySetAndFutureDeny(t *testing.T) {
 			}
 		} else if p.Mode != AuditOnly || p.ApprovalCount != 0 || p.SelfApprovalForbidden || p.ExecutorIdentity != "requesting-domain-service" {
 			t.Fatalf("Token audit-only policy became executable: %s", name)
+		}
+	}
+	for name, permission := range map[string]string{"TOKEN_ORGANIZATION_LIFECYCLE_APPLY": "internal.token.organization.lifecycle", "TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY": "internal.token.organization-unit.lifecycle"} {
+		p, err := Lookup(name)
+		if err != nil || p.RequesterPermission != permission || p.Mode != AuditOnly || p.ApprovalCount != 0 || Executable(name) || TokenExecutableApproval(name) {
+			t.Fatalf("lifecycle audit policy differs: %s", name)
 		}
 	}
 	for _, name := range []string{"MODEL_CATALOG_PUBLISH", "REFUND_FORCE_APPLY", "RECEIVABLE_WRITE_OFF", "SUPER_ADMIN_ROLE_HANDOFF"} {
@@ -60,5 +72,34 @@ func TestInstalledBillingPolicySetAndFutureDeny(t *testing.T) {
 	digest, err := PolicySetDigest()
 	if err != nil || len(digest) != 64 {
 		t.Fatal("manifest digest unavailable")
+	}
+}
+
+func TestInstalledOrganizationAuditPolicyMiddleware(t *testing.T) {
+	for command, permission := range map[string]string{
+		"ACCOUNT_MEMBER_UNITS_REPLACE":           "platform.organizations.members.manage",
+		"ACCOUNT_ORGANIZATION_CREATE":            "platform.organizations.create",
+		"TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE": "org.models.manage",
+	} {
+		t.Run(command, func(t *testing.T) {
+			policy, err := Lookup(command)
+			if err != nil || policy.Mode != AuditOnly || policy.RequesterPermission != permission || policy.ApprovalCount != 0 || Executable(command) || TokenExecutableApproval(command) {
+				t.Fatal("installed audit-only classification changed authority")
+			}
+			router := gin.New()
+			calls := 0
+			router.PUT("/installed", Require(command, AuditOnly), func(c *gin.Context) { calls++; c.Status(http.StatusNoContent) })
+			router.PUT("/unknown", Require("ACCOUNT_MEMBER_UNITS_REPLACE_UNKNOWN", AuditOnly), func(c *gin.Context) { calls++; c.Status(http.StatusNoContent) })
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/installed", nil))
+			if response.Code != http.StatusNoContent || calls != 1 || response.Header().Get("X-Command-Type") != command {
+				t.Fatal("registered audit-only command did not reach handler")
+			}
+			response = httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/unknown", nil))
+			if response.Code != http.StatusServiceUnavailable || calls != 1 {
+				t.Fatal("unknown command bypassed fail-closed policy")
+			}
+		})
 	}
 }

@@ -152,6 +152,51 @@ func TestClosureClaimACKOrder(t *testing.T) {
 			t.Fatal("replay duplicated isolation", e)
 		}
 	})
+	t.Run("ownership-added-after-request-is-rechecked-before-cleanup", func(t *testing.T) {
+		user, p := seed(t)
+		_, e := r.CreateAccountClosure(ctx, p, uuid.NewString(), accountClosureConfirmation)
+		if e != nil {
+			t.Fatal(e)
+		}
+		item, e := r.ClaimAccountClosure(ctx)
+		if e != nil || item == nil {
+			t.Fatal("real claim", e)
+		}
+		if e = r.AdvanceAccountClosureToIdentityCleanup(ctx, *item); e != nil {
+			t.Fatal(e)
+		}
+		item, e = r.ClaimAccountClosure(ctx)
+		if e != nil || item == nil {
+			t.Fatal("cleanup claim", e)
+		}
+		// Controlled persisted ownership models a precheck becoming stale.
+		// It is not a claim that the public producer accepts a CLOSING owner.
+		tx, e := r.pool.Begin(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer tx.Rollback(ctx)
+		org, membership := uuid.New(), uuid.New()
+		if _, e = tx.Exec(ctx, `INSERT INTO organizations(id,name,status,created_by,created_at,updated_at) VALUES($1,$2,'ACTIVE',$3,transaction_timestamp(),transaction_timestamp())`, org, "closure-owner-"+org.String(), user); e != nil {
+			t.Fatal(e)
+		}
+		if _, e = tx.Exec(ctx, `INSERT INTO memberships(id,organization_id,user_id,status,joined_at,updated_at) VALUES($1,$2,$3,'ACTIVE',transaction_timestamp(),transaction_timestamp())`, membership, org, user); e != nil {
+			t.Fatal(e)
+		}
+		if _, e = tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,starts_at,grant_source) VALUES($1,$2,'OWNER',$3,transaction_timestamp(),transaction_timestamp(),'ORGANIZATION_CREATION')`, uuid.New(), membership, user); e != nil {
+			t.Fatal(e)
+		}
+		if e = tx.Commit(ctx); e != nil {
+			t.Fatal(e)
+		}
+		if _, e = r.PrepareAccountClosureCleanup(ctx, item); !errors.Is(e, ErrLastOwner) {
+			t.Fatalf("new ownership was not rechecked: %v", e)
+		}
+		var prepared, closing bool
+		if e = r.pool.QueryRow(ctx, `SELECT cleanup_prepared_at IS NOT NULL,(SELECT status='CLOSING' FROM users WHERE id=$2) FROM account_closure_requests WHERE id=$1`, item.ID, user).Scan(&prepared, &closing); e != nil || prepared || !closing {
+			t.Fatal("failed ownership gate changed cleanup state", prepared, closing, e)
+		}
+	})
 	t.Run("expired-current-claim-cannot-record-external-ACK", func(t *testing.T) {
 		_, p := seed(t)
 		_, e := r.CreateAccountClosure(ctx, p, uuid.NewString(), accountClosureConfirmation)
@@ -175,6 +220,9 @@ func TestClosureClaimACKOrder(t *testing.T) {
 		}
 		if _, e = r.pool.Exec(ctx, `UPDATE account_closure_requests SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1`, item.ID); e != nil {
 			t.Fatal(e)
+		}
+		if e = r.RenewAccountClosureClaim(ctx, item); !errors.Is(e, ErrConflict) {
+			t.Fatalf("expired claim renewed=%v", e)
 		}
 		if e = r.MarkAccountClosureIdentityDeleted(ctx, item, prep.SubjectLifecycleVersion); !errors.Is(e, ErrConflict) {
 			t.Fatalf("expired claim recorded ACK=%v", e)

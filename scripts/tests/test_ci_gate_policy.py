@@ -219,6 +219,43 @@ class CiGatePolicyTests(unittest.TestCase):
         selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
         self.assertIn('command("npm", "test:account-platform-finance-ui")', selector)
 
+    def test_organization_member_smokes_resolve_to_real_browser_files(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        for feature, filename in (("organization", "account_platform_organization_ui_smoke.mjs"), ("member-units", "account_platform_member_units_ui_smoke.mjs")):
+            command = f"test:account-platform-{feature}-ui"
+            self.assertEqual(package["scripts"][command], f"node tests/{filename}")
+            self.assertTrue((ROOT / "pinvou3-app/tests" / filename).is_file())
+            self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+    def test_entitlement_correction_production_smoke_is_registered_for_full_and_feature_runs(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-entitlement-correction-ui"
+        self.assertEqual(package["scripts"][command], "node tests/account_platform_entitlement_production_smoke.mjs")
+        self.assertTrue((ROOT / "pinvou3-app/tests/account_platform_entitlement_production_smoke.mjs").is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+    def test_registration_bonus_smokes_resolve_to_both_compiled_browser_suites(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-registration-bonus-ui"
+        files = ("admin_registration_bonus_ui_smoke.mjs", "admin_registration_bonus_precision_ui_smoke.mjs")
+        self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{name}" for name in files))
+        for name in files:
+            self.assertTrue((ROOT / "pinvou3-app/tests" / name).is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+    def test_closure_smokes_include_production_recovery_and_original_contract(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-closure-ui"
+        files = ("account_platform_closure_ui_smoke.mjs", "account_platform_closure_production_smoke.mjs")
+        self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{name}" for name in files))
+        for name in files:
+            self.assertTrue((ROOT / "pinvou3-app/tests" / name).is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
     def test_embedded_account_portal_assets_are_rebuilt_and_checked(self):
         changes = _without_yaml_comments(
             self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
@@ -443,7 +480,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "\n  team-relay-hub-test:", maxsplit=1
         )[1].split("\n  release-contract-test:", maxsplit=1)[0]
         self.assertIn("needs.changes.outputs.team_relay_hub == 'true'", hub_job)
-        self.assertIn("postgres:16-alpine", hub_job)
+        self.assertRegex(hub_job, r"image: mirror\.gcr\.io/library/postgres@sha256:[a-f0-9]{64}")
         self.assertIn("TEAM_RELAY_TEST_DATABASE_URL", hub_job)
         self.assertIn("npm --prefix team-relay-hub ci", hub_job)
         self.assertIn("npm --prefix team-relay-hub test", hub_job)
@@ -470,7 +507,8 @@ class CiGatePolicyTests(unittest.TestCase):
             console_job,
         )
         self.assertIn(
-            "docker build --file update-release-console/Dockerfile "
+            'docker build --build-arg NODE_IMAGE="$PINVOU_UPDATE_NODE_IMAGE" '
+            "--file update-release-console/Dockerfile "
             "update-release-console",
             console_job,
         )
@@ -479,7 +517,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "config --quiet",
             console_job,
         )
-        self.assertIn("nginx:1.27-alpine nginx -t", console_job)
+        self.assertRegex(console_job, r"mirror\.gcr\.io/library/nginx@sha256:[a-f0-9]{64} nginx -t")
         self.assertIn("/var/www/pinvou3/latest.json", console_job)
         self.assertIn(
             "docker compose --file update-release-console/deploy/compose.yaml "

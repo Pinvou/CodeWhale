@@ -19,3 +19,19 @@ test('batch uses canonical 207 route and preserves per-item rejection without in
  const value=await api.reclaimClosedGrantsBatch(id(1),[id(2),id(6)],'reason','controlled-batch-key');assert.equal(value.items.length,2);assert.deepEqual(options.expectedStatus,[207]);assert.equal(options.idempotencyKey,'controlled-batch-key');
  await assert.rejects(api.reclaimClosedGrantsBatch(id(1),[id(2),id(2)],'reason','controlled-batch-key'),/INVALID_ORGANIZATION_INPUT/);
 });
+
+test('a rejected batch item cannot carry a financial receipt', async () => {
+ const api = new OrganizationClient({ request: async () => ({ items: [{ grant_id: id(2), status: 'FAILED', code: 'ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED', result: receipt }] }) });
+ await assert.rejects(api.reclaimClosedGrantsBatch(id(1), [id(2)], 'reason', 'controlled-batch-key'), /INVALID_ORGANIZATION_ACK/);
+});
+
+test('an unknown batch item cannot acknowledge or redispatch the original command', async () => {
+ const calls = [];
+ const api = new OrganizationClient({ request: async (...args) => {
+  calls.push(args);
+  return { items: [{ grant_id: id(2), status: 'FAILED', code: 'COMMAND_RESULT_UNKNOWN' }] };
+ } });
+ await assert.rejects(api.reclaimClosedGrantsBatch(id(1), [id(2)], 'reason', 'controlled-batch-key'), error => error.code === 'COMMAND_RESULT_UNKNOWN' && error.status === 503);
+ assert.equal(calls.length, 1);
+ assert.equal(calls[0][2].idempotencyKey, 'controlled-batch-key');
+});

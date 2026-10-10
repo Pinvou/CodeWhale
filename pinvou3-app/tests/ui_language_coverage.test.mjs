@@ -304,6 +304,9 @@ assert.doesNotMatch(accountPlatformPopover, /platformModel|selectPlatformModel|m
 assert.doesNotMatch(accountPlatformPopover, />可用余额</);
 assert.equal(accountPlatformCopy.zh.availableCredits, '可用积分');
 assert.equal(accountPlatformCopy.zh.reservedCredits, '使用中');
+assert.match(accountPlatformView, /localizedAccountPlatformError\(copy, reason\)/);
+assert.match(accountPlatformView, /copy\.retry/);
+assert.doesNotMatch(main, /refreshLlmApiStatus/);
 assert.match(main, /<ViewErrorBoundary[^>]*heading=\{t\.uiSettingsDetail\.settingsLoadFailed\}[^>]*detail=\{t\.uiSettingsDetail\.settingsLoadFailedDetail\}[^>]*t=\{t\}/);
 assert.match(viewLoaders, new RegExp("codex: \\(\\) => import\\('\\.\\./features/codex/CodexAcpView\\.jsx'\\)"));
 // The main window renders codex through the LazyCodexAcpView wrapper (which
@@ -390,6 +393,9 @@ assert.match(auxChatPanel, /const copy = t\.uiAuxChat/);
 assert.match(auxChatPanel, /copy=\{conversationCopy\}/);
 // Account Platform replaces the retired LLMAPI availability messages;
 // localized account failures are pinned below through localizedErrorMessage.
+const tauriBridge = source('platform/tauri/bridge.js');
+assert.match(tauriBridge, /var lang = state\.settings && state\.settings\.language;/);
+assert.match(tauriBridge, /lang === "en" \? BT_TABLE\.en : lang === "ja" \? BT_TABLE\.ja : BT_TABLE\.zh/);
 
 assert.equal(errorCode({ code: 'sso_timeout', message: '原始诊断' }), 'sso_timeout');
 assert.equal(errorCode(new Error('oidc_credentials_invalid: raw backend detail')), 'oidc_credentials_invalid');

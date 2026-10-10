@@ -162,6 +162,8 @@ func approvalProofReasonAllowed(command, verdict, reason string) bool {
 		return true
 	}
 	switch command {
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		return reason == "ACTIVATION_CHANGED" || reason == "EVIDENCE_MISSING"
 	case "WALLET_ADJUSTMENT":
 		return false
 	case "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":

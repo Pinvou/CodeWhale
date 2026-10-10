@@ -166,8 +166,12 @@ func lockReplayUserTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))`, "token.replay.user:"+userID.String()); err != nil {
 		return err
 	}
-	// F04 has no anonymization producer or marker storage. The public
-	// stage verifier rejects later histories; F08 restores its marker fence
-	// together with the actual cleanup producer and immutable migration.
+	var closed bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM usage_replay_anonymized_users WHERE user_id=$1)`, userID).Scan(&closed); err != nil {
+		return err
+	}
+	if closed {
+		return ErrForbidden
+	}
 	return nil
 }

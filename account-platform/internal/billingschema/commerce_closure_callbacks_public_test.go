@@ -16,6 +16,9 @@ import (
 )
 
 func TestCommerceClosureCallbacksRespectSubjectFence(t *testing.T) {
+	if os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL") == "" {
+		t.Skip("explicit isolated schema database required")
+	}
 	for _, name := range []string{"complete-user-wait", "retry-user-wait", "complete-after-anonymize", "retry-after-anonymize"} {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)

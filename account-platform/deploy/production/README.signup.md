@@ -32,6 +32,21 @@ missing projected identity or omitted permission fails closed in production.
 Account configures the fingerprint and prepares permanent historical eligibility
 before accepting registration traffic. BLOCKED historical readiness remains visible
 and prevents bonus policy enablement; unavailable preparation fails startup.
+Upgrade in this order: stop registration writers and wallet workers; install the
+complete Account/Billing F07 migrations using their existing migration identities;
+provide the permanent fingerprint key and exact incoming workload rules; start
+Account to finish its eligibility backfill; then start Billing and the existing
+wallet workers before restoring registration traffic. Original Account 087 retains
+its registered checksum; 900004 is delivered with it and validates required job
+facts. No applied migration or historical eligibility row is rewritten.
+Missing or invalid key material prevents a mobile-enabled Account from starting.
+A reused key id with different key bytes also fails closed. Restore the original
+private key from the operator's approved secret backup; do not generate a new key,
+rename the key id, erase eligibility, or enable the policy to bypass this check.
+If historical anonymized registrations make readiness BLOCKED, new registrations
+still consume their permanent eligibility and receive ordinary wallet provisioning
+without a gift. Policy activation remains unavailable until the historical issue
+is resolved with trustworthy evidence; this deployment supplies no manual override.
 Billing queries Account readiness using its fresh projected credential. The bonus
 policy starts disabled. GET/PUT `/admin/v1/registration-bonus-policy` require the
 current read/manage permission; PUT also requires existing recent authentication,

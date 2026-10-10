@@ -30,7 +30,7 @@ func prepareTokenMigration(ctx context.Context, tx pgx.Tx, m migrations.Migratio
 		return err
 	}
 	if !hardened {
-		return lendOverviewIndexDDL(ctx, tx, m)
+		return lendPinnedMigrationDDL(ctx, tx, m)
 	}
 	// Authority is uncommitted and scoped to this single migration transaction.
 	// Existing runtime connections see the prior owner/ACL until hardening commits.
@@ -56,7 +56,7 @@ func finishTokenMigration(ctx context.Context, tx pgx.Tx, m migrations.Migration
 		return err
 	}
 	if !hardened {
-		return revokeOverviewIndexDDL(ctx, tx, m)
+		return revokePinnedMigrationDDL(ctx, tx, m)
 	}
 	if err := bridgeHistoryDefiners(ctx, tx, false); err != nil {
 		return err
@@ -71,6 +71,9 @@ func finishTokenMigration(ctx context.Context, tx pgx.Tx, m migrations.Migration
  END LOOP;
  END $$; SET ROLE token_gateway;`)
 	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `SET ROLE token_schema_owner; DO $$ BEGIN IF to_regclass('public.usage_replay_anonymized_users') IS NOT NULL THEN REVOKE UPDATE,DELETE,TRUNCATE ON public.usage_replay_anonymized_users FROM token_gateway; END IF; END $$; SET ROLE token_gateway;`); err != nil {
 		return err
 	}
 	return bridgeHistoryDefiners(ctx, tx, true)

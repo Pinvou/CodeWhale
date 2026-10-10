@@ -3,8 +3,8 @@ import { organizationCopy } from '../../shared/i18n.js';
 import { hasPermission } from './authorization-ui.js';
 import { OrganizationClient, organizationID, organizationUnitIDs, organizationVersion } from './organization-client.js';
 import { OrganizationActionForm } from './OrganizationActionForm.jsx';
-import { OrganizationClosedGrantsWorkspace } from './OrganizationClosedGrantsWorkspace.jsx';
 import { OrganizationFinanceWorkspace } from './OrganizationFinanceWorkspace.jsx';
+import { OrganizationClosedGrantsWorkspace } from './OrganizationClosedGrantsWorkspace.jsx';
 import { OrganizationModelPolicyWorkspace } from './OrganizationModelPolicyWorkspace.jsx';
 import { PersonalUsageWorkspace } from './PersonalUsageWorkspace.jsx';
 

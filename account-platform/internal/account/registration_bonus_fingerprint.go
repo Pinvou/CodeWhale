@@ -4,7 +4,13 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
+	"strings"
+	"unicode/utf8"
 )
+
+func registrationBonusKeyIDValid(value string) bool {
+	return value != "" && len(value) <= 100 && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
+}
 
 func (r *PostgresRepository) registrationBonusFingerprint(normalizedMobile string) (string, []byte, error) {
 	if r.registrationBonusFingerprintKeyID == "" || len(r.registrationBonusFingerprintKey) != 32 {

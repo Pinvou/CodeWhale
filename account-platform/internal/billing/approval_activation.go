@@ -69,11 +69,6 @@ func validActivationItem(item ApprovalCommandActivation, commandType string, spe
 		(item.State != "ACTIVE" && item.State != "INACTIVE") {
 		return false
 	}
-	// The original v1 row remains immutable INACTIVE history. This delivery
-	// installs only the explicitly versioned v2/s2 correction contract.
-	if commandType == entitlementComponentAdjustmentCommand && item.PolicyVersion == 2 && item.SnapshotSchemaVersion == 2 {
-		return true
-	}
 	if !spec.mayBeActive && item.State != "INACTIVE" {
 		return false
 	}
@@ -85,14 +80,24 @@ func validActivationItem(item ApprovalCommandActivation, commandType string, spe
 // alternate repository cannot make the workload endpoint emit a partial or
 // future-incompatible projection.
 func validateApprovalCommandActivationSnapshot(snapshot ApprovalCommandActivationSnapshot, now time.Time) error {
-	if snapshot.SchemaVersion != approvalActivationSchemaVersion || len(snapshot.Activations) != len(billingApprovalActivationOrder) {
+	if snapshot.SchemaVersion != approvalActivationSchemaVersion || (len(snapshot.Activations) != len(billingApprovalActivationOrder) && len(snapshot.Activations) != len(billingApprovalActivationOrder)+1) {
 		return ErrApprovalActivationUnavailable
 	}
-	for index, commandType := range billingApprovalActivationOrder {
+	index := 0
+	for _, commandType := range billingApprovalActivationOrder {
 		item := snapshot.Activations[index]
 		spec := billingApprovalActivationSpecs[commandType]
 		if !validActivationItem(item, commandType, spec, now) {
 			return ErrApprovalActivationUnavailable
+		}
+		index++
+		// The original inactive v1 row remains mandatory immutable history.
+		// A v2 rollout appends its own activation; it never substitutes v1.
+		if commandType == entitlementComponentAdjustmentCommand && len(snapshot.Activations) == len(billingApprovalActivationOrder)+1 {
+			if !validActivationItem(snapshot.Activations[index], commandType, activationSpec{2, 2, true}, now) {
+				return ErrApprovalActivationUnavailable
+			}
+			index++
 		}
 	}
 	return nil
@@ -117,29 +122,8 @@ func (r *PostgresRepository) ApprovalCommandActivations(ctx context.Context) (Ap
 		return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
 	}
 	result := ApprovalCommandActivationSnapshot{SchemaVersion: approvalActivationSchemaVersion, Activations: make([]ApprovalCommandActivation, 0, len(billingApprovalActivationOrder))}
-	index := 0
-	now := r.now()
-	for _, commandType := range billingApprovalActivationOrder {
-		if index >= len(raw) || raw[index].CommandType != commandType {
-			return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
-		}
-		item := raw[index]
-		index++
-		if commandType == entitlementComponentAdjustmentCommand {
-			if item.PolicyVersion != 1 || !validActivationItem(item, commandType, billingApprovalActivationSpecs[commandType], now) {
-				return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
-			}
-			if index < len(raw) && raw[index].CommandType == commandType {
-				item = raw[index]
-				index++
-				if item.PolicyVersion != 2 || !validActivationItem(item, commandType, billingApprovalActivationSpecs[commandType], now) {
-					return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
-				}
-			}
-		}
-		result.Activations = append(result.Activations, item)
-	}
-	if index != len(raw) || validateApprovalCommandActivationSnapshot(result, now) != nil {
+	result.Activations = raw
+	if validateApprovalCommandActivationSnapshot(result, r.now()) != nil {
 		return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
 	}
 	return result, nil

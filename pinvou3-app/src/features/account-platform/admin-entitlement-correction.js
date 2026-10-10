@@ -85,7 +85,7 @@ export function entitlementCorrectionApprovalDraft(precheck, reasonCode, operato
   const reason = String(operatorReason || '').trim();
   if (!projection || !reasonCodeValid(code) || code !== projection.reasonCode ||
     [...reason].length < 10 || [...reason].length > 2000 || typeof requestKey !== 'string' ||
-    `approval:${requestKey}`.length < 16 || `approval:${requestKey}`.length > 128) {
+    `approval:${requestKey}`.length < 16 || `approval:${requestKey}`.length > 120) {
     throw Object.assign(new Error('entitlement correction precheck is not usable'), {
       code: 'ENTITLEMENT_CORRECTION_PRECHECK_INVALID',
     });

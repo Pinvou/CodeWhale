@@ -9,14 +9,19 @@ import (
 	"github.com/jackc/pgx/v5"
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 	"time"
 )
 
 func TestGiftClosurePublicHarness(t *testing.T) {
+	if os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL") == "" {
+		t.Skip("explicit isolated schema database required")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 160*time.Second)
 	defer cancel()
 	f := newStageFixture(t, ctx, os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL"))
+	f.installClosureTokenActors(t, ctx)
 	ac := f.database(t, ctx, "account", "account_service")
 	bc := f.database(t, ctx, "billing", "billing_schema_owner")
 	am, err := migrations.Load("../../migrations/account")
@@ -83,7 +88,11 @@ func TestGiftClosurePublicHarness(t *testing.T) {
 	}
 	migrations.Unlock(ctx, tc)
 
-	child := exec.CommandContext(ctx, os.Getenv("F08_TEST_GO"), "test", "-mod=readonly", "-race", "-count=1", "-json", "./internal/account", "-run", "^TestGiftClosureProducerBoundaries$")
+	args := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/account", "-run", "^TestGiftClosureProducerBoundaries$"}
+	if runtime.GOOS != "windows" {
+		args = append(args, "-race")
+	}
+	child := exec.CommandContext(ctx, os.Getenv("F08_TEST_GO"), args...)
 	child.Dir = "../.."
 	child.Env = append(os.Environ(), "F08_ACCOUNT_URL="+f.serviceURL(t, ac, "account_service"), "F08_BILLING_URL="+f.serviceURL(t, bc, "billing_service"), "F08_TOKEN_URL="+f.serviceURL(t, tc, "token_gateway"))
 	out, e := child.CombinedOutput()
@@ -92,5 +101,18 @@ func TestGiftClosurePublicHarness(t *testing.T) {
 	}
 	if e != nil {
 		t.Fatal("actual closure child failed; immutable log retained")
+	}
+	financialArgs := []string{"test", "-mod=readonly", "-tags=nomsgpack", "-count=1", "-json", "./internal/billing", "-run", "^TestClosedGrantPublishedOwnerEffects$"}
+	if runtime.GOOS != "windows" {
+		financialArgs = append(financialArgs, "-race")
+	}
+	financial := exec.CommandContext(ctx, os.Getenv("F08_TEST_GO"), financialArgs...)
+	financial.Dir, financial.Env = child.Dir, child.Env
+	financialOut, financialErr := financial.CombinedOutput()
+	if err = os.WriteFile(os.Getenv("F08_TEST_CHILD_LOG")+".billing", financialOut, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if financialErr != nil {
+		t.Fatal("actual closed-grant owner child failed; immutable log retained")
 	}
 }

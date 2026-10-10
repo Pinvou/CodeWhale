@@ -25,7 +25,6 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/billinggovernance"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 // configureEntitlementProofIdentity gives the real Billing proof authority the
@@ -81,7 +80,7 @@ func configureEntitlementProofIdentity(t *testing.T) (string, string) {
 	t.Setenv("WORKLOAD_IDENTITY_RULES_JSON", string(rules))
 	mint := func(subject string) string {
 		now := time.Now().UTC()
-		token, signErr := signApprovalExecutorJWT(key, map[string]any{
+		token, signErr := signEntitlementFixtureJWT(key, map[string]any{
 			"iss": issuer.URL, "sub": subject, "aud": audience, "exp": now.Add(10 * time.Minute).Unix(), "iat": now.Unix(),
 		})
 		if signErr != nil {
@@ -90,29 +89,6 @@ func configureEntitlementProofIdentity(t *testing.T) (string, string) {
 		return token
 	}
 	return mint(accountSubject), mint(executorSubject)
-}
-
-// transitionEntitlementCrossDomainAccountControl moves the isolated Account
-// control into the proof-era wire the entitlement correction command requires.
-// It is a test-only contract transition, not production wiring.
-func transitionEntitlementCrossDomainAccountControl(t *testing.T, ctx context.Context, connection *pgx.Conn) {
-	t.Helper()
-	if _, err := connection.Exec(ctx, `SET ROLE account_approval_control_owner`); err != nil {
-		t.Fatal(err)
-	}
-	for _, statement := range []string{
-		`UPDATE account_approval_control.admin_approval_control SET mode='QUIESCING',approval_epoch=approval_epoch+1,version=version+1,updated_at=now() WHERE control_id='ADMIN_APPROVAL'`,
-		`UPDATE account_approval_control.admin_approval_control SET authorization_relay_state='FENCED',authorization_relay_epoch=authorization_relay_epoch+1,version=version+1,updated_at=now() WHERE control_id='ADMIN_APPROVAL'`,
-		`UPDATE account_approval_control.admin_approval_control SET mode='PROOF_REQUIRED',approval_wire_version=2,proof_required=true,approval_epoch=approval_epoch+1,version=version+1,updated_at=now() WHERE control_id='ADMIN_APPROVAL'`,
-		`UPDATE account_approval_control.admin_approval_control SET authorization_relay_state='RUNNING',authorization_relay_epoch=authorization_relay_epoch+1,version=version+1,updated_at=now() WHERE control_id='ADMIN_APPROVAL'`,
-	} {
-		if _, err := connection.Exec(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := connection.Exec(ctx, `RESET ROLE; SET ROLE account_service`); err != nil {
-		t.Fatal(err)
-	}
 }
 
 type entitlementCrossDomainDelivery struct {
@@ -171,7 +147,7 @@ func TestEntitlementCorrectionCrossDomainActivationPostgresIntegration(t *testin
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	t.Cleanup(cancel)
 
-	repository, accountConnection, relay, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, accountURL, 0)
+	repository, accountConnection, relay, _ := newEntitlementApprovalFixture(t, ctx, accountURL)
 	billingRepository, billingPool, billingConnection := newEntitlementCrossDomainBillingFixture(t, ctx, billingURL)
 	proofToken, executorToken := configureEntitlementProofIdentity(t)
 	billingServer := httptest.NewServer(billingdomain.NewService(billingRepository).Handler("account-proof-test"))
@@ -194,7 +170,7 @@ func TestEntitlementCorrectionCrossDomainActivationPostgresIntegration(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	activation := activations.Activations[1]
+	activation := activations.Activations[2]
 	if activation.CommandType != policy.CommandType || activation.State != "INACTIVE" || activation.PolicyVersion != 2 || activation.SnapshotSchemaVersion != 2 {
 		t.Fatalf("entitlement correction activation is not the deployed INACTIVE v2 row: %#v", activation)
 	}
@@ -243,9 +219,9 @@ WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=1 AND s
 		t.Fatalf("inactive cross-domain advancement: %v", err)
 	}
 
-	requester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "entitlement-activation-requester")
-	approver := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "entitlement-activation-approver")
-	requesterPrincipal, approverPrincipal := approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
+	requester := seedEntitlementApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "entitlement-activation-requester")
+	approver := seedEntitlementApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "entitlement-activation-approver")
+	requesterPrincipal, approverPrincipal := entitlementApprovalPrincipal(requester), entitlementApprovalPrincipal(approver)
 	createDraft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "entitlement-activation-create",
 		NormalizedCommand: frozen.NormalizedCommand, TargetResourceType: frozen.TargetResourceType,
@@ -256,25 +232,25 @@ WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=1 AND s
 	if _, err := repository.CreateApprovalDraft(ctx, requesterPrincipal, createDraft); err == nil {
 		t.Fatal("inactive cross-domain create unexpectedly succeeded")
 	}
-	assertApprovalRequestAbsent(t, ctx, repository, requester.ID, createDraft.IdempotencyKey)
+	assertEntitlementRequestAbsent(t, ctx, repository, requester.ID, createDraft.IdempotencyKey)
 
-	submitID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT")
+	submitID := seedEntitlementAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.SubmitApprovalRequest(ctx, requesterPrincipal, submitID, 1)
 		return err
 	}); !errors.Is(err, ErrBillingGovernanceInactive) {
 		t.Fatalf("inactive cross-domain submit: %v", err)
 	}
-	assertApprovalRequestState(t, ctx, repository, submitID, "DRAFT", 1)
+	assertEntitlementRequestState(t, ctx, repository, submitID, "DRAFT", 1)
 
-	approveID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED")
+	approveID := seedEntitlementAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.DecideApprovalRequest(ctx, approverPrincipal, approveID, 1, "APPROVED", "closed cross-domain gate", frozen.CriticalResourceVersions)
 		return err
 	}); !errors.Is(err, ErrBillingGovernanceInactive) {
 		t.Fatalf("inactive cross-domain approve: %v", err)
 	}
-	assertApprovalRequestState(t, ctx, repository, approveID, "SUBMITTED", 1)
+	assertEntitlementRequestState(t, ctx, repository, approveID, "SUBMITTED", 1)
 
 	var decisions, outbox, executions int
 	if err := repository.pool.QueryRow(ctx, `SELECT
@@ -330,10 +306,10 @@ WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=2 AND s
 	// the Account decision obtains a signed Billing proof, the authorized event is
 	// published, and the dedicated durable consumer executes the paired ledger
 	// effect before the terminal state is confirmed.
-	transitionEntitlementCrossDomainAccountControl(t, ctx, accountConnection)
-	requester = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "entitlement-chain-requester")
-	approver = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "entitlement-chain-approver")
-	approverPrincipal = approvalIntegrationPrincipal(approver)
+
+	requester = seedEntitlementApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "entitlement-chain-requester")
+	approver = seedEntitlementApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "entitlement-chain-approver")
+	requesterPrincipal, approverPrincipal = entitlementApprovalPrincipal(requester), entitlementApprovalPrincipal(approver)
 	// The request is created through the same Account entry points the Portal
 	// business entry will call: closed draft -> submit -> independent approval.
 	draft := ApprovalDraft{
@@ -506,5 +482,14 @@ WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=2 AND s
 	}
 	if projected, ok := rolledBack.Find(policy.CommandType, 2, 2); !ok || projected.State != "INACTIVE" {
 		t.Fatalf("Account reader did not observe the rolled-back projection: %#v", projected)
+	}
+	// Operator deactivation cannot invalidate an already committed receipt.
+	deactivatedReplay := &entitlementCrossDomainDelivery{raw: raw, id: eventID.String(), meta: events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: 1, NumDelivered: 4}}
+	consumer.Handle(ctx, deactivatedReplay)
+	if deactivatedReplay.ack != 1 {
+		t.Fatal("committed authorization receipt did not replay after deactivation")
+	}
+	if err := billingPool.QueryRow(ctx, `SELECT (SELECT count(*) FROM entitlement_component_corrections), (SELECT count(*) FROM billing_approval_proof_claims), (SELECT count(*) FROM journal_entries WHERE entry_type='ADJUSTMENT')`).Scan(&replayCorrections, &replayClaims, &adjustmentJournals); err != nil || replayCorrections != 1 || replayClaims != 1 || adjustmentJournals != 1 {
+		t.Fatal("deactivated receipt replay changed financial facts")
 	}
 }

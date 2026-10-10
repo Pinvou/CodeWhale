@@ -534,6 +534,17 @@ func (r *PostgresRepository) ApplyLedgerRepair(ctx context.Context, input Ledger
 	} else if !errors.Is(err, ErrNotFound) {
 		return LedgerRepairResult{}, err
 	}
+	// Hold the fixed owner activation row lock through the financial commit.
+	// Runtime cannot UPDATE the activation table; immutable receipts above do
+	// not acquire this lock or become invalid when the operator disables writes.
+	var active bool
+	var activationVersion int64
+	if err := tx.QueryRow(ctx, `SELECT active,activation_version FROM billing_approval_execution.lock_ledger_activation()`).Scan(&active, &activationVersion); err != nil {
+		return LedgerRepairResult{}, ErrApprovalExecutionUnavailable
+	}
+	if !active || input.PolicyVersion != 1 || input.SchemaVersion != 1 || input.ActivationVersion != activationVersion {
+		return LedgerRepairResult{}, ErrApprovalSnapshotMismatch
+	}
 	plan, err := ledgerRepairPlanFrom(ctx, tx, input.Command, input.PolicyVersion, input.SchemaVersion, input.ActivationVersion)
 	if err != nil {
 		return LedgerRepairResult{}, err

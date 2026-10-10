@@ -28,11 +28,11 @@ type Descriptor struct {
 }
 
 var descriptors = []Descriptor{
+	{CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-entitlement-component-adjustment-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "LEDGER_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-ledger-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "WALLET_ADJUSTMENT", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-wallet-adjustment-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "PAYMENT_PROVIDER_RESUME", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-provider-resume-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "PAYMENT_PRODUCT_RESUME", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-product-resume-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
-	{CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-entitlement-component-adjustment-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", PolicyVersion: 2, ExecutorIdentity: TokenWorkload, Durable: "token-model-lifecycle-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},
 	{CommandType: "TOKEN_MODEL_CATALOG_ROLLBACK", PolicyVersion: 2, ExecutorIdentity: TokenWorkload, Durable: "token-catalog-rollback-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},
 	{CommandType: "TOKEN_CREDENTIAL_REVOKE", PolicyVersion: 1, ExecutorIdentity: TokenWorkload, Durable: "token-credential-revoke-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},
@@ -71,7 +71,7 @@ func Match(descriptor Descriptor, commandType string, policyVersion int64, execu
 func MatchRoute(descriptor Descriptor, commandType string, policyVersion int64, executorIdentity string) bool {
 	if descriptor == legacyBilling {
 		for _, candidate := range BillingCommands() {
-			if candidate.CommandType == commandType && candidate.PolicyVersion == policyVersion && candidate.ExecutorIdentity == executorIdentity {
+			if candidate.CommandType != "ENTITLEMENT_COMPONENT_ADJUSTMENT" && candidate.CommandType == commandType && candidate.PolicyVersion == policyVersion && candidate.ExecutorIdentity == executorIdentity {
 				return true
 			}
 		}

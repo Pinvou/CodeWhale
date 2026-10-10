@@ -60,7 +60,7 @@ type activationVersion struct {
 // entitlement correction command keeps exactly one v1 row as immutable history
 // and may append a v2 row, so this reader accepts either pair and never rewrites
 // the frozen version of an existing request. LEDGER_REPAIR keeps exactly one
-// v1/s1 pair, which is the only projection of that command that may be active.
+// v1/s1 pair; its state is still selected explicitly by the operator.
 var activationVersions = map[string][]activationVersion{
 	"CHARGEBACK_FINANCIAL_REPAIR":      {{1, 1}},
 	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {{1, 1}, {2, 2}},
@@ -87,14 +87,16 @@ func knownActivationVersion(command string, policyVersion int64, snapshotSchemaV
 // ValidateSnapshot also protects in-process readers. An INACTIVE existing
 // command is valid authoritative data, not an unavailable transport.
 func ValidateSnapshot(s Snapshot) error {
-	if s.SchemaVersion != 1 || len(s.Activations) != len(activationVersions) {
+	if s.SchemaVersion != 1 || (len(s.Activations) != len(activationVersions) && len(s.Activations) != len(activationVersions)+1) {
 		return ErrUnavailable
 	}
 	latest := time.Now().Add(time.Second)
 	previous := ""
+	previousPolicy := int64(0)
+	seen := make(map[string]bool, len(activationVersions))
 	for _, activation := range s.Activations {
 		_, known := activationVersions[activation.CommandType]
-		if !known || activation.CommandType <= previous || !knownActivationVersion(activation.CommandType, activation.PolicyVersion, activation.SnapshotSchemaVersion) ||
+		if !known || activation.CommandType < previous || (activation.CommandType == previous && (activation.CommandType != "ENTITLEMENT_COMPONENT_ADJUSTMENT" || previousPolicy != 1 || activation.PolicyVersion != 2)) || !knownActivationVersion(activation.CommandType, activation.PolicyVersion, activation.SnapshotSchemaVersion) ||
 			activation.Version < 1 || activation.UpdatedAt.IsZero() || activation.UpdatedAt.After(latest) {
 			return ErrUnavailable
 		}
@@ -102,18 +104,22 @@ func ValidateSnapshot(s Snapshot) error {
 			return ErrUnavailable
 		}
 		switch activation.CommandType {
+		case "LEDGER_REPAIR", "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
 		case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
-			if activation.State == "ACTIVE" && (activation.PolicyVersion != 2 || activation.SnapshotSchemaVersion != 2) {
+			if activation.PolicyVersion == 1 && activation.State != "INACTIVE" || activation.PolicyVersion == 2 && (!seen[activation.CommandType] || previousPolicy != 1) {
 				return ErrUnavailable
 			}
-		case "LEDGER_REPAIR", "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
-
 		default:
 			if activation.State != "INACTIVE" {
 				return ErrUnavailable
 			}
 		}
 		previous = activation.CommandType
+		previousPolicy = activation.PolicyVersion
+		seen[activation.CommandType] = true
+	}
+	if len(seen) != len(activationVersions) {
+		return ErrUnavailable
 	}
 	return nil
 }
@@ -165,7 +171,7 @@ func (c *Client) Snapshot(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, ErrUnavailable
 	}
 	var rows []json.RawMessage
-	if json.Unmarshal(root["activations"], &rows) != nil || len(rows) != len(activationVersions) {
+	if json.Unmarshal(root["activations"], &rows) != nil || (len(rows) != len(activationVersions) && len(rows) != len(activationVersions)+1) {
 		return Snapshot{}, ErrUnavailable
 	}
 	for _, row := range rows {

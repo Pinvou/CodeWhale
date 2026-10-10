@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
-	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/google/uuid"
@@ -48,6 +47,24 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 		return encoded
 	}
 	switch frozen.CommandType {
+	case entitlementComponentAdjustmentCommand:
+		owner, ok := repository.(interface {
+			EntitlementCorrectionProofInput(context.Context, uuid.UUID, uuid.UUID, string) (approvalencoding.LegacyProofInput, error)
+		})
+		var command struct {
+			PackageID      uuid.UUID `json:"package_id"`
+			PaymentOrderID uuid.UUID `json:"payment_order_id"`
+			ReasonCode     string    `json:"reason_code"`
+		}
+		if !ok || json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.PackageID == uuid.Nil || command.PackageID.String() != frozen.TargetResourceID {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		fresh, err := owner.EntitlementCorrectionProofInput(ctx, command.PackageID, command.PaymentOrderID, command.ReasonCode)
+		if err != nil {
+			return current, "", "", err
+		}
+		current = fresh
+		ownerState = "ENTITLEMENT_PACKAGE_ACTIVE"
 	case "WALLET_ADJUSTMENT":
 		var command struct {
 			AdjustmentID       uuid.UUID `json:"adjustment_id"`
@@ -117,31 +134,6 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 			return current, "EVIDENCE_MISSING", ownerState, nil
 		}
 		if actual.ProductID != frozen.TargetResourceID || !sameProductResumeVersions(actual, command) {
-			return current, "SNAPSHOT_MISMATCH", ownerState, nil
-		}
-	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
-		var command struct {
-			PackageID      uuid.UUID `json:"package_id"`
-			PaymentOrderID uuid.UUID `json:"payment_order_id"`
-			ReasonCode     string    `json:"reason_code"`
-		}
-		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.PackageID == uuid.Nil ||
-			command.PaymentOrderID == uuid.Nil || strings.TrimSpace(command.ReasonCode) == "" {
-			return current, "", "", ErrApprovalSnapshotMismatch
-		}
-		owner, ok := repository.(interface {
-			entitlementCorrectionPlan(context.Context, uuid.UUID, uuid.UUID) (entitlementCorrectionReadPlan, error)
-		})
-		if !ok {
-			return current, "", "", errBillingApprovalProofUnavailable
-		}
-		plan, err := owner.entitlementCorrectionPlan(ctx, command.PackageID, command.PaymentOrderID)
-		if err != nil {
-			return current, "", "", err
-		}
-		ownerState = plan.Amounts.SourceType + "->" + plan.Amounts.TargetType
-		current.CriticalResourceVersions, current.FinancialSnapshot = entitlementCorrectionProofProjection(plan)
-		if plan.PackageID != command.PackageID || plan.PaymentOrderID != command.PaymentOrderID {
 			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
 	case ledgerRepairCommand:

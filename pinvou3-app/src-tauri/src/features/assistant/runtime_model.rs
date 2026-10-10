@@ -125,6 +125,18 @@ pub trait RuntimeModelProvider: Send + Sync {
         Ok(())
     }
 
+    /// Freeze cancellation to this lifecycle epoch. Implementations mark local
+    /// delivery synchronously and schedule bounded network reconciliation.
+    fn capture_model_cancellation_scope(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+    fn cancel_logical_turn(&self, _session_id: &str, _generation: u64, _scope: Option<&str>) {}
+
+    /// Reclaim only captured calls; an unsubmitted reserved epoch survives a rebuild.
+    fn reclaim_model_session(&self, _session_id: &str, _preserved_generation: Option<u64>) {}
+    /// Permanently retire the deleted lifecycle's transport incarnation.
+    fn forget_model_session(&self, _session_id: &str) {}
+
     /// A user turn groups calls; the foundation owns each invocation identity.
     async fn begin_logical_turn(&self, _session_id: &str) -> Result<()> {
         Ok(())
