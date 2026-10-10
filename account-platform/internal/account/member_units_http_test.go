@@ -96,6 +96,9 @@ func TestMemberUnitPUTHandlerBoundary(t *testing.T) {
 			if w.Code != tc.want || repo.calls != tc.calls {
 				t.Fatalf("status=%d calls=%d want=%d/%d", w.Code, repo.calls, tc.want, tc.calls)
 			}
+			if tc.platform && tc.want == http.StatusOK && (w.Header().Get("X-Command-Type") != "ACCOUNT_MEMBER_UNITS_REPLACE" || w.Header().Get("X-Command-Policy-Version") != "1") {
+				t.Fatal("platform mutation bypassed its registered audit-only command policy")
+			}
 			if repo.calls > 0 && (repo.actor.Subject != principal.Subject || repo.organization != org || repo.target != target || repo.version != 7 || repo.units == nil || len(repo.units) != 0 || repo.key != tc.key || repo.platform != tc.platform) {
 				t.Fatal("handler changed actor, CAS, explicit empty scope, key or platform boundary")
 			}

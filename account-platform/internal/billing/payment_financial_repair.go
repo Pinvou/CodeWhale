@@ -638,9 +638,15 @@ func paymentFinancialRepairFrozenMismatch(plan PaymentFinancialRepairPlan, froze
 }
 
 func paymentFinancialRepairExecutionActivation(ctx context.Context, source paymentRepairReader, input PaymentFinancialRepairExecutionInput, now time.Time) error {
-	var active ApprovalCommandActivation
-	err := source.QueryRow(ctx, `SELECT command_type,policy_version,snapshot_schema_version,state,version,updated_at FROM billing_approval_command_activations WHERE command_type=$1 AND policy_version=$2`, paymentFinancialRepairCommand, input.PolicyVersion).
-		Scan(&active.CommandType, &active.PolicyVersion, &active.SnapshotSchemaVersion, &active.State, &active.Version, &active.UpdatedAt)
+	// This fixed owner capability retains its row lock until the financial transaction ends.
+	// Runtime cannot UPDATE activation or assume its independent schema owner.
+	active := ApprovalCommandActivation{CommandType: paymentFinancialRepairCommand, PolicyVersion: 1, SnapshotSchemaVersion: 1, State: "INACTIVE"}
+	var enabled bool
+	err := source.QueryRow(ctx, `SELECT active,activation_version,updated_at FROM billing_approval_execution.lock_payment_activation()`).
+		Scan(&enabled, &active.Version, &active.UpdatedAt)
+	if enabled {
+		active.State = "ACTIVE"
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrApprovalSnapshotMismatch
 	}

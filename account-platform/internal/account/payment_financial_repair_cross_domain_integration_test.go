@@ -75,7 +75,7 @@ func TestPaymentFinancialRepairCrossDomainActivationPostgresIntegration(t *testi
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	t.Cleanup(cancel)
 
-	repository, accountConnection, relay, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, accountURL, 0)
+	repository, accountConnection, relay, _ := newEntitlementApprovalFixture(t, ctx, accountURL)
 	billingRepository, billingPool, billingConnection, repair := newPaymentRepairCrossDomainBillingFixture(t, ctx, billingURL)
 	proofToken, executorToken := configureEntitlementProofIdentity(t)
 	billingServer := httptest.NewServer(billingdomain.NewService(billingRepository).Handler("account-proof-test"))
@@ -152,8 +152,8 @@ func TestPaymentFinancialRepairCrossDomainActivationPostgresIntegration(t *testi
 	if err := repository.requireApprovalAdvancement(ctx, policy); !errors.Is(err, ErrBillingGovernanceInactive) {
 		t.Fatalf("inactive cross-domain advancement: %v", err)
 	}
-	requester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "payment-repair-activation-requester")
-	approver := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "payment-repair-activation-approver")
+	requester := seedPaymentApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "payment-repair-activation-requester")
+	approver := seedPaymentApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "payment-repair-activation-approver")
 	requesterPrincipal, approverPrincipal := approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
 	createDraft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "payment-repair-activation-create",
@@ -166,7 +166,7 @@ func TestPaymentFinancialRepairCrossDomainActivationPostgresIntegration(t *testi
 		t.Fatal("inactive cross-domain create unexpectedly succeeded")
 	}
 	assertApprovalRequestAbsent(t, ctx, repository, requester.ID, createDraft.IdempotencyKey)
-	submitID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT")
+	submitID := seedPaymentAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.SubmitApprovalRequest(ctx, requesterPrincipal, submitID, 1)
 		return err
@@ -174,7 +174,7 @@ func TestPaymentFinancialRepairCrossDomainActivationPostgresIntegration(t *testi
 		t.Fatalf("inactive cross-domain submit: %v", err)
 	}
 	assertApprovalRequestState(t, ctx, repository, submitID, "DRAFT", 1)
-	approveID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED")
+	approveID := seedPaymentAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.DecideApprovalRequest(ctx, approverPrincipal, approveID, 1, "APPROVED", "closed cross-domain gate", frozen.CriticalResourceVersions)
 		return err
@@ -225,9 +225,12 @@ WHERE command_type='PAYMENT_FINANCIAL_REPAIR' AND policy_version=1 AND snapshot_
 		t.Fatalf("activated cross-domain proof=%+v err=%v", proof.Response, err)
 	}
 
-	transitionEntitlementCrossDomainAccountControl(t, ctx, accountConnection)
-	requester = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "payment-repair-chain-requester")
-	approver = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "payment-repair-chain-approver")
+	control, controlErr := repository.ApprovalActionControl(ctx)
+	if controlErr != nil || control.Mode != "PROOF_REQUIRED" {
+		t.Fatal("official Account fixture must already be PROOF_REQUIRED")
+	}
+	requester = seedPaymentApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "payment-repair-chain-requester")
+	approver = seedPaymentApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "payment-repair-chain-approver")
 	requesterPrincipal, approverPrincipal = approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
 	draft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "payment-repair-cross-domain-chain",

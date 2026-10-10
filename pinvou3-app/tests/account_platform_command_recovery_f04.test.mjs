@@ -64,7 +64,7 @@ test('missing invocation key performs no authority call', async () => {
 });
 
 test('actual five AuditOnly JSX recovery callbacks pass their original key and validate their target', async () => {
-  const sources = ['AdminModelTokenWorkspace.jsx', 'AdminModelDetailWorkspace.jsx', 'AdminTokenResourcesWorkspace.jsx', 'AdminTokenAccountDetailWorkspace.jsx'];
+  const sources = ['AdminModelTokenWorkspace.jsx', 'AdminModelDetailWorkspace.jsx', 'TokenAccountGovernanceActions.jsx', 'AdminTokenAccountDetailWorkspace.jsx'];
   const current = { id, model_id: id, credential_id: id };
   const action = { item: current }, model = current, credential = current, accountID = id;
   const seen = [];
@@ -87,7 +87,7 @@ test('actual five AuditOnly JSX recovery callbacks pass their original key and v
       seen.push(`${source}:${match[2]}`);
     }
   }
-  assert.deepEqual(seen, ['AdminModelTokenWorkspace.jsx:TOKEN_MODEL_PUBLISH', 'AdminModelTokenWorkspace.jsx:TOKEN_MODEL_CATALOG_SYNC', 'AdminModelDetailWorkspace.jsx:TOKEN_MODEL_PUBLISH', 'AdminTokenResourcesWorkspace.jsx:TOKEN_ACCOUNT_STATUS_CHANGE', 'AdminTokenAccountDetailWorkspace.jsx:TOKEN_CREDENTIAL_VALIDATE']);
+  assert.deepEqual(seen, ['AdminModelTokenWorkspace.jsx:TOKEN_MODEL_PUBLISH', 'AdminModelTokenWorkspace.jsx:TOKEN_MODEL_CATALOG_SYNC', 'AdminModelDetailWorkspace.jsx:TOKEN_MODEL_PUBLISH', 'TokenAccountGovernanceActions.jsx:TOKEN_ACCOUNT_STATUS_CHANGE', 'AdminTokenAccountDetailWorkspace.jsx:TOKEN_CREDENTIAL_VALIDATE']);
 });
 
 for (const error of [{ status: 404, code: 'NOT_FOUND' }, { status: 403, code: 'PERMISSION_DENIED' }, { status: 400, code: 'INVALID_REQUEST' }]) {

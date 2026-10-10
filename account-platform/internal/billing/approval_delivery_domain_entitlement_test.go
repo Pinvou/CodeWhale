@@ -66,7 +66,9 @@ func TestBillingAuthorizationDomainEntitlementCorrectionMapping(t *testing.T) {
 	repository := &entitlementAuthorizationRepositoryStub{entitlementCorrection: EntitlementCorrectionResult{CorrectionID: uuid.New(), Status: "SUCCEEDED"}}
 	domain := &billingAuthorizationDomain{repository: repository}
 
-	attempt := domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
+	// Mapping alone uses a stub owner. The full dispatch/proof path is covered
+	// by the official cross-domain PostgreSQL test.
+	attempt := domain.executeEntitlementCorrection(context.Background(), binding, event, command)
 	if attempt.FailureIsDefinite || len(attempt.Result.DomainResult) == 0 || repository.entitlementRuns != 1 ||
 		repository.entitlementFrozen != frozen || repository.entitlementKey != command.ExecutionIdempotencyKey ||
 		repository.entitlementReasonCode != "ORIGINAL_SPLIT_MISMATCH" {
@@ -77,14 +79,24 @@ func TestBillingAuthorizationDomainEntitlementCorrectionMapping(t *testing.T) {
 	}
 
 	repository.entitlementRunErr = ErrConflict
-	attempt = domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
+	attempt = domain.executeEntitlementCorrection(context.Background(), binding, event, command)
 	if !attempt.FailureIsDefinite || attempt.StableFailureCode != "DOMAIN_PRECONDITION_REJECTED" || repository.entitlementRuns != 2 {
 		t.Fatalf("entitlement conflict classification=%+v runs=%d", attempt, repository.entitlementRuns)
 	}
 	repository.entitlementRunErr = errors.New("commit outcome unknown")
-	attempt = domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
+	attempt = domain.executeEntitlementCorrection(context.Background(), binding, event, command)
 	if attempt.FailureIsDefinite || len(attempt.Result.DomainResult) != 0 || repository.entitlementRuns != 3 {
 		t.Fatalf("entitlement unknown outcome=%+v runs=%d", attempt, repository.entitlementRuns)
+	}
+}
+
+func TestBillingAuthorizationDomainEntitlementRejectsLegacySerialization(t *testing.T) {
+	binding, event, command, _ := entitlementCorrectionCommandFixture()
+	repository := &entitlementAuthorizationRepositoryStub{}
+	domain := &billingAuthorizationDomain{repository: repository}
+	attempt := domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
+	if !attempt.FailureIsDefinite || attempt.StableFailureCode != "COMMAND_MAPPING_INVALID" || repository.entitlementRuns != 0 {
+		t.Fatal("entitlement v2 must not reinterpret a legacy authorization as executable")
 	}
 }
 

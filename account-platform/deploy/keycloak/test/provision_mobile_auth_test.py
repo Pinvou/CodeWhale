@@ -19,6 +19,37 @@ FAKE = r'''#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$CONTROL_ARGS"
 if [ "${CONTROL_FAIL_ROLE:-false}" = true ] && [ "$1" = add-roles ]; then exit 1; fi
+case "$2" in
+  realms/test-realm|events/config)
+    resource=$(printf '%s' "$2" | tr '/' '-')
+    if [ "$1" = update ]; then
+      previous=''
+      for argument in "$@"; do
+        if [ "$previous" = -s ]; then
+          field=${argument%%=*}
+          case "$field" in *[!a-zA-Z0-9]*) exit 1 ;; esac
+          printf '%s\n' "${argument#*=}" > "$CONTROL_STATE/$resource-$field"
+        fi
+        previous=$argument
+      done
+    elif [ "$1" = get ]; then
+      field=''; previous=''
+      for argument in "$@"; do
+        if [ "$previous" = --fields ]; then field=$argument; fi
+        previous=$argument
+      done
+      case "$field" in ''|*[!a-zA-Z0-9]*) exit 1 ;; esac
+      if [ "$field" = "${CONTROL_UNAVAILABLE_READBACK_FIELD:-}" ]; then exit 1; fi
+      value=$(cat "$CONTROL_STATE/$resource-$field")
+      if [ "$field" = "${CONTROL_BAD_READBACK_FIELD:-}" ]; then value=false; fi
+      if [ "$field" = enabledEventTypes ]; then
+        if [ "${CONTROL_MISSING_EVENT:-false}" = true ]; then value='["LOGIN"]'; fi
+        printf '{"enabledEventTypes":%s}\n' "$value"
+      else
+        printf '%s\n' "$value"
+      fi
+    fi ;;
+esac
 if [ "$1" = get ]; then
   case "$2" in
     clients)
@@ -59,6 +90,7 @@ class ProvisioningContractTest(unittest.TestCase):
             fake = root / "kcadm.sh"
             fake.write_text(FAKE, encoding="utf-8", newline="\n")
             fake.chmod(0o700)
+            (root / "state").mkdir()
             source = SCRIPT.read_text(encoding="utf-8")
             marker = "KCADM_BINARY=/opt/keycloak/bin/kcadm.sh"
             self.assertEqual(1, source.count(marker))
@@ -82,6 +114,9 @@ class ProvisioningContractTest(unittest.TestCase):
                 "PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE": handoff.as_posix(),
                 "CONTROL_ARGS": (root / "args").as_posix(), "CONTROL_BODIES": (root / "bodies").as_posix(),
                 "CONTROL_EXISTING": str(existing).lower(), "CONTROL_FAIL_ROLE": str(role_failure).lower(),
+                "CONTROL_STATE": (root / "state").as_posix(),
+                "CONTROL_BAD_READBACK_FIELD": "", "CONTROL_UNAVAILABLE_READBACK_FIELD": "",
+                "CONTROL_MISSING_EVENT": "false",
                 "TMPDIR": root.as_posix(),
             })
             env.update(changes or {})
@@ -98,8 +133,36 @@ class ProvisioningContractTest(unittest.TestCase):
             self.assertFalse(list(root.glob("pinvou-kcadm.*")), "kcadm private session file must be removed")
             return result, args, bodies
 
+    def assert_hardening(self, args):
+        settings = {
+            "realms/test-realm": {
+                "bruteForceProtected": "true", "permanentLockout": "false", "failureFactor": "10",
+                "maxFailureWaitSeconds": "900", "minimumQuickLoginWaitSeconds": "60",
+                "waitIncrementSeconds": "60", "quickLoginCheckMilliSeconds": "1000",
+                "maxDeltaTimeSeconds": "43200", "accessTokenLifespan": "600",
+                "revokeRefreshToken": "true", "refreshTokenMaxReuse": "0",
+            },
+            "events/config": {
+                "eventsEnabled": "true", "eventsExpiration": "2592000",
+                "adminEventsEnabled": "true", "adminEventsDetailsEnabled": "false",
+            },
+        }
+        lines = args.splitlines()
+        for resource, fields in settings.items():
+            for field, value in fields.items():
+                with self.subTest(resource=resource, field=field):
+                    self.assertTrue(any(line.startswith(f"update {resource} ") and f" -s {field}={value}" in line for line in lines))
+                    self.assertEqual(1, sum(line.startswith(f"get {resource} ") and f" --fields {field} --format csv --noquotes" in line for line in lines))
+        events = ["LOGIN", "LOGIN_ERROR", "LOGOUT", "REGISTER", "REGISTER_ERROR", "UPDATE_PASSWORD",
+                  "UPDATE_PASSWORD_ERROR", "REFRESH_TOKEN", "REFRESH_TOKEN_ERROR"]
+        event_update = next(line for line in lines if line.startswith("update events/config "))
+        self.assertIn(" -s enabledEventTypes=" + json.dumps(events, separators=(",", ":")), event_update)
+        readback = next(line for line in lines if line.startswith("get events/config ") and " --fields enabledEventTypes " in line)
+        self.assertLess(lines.index(readback), next(index for index, line in enumerate(lines) if line.startswith("update users/profile ")))
+
     def assert_clients(self, result, args, bodies):
         self.assertEqual(0, result.returncode, result.stderr.decode())
+        self.assert_hardening(args)
         clients = {body["clientId"]: body for body in bodies if "clientId" in body}
         portal, handoff = clients["portal-test"], clients["handoff-test"]
         self.assertTrue(portal["publicClient"])
@@ -139,6 +202,7 @@ class ProvisioningContractTest(unittest.TestCase):
     def test_handoff_disabled_does_not_provision_a_secret_client(self):
         result, args, bodies = self.run_producer({"PORTAL_SESSION_HANDOFF": "false"})
         self.assertEqual(0, result.returncode)
+        self.assert_hardening(args)
         self.assertFalse(any(body.get("clientId") == "handoff-test" for body in bodies))
         self.assertNotIn("included.client.audience=handoff-test", args)
 
@@ -164,7 +228,35 @@ class ProvisioningContractTest(unittest.TestCase):
     def test_role_failure_stops_before_public_clients(self):
         result, args, bodies = self.run_producer(role_failure=True)
         self.assertNotEqual(0, result.returncode)
+        self.assertIn("add-roles ", args)
         self.assertFalse(any(body.get("clientId") == "portal-test" for body in bodies))
+
+    def test_wrong_hardening_readback_stops_before_profile_and_clients(self):
+        for field in ("bruteForceProtected", "refreshTokenMaxReuse", "eventsEnabled"):
+            with self.subTest(field=field):
+                result, args, bodies = self.run_producer({"CONTROL_BAD_READBACK_FIELD": field})
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(f"Keycloak hardening readback failed for {field}".encode(), result.stderr)
+                self.assertNotIn("update users/profile ", args)
+                # The existing producer creates its admin-only provisioner
+                # first; neither public client nor profile may follow failure.
+                self.assertEqual(["provisioner-test"], [body.get("clientId") for body in bodies])
+
+    def test_unavailable_hardening_readback_stops_before_profile_and_clients(self):
+        for field in ("bruteForceProtected", "eventsExpiration"):
+            with self.subTest(field=field):
+                result, args, bodies = self.run_producer({"CONTROL_UNAVAILABLE_READBACK_FIELD": field})
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(f"Keycloak hardening readback unavailable for {field}".encode(), result.stderr)
+                self.assertNotIn("update users/profile ", args)
+                self.assertEqual(["provisioner-test"], [body.get("clientId") for body in bodies])
+
+    def test_missing_enabled_events_stops_before_profile_and_clients(self):
+        result, args, bodies = self.run_producer({"CONTROL_MISSING_EVENT": "true"})
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(b"Keycloak required audit event missing: LOGIN_ERROR", result.stderr)
+        self.assertNotIn("update users/profile ", args)
+        self.assertEqual(["provisioner-test"], [body.get("clientId") for body in bodies])
 
 
 class ThemeContractTest(unittest.TestCase):

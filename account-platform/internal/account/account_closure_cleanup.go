@@ -37,6 +37,9 @@ func (r *PostgresRepository) PrepareAccountClosureCleanup(ctx context.Context, i
 	if stage != "IDENTITY_CLEANUP" || (closureStatus != "IN_PROGRESS" && closureStatus != "RETRY" && closureStatus != "REPAIR_REQUIRED") || userStatus != "CLOSING" {
 		return AccountClosureCleanupPreparation{}, ErrConflict
 	}
+	if err := checkAccountClosureRoleGateTx(ctx, tx, userID); err != nil {
+		return AccountClosureCleanupPreparation{}, err
+	}
 	subjects, err := accountClosureIdentitySubjects(ctx, tx, userID)
 	if err != nil {
 		return AccountClosureCleanupPreparation{}, err
@@ -347,7 +350,7 @@ EXISTS(SELECT 1 FROM commerce_customer_sync_jobs WHERE subject_type='USER' AND s
 	if _, err := tx.Exec(ctx, `UPDATE profile_change_requests SET old_value='closed:'||gen_random_uuid()::text,new_value='closed:'||gen_random_uuid()::text,identity_issuer='closed',identity_subject='closed:'||gen_random_uuid()::text,updated_at=$2 WHERE user_id=$1`, userID, now); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE password_reset_operations SET identity_issuer='closed',identity_subject='closed:'||gen_random_uuid()::text WHERE user_id=$1`, userID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE password_reset_operations SET mobile_e164='closed:'||gen_random_uuid()::text,identity_issuer='closed',identity_subject='closed:'||gen_random_uuid()::text WHERE user_id=$1`, userID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE registration_operations SET username_normalized='closed_'||replace(gen_random_uuid()::text,'-',''),mobile_e164='closed:'||gen_random_uuid()::text,identity_subject=NULL,updated_at=$2 WHERE candidate_user_id=$1 OR committed_user_id=$1`, userID, now); err != nil {

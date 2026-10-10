@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	PermissionPersonalAccountClosureRequest = "personal.account.close.request"
 	PermissionPersonalAccountClosureRead    = "personal.account.close.read"
+	PermissionPersonalAccountClosureRequest = "personal.account.close.request"
 	PermissionPlatformAccountClosuresRead   = "platform.account-closures.read"
 	PermissionPlatformAccountClosuresRepair = "platform.account-closures.repair"
 	PermissionPlatformUsersRead             = "platform.users.read"
@@ -266,7 +266,7 @@ func permissionAllowedForUserStatus(status, permission string) bool {
 			return true
 		}
 	case "CLOSING":
-		return false
+		return permission == "personal.account.close.read" || permission == "personal.account.close.request"
 	}
 	return false
 }
@@ -300,6 +300,11 @@ func (s *Service) requirePermission(permission string) gin.HandlerFunc {
 			return
 		}
 		decision, err := repository.Authorize(c.Request.Context(), principal, permission, nil, nil)
+		if err != nil && !errors.Is(err, ErrForbidden) {
+			api.WriteError(c.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
 		if err != nil || !decision.Allowed {
 			if auditor, auditOK := s.repository.(interface {
 				RecordPermissionDenial(context.Context, identity.Principal, string, string) error

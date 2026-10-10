@@ -56,6 +56,12 @@ assert.strictEqual(isLocalModel({ preset: 'openai_compatible', base_url: 'http:/
 assert.strictEqual(isLocalModel({ preset: 'openai_compatible', base_url: 'https://api.openai.com/v1' }), false);
 
 assert.strictEqual(shouldShowModelAccessGate(state('missing'), 'chat', true), true);
+assert.strictEqual(shouldShowModelAccessGate({modelsLoaded:false,savedModels:[]}, 'chat', true), false,
+  'an unreturned catalog must not invent a first-use failure');
+assert.strictEqual(shouldShowModelAccessGate({modelsLoaded:true,savedModels:[{id:'builtin_account_platform',kind:'builtin_account_platform'}]}, 'chat', true), true,
+  'the managed carrier alone is not a concrete callable selection');
+assert.strictEqual(shouldShowModelAccessGate({modelsLoaded:true,savedModels:[{id:'custom'}]}, 'chat', true), false,
+  'a configured external model remains reachable without managed account login');
 assert.strictEqual(shouldShowModelAccessGate(state('unavailable'), 'chat', true), true);
 assert.strictEqual(shouldShowModelAccessGate(state('configured'), 'chat', true), false);
 assert.strictEqual(

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/google/uuid"
-	"strings"
 	"testing"
 	"time"
 )
@@ -206,7 +205,7 @@ func TestPersonalUsageHoldBoundaries(t *testing.T) {
 			t.Fatal("extension lost exact reserve or immutable lease event", err)
 		}
 	})
-	t.Run("expiry-releases-only-original-hold", func(t *testing.T) {
+	t.Run("expiry-requires-proof-and-preserves-original-hold", func(t *testing.T) {
 		w := funded(t)
 		id := uuid.New()
 		now := r.now()
@@ -218,16 +217,16 @@ func TestPersonalUsageHoldBoundaries(t *testing.T) {
 		r.now = func() time.Time { return now.Add(2 * time.Minute) }
 		defer func() { r.now = originalClock }()
 		count, err := r.ExpireHolds(ctx, 100)
-		if err != nil || count < 1 {
-			t.Fatal("expired lease did not release", err)
+		if !errors.Is(err, ErrHoldExpiryProofRequired) || count != 0 {
+			t.Fatal("unproven expiry did not fail closed", err)
 		}
 		got, err := getHoldByUsage(ctx, r.pool, id, false)
-		if err != nil || got.ID != h.ID || got.Status != "RELEASED" {
+		if err != nil || got.ID != h.ID || got.Status != "ACTIVE" {
 			t.Fatal("expiry changed wrong hold", err)
 		}
-		var snapshot string
-		if err = r.pool.QueryRow(ctx, `SELECT usage_snapshot::text FROM usage_holds WHERE id=$1`, h.ID).Scan(&snapshot); err != nil || !strings.Contains(snapshot, "hold lease expired") {
-			t.Fatal("expiry lacked release evidence", err)
+		var reserved int64
+		if err = r.pool.QueryRow(ctx, "SELECT reserved_microcredits FROM wallets WHERE id=$1", w.ID).Scan(&reserved); err != nil || reserved != 100 {
+			t.Fatal("unproven expiry changed funds", reserved, err)
 		}
 	})
 }

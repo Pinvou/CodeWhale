@@ -138,9 +138,11 @@
                     "maximum": 3650
                   },
                   "expected_revision": {
-                    "type": "integer",
-                    "format": "int64",
-                    "minimum": 1
+                    "description": "Exact positive int64; the original numeric token remains supported. A canonical decimal string is accepted additively. Browser consumers must preserve the token with the registration policy lossless codec.",
+                    "oneOf": [
+                      {"type": "integer", "format": "int64", "minimum": 1},
+                      {"type": "string", "pattern": "^[1-9][0-9]*$", "maxLength": 19}
+                    ]
                   },
                   "reason": {
                     "type": "string",

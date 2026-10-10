@@ -483,9 +483,15 @@ func receivableWriteOffFrozenMismatch(plan ReceivableWriteOffPlan, command Recei
 // Only a fresh effect needs current activation. Committed results return before
 // this check so a later deactivation cannot turn a durable success into a retry.
 func receivableWriteOffExecutionActivation(ctx context.Context, source receivableWriteOffReader, input ReceivableWriteOffExecutionInput, now time.Time) error {
-	var active ApprovalCommandActivation
-	err := source.QueryRow(ctx, `SELECT command_type,policy_version,snapshot_schema_version,state,version,updated_at FROM billing_approval_command_activations WHERE command_type=$1 AND policy_version=$2`, receivableWriteOffCommand, input.PolicyVersion).
-		Scan(&active.CommandType, &active.PolicyVersion, &active.SnapshotSchemaVersion, &active.State, &active.Version, &active.UpdatedAt)
+	// The fixed owner capability locks this installed tuple in the financial transaction.
+	// Runtime has SELECT only on the activation table and cannot acquire this row lock directly.
+	active := ApprovalCommandActivation{CommandType: receivableWriteOffCommand, PolicyVersion: 1, SnapshotSchemaVersion: 1, State: "INACTIVE"}
+	var enabled bool
+	err := source.QueryRow(ctx, `SELECT active,activation_version,updated_at FROM billing_approval_execution.lock_receivable_activation()`).
+		Scan(&enabled, &active.Version, &active.UpdatedAt)
+	if enabled {
+		active.State = "ACTIVE"
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrApprovalSnapshotMismatch
 	}

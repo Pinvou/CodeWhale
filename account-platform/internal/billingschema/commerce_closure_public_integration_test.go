@@ -16,6 +16,9 @@ import (
 )
 
 func TestCommerceClaimSubjectLockKeepsLeaseLive(t *testing.T) {
+	if os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL") == "" {
+		t.Skip("explicit isolated schema database required")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	f := newStageFixture(t, ctx, os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL"))
@@ -79,6 +82,9 @@ func TestCommerceClaimSubjectLockKeepsLeaseLive(t *testing.T) {
 	var waiting bool
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		if _, e = blocker.Exec(ctx, `SELECT pg_stat_clear_snapshot()`); e != nil {
+			t.Fatal(e)
+		}
 		if e = blocker.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%SELECT status,subject_lifecycle_version FROM users%')`, blocker.PgConn().PID()).Scan(&waiting); e != nil {
 			t.Fatal(e)
 		}
@@ -115,6 +121,9 @@ func TestCommerceClaimSubjectLockKeepsLeaseLive(t *testing.T) {
 }
 
 func TestCommerceClaimMappingLockKeepsLeaseLive(t *testing.T) {
+	if os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL") == "" {
+		t.Skip("explicit isolated schema database required")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	f := newStageFixture(t, ctx, os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL"))
@@ -178,7 +187,10 @@ func TestCommerceClaimMappingLockKeepsLeaseLive(t *testing.T) {
 	var waiting bool
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if e = blocker.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(pid)) AND (query LIKE '%UPDATE commerce_customer_mappings SET status%' OR query LIKE '%SELECT id FROM commerce_customer_mappings%FOR UPDATE%'))`, blocker.PgConn().PID()).Scan(&waiting); e != nil {
+		if _, e = blocker.Exec(ctx, `SELECT pg_stat_clear_snapshot()`); e != nil {
+			t.Fatal(e)
+		}
+		if e = blocker.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%SELECT id,subject_type,subject_id,provider_id,adapter_version,version,status FROM commerce_customer_mappings%FOR UPDATE%')`, blocker.PgConn().PID()).Scan(&waiting); e != nil {
 			t.Fatal(e)
 		}
 		if waiting {
@@ -187,10 +199,10 @@ func TestCommerceClaimMappingLockKeepsLeaseLive(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if !waiting {
-		t.Fatal("actual Claim did not wait on its selected user's row lock")
+		t.Fatal("actual Claim did not wait on its selected mapping row lock")
 	}
-	// The request is already inside the actual user lock wait. Let its old
-	// sampled now+lease expire while the subject remains otherwise unchanged.
+	// The request is already inside the actual mapping lock wait. Let its old
+	// sampled now+lease expire while the mapping remains otherwise unchanged.
 	time.Sleep(250 * time.Millisecond)
 	if e = hold.Commit(ctx); e != nil {
 		t.Fatal(e)

@@ -1,4 +1,5 @@
-FROM node:20-bookworm-slim
+ARG NODE_IMAGE=node:20-bookworm-slim
+FROM ${NODE_IMAGE}
 
 ENV NODE_ENV=production
 WORKDIR /app/update-release-console

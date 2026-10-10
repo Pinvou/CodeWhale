@@ -2,7 +2,11 @@
 
 这是 `ENTITLEMENT_COMPONENT_ADJUSTMENT` policy v2 / snapshot v2 的现有部署增量。使用已审生产叠加文件，最后加入 `compose.entitlement-correction.yaml`。它复用现有镜像变量与 Compose 流程；全部镜像、迁移目录和 Portal 生成资产必须来自同一个已审 F09 源。不能以旧 Account/Billing/Portal 二进制配新表或新页面。
 
-使用现有公共 migrator 安装原字节 Account069/070、Billing056–059；原 v1 activation 不修改，保持 INACTIVE。Billing 的 v2 激活仍须满足现有 Account authority、policy digest、handler digest、proof claim、身份和发行前置。此叠加文件不激活命令，不生成身份、签名或 receipt。
+使用现有公共 migrator 安装原字节 Account069/070、Billing056–059，以及新增 Billing900013。原 v1 policy/snapshot 行和历史审批保留，v1 activation 保持 INACTIVE；新增 v2 行安装后也为 INACTIVE。Billing 的 v2 激活仍须满足现有 Account authority、policy digest、handler digest、proof claim、身份和发行前置。此叠加文件不激活命令，不生成身份、签名或 receipt。
+
+Billing900013 仅安装固定、无参数的 owner 锁能力：运行角色只有该私有 schema 的 USAGE 和函数 EXECUTE，没有 activation 表 UPDATE、schema CREATE 或 owner 身份继承。新执行在资金事务内锁定 ENTITLEMENT_COMPONENT_ADJUSTMENT policy2/snapshot2 的 activation 行；运维停用必须等待已持锁事务结束，之后的新执行失败关闭。已经提交的 immutable result 优先只读回放，停用不能使既有回执失效。
+
+数据迁移不提供回滚删除：Account069 和 Billing900013 的 Down 明确返回 SQLSTATE55000，不删除 policy、触发器、账务或 migration ledger。运维回退应停止专属 consumer，并由既有受控 operator 将 v2 activation 置为 INACTIVE，保留旧事实及未确认投递用于恢复。Issue1664 的旧 Account027 项由前序单独处理，不能以本波069验证宣称整项完成。
 
 Account 的 `BILLING_HTTP_URL` 指向实际 Billing owner；现有 workload 凭据以 `file:<path>` 配置并由请求时读取。原 workload-billing-rules 已授 Account service `internal.billing.approval-proof.read`，新 precheck 使用同一权限，并额外严格要求 Account service 身份。Portal 仅透传真实会话/CSRF 的 Account 管理 precheck 和既有 typed governed approvals；没有公开 Billing 内部接口。
 

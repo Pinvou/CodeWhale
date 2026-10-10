@@ -10,6 +10,8 @@ const run=async(name,fn)=>{const page=await browser.newPage();page.setDefaultTim
 try{
  for(const language of ['zh','en','ja'])await run('production finance tab / lossless precheck / draft / submit '+language,async page=>{
   await page.goto(server.resolvedUrls.local[0]+`tests/account_platform_ledger_repair_fixture.html?language=${language}${language==='en'?'&lost=1':''}`);
+  await page.waitForFunction(()=>window.f10 && [...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.financeCopy[window.f10.language].finance));
+  await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(b=>b.textContent===window.f10.financeCopy[window.f10.language].finance).click());
   await page.waitForFunction(()=>window.f10 && [...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.ledgerRepairCopy[window.f10.language].title));
   await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(b=>b.textContent===window.f10.ledgerRepairCopy[window.f10.language].title).click());
   await page.waitForSelector('.adm-financial-repair-target');
@@ -24,6 +26,8 @@ try{
  });
  await run('repair-only center directory, current detail, typed EDIT and business drilldown',async page=>{
   await page.goto(server.resolvedUrls.local[0]+'tests/account_platform_ledger_repair_fixture.html?language=en');
+  await page.waitForFunction(()=>window.f10 && [...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.financeCopy.en.finance));
+  await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(b=>b.textContent===window.f10.financeCopy.en.finance).click());
   await page.waitForSelector('.adm-financial-repair');
   await page.evaluate(()=>{window.f10.created=true;});
   await page.evaluate(()=>[...document.querySelectorAll('button')].find(b=>b.textContent===window.f10.adminPlatformCopy.en.nav.approvals).click());

@@ -324,7 +324,7 @@ func TestReceivableWriteOffClaimFailureClassification(t *testing.T) {
 }
 
 func (s *writeOffActivationReader) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
-	if !strings.Contains(sql, "billing_approval_command_activations") || len(args) != 2 || args[0] != receivableWriteOffCommand || args[1] != int64(1) {
+	if !strings.Contains(sql, "billing_approval_execution.lock_receivable_activation()") || len(args) != 0 {
 		s.t.Fatalf("wrong owner activation query %v", args)
 	}
 	return s
@@ -333,12 +333,9 @@ func (s *writeOffActivationReader) Scan(dest ...any) error {
 	if s.err != nil {
 		return s.err
 	}
-	*dest[0].(*string) = s.item.CommandType
-	*dest[1].(*int64) = s.item.PolicyVersion
-	*dest[2].(*int) = s.item.SnapshotSchemaVersion
-	*dest[3].(*string) = s.item.State
-	*dest[4].(*int64) = s.item.Version
-	*dest[5].(*time.Time) = s.item.UpdatedAt
+	*dest[0].(*bool) = s.item.State == "ACTIVE"
+	*dest[1].(*int64) = s.item.Version
+	*dest[2].(*time.Time) = s.item.UpdatedAt
 	return nil
 }
 
@@ -359,7 +356,15 @@ func TestReceivableWriteOffFreshActivationIsClosed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			reader := &writeOffActivationReader{item: valid, t: t}
 			change(reader)
-			err := receivableWriteOffExecutionActivation(context.Background(), reader, input, now)
+			invocation := input
+			// The owner function has a fixed tuple; these negatives belong to the caller's frozen tuple.
+			if name == "schema" {
+				invocation.SchemaVersion++
+			}
+			if name == "policy" {
+				invocation.PolicyVersion++
+			}
+			err := receivableWriteOffExecutionActivation(context.Background(), reader, invocation, now)
 			if name == "active" {
 				if err != nil {
 					t.Fatal(err)

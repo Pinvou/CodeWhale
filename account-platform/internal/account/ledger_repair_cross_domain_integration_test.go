@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/jackc/pgx/v5"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -39,7 +40,7 @@ func TestLedgerRepairCrossDomainActivationPostgresIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	t.Cleanup(cancel)
 
-	repository, accountConnection, relay, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, accountURL, 0)
+	repository, accountConnection, relay, _ := newEntitlementApprovalFixture(t, ctx, accountURL)
 	billingRepository, billingPool, billingConnection, repair := newLedgerRepairCrossDomainBillingFixture(t, ctx, billingURL)
 	proofToken, executorToken := configureEntitlementProofIdentity(t)
 	billingServer := httptest.NewServer(billingdomain.NewService(billingRepository).Handler("account-proof-test"))
@@ -128,8 +129,8 @@ WHERE command_type='LEDGER_REPAIR' AND policy_version=1 AND snapshot_schema_vers
 		t.Fatalf("inactive cross-domain advancement: %v", err)
 	}
 
-	requester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "ledger-repair-activation-requester")
-	approver := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "ledger-repair-activation-approver")
+	requester := seedLedgerApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "ledger-repair-activation-requester")
+	approver := seedLedgerApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "ledger-repair-activation-approver")
 	requesterPrincipal, approverPrincipal := approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
 	createDraft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "ledger-repair-activation-create",
@@ -143,7 +144,7 @@ WHERE command_type='LEDGER_REPAIR' AND policy_version=1 AND snapshot_schema_vers
 	}
 	assertApprovalRequestAbsent(t, ctx, repository, requester.ID, createDraft.IdempotencyKey)
 
-	submitID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT")
+	submitID := seedLedgerAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.SubmitApprovalRequest(ctx, requesterPrincipal, submitID, 1)
 		return err
@@ -152,7 +153,7 @@ WHERE command_type='LEDGER_REPAIR' AND policy_version=1 AND snapshot_schema_vers
 	}
 	assertApprovalRequestState(t, ctx, repository, submitID, "DRAFT", 1)
 
-	approveID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED")
+	approveID := seedLedgerAdvancementRequest(t, ctx, repository, requester.ID, policy, "SUBMITTED", frozen)
 	if err := retryWhileWriterUnavailable(t, ctx, repository, func() error {
 		_, err := repository.DecideApprovalRequest(ctx, approverPrincipal, approveID, 1, "APPROVED", "closed cross-domain gate", frozen.CriticalResourceVersions)
 		return err
@@ -209,9 +210,9 @@ WHERE command_type='LEDGER_REPAIR' AND policy_version=1 AND snapshot_schema_vers
 	}
 
 	// Real Account -> Billing authorization chain while the command is activated.
-	transitionEntitlementCrossDomainAccountControl(t, ctx, accountConnection)
-	requester = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "ledger-repair-chain-requester")
-	approver = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "ledger-repair-chain-approver")
+	// The official Account fixture has already completed the controlled READY transition.
+	requester = seedLedgerApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "ledger-repair-chain-requester")
+	approver = seedLedgerApprovalActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "ledger-repair-chain-approver")
 	requesterPrincipal, approverPrincipal = approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
 	draft := ApprovalDraft{
 		CommandType: policy.CommandType, IdempotencyKey: "ledger-repair-cross-domain-chain",
@@ -431,5 +432,25 @@ WHERE command_type='LEDGER_REPAIR' AND policy_version=1 AND snapshot_schema_vers
 	}
 	if projected, ok := rolledBack.Find(policy.CommandType, 1, 1); !ok || projected.State != "INACTIVE" {
 		t.Fatalf("Account reader did not observe the rolled-back projection: %#v", projected)
+	}
+}
+
+func transitionEntitlementCrossDomainAccountControl(t *testing.T, ctx context.Context, connection *pgx.Conn) {
+	t.Helper()
+	if _, err := connection.Exec(ctx, `SET ROLE account_approval_control_owner`); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`UPDATE account_approval_control.admin_approval_control SET mode='QUIESCING',approval_epoch=approval_epoch+1,version=version+1,updated_at=now() WHERE control_id='ADMIN_APPROVAL'`,
+		`UPDATE account_approval_control.admin_approval_control SET authorization_relay_state='FENCED',authorization_relay_epoch=authorization_relay_epoch+1,version=version+1,updated_at=now() WHERE control_id='ADMIN_APPROVAL'`,
+		`UPDATE account_approval_control.admin_approval_control SET mode='PROOF_REQUIRED',approval_wire_version=2,proof_required=true,approval_epoch=approval_epoch+1,version=version+1,updated_at=now() WHERE control_id='ADMIN_APPROVAL'`,
+		`UPDATE account_approval_control.admin_approval_control SET authorization_relay_state='RUNNING',authorization_relay_epoch=authorization_relay_epoch+1,version=version+1,updated_at=now() WHERE control_id='ADMIN_APPROVAL'`,
+	} {
+		if _, err := connection.Exec(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := connection.Exec(ctx, `RESET ROLE; SET ROLE account_service`); err != nil {
+		t.Fatal(err)
 	}
 }

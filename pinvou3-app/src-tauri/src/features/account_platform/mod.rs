@@ -6,6 +6,7 @@
 //! token in the system credential store so the next launch can sign in again.
 
 pub(crate) mod client_migration;
+mod model_cancellation;
 mod model_proxy;
 mod organization_routes;
 mod platform;
@@ -1662,15 +1663,16 @@ fn prepare_request(
     }
     organization_routes::exact_body(&input.area, parsed.path(), &mut input.body)?;
     let organization_key = organization_routes::keyed(&input.area, &method, parsed.path());
-    let closure_key = input.area == "account"
+    let requires_key = (input.area == "account"
         && method == Method::POST
-        && parsed.path() == "/v1/me/account-closure-requests";
-    let requires_key = closure_key
+        && parsed.path() == "/v1/me/account-closure-requests")
         || input.area == "token"
-            && method == Method::POST
-            && (parsed.path() == "/v1/recharge/orders"
-                || parsed.path().starts_with("/v1/usage-requests/")
-                    && parsed.path().ends_with("/cancel"));
+            && ((method == Method::POST
+                && (parsed.path() == "/v1/recharge/orders"
+                    || parsed.path().starts_with("/v1/usage-requests/")
+                        && parsed.path().ends_with("/cancel")))
+                || method == Method::GET
+                    && parsed.path() == "/v1/usage-requests/by-idempotency-key");
     match &input.idempotency_key {
         Some(key)
             if requires_key
@@ -1724,6 +1726,7 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
                 path,
                 "/v1/recharge/products"
                     | "/v1/models"
+                    | "/v1/usage-requests/by-idempotency-key"
                     | "/v1/payment-capabilities"
                     | "/v1/recharge/orders"
                     | "/v1/recharge/orders/recent"
@@ -1737,6 +1740,8 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         }
         let parts: Vec<_> = path.split('/').collect();
         return match parts.as_slice() {
+            ["", "v1", "usage-requests", id] if *method == Method::GET => uuid::Uuid::parse_str(id)
+                .is_ok_and(|value| !value.is_nil() && value.to_string() == *id),
             ["", "v1", "usage-requests", id, "cancel"] if *method == Method::POST => {
                 uuid::Uuid::parse_str(id)
                     .is_ok_and(|value| !value.is_nil() && value.to_string() == *id)
@@ -1767,8 +1772,8 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
             "/v1/account/bootstrap"
             | "/v1/auth/captcha/challenges"
             | "/v1/me/profile-change-requests"
-            | "/v1/me/password-changes"
-            | "/v1/me/account-closure-requests",
+            | "/v1/me/account-closure-requests"
+            | "/v1/me/password-changes",
         ) => true,
         _ => {
             let segments: Vec<_> = path.split('/').collect();
@@ -2517,6 +2522,50 @@ mod tests {
                 )
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn account_closure_exact_routes_and_key_boundary() {
+        let make = |method: &str, resource: &str, key: Option<&str>| ApiRequest {
+            area: "account".into(),
+            method: method.into(),
+            resource: resource.into(),
+            body: (method == "POST")
+                .then(|| serde_json::json!({"confirmation":"CLOSE_MY_ACCOUNT"})),
+            idempotency_key: key.map(str::to_owned),
+        };
+        assert!(
+            prepare_request(
+                &config(),
+                make("GET", "/v1/me/account-closure-request", None)
+            )
+            .is_ok()
+        );
+        let key = "closure-11111111-1111-4111-8111-111111111111";
+        let prepared = prepare_request(
+            &config(),
+            make("POST", "/v1/me/account-closure-requests", Some(key)),
+        )
+        .unwrap();
+        assert_eq!(prepared.idempotency_key.as_deref(), Some(key));
+        for invalid in [None, Some("short"), Some("key with spaces 0000")] {
+            assert!(
+                prepare_request(
+                    &config(),
+                    make("POST", "/v1/me/account-closure-requests", invalid)
+                )
+                .is_err()
+            );
+        }
+        for (method, path) in [
+            ("POST", "/v1/me/account-closure-request"),
+            ("GET", "/v1/me/account-closure-requests"),
+            ("GET", "/v1/me/account-closure"),
+            ("POST", "/v1/me/account-closure-requests/force"),
+            ("POST", "/admin/v1/account-closure-requests"),
+        ] {
+            assert!(prepare_request(&config(), make(method, path, Some(key))).is_err());
         }
     }
 
@@ -3299,6 +3348,29 @@ mod tests {
             idempotency_key: Some("cancel-operation-0001".into()),
         };
         assert!(prepare_request(&config(), request()).is_ok());
+        let lookup = || ApiRequest {
+            area: "token".into(),
+            resource: "/v1/usage-requests/by-idempotency-key".into(),
+            method: "GET".into(),
+            body: None,
+            idempotency_key: Some("original-invocation-0001".into()),
+        };
+        assert!(prepare_request(&config(), lookup()).is_ok());
+        let mut no_key = lookup();
+        no_key.idempotency_key = None;
+        assert!(prepare_request(&config(), no_key).is_err());
+        let mut query = lookup();
+        query.resource.push_str("?key=private");
+        assert!(prepare_request(&config(), query).is_err());
+        let mut body = lookup();
+        body.body = Some(serde_json::json!({}));
+        assert!(prepare_request(&config(), body).is_err());
+        assert!(route_allowed(
+            "token",
+            &Method::GET,
+            &format!("/v1/usage-requests/{id}"),
+            None
+        ));
         let mut absent = request();
         absent.idempotency_key = None;
         assert!(prepare_request(&config(), absent).is_err());
@@ -3317,9 +3389,21 @@ mod tests {
             "/admin/v1/usage-requests",
             None
         ));
+        assert!(route_allowed(
+            "token",
+            &Method::GET,
+            "/v1/organizations/11111111-1111-4111-8111-111111111111/model-policy",
+            None
+        ));
         assert!(!route_allowed(
             "token",
             &Method::GET,
+            "/v1/organizations/11111111-1111-4111-8111-111111111111/model-policy",
+            Some("extra=1")
+        ));
+        assert!(!route_allowed(
+            "token",
+            &Method::POST,
             "/v1/organizations/11111111-1111-4111-8111-111111111111/model-policy",
             None
         ));

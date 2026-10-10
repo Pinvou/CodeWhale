@@ -32,15 +32,23 @@ func TestRegistrationBonusGuardRequiresFrozenPair(t *testing.T) {
 			}
 		})
 	}
-	for _, target := range []string{"original-up", "guard-up", "guard-down", "guard-checksum", "duplicate"} {
+	for _, target := range []string{"original-up", "original-down", "original-name", "guard-name", "guard-up", "guard-down", "guard-checksum", "duplicate"} {
 		t.Run(target, func(t *testing.T) {
 			changed := slices.Clone(pair)
 			for i := range changed {
 				if changed[i].Version == 87 && target == "original-up" {
 					changed[i].UpSQL += "\n-- edited"
 				}
+				if changed[i].Version == 87 && target == "original-down" {
+					changed[i].DownSQL = "SELECT 1;"
+				}
+				if changed[i].Version == 87 && target == "original-name" {
+					changed[i].Name = "other"
+				}
 				if changed[i].Version == registrationBonusGuardVersion {
 					switch target {
+					case "guard-name":
+						changed[i].Name = "other"
 					case "guard-up":
 						changed[i].UpSQL += "\n-- edited"
 					case "guard-down":

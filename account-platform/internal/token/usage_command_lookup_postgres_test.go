@@ -169,7 +169,7 @@ func TestUsageCommandLookupThroughCurrentHandler(t *testing.T) {
 
 }
 
-// Existing route/account reads retain their authentication boundary. Future
+// Installed command reads retain their authentication boundary. Unknown
 // runtime families must not become reachable through the current usage lookup.
 func TestCurrentCommandKeyLookupDispatchBoundaries(t *testing.T) {
 	service := &Service{authorizer: &authorization.Client{}}

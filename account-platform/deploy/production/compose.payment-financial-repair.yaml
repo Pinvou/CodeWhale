@@ -3,9 +3,9 @@
 name: pinvou-personal
 services:
   account-migrate:
-    image: ${MIGRATE_IMAGE:?set reviewed same-source F12 migrator with Account073 and Billing065/066/077 together with complete predecessor schema}
+    image: ${MIGRATE_IMAGE:?set reviewed same-source F12 migrator with Account073 and Billing065/066/077/900016/900017 together with complete predecessor schema}
   billing-migrate:
-    image: ${MIGRATE_IMAGE:?set reviewed same-source F12 migrator with Account073 and Billing065/066/077 together with complete predecessor schema}
+    image: ${MIGRATE_IMAGE:?set reviewed same-source F12 migrator with Account073 and Billing065/066/077/900016/900017 together with complete predecessor schema}
   account-service:
     image: ${ACCOUNT_SERVICE_IMAGE:?set reviewed same-source F12 Account with closed Billing precheck and typed approval projection}
     environment:

@@ -16,6 +16,9 @@ import (
 func retainedOrganizationFinanceOrder(t *testing.T, r *PostgresRepository, ctx context.Context, credit int64, paid bool) (*PaymentCoordinator, PaymentOrder, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	owner := uuid.New()
+	if _, err := r.ApplyOrganizationLifecycle(ctx, owner, "ACTIVE", 1, false); err != nil {
+		t.Fatal(err)
+	}
 	wallet, _, err := r.EnsureWallet(ctx, "ORGANIZATION", owner)
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +107,11 @@ func TestRetainedOrganizationFinancialDismissal(t *testing.T) {
 				}
 				r.now = func() time.Time { return expires.Add(time.Second) }
 			}
-			if _, err := r.ResolvePaymentAnomaly(ctx, *chargeback.ManualReviewCaseID, uuid.New(), uuid.NewString(), "DISMISS", "controlled chargeback was disproved", "NONE"); err != nil {
+			firstActor := uuid.New()
+			if _, err := r.ClaimPaymentAnomaly(ctx, *chargeback.ManualReviewCaseID, firstActor, uuid.NewString()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.ResolvePaymentAnomaly(ctx, *chargeback.ManualReviewCaseID, firstActor, uuid.NewString(), "DISMISS", "controlled chargeback was disproved", "NONE"); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := r.ReserveMemberQuota(ctx, uuid.New(), wallet.ID, wallet.OwnerID, member, version, 100, nil, r.now().Add(time.Hour)); err == nil {
@@ -118,6 +125,9 @@ func TestRetainedOrganizationFinancialDismissal(t *testing.T) {
 				t.Fatal("other review's component fence disappeared", err)
 			}
 			actor, dismissalKey := uuid.New(), uuid.NewString()
+			if _, err := r.ClaimPaymentAnomaly(ctx, *forced.ManualReviewCaseID, actor, uuid.NewString()); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := r.ResolvePaymentAnomaly(ctx, *forced.ManualReviewCaseID, actor, dismissalKey, "DISMISS", "controlled forced refund was disproved", "NONE"); err != nil {
 				t.Fatal(err)
 			}
@@ -240,7 +250,11 @@ func TestRetainedOrganizationChargebackFinancialDismissal(t *testing.T) {
 				}
 				r.now = func() time.Time { return expires.Add(time.Second) }
 			}
-			if _, err := r.ResolvePaymentAnomaly(ctx, *chargeback.ManualReviewCaseID, uuid.New(), uuid.NewString(), "DISMISS", "controlled chargeback was disproved", "NONE"); err != nil {
+			firstActor := uuid.New()
+			if _, err := r.ClaimPaymentAnomaly(ctx, *chargeback.ManualReviewCaseID, firstActor, uuid.NewString()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.ResolvePaymentAnomaly(ctx, *chargeback.ManualReviewCaseID, firstActor, uuid.NewString(), "DISMISS", "controlled chargeback was disproved", "NONE"); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := r.ReserveMemberQuota(ctx, uuid.New(), wallet.ID, wallet.OwnerID, member, version, 100, nil, r.now().Add(time.Hour)); err == nil {
@@ -254,6 +268,9 @@ func TestRetainedOrganizationChargebackFinancialDismissal(t *testing.T) {
 				t.Fatal("other review's component fence disappeared", err)
 			}
 			actor, dismissalKey := uuid.New(), uuid.NewString()
+			if _, err := r.ClaimPaymentAnomaly(ctx, *forced.ManualReviewCaseID, actor, uuid.NewString()); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := r.ResolvePaymentAnomaly(ctx, *forced.ManualReviewCaseID, actor, dismissalKey, "DISMISS", "controlled forced refund was disproved", "NONE"); err != nil {
 				t.Fatal(err)
 			}
@@ -340,6 +357,10 @@ func TestRetainedOrganizationDismissWalletLockGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	actor := uuid.New()
+	if _, err := r.ClaimPaymentAnomaly(ctx, *forced.ManualReviewCaseID, actor, uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
 	blocker, err := r.pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -351,7 +372,7 @@ func TestRetainedOrganizationDismissWalletLockGate(t *testing.T) {
 	}
 	result := make(chan error, 1)
 	go func() {
-		_, err := r.ResolvePaymentAnomaly(ctx, *forced.ManualReviewCaseID, uuid.New(), uuid.NewString(), "DISMISS", "controlled financial dismissal waits for wallet", "NONE")
+		_, err := r.ResolvePaymentAnomaly(ctx, *forced.ManualReviewCaseID, actor, uuid.NewString(), "DISMISS", "controlled financial dismissal waits for wallet", "NONE")
 		result <- err
 	}()
 	gateContext, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -434,15 +455,21 @@ func TestRetainedOrganizationDismissKeepsLegacyRefundFence(t *testing.T) {
 				}
 				return facts
 			}
+			actor := uuid.New()
+			if _, err := r.ClaimPaymentAnomaly(ctx, *review.ManualReviewCaseID, actor, uuid.NewString()); err != nil {
+				t.Fatal(err)
+			}
 			before := rights()
-			if _, err = r.ResolvePaymentAnomaly(ctx, *review.ManualReviewCaseID, uuid.New(), uuid.NewString(), "DISMISS", "controlled disproved chargeback keeps refund fence", "NONE"); err != nil {
+			if _, err = r.ResolvePaymentAnomaly(ctx, *review.ManualReviewCaseID, actor, uuid.NewString(), "DISMISS", "controlled disproved chargeback keeps refund fence", "NONE"); err != nil {
 				t.Fatal(err)
 			}
 			if before != rights() {
 				t.Fatal("dismissal changed rights behind another pending refund")
 			}
+			// Recording the external financial fence durably moves REQUESTED to
+			// MANUAL_REVIEW; dismissal must retain this uncertainty and its rights fence.
 			var actual, componentState string
-			if err = r.pool.QueryRow(ctx, `SELECT r.status,c.status FROM refunds r JOIN entitlement_components c ON c.package_id=r.entitlement_package_id AND c.component_type='BASE' WHERE r.id=$1`, refund.ID).Scan(&actual, &componentState); err != nil || actual != status || componentState != "FROZEN" {
+			if err = r.pool.QueryRow(ctx, `SELECT r.status,c.status FROM refunds r JOIN entitlement_components c ON c.package_id=r.entitlement_package_id AND c.component_type='BASE' WHERE r.id=$1`, refund.ID).Scan(&actual, &componentState); err != nil || actual != "MANUAL_REVIEW" || componentState != "FROZEN" {
 				t.Fatal("retained refund financial fence removed", actual, componentState, err)
 			}
 		})
@@ -488,5 +515,57 @@ func retainedOrganizationFinancialDownFence(t *testing.T, r *PostgresRepository,
 	}
 	if facts != retainedOrganizationDismissFacts(t, r, ctx, grantID) {
 		t.Fatal("rejected rollback changed new-reason quota/financial facts")
+	}
+}
+
+// Owner-only fixture mutations represent old missing or stale projection evidence.
+// Runtime dismissal must retain all entitlement facts instead of guessing ACTIVE.
+func TestF06FinancialDismissKeepsUnknownMembership(t *testing.T) {
+	for _, evidence := range []string{"missing", "older-version"} {
+		t.Run(evidence, func(t *testing.T) {
+			r, ctx := retainedFinanceRepository(t)
+			_, order, transaction, pack := retainedOrganizationFinanceOrder(t, r, ctx, 1000000, true)
+			member := uuid.New()
+			if _, err := r.ApplyOrganizationMemberLifecycle(ctx, *order.BeneficiaryOrganizationID, member, "ACTIVE", 2); err != nil {
+				t.Fatal(err)
+			}
+			request := MemberQuotaAllocation{OrganizationID: *order.BeneficiaryOrganizationID, MemberUserID: member, ComponentType: "BASE", AmountMicrocredits: 500000, MembershipVersion: 2, CreatedBy: uuid.New(), IdempotencyKey: uuid.NewString(), PackageID: pack}
+			if err := r.pool.QueryRow(ctx, `SELECT id FROM entitlement_components WHERE package_id=$1 AND component_type='BASE'`, pack).Scan(&request.ComponentID); err != nil {
+				t.Fatal(err)
+			}
+			grant, _, err := r.AllocateMemberQuota(ctx, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			review, err := r.RecordAndFreezeForcedRefund(ctx, transaction, "controlled-unknown-membership", 5, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			statement := "DELETE FROM organization_member_lifecycle_states WHERE organization_id='" + request.OrganizationID.String() + "' AND user_id='" + member.String() + "'"
+			if evidence == "older-version" {
+				statement = "UPDATE organization_member_lifecycle_states SET membership_version=1 WHERE organization_id='" + request.OrganizationID.String() + "' AND user_id='" + member.String() + "'"
+			}
+			if _, err := retainedFinanceOwnerExec(t, r, ctx, statement); err != nil {
+				t.Fatal(err)
+			}
+			facts := func() string {
+				var value string
+				if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object('grant',to_jsonb(g),'component',to_jsonb(c),'package',to_jsonb(p),'wallet',to_jsonb(w))::text FROM member_quota_grants g JOIN entitlement_components c ON c.id=g.component_id JOIN entitlement_packages p ON p.id=g.package_id JOIN wallets w ON w.id=p.wallet_id WHERE g.id=$1`, grant.ID).Scan(&value); err != nil {
+					t.Fatal(err)
+				}
+				return value
+			}
+			actor := uuid.New()
+			if _, err := r.ClaimPaymentAnomaly(ctx, *review.ManualReviewCaseID, actor, uuid.NewString()); err != nil {
+				t.Fatal(err)
+			}
+			before := facts()
+			if _, err := r.ResolvePaymentAnomaly(ctx, *review.ManualReviewCaseID, actor, uuid.NewString(), "DISMISS", "controlled disproved event keeps unknown membership", "NONE"); err != nil {
+				t.Fatal(err)
+			}
+			if after := facts(); after != before {
+				t.Fatal("unknown membership changed frozen entitlement or money facts")
+			}
+		})
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	billingdomain "github.com/Pinvou/pinvou3/account-platform/internal/billing"
+	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -20,7 +21,7 @@ import (
 // billing_migrator with MIGRATION_ROLE=billing_service, and the runtime pool
 // runs as the non-superuser billing_service identity. Activation stays exactly
 // as deployed: policy v2 is appended INACTIVE next to the immutable v1 history.
-func newEntitlementCrossDomainBillingFixture(t *testing.T, ctx context.Context, databaseURL string) (*billingdomain.PostgresRepository, *pgxpool.Pool, *pgx.Conn) {
+func newEntitlementCrossDomainBillingFixture(t *testing.T, ctx context.Context, databaseURL string, beforeUp ...func(*pgx.Conn)) (*billingdomain.PostgresRepository, *pgxpool.Pool, *pgx.Conn) {
 	t.Helper()
 	base, err := pgx.ParseConfig(databaseURL)
 	if err != nil {
@@ -38,34 +39,61 @@ func newEntitlementCrossDomainBillingFixture(t *testing.T, ctx context.Context, 
 	t.Cleanup(func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, _ = admin.Exec(cleanup, `DROP DATABASE IF EXISTS `+identifier)
-		_ = admin.Close(context.Background())
+		if err := waitOwnedBillingFixtureSessionsClosed(cleanup, admin, database); err != nil {
+			t.Errorf("owned Billing cleanup guard failed: %s", err)
+		} else if _, err := admin.Exec(cleanup, `DROP DATABASE `+identifier); err != nil {
+			t.Error("owned Billing cleanup failed")
+		}
+		if err := admin.Close(context.Background()); err != nil {
+			t.Error("owned Billing cleanup control close failed")
+		}
 	})
-	migrationConfig := base.Copy()
-	migrationConfig.Database = database
-	connection, err := pgx.ConnectConfig(ctx, migrationConfig)
+	setupConfig := base.Copy()
+	setupConfig.Database = database
+	setup, err := pgx.ConnectConfig(ctx, setupConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = connection.Close(context.Background()) })
+	defer func() {
+		if err := setup.Close(context.Background()); err != nil {
+			t.Error("owned Billing setup close failed")
+		}
+	}()
 	// Mirror deploy/compose/init-databases.sh: the schema owner holds public and
 	// the runtime keeps schema CREATE only until migration 53 revokes it.
-	if _, err := connection.Exec(ctx, `ALTER SCHEMA public OWNER TO billing_schema_owner;
+	if _, err := setup.Exec(ctx, `ALTER SCHEMA public OWNER TO billing_schema_owner;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE,CREATE ON SCHEMA public TO billing_service`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := connection.Exec(ctx, `SET SESSION AUTHORIZATION billing_migrator; SET ROLE billing_service`); err != nil {
+	for _, prepare := range beforeUp {
+		prepare(setup)
+	}
+	migrationConfig := setupConfig.Copy()
+	migrationConfig.User, migrationConfig.Password = "billing_migrator", ""
+	connection, err := pgx.ConnectConfig(ctx, migrationConfig)
+	if err != nil {
+		t.Fatal("genuine Billing migration connection failed")
+	}
+	t.Cleanup(func() {
+		if err := connection.Close(context.Background()); err != nil {
+			t.Error("owned Billing operator close failed")
+		}
+	})
+	if _, err := connection.Exec(ctx, `SET ROLE billing_service`); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := migrations.Load("../../migrations/billing")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.Up(ctx, connection, loaded); err != nil {
+	if err := billingschema.Up(ctx, connection, loaded); err != nil {
 		t.Fatalf("Billing fixture migrations: %v", err)
 	}
 	migrations.Unlock(ctx, connection)
+	if _, err := migrations.VerifyApplied(ctx, connection, loaded); err != nil {
+		t.Fatal(err)
+	}
 
 	configuration, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
@@ -73,10 +101,7 @@ GRANT USAGE,CREATE ON SCHEMA public TO billing_service`); err != nil {
 	}
 	configuration.MaxConns = 20
 	configuration.ConnConfig.Database = database
-	configuration.AfterConnect = func(connectContext context.Context, connection *pgx.Conn) error {
-		_, connectErr := connection.Exec(connectContext, `SET SESSION AUTHORIZATION billing_service; SET search_path TO public,pg_temp`)
-		return connectErr
-	}
+	configuration.ConnConfig.User, configuration.ConnConfig.Password = "billing_service", ""
 	pool, err := pgxpool.NewWithConfig(ctx, configuration)
 	if err != nil {
 		t.Fatal(err)

@@ -23,6 +23,7 @@ import (
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
 
 type Service struct {
+	approvalPrechecks           ApprovalPrecheckSource
 	organizationLifecycle       []OrganizationLifecycleClient
 	organizationUnitLifecycle   []OrganizationUnitLifecycleClient
 	organizationMemberLifecycle []OrganizationMemberLifecycleClient
@@ -33,7 +34,6 @@ type Service struct {
 	humanDelegations            *humandelegation.Signer
 	recoveryResults             ApprovalRecoveryResultReader
 	recoveryEffects             approvaleffect.Reader
-	approvalPrechecks           ApprovalPrecheckSource
 	wallets                     WalletProvisioner
 	mobileAuth                  *MobileAuthService
 	profiles                    *ProfileChangeService
@@ -80,8 +80,9 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
+	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account.closure.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.GET("/client-compatibility", serviceauth.Require("internal.client-compatibility.read"), httpserver.AdaptFunc(s.internalClientCompatibility))
-	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account-closure-state.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
+	internal.GET("/registration-bonus-eligibility/readiness", serviceauth.Require("internal.registration-bonus-eligibility.read"), httpserver.AdaptFunc(s.internalRegistrationBonusEligibilityReadiness))
 	internal.POST("/token-owner-authority", serviceauth.Require("internal.token-owner-authority.read"), httpserver.AdaptFunc(s.internalTokenOwnerAuthority))
 	internal.GET("/token-owner-candidates", serviceauth.Require("internal.token-owner-candidates.read"), httpserver.AdaptFunc(s.internalTokenOwnerCandidates))
 	internal.POST("/authorization/check", serviceauth.Require("internal.authorization.check"), httpserver.AdaptFunc(s.checkPermission))
@@ -204,6 +205,8 @@ func (s *Service) getAuthorizationContext(w http.ResponseWriter, r *http.Request
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the request could not be completed"
 	switch {
+	case errors.Is(err, ErrInvalidAccountClosureRequest):
+		status, code, message = http.StatusBadRequest, "INVALID_REQUEST", "invalid account closure command"
 	case errors.Is(err, ErrNotFound):
 		status, code, message = http.StatusNotFound, "NOT_FOUND", "the requested account resource was not found"
 	case errors.Is(err, ErrForbidden):

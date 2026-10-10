@@ -8,6 +8,9 @@ import puppeteer from 'puppeteer-core';
 const browserPath = [process.env.CHROME, 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'].find((candidate) => candidate && existsSync(candidate));
 assert.ok(browserPath, 'Chromium or Edge is required');
 const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');
+let dropNextAck = false;
+let mutations = 0;
+const receipts = new Map();
 let permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
 let currentUserID = '0199a100-0001-7000-8000-000000000101';
 let csrfToken = 'csrf-user-a';
@@ -26,7 +29,7 @@ const writes = [];
 
 function json(response, payload, status = 200) {
   response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-  response.end(JSON.stringify(payload));
+  response.end(JSON.stringify(payload).replace(/"revision":"([1-9]\d*)"/g, '"revision":$1'));
 }
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
@@ -64,7 +67,7 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/auth/login') {
     reauthenticationRequests.push(url);
     let returnTo = url.searchParams.get('return_to') || '/admin.html?section=operations';
-    if (authenticationBehavior === 'concurrent-update') policy = { ...policy, revision: policy.revision + 1, amount_microcredits: 400_000, validity_days: 45, updated_at: new Date().toISOString() };
+    if (authenticationBehavior === 'concurrent-update') policy = { ...policy, revision: (BigInt(policy.revision) + 1n).toString(), amount_microcredits: 400_000, validity_days: 45, updated_at: new Date().toISOString() };
     if (authenticationBehavior === 'cancel') returnTo = '/admin.html?section=operations';
     if (authenticationBehavior === 'switch-user') {
       currentUserID = currentUserID.endsWith('0101') ? '0199a100-0001-7000-8000-000000000202' : '0199a100-0001-7000-8000-000000000101';
@@ -119,9 +122,16 @@ const server = createServer(async (request, response) => {
     }
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    writes.push({ body, idempotencyKey: request.headers['idempotency-key'], csrf: request.headers['x-csrf-token'] });
-    policy = { ...policy, revision: policy.revision + 1, enabled: body.enabled, amount_microcredits: (BigInt(body.amount_points) * 10_000n).toString(), validity_days: body.validity_days, updated_at: new Date().toISOString() };
+    const raw = Buffer.concat(chunks).toString('utf8');
+    const body = JSON.parse(raw);
+    writes.push({ raw, body, idempotencyKey: request.headers['idempotency-key'], csrf: request.headers['x-csrf-token'] });
+    const key = request.headers['idempotency-key'];
+    const receipt = receipts.get(key);
+    if (receipt) { assert.equal(raw, receipt.raw, 'replay must retain exact original request bytes'); return json(response, receipt.policy); }
+    mutations++;
+    policy = { ...policy, revision: (BigInt(policy.revision) + 1n).toString(), enabled: body.enabled, amount_microcredits: (BigInt(body.amount_points) * 10_000n).toString(), validity_days: body.validity_days, updated_at: new Date().toISOString() };
+    receipts.set(key, { raw, policy: { ...policy } });
+    if (dropNextAck) { const mode = dropNextAck; dropNextAck = false; if (mode === 'transport') { response.destroy(); return; } return json(response, { code: 'COMMAND_RESULT_UNKNOWN' }, 503); }
     return json(response, policy);
   }
   const relative = url.pathname === '/admin.html' ? 'admin.html' : url.pathname.replace(/^\//, '');
@@ -142,13 +152,19 @@ try {
     ['large-legal-integral-policy', '5000000000000070000', '500000000000007'],
     ['max-int64-allowed-integral-points', '9223372036854770000', '922337203685477'],
     ['legacy-nonintegral-truncates-towards-zero', '10001', '1'],
+    ['int64-revision-above-js-safe-integer', '10000', '1', '9007199254740993'],
+    ['lost-ack-reload-original-key-only', '10000', '1', '9007199254740993', 'http'],
+    ['transport-lost-ack-browser-retry-stable-key', '10000', '1', '9007199254740993', 'transport'],
+    ['unknown-stepup-keeps-original-key-and-shows-current-policy', '10000', '1', '9007199254740993', 'http-reauth'],
+    ['unknown-originating-actor-is-not-replayed-by-another-administrator', '10000', '1', '9007199254740993', 'http-actor'],
   ];
   let failures = 0;
-  for (const [name, microcredits, expectedPoints] of cases) {
+  for (const [name, microcredits, expectedPoints, revision = '2', lostAck = false] of cases) {
     const page = await browser.newPage();
     try {
-      policy = { ...policy, revision: 2, enabled: false, amount_microcredits: microcredits, eligibility_status: 'READY' };
-      writes.length = 0;
+      policy = { ...policy, revision, enabled: false, amount_microcredits: microcredits, eligibility_status: 'READY' };
+      currentUserID = '0199a100-0001-7000-8000-000000000101'; csrfToken = 'csrf-user-a';
+      writes.length = 0; receipts.clear(); mutations = 0; dropNextAck = lostAck;
       await page.setViewport({ width: 1280, height: 900 });
       await page.evaluateOnNewDocument(() => localStorage.setItem('pinvou.admin.language', 'en'));
       await page.goto(`http://127.0.0.1:${port}/admin.html?section=operations`, { waitUntil: 'networkidle0' });
@@ -158,13 +174,41 @@ try {
       await page.type('[data-testid="registration-bonus-policy"] textarea', 'Keep amount while changing only policy enablement');
       await page.click('[data-testid="registration-bonus-policy"] input[type="checkbox"]');
       await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
-      await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === '3');
-      assert.equal(writes.length, 1);
+      if (typeof lostAck === 'string' && lostAck.startsWith('http')) {
+        await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"] button');
+        assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] button[type="submit"]', node => node.disabled), true);
+        if (lostAck === 'http-actor') {
+          currentUserID = '0199a100-0001-7000-8000-000000000202'; csrfToken = 'csrf-user-b';
+          await page.reload({ waitUntil: 'networkidle0' });
+          await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+          assert.equal(writes.length, 1, 'foreign actor must not automatically replay the originating request');
+          assert.equal(await page.$('[data-testid="registration-bonus-policy"] [role="alert"]'), null);
+          assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', node => node.value), '');
+          assert.equal(await page.evaluate(() => Boolean(document.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.pending.0199a100-0001-7000-8000-000000000101'))), true, 'original actor recovery evidence remains preserved');
+          console.log(JSON.stringify({ action: 'pass', test: name }));
+          continue;
+        }
+        await page.reload({ waitUntil: 'networkidle0' });
+        await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"] button');
+        if (lostAck === 'http-reauth') {
+          recentAuthenticationRequired = true;
+          await page.click('[data-testid="registration-bonus-policy"] [role="alert"] button');
+          await page.waitForFunction(() => /sign in again/i.test(document.querySelector('[data-testid="registration-bonus-policy"] [role="alert"] button')?.textContent || ''));
+          await Promise.all([page.waitForNavigation({ waitUntil: 'networkidle0' }), page.click('[data-testid="registration-bonus-policy"] [role="alert"] button')]);
+          await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"] button');
+        }
+        await page.click('[data-testid="registration-bonus-policy"] [role="alert"] button');
+      }
+      const nextRevision = (BigInt(revision) + (lostAck === 'http-reauth' ? 2n : 1n)).toString();
+      await page.waitForFunction(expected => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === expected && !document.querySelector('[data-testid="registration-bonus-policy"] [role="alert"]'), {}, nextRevision);
+      assert.equal(writes.length, lostAck ? 2 : 1);
+      assert.equal(mutations, 1, 'lost acknowledgement must not create another mutation');
+      if (lostAck) assert.equal(writes[0].idempotencyKey, writes[1].idempotencyKey);
       assert.equal(shown, expectedPoints, `${name}: exact current points shown`);
       assert.equal(String(writes[0].body.amount_points), expectedPoints, `${name}: reason/enable save keeps point count`);
-      assert.equal(policy.amount_microcredits, (BigInt(expectedPoints) * 10000n).toString());
+      assert.equal(policy.amount_microcredits, lostAck === 'http-reauth' ? 400000 : (BigInt(expectedPoints) * 10000n).toString());
       assert.equal(writes[0].body.enabled, true);
-      assert.equal(writes[0].body.expected_revision, 2);
+      assert.match(writes[0].raw, new RegExp('\"expected_revision\":' + revision + ','));
       assert.equal(writes[0].csrf, 'csrf-user-a');
       assert.match(writes[0].idempotencyKey, /^registration-bonus-/);
       console.log(JSON.stringify({ action: 'pass', test: name }));

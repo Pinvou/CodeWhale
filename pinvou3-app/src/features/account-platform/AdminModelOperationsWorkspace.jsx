@@ -3,6 +3,10 @@ import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-n
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
 import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
 import { governedTokenEnvelope } from './admin-high-risk-action-state.js';
+import { AdminUsagePageOverview } from './AdminUsagePageOverview.jsx';
+import { AdminModelOperationsOverview } from './AdminModelOperationsOverview.jsx';
+import { readAdminModelOperationsWindow, usageOverviewRoute } from './admin-usage-overview.js';
+import './admin-usage-overview.css';
 import { requireUsageDetail, requireUsageReadiness, requireUsagePrecheck, requireUsageCommandResult } from './admin-usage-governance.js';
 
 function readDetailID(key) {
@@ -57,6 +61,28 @@ function sourceRetry({ state, source, query, histories, onQueryChange, setRefres
     delete histories.current[source];
     onQueryChange(source, { ...query, cursor: '' }, 'replace');
   } else setRefreshVersion((value) => value + 1);
+}
+
+function ProvisioningList({ load, copy, routeVersion, onQueryChange, onOpen, histories, canOpen }) {
+  const query = useMemo(() => readAdminModelTokenQuery('provisionings'), [routeVersion]);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const state = useAdminSource({ enabled: true, load, query, refreshVersion });
+  const retry = () => sourceRetry({ state, source: 'provisionings', query, histories, onQueryChange, setRefreshVersion });
+  return <section className="adm-card adm-source-card" aria-labelledby="provisionings-title">
+    <SourceHeader title={copy.provisionings} titleID="provisionings-title" state={state} copy={copy} onRetry={retry} />
+    <FilterForm source="provisionings" query={query} copy={copy} onQueryChange={onQueryChange} fields={[
+      { key: 'q', label: copy.provisioningSearch, placeholder: copy.identifierPlaceholder },
+      { key: 'status', label: copy.status, options: ['PENDING', 'READY', 'FAILED', 'REPAIR_REQUIRED'] },
+      { key: 'model_id', label: copy.modelID },
+      { key: 'token_account_id', label: copy.tokenAccountID },
+      { key: 'scope_type', label: copy.scope, options: ['PERSONAL', 'ORGANIZATION'] },
+      { key: 'scope_id', label: copy.scopeID },
+      { key: 'sla_overdue', label: copy.slaOverdue, options: ['true', 'false'] },
+    ]} />
+    <SourceFeedback state={state} copy={copy} onRetry={retry} />
+    {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.provisioning}</th><th>{copy.modelID}</th><th>{copy.status}</th><th>{copy.stage}</th><th>{copy.generation}</th><th>{copy.updatedAt}</th>{canOpen && <th>{copy.actions}</th>}</tr></thead><tbody>{state.items.map((item) => <tr key={item.provisioning_id}><td data-label={copy.provisioning}><span className="adm-mono">{item.provisioning_id}</span></td><td data-label={copy.modelID}><span className="adm-mono">{item.model_id}</span></td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.stage}>{copy.enumLabels?.[item.stage] || item.stage}</td><td data-label={copy.generation}>{item.actual_generation || 0} / {item.desired_generation}</td><td data-label={copy.updatedAt}><DateValue value={item.updated_at} /></td>{canOpen && <td data-label={copy.actions}><button type="button" onClick={() => onOpen(item.provisioning_id)}>{copy.viewDetail}</button></td>}</tr>)}</tbody></table></div>}
+    <Pagination source="provisionings" query={query} state={state} copy={copy} cursorHistory={histories} onQueryChange={onQueryChange} />
+  </section>;
 }
 
 function UsageList({ load, copy, routeVersion, onQueryChange, onOpen, histories, canOpen }) {
@@ -164,22 +190,40 @@ function UsageDetail({ id, client, copy, routeVersion, onBack, onQueryChange, hi
   </section>;
 }
 
-export function AdminModelOperationsWorkspace({ client, copy, permissions, routeVersion, onRouteChange }) {
+export function AdminModelOperationsWorkspace({ client, copy, permissions, routeVersion, onRouteChange, onNavigate, owner, authorizationVersion, pageOverviewEnabled = false, operationsOverviewEnabled = false }) {
   const histories = useRef({});
   const canRead = permissions.includes('platform.usage.read');
   const canReconcile = permissions.includes('platform.usage.reconcile.retry');
-  const tab = new URLSearchParams(globalThis.location?.search || '').get('operations_tab') === 'reconciliation' ? 'reconciliation' : 'usage';
+  const canReadTokens = permissions.includes('platform.tokens.read');
+  const tabs = [...(canRead ? ['usage', 'reconciliation'] : []), ...(canReadTokens ? ['provisionings'] : [])];
+  const requestedTab = new URLSearchParams(globalThis.location?.search || '').get('operations_tab');
+  const tab = tabs.includes(requestedTab) ? requestedTab : tabs[0];
+  const overviewWindow = readAdminModelOperationsWindow();
+  const provisioningLoad = useMemo(() => (filters, signal) => client.provisionings(filters, signal), [client]);
   const id = readDetailID('usage_request_id');
   const usageLoad = useMemo(() => (filters, signal) => client.usageRequests(filters, signal), [client]);
   const reconciliationLoad = useMemo(() => (filters, signal) => client.usageReconciliationCases(filters, signal), [client]);
   const onQueryChange = (source, query, mode) => onRouteChange(adminModelTokenQueryUpdates(source, query), mode);
   const open = (usageID) => onRouteChange({ usage_request_id: usageID, ...adminModelTokenQueryUpdates('usageEvidence', {}) });
   const back = () => onRouteChange({ usage_request_id: null, ...adminModelTokenQueryUpdates('usageEvidence', {}) });
-  if (!canRead) return null;
-  if (id) return <UsageDetail key={`${client.financeSessionEpoch || 0}:${id}`} id={id} client={client} copy={copy} routeVersion={routeVersion} onBack={back} onQueryChange={onQueryChange} histories={histories} canReconcile={canReconcile} />;
+  if (!tabs.length) return null;
+  if (id && canRead) return <UsageDetail key={`${client.financeSessionEpoch || 0}:${id}`} id={id} client={client} copy={copy} routeVersion={routeVersion} onBack={back} onQueryChange={onQueryChange} histories={histories} canReconcile={canReconcile} />;
+  const navigateOverview = (target) => {
+    const next = usageOverviewRoute(target, adminModelTokenQueryUpdates(target.source, { ...target.query, cursor: '' }));
+    if (!next) return;
+    delete histories.current[target.source];
+    onRouteChange(next.query);
+  };
+  const aggregateNavigate = (target, query) => {
+    const next = usageOverviewRoute({ section: target }, query);
+    onNavigate(target, next.query);
+  };
+  const aggregateAllowed = operationsOverviewEnabled && ['platform.models.read', 'platform.tokens.read', 'platform.usage.read'].every(permission => permissions.includes(permission));
   return <>
-    <nav aria-label={copy.operationsViews}>{['usage', 'reconciliation'].map(value => <button key={value} type="button" aria-pressed={tab === value} onClick={() => onRouteChange({ operations_tab: value })}>{value === 'usage' ? copy.usageRequests : copy.reconciliationQueue}</button>)}</nav>
-    {tab === 'usage' ? <UsageList load={usageLoad} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} onOpen={open} histories={histories} canOpen />
+    {pageOverviewEnabled && <AdminUsagePageOverview section="modelOperations" client={client} copy={copy} permissions={permissions} userID={owner} authorizationVersion={authorizationVersion} routeVersion={routeVersion} enabled onRouteChange={onRouteChange} onDrilldown={navigateOverview} />}
+    {!pageOverviewEnabled && aggregateAllowed && <AdminModelOperationsOverview key={`${owner}:${authorizationVersion}:${overviewWindow}`} client={client} copy={copy} routeVersion={routeVersion} onRouteChange={onRouteChange} onNavigate={aggregateNavigate} />}
+    <nav aria-label={copy.operationsViews}>{tabs.map(value => <button key={value} type="button" aria-pressed={tab === value} onClick={() => onRouteChange({ operations_tab: value })}>{value === 'usage' ? copy.usageRequests : value === 'provisionings' ? copy.provisionings : copy.reconciliationQueue}</button>)}</nav>
+    {tab === 'provisionings' ? <ProvisioningList load={provisioningLoad} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} histories={histories} canOpen={false} /> : tab === 'usage' ? <UsageList load={usageLoad} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} onOpen={open} histories={histories} canOpen />
       : <ReconciliationList load={reconciliationLoad} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} onOpen={open} histories={histories} canOpen />}
   </>;
 }

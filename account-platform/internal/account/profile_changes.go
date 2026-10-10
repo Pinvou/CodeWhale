@@ -533,6 +533,11 @@ func (r *PostgresRepository) CreateProfileChange(ctx context.Context, principal 
 		return ProfileChange{}, ErrProfileChangeConflict
 	}
 	active, activeErr := scanProfileChange(tx.QueryRow(ctx, profileChangeSelect+` WHERE user_id=$1 AND status IN ('PENDING','VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED') ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, change.UserID))
+	if activeErr != nil && !errors.Is(activeErr, pgx.ErrNoRows) {
+		// Preserve the actual database failure; another query on an aborted
+		// transaction would replace it with the uninformative SQLSTATE 25P02.
+		return ProfileChange{}, activeErr
+	}
 	var databaseNow time.Time
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseNow); err != nil {
 		return ProfileChange{}, err
@@ -568,8 +573,6 @@ func (r *PostgresRepository) CreateProfileChange(ctx context.Context, principal 
 		if err := appendAudit(ctx, tx, change.UserID, principal.SessionID, nil, "account.profile_change.superseded", "profile_change", active.ID.String(), "SUCCEEDED", map[string]any{"field": active.Field, "reason": reason}); err != nil {
 			return ProfileChange{}, err
 		}
-	} else if !errors.Is(activeErr, pgx.ErrNoRows) {
-		return ProfileChange{}, activeErr
 	}
 	change.ID = uuid.Must(uuid.NewV7())
 	change.FenceVersion = securityVersion + 1
@@ -886,17 +889,36 @@ func (r *PostgresRepository) MarkProfileIdentityUpdated(ctx context.Context, id 
 }
 
 func (r *PostgresRepository) CommitProfileChange(ctx context.Context, id uuid.UUID) error {
+	// Discover the immutable subject before opening the transaction; closure
+	// cleanup takes USER before profile, so this writer must use the same order.
+	var userID uuid.UUID
+	if err := r.pool.QueryRow(ctx, `SELECT user_id FROM profile_change_requests WHERE id=$1`, id).Scan(&userID); err != nil {
+		return err
+	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var userStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&userStatus); err != nil {
+		return err
+	}
 	c, err := scanProfileChange(tx.QueryRow(ctx, profileChangeSelect+` WHERE id=$1 FOR UPDATE`, id))
 	if err != nil {
 		return err
 	}
+	if c.UserID != userID {
+		return ErrConflict
+	}
 	if c.AccountCommittedAt != nil {
 		return nil
+	}
+	// Preserve acknowledged identity facts for closure Prepare to reconcile.
+	// A worker may retry this command after cleanup; committed receipts above
+	// remain read-only, while cancelled or closed subjects cannot regain PII.
+	if userStatus == "CLOSING" || userStatus == "DELETED" || userStatus == "ANONYMIZED" || c.Status == "CANCELLED_ACCOUNT_CLOSURE" {
+		return ErrConflict
 	}
 	if c.IdentityUpdatedAt == nil {
 		return ErrConflict
@@ -937,12 +959,34 @@ func (r *PostgresRepository) CommitProfileChange(ctx context.Context, id uuid.UU
 	return tx.Commit(ctx)
 }
 func (r *PostgresRepository) MarkProfileSessionsRevoked(ctx context.Context, id uuid.UUID) error {
+	// Preserve acknowledged revocation facts using USER, profile, sessions order.
+	var userID uuid.UUID
+	if err := r.pool.QueryRow(ctx, `SELECT user_id FROM profile_change_requests WHERE id=$1`, id).Scan(&userID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `DELETE FROM user_sessions WHERE user_id=(SELECT user_id FROM profile_change_requests WHERE id=$1)`, id); err != nil {
+	var lockedUserID uuid.UUID
+	if err = tx.QueryRow(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&lockedUserID); err != nil {
+		return err
+	}
+	c, err := scanProfileChange(tx.QueryRow(ctx, profileChangeSelect+` WHERE id=$1 FOR UPDATE`, id))
+	if err != nil {
+		return err
+	}
+	if c.UserID != lockedUserID {
+		return ErrConflict
+	}
+	if c.SessionsRevokedAt != nil {
+		return nil
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM user_sessions WHERE user_id=$1`, userID); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE profile_change_requests SET sessions_revoked_at=COALESCE(sessions_revoked_at,$2),version=version+1,updated_at=$2 WHERE id=$1`, id, r.now()); err != nil {
@@ -950,8 +994,9 @@ func (r *PostgresRepository) MarkProfileSessionsRevoked(ctx context.Context, id 
 	}
 	return tx.Commit(ctx)
 }
+
 func (r *PostgresRepository) CompleteProfileChange(ctx context.Context, id uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, `UPDATE profile_change_requests SET status='COMPLETED',last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND account_committed_at IS NOT NULL AND sessions_revoked_at IS NOT NULL`, id, r.now())
+	_, err := r.pool.Exec(ctx, `UPDATE profile_change_requests SET status='COMPLETED',last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND account_committed_at IS NOT NULL AND sessions_revoked_at IS NOT NULL AND status NOT IN ('COMPLETED','CANCELLED_ACCOUNT_CLOSURE')`, id, r.now())
 	return err
 }
 func (r *PostgresRepository) ScheduleProfileChangeRetry(ctx context.Context, id uuid.UUID, code string) error {
@@ -1049,6 +1094,11 @@ FOR UPDATE OF u`, issuer, mobile, PermissionPersonalSecurityManage).Scan(&userID
 	if err != nil {
 		return PasswordResetOperation{}, err
 	}
+	// The user row is already locked. Retire only expired, unverified work;
+	// proof-bearing or live profile changes still fence password operations.
+	if err := supersedeExpiredPendingProfileChanges(ctx, tx, userID); err != nil {
+		return PasswordResetOperation{}, err
+	}
 	var profileActive bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM profile_change_requests WHERE user_id=$1 AND status IN ('PENDING','VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED'))`, userID).Scan(&profileActive); err != nil {
 		return PasswordResetOperation{}, err
@@ -1075,7 +1125,7 @@ FOR UPDATE OF u`, issuer, mobile, PermissionPersonalSecurityManage).Scan(&userID
 		return PasswordResetOperation{}, err
 	}
 	id := uuid.Must(uuid.NewV7())
-	_, err = tx.Exec(ctx, `INSERT INTO password_reset_operations(id,user_id,identity_issuer,identity_subject,sms_challenge_id,method,status,mobile_e164,password_handle,password_policy_version,fence_version,next_attempt_at,sla_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'SMS','VERIFIED',$6,$7,$8,$9,$10+interval '30 seconds',$10+interval '30 minutes',$10,$10)`, id, userID, issuer, subject, challengeID, mobile, handle, policyVersion, fenceVersion, now)
+	_, err = tx.Exec(ctx, `INSERT INTO password_reset_operations(id,user_id,identity_issuer,identity_subject,sms_challenge_id,method,status,mobile_e164,password_handle,password_policy_version,fence_version,next_attempt_at,sla_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'SMS','VERIFIED',$6,$7,$8,$9,$10::timestamptz+interval '30 seconds',$10::timestamptz+interval '30 minutes',$10,$10)`, id, userID, issuer, subject, challengeID, mobile, handle, policyVersion, fenceVersion, now)
 	if err != nil {
 		return PasswordResetOperation{}, err
 	}
@@ -1115,6 +1165,11 @@ FOR UPDATE OF u`, principal.Issuer, principal.Subject, PermissionPersonalSecurit
 		return PasswordResetOperation{}, err
 	}
 	now := r.now()
+	// The user row is already locked. Retire only expired, unverified work;
+	// proof-bearing or live profile changes still fence password operations.
+	if err := supersedeExpiredPendingProfileChanges(ctx, tx, userID); err != nil {
+		return PasswordResetOperation{}, err
+	}
 	var profileActive bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM profile_change_requests WHERE user_id=$1 AND status IN ('PENDING','VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED'))`, userID).Scan(&profileActive); err != nil {
 		return PasswordResetOperation{}, err
@@ -1138,7 +1193,7 @@ FOR UPDATE OF u`, principal.Issuer, principal.Subject, PermissionPersonalSecurit
 		return PasswordResetOperation{}, ErrConflict
 	}
 	id := uuid.Must(uuid.NewV7())
-	if _, err = tx.Exec(ctx, `INSERT INTO password_reset_operations(id,user_id,identity_issuer,identity_subject,method,status,mobile_e164,password_handle,password_policy_version,fence_version,next_attempt_at,sla_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'AUTHENTICATED','VERIFIED',$5,$6,$7,$8,$9+interval '30 seconds',$9+interval '30 minutes',$9,$9)`, id, userID, principal.Issuer, subject, mobile, handle, policyVersion, fenceVersion, now); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO password_reset_operations(id,user_id,identity_issuer,identity_subject,method,status,mobile_e164,password_handle,password_policy_version,fence_version,next_attempt_at,sla_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'AUTHENTICATED','VERIFIED',$5,$6,$7,$8,$9::timestamptz+interval '30 seconds',$9::timestamptz+interval '30 minutes',$9,$9)`, id, userID, principal.Issuer, subject, mobile, handle, policyVersion, fenceVersion, now); err != nil {
 		return PasswordResetOperation{}, err
 	}
 	if err = appendAudit(ctx, tx, userID, principal.Subject, nil, "account.password_change.verified", "password_reset", id.String(), "SUCCEEDED", map[string]any{"method": "RECENT_AUTHENTICATION"}); err != nil {

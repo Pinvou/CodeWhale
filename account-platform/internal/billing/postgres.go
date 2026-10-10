@@ -98,7 +98,11 @@ func (r *PostgresRepository) ensureWalletWithinTransaction(ctx context.Context, 
 	now := r.now()
 	walletStatus := "ACTIVE"
 	if ownerType == "ORGANIZATION" {
-		if err := tx.QueryRow(ctx, `SELECT CASE status WHEN 'ACTIVE' THEN 'ACTIVE' WHEN 'DELETED' THEN 'CLOSED' ELSE 'FROZEN' END FROM organization_lifecycle_states WHERE organization_id=$1`, ownerID).Scan(&walletStatus); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.QueryRow(ctx, `SELECT CASE status WHEN 'ACTIVE' THEN 'ACTIVE' WHEN 'DELETED' THEN 'CLOSED' ELSE 'FROZEN' END FROM organization_lifecycle_states WHERE organization_id=$1`, ownerID).Scan(&walletStatus); errors.Is(err, pgx.ErrNoRows) {
+			// Only the authenticated lifecycle projection can authorize a new
+			// organization wallet. Missing evidence is not an ACTIVE state.
+			return Wallet{}, false, ErrConflict
+		} else if err != nil {
 			return Wallet{}, false, err
 		}
 	}

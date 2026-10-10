@@ -12,12 +12,16 @@ func (s *Service) isolateAccountClosedGrants(w http.ResponseWriter, r *http.Requ
 	repository, ok := s.repository.(interface {
 		IsolateAccountClosedGrants(context.Context, uuid.UUID, uuid.UUID, int64) (AccountClosureGrantIsolation, error)
 	})
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ACCOUNT_CLOSURE_UNAVAILABLE", "account closure isolation is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
 	userID, err := uuid.Parse(r.PathValue("user_id"))
 	var body struct {
 		ClosureRequestID        uuid.UUID `json:"closure_request_id"`
 		SubjectLifecycleVersion int64     `json:"subject_lifecycle_version"`
 	}
-	if !ok || err != nil || api.DecodeJSON(w, r, &body) != nil {
+	if err != nil || api.DecodeJSON(w, r, &body) != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid account closure grant isolation", httpserver.RequestID(r.Context()))
 		return
 	}

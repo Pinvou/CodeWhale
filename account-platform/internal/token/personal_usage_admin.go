@@ -22,7 +22,12 @@ func (s *Service) adminUsageRequests(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	summaries := make([]AdminUsageSummary, 0, len(items))
+	for _, item := range items {
+		summaries = append(summaries, redactAdminUsageSummary(item))
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": summaries})
 }
 func (s *Service) adminUsageRequest(w http.ResponseWriter, r *http.Request) {
 	repository, ok := s.requireAdminUsageRepository(w, r)

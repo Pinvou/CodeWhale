@@ -145,6 +145,33 @@ func (r *PostgresRepository) AdminAddMemberWithUnits(ctx context.Context, princi
 	}
 	var version int64
 
+	if !changed {
+		// ADD never replaces permissions on an active membership. A new key
+		// must describe its current managed grants; an existing receipt has
+		// already returned above and must not re-grant its historical roles.
+		member, err := getMember(ctx, tx, membershipID)
+		if err != nil {
+			return MembershipMutationResult{}, err
+		}
+		currentRoles := make([]string, 0, len(member.Roles))
+		for _, role := range member.Roles {
+			if role != "OWNER" && role != "UNIT_ADMIN" {
+				currentRoles = append(currentRoles, role)
+			}
+		}
+		// Organization creation grants OWNER alone. Its basic membership is
+		// implicit; comparing it must neither revoke OWNER nor add a grant.
+		if slices.Contains(member.Roles, "OWNER") && !slices.Contains(currentRoles, "MEMBER") {
+			currentRoles = append(currentRoles, "MEMBER")
+		}
+		sort.Strings(currentRoles)
+		currentUnits := append([]uuid.UUID(nil), member.UnitAdminIDs...)
+		sort.Slice(currentUnits, func(i, j int) bool { return currentUnits[i].String() < currentUnits[j].String() })
+		currentUnits = slices.Compact(currentUnits)
+		if !slices.Equal(currentRoles, roles) || !slices.Equal(currentUnits, unitAdminIDs) {
+			return MembershipMutationResult{}, ErrConflict
+		}
+	}
 	if !changed && units != nil {
 		existing, err := readMemberUnits(ctx, tx, membershipID)
 		if err != nil {

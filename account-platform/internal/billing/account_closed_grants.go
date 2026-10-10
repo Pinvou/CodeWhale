@@ -42,10 +42,12 @@ type HTTPAccountClosureStateVerifier struct {
 
 func NewHTTPAccountClosureStateVerifier(rawURL, serviceToken string) (*HTTPAccountClosureStateVerifier, error) {
 	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(rawURL), "/"))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || strings.TrimSpace(serviceToken) == "" {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.RawPath != "" || parsed.Fragment != "" || strings.TrimSpace(serviceToken) == "" {
 		return nil, errors.New("account closure state verifier requires an absolute Account URL and service token")
 	}
-	return &HTTPAccountClosureStateVerifier{baseURL: parsed, serviceToken: strings.TrimSpace(serviceToken), client: observability.NewHTTPClient(5 * time.Second)}, nil
+	client := observability.NewHTTPClient(5 * time.Second)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &HTTPAccountClosureStateVerifier{baseURL: parsed, serviceToken: strings.TrimSpace(serviceToken), client: client}, nil
 }
 
 func (v *HTTPAccountClosureStateVerifier) RequireAnonymized(ctx context.Context, userID uuid.UUID, lifecycleVersion int64) error {

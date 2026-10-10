@@ -5,6 +5,8 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 )
 
+const memberFinancialReasonVersion int64 = 900012
+
 func validateMemberFinancialReviewReason(input []migrations.Migration) error {
 	var lifecycle, targeted bool
 	var guard *migrations.Migration
@@ -15,7 +17,7 @@ func validateMemberFinancialReviewReason(input []migrations.Migration) error {
 		if m.Version == 27 {
 			targeted = true
 		}
-		if m.Version == 900012 {
+		if m.Version == memberFinancialReasonVersion {
 			if guard != nil {
 				return errors.New("duplicate member financial reason migration")
 			}
