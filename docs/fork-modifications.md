@@ -349,7 +349,7 @@
 
 1. 行为/设备遥测：开源仓经社区决议（Pinvou/pinvou-agent#616）移除 opt-in telemetry client；闭源仓按企业口径保留该客户端与设备运营统计链路（`pinvou3-app/src-tauri/src/features/behavior_telemetry.rs` 为 #616 对应的 opt-in client，`pinvou3-app/src-tauri/src/platform/telemetry.rs` 为设备登记/用量统计，设计见 `docs/设备运营统计-初版.md`），随行的 access-policy 差异一并保留。此分歧属发布面差异，不回流、不上游化。
 2. 语音 closeVoice/dismissVoice 语义分化：闭源对完成态语音通知的 dismiss 保留草稿 provenance、仅进行中录音视为显式取消，与开源的 dismissal-sweep 时序不同；该时序适配由 `pinvou3-app/tests/voice_operation_lifecycle.test.mjs` 钉定，不随开源实现回移。
-3. 开源 bridge shared-cluster 机制（`pinvou3-app/src/shared/bridge-shared-helpers.js`）闭源有意不采纳：闭源把对应函数体逐 lane 内联镜像到 `src/platform/tauri/bridge.js` 与 `src/platform/web/bridge.js`，保持各 lane 独立演进与可验证；同步时逐函数对照，不做文件级合并。
+3. 开源 bridge shared-cluster 机制（上游 `pinvou3-app/src/shared/bridge-shared-helpers.js`，本仓无此文件）闭源有意不采纳：闭源把对应函数体逐 lane 内联镜像（`src/platform/web/bridge.js`、`src/platform/tauri/bridge.js` 及 `src/platform/tauri/bridge/` 分文件），保持各 lane 独立演进与可验证；同步时逐函数对照，不做文件级合并。
 4. wire DTO 闭源超集：闭源 wire DTO 字段为开源面的超集，已在 Pinvou/pinvou3#463 登记，以该登记为准，此处不重复展开。
 
 ## 13. 发布与回退
