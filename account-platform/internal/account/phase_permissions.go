@@ -4,7 +4,7 @@ package account
 // advertised or authorized. Later immutable storage seeds confer no authority.
 func f01PermissionAllowed(permission string) bool {
 	switch permission {
-	case PermissionPlatformAuditExport, PermissionPlatformAuditPIIExport:
+	case PermissionPlatformAuditExport, PermissionPlatformAuditPIIExport, "personal.account.close.read", "personal.account.close.request", "platform.account-closures.read", "platform.account-closures.repair", "org.grants.reclaim_closed":
 		return true
 	case "platform.tokens.read", "platform.tokens.manage", "platform.tokens.credentials.validate", "platform.tokens.owner-candidates.read", "platform.tokens.credentials.revoke.request", "platform.tokens.credentials.revoke.approve", "platform.models.read", "platform.models.sync", "platform.models.manage", "platform.models.lifecycle.request", "platform.models.lifecycle.approve", "platform.models.catalog.rollback.request", "platform.models.catalog.rollback.approve", "platform.pricing.read", "platform.pricing.manage", "platform.audit.read", "platform.system.status.read":
 		return true

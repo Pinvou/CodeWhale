@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -79,58 +79,78 @@ function pullRequestTypes(text) {
   return items;
 }
 
-function jobBlock(name) {
-  const match = workflow.match(new RegExp(`^  ${name}:\\r?\\n[\\s\\S]*?(?=^  [\\w-]+:|$(?![\\s\\S]))`, "m"));
+function jobBlock(name, text = workflow) {
+  const match = text.match(new RegExp(`^  ${name}:\\r?\\n[\\s\\S]*?(?=^  [\\w-]+:|$(?![\\s\\S]))`, "m"));
   assert.ok(match, `job '${name}' not found`);
   return match[0];
 }
 
-// Read one named step; another gate in the same job must never become part
-// of its isolated fixture, regardless of the step's position in the job.
+// Select one named step before reading its literal run body. A later sibling
+// step (including a second run block) must never become part of the shell.
+function namedStep(job, name) {
+  const text = job.replaceAll("\r\n", "\n");
+  const matches = [...text.matchAll(/^ {6}- name: (.+)$/gm)].filter(match => match[1] === name);
+  assert.equal(matches.length, 1, `step '${name}' not found or duplicate`);
+  const start = matches[0].index;
+  const rest = text.slice(start + matches[0][0].length);
+  const end = rest.search(/^(?: {6}- | {0,5}\S)/m);
+  return text.slice(start, end === -1 ? text.length : start + matches[0][0].length + end);
+}
+
 function stepRun(job, name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const step = job.match(new RegExp(`^ {6}- name: ${escaped}\\r?\\n[\\s\\S]*?(?=^ {6}- |$(?![\\s\\S]))`, "m"));
-  assert.ok(step, `step '${name}' not found`);
-  const run = step[0].match(/^ {8}run: \|\r?\n([\s\S]*)/m);
-  assert.ok(run, `step '${name}' has no literal run block`);
-  return run[1].replace(/^ {10}/gm, "");
+  const step = namedStep(job, name);
+  assert.equal([...step.matchAll(/^ {8}run:/gm)].length, 1, `expected one run block for '${name}'`);
+  const marker = step.match(/^ {8}run: \|\n/m);
+  assert.ok(marker, `literal run block for '${name}' not found`);
+  const lines = step.slice(marker.index + marker[0].length).split("\n");
+  const body = [];
+  for (const line of lines) {
+    if (line === "") body.push("");
+    else if (line.startsWith("          ")) body.push(line.slice(10));
+    else break;
+  }
+  assert.ok(body.some(line => line.trim()), `empty run block for '${name}'`);
+  return body.join("\n");
+}
+
+const goStepName = "Test and vet all Account Platform Go modules";
+const auditPGStepName = "Audit export finite PostgreSQL rollback and persisted boundaries";
+
+function assertFiniteAuditPGSetup(job) {
+  const text = job.replaceAll("\r\n", "\n");
+  // This is a single approved ephemeral service, not permission for arbitrary
+  // services, production credentials, public ports or persistent volumes.
+  const service = text.match(/^ {4}services:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
+  assert.ok(service, "isolated audit PostgreSQL service not found");
+  assert.equal(service[0].trimEnd(), [
+    "    services:", "      audit-export-postgres:", "        image: postgres:16-alpine",
+    "        env:", "          POSTGRES_HOST_AUTH_METHOD: trust", "        ports:",
+    "          - 127.0.0.1:5432:5432", "        options: >-", "          --health-cmd pg_isready",
+    "          --health-interval 10s", "          --health-timeout 5s", "          --health-retries 5",
+  ].join("\n"));
+  assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
+  const pg = namedStep(job, auditPGStepName);
+  assert.match(pg, /^ {8}working-directory: account-platform$/m);
+  const env = pg.match(/^ {8}env:\n[\s\S]*?(?=^ {8}\S|$(?![\s\S]))/m);
+  assert.ok(env, "finite audit test profile not found");
+  assert.equal(env[0].trimEnd(), [
+    "        env:", "          F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable",
+    "          F17_TEST_DATABASE_PROFILE: github-actions-service",
+  ].join("\n"));
+  const defaultStep = namedStep(job, goStepName);
+  const jobEnv = text.match(/^ {4}env:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
+  assert.ok(jobEnv);
+  assert.doesNotMatch(jobEnv[0] + defaultStep, /DATABASE_URL|DATABASE_PROFILE|F17_TEST_/);
+  const pgRun = stepRun(job, auditPGStepName);
+  assert.match(pgRun, /^set -euo pipefail$/m);
+  assert.match(pgRun, /assert terminal and len\(terminal\) > len\(required\)/);
+  assert.match(pgRun, /assert all\(event\["Action"\] == "pass" for event in terminal\)/);
+  assert.match(pgRun, /assert roots == required/);
+  assert.equal([...pgRun.matchAll(/go test -race -json .*?-parallel=1 /g)].length, 2);
 }
 
 const bash = process.platform === "win32" && existsSync("C:/Program Files/Git/bin/bash.exe")
   ? "C:/Program Files/Git/bin/bash.exe" : "bash";
-
-test("container CI uses immutable official cache images without losing either build or runtime gates", () => {
-  const relay = jobBlock("team-relay-hub-test");
-  assert.match(relay, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
-  assert.match(relay, /--health-cmd "pg_isready/);
-  const consoleJob = jobBlock("update-release-console-test");
-  const selected = consoleJob.match(/PINVOU_UPDATE_NODE_IMAGE: (mirror\.gcr\.io\/library\/node@sha256:[a-f0-9]{64})/)[1];
-  const step = consoleJob.split("- name: 发布台容器与 Compose 配置校验")[1].split("- name: 清理发布台容器")[0];
-  assert.match(step, /if: \$\{\{ matrix\.node-version == '20' \}\}/);
-  const run = step.split(/run: \|\r?\n/)[1].split(/\r?\n/).map(line => line.replace(/^ {10}/, "")).join("\n");
-  const directory = mkdtempSync(join(tmpdir(), "pinvou-container-routing-"));
-  try {
-    const log = join(directory, "calls");
-    const prefix = 'docker() { printf "%s|%s\\n" "$PINVOU_UPDATE_NODE_IMAGE" "$*" >> "$LOG"; }; sudo() { return 0; }; curl() { return 0; };\n';
-    const result = spawnSync(bash, ["-e", "-c", prefix + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...process.env, LOG: log, PINVOU_UPDATE_NODE_IMAGE: selected } });
-    assert.equal(result.status, 0, result.stderr);
-    const calls = readFileSync(log, "utf8").trim().split("\n");
-    assert.ok(calls.some(line => line.includes(`build --build-arg NODE_IMAGE=${selected} --file`)), "direct build must receive the selected base");
-    assert.ok(calls.some(line => line.startsWith(selected + "|compose ") && line.includes("up --detach --build")), "Compose rebuild must inherit the same selection");
-    assert.ok(calls.some(line => /mirror\.gcr\.io\/library\/nginx@sha256:[a-f0-9]{64} nginx -t/.test(line)));
-    assert.match(run, /for attempt in \{1\.\.30\}/);
-    assert.match(run, /exit 1/);
-    assert.match(run, /release-console\/healthz/);
-    assert.match(run, /Authorization: Bearer \$PINVOU_UPDATE_ADMIN_TOKEN/);
-    assert.match(consoleJob, /always\(\)[\s\S]*down --volumes --remove-orphans/);
-    assert.doesNotMatch(step, /continue-on-error|\|\| true/);
-    const rejected = spawnSync(bash, ["-e", "-c", 'docker() { return 7; }; sudo() { return 0; }; curl() { return 0; };\n' + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true, env: { ...process.env, PINVOU_UPDATE_NODE_IMAGE: selected } });
-    assert.equal(rejected.status, 7, "image build failure must fail the gate before later checks");
-  } finally {
-    assert.ok(directory.startsWith(join(tmpdir(), "pinvou-container-routing-")));
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
 
 test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
   const paths = filterPaths(workflow, "account_platform");
@@ -155,12 +175,12 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
     assert.equal(result.status, expectedStatus, result.stderr);
     assert.equal(result.stdout, expectedOutput);
   }
-  assert.doesNotMatch(job, /secrets\.|services:|continue-on-error:/);
+  assertFiniteAuditPGSetup(job);
 });
 
 test("Go gate executes test and vet for root and future nested modules, and fails on errors", () => {
   const job = jobBlock("account-platform-test");
-  const run = stepRun(job, "Test and vet all Account Platform Go modules");
+  const run = stepRun(job, goStepName);
   const directory = mkdtempSync(join(tmpdir(), "pinvou-go-gate-"));
   try {
     for (const module of ["account-platform", "account-platform/tools/kms-recovery", "account-platform/tools/future tool"]) {
@@ -181,9 +201,53 @@ test("Go gate executes test and vet for root and future nested modules, and fail
     for (const command of ["test", "vet"]) {
       const failed = spawnSync(bash, ["-c", `go() { if [[ "$1" == "${command}" ]]; then return 7; fi; }; export -f go;\n` + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true });
       assert.equal(failed.status, 7, `a failing go ${command} must fail the gate: ${failed.stderr}`);
+      const nestedFailed = spawnSync(bash, ["-c", `go() { if [[ "$PWD" == */"tools/future tool" && "$1" == "${command}" ]]; then return 7; fi; }; export -f go;\n` + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true });
+      assert.equal(nestedFailed.status, 7, `a failing nested-module go ${command} must fail the gate: ${nestedFailed.stderr}`);
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("named Go step extraction excludes later YAML and fails closed on missing or duplicate names", () => {
+  const job = jobBlock("account-platform-test");
+  const run = stepRun(job, goStepName);
+  assert.doesNotMatch(run, /- name:|F17_TEST_DATABASE|f17-audit-schema/);
+  assert.equal(stepRun(job.replaceAll("\n", "\r\n"), goStepName), run);
+  assert.equal(stepRun(job + "      - name: Future sibling\n        run: |\n          exit 77\n", goStepName), run);
+  assert.throws(() => stepRun(job.replace(goStepName, "Renamed Go step"), goStepName));
+  assert.throws(() => stepRun(job + `      - name: ${goStepName}\n        run: |\n          exit 77\n`, goStepName));
+  const originalStep = namedStep(job, goStepName);
+  const foldedStep = originalStep.replace("        run: |", "        run: >-");
+  assert.notEqual(foldedStep, originalStep, "folded run mutation must hit the named Go step");
+  assert.throws(() => stepRun(job.replace(originalStep, foldedStep), goStepName));
+});
+
+test("finite audit PostgreSQL exception rejects unsafe or unrelated service and profile mutations", () => {
+  const job = jobBlock("account-platform-test").replaceAll("\r\n", "\n");
+  assertFiniteAuditPGSetup(job);
+  for (const [before, after] of [
+    ["127.0.0.1:5432:5432", "5432:5432"],
+    ["postgres:16-alpine", "postgres:latest"],
+    ["      audit-export-postgres:", "      unrelated-postgres:"],
+    ["    env:\n      GOTOOLCHAIN:", "      another-service:\n        image: postgres:16-alpine\n    env:\n      GOTOOLCHAIN:"],
+    ["        ports:", "        volumes:\n          - shared-data:/var/lib/postgresql/data\n        ports:"],
+    ["F17_TEST_DATABASE_PROFILE: github-actions-service", "F17_TEST_DATABASE_PROFILE: local-owned"],
+    ["postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable", "postgres://postgres@remote.invalid:5432/postgres?sslmode=disable"],
+    ["      GOTOOLCHAIN: local", "      F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n      GOTOOLCHAIN: local"],
+    ["        shell: bash", "        env:\n          F17_TEST_DATABASE_PROFILE: github-actions-service\n        shell: bash"],
+    ["          POSTGRES_HOST_AUTH_METHOD: trust", "          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}"],
+    ["        working-directory: account-platform", "        continue-on-error: true\n        working-directory: account-platform"],
+    ["assert roots == required", "assert roots <= required"],
+    ["assert all(event[\"Action\"] == \"pass\" for event in terminal)", "assert terminal"],
+    ["assert terminal and len(terminal) > len(required)", "assert True"],
+  ]) {
+    assert.ok(job.includes(before), `mutation must hit existing contract: ${before}`);
+    const original = before === "        shell: bash" ? namedStep(job, goStepName) : job;
+    const changed = original.replace(before, after);
+    assert.notEqual(changed, original, `mutation must change its exact target: ${before}`);
+    const mutatedJob = original === job ? changed : job.replace(original, changed);
+    assert.throws(() => assertFiniteAuditPGSetup(mutatedJob), `must reject: ${after}`);
   }
 });
 

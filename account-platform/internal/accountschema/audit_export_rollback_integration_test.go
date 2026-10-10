@@ -3,6 +3,7 @@ package accountschema
 import (
 	"context"
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
+	"github.com/Pinvou/pinvou3/account-platform/internal/f17fixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -103,6 +104,10 @@ func newAuditExportGuardFixture(t *testing.T, ctx context.Context, raw string) *
 		if directory != "/var/lib/postgresql/data" {
 			t.Fatal("isolated CI service directory rejected")
 		}
+	} else if os.Getenv("F17_TEST_DATABASE_PROFILE") == f17fixture.OwnedProfile {
+		if !f17fixture.DirectoryMatches(directory, os.Getenv("F17_TEST_OWNED_DATA_DIRECTORY")) {
+			t.Fatal("owned temporary directory rejected")
+		}
 	} else if strings.ReplaceAll(directory, "\\", "/") != "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data" {
 		t.Fatal("owned local runtime directory rejected")
 	}
@@ -200,6 +205,9 @@ func newAuditExportGuardFixture(t *testing.T, ctx context.Context, raw string) *
 func auditExportFixtureConfigurationAllowed(config *pgx.ConnConfig, profile string, githubActions bool) bool {
 	if config == nil || (config.Host != "127.0.0.1" && config.Host != "localhost") || config.Database != "postgres" || len(config.Fallbacks) != 0 {
 		return false
+	}
+	if profile == f17fixture.OwnedProfile {
+		return f17fixture.OwnedConfigurationAllowed(config, os.Getenv("F17_TEST_OWNED_PORT"), os.Getenv("F17_TEST_OWNED_DATA_DIRECTORY"))
 	}
 	if profile == "github-actions-service" {
 		return githubActions && config.Port == 5432 && config.User == "postgres"

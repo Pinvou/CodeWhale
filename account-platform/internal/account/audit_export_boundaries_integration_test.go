@@ -1,10 +1,13 @@
 package account
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/f17fixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
@@ -278,6 +281,81 @@ func TestAuditExportPersistedBoundaries(t *testing.T) {
 		}
 	})
 
+	t.Run("actual_http_base_and_pii_grant_revoke", func(t *testing.T) {
+		// The actual role-management repository validates and persists temporary
+		// bindings. This boundary test controls its trusted actor; it does not
+		// claim to test the management permission UI or approval delivery chain.
+		handler := NewService(repo, nil).WithAuditExports(exports).Handler(func(context.Context, string) (identity.Principal, error) { return principal, nil })
+		createHTTP := func(pii bool) int {
+			t.Helper()
+			now := time.Now().UTC()
+			payload, err := json.Marshal(AuditExportRequest{Reason: "public authority fixture", IncludePII: pii, IdempotencyKey: uuid.NewString(), Filter: AuditExportFilter{From: now.Add(-time.Minute), To: now}})
+			if err != nil {
+				t.Fatal("FIXTURE_REQUEST_ENCODING")
+			}
+			request := httptest.NewRequest(http.MethodPost, "/admin/v1/audit-exports", bytes.NewReader(payload))
+			request.Header.Set("Authorization", "Bearer controlled")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			return response.Code
+		}
+		jobs := func() int {
+			t.Helper()
+			var n int
+			if err := c.QueryRow(ctx, `SELECT count(*) FROM audit_export_jobs`).Scan(&n); err != nil {
+				t.Fatal("FIXTURE_JOB_COUNT")
+			}
+			return n
+		}
+		baseline := jobs()
+		if createHTTP(true) != http.StatusForbidden || jobs() != baseline {
+			t.Fatal("DEFAULT_PII_AUTHORITY_GRANTED")
+		}
+		grant := func(role string) uuid.UUID {
+			t.Helper()
+			expires := time.Now().UTC().Add(time.Hour)
+			binding, err := repo.AdminGrantRoleBinding(ctx, principal, RoleBindingGrant{UserID: me.UserID, RoleCode: role, ExpiresAt: &expires, IdempotencyKey: uuid.NewString(), Reason: "public temporary audit grant"})
+			if err != nil {
+				t.Fatalf("FIXTURE_GRANT_%s", auditExportBoundaryErrorClass(err))
+			}
+			return binding.ID
+		}
+		revoke := func(id uuid.UUID) {
+			t.Helper()
+			binding, err := repo.AdminRevokeRoleBinding(ctx, principal, id)
+			if err != nil || binding.ID != id || binding.Status != "REVOKED" {
+				t.Fatal("FIXTURE_REVOKE")
+			}
+		}
+		piiBinding := grant("PLATFORM_AUDIT_PII_EXPORT")
+		decision, err := repo.Authorize(ctx, principal, PermissionPlatformAuditPIIExport, nil, nil)
+		if err != nil || !decision.Allowed {
+			t.Fatal("ACTUAL_PII_GRANT_NOT_VISIBLE")
+		}
+		if createHTTP(true) != http.StatusForbidden || jobs() != baseline {
+			t.Fatal("PII_BYPASSED_BASE_PERMISSION")
+		}
+		baseBinding := grant("PLATFORM_AUDITOR")
+		if createHTTP(true) != http.StatusAccepted || jobs() != baseline+1 {
+			t.Fatal("ACTUAL_PII_EXPORT_NOT_ACCEPTED")
+		}
+		revoke(piiBinding)
+		decision, err = repo.Authorize(ctx, principal, PermissionPlatformAuditPIIExport, nil, nil)
+		if err != nil || decision.Allowed {
+			t.Fatal("ACTUAL_PII_REVOKE_NOT_VISIBLE")
+		}
+		if createHTTP(true) != http.StatusForbidden || jobs() != baseline+1 {
+			t.Fatal("REVOKED_PII_CREATED_JOB")
+		}
+		if createHTTP(false) != http.StatusAccepted || jobs() != baseline+2 {
+			t.Fatal("BASE_REDACTED_EXPORT_REGRESSED")
+		}
+		revoke(baseBinding)
+		if createHTTP(false) != http.StatusForbidden || jobs() != baseline+2 {
+			t.Fatal("REVOKED_BASE_CREATED_JOB")
+		}
+	})
+
 }
 
 type auditExportBoundaryFixture struct {
@@ -293,6 +371,12 @@ func newAuditExportBoundaryFixture(t *testing.T, ctx context.Context, raw string
 	expectedPort, expectedUser, expectedDirectory := uint16(55504), "pinvou_wave_test", "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data"
 	switch os.Getenv("F17_TEST_DATABASE_PROFILE") {
 	case "":
+	case f17fixture.OwnedProfile:
+		config, err := pgx.ParseConfig(raw)
+		if err != nil || !f17fixture.OwnedConfigurationAllowed(config, os.Getenv("F17_TEST_OWNED_PORT"), os.Getenv("F17_TEST_OWNED_DATA_DIRECTORY")) {
+			t.Fatal("owned temporary fixture configuration required")
+		}
+		expectedPort, expectedUser, expectedDirectory = config.Port, f17fixture.OwnedActor, strings.ReplaceAll(os.Getenv("F17_TEST_OWNED_DATA_DIRECTORY"), "\\", "/")
 	case "github-actions-service":
 		if os.Getenv("GITHUB_ACTIONS") != "true" {
 			t.Fatal("CI fixture profile requires GitHub Actions")
@@ -319,6 +403,13 @@ func newAuditExportBoundaryFixture(t *testing.T, ctx context.Context, raw string
 	var port, otherSessions, otherDBs int
 	if err := admin.QueryRow(ctx, `SELECT session_user,current_user,inet_server_port(),current_setting('data_directory'),(SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend'),(SELECT count(*) FROM pg_database WHERE NOT datistemplate AND datname<>'postgres')`).Scan(&session, &current, &port, &directory, &otherSessions, &otherDBs); err != nil || session != expectedUser || current != expectedUser || port != int(expectedPort) || strings.ReplaceAll(directory, "\\", "/") != expectedDirectory || otherSessions != 0 || otherDBs != 0 {
 		t.Fatal("owned server/identity/exclusive session/database guard failed")
+	}
+	if os.Getenv("F17_TEST_DATABASE_PROFILE") == f17fixture.OwnedProfile {
+		var super bool
+		var outsideActors int
+		if err := admin.QueryRow(ctx, `SELECT (SELECT rolsuper FROM pg_roles WHERE rolname=session_user),(SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>session_user)`).Scan(&super, &outsideActors); err != nil || !super || outsideActors != 0 {
+			t.Fatal("owned temporary coordinator/absent actors guard failed")
+		}
 	}
 	f := &auditExportBoundaryFixture{admin: admin, config: config, dbs: make(map[string]string), roles: []string{"account_service", "account_migrator", "account_approval_control_owner", "account_approval_authorization_owner", "account_approval_writer", "account_approval_backfill", "account_approval_relay", "account_approval_recovery", "billing_service", "billing_schema_owner", "billing_migrator"}}
 	var count int

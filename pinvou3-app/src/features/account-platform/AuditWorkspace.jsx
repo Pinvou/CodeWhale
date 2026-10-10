@@ -52,7 +52,7 @@ function Empty({ copy }) {
 function Table({ columns, items, copy }) {
   if (!items?.length) return <Empty copy={copy} />;
   return (
-    <div className="adm-table-wrap" tabIndex="0">
+    <div className="adm-table-wrap">
       <table className="adm-table">
         <thead>
           <tr>

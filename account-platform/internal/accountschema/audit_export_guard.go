@@ -33,7 +33,14 @@ func DownOne(ctx context.Context, conn *pgx.Conn, input []migrations.Migration) 
 	if err != nil {
 		return err
 	}
-	return migrations.DownOneWithGuard(ctx, conn, ordered, auditExportDownGuard)
+	return migrations.DownOneWithGuard(ctx, conn, ordered, rollbackDownGuard)
+}
+
+func rollbackDownGuard(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {
+	if err := retainedRollbackGuard(ctx, tx, m); err != nil {
+		return err
+	}
+	return auditExportDownGuard(ctx, tx, m)
 }
 
 func auditExportDownGuard(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {

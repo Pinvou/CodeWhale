@@ -16,3 +16,5 @@ Portal只开放精确审计读取、创建、查询和下载端点。一次性�
 当前为已审 F16 全父上的 F17 修复候选，尚未部署。格式为 `PINVOU_AUDIT_ENVELOPE_V1` 加密信封（`.pae`），内部 CSV 使用 AES-256-GCM 与 HMAC-SHA-256；不是 XLSX，也不是明文 CSV。操作者安全保存页面展示的密钥，按信封协议解密并校验完整性后读取 CSV；密钥遗失不能通过重发票据恢复。现有自动化验证覆盖协议解密往返，未运行外部电子表格或另造解密产品。
 
 编译、受控 HTTP/浏览器、规范资源及有限 PostgreSQL 的实际结果，以本波固定提交的 PR 验证记录为准。CI 在独立临时 PostgreSQL 中显式执行审计导出租约和回滚保护用例；普通 Go 测试的条件跳过仍单独披露，不能算通过。完整 E2E、真实 IdP、集群和 TLS 投放未执行；本说明不构成部署或发布通过。
+
+本地四个有限 PostgreSQL 用例可使用显式 `F17_TEST_DATABASE_PROFILE=local-owned`，与原默认和 GitHub Actions profile 分开。实例必须由测试操作者独立创建，专用协调身份为 `pinvou_audit_fixture`；`F17_TEST_OWNED_PORT` 必须与连接和服务器一致，`F17_TEST_OWNED_DATA_DIRECTORY` 必须是系统临时目录下 `pinvou-f17-audit-<规范非零UUID>/data` 且与服务器实际目录一致。仅允许本机无 TLS fallback 的 `postgres` 数据库；所有外部数据库、角色或会话都会阻止夹具写入，不复用部署实例、不终止外部会话。测试结束只在准确 owner、零会话及无外部依赖验证后清理自己创建的数据库和角色。该装配修复对应 #1731，不意味着部署或真实 IdP/NATS 验收通过。
