@@ -151,11 +151,7 @@ func (s *Service) verifyLoginSMS(w http.ResponseWriter, r *http.Request) {
 	ctx := withAuthRisk(r.Context(), requestSource(r), r.Header.Get("X-Device-ID"))
 	subject, err := s.mobileAuth.VerifyLogin(ctx, body.Mobile, body.ChallengeID, body.Code)
 	if err != nil {
-		if errors.Is(err, ErrSMSRateLimited) {
-			s.writeMobileAuthError(w, r, err)
-			return
-		}
-		api.WriteError(w, http.StatusUnauthorized, "SMS_CODE_INVALID", "the verification code is invalid or expired", httpserver.RequestID(r.Context()))
+		s.writeMobileAuthError(w, r, err)
 		return
 	}
 	w.Header().Set("X-Pinvou-Identity-Subject", subject)

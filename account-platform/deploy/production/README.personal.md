@@ -50,7 +50,7 @@ Keycloak 用当前同源 SPI/theme 镜像和 `keycloak-personal.conf.template` �
 
 模板使用 Docker 内置 DNS `127.0.0.11` 每 10 秒更新业务上游地址，容器重建后无需重启入口。`__KEYCLOAK_ORIGIN__` 必须是私有 DNS 名称及可选端口，不包含 scheme、路径或 IP 字面量；模板将 DNS 名称用于 HTTPS SNI 和证书名称核验，并保留真实请求路径。发布验证应重建一个隔离业务容器，验证 DNS 更新后请求恢复且 TLS 错误仍失败关闭。
 
-入口必须固定在 `PERSONAL_EDGE_BACKEND_IP`，该地址与私有网络的实际分配相符。NGINX 强制将 `X-Pinvou-Client-Source` 和 `X-Forwarded-For` 设置为实际连接地址，不追加或相信浏览器输入。Portal 的 `PORTAL_TRUSTED_PROXY_IPS` 只接受这一个显式入口身份；非受信任连接仍按实际 peer 处理。Identity 固定在 `PERSONAL_IDENTITY_BACKEND_IP`，两者都须在既有私有网络 IPAM 中独立校验且不能相同。Identity 公共 token grant 只能由入口访问，入口覆盖单值 XFF；其上游仅转发已准入的单值 source。Keycloak 只信任准确 edge 与准确 Identity 两个 peer 的 forwarded headers，不加 CIDR 或全部信任；生产 token proxy 单值 XFF 接线须随这项配置独立验证。不能以任意 XFF、整个公开地址网段或可绕过的业务宿主端口代替这条信任边界。
+入口必须固定在 `PERSONAL_EDGE_BACKEND_IP`，该地址与私有网络的实际分配相符。NGINX 强制将 `X-Pinvou-Client-Source` 和 `X-Forwarded-For` 设置为实际连接地址，不追加或相信浏览器输入。Portal 的 `PORTAL_TRUSTED_PROXY_IPS` 只接受这一个显式入口身份；非受信任连接仍按实际 peer 处理。Identity 固定在 `PERSONAL_IDENTITY_BACKEND_IP`，两者都须在既有私有网络 IPAM 中独立校验且不能相同。Identity 的 `IDENTITY_TRUSTED_PROXY_IPS` 同样只配置这个准确 edge 地址，缺省为空时仅采用规范化的直连 peer；配置拒绝 CIDR、主机名、通配符和带 zone 的地址。Identity 公共 token grant 只能由入口访问，入口覆盖单值 XFF；只有来自该准确 peer 的单个合法 IP XFF 才被采用，重复头、链和非法值回退为直连 peer，非法连接地址返回 400 且不进入风险准入或上游。其上游仅转发已准入的规范化单值 source，不转发浏览器的 source、Cookie 或 Authorization。Keycloak 只信任准确 edge 与准确 Identity 两个 peer 的 forwarded headers，不加 CIDR 或全部信任；生产 token proxy 单值 XFF 接线须随这项配置独立验证。不能以任意 XFF、整个公开地址网段或可绕过的业务宿主端口代替这条信任边界。
 
 Account 的 `ACCOUNT_TRUSTED_SOURCE_PEER_IPS` 只包含固定入口、Portal 和 Keycloak 的准确 peer IP；未配置时忽略所有来源头，采用直连地址。生产模板新增 `PERSONAL_PORTAL_BACKEND_IP` 与 `PERSONAL_KEYCLOAK_BACKEND_IP`，应与 edge、Identity 地址一并在既有 IPAM 核验且互不相同。将 Keycloak overlay 与站点配置组合时保持其既有必要网络并接入同一 `PERSONAL_BACKEND_NETWORK`，不要用动态 DNS 解析结果或整个 CIDR 作为可信来源。可信 peer 也只能传递一个合法 IP 来源头；部署验证须确认任意非可信 peer 伪造此头不改变风险计数来源。
 
@@ -65,3 +65,8 @@ NATS 使用现有 `nats.conf`、`authorization.conf` 和 `runbooks/nats-resource
 部署前依次核验镜像/私有挂载、真实 TLS/证书与身份、迁移 schema/角色、固定 NATS 资源，再启动业务和公开入口。实际注册必须直到 Billing wallet READY；密码/资料变更须完成 Keycloak fencing 和会话撤销；验证 Portal PKCE/refresh/logout/handoff、Desktop 登录恢复与个人余额。未知 ACK 按原请求恢复，不强制激活，不替换主体。
 
 本文件和模板不表示任何环境已经运行、realm 已安装或部署通过。源码、静态配置和有限单测结论只能覆盖各自实际输入；完整 Keycloak、TLS、Redis ACL、服务身份和生产部署验证另登记实际结果，未运行项如实披露。
+# F01 密码预检与修复审计边界
+
+Identity 的匿名密码预检保持原公开路径与 15 分钟 handle 有效期。`IDENTITY_PASSWORD_REFERENCE_CAPACITY` 限制当前未过期 handle 数量：默认 4096，可配置 1–65536；非法、零或无界配置拒绝启动。达到容量只拒绝新预检（503 `PASSWORD_PRECHECK_CAPACITY_REACHED`），不驱逐已接受 handle，不改变已有 48 小时 operation 绑定或正常回调。此上限是资源安全默认，不是并发用户服务承诺；容量和源准入应按实际流量继续评估。4096 个最大长度密码的原始文本最多 512 KiB；完整填充 benchmark 的累计分配约 5.10 MB，不能据此宣称进程驻留总内存。现有 handle 仍是原内存存储，不新增跨进程恢复承诺。
+
+注册修复在产生效果前持久记录 `registration.repair.retry.requested` 或 `registration.repair.compensate.requested`；其 `SUCCEEDED` 仅表示请求审计写入成功，不表示身份或钱包业务完成。写入失败时不派发修复效果。原 wallet/compensation 事务内强审计保持。结束审计写入失败时，保留已记录请求和原业务结果，返回 `X-Registration-Repair-Audit: pending` 并记录稳定诊断；该信号不触发资金动作或旧代际重派。修复后读不到权威 operation 时返回503 `REGISTRATION_REPAIR_RESULT_UNKNOWN`，不可把空对象当成功回执。自动可靠补齐结束审计仍未实现，继续由 #1624 跟踪；不得把 requested 事实或当前列表读取推断为未收到的业务完成回执。

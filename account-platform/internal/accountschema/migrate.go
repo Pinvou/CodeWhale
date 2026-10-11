@@ -163,6 +163,9 @@ func Up(ctx context.Context, connection *pgx.Conn, input []migrations.Migration)
 			return nil
 		},
 		AfterApply: func(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
+			if err := restoreExecutionFactsAfterBinding(ctx, tx, migration, ordered); err != nil {
+				return err
+			}
 			if !bridged[migration.Version] {
 				return nil
 			}

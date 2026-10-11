@@ -63,3 +63,87 @@ test('case writes preserve the same key and exact money response, reject false A
   globalThis.fetch = async () => new Response(JSON.stringify({ case_id: '22222222-2222-4222-8222-222222222222' }), { status: 200 });
   await assert.rejects(client.reconciliationCaseCommand(ID, facts, 'controlled-stable-key'));
 });
+
+import * as reconciliation from '../src/features/account-platform/reconciliation-contract.js';
+import fs from 'node:fs';
+const GENERATED_CASE_TYPES = ['UNSUPPORTED_PROVIDER_ENTRY', 'DUPLICATE_TRANSACTION', 'INTERNAL_PAID_PROVIDER_MISSING', 'INTERNAL_REFUND_PROVIDER_MISSING', 'INTERNAL_CHARGEBACK_PROVIDER_MISSING', 'AMOUNT_MISMATCH', 'REFUND_AMOUNT_MISMATCH', 'REFUND_DATE_UNVERIFIED', 'CHARGEBACK_DATE_UNVERIFIED', 'PAYMENT_LEDGER_INVALID', 'REFUND_LEDGER_INVALID', 'CHARGEBACK_LEDGER_INVALID', 'PAYMENT_PACKAGE_INVALID', 'PAYMENT_LEDGER_MISSING', 'REFUND_LEDGER_MISSING', 'CHARGEBACK_LEDGER_MISSING', 'PROVIDER_PAID_INTERNAL_MISSING', 'PROVIDER_REFUND_INTERNAL_MISSING', 'PROVIDER_CHARGEBACK_INTERNAL_MISSING'];
+test('all nineteen current producer case types have explicit three-language labels; future remains raw', () => {
+  for (const language of ['zh', 'en', 'ja']) {
+    assert.deepEqual(Object.keys(reconciliationCopy[language].caseTypes).sort(), [...GENERATED_CASE_TYPES].sort());
+    for (const type of GENERATED_CASE_TYPES) {
+      assert.ok(reconciliationCopy[language].caseTypes[type].trim());
+      assert.notEqual(reconciliationCaseLabel(type, reconciliationCopy[language]), type);
+    }
+    assert.equal(reconciliationCaseLabel('FUTURE_PROVIDER_EVIDENCE', reconciliationCopy[language]), 'FUTURE_PROVIDER_EVIDENCE');
+  }
+});
+test('only declared validation codes are input errors; state conflicts and unknown writes retain attribution', () => {
+  assert.equal(typeof reconciliation.reconciliationReadError, 'function');
+  for (const code of ['INVALID_REQUEST', 'INVALID_FILTER']) {
+    assert.equal(reconciliation.reconciliationReadError({ status: 400, code }), 'invalid');
+    assert.equal(reconciliation.reconciliationWriteError({ status: 400, code }), 'invalid');
+  }
+  assert.equal(reconciliation.reconciliationReadError({ status: 403 }), 'permissions');
+  assert.equal(reconciliation.reconciliationReadError({ status: 503 }), 'unavailable');
+  assert.equal(reconciliation.reconciliationReadError({ status: 422, code: 'PAGINATION_FILTER_REQUIRED' }), 'narrowFilters');
+  assert.equal(reconciliation.reconciliationReadError({ status: 422, code: 'UNRECOGNIZED_ERROR' }), 'unavailable');
+  for (const [status, code] of [[400, 'PAGINATION_CURSOR_INVALID'], [400, 'UNRECOGNIZED_ERROR'], [409, 'BILLING_CONFLICT'], [409, 'IDEMPOTENCY_CONFLICT']]) {
+    assert.equal(reconciliation.reconciliationReadError({ status, code }), 'sourceChanged');
+    assert.equal(reconciliation.reconciliationWriteError({ status, code }), 'sourceChanged');
+  }
+  for (const error of [{}, {status:503}, {status:400, code:'COMMAND_RESULT_UNKNOWN'}]) assert.equal(reconciliation.reconciliationWriteError(error), 'runUnknown');
+  assert.equal(reconciliation.reconciliationWriteError({ message:'INVALID_RECONCILIATION_INPUT' }), 'invalid');
+});
+test('OpenAPI describes actual list filters, snapshot cursors and distinct input/state/size responses', () => {
+  const contract=fs.readFileSync(new URL('../../account-platform/contracts/openapi/reconciliation.yaml', import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const operation = route => {
+    const marker=`  ${route}:\n`;
+    assert.ok(contract.includes(marker), `Missing route ${route}`);
+    return contract.split(marker)[1].split('\n  /')[0];
+  };
+  const parameter = name => {
+    const block=contract.split(`    ${name}:`)[1]?.split(/\n {4}(?=\S)/)[0];
+    assert.ok(block, `Missing parameter ${name}`);
+    return block;
+  };
+  const producer=fs.readFileSync(new URL('../../account-platform/internal/billing/admin_pagination.go',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const definition = name => producer.split(`\t${name}: {`)[1].split('\n\t},')[0];
+  const names = name => [...definition(name).matchAll(/^\t\t"([a-z_]+)":/gm)].map(match=>match[1]);
+  const queryNames = route => [...operation(route).split('    post:')[0].matchAll(/#\/components\/parameters\/([A-Za-z]+)/g)].map(match=>parameter(match[1]).match(/name: ([a-z_]+)/)[1]);
+  for (const [route, resource, scope] of [['/admin/v1/reconciliation-runs','adminPageReconciliationRuns',[]], ['/admin/v1/reconciliation-cases','adminPageReconciliationCases',['run_id']], ['/admin/v1/reconciliation-runs/{run_id}/cases','adminPageReconciliationCases',[]]]) {
+    const get=operation(route).split('    post:')[0];
+    // Compare the entire actual backend whitelist, separately accounting for path/query run scope.
+    assert.deepEqual(queryNames(route).sort(), ['limit','cursor',...scope,...names(resource)].sort());
+    assert.match(parameter('Limit'),/minimum: 1, maximum: 200, default: 50/);
+    for(const status of ['400','410','422','429','503']) assert.ok(get.includes(`'${status}':`));
+  }
+  for(const name of ['CreatedFrom','CreatedTo']) assert.match(parameter(name),/format: date-time/);
+  assert.match(parameter('CreatedFrom'),/Inclusive RFC3339.*366 days/);
+  assert.match(parameter('CreatedTo'),/Exclusive RFC3339/);
+  assert.match(producer,/validAdminTimeRange\(request.Filters, "created_from", "created_to"\)/);
+  assert.match(producer,/created_at>=NULLIF\(\$7,''\)::timestamptz/);
+  assert.match(producer,/created_at<NULLIF\(\$8,''\)::timestamptz/);
+  const imports=operation('/admin/v1/reconciliation-imports');
+  assert.match(imports,/'422':[^\n]*PAYMENT_CAPABILITY_UNSUPPORTED[^\n]*100000/);
+  assert.match(imports,/'413':[^\n]*64 MiB/);
+  assert.ok(imports.includes("'400':"));assert.ok(imports.includes("'409':"));
+  assert.ok(operation('/admin/v1/reconciliation-cases/{case_id}/commands').includes("'409':"));
+  // The independent server filter definitions are the authority, including all nineteen case enums.
+  for(const type of GENERATED_CASE_TYPES) assert.ok(definition('adminPageReconciliationCases').includes(`"${type}"`));
+  const declaredCases=parameter('CaseType').match(/enum: \[([^\]]+)\]/)[1].split(',').map(value=>value.trim());
+  assert.deepEqual(declaredCases.sort(),[...GENERATED_CASE_TYPES].sort());
+});
+
+test('case receipt conflicts use the real handler BILLING_CONFLICT contract', () => {
+  const contract=fs.readFileSync(new URL('../../account-platform/contracts/openapi/reconciliation.yaml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const handler=fs.readFileSync(new URL('../../account-platform/internal/billing/admin_reconciliation.go',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const errors=fs.readFileSync(new URL('../../account-platform/internal/billing/service.go',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  assert.match(handler,/existingHash != requestHash \|\| existingActor != command.ActorID[\s\S]*?return AdminReconciliationCase\{\}, ErrConflict/);
+  assert.match(handler.split('func (s *Service) writeReconciliationError')[1],/s.writeError\(w, r, err\)/);
+  assert.match(errors,/errors.Is\(err, ErrConflict\)[\s\S]*?"BILLING_CONFLICT"/);
+  const conflict=contract.split('    StateConflict:')[1].split(/\n {4}(?=\S)/)[0];
+  assert.match(conflict,/BILLING_CONFLICT[\s\S]*key.*actor.*request facts/);
+  assert.equal(conflict.includes('IDEMPOTENCY_CONFLICT'),false);
+
+
+});

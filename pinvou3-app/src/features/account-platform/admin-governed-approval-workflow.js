@@ -1,4 +1,5 @@
 import { validApprovalRequest } from './admin-high-risk-action-state.js';
+import { beforeFinanceDispatch, financeNotDispatched, financeWriteObserved } from './finance-operation-state.js';
 
 const activeStatuses = new Set(['SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTED', 'EXECUTION_FAILED']);
 const terminalStatuses = new Set(['REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED']);
@@ -62,23 +63,23 @@ export async function createAndSubmitGovernedApproval(client, draft, signal, exp
     }
     return submitted;
   } catch (error) {
-    throw withReference(error, requestID);
+    throw withReference(financeWriteObserved(error), requestID);
   }
 }
 
 export function supersedesEligibleApproval(page, commandType, targetID) {
   if (!page || !Array.isArray(page.items) || page.has_more === true || page.next_cursor || page.items.length >= 200) {
-    throw Object.assign(new Error('approval history is incomplete'), { code: 'APPROVAL_HISTORY_INCOMPLETE' });
+    throw financeNotDispatched(Object.assign(new Error('approval history is incomplete'), { code: 'APPROVAL_HISTORY_INCOMPLETE' }));
   }
   const matching = page.items.filter((item) => item.command_type === commandType &&
     (item.target?.resource_id || item.target_resource_id) === targetID);
   if (matching.some((item) => ['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTION_FAILED'].includes(item.status))) {
-    throw Object.assign(new Error('an approval is already open or awaiting recovery'), { code: 'APPROVAL_ALREADY_ACTIVE' });
+    throw financeNotDispatched(Object.assign(new Error('an approval is already open or awaiting recovery'), { code: 'APPROVAL_ALREADY_ACTIVE' }));
   }
   const latest = matching[0];
   if (!latest || latest.status === 'EXECUTED') return '';
   if (terminalStatuses.has(latest.status) && latest.approval_request_id) return latest.approval_request_id;
-  throw Object.assign(new Error('approval state is not eligible for replacement'), { code: 'APPROVAL_REPLACEMENT_UNAVAILABLE' });
+  throw financeNotDispatched(Object.assign(new Error('approval state is not eligible for replacement'), { code: 'APPROVAL_REPLACEMENT_UNAVAILABLE' }));
 }
 
 export async function createAndSubmitFreshGovernedApproval(client, draft, signal, expectedReference = '') {
@@ -93,10 +94,10 @@ export async function createAndSubmitFreshGovernedApproval(client, draft, signal
     references.delete(identity);
     return result;
   }
-  const page = await client.governedApprovalRequests({ command_type: draft.command_type,
-    target: draft.target_resource_id, limit: 200 }, signal);
+  const page = await beforeFinanceDispatch(() => client.governedApprovalRequests({ command_type: draft.command_type,
+    target: draft.target_resource_id, limit: 200 }, signal));
   if (!page || !Array.isArray(page.items) || page.has_more === true || page.next_cursor || page.items.length >= 200) {
-    throw Object.assign(new Error('approval history is incomplete'), { code: 'APPROVAL_HISTORY_INCOMPLETE' });
+    throw financeNotDispatched(Object.assign(new Error('approval history is incomplete'), { code: 'APPROVAL_HISTORY_INCOMPLETE' }));
   }
   const matching = page.items.filter((item) => item.command_type === draft.command_type &&
     (item.target?.resource_id || item.target_resource_id) === draft.target_resource_id);
@@ -110,8 +111,8 @@ export async function createAndSubmitFreshGovernedApproval(client, draft, signal
     if (expectedReference && matching[0].approval_request_id !== expectedReference) throw Object.assign(new Error('approval history returned another invocation'), { status: 202, code: 'COMMAND_RESULT_UNKNOWN', commandReference: expectedReference });
     if (!matching[0].approval_request_id || matching.slice(1).some((item) =>
       !terminalStatuses.has(item.status) && item.status !== 'EXECUTED')) {
-      throw Object.assign(new Error('approval history cannot identify a single editable draft'),
-        { code: 'APPROVAL_ALREADY_ACTIVE' });
+      throw financeNotDispatched(Object.assign(new Error('approval history cannot identify a single editable draft'),
+        { code: 'APPROVAL_ALREADY_ACTIVE' }));
     }
     // Preserve the first authoritative CAS for this logical invocation, even
     // when its PUT or subsequent submit commits but the response is lost.
@@ -132,20 +133,22 @@ export async function updateAndSubmitGovernedApproval(client, existing, draft, s
     !draft?.target_resource_id || existing?.command_type !== draft.command_type ||
     (existing.target?.resource_type || existing.target_resource_type) !== draft.target_resource_type ||
     (existing.target?.resource_id || existing.target_resource_id) !== draft.target_resource_id) {
-    throw Object.assign(new Error('approval reference does not match the edited command'), { code: 'INVALID_APPROVAL_RESPONSE' });
+    throw financeNotDispatched(Object.assign(new Error('approval reference does not match the edited command'), { code: 'INVALID_APPROVAL_RESPONSE' }));
   }
+  let writeObserved = false;
   try {
     const reference = { ...existing, target_resource_type: draft.target_resource_type,
       target_resource_id: draft.target_resource_id };
-    const current = requireDetail(await client.governedApprovalRequest(requestID, signal), requestID, reference, false);
+    const current = await beforeFinanceDispatch(async () => requireDetail(await client.governedApprovalRequest(requestID, signal), requestID, reference, false));
     const sameVersion = current.version === existing.version;
     if (sameVersion && (current.status !== 'DRAFT' || !current.allowed_actions.includes('EDIT'))) {
-      throw Object.assign(new Error('approval draft is no longer editable'), { code: 'APPROVAL_DRAFT_NOT_EDITABLE' });
+      throw financeNotDispatched(Object.assign(new Error('approval draft is no longer editable'), { code: 'APPROVAL_DRAFT_NOT_EDITABLE' }));
     }
     // On a lost acknowledgement, replay the original CAS and frozen input.
     // Account's durable edit receipt must prove it; the UI never infers success
     // from the newer version. Use the fresh action control, preserving that CAS.
     await client.updateGovernedApprovalDraft(requestID, { ...current, version: existing.version }, draft, signal);
+    writeObserved = true;
     const updated = requireDetail(await client.governedApprovalRequest(requestID, signal), requestID, draft);
     if (activeStatuses.has(updated.status)) {
       // The typed detail omits the original caller fingerprint. Confirm the
@@ -167,7 +170,7 @@ export async function updateAndSubmitGovernedApproval(client, existing, draft, s
     }
     return submitted;
   } catch (error) {
-    throw withReference(error, requestID);
+    throw withReference(writeObserved ? financeWriteObserved(error) : error, requestID);
   }
 }
 

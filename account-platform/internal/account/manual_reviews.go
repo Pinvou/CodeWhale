@@ -176,7 +176,14 @@ func evaluateAccountStopLoss(ctx context.Context, tx pgx.Tx, item struct {
 		return nil
 	}
 	var commandType string
-	if err := tx.QueryRow(ctx, `SELECT command_type FROM approval_requests WHERE id=$1`, item.resourceID).Scan(&commandType); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	// Touch the tuple without changing any logical value. A Serializable Begin
+	// may have taken its snapshot before waiting for this request: PostgreSQL
+	// must reject that stale transaction rather than let it miss the new pause.
+	err := tx.QueryRow(ctx, `UPDATE approval_requests SET updated_at=updated_at WHERE id=$1 RETURNING command_type`, item.resourceID).Scan(&commandType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} // no target, no pause fact
+	if err != nil {
 		return err
 	}
 	actions := map[string]any{"automatic_execution_paused": true, "manual_reauthorization_required": true}

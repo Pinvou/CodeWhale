@@ -8,7 +8,7 @@
 mod platform;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -578,6 +578,7 @@ pub struct AccountPlatformState {
     client: reqwest::Client,
     credentials: Arc<dyn CredentialStore + Send + Sync>,
     session_generation: AtomicU64,
+    restore_suppressed: AtomicBool,
     device_id: String,
 }
 
@@ -597,6 +598,7 @@ impl AccountPlatformState {
             client,
             credentials: Arc::new(SystemCredentialStore::new()),
             session_generation: AtomicU64::new(0),
+            restore_suppressed: AtomicBool::new(false),
             device_id: random_urlsafe(24),
         })
     }
@@ -1060,6 +1062,11 @@ impl AccountPlatformState {
             generation,
             account_user_id,
         });
+        // Only a newly persisted explicit login can reverse local sign-out.
+        // A refresh of an earlier session must never undo that boundary.
+        if previous_refresh_token.is_none() {
+            self.restore_suppressed.store(false, Ordering::SeqCst);
+        }
         Ok(access_token)
     }
 
@@ -1187,6 +1194,9 @@ impl AccountPlatformState {
     }
 
     fn persisted_refresh_token(&self) -> Result<Option<String>, String> {
+        if self.restore_suppressed.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
         self.credentials
             .get(&CredentialReference::for_account_platform_refresh_token())
             .map(|value| value.filter(|token| !token.trim().is_empty()))
@@ -1194,6 +1204,9 @@ impl AccountPlatformState {
     }
 
     async fn clear_authentication(&self) -> Result<(), String> {
+        // Deleting from the OS store can fail. Keep this process signed out
+        // even if that store (or its cache) still returns the old refresh token.
+        self.restore_suppressed.store(true, Ordering::SeqCst);
         self.session_generation.fetch_add(1, Ordering::Relaxed);
         *self.session.lock().await = None;
         self.credentials
@@ -1867,6 +1880,7 @@ mod tests {
     #[derive(Default)]
     struct MemoryCredentialStore {
         values: StdMutex<HashMap<(String, String), String>>,
+        fail_delete: std::sync::atomic::AtomicBool,
     }
 
     impl MemoryCredentialStore {
@@ -1916,6 +1930,11 @@ mod tests {
             &self,
             reference: &CredentialReference,
         ) -> Result<(), crate::platform::credential_store::CredentialError> {
+            if self.fail_delete.load(Ordering::SeqCst) {
+                return Err(crate::platform::credential_store::CredentialError::new(
+                    "controlled delete failure".to_string(),
+                ));
+            }
             self.values
                 .lock()
                 .unwrap()
@@ -2007,6 +2026,7 @@ mod tests {
                 .unwrap(),
             credentials,
             session_generation: AtomicU64::new(0),
+            restore_suppressed: AtomicBool::new(false),
             device_id: "fixture-device".to_string(),
         }
     }
@@ -2872,6 +2892,159 @@ mod tests {
         assert!(
             pending.is_some_and(|p| p.operation_id == "22222222-2222-4222-8222-222222222222"),
             "old terminal registration query deleted newly persisted recovery credential"
+        );
+    }
+
+    // A failed delete intentionally retains the old value, unlike a get(None)
+    // double. This exercises the real feature's refresh/read chain over HTTP.
+    fn logout_delete_refresh_fixture() -> (
+        Url,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicBool>,
+        thread::JoinHandle<()>,
+    ) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let count = requests.clone();
+        let stop = stopped.clone();
+        let handle = thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(3)))
+                            .unwrap();
+                        let request = independent_read_request(&mut stream);
+                        assert!(request.starts_with("POST /token "));
+                        assert!(request.contains("refresh_token=obsolete-refresh"));
+                        count.fetch_add(1, Ordering::SeqCst);
+                        independent_write_response(
+                            &mut stream,
+                            200,
+                            r#"{"access_token":"restored-access","refresh_token":"rotated-refresh","expires_in":300}"#,
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(1))
+                    }
+                    Err(error) => panic!("controlled listener failed: {error}"),
+                }
+            }
+        });
+        (
+            Url::parse(&format!("http://{address}/token")).unwrap(),
+            requests,
+            stopped,
+            handle,
+        )
+    }
+
+    #[tokio::test]
+    async fn logout_delete_failure_blocks_ensure_restored() {
+        let credentials = MemoryCredentialStore::with_refresh_token("obsolete-refresh");
+        credentials.fail_delete.store(true, Ordering::SeqCst);
+        let state = portal_test_state(
+            credentials.clone(),
+            Some(portal_runtime_session("old-access", "obsolete-refresh")),
+        );
+        assert!(
+            state
+                .logout()
+                .await
+                .unwrap_err()
+                .starts_with("credential_store_unavailable:")
+        );
+        assert!(state.session.lock().await.is_none());
+        assert_eq!(
+            credentials.refresh_token().as_deref(),
+            Some("obsolete-refresh")
+        );
+        let (url, count, stop, server) = logout_delete_refresh_fixture();
+        let mut config = config();
+        config.token_url = url;
+        let restored = state.ensure_restored(&config).await;
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        assert_eq!(
+            restored.unwrap(),
+            false,
+            "logout must not restore a retained credential after delete failure"
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "no old refresh may be dispatched"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_delete_failure_blocks_access_token() {
+        let credentials = MemoryCredentialStore::with_refresh_token("obsolete-refresh");
+        credentials.fail_delete.store(true, Ordering::SeqCst);
+        let state = portal_test_state(
+            credentials,
+            Some(portal_runtime_session("old-access", "obsolete-refresh")),
+        );
+        assert!(
+            state
+                .logout()
+                .await
+                .unwrap_err()
+                .starts_with("credential_store_unavailable:")
+        );
+        let (url, count, stop, server) = logout_delete_refresh_fixture();
+        let mut config = config();
+        config.token_url = url;
+        let result = state.access_token(&config, None).await;
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        assert!(result.unwrap_err().starts_with("authentication_required:"));
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "no old refresh may be dispatched"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_delete_failure_allows_new_explicit_login() {
+        let _env = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let credentials = MemoryCredentialStore::with_refresh_token("obsolete-refresh");
+        credentials.fail_delete.store(true, Ordering::SeqCst);
+        let state = portal_test_state(
+            credentials.clone(),
+            Some(portal_runtime_session("old-access", "obsolete-refresh")),
+        );
+        assert!(state.logout().await.is_err());
+        credentials.fail_delete.store(false, Ordering::SeqCst);
+        let (url, server) = spawn_portal_fixture(1, |request| {
+            assert!(request.contains("grant_type=password"));
+            assert!(request.contains("username=controlled-user"));
+            assert!(!request.contains("obsolete-refresh"));
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":300}"#,
+            )
+        });
+        independent_env_config(&url);
+        let result = state
+            .login(LoginCredentials {
+                account: "controlled-user".into(),
+                password: "controlled-password".into(),
+            })
+            .await;
+        server.join().unwrap();
+        assert!(result.unwrap().authenticated);
+        assert_eq!(credentials.refresh_token().as_deref(), Some("new-refresh"));
+        assert_eq!(
+            state.persisted_refresh_token().unwrap().as_deref(),
+            Some("new-refresh")
         );
     }
 }
