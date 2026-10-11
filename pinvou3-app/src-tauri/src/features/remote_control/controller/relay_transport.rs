@@ -617,6 +617,25 @@ impl ControllerTransportSender {
         self.clear_authenticated_lease();
     }
 
+    pub(crate) fn with_business_authority(
+        &self,
+        expected: &LeaseContext,
+        action: &mut dyn FnMut(),
+    ) -> bool {
+        // Clearing/suspending the lease takes the writer lock. A stop cannot
+        // finish retirement across an already admitted synchronous mutation.
+        let lease = self.lease.read();
+        if self.is_stopped()
+            || !lease
+                .as_ref()
+                .is_some_and(|lease| &lease.context == expected)
+        {
+            return false;
+        }
+        action();
+        true
+    }
+
     pub(crate) fn is_stopped(&self) -> bool {
         self.shutdown.is_cancelled()
     }

@@ -4,6 +4,15 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn real_reader_manager_worker_resume_round_trip() {
+    run_isolated_reader(false);
+}
+
+#[test]
+fn real_reader_endpoint_retirement_closes_waiting_and_connected_workers() {
+    run_isolated_reader(true);
+}
+
+fn run_isolated_reader(retire_endpoint: bool) {
     const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
     if std::env::var(CHILD).as_deref() == Ok("1") {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -21,7 +30,7 @@ fn real_reader_manager_worker_resume_round_trip() {
                         .manage(crate::features::remote_control::controller::relay_runtime::ControlledOutboundState::default())
                         .build(context).unwrap();
                     (app.handle().clone(), app)
-                }))
+                }, retire_endpoint))
                 .await
                 .unwrap();
         });
@@ -30,7 +39,12 @@ fn real_reader_manager_worker_resume_round_trip() {
     // A separate process owns Tauri's global runtime and path/env overrides.
     // Never alter the test runner's home or share its live managed states.
     let module = module_path!().split_once("::").unwrap().1;
-    let filter = format!("{module}::real_reader_manager_worker_resume_round_trip");
+    let name = if retire_endpoint {
+        "real_reader_endpoint_retirement_closes_waiting_and_connected_workers"
+    } else {
+        "real_reader_manager_worker_resume_round_trip"
+    };
+    let filter = format!("{module}::{name}");
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &filter, "--nocapture"])
         .env(CHILD, "1")

@@ -887,6 +887,57 @@
         }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
+    function listRemoteProxyArchiveCandidates() {
+      ensureAvailable();
+      return invoke("desktop_remote_proxy_archive_candidates", {})
+        .then(function (records) {
+          if (!Array.isArray(records) || records.length > 256 || records.some(function (record) {
+            return !record || !requiredOpaqueId(record.localSessionId)
+              || !record.localSessionId.startsWith("remote-") || typeof record.hidden !== "boolean";
+          })) throw asBoundedError("remote_proxy_projection_invalid");
+          // This management-only result must not publish hidden entries into
+          // the ordinary history list or select a live execution target.
+          return records;
+        }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    function listRemoteProxyArchives(before) {
+      ensureAvailable();
+      return invoke("desktop_remote_proxy_archive_list", { before: before || null })
+        .then(function (records) {
+          if (!Array.isArray(records) || records.length > 256 || records.some(function (record) {
+            return !record || !requiredOpaqueId(record.localSessionId)
+              || !record.localSessionId.startsWith("remote-") || record.archived !== true
+              || typeof record.archiveCursor !== "string" || !/^[1-9][0-9]{0,18}$/.test(record.archiveCursor);
+          })) throw asBoundedError("remote_proxy_projection_invalid");
+          return records;
+        })
+        .catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    function archiveRemoteProxyHistory(localSessionId) {
+      ensureAvailable();
+      if (!requiredOpaqueId(localSessionId) || !localSessionId.startsWith("remote-")) {
+        return Promise.reject(invalidTaskIntent());
+      }
+      return invoke("desktop_remote_proxy_archive", { localSessionId: localSessionId })
+        .then(function (cleaned) {
+          ++proxyListIntent;
+          proxyReadIntents[localSessionId] = (proxyReadIntents[localSessionId] || 0) + 1;
+          var selected = current().remoteProxyHistory;
+          if (selected && selected.localSessionId === localSessionId) {
+            publish(logic.projectRemoteProxyRead(current(), Object.assign({}, selected, {
+              archived: true, pendingUnknownCount: 0, unattemptedPending: [],
+            })));
+          }
+          // The irreversible Rust commit succeeded. Refresh failure cannot
+          // report it as an uncommitted archive or restore UI execution rights.
+          Promise.resolve().then(function () { return listRemoteProxyHistory(); }).catch(function () {});
+          Promise.resolve().then(function () { return readRemoteProxyHistory(localSessionId); }).catch(function () {});
+          return cleaned;
+        }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
     function scheduleRemoteProxyRefresh(notice) {
       if (proxyRefreshTimer) clearTimeout(proxyRefreshTimer);
       proxyRefreshTimer = setTimeout(function () {
@@ -1256,6 +1307,9 @@
       readRemoteProxyHistory: readRemoteProxyHistory,
       selectRemoteProxyHistory: selectRemoteProxyHistory,
       deleteRemoteProxyHistory: deleteRemoteProxyHistory,
+      archiveRemoteProxyHistory: archiveRemoteProxyHistory,
+      listRemoteProxyArchives: listRemoteProxyArchives,
+      listRemoteProxyArchiveCandidates: listRemoteProxyArchiveCandidates,
       reserveRemoteTask: reserveRemoteTask,
       commitRemoteTask: commitRemoteTask,
       cancelRemoteTask: cancelRemoteTask,
