@@ -31,6 +31,8 @@ pub(crate) trait ControlledTransportAuthority: Send + Sync {
     ) -> bool;
     fn is_stopped(&self) -> bool;
     fn stop(&self);
+    /// Hold exact transport authority through a synchronous business mutation.
+    fn with_business_authority(&self, expected: &LeaseContext, action: &mut dyn FnMut()) -> bool;
 }
 
 impl ControlledTransportAuthority for ControllerTransportSender {
@@ -53,6 +55,9 @@ impl ControlledTransportAuthority for ControllerTransportSender {
     }
     fn stop(&self) {
         ControllerTransportSender::stop(self);
+    }
+    fn with_business_authority(&self, expected: &LeaseContext, action: &mut dyn FnMut()) -> bool {
+        ControllerTransportSender::with_business_authority(self, expected, action)
     }
 }
 
@@ -808,8 +813,19 @@ impl ControlledDeviceManager {
         operation: ControlledOperation,
         error_code: String,
     ) -> Result<ControlledStatus> {
+        self.fail_operation_with_retired_lease(operation, error_code)
+            .map(|(status, _)| status)
+    }
+
+    /// Capture cleanup identity under the same lock as retiring its operation.
+    pub(crate) fn fail_operation_with_retired_lease(
+        &self,
+        operation: ControlledOperation,
+        error_code: String,
+    ) -> Result<(ControlledStatus, Option<LeaseContext>)> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
+        let retired_lease = inner.lease_context.clone();
         let retired_generation = inner.generation.clone();
         let generation = retired_generation.clone().unwrap_or_default();
         clear_sensitive(&mut inner, u64::MAX, true);
@@ -819,7 +835,7 @@ impl ControlledDeviceManager {
         let status = terminal_status_with_retired_generation(&inner, retired_generation);
         drop(inner);
         self.notify_cleanup(&generation);
-        Ok(status)
+        Ok((status, retired_lease))
     }
 
     pub(crate) fn complete_resumed(
@@ -1047,10 +1063,15 @@ impl ControlledDeviceManager {
         inner.liveness_epoch_a.clone()
     }
 
-    pub(crate) fn accept_remote_disconnect(&self) -> Result<ControlledStatus> {
-        {
-            let inner = self.inner.lock();
-            if inner.lease_context.is_none()
+    pub(crate) fn accept_remote_disconnect_for(
+        &self,
+        operation: &ControlledOperation,
+        expected: &LeaseContext,
+    ) -> Result<ControlledStatus> {
+        let status = {
+            let mut inner = self.inner.lock();
+            ensure_operation(&inner, operation)?;
+            if inner.lease_context.as_ref() != Some(expected)
                 || !matches!(
                     inner.phase,
                     ControlledStatusKind::Connected | ControlledStatusKind::Reconnecting
@@ -1058,12 +1079,17 @@ impl ControlledDeviceManager {
             {
                 return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
             }
-        }
-        Ok(self.terminate_local(
-            "desktop_remote_controller_disconnected",
-            ControlledStatusKind::Stopped,
-            false,
-        ))
+            let retired_generation = inner.generation.clone();
+            clear_sensitive(&mut inner, u64::MAX, false);
+            inner.device_name = None;
+            inner.phase = ControlledStatusKind::Stopped;
+            inner.error_code = None;
+            terminal_status_with_retired_generation(&inner, retired_generation)
+        };
+        // Host hooks may re-enter or start a successor. Never call them under
+        // the state lock or clear resources by reading the successor identity.
+        self.notify_cleanup(operation.generation());
+        Ok(status)
     }
 
     pub(crate) fn disconnect_now(&self) -> ControlledStatus {
@@ -1250,6 +1276,33 @@ impl ControlledDeviceManager {
     /// B business actions are admitted only while this exact authenticated
     /// generation remains connected. Stop/refresh cannot race the mutation.
     pub(crate) fn with_current_business_lease<T>(
+        &self,
+        expected: &LeaseContext,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let inner = self.inner.lock();
+        if inner.phase != ControlledStatusKind::Connected
+            || inner.lease_context.as_ref() != Some(expected)
+        {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        let Some(transport) = inner.transport.as_ref() else {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        };
+        let mut action = Some(action);
+        let mut result = None;
+        if !transport.with_business_authority(expected, &mut || {
+            result = action.take().map(|action| action());
+        }) {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        result.ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))
+    }
+
+    /// Response construction pins the B owner but is not business admission.
+    /// Each send separately checks exact socket/lease authority. Holding the
+    /// transport mutation gate here would deadlock when send re-enters it.
+    pub(crate) fn with_current_response_lease<T>(
         &self,
         expected: &LeaseContext,
         action: impl FnOnce() -> T,
@@ -1841,6 +1894,22 @@ mod tests {
         let inner = manager.inner.lock();
         assert!(inner.pairing.is_none());
         assert_eq!(inner.last_observed_now_b, observed_before);
+    }
+
+    #[test]
+    fn connected_without_transport_cannot_execute_business_mutation() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &operation);
+        manager.mark_claimed(operation.clone()).unwrap();
+        let context = lease(operation.generation()).context;
+        manager
+            .complete_connected(operation.clone(), lease(operation.generation()))
+            .unwrap();
+        let mut calls = 0;
+        let result = manager.with_current_business_lease(&context, || calls += 1);
+        assert_eq!(result.unwrap_err().code, "desktop_remote_not_connected");
+        assert_eq!(calls, 0);
     }
 
     #[test]
@@ -2861,7 +2930,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            manager.accept_remote_disconnect().unwrap_err().code,
+            manager
+                .accept_remote_disconnect_for(&operation, &lease(&operation.generation).context)
+                .unwrap_err()
+                .code,
             "desktop_remote_phase_invalid",
             "尚未连接时不得接受远端断开"
         );
@@ -2870,7 +2942,9 @@ mod tests {
         manager
             .complete_connected(operation.clone(), lease(&operation.generation))
             .unwrap();
-        let status = manager.accept_remote_disconnect().unwrap();
+        let status = manager
+            .accept_remote_disconnect_for(&operation, &lease(&operation.generation).context)
+            .unwrap();
         assert_eq!(status.status, ControlledStatusKind::Stopped);
         assert_eq!(status.workspace_count, 1, "用户工作区授权必须保留");
         assert_eq!(status.controller_device_name, None);
@@ -2880,8 +2954,119 @@ mod tests {
             "desktop_remote_not_connected"
         );
         assert_eq!(
-            manager.accept_remote_disconnect().unwrap_err().code,
+            manager
+                .accept_remote_disconnect_for(&operation, &lease(&operation.generation).context)
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_result"
+        );
+    }
+
+    #[test]
+    fn delayed_remote_disconnect_cannot_terminate_a_successor_or_a_rotated_lease() {
+        let manager = ControlledDeviceManager::default();
+        let old = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &old);
+        enter_handshake(&manager, &old);
+        let old_lease = lease(old.generation()).context;
+        manager
+            .complete_connected(old.clone(), lease(old.generation()))
+            .unwrap();
+        // This is the deterministic window after an old worker validated its
+        // frozen lease but before it asks the state owner to commit disconnect.
+        manager.stop();
+        let successor = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &successor);
+        enter_handshake(&manager, &successor);
+        let new_lease = lease(successor.generation()).context;
+        manager
+            .complete_connected(successor.clone(), lease(successor.generation()))
+            .unwrap();
+        let before = manager.status();
+        assert_eq!(
+            manager
+                .accept_remote_disconnect_for(&old, &old_lease)
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_result"
+        );
+        assert!(manager.status() == before);
+        let mut foreign = new_lease.clone();
+        foreign.controller_lease_id = "foreign-lease".into();
+        assert_eq!(
+            manager
+                .accept_remote_disconnect_for(&successor, &foreign)
+                .unwrap_err()
+                .code,
             "desktop_remote_phase_invalid"
+        );
+        assert_eq!(manager.live_lease().unwrap(), new_lease);
+    }
+
+    #[test]
+    fn remote_disconnect_cleanup_runs_unlocked_and_keeps_its_retired_identity() {
+        struct PausedCleanup {
+            retired: String,
+            entered: std::sync::mpsc::Sender<String>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl ControlledCleanupSink for PausedCleanup {
+            fn cleanup(&self, generation: &str, _: ControlledCleanupScope) {
+                if generation == self.retired {
+                    self.entered.send(generation.to_owned()).unwrap();
+                    self.release
+                        .lock()
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                }
+            }
+        }
+        let manager = Arc::new(ControlledDeviceManager::default());
+        let old = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &old);
+        enter_handshake(&manager, &old);
+        manager
+            .complete_connected(old.clone(), lease(old.generation()))
+            .unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        manager.register_cleanup_sink(Arc::new(PausedCleanup {
+            retired: old.generation().to_owned(),
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        }));
+        let retiring = manager.clone();
+        let expected = lease(old.generation()).context;
+        let old_generation = old.generation().to_owned();
+        let thread =
+            std::thread::spawn(move || retiring.accept_remote_disconnect_for(&old, &expected));
+        assert_eq!(
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            old_generation
+        );
+        // A successor can be installed while the old cleanup is paused. This
+        // would deadlock if host callbacks still ran under the state owner lock.
+        let successor = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &successor);
+        enter_handshake(&manager, &successor);
+        manager
+            .complete_connected(successor.clone(), lease(successor.generation()))
+            .unwrap();
+        release_tx.send(()).unwrap();
+        let retired_status = thread.join().unwrap().unwrap();
+        assert_eq!(
+            retired_status.generation.as_deref(),
+            Some(old_generation.as_str())
+        );
+        assert_eq!(
+            manager.current_generation().as_deref(),
+            Some(successor.generation())
+        );
+        assert_eq!(
+            manager.live_lease().unwrap(),
+            lease(successor.generation()).context
         );
     }
 

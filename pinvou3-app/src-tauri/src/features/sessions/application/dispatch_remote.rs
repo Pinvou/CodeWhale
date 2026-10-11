@@ -301,6 +301,9 @@ impl RemoteDispatchService {
         if ephemeral.len() >= MAX_EPHEMERAL_PACKAGES {
             return Err(error("remote_outbox_capacity"));
         }
+        // OS credentials may block on user authentication. They must not hold
+        // the service lock or stall unrelated commit/cancel/abandon operations.
+        drop(ephemeral);
         // DEV-15 performs the only package build. Nothing can be persisted or
         // sent until the exact returned wire payload is validated.
         let prepared = self.port.prepare(&request)?;
@@ -328,6 +331,42 @@ impl RemoteDispatchService {
             dispatch_state: PendingDispatchState::PreparedNeverAttempted,
             reservation_fingerprint: None,
         };
+        // Preparation is not admission. Recheck capacity, identity and live
+        // ownership after the unlocked work; the host then atomically gates the
+        // durable insert against the current authenticated manager/lane.
+        let mut ephemeral = self.ephemeral.lock();
+        let current = self
+            .store
+            .remote_proxy_snapshot(&semantics.local_session_id)
+            .ok_or_else(|| error("remote_proxy_not_found"))?;
+        if current.remote_session_ref != semantics.remote_session_ref
+            || current.controlled_session_id.as_deref() != Some(&semantics.controlled_session_id)
+            || current.peer_id != request.live.peer_id
+            || self
+                .store
+                .remote_dispatch_live_context(
+                    &semantics.local_session_id,
+                    &semantics.remote_session_ref,
+                )
+                .map_err(|_| error("remote_binding_mismatch"))?
+                != request.live
+        {
+            return Err(error("remote_binding_mismatch"));
+        }
+        if current.retired_requests.iter().any(|item| {
+            item.client_request_id == request.client_request_id || item.task_id == request.task_id
+        }) {
+            ephemeral.remove(&key);
+            return Err(error("remote_request_id_retired"));
+        }
+        if current.pending.iter().any(|item| {
+            item.client_request_id == request.client_request_id || item.task_id == request.task_id
+        }) {
+            return Err(error("remote_request_id_exists"));
+        }
+        if ephemeral.len() >= MAX_EPHEMERAL_PACKAGES {
+            return Err(error("remote_outbox_capacity"));
+        }
         match self
             .port
             .reserve_pending(
@@ -337,8 +376,13 @@ impl RemoteDispatchService {
                 &request.live,
                 pending,
             )
-            .map_err(|_| error("remote_pending_persist_failed"))?
-        {
+            .map_err(|failure| {
+                if failure.code() == "remote_proxy_byte_budget" {
+                    error("remote_proxy_byte_budget")
+                } else {
+                    error("remote_pending_persist_failed")
+                }
+            })? {
             PendingReservation::Inserted => {
                 ephemeral.insert(
                     key,
@@ -745,6 +789,13 @@ mod tests {
         model_route: Mutex<Value>,
         sent_route: Mutex<Option<Value>>,
         tamper_field: Mutex<Option<&'static str>>,
+        prepare_gate: Mutex<
+            Option<(
+                String,
+                std::sync::mpsc::Sender<()>,
+                std::sync::mpsc::Receiver<()>,
+            )>,
+        >,
     }
 
     impl FakePort {
@@ -770,6 +821,7 @@ mod tests {
                 })),
                 sent_route: Mutex::new(None),
                 tamper_field: Mutex::new(None),
+                prepare_gate: Mutex::new(None),
             }
         }
 
@@ -880,6 +932,20 @@ mod tests {
             request: &RemoteDispatchRequest,
         ) -> Result<PreparedRemoteTask, UseCaseError> {
             self.prepare_count.fetch_add(1, Ordering::SeqCst);
+            let gate = {
+                let mut gate = self.prepare_gate.lock();
+                if gate.as_ref().is_some_and(|gate| gate.0 == request.task_id) {
+                    gate.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((_, entered, release)) = gate {
+                entered.send(()).unwrap();
+                release
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            }
             if self.fail_prepare.load(Ordering::SeqCst)
                 || !self.credential_available.load(Ordering::SeqCst)
             {
@@ -1047,6 +1113,62 @@ mod tests {
     }
 
     #[test]
+    fn blocked_credentials_do_not_hold_the_outbox_lock_or_admit_retired_ids() {
+        for abandon in [false, true] {
+            let (_temp, store, request) = setup();
+            let port = Arc::new(FakePort::new(
+                store.clone(),
+                request.semantics.local_session_id.clone(),
+            ));
+            let service = Arc::new(RemoteDispatchService::new(store.clone(), port.clone()));
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *port.prepare_gate.lock() = Some((request.task_id.clone(), entered_tx, release_rx));
+            let first_request = same_request(&request);
+            let first_service = service.clone();
+            let first = std::thread::spawn(move || first_service.reserve_new(first_request));
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            let second_request = same_request(&request);
+            let second_service = service.clone();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let second = std::thread::spawn(move || {
+                let result = second_service.reserve_new(second_request);
+                if abandon && result.is_ok() {
+                    second_service
+                        .abandon_prepared_remote_task(
+                            &request.semantics.local_session_id,
+                            &request.client_request_id,
+                            &request.task_id,
+                        )
+                        .unwrap();
+                }
+                done_tx.send(result).unwrap();
+            });
+            // Release even when the assertion would fail, so a regressed lock
+            // cannot leave test threads hung or masquerade as an IPC timeout.
+            let result = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+            release_tx.send(()).unwrap();
+            let first_result = first.join().unwrap();
+            second.join().unwrap();
+            assert!(
+                result.unwrap().is_ok(),
+                "a second reserve must progress during credential wait"
+            );
+            assert_eq!(
+                first_result.unwrap_err().code(),
+                if abandon {
+                    "remote_request_id_retired"
+                } else {
+                    "remote_request_id_exists"
+                }
+            );
+            assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
     fn missing_prepared_entry_fails_before_durable_attempt_barrier() {
         let (_temp, store, request) = setup();
         let port = Arc::new(FakePort::new(
@@ -1177,7 +1299,7 @@ mod tests {
 
         assert_eq!(
             service.reserve_new(request).unwrap_err().code(),
-            "remote_pending_persist_failed"
+            "remote_binding_mismatch"
         );
         assert!(
             store
