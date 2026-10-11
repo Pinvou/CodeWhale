@@ -92,6 +92,16 @@ mod published_attachment;
 mod file_limits;
 
 mod features {
+    pub(crate) mod sessions {
+        pub(crate) mod validators {
+            // Explicit host seam: native tests cover SessionStore validation.
+            pub(crate) fn validate_session_id(id: &str) -> anyhow::Result<()> {
+                anyhow::ensure!(!id.is_empty() && id.bytes().all(|byte|
+                    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
+                Ok(())
+            }
+        }
+    }
     pub(crate) mod files {
         pub(crate) mod file_ingest {
             pub(crate) use crate::published_attachment::*;
@@ -156,6 +166,7 @@ mod features {
 }
 
 mod platform;
+mod remote_archive;
 
 pub(crate) mod relay_runtime {
     pub(crate) fn log_controlled_event(_event: &str, _outcome: &str) {}

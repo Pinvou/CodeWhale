@@ -464,7 +464,11 @@
     var candidate = shallowCopy(state);
     candidate.controllerOpenIntent = intent;
     candidate.controllerTerminatedOpenIntent = null;
-    var applied = applyControllerStatus(candidate, Object.assign({}, payload, { intent: intent }));
+    // Only this complete authoritative read may replace the terminated claim.
+    // Normal transport events still cannot opt themselves into a new binding.
+    var applied = applyControllerStatus(candidate, Object.assign({}, payload, {
+      intent: intent, replaceBinding: true,
+    }));
     return applied === candidate ? state : applied;
   }
 
@@ -840,6 +844,7 @@
       })) return state;
     var next = shallowCopy(state);
     next.remoteProxyHistory = {
+      archived: record.archived === true,
       localSessionId: record.localSessionId,
       title: projectionText(record.title, 120),
       pinned: record.pinned === true,

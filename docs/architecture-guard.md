@@ -83,8 +83,9 @@ python scripts/architecture-guard.py
 `features/remote_control/controller/relay_runtime/reader_resume_tests.rs`
 文件头使用守卫登记的 `allow-reader-test-host-type` 理由，并自行限定
 `#![cfg(all(test, target_os = "windows"))]`。只允许顶层
-`resume_round_trip<T>(build_host: impl FnOnce() -> (tauri::AppHandle, T))`
+`resume_round_trip<T>(build_host: impl FnOnce() -> (tauri::AppHandle, T), retire_endpoint: bool,)`
 签名中的一个类型路径，Wry 工厂仍由 `app/commands/remote_control/` 测试构建。
+第二参数只选择同一真实宿主的恢复或端点退休回归；缺失、改名、非 bool 或额外参数均不属于例外。
 该例外不增加宿主 API 基线，也不是文件级放行；增加类型、以等数量宿主调用替代类型、
 新增事件调用（含 `super::*` 继承的 Emitter）、Command、反向 app 依赖、移除 test/Windows
 条件或复制到其他文件均失败。真实 reader/manager/worker 回归不得改成纯状态 mock。

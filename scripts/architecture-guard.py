@@ -1059,7 +1059,7 @@ def reader_test_host_type_allowed(relative: str, text: str) -> bool:
         return False
     signature = rust_syntax_tokens(
         "pub(crate) async fn resume_round_trip<T>"
-        "(build_host: impl FnOnce() -> (tauri::AppHandle, T)) {"
+        "(build_host: impl FnOnce() -> (tauri::AppHandle, T), retire_endpoint: bool,) {"
     )
     depth = 0
     signatures = 0

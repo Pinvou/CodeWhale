@@ -83,7 +83,7 @@ fn open_live(
     }
     let prepared = store
         .prepare_remote_proxy_open(existing_local_session_id, &context)
-        .map_err(|_| "remote_proxy_open_failed".to_owned())?;
+        .map_err(remote_open_error)?;
     let remote_ref = prepared.open.remote_session_ref.clone();
     let (projection, created_intent): (ControllingSessionProjection, bool) = match sessions
         .open_with_outcome(Some(&remote_ref), "remote", "chat", &lease, &capabilities)
@@ -100,7 +100,7 @@ fn open_live(
         match manager.with_current_authenticated_remote_proxy_identity(lane, &expected, || {
             store
                 .commit_prepared_remote_proxy_open(prepared, &context)
-                .map_err(|_| "remote_proxy_open_failed".to_owned())
+                .map_err(remote_open_error)
         }) {
             Ok(opened) => opened,
             Err(error) => {
@@ -140,6 +140,15 @@ fn open_live(
     })
 }
 
+fn remote_open_error(error: anyhow::Error) -> String {
+    match error.to_string().as_str() {
+        "remote_proxy_byte_budget" | "RemoteProxy record capacity reached" => {
+            "remote_proxy_byte_budget".to_owned()
+        }
+        _ => "remote_proxy_open_failed".to_owned(),
+    }
+}
+
 #[tauri::command]
 pub(crate) fn desktop_remote_proxy_open_live(
     store: State<'_, SessionStore>,
@@ -158,11 +167,11 @@ pub(crate) fn desktop_remote_proxy_open_live(
     )
 }
 
-fn list_visible(store: &SessionStore) -> Vec<Value> {
+fn list_metadata(store: &SessionStore, include_hidden: bool) -> Vec<Value> {
     store
         .list_remote_proxy_history()
         .into_iter()
-        .filter(|item| !item.ui.hidden)
+        .filter(|item| include_hidden || !item.ui.hidden)
         .map(|item| {
             json!({
                 "localSessionId": item.local_session_id,
@@ -170,9 +179,14 @@ fn list_visible(store: &SessionStore) -> Vec<Value> {
                 "pinned": item.ui.pinned,
                 "lastOpenedAt": item.ui.last_opened_at,
                 "projectedEntryCount": item.projected_entry_count,
+                "hidden": item.ui.hidden,
             })
         })
         .collect()
+}
+
+fn list_visible(store: &SessionStore) -> Vec<Value> {
+    list_metadata(store, false)
 }
 
 fn read_visible(store: &SessionStore, local_session_id: &str) -> Result<Value, String> {
@@ -226,6 +240,7 @@ fn read_visible(store: &SessionStore, local_session_id: &str) -> Result<Value, S
         .collect();
     Ok(json!({
         "localSessionId": view.local_session_id,
+        "archived": store.is_archived_remote_proxy(local_session_id).map_err(|_| "remote_proxy_archive_unavailable".to_owned())?,
         "title": view.ui.title,
         "pinned": view.ui.pinned,
         "lastOpenedAt": view.ui.last_opened_at,
@@ -245,21 +260,27 @@ pub(crate) fn desktop_remote_proxy_history_list(
 }
 
 #[tauri::command]
-pub(crate) fn desktop_remote_proxy_history_read(
-    store: State<'_, SessionStore>,
+pub(crate) async fn desktop_remote_proxy_history_read<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     local_session_id: String,
 ) -> Result<Value, String> {
-    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
-    read_visible(&store, &local_session_id)
+    super::desktop_remote_task::run_a_dispatch_blocking(move || {
+        let store = super::desktop_remote_state::ready_state::<_, SessionStore>(&app)?;
+        read_visible(&store, &local_session_id)
+    })
+    .await
 }
 
 #[tauri::command]
-pub(crate) fn desktop_remote_proxy_history_delete(
-    store: State<'_, SessionStore>,
+pub(crate) async fn desktop_remote_proxy_history_delete<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     local_session_id: String,
 ) -> Result<(), String> {
-    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
-    hide_visible(&store, &local_session_id)
+    super::desktop_remote_task::run_a_dispatch_blocking(move || {
+        let store = super::desktop_remote_state::ready_state::<_, SessionStore>(&app)?;
+        hide_visible(&store, &local_session_id)
+    })
+    .await
 }
 
 fn hide_visible(store: &SessionStore, local_session_id: &str) -> Result<(), String> {
@@ -275,6 +296,92 @@ fn hide_visible(store: &SessionStore, local_session_id: &str) -> Result<(), Stri
                 "remote_proxy_delete_failed".to_owned()
             }
         })
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_remote_proxy_archive<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    local_session_id: String,
+) -> Result<bool, String> {
+    super::desktop_remote_task::run_a_dispatch_blocking(move || {
+        let store = super::desktop_remote_state::ready_state::<_, SessionStore>(&app)?;
+        let manager =
+            super::desktop_remote_state::ready_state::<_, ControllingDeviceManager>(&app)?;
+        manager.with_remote_archive_owner(|identity| {
+            let live = identity.map(|(lease, peer_id, resume_boundary_id)| LiveRemoteContext {
+                peer_id,
+                resume_boundary_id,
+                connection_id: lease.connection_id,
+                controller_lease_id: lease.controller_lease_id,
+                lease_epoch: lease.lease_epoch,
+                relay_epoch: lease.relay_epoch,
+                generation: lease.remote_control_generation,
+                control_connected: true,
+                encrypted_channel_connected: true,
+            });
+            store
+                .archive_remote_proxy(&local_session_id, live.as_ref())
+                .map_err(|error| {
+                    match error.to_string().as_str() {
+                        "remote_proxy_archive_online" => "remote_proxy_archive_online",
+                        "remote_proxy_archive_pending" => "remote_proxy_archive_pending",
+                        "remote_proxy_not_found" => "remote_proxy_not_found",
+                        _ => "remote_proxy_archive_unavailable",
+                    }
+                    .to_owned()
+                })
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_remote_proxy_archive_list<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    before: Option<String>,
+) -> Result<Vec<Value>, String> {
+    super::desktop_remote_task::run_a_dispatch_blocking(move || {
+        let store = super::desktop_remote_state::ready_state::<_, SessionStore>(&app)?;
+        let before = before
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|v| *v > 0)
+                    .ok_or_else(|| "remote_proxy_archive_cursor_invalid".to_owned())
+            })
+            .transpose()?;
+        store
+            .list_remote_proxy_archives(before)
+            .map_err(|_| "remote_proxy_archive_unavailable".to_owned())
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|(cursor, item)| {
+                        json!({
+                            "localSessionId":item.local_session_id,"title":item.ui.title,
+                            "pinned":item.ui.pinned,"lastOpenedAt":item.ui.last_opened_at,
+                            "projectedEntryCount":item.projected_entry_count,"archived":true,
+                            "archiveCursor":cursor.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+    })
+    .await
+}
+
+/// Management-only metadata: hidden records still consume capacity and must
+/// remain discoverable here without reviving ordinary history visibility.
+#[tauri::command]
+pub(crate) async fn desktop_remote_proxy_archive_candidates<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<Vec<Value>, String> {
+    super::desktop_remote_task::run_a_dispatch_blocking(move || {
+        let store = super::desktop_remote_state::ready_state::<_, SessionStore>(&app)?;
+        Ok(list_metadata(&store, true))
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -325,6 +432,8 @@ mod tests {
             .hide_remote_proxy_history(&opened.local_session_id)
             .unwrap();
         assert!(list_visible(&store).is_empty());
+        assert_eq!(list_metadata(&store, true).len(), 1);
+        assert_eq!(list_metadata(&store, true)[0]["hidden"], true);
         assert_eq!(
             read_visible(&store, &opened.local_session_id).unwrap_err(),
             "remote_proxy_not_found"
@@ -334,6 +443,34 @@ mod tests {
                 .remote_proxy_snapshot(&opened.local_session_id)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn hidden_full_registry_is_manageable_and_sealed_history_remains_readable() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..256 {
+            ids.push(
+                store
+                    .test_commit_remote_proxy_open(None, &live())
+                    .unwrap()
+                    .local_session_id,
+            );
+        }
+        for id in &ids {
+            store.hide_remote_proxy_history(id).unwrap();
+        }
+        assert!(list_visible(&store).is_empty());
+        assert_eq!(list_metadata(&store, true).len(), 256);
+        assert!(store.test_commit_remote_proxy_open(None, &live()).is_err());
+        assert!(store.archive_remote_proxy(&ids[0], None).unwrap());
+        assert_eq!(list_metadata(&store, true).len(), 255);
+        assert!(list_visible(&store).is_empty());
+        let archives = store.list_remote_proxy_archives(None).unwrap();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(read_visible(&store, &ids[0]).unwrap()["archived"], true);
+        assert!(store.test_commit_remote_proxy_open(None, &live()).is_ok());
     }
 
     #[test]
