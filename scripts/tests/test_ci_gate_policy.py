@@ -148,7 +148,7 @@ class CiGatePolicyTests(unittest.TestCase):
         verifier_gate = self.pr_workflow.split(
             "- name: 公开底座 gitlink 可达性", maxsplit=1
         )[1].split("- name: 初始化公共底座 submodule", maxsplit=1)[0]
-        self.assertIn("./scripts/verify-public-submodule.sh", verifier_gate)
+        self.assertIn("./scripts/verify-public-submodule.sh --registered-snapshot", verifier_gate)
         self.assertNotIn("--allow-registered-candidate", verifier_gate)
         self.assertNotIn("LOCAL_SECURITY_HEAD", verifier)
         self.assertIn('[[ "$tag_target" != "$gitlink" ]]', verifier)
@@ -410,7 +410,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "\n  team-relay-hub-test:", maxsplit=1
         )[1].split("\n  release-contract-test:", maxsplit=1)[0]
         self.assertIn("needs.changes.outputs.team_relay_hub == 'true'", hub_job)
-        self.assertIn("postgres:16-alpine", hub_job)
+        self.assertRegex(hub_job, r"image: mirror\.gcr\.io/library/postgres@sha256:[a-f0-9]{64}")
         self.assertIn("TEAM_RELAY_TEST_DATABASE_URL", hub_job)
         self.assertIn("npm --prefix team-relay-hub ci", hub_job)
         self.assertIn("npm --prefix team-relay-hub test", hub_job)
@@ -437,7 +437,8 @@ class CiGatePolicyTests(unittest.TestCase):
             console_job,
         )
         self.assertIn(
-            "docker build --file update-release-console/Dockerfile "
+            'docker build --build-arg NODE_IMAGE="$PINVOU_UPDATE_NODE_IMAGE" '
+            "--file update-release-console/Dockerfile "
             "update-release-console",
             console_job,
         )
@@ -446,7 +447,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "config --quiet",
             console_job,
         )
-        self.assertIn("nginx:1.27-alpine nginx -t", console_job)
+        self.assertRegex(console_job, r"mirror\.gcr\.io/library/nginx@sha256:[a-f0-9]{64} nginx -t")
         self.assertIn("/var/www/pinvou3/latest.json", console_job)
         self.assertIn(
             "docker compose --file update-release-console/deploy/compose.yaml "
