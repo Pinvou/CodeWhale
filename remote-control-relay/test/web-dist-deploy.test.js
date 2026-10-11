@@ -77,7 +77,10 @@ test("actual local and staged deployment checks require current Web entry resour
     production.match(staged) ? prepare + "\n" + production.match(staged)[0] : undefined];
   assert.ok(commands.every(Boolean), "execute all three actual script checks");
   assert.doesNotMatch(production + testing, /test -f [^\n]*platform\/tauri\/bridge\.js/);
-  const fixtures = ["current", "missing-module", "missing-startup", "wrong-base", "missing-index", "bridge-only", "traversal"];
+  const fixtures = ["current", "missing-module", "missing-startup", "wrong-base", "comment-base", "second-base",
+    "raw-text-base", "comment-only-base", "attribute-base", "inert-base", "unclosed-comment-base", "raw-prefix-close-base", "foreign-base",
+    "comment-resources", "raw-resources", "attribute-resources", "fake-module-attribute", "comment-title", "unquoted-module-slash", "asset-trailing-slash",
+    "missing-index", "bridge-only", "traversal"];
   for (const fixture of fixtures) {
     const directory = mkdtempSync(join(tmpdir(), "pinvou-web-dist-check-"));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -99,9 +102,38 @@ test("actual local and staged deployment checks require current Web entry resour
     copyFileSync(uploadedPackage, join(relay, "package.json"));
     assert.equal(existsSync(join(stage, "package.json")), false);
     const base = fixture === "wrong-base" ? "/other/" : "/pinvou3/remote/";
+    // Relative resources isolate the base gate: a wrong base must fail even
+    // though every referenced file exists and no absolute-prefix check helps.
     let html = `<title>PINVOU 智能助手</title><base href="${base}">`
-      + `<script src="${base}startup/fixture.js"></script>`
-      + `<script type="module" src="${base}assets/fixture.js"></script>`;
+      + '<script src="startup/fixture.js"></script>'
+      + '<script type="module" src="assets/fixture.js"></script>';
+    if (fixture === "comment-base") html = html.replace(`<base href="${base}">`,
+      '<base href="/other/"><!-- <base href="/pinvou3/remote/"> -->');
+    if (fixture === "second-base") html = html.replace(`<base href="${base}">`,
+      '<base href="/other/"><base href="/pinvou3/remote/">');
+    if (fixture === "raw-text-base") html = html.replace(`<base href="${base}">`,
+      '<script>const fixture = \'<base href="/pinvou3/remote/">\';</script>');
+    if (fixture === "comment-only-base") html = html.replace(`<base href="${base}">`,
+      '<!-- <base href="/pinvou3/remote/"> -->');
+    if (fixture === "attribute-base") html = html.replace(`<base href="${base}">`,
+      '<div data-fixture=\'<base href="/pinvou3/remote/">\'></div>');
+    if (fixture === "inert-base") html = html.replace(`<base href="${base}">`,
+      '<template><base href="/pinvou3/remote/"></template>');
+    if (fixture === "unclosed-comment-base") html = html.replace(`<base href="${base}">`,
+      '<!-- <base href="/pinvou3/remote/">');
+    if (fixture === "raw-prefix-close-base") html = html.replace(`<base href="${base}">`,
+      '<script>fixture</script-not-close><base href="/pinvou3/remote/"></script>');
+    if (fixture === "foreign-base") html = html.replace(`<base href="${base}">`,
+      '<svg><base href="/pinvou3/remote/"></svg>');
+    const resources = '<script src="startup/fixture.js"></script><script type="module" src="assets/fixture.js"></script>';
+    if (fixture === "comment-resources") html = html.replace(resources, '<!-- ' + resources + ' -->');
+    if (fixture === "raw-resources") html = html.replace(resources, '<script>const fixture = ' + JSON.stringify(resources) + ';</script>');
+    if (fixture === "attribute-resources") html = html.replace(resources, "<div data-fixture='" + resources + "'></div>");
+    if (fixture === "fake-module-attribute") html = html.replace('type="module"', 'data-fixture="type=\'module\'"');
+    if (fixture === "comment-title") html = html.replace('<title>PINVOU 智能助手</title>', '<title>unrelated</title><!-- <title>PINVOU 智能助手</title> -->');
+    if (fixture === "unquoted-module-slash") html = html.replace('type="module" src="assets/fixture.js">',
+      'src="assets/fixture.js" type=module/>');
+    if (fixture === "asset-trailing-slash") html = html.replace('src="assets/fixture.js"', 'src="assets/fixture.js/"');
     if (fixture === "bridge-only") html = `<title>PINVOU 智能助手</title><base href="${base}"><script src="${base}platform/tauri/bridge.js"></script>`;
     if (fixture === "traversal") {
       writeFileSync(join(dist, "..", "outside.js"), "/* outside artifact */");

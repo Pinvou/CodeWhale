@@ -75,6 +75,6 @@ bash scripts/deploy-remote-relay-test.sh --teardown
 - 当前 Windows B 端恢复接线回归的宿主入口是 `pinvou3-app/src-tauri/src/app/commands/remote_control/reader_resume_tests.rs` 的 `real_reader_manager_worker_resume_round_trip()`；它调用 `features/remote_control/controller/relay_runtime/reader_resume_tests.rs` 的共享 `resume_round_trip()` 夹具：
   走真实 WebSocket reader、manager 与 worker，但 Relay 是本地协议模拟端；不替代 Web v2 mobile、真实三角色或双 Windows 验收。
 
-Windows 本机还需取得 PowerShell 属主、身份与 launcher 的实际执行结果，平台 skip 不算通过。以上检查不执行真实 SSH、生产部署、线上回滚或双 Windows 验收。
+`node scripts/run-windows-relay-tools-tests.mjs` 在原生 Windows PowerShell 5.1 执行属主、身份与 launcher 三组测试，CI 的 `windows-relay-tools-test` 同样执行且禁止零计数或 skip。健康片段覆盖有界重试/请求超时和恢复旧 unit，不代表完整故障矩阵（#1429）。以上检查不执行真实 SSH、生产部署、线上回滚或双 Windows 验收。
 
 真实双机旅程与发布门禁见 [部署说明](Windows双端远程控制服务部署说明.md) 和 [发布与回滚](Windows双端远程控制发布与回滚.md)。敏感信息或未修漏洞按 CONTRIBUTING.md 中的私密安全报告通道处理，不在公开 Issue 粘贴实例值。
