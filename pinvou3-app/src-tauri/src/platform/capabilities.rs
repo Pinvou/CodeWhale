@@ -83,12 +83,21 @@ pub(crate) fn supports_desktop_remote_control(os: &str) -> bool {
 /// because enabling its controller runtime also requires enrollment secrets.
 /// Durable registry/tombstone data is not coupled to this switch.
 pub(crate) fn desktop_remote_control_enabled() -> bool {
-    desktop_remote_control_enabled_for(
+    desktop_remote_control_enabled_from_env(
         std::env::consts::OS,
-        std::env::var("PINVOU_DESKTOP_CONTROLLER_ENABLED")
-            .ok()
-            .as_deref(),
+        std::env::var("PINVOU_DESKTOP_CONTROLLER_ENABLED"),
     )
+}
+
+fn desktop_remote_control_enabled_from_env(
+    os: &str,
+    flag: Result<String, std::env::VarError>,
+) -> bool {
+    match flag {
+        Ok(value) => desktop_remote_control_enabled_for(os, Some(&value)),
+        Err(std::env::VarError::NotPresent) => desktop_remote_control_enabled_for(os, None),
+        Err(std::env::VarError::NotUnicode(_)) => false,
+    }
 }
 
 pub(crate) fn ensure_desktop_remote_control_enabled() -> Result<(), String> {
@@ -178,6 +187,16 @@ mod tests {
 
     #[test]
     fn desktop_remote_control_is_default_on_and_windows_only() {
+        assert!(!desktop_remote_control_enabled_from_env(
+            "windows",
+            Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+                "invalid"
+            )))
+        ));
+        assert!(desktop_remote_control_enabled_from_env(
+            "windows",
+            Err(std::env::VarError::NotPresent)
+        ));
         assert!(desktop_remote_control_enabled_for("windows", None));
         assert!(desktop_remote_control_enabled_for("windows", Some("1")));
         for flag in [Some(""), Some("0"), Some("true"), Some("01")] {

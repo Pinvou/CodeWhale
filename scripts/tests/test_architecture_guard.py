@@ -1378,7 +1378,7 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
             reason + '\n// architecture-guard: allow-target-cfg -- Real Windows test host only.\n'
             '#![cfg(all(test, target_os = "windows"))]\nuse super::*;\n'
             'pub(crate) async fn resume_round_trip<T>'
-            '(build_host: impl FnOnce() -> (tauri::AppHandle, T)) {}\n'
+            '(build_host: impl FnOnce() -> (tauri::AppHandle, T), retire_endpoint: bool,) {}\n'
         )
         cases = {
             "extra type": canonical + "type Extra = tauri::AppHandle;\n",
@@ -1387,6 +1387,12 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
             "same count host call": canonical.replace("tauri::AppHandle", "AppHandle")
                 + "fn leak() { tauri::async_runtime::spawn(work()); }\n",
             "same type wrong signature": canonical.replace("resume_round_trip", "other"),
+            "missing retirement selector": canonical.replace(
+                ", retire_endpoint: bool,", ""
+            ),
+            "renamed retirement selector": canonical.replace("retire_endpoint", "retire_other"),
+            "nonboolean retirement selector": canonical.replace("retire_endpoint: bool", "retire_endpoint: u8"),
+            "extra parameter": canonical.replace("retire_endpoint: bool,", "retire_endpoint: bool, extra: bool,"),
             "parenthesized macro signature": canonical.replace(
                 "pub(crate) async", "macro_rules! wrap { ($($i:tt)*) => {$($i)*}; }\nwrap!(pub(crate) async"
             ).replace("{}\n", "{});\n"),
