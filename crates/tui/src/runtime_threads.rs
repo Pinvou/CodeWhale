@@ -5957,12 +5957,13 @@ impl RuntimeThreadManager {
                     // that would end up an ancestor of the new primary (or a
                     // super-root inherited from a legacy row) is a widening
                     // decision and is rejected, not admitted silently.
-                    let additional: Vec<PathBuf> = thread
-                        .workspace_roots
-                        .iter()
-                        .filter(|root| **root != thread.workspace)
-                        .cloned()
-                        .collect();
+                    // Round-38 M38-3: the lexical head strip — a
+                    // `..`-spelled copy of the OLD primary leaves the set
+                    // with the primary itself.
+                    let additional: Vec<PathBuf> = codewhale_core::strip_workspace_roots_head(
+                        &thread.workspace,
+                        &thread.workspace_roots,
+                    );
                     let normalized =
                         codewhale_core::validate_workspace_roots(&workspace, &additional)?;
                     if thread.workspace_roots != normalized {

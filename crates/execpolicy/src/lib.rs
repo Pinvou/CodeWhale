@@ -483,34 +483,38 @@ impl ExecPolicyEngine {
                 // allocating a Vec per rule per call; only scoped
                 // ask/deny over a multi-root set allocates.
                 let scoped_candidates: Vec<usize>;
-                let candidate_idx: &[usize] = if rule.action == PermissionAction::Allow {
-                    // An Allow rule keeps the primary-only narrowing on
-                    // every filter regardless of whether it carries a
-                    // workspace: its rooted path and scope may never reach
-                    // into an attached root.
-                    if rule
-                        .workspace
-                        .as_deref()
-                        .is_none_or(|workspace| workspace_scope_matches(workspace, ctx.cwd))
-                    {
+                let candidate_idx: &[usize] =
+                    if rule.action == PermissionAction::Allow {
+                        // An Allow rule keeps the primary-only narrowing on
+                        // every filter regardless of whether it carries a
+                        // workspace: its rooted path and scope may never reach
+                        // into an attached root. Round-38 M38-1: the scope
+                        // check here is EXACT — an allow scoped to the primary
+                        // must not auto-approve a `cwd:`-operand call judged
+                        // inside the primary's subtree (the subtree matcher
+                        // exists for ask/deny, where it closes a fail-open;
+                        // widening auto-approval is the wrong direction).
+                        if rule.workspace.as_deref().is_none_or(|workspace| {
+                            workspace_scope_matches_exact(workspace, ctx.cwd)
+                        }) {
+                            &[0]
+                        } else {
+                            &[]
+                        }
+                    } else if rule.workspace.is_none() && roots.len() == 1 {
                         &[0]
                     } else {
-                        &[]
-                    }
-                } else if rule.workspace.is_none() && roots.len() == 1 {
-                    &[0]
-                } else {
-                    scoped_candidates = match rule.workspace.as_deref() {
-                        None => (0..roots.len()).collect(),
-                        Some(workspace) => roots
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, root)| workspace_scope_matches(workspace, root))
-                            .map(|(idx, _)| idx)
-                            .collect(),
+                        scoped_candidates = match rule.workspace.as_deref() {
+                            None => (0..roots.len()).collect(),
+                            Some(workspace) => roots
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, root)| workspace_scope_matches(workspace, root))
+                                .map(|(idx, _)| idx)
+                                .collect(),
+                        };
+                        &scoped_candidates
                     };
-                    &scoped_candidates
-                };
                 if candidate_idx.is_empty() {
                     return false;
                 }
@@ -1137,22 +1141,32 @@ pub fn normalize_workspace_scope(value: &str) -> Option<String> {
     ))
 }
 
+fn workspace_scope_matches_exact(rule_workspace: &str, cwd: &str) -> bool {
+    match (
+        normalize_workspace_scope(rule_workspace),
+        normalize_workspace_scope(cwd),
+    ) {
+        (Some(rule_workspace), Some(cwd)) => rule_workspace == cwd,
+        _ => false,
+    }
+}
+
 fn workspace_scope_matches(rule_workspace: &str, cwd: &str) -> bool {
     match (
         normalize_workspace_scope(rule_workspace),
         normalize_workspace_scope(cwd),
     ) {
         (Some(rule_workspace), Some(cwd)) => {
-            // Round-37 M37-10: a scoped rule applies to the whole scope
-            // SUBTREE, not only its exact root. The exact-equality form let
-            // a scoped deny be filtered out for a call judged inside its
+            // Round-37 M37-10 + round-38 M38-1: ask/deny candidate roots
+            // own the whole scope SUBTREE — the exact-equality form let a
+            // scoped deny be filtered out for a call judged inside its
             // scope (a `cwd: "sub"` operand judges as /repo/sub while the
-            // rule's scope is /repo) — the denied command then ran, a
-            // fail-open the body never disclosed. Containment also restores
-            // the mirrored allow direction (exact-scoped allow no longer
-            // firing inside its own scope) that the body disclosed as a
-            // deliberate narrowing.
-            cwd == rule_workspace || cwd.starts_with(&format!("{rule_workspace}/"))
+            // rule's scope is /repo), so the denied command ran. ALLOW
+            // eligibility deliberately keeps the exact matcher: subtree
+            // reach there would auto-approve operand redirects inside the
+            // scope, a widening the standing body disclosures promise
+            // never happens.
+            rule_workspace == cwd || cwd.starts_with(&format!("{rule_workspace}/"))
         }
         _ => false,
     }
@@ -2890,6 +2904,60 @@ mod tests {
             })
             .unwrap();
         assert_ne!(outside.matched_action, Some(PermissionAction::Deny));
+    }
+
+    #[test]
+    fn workspace_scoped_allow_stays_exact_for_subdirectory_operands() {
+        // Round-38 M38-1: the subtree matcher widened ALLOW eligibility —
+        // an allow scoped to the primary auto-approved any cwd-operand call
+        // judged inside the primary's subtree, contradicting the body's
+        // standing fail-closed disclosure. Allow keeps the exact matcher;
+        // only ask/deny own the subtree (their fail-open was the bug).
+        let engine =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule {
+                    tool: "exec_shell".into(),
+                    command: Some("git status".into()),
+                    path: None,
+                    action: PermissionAction::Allow,
+                    workspace: Some("/repo".into()),
+                    ..ToolAskRule::new("")
+                }],
+            )]);
+
+        let at_root = engine
+            .check(ExecPolicyContext {
+                command: "git status",
+                cwd: "/repo",
+                tool: Some("exec_shell"),
+                path: None,
+                ask_for_approval: AskForApproval::OnRequest,
+                sandbox_mode: None,
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(
+            at_root.matched_action,
+            Some(PermissionAction::Allow),
+            "an allow scoped to /repo fires at /repo itself"
+        );
+
+        let in_subdir = engine
+            .check(ExecPolicyContext {
+                command: "git status",
+                cwd: "/repo/sub",
+                tool: Some("exec_shell"),
+                path: None,
+                ask_for_approval: AskForApproval::OnRequest,
+                sandbox_mode: None,
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert_ne!(
+            in_subdir.matched_action,
+            Some(PermissionAction::Allow),
+            "a scoped allow must NOT auto-approve a subdirectory operand"
+        );
     }
 
     #[test]

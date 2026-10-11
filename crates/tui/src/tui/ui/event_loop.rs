@@ -659,11 +659,11 @@ pub async fn run_tui(
                             // primary (B27-1/B27-2): the restore re-homes the
                             // app onto it, so this is a pure load and the
                             // launch directory never enters the set.
-                            app.workspace_roots =
-                                crate::tui::ui::session_state::seed_loaded_workspace_roots(
-                                    &saved.metadata.workspace,
-                                    &saved.metadata.workspace_roots,
-                                );
+                            crate::tui::ui::session_state::seed_loaded_workspace_roots_into(
+                                &mut app,
+                                &saved.metadata.workspace,
+                                &saved.metadata.workspace_roots,
+                            );
                             // Name the inherited set in the transcript: the
                             // roots arrived from another host and no header
                             // chrome reports them.

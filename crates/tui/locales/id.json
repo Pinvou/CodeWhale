@@ -1760,6 +1760,8 @@
   "WorkspaceSwitchSessionsDirFailed": "Gagal membuka direktori sesi: {error}",
   "WorkspaceSwitchSetRefused": "Tidak dapat mengganti workspace ke {workspace}: himpunan root yang dibawa akan melebar melewati direktori baru ({reason}). Penggantian ditolak; mulai sesi baru di direktori tersebut, atau hapus root yang melebar dari himpunan root tersimpan sesi ini di luar TUI.",
   "ForkSourceSetRefused": "Tidak dapat fork: himpunan root sumber yang dipasang ulang ke {workspace} akan melebar melewatinya ({reason}). Fork ditolak; mulailah dari direktori yang tidak dilebarkan himpunan tersebut, atau bersihkan root yang melebar dari rekaman tersimpan di luar TUI.",
+  "SaveLiveSetRefused": "Tidak dapat menyimpan: himpunan root workspace saat ini tidak lagi lolos intake ({reason}). Deklarasikan ulang root dengan /workspace atau perbaiki rekaman sesi di luar TUI.",
+  "ForkLiveSetRefused": "Tidak dapat fork: himpunan root workspace saat ini tidak lagi lolos intake ({reason}). Deklarasikan ulang root dengan /workspace atau perbaiki rekaman sesi di luar TUI.",
   "WorkspaceRootsRemainder": "… (+{count} lainnya)",
   "WorkspaceRootsNotice": "Folder yang dapat diakses selain {workspace}: {roots}",
   "StatusLabelProjectDocs": "Dokumen proyek",

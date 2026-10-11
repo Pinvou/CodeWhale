@@ -322,6 +322,13 @@ fn param_preview(params: &Value, keys: &[&str], max_len: usize) -> Option<String
         let Some(value) = map.get(*key) else {
             continue;
         };
+        // Round-38 minor: skip Null like the key/check/exec sides (B20-2) —
+        // a `{"cwd": null, "working_dir": "..."}` call previews the
+        // working_dir operand it will actually run under, not a literal
+        // "null".
+        if value.is_null() {
+            continue;
+        }
         match value {
             Value::String(text) => return Some(truncate_string_value(text, max_len)),
             Value::Number(number) => return Some(number.to_string()),

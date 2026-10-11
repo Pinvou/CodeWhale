@@ -1088,11 +1088,14 @@ The runtime uses a durable Thread/Turn/Item lifecycle.
 - **ThreadRecord** — `id`, `created_at`, `updated_at`, `model`,
   `model_provider` (generic kind), `model_provider_id` (optional exact configured
   route), `workspace`, `workspace_roots` (the full accessible root set,
-  primary first; normalization always prepends the workspace, so a thread
-  created through `POST /v1/threads` serializes at least one element — a
-  single-root thread reads `"workspace_roots": ["<workspace>"]` — and any
-  row whose normalized set is empty — including every row persisted before
-  the field existed — omits the key entirely), `mode`,
+  primary first; normalization prepends the workspace only when it is a
+  non-empty ABSOLUTE path, so an absolute-workspace thread created through
+  `POST /v1/threads` serializes at least one element — a single-root
+  thread reads `"workspace_roots": ["<workspace>"]` — while a relative
+  workspace (rejected by the validating faces, tolerated only by legacy
+  rows) collapses the set to empty and the key is omitted; any row whose
+  normalized set is empty — including every row persisted before the field
+  existed — omits the key entirely), `mode`,
   `task_id`, `system_prompt`, `latest_turn_id`,
   `latest_response_bookmark`, `archived`
 - **TurnRecord** — `id`, `thread_id`, `status` (`queued|in_progress|completed|

@@ -629,11 +629,48 @@ pub(crate) async fn sync_runtime_workspace_state(
 /// genuine primary MOVE keeps using the core lane's own validating path
 /// (`resolve_resume_roots`), which strips the old primary before
 /// validating; no TUI face moves the primary.
+/// Round-38 M38-2 — explicit tolerance decision: tolerant here means
+/// STRIP-AND-WARN, not arm-verbatim. The seed drops the entries the
+/// validating intake refuses (a filesystem root, an ancestor of the
+/// record primary) via [`codewhale_core::sanitize_workspace_roots`]; the
+/// caller surfaces [`note_sanitized_loaded_roots`] so the drop is named.
+/// Arming them was the M15-2 empty-string-root class through another
+/// lane: the in-process file tools' containment boundary IS the root set,
+/// so a live `/` contained every path on disk.
 pub(crate) fn seed_loaded_workspace_roots(
     record_primary: &std::path::Path,
     persisted_roots: &[std::path::PathBuf],
-) -> Vec<std::path::PathBuf> {
-    codewhale_core::normalize_workspace_roots(record_primary, persisted_roots)
+) -> (Vec<std::path::PathBuf>, usize) {
+    codewhale_core::sanitize_workspace_roots(record_primary, persisted_roots)
+}
+
+/// The assignment-shaped wrapper every load face uses (round-38 M38-2):
+/// seed the sanitized set onto the App and name the drop when one happened.
+pub(crate) fn seed_loaded_workspace_roots_into(
+    app: &mut crate::tui::app::App,
+    record_primary: &std::path::Path,
+    persisted_roots: &[std::path::PathBuf],
+) {
+    let (clean, dropped) = seed_loaded_workspace_roots(record_primary, persisted_roots);
+    app.workspace_roots = clean;
+    note_sanitized_loaded_roots(app, dropped);
+}
+
+/// The strip-and-warn receipt for a loaded row whose set carried entries
+/// the validating intake refuses (round-38 M38-2): the load stays tolerant
+/// — the session must open so its owner can repair it — but the drop is
+/// named in the transcript instead of silently arming a narrower set.
+pub(crate) fn note_sanitized_loaded_roots(app: &mut crate::tui::app::App, dropped: usize) {
+    if dropped == 0 {
+        return;
+    }
+    let notice = format!(
+        "Dropped {dropped} workspace root(s) from the loaded session that failed the          workspace intake (filesystem root or primary ancestor); the session runs          without them. Repair the saved record outside the TUI to restore them."
+    );
+    app.add_message(HistoryCell::System {
+        content: notice.clone(),
+    });
+    app.status_message = Some(notice);
 }
 
 /// One-line human disclosure for a session that carries accessible roots
@@ -791,12 +828,12 @@ pub(crate) async fn switch_workspace(
     // ancestor of (or a super-root for) the new primary — persisting one
     // here would strand a later bare fork/resume-move with a hard error.
     // Validate BEFORE the swap and refuse the move with the same rule.
-    let carried: Vec<PathBuf> = app
-        .workspace_roots
-        .iter()
-        .filter(|root| **root != app.workspace)
-        .cloned()
-        .collect();
+    // Round-38 M38-3: the carried set strips the OLD head through the
+    // shared lexical primitive — a `..`-spelled copy of the old primary
+    // must leave the set with the primary itself, or the abandoned
+    // directory stays writable after the move.
+    let carried: Vec<PathBuf> =
+        codewhale_core::strip_workspace_roots_head(&app.workspace, &app.workspace_roots);
     let re_based = match codewhale_core::validate_workspace_roots(&workspace, &carried) {
         Ok(roots) => roots,
         Err(err) => {
@@ -1803,8 +1840,9 @@ mod seed_loaded_workspace_roots_tests {
             std::path::PathBuf::from("/work/project"),
             std::path::PathBuf::from("/home/alice"),
         ];
-        let seeded = seed_loaded_workspace_roots(&record_primary, &carried);
+        let (seeded, dropped) = seed_loaded_workspace_roots(&record_primary, &carried);
         assert_eq!(seeded, carried);
+        assert_eq!(dropped, 0, "a clean row seeds whole");
         assert!(
             !seeded.contains(&launch_dir),
             "the launch directory must never be seeded as a root: {seeded:?}"
@@ -1812,7 +1850,7 @@ mod seed_loaded_workspace_roots_tests {
         // The launch directory being an ANCESTOR of nothing relevant is not
         // consulted at all — no move arm exists on the TUI faces (B27-2:
         // primary-led rows load from any directory without false refusal).
-        let primary_led = seed_loaded_workspace_roots(
+        let (primary_led, dropped) = seed_loaded_workspace_roots(
             &record_primary,
             &[
                 std::path::PathBuf::from("/work/project"),
@@ -1827,5 +1865,27 @@ mod seed_loaded_workspace_roots_tests {
             ],
             "a primary-led row is a pure load from any directory (B27-2)"
         );
+        assert_eq!(dropped, 0);
+
+        // Round-38 M38-2: the tolerance decision is STRIP-AND-WARN. A
+        // legacy/hand-edited row carrying the filesystem root (or a primary
+        // ancestor) must not arm — the in-process file tools' containment
+        // boundary IS the root set, so a live `/` contained every path on
+        // disk. The seed drops the poison and reports the count; the load
+        // itself stays tolerant (the session must open to be repairable).
+        let (stripped, dropped) = seed_loaded_workspace_roots(
+            &record_primary,
+            &[
+                std::path::PathBuf::from("/work/project"),
+                std::path::PathBuf::from("/"),
+                std::path::PathBuf::from("/work"),
+            ],
+        );
+        assert_eq!(
+            stripped,
+            vec![std::path::PathBuf::from("/work/project")],
+            "the fs-root and the primary-ancestor entries drop, the clean head stays"
+        );
+        assert_eq!(dropped, 2, "both poison entries are named in the receipt");
     }
 }

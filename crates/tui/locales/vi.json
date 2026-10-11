@@ -1760,6 +1760,8 @@
   "WorkspaceSwitchSessionsDirFailed": "Không mở được thư mục phiên: {error}",
   "WorkspaceSwitchSetRefused": "Không thể chuyển workspace sang {workspace}: bộ gốc được mang theo sẽ mở rộng vượt ra thư mục mới ({reason}). Lần chuyển bị từ chối; hãy bắt đầu phiên mới trong thư mục đó, hoặc xóa các gốc mở rộng khỏi bộ gốc đã lưu của phiên này bên ngoài TUI.",
   "ForkSourceSetRefused": "Không thể fork: bộ gốc của nguồn đặt lại lên {workspace} sẽ mở rộng vượt ra ngoài nó ({reason}). Lần fork bị từ chối; hãy bắt đầu từ một thư mục mà bộ không mở rộng vượt qua, hoặc xóa các gốc mở rộng khỏi bản ghi đã lưu bên ngoài TUI.",
+  "SaveLiveSetRefused": "Không thể lưu: bộ gốc workspace hiện tại không còn vượt qua intake ({reason}). Hãy khai báo lại bộ gốc bằng /workspace hoặc sửa bản ghi phiên bên ngoài TUI.",
+  "ForkLiveSetRefused": "Không thể fork: bộ gốc workspace hiện tại không còn vượt qua intake ({reason}). Hãy khai báo lại bộ gốc bằng /workspace hoặc sửa bản ghi phiên bên ngoài TUI.",
   "WorkspaceRootsRemainder": "… (+{count} nữa)",
   "WorkspaceRootsNotice": "Thư mục có thể truy cập bên cạnh {workspace}: {roots}",
   "StatusLabelProjectDocs": "Tài liệu dự án",

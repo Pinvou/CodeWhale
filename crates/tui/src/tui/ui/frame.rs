@@ -911,8 +911,16 @@ pub(crate) fn build_session_snapshot(
     };
     // Autosave must rewrite the roots the session runs with, not an empty
     // set: an erased `workspace_roots` here durably degrades a multi-root
-    // session on disk.
-    session.metadata.workspace_roots = app.workspace_roots.clone();
+    // session on disk. Round-38 M38-2: the stamp runs through the SAME
+    // sanitize the load faces use — a live set that somehow carries poison
+    // (the seed strips it; this is the belt) is stripped here instead of
+    // laundered onto disk, and the drop is logged for the record.
+    let (sanitized_roots, dropped_roots) =
+        codewhale_core::sanitize_workspace_roots(&app.workspace, &app.workspace_roots);
+    if dropped_roots > 0 {
+        tracing::warn!("autosave dropped {dropped_roots} workspace root(s) that failed the intake");
+    }
+    session.metadata.workspace_roots = sanitized_roots;
     let computed_title = session.metadata.title.clone();
     if let Some(cached) = app
         .current_session_metadata

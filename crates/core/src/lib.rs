@@ -276,14 +276,19 @@ pub const MAX_WORKSPACE_ROOTS: usize = 64;
 /// Intake validation for a caller-declared root set: admit it whole or reject
 /// it with an error, never silently reshape it.
 ///
-/// LEXICAL ONLY (review #484/CodeWhale round-20 B20-4): the checks run on
-/// `normalize_lexical_components` output, while enforcement canonicalizes
-/// per root — a symlink can make a lexically-sibling root the primary's
-/// canonical ancestor (macOS `/tmp` ↔ `/private/tmp`), and a symlink to `/`
-/// inside the workspace passes as a lexical child. Canonicalize-at-intake
-/// (or re-checking at `get_writable_roots` materialization) is the
-/// scheduled promotion; until then the rejection is advisory for any root
-/// whose spelling differs from its canonical form.
+/// CANONICAL+LEXICAL (round-37 M37-3 promoted the round-20 B20-4 shape):
+/// an EXISTING declared root canonicalizes before the filesystem-root and
+/// ancestor comparisons, so a symlink spelling — and, on case-insensitive
+/// filesystems, a case-folded spelling — of the primary's ancestor is
+/// rejected here instead of widening the boundary at the canonicalizing
+/// enforcement (`get_writable_roots`, seatbelt, bwrap). A declared root
+/// that does not exist yet keeps the lexical judgment: materialization
+/// stays the delivery lane's job, and the same-disk TOCTOU between this
+/// check and enforcement is the disclosed inherent residual. A not-yet-
+/// materialized PRIMARY also keeps its lexical spelling, so on hosts where
+/// the primary's canonical form differs from its spelling (macOS
+/// `/tmp` ↔ `/private/tmp`) the ancestor guard is existence-dependent on
+/// the primary — disclosed residual (round-38 minor).
 ///
 /// The per-turn sandbox copies this set verbatim into
 /// `WorkspaceWrite.writable_roots`, so three classes of declared entry widen
@@ -358,6 +363,24 @@ pub fn validate_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
     Ok(normalize_workspace_roots(cwd, roots))
 }
 
+/// Strip a stored row's own head: entries whose lexical collapse equals
+/// `primary` (the cwd-first head itself, INCLUDING a `..`-spelled copy the
+/// raw-equality dedup in [`normalize_workspace_roots`] admits) are the
+/// row's primary slot, not declared additions. Every face that converts a
+/// stored row into a declaration — a re-declaring resume/fork/load, a
+/// primary move's carried set, a bridged wire body — goes through this one
+/// strip, or a `..`-spelled copy of the OLD primary survives the move and
+/// keeps the abandoned directory writable (review #484/CodeWhale round-38
+/// M38-3).
+pub fn strip_workspace_roots_head(primary: &Path, stored: &[PathBuf]) -> Vec<PathBuf> {
+    let head = normalize_lexical_components(primary);
+    stored
+        .iter()
+        .filter(|root| normalize_lexical_components(root.as_path()) != head)
+        .cloned()
+        .collect()
+}
+
 /// Validate a STORED root row — the cwd-first full form
 /// [`normalize_workspace_roots`] persists (primary first, additional entries
 /// after) — for re-declaration through [`validate_workspace_roots`].
@@ -369,16 +392,44 @@ pub fn validate_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
 /// path) would otherwise be miscounted as an over-cap declaration and
 /// permanently rejected as "corrupt or hand-edited" by exactly the gate
 /// that admits its creation (review #484/CodeWhale round-37 B37-2/B37-3).
-/// The head comparison is lexical, so a `..`-spelled copy of the primary
-/// strips too instead of surviving as a phantom additional root.
+/// The head strip is [`strip_workspace_roots_head`] — lexical.
 pub fn validate_stored_workspace_roots(primary: &Path, stored: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let head = normalize_lexical_components(primary);
-    let carried: Vec<PathBuf> = stored
-        .iter()
-        .filter(|root| normalize_lexical_components(root.as_path()) != head)
-        .cloned()
-        .collect();
-    validate_workspace_roots(primary, &carried)
+    validate_workspace_roots(primary, &strip_workspace_roots_head(primary, stored))
+}
+
+/// Tolerant-load companion to [`validate_workspace_roots`] (round-38
+/// M38-2): instead of rejecting a legacy or hand-edited row, DROP the
+/// entries the validating intake would refuse — a filesystem root or an
+/// ancestor of the primary, judged with the same canonical+lexical
+/// comparison — and return the clean set plus how many entries dropped.
+/// The load faces use this to strip-and-warn explicitly instead of arming
+/// the poison: an in-process file tool's containment boundary IS its root
+/// set, and a live row carrying `/` contained every path on disk.
+pub fn sanitize_workspace_roots(cwd: &Path, stored: &[PathBuf]) -> (Vec<PathBuf>, usize) {
+    let normalized = normalize_workspace_roots(cwd, stored);
+    if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
+        return (Vec::new(), normalized.len());
+    }
+    let primary_real = cwd
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_lexical_components(cwd));
+    let mut clean = Vec::with_capacity(normalized.len());
+    let mut dropped = 0usize;
+    for (index, root) in normalized.into_iter().enumerate() {
+        // The cwd-first head is the primary slot itself.
+        if index == 0 {
+            clean.push(root);
+            continue;
+        }
+        let judged = normalize_lexical_components(&root);
+        let real = root.canonicalize().unwrap_or_else(|_| judged.clone());
+        if is_filesystem_root(&real) || (primary_real != real && primary_real.starts_with(&real)) {
+            dropped += 1;
+            continue;
+        }
+        clean.push(root);
+    }
+    (clean, dropped)
 }
 
 /// Lexically collapse CurDir and ParentDir components of `path`, clamping a

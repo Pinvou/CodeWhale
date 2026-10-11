@@ -19789,4 +19789,53 @@ mod fork_session_tests {
             "the fork must persist the source's root set, not the freshly constructed empty one"
         );
     }
+
+    #[test]
+    fn fork_session_forks_a_legal_full_load_row_whole() {
+        // Round-38 minor 10: the CLI fork face's at-cap round trip — a
+        // 64-root declaration persists as the 65-entry cwd-first full form,
+        // and the fork's stored-row strip must revalidate it whole instead
+        // of miscounting the row's own head against the intake cap.
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let _home = EnvVarGuard::set("HOME", &home);
+
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let mut stored = vec![workspace.clone()];
+        stored.extend((0..codewhale_core::MAX_WORKSPACE_ROOTS).map(|index| {
+            let root = tmp.path().join(format!("r{index}"));
+            std::fs::create_dir_all(&root).expect("full-load root");
+            root
+        }));
+        let manager = SessionManager::default_location().expect("default manager");
+        let mut source = create_saved_session(
+            &[crate::models::Message {
+                role: crate::models::Role::User,
+                content: vec![crate::models::ContentBlock::Text {
+                    text: "fork my full load".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            "deepseek-chat",
+            &workspace,
+            0,
+            None,
+        );
+        source.metadata.workspace_roots = stored;
+        manager.save_session(&source).expect("save source");
+
+        let config = Config::default();
+        let forked_id = fork_session(&config, Some(source.metadata.id.clone()), false, &workspace)
+            .expect("a legal full-load row forks whole");
+
+        let forked = manager.load_session(&forked_id).expect("fork persisted");
+        assert_eq!(
+            forked.metadata.workspace_roots.len(),
+            codewhale_core::MAX_WORKSPACE_ROOTS + 1,
+            "the full-load form round-trips through the CLI fork"
+        );
+    }
 }

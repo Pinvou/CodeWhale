@@ -5948,6 +5948,47 @@ async fn update_thread_roots_evicts_idle_engine() -> Result<()> {
 }
 
 #[tokio::test]
+async fn workspace_move_strips_a_dot_dot_spelled_old_primary_copy() -> Result<()> {
+    // Round-38 M38-3: intake admits a root canonically equal to the primary
+    // (a `..`-spelled copy — the ancestor check skips equality and the
+    // normalizer dedups raw). A primary move must drop that copy with the
+    // OLD primary itself (the shared lexical strip), or the abandoned
+    // directory stays writable through the surviving spelling.
+    let manager = test_manager(test_runtime_dir())?;
+    let old_ws = std::env::temp_dir().join("codewhale-dotdot-move/old");
+    let new_ws = std::env::temp_dir().join("codewhale-dotdot-move/new");
+    let keep = std::env::temp_dir().join("codewhale-dotdot-move/shared");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(old_ws.clone()),
+            workspace_roots: vec![keep.clone()],
+            ..Default::default()
+        })
+        .await?;
+    // Seed the stored row with the dot-dot-spelled copy of the primary
+    // beside the head (the shape intake admits).
+    let mut row = manager.get_thread(&thread.id).await?;
+    row.workspace_roots = vec![old_ws.clone(), old_ws.join("sub").join(".."), keep.clone()];
+    manager.store.save_thread(&row)?;
+
+    let updated = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace: Some(new_ws.clone()),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+    assert_eq!(
+        updated.workspace_roots,
+        vec![new_ws.clone(), keep.clone()],
+        "the dot-dot-spelled old primary drops with the head on the move"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn update_thread_explicit_empty_roots_clears_to_primary_and_evicts_engine() -> Result<()> {
     // Round-15 pin for the explicit-clear leg: PATCH `workspace_roots: []`
     // is not "no change" — it clears the set back to the bare primary root,
@@ -12428,6 +12469,36 @@ async fn both_fork_faces_and_engine_arming_survive_a_legal_full_load_row() -> Re
         .get_engine(&thread.id)
         .await
         .expect("a legal full-load row must arm an engine");
+    Ok(())
+}
+
+#[tokio::test]
+async fn engine_arming_refuses_a_poisoned_thread_row() -> Result<()> {
+    // Round-38 minor 10: the arming gate's poison-refusal half — a stored
+    // row carrying the filesystem root must fail engine acquisition with
+    // the intake reason, not arm it (the legal-row half lives in the
+    // full-load test above).
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-runtime-arming-poison");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            ..Default::default()
+        })
+        .await?;
+    let mut poisoned = manager.get_thread(&thread.id).await?;
+    poisoned.workspace_roots = vec![workspace.clone(), std::path::PathBuf::from("/")];
+    manager.store.save_thread(&poisoned)?;
+
+    let err = match manager.get_engine(&thread.id).await {
+        Ok(_) => panic!("a poisoned row must not arm an engine"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("corrupt or hand-edited"),
+        "the refusal names the row state: {err:#}"
+    );
     Ok(())
 }
 

@@ -1224,7 +1224,8 @@ pub(crate) async fn apply_command_result(
                 // under the RECORD primary (B27-1/B27-2): the restore has
                 // already re-homed the app there, so this is a pure load and
                 // the launch directory never enters the set.
-                app.workspace_roots = crate::tui::ui::session_state::seed_loaded_workspace_roots(
+                crate::tui::ui::session_state::seed_loaded_workspace_roots_into(
+                    app,
                     &session.metadata.workspace,
                     &session.metadata.workspace_roots,
                 );

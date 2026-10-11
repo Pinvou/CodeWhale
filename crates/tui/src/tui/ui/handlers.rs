@@ -1173,11 +1173,11 @@ pub(crate) async fn handle_view_events(
                         // restore re-homes the app onto it, so this is a pure
                         // load and the previous session's directory never
                         // enters the set.
-                        app.workspace_roots =
-                            crate::tui::ui::session_state::seed_loaded_workspace_roots(
-                                &session.metadata.workspace,
-                                &session.metadata.workspace_roots,
-                            );
+                        crate::tui::ui::session_state::seed_loaded_workspace_roots_into(
+                            app,
+                            &session.metadata.workspace,
+                            &session.metadata.workspace_roots,
+                        );
                         sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
                         if respawn {
                             let _ = engine_handle.send(Op::Shutdown).await;

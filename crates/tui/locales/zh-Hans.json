@@ -1760,6 +1760,8 @@
   "WorkspaceSwitchSessionsDirFailed": "无法打开会话目录：{error}",
   "WorkspaceSwitchSetRefused": "无法切换工作区到 {workspace}:携带的根集合会越过新目录扩大({reason})。切换已被拒绝;请在该目录启动新会话,或在 TUI 外从此会话的已保存根集合中移除扩大的根。",
   "ForkSourceSetRefused": "无法分支:源根集合重设到 {workspace} 后会越界扩大({reason})。分支已被拒绝;请从集合不会越界的目录启动,或在 TUI 外从已保存记录中清除扩大的根。",
+  "SaveLiveSetRefused": "无法保存:当前工作区根集合不再通过 intake({reason})。请用 /workspace 重新声明,或在 TUI 外修复会话记录。",
+  "ForkLiveSetRefused": "无法分支:当前工作区根集合不再通过 intake({reason})。请用 /workspace 重新声明,或在 TUI 外修复会话记录。",
   "WorkspaceRootsRemainder": "…（另有 {count} 个）",
   "WorkspaceRootsNotice": "{workspace} 之外可访问的文件夹：{roots}",
   "StatusLabelProjectDocs": "项目文档",

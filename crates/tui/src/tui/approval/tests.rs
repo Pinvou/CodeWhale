@@ -227,6 +227,20 @@ fn approval_card_previews_the_working_dir_redirect() {
         .find(|detail| detail.label == "Dir")
         .expect("the cwd spelling stays previewed");
     assert_eq!(dir.value, "/repo/other");
+
+    // Round-38 minor: `cwd: null` does not shadow the working_dir operand
+    // with a literal "null" — the preview skips Null like the key and
+    // execution sides.
+    let details = build_prominent_details(
+        "exec_shell",
+        ToolCategory::Shell,
+        &json!({"command": "cargo test", "cwd": null, "working_dir": "/repo/redirect"}),
+    );
+    let dir = details
+        .iter()
+        .find(|detail| detail.label == "Dir")
+        .expect("the working_dir operand must be the visible one");
+    assert_eq!(dir.value, "/repo/redirect");
 }
 
 // ========================================================================

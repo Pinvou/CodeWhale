@@ -1760,6 +1760,8 @@
   "WorkspaceSwitchSessionsDirFailed": "No s'ha pogut obrir el directori de sessions: {error}",
   "WorkspaceSwitchSetRefused": "No es pot canviar l'workspace a {workspace}: el conjunt d'arrels transportat s'ampliaria més enllà del directori nou ({reason}). El canvi s'ha rebutjat; inicia una sessió nova en aquest directori o elimina les arrels que amplien del conjunt d'arrels desat d'aquesta sessió fora del TUI.",
   "ForkSourceSetRefused": "No es pot bifurcar: el conjunt d'arrels de l'origen reubicat a {workspace} s'ampliaria més enllà d'ell ({reason}). La bifurcació s'ha rebutjat; comença-la des d'un directori que el conjunt no ampliï, o elimina les arrels que amplien del registre desat fora del TUI.",
+  "SaveLiveSetRefused": "No es pot desar: el conjunt d'arrels actual de l'workspace ja no passa l'entrada ({reason}). Redeclara les arrels amb /workspace o repara el registre de la sessió fora del TUI.",
+  "ForkLiveSetRefused": "No es pot bifurcar: el conjunt d'arrels actual de l'workspace ja no passa l'entrada ({reason}). Redeclara les arrels amb /workspace o repara el registre de la sessió fora del TUI.",
   "WorkspaceRootsRemainder": "… (+{count} més)",
   "WorkspaceRootsNotice": "Carpetes accessibles a més de {workspace}: {roots}",
   "StatusLabelProjectDocs": "Docs del projecte",

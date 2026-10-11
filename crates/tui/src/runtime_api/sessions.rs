@@ -321,14 +321,13 @@ pub(super) async fn resume_session_thread(
     // head would miscount a legal full-load row (64 additions + head) as
     // over-cap and strand the resume at a 400 with no repair path. Strip the
     // head before declaring; create_thread re-anchors it as the primary
-    // (round-37 B37-2, the fifth face).
-    let declared_roots: Vec<PathBuf> = session
-        .metadata
-        .workspace_roots
-        .iter()
-        .filter(|root| root.as_path() != session.metadata.workspace)
-        .cloned()
-        .collect();
+    // (round-37 B37-2, the fifth face; round-38 M38-3: the strip is the
+    // shared LEXICAL primitive, so a `..`-spelled copy of the head drops
+    // with it).
+    let declared_roots: Vec<PathBuf> = codewhale_core::strip_workspace_roots_head(
+        &session.metadata.workspace,
+        &session.metadata.workspace_roots,
+    );
 
     let thread = state
         .runtime_threads
@@ -1066,6 +1065,11 @@ fn map_resume_thread_create_err(err: anyhow::Error) -> ApiError {
         || reason.starts_with("saved session requires custom provider")
         || reason.starts_with("legacy session records only the generic `custom` provider kind")
         || reason.starts_with("legacy `provider = \"custom\"`")
+        // Round-38 minor: a legacy/hand-edited row with an EMPTY workspace
+        // is a client-side record defect (create_thread's own guard
+        // refuses it); the face's doctrine is 400 with the reason, not a
+        // 500 — the ACP lane refuses the same row with invalid_params.
+        || reason.starts_with("workspace must not be empty")
     {
         ApiError::bad_request(message)
     } else {

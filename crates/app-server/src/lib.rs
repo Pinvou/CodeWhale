@@ -226,15 +226,13 @@ struct RuntimeThreadHint {
 /// Convert a stored cwd-first root set (primary included) into the DECLARED
 /// additional entries the runtime's create/PATCH intakes expect: entries
 /// equal to `primary` are the row's own head, not declared additions, so
-/// they must not count against the runtime's intake cap. A `None` workspace
-/// has no head to strip and passes the set through untouched.
+/// they must not count against the runtime's intake cap. The strip is the
+/// shared LEXICAL core primitive (round-38 M38-3): a `..`-spelled copy of
+/// the head drops with it. A `None` workspace has no head to strip and
+/// passes the set through untouched.
 fn declared_roots_without_primary(primary: Option<&Path>, stored: &[PathBuf]) -> Vec<PathBuf> {
     match primary {
-        Some(primary) => stored
-            .iter()
-            .filter(|root| root.as_path() != primary)
-            .cloned()
-            .collect(),
+        Some(primary) => codewhale_core::strip_workspace_roots_head(primary, stored),
         None => stored.to_vec(),
     }
 }

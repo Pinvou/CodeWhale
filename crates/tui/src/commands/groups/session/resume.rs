@@ -120,7 +120,8 @@ fn import_container(
     // B27-1/B27-2: seeded under the record's own primary — `import_foreign`
     // mints the record under the CURRENT workspace with an EMPTY root set,
     // so this is the single-root pure-load shape by construction.
-    app.workspace_roots = crate::tui::ui::seed_loaded_workspace_roots(
+    crate::tui::ui::seed_loaded_workspace_roots_into(
+        app,
         &imported.metadata.workspace,
         &imported.metadata.workspace_roots,
     );

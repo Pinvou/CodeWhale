@@ -1760,6 +1760,8 @@
   "WorkspaceSwitchSessionsDirFailed": "無法開啟工作階段目錄：{error}",
   "WorkspaceSwitchSetRefused": "無法切換工作區到 {workspace}:攜帶的根集合會越過新目錄擴大({reason})。切換已被拒絕;請在該目錄啟動新會話,或在 TUI 外從此會話的已儲存根集合中移除擴大的根。",
   "ForkSourceSetRefused": "無法分支:源根集合重設到 {workspace} 後會越界擴大({reason})。分支已被拒絕;請從集合不會越界的目錄啟動,或在 TUI 外從已儲存記錄中清除擴大的根。",
+  "SaveLiveSetRefused": "無法儲存:目前工作區根集合不再通過 intake({reason})。請用 /workspace 重新宣告,或在 TUI 外修復會話記錄。",
+  "ForkLiveSetRefused": "無法分支:目前工作區根集合不再通過 intake({reason})。請用 /workspace 重新宣告,或在 TUI 外修復會話記錄。",
   "WorkspaceRootsRemainder": "…（另有 {count} 個）",
   "WorkspaceRootsNotice": "{workspace} 之外可存取的資料夾：{roots}",
   "StatusLabelProjectDocs": "專案文件",
