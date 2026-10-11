@@ -172,7 +172,10 @@ impl Drop for OwnedLane {
     }
 }
 
-pub(crate) async fn resume_round_trip<T>(build_host: impl FnOnce() -> (tauri::AppHandle, T)) {
+pub(crate) async fn resume_round_trip<T>(
+    build_host: impl FnOnce() -> (tauri::AppHandle, T),
+    retire_endpoint: bool,
+) {
     use super::super::controlling_handshake::ControllingHandshake;
     use super::super::encrypted_lane::ControllingLaneState;
     use super::super::test_support::{hex_lower, joined_message, pairing_fixture};
@@ -289,6 +292,70 @@ pub(crate) async fn resume_round_trip<T>(build_host: impl FnOnce() -> (tauri::Ap
         "initial_connected",
     )
     .await;
+    if retire_endpoint {
+        // Unlike the direct channel rotation regression, this retires a live
+        // worker after the full authenticated handshake and actual joined frame.
+        relay.refresh().unwrap();
+        tokio::time::timeout(Duration::from_secs(3), owned.worker.take().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Error);
+        assert!(manager.live_lease().is_err());
+        assert!(!handle.state::<ControlledLaneState>().is_installed());
+        assert!(handle.state::<ControlledOutboundState>().sender().is_none());
+        let _new_socket = lifecycle_registered(&listener).await;
+        // Waiting-for-pairing has no watchdog. EOF must retire it immediately,
+        // not leave a code and permanently busy state with no receiving worker.
+        let waiting = manager.start(None, Vec::new()).unwrap();
+        manager
+            .complete_registration(
+                waiting.clone(),
+                ControlledRegistration {
+                    pairing_code: "2345678".into(),
+                    sealed_code_b64: "sealed".into(),
+                    expires_at_ms: controlled_monotonic_millis() + 30_000,
+                },
+                controlled_monotonic_millis(),
+            )
+            .unwrap();
+        let channel = relay
+            .start_controller_relay(waiting.generation())
+            .await
+            .unwrap();
+        let worker = ControlledRelayWorker {
+            app: handle.clone(),
+            relay: relay.clone(),
+            operation: waiting.clone(),
+            code_wrap: CodeWrapKeyPair::generate().unwrap(),
+            handshake: Some(HandshakeKeyPair::generate().unwrap()),
+            channel,
+            business: std::sync::Arc::new(NoBusiness),
+            action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
+            business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
+            processed_frames: None,
+        };
+        let waiting_worker = tokio::spawn(worker.serve());
+        relay.stop_current().unwrap();
+        tokio::time::timeout(Duration::from_secs(3), waiting_worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Error);
+        assert!(
+            serde_json::to_value(manager.status())
+                .unwrap()
+                .get("pairingCode")
+                .is_none()
+        );
+        assert!(manager.current_operation().is_none());
+        assert!(
+            manager.start(None, Vec::new()).is_ok(),
+            "retired waiting worker must not leave busy"
+        );
+        manager.stop();
+        return;
+    }
     let frozen = manager.watchdog_deadline_for_test().unwrap();
     // A real socket close goes through RelayClient's connection event and the
     // manager reader, rather than directly invoking a resume helper.
@@ -492,5 +559,150 @@ pub(crate) async fn resume_round_trip<T>(build_host: impl FnOnce() -> (tauri::Ap
     .await
     .expect("replacement registration timed out");
     relay.assert_retired_reader_fenced_for_test(&retired_reader, &mut replacement);
-    drop(replacement);
+    endpoint_rotation_round_trip(
+        &relay,
+        &listener,
+        replacement,
+        &handle.state::<ControlledOutboundState>(),
+    )
+    .await;
+}
+
+/// Refresh/stop run their real persistence and socket lifecycle in this private
+/// loopback process. Revocation sockets use legacy v2 (no controller protocol).
+struct LifecycleProtocol;
+impl tokio_tungstenite::tungstenite::handshake::server::Callback for LifecycleProtocol {
+    fn on_request(
+        self,
+        request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+        mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+    ) -> Result<
+        tokio_tungstenite::tungstenite::handshake::server::Response,
+        tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+    > {
+        if let Some(protocol) = request.headers().get("Sec-WebSocket-Protocol") {
+            assert_eq!(protocol, super::super::protocol::CONTROLLER_SUBPROTOCOL);
+            response
+                .headers_mut()
+                .insert("Sec-WebSocket-Protocol", protocol.clone());
+        }
+        Ok(response)
+    }
+}
+
+async fn lifecycle_registered(listener: &TcpListener) -> Socket {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(stream, LifecycleProtocol)
+                .await
+                .unwrap();
+            let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+                panic!("lifecycle first frame must be registration or revocation");
+            };
+            let frame: Value = serde_json::from_str(&text).unwrap();
+            match frame["type"].as_str().unwrap() {
+                "desktop_endpoint_revoke" => {
+                    send(
+                        &mut socket,
+                        &json!({"v":2,"type":"desktop_endpoint_revoked",
+                        "endpoint_id":frame["endpoint_id"]}),
+                    )
+                    .await;
+                }
+                "desktop_endpoint_register" => {
+                    send(
+                        &mut socket,
+                        &json!({"v":2,"type":"desktop_endpoint_registered",
+                        "endpoint_id":frame["endpoint_id"],"web_client_connected":false}),
+                    )
+                    .await;
+                    return socket;
+                }
+                other => panic!("unexpected lifecycle frame {other}"),
+            }
+        }
+    })
+    .await
+    .expect("lifecycle loopback registration timeout")
+}
+
+async fn assert_lifecycle_route(
+    socket: &mut Socket,
+    lane: &mut crate::features::remote_control::manager::ControllerRelayChannel,
+) {
+    let marker = json!({"v":1,"type":"error","request_id":"request-lifecycle-route",
+        "code":"invalid_message","message":"rejected"});
+    send(socket, &marker).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame = lane.recv().await.expect("successor lane must stay open");
+            if frame == marker {
+                return;
+            }
+            assert!(matches!(
+                frame["type"].as_str(),
+                Some("desktop_relay_connection" | "desktop_endpoint_registered")
+            ));
+        }
+    })
+    .await
+    .expect("new reader did not route to the new lane");
+}
+
+async fn endpoint_rotation_round_trip(
+    relay: &RemoteControlManager,
+    listener: &TcpListener,
+    mut old: crate::features::remote_control::manager::ControllerRelayChannel,
+    outbound: &ControlledOutboundState,
+) {
+    let old_sender = old.sender();
+    outbound.install(old_sender.clone());
+    relay.queue_controller_frame_for_loopback_test(json!({"type": "encrypted_frame"}));
+    relay.refresh().unwrap();
+    assert!(old_sender.try_send(json!({})).is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), old.recv())
+            .await
+            .unwrap()
+            .is_none(),
+        "retired channel must discard frames queued before refresh"
+    );
+    // Reuse the generation deliberately: old Drop must check socket+binding,
+    // not clear a successor just because its generation string matches.
+    let mut current = relay
+        .start_controller_relay(old.generation())
+        .await
+        .unwrap();
+    outbound.install(current.sender());
+    outbound.clear_owned(&old_sender);
+    assert!(outbound.sender().unwrap().same_binding(&current.sender()));
+    let mut socket = lifecycle_registered(listener).await;
+    drop(old);
+    assert_lifecycle_route(&mut socket, &mut current).await;
+    let old_sender = current.sender();
+    relay.queue_controller_frame_for_loopback_test(json!({"type": "encrypted_frame"}));
+    relay.stop_current().unwrap();
+    assert!(old_sender.try_send(json!({})).is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), current.recv())
+            .await
+            .unwrap()
+            .is_none(),
+        "retired channel must discard frames queued before stop"
+    );
+    // This first start after stop has no endpoint. Its preinstalled lane must
+    // survive activate, while the stopped lane cannot cause permanent busy.
+    let mut successor = relay
+        .start_controller_relay(current.generation())
+        .await
+        .unwrap();
+    outbound.install(successor.sender());
+    outbound.clear_owned(&old_sender);
+    assert!(outbound.sender().unwrap().same_binding(&successor.sender()));
+    let mut successor_socket = lifecycle_registered(listener).await;
+    drop(current);
+    assert_lifecycle_route(&mut successor_socket, &mut successor).await;
+    outbound.clear_owned(&successor.sender());
+    drop(successor);
 }
