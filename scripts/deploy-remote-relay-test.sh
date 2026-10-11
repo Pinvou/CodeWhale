@@ -149,7 +149,7 @@ relay_ssh() { ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$RELAY_SE
 proxy_ssh() {
   if [ -n "$PROXY_SSH_JUMP" ]; then
     ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 \
-      -o "ProxyCommand=ssh -i $(shq "$SSH_KEY") -W %h:%p $(shq "$PROXY_SSH_JUMP")" \
+      -o "ProxyCommand=ssh -i $(shq "$SSH_KEY") -o BatchMode=yes -o ConnectTimeout=15 -W %h:%p $(shq "$PROXY_SSH_JUMP")" \
       "$PROXY_SERVER" "$@"
   else
     ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$PROXY_SERVER" "$@"
@@ -293,10 +293,10 @@ echo "── 上传 Relay 代码到已确认测试目标（暂存 + 整体替换
 # artifact；其余根目录 JS 仍作为同一发布单元全量收集，避免后续新增模块漏传。
 relay_js_files=()
 while IFS= read -r relay_js_file; do
-  if [[ "$relay_js_file" != "behavior-telemetry-schema.js" ]]; then
+  if [[ "$relay_js_file" != "./behavior-telemetry-schema.js" ]]; then
     relay_js_files+=("$relay_js_file")
   fi
-done < <(cd "$RELAY_DIR" && printf '%s\n' *.js)
+done < <(cd "$RELAY_DIR" && printf '%s\n' ./*.js)
 tar -czf - -C "$RELAY_DIR" \
   "${relay_js_files[@]}" behavior-telemetry-schema.js package.json package-lock.json web/dist web/stats.html \
   -C "$ROOT" docs/schemas/behavior-telemetry-v1.schema.json docs/schemas/behavior-telemetry-registries.json \
@@ -477,7 +477,7 @@ systemctl restart "$service"
 healthy=0
 for _ in $(seq 1 30); do
   if systemctl is-active --quiet "$service" \
-    && curl -fsS "http://127.0.0.1:$port$base_path/healthz" > /dev/null; then
+    && curl -fsS --connect-timeout 3 --max-time 5 "http://127.0.0.1:$port$base_path/healthz" > /dev/null; then
     healthy=1
     break
   fi
@@ -499,7 +499,7 @@ if [ "$healthy" != "1" ]; then
     rollback_healthy=0
     for _ in $(seq 1 15); do
       if systemctl is-active --quiet "$service" \
-        && curl -fsS "http://127.0.0.1:$port$base_path/healthz" > /dev/null; then
+        && curl -fsS --connect-timeout 3 --max-time 5 "http://127.0.0.1:$port$base_path/healthz" > /dev/null; then
         rollback_healthy=1
         break
       fi
@@ -751,16 +751,23 @@ fi
 rm -rf "$test_dir.failed"
 mv "$test_dir" "$test_dir.failed"
 mv "$test_dir.bak" "$test_dir"
+if [ -f "/etc/systemd/system/$service.bak" ]; then
+  cp -a "/etc/systemd/system/$service.bak" "/etc/systemd/system/$service"
+  systemctl daemon-reload
+fi
 systemctl restart "$service"
 sleep 2
-systemctl is-active --quiet "$service" && curl -fsS "http://127.0.0.1:$port$base_path/healthz" > /dev/null \
+systemctl is-active --quiet "$service" && curl -fsS --connect-timeout 3 --max-time 5 "http://127.0.0.1:$port$base_path/healthz" > /dev/null \
   && echo "已恢复上一版并通过健康检查(失败版本保留在 $test_dir.failed)" \
   || { echo "⚠ 回滚后健康检查仍未通过,请人工检查: journalctl -u $service" >&2; exit 1; }
 REMOTE
 }
 if ! public_verify; then
-  rollback_relay || true
-  echo "✗ 部署后公网验证失败,已回滚 relay 侧;请按上方阶段输出排查隧道/nginx/公网链路" >&2
+  if rollback_relay; then
+    echo "✗ 部署后公网验证失败,已回滚 relay 侧;请按上方阶段输出排查隧道/nginx/公网链路" >&2
+  else
+    echo "✗ 部署后公网验证失败且回滚未通过;请立即检查 relay 侧与上方阶段输出" >&2
+  fi
   exit 1
 fi
 
