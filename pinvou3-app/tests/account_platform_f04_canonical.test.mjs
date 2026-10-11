@@ -11,7 +11,10 @@ test('integer-like and non-BMP keys use Go UTF8 lexical order without object enu
     '{"10":1,"2":2,"\ue000":3,"\u{10000}":4}');
 });
 test('wire replacement, null, arrays and omitted values preserve JSON transport semantics', () => {
-  assert.equal(highRiskPayloadKey({ '\ud800': 'first', '\ud801': '\udc00', omit: undefined, array: [, undefined, null, true, false] }),
+  const array = [undefined, undefined, null, true, false];
+  delete array[0];
+  assert.equal(0 in array, false);
+  assert.equal(highRiskPayloadKey({ '\ud800': 'first', '\ud801': '\udc00', omit: undefined, array }),
     '{"array":[null,null,null,true,false],"\ufffd":"\ufffd"}');
 });
 test('existing ASCII publication fingerprint remains byte-for-byte unchanged', async () => {
