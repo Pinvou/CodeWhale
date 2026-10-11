@@ -2,6 +2,7 @@ package account
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -47,6 +48,12 @@ func (s *Service) adminRetryRegistration(w http.ResponseWriter, r *http.Request)
 	if err == nil && operation.Status != "REPAIR_REQUIRED" {
 		err = ErrRegistrationConflict
 	}
+	if err == nil {
+		if auditErr := repository.AuditRegistrationRepair(r.Context(), principal, operationID, "registration.repair.retry.requested", "SUCCEEDED"); auditErr != nil {
+			s.writeRegistrationAdminError(w, r, auditErr)
+			return
+		}
+	}
 	if err == nil && operation.UserID != nil {
 		err = repository.RetryWalletProvisioning(r.Context(), principal, *operation.UserID)
 	} else if err == nil {
@@ -59,12 +66,21 @@ func (s *Service) adminRetryRegistration(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		result = "FAILED"
 	}
-	_ = repository.AuditRegistrationRepair(r.Context(), principal, operationID, "registration.repair.retry", result)
+	if auditErr := repository.AuditRegistrationRepair(r.Context(), principal, operationID, "registration.repair.retry", result); auditErr != nil {
+		signalRegistrationRepairAuditPending(w, r)
+	}
 	if err != nil {
 		s.writeRegistrationAdminError(w, r, err)
 		return
 	}
-	operation, _ = repository.RegistrationOperation(r.Context(), operationID)
+	operation, err = repository.RegistrationOperation(r.Context(), operationID)
+	if err != nil {
+		// The repair call returned, but its authoritative operation projection
+		// is unavailable. Do not return an empty operation or invite a new
+		// command based on a fabricated result.
+		api.WriteError(w, http.StatusServiceUnavailable, "REGISTRATION_REPAIR_RESULT_UNKNOWN", "the repair result is unavailable; recover the original operation", httpserver.RequestID(r.Context()))
+		return
+	}
 	api.WriteJSON(w, http.StatusAccepted, registrationResult(operation))
 }
 
@@ -79,6 +95,10 @@ func (s *Service) adminCompensateRegistration(w http.ResponseWriter, r *http.Req
 		return
 	}
 	principal := mustPrincipal(r.Context())
+	if err := repository.AuditRegistrationRepair(r.Context(), principal, operationID, "registration.repair.compensate.requested", "SUCCEEDED"); err != nil {
+		s.writeRegistrationAdminError(w, r, err)
+		return
+	}
 	operation, err := repository.PrepareRegistrationCompensation(r.Context(), principal, operationID)
 	if err == nil {
 		err = s.mobileAuth.identities.DisableUserAndConfirm(r.Context(), operation.IdentitySubject)
@@ -87,7 +107,9 @@ func (s *Service) adminCompensateRegistration(w http.ResponseWriter, r *http.Req
 		err = repository.CompleteRegistrationCompensation(r.Context(), principal, operationID)
 	}
 	if err != nil {
-		_ = repository.AuditRegistrationRepair(r.Context(), principal, operationID, "registration.repair.compensate", "FAILED")
+		if auditErr := repository.AuditRegistrationRepair(r.Context(), principal, operationID, "registration.repair.compensate", "FAILED"); auditErr != nil {
+			signalRegistrationRepairAuditPending(w, r)
+		}
 		s.writeRegistrationAdminError(w, r, err)
 		return
 	}
@@ -113,4 +135,11 @@ func (s *Service) writeRegistrationAdminError(w http.ResponseWriter, r *http.Req
 		return
 	}
 	s.writeError(w, r, err)
+}
+
+// The requested audit is persisted before effects. A missing terminal audit
+// does not turn a known business result into a new dispatchable command.
+func signalRegistrationRepairAuditPending(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Registration-Repair-Audit", "pending")
+	slog.ErrorContext(r.Context(), "REGISTRATION_REPAIR_AUDIT_PENDING", "request_id", httpserver.RequestID(r.Context()))
 }

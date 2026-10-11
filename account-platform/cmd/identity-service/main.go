@@ -43,7 +43,11 @@ func main() {
 	if err != nil {
 		log.Fatal("IDENTITY_PASSWORD_HMAC_KEY_BASE64 must be unpadded standard Base64")
 	}
-	vault, err := identityadapter.NewPasswordVault(key, directory)
+	capacity, err := configuredPasswordReferenceCapacity(os.Getenv("IDENTITY_PASSWORD_REFERENCE_CAPACITY"))
+	if err != nil {
+		log.Fatal("IDENTITY_PASSWORD_REFERENCE_CAPACITY_INVALID")
+	}
+	vault, err := identityadapter.NewPasswordVaultWithCapacity(key, directory, capacity)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -86,4 +90,16 @@ func configuredAuthRiskRedisURL(production bool, raw string) (string, error) {
 func enabled(name string) bool {
 	value, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(name)))
 	return err == nil && value
+}
+
+func configuredPasswordReferenceCapacity(raw string) (int, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return identityadapter.DefaultPasswordReferenceCapacity, nil
+	}
+	capacity, err := strconv.Atoi(value)
+	if err != nil || capacity < 1 || capacity > identityadapter.MaximumPasswordReferenceCapacity {
+		return 0, errors.New("password reference capacity is outside the bounded range")
+	}
+	return capacity, nil
 }

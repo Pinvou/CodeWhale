@@ -202,6 +202,8 @@ func (s *Service) deleteUser(w http.ResponseWriter, r *http.Request) {
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "IDENTITY_INTERNAL_ERROR", "the identity request could not be completed"
 	switch {
+	case errors.Is(err, ErrPasswordReferenceCapacity):
+		status, code, message = http.StatusServiceUnavailable, "PASSWORD_PRECHECK_CAPACITY_REACHED", "password precheck capacity is temporarily unavailable; retry later"
 	case errors.Is(err, ErrPasswordEdgeSpace):
 		status, code, message = http.StatusBadRequest, "PASSWORD_EDGE_SPACE_NOT_ALLOWED", "password must not start or end with a space"
 	case errors.Is(err, ErrPasswordInvalid):

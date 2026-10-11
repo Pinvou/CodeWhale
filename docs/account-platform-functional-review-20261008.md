@@ -63,3 +63,21 @@ F00修复通过普通merge引入：96899c70及6077d33fc。F00当前head16184c38d
 验证进展：钱包ACK及过期租约回归通过；Node相关测试、真实浏览器20项、UI build/lint、架构守卫通过。public limiter真实隔离PG并发、重启、共享来源、TTL、随机键基数测试及独立复审通过；事件Claim范围/字面前缀/租约测试通过；部署配置Go来源边界与3项真实脚本mock/结构契约通过且独立代码复审通过。清理5项真实PG子测试通过，覆盖所有业务引用、未来投递租约、89/91天与24小时边界、501条分批和锁行跳过，独立复审通过；主模块全量test/vet通过。官方Windows nginx 1.30.5隔离 nginx -t通过，未启动服务；真实容器DNS重建和Keycloak realm行为未运行验证，不能将mock或syntax检查作为部署验收。Rust完整app lib实际MSVC链接成功，并执行account_platform模块27项测试全部通过、无跳过；仅命令行临时将CodeWhale TUI测试编译opt-level设0，未修改Cargo配置或gitlink。
 
 状态：确认问题修复完成、独立代码复审及本轮适用本地验证通过；推送后回复两位原审核人并申请重审，当前head CI通过后向F02普通merge传播。真实外部服务与组合部署验收仍保持原先披露的延期范围。
+### F00 新增复审复核（2026-10-11）
+
+针对已发布 `055f680d` 的新复审，实际复现 Gin 在部分 JSON、流式文本和二进制响应已写出后追加错误 JSON，以及吞掉主动 `http.ErrAbortHandler` 的问题。恢复边界改为显式中止：已写出、Flush 或 Hijack 后的异常向外抛出 `ErrAbortHandler`，由外层 HTTP 恢复逻辑中止响应并关闭已接管连接；未写响应的普通异常仍返回脱敏 JSON 500。保留未写响应时 EPIPE/ECONNRESET 不写正文的原行为，已写响应后的断连则同样中止，避免吞掉外层关闭信号。日志不包含原始异常或请求内容。
+
+确认的非阻塞配置问题登记为 [Issue #1752](https://github.com/Pinvou/pinvou3/issues/1752)：进程启动前明确 Gin 模式，未设置 `GIN_MODE` 时 development 使用 debug、test 使用 test、其他环境默认 release；保留显式诊断设置。实际注册路由的七场景测试验证路由日志边界。非法模式测试仅验证包初始化后的配置函数；Gin 自身 import 初始化也读取该环境变量，未声明真实非法环境子进程的错误脱敏已经验证。
+
+其余意见按实际目标分支核对：当前 go-oidc/v3 3.17 内部使用 `context.WithoutCancel`，构造上下文取消导致后续 JWKS 永久失效的推断不成立；当前 F00 无 Billing 数据库调用方，不将后续波次的 half-open 早退问题算作此处已修。文件读取副本差异没有证明越过现有可信运维目录边界，不按文件数量机械拆分。fork 文档登记的是实际冻结 gitlink 44921cf02，不因主线日常更新改写基线。
+
+保留两项已明确登记的 CI 必要范围：Sharp 补丁升级修复此前唯一依赖审计阻断 GHSA-wq5f-xc86-pv6w；发布控制台镜像参数化使 CI 构建与 Compose 使用同一已验证镜像来源，修复 [Issue #1676](https://github.com/Pinvou/pinvou3/issues/1676) 的真实匿名拉取 429。生产默认 Node 20 来源及容器业务行为不变，不恢复漏洞依赖或隐藏门禁失败；此前 CI/55 项 Hub 测试和零漏洞审计是历史证据，不冒充本轮复跑。
+
+本轮作者主模块 13 个包测试通过，HTTP 范围 vet、架构与 diff 检查通过。非作者在五项末版源码前后 SHA/blob 不变的条件下实际复跑完整 HTTP 模块：32 主例、23 子例，零失败、零跳过。Windows 未执行 race，真实 Linux、macOS、外部 Keycloak 和部署仍不在本轮本地通过声明内。全部前序未合入 PR 已完整分页回查；签名提交后回复原审核并申请重审，新提交适用 CI 仍须跟踪，不以旧 head 的绿灯替代。
+### F01 新复审修复候选（2026-10-11）
+
+针对 Issue #1753，密码审计记录真实 session ID；用户名改名预检与既有 lower(username) 唯一索引一致；五项实时版本头使用同身份、会话和组织范围的窄查询，旧 Repository 实现保留 GetMe fallback，查询错误不伪造版本；captcha 更新数据库错误保留基础设施错误。未改变已禁用、关闭中主体或资金规则。
+
+Issue #1624 的密码预检新增可配置容量准入：默认 4096、上限 65536，保留 15 分钟 handle 与原 48 小时 operation 绑定，容量满仅拒绝新请求，不驱逐已接受记录。4096 条 benchmark 累计分配 5,095,232 B/op，不是驻留内存或运营峰值验收。修复操作先强持久记录 requested 事实；其 SUCCEEDED 仅指请求事实写入成功。终态外围审计失败保留原业务结果和 pending 信号；操作后权威读取失败明确返回 503 REGISTRATION_REPAIR_RESULT_UNKNOWN，不返回空对象假成功。不新增资金重派，原事务强审计保持；自动可靠终态审计补全仍未实现，#1624 保持 OPEN。
+
+作者实际独占官方 Account Up+VerifyApplied fixture：4 个顶层、17 个场景通过且零跳过，覆盖新增五个 PG 边界、原 wallet 过期/替换/锁等待围栏。末版定向 6 个顶层、13 个场景通过且零跳过；完整主模块默认 test、whole vet、架构守卫通过，默认非 verbose 的跳过数量未知。保留初次容量/updated_at 夹具失败及错误响应调用参数的编译失败日志，不追溯为通过。专属实例清理读证只剩原 bootstrap role 和 postgres 数据库、其他客户端为零；未终止进程或删除历史数据。当前尚待非作者独立审核、新 head CI；真实 Keycloak、部署和外部服务验收不在本轮通过声明内。

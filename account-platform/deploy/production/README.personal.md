@@ -65,3 +65,8 @@ NATS 使用现有 `nats.conf`、`authorization.conf` 和 `runbooks/nats-resource
 部署前依次核验镜像/私有挂载、真实 TLS/证书与身份、迁移 schema/角色、固定 NATS 资源，再启动业务和公开入口。实际注册必须直到 Billing wallet READY；密码/资料变更须完成 Keycloak fencing 和会话撤销；验证 Portal PKCE/refresh/logout/handoff、Desktop 登录恢复与个人余额。未知 ACK 按原请求恢复，不强制激活，不替换主体。
 
 本文件和模板不表示任何环境已经运行、realm 已安装或部署通过。源码、静态配置和有限单测结论只能覆盖各自实际输入；完整 Keycloak、TLS、Redis ACL、服务身份和生产部署验证另登记实际结果，未运行项如实披露。
+# F01 密码预检与修复审计边界
+
+Identity 的匿名密码预检保持原公开路径与 15 分钟 handle 有效期。`IDENTITY_PASSWORD_REFERENCE_CAPACITY` 限制当前未过期 handle 数量：默认 4096，可配置 1–65536；非法、零或无界配置拒绝启动。达到容量只拒绝新预检（503 `PASSWORD_PRECHECK_CAPACITY_REACHED`），不驱逐已接受 handle，不改变已有 48 小时 operation 绑定或正常回调。此上限是资源安全默认，不是并发用户服务承诺；容量和源准入应按实际流量继续评估。4096 个最大长度密码的原始文本最多 512 KiB；完整填充 benchmark 的累计分配约 5.10 MB，不能据此宣称进程驻留总内存。现有 handle 仍是原内存存储，不新增跨进程恢复承诺。
+
+注册修复在产生效果前持久记录 `registration.repair.retry.requested` 或 `registration.repair.compensate.requested`；其 `SUCCEEDED` 仅表示请求审计写入成功，不表示身份或钱包业务完成。写入失败时不派发修复效果。原 wallet/compensation 事务内强审计保持。结束审计写入失败时，保留已记录请求和原业务结果，返回 `X-Registration-Repair-Audit: pending` 并记录稳定诊断；该信号不触发资金动作或旧代际重派。修复后读不到权威 operation 时返回503 `REGISTRATION_REPAIR_RESULT_UNKNOWN`，不可把空对象当成功回执。自动可靠补齐结束审计仍未实现，继续由 #1624 跟踪；不得把 requested 事实或当前列表读取推断为未收到的业务完成回执。

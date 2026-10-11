@@ -266,13 +266,13 @@ func (s *Service) contextVersionHeaders() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		me, err := s.repository.GetMe(c.Request.Context(), principal)
+		versions, err := readAuthorizationVersions(c.Request.Context(), s.repository, principal)
 		if err == nil {
-			c.Header("X-Context-Version", stringInt64(me.ActiveContext.ContextVersion))
-			c.Header("X-Authorization-Version", stringInt64(me.ActiveContext.AuthorizationVersion))
-			c.Header("X-Personal-Authorization-Version", stringInt64(me.ActiveContext.PersonalAuthorizationVersion))
-			c.Header("X-Platform-Authorization-Version", stringInt64(me.ActiveContext.PlatformAuthorizationVersion))
-			c.Header("X-Organization-Authorization-Version", stringInt64(me.ActiveContext.OrganizationAuthorizationVersion))
+			c.Header("X-Context-Version", stringInt64(versions.ContextVersion))
+			c.Header("X-Authorization-Version", stringInt64(versions.AuthorizationVersion))
+			c.Header("X-Personal-Authorization-Version", stringInt64(versions.PersonalAuthorizationVersion))
+			c.Header("X-Platform-Authorization-Version", stringInt64(versions.PlatformAuthorizationVersion))
+			c.Header("X-Organization-Authorization-Version", stringInt64(versions.OrganizationAuthorizationVersion))
 		}
 		c.Next()
 	}
