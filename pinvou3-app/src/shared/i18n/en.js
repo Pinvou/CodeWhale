@@ -2534,6 +2534,20 @@ dictEn.uiSettings.remoteControl = 'Desktop Remote Control';
 // (same pattern as "Help & Feedback → Behavior analytics").
 dictEn.uiSettingsDetail.desktopRemoteControlEntryDesc = "Let someone connect with a pairing code and run tasks with this machine's model; you can review and disconnect at any time.";
 dictEn.uiSettingsDetail.desktopRemoteControlBack = 'Back to General';
+dictEn.remoteArchive = {
+  byteBudget: 'Remote conversation capacity is full. Open Settings → Remote control → Remote conversation archives, disconnect offline conversations and settle unresolved tasks, then archive them permanently to free capacity.',
+  title: 'Remote conversation archives', active: 'Active records', archived: 'Archived history',
+  hint: 'Archive offline conversations to free active capacity. History and replay protection are retained; archived conversations cannot run tasks or reconnect. Connected conversations and unresolved tasks must be settled first.',
+  archive: 'Archive permanently', refresh: 'Refresh', empty: 'No conversations', untitled: 'Untitled conversation',
+  previous: 'Previous page', next: 'Next page', readOnly: 'Read-only archive',
+  completed: 'Archived. Active capacity has been released.',
+  completedRefreshPending: 'Permanently archived, but the list could not refresh. Refresh the list; do not retry this conversation as a new task.',
+  cleanupPending: 'Archived safely. Active-file cleanup is pending and will retry on the next write; this conversation cannot execute.',
+  online: 'This conversation is connected or recovering. Disconnect it before archiving.',
+  pending: 'Unresolved tasks remain. Reconcile their results or explicitly abandon never-attempted tasks before archiving.',
+  unavailable: 'Archive storage is unavailable. Keep the original data and try again.',
+};
+dictEn.controllerConnection.errorArchiveCapacity = dictEn.remoteArchive.byteBudget;
 // restored: baseline catalog descriptions (referenced by the model catalog data)
 Object.assign(dictEn.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'Default model for the local service', '高能力模型': 'High-capability model', '快速响应': 'Fast responses', '最新通用模型': 'Latest general-purpose model', '代码场景': 'Coding tasks', '高速代码场景': 'High-speed coding tasks', '稳定可用': 'Stable release', '高性价比': 'Cost-effective', '通用能力': 'General-purpose', '兼容保留': 'Compatibility option', '高速响应': 'High-speed responses', '轻量模型': 'Lightweight model'
 });

@@ -203,6 +203,7 @@ export function controllerConnectionUiState(connection, inputState = 'empty', lo
 
 /** Maps a bounded server error code to one shared copy key. */
 export function connectionErrorKey(code) {
+  if (code === 'remote_proxy_byte_budget') return 'errorArchiveCapacity';
   switch (code) {
     case 'controller_busy':
       return 'errorBusy';
