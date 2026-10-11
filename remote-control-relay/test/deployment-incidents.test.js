@@ -1,0 +1,205 @@
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { test } from 'node:test';
+
+const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+const production = readFileSync(join(root, 'scripts/deploy-remote-relay.sh'), 'utf8');
+const testing = readFileSync(join(root, 'scripts/deploy-remote-relay-test.sh'), 'utf8');
+const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash';
+function shell(source, env = {}) {
+  const result = spawnSync(bash, ['-c', 'set -euo pipefail\n' + source], {
+    env: { ...process.env, ...env }, encoding: 'utf8', timeout: 10_000,
+  });
+  assert.equal(result.error, undefined);
+  return result;
+}
+function fragment(source, pattern) {
+  const match = source.match(pattern);
+  assert.ok(match, 'actual deployment fragment must exist');
+  return match[0];
+}
+
+test('actual production confirmation and base gates reject before any operations', () => {
+  const confirmation = fragment(production, /^if \[\[ "\$\{PINVOU_CONFIRM_PRODUCTION_DEPLOY[^]*?^fi/m);
+  const base = fragment(production, /^if \[\[ "\$BASE_PATH"[^]*?^fi/m);
+  for (const value of ['', '0', 'true', '2']) {
+    const result = shell(confirmation + '\necho unexpected_operation', { PINVOU_CONFIRM_PRODUCTION_DEPLOY: value });
+    assert.equal(result.status, 64);
+    assert.equal(result.stdout, '');
+  }
+  assert.equal(shell(confirmation, { PINVOU_CONFIRM_PRODUCTION_DEPLOY: '1' }).status, 0);
+  for (const value of ['', '/other', '/pinvou3/remote-test', '/pinvou3/remote/']) {
+    const result = shell(base + '\necho unexpected_operation', { BASE_PATH: value });
+    assert.equal(result.status, 64);
+    assert.equal(result.stdout, '');
+  }
+  assert.equal(shell(base, { BASE_PATH: '/pinvou3/remote' }).status, 0);
+});
+
+test('actual production baseline failure stops before build, upload, or SSH', () => {
+  const gate = fragment(production, /^if ! verify_public baseline; then[^]*?^fi/m);
+  assert.ok(production.indexOf(gate) < production.indexOf('node --check'));
+  assert.ok(production.indexOf(gate) < production.indexOf('scp -i'));
+  const result = shell('VERIFY_ERROR=TEST_ONLY_BASELINE_FAILURE\nverify_public() { return 1; }\n'
+    + gate + '\necho unexpected_operation');
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /TEST_ONLY_BASELINE_FAILURE/);
+});
+
+test('actual remote health loops retry transient failures and bound permanent failures', () => {
+  const cases = [
+    { source: production, expectedSuccess: 4, expectedFailure: 30 },
+    { source: testing, expectedSuccess: 3, expectedFailure: 45 },
+  ];
+  for (const { source, expectedSuccess, expectedFailure } of cases) {
+    const health = fragment(source, /^healthy=0[^]*?(?=^echo "(?:backup=|测试 relay))/m);
+    // Execute only the real health/rollback section. All IO boundaries are
+    // in-process functions; no SSH, network, service or filesystem operation.
+    const stubs = [
+      'service=fixture.service; port=8788; base_path=/fixture; test_dir=/fixture; backup=/fixture-backup',
+      'calls=0',
+      'curl() { calls=$((calls+1)); [[ " $* " == *" --connect-timeout 3 "* && " $* " == *" --max-time 5 "* ]] || { echo BAD_BOUND; return 98; }; [[ "$FIXTURE_MODE" == transient && "$calls" -ge 3 ]]; }',
+      'sleep() { :; }',
+      'systemctl() { printf "systemctl:%s\\n" "$*"; }',
+      '[() { if [[ "$1" == -d || "$1" == -f ]]; then return 0; fi; builtin [ "$@"; }',
+      'rm() { :; }; mv() { :; }',
+      'cp() { printf "copy:%s\\n" "$*"; }',
+      'rollback() { echo rollback; }',
+      'trap \'printf "calls=%s\\n" "$calls"\' EXIT',
+    ].join('\n');
+    for (const mode of ['transient', 'permanent']) {
+      const result = shell(stubs + '\n' + health, { FIXTURE_MODE: mode });
+      assert.equal(result.status, mode === 'transient' ? 0 : 1, result.stderr);
+      assert.match(result.stdout, new RegExp('calls=' + (mode === 'transient' ? expectedSuccess : expectedFailure) + '\\b'));
+      assert.doesNotMatch(result.stdout, /BAD_BOUND/);
+      if (mode === 'permanent' && source === testing) {
+        assert.match(result.stdout, /copy:-a \/etc\/systemd\/system\/fixture.service.bak \/etc\/systemd\/system\/fixture.service/);
+        const copy = result.stdout.indexOf('copy:');
+        assert.ok(copy < result.stdout.indexOf('systemctl:daemon-reload'));
+        assert.ok(copy < result.stdout.indexOf('systemctl:restart'));
+      }
+    }
+  }
+});
+
+test('actual deployment failure handler preserves remote stdout and stderr', () => {
+  const handler = fragment(production, /^\)" \|\| \{[^]*?^\}/m);
+  const result = shell('deploy_output="$(printf TEST_ONLY_REMOTE_STDOUT; printf TEST_ONLY_REMOTE_STDERR >&2; exit 27\n'
+    + handler + '\necho unexpected_operation');
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /TEST_ONLY_REMOTE_STDOUT/);
+  assert.match(result.stderr, /TEST_ONLY_REMOTE_STDERR/);
+  assert.match(result.stderr, /远程部署步骤失败/);
+});
+
+test('actual production SSH and scp argv preserve private key and noninteractive auth', () => {
+  // Capture every invocation BEFORE checking the auth flags; filtering by -i
+  // would silently drop the very mutation that this test must reject.
+  const commands = production.split(/\r?\n/).filter((line) =>
+    /^(?:scp\s|deploy_output="\$\(ssh\s|\s+\|\s*ssh\s|\s+ssh\s)/.test(line));
+  assert.ok(commands.length >= 8);
+  for (const command of commands) {
+    const invocation = command.slice(command.search(/\b(?:ssh|scp)\s/))
+      .replace(/ <<'REMOTE'.*$/, '');
+    const result = shell([
+      'SSH_KEY="fixture key"; SERVER=fixture.invalid; RELAY_DIR=/fixture; REMOTE_DIR=/fixture',
+      'SERVICE=fixture; STAMP=fixture; backup=/fixture-backup; HARDENING_SNAPSHOT=/fixture-hardening',
+      'IPV4_DB_CACHE=/fixture-input; IPV6_DB_CACHE=/fixture-input; IPV4_DB_SHA256=fixture; IPV6_DB_SHA256=fixture',
+      ...[...production.matchAll(/^(REMOTE_[A-Z0-9_]+)="[^\n]+"/gm)].map((m) => m[1] + '=/fixture-input'),
+      'ssh() { [[ "$1" == -i && "$2" == "fixture key" && "$3" == -o && "$4" == BatchMode=yes ]] || return 98; echo valid_auth; }',
+      'scp() { ssh "$@"; }', invocation,
+    ].join('\n'));
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), 'valid_auth');
+  }
+});
+
+test('actual test public rollback restores the old unit before restarting and bounds curl', () => {
+  const rollback = fragment(testing, /^rollback_relay\(\) \{[^]*?^\}/m);
+  const remote = fragment(rollback, /^set -euo pipefail[^]*?(?=^REMOTE$)/m);
+  const result = shell([
+    'set -- /fixture 8788 /fixture fixture.service',
+    '[() { [[ "$1" != "!" ]]; }; rm() { :; }; mv() { :; }; sleep() { :; }',
+    'cp() { echo restored_unit; }',
+    'systemctl() { printf "systemctl:%s\\n" "$*"; }',
+    'curl() { [[ " $* " == *" --connect-timeout 3 "* && " $* " == *" --max-time 5 "* ]]; }',
+    remote,
+  ].join('\n'));
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /restored_unit/);
+  assert.ok(result.stdout.indexOf('restored_unit') < result.stdout.indexOf('systemctl:restart'));
+});
+
+test('private hardening input is explicit, validated and uploaded as a snapshot', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'pinvou-hardening-check-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const validator = join(root, 'remote-control-relay/scripts/validate-deploy-hardening.cjs');
+  const template = readFileSync(join(root, 'remote-control-relay/10-hardening.conf'), 'utf8');
+  assert.doesNotMatch(template, /(?:\d{1,3}\.){3}\d{1,3}/);
+  const valid = template.replaceAll('REPLACE_WITH_CONFIRMED_PROXY_IP', '192.0.2.20');
+  const input = join(directory, 'operator config.conf');
+  const run = (path) => spawnSync(process.execPath, [validator, path], { encoding: 'utf8', timeout: 10_000 });
+  for (const contents of [template, '', valid.replace('MAX_ROOMS=2000', 'MAX_ROOMS=9999'),
+    valid.replace('ROOM_CREATE_WINDOW_MS=60000', 'ROOM_CREATE_WINDOW_MS=1'),
+    valid.replace('WS_CONNECT_WINDOW_MS=60000', 'WS_CONNECT_WINDOW_MS=1'),
+    valid.replace('TRUSTED_PROXY_IPS=192.0.2.20', 'TRUSTED_PROXY_IPS=192.0.2.21'),
+    valid + '\nExecStart=/fixture\n', valid + '\nEnvironment=MAX_ROOMS=2000\n']) {
+    writeFileSync(input, contents);
+    const result = run(input);
+    assert.equal(result.status, 64);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr.trim(), 'deploy_hardening_configuration_invalid');
+  }
+  for (const path of ['', directory, join(directory, 'absent')]) assert.equal(run(path).status, 64);
+  writeFileSync(input, valid);
+  assert.equal(run(input).status, 0);
+  const link = join(directory, 'linked-parent');
+  symlinkSync(directory, link, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal(run(join(link, 'operator config.conf')).status, 64);
+  assert.match(production, /HARDENING_FILE="\$\{PINVOU_REMOTE_HARDENING_FILE:-\}"/);
+  assert.doesNotMatch(production, /scp[^\n]*10-hardening\.conf/);
+  const check = 'node "$RELAY_DIR/scripts/validate-deploy-hardening.cjs" "$HARDENING_FILE"';
+  assert.ok(production.indexOf(check) < production.indexOf('if ! verify_public baseline'));
+  assert.match(production, /scp -i "\$SSH_KEY" -o BatchMode=yes "\$HARDENING_SNAPSHOT"/);
+  assert.match(production, /node "\$RELAY_DIR\/scripts\/validate-deploy-hardening.cjs" "\$HARDENING_SNAPSHOT"/);
+  assert.equal((production.match(/cp -a "\$backup\/10-hardening.conf"/g) ?? []).length, 2);
+});
+
+test('actual hardening preflight rejects missing config before network and uploads exact validated content', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'pinvou-hardening-preflight-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const input = join(directory, 'operator.conf');
+  const template = readFileSync(join(root, 'remote-control-relay/10-hardening.conf'), 'utf8');
+  writeFileSync(input, template.replaceAll('REPLACE_WITH_CONFIRMED_PROXY_IP', '192.0.2.20'));
+  const preflight = fragment(production, /^node "\$RELAY_DIR\/scripts\/validate-deploy-hardening.cjs" "\$HARDENING_FILE"[^]*?^node "\$RELAY_DIR\/scripts\/validate-deploy-hardening.cjs" "\$HARDENING_SNAPSHOT"$/m);
+  const upload = fragment(production, /^scp -i "\$SSH_KEY" -o BatchMode=yes "\$HARDENING_SNAPSHOT"[^\n]*/m);
+  const posixPath = (value) => value.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_, drive) => '/' + drive.toLowerCase());
+  for (const path of ['', join(directory, 'missing'), input]) {
+    const result = shell(preflight + '\nSSH_KEY=fixture; SERVER=fixture.invalid; REMOTE_HARDENING_TMP=/fixture\n'
+      + 'scp() { [[ "$1" == -i && "$2" == fixture && "$3" == -o && "$4" == BatchMode=yes ]]; cmp "$5" "$HARDENING_FILE"; echo exact_upload; }\n'
+      + upload, { RELAY_DIR: process.platform === 'win32' ? posixPath(join(root, 'remote-control-relay')) : join(root, 'remote-control-relay'),
+        HARDENING_FILE: process.platform === 'win32' ? posixPath(path) : path,
+        TMPDIR: process.platform === 'win32' ? posixPath(directory) : directory });
+    assert.equal(result.status, path === input ? 0 : 64, result.stderr);
+    assert.equal(result.stdout.trim(), path === input ? 'exact_upload' : '');
+  }
+});
+
+test('Rust endpoint selection keeps env before persisted profile before production fallback', () => {
+  // Source contract only: no new native-runtime execution is claimed here.
+  const source = readFileSync(join(root, 'pinvou3-app/src-tauri/src/features/remote_control/manager/mod.rs'), 'utf8');
+  const body = fragment(source, /^pub\(crate\) fn active_endpoint_profile\(\)[^]*?^\}/m);
+  assert.match(body, /std::env::var\("PINVOU_REMOTE_ENDPOINT_PROFILE"\)/);
+  assert.match(body, /endpoint_profile_by_id\(requested.trim\(\)\)/);
+  assert.match(body, /persistence::selected_endpoint_profile\(\)/);
+  assert.match(body, /endpoint_profile_by_id\(selected.as_str\(\)\)/);
+  assert.match(body, /&PRODUCTION_PROFILE\s*\}/);
+  assert.ok(body.indexOf('std::env::var') < body.indexOf('persistence::selected_endpoint_profile'));
+  assert.equal((body.match(/return profile;/g) ?? []).length, 2);
+});
