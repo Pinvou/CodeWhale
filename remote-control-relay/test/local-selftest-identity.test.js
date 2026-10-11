@@ -35,12 +35,12 @@ function invalidKeys(valid) {
 
 test("actual local signing validator checks Ed25519 identity without sensitive output", () => {
   const valid = signingKey();
-  const good = spawnSync(process.execPath, [validator], { input: JSON.stringify(valid), encoding: "utf8" });
+  const good = spawnSync(process.execPath, [validator], { input: JSON.stringify(valid), encoding: "utf8", timeout: 10_000 });
   assert.equal(good.status, 0);
   assert.equal(good.stdout, '{"ok":true}\n');
   assert.equal(good.stderr, "");
   for (const [kind, key] of invalidKeys(valid)) {
-    const bad = spawnSync(process.execPath, [validator], { input: JSON.stringify(key), encoding: "utf8" });
+    const bad = spawnSync(process.execPath, [validator], { input: JSON.stringify(key), encoding: "utf8", timeout: 10_000 });
     assert.equal(bad.status, 1, kind);
     assert.equal(bad.stdout, "", kind);
     assert.equal(bad.stderr, "selftest_signing_identity_invalid\n", kind);
