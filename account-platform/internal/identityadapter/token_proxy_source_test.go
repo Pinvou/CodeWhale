@@ -13,7 +13,7 @@ func TestTokenProxyPreservesAdmittedSourceForKeycloakTrustedProxy(t *testing.T) 
 	}{
 		{"edge IPv4", "198.51.100.42", "192.0.2.20:43000", "198.51.100.42"},
 		{"edge IPv6", "2001:db8::42", "[2001:db8::20]:43000", "2001:db8::42"},
-		{"existing last forwarded hop", "203.0.113.9, 198.51.100.42", "192.0.2.20:43000", "198.51.100.42"},
+		{"forwarded chain falls back to peer", "203.0.113.9, 198.51.100.42", "192.0.2.20:43000", "192.0.2.20"},
 		{"direct peer", "", "192.0.2.20:43000", "192.0.2.20"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -28,7 +28,7 @@ func TestTokenProxyPreservesAdmittedSourceForKeycloakTrustedProxy(t *testing.T) 
 			}))
 			defer upstream.Close()
 			admission := &admissionFake{}
-			proxy, err := NewTokenProxy(upstream.URL, admission)
+			proxy, err := NewTokenProxyWithTrustedPeers(upstream.URL, admission, "", false, "192.0.2.20,2001:db8::20")
 			if err != nil {
 				t.Fatal(err)
 			}

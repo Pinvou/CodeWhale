@@ -58,7 +58,7 @@ func main() {
 		if admissionErr != nil {
 			log.Fatal(admissionErr)
 		}
-		proxy, proxyErr := identityadapter.NewTokenProxyWithTrust(os.Getenv("KEYCLOAK_PROVISIONER_TOKEN_URL"), admission, os.Getenv("KEYCLOAK_CA_FILE"), production)
+		proxy, proxyErr := identityadapter.NewTokenProxyWithTrustedPeers(os.Getenv("KEYCLOAK_PROVISIONER_TOKEN_URL"), admission, os.Getenv("KEYCLOAK_CA_FILE"), production, os.Getenv("IDENTITY_TRUSTED_PROXY_IPS"))
 		if proxyErr != nil {
 			log.Fatal(proxyErr)
 		}
