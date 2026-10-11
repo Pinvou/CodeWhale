@@ -466,6 +466,14 @@ impl LaneStore {
         self.suspended.store(false, Ordering::SeqCst);
     }
 
+    fn clear_if_lease(&self, expected: &super::protocol::LeaseContext) {
+        let mut lane = self.lane.lock();
+        if lane.as_ref().is_some_and(|lane| lane.lease() == expected) {
+            *lane = None;
+            self.suspended.store(false, Ordering::SeqCst);
+        }
+    }
+
     pub(crate) fn is_installed(&self) -> bool {
         self.lane.lock().is_some()
     }
@@ -686,6 +694,12 @@ macro_rules! lane_state {
 lane_state!(ControllingLaneState, "A 端（主控）加密业务通道状态。");
 lane_state!(ControlledLaneState, "B 端（被控）加密业务通道状态。");
 
+impl ControlledLaneState {
+    pub(crate) fn clear_if_lease(&self, expected: &super::protocol::LeaseContext) {
+        self.store.clear_if_lease(expected);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,6 +903,45 @@ mod tests {
                 .unwrap_err(),
             LaneFailure::Invalid
         );
+    }
+
+    #[test]
+    fn delayed_disconnect_cleanup_preserves_a_successor_lane_and_its_suspend_gate() {
+        let state = ControlledLaneState::default();
+        let PairingFixture {
+            reservation,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture("relay-old-cleanup");
+        let (_, old_session) = paired_session_keys(a_keys, b_keys, &reservation);
+        let old_lease = lease_context(&reservation);
+        state
+            .install(ControllerRole::B, &old_lease, old_session)
+            .unwrap();
+        let PairingFixture {
+            reservation,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture("relay-new-cleanup");
+        let (_, new_session) = paired_session_keys(a_keys, b_keys, &reservation);
+        let mut new_lease = lease_context(&reservation);
+        new_lease.remote_control_generation = "generation-successor".into();
+        state
+            .install(ControllerRole::B, &new_lease, new_session)
+            .unwrap();
+        state.suspend();
+        state.clear_if_lease(&old_lease);
+        assert!(state.is_installed());
+        assert!(state.is_suspended());
+        assert_eq!(
+            state.store.lane.lock().as_ref().unwrap().lease(),
+            &new_lease
+        );
+        state.clear_if_lease(&new_lease);
+        assert!(!state.is_installed());
+        assert!(!state.is_suspended());
     }
 
     /// 另一对握手密钥无法打开本对的帧（会话密钥绑定 + AEAD 失败关闭）。

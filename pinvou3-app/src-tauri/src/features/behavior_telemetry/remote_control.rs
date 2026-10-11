@@ -225,7 +225,10 @@ fn classify_error(error: &str) -> (RemoteOutcome, RemoteReason) {
     }
 }
 
-pub(crate) fn track_remote_control(app: &tauri::AppHandle, event: RemoteControlEvent) {
+pub(crate) fn track_remote_control<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    event: RemoteControlEvent,
+) {
     super::events::track(app, event.into_behavior());
 }
 
