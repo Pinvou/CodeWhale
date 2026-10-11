@@ -1758,6 +1758,8 @@
   "WorkspaceSwitchPersistedActorUnavailable": "Perubahan workspace disimpan, tetapi actor persistensi tidak tersedia; penyimpanan otomatis berikutnya akan menulisnya ulang",
   "WorkspaceSwitchSnapshotFailed": "Gagal membuat snapshot perubahan workspace: {error}",
   "WorkspaceSwitchSessionsDirFailed": "Gagal membuka direktori sesi: {error}",
+  "WorkspaceSwitchSetRefused": "Tidak dapat mengganti workspace ke {workspace}: himpunan root yang dibawa akan melebar melewati direktori baru ({reason}). Penggantian ditolak; mulai sesi baru di direktori tersebut, atau hapus root yang melebar dari himpunan root tersimpan sesi ini di luar TUI.",
+  "ForkSourceSetRefused": "Tidak dapat fork: himpunan root sumber yang dipasang ulang ke {workspace} akan melebar melewatinya ({reason}). Fork ditolak; mulailah dari direktori yang tidak dilebarkan himpunan tersebut, atau bersihkan root yang melebar dari rekaman tersimpan di luar TUI.",
   "WorkspaceRootsRemainder": "… (+{count} lainnya)",
   "WorkspaceRootsNotice": "Folder yang dapat diakses selain {workspace}: {roots}",
   "StatusLabelProjectDocs": "Dokumen proyek",

@@ -4453,6 +4453,98 @@ async fn session_resume_thread_carries_persisted_workspace_roots() -> Result<()>
 }
 
 #[tokio::test]
+async fn session_resume_thread_survives_a_legal_full_load_row() -> Result<()> {
+    // Round-37 B37-2, the resume-thread face: a session saved with a 64-root
+    // declaration persists the 65-entry cwd-first full form. Re-declaring
+    // that row verbatim into create_thread would miscount its own head
+    // against the intake cap and strand the resume at a 400 with no repair
+    // path; the face strips the head before declaring.
+    let root = std::env::temp_dir().join(format!(
+        "deepseek-session-resume-full-load-{}",
+        Uuid::new_v4()
+    ));
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+    let full_load_roots: Vec<String> = (0..codewhale_core::MAX_WORKSPACE_ROOTS)
+        .map(|index| format!("/tmp/test/r{index}"))
+        .collect();
+    let stored_full_form: Vec<String> = std::iter::once("/tmp/test".to_string())
+        .chain(full_load_roots.iter().cloned())
+        .collect();
+    let session = json!({
+        "schema_version": 1,
+        "metadata": {
+            "id": "sess_full_load_resume",
+            "title": "Full-load resume session",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:10:00Z",
+            "message_count": 1,
+            "total_tokens": 10,
+            "model": "deepseek-v4-pro",
+            "workspace": "/tmp/test",
+            // The stored full form: the head plus 64 additions.
+            "workspace_roots": stored_full_form,
+            "mode": "agent"
+        },
+        "messages": [
+            {
+                "role": "user",
+                "content": [{ "type": "text", "text": "Hello, full load!" }]
+            }
+        ],
+        "system_prompt": null
+    });
+    fs::write(
+        sessions_dir.join("sess_full_load_resume.json"),
+        serde_json::to_string_pretty(&session)?,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/sessions/sess_full_load_resume/resume-thread"
+        ))
+        .json(&json!({ "model": "deepseek-v4-pro" }))
+        .send()
+        .await?;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "a legal full-load row must resume, not trip the intake cap"
+    );
+    let resumed: serde_json::Value = resp.json().await?;
+    let thread_id = resumed["thread_id"]
+        .as_str()
+        .context("missing resumed thread id")?;
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{addr}/v1/threads/{thread_id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let armed = detail["thread"]["workspace_roots"]
+        .as_array()
+        .context("thread workspace_roots")?;
+    assert_eq!(
+        armed.len(),
+        codewhale_core::MAX_WORKSPACE_ROOTS + 1,
+        "the resumed thread arms the full-load set whole, head re-anchored"
+    );
+    assert_eq!(detail["thread"]["workspace_roots"][0], "/tmp/test");
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn saved_sessions_carry_thread_workspace_roots_through_save_and_resave() -> Result<()> {
     let root = std::env::temp_dir().join(format!("deepseek-session-roots-{}", Uuid::new_v4()));
     let sessions_dir = root.join("sessions");

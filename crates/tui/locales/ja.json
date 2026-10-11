@@ -1758,6 +1758,8 @@
   "WorkspaceSwitchPersistedActorUnavailable": "ワークスペース切り替えは保存されましたが、永続化アクターが利用できません。次の自動保存で再保存されます",
   "WorkspaceSwitchSnapshotFailed": "ワークスペース切り替えのスナップショットに失敗しました: {error}",
   "WorkspaceSwitchSessionsDirFailed": "セッションディレクトリを開けませんでした: {error}",
+  "WorkspaceSwitchSetRefused": "ワークスペースを {workspace} へ切り替えられません:持ち越しのルート一覧が新しいディレクトリの範囲を超えて拡大します({reason})。切り替えは拒否されました。そのディレクトリで新しいセッションを開始するか、TUI の外でこのセッションの保存ルート一覧から拡大するルートを取り除いてください。",
+  "ForkSourceSetRefused": "フォークできません:ソースのルート一覧を {workspace} に再設定すると範囲を超えて拡大します({reason})。フォークは拒否されました。一覧が拡大しないディレクトリから開始するか、TUI の外で保存レコードから拡大するルートを取り除いてください。",
   "WorkspaceRootsRemainder": "…（ほか {count} 件）",
   "WorkspaceRootsNotice": "{workspace} のほかにアクセス可能なフォルダ: {roots}",
   "StatusLabelProjectDocs": "プロジェクト文書",

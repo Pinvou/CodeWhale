@@ -315,6 +315,21 @@ pub(super) async fn resume_session_thread(
             .unwrap_or_else(|| "agent".to_string())
     });
 
+    // The session row persists the cwd-first full form (primary included),
+    // but `create_thread` validates its `workspace_roots` as DECLARED
+    // additional entries under the intake cap — re-declaring the row's own
+    // head would miscount a legal full-load row (64 additions + head) as
+    // over-cap and strand the resume at a 400 with no repair path. Strip the
+    // head before declaring; create_thread re-anchors it as the primary
+    // (round-37 B37-2, the fifth face).
+    let declared_roots: Vec<PathBuf> = session
+        .metadata
+        .workspace_roots
+        .iter()
+        .filter(|root| root.as_path() != session.metadata.workspace)
+        .cloned()
+        .collect();
+
     let thread = state
         .runtime_threads
         .create_thread(CreateThreadRequest {
@@ -322,7 +337,7 @@ pub(super) async fn resume_session_thread(
             model_provider: Some(session.metadata.model_provider.clone()),
             model_provider_id: session.metadata.model_provider_id.clone(),
             workspace: Some(session.metadata.workspace.clone()),
-            workspace_roots: session.metadata.workspace_roots.clone(),
+            workspace_roots: declared_roots,
             mode: Some(mode),
             allow_shell: None,
             trust_mode: None,

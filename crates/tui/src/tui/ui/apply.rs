@@ -1293,10 +1293,22 @@ pub(crate) async fn apply_command_result(
             } => {
                 let mut session_id = session_id;
                 let is_full_reset = messages.is_empty() && system_prompt.is_none();
+                let previous_session_id = app.current_session_id.clone();
                 if is_full_reset && session_id.is_none() {
                     let new_session_id = uuid::Uuid::new_v4().to_string();
                     app.current_session_id = Some(new_session_id.clone());
                     session_id = Some(new_session_id);
+                }
+                // Round-37 M37-6: a session grant/denial belongs to the
+                // conversation it was approved in. A fork, a full reset, or
+                // a different session's load installs a NEW conversation —
+                // even over the same workspace — so the sets reset here too
+                // (a workspace move clears them inside
+                // `apply_workspace_runtime_state`). Same-session re-syncs
+                // keep their grants.
+                if is_full_reset || session_id != previous_session_id {
+                    app.approval_session_approved.clear();
+                    app.approval_session_denied.clear();
                 }
                 let workspace_changed = task_manager.default_workspace().await != workspace;
                 if workspace_changed {
@@ -1310,7 +1322,20 @@ pub(crate) async fn apply_command_result(
                 // early, and leaving the previous session's set paired with
                 // the new workspace would make every later re-sync send a
                 // workspace whose primary root is the old directory.
+                let previous_workspace_roots = app.workspace_roots.clone();
                 app.workspace_roots = workspace_roots.clone();
+                // Round-37 M37-8: a SyncSession that INSTALLS a different
+                // root set (a fork carrying the parent's set, a loaded
+                // conversation) discloses it like every other loading face —
+                // the bare "Forked <id>" receipt must not be the only trace
+                // of a silently swapped live set. The notice renders only for
+                // a set with additional roots.
+                if workspace_roots != previous_workspace_roots
+                    && let Some(notice) =
+                        workspace_roots_notice(app.ui_locale, &app.workspace, &app.workspace_roots)
+                {
+                    app.add_message(HistoryCell::System { content: notice });
+                }
                 let provider_changed = config.api_provider() != app.api_provider
                     || config.provider_identity_for(config.api_provider())
                         != app.provider_identity_for_persistence();
@@ -2460,6 +2485,14 @@ fn edit_project_hooks_from_tui(terminal: &mut AppTerminal, app: &mut App, config
 
 pub(crate) fn apply_workspace_runtime_state(app: &mut App, config: &Config, workspace: PathBuf) {
     app.workspace = workspace.clone();
+    // Round-37 M37-6: session approval grants/denials are keyed to the
+    // primary the approval was judged under (shell operand resolution and
+    // the patch family both bind the root). The whole set is stale the
+    // moment the workspace moves — an approved `cwd: "sub"` family or patch
+    // path set must not auto-approve the same spellings re-resolved under
+    // the new root.
+    app.approval_session_approved.clear();
+    app.approval_session_denied.clear();
     app.coordination_detail = None;
     app.plugin_registry = app.plugin_registry.rediscover_for_workspace(&workspace);
     for error in crate::commands::user_registry::install_plugin_registry(

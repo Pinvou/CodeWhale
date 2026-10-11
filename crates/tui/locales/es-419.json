@@ -1758,6 +1758,8 @@
   "WorkspaceSwitchPersistedActorUnavailable": "El cambio de workspace se guardó, pero el actor de persistencia no está disponible; el siguiente autoguardado lo vuelve a escribir",
   "WorkspaceSwitchSnapshotFailed": "Error al crear la instantánea del cambio de workspace: {error}",
   "WorkspaceSwitchSessionsDirFailed": "No se pudo abrir el directorio de sesiones: {error}",
+  "WorkspaceSwitchSetRefused": "No se puede cambiar el workspace a {workspace}: el conjunto de raíces transportado se ampliaría más allá del nuevo directorio ({reason}). El cambio fue rechazado; inicia una nueva sesión en ese directorio o quita las raíces que amplían del conjunto guardado de esta sesión fuera del TUI.",
+  "ForkSourceSetRefused": "No se puede bifurcar: el conjunto de raíces de origen reubicado en {workspace} se ampliaría más allá de él ({reason}). La bifurcación fue rechazada; comiénzala desde un directorio que el conjunto no amplíe, o quita las raíces que amplían del registro guardado fuera del TUI.",
   "WorkspaceRootsRemainder": "… (+{count} más)",
   "WorkspaceRootsNotice": "Carpetas accesibles además de {workspace}: {roots}",
   "StatusLabelProjectDocs": "Docs del proyecto",

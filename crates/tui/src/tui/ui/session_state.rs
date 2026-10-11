@@ -806,11 +806,13 @@ pub(crate) async fn switch_workspace(
             // refused, so there is nothing to re-declare "after". The
             // actionable exits are a new session in that directory or
             // editing the session's root set outside the TUI.
-            let message = format!(
-                "Cannot switch workspace to {}: the carried root set would widen past the new directory ({}). The switch is refused; start a new session in that directory, or remove the widening roots from this session's saved root set outside the TUI.",
-                workspace.display(),
-                err
-            );
+            // Round-37 M37-8: the refusal is localized like its sibling
+            // messages (this flow's every other message ships in all 15
+            // packs).
+            let message = app
+                .tr(MessageId::WorkspaceSwitchSetRefused)
+                .replace("{workspace}", &workspace.display().to_string())
+                .replace("{reason}", &format!("{err:#}"));
             app.status_message = Some(message.clone());
             app.add_message(HistoryCell::System { content: message });
             return;

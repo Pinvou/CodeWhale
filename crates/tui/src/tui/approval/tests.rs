@@ -195,6 +195,40 @@ fn risk_dangerous_shell_command_stays_destructive() {
     );
 }
 
+#[test]
+fn approval_card_previews_the_working_dir_redirect() {
+    // Round-37 M37-9: the card's Dir preview must read the SAME operand
+    // keys the shell tool and the approval cache key read (["cwd",
+    // "working_dir"]). The old ["workdir", "cwd"] preview left a
+    // `working_dir` redirect invisible on the card while the grant it
+    // approved was keyed by that very operand.
+    let details = build_prominent_details(
+        "exec_shell",
+        ToolCategory::Shell,
+        &json!({
+            "command": "cargo test",
+            "working_dir": "/repo/subdir"
+        }),
+    );
+    let dir = details
+        .iter()
+        .find(|detail| detail.label == "Dir")
+        .expect("a working_dir redirect must be visible on the card");
+    assert_eq!(dir.value, "/repo/subdir");
+
+    // The legacy `cwd` spelling stays previewed too.
+    let details = build_prominent_details(
+        "exec_shell",
+        ToolCategory::Shell,
+        &json!({"command": "cargo test", "cwd": "/repo/other"}),
+    );
+    let dir = details
+        .iter()
+        .find(|detail| detail.label == "Dir")
+        .expect("the cwd spelling stays previewed");
+    assert_eq!(dir.value, "/repo/other");
+}
+
 // ========================================================================
 // ApprovalRequest Tests
 // ========================================================================

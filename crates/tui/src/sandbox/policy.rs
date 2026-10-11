@@ -355,6 +355,16 @@ impl SandboxPolicy {
                     roots.push(canonical);
                 }
 
+                // Round-37 M37-7: a root that canonicalizes to the
+                // filesystem root is dropped here, at the one enumeration
+                // every boundary consumer reads — seatbelt used to emit it
+                // as a plain `(subpath /)` allow, granting a
+                // whole-filesystem-write sandbox to any spelling (symlink,
+                // case-fold) that slipped past the lexical intake, while
+                // bwrap silently dropped the same root. Both platforms now
+                // fail closed on it.
+                roots.retain(|root| root != Path::new("/"));
+
                 // Convert to WritableRoot with read-only subpaths
                 roots
                     .into_iter()
@@ -778,6 +788,38 @@ mod tests {
         assert!(root_paths.contains(&worktree.canonicalize().expect("canonical worktree")));
         assert!(root_paths.contains(&worktree_git_dir.canonicalize().expect("canonical gitdir")));
         assert!(root_paths.contains(&common_git_dir.canonicalize().expect("canonical common git")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_write_drops_a_root_that_canonicalizes_to_the_filesystem_root() {
+        // Round-37 M37-7: a symlink spelling of `/` past the lexical intake
+        // used to reach seatbelt's enumeration as a plain writable root —
+        // `(subpath /)` is a whole-filesystem-write allow — while bwrap
+        // dropped the same root. The shared enumeration now drops it on
+        // every platform: the boundary fails closed instead of widening.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("ws");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let slash_link = tmp.path().join("slash-link");
+        std::os::unix::fs::symlink("/", &slash_link).expect("symlink to /");
+
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![slash_link],
+            network_access: true,
+            exclude_tmpdir: true,
+            exclude_slash_tmp: true,
+        };
+
+        let root_paths: Vec<PathBuf> = policy
+            .get_writable_roots(&workspace)
+            .into_iter()
+            .map(|root| root.root)
+            .collect();
+        assert!(
+            !root_paths.contains(&PathBuf::from("/")),
+            "a root canonicalizing to / must not survive enumeration: {root_paths:?}"
+        );
     }
 
     #[test]

@@ -3870,6 +3870,34 @@ fn create_test_app() -> App {
 }
 
 #[test]
+fn workspace_move_and_conversation_change_clear_session_approval_sets() {
+    // Round-37 M37-6: session grants/denials are keyed to the primary the
+    // approval was judged under (operand resolution + patch root binding),
+    // so installing a different workspace or a different conversation must
+    // drop the stale set instead of letting it auto-approve the same
+    // spellings re-resolved under the new root.
+    let mut app = create_test_app();
+    app.approval_session_approved
+        .insert("shell:2:sh@cwd:8:/old/sub".to_string());
+    app.approval_session_denied
+        .insert("file:edit_file:abc".to_string());
+    assert_eq!(app.approval_session_approved.len(), 1);
+    assert_eq!(app.approval_session_denied.len(), 1);
+
+    let config = crate::config::Config::default();
+    let moved = std::env::temp_dir().join(format!("m37-6-move-{}", std::process::id()));
+    super::apply::apply_workspace_runtime_state(&mut app, &config, moved);
+    assert!(
+        app.approval_session_approved.is_empty(),
+        "a workspace move orphans every root-bound grant"
+    );
+    assert!(
+        app.approval_session_denied.is_empty(),
+        "the denial receipts move with the same anchor"
+    );
+}
+
+#[test]
 fn runtime_chat_short_circuits_inline_voice_and_cache_actions_before_ui_mutation() {
     let mut app = create_test_app();
     app.remote_control.block_runtime_chat_dispatch_for_tests();

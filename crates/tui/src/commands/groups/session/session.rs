@@ -44,10 +44,21 @@ pub fn save(app: &mut App, path: Option<&str>) -> CommandResult {
     // and `build_session_snapshot`: the freshly built metadata carries an
     // empty set, and an explicit-path `/save` has no later autosave to heal
     // it — `/save` followed by quit durably degrades a multi-root session.
-    session
-        .metadata
-        .workspace_roots
-        .clone_from(&app.workspace_roots);
+    // Round-37 M37-4: the live set is validated before it is stamped — the
+    // tolerant-load lane can seed App with a hand-edited row's set, and
+    // persisting it verbatim would launder the poison past the intake every
+    // resume lane enforces. A clean live set passes unchanged.
+    session.metadata.workspace_roots =
+        match codewhale_core::validate_stored_workspace_roots(&app.workspace, &app.workspace_roots)
+        {
+            Ok(roots) => roots,
+            Err(err) => {
+                return CommandResult::error(format!(
+                    "Cannot save: the live workspace root set no longer passes intake ({err:#}). \
+                 Re-declare the roots with /workspace or repair the session record outside the TUI."
+                ));
+            }
+        };
     let save_path = explicit_save_path.unwrap_or_else(|| {
         let dir = crate::session_manager::default_sessions_dir()
             .unwrap_or_else(|_| app.workspace.clone());
@@ -172,18 +183,19 @@ pub fn fork_from_session(app: &mut App, session_id_or_prefix: &str) -> CommandRe
         .collect();
     // Round-20 should-fix 1: same intake rule as /cd and the runtime lanes —
     // a re-based set that widens past the fork's primary must not persist.
-    forked.metadata.workspace_roots = match codewhale_core::validate_workspace_roots(
-        &app.workspace,
-        &additional_roots,
-    ) {
-        Ok(roots) => roots,
-        Err(err) => {
-            return CommandResult::error(format!(
-                "Cannot fork: the source root set re-based onto {} would widen past it ({err:#}). The fork is refused; start it from a directory the set does not widen past, or clear the widening roots from the saved record outside the TUI.",
-                app.workspace.display()
-            ));
-        }
-    };
+    forked.metadata.workspace_roots =
+        match codewhale_core::validate_workspace_roots(&app.workspace, &additional_roots) {
+            Ok(roots) => roots,
+            Err(err) => {
+                // Round-37 M37-8: the refusal is localized like its sibling
+                // messages (the /cd widening refusal ships in all 15 packs).
+                return CommandResult::error(
+                    app.tr(crate::localization::MessageId::ForkSourceSetRefused)
+                        .replace("{workspace}", &app.workspace.display().to_string())
+                        .replace("{reason}", &format!("{err:#}")),
+                );
+            }
+        };
     if let Err(err) = manager.save_session(&forked) {
         return CommandResult::error(format!("Failed to save forked session: {err}"));
     }
@@ -264,8 +276,22 @@ pub fn fork(app: &mut App) -> CommandResult {
     // The freshly constructed metadata has empty roots; the live App state
     // is the current set for this session (it supersedes the cached copy,
     // which the App itself wrote at the last snapshot). Stamp it before the
-    // save for the same durable-erasure reason as above.
-    parent.metadata.workspace_roots = app.workspace_roots.clone();
+    // save for the same durable-erasure reason as above. Round-37 M37-4:
+    // like every other fork face, the mint runs the validating intake — a
+    // tolerant-load seed's forbidden entries must not ride the plain fork
+    // into durable propagation across BOTH rows. A clean live set passes
+    // unchanged.
+    parent.metadata.workspace_roots =
+        match codewhale_core::validate_stored_workspace_roots(&app.workspace, &app.workspace_roots)
+        {
+            Ok(roots) => roots,
+            Err(err) => {
+                return CommandResult::error(format!(
+                    "Cannot fork: the live workspace root set no longer passes intake ({err:#}). \
+                 Re-declare the roots with /workspace or repair the session record outside the TUI."
+                ));
+            }
+        };
     app.sync_cost_to_metadata(&mut parent.metadata);
     parent.context_references = app.session_context_references.clone();
     parent.artifacts = app.session_artifacts.clone();
@@ -1010,6 +1036,65 @@ mod tests {
             }
             other => panic!("expected SyncSession action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn save_and_plain_fork_refuse_a_poisoned_live_root_set() {
+        // Round-37 M37-4: /save and the plain /fork stamped the live set
+        // with no intake, while every other fork face validates its mint —
+        // a fault-tolerant seed's forbidden entries (here the filesystem
+        // root) would durably propagate across both rows.
+        let tmpdir = TempDir::new().unwrap();
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        let save_path = tmpdir.path().join("poisoned_session.json");
+        app.workspace_roots = vec![app.workspace.clone(), std::path::PathBuf::from("/")];
+
+        let result = save(&mut app, Some(save_path.to_str().unwrap()));
+        assert!(
+            result.is_error,
+            "a poisoned live set must not be persisted by /save"
+        );
+        let msg = result.message.expect("refusal message");
+        assert!(
+            msg.contains("no longer passes intake"),
+            "the refusal names the intake reason: {msg}"
+        );
+        assert!(
+            !save_path.exists(),
+            "the poisoned row must not reach the disk"
+        );
+
+        let _lock = crate::test_support::lock_test_env();
+        let home = tmpdir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_guard = EnvVarGuard::set("HOME", &home);
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        app.current_session_id = Some("parent-poisoned".to_string());
+        app.workspace_roots = vec![app.workspace.clone(), std::path::PathBuf::from("/")];
+        app.api_messages.push(crate::models::Message {
+            role: Role::User,
+            content: vec![crate::models::ContentBlock::Text {
+                text: "fork with poison".to_string(),
+                cache_control: None,
+            }],
+        });
+
+        let result = fork(&mut app);
+        drop(home_guard);
+        assert!(
+            result.is_error,
+            "a poisoned live set must not ride the plain /fork into two rows"
+        );
+        let msg = result.message.expect("refusal message");
+        assert!(
+            msg.contains("no longer passes intake"),
+            "the refusal names the intake reason: {msg}"
+        );
+        assert_eq!(
+            app.current_session_id.as_deref(),
+            Some("parent-poisoned"),
+            "the refused fork must not switch the active session"
+        );
     }
 
     #[test]

@@ -1758,6 +1758,8 @@
   "WorkspaceSwitchPersistedActorUnavailable": "Der Arbeitsbereichswechsel wurde gespeichert, aber der Persistenz-Aktor ist nicht verfügbar; das nächste Autosave schreibt ihn erneut",
   "WorkspaceSwitchSnapshotFailed": "Die Momentaufnahme des Arbeitsbereichswechsels ist fehlgeschlagen: {error}",
   "WorkspaceSwitchSessionsDirFailed": "Das Sitzungsverzeichnis konnte nicht geöffnet werden: {error}",
+  "WorkspaceSwitchSetRefused": "Workspace kann nicht zu {workspace} gewechselt werden: der mitgeführte Root-Satz würde über das neue Verzeichnis hinaus erweitert ({reason}). Der Wechsel wurde abgelehnt; starte in dem Verzeichnis eine neue Session oder entferne die erweiternden Roots außerhalb des TUI aus dem gespeicherten Root-Satz dieser Session.",
+  "ForkSourceSetRefused": "Fork nicht möglich: der auf {workspace} neu verankerte Quell-Root-Satz würde darüber hinaus erweitert ({reason}). Der Fork wurde abgelehnt; starte ihn aus einem Verzeichnis, über das der Satz nicht hinaus erweitert, oder entferne die erweiternden Roots außerhalb des TUI aus dem gespeicherten Datensatz.",
   "WorkspaceRootsRemainder": "… (+{count} weitere)",
   "WorkspaceRootsNotice": "Zugängliche Ordner neben {workspace}: {roots}",
   "StatusLabelProjectDocs": "Projektdokumente",

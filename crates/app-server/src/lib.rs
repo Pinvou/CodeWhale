@@ -223,6 +223,36 @@ struct RuntimeThreadHint {
     workspace_roots: Vec<PathBuf>,
 }
 
+/// Convert a stored cwd-first root set (primary included) into the DECLARED
+/// additional entries the runtime's create/PATCH intakes expect: entries
+/// equal to `primary` are the row's own head, not declared additions, so
+/// they must not count against the runtime's intake cap. A `None` workspace
+/// has no head to strip and passes the set through untouched.
+fn declared_roots_without_primary(primary: Option<&Path>, stored: &[PathBuf]) -> Vec<PathBuf> {
+    match primary {
+        Some(primary) => stored
+            .iter()
+            .filter(|root| root.as_path() != primary)
+            .cloned()
+            .collect(),
+        None => stored.to_vec(),
+    }
+}
+
+/// The runtime create/PATCH wire body for a stored root set: the head is
+/// stripped (see [`declared_roots_without_primary`]) because the runtime's
+/// intakes validate `workspace_roots` as DECLARED additional entries under
+/// the intake cap — re-declaring a legal full-load row's own head (64
+/// additions + head) would fail creation with a 400 and leave the bridge
+/// answering `runtime_unavailable` for every later turn with no eviction
+/// path for the poisoned hint (review #484/CodeWhale round-37 B37-3). An
+/// empty remainder stays off the wire: it degenerates to the workspace
+/// root on the runtime side.
+fn runtime_thread_roots_wire(workspace: Option<&Path>, stored: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    let declared = declared_roots_without_primary(workspace, stored);
+    (!declared.is_empty()).then_some(declared)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TurnTerminalStatus {
     Completed,
@@ -1693,7 +1723,11 @@ impl RuntimeBridge {
             let hint = hint.expect("a root-set change implies a hint");
             let body = json!({
                 "workspace": hint.workspace,
-                "workspace_roots": hint.workspace_roots,
+                "workspace_roots": runtime_thread_roots_wire(
+                    hint.workspace.as_deref(),
+                    &hint.workspace_roots,
+                )
+                .unwrap_or_default(),
             });
             let _record = self
                 .request_json(
@@ -1740,12 +1774,8 @@ impl RuntimeBridge {
             "mode": "agent",
             "archived": false,
         });
-        if !workspace_roots.is_empty() {
-            // Every bridged turn runs on this runtime thread, not on the
-            // stdio record that declared the roots, so the set has to travel
-            // with the create request. An empty set stays off the wire: it
-            // degenerates to the workspace root on the runtime side.
-            body["workspace_roots"] = json!(workspace_roots);
+        if let Some(declared) = runtime_thread_roots_wire(workspace.as_deref(), &workspace_roots) {
+            body["workspace_roots"] = json!(declared);
         }
         let record = self
             .request_json(
@@ -3542,6 +3572,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bridge_wire_strips_a_stored_full_load_row_head() {
+        // Round-37 B37-3 pin: the hint stores the parent record's cwd-first
+        // full form (primary included), while the runtime's create/PATCH
+        // intakes validate `workspace_roots` as DECLARED additional entries
+        // under the intake cap. A legal full-load row (64 additions + head)
+        // must go on the wire as 64 declarations or the runtime 400s the
+        // create and the bridge answers `runtime_unavailable` forever.
+        let primary = PathBuf::from("/repo");
+        let mut stored = vec![primary.clone()];
+        stored.extend((0..64).map(|index| PathBuf::from(format!("/repo/r{index}"))));
+        let wire = runtime_thread_roots_wire(Some(primary.as_path()), &stored).expect("wire set");
+        assert_eq!(wire.len(), 64, "the head is not a declaration");
+        assert!(!wire.contains(&primary), "the head is stripped");
+
+        // A single-root row (head only) stays off the wire entirely: the
+        // empty remainder degenerates to the workspace root on the runtime
+        // side.
+        assert!(
+            runtime_thread_roots_wire(Some(primary.as_path()), std::slice::from_ref(&primary))
+                .is_none(),
+            "a head-only set must not be declared"
+        );
+
+        // Without a workspace there is no head to strip.
+        let passthrough =
+            runtime_thread_roots_wire(None, &stored).expect("no-head set still declared");
+        assert_eq!(passthrough.len(), 65);
+    }
+
     #[tokio::test]
     async fn stdio_resume_of_missing_thread_fails_without_clobbering_the_hint() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4374,11 +4434,12 @@ mod tests {
             assert_eq!(body["workspace"], "/tmp/codewhale-stdio");
             // A multi-root stdio thread must create a multi-root runtime
             // thread: this is the only place the declared set can reach the
-            // thread every bridged turn executes on.
-            assert_eq!(
-                body["workspace_roots"],
-                json!(["/tmp/codewhale-stdio", "/tmp/codewhale-shared"])
-            );
+            // thread every bridged turn executes on. Round-37 B37-3: the
+            // wire carries the DECLARED additional entries — the stored
+            // head is the row's primary slot (re-anchored server-side from
+            // `workspace`) and must not count against the runtime's intake
+            // cap.
+            assert_eq!(body["workspace_roots"], json!(["/tmp/codewhale-shared"]));
             Json(json!({
                 "id": "thr_runtime",
                 "model": body["model"].clone(),
@@ -4576,7 +4637,8 @@ mod tests {
         assert_eq!(bodies.len(), 2, "one create plus one PATCH");
         assert_eq!(
             bodies[0]["workspace_roots"],
-            json!(["/tmp/codewhale-primary", "/tmp/codewhale-r1"])
+            json!(["/tmp/codewhale-r1"]),
+            "round-37 B37-3: the create wire carries the declared additions, head stripped"
         );
         assert_eq!(
             bodies[1]["patch"],
@@ -4590,8 +4652,8 @@ mod tests {
         );
         assert_eq!(
             bodies[1]["workspace_roots"],
-            json!(["/tmp/codewhale-primary", "/tmp/codewhale-r2"]),
-            "the PATCH carries the resumed root set"
+            json!(["/tmp/codewhale-r2"]),
+            "round-37 B37-3: the PATCH carries the resumed declared additions, head stripped"
         );
         assert_eq!(
             bodies[1]["turns"].as_array().map(Vec::len),

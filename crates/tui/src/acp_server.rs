@@ -1618,14 +1618,18 @@ impl AcpServer {
         // lane answers 400 for the same row and the TUI lane tolerates with
         // a disclosure. Validate here: a poisoned row is refused with the
         // intake reason (the IDE can repair the record); a clean row passes
-        // byte-identically (same primary, no re-anchor).
+        // with its stored head stripped — the head is the row's primary
+        // slot, not a declared addition, so a legal full-load row revalidates
+        // whole rather than tripping the intake cap (round-37 B37-2).
         let workspace_roots = saved.metadata.workspace_roots.clone();
-        let workspace_roots = codewhale_core::validate_workspace_roots(&cwd, &workspace_roots)
-            .map_err(|reason| {
-                AcpError::invalid_params(format!(
-                    "session {session_id} root set no longer passes intake: {reason}"
-                ))
-            })?;
+        let workspace_roots =
+            codewhale_core::validate_stored_workspace_roots(&cwd, &workspace_roots).map_err(
+                |reason| {
+                    AcpError::invalid_params(format!(
+                        "session {session_id} root set no longer passes intake: {reason}"
+                    ))
+                },
+            )?;
         let tool_registry = Arc::new(build_acp_tool_registry(
             &self.config,
             &cwd,
@@ -2899,6 +2903,72 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
             .spawn(session_load_rejects_a_poisoned_persisted_root_set_body)
+            .expect("spawn test thread")
+            .join()
+            .expect("test thread");
+    }
+
+    fn session_load_revalidates_a_legal_full_load_root_row_body() {
+        // Round-37 B37-2 pin: a session saved with a 64-root declaration
+        // persists the 65-entry cwd-first full form — this build's own save
+        // shape. Counting the row's head against the intake cap would refuse
+        // the row its own save path minted; the stored-row strip must load
+        // it whole.
+        let _guard = crate::test_support::lock_test_env();
+        let home = tempfile::TempDir::new().expect("isolated codewhale home");
+        let _home_guard =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path().as_os_str());
+
+        let workspace = home.path().join("ws");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let mut saved = crate::session_manager::create_saved_session(
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "full-load session".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+        );
+        let mut stored = vec![workspace.clone()];
+        stored.extend((0..codewhale_core::MAX_WORKSPACE_ROOTS).map(|index| {
+            let root = home.path().join(format!("r{index}"));
+            std::fs::create_dir_all(&root).expect("full-load root dir");
+            root
+        }));
+        saved.metadata.workspace_roots = stored;
+        let saved_id = saved.metadata.id.clone();
+        let manager = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir().expect("sessions dir"),
+        )
+        .expect("session manager");
+        manager.save_session(&saved).expect("save fixture session");
+
+        let mut server = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".to_string(),
+            home.path().to_path_buf(),
+        );
+        server
+            .load_session(json!({ "sessionId": saved_id }))
+            .expect("a legal full-load row loads whole");
+        let session = server.sessions.get(&saved_id).expect("loaded session");
+        assert_eq!(
+            session.workspace_roots.len(),
+            codewhale_core::MAX_WORKSPACE_ROOTS + 1,
+            "session/load arms the full-load set, head included"
+        );
+    }
+
+    #[test]
+    fn session_load_revalidates_a_legal_full_load_root_row() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(session_load_revalidates_a_legal_full_load_root_row_body)
             .expect("spawn test thread")
             .join()
             .expect("test thread");

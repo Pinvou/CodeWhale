@@ -4872,10 +4872,16 @@ impl Engine {
                             &tool_input,
                         )
                         .0;
+                        // Round-37 M37-6: the grouping key resolves the cwd
+                        // operand against the session's CURRENT primary (the
+                        // same anchor the TUI approval card uses), so a
+                        // grant approved in one root cannot cover the same
+                        // raw operand after a workspace move.
                         let approval_grouping_key =
                             crate::tools::approval_cache::build_approval_grouping_key(
                                 &tool_name,
                                 &tool_input,
+                                &self.session.workspace,
                             )
                             .0;
                         let approval_event = Event::ApprovalRequired {

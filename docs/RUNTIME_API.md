@@ -631,10 +631,23 @@ root that is an ancestor of the primary workspace (its parent directory)
 all answer `400 Bad Request` with the reason — each of those would widen
 the per-turn sandbox past what the request declared. A root that sits under
 the primary is accepted, and an explicit empty array still clears back to
-the bare workspace. These rejection checks are **lexical** (round-20
-B20-4): enforcement canonicalizes per root, so a symlink spelling can carry
-a lexically-sibling root past the ancestor rejection; canonicalize-at-
-intake is the scheduled promotion.
+the bare workspace. A declared set is additionally capped at **64 entries**
+(`MAX_WORKSPACE_ROOTS`): an over-cap declaration answers `400` instead of
+being truncated. The ancestor and filesystem-root rejections judge the
+path the filesystem resolves (round-37 M37-3): an EXISTING declared root is
+canonicalized before the comparison, so a symlink spelling — and, on
+case-insensitive filesystems, a case-folded spelling — of the primary's
+ancestor is rejected; a declared root that does not exist yet keeps the
+lexical judgment (materialization stays the delivery lane's job; the
+same-disk TOCTOU is the disclosed inherent one).
+
+Stored rows persist the cwd-first full form (primary first, up to 64
+additional entries — 65 stored). Every resume/fork/load face that
+re-declares a stored row through the validating intake strips the stored
+head first (`validate_stored_workspace_roots`), so a legal full-load row
+round-trips whole; a client replaying a stored row's `workspace_roots` as
+a fresh declaration must strip the primary itself, or a full-load row
+answers `400` on the cap.
 
 `reasoning_effort` uses the canonical Runtime vocabulary (`auto`, `off`,
 `low`, `medium`, `high`, `xhigh`, `ultra`, or `max`; documented compatibility

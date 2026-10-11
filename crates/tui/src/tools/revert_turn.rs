@@ -36,9 +36,7 @@ impl ToolSpec for RevertTurnTool {
          `turn_offset` is 1-based: 1 reverts the most recent turn, 2 reverts the previous one, \
          and so on (max 50). Conversation history is NOT modified — only working-tree files are \
          restored from the side-git snapshot repo. Snapshots cover the primary workspace root \
-         only; writes under attached workspace roots are not rolled back — this sentence \
-         ships for every session, including single-root ones whose tool schema therefore \
-         differs from the base (recorded, round-26 M26-4d)."
+         only; writes under attached workspace roots are not rolled back."
     }
 
     fn input_schema(&self) -> Value {
@@ -342,10 +340,16 @@ mod tests {
         // unconditional literal — every session's schema (single-root ones
         // included) differs from base, so the description face needs its own
         // pin, matching the response-face pins.
+        // Round-37 M37-1: the description is MODEL-FACING — review
+        // meta-text must never ride it onto the wire.
         let description = RevertTurnTool::description(&RevertTurnTool);
         assert!(
             description.contains("attached workspace roots are not rolled back"),
             "the description must keep naming the rollback boundary: {description}"
+        );
+        assert!(
+            !description.contains("round-") && !description.contains("recorded"),
+            "review meta-text must not ship to the model: {description}"
         );
     }
 }

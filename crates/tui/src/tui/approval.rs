@@ -182,7 +182,8 @@ impl ApprovalRequest {
         let category = get_tool_category_for_call(tool_name, params);
         let risk = classify_risk(tool_name, category, params);
         let approval_grouping_key =
-            crate::tools::approval_cache::build_approval_grouping_key(tool_name, params).0;
+            crate::tools::approval_cache::build_approval_grouping_key(tool_name, params, workspace)
+                .0;
         let persistent_ask_rules =
             build_persistent_ask_rules(semantic_tool_name, params, workspace);
         let persistent_allow_rules = if classify_stakes(tool_name, category, risk, params)
@@ -526,7 +527,12 @@ fn build_prominent_details(
                     value: command,
                 });
             }
-            if let Some(workdir) = param_preview(params, &["workdir", "cwd"], 96) {
+            // The preview keys must mirror the operand readers exactly —
+            // the shell tool and the approval cache key both read
+            // ["cwd", "working_dir"] (round-37 M37-9): a `working_dir`
+            // redirect invisible on the card would let the user approve a
+            // grant keyed by an operand they never saw.
+            if let Some(workdir) = param_preview(params, &["cwd", "working_dir"], 96) {
                 details.push(ApprovalDetail {
                     label: "Dir".to_string(),
                     value: workdir,

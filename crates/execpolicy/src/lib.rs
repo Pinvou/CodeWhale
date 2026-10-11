@@ -1142,7 +1142,18 @@ fn workspace_scope_matches(rule_workspace: &str, cwd: &str) -> bool {
         normalize_workspace_scope(rule_workspace),
         normalize_workspace_scope(cwd),
     ) {
-        (Some(rule_workspace), Some(cwd)) => rule_workspace == cwd,
+        (Some(rule_workspace), Some(cwd)) => {
+            // Round-37 M37-10: a scoped rule applies to the whole scope
+            // SUBTREE, not only its exact root. The exact-equality form let
+            // a scoped deny be filtered out for a call judged inside its
+            // scope (a `cwd: "sub"` operand judges as /repo/sub while the
+            // rule's scope is /repo) — the denied command then ran, a
+            // fail-open the body never disclosed. Containment also restores
+            // the mirrored allow direction (exact-scoped allow no longer
+            // firing inside its own scope) that the body disclosed as a
+            // deliberate narrowing.
+            cwd == rule_workspace || cwd.starts_with(&format!("{rule_workspace}/"))
+        }
         _ => false,
     }
 }
@@ -2825,6 +2836,60 @@ mod tests {
             "expected deny reason, got: {}",
             decision.reason()
         );
+    }
+
+    #[test]
+    fn workspace_scoped_deny_fires_for_a_call_judged_inside_its_scope() {
+        // Round-37 M37-10: a `cwd: "sub"` operand judges as /repo/sub (the
+        // canonical operand judging this topic introduced), while the
+        // persisted rule's scope names the repository root. The exact-
+        // equality eligibility filtered the deny out for the subdirectory
+        // call — the denied command ran (fail-open, undisclosed). The scope
+        // must own its whole subtree.
+        let engine =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule {
+                    tool: "exec_shell".into(),
+                    command: Some("sed".into()),
+                    path: None,
+                    action: PermissionAction::Deny,
+                    workspace: Some("/repo".into()),
+                    ..ToolAskRule::new("")
+                }],
+            )]);
+
+        let inside = engine
+            .check(ExecPolicyContext {
+                command: "sed -i 's/foo/bar/' file.txt",
+                cwd: "/repo/sub",
+                tool: Some("exec_shell"),
+                path: None,
+                ask_for_approval: AskForApproval::OnRequest,
+                sandbox_mode: None,
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert!(
+            !inside.allow,
+            "a deny scoped to /repo must still fire for a call judged at /repo/sub: {:?}",
+            inside.reason()
+        );
+        assert_eq!(inside.matched_action, Some(PermissionAction::Deny));
+
+        // A call OUTSIDE the scope keeps the scope's meaning: the rule is
+        // not global.
+        let outside = engine
+            .check(ExecPolicyContext {
+                command: "sed -i 's/foo/bar/' file.txt",
+                cwd: "/elsewhere",
+                tool: Some("exec_shell"),
+                path: None,
+                ask_for_approval: AskForApproval::OnRequest,
+                sandbox_mode: None,
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert_ne!(outside.matched_action, Some(PermissionAction::Deny));
     }
 
     #[test]

@@ -6180,19 +6180,18 @@ impl RuntimeThreadManager {
         // source row (a super-root, a primary-ancestor, or an over-cap set
         // hand-edited into the store) is rejected instead of duplicated
         // into a fresh id. A degenerate relative primary collapses to the
-        // empty set fail-closed, exactly like create.
-        let carried: Vec<PathBuf> = source
-            .workspace_roots
-            .iter()
-            .filter(|root| **root != source.workspace)
-            .cloned()
-            .collect();
-        forked.workspace_roots =
-            codewhale_core::validate_workspace_roots(&source.workspace, &carried).map_err(
-                |reason| {
-                    anyhow::anyhow!("source thread root set no longer passes intake: {reason}")
-                },
-            )?;
+        // empty set fail-closed, exactly like create. The stored-row strip
+        // is lexical, so a `..`-spelled copy of the primary drops with the
+        // head instead of riding into the fork as a phantom additional
+        // root, and a legal full-load source row forks whole (round-37
+        // B37-2).
+        forked.workspace_roots = codewhale_core::validate_stored_workspace_roots(
+            &source.workspace,
+            &source.workspace_roots,
+        )
+        .map_err(|reason| {
+            anyhow::anyhow!("source thread root set no longer passes intake: {reason}")
+        })?;
 
         let source_turns = self.store.list_turns_for_thread(&source.id)?;
         let mut cloned_records = Vec::with_capacity(source_turns.len());
@@ -6321,19 +6320,15 @@ impl RuntimeThreadManager {
         // /retry routes) MINTS a new row exactly like `fork_thread` and now
         // runs the same validating intake on the cloned set — a poisoned
         // source row (super-root, primary-ancestor, over-cap) is rejected
-        // instead of duplicated into a fresh id.
-        let carried: Vec<PathBuf> = source
-            .workspace_roots
-            .iter()
-            .filter(|root| **root != source.workspace)
-            .cloned()
-            .collect();
-        forked.workspace_roots =
-            codewhale_core::validate_workspace_roots(&source.workspace, &carried).map_err(
-                |reason| {
-                    anyhow::anyhow!("source thread root set no longer passes intake: {reason}")
-                },
-            )?;
+        // instead of duplicated into a fresh id. Same stored-row strip as
+        // `fork_thread` (round-37 B37-2).
+        forked.workspace_roots = codewhale_core::validate_stored_workspace_roots(
+            &source.workspace,
+            &source.workspace_roots,
+        )
+        .map_err(|reason| {
+            anyhow::anyhow!("source thread root set no longer passes intake: {reason}")
+        })?;
 
         let mut cloned_records = Vec::with_capacity(target_turn_idx);
         for source_turn in source_turns.iter().take(target_turn_idx) {
@@ -8276,17 +8271,23 @@ impl RuntimeThreadManager {
             // Round-35 M2: a PERSISTED root set is validated before arming
             // (sibling parity — the REST resume lane 400s the same shape;
             // normalize-only here silently granted a hand-edited row a
-            // writable sandbox).
+            // writable sandbox). Round-37 B37-2: the stored-row strip keeps
+            // the row's own head from counting against the intake cap, so a
+            // legal full-load row revalidates whole instead of bricking
+            // every later resume of the thread.
             let armed_workspace_roots = if thread.workspace_roots.is_empty() {
                 Vec::new()
             } else {
-                codewhale_core::validate_workspace_roots(&thread.workspace, &thread.workspace_roots)
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "persisted workspace_roots failed validation on resume \
+                codewhale_core::validate_stored_workspace_roots(
+                    &thread.workspace,
+                    &thread.workspace_roots,
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "persisted workspace_roots failed validation on resume \
                          (thread row is corrupt or hand-edited): {error}"
-                        )
-                    })?
+                    )
+                })?
             };
             let engine_cfg = EngineConfig {
                 model: route_model.clone(),

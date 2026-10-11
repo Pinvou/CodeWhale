@@ -8424,8 +8424,10 @@ fn fork_session(
     // M27-3: the CLI fork mints a session-row copy like every other fork
     // face — the same validating intake applies, so an out-of-band poisoned
     // source row cannot ride the fork to durable propagation past the
-    // source's own runtime resume rejection.
-    forked.metadata.workspace_roots = match codewhale_core::validate_workspace_roots(
+    // source's own runtime resume rejection. The stored-row strip keeps the
+    // source's own head from counting against the intake cap, so forking a
+    // legal full-load row succeeds whole (round-37 B37-2).
+    forked.metadata.workspace_roots = match codewhale_core::validate_stored_workspace_roots(
         &saved.metadata.workspace,
         &saved.metadata.workspace_roots,
     ) {

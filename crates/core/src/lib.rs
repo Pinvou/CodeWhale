@@ -322,6 +322,17 @@ pub fn validate_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
         )));
     }
     let primary = normalize_lexical_components(cwd);
+    // Round-37 M37-3: judge against the paths the FILESYSTEM actually
+    // resolves, not only the lexical spellings. A declared ancestor that
+    // differs by case (case-insensitive filesystems) or rides a symlink
+    // canonicalizes INTO the primary's real parent chain, and the
+    // canonicalizing boundaries (get_writable_roots, seatbelt, bwrap) arm
+    // the widened root as-is — the rejection must fire here, at the one
+    // intake every declared set crosses. A declared root that does not
+    // exist yet keeps the lexical judgment (the soft-keep/delivery lane
+    // owns materialization; the same-disk TOCTOU is the disclosed
+    // inherent one).
+    let primary_real = cwd.canonicalize().unwrap_or_else(|_| primary.clone());
     for root in roots {
         if root.as_os_str().is_empty() || !root.is_absolute() {
             return Err(IntakeValidationError::err(format!(
@@ -329,13 +340,14 @@ pub fn validate_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
             )));
         }
         let normalized = normalize_lexical_components(root);
-        if is_filesystem_root(&normalized) {
+        let judged = root.canonicalize().unwrap_or_else(|_| normalized.clone());
+        if is_filesystem_root(&judged) {
             return Err(IntakeValidationError::err(format!(
                 "workspace root {root:?} normalizes to the filesystem root; \
                  attaching it would make the whole filesystem writable"
             )));
         }
-        if primary != normalized && primary.starts_with(&normalized) {
+        if primary_real != judged && primary_real.starts_with(&judged) {
             return Err(IntakeValidationError::err(format!(
                 "workspace root {root:?} contains the primary root {cwd:?}; \
                  attaching an ancestor of the primary would widen the sandbox \
@@ -344,6 +356,29 @@ pub fn validate_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
         }
     }
     Ok(normalize_workspace_roots(cwd, roots))
+}
+
+/// Validate a STORED root row — the cwd-first full form
+/// [`normalize_workspace_roots`] persists (primary first, additional entries
+/// after) — for re-declaration through [`validate_workspace_roots`].
+///
+/// The stored head is the row's own primary slot, not a declared addition,
+/// so it must not count against the intake cap when the row is fed back
+/// through a validating resume/fork/load face: a legal full-load row (64
+/// additional entries plus the stored head, minted by this build's own save
+/// path) would otherwise be miscounted as an over-cap declaration and
+/// permanently rejected as "corrupt or hand-edited" by exactly the gate
+/// that admits its creation (review #484/CodeWhale round-37 B37-2/B37-3).
+/// The head comparison is lexical, so a `..`-spelled copy of the primary
+/// strips too instead of surviving as a phantom additional root.
+pub fn validate_stored_workspace_roots(primary: &Path, stored: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let head = normalize_lexical_components(primary);
+    let carried: Vec<PathBuf> = stored
+        .iter()
+        .filter(|root| normalize_lexical_components(root.as_path()) != head)
+        .cloned()
+        .collect();
+    validate_workspace_roots(primary, &carried)
 }
 
 /// Lexically collapse CurDir and ParentDir components of `path`, clamping a
@@ -418,6 +453,16 @@ fn resolve_resume_roots(
         let cwd = params_cwd
             .cloned()
             .unwrap_or_else(|| persisted_cwd.to_path_buf());
+        // Round-37 minor: the same A28-1 destruction applies when the
+        // replacement set anchors on the row's own persisted primary — a
+        // relative persisted primary collapses the validator to the empty
+        // set and silently destroys the caller's declared replacement
+        // instead of erroring.
+        if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
+            return Err(IntakeValidationError::err(
+                "cwd must be a non-empty absolute path",
+            ));
+        }
         // An explicit set replaces the persisted one wholesale — including
         // the explicit empty set, which clears back to the bare cwd. The
         // replacement is a caller decision, so it validates instead of
@@ -426,9 +471,14 @@ fn resolve_resume_roots(
         return Ok((cwd, roots));
     }
     if let Some(new_cwd) = params_cwd {
+        // The head comparison is lexical (the stored-row strip's rule): a
+        // `..`-spelled copy of the OLD primary must drop with the primary
+        // itself, or it survives the move as a phantom additional root the
+        // re-validation then judges as a widening entry.
+        let old_head = normalize_lexical_components(persisted_cwd);
         let additional: Vec<PathBuf> = persisted_roots
             .iter()
-            .filter(|root| root.as_path() != persisted_cwd)
+            .filter(|root| normalize_lexical_components(root.as_path()) != old_head)
             .cloned()
             .collect();
         // The persisted entries were admitted under the OLD primary; after
@@ -3796,6 +3846,100 @@ mod tests {
     }
 
     #[test]
+    fn stored_row_revalidation_round_trips_a_legal_full_load_row() {
+        // Round-37 B37-2: the stored row persists the cwd-first full form —
+        // the `validated` set above IS the stored shape. Feeding it back
+        // through the plain declared-count validator miscounts its own head
+        // as an over-cap declaration; the stored-row strip must revalidate
+        // the row whole, or every resume/fork/load face using it would
+        // brick the row its own save path minted.
+        let cwd = Path::new("/repo/main");
+        let roots: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS)
+            .map(|index| PathBuf::from(format!("/repo/r{index}")))
+            .collect();
+        let stored =
+            validate_workspace_roots(cwd, &roots).expect("a full declaration is admitted whole");
+        assert_eq!(stored.len(), MAX_WORKSPACE_ROOTS + 1);
+        let revalidated = validate_stored_workspace_roots(cwd, &stored)
+            .expect("a legal full-load row revalidates whole");
+        assert_eq!(revalidated, stored, "the round trip is lossless");
+        assert!(
+            validate_workspace_roots(cwd, &stored).is_err(),
+            "the plain validator is the miscounting control this primitive exists to bypass"
+        );
+    }
+
+    #[test]
+    fn stored_row_revalidation_strips_a_dot_dot_spelled_head_copy() {
+        // Round-37 minor: the strip comparison is lexical, so a `..`-spelled
+        // copy of the primary drops with the head instead of surviving as a
+        // phantom additional root (the raw-equality dedup above lets the
+        // spelling through; re-validation would then judge it a widening
+        // entry and brick the row).
+        let cwd = Path::new("/repo");
+        let stored = vec![
+            PathBuf::from("/repo"),
+            PathBuf::from("/repo/sub/.."),
+            PathBuf::from("/shared"),
+        ];
+        let revalidated = validate_stored_workspace_roots(cwd, &stored)
+            .expect("the lexical head strip keeps the row loadable");
+        assert_eq!(
+            revalidated,
+            vec![PathBuf::from("/repo"), PathBuf::from("/shared")]
+        );
+    }
+
+    #[test]
+    fn stored_row_revalidation_still_refuses_a_poisoned_entry() {
+        // The strip must not launder: a row carrying the filesystem root
+        // under any spelling is refused exactly like a fresh declaration.
+        let cwd = Path::new("/repo");
+        let stored = vec![PathBuf::from("/repo"), PathBuf::from("/")];
+        let err = validate_stored_workspace_roots(cwd, &stored)
+            .expect_err("the head strip is not an amnesty for poisoned entries");
+        assert!(
+            err.to_string().contains("filesystem root"),
+            "the refusal names the poison: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn intake_rejects_a_symlink_spelled_ancestor_that_canonicalizes_into_the_primary() {
+        // Round-37 M37-3: the ancestor rejection judges against the path
+        // the filesystem resolves. A declared root that differs lexically
+        // but canonicalizes into the primary's real parent chain — here via
+        // a symlink, on case-insensitive filesystems via case-fold — used
+        // to pass intake and then widen the sandbox at the canonicalizing
+        // boundaries (get_writable_roots, seatbelt, bwrap arm the
+        // canonicalized root as-is).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("real");
+        let workspace = real.join("ws");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let link = temp.path().join("link-ancestor");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink to the real ancestor");
+
+        let err = validate_workspace_roots(&workspace, &[link])
+            .expect_err("a symlink spelling of the primary's ancestor must be rejected");
+        assert!(
+            err.to_string().contains("contains the primary root"),
+            "the rejection names the widening: {err}"
+        );
+
+        // A symlink pointing OUTSIDE the primary's chain stays admissible:
+        // only ancestors are rejected, not symlinks per se.
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        let outside_link = temp.path().join("link-outside");
+        std::os::unix::fs::symlink(&outside, &outside_link).expect("symlink outside");
+        let validated = validate_workspace_roots(&workspace, &[outside_link])
+            .expect("a non-ancestor symlink is admissible");
+        assert_eq!(validated.len(), 2);
+    }
+
+    #[test]
     fn spawn_thread_rejects_a_non_absolute_root_instead_of_dropping_it() {
         // Regression pin, round-17: an empty-string root accepted at intake
         // used to reach the persisted set and then boundary_roots(), where
@@ -4198,6 +4342,39 @@ mod tests {
                 PathBuf::from("/keep"),
                 PathBuf::from("/also")
             ]
+        );
+    }
+
+    #[test]
+    fn resume_cwd_move_strips_a_dot_dot_spelled_old_primary_copy() {
+        // Round-37 minor: the move-arm strip is lexical — a `..`-spelled
+        // copy of the OLD primary must drop with the primary itself, or it
+        // survives the move as a phantom additional root and the
+        // re-validation then judges it a widening entry against the new
+        // primary, bricking the move the plain-spelling copy survives.
+        let store = temp_core_state("resume-roots-cwd-dotdot");
+        let mut metadata = test_thread_metadata("thread-roots-dotdot");
+        metadata.cwd = PathBuf::from("/old");
+        metadata.workspace_roots = vec![
+            PathBuf::from("/old"),
+            PathBuf::from("/old/sub/.."),
+            PathBuf::from("/keep"),
+        ];
+        store.upsert_thread(&metadata).expect("seed thread");
+
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-roots-dotdot");
+        params.cwd = Some(PathBuf::from("/new"));
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("the lexical strip keeps the move loadable")
+            .expect("thread found");
+
+        assert_eq!(resumed.thread.cwd, PathBuf::from("/new"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![PathBuf::from("/new"), PathBuf::from("/keep")],
+            "the dot-dot-spelled old primary drops with the head"
         );
     }
 

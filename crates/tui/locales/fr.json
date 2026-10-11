@@ -1758,6 +1758,8 @@
   "WorkspaceSwitchPersistedActorUnavailable": "Le changement d'espace de travail est enregistré, mais l'acteur de persistance est indisponible ; la prochaine sauvegarde automatique le réécrira",
   "WorkspaceSwitchSnapshotFailed": "Échec de l'instantané du changement d'espace de travail : {error}",
   "WorkspaceSwitchSessionsDirFailed": "Impossible d'ouvrir le répertoire des sessions : {error}",
+  "WorkspaceSwitchSetRefused": "Impossible de basculer l'espace de travail vers {workspace} : l'ensemble de racines transporté s'élargirait au-delà du nouveau répertoire ({reason}). Le basculement est refusé ; démarrez une nouvelle session dans ce répertoire, ou retirez hors du TUI les racines élargissantes de l'ensemble enregistré de cette session.",
+  "ForkSourceSetRefused": "Impossible de bifurquer : l'ensemble de racines source réancré sur {workspace} s'élargirait au-delà ({reason}). La bifurcation est refusée ; démarrez-la depuis un répertoire que l'ensemble n'élargit pas, ou nettoyez hors du TUI les racines élargissantes de l'enregistrement.",
   "WorkspaceRootsRemainder": "… (+{count} autres)",
   "WorkspaceRootsNotice": "Dossiers accessibles en plus de {workspace} : {roots}",
   "StatusLabelProjectDocs": "Docs du projet",

@@ -79,7 +79,11 @@ pub fn build_approval_key(tool_name: &str, input: &serde_json::Value) -> Approva
 /// "approve for session" decision covers later invocations that differ only
 /// by flags. Denials must keep using the exact [`build_approval_key`].
 #[must_use]
-pub fn build_approval_grouping_key(tool_name: &str, input: &serde_json::Value) -> ApprovalKey {
+pub fn build_approval_grouping_key(
+    tool_name: &str,
+    input: &serde_json::Value,
+    workspace: &std::path::Path,
+) -> ApprovalKey {
     let tool_name = crate::tools::canonical_action::canonical_action_alias(tool_name, input);
     let fingerprint = match tool_name {
         "apply_patch" => {
@@ -92,8 +96,14 @@ pub fn build_approval_grouping_key(tool_name: &str, input: &serde_json::Value) -
             // (b) collected only `+++ b/` headers, keying `+++ a/`-spelled,
             // bare, timestamped, and /dev/null-delete sections into one
             // shared `no_files` family that covers arbitrary targets.
+            // Round-37 M37-6: the touched-path hash alone had NO root
+            // component, so a patch grant approved under one primary rode a
+            // `/workspace` move and auto-approved the same relative paths
+            // under the new root. Bind the family to the primary the grant
+            // was judged under.
             let paths_hash = hash_patch_paths(input);
-            format!("patch:{paths_hash}")
+            let root_tag = workspace.display().to_string();
+            format!("patch:{paths_hash}@root:{}:{root_tag}", root_tag.len())
         }
         "exec_shell"
         | "task_shell_start"
@@ -107,6 +117,12 @@ pub fn build_approval_grouping_key(tool_name: &str, input: &serde_json::Value) -
             // command family AND the cwd operand: a grant approved at the
             // session workspace must not silently cover the same command
             // redirected into another root.
+            // Round-37 M37-6: the operand is RESOLVED against the current
+            // primary before keying — the raw spelling is
+            // workspace-relative, so a grant approved for `cwd: "sub"` in
+            // one root used to cover the same raw operand after a
+            // `/workspace` move even though execution then landed in the
+            // new root's `sub`.
             match shell_cwd_operand(input) {
                 // Length-prefix the operand (round-20 B20-2): the raw
                 // `prefix@cwd:` concatenation is non-injective — model-craftable
@@ -116,7 +132,16 @@ pub fn build_approval_grouping_key(tool_name: &str, input: &serde_json::Value) -
                 // itself contain "@cwd:<n>:", which let {"git foo" @ cwd
                 // "a@cwd:1:b"} collide with {"git@cwd:9:a & payload" @
                 // cwd "b"} (the review's dynamic probe).
-                Some(cwd) => format!("shell:{}:{prefix}@cwd:{}:{cwd}", prefix.len(), cwd.len()),
+                Some(cwd) => {
+                    let resolved = codewhale_core::resolve_operand_cwd(workspace, cwd)
+                        .to_string_lossy()
+                        .into_owned();
+                    format!(
+                        "shell:{}:{prefix}@cwd:{}:{resolved}",
+                        prefix.len(),
+                        resolved.len()
+                    )
+                }
                 // Round-32 B32-2: length-prefix the operand-less arm too —
                 // classify_command's fallback prefix is any single token, so
                 // a forged `2:sh@cwd:1:/` command string produced the same
@@ -320,6 +345,12 @@ fn push_canonical_json(value: &Value, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tests anchor operand resolution at a fixed primary (round-37 M37-6);
+    /// comparisons stay valid because both sides share the anchor.
+    fn gkey(tool: &str, input: &serde_json::Value) -> ApprovalKey {
+        build_approval_grouping_key(tool, input, std::path::Path::new("/repo"))
+    }
     use serde_json::json;
 
     #[test]
@@ -343,11 +374,54 @@ mod tests {
         assert_ne!(key_a, key_b);
     }
 
+    /// Round-37 M37-6 pins: the grouping key resolves the cwd operand
+    /// against the CURRENT primary and binds the patch family to it, so a
+    /// session grant approved in one root cannot ride a `/workspace` move.
+    #[test]
+    fn grouping_key_rekeys_a_relative_operand_under_a_moved_workspace() {
+        let call = serde_json::json!({"command": "sh build", "cwd": "sub"});
+        let under_a =
+            build_approval_grouping_key("exec_shell", &call, std::path::Path::new("/repo-a"));
+        let under_b =
+            build_approval_grouping_key("exec_shell", &call, std::path::Path::new("/repo-b"));
+        assert_ne!(
+            under_a, under_b,
+            "the same raw operand re-resolves under the new primary — a grant must not cross roots"
+        );
+        // An absolute operand resolves to itself under either anchor: the
+        // root binding intentionally does NOT quarantine cross-root absolute
+        // redirects that were approved as such.
+        let absolute = serde_json::json!({"command": "sh build", "cwd": "/shared"});
+        let abs_a =
+            build_approval_grouping_key("exec_shell", &absolute, std::path::Path::new("/repo-a"));
+        let abs_b =
+            build_approval_grouping_key("exec_shell", &absolute, std::path::Path::new("/repo-b"));
+        assert_eq!(
+            abs_a, abs_b,
+            "an explicitly approved absolute redirect stays one family"
+        );
+    }
+
+    #[test]
+    fn grouping_key_binds_the_patch_family_to_the_primary_root() {
+        let patch = serde_json::json!({"replace": [{"path": "a.rs", "content": "x"}]});
+        let under_a =
+            build_approval_grouping_key("apply_patch", &patch, std::path::Path::new("/repo-a"));
+        let under_b =
+            build_approval_grouping_key("apply_patch", &patch, std::path::Path::new("/repo-b"));
+        assert_ne!(
+            under_a, under_b,
+            "a patch grant approved under one primary must not cover the same relative paths after /workspace"
+        );
+        let same =
+            build_approval_grouping_key("apply_patch", &patch, std::path::Path::new("/repo-a"));
+        assert_eq!(under_a, same);
+    }
+
     #[test]
     fn grouping_key_collapses_shell_flag_variants() {
-        let key_a = build_approval_grouping_key("exec_shell", &json!({"command": "cargo build"}));
-        let key_b =
-            build_approval_grouping_key("exec_shell", &json!({"command": "cargo build --release"}));
+        let key_a = gkey("exec_shell", &json!({"command": "cargo build"}));
+        let key_b = gkey("exec_shell", &json!({"command": "cargo build --release"}));
         assert_eq!(
             key_a, key_b,
             "approving a command family must cover later flag variants"
@@ -361,11 +435,11 @@ mod tests {
         // approves the echo kind once and later variants of the same reviewed
         // tool must not re-prompt. R2's shell command-family scoping is
         // untouched — this is the MCP arm only.
-        let key_a = build_approval_grouping_key(
+        let key_a = gkey(
             "mcp_plugin-4-demo-local_echo",
             &json!({"text": "acceptance", "hang": false}),
         );
-        let key_b = build_approval_grouping_key(
+        let key_b = gkey(
             "mcp_plugin-4-demo-local_echo",
             &json!({"text": "acceptance", "hang": true}),
         );
@@ -373,7 +447,7 @@ mod tests {
             key_a, key_b,
             "a reviewed MCP kind grant covers argument variants of that tool"
         );
-        let key_c = build_approval_grouping_key("mcp_plugin-4-demo-local_kick", &json!({"x": 1}));
+        let key_c = gkey("mcp_plugin-4-demo-local_kick", &json!({"x": 1}));
         assert_ne!(key_a, key_c, "a different MCP tool is a different kind");
         // The exact-call key stays per-arguments so denials still suppress
         // only exact retries.
@@ -390,8 +464,8 @@ mod tests {
 
     #[test]
     fn grouping_key_still_separates_distinct_commands() {
-        let key_a = build_approval_grouping_key("exec_shell", &json!({"command": "git status"}));
-        let key_b = build_approval_grouping_key("exec_shell", &json!({"command": "git push"}));
+        let key_a = gkey("exec_shell", &json!({"command": "git status"}));
+        let key_b = gkey("exec_shell", &json!({"command": "git push"}));
         assert_ne!(key_a, key_b);
     }
 
@@ -415,8 +489,8 @@ mod tests {
                 { "path": target, "content": "y" }
             ]
         });
-        let a = build_approval_grouping_key("apply_patch", &override_form);
-        let b = build_approval_grouping_key("apply_patch", &listed_form);
+        let a = gkey("apply_patch", &override_form);
+        let b = gkey("apply_patch", &listed_form);
         assert_ne!(
             a, b,
             "the override marker and a touched file named 'override' must not collide"
@@ -436,8 +510,8 @@ mod tests {
             "command": "sh -c 'payload'",
             "cwd": "/"
         });
-        let a = build_approval_grouping_key("exec_shell", &forged);
-        let b = build_approval_grouping_key("exec_shell", &genuine);
+        let a = gkey("exec_shell", &forged);
+        let b = gkey("exec_shell", &genuine);
         assert_ne!(
             a, b,
             "an operand-less spelling must not forge an operand-carrying key"
@@ -456,8 +530,8 @@ mod tests {
             "command": "git@cwd:9:a & payload",
             "cwd": "b"
         });
-        let a = build_approval_grouping_key("exec_shell", &weird_cwd);
-        let b = build_approval_grouping_key("exec_shell", &payload_prefix);
+        let a = gkey("exec_shell", &weird_cwd);
+        let b = gkey("exec_shell", &payload_prefix);
         assert_ne!(
             a, b,
             "an embedded '@cwd:' spelling in either operand must not forge the other key"
@@ -466,11 +540,11 @@ mod tests {
 
     #[test]
     fn grouping_key_collapses_patch_body_for_same_path() {
-        let key_a = build_approval_grouping_key(
+        let key_a = gkey(
             "apply_patch",
             &json!({"replace": [{"path": "a.rs", "content": "x"}]}),
         );
-        let key_b = build_approval_grouping_key(
+        let key_b = gkey(
             "apply_patch",
             &json!({"replace": [{"path": "a.rs", "content": "y"}]}),
         );
@@ -490,9 +564,9 @@ mod tests {
         // class, on the patch arm). Alias spellings fold first, exactly
         // like preflight/execute.
         let patch = "@@ -1,2 +1,2 @@\n old\n-value\n+new-value\n";
-        let decoy = build_approval_grouping_key("apply_patch", &json!({"patch": patch}));
+        let decoy = gkey("apply_patch", &json!({"patch": patch}));
         for alias in ["path", "file_path", "filePath"] {
-            let redirected = build_approval_grouping_key(
+            let redirected = gkey(
                 "apply_patch",
                 &json!({alias: ".git/hooks/pre-commit", "patch": patch}),
             );
@@ -503,11 +577,11 @@ mod tests {
         }
         // The same override target under different alias spellings is ONE
         // family (the fold runs before hashing).
-        let canonical = build_approval_grouping_key(
+        let canonical = gkey(
             "apply_patch",
             &json!({"path": ".git/hooks/pre-commit", "patch": patch}),
         );
-        let alias_spellings = build_approval_grouping_key(
+        let alias_spellings = gkey(
             "apply_patch",
             &json!({"filePath": ".git/hooks/pre-commit", "patch": patch}),
         );
@@ -520,11 +594,11 @@ mod tests {
         // never reads — the key must follow the entries, so an approved
         // patch-form override grant cannot cover a replace-write hiding
         // behind the same decoy.
-        let replace_decoy = build_approval_grouping_key(
+        let replace_decoy = gkey(
             "apply_patch",
             &json!({"path": ".git/hooks/pre-commit", "replace": [{"path": "notes.txt", "content": "x"}]}),
         );
-        let replace_plain = build_approval_grouping_key(
+        let replace_plain = gkey(
             "apply_patch",
             &json!({"replace": [{"path": "notes.txt", "content": "x"}]}),
         );
@@ -534,7 +608,7 @@ mod tests {
         );
         assert_ne!(
             replace_plain,
-            build_approval_grouping_key(
+            gkey(
                 "apply_patch",
                 &json!({"replace": [{"path": "other.txt", "content": "x"}]}),
             ),
@@ -548,11 +622,11 @@ mod tests {
         // are ONE family (the parser normalizes both to x) — the old ad-hoc
         // `+++ b/`-only scan keyed the a-spelling into the shared `no_files`
         // family, whose grant then covered arbitrary targets (A28-3).
-        let b_spelled = build_approval_grouping_key(
+        let b_spelled = gkey(
             "apply_patch",
             &json!({"patch": "--- a/.env\n+++ b/.env\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),
         );
-        let a_spelled = build_approval_grouping_key(
+        let a_spelled = gkey(
             "apply_patch",
             &json!({"patch": "--- b/.env\n+++ a/.env\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),
         );
@@ -562,18 +636,18 @@ mod tests {
         );
         assert_ne!(
             b_spelled,
-            build_approval_grouping_key(
+            gkey(
                 "apply_patch",
                 &json!({"patch": "--- a/other.txt\n+++ b/other.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),
             ),
             "different targets stay different families"
         );
         // Deletions key under a delete marker: a delete grant covers no write.
-        let deletion = build_approval_grouping_key(
+        let deletion = gkey(
             "apply_patch",
             &json!({"patch": "--- a/old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n"}),
         );
-        let write_same_path = build_approval_grouping_key(
+        let write_same_path = gkey(
             "apply_patch",
             &json!({"patch": "--- a/old.txt\n+++ b/old.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),
         );
@@ -585,11 +659,11 @@ mod tests {
 
     #[test]
     fn grouping_key_treats_replace_and_legacy_changes_as_the_same_path_set() {
-        let canonical = build_approval_grouping_key(
+        let canonical = gkey(
             "apply_patch",
             &json!({"replace": [{"path": "a.rs", "content": "new"}]}),
         );
-        let legacy = build_approval_grouping_key(
+        let legacy = gkey(
             "apply_patch",
             &json!({"changes": [{"path": "a.rs", "content": "new"}]}),
         );
@@ -604,17 +678,15 @@ mod tests {
             build_approval_key("exec_shell", &json!({"command": "cargo build --release"}));
         assert_ne!(exact_a, exact_b, "denials must remain exact-call scoped");
 
-        let group_a = build_approval_grouping_key("exec_shell", &json!({"command": "cargo build"}));
-        let group_b =
-            build_approval_grouping_key("exec_shell", &json!({"command": "cargo build --release"}));
+        let group_a = gkey("exec_shell", &json!({"command": "cargo build"}));
+        let group_b = gkey("exec_shell", &json!({"command": "cargo build --release"}));
         assert_eq!(group_a, group_b, "approvals must group by command family");
     }
 
     #[test]
     fn shell_grouping_key_rekeys_on_the_cwd_operand() {
-        let at_workspace =
-            build_approval_grouping_key("exec_shell", &json!({"command": "git status"}));
-        let redirected = build_approval_grouping_key(
+        let at_workspace = gkey("exec_shell", &json!({"command": "git status"}));
+        let redirected = gkey(
             "exec_shell",
             &json!({"command": "git status", "cwd": "/attached/repo"}),
         );
@@ -623,7 +695,7 @@ mod tests {
             "a grant approved at the session workspace must not cover the same command redirected into another root"
         );
 
-        let same_redirect = build_approval_grouping_key(
+        let same_redirect = gkey(
             "exec_shell",
             &json!({"command": "git status -s", "cwd": "/attached/repo"}),
         );
@@ -632,7 +704,7 @@ mod tests {
             "the same command family in the same cwd stays one grant"
         );
 
-        let via_working_dir = build_approval_grouping_key(
+        let via_working_dir = gkey(
             "exec_shell",
             &json!({"command": "git status", "working_dir": "/attached/repo"}),
         );
@@ -646,7 +718,7 @@ mod tests {
         // while the check and execution treated the same call as redirected,
         // letting a session-approved plain command run in the attached root
         // unprompted.
-        let null_cwd_with_working_dir = build_approval_grouping_key(
+        let null_cwd_with_working_dir = gkey(
             "exec_shell",
             &json!({"command": "git status", "cwd": null, "working_dir": "/attached/repo"}),
         );

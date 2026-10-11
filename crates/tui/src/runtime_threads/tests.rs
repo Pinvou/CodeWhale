@@ -12376,6 +12376,62 @@ async fn both_fork_faces_reject_a_poisoned_source_root_set() -> Result<()> {
 }
 
 #[tokio::test]
+async fn both_fork_faces_and_engine_arming_survive_a_legal_full_load_row() -> Result<()> {
+    // Round-37 B37-2 at-cap round trip: a 64-root declaration stores as the
+    // 65-entry cwd-first full form (this build's own save shape). Every
+    // re-declaring face — the fork mint and the resume arming under
+    // `get_engine`/`ensure_engine_loaded` — must consume that row whole;
+    // counting the row's own head against the intake cap would brick the
+    // row one resume after its own creation.
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-runtime-full-load");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    let roots: Vec<std::path::PathBuf> = (0..codewhale_core::MAX_WORKSPACE_ROOTS)
+        .map(|index| {
+            let root = workspace.join(format!("r{index}"));
+            std::fs::create_dir_all(&root).expect("full-load root dir");
+            root
+        })
+        .collect();
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            workspace_roots: roots.clone(),
+            ..Default::default()
+        })
+        .await?;
+    // The stored row is the cwd-first full form: 65 entries.
+    let stored = manager.get_thread(&thread.id).await?;
+    assert_eq!(
+        stored.workspace_roots.len(),
+        codewhale_core::MAX_WORKSPACE_ROOTS + 1,
+        "the save face mints the full-load form"
+    );
+    assert_eq!(stored.workspace_roots[0], workspace);
+
+    seed_turns_with_user_messages(&manager, &thread.id, &["first", "second"])?;
+    let bare = manager.fork_thread(&thread.id).await?;
+    assert_eq!(
+        bare.workspace_roots, stored.workspace_roots,
+        "fork_thread revalidates the full-load row whole"
+    );
+    let (backtracked, _) = manager.fork_at_user_message(&thread.id, 0).await?;
+    assert_eq!(
+        backtracked.workspace_roots, stored.workspace_roots,
+        "fork_at_user_message revalidates the full-load row whole"
+    );
+
+    // The resume arming lane (round-35 M2's validating gate) takes the same
+    // row through the stored-row strip: engine acquisition must succeed,
+    // not refuse the 65-entry row as over-cap.
+    let _engine = manager
+        .get_engine(&thread.id)
+        .await
+        .expect("a legal full-load row must arm an engine");
+    Ok(())
+}
+
+#[tokio::test]
 async fn both_fork_faces_clear_the_source_session_handle() -> Result<()> {
     // M27-2: ensure_engine_loaded prefers thread.session_id and would
     // replay the FULL source session file into the fork's model context —
