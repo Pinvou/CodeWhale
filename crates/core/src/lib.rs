@@ -283,6 +283,34 @@ pub const MAX_WORKSPACE_ROOTS: usize = 64;
 /// `normalize_windows_path_for_comparison` precedent in codewhale-config.
 /// A no-op on Unix, where case is significant and no verbatim prefix
 /// exists.
+/// Ancestor test for the intake/sanitizer guards, split by platform
+/// (round-39 B39-2 + the same round's P2 correction): on Unix the NATIVE
+/// component comparison is already correct — `canonicalize` never produces
+/// a verbatim prefix here, so the mixed-spelling hazard does not exist,
+/// and a string boundary heuristic would MISJUDGE legal `:`/`\`-bearing
+/// filenames (a sibling named `data:` is not the ancestor of
+/// `data:archive/ws`). The Windows spelling/boundary rules stay confined
+/// to Windows, where the verbatim-vs-DOS divergence is real.
+#[cfg(not(target_os = "windows"))]
+fn comparison_is_ancestor_of(primary: &Path, judged: &Path) -> bool {
+    primary.starts_with(judged)
+}
+
+#[cfg(target_os = "windows")]
+fn comparison_is_ancestor_of(primary: &Path, judged: &Path) -> bool {
+    let haystack = comparison_spelling(primary);
+    let needle = comparison_spelling(judged);
+    haystack.starts_with(&needle) && comparison_contains(&haystack, &needle)
+}
+
+/// Windows-only comparison-local spelling normalization (round-39 B39-2):
+/// `std::fs::canonicalize` returns verbatim `\\?\`-prefixed paths while
+/// lexical spellings keep the DOS form, and the two prefix components never
+/// compare equal — so a comparison mixing one canonicalized side with one
+/// lexical side silently skips the ancestor/filesystem-root guard (the
+/// fail-open). Strip the verbatim prefix (mapping `\\?\UNC\` to `\\`) and
+/// case-fold, mirroring the repo's existing
+/// `normalize_windows_path_for_comparison` precedent in codewhale-config.
 #[cfg(target_os = "windows")]
 fn comparison_spelling(path: &Path) -> String {
     let spelling = path.to_string_lossy().replace('/', "\\");
@@ -296,13 +324,11 @@ fn comparison_spelling(path: &Path) -> String {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn comparison_spelling(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
-
-/// Separator-boundary prefix test over [`comparison_spelling`] output: true
-/// when `haystack` equals `needle` or extends it by one path component.
+/// Windows-only separator-boundary prefix test over
+/// [`comparison_spelling`] output: true when `haystack` equals `needle` or
+/// extends it by one path component (a root-ending needle — `/`, a drive
+/// root like `d:`, a UNC share root — contains everything below it).
+#[cfg(target_os = "windows")]
 fn comparison_contains(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() || !haystack.starts_with(needle) {
         return false;
@@ -310,9 +336,6 @@ fn comparison_contains(haystack: &str, needle: &str) -> bool {
     if haystack.len() == needle.len() {
         return true;
     }
-    // A filesystem-root needle ("/", a drive root like `d:`/`d:\`, a UNC
-    // share root) ends in its own separator or colon and contains every
-    // path that starts with it — no further boundary is needed.
     if needle.ends_with('/') || needle.ends_with('\\') || needle.ends_with(':') {
         return true;
     }
@@ -387,7 +410,6 @@ pub fn validate_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
     // owns materialization; the same-disk TOCTOU is the disclosed
     // inherent one).
     let primary_real = cwd.canonicalize().unwrap_or_else(|_| primary.clone());
-    let primary_cmp = comparison_spelling(&primary_real);
     for root in roots {
         if root.as_os_str().is_empty() || !root.is_absolute() {
             return Err(IntakeValidationError::err(format!(
@@ -402,11 +424,10 @@ pub fn validate_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
                  attaching it would make the whole filesystem writable"
             )));
         }
-        // Round-39 B39-2: compare through the spelling normalizer — a
-        // verbatim-canonicalized side must never silently fail to equal or
-        // contain its DOS-form counterpart (the Windows fail-open).
-        let judged_cmp = comparison_spelling(&judged);
-        if primary_cmp != judged_cmp && comparison_contains(&primary_cmp, &judged_cmp) {
+        // Round-39 B39-2 + P2: the platform-split ancestor predicate —
+        // native component comparison on Unix, spelling-normalized on
+        // Windows (the verbatim fail-open).
+        if primary_real != judged && comparison_is_ancestor_of(&primary_real, &judged) {
             return Err(IntakeValidationError::err(format!(
                 "workspace root {root:?} contains the primary root {cwd:?}; \
                  attaching an ancestor of the primary would widen the sandbox \
@@ -475,7 +496,6 @@ pub fn sanitize_workspace_roots(cwd: &Path, stored: &[PathBuf]) -> (Vec<PathBuf>
     let primary_real = cwd
         .canonicalize()
         .unwrap_or_else(|_| normalize_lexical_components(cwd));
-    let primary_cmp = comparison_spelling(&primary_real);
     let mut clean = Vec::with_capacity(normalized.len());
     for (index, root) in normalized.into_iter().enumerate() {
         // The cwd-first head is the primary slot itself.
@@ -485,9 +505,8 @@ pub fn sanitize_workspace_roots(cwd: &Path, stored: &[PathBuf]) -> (Vec<PathBuf>
         }
         let judged = normalize_lexical_components(&root);
         let real = root.canonicalize().unwrap_or_else(|_| judged.clone());
-        let real_cmp = comparison_spelling(&real);
         if is_filesystem_root(&real)
-            || (primary_cmp != real_cmp && comparison_contains(&primary_cmp, &real_cmp))
+            || (primary_real != real && comparison_is_ancestor_of(&primary_real, &real))
         {
             continue;
         }
@@ -3981,10 +4000,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
     fn comparison_contains_respects_component_boundaries() {
-        // Round-39 B39-2: the mixed-spelling comparison helper's boundary
-        // rule — a needle is contained only at a path-component edge, never
-        // mid-component (/repo must not contain /rep.ro or /repository).
+        // Round-39 B39-2: the Windows boundary rule — a needle is contained
+        // only at a path-component edge, never mid-component (/repo must
+        // not contain /rep.ro or /repository); the boundary helpers are
+        // Windows-only after the round-39 P2 correction.
         assert!(comparison_contains("/repo/main", "/repo"));
         assert!(comparison_contains("/repo", "/repo"));
         assert!(comparison_contains("/repo", "/"));
@@ -3993,6 +4014,40 @@ mod tests {
         assert!(!comparison_contains("/repo", ""));
         assert!(comparison_contains("d:\\work\\proj", "d:\\work"));
         assert!(!comparison_contains("d:\\worksheet", "d:\\work"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unix_filenames_with_colons_or_backslashes_stay_unrelated_roots() {
+        // Round-39 P2 (reviewer-reproduced regression): `:` and `\` are
+        // legal Unix filename characters — a string boundary heuristic
+        // made validate_workspace_roots REJECT and sanitize_workspace_roots
+        // DROP legal sibling attachments (data: vs data:archive/ws;
+        // data vs a sibling literally named data\archive). The guards keep
+        // the native component comparison on Unix.
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let colon_sibling = temp.path().join("data:");
+        let colon_ws = temp.path().join("data:archive").join("ws");
+        std::fs::create_dir_all(&colon_sibling).expect("colon sibling");
+        std::fs::create_dir_all(&colon_ws).expect("colon workspace");
+        validate_workspace_roots(&colon_ws, std::slice::from_ref(&colon_sibling))
+            .expect("a colon-named sibling is not the workspace's ancestor");
+        let (clean, dropped) =
+            sanitize_workspace_roots(&colon_ws, &[colon_ws.clone(), colon_sibling.clone()]);
+        assert_eq!(clean, vec![colon_ws.clone(), colon_sibling]);
+        assert_eq!(dropped, 0);
+
+        let plain = temp.path().join("data");
+        let backslash_ws = temp.path().join("data\\archive").join("ws");
+        std::fs::create_dir_all(&plain).expect("plain sibling");
+        std::fs::create_dir_all(&backslash_ws).expect("backslash workspace");
+        validate_workspace_roots(&backslash_ws, std::slice::from_ref(&plain))
+            .expect("a backslash-named sibling is not the workspace's ancestor");
+        let (clean, dropped) =
+            sanitize_workspace_roots(&backslash_ws, &[backslash_ws.clone(), plain.clone()]);
+        assert_eq!(clean, vec![backslash_ws.clone(), plain]);
+        assert_eq!(dropped, 0);
     }
 
     #[cfg(target_os = "windows")]
