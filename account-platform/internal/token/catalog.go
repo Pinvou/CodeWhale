@@ -640,7 +640,7 @@ func (item CatalogModel) Snapshot() map[string]any {
 }
 
 func (item CatalogModel) ValidateRequestLimits(input, output int64) error {
-	if input < 0 || output < 0 || output > item.MaximumOutputTokens || input+output > item.ContextLength {
+	if input < 0 || output < 0 || output > item.MaximumOutputTokens || output > item.ContextLength || input > item.ContextLength-output {
 		return fmt.Errorf("%w: request exceeds frozen model capability", ErrModelUnavailable)
 	}
 	return nil

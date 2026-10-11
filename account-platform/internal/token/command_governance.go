@@ -942,18 +942,7 @@ func (s *Service) adminCreateTokenCommandBody(w http.ResponseWriter, r *http.Req
 	}
 	if envelope.CommandType == "TOKEN_CREDENTIAL_VALIDATE" && item.Status == "PENDING" {
 		completed, executeErr := s.executeGovernedCredentialValidation(r.Context(), repository, item.CommandReference, actor, envelope)
-		if errors.Is(executeErr, ErrCredentialProbeClaimed) {
-			w.Header().Set("Cache-Control", "no-store")
-			w.Header().Set("Retry-After", "2")
-			api.WriteJSON(w, http.StatusAccepted, completed)
-			return
-		}
-		if executeErr != nil {
-			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNKNOWN", "query the same command reference before retrying", httpserver.RequestID(r.Context()))
-			return
-		}
-		w.Header().Set("Cache-Control", "no-store")
-		api.WriteJSON(w, http.StatusOK, completed)
+		writeCredentialValidationCommandResponse(w, r, item.CommandReference, completed, executeErr)
 		return
 	}
 	status := http.StatusOK

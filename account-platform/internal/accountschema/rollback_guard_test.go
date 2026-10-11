@@ -3,6 +3,8 @@ package accountschema
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
@@ -11,10 +13,14 @@ import (
 )
 
 func TestRetainedPolicyRollbackGuard(t *testing.T) {
-	if err := retainedRollbackGuard(context.Background(), nil, migrations.Migration{Version: 33}); err == nil {
-		t.Fatal("statement-level immutable policy deletion was allowed")
+	for _, version := range []int64{24, 25, 26, 33} {
+		t.Run(fmt.Sprintf("policy-%d", version), func(t *testing.T) {
+			if err := retainedRollbackGuard(context.Background(), nil, migrations.Migration{Version: version}); err == nil || !strings.Contains(err.Error(), "append-only policy history") {
+				t.Fatalf("statement-level immutable policy deletion was allowed: %v", err)
+			}
+		})
 	}
-	for _, version := range []int64{18, 32, 34, 900001, 900002} {
+	for _, version := range []int64{18, 31, 32, 34, 41, 44, 900001, 900002} {
 		if err := retainedRollbackGuard(context.Background(), nil, migrations.Migration{Version: version}); err != nil {
 			t.Fatalf("unrelated migration %d was blocked: %v", version, err)
 		}

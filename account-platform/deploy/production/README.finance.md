@@ -22,6 +22,8 @@ Billing 私有环境必须配置 `MANUAL_REVIEW_ON_CALL_USER_IDS`、与 Account 
 
 首次启动先单独完成迁移、预置固定 stream 和 fresh-only 审批初始化，不能直接启动全部服务再让服务自动生成审批资源。使用 `approval-resources` profile 对每步显式传入 `-action` 与当前 `-expected-version`，按 runbook 的 status、quiesce、fence、initialize-consumers、activate、resume 次序执行。初始化前 receipt 目录为空且由操作员 UID 控制；输出 receipt 独立回读核验后再设置 `APPROVAL_RECEIPT_SHA256`。Billing 挂载只读 receipt，缺少真实回执或存在漂移时拒绝启动。Compose 的默认 operator 命令只有 status，不会自动启用审批。已有审批或 NATS 历史必须拒绝 fresh-only 路径，不能删除历史、重置 consumer 或扩大 ACL 来伪装首次安装。
 
+当前 F04 `approval-resources` 镜像的 `activate` 和 `resume` 均会联合核验三条 Billing 和三条 Token consumer；必须在 Billing 的 `initialize-consumers` 完成后、`activate` 前，按 [模型审批资源说明](README.models.md#审批资源和-workload-身份) 显式执行 `token-consumers initialize` 并独立核验其回执。Billing 与 Token 使用各自的回执目录，不得合并、覆盖；关闭模型界面或启动 executor 都不能省略初始化。既有 F02 镜像仍遵循原三项 Billing 审批边界。
+
 F01 TLS edge 只新增两个精确 POST 回调入口 `/api/v1/payment-callback/token` 和 `/api/v1/payment-callbacks`；回调自身仍执行客户身份、Bearer、provider/merchant/profile 和付款事实检查。Billing 内部与管理接口不向公网代理。Portal 经私网 `BILLING_HTTP_URL` 转发管理员已有授权操作，用户订单仍经 Token 网关校验个人上下文。
 
 ## 验证限制

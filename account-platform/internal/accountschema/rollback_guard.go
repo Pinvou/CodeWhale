@@ -24,5 +24,11 @@ func retainedRollbackGuard(_ context.Context, _ pgx.Tx, migration migrations.Mig
 		// trigger, including DELETE statements that match no policy rows.
 		return errors.New("payment provider resume policy rollback would delete append-only policy history")
 	}
+	switch migration.Version {
+	case 24, 25, 26:
+		// These original DELETE statements are also rejected by 018's
+		// statement-level trigger, even when no command policy matches.
+		return errors.New("Account command policy rollback would delete append-only policy history")
+	}
 	return nil
 }

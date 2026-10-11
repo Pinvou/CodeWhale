@@ -124,3 +124,18 @@ The Portal derives the source using its existing exact trusted-edge policy and
 signs the final method, upstream RequestURI (including query) and canonical IP;
 browser source/signature headers are not forwarded as authority. Actual remote
 deployment and secret injection are not exercised by the finite HTTP proof.
+
+### Original Account command-policy rollback limits
+
+The public Account rollback wrapper rejects original migrations 024, 025, 026
+and the previously guarded 033 before executing their Down SQL. Original 018's
+statement-level immutable-policy trigger already rejects those DELETE statements,
+even when no policy matches. The invariant check runs in the same transaction
+as the original rollback and preserves policy rows, triggers and migration history.
+Historical SQL versions, filenames and checksums remain unchanged.
+
+This guard does not prohibit all policy rollbacks. Original 041 and 044 retain
+their existing behavior; 044 also checks references from approval requests.
+The isolated numeric-history tests are not deployment acceptance or permission
+to erase retained history. They include an empty-history original 031 positive
+control, and do not bypass the current high-numbered forward-only migrations.
