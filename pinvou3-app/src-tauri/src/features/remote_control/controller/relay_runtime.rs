@@ -1198,7 +1198,18 @@ impl ControlledRelayWorker {
                     continue 'serve;
                 }
                 message = self.channel.recv() => {
-                    let Some(message) = message else { break 'serve };
+                    let Some(message) = message else {
+                        let manager = self.app.state::<ControlledDeviceManager>();
+                        if let Ok((status, lease)) = manager.fail_operation_with_retired_lease(
+                            self.operation.clone(), "desktop_relay_retired".into(),
+                        ) {
+                            if let Some(lease) = lease {
+                                self.app.state::<ControlledLaneState>().clear_if_lease(&lease);
+                            }
+                            emit_controlled_status(&self.app, &status);
+                        }
+                        break 'serve;
+                    };
                     #[cfg(test)]
                     let _processed = ProcessedControllerFrame {
                         sink: self.processed_frames.clone(),
@@ -1381,7 +1392,7 @@ impl ControlledRelayWorker {
         // 通道关闭（stop/refresh/断线）时丢弃出站旁路，避免旧 generation 继续回传。
         self.app
             .state::<ControlledOutboundState>()
-            .clear_generation(self.channel.generation());
+            .clear_owned(&self.channel.sender());
     }
 
     /// E2E-06：按 watchdog 需求发起挑战 / 升级到 Relay 签名兜底 / 作废超时挑战。
@@ -1461,7 +1472,7 @@ impl ControlledRelayWorker {
         };
         let context =
             crate::features::remote_control::controller::protocol::RuntimeValidationContext {
-                lease: Some(lease),
+                lease: Some(lease.clone()),
                 negotiated_capabilities: capabilities,
             };
         let validated = crate::features::remote_control::controller::protocol::validate_controller_runtime_message_json(
@@ -1472,10 +1483,14 @@ impl ControlledRelayWorker {
         if validated.is_err() {
             return false;
         }
-        match manager.accept_remote_disconnect() {
+        match manager.accept_remote_disconnect_for(&self.operation, &lease) {
             Ok(status) => {
-                self.app.state::<ControlledLaneState>().clear();
-                self.app.state::<ControlledOutboundState>().clear();
+                self.app
+                    .state::<ControlledLaneState>()
+                    .clear_if_lease(&lease);
+                self.app
+                    .state::<ControlledOutboundState>()
+                    .clear_owned(&self.channel.sender());
                 emit_controlled_status(&self.app, &status);
                 true
             }
@@ -1743,7 +1758,7 @@ async fn dispatch_controlled_business_job(
     // Async business may finish after stop/disconnect/re-pair. Seal/send while
     // pinned to the same current live lease; no late response may enter a new
     // transport cycle or resurrect suspended business authority.
-    let _ = manager.with_current_business_lease(&lease, || {
+    let _ = manager.with_current_response_lease(&lease, || {
         if epoch.load(Ordering::Acquire) != transport_epoch {
             return;
         }
@@ -2235,6 +2250,19 @@ pub(crate) struct ControlledOutboundState {
 }
 
 impl ControlledOutboundState {
+    pub(crate) fn clear_owned(
+        &self,
+        expected: &crate::features::remote_control::manager::ControllerRelaySender,
+    ) {
+        let mut sender = self.sender.lock();
+        if sender
+            .as_ref()
+            .is_some_and(|sender| sender.same_binding(expected))
+        {
+            *sender = None;
+        }
+    }
+
     pub(crate) fn clear_generation(&self, generation: &str) {
         let mut sender = self.sender.lock();
         if sender

@@ -27,6 +27,309 @@ fn make_store(root: &std::path::Path) -> SessionStore {
     SessionStore::boot_at_test_dir(root).expect("test SessionStore")
 }
 
+#[test]
+fn exact_byte_budget_admission_reserves_fingerprint_attempt_projection_and_terminal() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store(temp.path());
+    let live = context();
+    let active = store.test_commit_remote_proxy_open(None, &live).unwrap();
+    let filler = store.test_commit_remote_proxy_open(None, &live).unwrap();
+    store
+        .confirm_remote_mapping(
+            &active.local_session_id,
+            &live,
+            &AuthenticatedMapping {
+                remote_session_ref: active.remote_session_ref.clone(),
+                controlled_session_id: "b-budget".into(),
+            },
+        )
+        .unwrap();
+    let pending = PendingRemoteRequest {
+        client_request_id: "budget-client".into(),
+        task_id: "budget-task".into(),
+        request_fingerprint: "a".repeat(64),
+        dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+        reservation_fingerprint: None,
+    };
+    {
+        let mut state = store.remote_proxies.lock();
+        state
+            .records
+            .get_mut(&active.local_session_id)
+            .unwrap()
+            .pending
+            .push(pending.clone());
+        let bytes = serde_json::to_vec(&super::schema::RemoteProxyFile {
+            schema_version: super::schema::REMOTE_PROXY_SCHEMA_VERSION,
+            records: state.records.values().cloned().collect(),
+        })
+        .unwrap();
+        let required = state.required_budget(&bytes).unwrap();
+        state
+            .records
+            .get_mut(&active.local_session_id)
+            .unwrap()
+            .pending
+            .clear();
+        state
+            .records
+            .get_mut(&filler.local_session_id)
+            .unwrap()
+            .peer_id
+            .push_str(&"p".repeat(super::schema::MAX_REMOTE_PROXY_FILE_BYTES - required));
+        state.persist().unwrap();
+    }
+    store
+        .insert_remote_pending(
+            &active.local_session_id,
+            &active.remote_session_ref,
+            &live,
+            pending,
+        )
+        .unwrap();
+    assert_eq!(
+        store.remote_proxies.lock().persisted_required.get(),
+        Some(super::schema::MAX_REMOTE_PROXY_FILE_BYTES)
+    );
+    store
+        .replace_prepared_remote_fingerprint(
+            &active.local_session_id,
+            &active.remote_session_ref,
+            &live,
+            "budget-client",
+            "budget-task",
+            &"a".repeat(64),
+            &"b".repeat(64),
+        )
+        .unwrap();
+    store
+        .mark_remote_dispatch_attempt(
+            &active.local_session_id,
+            &active.remote_session_ref,
+            &live,
+            "budget-client",
+            "budget-task",
+            &"b".repeat(64),
+        )
+        .unwrap();
+    for sequence in 1..=10 {
+        let mut entry = projection_entry(sequence, "answer");
+        entry.task_id = Some("budget-task".into());
+        store
+            .project_authenticated_remote_entry(
+                &active.local_session_id,
+                &active.remote_session_ref,
+                &live,
+                "b-budget",
+                entry,
+            )
+            .unwrap();
+    }
+    // Exercise the actual stored-schema escaped epoch upper bound, not only
+    // ASCII producer fixtures. 64*128 input bytes exceed the old 20KiB reserve.
+    {
+        let mut state = store.remote_proxies.lock();
+        let mut record = state.records[&active.local_session_id].clone();
+        record.retired_epochs = (0..64)
+            .map(|index| format!("{}{:02}", "\u{0001}".repeat(126), index))
+            .collect();
+        assert!(serde_json::to_vec(&record.retired_epochs).unwrap().len() > 20 * 1024);
+        super::persistence::persist_changed(&mut state, &active.local_session_id, record).unwrap();
+    }
+    let mut terminal = projection_entry(11, "succeeded");
+    terminal.kind = ProjectionKind::Status;
+    terminal.task_id = Some("budget-task".into());
+    store
+        .project_authenticated_remote_terminal(
+            &active.local_session_id,
+            &active.remote_session_ref,
+            &live,
+            "b-budget",
+            "budget-client",
+            "budget-task",
+            &"b".repeat(64),
+            terminal,
+        )
+        .unwrap();
+    let record = store
+        .remote_proxy_snapshot(&active.local_session_id)
+        .unwrap();
+    assert!(record.pending.is_empty());
+    assert_eq!(record.retired_requests.len(), 1);
+    assert!(
+        std::fs::metadata(temp.path().join("sessions/_remote_proxies.json"))
+            .unwrap()
+            .len()
+            <= super::schema::MAX_REMOTE_PROXY_FILE_BYTES as u64
+    );
+}
+
+#[test]
+fn legacy_over_reserved_pending_file_loads_and_can_abandon_without_new_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store(temp.path());
+    let mut records = Vec::new();
+    for index in 0..17 {
+        let opened = store
+            .test_commit_remote_proxy_open(None, &context())
+            .unwrap();
+        let mut record = store
+            .remote_proxy_snapshot(&opened.local_session_id)
+            .unwrap();
+        record.pending.push(PendingRemoteRequest {
+            client_request_id: format!("legacy-request-{index}"),
+            task_id: format!("legacy-task-{index}"),
+            request_fingerprint: "a".repeat(64),
+            dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+            reservation_fingerprint: None,
+        });
+        records.push(record);
+    }
+    let bytes = serde_json::to_vec(&super::schema::RemoteProxyFile {
+        schema_version: super::schema::REMOTE_PROXY_SCHEMA_VERSION,
+        records: records.clone(),
+    })
+    .unwrap();
+    assert!(bytes.len() < 65536);
+    drop(store);
+    std::fs::write(temp.path().join("sessions/_remote_proxies.json"), bytes).unwrap();
+    let restarted = make_store(temp.path());
+    assert!(!restarted.remote_proxies.lock().load_failed);
+    assert!(
+        restarted
+            .test_commit_remote_proxy_open(None, &context())
+            .is_err()
+    );
+    for record in records {
+        let pending = &record.pending[0];
+        restarted
+            .abandon_unattempted_remote_pending(
+                &record.local_session_id,
+                &pending.client_request_id,
+                &pending.task_id,
+                &pending.request_fingerprint,
+            )
+            .unwrap();
+    }
+    assert!(
+        restarted
+            .test_commit_remote_proxy_open(None, &context())
+            .is_ok()
+    );
+}
+
+#[test]
+fn fully_used_legacy_json_can_seal_without_growing_active_dependency_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store(temp.path());
+    let opened = store
+        .test_commit_remote_proxy_open(None, &context())
+        .unwrap();
+    let mut record = store
+        .remote_proxy_snapshot(&opened.local_session_id)
+        .unwrap();
+    let mut file = super::schema::RemoteProxyFile {
+        schema_version: super::schema::REMOTE_PROXY_SCHEMA_VERSION,
+        records: vec![record.clone()],
+    };
+    let initial = serde_json::to_vec(&file).unwrap().len();
+    record
+        .peer_id
+        .push_str(&"p".repeat(super::schema::MAX_REMOTE_PROXY_FILE_BYTES - initial));
+    file.records[0] = record;
+    let bytes = serde_json::to_vec(&file).unwrap();
+    assert_eq!(bytes.len(), super::schema::MAX_REMOTE_PROXY_FILE_BYTES);
+    drop(store);
+    std::fs::write(temp.path().join("sessions/_remote_proxies.json"), bytes).unwrap();
+    let restarted = make_store(temp.path());
+    assert!(!restarted.remote_proxies.lock().load_failed);
+    assert!(
+        restarted
+            .archive_remote_proxy(&opened.local_session_id, None)
+            .unwrap()
+    );
+    assert!(restarted.remote_proxies.lock().records.is_empty());
+    assert!(
+        restarted
+            .is_archived_remote_proxy(&opened.local_session_id)
+            .unwrap()
+    );
+    let again = make_store(temp.path());
+    assert!(
+        again
+            .read_remote_proxy_history(&opened.local_session_id)
+            .is_some()
+    );
+    assert!(
+        again
+            .prepare_remote_proxy_open(Some(&opened.local_session_id), &context())
+            .is_err()
+    );
+}
+
+#[test]
+fn offline_archive_rejects_live_and_pending_then_releases_capacity() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store(temp.path());
+    let opened = store
+        .test_commit_remote_proxy_open(None, &context())
+        .unwrap();
+    assert_eq!(
+        store
+            .archive_remote_proxy(&opened.local_session_id, Some(&context()))
+            .unwrap_err()
+            .to_string(),
+        "remote_proxy_archive_online"
+    );
+    {
+        let mut state = store.remote_proxies.lock();
+        let mut record = state.records[&opened.local_session_id].clone();
+        record.pending.push(PendingRemoteRequest {
+            client_request_id: "pending".into(),
+            task_id: "pending-task".into(),
+            request_fingerprint: "a".repeat(64),
+            dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+            reservation_fingerprint: None,
+        });
+        super::persistence::persist_changed(&mut state, &opened.local_session_id, record).unwrap();
+    }
+    assert_eq!(
+        store
+            .archive_remote_proxy(&opened.local_session_id, None)
+            .unwrap_err()
+            .to_string(),
+        "remote_proxy_archive_pending"
+    );
+    store
+        .abandon_unattempted_remote_pending(
+            &opened.local_session_id,
+            "pending",
+            "pending-task",
+            &"a".repeat(64),
+        )
+        .unwrap();
+    assert!(
+        store
+            .archive_remote_proxy(&opened.local_session_id, None)
+            .unwrap()
+    );
+    assert!(
+        store
+            .remote_proxy_snapshot(&opened.local_session_id)
+            .is_none()
+    );
+    assert!(
+        store
+            .read_remote_proxy_history(&opened.local_session_id)
+            .is_some()
+    );
+    assert!(
+        store
+            .prepare_remote_proxy_open(Some(&opened.local_session_id), &context())
+            .is_err()
+    );
+}
+
 fn assert_invalid_cache_is_isolated(root: &std::path::Path) {
     let sessions_dir = root.join("sessions");
     let path = sessions_dir.join("_remote_proxies.json");
@@ -43,6 +346,13 @@ fn assert_invalid_cache_is_isolated(root: &std::path::Path) {
             store.session_kind(&local.metadata.id).unwrap(),
             SessionKind::Chat
         );
+        store.set_local_backend_resolver(Arc::new(|_| Ok(LocalBackendBinding::Engine)));
+        assert_eq!(
+            store
+                .route_session(&local.metadata.id, true, None, None)
+                .unwrap(),
+            SessionRoute::Engine
+        );
         assert!(
             store
                 .list()
@@ -54,6 +364,85 @@ fn assert_invalid_cache_is_isolated(root: &std::path::Path) {
         assert!(store.remote_proxies.lock().persist().is_err());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
+}
+
+#[test]
+fn missing_archive_bank_disables_remote_authority_without_blocking_local_sessions() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store(temp.path());
+    let opened = store
+        .test_commit_remote_proxy_open(None, &context())
+        .unwrap();
+    store
+        .archive_remote_proxy(&opened.local_session_id, None)
+        .unwrap();
+    assert_eq!(
+        store.session_kind(&opened.local_session_id).unwrap(),
+        SessionKind::RemoteProxy
+    );
+    assert_eq!(
+        store
+            .route_session(&opened.local_session_id, false, None, None)
+            .unwrap(),
+        SessionRoute::RemoteReadOnly
+    );
+    assert!(
+        store
+            .route_session(
+                &opened.local_session_id,
+                true,
+                Some(&opened.remote_session_ref),
+                Some(&context())
+            )
+            .is_err()
+    );
+    let forged = deepseek_tui::session_manager::create_saved_session_with_id_and_mode(
+        opened.local_session_id.clone(),
+        &[],
+        "/model",
+        temp.path(),
+        0,
+        None,
+        None,
+    );
+    assert!(store.save(&forged).is_err());
+    assert!(store.delete(&opened.local_session_id).is_err());
+    assert!(
+        store
+            .read_remote_proxy_history(&opened.local_session_id)
+            .is_some()
+    );
+    drop(store);
+    // Exact test-owned bank only. Its durable anchor must not recreate it.
+    let bank = temp
+        .path()
+        .join("sessions/_remote_proxies.archives.sqlite3");
+    std::fs::remove_file(&bank).unwrap();
+    let restarted = make_store(temp.path());
+    let local = restarted
+        .create_new("/model".into(), None, temp.path().to_path_buf())
+        .unwrap();
+    assert!(restarted.load(&local.metadata.id).is_ok());
+    assert_eq!(
+        restarted.session_kind(&local.metadata.id).unwrap(),
+        SessionKind::Chat
+    );
+    restarted.set_local_backend_resolver(Arc::new(|_| Ok(LocalBackendBinding::Acp)));
+    assert_eq!(
+        restarted
+            .route_session(&local.metadata.id, true, None, None)
+            .unwrap(),
+        SessionRoute::Acp
+    );
+    restarted.save(&local).unwrap();
+    restarted.delete(&local.metadata.id).unwrap();
+    assert!(restarted.session_kind(&opened.local_session_id).is_err());
+    assert!(
+        restarted
+            .prepare_remote_proxy_open(None, &context())
+            .is_err()
+    );
+    assert!(!bank.exists());
 }
 
 #[test]

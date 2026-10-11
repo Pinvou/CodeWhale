@@ -508,11 +508,12 @@ impl SessionStore {
 
     pub fn save(&self, session: &SavedSession) -> Result<PathBuf> {
         let _mutation = self.scheduled_mutation.lock();
-        if self
-            .remote_proxies
-            .lock()
-            .records
-            .contains_key(&session.metadata.id)
+        if session.metadata.id.starts_with("remote-")
+            || self
+                .remote_proxies
+                .lock()
+                .records
+                .contains_key(&session.metadata.id)
         {
             bail!("RemoteProxy cannot be saved as a local Engine/ACP Session");
         }
@@ -559,7 +560,7 @@ impl SessionStore {
         // A remote-proxy record is owned by the remote-control feature's own
         // lifecycle; deleting it through the local Engine/ACP path would
         // strand the proxy state.
-        if self.remote_proxies.lock().records.contains_key(id) {
+        if id.starts_with("remote-") || self.remote_proxies.lock().records.contains_key(id) {
             bail!("RemoteProxy cannot be deleted through local Engine/ACP lifecycle");
         }
         if super::validators::is_sched_session_id(id) || self.is_scheduled_session(id)? {
@@ -712,7 +713,11 @@ impl SessionStore {
 
     pub fn session_kind(&self, id: &str) -> Result<SessionKind> {
         validate_session_id(id)?;
-        if self.remote_proxies.lock().records.contains_key(id) {
+        // Remote archive availability must not classify or block local records.
+        // Only the reserved remote namespace needs permanent-bank authority.
+        if self.remote_proxies.lock().records.contains_key(id)
+            || (id.starts_with("remote-") && self.is_archived_remote_proxy(id)?)
+        {
             Ok(SessionKind::RemoteProxy)
         } else if id.starts_with("remote-") {
             bail!("RemoteProxy record is unavailable");
