@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::desktop_remote_state::DesktopRemoteState as State;
+use super::desktop_remote_state::ready_state;
 use deepseek_tui::models::{ContentBlock, Message, Role};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -1634,6 +1635,7 @@ pub(super) fn with_current_dispatch_binding<T>(
         .with_current_authenticated_remote_proxy_identity(&lane, &(lease, peer, boundary), commit)
         .map_err(|code| match code.as_str() {
             "remote_pending_persist_failed" => dispatch_error("remote_pending_persist_failed"),
+            "remote_proxy_byte_budget" => dispatch_error("remote_proxy_byte_budget"),
             "remote_attempt_persist_failed" => dispatch_error("remote_attempt_persist_failed"),
             "remote_attachment_unconfirmed"
             | "remote_attachment_count_invalid"
@@ -1688,7 +1690,13 @@ impl RemoteTaskDispatchPort for DesktopRemoteTaskDispatchPort {
         with_current_dispatch_binding(&self.app, live, || {
             store
                 .insert_remote_pending(local_session_id, remote_ref, live, pending)
-                .map_err(|_| "remote_pending_persist_failed".to_owned())
+                .map_err(|error| {
+                    if error.to_string() == "remote_proxy_byte_budget" {
+                        "remote_proxy_byte_budget".to_owned()
+                    } else {
+                        "remote_pending_persist_failed".to_owned()
+                    }
+                })
         })
     }
 
@@ -1945,17 +1953,39 @@ pub(crate) enum RemoteTaskReserveIntent {
     },
 }
 
+/// Keep credential and disk operations off both IPC and async executor threads.
+/// Dropping an admitted IPC future does not interrupt the durable send protocol.
+pub(crate) async fn run_a_dispatch_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    static SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    let permit = SLOTS
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| "remote_dispatch_unavailable".to_owned())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|_| "remote_dispatch_unavailable".to_owned())?
+}
+
 #[tauri::command]
-pub fn desktop_remote_task_reserve_a(
-    service: State<'_, RemoteDispatchService>,
-    store: State<'_, SessionStore>,
-    manager: State<'_, ControllingDeviceManager>,
-    sessions: State<'_, ControllingSessionManager>,
+pub async fn desktop_remote_task_reserve_a<R: tauri::Runtime>(
+    app: AppHandle<R>,
     local_session_id: String,
     remote_ref: String,
     intent: RemoteTaskReserveIntent,
 ) -> Result<RemoteDispatchReport, String> {
-    (|| {
+    run_a_dispatch_blocking(move || {
+        let service = ready_state::<_, RemoteDispatchService>(&app)?;
+        let store = ready_state::<_, SessionStore>(&app)?;
+        let manager = ready_state::<_, ControllingDeviceManager>(&app)?;
+        let sessions = ready_state::<_, ControllingSessionManager>(&app)?;
         crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
         if !manager.is_supported() {
             return Err(UNSUPPORTED.to_owned());
@@ -2068,7 +2098,8 @@ pub fn desktop_remote_task_reserve_a(
         service
             .reserve_new(request)
             .map_err(|error| error.code().to_owned())
-    })()
+    })
+    .await
 }
 
 /// A separate, explicit irreversible action. A successful reserve has already
@@ -2076,27 +2107,30 @@ pub fn desktop_remote_task_reserve_a(
 /// attempt barrier and send. Attachment IDs are B-authenticated upload receipts
 /// verified by the host port before they enter the final fingerprint.
 #[tauri::command]
-pub fn desktop_remote_task_commit_a(
-    app: AppHandle,
-    service: State<'_, RemoteDispatchService>,
+pub async fn desktop_remote_task_commit_a<R: tauri::Runtime>(
+    app: AppHandle<R>,
     local_session_id: String,
     remote_ref: String,
     handle: RemoteRetryHandle,
     attachment_ids: Vec<String>,
 ) -> Result<RemoteDispatchReport, String> {
-    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
-    let started = Instant::now();
-    let result = service
-        .commit_prepared(&local_session_id, &remote_ref, handle, &attachment_ids)
-        .map_err(|error| error.code().to_owned());
-    if let Some(outcome) = task_submit_telemetry_outcome(&result) {
-        track_remote_control(
-            &app,
-            RemoteControlEvent::new(RemoteStage::TaskSubmit, outcome)
-                .latency_ms(started.elapsed().as_millis() as u64),
-        );
-    }
-    result
+    run_a_dispatch_blocking(move || {
+        let service = ready_state::<_, RemoteDispatchService>(&app)?;
+        crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+        let started = Instant::now();
+        let result = service
+            .commit_prepared(&local_session_id, &remote_ref, handle, &attachment_ids)
+            .map_err(|error| error.code().to_owned());
+        if let Some(outcome) = task_submit_telemetry_outcome(&result) {
+            track_remote_control(
+                &app,
+                RemoteControlEvent::new(RemoteStage::TaskSubmit, outcome)
+                    .latency_ms(started.elapsed().as_millis() as u64),
+            );
+        }
+        result
+    })
+    .await
 }
 
 fn task_submit_telemetry_outcome(
@@ -2116,37 +2150,82 @@ fn task_submit_telemetry_outcome(
 }
 
 #[tauri::command]
-pub fn desktop_remote_task_cancel_a(
-    service: State<'_, RemoteDispatchService>,
+pub async fn desktop_remote_task_cancel_a<R: tauri::Runtime>(
+    app: AppHandle<R>,
     local_session_id: String,
     remote_ref: String,
     task_id: String,
 ) -> Result<RemoteCancelReport, String> {
-    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
-    service
-        .cancel_task(&local_session_id, &remote_ref, &task_id)
-        .map_err(|error| error.code().to_owned())
+    run_a_dispatch_blocking(move || {
+        let service = ready_state::<_, RemoteDispatchService>(&app)?;
+        crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+        service
+            .cancel_task(&local_session_id, &remote_ref, &task_id)
+            .map_err(|error| error.code().to_owned())
+    })
+    .await
 }
 #[tauri::command]
-pub fn desktop_remote_task_abandon_prepared_a(
-    app: AppHandle,
-    service: State<'_, RemoteDispatchService>,
+pub async fn desktop_remote_task_abandon_prepared_a<R: tauri::Runtime>(
+    app: AppHandle<R>,
     local_session_id: String,
     client_request_id: String,
     task_id: String,
 ) -> Result<(), String> {
-    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
-    service
-        .abandon_prepared_remote_task(&local_session_id, &client_request_id, &task_id)
-        .map_err(|error| error.code().to_owned())?;
-    app.state::<Arc<super::desktop_remote_action::DesktopRemoteActionState>>()
-        .discard_task_receipts(&local_session_id, &task_id);
-    Ok(())
+    run_a_dispatch_blocking(move || {
+        let service = ready_state::<_, RemoteDispatchService>(&app)?;
+        let actions =
+            ready_state::<_, Arc<super::desktop_remote_action::DesktopRemoteActionState>>(&app)?;
+        crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+        service
+            .abandon_prepared_remote_task(&local_session_id, &client_request_id, &task_id)
+            .map_err(|error| error.code().to_owned())?;
+        actions.discard_task_receipts(&local_session_id, &task_id);
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_dispatch_blocking_worker_does_not_occupy_the_async_executor() {
+        let executor = std::thread::current().id();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let work = tokio::spawn(run_a_dispatch_blocking(move || {
+            assert_ne!(std::thread::current().id(), executor);
+            entered_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            Ok(())
+        }));
+        entered_rx.await.unwrap();
+        // This current-thread executor must still run while keychain work waits.
+        tokio::task::yield_now().await;
+        release_tx.send(()).unwrap();
+        work.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn all_a_dispatch_ipc_commands_enter_the_bounded_blocking_worker() {
+        let source = include_str!("desktop_remote_task.rs").replace("\r\n", "\n");
+        for name in ["reserve", "commit", "cancel", "abandon_prepared"] {
+            let prefix = format!("pub async fn desktop_remote_task_{name}_a<R: tauri::Runtime>(");
+            let command = source
+                .split(&prefix)
+                .nth(1)
+                .unwrap()
+                .split("\n}\n")
+                .next()
+                .unwrap();
+            assert!(command.contains("run_a_dispatch_blocking(move ||"));
+            assert!(command.contains(".await"));
+        }
+    }
 
     #[test]
     fn a_capability_selection_preserves_chat_and_code_skill_scopes() {
@@ -2330,10 +2409,10 @@ mod tests {
     fn new_reserve_checks_authenticated_capability_before_outbox_reservation() {
         let source = include_str!("desktop_remote_task.rs");
         let start = source
-            .find("pub fn desktop_remote_task_reserve_a(")
+            .find("pub async fn desktop_remote_task_reserve_a<R: tauri::Runtime>(")
             .unwrap();
         let end = source[start..]
-            .find("pub fn desktop_remote_task_abandon_prepared_a(")
+            .find("pub async fn desktop_remote_task_abandon_prepared_a<R: tauri::Runtime>(")
             .map(|offset| start + offset)
             .unwrap();
         let command = &source[start..end];
@@ -2347,10 +2426,14 @@ mod tests {
     fn task_submit_telemetry_is_emitted_only_for_the_first_irreversible_attempt() {
         let source = include_str!("desktop_remote_task.rs");
         let reserve_start = source
-            .find("pub fn desktop_remote_task_reserve_a(")
+            .find("pub async fn desktop_remote_task_reserve_a<R: tauri::Runtime>(")
             .unwrap();
-        let commit_start = source.find("pub fn desktop_remote_task_commit_a(").unwrap();
-        let cancel_start = source.find("pub fn desktop_remote_task_cancel_a(").unwrap();
+        let commit_start = source
+            .find("pub async fn desktop_remote_task_commit_a<R: tauri::Runtime>(")
+            .unwrap();
+        let cancel_start = source
+            .find("pub async fn desktop_remote_task_cancel_a<R: tauri::Runtime>(")
+            .unwrap();
         assert!(!source[reserve_start..commit_start].contains("RemoteStage::TaskSubmit"));
         let commit = &source[commit_start..cancel_start];
         assert!(commit.contains("RemoteDispatchAttempt::FirstAttempt"));
@@ -2507,6 +2590,24 @@ mod tests {
             )
             .unwrap();
         let context = manager.live_lease().unwrap();
+        // Exercise the real transport authority gate, not a Connected DTO
+        // without a transport. This unit fixture does not claim socket proof.
+        let (transport, _receiver) =
+            crate::features::remote_control::controller::relay_transport::transport_channels(
+                crate::features::remote_control::controller::relay_transport::ControllerRole::ControlledB,
+                operation.generation(), 4, 4, 4096, 512,
+            );
+        transport
+            .install_authenticated_lease(
+                crate::features::remote_control::controller::relay_transport::AuthenticatedLease {
+                    context: context.clone(),
+                    negotiated_capabilities: vec!["task_v1".into()],
+                },
+            )
+            .unwrap();
+        manager
+            .replace_authenticated_transport(operation.clone(), transport)
+            .unwrap();
         let service = Arc::new(RemoteTaskService::new(Arc::new(
             RemoteTaskLedger::in_memory(),
         )));

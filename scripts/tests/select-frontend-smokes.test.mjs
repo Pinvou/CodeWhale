@@ -9,6 +9,13 @@ import {
 const labels = (items) => items.map(({ kind, target }) => `${kind}:${target}`);
 const fullLabels = labels(FULL_FRONTEND_SMOKES);
 
+test("the real archive component smoke is included in the full CI suite", () => {
+  assert.ok(fullLabels.includes("node:tests/remote_archive_smoke.mjs"));
+  assert.ok(labels(selectFrontendSmokes([
+    "pinvou3-app/src/features/remote-control/RemoteProxyArchivePanel.jsx",
+  ])).includes("node:tests/remote_archive_smoke.mjs"));
+});
+
 test("shared frontend paths fail closed to the full browser suite", () => {
   assert.deepEqual(
     labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])),

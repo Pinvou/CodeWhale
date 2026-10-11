@@ -285,6 +285,47 @@ pub(crate) fn atomic_write_private(path: &Path, content: &[u8]) -> io::Result<()
     atomic_write_impl(path, content, true)
 }
 
+/// Create-once publication. Never overwrite an existing or damaged identity
+/// anchor. A synced sibling tempfile is published with no-clobber semantics.
+pub(crate) fn create_private_file_once(path: &Path, content: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing parent"))?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    staged.write_all(content)?;
+    staged.as_file().sync_all()?;
+    staged
+        .persist_noclobber(path)
+        .map_err(|error| error.error)?;
+    if let Ok(directory) = File::open(parent) {
+        directory.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Hold a plain database object while SQLite uses its pathname. Windows pins
+/// against rename/delete; POSIX callers must also check the inode after work.
+pub(crate) fn pin_plain_database_file(path: &Path) -> io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    if !metadata_is_plain_file(&file.metadata()?) || !reserved_target_is_unchanged(&file, path) {
+        return Err(io::Error::other("database file changed or is not plain"));
+    }
+    Ok(file)
+}
+
 fn atomic_write_impl(path: &Path, content: &[u8], private: bool) -> io::Result<()> {
     use std::io::Write as _;
 

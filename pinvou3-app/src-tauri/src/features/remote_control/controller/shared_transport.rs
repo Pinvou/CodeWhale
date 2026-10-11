@@ -2,7 +2,9 @@
 //!
 //! Only the socket reader can mint receipts. The lifecycle owner consumes them
 //! after authenticating the handshake/resume; queued old receipts cannot grant
-//! authority on a replacement socket. No callback/await occurs under this lock.
+//! authority on a replacement socket. The business gate permits reviewed narrow
+//! synchronous mutations and non-reentrant telemetry only; no await or callback
+//! into lifecycle/transport/desktop-endpoint owners occurs under this lock.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,6 +76,89 @@ impl SharedSocket {
     }
 }
 
+#[cfg(test)]
+mod business_authority_tests {
+    use super::*;
+
+    fn fixture() -> (SharedControllerAuthority, LeaseContext) {
+        let expected = LeaseContext {
+            connection_id: "connection-0001".into(),
+            controller_lease_id: "lease-0001".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "relay-epoch-0001".into(),
+            remote_control_generation: "generation-0001".into(),
+        };
+        // Only the synchronization gate is under test here. Reader-minted
+        // receipt/handshake proof is exercised by the native loopback driver.
+        let authority = SharedControllerAuthority::default();
+        *authority.0.lock() = State {
+            connected: true,
+            generation: Some(expected.remote_control_generation.clone()),
+            binding: 1,
+            lease: Some(RuntimeValidationContext {
+                lease: Some(expected.clone()),
+                negotiated_capabilities: vec!["task_v1".into()],
+            }),
+            ..State::default()
+        };
+        (authority, expected)
+    }
+
+    #[test]
+    fn retired_suspended_or_foreign_business_authority_never_runs_mutation() {
+        let (authority, expected) = fixture();
+        let mut calls = 0;
+        assert!(
+            authority.with_business_authority("generation-0001", 1, &expected, &mut || calls += 1)
+        );
+        let mut foreign = expected.clone();
+        foreign.controller_lease_id = "lease-0002".into();
+        assert!(
+            !authority.with_business_authority("generation-0001", 1, &foreign, &mut || calls += 1)
+        );
+        assert!(
+            !authority.with_business_authority("generation-0001", 2, &expected, &mut || calls += 1)
+        );
+        authority.0.lock().suspended = true;
+        assert!(
+            !authority.with_business_authority("generation-0001", 1, &expected, &mut || calls += 1)
+        );
+        authority.0.lock().suspended = false;
+        authority.retire_owned("generation-0001", 1);
+        assert!(
+            !authority.with_business_authority("generation-0001", 1, &expected, &mut || calls += 1)
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retirement_cannot_cross_an_admitted_synchronous_mutation() {
+        let (authority, expected) = fixture();
+        let worker_authority = authority.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            worker_authority.with_business_authority("generation-0001", 1, &expected, &mut || {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap();
+            })
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        assert!(
+            authority.0.try_lock().is_none(),
+            "mutation must hold the retirement lock"
+        );
+        release_tx.send(()).unwrap();
+        assert!(worker.join().unwrap());
+        authority.retire_owned("generation-0001", 1);
+        assert!(authority.binding("generation-0001").is_none());
+    }
+}
+
 /// Enqueued controller frames are socket/generation scoped, unlike legacy v2.
 pub(crate) struct ControllerOutboundScope {
     epoch: u64,
@@ -134,6 +219,34 @@ impl SharedControllerAuthority {
     pub(crate) fn binding(&self, generation: &str) -> Option<u64> {
         let state = self.0.lock();
         (state.generation.as_deref() == Some(generation)).then_some(state.binding)
+    }
+
+    /// Linearize a narrow synchronous mutation against socket invalidation,
+    /// suspension and binding retirement. The callback must not call transport
+    /// methods or the desktop endpoint manager, nor await or invoke reentrant
+    /// lifecycle callbacks. Non-reentrant telemetry enqueue is allowed.
+    pub(crate) fn with_business_authority(
+        &self,
+        generation: &str,
+        binding: u64,
+        expected: &LeaseContext,
+        action: &mut dyn FnMut(),
+    ) -> bool {
+        let state = self.0.lock();
+        if !state.connected
+            || state.suspended
+            || state.generation.as_deref() != Some(generation)
+            || state.binding != binding
+            || state
+                .lease
+                .as_ref()
+                .and_then(|runtime| runtime.lease.as_ref())
+                != Some(expected)
+        {
+            return false;
+        }
+        action();
+        true
     }
 
     pub(crate) fn retire_owned(&self, generation: &str, binding: u64) {

@@ -2743,7 +2743,9 @@ const openChatExternalUrl = (url) => {
           setRemoteDispatchAction(null);
         }
       }
-      const remoteSendMessage = currentRemoteSendError === 'task_session_busy'
+      const remoteSendMessage = currentRemoteSendError === 'remote_proxy_byte_budget'
+        ? t.remoteArchive.byteBudget
+        : currentRemoteSendError === 'task_session_busy'
         ? t.remoteConversation.sessionBusy
         : (currentRemoteSendError === 'temporary_model_capability_required'
           ? t.remoteConversation.temporaryModelCapabilityRequired

@@ -23,6 +23,15 @@ pub(crate) fn ensure_ready<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<(), 
     }
 }
 
+/// The same fail-closed extraction for commands whose synchronous domain work
+/// runs in a blocking closure (borrowed IPC State cannot cross that boundary).
+pub(crate) fn ready_state<R: Runtime, T: Send + Sync + 'static>(
+    app: &tauri::AppHandle<R>,
+) -> Result<State<'_, T>, String> {
+    ensure_ready(app)?;
+    app.try_state::<T>().ok_or_else(|| UNAVAILABLE.to_owned())
+}
+
 pub(crate) struct DesktopRemoteState<'a, T: Send + Sync + 'static>(State<'a, T>);
 
 impl<'a, T: Send + Sync + 'static> DesktopRemoteState<'a, T> {
@@ -65,6 +74,47 @@ mod tests {
     #[tauri::command]
     fn framework_missing_state_probe(_state: tauri::State<'_, ()>) -> bool {
         true
+    }
+
+    #[tauri::command]
+    fn blocking_ready_state_probe<R: Runtime>(app: tauri::AppHandle<R>) -> Result<bool, String> {
+        let _state = ready_state::<_, ()>(&app)?;
+        Ok(true)
+    }
+
+    #[test]
+    fn managed_dependency_without_ready_marker_is_not_authority() {
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![
+                commands::desktop_remote_state::tests::blocking_ready_state_probe
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        // This isolates the exact worker extraction helper: a managed real
+        // dependency must never bypass the composition-root Ready marker.
+        app.manage(());
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let expected = if crate::platform::capabilities::current().desktop_remote_control_supported
+        {
+            UNAVAILABLE
+        } else {
+            "desktop_remote_control_unsupported"
+        };
+        tauri::test::assert_ipc_response(
+            &window,
+            tauri::webview::InvokeRequest {
+                cmd: "blocking_ready_state_probe".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: window.url().unwrap(),
+                body: Default::default(),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_owned(),
+            },
+            Err::<String, String>(expected.to_owned()),
+        );
     }
 
     #[test]
@@ -110,11 +160,18 @@ mod tests {
                 commands::desktop_remote_proxy::desktop_remote_proxy_history_list,
                 commands::desktop_remote_proxy::desktop_remote_proxy_history_read,
                 commands::desktop_remote_proxy::desktop_remote_proxy_history_delete,
+                commands::desktop_remote_proxy::desktop_remote_proxy_archive,
+                commands::desktop_remote_proxy::desktop_remote_proxy_archive_list,
+                commands::desktop_remote_proxy::desktop_remote_proxy_archive_candidates,
                 commands::desktop_remote_model::desktop_remote_model_list_exportable,
                 commands::desktop_remote_permission::desktop_remote_permission_list_b,
                 commands::desktop_remote_permission::desktop_remote_permission_deny_task,
                 commands::desktop_remote_capability::desktop_remote_controller_capability_snapshot,
                 commands::desktop_remote_capability::desktop_remote_controller_capability_send,
+                commands::desktop_remote_task::desktop_remote_task_reserve_a,
+                commands::desktop_remote_task::desktop_remote_task_commit_a,
+                commands::desktop_remote_task::desktop_remote_task_cancel_a,
+                commands::desktop_remote_task::desktop_remote_task_abandon_prepared_a,
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
@@ -125,7 +182,12 @@ mod tests {
         let payload = serde_json::json!({"taskId":"fixture-task", "epoch":"fixture",
             "sequence":0, "remoteSessionRef":"fixture-session", "reason":"fixture",
             "localSessionId":"fixture-session", "remoteRef":"fixture-ref",
-            "request":{"title":"Report","bSessionReference":null}});
+            "request":{"title":"Report","bSessionReference":null},
+            "intent":{"kind":"new","text":"hello","mode":"chat","workspaceId":null,
+                "skillIds":[],"modelSource":"controlled_device","selectedModelId":null},
+            "handle":{"taskId":"fixture-task","clientRequestId":"fixture-request",
+                "requestFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            "attachmentIds":[],"clientRequestId":"fixture-request"});
         let expected_error =
             if crate::platform::capabilities::current().desktop_remote_control_supported {
                 UNAVAILABLE
@@ -146,11 +208,18 @@ mod tests {
                 "proxy_history_list",
                 "proxy_history_read",
                 "proxy_history_delete",
+                "proxy_archive",
+                "proxy_archive_list",
+                "proxy_archive_candidates",
                 "model_list_exportable",
                 "permission_list_b",
                 "permission_deny_task",
                 "controller_capability_snapshot",
                 "controller_capability_send",
+                "task_reserve_a",
+                "task_commit_a",
+                "task_cancel_a",
+                "task_abandon_prepared_a",
             ] {
                 tauri::test::assert_ipc_response(
                     &window,
