@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use super::RemoteProxyState;
 use super::schema::{
-    MAX_REMOTE_PROXY_FILE_BYTES, MAX_REMOTE_PROXY_RECORDS, REMOTE_PROXY_SCHEMA_VERSION,
-    RemoteProxyFile, RemoteProxyRecord,
+    MAX_PROJECTION_BYTES, MAX_REMOTE_PROXY_FILE_BYTES, MAX_REMOTE_PROXY_RECORDS,
+    REMOTE_PROXY_SCHEMA_VERSION, RemoteProxyFile, RemoteProxyRecord,
 };
 use anyhow::{Context, Result, bail};
 
@@ -34,6 +34,7 @@ impl RemoteProxyState {
         if self.load_failed {
             bail!("RemoteProxy cache is unavailable; original file preserved");
         }
+        self.archives.require_present()?;
         Ok(())
     }
 
@@ -41,10 +42,15 @@ impl RemoteProxyState {
         let file = match fs::File::open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => {
-                return Ok(Self {
+                let state = Self {
+                    archives: super::archive::ArchiveStore::at(
+                        path.with_extension("archives.sqlite3"),
+                    ),
                     path,
                     ..Self::default()
-                });
+                };
+                state.require_available()?;
+                return Ok(state);
             }
             Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
         };
@@ -65,15 +71,31 @@ impl RemoteProxyState {
         }
         let records = file.records;
         let mut state = Self {
+            archives: super::archive::ArchiveStore::at(path.with_extension("archives.sqlite3")),
             path,
             ..Self::default()
         };
         let mut references = HashSet::new();
+        state.require_available()?;
         if records.len() > MAX_REMOTE_PROXY_RECORDS {
             bail!("RemoteProxy record capacity exceeded");
         }
         for record in records {
             record.validate_stored()?;
+            if state.archives.contains(&record.local_session_id)? {
+                let archived = state
+                    .archives
+                    .read(&record.local_session_id)?
+                    .ok_or_else(|| anyhow::anyhow!("remote archive unavailable"))?;
+                // A committed seal may survive interrupted JSON cleanup. Only
+                // an identical immutable record permits dropping that residue.
+                let mut comparable = archived;
+                comparable.ui.hidden = record.ui.hidden;
+                if comparable != record {
+                    bail!("remote archive conflicts with active residue");
+                }
+                continue;
+            }
             if sessions_dir
                 .join(format!("{}.json", record.local_session_id))
                 .exists()
@@ -90,6 +112,18 @@ impl RemoteProxyState {
             }
         }
         state.validate_global_request_ids()?;
+        state
+            .archives
+            .require_active_records(state.records.values())?;
+        let active_bytes = serde_json::to_vec(&RemoteProxyFile {
+            schema_version: REMOTE_PROXY_SCHEMA_VERSION,
+            records: state.records.values().cloned().collect(),
+        })?;
+        // A valid legacy file is not corrupt merely because new admissions
+        // would need more headroom. Keep settlement/abandon/archive usable.
+        state
+            .persisted_required
+            .set(Some(state.required_budget(&active_bytes)?));
         Ok(state)
     }
 
@@ -109,16 +143,27 @@ impl RemoteProxyState {
             }
         }
         self.validate_global_request_ids()?;
+        self.archives
+            .require_active_records(self.records.values())?;
         records.sort_by(|left, right| left.local_session_id.cmp(&right.local_session_id));
-        let bytes = serde_json::to_vec_pretty(&RemoteProxyFile {
+        let bytes = serde_json::to_vec(&RemoteProxyFile {
             schema_version: REMOTE_PROXY_SCHEMA_VERSION,
             records,
         })?;
-        if bytes.len() > MAX_REMOTE_PROXY_FILE_BYTES {
-            bail!("RemoteProxy file exceeds byte budget");
+        let required = self.required_budget(&bytes)?;
+        if bytes.len() > MAX_REMOTE_PROXY_FILE_BYTES
+            || (required > MAX_REMOTE_PROXY_FILE_BYTES
+                && self
+                    .persisted_required
+                    .get()
+                    .is_none_or(|old| required > old))
+        {
+            bail!("remote_proxy_byte_budget");
         }
         deepseek_tui::utils::write_atomic(&self.path, &bytes)
-            .with_context(|| format!("persist RemoteProxy records to {}", self.path.display()))
+            .with_context(|| format!("persist RemoteProxy records to {}", self.path.display()))?;
+        self.persisted_required.set(Some(required));
+        Ok(())
     }
 
     fn validate_global_request_ids(&self) -> Result<()> {
@@ -141,6 +186,37 @@ impl RemoteProxyState {
             }
         }
         Ok(())
+    }
+
+    /// Admission reserves growth for pending settlement and a complete bounded
+    /// authenticated snapshot. Tombstones are never discarded to fit the file.
+    /// Persistence is compact JSON, exactly like the projection validator.
+    /// Epochs allow control characters: each input byte may escape to six JSON
+    /// bytes. 64*(128*6+3)+2 bounds the whole epoch array; 1KiB bounds the cursor.
+    /// Subtract current serialized use so growth consumes, not duplicates,
+    /// the reservation. Each pending handle has 1KiB settlement headroom.
+    pub(super) fn required_budget(&self, bytes: &[u8]) -> Result<usize> {
+        let mut required = bytes.len();
+        for record in self
+            .records
+            .values()
+            .filter(|record| !record.pending.is_empty())
+        {
+            let projection_bytes = serde_json::to_vec(&record.projection)?.len();
+            let epoch_bytes = serde_json::to_vec(&record.retired_epochs)?.len();
+            let cursor_bytes = serde_json::to_vec(&record.authenticated_cursor)?.len();
+            required = required
+                .saturating_add(MAX_PROJECTION_BYTES.saturating_sub(projection_bytes))
+                .saturating_add((64 * (128 * 6 + 3) + 2_usize).saturating_sub(epoch_bytes))
+                .saturating_add(1024_usize.saturating_sub(cursor_bytes));
+            for pending in &record.pending {
+                // Prepared→attempted and reservation fingerprint growth must
+                // consume already reserved space, even at exact admission cap.
+                required = required
+                    .saturating_add(1024_usize.saturating_sub(serde_json::to_vec(pending)?.len()));
+            }
+        }
+        Ok(required)
     }
 }
 
