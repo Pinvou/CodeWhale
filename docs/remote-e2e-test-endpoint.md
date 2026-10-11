@@ -49,6 +49,6 @@ bash scripts/deploy-remote-relay-test.sh --teardown
 
 ## 验证边界
 
-`npm --prefix remote-control-relay test` 覆盖 Relay 与部署合同；Windows 本机还需取得 PowerShell 属主、身份与 launcher 的实际执行结果，平台 skip 不算通过。WebUI 浏览器 smoke 使用 `npm --prefix pinvou3-app run test:webui`。这些检查不执行真实 SSH、生产部署、线上回滚或双 Windows 验收。
+`npm --prefix remote-control-relay test` 覆盖 Relay 与离线部署合同；`node scripts/run-windows-relay-tools-tests.mjs` 在原生 Windows PowerShell 5.1 执行属主、身份与 launcher 三组测试，CI 的 `windows-relay-tools-test` 同样执行且禁止零计数或 skip。健康片段覆盖有界重试/请求超时和恢复旧 unit，不代表完整故障矩阵（#1429）。WebUI 浏览器 smoke 使用 `npm --prefix pinvou3-app run test:webui`。这些检查不执行真实 SSH、生产部署、线上回滚或双 Windows 验收。
 
 真实双机旅程与发布门禁见 [部署说明](Windows双端远程控制服务部署说明.md) 和 [发布与回滚](Windows双端远程控制发布与回滚.md)。敏感信息或未修漏洞按 CONTRIBUTING.md 中的私密安全报告通道处理，不在公开 Issue 粘贴实例值。
