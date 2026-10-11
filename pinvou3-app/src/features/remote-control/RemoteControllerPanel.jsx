@@ -3,6 +3,7 @@ import { AlertTriangle, CheckCircle2, Clock, Lock, RefreshCw } from '../../compo
 import { bridge } from '../../hooks/useBridge.js';
 import { connectionErrorKey, controllerConnectionUiState } from './remote-control-logic.mjs';
 import RemoteConnectForm from './RemoteConnectForm.jsx';
+import RemoteProxyArchivePanel from './RemoteProxyArchivePanel.jsx';
 
 const ACTIVE_STATES = ['connecting', 'safety_handshake', 'connected', 'reconnecting'];
 const ERROR_STATES = ['invalid', 'busy', 'offline', 'version', 'protocol', 'unsupported', 'local_busy', 'failed'];
@@ -125,6 +126,15 @@ export default function RemoteControllerPanel({
     }
   };
 
+  const openConversation = async () => {
+    if (busy) return;
+    setBusy(true);
+    setDisconnectError(null);
+    try { await onConversationOpen?.(); }
+    catch (failure) { setDisconnectError(connectionErrorKey(failure?.code)); }
+    finally { setBusy(false); }
+  };
+
   return (
     <section data-testid="remote-controller-panel" data-ui-state={state} aria-labelledby="remote-controller-panel-title" className="space-y-4">
       <div>
@@ -139,7 +149,7 @@ export default function RemoteControllerPanel({
           deviceName={connection.deviceName}
           busy={busy}
           onDisconnect={disconnect}
-          onOpen={onConversationOpen}
+          onOpen={onConversationOpen ? openConversation : undefined}
         />
       )}
 
@@ -171,6 +181,7 @@ export default function RemoteControllerPanel({
         <Lock size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
         <span>{copy.securityNotice}</span>
       </div>
+      <RemoteProxyArchivePanel t={t} />
     </section>
   );
 }
