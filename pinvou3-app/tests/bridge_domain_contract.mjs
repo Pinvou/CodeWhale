@@ -31,6 +31,7 @@ export const desktopBridgeApi = {
     'isAvailable',
     'listExportableModels',
     'listRemoteProxyHistory', 'readRemoteProxyHistory', 'deleteRemoteProxyHistory', 'openLiveRemoteProxy',
+    'archiveRemoteProxyHistory', 'listRemoteProxyArchiveCandidates', 'listRemoteProxyArchives',
     'permissionDecide', 'permissionDenyTask', 'permissionList', 'controlledPermissionList', 'setEndpointProfile',
     'reserveRemoteTask', 'commitRemoteTask', 'cancelRemoteTask', 'abandonRemoteTask',
   ],
