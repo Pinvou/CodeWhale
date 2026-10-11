@@ -453,6 +453,10 @@ jobs:
               - 'remote-control-relay/**'
               - 'scripts/deploy-remote-relay.sh'
               - 'scripts/deploy-remote-relay-test.sh'
+              - 'scripts/remote-control-local-selftest.ps1'
+              - 'scripts/run-remote-control-endpoint.ps1'
+              - 'scripts/run-windows-relay-tools-tests.mjs'
+              - 'scripts/windows-relay-tools-test-summary.mjs'
               - '.github/workflows/pr-check.yml'
             team_relay_hub:
               - 'team-relay-hub/**'
@@ -812,6 +816,24 @@ jobs:
           bash -n scripts/deploy-remote-relay.sh
           bash -n scripts/deploy-remote-relay-test.sh
           npm --prefix remote-control-relay test
+
+  windows-relay-tools-test:
+    name: windows-relay-tools-test
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: remote-control-relay/package-lock.json
+      - name: 安装 relay 依赖
+        run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
+      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）
+        run: node scripts/run-windows-relay-tools-tests.mjs
 
   team-relay-hub-test:
     name: team-relay-hub-test
@@ -2327,6 +2349,7 @@ jobs:
       - fast-gate
       - frontend-test
       - relay-test
+      - windows-relay-tools-test
       - team-relay-hub-test
       - update-release-console-test
       - release-contract-test
@@ -2361,6 +2384,8 @@ jobs:
           FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
+          WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}
+          RELAY_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.relay == 'true' }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
           UPDATE_RELEASE_CONSOLE_RESULT: ${{ needs.update-release-console-test.result }}
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
@@ -2395,11 +2420,17 @@ jobs:
             exit 1
           fi
 
+          if [[ "$RELAY_REQUIRED_BY_POLICY" == "true" && ( "$RELAY_RESULT" != success || "$WINDOWS_RELAY_RESULT" != success ) ]]; then
+            echo "Relay 变更要求 Linux 与 Windows 实际回归成功: relay=$RELAY_RESULT windows-relay=$WINDOWS_RELAY_RESULT" >&2
+            exit 1
+          fi
+
           failed=0
           for item in \
             "backflow-portability:$BACKFLOW_PORTABILITY_RESULT" \
             "frontend-test:$FRONTEND_RESULT" \
             "relay-test:$RELAY_RESULT" \
+            "windows-relay-tools-test:$WINDOWS_RELAY_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
             "update-release-console-test:$UPDATE_RELEASE_CONSOLE_RESULT" \
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \

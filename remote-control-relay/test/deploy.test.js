@@ -101,19 +101,20 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
     "-C", "..",
     "docs/schemas/behavior-telemetry-v1.schema.json",
     "docs/schemas/behavior-telemetry-registries.json",
-  ], { cwd: repoRoot });
+  ], { cwd: repoRoot, timeout: 10_000 });
   assert.equal(packed.status, 0, packed.stderr?.toString("utf8"));
   const extracted = spawnSync("tar", ["-xzf", "-"], {
     cwd: stage,
     input: packed.stdout,
     encoding: "utf8",
+    timeout: 10_000,
   });
   assert.equal(extracted.status, 0, extracted.stderr);
   const loaded = spawnSync(process.execPath, [
     "--input-type=module",
     "-e",
     "await import('./telemetry-service.js')",
-  ], { cwd: stage, encoding: "utf8" });
+  ], { cwd: stage, encoding: "utf8", timeout: 10_000 });
   assert.equal(loaded.status, 0, loaded.stderr);
 });
 
@@ -136,13 +137,13 @@ test("staged controller smoke resolves its protocol after the real module instal
   const loop = source.match(/for module in "\$code_stage"\/\*\.js; do[\s\S]*?\r?\ndone/);
   assert.ok(loop, "the deployment must install the complete root module set");
   const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
-  const copied = spawnSync(bash, ["-c", `set -euo pipefail\ncode_stage=stage\nremote_dir=installed\n${loop[0]}`], { cwd: root, encoding: "utf8" });
+  const copied = spawnSync(bash, ["-c", `set -euo pipefail\ncode_stage=stage\nremote_dir=installed\n${loop[0]}`], { cwd: root, encoding: "utf8", timeout: 10_000 });
   assert.equal(copied.status, 0, copied.stderr || String(copied.error));
   const loaded = spawnSync(process.execPath, [
     "--input-type=module",
     "-e",
     "await import('./stage/scripts/controller-route-smoke.mjs'); await import('./stage/scripts/deploy-controller-preflight.mjs')",
-  ], { cwd: root, encoding: "utf8" });
+  ], { cwd: root, encoding: "utf8", timeout: 10_000 });
   assert.equal(loaded.status, 0, loaded.stderr);
   assert.equal(await readFile(join(installed, "protocol-controller.js"), "utf8"), await readFile(join(stage, "protocol-controller.js"), "utf8"));
   assert.equal(await readFile(join(installed, "cli-entrypoint.js"), "utf8"), await readFile(join(stage, "cli-entrypoint.js"), "utf8"));
@@ -150,7 +151,7 @@ test("staged controller smoke resolves its protocol after the real module instal
   // helper dependency must resolve, and the gate must execute before mutation.
   const command = source.match(/^node "\$code_stage\/scripts\/deploy-controller-preflight\.mjs" "\$controller_env"$/m);
   assert.ok(command, "exercise the actual staged CLI invocation");
-  const rejected = spawnSync(bash, ["-c", `set -euo pipefail\ncode_stage=stage\ncontroller_env=missing-controller.env\n${command[0]}`], { cwd: root, encoding: "utf8" });
+  const rejected = spawnSync(bash, ["-c", `set -euo pipefail\ncode_stage=stage\ncontroller_env=missing-controller.env\n${command[0]}`], { cwd: root, encoding: "utf8", timeout: 10_000 });
   assert.equal(rejected.status, 1, rejected.error?.message || rejected.stderr);
   assert.equal(rejected.stderr.trim(), "ENOENT");
 });
@@ -173,7 +174,7 @@ test("deploy module collection does not require mapfile and preserves relative n
     'RELAY_DIR="$1"',
     collection[0],
     'printf \'%s\\n\' "${relay_modules[@]}"',
-  ].join("\n"), "collect", relayDir.replaceAll("\\", "/")], { encoding: "utf8" });
+  ].join("\n"), "collect", relayDir.replaceAll("\\", "/")], { encoding: "utf8", timeout: 10_000 });
   assert.equal(collected.status, 0, collected.error?.message || collected.stderr);
   assert.deepEqual(collected.stdout.trim().split(/\r?\n/), ["./extra module.js", "./server.js"]);
 });
@@ -264,7 +265,7 @@ test("deployment SSH mock recognizes timestamped rollback and rejects unknown ca
   const remoteCommand = (...args) => spawnSync(bash, [
     "-c", mockedSshScript(shellLog), "mock-ssh", "-i", "fixture-key",
     "-o", "BatchMode=yes", "fixture.invalid", "bash", "-s", "--", ...args,
-  ], { input: "", encoding: "utf8" });
+  ], { input: "", encoding: "utf8", timeout: 10_000 });
   const deployed = remoteCommand(remoteDir, "fixture.service", "20261001-123456", ...Array(8).fill("/tmp/fixture"));
   assert.equal(deployed.status, 0, deployed.stderr);
   for (const stamp of ["20261001-123456", "20261102-234567"]) {
@@ -292,6 +293,8 @@ test("deploy script rolls back when post-deploy public verification fails", {
   const bin = join(root, "bin");
   const log = join(root, "calls.log");
   await mkdir(bin);
+  const hardening = join(root, "operator-hardening.conf");
+  await writeFile(hardening, "TEST_ONLY_OFFLINE_SSH_MOCK_INPUT");
 
   await executable(join(bin, "node"), "#!/usr/bin/env bash\nexit 0\n");
   await executable(join(bin, "npm"), "#!/usr/bin/env bash\nexit 0\n");
@@ -330,10 +333,12 @@ esac
       SSH_KEY: "fixture-key",
       PINVOU_REMOTE_DIRECT_URL: "http://direct.invalid/pinvou3/remote",
       PINVOU_CONFIRM_PRODUCTION_DEPLOY: "1",
+      PINVOU_REMOTE_HARDENING_FILE: hardening,
       SKIP_WEB_BUILD: "1",
       SKIP_LOCAL_TESTS: "1",
     },
     encoding: "utf8",
+    timeout: 20_000,
   });
   const output = `${result.stdout}\n${result.stderr}`;
   assert.equal(result.status, 1, output);

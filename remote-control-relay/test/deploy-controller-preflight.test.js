@@ -135,6 +135,11 @@ test("production controller environment requires matching literal proxy addresse
     .replace("PINVOU_REMOTE_ALLOWED_PROXY_IPS=192.0.2.10", "PINVOU_REMOTE_ALLOWED_PROXY_IPS=192.0.2.10,2001:db8::10")
     .replace("PINVOU_REMOTE_TRUSTED_PROXY_IPS=192.0.2.10", "PINVOU_REMOTE_TRUSTED_PROXY_IPS=2001:db8::10,192.0.2.10");
   assert.doesNotThrow(() => validateControllerEnvironment(parseControllerEnvironment(multiple)));
+  const ipv6 = VALID_ENV.replaceAll("=192.0.2.10", "=2001:db8::10");
+  assert.doesNotThrow(() => validateControllerEnvironment(parseControllerEnvironment(ipv6)));
+  assert.throws(() => validateControllerEnvironment(parseControllerEnvironment(
+    ipv6.replace("PINVOU_REMOTE_TRUSTED_PROXY_IPS=2001:db8::10", "PINVOU_REMOTE_TRUSTED_PROXY_IPS=2001:db8::11"),
+  )), /controller_env_proxy_ips_mismatch/u);
 });
 
 test("production controller environment rejects links, loose modes, and non-root owners", () => {
