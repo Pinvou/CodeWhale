@@ -1,10 +1,13 @@
 //! SessionStore-owned remote session records. No transport or Tauri dependency.
 
+mod archive;
+mod archive_lifecycle;
 pub(crate) mod binding;
 pub(crate) mod history;
 pub(crate) mod outbox;
 mod persistence;
 pub(crate) mod projection;
+mod records;
 pub(crate) mod routing;
 pub(crate) mod schema;
 
@@ -26,6 +29,10 @@ pub(crate) struct RemoteProxyState {
     /// A failed load disables remote writes for this process. Keep the original
     /// file untouched rather than replacing unreadable history with an empty map.
     pub(super) load_failed: bool,
+    pub(super) archives: archive::ArchiveStore,
+    /// Last successfully durable reservation total. Legacy files may exceed
+    /// new admission headroom; recovery writes may reduce, never increase it.
+    pub(super) persisted_required: std::cell::Cell<Option<usize>>,
 }
 
 #[cfg(test)]

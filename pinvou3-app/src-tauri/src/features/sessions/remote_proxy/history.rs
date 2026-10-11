@@ -11,6 +11,10 @@ use crate::features::sessions::SessionStore;
 impl SessionStore {
     pub(crate) fn hide_remote_proxy_history(&self, local_session_id: &str) -> Result<()> {
         let mut state = self.remote_proxies.lock();
+        state.require_available()?;
+        if state.archives.contains(local_session_id)? {
+            return state.archives.hide(local_session_id);
+        }
         let mut record = state
             .records
             .get(local_session_id)

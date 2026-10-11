@@ -269,7 +269,7 @@ export function activeRemoteTaskId(localSessionId, history) {
 }
 
 export function remoteProxyHandshakeBinding(localSessionId, history, connection) {
-  if (!remoteProxyForSession(localSessionId, history)
+  if (history?.archived === true || !remoteProxyForSession(localSessionId, history)
     || !connection || connection.status !== 'connected'
     || !connection.sessionRef
     || connection.sessionMode !== 'chat'
