@@ -237,3 +237,22 @@ ChatView 重试提交跨 composer identity 退休后，transfer guard.finish 为
 跳过全组件 remoteDispatchAction 的清理；独立审核用实际函数、guard 与 case helper
 作内存执行确认 UI busy 残留。按 P3 可用性登记，不再称不可达，不混为认证漏洞或
 导航读取意图问题；后续需精确 owner 收尾与真实组件迟到 Promise 回归。
+
+### 推送后的 CI 平台与入口修正
+
+提交 b3c981373 的 frontend-test 在 Knip 报归档 smoke 未登记执行入口；rust-lint
+在 Linux core harness 编译时报 metadata_is_plain_file 只有 Windows 定义。两项
+实际失败均为本轮引入，立即停止 A09 传播，尚未提交或推送其本地合并。
+
+Knip 新增该 smoke 的精确 entry，不扩大 ignore；selector 回归同时验证执行清单
+和 entry。普通文件 helper 提供非 Windows 定义，Windows 仍检查 reparse；保留
+后续 pathname/inode 校验。受支持 Unix 的打开使用 NOFOLLOW/NONBLOCK/CLOEXEC，
+拒绝最终 symlink，避免被替换 FIFO 在类型检查前阻塞。新增普通/缺失/目录、
+Unix symlink/被替换 inode 以及有限等待的 FIFO 真实测试；只操作临时测试目录。
+
+Linux 动态执行仍须以新提交 CI 为准，不以 Windows 通过冒充。本机 WSL 不可用；
+额外 Linux 目标编译尝试在 MSVC build-script 链接器缺失时失败，没有算作通过。
+随后以独立 GNU host 工具链和其配套 CRT 完成实际 filesystem.rs 全文件及测试的
+x86_64-unknown-linux-gnu cargo check --tests。临时校验包只位于忽略的 target，
+不修改项目依赖、默认工具链或门禁；只证明该源码的 Linux 目标编译，不等价于
+完整 app/core harness 的 Linux 构建或 Unix 动态执行，初次失败记录仍保留。

@@ -8,6 +8,7 @@
     "src/app/personas-overlay.js",
     "tests/*.test.{js,mjs}",
     "tests/*.js",
+    "tests/remote_archive_smoke.mjs",
     "src/platform/tauri/bridge.js",
     "src/platform/tauri/bridge/*.js",
     "src/platform/web/bridge.js",

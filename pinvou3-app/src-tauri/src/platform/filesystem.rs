@@ -309,6 +309,15 @@ pub(crate) fn create_private_file_once(path: &Path, content: &[u8]) -> io::Resul
 pub(crate) fn pin_plain_database_file(path: &Path) -> io::Result<File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", target_pointer_width = "64")
+    ))]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // Reject aliases before open and never block on a substituted FIFO.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt as _;
@@ -2487,13 +2496,17 @@ fn windows_file_identity(file: &File) -> io::Result<(u32, u64)> {
     Ok((information.dwVolumeSerialNumber, file_index))
 }
 
-#[cfg(windows)]
 fn metadata_is_plain_file(metadata: &std::fs::Metadata) -> bool {
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
         return false;
     }
-    use std::os::windows::fs::MetadataExt as _;
-    windows_attributes_are_not_reparse(metadata.file_attributes())
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        return windows_attributes_are_not_reparse(metadata.file_attributes());
+    }
+    #[cfg(not(windows))]
+    true
 }
 
 #[cfg(any(
@@ -2746,6 +2759,57 @@ pub(crate) mod tests {
     use std::path::Path;
 
     use super::{atomic_write, atomic_write_private, is_executable_file, quarantine_corrupt_file};
+
+    #[test]
+    fn database_pin_accepts_plain_file_and_rejects_missing_or_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("archive.sqlite3");
+        assert!(super::pin_plain_database_file(&path).is_err());
+        assert!(super::pin_plain_database_file(temp.path()).is_err());
+        std::fs::write(&path, b"plain").unwrap();
+        let pinned = super::pin_plain_database_file(&path).unwrap();
+        assert!(super::reserved_target_is_unchanged(&pinned, &path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_pin_rejects_symlink_and_detects_replaced_inode() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("archive.sqlite3");
+        let alias = temp.path().join("alias.sqlite3");
+        std::fs::write(&path, b"original").unwrap();
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(super::pin_plain_database_file(&alias).is_err());
+        let pinned = super::pin_plain_database_file(&path).unwrap();
+        std::fs::rename(&path, temp.path().join("retired.sqlite3")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        assert!(!super::reserved_target_is_unchanged(&pinned, &path));
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", target_pointer_width = "64")
+    ))]
+    #[test]
+    fn database_pin_rejects_fifo_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("archive.sqlite3");
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: c_path is a live, NUL-terminated private temporary pathname.
+        assert_eq!(
+            unsafe { super::platform_libc::mkfifo(c_path.as_ptr(), 0o600) },
+            0
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(super::pin_plain_database_file(&path).is_err());
+        });
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(3)),
+            Ok(true)
+        );
+    }
 
     #[cfg(windows)]
     #[test]
