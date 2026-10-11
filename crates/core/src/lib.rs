@@ -273,6 +273,55 @@ impl IntakeValidationError {
 /// session and bounds that work to a constant.
 pub const MAX_WORKSPACE_ROOTS: usize = 64;
 
+/// Comparison-local spelling normalization (round-39 B39-2): on Windows,
+/// `std::fs::canonicalize` returns verbatim `\\?\`-prefixed paths while
+/// lexical spellings keep the DOS form, and the two prefix components never
+/// compare equal — so a comparison mixing one canonicalized side with one
+/// lexical side silently skips the ancestor/filesystem-root guard (the
+/// fail-open). Strip the verbatim prefix (mapping `\\?\UNC\` to `\\`) and
+/// case-fold, mirroring the repo's existing
+/// `normalize_windows_path_for_comparison` precedent in codewhale-config.
+/// A no-op on Unix, where case is significant and no verbatim prefix
+/// exists.
+#[cfg(target_os = "windows")]
+fn comparison_spelling(path: &Path) -> String {
+    let spelling = path.to_string_lossy().replace('/', "\\");
+    let folded = spelling.to_ascii_lowercase();
+    if let Some(rest) = folded.strip_prefix(r"\\?\unc\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = folded.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        folded
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn comparison_spelling(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// Separator-boundary prefix test over [`comparison_spelling`] output: true
+/// when `haystack` equals `needle` or extends it by one path component.
+fn comparison_contains(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() || !haystack.starts_with(needle) {
+        return false;
+    }
+    if haystack.len() == needle.len() {
+        return true;
+    }
+    // A filesystem-root needle ("/", a drive root like `d:`/`d:\`, a UNC
+    // share root) ends in its own separator or colon and contains every
+    // path that starts with it — no further boundary is needed.
+    if needle.ends_with('/') || needle.ends_with('\\') || needle.ends_with(':') {
+        return true;
+    }
+    matches!(
+        haystack.as_bytes().get(needle.len()),
+        Some(b'/') | Some(b'\\')
+    )
+}
+
 /// Intake validation for a caller-declared root set: admit it whole or reject
 /// it with an error, never silently reshape it.
 ///
@@ -338,6 +387,7 @@ pub fn validate_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
     // owns materialization; the same-disk TOCTOU is the disclosed
     // inherent one).
     let primary_real = cwd.canonicalize().unwrap_or_else(|_| primary.clone());
+    let primary_cmp = comparison_spelling(&primary_real);
     for root in roots {
         if root.as_os_str().is_empty() || !root.is_absolute() {
             return Err(IntakeValidationError::err(format!(
@@ -352,7 +402,11 @@ pub fn validate_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
                  attaching it would make the whole filesystem writable"
             )));
         }
-        if primary_real != judged && primary_real.starts_with(&judged) {
+        // Round-39 B39-2: compare through the spelling normalizer — a
+        // verbatim-canonicalized side must never silently fail to equal or
+        // contain its DOS-form counterpart (the Windows fail-open).
+        let judged_cmp = comparison_spelling(&judged);
+        if primary_cmp != judged_cmp && comparison_contains(&primary_cmp, &judged_cmp) {
             return Err(IntakeValidationError::err(format!(
                 "workspace root {root:?} contains the primary root {cwd:?}; \
                  attaching an ancestor of the primary would widen the sandbox \
@@ -408,13 +462,21 @@ pub fn validate_stored_workspace_roots(primary: &Path, stored: &[PathBuf]) -> Re
 pub fn sanitize_workspace_roots(cwd: &Path, stored: &[PathBuf]) -> (Vec<PathBuf>, usize) {
     let normalized = normalize_workspace_roots(cwd, stored);
     if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
-        return (Vec::new(), normalized.len());
+        return (Vec::new(), stored.len());
     }
+    // Round-39 minors 2+3: the count is the difference between the stored
+    // candidates (every non-head entry) and what the tolerant load actually
+    // arms — covering the shape normalizer's drops (relative/empty
+    // spellings), its cap truncation, and the poison loop below in one
+    // number, or the strip-and-warn receipt stays silent for part of its
+    // input (a relative entry stripped with dropped == 0; a hand-edited
+    // 70-root row silently truncating to 65).
+    let additional_in = stored.iter().filter(|root| root.as_path() != cwd).count();
     let primary_real = cwd
         .canonicalize()
         .unwrap_or_else(|_| normalize_lexical_components(cwd));
+    let primary_cmp = comparison_spelling(&primary_real);
     let mut clean = Vec::with_capacity(normalized.len());
-    let mut dropped = 0usize;
     for (index, root) in normalized.into_iter().enumerate() {
         // The cwd-first head is the primary slot itself.
         if index == 0 {
@@ -423,12 +485,15 @@ pub fn sanitize_workspace_roots(cwd: &Path, stored: &[PathBuf]) -> (Vec<PathBuf>
         }
         let judged = normalize_lexical_components(&root);
         let real = root.canonicalize().unwrap_or_else(|_| judged.clone());
-        if is_filesystem_root(&real) || (primary_real != real && primary_real.starts_with(&real)) {
-            dropped += 1;
+        let real_cmp = comparison_spelling(&real);
+        if is_filesystem_root(&real)
+            || (primary_cmp != real_cmp && comparison_contains(&primary_cmp, &real_cmp))
+        {
             continue;
         }
         clean.push(root);
     }
+    let dropped = additional_in.saturating_sub(clean.len().saturating_sub(1));
     (clean, dropped)
 }
 
@@ -526,12 +591,9 @@ fn resolve_resume_roots(
         // `..`-spelled copy of the OLD primary must drop with the primary
         // itself, or it survives the move as a phantom additional root the
         // re-validation then judges as a widening entry.
-        let old_head = normalize_lexical_components(persisted_cwd);
-        let additional: Vec<PathBuf> = persisted_roots
-            .iter()
-            .filter(|root| normalize_lexical_components(root.as_path()) != old_head)
-            .cloned()
-            .collect();
+        // Round-39 minor 8: the one shared strip — the primitive's
+        // "one implementation" doc holds for the move arm too.
+        let additional: Vec<PathBuf> = strip_workspace_roots_head(persisted_cwd, persisted_roots);
         // The persisted entries were admitted under the OLD primary; after
         // the caller moves it they must satisfy the same intake rules the
         // replacement set does, or the persisted row would grow a widening
@@ -1178,12 +1240,12 @@ impl ThreadManager {
         // stays an explicit clear.
         let workspace_roots = match params.workspace_roots.as_deref() {
             Some(roots) => roots.to_vec(),
-            None => parent_thread
-                .workspace_roots
-                .iter()
-                .filter(|root| root.as_path() != parent_thread.cwd)
-                .cloned()
-                .collect(),
+            // Round-39 B39-1: the shared LEXICAL head strip, like every
+            // other face converting a stored row into a declaration — a
+            // `..`-spelled copy of the parent's primary must drop with the
+            // head, or the abandoned directory stays writable in the
+            // fork's inherited set.
+            None => strip_workspace_roots_head(&parent_thread.cwd, &parent_thread.workspace_roots),
         };
         let new = self.spawn_thread_with_history(
             params
@@ -3897,6 +3959,66 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn sanitize_drops_a_symlink_spelled_ancestor_via_the_canonical_leg() {
+        // Round-39 minor 11: the canonical leg of the sanitizer — every
+        // other fixture uses nonexistent paths (lexical fallback); here the
+        // stored ancestor EXISTS and reaches the comparison as a canonical
+        // spelling.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("real");
+        let workspace = real.join("ws");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let link = temp.path().join("ancestor-link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink ancestor");
+        let keep = temp.path().join("keep");
+        std::fs::create_dir_all(&keep).expect("keep dir");
+
+        let (clean, dropped) =
+            sanitize_workspace_roots(&workspace, &[workspace.clone(), link, keep.clone()]);
+        assert_eq!(clean, vec![workspace.clone(), keep]);
+        assert_eq!(dropped, 1, "the canonical ancestor drop is counted");
+    }
+
+    #[test]
+    fn comparison_contains_respects_component_boundaries() {
+        // Round-39 B39-2: the mixed-spelling comparison helper's boundary
+        // rule — a needle is contained only at a path-component edge, never
+        // mid-component (/repo must not contain /rep.ro or /repository).
+        assert!(comparison_contains("/repo/main", "/repo"));
+        assert!(comparison_contains("/repo", "/repo"));
+        assert!(comparison_contains("/repo", "/"));
+        assert!(!comparison_contains("/repository", "/repo"));
+        assert!(!comparison_contains("/repo", "/repo/main"));
+        assert!(!comparison_contains("/repo", ""));
+        assert!(comparison_contains("d:\\work\\proj", "d:\\work"));
+        assert!(!comparison_contains("d:\\worksheet", "d:\\work"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn intake_rejects_a_mixed_spelling_ancestor_on_windows() {
+        // Round-39 B39-2 pin (runs on the required windows-latest check):
+        // canonicalize returns a verbatim `\\?\`-prefixed path while the
+        // lexical fallback keeps the DOS form — the two spellings must
+        // still compare as the same path, or the ancestor guard silently
+        // skipped whenever exactly one side canonicalized (the fail-open:
+        // an existing primary d:\work\proj plus a not-yet-materialized
+        // d:\work ancestor was admitted).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let primary = temp.path().join("proj");
+        std::fs::create_dir_all(&primary).expect("primary dir");
+        let ancestor = temp.path().to_path_buf();
+
+        let err = validate_workspace_roots(&primary, &[ancestor])
+            .expect_err("a mixed-spelling ancestor must be rejected on Windows");
+        assert!(
+            err.to_string().contains("contains the primary root"),
+            "the rejection names the widening: {err}"
+        );
+    }
+
+    #[test]
     fn stored_row_revalidation_round_trips_a_legal_full_load_row() {
         // Round-37 B37-2: the stored row persists the cwd-first full form —
         // the `validated` set above IS the stored shape. Feeding it back
@@ -4556,6 +4678,36 @@ mod tests {
             .expect("read fork")
             .expect("fork persisted");
         assert_eq!(persisted.workspace_roots, forked.thread.workspace_roots);
+    }
+
+    #[test]
+    fn fork_without_roots_strips_a_dot_dot_spelled_parent_head_copy() {
+        // Round-39 B39-1: the None-inherit arm is the sixth conversion
+        // face — a `..`-spelled copy of the parent's primary (admitted by
+        // intake, deduped raw-only by the normalizer) must drop with the
+        // head, or the abandoned directory stays writable in the fork's
+        // inherited set.
+        let store = temp_core_state("fork-roots-dotdot");
+        let mut metadata = test_thread_metadata("thread-parent");
+        metadata.cwd = PathBuf::from("/w/repo");
+        metadata.workspace_roots = vec![
+            PathBuf::from("/w/repo"),
+            PathBuf::from("/w/repo/sub/.."),
+            PathBuf::from("/repo/lib"),
+        ];
+        store.upsert_thread(&metadata).expect("seed thread");
+        let mut manager = ThreadManager::new(store);
+
+        let forked = manager
+            .fork_thread(&fork_params("thread-parent"))
+            .expect("fork thread")
+            .expect("parent found");
+
+        assert_eq!(
+            forked.thread.workspace_roots,
+            vec![PathBuf::from("/w/repo"), PathBuf::from("/repo/lib")],
+            "the dot-dot-spelled head copy drops with the head on inheritance"
+        );
     }
 
     #[test]

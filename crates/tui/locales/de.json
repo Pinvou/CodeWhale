@@ -1762,6 +1762,7 @@
   "ForkSourceSetRefused": "Fork nicht möglich: der auf {workspace} neu verankerte Quell-Root-Satz würde darüber hinaus erweitert ({reason}). Der Fork wurde abgelehnt; starte ihn aus einem Verzeichnis, über das der Satz nicht hinaus erweitert, oder entferne die erweiternden Roots außerhalb des TUI aus dem gespeicherten Datensatz.",
   "SaveLiveSetRefused": "Speichern nicht möglich: der aktuelle Root-Satz des Workspace besteht die Aufnahme nicht mehr ({reason}). Deklariere die Roots mit /workspace neu oder repariere den Session-Datensatz außerhalb des TUI.",
   "ForkLiveSetRefused": "Fork nicht möglich: der aktuelle Root-Satz des Workspace besteht die Aufnahme nicht mehr ({reason}). Deklariere die Roots mit /workspace neu oder repariere den Session-Datensatz außerhalb des TUI.",
+  "SanitizedLoadedRoots": "{count} Workspace-Root(s) aus der geladenen Session entfernt, die die Workspace-Aufnahme verweigert (Dateisystemwurzel, Vorfahr der primären Root, ungültige Schreibweise oder über der 64-Root-Grenze). Die Session läuft ohne sie, und das nächste Speichern persistiert den reduzierten Satz; erneut benötigte Roots mit /workspace wieder anhängen.",
   "WorkspaceRootsRemainder": "… (+{count} weitere)",
   "WorkspaceRootsNotice": "Zugängliche Ordner neben {workspace}: {roots}",
   "StatusLabelProjectDocs": "Projektdokumente",

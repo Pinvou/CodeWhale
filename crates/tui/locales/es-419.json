@@ -1762,6 +1762,7 @@
   "ForkSourceSetRefused": "No se puede bifurcar: el conjunto de raíces de origen reubicado en {workspace} se ampliaría más allá de él ({reason}). La bifurcación fue rechazada; comiénzala desde un directorio que el conjunto no amplíe, o quita las raíces que amplían del registro guardado fuera del TUI.",
   "SaveLiveSetRefused": "No se puede guardar: el conjunto de raíces actual del workspace ya no pasa la entrada ({reason}). Redeclara las raíces con /workspace o repara el registro de la sesión fuera del TUI.",
   "ForkLiveSetRefused": "No se puede bifurcar: el conjunto de raíces actual del workspace ya no pasa la entrada ({reason}). Redeclara las raíces con /workspace o repara el registro de la sesión fuera del TUI.",
+  "SanitizedLoadedRoots": "Se descartaron {count} raíz(es) del workspace de la sesión cargada que la entrada del workspace rechaza (raíz del sistema de archivos, ancestro de la raíz primaria, grafía inválida o por encima del límite de 64 raíces). La sesión funciona sin ellas y el próximo guardado persiste el conjunto reducido; vuelve a adjuntar cualquier raíz aún deseada con /workspace.",
   "WorkspaceRootsRemainder": "… (+{count} más)",
   "WorkspaceRootsNotice": "Carpetas accesibles además de {workspace}: {roots}",
   "StatusLabelProjectDocs": "Docs del proyecto",

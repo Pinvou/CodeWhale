@@ -1762,6 +1762,7 @@
   "ForkSourceSetRefused": "No es pot bifurcar: el conjunt d'arrels de l'origen reubicat a {workspace} s'ampliaria més enllà d'ell ({reason}). La bifurcació s'ha rebutjat; comença-la des d'un directori que el conjunt no ampliï, o elimina les arrels que amplien del registre desat fora del TUI.",
   "SaveLiveSetRefused": "No es pot desar: el conjunt d'arrels actual de l'workspace ja no passa l'entrada ({reason}). Redeclara les arrels amb /workspace o repara el registre de la sessió fora del TUI.",
   "ForkLiveSetRefused": "No es pot bifurcar: el conjunt d'arrels actual de l'workspace ja no passa l'entrada ({reason}). Redeclara les arrels amb /workspace o repara el registre de la sessió fora del TUI.",
+  "SanitizedLoadedRoots": "S'han descartat {count} arrel(s) del workspace de la sessió carregada que l'entrada del workspace rebutja (arrel del sistema de fitxers, ancestre de l'arrel primària, grafia no vàlida o per sobre del límit de 64 arrels). La sessió funciona sense elles i el proper desat persisteix el conjunt reduït; reannexiona qualsevol arrel encara desitjada amb /workspace.",
   "WorkspaceRootsRemainder": "… (+{count} més)",
   "WorkspaceRootsNotice": "Carpetes accessibles a més de {workspace}: {roots}",
   "StatusLabelProjectDocs": "Docs del projecte",

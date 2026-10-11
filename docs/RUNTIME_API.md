@@ -606,10 +606,14 @@ provider, model, workspace, and permission fields:
 `workspace_roots` (added by the multi-root workspace theme) declares the
 thread's full accessible root set: the first entry is the primary root (the
 thread's `workspace`) and the rest are attached roots whose writes the
-thread's sandbox policy, write carve-out, and repo law also govern. One
-server-side substitution qualifies "first entry": when the request omits
-`workspace`, the server fills in its own workspace, which takes the primary
-slot and demotes the client-sent first entry to an attached root. Omitting
+thread's sandbox policy, write carve-out, and repo law also govern. Two
+server-side qualifications apply to "first entry" (round-39 B39-4): when
+the request omits `workspace`, the server fills in its own workspace,
+which takes the primary slot and demotes the client-sent first entry to an
+attached root; and when `workspace` IS present and `workspace_roots[0]`
+differs from it, the same silent demotion applies — the `workspace` field
+is always the primary, and the declared first entry rides as an attached
+root. Omitting
 the field yields the historical single-root thread: the stored set is
 `[workspace]`, serialized as a one-element array (see the ThreadRecord note
 under "Runtime data model"). `PATCH
@@ -1092,10 +1096,13 @@ The runtime uses a durable Thread/Turn/Item lifecycle.
   non-empty ABSOLUTE path, so an absolute-workspace thread created through
   `POST /v1/threads` serializes at least one element — a single-root
   thread reads `"workspace_roots": ["<workspace>"]` — while a relative
-  workspace (rejected by the validating faces, tolerated only by legacy
-  rows) collapses the set to empty and the key is omitted; any row whose
-  normalized set is empty — including every row persisted before the field
-  existed — omits the key entirely), `mode`,
+  workspace collapses the set to empty and the key is omitted. NOTE
+  (round-39 B39-4): `POST /v1/threads` rejects only an EMPTY workspace —
+  a fresh relative-workspace row is mintable through this API today (the
+  inline guard records that "requires it to be absolute" overclaims), so
+  the collapsed shape is NOT legacy-only; any row whose normalized set is
+  empty — including every row persisted before the field existed — omits
+  the key entirely), `mode`,
   `task_id`, `system_prompt`, `latest_turn_id`,
   `latest_response_bookmark`, `archived`
 - **TurnRecord** — `id`, `thread_id`, `status` (`queued|in_progress|completed|

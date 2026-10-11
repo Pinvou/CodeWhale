@@ -1590,6 +1590,7 @@ pub enum MessageId {
     ForkSourceSetRefused,
     SaveLiveSetRefused,
     ForkLiveSetRefused,
+    SanitizedLoadedRoots,
     // Underwater post-launch empty state.
     EmptyStateNoGit,
     EmptyStateMcpLabel,
@@ -3725,6 +3726,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ForkSourceSetRefused,
     MessageId::SaveLiveSetRefused,
     MessageId::ForkLiveSetRefused,
+    MessageId::SanitizedLoadedRoots,
     MessageId::EmptyStateNoGit,
     MessageId::EmptyStateMcpLabel,
     MessageId::EmptyStatePrompt,

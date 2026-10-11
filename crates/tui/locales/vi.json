@@ -1762,6 +1762,7 @@
   "ForkSourceSetRefused": "Không thể fork: bộ gốc của nguồn đặt lại lên {workspace} sẽ mở rộng vượt ra ngoài nó ({reason}). Lần fork bị từ chối; hãy bắt đầu từ một thư mục mà bộ không mở rộng vượt qua, hoặc xóa các gốc mở rộng khỏi bản ghi đã lưu bên ngoài TUI.",
   "SaveLiveSetRefused": "Không thể lưu: bộ gốc workspace hiện tại không còn vượt qua intake ({reason}). Hãy khai báo lại bộ gốc bằng /workspace hoặc sửa bản ghi phiên bên ngoài TUI.",
   "ForkLiveSetRefused": "Không thể fork: bộ gốc workspace hiện tại không còn vượt qua intake ({reason}). Hãy khai báo lại bộ gốc bằng /workspace hoặc sửa bản ghi phiên bên ngoài TUI.",
+  "SanitizedLoadedRoots": "Đã loại {count} root khỏi phiên được tải mà intake của workspace từ chối (gốc hệ thống tệp, tổ tiên của primary, chính tả không hợp lệ hoặc vượt giới hạn 64 root). Phiên chạy không có chúng và lần lưu kế tiếp sẽ ghi bộ đã thu gọn; hãy gắn lại root còn cần bằng /workspace.",
   "WorkspaceRootsRemainder": "… (+{count} nữa)",
   "WorkspaceRootsNotice": "Thư mục có thể truy cập bên cạnh {workspace}: {roots}",
   "StatusLabelProjectDocs": "Tài liệu dự án",

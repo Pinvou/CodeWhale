@@ -664,9 +664,14 @@ pub(crate) fn note_sanitized_loaded_roots(app: &mut crate::tui::app::App, droppe
     if dropped == 0 {
         return;
     }
-    let notice = format!(
-        "Dropped {dropped} workspace root(s) from the loaded session that failed the          workspace intake (filesystem root or primary ancestor); the session runs          without them. Repair the saved record outside the TUI to restore them."
-    );
+    // Round-39 minor 1: localized (all 15 packs), no literal runs of
+    // folded-source spaces, and an actionable remedy — the dropped classes
+    // are refused by every intake and the next autosave persists the
+    // reduced set, so "repair the record outside the TUI" was not
+    // actionable; re-attaching through /workspace is.
+    let notice = app
+        .tr(crate::localization::MessageId::SanitizedLoadedRoots)
+        .replace("{count}", &dropped.to_string());
     app.add_message(HistoryCell::System {
         content: notice.clone(),
     });
@@ -687,18 +692,14 @@ pub(crate) fn workspace_roots_notice(
     roots: &[PathBuf],
 ) -> Option<String> {
     const MAX_LISTED_ROOTS: usize = 5;
-    let additional: Vec<&PathBuf> = roots
-        .iter()
-        .filter(|root| root.as_path() != workspace)
-        .take(MAX_LISTED_ROOTS)
-        .collect();
+    // Round-39 minor 7: the shared lexical strip — a `..`-spelled copy of
+    // the primary is the head, not an attached root, in the notice too.
+    let stripped = codewhale_core::strip_workspace_roots_head(workspace, roots);
+    let additional: Vec<&PathBuf> = stripped.iter().take(MAX_LISTED_ROOTS).collect();
     if additional.is_empty() {
         return None;
     }
-    let remainder = roots
-        .len()
-        .saturating_sub(1)
-        .saturating_sub(additional.len());
+    let remainder = stripped.len().saturating_sub(additional.len());
     let listed = additional
         .into_iter()
         .map(|root| root.display().to_string())
@@ -1887,5 +1888,35 @@ mod seed_loaded_workspace_roots_tests {
             "the fs-root and the primary-ancestor entries drop, the clean head stays"
         );
         assert_eq!(dropped, 2, "both poison entries are named in the receipt");
+
+        // Round-39 minors 2+3: the receipt also counts the shape
+        // normalizer's own drops (a relative spelling) and its cap
+        // truncation — a silently-truncated over-cap row reports the
+        // truncation instead of loading quietly at 65.
+        let (_, dropped) = seed_loaded_workspace_roots(
+            &record_primary,
+            &[
+                std::path::PathBuf::from("/work/project"),
+                std::path::PathBuf::from("relative/root"),
+                std::path::PathBuf::from("/srv/data"),
+            ],
+        );
+        assert_eq!(
+            dropped, 1,
+            "a relative entry dropped by the shape normalizer is counted"
+        );
+
+        let mut over_cap = vec![std::path::PathBuf::from("/work/project")];
+        over_cap.extend(
+            (0..codewhale_core::MAX_WORKSPACE_ROOTS + 6)
+                .map(|i| std::path::PathBuf::from(format!("/srv/r{i}"))),
+        );
+        let (armed, dropped) = seed_loaded_workspace_roots(&record_primary, &over_cap);
+        assert_eq!(
+            armed.len(),
+            codewhale_core::MAX_WORKSPACE_ROOTS + 1,
+            "the tolerant load truncates at the cap"
+        );
+        assert_eq!(dropped, 6, "the cap truncation is counted, not silent");
     }
 }

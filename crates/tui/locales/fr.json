@@ -1762,6 +1762,7 @@
   "ForkSourceSetRefused": "Impossible de bifurquer : l'ensemble de racines source réancré sur {workspace} s'élargirait au-delà ({reason}). La bifurcation est refusée ; démarrez-la depuis un répertoire que l'ensemble n'élargit pas, ou nettoyez hors du TUI les racines élargissantes de l'enregistrement.",
   "SaveLiveSetRefused": "Impossible d'enregistrer : l'ensemble de racines actuel de l'espace de travail ne passe plus l'admission ({reason}). Redéclarez les racines avec /workspace ou réparez l'enregistrement de session hors du TUI.",
   "ForkLiveSetRefused": "Impossible de bifurquer : l'ensemble de racines actuel de l'espace de travail ne passe plus l'admission ({reason}). Redéclarez les racines avec /workspace ou réparez l'enregistrement de session hors du TUI.",
+  "SanitizedLoadedRoots": "{count} racine(s) d'espace de travail écartée(s) de la session chargée, refusée(s) par l'admission de l'espace de travail (racine du système de fichiers, ancêtre de la racine primaire, orthographe invalide ou au-delà de la limite de 64 racines). La session fonctionne sans elles et la prochaine enregistrement persiste l'ensemble réduit ; rattachez toute racine encore voulue via /workspace.",
   "WorkspaceRootsRemainder": "… (+{count} autres)",
   "WorkspaceRootsNotice": "Dossiers accessibles en plus de {workspace} : {roots}",
   "StatusLabelProjectDocs": "Docs du projet",

@@ -1762,6 +1762,7 @@
   "ForkSourceSetRefused": "フォークできません:ソースのルート一覧を {workspace} に再設定すると範囲を超えて拡大します({reason})。フォークは拒否されました。一覧が拡大しないディレクトリから開始するか、TUI の外で保存レコードから拡大するルートを取り除いてください。",
   "SaveLiveSetRefused": "保存できません:現在のルート一覧が intake を通らなくなりました({reason})。/workspace で再宣言するか、TUI の外でセッション記録を修復してください。",
   "ForkLiveSetRefused": "フォークできません:現在のルート一覧が intake を通らなくなりました({reason})。/workspace で再宣言するか、TUI の外でセッション記録を修復してください。",
+  "SanitizedLoadedRoots": "読み込んだセッションから、ワークスペース intake が拒否するルート（ファイルシステム根・主根の祖先・無効な綴り・64 根上限超過）を {count} 件除外しました。セッションはそれなしで動作し、次回の保存で縮小後のセットが永続化されます。必要なルートは /workspace で再追加してください。",
   "WorkspaceRootsRemainder": "…（ほか {count} 件）",
   "WorkspaceRootsNotice": "{workspace} のほかにアクセス可能なフォルダ: {roots}",
   "StatusLabelProjectDocs": "プロジェクト文書",

@@ -293,12 +293,13 @@ fn push_row(out: &mut String, locale: Locale, label: MessageId, value: &str) {
 /// above already names the only accessible root.
 fn workspace_roots_summary(app: &App) -> Option<String> {
     const MAX_LISTED_ROOTS: usize = 5;
-    let additional: Vec<String> = app
-        .workspace_roots
-        .iter()
-        .filter(|root| root.as_path() != app.workspace.as_path())
-        .map(|root| display_path(root))
-        .collect();
+    // Round-39 minor 7: the shared lexical strip — a `..`-spelled copy of
+    // the primary is the head, not an attached root, on the display too.
+    let additional: Vec<String> =
+        codewhale_core::strip_workspace_roots_head(&app.workspace, &app.workspace_roots)
+            .iter()
+            .map(|root| display_path(root))
+            .collect();
     if additional.is_empty() {
         return None;
     }

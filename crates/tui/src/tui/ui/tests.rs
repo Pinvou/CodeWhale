@@ -3870,6 +3870,65 @@ fn create_test_app() -> App {
 }
 
 #[test]
+fn autosave_snapshot_sanitizes_a_poisoned_live_root_set() {
+    // Round-39 minor 11: the autosave belt's non-identity case — a live set
+    // carrying poison (which the seed strips; this is the defense in depth)
+    // is sanitized onto the persisted snapshot instead of laundered.
+    let tmpdir = tempfile::TempDir::new().unwrap();
+    let mut app = create_test_app();
+    app.workspace = tmpdir.path().join("ws");
+    std::fs::create_dir_all(&app.workspace).unwrap();
+    let keep = tmpdir.path().join("keep");
+    std::fs::create_dir_all(&keep).unwrap();
+    app.workspace_roots = vec![
+        app.workspace.clone(),
+        std::path::PathBuf::from("/"),
+        keep.clone(),
+    ];
+
+    let manager =
+        crate::session_manager::SessionManager::new(tmpdir.path().join("sessions")).unwrap();
+    let snapshot =
+        super::frame::build_session_snapshot(&mut app, &manager).expect("snapshot builds");
+
+    assert_eq!(
+        snapshot.metadata.workspace_roots,
+        vec![app.workspace.clone(), keep],
+        "the belt strips the poison from the persisted snapshot"
+    );
+}
+
+#[test]
+fn sanitized_roots_receipt_is_localized_and_names_the_count() {
+    // Round-39 minor 1: the user-visible half of strip-and-warn — the
+    // receipt renders the localized message with the count substituted,
+    // carries no folded-source space runs, and names the actionable remedy
+    // (/workspace re-attach), not the unactionable "repair outside the
+    // TUI" (the next autosave persists the reduced set regardless).
+    let mut app = create_test_app();
+    super::session_state::note_sanitized_loaded_roots(&mut app, 3);
+    let message = app.status_message.expect("receipt surfaced");
+    assert!(message.contains('3'), "the count is substituted: {message}");
+    assert!(
+        !message.contains("  "),
+        "no folded-source space runs ship in the receipt: {message:?}"
+    );
+    assert!(
+        message.contains("/workspace"),
+        "the remedy names the re-attach command: {message}"
+    );
+    assert!(
+        !message.contains("Repair the saved record"),
+        "the unactionable remedy is gone: {message}"
+    );
+
+    // Zero drops stay silent.
+    let mut app = create_test_app();
+    super::session_state::note_sanitized_loaded_roots(&mut app, 0);
+    assert!(app.status_message.is_none(), "a clean load gets no receipt");
+}
+
+#[test]
 fn workspace_move_and_conversation_change_clear_session_approval_sets() {
     // Round-37 M37-6: session grants/denials are keyed to the primary the
     // approval was judged under (operand resolution + patch root binding),

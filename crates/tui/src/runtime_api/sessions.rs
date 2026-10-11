@@ -795,7 +795,17 @@ pub(super) async fn save_current_session(
         .runtime_threads
         .get_engine(&thread_id)
         .await
-        .map_err(|e| ApiError::internal(format!("Failed to get engine for thread: {e}")))?;
+        .map_err(|e| {
+            // Round-39 minor 4: the arming gate's poison refusal is a
+            // client-side record defect — the identical row answers 400 on
+            // `/v1/threads/{id}/resume`; 500 here was a within-PR
+            // inconsistency.
+            if e.to_string().contains("corrupt or hand-edited") {
+                ApiError::bad_request(format!("Failed to get engine for thread: {e}"))
+            } else {
+                ApiError::internal(format!("Failed to get engine for thread: {e}"))
+            }
+        })?;
 
     let snapshot = engine
         .get_session_snapshot()

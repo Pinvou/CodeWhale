@@ -4453,6 +4453,66 @@ async fn session_resume_thread_carries_persisted_workspace_roots() -> Result<()>
 }
 
 #[tokio::test]
+async fn session_resume_thread_answers_400_for_an_empty_workspace_row() -> Result<()> {
+    // Round-39 minor 11: a legacy/hand-edited row with an EMPTY workspace
+    // is a client-side record defect — the face's own doctrine is 400 with
+    // the reason (round-38 fixed the mapping; this pins it).
+    let root = std::env::temp_dir().join(format!("deepseek-session-empty-ws-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+    let session = json!({
+        "schema_version": 1,
+        "metadata": {
+            "id": "sess_empty_ws",
+            "title": "Empty workspace",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:10:00Z",
+            "message_count": 1,
+            "total_tokens": 10,
+            "model": "deepseek-v4-pro",
+            "workspace": "",
+            "mode": "agent"
+        },
+        "messages": [
+            { "role": "user", "content": [{ "type": "text", "text": "hi" }] }
+        ],
+        "system_prompt": null
+    });
+    fs::write(
+        sessions_dir.join("sess_empty_ws.json"),
+        serde_json::to_string_pretty(&session)?,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/sessions/sess_empty_ws/resume-thread"
+        ))
+        .json(&json!({ "model": "deepseek-v4-pro" }))
+        .send()
+        .await?;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "an empty-workspace row is a client defect, not a server fault"
+    );
+    let body: serde_json::Value = resp.json().await?;
+    assert!(
+        body.to_string().contains("workspace must not be empty"),
+        "the 400 carries the producer reason: {body}"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn session_resume_thread_survives_a_legal_full_load_row() -> Result<()> {
     // Round-37 B37-2, the resume-thread face: a session saved with a 64-root
     // declaration persists the 65-entry cwd-first full form. Re-declaring

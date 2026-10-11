@@ -1762,6 +1762,7 @@
   "ForkSourceSetRefused": "Cannot fork: the source root set re-based onto {workspace} would widen past it ({reason}). The fork is refused; start it from a directory the set does not widen past, or clear the widening roots from the saved record outside the TUI.",
   "SaveLiveSetRefused": "Cannot save: the live workspace root set no longer passes intake ({reason}). Re-declare the roots with /workspace or repair the session record outside the TUI.",
   "ForkLiveSetRefused": "Cannot fork: the live workspace root set no longer passes intake ({reason}). Re-declare the roots with /workspace or repair the session record outside the TUI.",
+  "SanitizedLoadedRoots": "Dropped {count} workspace root(s) from the loaded session that the workspace intake refuses (filesystem root, primary ancestor, invalid spelling, or past the 64-root cap). The session runs without them and the next save persists the reduced set; re-attach any still-wanted root with /workspace.",
   "WorkspaceRootsRemainder": "… (+{count} more)",
   "WorkspaceRootsNotice": "Accessible folders beside {workspace}: {roots}",
   "StatusLabelProjectDocs": "Project docs",

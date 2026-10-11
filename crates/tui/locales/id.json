@@ -1762,6 +1762,7 @@
   "ForkSourceSetRefused": "Tidak dapat fork: himpunan root sumber yang dipasang ulang ke {workspace} akan melebar melewatinya ({reason}). Fork ditolak; mulailah dari direktori yang tidak dilebarkan himpunan tersebut, atau bersihkan root yang melebar dari rekaman tersimpan di luar TUI.",
   "SaveLiveSetRefused": "Tidak dapat menyimpan: himpunan root workspace saat ini tidak lagi lolos intake ({reason}). Deklarasikan ulang root dengan /workspace atau perbaiki rekaman sesi di luar TUI.",
   "ForkLiveSetRefused": "Tidak dapat fork: himpunan root workspace saat ini tidak lagi lolos intake ({reason}). Deklarasikan ulang root dengan /workspace atau perbaiki rekaman sesi di luar TUI.",
+  "SanitizedLoadedRoots": "{count} root workspace dikeluarkan dari sesi yang dimuat karena ditolak intake workspace (akar sistem berkas, leluhur primary, ejaan tidak valid, atau melebihi batas 64 root). Sesi berjalan tanpanya dan simpanan berikutnya mempertahankan himpunan yang diperkecil; pasang kembali root yang masih diinginkan dengan /workspace.",
   "WorkspaceRootsRemainder": "… (+{count} lainnya)",
   "WorkspaceRootsNotice": "Folder yang dapat diakses selain {workspace}: {roots}",
   "StatusLabelProjectDocs": "Dokumen proyek",
