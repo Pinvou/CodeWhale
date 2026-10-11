@@ -8,6 +8,7 @@ import { createAndSubmitFreshGovernedApproval, updateAndSubmitGovernedApproval }
 import { loadFinancePage } from './admin-finance-pagination.js';
 import { secureRequestID } from './request-id.js';
 import { approvalBusinessRoute, approvalRequester } from './admin-approval-actions.js';
+import { financeNotDispatched, financeWriteObserved } from './finance-operation-state.js';
 import { AdminPaymentReviewQueue } from './AdminPaymentReviewQueue.jsx';
 
 function Feedback({ operation, copy }) {
@@ -76,7 +77,7 @@ export function Approvals({ client, copy, permissions, owner, requestID, query =
   const queryKey = JSON.stringify(query);
   useEffect(() => { onStateChange?.(operation.busy || operation.unknown); }, [onStateChange, operation.busy, operation.unknown]);
   useEffect(() => { void (async () => { setDetail(null); setPage(null); setItems([]); setPrevious([]); await load(''); if (requestID) await open(requestID); })(); }, [client, owner, requestID, queryKey, pendingUserID]); // eslint-disable-line react-hooks/exhaustive-deps
-  const open = async id => { const value = await operation.read(() => client.governedApprovalRequest(id)); if (value) { if (value.approval_request_id !== id) return; setDetail(value); } };
+  const open = async id => { const value = await operation.read(async () => { const value = await client.governedApprovalRequest(id); if (value?.approval_request_id !== id) throw new Error('INVALID_FINANCE_ACK'); return value; }); if (value) setDetail(value); };
   const act = async action => {
     let facts = operation.pendingFacts;
     if (!facts) {
@@ -149,13 +150,25 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
         return createAndSubmitFreshGovernedApproval(client, walletAdjustmentApprovalDraft(fresh, fresh.reason, fresh.request_idempotency_key));
       }
       const key = facts.replacement?.key || operationKey;
+      try { requireFinanceID(facts.walletID); integerMoney(facts.delta); }
+      catch (error) { throw financeNotDispatched(error, true); }
+      if (facts.createdAdjustment) {
+        try {
+          const fresh = await currentPendingAdjustment(client, facts.createdAdjustment, requesterID);
+          return await createAndSubmitFreshGovernedApproval(client, walletAdjustmentApprovalDraft(fresh, facts.reason, key));
+        } catch (error) { throw financeWriteObserved(error); }
+      }
       if (facts.replacement && (facts.walletID !== facts.replacement.walletID || !walletReplacementEligible(await client.governedApprovalRequest(facts.replacement.requestID), facts.replacement.adjustmentID, facts.walletID, requesterID))) {
         throw Object.assign(new Error('old adjustment approval changed'), { status: 409 });
       }
       const item = await client.createAdjustment({ wallet_id: requireFinanceID(facts.walletID), amount_microcredits: facts.delta, reason: facts.reason, idempotency_key: key });
       if (item.wallet_id !== facts.walletID || integerMoney(item.amount_microcredits) !== integerMoney(facts.delta) || item.requested_by !== requesterID || item.request_idempotency_key !== key || item.reason !== facts.reason || item.status !== 'PENDING_APPROVAL' || !Number.isSafeInteger(item.version) || item.version < 1) throw new Error('INVALID_FINANCE_ACK');
       requireFinanceID(item.adjustment_id);
-      return createAndSubmitFreshGovernedApproval(client, walletAdjustmentApprovalDraft(item, facts.reason, key));
+      // Only a fully validated receipt can become a recovery checkpoint. Keep
+      // the original input/key and re-read this exact adjustment on retry.
+      facts.createdAdjustment = item;
+      try { return await createAndSubmitFreshGovernedApproval(client, walletAdjustmentApprovalDraft(item, facts.reason, key)); }
+      catch (error) { throw financeWriteObserved(error); }
     });
     if (value) { setReplacement(null); setWalletID(''); setDelta(''); setReason(''); await load(); await loadAdjustments(); }
   };

@@ -24,7 +24,7 @@ export function useFinanceOperation(owner, copy, client, scope) {
     if (running.current) return;
     const stamp = generation.current; running.current = true; setBusy(true); setError('');
     try { const value = await action(); if (stamp === generation.current) return value; }
-    catch (reason) { if (stamp === generation.current) setError(classifyError ? classifyError(reason) : 'unavailable'); }
+    catch (reason) { if (stamp === generation.current) setError(classifyError ? classifyError(reason) : reason.status === 403 ? 'permissions' : 'unavailable'); }
     finally { if (stamp === generation.current) { running.current = false; setBusy(false); } }
   };
   const mutate = async (facts, action) => {
@@ -43,9 +43,11 @@ export function useFinanceOperation(owner, copy, client, scope) {
       intent.current = null; pending.delete(identity); setUnknown(false); setMessage('saved'); return value;
     } catch (reason) {
       if (stamp !== generation.current) return;
-      const uncertain = hadUnresolved || !Number.isInteger(reason.status) || reason.status >= 500 || reason.code === 'COMMAND_RESULT_UNKNOWN';
+      const uncertain = hadUnresolved || reason.financeRequestState === 'WRITE_OBSERVED' ||
+        (reason.financeRequestState !== 'NOT_DISPATCHED' &&
+          (!Number.isInteger(reason.status) || reason.status >= 500 || reason.code === 'COMMAND_RESULT_UNKNOWN'));
       if (!uncertain) { intent.current = null; pending.delete(identity); }
-      setUnknown(uncertain); setError(uncertain ? 'unknown' : reason.status === 403 ? 'permissions' : 'sourceChanged');
+      setUnknown(uncertain); setError(uncertain ? 'unknown' : reason.financeInputInvalid ? 'inputInvalid' : reason.status === 403 ? 'permissions' : 'sourceChanged');
     } finally { if (stamp === generation.current) { running.current = false; setBusy(false); } }
   };
   return { busy, unknown, pendingFacts: intent.current?.facts || null, message: copy[message] || '', error: copy[error] || '', read, mutate };

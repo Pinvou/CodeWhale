@@ -1,12 +1,14 @@
 package accountschema
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/jackc/pgx/v5"
 )
 
 const executionGuardVersion int64 = 900002
@@ -46,4 +48,24 @@ func validateExecutionGuard(input []migrations.Migration) error {
 		return errors.New("execution facts guard is not the frozen forward-only SQL")
 	}
 	return nil
+}
+
+// Original 053 replaces the execution trigger function. Restore the already
+// frozen guard before that migration can commit, rather than leaving a window
+// until 900002's separate transaction. Its ledger identity is still recorded
+// only when the migration engine later applies original 900002 normally.
+func restoreExecutionFactsAfterBinding(ctx context.Context, tx pgx.Tx, migration migrations.Migration, input []migrations.Migration) error {
+	if migration.Version != 53 {
+		return nil
+	}
+	if err := validateExecutionGuard(input); err != nil {
+		return err
+	}
+	for _, guard := range input {
+		if guard.Version == executionGuardVersion {
+			_, err := tx.Exec(ctx, guard.UpSQL)
+			return err
+		}
+	}
+	return errors.New("execution facts guard migration is required")
 }

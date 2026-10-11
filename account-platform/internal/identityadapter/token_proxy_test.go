@@ -54,7 +54,7 @@ func TestTokenProxyAppliesDimensionsAndNormalizesCredentialFailure(t *testing.T)
 	if response.Code != http.StatusUnauthorized || response.Body.String() != "{\"error\":\"invalid_grant\"}\n" {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
-	if admission.dimensions.source != "192.0.2.20" || admission.dimensions.device != "device-1" || admission.dimensions.identifier != "alice" || admission.success || admission.completions != 1 {
+	if admission.dimensions.source != "192.0.2.1" || admission.dimensions.device != "device-1" || admission.dimensions.identifier != "alice" || admission.success || admission.completions != 1 {
 		t.Fatalf("dimensions/result = %+v success=%v completions=%d", admission.dimensions, admission.success, admission.completions)
 	}
 }
@@ -188,7 +188,7 @@ func TestTokenProxyForwardsTrustedRiskDimensionsAndLearnsStableSubject(t *testin
 	}))
 	defer upstream.Close()
 	admission := &admissionFake{}
-	proxy, _ := NewTokenProxy(upstream.URL, admission)
+	proxy, _ := NewTokenProxyWithTrustedPeers(upstream.URL, admission, "", false, "192.0.2.1")
 	proxy.floor = 0
 	request := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader("grant_type=password&client_id=desktop&username=alice&password=secret"))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")

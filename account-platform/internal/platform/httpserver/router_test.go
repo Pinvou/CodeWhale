@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"syscall"
 	"testing"
 )
 
@@ -55,5 +56,64 @@ func TestRouterRecoversPanicsAsJSON(t *testing.T) {
 	}
 	if body["code"] != "INTERNAL_ERROR" {
 		t.Fatalf("unexpected response: %#v", body)
+	}
+}
+
+func TestRouterAbortsPanicsAfterResponseStarted(t *testing.T) {
+	for _, body := range []string{`{"partial":true}`, "stream chunk\n", "\x00\xffbinary"} {
+		t.Run(body, func(t *testing.T) {
+			router := NewRouter()
+			router.GET("/partial", AdaptFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(body))
+				panic("private panic value")
+			}))
+			response := httptest.NewRecorder()
+			defer func() {
+				if got := recover(); got != http.ErrAbortHandler {
+					t.Errorf("panic = %v, want ErrAbortHandler", got)
+				}
+				if got := response.Body.String(); got != body {
+					t.Errorf("response was changed after panic: %q", got)
+				}
+			}()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/partial", nil))
+		})
+	}
+}
+
+func TestRouterPreservesExplicitAbortHandler(t *testing.T) {
+	router := NewRouter()
+	router.GET("/abort", AdaptFunc(func(http.ResponseWriter, *http.Request) { panic(http.ErrAbortHandler) }))
+	response := httptest.NewRecorder()
+	defer func() {
+		if got := recover(); got != http.ErrAbortHandler {
+			t.Errorf("panic = %v, want ErrAbortHandler", got)
+		}
+		if response.Body.Len() != 0 {
+			t.Errorf("abort wrote an error response: %q", response.Body.String())
+		}
+	}()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/abort", nil))
+}
+
+func TestRouterAbortsBrokenConnectionsAfterResponseStarted(t *testing.T) {
+	for _, connectionError := range []error{syscall.EPIPE, syscall.ECONNRESET} {
+		t.Run(connectionError.Error(), func(t *testing.T) {
+			router := NewRouter()
+			router.GET("/broken", AdaptFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.(http.Flusher).Flush()
+				panic(connectionError)
+			}))
+			response := httptest.NewRecorder()
+			defer func() {
+				if got := recover(); got != http.ErrAbortHandler {
+					t.Errorf("panic = %v, want ErrAbortHandler", got)
+				}
+				if response.Body.Len() != 0 {
+					t.Errorf("broken connection wrote an error body: %q", response.Body.String())
+				}
+			}()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/broken", nil))
+		})
 	}
 }

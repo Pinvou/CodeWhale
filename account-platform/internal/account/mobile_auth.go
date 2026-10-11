@@ -732,7 +732,9 @@ func (r *PostgresRepository) SMSChallengeReady(ctx context.Context, id uuid.UUID
 	}
 	if status != "SENT" && !(status == "CREATED" && deliveryStartedAt != nil) || attempts >= 5 || !expires.After(r.now()) {
 		if (status == "SENT" || status == "CREATED") && !expires.After(r.now()) {
-			_, _ = r.pool.Exec(ctx, `UPDATE sms_challenges SET status='EXPIRED',delivery_lease_id=NULL,delivery_lease_until=NULL,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','SENT')`, id, r.now())
+			if _, err := r.pool.Exec(ctx, `UPDATE sms_challenges SET status='EXPIRED',delivery_lease_id=NULL,delivery_lease_until=NULL,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','SENT')`, id, r.now()); err != nil {
+				return SMSVerificationData{}, err
+			}
 		}
 		return SMSVerificationData{}, ErrSMSInvalid
 	}
@@ -758,15 +760,23 @@ func (r *PostgresRepository) ConsumeSMSChallenge(ctx context.Context, id uuid.UU
 	}
 	if status != "SENT" && !(status == "CREATED" && deliveryStartedAt != nil) || attempts >= 5 || !expires.After(r.now()) {
 		if (status == "SENT" || status == "CREATED") && !expires.After(r.now()) {
-			_, _ = tx.Exec(ctx, `UPDATE sms_challenges SET status='EXPIRED',delivery_lease_id=NULL,delivery_lease_until=NULL,updated_at=$2 WHERE id=$1`, id, r.now())
-			_ = tx.Commit(ctx)
+			if _, err := tx.Exec(ctx, `UPDATE sms_challenges SET status='EXPIRED',delivery_lease_id=NULL,delivery_lease_until=NULL,updated_at=$2 WHERE id=$1`, id, r.now()); err != nil {
+				return err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return err
+			}
 		}
 		return ErrSMSInvalid
 	}
 	if !verified {
 		attempts++
-		_, _ = tx.Exec(ctx, `UPDATE sms_challenges SET attempts=$2,status=CASE WHEN $2>=5 THEN 'FAILED' ELSE status END,updated_at=$3 WHERE id=$1`, id, attempts, r.now())
-		_ = tx.Commit(ctx)
+		if _, err := tx.Exec(ctx, `UPDATE sms_challenges SET attempts=$2,status=CASE WHEN $2>=5 THEN 'FAILED' ELSE status END,updated_at=$3 WHERE id=$1`, id, attempts, r.now()); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
 		return ErrSMSInvalid
 	}
 	_, err = tx.Exec(ctx, `UPDATE sms_challenges SET status='CONSUMED',consumed_at=$2,updated_at=$2 WHERE id=$1`, id, r.now())

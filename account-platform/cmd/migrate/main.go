@@ -116,16 +116,17 @@ func main() {
 		}
 	case "down":
 		if domain == "account" {
-			loaded, err = accountschema.Ordered(loaded)
+			err = accountschema.DownOne(ctx, connection, loaded)
 		} else if domain == "billing" {
-			loaded, err = billingschema.Ordered(loaded)
+			err = billingschema.DownOne(ctx, connection, loaded)
 		} else if domain == "payment-simulator" {
 			loaded, err = simulatorschema.Ordered(loaded)
+			if err == nil {
+				err = migrations.DownOne(ctx, connection, loaded)
+			}
+		} else {
+			err = migrations.DownOne(ctx, connection, loaded)
 		}
-		if err != nil {
-			break
-		}
-		err = migrations.DownOne(ctx, connection, loaded)
 	default:
 		err = fmt.Errorf("unsupported migration direction %q", *direction)
 	}

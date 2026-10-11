@@ -132,7 +132,9 @@ func (r *PostgresRepository) consumeSliderCaptchaTx(ctx context.Context, tx pgx.
 	}
 	if status != "CREATED" || attempts >= 5 || !expires.After(r.now()) {
 		if status == "CREATED" && !expires.After(r.now()) {
-			_, _ = tx.Exec(ctx, `UPDATE slider_captcha_challenges SET status='EXPIRED',updated_at=$2 WHERE id=$1`, id, r.now())
+			if _, err := tx.Exec(ctx, `UPDATE slider_captcha_challenges SET status='EXPIRED',updated_at=$2 WHERE id=$1`, id, r.now()); err != nil {
+				return err
+			}
 		}
 		return ErrCaptchaInvalid
 	}
@@ -142,7 +144,9 @@ func (r *PostgresRepository) consumeSliderCaptchaTx(ctx context.Context, tx pgx.
 	}
 	if delta > sliderCaptchaTolerance {
 		attempts++
-		_, _ = tx.Exec(ctx, `UPDATE slider_captcha_challenges SET attempts=$2,status=CASE WHEN $2>=5 THEN 'FAILED' ELSE status END,updated_at=$3 WHERE id=$1`, id, attempts, r.now())
+		if _, err := tx.Exec(ctx, `UPDATE slider_captcha_challenges SET attempts=$2,status=CASE WHEN $2>=5 THEN 'FAILED' ELSE status END,updated_at=$3 WHERE id=$1`, id, attempts, r.now()); err != nil {
+			return err
+		}
 		return ErrCaptchaInvalid
 	}
 	if _, err := tx.Exec(ctx, `UPDATE slider_captcha_challenges SET status='PASSED',passed_at=$2,updated_at=$2 WHERE id=$1`, id, r.now()); err != nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/trustedclock"
+	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
@@ -171,6 +172,9 @@ func ConfigureProcessLogging(serviceName string) error {
 	if environment == "" {
 		return errors.New("APP_ENV must be explicitly configured")
 	}
+	if err := configureGinMode(environment); err != nil {
+		return err
+	}
 	config := observability.Config{Service: serviceName, Environment: environment, Version: version, Commit: commit}
 	observability.ConfigureDefaultLogger(config)
 	shutdown, err := observability.SetupTracing(context.Background(), config)
@@ -181,6 +185,27 @@ func ConfigureProcessLogging(serviceName string) error {
 	tracingPreparation.service = serviceName
 	tracingPreparation.shutdown = shutdown
 	tracingPreparation.Unlock()
+	return nil
+}
+
+// Configure the process-wide Gin mode before constructing application routes.
+// An explicit GIN_MODE remains available for deliberate diagnostics.
+func configureGinMode(environment string) error {
+	mode := strings.TrimSpace(os.Getenv("GIN_MODE"))
+	if mode == "" {
+		switch environment {
+		case "development":
+			mode = gin.DebugMode
+		case "test":
+			mode = gin.TestMode
+		default:
+			mode = gin.ReleaseMode
+		}
+	}
+	if mode != gin.DebugMode && mode != gin.ReleaseMode && mode != gin.TestMode {
+		return errors.New("GIN_MODE must be debug, release, or test")
+	}
+	gin.SetMode(mode)
 	return nil
 }
 
@@ -203,6 +228,9 @@ func RunWithApplicationContext(ctx context.Context, serviceName string, applicat
 func runApplication(ctx context.Context, serviceName string, application http.Handler, ready func(context.Context) error, collectors ...prometheus.Collector) error {
 	cfg, err := config.Load(serviceName)
 	if err != nil {
+		return err
+	}
+	if err := configureGinMode(cfg.Environment); err != nil {
 		return err
 	}
 
