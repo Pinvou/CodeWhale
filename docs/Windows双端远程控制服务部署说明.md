@@ -35,7 +35,7 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 | 密钥/状态 | `%LOCALAPPDATA%\Pinvou3\remote-control-selftest\`（Ed25519 签名密钥 + HMAC 材料 + `relay-state\`，禁止提交） |
 | 遥测 | `Telemetry disabled`（本机未提供 enrollment token / device pepper / admin password），属预期 |
 
-**边界声明**：该实例是 `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development` + `DEVELOPMENT_TOFU=true`，只允许在本机自测使用；`ENROLLMENT.md` 明确要求 TOFU 仅在 development 且 `NODE_ENV≠production` 时可用，**不得作为生产或对外服务**。
+**边界声明**：该实例是 `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development` + `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=true`，只允许在本机自测使用；`ENROLLMENT.md` 明确要求 TOFU 仅在 development 且 `NODE_ENV≠production` 时可用，**不得作为生产或对外服务**。
 
 当前自测脚本直接启动并记录 Node 服务进程（PID + 启动时间），停止时还验证 Node 路径及绝对脚本命令行，不再启动包装进程或按端口强杀。旧 PID 文件、复用 PID、无法证明属主或被无关服务占用的端口均不会被停止；旧手工启动的服务需操作者自行确认后处理。标准错误单独记录到同一自测目录的 `relay.stderr.log`，上表旧 PID 仅为历史记录。
 
@@ -60,7 +60,7 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 | `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT` | 当前已实现的生产 controller dispatcher 仅支持 `self_hosted`；`official` live claim 尚未接线，预检及启动均失败关闭，不得宣称可部署 |
 | `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | 生产部署必须显式为 `false`；拒绝 development/test 环境、development 部署及 TOFU 降级 |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID` / `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY` | registry HMAC（32–4096 字节） |
-| `PINVOU_REMOTE_PAIRING_HMAC_KEY_ID` / `PINVOU_REMOTE_PAIRING_HMAC_KEY` | 连接码摘要 keyring（支持轮换，见发布文档第 2 节步骤 2、第 3 节旅程 20） |
+| `PINVOU_REMOTE_PAIRING_HMAC_KEY_ID` / `PINVOU_REMOTE_PAIRING_HMAC_KEY` | 连接码摘要 keyring（轮换规则见 `remote-control-relay/ENROLLMENT.md`；发布验收见发布文档第 3 节旅程 20、第 5 节回滚） |
 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64` | Ed25519 PKCS#8 DER base64，签名 pairing transcript |
 | `PINVOU_REMOTE_CONTROLLER_STATE_PATH` / `PINVOU_REMOTE_STATE_PATH` | 新旧状态文件绝对路径，必须不同 |
 | `PINVOU_REMOTE_ALLOWED_PROXY_IPS` / `PINVOU_REMOTE_TRUSTED_PROXY_IPS` | 实际反向代理的 IPv4/IPv6 地址列表；两者必须显式配置且集合完全一致 |
@@ -93,7 +93,9 @@ controller 环境文件使用本预检支持的裸 `KEY=value`：值不加引号
 
 部署前须由运维在本地受控配置中提供 SSH 目标、独立登记目标、部署私钥路径、域名/TLS、部署目录和 secret 注入方式；禁止提交这些实例值。secret 材料仅由部署环境生成、验证和注入，Agent 不通过 PR 或日志传递私钥。
 
-生产脚本必须同时配置 `PINVOU_CONFIRM_PRODUCTION_DEPLOY=1`、`PINVOU_REMOTE_DEPLOY_SERVER`、`PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER`、`SSH_KEY`、`PINVOU_REMOTE_DIRECT_URL`。两份目标必须一致，不配置或不一致时，在联网、上传前退出。确认标志不是 enrollment、验收或回滚门禁豁免。
+生产脚本必须同时配置 `PINVOU_CONFIRM_PRODUCTION_DEPLOY=1`、`PINVOU_REMOTE_DEPLOY_SERVER`、`PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER`、`SSH_KEY`、`PINVOU_REMOTE_DIRECT_URL` 和 `PINVOU_REMOTE_HARDENING_FILE`。两份目标必须一致，不配置或不一致时，在联网、上传前退出。确认标志不是 enrollment、验收或回滚门禁豁免。
+
+硬化文件必须显式指定为本地受控输入，可按仓库 `remote-control-relay/10-hardening.conf` 的无实例通用模板准备；仅接受八项通用限制，禁止代理条款和其他未知条款。代理允许/信任地址唯一来源为服务器受权限保护的 controller 环境文件，保留 IPv4/IPv6 非空且相同集合的远端预检，不在硬化文件中重复配置。数量/字节/认证等待不能超过模板上限，两项限流窗口固定为模板的 60000ms（缩短会弱化限流）。文件或父目录不能是链接。缺失、重复/未知条款或不合法限制在任何网络操作前拒绝。上传使用验证后的私有快照，回滚仍恢复原 drop-in；实例值、文件内容与路径不写入提交或 PR。
 
 测试脚本必须同时配置 `RELAY_SERVER`、`EXPECTED_RELAY_SERVER`、`PROXY_SERVER`、`EXPECTED_PROXY_SERVER` 和 `SSH_KEY`；目标为 SSH 账号与字面 IPv4，登记值从运维清单独立取得，不能从实际目标自动赋值。有跳板时同时配置 `PROXY_SSH_JUMP` 与 `EXPECTED_PROXY_SSH_JUMP`。参见 [测试端点操作说明](remote-e2e-test-endpoint.md)。
 
@@ -132,6 +134,6 @@ ENABLE_DESKTOP_CONTROLLER=1 bash scripts/deploy-remote-relay-test.sh
 
 Windows 本机应执行 `npm --prefix remote-control-relay test`，保留 PowerShell 身份、属主和 launcher 行为测试的实际结果；Linux 的 win32 skip 和文件符号链接权限 skip 均不计通过。CI 的具体选择与结果以当前提交工作流为准，不以 required gate 绿色声称所有平台行为已执行。
 
-非阻塞跟进：Windows 脚本行为 CI 覆盖见 #1512；本地自测秘密文件当前依赖 LOCALAPPDATA 继承权限，尚无显式 DACL 验证/收紧，后续实测与硬化见 #1675。未复现越权读取，不据此声称发生泄露；launcher 的健康 warning 或缺可执行文件退出也不是应用已成功启动的证据。
+Windows 脚本行为由 `windows-relay-tools-test` 在原生 Windows PowerShell 5.1 执行三文件全部用例；任何失败、零计数或 skip 均失败，Relay 变更的 required-gate 要求 Linux 与 Windows 两腿成功（#1512）。本地自测秘密文件当前依赖 LOCALAPPDATA 继承权限，尚无显式 DACL 验证/收紧，后续实测与硬化见 #1675。未复现越权读取，不据此声称发生泄露；launcher 的健康 warning 或缺可执行文件退出也不是应用已成功启动的证据。
 
-历史脚本曾遗漏运行期模块、错误放置 legacy 状态、随代码替换丢状态、用固定等待误判健康；目前分别由完整模块归档、独立状态/身份目录、回滚恢复单元与有界健康重试覆盖。具体实现、测试数量和是否通过以当前源码与当前执行输出为准。
+历史脚本曾遗漏运行期模块、错误放置 legacy 状态、随代码替换丢状态、用固定等待误判健康；当前离线测试执行真实归档、身份、健康与回滚片段，检查延迟成功/永久失败次数、单次 curl 超时、旧 unit 恢复、SSH 身份参数和失败输出；不执行真实网络或服务操作。profile 优先级另有源码合同检查，不据此声称完成原生端到端验证。完整部署故障矩阵、回滚二次失败/中断/并发风险仍见 #1429；真实部署和双 Windows 发布验收未运行。
