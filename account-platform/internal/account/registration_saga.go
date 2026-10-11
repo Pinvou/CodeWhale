@@ -202,16 +202,23 @@ SELECT sc.status,sc.attempts,sc.expires_at
 FROM registration_operations ro JOIN sms_challenges sc ON sc.id=ro.sms_challenge_id
 WHERE ro.id=$1 AND ro.status='SMS_PENDING' AND sc.id=$2 AND sc.mobile_e164=$3 AND sc.purpose='REGISTER'
 FOR UPDATE OF ro,sc`, operationID, challengeID, mobile).Scan(&status, &attempts, &expires)
-	if errors.Is(err, pgx.ErrNoRows) || status != "SENT" || attempts >= 5 || !expires.After(r.now()) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrSMSInvalid
 	}
 	if err != nil {
 		return err
 	}
+	if status != "SENT" || attempts >= 5 || !expires.After(r.now()) {
+		return ErrSMSInvalid
+	}
 	if !verified {
 		attempts++
-		_, _ = tx.Exec(ctx, `UPDATE sms_challenges SET attempts=$2,status=CASE WHEN $2>=5 THEN 'FAILED' ELSE status END,updated_at=$3 WHERE id=$1`, challengeID, attempts, r.now())
-		_ = tx.Commit(ctx)
+		if _, err := tx.Exec(ctx, `UPDATE sms_challenges SET attempts=$2,status=CASE WHEN $2>=5 THEN 'FAILED' ELSE status END,updated_at=$3 WHERE id=$1`, challengeID, attempts, r.now()); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
 		return ErrSMSInvalid
 	}
 	now := r.now()
