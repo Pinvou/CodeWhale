@@ -2517,3 +2517,17 @@ dictZh.uiSettings.remoteControl = '桌面远程控制';
 // 「通用 → 桌面远程控制」二级菜单的入口说明与返回文案（口径同「帮助 → 行为分析」）。
 dictZh.uiSettingsDetail.desktopRemoteControlEntryDesc = '允许他人输入连接码连接本机，使用本机模型执行任务；可随时查看并断开。';
 dictZh.uiSettingsDetail.desktopRemoteControlBack = '返回通用';
+dictZh.remoteArchive = {
+  byteBudget: '远控会话容量已满。请打开“设置 → 远程控制 → 远控会话归档”，先断开会话并处理未决任务，再永久归档离线会话以释放容量。',
+  title: '远控会话归档', active: '活动台账', archived: '已归档历史',
+  hint: '归档离线会话可释放活动容量，历史与反重放记录仍会保留。归档后不可执行任务或重新连接；在线会话及未决任务须先收口。',
+  archive: '永久归档', refresh: '刷新', empty: '暂无会话', untitled: '未命名会话',
+  previous: '上一页', next: '下一页', readOnly: '只读归档',
+  completed: '归档完成，已释放活动容量。',
+  completedRefreshPending: '已永久归档，但列表刷新失败。请刷新列表；不要将该会话作为新任务重试。',
+  cleanupPending: '已安全归档，活动文件清理待下次写入重试；该会话已不可执行。',
+  online: '该会话仍在线或正在恢复，请先断开再归档。',
+  pending: '仍有未决任务，请先核实结果，或显式放弃从未尝试发送的任务，再归档。',
+  unavailable: '归档存储不可用，请保留原数据并重试。',
+};
+dictZh.controllerConnection.errorArchiveCapacity = dictZh.remoteArchive.byteBudget;

@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn track(app: &tauri::AppHandle, event: BehaviorEvent) {
+pub fn track<R: tauri::Runtime>(app: &tauri::AppHandle<R>, event: BehaviorEvent) {
     if let Some(telemetry) = app.try_state::<BehaviorTelemetry>() {
         telemetry.track(event);
     }
