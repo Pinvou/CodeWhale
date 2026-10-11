@@ -232,6 +232,13 @@ func checksum(value string) string {
 }
 
 func DownOne(ctx context.Context, connection *pgx.Conn, migrations []Migration) error {
+	return DownOneWithGuard(ctx, connection, migrations, nil)
+}
+
+// DownOneWithGuard checks domain-owned rollback invariants in the same
+// transaction as the original Down SQL and ledger removal. A rejected guard
+// leaves both data and migration history unchanged.
+func DownOneWithGuard(ctx context.Context, connection *pgx.Conn, migrations []Migration, guard func(context.Context, pgx.Tx, Migration) error) error {
 	if err := prepare(ctx, connection); err != nil {
 		return err
 	}
@@ -258,7 +265,14 @@ func DownOne(ctx context.Context, connection *pgx.Conn, migrations []Migration) 
 		if err != nil {
 			return fmt.Errorf("begin rollback %d: %w", version, err)
 		}
-		if err = setMigrationRole(ctx, tx, role); err == nil {
+		if err = setMigrationRole(ctx, tx, role); err == nil && guard != nil {
+			err = guard(ctx, tx, migration)
+		}
+		// A trusted guard must not choose the identity of the original SQL.
+		if err == nil {
+			err = setMigrationRole(ctx, tx, role)
+		}
+		if err == nil {
 			if _, err = tx.Exec(ctx, migration.DownSQL); err == nil {
 				if err = setMigrationRole(ctx, tx, role); err == nil {
 					_, err = tx.Exec(ctx, `DELETE FROM schema_migrations WHERE version = $1`, version)

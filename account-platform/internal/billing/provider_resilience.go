@@ -13,16 +13,20 @@ func providerCall[T any](ctx context.Context, coordinator *PaymentCoordinator, c
 	capabilities := coordinator.Capabilities()
 	key := resilience.Key(capabilities.ProviderID+"@"+capabilities.Version, capability, route)
 	var admissionErr error
+	var cancelProbe func()
 	if uncertainOnFailure {
 		admissionErr = coordinator.breaker.BeforeHighRisk(key)
 	} else {
-		admissionErr = coordinator.breaker.Before(key)
+		cancelProbe, admissionErr = coordinator.breaker.BeforeReadOnly(key)
 	}
 	if admissionErr != nil {
 		return zero, admissionErr
 	}
 	attempt, err := coordinator.repository.beginProviderAttempt(ctx, capabilities.ProviderID, capabilities.Version, capability, route, route, scope)
 	if err != nil {
+		if cancelProbe != nil {
+			cancelProbe()
+		}
 		return zero, err
 	}
 	result, err := call()

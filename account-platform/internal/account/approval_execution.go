@@ -86,6 +86,16 @@ WHERE e.approval_request_id=$1 AND e.command_type=$2`, requestID, item.CommandTy
 		applyApprovalExecutionBinding(&execution, storedBinding)
 		return execution, tx.Commit(ctx)
 	}
+	// A stop-loss evaluation belongs to this immutable request, not every
+	// command of its type. Reading it under the request lock also serializes
+	// against evaluation; original executing/executed replays above stay valid.
+	paused, err := approvalExecutionPaused(ctx, tx, item.ID, item.CommandType)
+	if err != nil {
+		return ApprovalExecution{}, err
+	}
+	if paused {
+		return ApprovalExecution{}, fmt.Errorf("%w: %w", ErrConflict, ErrApprovalExecutionPaused)
+	}
 	if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
 		return ApprovalExecution{}, err
 	}
@@ -337,4 +347,19 @@ func canonicalSafeJSONObject(raw json.RawMessage) ([]byte, error) {
 		return nil, ErrConflict
 	}
 	return canonical, nil
+}
+
+var ErrApprovalExecutionPaused = errors.New("approval request execution is paused by stop loss")
+
+func approvalExecutionPaused(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, commandType string) (bool, error) {
+	var paused bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(
+ SELECT 1 FROM manual_review_stop_loss_evaluations evaluation
+ JOIN manual_review_cases review ON review.id=evaluation.case_id
+ WHERE review.domain='ACCOUNT' AND review.case_type='HIGH_RISK_COMMAND_REPAIR'
+ AND review.resource_type='APPROVAL_REQUEST' AND review.resource_id=$1
+ AND evaluation.high_risk_command_type=$2
+ AND evaluation.action_snapshot->'automatic_execution_paused'='true'::jsonb
+ )`, requestID, commandType).Scan(&paused)
+	return paused, err
 }
