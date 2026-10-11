@@ -172,17 +172,19 @@ func (s *Service) adminUpdateReconciliationCase(w http.ResponseWriter, r *http.R
 		return
 	}
 	command := ReconciliationCaseCommand{Action: body.Action, OwnerID: body.OwnerID, RepairAction: body.RepairAction, ReviewResult: body.ReviewResult, Reason: body.Reason, IdempotencyKey: idempotencyKey, ActorID: adminActor(adminPrincipal(r))}
+	operationCtx, cancel := reconciliationCaseOperationContext(r.Context(), body.Action)
+	defer cancel()
 	if strings.EqualFold(strings.TrimSpace(body.Action), "RESOLVE") {
 		if s.payments == nil {
 			s.writeReconciliationError(w, r, ErrConflict)
 			return
 		}
-		if err := s.payments.prepareReconciliationResolution(r.Context(), caseID, &command); err != nil {
+		if err := s.payments.prepareReconciliationResolution(operationCtx, caseID, &command); err != nil {
 			s.writeReconciliationError(w, r, err)
 			return
 		}
 	}
-	item, err := repository.UpdateReconciliationCase(r.Context(), caseID, command)
+	item, err := repository.UpdateReconciliationCase(operationCtx, caseID, command)
 	if err != nil {
 		s.writeReconciliationError(w, r, err)
 		return
@@ -190,23 +192,13 @@ func (s *Service) adminUpdateReconciliationCase(w http.ResponseWriter, r *http.R
 	writeAdminFinancialJSON(w, http.StatusOK, item)
 }
 
-func (r *PostgresRepository) AdminReconciliationRuns(ctx context.Context, limit int) ([]ReconciliationRun, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,provider_id,provider_version,channel,business_date,source_mode,requested_by,input_digest,status,provider_row_count,case_count,started_at,completed_at FROM reconciliation_runs ORDER BY started_at DESC,id LIMIT $1`, limit)
-	if err != nil {
-		return nil, err
+// RESOLVE shares the existing reconciliation budget across supplier validation
+// and the final database command. Other case commands retain caller deadlines.
+func reconciliationCaseOperationContext(ctx context.Context, action string) (context.Context, context.CancelFunc) {
+	if strings.EqualFold(strings.TrimSpace(action), "RESOLVE") {
+		return context.WithTimeout(ctx, 25*time.Second)
 	}
-	defer rows.Close()
-	items := make([]ReconciliationRun, 0)
-	for rows.Next() {
-		var item ReconciliationRun
-		var businessDate time.Time
-		if err := rows.Scan(&item.ID, &item.ProviderID, &item.ProviderVersion, &item.Channel, &businessDate, &item.SourceMode, &item.RequestedBy, &item.InputDigest, &item.Status, &item.ProviderRowCount, &item.CaseCount, &item.StartedAt, &item.CompletedAt); err != nil {
-			return nil, err
-		}
-		item.BusinessDate = businessDate.Format("2006-01-02")
-		items = append(items, item)
-	}
-	return items, rows.Err()
+	return ctx, func() {}
 }
 
 func (r *PostgresRepository) AdminReconciliationCases(ctx context.Context, runID uuid.UUID, limit int) ([]AdminReconciliationCase, error) {
@@ -244,6 +236,19 @@ func (r *PostgresRepository) UpdateReconciliationCase(ctx context.Context, caseI
 	requestPayload, _ := json.Marshal(map[string]any{"action": command.Action, "owner_id": command.OwnerID, "repair_action": command.RepairAction, "review_result": command.ReviewResult, "reason": command.Reason})
 	digest := sha256.Sum256(requestPayload)
 	requestHash := fmt.Sprintf("%x", digest[:])
+	var item AdminReconciliationCase
+	err := reconciliationRetry(ctx, func() error {
+		var attemptErr error
+		item, attemptErr = r.updateReconciliationCaseOnce(ctx, caseID, command, requestHash)
+		return attemptErr
+	})
+	return item, err
+}
+
+// Only the database transaction is retried on PostgreSQL's definite aborted
+// transaction codes. Supplier verification and immutable command input stay
+// outside retries; network errors and unknown commits are returned unchanged.
+func (r *PostgresRepository) updateReconciliationCaseOnce(ctx context.Context, caseID uuid.UUID, command ReconciliationCaseCommand, requestHash string) (AdminReconciliationCase, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return AdminReconciliationCase{}, err

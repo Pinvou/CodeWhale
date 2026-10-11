@@ -7,7 +7,23 @@ paths:
   /admin/v1/reconciliation-runs:
     get:
       x-permission: platform.billing.reconciliation.read
-      responses: {'200': {description: Snapshot page, content: {application/json: {schema: {$ref: '#/components/schemas/RunPage'}}}}}
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/ProviderID'}
+        - {$ref: '#/components/parameters/Channel'}
+        - {$ref: '#/components/parameters/RunStatus'}
+        - {$ref: '#/components/parameters/BusinessDateFrom'}
+        - {$ref: '#/components/parameters/BusinessDateTo'}
+      responses:
+        '200': {description: Frozen snapshot page, content: {application/json: {schema: {$ref: '#/components/schemas/RunPage'}}}}
+        '400': {$ref: '#/components/responses/InvalidList'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '410': {$ref: '#/components/responses/ExpiredCursor'}
+        '422': {$ref: '#/components/responses/FilterRequired'}
+        '429': {$ref: '#/components/responses/SnapshotLimited'}
+        '503': {$ref: '#/components/responses/SnapshotUnavailable'}
     post:
       x-permission: platform.billing.reconciliation.run
       x-command-type: BILLING_RECONCILIATION_RUN
@@ -15,6 +31,9 @@ paths:
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunRequest'}}}}
       responses:
         '200': {description: Completed actual provider bill run, content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '409': {$ref: '#/components/responses/StateConflict'}
+        '422': {description: PAYMENT_CAPABILITY_UNSUPPORTED; provider operation or channel unsupported, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
         '503': {description: Durable run outcome requires refreshing batches; no completed success is asserted, content: {application/json: {schema: {$ref: '#/components/schemas/UnknownRunError'}}}}
   /admin/v1/reconciliation-imports:
     post:
@@ -25,17 +44,55 @@ paths:
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ImportRequest'}}}}
       responses:
         '201': {description: Completed import or identical provider/date/digest replay, content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '409': {$ref: '#/components/responses/StateConflict'}
+        '422': {description: PAYMENT_CAPABILITY_UNSUPPORTED; provider operation or channel unsupported or more than 100000 imported rows, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
         '413': {description: Request exceeds the dedicated 64 MiB import limit}
         '503': {description: Durable run outcome requires refreshing batches; retry identical facts to resume, content: {application/json: {schema: {$ref: '#/components/schemas/UnknownRunError'}}}}
   /admin/v1/reconciliation-cases:
     get:
       x-permission: platform.billing.reconciliation.read
-      responses: {'200': {description: Snapshot page, content: {application/json: {schema: {$ref: '#/components/schemas/CasePage'}}}}}
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/RunID'}
+        - {$ref: '#/components/parameters/CaseStatus'}
+        - {$ref: '#/components/parameters/Severity'}
+        - {$ref: '#/components/parameters/OwnerID'}
+        - {$ref: '#/components/parameters/CaseType'}
+        - {$ref: '#/components/parameters/CreatedFrom'}
+        - {$ref: '#/components/parameters/CreatedTo'}
+      responses:
+        '200': {description: Frozen snapshot page, content: {application/json: {schema: {$ref: '#/components/schemas/CasePage'}}}}
+        '400': {$ref: '#/components/responses/InvalidList'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '410': {$ref: '#/components/responses/ExpiredCursor'}
+        '422': {$ref: '#/components/responses/FilterRequired'}
+        '429': {$ref: '#/components/responses/SnapshotLimited'}
+        '503': {$ref: '#/components/responses/SnapshotUnavailable'}
   /admin/v1/reconciliation-runs/{run_id}/cases:
     parameters: [{name: run_id, in: path, required: true, schema: {type: string, format: uuid}}]
     get:
       x-permission: platform.billing.reconciliation.read
-      responses: {'200': {description: Cases scoped to actual run, content: {application/json: {schema: {$ref: '#/components/schemas/CasePage'}}}}}
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/CaseStatus'}
+        - {$ref: '#/components/parameters/Severity'}
+        - {$ref: '#/components/parameters/OwnerID'}
+        - {$ref: '#/components/parameters/CaseType'}
+        - {$ref: '#/components/parameters/CreatedFrom'}
+        - {$ref: '#/components/parameters/CreatedTo'}
+      responses:
+        '200': {description: Cases scoped to the path run_id; path scope takes precedence over query run_id, content: {application/json: {schema: {$ref: '#/components/schemas/CasePage'}}}}
+        '400': {$ref: '#/components/responses/InvalidList'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '410': {$ref: '#/components/responses/ExpiredCursor'}
+        '422': {$ref: '#/components/responses/FilterRequired'}
+        '429': {$ref: '#/components/responses/SnapshotLimited'}
+        '503': {$ref: '#/components/responses/SnapshotUnavailable'}
   /admin/v1/reconciliation-cases/{case_id}/commands:
     parameters: [{name: case_id, in: path, required: true, schema: {type: string, format: uuid}}]
     post:
@@ -44,16 +101,105 @@ paths:
       x-command-policy-version: 2
       parameters: [{name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8, maxLength: 120}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CaseCommand'}}}}
-      responses: {'200': {description: Frozen invocation receipt for exact actor and facts, content: {application/json: {schema: {$ref: '#/components/schemas/Case'}}}}}
+      responses:
+        '200': {description: Frozen invocation receipt for exact actor and facts, content: {application/json: {schema: {$ref: '#/components/schemas/Case'}}}}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/StateConflict'}
+        '413': {description: Request body exceeds the existing 1 MiB command budget}
+        '503': {description: Repository or authorization unavailable; unconfirmed writes retain their invocation identity}
   /internal/v1/reconciliation/runs:
     post:
       x-permission: internal.billing.reconciliation.run
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunRequest'}}}}
       responses:
         '200': {description: Completed actual provider bill run, content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '409': {$ref: '#/components/responses/StateConflict'}
+        '422': {description: PAYMENT_CAPABILITY_UNSUPPORTED; provider operation or channel unsupported, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
         '503': {description: Durable run outcome requires refreshing batches; no completed success is asserted, content: {application/json: {schema: {$ref: '#/components/schemas/UnknownRunError'}}}}
 components:
+  parameters:
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque snapshot cursor bound to actor, resource, scope and all normalized filters. Retain identical filters while paging; an expired cursor requires a fresh first page.
+      schema: {type: string}
+    ProviderID: {name: provider_id, in: query, schema: {type: string, maxLength: 120}}
+    Channel:
+      name: channel
+      in: query
+      description: Normalized uppercase channel identifier; the read filter accepts the current identifier syntax, not only the write channel enum.
+      schema: {type: string, maxLength: 32, pattern: '^[A-Za-z0-9_]{1,32}$'}
+    RunStatus: {name: status, in: query, schema: {type: string, enum: [RUNNING, COMPLETED, FAILED]}}
+    CaseStatus: {name: status, in: query, schema: {type: string, enum: [OPEN, IN_REVIEW, RESOLVED, IGNORED]}}
+    BusinessDateFrom:
+      name: business_date_from
+      in: query
+      description: Inclusive Shanghai business-date lower bound. When both bounds are supplied the non-empty half-open range must not exceed 366 days.
+      schema: {type: string, format: date}
+    BusinessDateTo:
+      name: business_date_to
+      in: query
+      description: Exclusive Shanghai business-date upper bound; use the next calendar date to select one day.
+      schema: {type: string, format: date}
+    CreatedFrom:
+      name: created_from
+      in: query
+      description: Inclusive RFC3339 creation-time lower bound, normalized to UTC. When both bounds are supplied the non-empty half-open range must not exceed 366 days.
+      schema: {type: string, format: date-time, maxLength: 64}
+    CreatedTo:
+      name: created_to
+      in: query
+      description: Exclusive RFC3339 creation-time upper bound, normalized to UTC.
+      schema: {type: string, format: date-time, maxLength: 64}
+    RunID: {name: run_id, in: query, schema: {type: string, format: uuid}}
+    Severity: {name: severity, in: query, schema: {type: string, enum: [P0, P1, P2]}}
+    OwnerID: {name: owner_id, in: query, schema: {type: string, format: uuid}}
+    CaseType:
+      name: case_type
+      in: query
+      schema:
+        type: string
+        enum: [PROVIDER_PAID_INTERNAL_MISSING, INTERNAL_PAID_PROVIDER_MISSING, AMOUNT_MISMATCH, DUPLICATE_TRANSACTION, PROVIDER_REFUND_INTERNAL_MISSING, INTERNAL_REFUND_PROVIDER_MISSING, REFUND_AMOUNT_MISMATCH, PROVIDER_CHARGEBACK_INTERNAL_MISSING, INTERNAL_CHARGEBACK_PROVIDER_MISSING, PAYMENT_LEDGER_MISSING, REFUND_LEDGER_MISSING, CHARGEBACK_LEDGER_MISSING, UNSUPPORTED_PROVIDER_ENTRY, PAYMENT_LEDGER_INVALID, REFUND_LEDGER_INVALID, CHARGEBACK_LEDGER_INVALID, PAYMENT_PACKAGE_INVALID, REFUND_DATE_UNVERIFIED, CHARGEBACK_DATE_UNVERIFIED]
+  responses:
+    InvalidList:
+      description: INVALID_FILTER for invalid limits or filters; INVALID_REQUEST for invalid run scope; PAGINATION_CURSOR_INVALID for a cursor mismatching actor, resource, scope or filter facts. Cursor errors require rereading facts, not relabeling them as editable input.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    InvalidRequest:
+      description: INVALID_REQUEST; invalid JSON, unknown fields, invalid date, target UUID, command fields or idempotency-key length.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Unauthorized:
+      description: Unauthenticated caller; no response facts are adopted.
+    Forbidden:
+      description: Missing the route's existing dedicated reconciliation permission.
+    StateConflict:
+      description: BILLING_CONFLICT for invalid bill contents, current case state, or a reused case command key with different actor or request facts. Refresh current facts; unknown prior writes retain their original key and facts.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    ExpiredCursor:
+      description: PAGINATION_CURSOR_EXPIRED; retry once from the first page with identical filters.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    FilterRequired:
+      description: PAGINATION_FILTER_REQUIRED; the snapshot result exceeds capacity, narrow existing filters.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    SnapshotLimited:
+      description: PAGINATION_SNAPSHOT_LIMITED; temporary snapshot capacity exhaustion.
+      headers: {Retry-After: {schema: {type: integer}, description: Current retry delay is 10 seconds}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    SnapshotUnavailable:
+      description: PAGINATION_SNAPSHOT_UNAVAILABLE or repository/authorization unavailable; no successful page is asserted.
+      headers: {Retry-After: {schema: {type: integer}, description: Snapshot storage failure currently advises 5 seconds; other failures may omit this header}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
   schemas:
+    Error:
+      type: object
+      required: [code]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        request_id: {type: string}
     UnknownRunError:
       type: object
       required: [code]

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { reconciliationCopy } from '../../shared/i18n.js';
 import { requireFinanceCollection, requireFinanceID } from './finance-contract.js';
-import { RECONCILIATION_ACTIONS, reconciliationCommand, reconciliationDayRange, reconciliationImportItems, reconciliationCaseLabel, requireReconciliationDate } from './reconciliation-contract.js';
+import { RECONCILIATION_ACTIONS, reconciliationCommand, reconciliationDayRange, reconciliationImportItems, reconciliationCaseLabel, reconciliationReadError, reconciliationWriteError, requireReconciliationDate } from './reconciliation-contract.js';
 import { loadFinancePage } from './admin-finance-pagination.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 
@@ -12,7 +12,7 @@ function today() {
 }
 
 function CaseActions({ client, item, owner, copy, canWrite, onChanged }) {
-  const op = useFinanceOperation(owner, { ...copy, permissions: copy.permission }, client, `reconciliation-case:${item.case_id}`);
+  const op = useFinanceOperation(owner, { ...copy, permissions: copy.permission, inputInvalid: copy.invalid }, client, `reconciliation-case:${item.case_id}`);
   const [action, setAction] = useState('CLAIM');
   const [fields, setFields] = useState({ reason: '', owner: '', repair: '', review: '' });
   const [invalid, setInvalid] = useState(false);
@@ -20,7 +20,14 @@ function CaseActions({ client, item, owner, copy, canWrite, onChanged }) {
     setInvalid(false);
     try {
       const facts = op.pendingFacts || reconciliationCommand(action, fields);
-      const result = await op.mutate(facts, (frozen, key) => client.reconciliationCaseCommand(item.case_id, frozen, key));
+      const result = await op.mutate(facts, async (frozen, key) => {
+        try { return await client.reconciliationCaseCommand(item.case_id, frozen, key); }
+        catch (error) {
+          // The shared hook retains unknown writes even when a retry gets an input error.
+          if (error.status === 400 && reconciliationReadError(error) === 'invalid') error.financeInputInvalid = true;
+          throw error;
+        }
+      });
       if (result) onChanged(result);
     } catch { setInvalid(true); }
   };
@@ -73,7 +80,7 @@ function Workspace({ client, me, copy }) {
       if (tab === 'cases' && runID) requireFinanceID(runID);
       const range = tab === 'runs' ? reconciliationDayRange(date) : null;
       const query = tab === 'runs' ? { channel, ...range, cursor: next } : { run_id: runID, status, cursor: next };
-      const result = await op.read(() => loadFinancePage(query, filters => tab === 'runs' ? client.reconciliationRuns(filters) : client.reconciliationCases(filters), () => { if (currentFilter.current === filterKey) { setHistory([]); setCursor(''); } }), error => error.status === 403 ? 'permissions' : error.status === 400 ? 'sourceChanged' : 'unavailable');
+      const result = await op.read(() => loadFinancePage(query, filters => tab === 'runs' ? client.reconciliationRuns(filters) : client.reconciliationCases(filters), () => { if (currentFilter.current === filterKey) { setHistory([]); setCursor(''); } }), reconciliationReadError);
       if (result && currentFilter.current === filterKey) {
         const value = result.value;
         requireFinanceCollection(value);
@@ -93,7 +100,7 @@ function Workspace({ client, me, copy }) {
       setRunID(result.reconciliation_run_id); setWriteNotice(copy.saved); await load('');
     } catch (error) {
       if (epoch !== generation.current) return;
-      setWriteError(error.message === 'INVALID_RECONCILIATION_INPUT' ? copy.invalid : error.status === 403 ? copy.permission : !error.status || error.status >= 500 ? copy.runUnknown : copy.sourceChanged);
+      setWriteError(copy[reconciliationWriteError(error)]);
     } finally { if (epoch === generation.current) setWriting(false); }
   };
   const busy = op.busy || writing;
