@@ -85,6 +85,9 @@ impl SessionStore {
         let state = self.remote_proxies.lock();
         state.require_available()?;
         if let Some(id) = existing_id {
+            if state.archives.contains(id)? {
+                bail!("remote_proxy_archived");
+            }
             let record = state
                 .records
                 .get(id)
@@ -143,6 +146,9 @@ impl SessionStore {
         let mut state = self.remote_proxies.lock();
         state.require_available()?;
         let id = &prepared.open.local_session_id;
+        if state.archives.contains(id)? {
+            bail!("remote_proxy_archived");
+        }
         let remote_ref = &prepared.open.remote_session_ref;
         if prepared.existing {
             let record = state
@@ -337,6 +343,9 @@ pub(super) fn require_live_locked(
     remote_ref: &str,
     context: &LiveRemoteContext,
 ) -> Result<()> {
+    if state.archives.contains(id)? {
+        bail!("remote_proxy_archived");
+    }
     let record = state
         .records
         .get(id)

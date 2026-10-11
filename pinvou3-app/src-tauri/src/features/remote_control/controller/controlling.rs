@@ -721,6 +721,23 @@ impl ControllingDeviceManager {
     }
 
     /// The final RemoteProxy commit is guarded by the same live lease and encrypted
+    /// Archive admission uses this owner too: reconnecting/suspended authenticated
+    /// identities remain live and cannot be mistaken for an offline history.
+    pub(crate) fn with_remote_archive_owner<T>(
+        &self,
+        action: impl FnOnce(Option<(LeaseContext, String, String)>) -> T,
+    ) -> T {
+        let inner = self.inner.lock();
+        action(inner.lease.as_ref().map(|lease| {
+            (
+                lease.context.clone(),
+                lease.peer_endpoint_id.clone(),
+                lease.reservation_id.clone(),
+            )
+        }))
+    }
+
+    /// The final RemoteProxy commit is guarded by the same live lease and encrypted
     /// channel ownership. Disconnect, generation replacement, or channel suspension
     /// cannot interleave between this check and the caller's durable commit.
     pub(crate) fn with_current_authenticated_remote_proxy_identity<T>(
@@ -1263,6 +1280,35 @@ mod tests {
                 "task_v1".into(),
             ],
         }
+    }
+
+    #[test]
+    fn archive_owner_preserves_recovery_identity_until_explicit_disconnect() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager.complete_connected(operation, lease()).unwrap();
+        for recovering in [false, true] {
+            if recovering {
+                manager.mark_transport_disconnected(5000, Some(30000));
+            }
+            manager.with_remote_archive_owner(|identity| {
+                assert!(
+                    manager.inner.try_lock().is_none(),
+                    "the archive decision must hold the lifecycle owner"
+                );
+                assert_eq!(
+                    identity,
+                    Some((
+                        lease().context,
+                        lease().peer_endpoint_id,
+                        lease().reservation_id
+                    ))
+                );
+            });
+        }
+        manager.disconnect();
+        manager.with_remote_archive_owner(|identity| assert!(identity.is_none()));
     }
 
     #[test]
