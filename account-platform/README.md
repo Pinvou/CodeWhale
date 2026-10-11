@@ -6,6 +6,8 @@
 
 服务启动必须显式设置非空 `APP_ENV`，缺失或仅空白时拒绝启动，不再自动选择开发模式。仅明确的 `development` / `test` 允许既有静态服务 token；其他环境要求 OIDC 工作负载身份。`production` 前缀变体启用生产时钟与 HSTS 门禁，保留既有 staging 行为。已有无环境变量的本地启动需补 `APP_ENV=development`，生产部署应使用明确的生产环境及工作负载配置。
 
+构造业务路由前调用 `httpserver.ConfigureProcessLogging`，统一配置进程日志和 Gin 模式。未设置 `GIN_MODE` 时，`development` 使用 debug、`test` 使用 test，其他环境默认 release，避免生产启动打印路由表。可显式设置 `GIN_MODE=debug|release|test`；其他值拒绝启动。生产显式开启 debug 会输出路由注册信息，仅用于有意诊断。独立调用 `NewRouter` 的工具应先配置进程，或显式设置 `GIN_MODE=release`。服务运行入口同样验证模式，路由构造时不反复修改全局配置。
+
 工作负载目录允许父目录的系统别名（例如 macOS 的 `/var`），仍拒绝私有目录末级符号链接及不安全写权限。引导密钥和投影目录按解析后的实际目录核对隔离，不能通过不同父目录别名把密钥放入读取方可见的投影目录。
 
 普通 `events.Relay` 必须显式设置非空 `AllowedSubjects`（精确主题或末尾 `.>` 子树）。`OutboxStore.Claim` 的最后一个参数为该主题范围，存储必须在领取租约前过滤，并同时保留自身的事件排除规则。越域返回整批失败且不修改重试或死信状态。普通崩溃重领保留 `PublicationGeneration` 和 broker 去重 ID；仅明确重新发布可推进代次。冻结投递使用独立协议。

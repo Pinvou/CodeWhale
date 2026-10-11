@@ -1,9 +1,11 @@
 package httpserver
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
+	"syscall"
 
 	"github.com/gin-gonic/gin"
 )
@@ -17,14 +19,38 @@ func NewRouter() *Router {
 	router.RedirectTrailingSlash = false
 	router.RedirectFixedPath = false
 	router.RemoveExtraSlash = false
-	router.Use(gin.CustomRecoveryWithWriter(nil, func(c *gin.Context, _ any) {
-		slog.ErrorContext(c.Request.Context(), "http handler panic recovered", "error_code", "HTTP_HANDLER_PANIC")
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
-			"code":       "INTERNAL_ERROR",
-			"message":    "the request could not be completed",
-			"request_id": RequestID(c.Request.Context()),
-		})
-	}))
+	router.Use(func(c *gin.Context) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				c.Abort()
+				if recovered == http.ErrAbortHandler {
+					panic(http.ErrAbortHandler)
+				}
+				if err, ok := recovered.(error); ok {
+					if errors.Is(err, http.ErrAbortHandler) {
+						panic(http.ErrAbortHandler)
+					}
+					if errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) {
+						if c.Writer.Written() {
+							panic(http.ErrAbortHandler)
+						}
+						_ = c.Error(err)
+						return
+					}
+				}
+				slog.ErrorContext(c.Request.Context(), "http handler panic recovered", "error_code", "HTTP_HANDLER_PANIC")
+				if c.Writer.Written() {
+					panic(http.ErrAbortHandler)
+				}
+				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+					"code":       "INTERNAL_ERROR",
+					"message":    "the request could not be completed",
+					"request_id": RequestID(c.Request.Context()),
+				})
+			}
+		}()
+		c.Next()
+	})
 	return &Router{Engine: router}
 }
 
