@@ -72,6 +72,7 @@ $generated = Write-EnvFiles -stateDir $stateDir -key $key
       PINVOU_TEST_SELFTEST_ROOT: root,
     },
     encoding: "utf8",
+    timeout: 20_000,
   });
   assert.equal(result.status, 0, result.stderr);
   const projected = JSON.parse(result.stdout.trim());
@@ -112,6 +113,7 @@ $production = @{}; foreach ($name in $names) { $production[$name] = [Environment
   const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
     env: { ...process.env, PINVOU_TEST_LAUNCHER_PATH: launcher },
     encoding: "utf8",
+    timeout: 20_000,
   });
   assert.equal(result.status, 0, result.stderr);
   const projected = JSON.parse(result.stdout.trim());

@@ -16,6 +16,7 @@ RELAY_DIR="$ROOT/remote-control-relay"
 SERVER="${PINVOU_REMOTE_DEPLOY_SERVER:-}"
 EXPECTED_SERVER="${PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER:-}"
 SSH_KEY="${SSH_KEY:-}"
+HARDENING_FILE="${PINVOU_REMOTE_HARDENING_FILE:-}"
 REMOTE_DIR="${PINVOU_REMOTE_DEPLOY_DIR:-/opt/pinvou-remote-relay}"
 SERVICE="${PINVOU_REMOTE_DEPLOY_SERVICE:-pinvou-remote-relay.service}"
 PUBLIC_URL="${PINVOU_REMOTE_PUBLIC_URL:-https://pinvou.com/pinvou3/remote}"
@@ -52,6 +53,15 @@ if [[ "$BASE_PATH" != "/pinvou3/remote" ]]; then
   echo "拒绝执行：生产部署 BASE_PATH 必须是 /pinvou3/remote，当前为 $BASE_PATH" >&2
   exit 64
 fi
+
+# 通用硬化限制须显式指定受控输入，可按仓库通用模板准备。
+# 代理地址唯一来源是远端受保护的 controller 环境文件。
+# 先验证来源，再验证私有快照，上传只消费这份已验证的内容。
+node "$RELAY_DIR/scripts/validate-deploy-hardening.cjs" "$HARDENING_FILE"
+HARDENING_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/pinvou-hardening.XXXXXXXX")"
+trap 'rm -f "$HARDENING_SNAPSHOT"' EXIT
+cp "$HARDENING_FILE" "$HARDENING_SNAPSHOT"
+node "$RELAY_DIR/scripts/validate-deploy-hardening.cjs" "$HARDENING_SNAPSHOT"
 
 ensure_cached_db() {
   local path="$1"
@@ -138,7 +148,7 @@ tar -czf - -C "$RELAY_DIR" \
 # dist 包含带哈希的 JS/CSS、启动脚本和本地 vendor，必须作为一个版本整体上传。
 tar -czf - -C "$RELAY_DIR/web/dist" . | ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" "cat > '$REMOTE_WEB_TMP'"
 scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/web/stats.html" "$SERVER:$REMOTE_STATS_TMP"
-scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/10-hardening.conf" "$SERVER:$REMOTE_HARDENING_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$HARDENING_SNAPSHOT" "$SERVER:$REMOTE_HARDENING_TMP"
 scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/package.json" "$SERVER:$REMOTE_PACKAGE_TMP"
 scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/package-lock.json" "$SERVER:$REMOTE_LOCK_TMP"
 scp -i "$SSH_KEY" -o BatchMode=yes "$IPV4_DB_CACHE" "$SERVER:$REMOTE_IPV4_DB_TMP"
