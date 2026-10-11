@@ -3,10 +3,13 @@
 //! The command reads B's installed/enabled marketplace surfaces and ACP
 //! readiness, then passes only opaque IDs and display names through the DEV-12
 //! snapshot manager. DEV-20 owns final handler registration.
+//! This is B-native inventory, not A's remote-capability retrieval. A07 does
+//! not expose it on A's renderer bridge; A08 must carry the snapshot through
+//! authenticated Rust transport and then apply A's complete lease binding.
 
 use std::collections::{HashMap, HashSet};
 
-use tauri::State;
+use super::desktop_remote_state::DesktopRemoteState as State;
 
 use crate::features::assistant::skill_materialization::enabled_skills_for;
 use crate::features::codex_acp::AcpPool;

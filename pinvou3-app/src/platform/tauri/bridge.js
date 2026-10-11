@@ -73,13 +73,22 @@
 
   async function loadPlatformCapabilities() {
     try {
+      var detected = await invoke("get_platform_capabilities");
       state.platformCapabilities = Object.assign(
         {},
         state.platformCapabilities,
-        await invoke("get_platform_capabilities"),
-        { loaded: true }
+        detected,
+        {
+          loaded: true,
+          desktopRemoteControl: !!detected && detected.os === "windows" &&
+            detected.desktopRemoteControlSupported === true,
+        }
       );
     } catch (error) {
+      state.platformCapabilities = Object.assign({}, state.platformCapabilities, {
+        loaded: false,
+        desktopRemoteControl: false,
+      });
       console.warn("[platform] capability detection failed", error);
     }
     notify();
@@ -352,6 +361,11 @@
       last_error: null,
       starting: false,
     },
+    // Windows 桌面双端远程控制（B 被控端 / A 主控端），与 Web 分享独立。
+    desktopRemoteControl: (function () {
+      var logic = window.__PINVOU_REMOTE_CONTROL_STATE__;
+      return logic ? logic.createState() : null;
+    })(),
     updateChecking: false,
     updateCheckError: null,   // 手动检查的错误/「已是最新」提示文案
     updateDownloading: false,
@@ -1655,6 +1669,15 @@
     personas: ["activePersona", "personaEvents", "personaPool"],
     memory: ["memory"],
     remoteControl: ["webAccess"],
+    // Windows 双端远程控制（DEV-20）：与 Web 分享完全独立的状态域。
+    desktopRemoteControl: [
+      "controlledDevice",
+      "controllerConnection",
+      "remoteCapabilities",
+      "remoteModels",
+      "remoteHistories",
+      "tasks",
+    ],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
     dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstallProgress", "depsInstalling"],
     teamRelay: ["teamRelay"],
@@ -1667,7 +1690,8 @@
     var fields = STATE_SLICE_FIELDS[domain];
     if (!fields) throw new Error("Unknown Tauri bridge state slice: " + domain);
     var slice = {};
-    for (var i = 0; i < fields.length; i++) slice[fields[i]] = state[fields[i]];
+    var source = domain === "desktopRemoteControl" ? state.desktopRemoteControl : state;
+    for (var i = 0; i < fields.length; i++) slice[fields[i]] = source && source[fields[i]];
     if (typeof structuredClone === "function") {
       try { return structuredClone(slice); } catch (_) {} // safari14-ok: typeof-guarded with JSON fallback
     }
@@ -1773,8 +1797,9 @@
     var cached = subscriptionSliceCache[domain];
     if (cached && cached.revision === subscriptionSliceRevision) return cached.snapshot;
     var current = {};
+    var source = domain === "desktopRemoteControl" ? state.desktopRemoteControl : state;
     for (var i = 0; i < fields.length; i++) {
-      current[fields[i]] = state[fields[i]];
+      current[fields[i]] = source && source[fields[i]];
     }
     var snapshot = subscriptionStateValue(current, cached && cached.snapshot);
     subscriptionSliceCache[domain] = { revision: subscriptionSliceRevision, snapshot: snapshot };
@@ -2661,6 +2686,16 @@
   var startRemoteControl = remoteControlFeature.startRemoteControl;
   var stopRemoteControl = remoteControlFeature.stopRemoteControl;
   var refreshRemoteControlQr = remoteControlFeature.refreshRemoteControlQr;
+  var desktopRemoteControlFeature = installBridgeFeature("desktop-remote-control", {
+    state: state,
+    notify: notify,
+    invoke: invoke,
+    listen: listen,
+    bt: bt,
+    can: function (capability) {
+      return !!(state.platformCapabilities && state.platformCapabilities[capability] === true);
+    },
+  });
   var dependenciesFeature = installBridgeFeature("dependencies", { state: state, notify: notify, invoke: invoke, listen: listen, bt: bt });
   var checkDependencies = dependenciesFeature.checkDependencies;
   var installDependencies = dependenciesFeature.installDependencies;
@@ -3078,6 +3113,26 @@
       getWebRelaySettings: remoteControlFeature.getWebRelaySettings,
       setWebRelayAddress: remoteControlFeature.setWebRelayAddress,
       resetWebRelayAddress: remoteControlFeature.resetWebRelayAddress,
+    },
+    desktopRemoteControl: {
+      controlledStart: desktopRemoteControlFeature.controlledStart,
+      controlledRefresh: desktopRemoteControlFeature.controlledRefresh,
+      controlledStop: desktopRemoteControlFeature.controlledStop,
+      controlledDisconnectNow: desktopRemoteControlFeature.controlledDisconnectNow,
+      controlledStatus: desktopRemoteControlFeature.controlledStatus,
+      controlledListWorkspaces: desktopRemoteControlFeature.controlledListWorkspaces,
+      controlledAuthorizeWorkspace: desktopRemoteControlFeature.controlledAuthorizeWorkspace,
+      controllerConnect: desktopRemoteControlFeature.controllerConnect,
+      controllerDisconnect: desktopRemoteControlFeature.controllerDisconnect,
+      controllerStatus: desktopRemoteControlFeature.controllerStatus,
+      controllerListHistory: desktopRemoteControlFeature.controllerListHistory,
+      controllerCreateHistory: desktopRemoteControlFeature.controllerCreateHistory,
+      cancelRemoteTask: desktopRemoteControlFeature.cancelRemoteTask,
+      remoteTaskStatus: desktopRemoteControlFeature.remoteTaskStatus,
+      journalReplay: desktopRemoteControlFeature.journalReplay,
+      journalSnapshot: desktopRemoteControlFeature.journalSnapshot,
+      journalAcknowledge: desktopRemoteControlFeature.journalAcknowledge,
+      isAvailable: desktopRemoteControlFeature.isAvailable,
     },
     artifacts: {
       artifactInfo: artifactInfo,

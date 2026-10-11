@@ -325,6 +325,7 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 - **不做**：不实现临时模型、审批 Allow、附件和成果下载；不暴露计划/系统任务。
 - **预计文件**：`controller/task.rs`、`app/commands/desktop_remote_task.rs`（均由本任务独占）、`features/sessions/` 的窄接口、assistant EnginePool/Codex AcpPool 适配和测试；DEV-15～18 只能实现已冻结扩展 trait，不回改 `task.rs` 或中央 command 文件。
 - **协议/数据**：任务绑定 connection/lease/epoch/generation/session；ledger 原子记录 admission/dispatch/terminal；只通过 `SessionStore` 写权威 transcript，A 的请求不是第二真相源。
+- **重启装配约束**：生产使用 sessions 根目录下独立的 `_remote_control_tasks.json` 原子完整快照（最多 256 条、64 条活动记录、文件最多 2 MiB），内存淘汰与磁盘快照同步。装配公开前校验字段、摘要、请求指纹及 task/client/sequence/session 活锁唯一性，并一次原子关闭全部重启遗留任务；已派发但不能证明结果的任务报告 `result_unknown`。读取、校验或恢复写入失败时明确禁用桌面远控，不回退内存台账、不覆盖坏文件，既有 Legacy Web 仍可恢复。持久的旧租约标识只用于终态和幂等证明，不恢复认证状态、密钥或令牌，也不跨进程比较单调时间。
 - **测试**：重复请求、结果丢失、并发 turn、普通/代码模式、取消、stop/refresh/disconnect、窗口隐藏、session 切换、计划任务隔离、迟到事件丢弃、B 重启收尾。
 - **验收**：相同 client request 最多执行一次；所有已接纳任务最终有 completed/failed/cancelled/interrupted 之一；B Session 重载后仍能证明终态。
 - **风险**：跨 Engine/ACP 两套执行器终态不一致。统一 adapter 和 ledger terminal CAS，不从 UI 事件反推终态。
@@ -383,6 +384,7 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 - **不做**：不接受任意 B 路径，不放宽现有 Web 附件上限，不让 Relay 缓存明文，不将上传缓存持久化。
 - **预计文件**：`controller/transfer/upload.rs`、`app/commands/desktop_remote_attachment.rs`（均由本任务独占）、`features/files/attachment_upload.rs`、assistant/Codex attachment adapter 和 fixture；不修改 DEV-13 task core、DEV-14 的 `core/limits/download`、中央 command/`lib.rs`。
 - **协议/数据**：元数据和块均在 E2E 帧内；摘要/长度在接纳前校验；成功 handle 只能由同任务消费一次。
+- **本地写入约束**：复用 `platform::filesystem::PrivateFileDirectory` 固定目录对象，先预留有界槽位再分配临时资源；暂存采用独占创建、删除随句柄关闭的匿名文件，分块只写持有的文件句柄，不重开可替换路径。提交从同一文件读取并复核长度和摘要，在同一锚定目录原子发布；提交缓冲最多 32 MiB。清理仅操作已知文件和空子目录，不递归跟随链接；清理失败保留明确错误和重试索引，不声称已清理。任务终态/超时和跨重启清扫的接线仍须分别验收。
 - **测试**：文本/图片/允许文件、块乱序/重复/篡改、超限、连接内存上限、取消/超时/disconnect/stop 清理、跨 lease/task/session handle、普通/代码任务。
 - **验收**：Relay 无法读取文件名/内容；B 只在目标 Session 隔离目录得到完整文件；失败后有界时间内无孤儿缓存。
 - **风险**：复用 Web cache 时身份域混淆。共享底层 chunk primitive，但 WebHandle 与 ControllerHandle 使用不同类型/前缀和校验入口。

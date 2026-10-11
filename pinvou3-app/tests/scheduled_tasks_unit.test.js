@@ -34,6 +34,10 @@ const bridgeMessages = fs.readFileSync(
   path.join(__dirname, '..', 'src', 'shared', 'bridge-messages.js'),
   'utf8'
 );
+const remoteControlState = fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'features', 'remote-control', 'remote-control-state.js'),
+  'utf8'
+);
 const tauriBridge = [bridgeMessages]
   .concat(tauriBridgeFeatureNames.map(name => fs.readFileSync(path.join(__dirname, '..', 'src', 'platform', 'tauri', 'bridge', `${name}.js`), 'utf8')))
   .concat(fs.readFileSync(path.join(__dirname, '..', 'src', 'platform', 'tauri', 'bridge.js'), 'utf8'))
@@ -904,6 +908,9 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
     TextDecoder: TextDecoder,
     Uint8Array: Uint8Array,
   };
+  // Match index.html: the shared state reducer is installed before either
+  // platform bridge consumes the desktopRemoteControl domain.
+  vm.runInNewContext(remoteControlState, context, { filename: "remote-control-state.js" });
   vm.runInNewContext(
     bridgeKind === "web" ? webBridge : tauriBridge,
     context,

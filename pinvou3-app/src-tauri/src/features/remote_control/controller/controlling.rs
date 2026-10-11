@@ -635,6 +635,33 @@ fn status_locked(inner: &Inner) -> ControllingStatus {
 mod tests {
     use super::*;
 
+    #[test]
+    fn serialized_status_matches_the_shared_bridge_fixture() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/desktop_remote_status.json"
+        ))
+        .unwrap();
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        let mut connected = manager
+            .complete_connected(operation.clone(), lease())
+            .unwrap();
+        connected.claim_request_id = Some("claim-0001".into());
+        assert_eq!(
+            serde_json::to_value(&connected).unwrap(),
+            fixtures["controllerConnected"]
+        );
+        let mut failed = manager
+            .fail_connection(operation, "endpoint_offline")
+            .unwrap();
+        failed.claim_request_id = Some("claim-0001".into());
+        assert_eq!(
+            serde_json::to_value(failed).unwrap(),
+            fixtures["controllerError"]
+        );
+    }
+
     fn lease() -> ControllerLease {
         ControllerLease {
             context: LeaseContext {
@@ -649,6 +676,39 @@ mod tests {
             resume_deadline_b: 30_000,
             resume_token: [1; 32],
             transport_key_fingerprint: [2; 32],
+        }
+    }
+
+    #[test]
+    fn history_list_matches_the_shared_renderer_fixture() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/desktop_remote_status.json"
+        ))
+        .unwrap();
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager.complete_connected(operation, lease()).unwrap();
+        let record = manager
+            .create_history("Report", Some("session-0001"))
+            .unwrap();
+        let mut expected = fixtures["controllerHistories"].clone();
+        // IDs are intentionally random; only substitute that one dynamic value.
+        expected[0]["historyId"] = record.history_id.clone().into();
+        assert_eq!(serde_json::to_value(manager.history()).unwrap(), expected);
+        for status in [
+            RemoteHistoryStatus::Completed,
+            RemoteHistoryStatus::Failed,
+            RemoteHistoryStatus::Cancelled,
+            RemoteHistoryStatus::Interrupted,
+        ] {
+            let finished = manager.finish_history(&record.history_id, status).unwrap();
+            expected[0]["status"] = serde_json::to_value(status).unwrap();
+            assert_eq!(serde_json::to_value(manager.history()).unwrap(), expected);
+            assert_eq!(
+                finished.b_session_reference.as_deref(),
+                Some("session-0001")
+            );
         }
     }
 

@@ -33,6 +33,16 @@
     // (没有 bridge.projects 方法面,列表恒空),防止启动期 getMany 抛
     // "Unknown Tauri bridge state slice: projects"(栈内 #448 的根因)。
     projects: ["projectsList"],
+    // desktopRemoteControl 整域桌面专属（Windows 双端远控）：Web 端补空桩，
+    // 字段集必须与桌面 STATE_SLICE_FIELDS 完全一致（见 bridge_state_domains）。
+    desktopRemoteControl: [
+      "controlledDevice",
+      "controllerConnection",
+      "remoteCapabilities",
+      "remoteModels",
+      "remoteHistories",
+      "tasks"
+    ],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
     dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstalling"]
     ,teamRelay: ["teamRelay"]

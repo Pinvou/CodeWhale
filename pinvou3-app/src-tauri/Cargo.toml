@@ -65,6 +65,7 @@ tauri-build = { version = "2.6.1", features = [] }
 cc = "1"
 
 [dev-dependencies]
+tauri = { version = "2.11.1", features = ["test"] }
 # test-util is unified onto the normal tokio build for test targets only:
 # engine_pool's rebind gate-timeout regression drives tokio::time with a
 # paused clock (#[tokio::test(start_paused = true)]) instead of sleeping the

@@ -59,6 +59,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -73,6 +74,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -6881,6 +6883,8 @@ dependencies = [
 name = "pinvou3-tauri"
 version = "0.10.6"
 dependencies = [
+ "aes",
+ "aes-gcm",
  "age",
  "agent-backend-api",
  "agent-client-protocol",
@@ -6902,6 +6906,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "gtk",
+ "hkdf",
  "include_dir",
  "javascriptcore-rs",
  "libc",
@@ -6926,11 +6931,13 @@ dependencies = [
  "quick-xml",
  "rand 0.10.2",
  "reqwest 0.13.4",
+ "ring",
  "rusqlite",
  "rustls",
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sha2 0.11.0",
  "sysinfo",
  "tar",
@@ -6955,8 +6962,10 @@ dependencies = [
  "windows-core 0.61.2",
  "windows-sys 0.61.2",
  "x11",
+ "x25519-dalek",
  "xcap",
  "zbus 5.19.0",
+ "zeroize",
  "zip",
 ]
 

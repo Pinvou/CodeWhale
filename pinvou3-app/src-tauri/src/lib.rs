@@ -34,6 +34,10 @@ use crate::features::{
     monitor::MonitorState,
     pet::{pet_window, selected_pet},
     remote_control::RemoteControlManager,
+    remote_control::controller::{
+        capabilities::CapabilitySnapshotManager, controlled::ControlledDeviceManager,
+        controlling::ControllingDeviceManager, permission::PermissionAuthority,
+    },
     remote_knowledge::RemoteKnowledgeService,
     scheduled::tasks as scheduled_tasks,
     sessions::SessionStore,
@@ -1239,6 +1243,93 @@ pub fn run() {
                     // （回到 lazy spawn 语义，下次发消息重建 + 注水历史）。
                     pool.start_idle_reaper();
                     eprintln!("[pinvou3-app] engine pool ready (lazy spawn per session)");
+                    // ── Windows 桌面双端远程控制（DEV-20 单一注册点） ──
+                    let desktop_boot = (|| -> Result<(), String> {
+                        if !crate::platform::capabilities::current().desktop_remote_control_supported {
+                            return Ok(());
+                        }
+                        // A corrupt/unwritable remote ledger disables this domain;
+                        // it must not prevent the released Legacy Web from resuming.
+                        let ledger = std::sync::Arc::new(
+                            crate::features::remote_control::controller::task::RemoteTaskLedger::open_recovered(
+                                crate::platform::paths::sessions_root().join("_remote_control_tasks.json"),
+                                crate::features::remote_control::controller::clock::monotonic_millis(),
+                            ).map_err(|error| error.code.to_owned())?,
+                        );
+                        // Recover before publishing any desktop state. A failed
+                        // history load must never expose a fresh writable store.
+                        let desktop_history =
+                            commands::desktop_remote_history::DesktopRemoteHistoryRuntime::with_persistent_history(
+                                crate::platform::paths::sessions_root().join("_remote_control_history.json"),
+                                format!("boot-{}", std::process::id()),
+                            )?;
+                        handle.manage(ControlledDeviceManager::default());
+                        handle.manage(ControllingDeviceManager::default());
+                        handle.manage(CapabilitySnapshotManager::default());
+                        let temporary_models = commands::desktop_remote_model::shared_model_store();
+                        handle.manage(temporary_models.clone());
+                        let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
+                        handle.manage(permission_authority.clone());
+                        let desktop_task_runtime = commands::desktop_remote_task::DesktopRemoteTaskRuntime::new(
+                            handle.clone(),
+                            store_for_engine.clone(),
+                            pool.clone(),
+                            acp_pool_for_capabilities.clone(),
+                            ledger,
+                        );
+                        handle.manage(desktop_task_runtime.ledger());
+                        let desktop_transfer_registry = std::sync::Arc::new(
+                            crate::features::remote_control::controller::transfer::TransferRegistry::default()
+                        );
+                        let desktop_attachments =
+                            commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::from_session_store(
+                                store_for_engine.clone(),
+                                desktop_task_runtime.service(),
+                                desktop_transfer_registry.clone(),
+                            );
+                        let desktop_artifacts =
+                            commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime::with_registry(
+                                desktop_task_runtime.service(),
+                                desktop_transfer_registry,
+                            );
+                        handle.state::<ControlledDeviceManager>().register_cleanup_sink(desktop_attachments.cleanup_sink());
+                        desktop_task_runtime
+                            .hooks()
+                            .set_model_scope(temporary_models);
+                        desktop_task_runtime
+                            .hooks()
+                            .set_permission_scope(permission_authority);
+                        desktop_task_runtime.hooks().set_transfer_scope(std::sync::Arc::new(
+                            commands::desktop_remote_attachment::DesktopRemoteTransferScope::new(
+                                desktop_attachments.clone(),
+                                desktop_artifacts.clone(),
+                            ),
+                        ));
+                        desktop_task_runtime.hooks().set_journal(std::sync::Arc::new(
+                            commands::desktop_remote_history::DesktopTaskEventSink::new(
+                                handle.clone(),
+                                desktop_history.journal().clone(),
+                            ),
+                        ));
+                        let recovered = desktop_task_runtime.recover_after_restart();
+                        if recovered > 0 {
+                            eprintln!(
+                                "[pinvou3-app] remote control: {recovered} in-flight task(s) closed after restart"
+                            );
+                        }
+                        handle.manage(desktop_task_runtime);
+                        commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::start_reaper(&desktop_attachments);
+                        handle.manage(desktop_attachments);
+                        handle.manage(desktop_artifacts);
+                        handle.manage(desktop_history);
+                        // Publish readiness only after every domain state and hook exists.
+                        handle.manage(commands::desktop_remote_state::DesktopRemoteReady);
+                        eprintln!("[pinvou3-app] Windows desktop remote control ready");
+                        Ok(())
+                    })();
+                    if let Err(error) = desktop_boot {
+                        eprintln!("[pinvou3-app] desktop remote control disabled: {error}");
+                    }
                     match remote_control_manager.resume() {
                         Ok(true) => eprintln!("[pinvou3-app] persistent Web access resumed"),
                         Ok(false) => {}
@@ -1627,6 +1718,28 @@ pub fn run() {
             commands::runtime::cancel_generation,
             commands::runtime::list_shell_tasks,
             commands::runtime::cancel_shell_task,
+            commands::desktop_remote_controlled::desktop_remote_controlled_start,
+            commands::desktop_remote_controlled::desktop_remote_controlled_refresh,
+            commands::desktop_remote_controlled::desktop_remote_controlled_stop,
+            commands::desktop_remote_controlled::desktop_remote_controlled_disconnect_now,
+            commands::desktop_remote_controlled::desktop_remote_controlled_status,
+            commands::desktop_remote_controlled::desktop_remote_controlled_poll_watchdog,
+            commands::desktop_remote_controlled::desktop_remote_controlled_authorize_workspace,
+            commands::desktop_remote_controlled::desktop_remote_controlled_list_workspaces,
+            commands::desktop_remote_controller::desktop_remote_controller_connect,
+            commands::desktop_remote_controller::desktop_remote_controller_disconnect,
+            commands::desktop_remote_controller::desktop_remote_controller_status,
+            commands::desktop_remote_controller::desktop_remote_controller_live_context,
+            commands::desktop_remote_controller::desktop_remote_controller_create_history,
+            commands::desktop_remote_controller::desktop_remote_controller_list_history,
+            commands::desktop_remote_capabilities::desktop_remote_capabilities_snapshot,
+            commands::desktop_remote_task::desktop_remote_task_close_session,
+            commands::desktop_remote_task::desktop_remote_task_cancel,
+            commands::desktop_remote_task::desktop_remote_task_status,
+            commands::desktop_remote_task::desktop_remote_task_interrupt_all,
+            commands::desktop_remote_history::desktop_remote_journal_replay,
+            commands::desktop_remote_history::desktop_remote_journal_snapshot,
+            commands::desktop_remote_history::desktop_remote_journal_acknowledge,
             commands::remote_control::web_access_enable,
             commands::remote_control::web_access_disable,
             commands::remote_control::web_access_status,
