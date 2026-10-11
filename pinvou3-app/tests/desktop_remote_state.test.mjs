@@ -57,6 +57,47 @@ function makeBridge(responses = {}) {
   };
 }
 
+test('archive management enumerates hidden candidates without reviving ordinary history', async () => {
+  const hidden = { localSessionId: 'remote-hidden', title: 'Hidden', pinned: false,
+    lastOpenedAt: null, projectedEntryCount: 0, hidden: true };
+  const host = makeBridge({ desktop_remote_proxy_archive_candidates: [hidden] });
+  await Promise.resolve();
+  const before = JSON.stringify(host.state);
+  const list = await host.bridge.listRemoteProxyArchiveCandidates();
+  assert.equal(list.length, 1);
+  assert.equal(list[0].hidden, true);
+  assert.equal(JSON.stringify(host.state), before);
+  for (const bad of [[{ ...hidden, hidden: undefined }], Array(257).fill(hidden)]) {
+    const rejected = makeBridge({ desktop_remote_proxy_archive_candidates: bad });
+    await assert.rejects(rejected.bridge.listRemoteProxyArchiveCandidates(),
+      error => error.code === 'remote_proxy_projection_invalid');
+  }
+});
+
+test('archive pages retain opaque exact cursors and reject invalid host metadata', async () => {
+  const host = makeBridge({ desktop_remote_proxy_archive_list: [{
+    localSessionId: 'remote-archive', archived: true, archiveCursor: '9223372036854775806',
+  }] });
+  const list = await host.bridge.listRemoteProxyArchives('9223372036854775807');
+  assert.equal(list[0].archiveCursor, '9223372036854775806');
+  assert.equal(host.calls.find(call => call.name === 'desktop_remote_proxy_archive_list').args.before, '9223372036854775807');
+  const bad = makeBridge({ desktop_remote_proxy_archive_list: [{
+    localSessionId: 'remote-archive', archived: false, archiveCursor: '1',
+  }] });
+  await assert.rejects(bad.bridge.listRemoteProxyArchives(),
+    error => error.code === 'remote_proxy_projection_invalid');
+});
+
+test('successful irreversible archive is not reported as failure when refresh fails', async () => {
+  const host = makeBridge({
+    desktop_remote_proxy_archive: false,
+    desktop_remote_proxy_history_list: () => { throw new Error('disk unavailable'); },
+    desktop_remote_proxy_history_read: () => { throw new Error('disk unavailable'); },
+  });
+  assert.equal(await host.bridge.archiveRemoteProxyHistory('remote-archive'), false);
+  assert.ok(host.calls.some(call => call.name === 'desktop_remote_proxy_archive'));
+});
+
 test('canonical waiting updates retain only absent pairing fields on the same status binding', () => {
   let state = logic.applyControlledStatus(logic.createState(), { ...fixtures.controlledWaiting, status: 'waiting_for_pairing' });
   assert.equal(state.controlledDevice.status, 'waiting_for_pairing');
@@ -734,6 +775,7 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
     'desktop_remote_controller_connect', 'desktop_remote_controller_disconnect', 'desktop_remote_controller_status',
     'desktop_remote_endpoint_profiles', 'desktop_remote_model_list_exportable',
     'desktop_remote_permission_deny_task', 'desktop_remote_permission_list_b',
+    'desktop_remote_proxy_archive', 'desktop_remote_proxy_archive_candidates', 'desktop_remote_proxy_archive_list',
     'desktop_remote_proxy_history_delete', 'desktop_remote_proxy_history_list',
     'desktop_remote_proxy_history_read', 'desktop_remote_proxy_open_live', 'desktop_remote_set_endpoint_profile',
     'desktop_remote_task_abandon_prepared_a', 'desktop_remote_task_cancel_a',
@@ -1064,4 +1106,34 @@ test('A pending-terminal fence opens only for a complete authoritative live leas
   state = logic.reconcileControllerOpenStatus(state, first, liveController('new-connection', '2'));
   assert.equal(state.controllerFenced, false);
   assert.equal(state.controllerConnection.connectionId, 'new-connection');
+});
+
+test('authoritative reconnect replaces a terminated old claim without reopening old leases', () => {
+  let state = logic.applyControllerStatus(logic.createState(), {
+    ...liveController('old-connection', '1'), claimRequestId: 'claim-1',
+  });
+  state = logic.beginControllerIntent(state, true);
+  const intent = state.intents.controller;
+  state = logic.applyControllerStatus(state, {
+    ...liveController('old-connection', '1'), claimRequestId: 'claim-1', status: 'error',
+  });
+  const authoritative = { ...liveController('new-connection', '2'), claimRequestId: 'claim-2' };
+  assert.equal(state.controllerConnection.claimRequestId, 'claim-1');
+  assert.equal(logic.applyControllerStatus(state, { ...authoritative, intent }), state,
+    'a transport event is not an authoritative reconciliation');
+  assert.equal(logic.reconcileControllerOpenStatus(state, intent - 1, authoritative), state);
+  assert.equal(logic.reconcileControllerOpenStatus(state, intent, {
+    ...authoritative, controllerLeaseId: null,
+  }), state);
+  assert.equal(logic.reconcileControllerOpenStatus(state, intent, {
+    ...liveController('old-connection', '1'), claimRequestId: 'claim-2',
+  }), state, 'a new claim cannot resurrect a retired lease');
+  state = logic.reconcileControllerOpenStatus(state, intent, authoritative);
+  assert.equal(state.controllerConnection.status, 'connected');
+  assert.equal(state.controllerConnection.claimRequestId, 'claim-2');
+  assert.equal(state.controllerFenced, false);
+  assert.equal(state.controllerTerminatedOpenIntent, null);
+  assert.equal(logic.applyControllerStatus(state, {
+    ...liveController('old-connection', '1'), claimRequestId: 'claim-1', status: 'error',
+  }), state, 'a late old terminal cannot stop the replacement');
 });
