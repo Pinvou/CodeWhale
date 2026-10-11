@@ -2531,6 +2531,20 @@ dictJa.uiSettings.remoteControl = 'デスクトップ遠隔操作';
 // （「ヘルプとフィードバック → 行動分析」と同じパターン）。
 dictJa.uiSettingsDetail.desktopRemoteControlEntryDesc = '接続コードを入力して相手の端末から本機に接続し、本機のモデルでタスクを実行できます。いつでも確認して切断できます。';
 dictJa.uiSettingsDetail.desktopRemoteControlBack = '一般に戻る';
+dictJa.remoteArchive = {
+  byteBudget: 'リモート会話の容量がいっぱいです。「設定 → リモート操作 → リモート会話のアーカイブ」で接続を解除し、未解決のタスクを処理してから、オフライン会話を永久にアーカイブして容量を解放してください。',
+  title: 'リモート会話のアーカイブ', active: '有効な記録', archived: 'アーカイブ済み履歴',
+  hint: 'オフラインの会話をアーカイブすると有効な記録の容量を解放できます。履歴とリプレイ防止記録は保持されますが、タスクの実行や再接続はできません。接続中の会話と未確定のタスクは先に終了してください。',
+  archive: '永久にアーカイブ', refresh: '更新', empty: '会話はありません', untitled: '無題の会話',
+  previous: '前のページ', next: '次のページ', readOnly: '読み取り専用アーカイブ',
+  completed: 'アーカイブが完了し、有効な記録の容量が解放されました。',
+  completedRefreshPending: '永久アーカイブは完了しましたが、一覧を更新できませんでした。一覧を更新し、この会話を新しいタスクとして再試行しないでください。',
+  cleanupPending: '安全にアーカイブされました。次回の書き込みで有効なファイルの整理を再試行します。この会話は実行できません。',
+  online: 'この会話は接続中または復旧中です。切断してからアーカイブしてください。',
+  pending: '未確定のタスクがあります。結果を確認するか、一度も送信を試みていないタスクを明示的に破棄してください。',
+  unavailable: 'アーカイブの保存先を利用できません。元のデータを保持して再試行してください。',
+};
+dictJa.controllerConnection.errorArchiveCapacity = dictJa.remoteArchive.byteBudget;
 // restored: baseline catalog descriptions (referenced by the model catalog data)
 Object.assign(dictJa.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'ローカルサービスのデフォルトモデル'
 });

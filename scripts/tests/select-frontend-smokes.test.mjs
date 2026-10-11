@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -8,6 +9,21 @@ import {
 
 const labels = (items) => items.map(({ kind, target }) => `${kind}:${target}`);
 const fullLabels = labels(FULL_FRONTEND_SMOKES);
+
+test("the real archive component smoke is included in the full CI suite", () => {
+  assert.ok(fullLabels.includes("node:tests/remote_archive_smoke.mjs"));
+  assert.ok(labels(selectFrontendSmokes([
+    "pinvou3-app/src/features/remote-control/RemoteProxyArchivePanel.jsx",
+  ])).includes("node:tests/remote_archive_smoke.mjs"));
+});
+
+test("the archive smoke is an executable Knip entry, not an ignored file", () => {
+  const knip = JSON.parse(readFileSync(
+    new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8",
+  ));
+  assert.ok(knip.entry.includes("tests/remote_archive_smoke.mjs"));
+  assert.ok(!knip.ignore.includes("tests/remote_archive_smoke.mjs"));
+});
 
 test("shared frontend paths fail closed to the full browser suite", () => {
   assert.deepEqual(
