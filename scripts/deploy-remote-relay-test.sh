@@ -149,7 +149,7 @@ relay_ssh() { ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$RELAY_SE
 proxy_ssh() {
   if [ -n "$PROXY_SSH_JUMP" ]; then
     ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 \
-      -o "ProxyCommand=ssh -i $(shq "$SSH_KEY") -W %h:%p $(shq "$PROXY_SSH_JUMP")" \
+      -o "ProxyCommand=ssh -i $(shq "$SSH_KEY") -o BatchMode=yes -o ConnectTimeout=15 -W %h:%p $(shq "$PROXY_SSH_JUMP")" \
       "$PROXY_SERVER" "$@"
   else
     ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$PROXY_SERVER" "$@"
@@ -288,9 +288,12 @@ echo "── 上传 Relay 代码到已确认测试目标（暂存 + 整体替换
 # 注意:清单必须覆盖 relay 根目录的全部运行期模块——controller-*.js / enrollment-*.js /
 # pairing-*.js / relay-state-store.js 等是 server.js 按需动态 import 的运行时依赖,
 # 漏传会让启用 controller lane 的实例启动即 ERR_MODULE_NOT_FOUND(2026-09-19 实测踩坑)。
-relay_js_files="$(cd "$RELAY_DIR" && ls *.js)"
+relay_js_files=()
+while IFS= read -r relay_module; do
+  relay_js_files+=("$relay_module")
+done < <(cd "$RELAY_DIR" && printf '%s\n' ./*.js)
 tar -czf - -C "$RELAY_DIR" \
-  $relay_js_files package.json package-lock.json web/dist web/stats.html \
+  "${relay_js_files[@]}" package.json package-lock.json web/dist web/stats.html \
   -C "$ROOT" docs/schemas/behavior-telemetry-v1.schema.json docs/schemas/behavior-telemetry-registries.json \
   | relay_ssh "cat > '$TEST_DIR.staging.tar.gz.tmp' && mv '$TEST_DIR.staging.tar.gz.tmp' '$TEST_DIR.staging.tar.gz'"
 
@@ -469,7 +472,7 @@ systemctl restart "$service"
 healthy=0
 for _ in $(seq 1 30); do
   if systemctl is-active --quiet "$service" \
-    && curl -fsS "http://127.0.0.1:$port$base_path/healthz" > /dev/null; then
+    && curl -fsS --connect-timeout 3 --max-time 5 "http://127.0.0.1:$port$base_path/healthz" > /dev/null; then
     healthy=1
     break
   fi
@@ -491,7 +494,7 @@ if [ "$healthy" != "1" ]; then
     rollback_healthy=0
     for _ in $(seq 1 15); do
       if systemctl is-active --quiet "$service" \
-        && curl -fsS "http://127.0.0.1:$port$base_path/healthz" > /dev/null; then
+        && curl -fsS --connect-timeout 3 --max-time 5 "http://127.0.0.1:$port$base_path/healthz" > /dev/null; then
         rollback_healthy=1
         break
       fi
@@ -743,16 +746,23 @@ fi
 rm -rf "$test_dir.failed"
 mv "$test_dir" "$test_dir.failed"
 mv "$test_dir.bak" "$test_dir"
+if [ -f "/etc/systemd/system/$service.bak" ]; then
+  cp -a "/etc/systemd/system/$service.bak" "/etc/systemd/system/$service"
+  systemctl daemon-reload
+fi
 systemctl restart "$service"
 sleep 2
-systemctl is-active --quiet "$service" && curl -fsS "http://127.0.0.1:$port$base_path/healthz" > /dev/null \
+systemctl is-active --quiet "$service" && curl -fsS --connect-timeout 3 --max-time 5 "http://127.0.0.1:$port$base_path/healthz" > /dev/null \
   && echo "已恢复上一版并通过健康检查(失败版本保留在 $test_dir.failed)" \
   || { echo "⚠ 回滚后健康检查仍未通过,请人工检查: journalctl -u $service" >&2; exit 1; }
 REMOTE
 }
 if ! public_verify; then
-  rollback_relay || true
-  echo "✗ 部署后公网验证失败,已回滚 relay 侧;请按上方阶段输出排查隧道/nginx/公网链路" >&2
+  if rollback_relay; then
+    echo "✗ 部署后公网验证失败,已回滚 relay 侧;请按上方阶段输出排查隧道/nginx/公网链路" >&2
+  else
+    echo "✗ 部署后公网验证失败且回滚未通过;请立即检查 relay 侧与上方阶段输出" >&2
+  fi
   exit 1
 fi
 

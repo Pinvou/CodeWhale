@@ -76,15 +76,15 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
     "-C", repoRoot,
     "docs/schemas/behavior-telemetry-v1.schema.json",
     "docs/schemas/behavior-telemetry-registries.json",
-  ], { encoding: "utf8" });
+  ], { encoding: "utf8", timeout: 10_000 });
   assert.equal(packed.status, 0, packed.stderr);
-  const extracted = spawnSync("tar", ["-xzf", archive, "-C", stage], { encoding: "utf8" });
+  const extracted = spawnSync("tar", ["-xzf", archive, "-C", stage], { encoding: "utf8", timeout: 10_000 });
   assert.equal(extracted.status, 0, extracted.stderr);
   const loaded = spawnSync(process.execPath, [
     "--input-type=module",
     "-e",
     "await import('./telemetry-service.js')",
-  ], { cwd: stage, encoding: "utf8" });
+  ], { cwd: stage, encoding: "utf8", timeout: 10_000 });
   assert.equal(loaded.status, 0, loaded.stderr);
 });
 
@@ -106,7 +106,7 @@ test("deploy module collection does not require mapfile and preserves relative n
     'RELAY_DIR="$1"',
     collection[0],
     'printf \'%s\\n\' "${relay_modules[@]}"',
-  ].join("\n"), "collect", relayDir.replaceAll("\\", "/")], { encoding: "utf8" });
+  ].join("\n"), "collect", relayDir.replaceAll("\\", "/")], { encoding: "utf8", timeout: 10_000 });
   assert.equal(collected.status, 0, collected.error?.message || collected.stderr);
   assert.deepEqual(collected.stdout.trim().split(/\r?\n/), ["./extra module.js", "./server.js"]);
 });
@@ -197,7 +197,7 @@ test("deployment SSH mock recognizes timestamped rollback and rejects unknown ca
   const remoteCommand = (...args) => spawnSync(bash, [
     "-c", mockedSshScript(shellLog), "mock-ssh", "-i", "fixture-key",
     "-o", "BatchMode=yes", "fixture.invalid", "bash", "-s", "--", ...args,
-  ], { input: "", encoding: "utf8" });
+  ], { input: "", encoding: "utf8", timeout: 10_000 });
   const deployed = remoteCommand(remoteDir, "fixture.service", "20261001-123456", ...Array(8).fill("/tmp/fixture"));
   assert.equal(deployed.status, 0, deployed.stderr);
   for (const stamp of ["20261001-123456", "20261102-234567"]) {
@@ -225,6 +225,8 @@ test("deploy script rolls back when post-deploy public verification fails", {
   const bin = join(root, "bin");
   const log = join(root, "calls.log");
   await mkdir(bin);
+  const hardening = join(root, "operator-hardening.conf");
+  await writeFile(hardening, "TEST_ONLY_OFFLINE_SSH_MOCK_INPUT");
 
   await executable(join(bin, "node"), "#!/usr/bin/env bash\nexit 0\n");
   await executable(join(bin, "npm"), "#!/usr/bin/env bash\nexit 0\n");
@@ -263,10 +265,12 @@ esac
       SSH_KEY: "fixture-key",
       PINVOU_REMOTE_DIRECT_URL: "http://direct.invalid/pinvou3/remote",
       PINVOU_CONFIRM_PRODUCTION_DEPLOY: "1",
+      PINVOU_REMOTE_HARDENING_FILE: hardening,
       SKIP_WEB_BUILD: "1",
       SKIP_LOCAL_TESTS: "1",
     },
     encoding: "utf8",
+    timeout: 20_000,
   });
   const output = `${result.stdout}\n${result.stderr}`;
   assert.equal(result.status, 1, output);
