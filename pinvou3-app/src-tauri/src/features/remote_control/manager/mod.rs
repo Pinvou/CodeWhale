@@ -447,6 +447,21 @@ impl ControllerRelayChannel {
 
     pub async fn recv(&mut self) -> Option<Value> {
         let frame = self.receiver.recv().await?;
+        // Dropping the stored sender does not discard Tokio's buffered frames.
+        // Retirement, unlike a resumable socket disconnect, removes this exact
+        // binding. Never hand an already queued frame to the retired worker.
+        let inner = self.manager.inner.lock();
+        if inner.controller_binding != Some(self.binding)
+            || inner.controller_relay_generation.as_deref() != Some(self.generation.as_str())
+            || !inner
+                .endpoint
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.sender.same_channel(&self.owner))
+        {
+            self.receiver.close();
+            *self.last_receipt.lock() = None;
+            return None;
+        }
         *self.last_receipt.lock() = frame.receipt;
         Some(frame.message)
     }
@@ -510,6 +525,12 @@ pub struct ControllerRelaySender {
 }
 
 impl ControllerRelaySender {
+    pub(crate) fn same_binding(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.binding == other.binding
+            && self.owner.same_channel(&other.owner)
+    }
+
     pub fn try_send(&self, message: Value) -> Result<(), String> {
         self.manager
             .send_controller_message(&self.generation, self.binding, message, &self.owner)
@@ -546,6 +567,14 @@ impl ControlledTransportAuthority for ControllerRelaySender {
     }
     fn is_stopped(&self) -> bool {
         self.owner.controller_authority.binding(&self.generation) != Some(self.binding)
+    }
+    fn with_business_authority(&self, expected: &LeaseContext, action: &mut dyn FnMut()) -> bool {
+        self.owner.controller_authority.with_business_authority(
+            &self.generation,
+            self.binding,
+            expected,
+            action,
+        )
     }
     fn stop(&self) {
         self.owner
@@ -1044,6 +1073,19 @@ fn reset_web_state(inner: &mut Inner) {
     inner.web_workspace_grants.clear();
 }
 
+/// Retire the exact endpoint's controller authority before removing its socket.
+/// Must run under the owner lock: late old-reader callbacks cannot reach a new lane.
+fn take_retired_endpoint(inner: &mut Inner) -> Option<ActiveEndpoint> {
+    if let Some(generation) = inner.controller_relay_generation.take()
+        && let Some(endpoint) = &inner.endpoint
+    {
+        endpoint.sender.controller_authority.retire(&generation);
+    }
+    inner.controller_binding = None;
+    inner.controller_inbound = None;
+    inner.endpoint.take()
+}
+
 impl RemoteControlManager {
     pub fn new(app: AppHandle) -> Self {
         let (policy, policy_error) = match AccessPolicy::load() {
@@ -1241,6 +1283,24 @@ impl RemoteControlManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn queue_controller_frame_for_loopback_test(&self, message: Value) {
+        let inner = self.inner.lock();
+        let endpoint = inner.endpoint.as_ref().unwrap();
+        let url = reqwest::Url::parse(&endpoint.config.relay_url).unwrap();
+        assert_eq!(url.scheme(), "ws");
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+        inner
+            .controller_inbound
+            .as_ref()
+            .unwrap()
+            .try_send(ControllerRelayFrame {
+                message,
+                receipt: None,
+            })
+            .unwrap();
+    }
+
+    #[cfg(test)]
     pub(crate) fn replace_loopback_reader_for_test(&self) -> RelaySender {
         let (config, old) = {
             let inner = self.inner.lock();
@@ -1432,7 +1492,7 @@ impl RemoteControlManager {
             inner.rpc_ledger = RpcLedger::default();
             reset_web_state(&mut inner);
             inner.stream.reset();
-            inner.endpoint.take()
+            take_retired_endpoint(&mut inner)
         };
         if let Some(previous) = previous {
             let _ = previous.sender.try_send(RelayOutbound::Shutdown);
@@ -1573,7 +1633,7 @@ impl RemoteControlManager {
             inner.stream.reset();
             inner.idle_status = WebAccessStatusKind::Stopped;
             inner.idle_error = None;
-            inner.endpoint.take()
+            take_retired_endpoint(&mut inner)
         };
         if let Some(endpoint) = endpoint {
             let _ = endpoint.sender.try_send(RelayOutbound::Shutdown);
@@ -2404,12 +2464,11 @@ impl RemoteControlManager {
             inner.rpc_ledger = rpc_ledger;
             inner.rpc_cache.clear();
             inner.rpc_order.clear();
-            if let Some(previous) = inner.endpoint.take() {
-                if let Some(generation) = inner.controller_relay_generation.take() {
-                    previous.sender.controller_authority.retire(&generation);
-                }
-                inner.controller_binding = None;
-                inner.controller_inbound = None;
+            // First controller startup installs its lane before this endpoint.
+            // Retire only a replaced socket, never the first pending lane.
+            if inner.endpoint.is_some()
+                && let Some(previous) = take_retired_endpoint(&mut inner)
+            {
                 let _ = previous.sender.try_send(RelayOutbound::Shutdown);
             }
             inner.endpoint = Some(ActiveEndpoint {

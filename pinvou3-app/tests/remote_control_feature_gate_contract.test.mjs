@@ -12,13 +12,13 @@ test('every registered desktop-remote Tauri command crosses the unified release 
   assert.ok(registered.length >= 30, 'expected the complete A/B command surface');
   for (const { module, command } of registered) {
     const source = readFileSync(new URL(`${module}.rs`, commandRoot), 'utf8');
-    const start = source.indexOf(`fn ${command}(`);
+    const start = source.search(new RegExp(`fn ${command}(?:<[^>]+>)?[(]`, 'u'));
     assert.notEqual(start, -1, `missing command implementation: ${command}`);
     const next = source.indexOf('#[tauri::command]', start + 1);
     const body = source.slice(start, next === -1 ? source.length : next);
     assert.match(
       body,
-      /ensure_desktop_remote_control_enabled\(\)|ensure_supported\(|desktop_remote_state::ensure_ready\(&app\)/u,
+      /ensure_desktop_remote_control_enabled\(\)|ensure_supported\(|desktop_remote_state::ensure_ready\(&app\)|ready_state::<_, [A-Za-z]+>\(&app\)/u,
       `${command} must fail closed through the shared release switch`,
     );
   }
