@@ -308,6 +308,10 @@ test('live dispatch needs the same local ID and remote ref; offline projection r
     localSessionId: 'remote-local-1', remoteRef: 'ref-1',
   });
   assert.equal(remoteProxyChatItems('remote-local-1', history).length, 3);
+  const archived = { ...history, archived: true };
+  assert.equal(remoteProxyHandshakeBinding('remote-local-1', archived, live), null);
+  assert.equal(liveRemoteProxyBinding('remote-local-1', archived, live), null);
+  assert.equal(remoteProxyChatItems('remote-local-1', archived).length, 3);
   assert.equal(remoteProxyPresentationState('remote-local-1', history, live), 'ready');
   assert.equal(remoteProxyPresentationState('remote-local-1', history, { ...live, capabilityRevision: null }), 'preparing');
   assert.equal(remoteProxyPresentationState('remote-local-1', history, { ...live, capabilityStatus: 'error' }), 'capability_error');
