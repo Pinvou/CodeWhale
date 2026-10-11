@@ -160,6 +160,7 @@ class CiGatePolicyTests(unittest.TestCase):
                      "remote-control-relay/scripts/check-local-signing-key.cjs",
                      "scripts/remote-control-local-selftest.ps1", "scripts/run-remote-control-endpoint.ps1",
                      "scripts/run-windows-relay-tools-tests.mjs", "scripts/windows-relay-tools-test-summary.mjs",
+                     "scripts/windows-relay-tools-preflight.mjs",
                      ".github/workflows/pr-check.yml"):
             self.assertTrue(_matches_paths_filter(path, paths), path)
 

@@ -457,6 +457,7 @@ jobs:
               - 'scripts/run-remote-control-endpoint.ps1'
               - 'scripts/run-windows-relay-tools-tests.mjs'
               - 'scripts/windows-relay-tools-test-summary.mjs'
+              - 'scripts/windows-relay-tools-preflight.mjs'
               - '.github/workflows/pr-check.yml'
             team_relay_hub:
               - 'team-relay-hub/**'
