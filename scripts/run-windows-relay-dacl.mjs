@@ -11,7 +11,29 @@ if (process.platform !== 'win32') {
   process.exit(1);
 }
 
-async function verifiedCanonical(original) {
+let stage = 'base_resolve';
+function reportFailure(error) {
+  const diagnostic = { stage, code: 'unknown' };
+  // Never stringify an exception: it may carry command, path or environment data.
+  const read = (field) => {
+    try { return error?.[field]; }
+    catch { return undefined; }
+  };
+  const code = read('code');
+  const errno = read('errno');
+  const killed = read('killed');
+  const signal = read('signal');
+  if (['ETIMEDOUT', 'EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'EINVAL',
+    'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'relay_state_windows_runtime_unavailable',
+    'relay_state_path_component_unsafe'].includes(code)) diagnostic.code = code;
+  if (Number.isSafeInteger(errno) && errno >= -2147483648
+    && errno <= 2147483647) diagnostic.errno = errno;
+  if (typeof killed === 'boolean') diagnostic.killed = killed;
+  if (['SIGTERM', 'SIGKILL', 'SIGABRT', 'SIGINT'].includes(signal)) diagnostic.signal = signal;
+  console.error(`windows_relay_dacl_stage_failure ${JSON.stringify(diagnostic)}`);
+}
+
+async function verifiedCanonical(original, scope) {
   // Check the original spelling before resolving a short-name alias: blindly
   // realpath-ing a junction would hide the unsafe ancestor from this preflight.
   original = resolve(original);
@@ -20,20 +42,29 @@ async function verifiedCanonical(original) {
   const ancestors = [];
   for (const part of original.slice(root.length).split(/[\\/]+/u).filter(Boolean)) {
     current = join(current, part);
+    stage = `${scope}_lstat`;
     const entry = await lstat(current);
+    stage = `${scope}_type`;
     if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error();
     ancestors.push(current);
   }
+  stage = `${scope}_reparse`;
   await verifyWindowsAncestors(ancestors);
+  stage = `${scope}_realpath`;
   return realpath(original);
 }
 
 let temporary, base, identity;
 try {
-  base = await verifiedCanonical(tmpdir());
+  base = await verifiedCanonical(tmpdir(), 'base');
+  stage = 'owned_create';
   temporary = await mkdtemp(join(base, 'pinvou-relay-dacl-'));
+  stage = 'owned_identity';
   identity = await lstat(temporary);
-  if (await verifiedCanonical(temporary) !== temporary) throw new Error();
+  const canonical = await verifiedCanonical(temporary, 'owned');
+  stage = 'owned_canonical';
+  if (canonical !== temporary) throw new Error();
+  stage = 'child_spawn';
   const result = spawnSync(process.execPath, [
     '--test', '--test-reporter=tap', '--test-concurrency=1',
     '--test-name-pattern=^Windows state directory and every durable/lock file have protected DACLs$',
@@ -49,20 +80,27 @@ try {
     console.error('windows_relay_dacl_qualification_failed');
     process.exitCode = 1;
   }
-} catch {
+} catch (error) {
+  reportFailure(error);
   console.error('windows_relay_dacl_temporary_unsafe');
   process.exitCode = 1;
 } finally {
   if (temporary) {
     try {
+      stage = 'cleanup_identity';
       const current = await lstat(temporary);
       if (!identity || !current.isDirectory() || current.isSymbolicLink()
         || current.dev !== identity.dev || current.ino !== identity.ino
         || dirname(temporary) !== base
         || !/^pinvou-relay-dacl-[A-Za-z0-9]+$/u.test(basename(temporary))
-        || await verifiedCanonical(temporary) !== temporary) throw new Error();
+      ) throw new Error();
+      const canonical = await verifiedCanonical(temporary, 'cleanup');
+      stage = 'cleanup_canonical';
+      if (canonical !== temporary) throw new Error();
+      stage = 'cleanup_remove';
       await rm(temporary, { recursive: true });
-    } catch {
+    } catch (error) {
+      reportFailure(error);
       console.error('windows_relay_dacl_cleanup_unsafe');
       process.exitCode = 1;
     }
