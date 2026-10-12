@@ -434,17 +434,25 @@ pub(super) fn delete_model_inner(id: &str, store: &dyn CredentialStore) -> Resul
     Ok(())
 }
 
+// Local selections must name a user configuration, not the platform runtime
+// carrier. Catalog selections keep their separate, source-aware command path.
+fn require_local_model_selection<'a>(
+    model: Option<&'a SavedModel>,
+    id: &str,
+) -> Result<&'a SavedModel, String> {
+    let model = model.ok_or_else(|| format!("model not found: {id}"))?;
+    if model.is_builtin_account_platform() {
+        return Err("select a concrete Account Platform catalog model".to_string());
+    }
+    Ok(model)
+}
+
 /// 设全局默认模型(新建会话继承它)。不打断已在用的会话——它们各自保持 spawn
 /// 时的模型,想换在该会话的 chip 里切。
 #[tauri::command]
 pub async fn set_active_model(id: String, app: AppHandle) -> Result<(), String> {
     UserPrefs::update_transaction(|prefs| {
-        let model = prefs
-            .model_by_id(&id)
-            .ok_or_else(|| format!("model not found: {id}"))?;
-        if model.is_builtin_account_platform() {
-            return Err("select a concrete Account Platform catalog model".to_string());
-        }
+        require_local_model_selection(prefs.model_by_id(&id), &id)?;
         prefs.set_default_model_ref(ModelSelectionRef::local(&id))
     })
     .map_err(|e| sanitize_command_error("set_active_model", e))?;
@@ -481,9 +489,7 @@ pub async fn set_session_model(
     }
     let prefs = UserPrefs::load();
     if let Some(mid) = &model_id {
-        if prefs.model_by_id(mid).is_none() {
-            return Err(format!("model not found: {mid}"));
-        }
+        require_local_model_selection(prefs.model_by_id(mid), mid)?;
     }
     let selected_model = model_id
         .as_deref()
@@ -1549,6 +1555,34 @@ pub async fn save_search_settings_and_restart(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_model_selection_rejects_platform_carrier() {
+        let model = SavedModel::builtin_account_platform();
+        assert_eq!(
+            require_local_model_selection(Some(&model), &model.id).unwrap_err(),
+            "select a concrete Account Platform catalog model"
+        );
+    }
+
+    #[test]
+    fn local_model_selection_keeps_missing_id_error() {
+        assert_eq!(
+            require_local_model_selection(None, "missing").unwrap_err(),
+            "model not found: missing"
+        );
+    }
+
+    #[test]
+    fn local_model_selection_keeps_user_model() {
+        let mut model = SavedModel::builtin_account_platform();
+        model.id = "local-user-model".to_string();
+        assert!(std::ptr::eq(
+            require_local_model_selection(Some(&model), &model.id).unwrap(),
+            &model
+        ));
+    }
+
     use crate::platform::paths::tests::ENV_LOCK;
 
     #[test]

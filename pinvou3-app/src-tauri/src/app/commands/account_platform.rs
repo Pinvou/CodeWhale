@@ -226,10 +226,9 @@ pub async fn account_platform_select_session_model(
     }))
 }
 
-async fn select_catalog_model(
+async fn validate_catalog_model(
     requested_model_id: &str,
     state: &AccountPlatformState,
-    pool: &EnginePool,
 ) -> Result<serde_json::Value, String> {
     let model_id = requested_model_id.trim();
     if model_id.is_empty() || model_id.len() > 128 {
@@ -260,15 +259,27 @@ async fn select_catalog_model(
             "model_catalog_selection_invalid: model is not catalog visible".to_string()
         })?;
     ensure_new_session_model_selectable(item)?;
-    UserPrefs::update_transaction(|prefs| {
-        prefs.set_default_model_ref(ModelSelectionRef::account_platform(model_id))
-    })?;
-    pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
     Ok(serde_json::json!({
         "model_id": model_id,
         "catalog_version": catalog.body.get("catalog_version"),
         "lifecycle_status": item.get("lifecycle_status"),
     }))
+}
+
+// Explicitly changing the default is separate from validating a model for a
+// replacement branch. A branch must never modify another session's default.
+async fn select_catalog_model(
+    requested_model_id: &str,
+    state: &AccountPlatformState,
+    pool: &EnginePool,
+) -> Result<serde_json::Value, String> {
+    let selection = validate_catalog_model(requested_model_id, state).await?;
+    let model_id = requested_model_id.trim();
+    UserPrefs::update_transaction(|prefs| {
+        prefs.set_default_model_ref(ModelSelectionRef::account_platform(model_id))
+    })?;
+    pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
+    Ok(selection)
 }
 
 #[derive(serde::Deserialize)]
@@ -278,6 +289,8 @@ pub struct ReplacementSessionBranch {
     source_turn_id: String,
     source_message_count: usize,
     replacement_model_id: String,
+    replacement_title_suffix: String,
+    default_chat_title: String,
 }
 
 #[tauri::command]
@@ -285,19 +298,30 @@ pub async fn account_platform_branch_replacement_session(
     input: ReplacementSessionBranch,
     app: AppHandle,
     state: State<'_, AccountPlatformState>,
-    pool: State<'_, EnginePool>,
+    _pool: State<'_, EnginePool>,
     store: State<'_, SessionStore>,
 ) -> Result<serde_json::Value, String> {
     if input.source_turn_id.trim().is_empty() || input.source_turn_id.len() > 160 {
         return Err("replacement_branch_invalid: source turn is required".to_string());
     }
-    select_catalog_model(&input.replacement_model_id, &state, &pool).await?;
+    if [&input.replacement_title_suffix, &input.default_chat_title]
+        .iter()
+        .any(|value| value.trim().is_empty() || value.chars().any(char::is_control))
+    {
+        return Err(
+            "replacement_branch_invalid: title copy is required without control characters"
+                .to_string(),
+        );
+    }
+    validate_catalog_model(&input.replacement_model_id, &state).await?;
     let (session, lineage) = store
         .create_replacement_branch(
             input.source_conversation_id.trim(),
             input.source_message_count,
             input.source_turn_id.trim().to_string(),
             input.replacement_model_id.trim().to_string(),
+            input.replacement_title_suffix,
+            input.default_chat_title,
         )
         .map_err(|error| format!("replacement_branch_failed: {error:#}"))?;
     store.set_active(Some(session.metadata.id.clone()));
@@ -345,6 +369,50 @@ fn ensure_new_session_model_selectable(item: &serde_json::Value) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::ensure_new_session_model_selectable;
+
+    #[test]
+    fn replacement_branch_never_invokes_global_model_selection() {
+        let source = include_str!("account_platform.rs");
+        let branch = source
+            .split("pub async fn account_platform_branch_replacement_session(")
+            .nth(1)
+            .unwrap()
+            .split("fn ensure_new_session_model_selectable(")
+            .next()
+            .unwrap();
+        assert!(
+            branch.contains("validate_catalog_model(&input.replacement_model_id, &state).await?")
+        );
+        assert!(!branch.contains("select_catalog_model("));
+        assert!(!branch.contains("UserPrefs::update_transaction"));
+        assert!(!branch.contains("mark_model_updated"));
+        assert!(branch.contains(".create_replacement_branch("));
+    }
+
+    #[test]
+    fn catalog_validation_and_explicit_default_selection_keep_distinct_mutation_boundaries() {
+        let source = include_str!("account_platform.rs");
+        let validation = source
+            .split("async fn validate_catalog_model(")
+            .nth(1)
+            .expect("read-only catalog validation")
+            .split("async fn select_catalog_model(")
+            .next()
+            .unwrap();
+        assert!(!validation.contains("UserPrefs::update_transaction"));
+        assert!(!validation.contains("mark_model_updated"));
+        assert!(validation.contains("ensure_new_session_model_selectable(item)?"));
+        let selection = source
+            .split("async fn select_catalog_model(")
+            .nth(1)
+            .unwrap()
+            .split("pub struct ReplacementSessionBranch")
+            .next()
+            .unwrap();
+        assert!(selection.contains("validate_catalog_model(requested_model_id, state).await?"));
+        assert!(selection.contains("UserPrefs::update_transaction"));
+        assert!(selection.contains("pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)"));
+    }
 
     #[test]
     fn catalog_selection_obeys_new_session_cutoff_and_context_eligibility() {
