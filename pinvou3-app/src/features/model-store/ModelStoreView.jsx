@@ -19,6 +19,7 @@ import { IosSearchField } from '../../components/IosControls.jsx';
 import {
   disableTestStore,
   fetchLibrary,
+  fetchMemoryAdmission,
   fetchStoreCards,
   fetchTestStoreState,
   forceRemoveModel,
@@ -65,6 +66,8 @@ import { ModelStoreTaskPanel } from './ModelStoreTaskPanel.jsx';
 import { ModelDetailDialog } from './ModelDetailDialog.jsx';
 import { StoreCardDialog } from './StoreCardDialog.jsx';
 import { StorageSettingsDialog } from './StorageSettingsDialog.jsx';
+import { EngineManagementDialog } from './EngineManagementDialog.jsx';
+import { LocalResourcesDialog } from './LocalResourcesDialog.jsx';
 import {
   BTN_NEUTRAL,
   HOVER_SURFACE,
@@ -134,6 +137,12 @@ const ModelStoreView = ({ theme, t, bs }) => {
   // 「存储与导入」设置框。权重目录跟用户实际存放位置对不上时，下载会白跑几十
   // 个小时而界面上看不出异常,所以这个入口是常驻的,不藏。
   const [storageOpen, setStorageOpen] = useState(false);
+  // 两个资源管理入口必须常驻：模型商店不只是下载页，用户也要能看见并处理本机
+  // 已有的引擎和外部权重。它们各自按打开时刷新，避免首页加载被慢扫描拖住。
+  const [enginesOpen, setEnginesOpen] = useState(false);
+  const [localResourcesOpen, setLocalResourcesOpen] = useState(false);
+  // 二次内存确认只在“已有模型运行且风险/预算未知”时出现。首个模型不拦截。
+  const [memoryConfirm, setMemoryConfirm] = useState(null);
 
   // 测试模型商店:卡片和脚本打包在 LMM 内、不依赖商店服务器,只给开发验证脚本
   // 本身用。所以它默认关着,而且开关是**隐藏**的 —— 见下面 handleSecretUnlockClick。
@@ -519,16 +528,35 @@ const ModelStoreView = ({ theme, t, bs }) => {
     [deployWithProfile]
   );
 
-  const handleEnable = useCallback(
-    (record) => runLifecycle({
+  const startEnabledModel = useCallback(
+    (record, memoryConfirmed = false) => runLifecycle({
       record,
       kind: 'enable',
       title: copy.taskEnable(record.card_name),
-      start: () => startEnable(record.card_id),
+      start: () => startEnable(record.card_id, memoryConfirmed),
       doneText: copy.enableDone(record.card_name),
     }),
     [copy, runLifecycle]
   );
+
+  const handleEnable = useCallback(async (record) => {
+    try {
+      const admission = await fetchMemoryAdmission(record.card_id);
+      if (admission?.requires_confirmation) {
+        setMemoryConfirm({ record, admission });
+        return;
+      }
+      await startEnabledModel(record, false);
+    } catch (error) {
+      showToast(`无法检查启用条件：${String(error?.message || error)}`);
+    }
+  }, [showToast, startEnabledModel]);
+
+  const confirmMemoryEnable = useCallback(async () => {
+    const pending = memoryConfirm;
+    setMemoryConfirm(null);
+    if (pending?.record) await startEnabledModel(pending.record, true);
+  }, [memoryConfirm, startEnabledModel]);
 
   const handleStop = useCallback(
     (record) => runLifecycle({
@@ -910,6 +938,24 @@ const ModelStoreView = ({ theme, t, bs }) => {
               </button>
               <button
                 type="button"
+                data-testid="model-store-engines"
+                className={BTN_NEUTRAL}
+                onClick={() => setEnginesOpen(true)}
+              >
+                <Package size={14} className="opacity-70" />
+                推理引擎
+              </button>
+              <button
+                type="button"
+                data-testid="model-store-local-resources"
+                className={BTN_NEUTRAL}
+                onClick={() => setLocalResourcesOpen(true)}
+              >
+                <Database size={14} className="opacity-70" />
+                本地资源
+              </button>
+              <button
+                type="button"
                 disabled={loading}
                 data-testid="model-store-refresh"
                 className={BTN_NEUTRAL}
@@ -981,6 +1027,59 @@ const ModelStoreView = ({ theme, t, bs }) => {
         theme={theme}
         onSaved={showToast}
       />
+
+      <EngineManagementDialog
+        open={enginesOpen}
+        onClose={() => setEnginesOpen(false)}
+        onChanged={loadAll}
+        theme={theme}
+      />
+
+      <LocalResourcesDialog
+        open={localResourcesOpen}
+        onClose={() => setLocalResourcesOpen(false)}
+        onStorageSettings={() => {
+          setLocalResourcesOpen(false);
+          setStorageOpen(true);
+        }}
+        theme={theme}
+      />
+
+      <MsDialog
+        open={!!memoryConfirm}
+        onClose={() => setMemoryConfirm(null)}
+        theme={theme}
+        labelledBy="model-store-memory-confirm-title"
+        testId="model-store-memory-confirm"
+      >
+        {memoryConfirm ? (
+          <>
+            <MsDialogTitle id="model-store-memory-confirm-title">确认启用模型</MsDialogTitle>
+            <p className={`text-[13px] leading-6 ${TEXT_PRIMARY}`}>{memoryConfirm.admission.message}</p>
+            <div className={`mt-4 rounded-[14px] bg-[#F0F4F9] p-3 text-[12px] leading-6 dark:bg-[#282A2C] ${TEXT_SECONDARY}`}>
+              <div>设备内存：{formatBytes(memoryConfirm.admission.total_bytes || 0)}</div>
+              <div>当前可用：{formatBytes(memoryConfirm.admission.available_bytes || 0)}</div>
+              {memoryConfirm.admission.candidate_peak_bytes == null ? (
+                <div>待启用模型：卡片尚未提供可信的峰值内存档位</div>
+              ) : (
+                <>
+                  <div>待启用模型峰值：约 {formatBytes(memoryConfirm.admission.candidate_peak_bytes)}</div>
+                  <div>启用后预计可用：约 {formatBytes(memoryConfirm.admission.projected_available_bytes || 0)}</div>
+                </>
+              )}
+              {(memoryConfirm.admission.running_models || []).map((model) => (
+                <div key={model.card_id}>
+                  正在运行：{model.card_name}（当前占用 {model.rss_bytes == null ? '暂无法读取' : formatBytes(model.rss_bytes)}）
+                </div>
+              ))}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <MsButton tone="ghost" onClick={() => setMemoryConfirm(null)}>暂不启用</MsButton>
+              <MsButton tone="danger" onClick={confirmMemoryEnable}>仍要启用</MsButton>
+            </div>
+          </>
+        ) : null}
+      </MsDialog>
 
       <StoreCardDialog
         card={detailCard}

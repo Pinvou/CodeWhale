@@ -49,6 +49,29 @@ pub async fn model_store_model_detail(card_id: String) -> Result<Value, String> 
     model_store::model_detail(card_id).await
 }
 
+#[tauri::command]
+pub async fn model_store_installed_engines() -> Result<Value, String> {
+    model_store::installed_engines().await
+}
+
+#[tauri::command]
+pub async fn model_store_local_resources() -> Result<Value, String> {
+    model_store::local_resources().await
+}
+
+#[tauri::command]
+pub async fn model_store_memory_admission(card_id: String) -> Result<Value, String> {
+    model_store::memory_admission(card_id).await
+}
+
+#[tauri::command]
+pub async fn model_store_delete_engine(
+    engine_name: String,
+    engine_version: Option<String>,
+) -> Result<Value, String> {
+    model_store::delete_engine(engine_name, engine_version).await
+}
+
 // ---------------------------------------------------------------- 长操作
 
 #[tauri::command]
@@ -80,8 +103,15 @@ pub fn model_store_start_lifecycle(
     card_id: String,
     action: String,
     purge_weights: Option<bool>,
+    memory_confirmed: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::start_lifecycle(&service, card_id, action, purge_weights.unwrap_or(false))
+    model_store::start_lifecycle(
+        &service,
+        card_id,
+        action,
+        purge_weights.unwrap_or(false),
+        memory_confirmed.unwrap_or(false),
+    )
 }
 
 #[tauri::command]

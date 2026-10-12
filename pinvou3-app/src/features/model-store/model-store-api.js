@@ -80,6 +80,26 @@ function fetchModelDetail(cardId) {
   return invokeTauri('model_store_model_detail', { cardId });
 }
 
+/** 已验证存在的模型商店推理引擎；历史数据库残留不会混进列表。 */
+function fetchInstalledEngines() {
+  return invokeTauri('model_store_installed_engines');
+}
+
+/** 本机扫描到的外部权重候选。它们尚未被认定为某张卡片的完整模型。 */
+function fetchLocalResources() {
+  return invokeTauri('model_store_local_resources');
+}
+
+/** 启用模型前的内存准入快照。 */
+function fetchMemoryAdmission(cardId) {
+  return invokeTauri('model_store_memory_admission', { cardId });
+}
+
+/** 删除一个未被模型绑定、且客户端能安全清理的推理引擎。 */
+function deleteInstalledEngine(engineName, engineVersion = null) {
+  return invokeTauri('model_store_delete_engine', { engineName, engineVersion });
+}
+
 /**
  * 某个模型的 API Key 列表。
  * @param {string} cardId - 卡片 ID。
@@ -124,8 +144,12 @@ function startDeploy(cardId, profileId = null) {
  * @param {string} cardId - 卡片 ID。
  * @returns {Promise<{run_id:string}>} 运行句柄。
  */
-function startEnable(cardId) {
-  return invokeTauri('model_store_start_lifecycle', { cardId, action: 'enable' });
+function startEnable(cardId, memoryConfirmed = false) {
+  return invokeTauri('model_store_start_lifecycle', {
+    cardId,
+    action: 'enable',
+    memoryConfirmed: !!memoryConfirmed,
+  });
 }
 
 /**
@@ -268,6 +292,10 @@ export {
   disableTestStore,
   fetchLibrary,
   fetchModelDetail,
+  fetchInstalledEngines,
+  fetchLocalResources,
+  fetchMemoryAdmission,
+  deleteInstalledEngine,
   fetchApiKeys,
   createApiKey,
   startDownload,

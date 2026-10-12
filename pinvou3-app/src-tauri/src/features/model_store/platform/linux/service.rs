@@ -429,6 +429,83 @@ pub async fn model_detail(card_id: String) -> Result<Value, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// 仅列出已经过实体校验的引擎。数据库里的历史记录不能直接拿来显示，否则用户会
+/// 看见“0 B、删不掉”的幽灵条目。
+pub async fn installed_engines() -> Result<Value, String> {
+    tokio::task::spawn_blocking(|| {
+        serde_json::to_value(ModelManager::new(None, None).list_installed_engines())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 扫描用户配置的本地导入目录。结果只是“可能的权重资源”，不是模型归属结论；卡片
+/// 脚本仍需在下载时核验它是否完整且确实属于当前模型。
+pub async fn local_resources() -> Result<Value, String> {
+    tokio::task::spawn_blocking(|| {
+        let settings = config::load_settings();
+        let candidates = import_scan::scan(&import_scan::roots(
+            &settings.import_scan_dirs,
+            &settings.models_path(),
+            &settings.staging_path(),
+        ));
+        Ok(json!({
+            "resources": candidates,
+            "scan_dirs": import_scan::roots(
+                &settings.import_scan_dirs,
+                &settings.models_path(),
+                &settings.staging_path(),
+            ).iter().map(|path| path.to_string_lossy().to_string()).collect::<Vec<_>>(),
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 启用前内存准入快照。前端据此决定是否需要给用户二次确认，真正开始启用时还会在
+/// `start_lifecycle` 里复算一次，避免用户打开确认框后内存状态已变化。
+pub async fn memory_admission(card_id: String) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        ModelManager::new(None, None)
+            .memory_admission(&card_id)
+            .map_err(|e| e.to_string())
+            .and_then(|admission| serde_json::to_value(admission).map_err(|e| e.to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 删除未被任何模型绑定的、且当前客户端有安全删除方式的引擎。
+pub async fn delete_engine(
+    engine_name: String,
+    engine_version: Option<String>,
+) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let manager = ModelManager::new(None, None);
+        let current = manager.list_installed_engines();
+        let engine = current
+            .iter()
+            .find(|engine| engine.engine_name == engine_name && engine.engine_version == engine_version)
+            .ok_or_else(|| "未找到可验证的本地引擎；它可能已被手动删除，请刷新列表。".to_string())?;
+        if !engine.affected_models.is_empty() {
+            return Err(format!(
+                "该引擎仍被以下模型绑定，不能删除：{}。请先删除或重新部署这些模型。",
+                engine.affected_models.join("、")
+            ));
+        }
+        if !engine.cleanup_supported {
+            return Err("该引擎已验证存在，但模型卡片尚未提供安全的独立清理方式；为避免误删模型文件，当前不能自动删除。".to_string());
+        }
+        manager
+            .delete_engine(&engine_name, engine_version.as_deref())
+            .map_err(|e| e.to_string())
+            .and_then(|outcome| serde_json::to_value(outcome).map_err(|e| e.to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------------------------------------------------------------- 长操作
 
 pub fn start_download(
@@ -511,6 +588,7 @@ pub fn start_lifecycle(
     card_id: String,
     action: String,
     purge_weights: bool,
+    memory_confirmed: bool,
 ) -> Result<Value, String> {
     let op = match action.as_str() {
         "enable" => OP_ENABLE,
@@ -543,6 +621,18 @@ pub fn start_lifecycle(
                     rec.card_name
                 ));
             }
+        }
+    }
+
+    if op == OP_ENABLE {
+        let admission = ModelManager::new(None, None)
+            .memory_admission(&card_id)
+            .map_err(|e| e.to_string())?;
+        if admission.requires_confirmation && !memory_confirmed {
+            return Err(format!(
+                "启用前需要确认内存风险：{} 请重新点击“启用”，确认后继续。",
+                admission.message
+            ));
         }
     }
 

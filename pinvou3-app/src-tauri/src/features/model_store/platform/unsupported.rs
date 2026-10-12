@@ -42,6 +42,25 @@ pub async fn model_detail(_card_id: String) -> Result<Value, String> {
     nope()
 }
 
+pub async fn installed_engines() -> Result<Value, String> {
+    nope()
+}
+
+pub async fn local_resources() -> Result<Value, String> {
+    nope()
+}
+
+pub async fn memory_admission(_card_id: String) -> Result<Value, String> {
+    nope()
+}
+
+pub async fn delete_engine(
+    _engine_name: String,
+    _engine_version: Option<String>,
+) -> Result<Value, String> {
+    nope()
+}
+
 pub fn start_download(
     _service: &Arc<ModelStoreService>,
     _card_id: String,
@@ -63,6 +82,7 @@ pub fn start_lifecycle(
     _card_id: String,
     _action: String,
     _purge_weights: bool,
+    _memory_confirmed: bool,
 ) -> Result<Value, String> {
     nope()
 }

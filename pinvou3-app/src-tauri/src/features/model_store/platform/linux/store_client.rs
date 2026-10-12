@@ -31,6 +31,31 @@ pub struct DeployProfile {
     pub description: Option<String>,
 }
 
+/// 卡片作者实测的运行内存需求。
+///
+/// 权重文件大小不是运行时内存需求：量化方式、KV cache、上下文长度和引擎都会让两者
+/// 相差很大。因此模型商店只接受卡片随部署方案下发的实测峰值；字段缺失时宁可告诉
+/// 用户“无法可靠预测”，绝不把磁盘体积伪装成内存预算。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceRequirements {
+    /// 统一内存设备（如 GB10）在稳定推理负载下的峰值。单位 MiB。
+    #[serde(default)]
+    pub unified_memory_peak_mib: Option<u64>,
+    /// 独立主机内存设备上的运行峰值。单位 MiB。
+    #[serde(default)]
+    pub host_ram_peak_mib: Option<u64>,
+    /// 独立显存设备上的运行峰值。单位 MiB；当前仅展示，准入不和主机内存相加。
+    #[serde(default)]
+    pub gpu_vram_peak_mib: Option<u64>,
+}
+
+impl ResourceRequirements {
+    /// 当前启用准入应扣减的内存预算。统一内存优先，避免把同一块内存算两遍。
+    pub fn admission_peak_mib(&self) -> Option<u64> {
+        self.unified_memory_peak_mib.or(self.host_ram_peak_mib)
+    }
+}
+
 /// 这张卡把权重下下来之后，**凭什么说这份权重就是它声称的那份**。
 ///
 /// 为什么要有这个字段：内置卡之间的完整性保障差着两个数量级，界面上却长得一模
@@ -113,6 +138,9 @@ pub struct StoreCardSummary {
     /// 第一天起就只对"记得填"的人生效，那等于没做。
     #[serde(default)]
     pub weight_verification: WeightVerification,
+    /// 由模型卡片下发的实测运行内存档位。老卡片没有时保留空值并走保守提示。
+    #[serde(default)]
+    pub resource_requirements: ResourceRequirements,
 }
 
 /// 卡片的部署拓扑。目前只区分单机和双机直连；多机以后再说，不预留半成品。
@@ -431,6 +459,27 @@ mod tests {
         let c: StoreCardSummary = serde_json::from_str(json).unwrap();
         assert_eq!(c.deploy_topology, DeployTopology::Single);
         assert_eq!(c.deploy_topology.node_count(), 1);
+    }
+
+    #[test]
+    fn resource_requirements_prefer_unified_memory_and_never_infer_from_weight_size() {
+        let unified = ResourceRequirements {
+            unified_memory_peak_mib: Some(48 * 1024),
+            host_ram_peak_mib: Some(16 * 1024),
+            gpu_vram_peak_mib: Some(32 * 1024),
+        };
+        assert_eq!(unified.admission_peak_mib(), Some(48 * 1024));
+
+        let discrete = ResourceRequirements {
+            unified_memory_peak_mib: None,
+            host_ram_peak_mib: Some(12 * 1024),
+            gpu_vram_peak_mib: Some(24 * 1024),
+        };
+        assert_eq!(discrete.admission_peak_mib(), Some(12 * 1024));
+
+        // 旧卡没有运行内存档位时，必须显式返回未知；调用方据此请求用户确认，
+        // 而不是把下载后的权重文件大小编造成内存需求。
+        assert_eq!(ResourceRequirements::default().admission_peak_mib(), None);
     }
 
     #[test]

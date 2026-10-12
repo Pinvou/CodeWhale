@@ -22,6 +22,8 @@ use super::script_runner::{self, RunScriptOptions, ScriptProgress};
 use super::store_client::{
     DeployProfile, DeployTopology, StoreCardDetail, StoreCardSummary, StoreClient, StoreSource,
 };
+use crate::features::monitor::current_ram_snapshot;
+use crate::platform::process_resources::ProcessResourceSampler;
 
 pub type ModelManagerError = AppError;
 
@@ -133,8 +135,39 @@ pub struct InstalledEngineInfo {
     pub engine_name: String,
     pub engine_version: Option<String>,
     pub docker_image: Option<String>,
-    pub size_bytes: u64,
+    /// docker/ollama 可以精确统计；厂商交付的二进制引擎只在探针验证过存在时列出，
+    /// 但未必有安全的通用方式统计其全部附属文件。
+    pub size_bytes: Option<u64>,
     pub affected_models: Vec<String>,
+    /// 只有当前客户端知道如何安全删除的引擎才允许点删除。
+    pub cleanup_supported: bool,
+}
+
+/// 已运行模型的实际进程树占用。它是“现在已经占了多少”的观测值，不拿来替代卡片
+/// 的峰值预算：模型加载后的 KV cache 会继续增长，二者是互补关系。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunningModelMemory {
+    pub card_id: String,
+    pub card_name: String,
+    pub rss_bytes: Option<u64>,
+}
+
+/// 启用前的统一内存准入快照。所有字节数都用字节交给前端，避免 GiB/GB 换算混乱。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryAdmission {
+    pub card_id: String,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+    pub safety_reserve_bytes: u64,
+    pub hard_reserve_bytes: u64,
+    pub candidate_peak_bytes: Option<u64>,
+    pub projected_available_bytes: Option<u64>,
+    pub running_models: Vec<RunningModelMemory>,
+    /// green / caution / warning / unknown。unknown 是“卡片尚未给出可信峰值”，不是 0。
+    pub level: String,
+    pub requires_confirmation: bool,
+    /// 直接可显示给用户的一句话，不暴露 docker / /proc 等实现细节。
+    pub message: String,
 }
 
 /// `delete_engine` 的结果。跟 `UninstallOutcome` 是同一个理由：**如实说出这次
@@ -1192,6 +1225,15 @@ impl ModelManager {
             },
         })
         .map_err(|e| ModelManagerError::new(format!("记录模型下载状态失败：{e}")))?;
+        // 内存档位随这次成功下载的卡片一起固化；启用时不再依赖商店网络，也不会把
+        // 权重文件大小误当作内存预算。空结构的语义是“当前卡片没有给可信预算”。
+        // 这个档位只影响后续的启用前提醒，不能把已经完成的下载误报成失败。
+        // 写入失败时保守地回退到“需要用户确认”的未知档位即可。
+        if let Err(e) =
+            db::set_resource_requirements(&card.summary.id, &card.summary.resource_requirements)
+        {
+            eprintln!("[model-store] 保存模型内存档位失败（将使用保守提示）：{e}");
+        }
 
         // 把六类脚本的正文固化到本地：从这一刻起，这个模型的部署/启用/停用/
         // 卸载全部用本地副本执行，不再依赖商店可达——商店重启、上架、改脚本
@@ -2180,39 +2222,179 @@ impl ModelManager {
     // "引擎和模型是两个独立的东西"这句话对 docker 形态成立，**对 ollama 不成立**
     // ——它的引擎和模型数据同住 `~/.ollama`，删引擎就是删模型。见 delete_engine。
     //
-    // **这一节（list_installed_engines / delete_engine）目前零调用点**：命令
-    // 未注册，界面上也没有"已安装引擎"这一块，留待后续分期接线。注意
-    // delete_engine 虽然用户够不着，它里面的超时/幂等问题仍然照修——接线那天
-    // 才发现，代价是真机上删到一半的镜像和删不掉的引擎记录。
+    // 推理引擎页调用这一节时，数据库只作为候选来源，展示前必须验明实体仍在。
+    // 否则用户会看到“0 B、删不掉”的幽灵记录；删除入口也只会开放给已经解除
+    // 全部模型绑定、且客户端有明确清理契约的引擎。
 
     pub fn list_installed_engines(&self) -> Vec<InstalledEngineInfo> {
         let Ok(records) = db::list_installed_engines() else {
             return Vec::new();
         };
+        let models = db::list_store_models().unwrap_or_default();
         records
             .into_iter()
-            .map(|rec| {
-                let size = if let Some(image) = &rec.docker_image {
-                    docker_image_size(image)
+            .filter_map(|rec| {
+                // 数据库只说明“过去装过”，不代表实体仍在。先验实际 docker 镜像、
+                // ollama 目录或卡片的只读探针；旧记录/残缺目录绝不能在用户眼前伪装
+                // 成一个 0 B 的可管理引擎。
+                let (size, cleanup_supported) = if let Some(image) = &rec.docker_image {
+                    let size = docker_image_size(image);
+                    if size == 0 {
+                        return None;
+                    }
+                    (Some(size), true)
                 } else if rec.engine_name == "ollama" {
-                    ollama_size()
+                    let size = ollama_size();
+                    if size == 0 {
+                        return None;
+                    }
+                    (Some(size), true)
                 } else {
-                    0
+                    let Some(model) = models.iter().find(|model| {
+                        model.engine_name == rec.engine_name
+                            && model.engine_version == rec.engine_version
+                            && !model.scripts_content.is_empty()
+                    }) else {
+                        return None;
+                    };
+                    let source = self.local_scripts_source(model);
+                    if !self
+                        .engine_probe(&source, &model.card_id, &self.env_for_record(model))
+                        .installed
+                    {
+                        return None;
+                    }
+                    // 非 docker 的厂商交付引擎暂未下发独立的清理契约；显示真实存在
+                    // 的实体，但绝不猜路径 `rm -rf`。等卡片提供 uninstall_engine 后
+                    // 再把这一项开放为可删除。
+                    (None, false)
                 };
                 let affected = db::list_model_names_using_engine(
                     &rec.engine_name,
                     rec.engine_version.as_deref(),
                 )
                 .unwrap_or_default();
-                InstalledEngineInfo {
+                Some(InstalledEngineInfo {
                     engine_name: rec.engine_name,
                     engine_version: rec.engine_version,
                     docker_image: rec.docker_image,
                     size_bytes: size,
                     affected_models: affected,
-                }
+                    cleanup_supported,
+                })
             })
             .collect()
+    }
+
+    /// 启用前读取一次真实系统内存与当前受本模型商店管理的运行模型。
+    ///
+    /// 第一台模型不做准入拦截——用户买设备最基本的预期是至少能跑起一个模型。已有
+    /// 模型时才按卡片实测峰值做风险分级；卡片尚未提供峰值时，明确要求确认而不是用
+    /// 权重体积瞎算。
+    pub fn memory_admission(&self, card_id: &str) -> Result<MemoryAdmission, ModelManagerError> {
+        let candidate = db::get_store_model(card_id)
+            .map_err(|e| ModelManagerError::new(format!("读取模型记录失败：{e}")))?
+            .ok_or_else(|| ModelManagerError::new("模型不存在，请先下载并部署"))?;
+        let ram = current_ram_snapshot().ok_or_else(|| {
+            ModelManagerError::new("暂时无法读取设备内存状态，请稍后重试后再启用模型")
+        })?;
+        let total_bytes = ram.total_kib.saturating_mul(1024);
+        let available_bytes = ram
+            .total_kib
+            .saturating_sub(ram.used_kib)
+            .saturating_mul(1024);
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let safety_reserve_bytes = (total_bytes / 100 * 15).max(12 * GIB);
+        let hard_reserve_bytes = (total_bytes / 100 * 10).max(6 * GIB);
+
+        // 首先纠正可能在上次异常退出后遗留的 running 标志，随后只统计我们自己记录
+        // 过 container_name 的模型；绝不凭镜像名把用户手工起的容器算进来。
+        self.reconcile_running_status();
+        let running_records = db::list_store_models()
+            .map_err(|e| ModelManagerError::new(format!("读取运行模型失败：{e}")))?
+            .into_iter()
+            .filter(|model| model.running && model.card_id != candidate.card_id)
+            .collect::<Vec<_>>();
+        let roots = running_records
+            .iter()
+            .filter_map(|model| {
+                let name = model.container_name.as_deref()?;
+                docker_container_pid(name).map(|pid| (model.card_id.clone(), pid))
+            })
+            .collect::<Vec<_>>();
+        let mut sampler = ProcessResourceSampler::default();
+        let sampled = sampler.sample_trees(&roots.iter().map(|(_, pid)| *pid).collect::<Vec<_>>());
+        let running_models = running_records
+            .iter()
+            .map(|model| {
+                let pid = roots
+                    .iter()
+                    .find(|(card, _)| card == &model.card_id)
+                    .map(|(_, pid)| *pid);
+                RunningModelMemory {
+                    card_id: model.card_id.clone(),
+                    card_name: model.card_name.clone(),
+                    rss_bytes: pid.and_then(|pid| sampled.get(&pid).map(|usage| usage.rss_bytes)),
+                }
+            })
+            .collect::<Vec<_>>();
+        let candidate_peak_bytes = candidate
+            .resource_requirements
+            .admission_peak_mib()
+            .map(|mib| mib.saturating_mul(1024 * 1024));
+        let projected_available_bytes =
+            candidate_peak_bytes.map(|peak| available_bytes.saturating_sub(peak));
+
+        let (level, requires_confirmation, message) = if running_models.is_empty() {
+            (
+                "green".to_string(),
+                false,
+                "当前没有其他模型在运行，可以启用此模型。".to_string(),
+            )
+        } else if let Some(projected) = projected_available_bytes {
+            if projected < hard_reserve_bytes {
+                (
+                    "warning".to_string(),
+                    true,
+                    "启用后可用内存将低于安全下限，可能导致设备卡顿或服务退出。建议先停用其他模型。"
+                        .to_string(),
+                )
+            } else if projected < safety_reserve_bytes {
+                (
+                    "caution".to_string(),
+                    true,
+                    "启用后可用内存余量较小。建议先停用其他模型；如继续，请留意设备响应。"
+                        .to_string(),
+                )
+            } else {
+                (
+                    "green".to_string(),
+                    false,
+                    "当前内存余量充足，可以启用此模型。".to_string(),
+                )
+            }
+        } else {
+            (
+                "unknown".to_string(),
+                true,
+                "该模型卡片尚未提供可信的运行内存档位，无法可靠预测与现有模型同时运行的结果。建议先停用其他模型。"
+                    .to_string(),
+            )
+        };
+
+        Ok(MemoryAdmission {
+            card_id: candidate.card_id,
+            total_bytes,
+            available_bytes,
+            safety_reserve_bytes,
+            hard_reserve_bytes,
+            candidate_peak_bytes,
+            projected_available_bytes,
+            running_models,
+            level,
+            requires_confirmation,
+            message,
+        })
     }
 
     /// 删掉引擎本身。**后果按引擎形态分两种，措辞绝不能混用**：
@@ -2661,6 +2843,19 @@ fn docker_image_size(image: &str) -> u64 {
     )
     .and_then(|s| s.trim().parse::<u64>().ok())
     .unwrap_or(0)
+}
+
+/// 只读取由本模型商店登记的容器 PID，供内存准入采样进程树使用。
+///
+/// 失败时返回 None：容器可能恰好在停止、docker 也可能短暂不可用；这种情况下前端
+/// 会显示“当前占用暂不可读取”，但仍按系统 `MemAvailable` 做保守判断。
+fn docker_container_pid(container_name: &str) -> Option<u32> {
+    proc_timeout::query(
+        "docker",
+        &["inspect", "--format", "{{.State.Pid}}", container_name],
+    )
+    .and_then(|pid| pid.trim().parse::<u32>().ok())
+    .filter(|pid| *pid > 0)
 }
 
 fn ollama_size() -> u64 {

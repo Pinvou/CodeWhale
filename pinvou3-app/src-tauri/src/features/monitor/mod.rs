@@ -76,6 +76,15 @@ pub struct RamSnapshot {
     pub swap_used_kib: u64,
 }
 
+/// 当前主机内存快照。
+///
+/// 监控页之外也有需要做资源准入的地方（例如模型商店启用第二个模型）。它们必须
+/// 复用和监控页完全相同的 `MemAvailable` 口径，不能各自再解析一次 `/proc/meminfo`
+/// 后得出两套“可用内存”。采样失败仍返回 `None`，调用方据此降级为保守提示。
+pub fn current_ram_snapshot() -> Option<RamSnapshot> {
+    platform::ram_snapshot()
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AppSnapshot {
     pub pinvou3_version: &'static str,

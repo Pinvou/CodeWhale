@@ -19,7 +19,7 @@ use rand::Rng as _;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::config;
-use super::store_client::{DeployProfile, DeployTopology};
+use super::store_client::{DeployProfile, DeployTopology, ResourceRequirements};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS installed_engines (
@@ -79,7 +79,9 @@ CREATE TABLE IF NOT EXISTS store_models (
     scripts_fetched_at TEXT,
     deployed_script_sha256 TEXT,
     deploy_topology TEXT,
-    assets_content_json TEXT
+    assets_content_json TEXT,
+    -- 模型卡片实测的运行内存档位。缺失不代表 0，而是尚不可可靠预测。
+    resource_requirements_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -122,6 +124,7 @@ const MIGRATION_COLUMNS: &[(&str, &[(&str, &str)])] = &[
             // 这是判断"某个容器是不是本应用起的"唯一可靠的依据——镜像不是身份，
             // 别人用同一个镜像起的容器跟我们的长得一模一样。
             ("container_name", "TEXT"),
+            ("resource_requirements_json", "TEXT"),
         ],
     ),
     ("api_keys", &[("card_id", "TEXT")]),
@@ -538,6 +541,8 @@ pub struct StoreModelRecord {
     /// 一比就知道。以前界面对所有已部署模型都常驻一个「重新部署」按钮，用户
     /// 根本不知道自己为什么要点它。
     pub deployed_script_sha256: Option<String>,
+    /// 卡片下发的运行内存需求。空结构表示当前卡片尚未提供可信预算。
+    pub resource_requirements: ResourceRequirements,
 }
 
 /// 一份固化下来的脚本：正文 + 它的 sha256（来源哈希，用于"检查卡片更新"时
@@ -605,6 +610,10 @@ impl StoreModelRecord {
                 .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok())
                 .unwrap_or_default(),
             deployed_script_sha256: row.get("deployed_script_sha256")?,
+            resource_requirements: row
+                .get::<_, Option<String>>("resource_requirements_json")?
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default(),
         })
     }
 }
@@ -834,6 +843,23 @@ pub fn mark_uninstalled(card_id: &str) -> rusqlite::Result<()> {
 /// 权重和引擎保持不动，用户重新部署即可恢复可用状态。
 pub fn mark_deployment_missing(card_id: &str) -> rusqlite::Result<()> {
     clear_deployment_state(card_id)
+}
+
+/// 下载成功后把当时卡片下发的运行内存档位固化到本地。
+///
+/// 启用必须在离线时也能工作，不能每次为了一个内存提示重新请求商店；同时卡片以后
+/// 更新档位也不会悄悄改变已下载模型的行为，用户重新下载/更新卡片后才会刷新。
+pub fn set_resource_requirements(
+    card_id: &str,
+    requirements: &ResourceRequirements,
+) -> rusqlite::Result<()> {
+    let json = serde_json::to_string(requirements).unwrap_or_default();
+    let conn = connect()?;
+    conn.execute(
+        "UPDATE store_models SET resource_requirements_json = ?1 WHERE card_id = ?2",
+        params![json, card_id],
+    )?;
+    Ok(())
 }
 
 /// 部署时发现权重缺失或不完整，撤销“已经下载好”的过期声明。
