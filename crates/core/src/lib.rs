@@ -449,13 +449,14 @@ pub fn validate_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
 /// M38-3).
 pub fn strip_workspace_roots_head(primary: &Path, stored: &[PathBuf]) -> Vec<PathBuf> {
     let head = normalize_lexical_components(primary);
-    // Round-41 M41-2: the head comparison also runs CANONICALLY (existing
-    // paths canonicalize with a lexical fallback; the strip only runs on
-    // cold move/load faces). A symlink alias of the OLD primary — or, on
-    // case-insensitive hosts, a case-folded spelling — is admitted at
-    // intake (the ancestor rejection exempts equality) and survives a pure
-    // lexical strip, re-arming the abandoned directory after a move; the
-    // canonical leg drops it with the head.
+    // Round-41 M41-2 + the zhuowp Windows follow-up: the head comparison
+    // runs CANONICALLY (existing paths canonicalize with a lexical
+    // fallback; the strip only runs on cold move/load faces), and when
+    // BOTH sides fall back to lexical spellings — the old directory has
+    // disappeared — the comparison goes through the platform's comparison
+    // spelling (case-fold + verbatim strip on Windows, identity on Unix),
+    // so a stored case alias of the vanished old primary still drops
+    // instead of riding the move.
     let head_real = primary.canonicalize().unwrap_or_else(|_| head.clone());
     stored
         .iter()
@@ -463,12 +464,27 @@ pub fn strip_workspace_roots_head(primary: &Path, stored: &[PathBuf]) -> Vec<Pat
             let lexical = normalize_lexical_components(root.as_path());
             if lexical != head {
                 let real = root.canonicalize().unwrap_or_else(|_| lexical.clone());
-                return real != head_real;
+                return !strip_head_equivalent(&real, &head_real);
             }
             false
         })
         .cloned()
         .collect()
+}
+
+/// Head-equivalence for the strip's fallback legs: the Windows comparison
+/// spelling (case-fold, verbatim-prefix strip) on Windows — where a case
+/// alias and the primary are the same path whether or not either still
+/// exists — and the native comparison on Unix, where distinct spellings of
+/// a vanished directory remain distinct paths.
+#[cfg(target_os = "windows")]
+fn strip_head_equivalent(real: &Path, head_real: &Path) -> bool {
+    comparison_spelling(real) == comparison_spelling(head_real)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn strip_head_equivalent(real: &Path, head_real: &Path) -> bool {
+    real == head_real
 }
 
 /// Validate a STORED root row — the cwd-first full form
@@ -4759,6 +4775,34 @@ mod tests {
             .expect("read fork")
             .expect("fork persisted");
         assert_eq!(persisted.workspace_roots, forked.thread.workspace_roots);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn workspace_move_strips_a_case_alias_of_a_vanished_old_primary() {
+        // Round-41 zhuowp follow-up: the old directory has DISAPPEARED, so
+        // both canonicalize calls fail and the comparison falls back to the
+        // lexical spellings — a stored case alias of the old primary is
+        // still the same path on a case-insensitive filesystem and must
+        // drop with the head, not ride the move into the new primary's set.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let old_ws = temp.path().join("Repo");
+        let alias = temp.path().join("rEPO");
+        let new_ws = temp.path().join("moved");
+        std::fs::create_dir_all(&new_ws).expect("new workspace");
+        let keep = temp.path().join("keep");
+        std::fs::create_dir_all(&keep).expect("keep root");
+        // Neither old_ws nor alias is created: the vanished-directory leg.
+
+        let stripped = strip_workspace_roots_head(&old_ws, &[old_ws.clone(), alias, keep.clone()]);
+        assert_eq!(
+            stripped,
+            vec![keep.clone()],
+            "a case alias of the vanished old primary drops with the head"
+        );
+
+        let moved = validate_workspace_roots(&new_ws, &stripped).expect("re-validate");
+        assert_eq!(moved, vec![new_ws.clone(), keep]);
     }
 
     #[test]
