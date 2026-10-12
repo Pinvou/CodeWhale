@@ -1275,6 +1275,17 @@ jobs:
         with:
           submodules: false
 
+      # / 与 /mnt 在 hosted runner 上共用同一块磁盘。memory setup 会先占用
+      # 8 GiB swap（zram 不可用时为 16 GiB），随后还要安装系统/Node 依赖并
+      # 解压两份 Rust cache。等 cache 恢复完再清理来不及：runner 可能先因
+      # ENOSPC 退出，连诊断日志都无法写入。保留后面的二次检查，同时在任何
+      # 大体积写入前先清掉明确不用的预装 SDK，并要求至少 24 GiB 初始余量。
+      - name: 在 swap 与缓存前准备 Rust 磁盘空间
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py --min-free-gib 24
+
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
@@ -1430,7 +1441,7 @@ jobs:
       # tests passed, but the separate telemetry library exhausted the disk.
       # Reserve room after dependencies, cache restore and swap allocation;
       # only unused SDKs on this disposable hosted runner are removed.
-      - name: 为两轮 Rust 测试准备磁盘空间
+      - name: 在缓存后确认两轮 Rust 测试磁盘空间
         run: |
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
