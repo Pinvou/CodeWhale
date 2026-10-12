@@ -33,6 +33,78 @@ function claim(manager, overrides = {}) {
   });
 }
 
+test("monotonic reservation phases expire despite wall rollback without changing wire deadlines", async () => {
+  for (const phase of ["reserved", "handshake_pending"]) {
+    let wall = 1000; let elapsed = 0;
+    const slots = new EndpointInteractionSlots();
+    const manager = new ControllerReservationManager({ pairingStore: pairingStore(), interactionSlots: slots,
+      clock: () => wall, elapsedClock: () => elapsed });
+    const key = publicKey();
+    let reservation = claim(manager, { handshakePublicKeyB64: key });
+    assert.equal(reservation.reserved_deadline_ms, "11000");
+    if (phase === "handshake_pending") {
+      reservation = manager.beginHandshake({ reservationId: reservation.reservation_id, socketIdentity: "socket-0001" });
+      assert.equal(reservation.handshake_deadline_ms, "21000");
+    }
+    elapsed = phase === "reserved" ? 9999 : 19999; wall = 100;
+    assert.equal(claim(manager, { handshakePublicKeyB64: key }), reservation);
+    elapsed += 1;
+    assert.throws(() => claim(manager, { handshakePublicKeyB64: key }), { code: "pairing_code_invalid" });
+    assert.throws(() => phase === "reserved"
+      ? manager.beginHandshake({ reservationId: reservation.reservation_id, socketIdentity: "socket-0001" })
+      : manager.promoteToLease({ reservationId: reservation.reservation_id, socketIdentity: "socket-0001", controllerLeaseId: "lease-0001" }), { code: "reservation_expired" });
+    assert.equal(await manager.expire(), 1);
+    assert.equal(slots.read("endpoint-0001").owner, null);
+  }
+});
+
+test("wall forward and invalid elapsed clocks fail closed without resetting reservation budgets", async () => {
+  for (const elapsedValue of [NaN, Infinity, -1, 1]) {
+    let wall = 1000; let elapsed = 2;
+    const slots = new EndpointInteractionSlots();
+    const manager = new ControllerReservationManager({ pairingStore: pairingStore(), interactionSlots: slots,
+      clock: () => wall, elapsedClock: () => elapsed });
+    const reservation = claim(manager);
+    elapsed = elapsedValue;
+    assert.throws(() => manager.beginHandshake({ reservationId: reservation.reservation_id, socketIdentity: "socket-0001" }),
+      { code: "controller_reservation_clock_invalid" });
+    assert.equal(slots.read("endpoint-0001").owner.owner_id, reservation.reservation_id);
+    elapsed = 10002;
+    assert.equal(await manager.expire(), 1);
+  }
+  let wall = 1000;
+  const manager = new ControllerReservationManager({ pairingStore: pairingStore(), interactionSlots: new EndpointInteractionSlots(),
+    clock: () => wall, elapsedClock: () => 0 });
+  const reservation = claim(manager);
+  wall = 11000;
+  assert.throws(() => manager.beginHandshake({ reservationId: reservation.reservation_id, socketIdentity: "socket-0001" }), { code: "reservation_expired" });
+  assert.equal(await manager.expire(), 1);
+});
+
+test("elapsed expiry invalidation retry retains exact slot and never grants a new budget", async () => {
+  let wall = 1000; let elapsed = 0; let failed = true;
+  const slots = new EndpointInteractionSlots(); const pairings = pairingStore();
+  pairings.terminate = async () => { if (failed) throw new Error("fixed-invalidation-failure"); };
+  const manager = new ControllerReservationManager({ pairingStore: pairings, interactionSlots: slots,
+    clock: () => wall, elapsedClock: () => elapsed });
+  const key = publicKey();
+  const reservation = claim(manager, { handshakePublicKeyB64: key });
+  elapsed = 10000; wall = 100;
+  await assert.rejects(manager.expire(), /reservation_cleanup_failed/u);
+  assert.equal(manager.reservationForOwner({ reservationId: reservation.reservation_id, socketIdentity: "socket-0001" }).state, "invalidating");
+  assert.equal(slots.read("endpoint-0001").owner.owner_id, reservation.reservation_id);
+  assert.throws(() => claim(manager, { handshakePublicKeyB64: key }), { code: "pairing_code_invalid" });
+  failed = false;
+  assert.equal(await manager.expire(), 1);
+  const replacement = slots.acquireWeb({ endpointId: "endpoint-0001", leaseId: "replacement-web" });
+  assert.equal(await manager.expire(), 0);
+  assert.deepEqual(slots.read("endpoint-0001"), replacement);
+  const restarted = new ControllerReservationManager({ pairingStore: pairings, interactionSlots: slots,
+    clock: () => wall, elapsedClock: () => 0 });
+  assert.equal(restarted.reservationForOwner({ reservationId: reservation.reservation_id, socketIdentity: "socket-0001" }), null);
+  assert.equal(await restarted.expire(), 0);
+});
+
 test("identifier contract: reservation accepts wire colon IDs without changing ownership", async () => {
   const slots = new EndpointInteractionSlots();
   const manager = new ControllerReservationManager({ pairingStore: pairingStore(), interactionSlots: slots });

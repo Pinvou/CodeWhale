@@ -343,6 +343,14 @@ before code lookup, and their bounded source/socket maps fail closed when full.
 Invalid syntax, absent, expired, consumed, revoked, stale-generation and
 rate-limited claims all expose only `pairing_code_invalid`.
 
+Reservation and handshake admission retain their original signed wall-clock
+deadlines and also require unexpired
+process-local monotonic budgets (10 and 20 seconds respectively). Either fence
+expiring rejects admission: wall-clock rollback cannot extend elapsed time,
+and a wall-clock jump forward does not relax authentication expiry. Monotonic
+timing is neither transmitted nor restored across process restarts. Invalidation
+failure retains the original slot and retry evidence without renewing a budget.
+
 Each endpoint has one revisioned interaction slot. Its owner is exactly one of
 `web_lease`, `desktop_reservation`, or `controller_lease`; mutation requires a
 matching canonical uint64 revision. A free slot may be claimed by either Web or

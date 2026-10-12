@@ -120,6 +120,7 @@ export class ControllerLeaseManager {
       || typeof reservationManager.promoteToLease !== "function"
       || typeof reservationManager.release !== "function"
       || typeof reservationManager.reservationForOwner !== "function"
+      || typeof reservationManager.isReservationLive !== "function"
       || typeof reservationManager.releaseControllerLease !== "function"
       || !isControllerIdentifier(relayEpoch)
       || !isRelaySigningKeyIdentifier(signingKeyId)
@@ -221,7 +222,9 @@ export class ControllerLeaseManager {
       fail("controller_handshake_expired");
     }
     const deadline = current.state === "reserved" ? current.reserved_deadline_ms : current.handshake_deadline_ms;
-    if (this.#now() >= Number(deadline)) fail("controller_handshake_expired");
+    if (this.#now() >= Number(deadline) || !this.#reservations.isReservationLive({
+      reservationId: current.reservation_id, socketIdentity,
+    })) fail("controller_handshake_expired");
     return current;
   }
 
@@ -657,7 +660,8 @@ export class ControllerLeaseManager {
       || handshake.sockets.A !== socketIdentity || handshake.sockets.B !== controlledSocketIdentity) return false;
     const current = this.#reservations.reservationForOwner({ reservationId, socketIdentity });
     return Boolean(current?.state === "handshake_pending"
-      && this.#now() < Number(current.handshake_deadline_ms));
+      && this.#now() < Number(current.handshake_deadline_ms)
+      && this.#reservations.isReservationLive({ reservationId, socketIdentity }));
   }
 
   async abortHandshakesBySocket({ socketIdentity, reason = "owner_disconnected", reservationId, endpointId } = {}) {
@@ -715,9 +719,13 @@ export class ControllerLeaseManager {
     const now = this.#now();
     const expired = [...this.#handshakes.values()]
       .filter((handshake) => handshake.state !== "committing"
-        && Number(handshake.reservation.handshake_deadline_ms) <= now);
+        && (Number(handshake.reservation.handshake_deadline_ms) <= now
+          || !this.#reservations.isReservationLive({ reservationId: handshake.reservation.reservation_id,
+            socketIdentity: handshake.sockets.A })));
     const flights = [...this.#claimFlights.values()].filter((flight) => !flight.cancelled
-      && Number(flight.reservation.handshake_deadline_ms ?? flight.reservation.reserved_deadline_ms) <= now);
+      && (Number(flight.reservation.handshake_deadline_ms ?? flight.reservation.reserved_deadline_ms) <= now
+        || !this.#reservations.isReservationLive({ reservationId: flight.reservation.reservation_id,
+          socketIdentity: flight.sockets.A })));
     const owned = new Map();
     for (const flight of flights) {
       flight.cancelled = true;

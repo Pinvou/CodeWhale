@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { isControllerIdentifier, isEnrollmentEndpointIdentifier } from "./identifier-contract.js";
 
 const SOURCE = /^[\x21-\x7e]{1,128}$/u;
@@ -162,16 +163,17 @@ export class ControllerReservationManager {
   #reservations = new Map(); #sourceBuckets = new Map(); #connectionBuckets = new Map();
   #globalBuckets = new Map(); #requests = new Map(); #releases = new Map(); #limits;
   #codeProofKey = crypto.randomBytes(32);
+  #elapsedClock; #lastElapsed = 0; #timings = new Map();
 
   constructor({
-    pairingStore, interactionSlots, clock = Date.now, randomBytes = crypto.randomBytes,
+    pairingStore, interactionSlots, clock = Date.now, elapsedClock = () => performance.now(), randomBytes = crypto.randomBytes,
     onPairingInvalidated = async () => {}, audit = () => {},
     sourceLimit = 30, connectionLimit = 10, globalLimit = 10_000, windowMs = 60_000,
     maxSourceBuckets = 4096, maxConnectionBuckets = 4096,
   } = {}) {
     if (!pairingStore || typeof pairingStore.findActiveByCode !== "function"
       || typeof pairingStore.terminate !== "function" || !(interactionSlots instanceof EndpointInteractionSlots)
-      || typeof clock !== "function" || typeof randomBytes !== "function"
+      || typeof clock !== "function" || typeof elapsedClock !== "function" || typeof randomBytes !== "function"
       || typeof onPairingInvalidated !== "function" || typeof audit !== "function") {
       fail("controller_reservation_config_invalid");
     }
@@ -182,6 +184,7 @@ export class ControllerReservationManager {
     this.#pairings = pairingStore;
     this.#slots = interactionSlots;
     this.#clock = clock;
+    this.#elapsedClock = elapsedClock;
     this.#randomBytes = randomBytes;
     this.#onInvalidated = onPairingInvalidated;
     this.#audit = audit;
@@ -212,6 +215,27 @@ export class ControllerReservationManager {
     fail("controller_reservation_entropy_exhausted");
   }
 
+  #elapsed() {
+    const now = this.#elapsedClock();
+    if (!Number.isFinite(now) || now < this.#lastElapsed || now < 0
+      || now > Number.MAX_SAFE_INTEGER - HANDSHAKE_TIMEOUT_MS) {
+      fail("controller_reservation_clock_invalid");
+    }
+    this.#lastElapsed = now;
+    return now;
+  }
+
+  // Process-local timing never enters the signed/wire reservation. Ownership
+  // reads remain available for invalidation retry even after either fence expires.
+  isReservationLive({ reservationId, socketIdentity } = {}) {
+    const current = this.reservationForOwner({ reservationId, socketIdentity });
+    if (!current || !["reserved", "handshake_pending"].includes(current.state)) return false;
+    const timing = this.#timings.get(current.reservation_id);
+    const deadline = current.state === "reserved" ? current.reserved_deadline_ms : current.handshake_deadline_ms;
+    return Boolean(timing?.phase === current.state && this.#now() < Number(deadline)
+      && this.#elapsed() < timing.deadline);
+  }
+
   #codeProof(code) {
     return crypto.createHmac("sha256", this.#codeProofKey).update(code, "ascii").digest();
   }
@@ -228,11 +252,13 @@ export class ControllerReservationManager {
       if (code && previous?.owner_socket_identity === socketIdentity
         && previous.controller_public_key_sha256 === keyHash
         && ["reserved", "handshake_pending"].includes(previous.state)
+        && this.isReservationLive({ reservationId: previous.reservation_id, socketIdentity })
         && crypto.timingSafeEqual(previousRequest.code_proof, this.#codeProof(code))) return previous;
       this.#emit("claim_request_conflict");
       publicInvalid();
     }
     const now = this.#now(RESERVED_TIMEOUT_MS);
+    const elapsed = this.#elapsed();
     if (!consume(this.#sourceBuckets, source, this.#limits.sourceLimit, this.#limits.windowMs, now,
       this.#limits.maxSourceBuckets)
       || !consume(this.#connectionBuckets, socketIdentity, this.#limits.connectionLimit,
@@ -284,6 +310,7 @@ export class ControllerReservationManager {
           kind: "desktop_reservation", owner_id: reservationId,
         });
         this.#reservations.set(reservationId, reservation);
+        this.#timings.set(reservationId, { phase: "reserved", deadline: elapsed + RESERVED_TIMEOUT_MS });
         this.#requests.set(requestId, Object.freeze({
           reservation_id: reservationId, code_proof: this.#codeProof(code),
         }));
@@ -302,11 +329,13 @@ export class ControllerReservationManager {
     const current = this.#owned(reservationId, socketIdentity);
     if (current.state !== "reserved") fail("reservation_state_invalid");
     const now = this.#now(HANDSHAKE_TIMEOUT_MS);
-    if (now >= Number(current.reserved_deadline_ms)) fail("reservation_expired");
+    if (!this.isReservationLive({ reservationId, socketIdentity })) fail("reservation_expired");
+    const elapsed = this.#elapsed();
     const next = Object.freeze({
       ...current, state: "handshake_pending", handshake_deadline_ms: String(now + HANDSHAKE_TIMEOUT_MS),
     });
     this.#reservations.set(reservationId, next);
+    this.#timings.set(reservationId, { phase: "handshake_pending", deadline: elapsed + HANDSHAKE_TIMEOUT_MS });
     return next;
   }
 
@@ -349,7 +378,7 @@ export class ControllerReservationManager {
     const reservation = this.#owned(reservationId, socketIdentity);
     controllerLeaseId = identifier(controllerLeaseId, "controller_lease_id");
     if (reservation.state !== "handshake_pending") fail("reservation_state_invalid");
-    if (this.#now() >= Number(reservation.handshake_deadline_ms)) fail("reservation_expired");
+    if (!this.isReservationLive({ reservationId, socketIdentity })) fail("reservation_expired");
     const slot = this.#slots.read(reservation.endpoint_id);
     if (slot.owner?.kind !== "desktop_reservation"
       || slot.owner.owner_id !== reservation.reservation_id) {
@@ -359,6 +388,7 @@ export class ControllerReservationManager {
       kind: "controller_lease", owner_id: controllerLeaseId,
     });
     this.#reservations.delete(reservation.reservation_id);
+    this.#timings.delete(reservation.reservation_id);
     this.#requests.delete(reservation.request_id);
     this.#pairings.releaseReservation?.(reservation.pairing_id);
     this.#emit("reservation_promoted");
@@ -386,6 +416,7 @@ export class ControllerReservationManager {
       this.#slots.compareAndSwap(reservation.endpoint_id, slot.revision, null);
     }
     this.#reservations.delete(reservation.reservation_id);
+    this.#timings.delete(reservation.reservation_id);
     this.#requests.delete(reservation.request_id);
     this.#pairings.releaseReservation?.(reservation.pairing_id);
     this.#emit("reservation_released");
@@ -419,14 +450,10 @@ export class ControllerReservationManager {
   }
 
   async expire() {
-    const now = this.#now();
-    const expired = [...this.#reservations.values()].filter((reservation) => (
-      reservation.state === "reserved"
-        ? Number(reservation.reserved_deadline_ms) <= now
-        : reservation.state === "handshake_pending"
-          ? Number(reservation.handshake_deadline_ms) <= now
-          : reservation.state === "invalidating"
-    ));
+    const expired = [...this.#reservations.values()].filter((reservation) =>
+      reservation.state === "invalidating" || !this.isReservationLive({
+        reservationId: reservation.reservation_id, socketIdentity: reservation.owner_socket_identity,
+      }));
     return this.#releaseAll(expired, "timeout");
   }
 

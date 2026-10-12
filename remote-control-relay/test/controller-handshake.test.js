@@ -24,7 +24,7 @@ function publicKey() {
     .subarray(-32).toString("base64");
 }
 
-function fixture({ clock = () => 1000, failConsume = false, pairingCapabilities = CAPABILITIES, resolveControlled, signTranscript, consumeLease,
+function fixture({ clock = () => 1000, elapsedClock, failConsume = false, pairingCapabilities = CAPABILITIES, resolveControlled, signTranscript, consumeLease,
   relayEpoch = "relay-epoch-0001", signingKeyId = "relay-signing-key-0001" } = {}) {
   const pairing = Object.freeze({
     pairing_id: "pairing-0001",
@@ -48,7 +48,7 @@ function fixture({ clock = () => 1000, failConsume = false, pairingCapabilities 
   };
   const slots = new EndpointInteractionSlots();
   const reservations = new ControllerReservationManager({
-    pairingStore: pairings, interactionSlots: slots, clock,
+    pairingStore: pairings, interactionSlots: slots, clock, elapsedClock,
   });
   const signing = crypto.generateKeyPairSync("ed25519");
   const manager = new ControllerLeaseManager({
@@ -218,6 +218,68 @@ function deferred() {
   const promise = new Promise((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+for (const phase of ["resolve", "sign", "consume"]) {
+  test(`monotonic fence rejects wall rollback across real ${phase} await`, async () => {
+    let wall = 1000; let elapsed = 0;
+    const entered = deferred(); const gate = deferred();
+    const value = fixture({ clock: () => wall, elapsedClock: () => elapsed,
+      resolveControlled: async () => {
+        if (phase === "resolve") { entered.resolve(); await gate.promise; }
+        return { socketIdentity: "socket-B" };
+      },
+      signTranscript: async (preimage, key) => {
+        if (phase === "sign") { entered.resolve(); await gate.promise; }
+        return crypto.sign(null, preimage, key);
+      },
+      consumeLease: async () => { if (phase === "consume") { entered.resolve(); await gate.promise; } },
+    });
+    let operation;
+    if (phase === "consume") {
+      const reserved = await start(value.manager);
+      const a = crypto.randomBytes(32); const b = crypto.randomBytes(32);
+      submitCommitmentsAndFinished(value.manager, reserved, a, b);
+      await value.manager.acceptReceipt({ message: receiptMessage(reserved, "A", a), role: "B", socketIdentity: "socket-B" });
+      operation = value.manager.acceptReceipt({ message: receiptMessage(reserved, "B", b), role: "A", socketIdentity: "socket-A" });
+    } else operation = start(value.manager);
+    const settled = Promise.allSettled([operation]);
+    await entered.promise;
+    wall = 100; elapsed = phase === "resolve" ? 10000 : 20000;
+    gate.resolve();
+    assert.equal((await settled)[0].status, "rejected");
+    assert.equal(value.slots.read("endpoint-0001").owner, null);
+    assert.deepEqual(value.terminal, ["pairing-0001"]);
+  });
+}
+
+test("monotonic pending handshake expiry cancels only the owned handshake", async () => {
+  let wall = 1000; let elapsed = 0;
+  const value = fixture({ clock: () => wall, elapsedClock: () => elapsed });
+  const reserved = await start(value.manager);
+  const input = { reservationId: reserved.reservation_id, socketIdentity: "socket-A", controlledSocketIdentity: "socket-B" };
+  assert.equal(value.manager.isPendingHandshake(input), true);
+  wall = 100; elapsed = 20000;
+  assert.equal(value.manager.isPendingHandshake(input), false);
+  assert.equal(await value.manager.expire(), 1);
+  assert.equal(value.slots.read("endpoint-0001").owner, null);
+  assert.equal(await value.manager.expire(), 0);
+});
+
+test("monotonic expiry cancels a real pending resolver flight before it can publish", async () => {
+  let wall = 1000; let elapsed = 0;
+  const entered = deferred(); const gate = deferred();
+  const value = fixture({ clock: () => wall, elapsedClock: () => elapsed,
+    resolveControlled: async () => { entered.resolve(); await gate.promise; return { socketIdentity: "socket-B" }; },
+  });
+  const settled = Promise.allSettled([start(value.manager)]);
+  await entered.promise;
+  wall = 100; elapsed = 10000;
+  assert.equal(await value.manager.expire(), 1);
+  gate.resolve();
+  assert.equal((await settled)[0].status, "rejected");
+  assert.equal(value.slots.read("endpoint-0001").owner, null);
+  assert.equal(await value.manager.expire(), 0);
+});
 
 for (const phase of ["resolve", "sign"]) {
   test(`concurrent stable claim retries share one preparation during ${phase}`, async () => {
