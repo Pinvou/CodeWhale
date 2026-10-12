@@ -104,7 +104,7 @@ func ValidateSnapshot(s Snapshot) error {
 			return ErrUnavailable
 		}
 		switch activation.CommandType {
-		case "RECEIVABLE_WRITE_OFF", "LEDGER_REPAIR", "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+		case "PAYMENT_FINANCIAL_REPAIR", "RECEIVABLE_WRITE_OFF", "LEDGER_REPAIR", "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
 		case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 			if activation.PolicyVersion == 1 && activation.State != "INACTIVE" || activation.PolicyVersion == 2 && (!seen[activation.CommandType] || previousPolicy != 1) {
 				return ErrUnavailable

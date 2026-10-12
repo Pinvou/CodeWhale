@@ -6,7 +6,8 @@ export const ledgerRepairCopy = {
     "command": "修复命令",
     "targets": {
       "LEDGER_REPAIR": "目标过账 ID",
-      "RECEIVABLE_WRITE_OFF": "应收 ID"
+      "RECEIVABLE_WRITE_OFF": "应收 ID",
+      "PAYMENT_FINANCIAL_REPAIR": "支付订单 ID"
     },
     "fields": {
       "receivable_id": "应收 ID",
@@ -19,7 +20,17 @@ export const ledgerRepairCopy = {
       "correct_ledger_account_id": "正确平台账户 ID",
       "amount_microcredits": "金额（微积分）",
       "target": "目标",
-      "reason_code": "固定原因码"
+      "reason_code": "固定原因码",
+      "payment_order_id": "支付订单 ID",
+      "payment_evidence_id": "支付证据 ID",
+      "amount_fen": "支付金额（分）",
+      "credit_microcredits": "入账金额（微积分）",
+      "applied_to_receivables": "用于应收的金额（微积分）",
+      "wallet_version": "钱包版本",
+      "wallet_id": "钱包 ID",
+      "provider_transaction_id": "支付渠道交易 ID",
+      "payment_order_updated_at": "订单更新时间",
+      "facts_digest": "事实摘要"
     },
     "readFacts": "读取冻结事实",
     "reading": "正在读取…",
@@ -38,7 +49,8 @@ export const ledgerRepairCopy = {
     "createdHint": "已创建审批草稿：",
     "invalidDraft": "冻结事实或理由/请求键不满足闭合要求，草稿未提交。",
     "draftFailed": "创建审批草稿失败，请稍后重试。",
-    "controlChanged": "审批控制已变化，请重新读取冻结事实。"
+    "controlChanged": "审批控制已变化，请重新读取冻结事实。",
+    "paymentRepairTitle": "支付财务修复"
   },
   "en": {
     "title": "Start a financial repair approval",
@@ -47,7 +59,8 @@ export const ledgerRepairCopy = {
     "command": "Repair command",
     "targets": {
       "LEDGER_REPAIR": "Target posting ID",
-      "RECEIVABLE_WRITE_OFF": "Receivable ID"
+      "RECEIVABLE_WRITE_OFF": "Receivable ID",
+      "PAYMENT_FINANCIAL_REPAIR": "Payment order ID"
     },
     "fields": {
       "receivable_id": "Receivable ID",
@@ -60,7 +73,17 @@ export const ledgerRepairCopy = {
       "correct_ledger_account_id": "Correct ledger account ID",
       "amount_microcredits": "Amount (microcredits)",
       "target": "Target",
-      "reason_code": "Fixed reason code"
+      "reason_code": "Fixed reason code",
+      "payment_order_id": "Payment order ID",
+      "payment_evidence_id": "Payment evidence ID",
+      "amount_fen": "Payment amount (fen)",
+      "credit_microcredits": "Credit amount (microcredits)",
+      "applied_to_receivables": "Applied to receivables (microcredits)",
+      "wallet_version": "Wallet version",
+      "wallet_id": "Wallet ID",
+      "provider_transaction_id": "Provider transaction ID",
+      "payment_order_updated_at": "Order updated at",
+      "facts_digest": "Facts digest"
     },
     "readFacts": "Read frozen facts",
     "reading": "Reading…",
@@ -79,7 +102,8 @@ export const ledgerRepairCopy = {
     "createdHint": "Approval draft created:",
     "invalidDraft": "The frozen facts, reason or request key do not meet the closed contract; nothing was submitted.",
     "draftFailed": "Creating the approval draft failed. Try again later.",
-    "controlChanged": "The approval control changed; read the frozen facts again."
+    "controlChanged": "The approval control changed; read the frozen facts again.",
+    "paymentRepairTitle": "Payment financial repair"
   },
   "ja": {
     "title": "財務修復の承認を起動",
@@ -88,7 +112,8 @@ export const ledgerRepairCopy = {
     "command": "修復コマンド",
     "targets": {
       "LEDGER_REPAIR": "対象仕訳転記 ID",
-      "RECEIVABLE_WRITE_OFF": "売掛金 ID"
+      "RECEIVABLE_WRITE_OFF": "売掛金 ID",
+      "PAYMENT_FINANCIAL_REPAIR": "支払注文 ID"
     },
     "fields": {
       "receivable_id": "売掛金 ID",
@@ -101,7 +126,17 @@ export const ledgerRepairCopy = {
       "correct_ledger_account_id": "正しい勘定 ID",
       "amount_microcredits": "金額（マイクロクレジット）",
       "target": "対象",
-      "reason_code": "固定理由コード"
+      "reason_code": "固定理由コード",
+      "payment_order_id": "支払注文 ID",
+      "payment_evidence_id": "支払証拠 ID",
+      "amount_fen": "支払金額（分）",
+      "credit_microcredits": "計上額（マイクロクレジット）",
+      "applied_to_receivables": "売掛金充当額（マイクロクレジット）",
+      "wallet_version": "ウォレット版",
+      "wallet_id": "ウォレット ID",
+      "provider_transaction_id": "決済取引 ID",
+      "payment_order_updated_at": "注文更新時刻",
+      "facts_digest": "事実ダイジェスト"
     },
     "readFacts": "固定事実を読み込む",
     "reading": "読み込み中…",
@@ -120,7 +155,8 @@ export const ledgerRepairCopy = {
     "createdHint": "承認ドラフトを作成しました:",
     "invalidDraft": "固定事実・理由・リクエストキーが閉じた契約を満たさないため、送信しませんでした。",
     "draftFailed": "承認ドラフトの作成に失敗しました。後でもう一度お試しください。",
-    "controlChanged": "承認制御が変更されました。固定事実を再読み込みしてください。"
+    "controlChanged": "承認制御が変更されました。固定事実を再読み込みしてください。",
+    "paymentRepairTitle": "支払財務修復"
   }
 };
 

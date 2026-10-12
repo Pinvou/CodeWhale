@@ -4,6 +4,7 @@ import {
   financialRepairProjectionRows, financialRepairDraftFromProjection,
 } from './admin-financial-repair-form.js';
 
+import { AdminPaymentFinancialRepairForm } from './AdminPaymentFinancialRepairForm.jsx';
 import { AdminReceivableWriteOffForm } from './AdminReceivableWriteOffForm.jsx';
 import { useClosureOperation } from './useClosureOperation.js';
 import { ledgerIntentStorage, readLedgerIntent } from './ledger-repair-intent.js';
@@ -14,6 +15,9 @@ import { requireFinanceID } from './finance-contract.js';
 // The only operator inputs are the target references, the free-text reason and
 // the request key.
 export function AdminFinancialRepairDraftForm(props) {
+  if (props.commandTypes?.length === 1 && props.commandTypes[0] === 'PAYMENT_FINANCIAL_REPAIR') {
+    return <AdminPaymentFinancialRepairForm {...props} />;
+  }
   if (props.commandTypes?.length === 1 && props.commandTypes[0] === 'RECEIVABLE_WRITE_OFF') {
     return <AdminReceivableWriteOffForm {...props} />;
   }

@@ -1,0 +1,26 @@
+# Apply last, after the reviewed current PERSONAL/ORG/closure overlays.
+# All binaries, public migrations and Portal assets must come from the same F12 source.
+name: pinvou-personal
+services:
+  account-migrate:
+    image: ${MIGRATE_IMAGE:?set reviewed same-source F12 migrator with Account073 and Billing065/066/077/900016/900017 together with complete predecessor schema}
+  billing-migrate:
+    image: ${MIGRATE_IMAGE:?set reviewed same-source F12 migrator with Account073 and Billing065/066/077/900016/900017 together with complete predecessor schema}
+  account-service:
+    image: ${ACCOUNT_SERVICE_IMAGE:?set reviewed same-source F12 Account with closed Billing precheck and typed approval projection}
+    environment:
+      BILLING_HTTP_URL: http://billing-service:8080
+  billing-service:
+    image: ${BILLING_SERVICE_IMAGE:?set reviewed same-source F12 Billing owner/proof/claim/effect/result}
+  token-gateway:
+    image: ${TOKEN_GATEWAY_IMAGE:?set reviewed same-source F12 policy registry binary}
+  token-command-executor:
+    image: ${TOKEN_COMMAND_EXECUTOR_IMAGE:?set reviewed same-source F12 policy registry executor}
+  token-portal:
+    image: ${TOKEN_PORTAL_IMAGE:?set reviewed same-source F12 Portal BFF and generated three-language financial form assets}
+  account-event-relay:
+    image: ${EVENT_RELAY_IMAGE:?set reviewed same-source F12 ten-consumer registry relay}
+  billing-event-relay:
+    image: ${EVENT_RELAY_IMAGE:?set reviewed same-source F12 registry relay}
+  approval-resources:
+    image: ${APPROVAL_RESOURCES_IMAGE:?set reviewed same-source F12 seven-Billing-consumer operator}
