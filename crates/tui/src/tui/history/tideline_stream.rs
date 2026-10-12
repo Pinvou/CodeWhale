@@ -289,3 +289,37 @@ pub fn render_tideline_stream(area: Rect, buf: &mut Buffer, stream: &TidelineStr
         );
     }
 }
+
+/// Row hitboxes for the stream (transcript click path, spec §6): one rect
+/// per event, fleet trees spanning their edges.
+#[must_use]
+#[allow(dead_code)] // translation scaffolding: wired by the landing slice
+pub fn tideline_stream_hitboxes(area: Rect, stream: &TidelineStream<'_>) -> Vec<Rect> {
+    let mut out = Vec::new();
+    if area.width < 10 || area.height < 1 {
+        return out;
+    }
+    let legend_reserve = if area.height > 2 { 1 } else { 0 };
+    let body_height = area.height - legend_reserve;
+    let mut y = area.y;
+    let bottom = area.y + body_height;
+    for event in stream.events {
+        if y >= bottom {
+            break;
+        }
+        let height = match event {
+            TidelineStreamEvent::PodFormation { edges } => edges.len().max(1) as u16,
+            _ => 1,
+        };
+        if y + height <= bottom {
+            out.push(Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height,
+            });
+        }
+        y += height;
+    }
+    out
+}

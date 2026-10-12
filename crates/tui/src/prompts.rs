@@ -1060,6 +1060,14 @@ fn apply_static_prompt_composer(
 
 // ── Public API ────────────────────────────────────────────────────────
 
+/// Get the system prompt for a specific mode with project context.
+pub fn system_prompt_for_mode_with_context(
+    workspace: &Path,
+    working_set_summary: Option<&str>,
+) -> SystemPrompt {
+    system_prompt_for_mode_with_context_and_skills(workspace, working_set_summary, None, None, None)
+}
+
 /// Get the system prompt for a specific mode with project and skills context.
 ///
 /// **Volatile-content-last invariant.** Blocks are appended in order from
@@ -3025,9 +3033,7 @@ mod tests {
         )
         .unwrap();
 
-        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
-            workspace, None, None, None, None,
-        ));
+        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
 
         assert!(prompt.contains(HANDOFF_BLOCK_MARKER));
         assert!(prompt.contains("Finish #32."));
@@ -3090,13 +3096,8 @@ mod tests {
     #[test]
     fn missing_handoff_does_not_inject_block() {
         let tmp = tempdir().expect("tempdir");
-        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
-            tmp.path(),
-            None,
-            None,
-            None,
-            None,
-        ));
+        let prompt =
+            system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
         assert!(!prompt.contains(HANDOFF_BLOCK_MARKER));
     }
 
@@ -3106,13 +3107,8 @@ mod tests {
         let dir = tmp.path().join(".deepseek");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("handoff.md"), "   \n\n  ").unwrap();
-        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
-            tmp.path(),
-            None,
-            None,
-            None,
-            None,
-        ));
+        let prompt =
+            system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
         assert!(!prompt.contains(HANDOFF_BLOCK_MARKER));
     }
 
@@ -3287,13 +3283,8 @@ mod tests {
     #[test]
     fn compact_template_is_lazy_in_fresh_prompt() {
         let tmp = tempdir().expect("tempdir");
-        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
-            tmp.path(),
-            None,
-            None,
-            None,
-            None,
-        ));
+        let prompt =
+            system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
         assert!(!prompt.contains("# Session relay"));
         assert!(!prompt.contains("## Verification"));
     }
@@ -3659,12 +3650,8 @@ mod tests {
         let _skills_dir = EnvVarGuard::remove("DEEPSEEK_SKILLS_DIR");
         let workspace = workspace_tmp.path();
 
-        let a = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
-            workspace, None, None, None, None,
-        ));
-        let b = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
-            workspace, None, None, None, None,
-        ));
+        let a = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
+        let b = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
         assert_byte_identical(
             "system_prompt_for_mode_with_context() on empty workspace",
             &a,
@@ -3686,19 +3673,13 @@ mod tests {
         let workspace = tmp.path();
         let summary = "## Repo Working Set\nWorkspace: /tmp/x\n";
 
-        let a = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
+        let a = system_prompt_flat_text(&system_prompt_for_mode_with_context(
             workspace,
             Some(summary),
-            None,
-            None,
-            None,
         ));
-        let b = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
+        let b = system_prompt_flat_text(&system_prompt_for_mode_with_context(
             workspace,
             Some(summary),
-            None,
-            None,
-            None,
         ));
         assert_byte_identical(
             "system_prompt_for_mode_with_context with constant working_set summary",
@@ -3732,12 +3713,8 @@ mod tests {
         )
         .unwrap();
 
-        let a = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
-            workspace, None, None, None, None,
-        ));
-        let b = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
-            workspace, None, None, None, None,
-        ));
+        let a = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
+        let b = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
         assert_byte_identical(
             "system_prompt_for_mode_with_context with constant handoff file",
             &a,
@@ -3760,12 +3737,9 @@ mod tests {
         std::fs::write(handoff_dir.join("handoff.md"), "# handoff body\n").unwrap();
 
         let summary = "## Repo Working Set\nWorkspace: /tmp/x\n";
-        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
+        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context(
             workspace,
             Some(summary),
-            None,
-            None,
-            None,
         ));
 
         let execution_pos = prompt
@@ -3813,16 +3787,14 @@ mod tests {
         let _userprofile = EnvVarGuard::set("USERPROFILE", home_tmp.path().as_os_str());
         let _skills_dir = EnvVarGuard::remove("DEEPSEEK_SKILLS_DIR");
         let workspace = tmp.path();
-        let prompt =
-            match system_prompt_for_mode_with_context_and_skills(workspace, None, None, None, None)
-            {
-                SystemPrompt::Text(text) => text,
-                SystemPrompt::Blocks(blocks) => blocks
-                    .iter()
-                    .map(|block| block.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            };
+        let prompt = match system_prompt_for_mode_with_context(workspace, None) {
+            SystemPrompt::Text(text) => text,
+            SystemPrompt::Blocks(blocks) => blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        };
 
         // No absolute paths (Unix or Windows).
         let offending: Vec<&str> = prompt

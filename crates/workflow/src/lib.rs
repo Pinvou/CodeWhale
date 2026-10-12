@@ -19,9 +19,11 @@ pub mod fleet_reasoning;
 pub mod fleet_snapshot;
 mod gates;
 mod js_authoring;
+mod model_policy;
 mod named_fleet;
 pub mod reasoning_router;
 pub mod redaction;
+mod review_repair;
 mod role_resolve;
 
 use std::collections::BTreeSet;
@@ -54,7 +56,7 @@ pub use fleet_reasoning::{
 };
 pub use fleet_snapshot::{
     FleetSnapshot, FleetSnapshotLegacyRole, FleetSnapshotMember, FleetSnapshotRouter,
-    QualifiedFleetId, captured_legacy_inline_router,
+    QualifiedFleetId, captured_legacy_inline_router, verify_snapshot_content_hash,
 };
 pub use gates::{
     GateError, GateKind, GateOn, GateOnFail, GateOutcome, GateSpec, GateState, GateStatusLine,
@@ -64,6 +66,7 @@ pub use js_authoring::{
     JavascriptWorkflowError, JavascriptWorkflowResult, compile_javascript_workflow,
     compile_typescript_workflow,
 };
+pub use model_policy::*;
 pub use named_fleet::{
     FleetDocument, FleetSchema, FleetSearchRoot, NamedFleet, NamedFleetError,
     STOPSHIP_REQUIRED_ROLES, exact_schema_revision, load_named_fleet, load_named_fleet_file,
@@ -77,6 +80,10 @@ pub use reasoning_router::{
 pub use redaction::{
     REDACTION_ABSOLUTE_PATH, REDACTION_RELATIVE_PATH, REDACTION_SECRET, Redaction,
     redact_for_disclosure,
+};
+pub use review_repair::{
+    IterationReceipt, IterationVerdict, ReviewRepairBounds, ReviewRepairError, ReviewRepairLoop,
+    ReviewRepairPolicy, RouteReceipt, RoutedBy, StopReason,
 };
 pub use role_resolve::{
     FleetRoleMap, FleetRoleResolveError, ResolvedWorkflowAgent, normalize_token,

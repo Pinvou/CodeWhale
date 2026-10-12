@@ -4303,6 +4303,7 @@ fn live_motion_invalidation_only_bumps_live_transcript_rows() {
         is_diff: false,
     })));
     let app_active_before = app.active_cell_revision;
+    let cell_active_before = app.active_cell.as_ref().expect("active cell").revision();
 
     app.mark_live_motion_updated();
 
@@ -4312,9 +4313,14 @@ fn live_motion_invalidation_only_bumps_live_transcript_rows() {
     assert_eq!(app.history_revisions[3], history_before[3]);
     assert_eq!(app.history_revisions[4], history_before[4]);
     assert_ne!(app.active_cell_revision, app_active_before);
+    assert_ne!(
+        app.active_cell.as_ref().expect("active cell").revision(),
+        cell_active_before
+    );
 
     let history_after_all_live = app.history_revisions.clone();
     let app_active_after_all_live = app.active_cell_revision;
+    let cell_active_after_all_live = app.active_cell.as_ref().expect("active cell").revision();
     app.mark_live_history_motion_updated();
 
     assert_eq!(app.history_revisions[0], history_after_all_live[0]);
@@ -4323,6 +4329,10 @@ fn live_motion_invalidation_only_bumps_live_transcript_rows() {
     assert_eq!(app.history_revisions[3], history_after_all_live[3]);
     assert_eq!(app.history_revisions[4], history_after_all_live[4]);
     assert_eq!(app.active_cell_revision, app_active_after_all_live);
+    assert_eq!(
+        app.active_cell.as_ref().expect("active cell").revision(),
+        cell_active_after_all_live
+    );
 }
 
 #[test]

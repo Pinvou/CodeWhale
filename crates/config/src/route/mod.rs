@@ -25,6 +25,7 @@
 pub use crate::provider::WireFormat as RequestProtocol;
 
 pub mod auth;
+pub mod authority;
 pub mod candidate;
 pub mod capabilities;
 pub mod descriptor;
@@ -32,11 +33,15 @@ pub mod errors;
 pub mod export;
 pub mod ids;
 pub mod offering;
+pub mod policy;
 pub mod resolver;
 
 pub use auth::{
     AuthKind, AuthMethod, AuthMethodExport, Choice, ChoiceExport, Op, Prompt, PromptExport, When,
     WhenExport,
+};
+pub use authority::{
+    AuthorityResolution, CatalogOfferingReceipt, RouteAuthoritySnapshot, RouteCatalogScope,
 };
 pub use candidate::{
     LimitField, OverrideSource, PricingSku, ReadyRouteCandidate, ResolvedAuthSource,
@@ -56,6 +61,7 @@ pub use ids::{LogicalModelRef, ModelId, NamespaceHint, ProviderId, RouteId, Wire
 pub use offering::{
     ProviderModelOffering, RouteLimits, bundled_offerings, opencode_zen_picker_models,
 };
+pub use policy::{CatalogPolicy, PolicyAction, PolicyEffect, PolicyRule};
 pub use resolver::{RouteRequest, RouteResolver};
 
 #[cfg(test)]

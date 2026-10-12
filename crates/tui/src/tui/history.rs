@@ -3200,6 +3200,7 @@ pub(crate) mod tideline_exports {
 
     pub use super::tideline_stream::{
         TidelineReceiptState, TidelineStream, TidelineStreamEvent, render_tideline_stream,
+        tideline_stream_hitboxes,
     };
 }
 

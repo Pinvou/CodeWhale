@@ -312,10 +312,34 @@ impl ToolCatalogCache {
         entry
     }
 
+    /// Drop every cached entry. Used by tool-registry mutation paths
+    /// (e.g. plugin hot-reload, MCP attach) when the caller cannot
+    /// easily prove the tool set is unchanged.
+    #[allow(dead_code)] // observability; called by /cache flush and tests
+    pub fn invalidate(&mut self) {
+        self.by_identity.clear();
+        self.insertion_order.clear();
+    }
+
     /// Returns the number of cached entries.
     #[must_use]
     pub fn len(&self) -> usize {
         self.by_identity.len()
+    }
+
+    /// Returns `true` if the cache has no entries.
+    #[allow(dead_code)] // observability; surfaced via /status
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_identity.is_empty()
+    }
+
+    /// Returns `(current_entries, capacity)` for observability. Surfaced via
+    /// the `/status` chip in a follow-up; tests exercise the path.
+    #[allow(dead_code)] // surfaced via /status in a follow-up; tests exercise it
+    #[must_use]
+    pub fn stats(&self) -> (usize, usize) {
+        (self.len(), self.capacity)
     }
 }
 
@@ -401,7 +425,6 @@ fn hash_json_value<H: Hasher>(value: &serde_json::Value, state: &mut H) {
 #[allow(dead_code)]
 impl PrefixStabilityManager {
     /// Create a new manager and immediately pin the first fingerprint.
-    #[cfg(test)]
     pub fn new(system_text: &str, tools: Option<&[Tool]>) -> Self {
         let mut cache = ToolCatalogCache::new();
         let fp = PrefixFingerprint::compute_with_tool_cache(system_text, tools, &mut cache);
@@ -420,7 +443,7 @@ impl PrefixStabilityManager {
     }
 
     /// Create a manager in "unpinned" state — no initial fingerprint.
-    /// Call `check(.., Some(reason))` to establish the baseline.
+    /// Call `pin()` or `check_and_update()` to establish the baseline.
     pub fn new_unpinned() -> Self {
         Self {
             pinned: None,
@@ -434,6 +457,33 @@ impl PrefixStabilityManager {
             context_update_count: 0,
             tool_catalog_cache: ToolCatalogCache::new(),
         }
+    }
+
+    /// Explicitly pin a fingerprint, replacing any prior pinned state.
+    /// Returns `true` if this is the first pin, or `false` if replacing.
+    /// Note: does NOT increment `check_count` — that counter is reserved
+    /// for `check_and_update` calls so `stability_ratio()` stays accurate.
+    pub fn pin(&mut self, system_text: &str, tools: Option<&[Tool]>) -> bool {
+        self.pin_with_reason(system_text, tools, "initial")
+    }
+
+    /// Pin under an explicit reason (`initial`, `resume`, `change:<what>`).
+    pub fn pin_with_reason(
+        &mut self,
+        system_text: &str,
+        tools: Option<&[Tool]>,
+        reason: &str,
+    ) -> bool {
+        let fp = PrefixFingerprint::compute_with_tool_cache(
+            system_text,
+            tools,
+            &mut self.tool_catalog_cache,
+        );
+        let was_unpinned = self.pinned.is_none();
+        self.pinned = Some(fp.clone());
+        self.current = Some(fp);
+        self.pin_reason = Some(reason.to_string());
+        was_unpinned
     }
 
     /// Record an expected miss that is not a header change (compaction,
@@ -566,7 +616,6 @@ impl PrefixStabilityManager {
     }
 
     /// Attributed change/drift/reset history, oldest first.
-    #[cfg(test)]
     pub fn history(&self) -> impl Iterator<Item = &PrefixHistoryEntry> {
         self.history.iter()
     }
@@ -583,7 +632,6 @@ impl PrefixStabilityManager {
     /// - `Err(change)` when the prefix drifted. The pin is **kept**: an
     ///   undeclared change never becomes the new baseline. Use [`Self::check`]
     ///   with a declared reason to move the pin on purpose.
-    #[cfg(test)]
     pub fn check_and_update(
         &mut self,
         system_text: &str,
@@ -598,7 +646,6 @@ impl PrefixStabilityManager {
     }
 
     /// Returns the most recent prefix change, if any.
-    #[cfg(test)]
     pub fn last_change(&self) -> Option<&PrefixChange> {
         self.last_change.as_ref()
     }
@@ -609,13 +656,11 @@ impl PrefixStabilityManager {
     }
 
     /// Returns the current (most recently computed) fingerprint.
-    #[cfg(test)]
     pub fn current_fingerprint(&self) -> Option<&PrefixFingerprint> {
         self.current.as_ref()
     }
 
     /// Returns the total number of prefix changes detected.
-    #[cfg(test)]
     pub fn change_count(&self) -> u64 {
         self.change_count
     }
@@ -635,6 +680,31 @@ impl PrefixStabilityManager {
             let stable_checks = self.check_count - self.change_count;
             stable_checks as f64 / self.check_count as f64
         }
+    }
+
+    /// Returns a human-readable stability summary.
+    pub fn summary(&self) -> String {
+        let pct = self.stability_ratio() * 100.0;
+        let pinned_short = self
+            .pinned
+            .as_ref()
+            .map(|fp| {
+                if fp.combined_sha256.len() >= 12 {
+                    &fp.combined_sha256[..12]
+                } else {
+                    &fp.combined_sha256
+                }
+            })
+            .unwrap_or("none");
+
+        format!(
+            "Prefix stability: {pct:.1}% ({stable}/{total} checks stable) | fingerprint: {pinned_short} | changes: {changes}",
+            pct = pct,
+            stable = self.check_count.saturating_sub(self.change_count),
+            total = self.check_count,
+            pinned_short = pinned_short,
+            changes = self.change_count,
+        )
     }
 }
 
@@ -1094,6 +1164,16 @@ mod tests {
         // The returned digest should match a fresh fingerprint of the same set.
         let fresh = cache.fingerprint_for(&[make_tool("a")]);
         assert_eq!(re_entry.sha256_hex, fresh.sha256_hex);
+    }
+
+    #[test]
+    fn tool_catalog_cache_invalidate_clears_all() {
+        let mut cache = ToolCatalogCache::new();
+        cache.fingerprint_for(&[make_tool("a")]);
+        cache.fingerprint_for(&[make_tool("b")]);
+        cache.invalidate();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
     }
 
     #[test]

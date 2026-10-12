@@ -283,6 +283,21 @@ impl WorkshopVariables {
         self.last_tool_result = raw.to_string();
         self.last_tool_name = tool_name.to_string();
     }
+
+    /// Retrieve and clear the stored raw output (consume semantics so the
+    /// variable is not accidentally promoted twice).
+    ///
+    /// Called by the `promote_to_context` tool (not yet wired in this PR).
+    #[must_use]
+    #[allow(dead_code)] // consumed by promote_to_context tool in follow-up
+    pub fn take_raw(&mut self) -> Option<(String, String)> {
+        if self.last_tool_result.is_empty() {
+            return None;
+        }
+        let content = std::mem::take(&mut self.last_tool_result);
+        let name = std::mem::take(&mut self.last_tool_name);
+        Some((name, content))
+    }
 }
 
 // ── Adaptive evidence routing (#4619) ─────────────────────────────────────────
@@ -515,14 +530,17 @@ mod tests {
     }
 
     #[test]
-    fn workshop_variables_store_raw_records_last_output() {
+    fn workshop_variables_store_and_take() {
         let mut vars = WorkshopVariables::default();
-        assert!(vars.last_tool_result.is_empty());
-        assert!(vars.last_tool_name.is_empty());
+        assert!(vars.take_raw().is_none());
 
         vars.store_raw("read_file", "raw content here");
-        assert_eq!(vars.last_tool_name, "read_file");
-        assert_eq!(vars.last_tool_result, "raw content here");
+        let taken = vars.take_raw().expect("should have content");
+        assert_eq!(taken.0, "read_file");
+        assert_eq!(taken.1, "raw content here");
+
+        // Second take is empty — consume semantics
+        assert!(vars.take_raw().is_none());
     }
 
     #[test]

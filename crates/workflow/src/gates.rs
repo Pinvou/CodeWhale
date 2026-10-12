@@ -13,6 +13,7 @@
 //! wire in later; unit tests cover block/approve/retry/escalate paths.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -254,6 +255,20 @@ impl LaneGateBoard {
         Ok(())
     }
 
+    /// Latest handoff of `kind` from `from_role` to `to_role`, if any.
+    pub fn latest_handoff(
+        &self,
+        from_role: &str,
+        to_role: &str,
+        kind: &str,
+    ) -> Option<&HandoffArtifact> {
+        self.artifacts.iter().rev().find(|a| {
+            a.from_role.eq_ignore_ascii_case(from_role)
+                && a.to_role.eq_ignore_ascii_case(to_role)
+                && a.kind.eq_ignore_ascii_case(kind)
+        })
+    }
+
     /// Remove and return the latest handoffs addressed to `to_role` (newest
     /// first), up to `limit`.
     ///
@@ -278,6 +293,22 @@ impl LaneGateBoard {
             consumed.push(self.artifacts.remove(index));
         }
         consumed
+    }
+
+    /// Persist board under a lane directory (JSON).
+    pub fn save_to_dir(&self, dir: &Path) -> Result<PathBuf, GateError> {
+        std::fs::create_dir_all(dir).map_err(|e| GateError::Io(e.to_string()))?;
+        let path = dir.join("gates.json");
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| GateError::Serde(e.to_string()))?;
+        std::fs::write(&path, json).map_err(|e| GateError::Io(e.to_string()))?;
+        Ok(path)
+    }
+
+    pub fn load_from_dir(dir: &Path) -> Result<Self, GateError> {
+        let path = dir.join("gates.json");
+        let text = std::fs::read_to_string(&path).map_err(|e| GateError::Io(e.to_string()))?;
+        serde_json::from_str(&text).map_err(|e| GateError::Serde(e.to_string()))
     }
 
     /// Compact status for `lane status` / panel surfaces.
@@ -307,11 +338,16 @@ pub enum GateError {
     EmptyGateId,
     #[error("handoff lane id `{got}` does not match board lane `{expected}`")]
     LaneMismatch { expected: String, got: String },
+    #[error("io error: {0}")]
+    Io(String),
+    #[error("serde error: {0}")]
+    Serde(String),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     /// Inline copy of the canonical stopship-style gate specs (scout →
     /// implementer → reviewer → verifier → release_lead). The production
@@ -372,6 +408,12 @@ mod tests {
                 created_at: "2026-07-09T00:00:00Z".into(),
             })
             .unwrap();
+
+        let art = board
+            .latest_handoff("scout", "implementer", "findings")
+            .expect("findings artifact");
+        assert_eq!(art.id, "art-1");
+        assert!(art.payload.contains("4090"));
 
         // Approve scout gate so implementer unblocks.
         let state = board.evaluate(&gates[0], GateOutcome::Pass).unwrap();
@@ -508,5 +550,28 @@ mod tests {
             .unwrap();
         assert_eq!(state, GateState::Passed);
         assert!(board.role_is_blocked(&gates, "verifier").is_none());
+    }
+
+    #[test]
+    fn board_persists_for_lane_status() {
+        let dir = tempdir().unwrap();
+        let mut board = LaneGateBoard::new("lane-persist");
+        board.install_gates(&stopship_gate_specs());
+        board
+            .evaluate(
+                &stopship_gate_specs()[0],
+                GateOutcome::Fail {
+                    reason: "scout incomplete".into(),
+                },
+            )
+            .unwrap();
+        board.save_to_dir(dir.path()).unwrap();
+        let loaded = LaneGateBoard::load_from_dir(dir.path()).unwrap();
+        let summary = loaded.status_summary();
+        assert!(
+            summary
+                .iter()
+                .any(|l| l.gate_id == "scout-findings" && l.state == "blocked")
+        );
     }
 }

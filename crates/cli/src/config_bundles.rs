@@ -678,6 +678,55 @@ fn validate_scope_target(scope: BundleScope, target: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Path safety
+// ---------------------------------------------------------------------------
+
+/// Resolve `candidate` inside `base_dir`, refusing traversal and symlink
+/// escapes. Returns the resolved path or an error naming the refusal — the
+/// candidate string itself is safe to echo (it is config data, not a secret).
+/// Resolve `candidate` inside `base_dir`, refusing traversal and symlink
+/// escapes. Returns the joined path or an error naming the refusal.
+/// Reserved for path-carrying bundle sections (none shipped yet); exercised
+/// by the traversal tests so the contract cannot silently rot.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "path-carrying sections land with the next schema")
+)]
+pub fn resolve_bounded_path(base_dir: &Path, candidate: &str) -> Result<PathBuf> {
+    if candidate.contains('\0') {
+        bail!("bundle path contains a NUL byte; refused");
+    }
+    let candidate_path = Path::new(candidate);
+    if candidate_path.is_absolute() {
+        bail!(
+            "bundle path {candidate:?} is absolute; only paths inside the config directory are accepted"
+        );
+    }
+    let canonical_base = base_dir
+        .canonicalize()
+        .with_context(|| format!("config directory {} is unavailable", base_dir.display()))?;
+    let joined = base_dir.join(candidate_path);
+    // Walk the joined path's ancestors from the deepest existing component up:
+    // every existing component must canonicalize inside the base, so a symlink
+    // pointing outside the config directory is refused even when the final
+    // target does not exist yet.
+    let deepest_existing = joined
+        .ancestors()
+        .find(|ancestor| ancestor.symlink_metadata().is_ok())
+        .context("bundle path has no existing ancestor inside the config directory")?;
+    let resolved = deepest_existing.canonicalize().with_context(|| {
+        format!(
+            "could not resolve bundle path component {}",
+            deepest_existing.display()
+        )
+    })?;
+    if !resolved.starts_with(&canonical_base) {
+        bail!("bundle path {candidate:?} escapes the config directory via a symlink; refused");
+    }
+    Ok(joined)
+}
+
+// ---------------------------------------------------------------------------
 // Remote fetch
 // ---------------------------------------------------------------------------
 
@@ -3379,6 +3428,23 @@ label = "safe-nested-workspace-label"
         let err = require_import_consent(false, &plan).expect_err("headless needs --yes");
         assert!(err.to_string().contains("--yes"), "{err:#}");
         require_import_consent(true, &plan).expect("--yes short-circuits consent");
+    }
+
+    #[test]
+    fn bounded_paths_refuse_traversal_and_absolute_escapes() {
+        let base = tempfile::tempdir().expect("base");
+        let err =
+            resolve_bounded_path(base.path(), "../escape.toml").expect_err("traversal refused");
+        assert!(
+            err.to_string().contains("escapes") || err.to_string().contains("absolute"),
+            "{err:#}"
+        );
+        let absolute = base.path().join("absolute.toml");
+        let err = resolve_bounded_path(base.path(), absolute.to_string_lossy().as_ref())
+            .expect_err("absolute refused");
+        assert!(err.to_string().contains("absolute"), "{err:#}");
+        let ok = resolve_bounded_path(base.path(), "nested/thing.toml").expect("inside ok");
+        assert!(ok.starts_with(base.path()));
     }
 
     // -- helpers ------------------------------------------------------------

@@ -1,7 +1,9 @@
 pub mod fragments;
 pub mod ids;
+pub mod journal;
 pub mod request;
 pub mod role;
+pub mod session;
 pub mod tool_parser;
 
 use std::collections::{HashMap, HashSet};

@@ -291,6 +291,17 @@ impl VerifyTool {
             critic_effort: ReasoningEffort::Max,
         }
     }
+
+    /// Override the critic reasoning tier. Values below `High` are clamped up to
+    /// `High` — elevated reasoning is the whole point of this tool. This is the
+    /// seam for a future `[verify] critic_effort` config knob; production
+    /// registration currently uses the `Max` default from [`Self::new`].
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_critic_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.critic_effort = clamp_to_elevated(effort);
+        self
+    }
 }
 
 #[async_trait]
@@ -905,6 +916,14 @@ mod tests {
         let req_max = build_critic_request("m", ReasoningEffort::Max, 65_536, "prompt".to_string());
         assert_eq!(req_max.reasoning_effort.as_deref(), Some("max"));
         assert!(req_max.tools.is_none());
+    }
+
+    #[test]
+    fn with_critic_effort_clamps_below_high() {
+        let tool = VerifyTool::new(None, "m".to_string()).with_critic_effort(ReasoningEffort::Low);
+        assert_eq!(tool.critic_effort, ReasoningEffort::High);
+        let tool = VerifyTool::new(None, "m".to_string()).with_critic_effort(ReasoningEffort::Max);
+        assert_eq!(tool.critic_effort, ReasoningEffort::Max);
     }
 
     // === Critic-finds-a-planted-bug (mocked model) ===

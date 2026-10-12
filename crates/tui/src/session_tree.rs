@@ -158,6 +158,32 @@ impl SessionJournal {
     pub fn append_message(&mut self, message: Message) -> EntryId {
         self.append(SessionEntryKind::Message { message })
     }
+    pub fn append_compaction(
+        &mut self,
+        summary: String,
+        tokens_before: Option<u64>,
+        tokens_after: Option<u64>,
+        model: Option<String>,
+    ) -> EntryId {
+        self.append(SessionEntryKind::Compaction {
+            summary,
+            tokens_before,
+            tokens_after,
+            model,
+        })
+    }
+    pub fn append_branch_summary(
+        &mut self,
+        branch_id: String,
+        summary: String,
+        parent_branch_id: Option<String>,
+    ) -> EntryId {
+        self.append(SessionEntryKind::BranchSummary {
+            branch_id,
+            summary,
+            parent_branch_id,
+        })
+    }
     pub fn branch_to(&mut self, entry_id: &str) -> Result<(), String> {
         if self.entries.iter().any(|e| e.id == entry_id) {
             self.leaf_id = Some(entry_id.to_string());
@@ -519,6 +545,25 @@ mod tests {
             5,
             "one shared entry plus two branches"
         );
+    }
+    #[test]
+    fn compaction_fits() {
+        let mut j = SessionJournal::new();
+        let id = j.append_compaction("summary".into(), Some(1000), Some(100), None);
+        assert!(j.contains(&id));
+        assert!(matches!(
+            j.leaf().unwrap().kind,
+            SessionEntryKind::Compaction { .. }
+        ));
+    }
+    #[test]
+    fn branch_summary_fits() {
+        let mut j = SessionJournal::new();
+        let a = j.append(SessionEntryKind::User {
+            text: "root".into(),
+        });
+        let b = j.append_branch_summary(a.clone(), "branch summary".into(), None);
+        assert!(j.contains(&b));
     }
     #[test]
     fn spawn_depth_fork() {

@@ -23,12 +23,18 @@ use std::hash::{Hash, Hasher};
 use crate::compaction::estimate_input_tokens_conservative;
 use crate::models::{Message, SystemPrompt};
 
+/// Default capacity for the rolling audit ring. Sized so a 64-entry window
+/// covers a full capacity controller observation cycle without unbounded
+/// growth on long-running sessions.
+const AUDIT_RING_CAPACITY: usize = 64;
+
 /// Process-local memoization for `estimate_input_tokens_conservative`.
 ///
 /// The cache is keyed on the `(messages_revision, system_fingerprint)`
 /// pair, both of which the engine bumps on every content change. On a hit
 /// the previously stored token estimate is returned without re-walking the
-/// message list. On a miss, the estimator runs and the result is stored.
+/// message list. On a miss, the estimator runs and the result is stored
+/// alongside the audit ring entry.
 #[derive(Debug, Default, Clone)]
 pub struct TokenEstimateCache {
     /// Monotonic counter bumped by the engine on every message mutation.
@@ -38,13 +44,21 @@ pub struct TokenEstimateCache {
     system_fingerprint: u64,
     /// Cached token count, valid iff both keys match the current inputs.
     cached_tokens: Option<usize>,
+    /// Audit ring of recent (revision, tokens) pairs. The most recent entry
+    /// is the tail; the oldest is dropped when capacity is exceeded. Used by
+    /// observability to surface cache effectiveness to `/status`.
+    audit_ring: Vec<(u64, usize)>,
+    /// Number of cache hits since the cache was last cleared. Saturates at
+    /// `u64::MAX` (effectively never in practice).
+    hits: u64,
+    /// Number of cache misses since the cache was last cleared.
+    misses: u64,
 }
 
 impl TokenEstimateCache {
-    /// Construct a fresh, empty cache. `messages_revision` defaults to 0;
-    /// the engine passes the current revision on every
-    /// [`lookup_or_compute`](Self::lookup_or_compute) call so the next
-    /// lookup correctly invalidates.
+    /// Construct a fresh, empty cache. `messages_revision` defaults to 0; the
+    /// engine must call [`bump_messages_revision`](Self::bump_messages_revision)
+    /// whenever a mutation occurs so the next lookup correctly invalidates.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -67,6 +81,7 @@ impl TokenEstimateCache {
             && self.system_fingerprint == system_fingerprint
             && let Some(tokens) = self.cached_tokens
         {
+            self.hits = self.hits.saturating_add(1);
             return tokens;
         }
 
@@ -74,7 +89,52 @@ impl TokenEstimateCache {
         self.messages_revision = messages_revision;
         self.system_fingerprint = system_fingerprint;
         self.cached_tokens = Some(tokens);
+        self.misses = self.misses.saturating_add(1);
+        self.push_audit(messages_revision, tokens);
         tokens
+    }
+
+    /// Record a messages-revision bump. The engine calls this whenever
+    /// `session.messages` is mutated. Calling it with a value smaller than
+    /// the current value is a no-op (the cache is monotonic).
+    #[allow(dead_code)] // exposed for future wiring of /clear and reset paths; tests exercise it
+    pub fn bump_messages_revision(&mut self, revision: u64) {
+        if revision > self.messages_revision {
+            self.messages_revision = revision;
+            self.cached_tokens = None;
+        }
+    }
+
+    /// Forget all cached state. Used by `/clear` and session reset paths.
+    #[allow(dead_code)] // exposed for future wiring of /clear and reset paths; tests exercise it
+    pub fn invalidate(&mut self) {
+        self.cached_tokens = None;
+        self.system_fingerprint = 0;
+        self.audit_ring.clear();
+        self.hits = 0;
+        self.misses = 0;
+    }
+
+    /// Returns `(hits, misses)` counters since the last `invalidate` call.
+    #[allow(dead_code)] // surfaced via /status in a follow-up; tests exercise it
+    #[must_use]
+    pub fn stats(&self) -> (u64, u64) {
+        (self.hits, self.misses)
+    }
+
+    /// Returns the most recent `(revision, tokens)` audit entries, newest
+    /// first. Bounded by [`AUDIT_RING_CAPACITY`].
+    #[allow(dead_code)] // surfaced via /status in a follow-up; tests exercise it
+    #[must_use]
+    pub fn recent_audit(&self) -> &[(u64, usize)] {
+        &self.audit_ring
+    }
+
+    fn push_audit(&mut self, revision: u64, tokens: usize) {
+        if self.audit_ring.len() >= AUDIT_RING_CAPACITY {
+            self.audit_ring.remove(0);
+        }
+        self.audit_ring.push((revision, tokens));
     }
 }
 
@@ -124,45 +184,89 @@ mod tests {
     }
 
     #[test]
-    fn first_call_computes_a_positive_estimate() {
+    fn first_call_is_a_miss() {
         let mut cache = TokenEstimateCache::new();
         let messages = vec![user_text("hello world")];
         let tokens = cache.lookup_or_compute(1, None, &messages);
+        let (hits, misses) = cache.stats();
         assert!(tokens > 0);
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 1);
     }
 
     #[test]
-    fn repeated_call_with_same_revision_returns_the_cached_estimate() {
+    fn repeated_call_with_same_revision_is_a_hit() {
         let mut cache = TokenEstimateCache::new();
         let messages = vec![user_text("hello world")];
-        let first = cache.lookup_or_compute(1, None, &messages);
-        let second = cache.lookup_or_compute(1, None, &messages);
-        assert!(first > 0);
-        assert_eq!(first, second);
+        let _ = cache.lookup_or_compute(1, None, &messages);
+        let _ = cache.lookup_or_compute(1, None, &messages);
+        let (hits, misses) = cache.stats();
+        assert_eq!(hits, 1);
+        assert_eq!(misses, 1);
     }
 
     #[test]
-    fn revision_bump_recomputes_the_same_estimate() {
+    fn revision_bump_invalidates() {
         let mut cache = TokenEstimateCache::new();
         let messages = vec![user_text("hi")];
         let a = cache.lookup_or_compute(1, None, &messages);
         let b = cache.lookup_or_compute(2, None, &messages);
-        assert!(a > 0);
+        let (hits, misses) = cache.stats();
+        // Both calls were misses (different revisions), neither hit the cache.
         assert_eq!(a, b);
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 2);
     }
 
     #[test]
-    fn system_prompt_change_recomputes_the_same_estimate() {
+    fn system_prompt_change_invalidates() {
         let mut cache = TokenEstimateCache::new();
         let messages = vec![user_text("hi")];
-        let a = cache.lookup_or_compute(1, Some(&sys_text("alpha")), &messages);
-        let b = cache.lookup_or_compute(1, Some(&sys_text("beta")), &messages);
-        assert!(a > 0);
-        assert_eq!(a, b);
+        let _ = cache.lookup_or_compute(1, Some(&sys_text("alpha")), &messages);
+        let _ = cache.lookup_or_compute(1, Some(&sys_text("beta")), &messages);
+        let (hits, misses) = cache.stats();
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 2);
     }
 
     #[test]
-    fn blocks_system_prompt_lookups_stay_consistent() {
+    fn bump_messages_revision_clears_cache() {
+        let mut cache = TokenEstimateCache::new();
+        let messages = vec![user_text("x")];
+        let _ = cache.lookup_or_compute(1, None, &messages);
+        cache.bump_messages_revision(2);
+        let _ = cache.lookup_or_compute(2, None, &messages);
+        let (hits, misses) = cache.stats();
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 2);
+    }
+
+    #[test]
+    fn bump_to_smaller_revision_is_noop() {
+        let mut cache = TokenEstimateCache::new();
+        let messages = vec![user_text("x")];
+        let _ = cache.lookup_or_compute(5, None, &messages);
+        cache.bump_messages_revision(2);
+        // revision went down, cache should still be valid for revision 5
+        let _ = cache.lookup_or_compute(5, None, &messages);
+        let (hits, _) = cache.stats();
+        assert_eq!(hits, 1, "downward revision bumps must not invalidate");
+    }
+
+    #[test]
+    fn invalidate_resets_state() {
+        let mut cache = TokenEstimateCache::new();
+        let messages = vec![user_text("x")];
+        let _ = cache.lookup_or_compute(1, None, &messages);
+        let _ = cache.lookup_or_compute(1, None, &messages);
+        cache.invalidate();
+        let (hits, misses) = cache.stats();
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 0);
+    }
+
+    #[test]
+    fn blocks_system_prompt_yields_distinct_fingerprint() {
         let blocks_a = SystemPrompt::Blocks(vec![SystemBlock {
             block_type: "text".to_string(),
             text: "alpha".to_string(),
@@ -175,9 +279,35 @@ mod tests {
         }]);
         let mut cache = TokenEstimateCache::new();
         let messages = vec![user_text("hi")];
-        let a = cache.lookup_or_compute(1, Some(&blocks_a), &messages);
-        let b = cache.lookup_or_compute(1, Some(&blocks_b), &messages);
-        assert!(a > 0);
-        assert_eq!(a, b);
+        let _ = cache.lookup_or_compute(1, Some(&blocks_a), &messages);
+        let _ = cache.lookup_or_compute(1, Some(&blocks_b), &messages);
+        let (hits, misses) = cache.stats();
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 2);
+    }
+
+    #[test]
+    fn audit_ring_records_recent_pairs() {
+        let mut cache = TokenEstimateCache::new();
+        let messages = vec![user_text("hi")];
+        for rev in 1..=5 {
+            let _ = cache.lookup_or_compute(rev, None, &messages);
+        }
+        let ring = cache.recent_audit();
+        assert_eq!(ring.len(), 5);
+        assert_eq!(ring.last().copied(), Some((5, ring.last().unwrap().1)));
+    }
+
+    #[test]
+    fn audit_ring_bounded_by_capacity() {
+        let mut cache = TokenEstimateCache::new();
+        let messages = vec![user_text("hi")];
+        for rev in 1..=(AUDIT_RING_CAPACITY + 10) as u64 {
+            let _ = cache.lookup_or_compute(rev, None, &messages);
+        }
+        let ring = cache.recent_audit();
+        assert_eq!(ring.len(), AUDIT_RING_CAPACITY);
+        // newest entry should be the most recent revision we asked for
+        assert_eq!(ring.last().unwrap().0, (AUDIT_RING_CAPACITY + 10) as u64);
     }
 }

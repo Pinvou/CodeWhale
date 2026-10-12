@@ -11610,6 +11610,98 @@ fn mode_only_override_preserves_legacy_full_access_posture() -> Result<()> {
     Ok(())
 }
 
+fn rebind_event(event: &str, agent_id: &str, seq: u64) -> RuntimeEventRecord {
+    RuntimeEventRecord {
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        seq,
+        timestamp: Utc::now(),
+        thread_id: "thr_test".to_string(),
+        turn_id: Some("turn_test".to_string()),
+        item_id: None,
+        event: event.to_string(),
+        payload: json!({ "agent_id": agent_id }),
+    }
+}
+
+#[test]
+fn collect_agent_rebind_hints_resumes_a_mid_fanout_session() {
+    // Mirror what runtime_threads persists during a real fanout: three
+    // workers spawned, two finished, one still running when the session
+    // was killed. The TUI re-attach must rebuild placeholders for the
+    // running worker AND the two completed workers (the fanout card
+    // tracks all of them so the dot-grid stays accurate post-resume).
+    let events = vec![
+        rebind_event("agent.spawned", "agent_a", 1),
+        rebind_event("agent.spawned", "agent_b", 2),
+        rebind_event("agent.spawned", "agent_c", 3),
+        rebind_event("agent.progress", "agent_a", 4),
+        rebind_event("agent.completed", "agent_a", 5),
+        rebind_event("agent.progress", "agent_b", 6),
+        rebind_event("agent.completed", "agent_b", 7),
+        rebind_event("agent.progress", "agent_c", 8),
+    ];
+    let hints = collect_agent_rebind_hints(&events);
+    assert_eq!(hints.len(), 3, "every fanout worker must be rebound");
+    let by_id: std::collections::BTreeMap<&str, AgentRebindStatus> = hints
+        .iter()
+        .map(|h| (h.agent_id.as_str(), h.status))
+        .collect();
+    assert_eq!(by_id.get("agent_a"), Some(&AgentRebindStatus::Completed));
+    assert_eq!(by_id.get("agent_b"), Some(&AgentRebindStatus::Completed));
+    assert_eq!(
+        by_id.get("agent_c"),
+        Some(&AgentRebindStatus::InProgress),
+        "in-flight worker must rebind in InProgress, not downgrade"
+    );
+}
+
+#[test]
+fn collect_agent_rebind_hints_ignores_unrelated_events() {
+    // Status / tool events should not produce phantom hints — only the
+    // agent.* family carries the contract we re-bind from.
+    let events = vec![
+        RuntimeEventRecord {
+            schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+            seq: 1,
+            timestamp: Utc::now(),
+            thread_id: "thr".to_string(),
+            turn_id: None,
+            item_id: None,
+            event: "tool.completed".to_string(),
+            payload: json!({"name": "read_file"}),
+        },
+        rebind_event("agent.spawned", "agent_x", 2),
+        RuntimeEventRecord {
+            schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+            seq: 3,
+            timestamp: Utc::now(),
+            thread_id: "thr".to_string(),
+            turn_id: None,
+            item_id: None,
+            event: "compaction.completed".to_string(),
+            payload: json!({"messages_after": 12}),
+        },
+    ];
+    let hints = collect_agent_rebind_hints(&events);
+    assert_eq!(hints.len(), 1);
+    assert_eq!(hints[0].agent_id, "agent_x");
+}
+
+#[test]
+fn collect_agent_rebind_hints_does_not_downgrade_completed_to_in_progress() {
+    // Out-of-order replay: a stale `agent.progress` arriving after the
+    // completed event must NOT clobber the terminal status. This matters
+    // when an event log is concatenated from interrupted segments.
+    let events = vec![
+        rebind_event("agent.spawned", "agent_y", 1),
+        rebind_event("agent.completed", "agent_y", 2),
+        rebind_event("agent.progress", "agent_y", 3),
+    ];
+    let hints = collect_agent_rebind_hints(&events);
+    assert_eq!(hints.len(), 1);
+    assert_eq!(hints[0].status, AgentRebindStatus::Completed);
+}
+
 /// Helper for the `fork_at_user_message` tests: write a sequence of
 /// (user, assistant) turns under the given thread id. Each turn gets
 /// one UserMessage item carrying `user_text` in `detail` plus one

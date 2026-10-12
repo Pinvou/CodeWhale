@@ -628,7 +628,8 @@ impl CatalogSnapshot {
 
 /// Builds a [`CatalogSnapshot`] by merging layers in precedence order.
 ///
-/// Last writer wins per `(provider, wire id)` field:
+/// Last writer wins per `(provider, wire id)` field. Policy DENY is applied
+/// after every layer and is never overridden:
 ///
 /// ```text
 ///  0 bundled              committed models.dev-shaped snapshot
@@ -638,6 +639,7 @@ impl CatalogSnapshot {
 /// 25 codewhale live       signed CWC catalog (authority)
 /// 30 config               config.toml [providers.*] overrides
 /// 40 user                 user approved set
+///    policy DENY          last, never overridden
 /// ```
 ///
 /// [`Self::with_live`] remains the combined live bucket so existing callers
@@ -653,6 +655,7 @@ pub struct CatalogCompiler {
     codewhale_live: Vec<CatalogOffering>,
     config: Vec<CatalogOffering>,
     overrides: Vec<CatalogOffering>,
+    policy: crate::route::CatalogPolicy,
 }
 
 impl CatalogCompiler {
@@ -730,7 +733,14 @@ impl CatalogCompiler {
         self
     }
 
-    /// Merge all layers into a deterministic snapshot.
+    /// Attach policy evaluated after every layer. DENY is never overridden.
+    #[must_use]
+    pub fn with_policy(mut self, policy: crate::route::CatalogPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Merge all layers into a deterministic snapshot, then apply policy DENY.
     #[must_use]
     pub fn compile(self) -> CatalogSnapshot {
         let mut merged: BTreeMap<(String, String), CatalogOffering> = BTreeMap::new();
@@ -747,7 +757,10 @@ impl CatalogCompiler {
         {
             merged.insert(row.merge_key(), row);
         }
-        let offerings = merged.into_values().collect();
+        let offerings = merged
+            .into_values()
+            .filter(|row| self.policy.allows(&row.provider, &row.wire_model_id))
+            .collect();
         CatalogSnapshot { offerings }
     }
 }
