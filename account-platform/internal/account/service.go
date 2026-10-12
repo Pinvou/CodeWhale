@@ -75,6 +75,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
 	internal.GET("/client-compatibility", serviceauth.Require("internal.client-compatibility.read"), httpserver.AdaptFunc(s.internalClientCompatibility))
+	internal.GET("/registration-bonus-eligibility/readiness", serviceauth.Require("internal.registration-bonus-eligibility.read"), httpserver.AdaptFunc(s.internalRegistrationBonusEligibilityReadiness))
 	internal.POST("/token-owner-authority", serviceauth.Require("internal.token-owner-authority.read"), httpserver.AdaptFunc(s.internalTokenOwnerAuthority))
 	internal.GET("/token-owner-candidates", serviceauth.Require("internal.token-owner-candidates.read"), httpserver.AdaptFunc(s.internalTokenOwnerCandidates))
 	internal.POST("/authorization/check", serviceauth.Require("internal.authorization.check"), httpserver.AdaptFunc(s.checkPermission))
