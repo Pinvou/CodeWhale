@@ -255,6 +255,18 @@ Instead, choose the closest shipped route and override its endpoint/model:
   from an AgentProfile, can use a custom table such as
   `[providers.lm-studio] kind = "openai-compatible"` and select it with
   `provider = "lm-studio"` or a profile `provider = "lm-studio"`.
+- A custom table defaults to the OpenAI Chat Completions contract. Set `wire`
+  in the table to serve a different protocol from the same base URL:
+  `wire = "responses"` selects the OpenAI Responses API (`{base}/responses`)
+  and `wire = "anthropic"` (or `messages`) the Anthropic Messages API
+  (`{base}/messages`). The dialect is the route's wire everywhere — turns,
+  receipts, preflight, the `/provider` row — and an unrecognized value falls
+  back to Chat Completions with a warning naming the table. The Anthropic
+  dialect authenticates with `x-api-key` carrying the table's `api_key`
+  (never `Authorization: Bearer`), and a conflicting `Authorization` header
+  in `http_headers` is dropped — a Messages-compatible relay that only
+  accepts Bearer auth is not servable through this dialect yet. See the
+  `wire` key reference in [CONFIGURATION.md](CONFIGURATION.md).
 - Local OpenAI-compatible runtimes: use `provider = "vllm"`, `"sglang"`, or
   `"ollama"` with the matching provider-specific base URL/model values.
 

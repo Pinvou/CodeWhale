@@ -305,19 +305,34 @@ pub(crate) fn compaction_checkpoint_message(prompt: &SystemPrompt) -> Message {
 /// The anchor and the deletion prefer the provenance-stamped carrier: its
 /// second text block is engine-written, so a pasted user turn that merely
 /// starts with the summary header can neither steal the insertion position
-/// nor be deleted as the carrier. The loose predicate applies only when no
-/// stamped carrier exists — a structural condition, not a session age: it
-/// covers saves from before the provenance block and equally histories that
-/// never compacted. There a pasted header is indistinguishable from a real
-/// bare carrier on content alone (or there is no carrier to anchor on at
-/// all), so the historical replace-in-place applies and a pasted header can
-/// still be dropped. The same loose predicate also backs the keep/recompaction
-/// filters in `compaction/last_round.rs` — same recognition family,
-/// explicitly out of scope here.
+/// nor be deleted as the carrier. The loose predicate applies only when a
+/// checkpoint is actually being restored and no stamped carrier exists —
+/// covering saves from before the provenance block. There a pasted header is
+/// indistinguishable from a real bare carrier on content alone, so the
+/// historical replace-in-place applies and a pasted header can still be
+/// dropped. A restore without a checkpoint runs no carrier-deletion scan and
+/// deletes nothing: with no summary to reinsert, the loose scan's
+/// pasted-header risk would be pure loss; topology relocation still runs.
+/// The same loose predicate also backs the keep/recompaction filters
+/// in `compaction/last_round.rs` — same recognition family, explicitly out
+/// of scope here.
 pub(crate) fn restore_compaction_checkpoint(
     mut messages: Vec<Message>,
     checkpoint: Option<&SystemPrompt>,
 ) -> Vec<Message> {
+    let Some(checkpoint) = checkpoint else {
+        // Nothing to reinsert, so there is nothing to repair. The loose
+        // legacy scan below cannot tell a pre-provenance carrier from a user
+        // turn that pastes the whole summary header, and deleting such a turn
+        // would lose real user content on every checkpoint-less load — not
+        // only never-compacted sessions: the stable system prefix never
+        // carries the summary, so a compacted session resumed from its
+        // session file lands here with the genuine saved carrier at stake.
+        // Topology relocation is still safe: it only reorders Agent-topology
+        // sidecars to their placement anchors, never deletes.
+        crate::runtime_handoff::relocate_restored_compaction_topology(&mut messages);
+        return messages;
+    };
     let provenance_anchor = messages.iter().position(is_generated_compaction_checkpoint);
     let carrier: fn(&Message) -> bool = if provenance_anchor.is_some() {
         is_generated_compaction_checkpoint
@@ -327,10 +342,8 @@ pub(crate) fn restore_compaction_checkpoint(
     let checkpoint_index =
         provenance_anchor.or_else(|| messages.iter().position(is_compaction_checkpoint_message));
     messages.retain(|message| !carrier(message));
-    if let Some(checkpoint) = checkpoint {
-        let index = checkpoint_index.unwrap_or(messages.len());
-        messages.insert(index, compaction_checkpoint_message(checkpoint));
-    }
+    let index = checkpoint_index.unwrap_or(messages.len());
+    messages.insert(index, compaction_checkpoint_message(checkpoint));
     crate::runtime_handoff::relocate_restored_compaction_topology(&mut messages);
     messages
 }
@@ -341,13 +354,48 @@ pub(crate) fn estimate_tokens_for_message(message: &Message, include_thinking: b
         .iter()
         .map(|c| match c {
             ContentBlock::Text { text, .. } => text.len() / 4,
-            // Historical reasoning blocks are UI/session metadata for DeepSeek.
-            // Only current-turn tool-call reasoning is sent back to the API.
-            ContentBlock::Thinking { thinking, .. } if include_thinking => thinking.len() / 4,
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+                state,
+                redacted_data,
+                reasoning_details,
+            } if include_thinking => {
+                // Every byte of a stored thinking block is replay-shaped
+                // input under at least one provider's contract: the readable
+                // text (Anthropic replays it on all prior turns, DeepSeek on
+                // tool-call turns), the Anthropic signature and redacted
+                // payload, the Responses `encrypted_content`, and OpenRouter
+                // `reasoning_details` entries all go back verbatim. Counting
+                // all of it errs high on providers that drop a subset, which
+                // compacts slightly early rather than overflowing.
+                let bytes = thinking.len()
+                    + signature.as_deref().map_or(0, str::len)
+                    + state.as_ref().map_or(0, |s| s.encrypted_content.len())
+                    + redacted_data.as_deref().map_or(0, str::len)
+                    + reasoning_details.as_ref().map_or(0, |details| {
+                        details
+                            .iter()
+                            .map(|entry| entry.to_string().len())
+                            .sum::<usize>()
+                    });
+                bytes / 4
+            }
             ContentBlock::Thinking { .. } => 0,
-            ContentBlock::ToolUse { input, .. } => serde_json::to_string(input)
-                .map(|s| s.len() / 4)
-                .unwrap_or(100),
+            ContentBlock::ToolUse {
+                input,
+                thought_signature,
+                ..
+            } => {
+                let input_tokens = serde_json::to_string(input)
+                    .map(|s| s.len() / 4)
+                    .unwrap_or(100);
+                // Google's thought_signature rides every replayed tool call
+                // on the exact Google route, so it is replay-shaped input
+                // like the thinking payloads above.
+                let signature_tokens = thought_signature.as_deref().map_or(0, str::len) / 4;
+                input_tokens + signature_tokens
+            }
             ContentBlock::ToolResult {
                 content,
                 content_blocks,
@@ -383,20 +431,16 @@ pub(crate) fn estimate_tokens_for_message(message: &Message, include_thinking: b
 const IMAGE_TOKEN_ESTIMATE: usize = 1000;
 
 pub fn estimate_tokens(messages: &[Message]) -> usize {
-    // Rough estimate: ~4 chars per token. DeepSeek thinking-mode rule: any
-    // assistant message with tool_calls keeps its reasoning_content forever
-    // (replayed in all subsequent requests). Final text-only answers drop it.
+    // Rough estimate: ~4 chars per token. Thinking blocks count on every
+    // assistant message: the preserved-thinking replay contracts (Anthropic
+    // signed/redacted blocks on all prior turns, Responses reasoning items
+    // with their function-call chain, OpenRouter reasoning_details, DeepSeek
+    // tool-call turns) send stored reasoning back on later requests, so a
+    // tool-call-only rule undercounts the budget and compacts too late.
     messages
         .iter()
-        .map(|message| estimate_tokens_for_message(message, message_has_tool_use(message)))
+        .map(|message| estimate_tokens_for_message(message, true))
         .sum()
-}
-
-pub(crate) fn message_has_tool_use(message: &Message) -> bool {
-    message
-        .content
-        .iter()
-        .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
 }
 
 pub(crate) fn estimate_text_tokens_conservative(text: &str) -> usize {
@@ -1579,6 +1623,7 @@ mod quota_tests;
 #[cfg(test)]
 mod tests {
     use crate::models::{ImageUrlContent, Message};
+    use codewhale_core::request::OpaqueReasoningState;
 
     #[test]
     fn inline_image_estimates_nonzero_tokens() {
@@ -2056,6 +2101,109 @@ mod tests {
         assert!(is_generated_compaction_checkpoint(restored.last().unwrap()));
     }
 
+    #[test]
+    fn forkguard_restore_without_checkpoint_keeps_pasted_summary_turn() {
+        // A never-compacted history has no summary to reinsert, so restore
+        // must not delete anything. The loose legacy scan cannot tell a
+        // pre-provenance carrier from a user turn that pastes the whole
+        // summary, and dropping that turn loses real user content on every
+        // load of such a session.
+        let pasted_text = build_compaction_summary_block_text("someone else's handoff", "");
+        let pasted = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: pasted_text.clone(),
+                cache_control: None,
+            }],
+        };
+        assert!(
+            !is_generated_compaction_checkpoint(&pasted),
+            "the pasted turn carries no provenance"
+        );
+        let messages = vec![msg("user", "hello"), pasted];
+
+        let restored = restore_compaction_checkpoint(messages, None);
+
+        assert_eq!(
+            restored.len(),
+            2,
+            "restore without a checkpoint keeps the whole history: {restored:?}"
+        );
+        assert!(
+            restored
+                .iter()
+                .any(|message| user_text_of(message).as_deref() == Some(pasted_text.as_str())),
+            "the pasted summary turn must survive an unrestorable load: {restored:?}"
+        );
+    }
+
+    #[test]
+    fn forkguard_restore_without_checkpoint_keeps_the_saved_carrier() {
+        // Same contract for the stamped carrier: deletion only happens as
+        // part of a repair that reinserts a checkpoint, never on a bare
+        // restore.
+        let text = build_compaction_summary_block_text("handoff", "");
+        let messages = vec![
+            msg("user", "Run the suite."),
+            compaction_checkpoint_message(&SystemPrompt::Text(text)),
+        ];
+
+        let restored = restore_compaction_checkpoint(messages, None);
+
+        assert_eq!(
+            restored.len(),
+            2,
+            "the saved carrier must survive a checkpoint-less restore: {restored:?}"
+        );
+        assert_eq!(
+            restored
+                .iter()
+                .filter(|message| is_generated_compaction_checkpoint(message))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn forkguard_restore_without_checkpoint_still_relocates_topology_sidecars() {
+        // The None arm keeps topology relocation: a pre-placement-fix save
+        // appends the Agent-topology sidecar after its round's tool result,
+        // and a checkpoint-less restore must still move it to its anchor even
+        // though there is no checkpoint to reinsert.
+        let mut messages: Vec<Message> = serde_json::from_value(serde_json::json!([
+            {"role":"user","content":[{"type":"text","text":"Analyze the data"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read","input":{"path":"a.txt"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ready"}]}
+        ]))
+        .unwrap();
+        let mut empty: Vec<Message> = Vec::new();
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut empty, &[]);
+        messages.push(empty.remove(0));
+
+        let restored = restore_compaction_checkpoint(
+            crate::runtime_handoff::project_messages_for_restore(&messages),
+            None,
+        );
+
+        assert_eq!(
+            restored.len(),
+            4,
+            "a checkpoint-less restore never drops messages: {restored:?}"
+        );
+        let sidecar_index = restored
+            .iter()
+            .position(|message| {
+                crate::runtime_handoff::is_agent_topology_checkpoint(message)
+                    || crate::runtime_handoff::restored_subagent_checkpoint_display(message)
+                        .is_some()
+            })
+            .unwrap_or_else(|| panic!("the sidecar must survive: {restored:?}"));
+        assert_eq!(
+            sidecar_index, 1,
+            "the sidecar must sit at its anchor, directly after the prompt, not on the trailing tool result: {restored:?}"
+        );
+    }
+
     #[tokio::test]
     async fn compaction_commits_summary_and_retains_recent_user_messages() {
         let messages = vec![
@@ -2494,6 +2642,8 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: thinking.clone(),
+                        redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::ToolUse {
                         id: "tool-1".to_string(),
@@ -2548,6 +2698,198 @@ mod tests {
         assert!(estimate_tokens(&current_messages) > lower_bound);
         assert!(estimate_tokens(&completed_messages) > lower_bound);
         assert!(estimate_tokens(&historical_messages) > lower_bound);
+    }
+
+    #[test]
+    fn estimate_tokens_counts_thinking_on_text_only_assistant_turns() {
+        // Preserved-thinking replay is no longer a DeepSeek tool-round rule:
+        // Anthropic Messages replays signed thinking on every prior assistant
+        // turn, text-only ones included. A tool-call-only rule would count
+        // this message at 0 and compact too late.
+        let thinking = "reasoning ".repeat(800);
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: thinking.clone(),
+                        signature: None,
+                        state: None,
+                        redacted_data: None,
+                        reasoning_details: None,
+                    },
+                    ContentBlock::Text {
+                        text: "Answer.".to_string(),
+                        cache_control: None,
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Next.".to_string(),
+                    cache_control: None,
+                }],
+            },
+        ];
+        let lower_bound = thinking.len() / 5;
+        assert!(
+            estimate_tokens(&messages) > lower_bound,
+            "thinking on a text-only assistant turn must count toward the estimate"
+        );
+    }
+
+    #[test]
+    fn estimate_tokens_counts_opaque_thinking_payloads() {
+        // Signature, redacted payload, Responses encrypted state, and
+        // OpenRouter reasoning_details entries are all replayed verbatim;
+        // counting only the readable text would estimate them at 0.
+        let base = estimate_tokens_for_message(
+            &Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: None,
+                    redacted_data: None,
+                    reasoning_details: None,
+                }],
+            },
+            true,
+        );
+        assert_eq!(base, 0, "an empty block must still estimate to 0");
+
+        let payload = "x".repeat(400);
+        let with_signature = estimate_tokens_for_message(
+            &Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: Some(payload.clone()),
+                    state: None,
+                    redacted_data: None,
+                    reasoning_details: None,
+                }],
+            },
+            true,
+        );
+        assert!(
+            with_signature >= payload.len() / 5,
+            "signature bytes are replayed and must count"
+        );
+
+        let with_redacted = estimate_tokens_for_message(
+            &Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: None,
+                    redacted_data: Some(payload.clone()),
+                    reasoning_details: None,
+                }],
+            },
+            true,
+        );
+        assert!(
+            with_redacted >= payload.len() / 5,
+            "redacted_thinking data is replayed byte-exact and must count"
+        );
+
+        let with_state = estimate_tokens_for_message(
+            &Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: Some(OpaqueReasoningState {
+                        provider: "openai".to_string(),
+                        api: "responses".to_string(),
+                        model: "gpt-test".to_string(),
+                        id: None,
+                        encrypted_content: payload.clone(),
+                        endpoint: None,
+                    }),
+                    redacted_data: None,
+                    reasoning_details: None,
+                }],
+            },
+            true,
+        );
+        assert!(
+            with_state >= payload.len() / 5,
+            "Responses encrypted_content is replayed and must count"
+        );
+
+        let details_entry = serde_json::json!({
+            "type": "reasoning.encrypted",
+            "format": "openai-responses-v1",
+            "data": payload,
+        });
+        let with_details = estimate_tokens_for_message(
+            &Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: None,
+                    redacted_data: None,
+                    reasoning_details: Some(vec![details_entry.clone()]),
+                }],
+            },
+            true,
+        );
+        assert!(
+            with_details >= details_entry.to_string().len() / 5,
+            "OpenRouter reasoning_details entries are replayed and must count"
+        );
+    }
+
+    #[test]
+    fn estimate_tokens_still_skips_thinking_when_opted_out() {
+        // The include_thinking=false contract (used to isolate non-reasoning
+        // content, e.g. the inline-image floor check) must keep ignoring
+        // thinking blocks entirely.
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: "reasoning ".repeat(800),
+                signature: None,
+                state: None,
+                redacted_data: None,
+                reasoning_details: None,
+            }],
+        };
+        assert_eq!(
+            estimate_tokens_for_message(&msg, false),
+            0,
+            "opted-out estimates must not count thinking bytes"
+        );
+    }
+
+    #[test]
+    fn estimate_tokens_counts_google_thought_signatures_on_tool_calls() {
+        // The thought_signature replays verbatim on every tool call of the
+        // exact Google route, so it is replay-shaped input like the thinking
+        // payloads above and must not score zero.
+        let signature = "s".repeat(400);
+        let tool_use = |thought_signature: Option<String>| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({}),
+                caller: None,
+                thought_signature,
+            }],
+        };
+        let with_signature = estimate_tokens_for_message(&tool_use(Some(signature.clone())), true);
+        let bare = estimate_tokens_for_message(&tool_use(None), true);
+        assert_eq!(
+            with_signature - bare,
+            signature.len() / 4,
+            "signature bytes must count toward the tool-call estimate"
+        );
     }
 
     #[test]

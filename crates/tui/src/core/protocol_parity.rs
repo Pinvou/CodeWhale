@@ -493,6 +493,9 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             route: route_to_wire(route),
         },
         Event::TurnComplete {
+            turn_id,
+            submission_id,
+            compaction_id,
             usage,
             status,
             error,
@@ -501,7 +504,9 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
         } => wire::EventMsg::TurnComplete {
             thread_id,
             session_id,
-            turn_id: None,
+            turn_id: turn_id.clone(),
+            submission_id: submission_id.clone(),
+            compaction_id: compaction_id.clone(),
             status: outcome_status_to_wire(*status),
             error: error.clone(),
             usage: usage_to_wire(usage),
@@ -1209,6 +1214,24 @@ mod tests {
     /// exists so the guard has a name in the test log and so the projection
     /// is proven to agree with the protocol's wire-tag table.
     #[test]
+    fn manual_compaction_terminal_keeps_its_operation_id_in_projection() {
+        let event = Event::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: Some("compact-1".into()),
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Failed,
+            error: Some("route rejected".into()),
+            tool_catalog: None,
+            base_url: None,
+        };
+        let value = serde_json::to_value(event.to_protocol(&ids())).unwrap();
+        assert_eq!(value["compaction_id"], "compact-1");
+        assert!(value.get("turn_id").is_none());
+        assert!(value.get("submission_id").is_none());
+    }
+
+    #[test]
     fn protocol_covers_engine_events() {
         let ids = ids();
         let usage = Usage {
@@ -1251,6 +1274,9 @@ mod tests {
                 submission_id: Some("sub-host-1".into()),
             },
             Event::TurnComplete {
+                turn_id: Some("turn-1".into()),
+                submission_id: Some("sub-host-1".into()),
+                compaction_id: None,
                 usage: usage.clone(),
                 status: TurnOutcomeStatus::Interrupted,
                 error: Some("stopped".into()),
@@ -1338,6 +1364,10 @@ mod tests {
             serde_json::to_value(events[8].to_protocol(&ids)).unwrap()["status"],
             "interrupted"
         );
+        let terminal = serde_json::to_value(events[8].to_protocol(&ids)).unwrap();
+        assert_eq!(terminal["turn_id"], "turn-1");
+        assert_eq!(terminal["submission_id"], "sub-host-1");
+        assert!(terminal.get("compaction_id").is_none());
         let error = serde_json::to_value(events[10].to_protocol(&ids)).unwrap();
         assert_eq!(error["category"], "rate_limit");
         assert_eq!(error["severity"], "warning");

@@ -129,10 +129,10 @@ impl ToolSpec for GithubTool {
     fn description(&self) -> &'static str {
         match self.forced_action {
             Some("issue_context") => {
-                "Read GitHub issue context using gh. Read-only: body/comments/labels/state are summarized and large bodies become task artifacts when a durable task is active."
+                "Read GitHub issue context using gh. Read-only: bodies over ~4KB are condensed to a ~1200-char excerpt (the full text is written to a task artifact only when a durable task is active); comments, labels, and state pass through verbatim."
             }
             Some("pr_context") => {
-                "Read GitHub PR context using gh: body/comments/reviews/check status/files and optional diff artifact. Read-only; no push/merge/close."
+                "Read GitHub PR context using gh: body/comments/reviews/check status/files and optional diff artifact. The body is condensed like issue bodies when large (~4KB to a ~1200-char excerpt, full text to a task artifact only when a durable task is active). Read-only; no push/merge/close."
             }
             Some("comment") => {
                 "Post an evidence-backed GitHub issue/PR comment with gh. Requires approval. Use blocker comments for partial work; do not claim closure without evidence."
@@ -144,10 +144,10 @@ impl ToolSpec for GithubTool {
                 "Close a GitHub pull request only when structured acceptance evidence is present and approved. Rejected when the worktree is dirty unless allow_dirty=true. Use this for PRs instead of github_close_issue so the UI, audit trail, and comments keep PR wording clear."
             }
             _ if self.read_only => {
-                "Read GitHub issue/PR context using gh. Actions: \"issue_context\" and \"pr_context\"; bodies/comments/labels/state are summarized and large bodies become task artifacts when a durable task is active."
+                "Read GitHub issue/PR context using gh. Actions: \"issue_context\" and \"pr_context\". Bodies over ~4KB are condensed to a ~1200-char excerpt (the full text is written to a task artifact only when a durable task is active); smaller bodies, comments, labels, and state pass through verbatim."
             }
             _ => {
-                "Read and guardedly mutate GitHub issues/PRs using gh. Actions: \"issue_context\", \"pr_context\" (read-only; large bodies become task artifacts when a durable task is active), \"comment\" (approval; evidence-backed), \"close_issue\", \"close_pr\" (approval; only with structured acceptance evidence — never close merely because the agent is stopping; rejected when the worktree is dirty unless allow_dirty=true). No push/merge."
+                "Read and guardedly mutate GitHub issues/PRs using gh. Actions: \"issue_context\", \"pr_context\" (read-only; bodies over ~4KB are condensed to a ~1200-char excerpt (a durable task additionally captures the full text as an artifact)), \"comment\" (approval; evidence-backed), \"close_issue\", \"close_pr\" (approval; only with structured acceptance evidence — never close merely because the agent is stopping; rejected when the worktree is dirty unless allow_dirty=true). No push/merge."
             }
         }
     }
@@ -277,6 +277,36 @@ mod tests {
             GithubTool::alias("github_close_pr", "close_pr")
                 .description()
                 .contains("pull request")
+        );
+    }
+
+    /// The condensation disclosure was rewritten three times inside this PR
+    /// (an "unless" phrasing and an uncorrected alias arm both regressed);
+    /// every read arm must keep stating it truthfully.
+    #[test]
+    fn read_arms_disclose_body_condensation() {
+        for (name, description) in [
+            ("read_only", GithubTool::read_only("github").description()),
+            ("default", GithubTool::new("github").description()),
+            (
+                "forced issue_context",
+                GithubTool::alias("github_issue_context", "issue_context").description(),
+            ),
+            (
+                "forced pr_context",
+                GithubTool::alias("github_pr_context", "pr_context").description(),
+            ),
+        ] {
+            assert!(
+                description.contains("~1200-char excerpt"),
+                "{name} arm must disclose the body condensation:\n{description}"
+            );
+        }
+        assert!(
+            GithubTool::alias("github_issue_context", "issue_context")
+                .description()
+                .contains("pass through verbatim"),
+            "forced issue_context arm must state what passes through verbatim"
         );
     }
 

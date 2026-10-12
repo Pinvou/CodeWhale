@@ -475,4 +475,83 @@ mod tests {
             "an approval decision without a committed terminal receipt must not grant execution"
         );
     }
+
+    fn user_input_request() -> UserInputRequest {
+        UserInputRequest {
+            questions: vec![crate::tools::user_input::UserInputQuestion {
+                header: "Confirm".to_string(),
+                id: "confirm".to_string(),
+                question: "Proceed?".to_string(),
+                options: vec![
+                    crate::tools::user_input::UserInputOption {
+                        label: "yes".to_string(),
+                        description: "proceed".to_string(),
+                    },
+                    crate::tools::user_input::UserInputOption {
+                        label: "no".to_string(),
+                        description: "stop".to_string(),
+                    },
+                ],
+                allow_free_text: false,
+                multi_select: false,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_user_input_resolves_the_headless_wait_deterministically() {
+        // The headless exec agent's `UserInputRequired` arm resolves the
+        // otherwise-unbounded engine wait with `handle.cancel_user_input`;
+        // this pins the engine side of that contract: the cancellation is
+        // delivered (never dropped behind the approval multiplexer), the
+        // wait returns promptly with the deterministic cancelled error, and
+        // a cancellation for a *different* id does not end the wait.
+        let (mut engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
+        let request = user_input_request();
+        let task =
+            tokio::spawn(async move { engine.await_user_input("call_headless", request).await });
+
+        let emitted = handle
+            .rx_event
+            .write()
+            .await
+            .recv()
+            .await
+            .expect("user input event");
+        let Event::UserInputRequired { id, .. } = emitted else {
+            panic!("expected UserInputRequired, got {emitted:?}");
+        };
+        assert_eq!(id, "call_headless");
+
+        // A decision for a different tool id must not resolve the wait:
+        // the loop re-serves it rather than dropping the waiter. If the
+        // unrelated cancellation *did* end the wait, the task below would
+        // already be finished before the matching cancellation arrives.
+        handle
+            .cancel_user_input("call_unrelated")
+            .await
+            .expect("deliver unrelated cancellation");
+        // Give the engine a scheduling opportunity to mis-consume it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !task.is_finished(),
+            "a cancellation for a different tool id must not end the wait"
+        );
+
+        // The matching cancellation is the one that resolves the wait.
+        handle
+            .cancel_user_input("call_headless")
+            .await
+            .expect("deliver cancellation");
+
+        let resolved = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the cancelled wait must resolve promptly")
+            .expect("engine task");
+        let rendered = format!("{resolved:?}");
+        assert!(
+            rendered.to_lowercase().contains("cancel"),
+            "the wait must end as a cancelled error, got {resolved:?}"
+        );
+    }
 }

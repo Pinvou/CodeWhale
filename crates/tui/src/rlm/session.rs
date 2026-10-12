@@ -102,7 +102,7 @@ impl Default for RlmSessionConfig {
     fn default() -> Self {
         Self {
             output_feedback: OutputFeedback::Full,
-            sub_query_timeout_secs: 120,
+            sub_query_timeout_secs: super::bridge::CHILD_TIMEOUT_SECS,
             sub_rlm_max_depth: 1,
             share_session: false,
         }
