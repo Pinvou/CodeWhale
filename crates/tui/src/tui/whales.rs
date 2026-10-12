@@ -196,6 +196,21 @@ impl WhaleState {
         Self::Offline,
     ];
 
+    /// CWC state priority; higher wins when several facts apply. Public
+    /// contract for surfaces that fold several children into one whale.
+    #[cfg(test)]
+    #[must_use]
+    pub const fn priority(self) -> u8 {
+        match self {
+            Self::Waiting => 60,
+            Self::Blocked => 50,
+            Self::Working => 40,
+            Self::Thinking => 30,
+            Self::Offline => 20,
+            Self::Resting => 10,
+        }
+    }
+
     /// Localized state word — always rendered next to the glyph cue.
     #[must_use]
     pub fn word(self, locale: Locale) -> Cow<'static, str> {
@@ -502,6 +517,14 @@ mod tests {
     }
 
     #[test]
+    fn state_priority_orders_attention_before_work() {
+        assert!(
+            WhaleState::Waiting.priority() > WhaleState::Working.priority()
+                && WhaleState::Working.priority() > WhaleState::Resting.priority()
+        );
+    }
+
+    #[test]
     fn badge_glyphs_have_ascii_fallbacks_and_stay_distinct() {
         for species in WhaleSpecies::ALL {
             let badge = badge_ascii(species);
@@ -606,6 +629,12 @@ mod tests {
             question: "which branch?".into(),
         });
         assert_eq!(WhaleState::for_subagent(&agent), WhaleState::Waiting);
+        // Priorities match CWC.
+        assert!(WhaleState::Waiting.priority() > WhaleState::Blocked.priority());
+        assert!(WhaleState::Blocked.priority() > WhaleState::Working.priority());
+        assert!(WhaleState::Working.priority() > WhaleState::Thinking.priority());
+        assert!(WhaleState::Thinking.priority() > WhaleState::Offline.priority());
+        assert!(WhaleState::Offline.priority() > WhaleState::Resting.priority());
     }
 
     #[test]

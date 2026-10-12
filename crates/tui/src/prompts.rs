@@ -398,6 +398,8 @@ fn user_constitution_disabled_by_setup_state() -> bool {
 // prompt text in `text.rs` directly; the test suite below guards content
 // and ordering invariants (constitution structure and binding gates #4032,
 // byte-stable prefix ordering, prefix privacy #4632).
+#[cfg(test)]
+use text::CALM_PERSONALITY;
 pub use text::{
     BASE_PROMPT, COMPACT_TEMPLATE, CORE_EXECUTION_PROFILE_PROMPT, GOAL_CONTINUATION_PROMPT,
     HEADLESS_BASE_PROMPT, LANGUAGE_PROMPT, MEMORY_GUIDANCE, OUTPUT_PROMPT,
@@ -2916,6 +2918,7 @@ mod tests {
     fn only_the_constitution_states_precedence() {
         // Composed overlays must describe behavior, never their own rank.
         let overlays = [
+            ("CALM_PERSONALITY", CALM_PERSONALITY),
             ("COMPACT_TEMPLATE", COMPACT_TEMPLATE),
             ("MEMORY_GUIDANCE", MEMORY_GUIDANCE),
             ("LANGUAGE_PROMPT", LANGUAGE_PROMPT),
@@ -3984,6 +3987,20 @@ mod tests {
         assert!(
             prompt.contains("## Concise Output Discipline"),
             "Concise Output Discipline should be appended"
+        );
+    }
+
+    /// #2953 — the Calm overlay (`CALM_PERSONALITY`) stays out of the default
+    /// model-prompt path to keep the static prefix slim. Voice and tone
+    /// guidance travels via the constitution preamble instead.
+    #[test]
+    fn default_prompt_does_not_include_calm_personality_overlay() {
+        let prompt = compose_prompt_with_approval_model_and_shell(Personality::Calm, "codewhale");
+        let calm_text = CALM_PERSONALITY;
+        let first_calm_line = calm_text.lines().find(|l| !l.is_empty()).unwrap_or("");
+        assert!(
+            !prompt.contains(first_calm_line),
+            "default agent prompt must not include the calm personality overlay"
         );
     }
 

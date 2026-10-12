@@ -206,6 +206,10 @@ pub struct FleetFile {
 pub enum FleetStoreError {
     #[error("invalid fleet: {0}")]
     Invalid(String),
+    #[error(
+        "fleet `{0}` is defined in both {1} and {2}; name one explicitly as {1}/{0} or {2}/{0}"
+    )]
+    Ambiguous(String, String, String),
     #[error("fleet file not found: {0}")]
     NotFound(String),
     #[error("failed to read {path}: {message}")]
@@ -496,8 +500,53 @@ fn collect_entries(dir: &Path, scope: FleetScope, out: &mut Vec<FleetEntry>) {
     }
 }
 
-/// Load a v2 Fleet by name in one explicit scope. This never resolves
-/// ambiguity — the caller already knows where the Fleet
+/// Load a v2 Fleet by name. Ambiguity between the two scopes is an error that
+/// names both origins — the caller (UI) resolves it by asking for a scope.
+/// (Kept for the qualified-name flow and the ambiguity tests; the list/detail
+/// UI resolves by scope via load_fleet_in_scope.)
+#[allow(dead_code)]
+pub fn load_fleet(
+    name: &str,
+    workspace: &Path,
+) -> Result<(FleetFile, FleetScope, PathBuf), FleetStoreError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(FleetStoreError::NotFound("<empty name>".to_string()));
+    }
+    let mut found: Vec<(FleetScope, PathBuf)> = Vec::new();
+    if let Ok(dir) = personal_fleets_dir() {
+        let path = dir.join(format!("{}.toml", slugify(name)));
+        if path.is_file() {
+            found.push((FleetScope::Personal, path));
+        }
+    }
+    let ws_path = workspace_fleets_dir(workspace).join(format!("{}.toml", slugify(name)));
+    if ws_path.is_file() {
+        found.push((FleetScope::Workspace, ws_path));
+    }
+    if found.len() > 1 {
+        return Err(FleetStoreError::Ambiguous(
+            name.to_string(),
+            FleetScope::Personal.label().to_string(),
+            FleetScope::Workspace.label().to_string(),
+        ));
+    }
+    let Some((scope, path)) = found.pop() else {
+        return Err(FleetStoreError::NotFound(name.to_string()));
+    };
+    let text = fs::read_to_string(&path).map_err(|e| FleetStoreError::Io {
+        path: path.display().to_string(),
+        message: e.to_string(),
+    })?;
+    let fleet = FleetFile::parse(&text).map_err(|e| FleetStoreError::Parse {
+        path: path.display().to_string(),
+        message: e.to_string(),
+    })?;
+    Ok((fleet, scope, path))
+}
+
+/// Load a v2 Fleet by name in one explicit scope. Unlike [`load_fleet`],
+/// this never resolves ambiguity — the caller already knows where the Fleet
 /// lives (e.g. the row the user just picked).
 pub fn load_fleet_in_scope(
     name: &str,
@@ -1070,6 +1119,32 @@ role = "scout"
         )
         .expect("pre-display-name revision-2 file");
         assert!(without_name.members[0].display_name.is_none());
+    }
+
+    #[test]
+    fn save_load_round_trips_in_workspace_scope() {
+        let _lock = crate::test_support::lock_test_env();
+        let ws = tempfile::TempDir::new().unwrap();
+        let fleet = sample_fleet();
+        let path = save_fleet(&fleet, FleetScope::Workspace, ws.path()).expect("save");
+        assert!(
+            path.ends_with(".codewhale/fleets/deepseek-flash.toml"),
+            "{path:?}"
+        );
+
+        let (loaded, scope, path) = load_fleet("DeepSeek Flash", ws.path()).expect("load");
+        assert_eq!(loaded, fleet);
+        assert_eq!(scope, FleetScope::Workspace);
+        assert_eq!(path, load_fleet("DeepSeek Flash", ws.path()).unwrap().2);
+
+        // A same-name Fleet in the personal scope makes the bare name
+        // ambiguous — the reader names both origins instead of shadowing.
+        let _home = set_sealed_home();
+        save_fleet(&fleet, FleetScope::Personal, ws.path()).expect("save personal");
+        let err = load_fleet("DeepSeek Flash", ws.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("defined in both"), "{msg}");
+        assert!(msg.contains("user") && msg.contains("folder"), "{msg}");
     }
 
     #[test]

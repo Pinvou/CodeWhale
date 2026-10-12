@@ -3277,19 +3277,8 @@ mod tests {
         let restored = WorkflowPanel::from_run_json(&snapshot).expect("panel rehydrates");
         assert_eq!(restored.done_total(), (0, 1));
         assert_eq!(restored.failure_cancel_counts(), (1, 0));
-        let history_lines = {
-            let content_width = usize::from(120u16).max(1);
-            let summary = restored.compact_summary_text(content_width.saturating_sub(2));
-            let mut lines = vec![Line::from(Span::styled(
-                truncate_line_to_width(&format!("▼ {summary}"), content_width),
-                Style::default()
-                    .fg(restored.lifecycle.color())
-                    .add_modifier(Modifier::BOLD),
-            ))];
-            lines.extend(restored.history_expanded_lines(120, &WorkflowHistoryExtras::default()));
-            lines
-        };
-        let history = history_lines
+        let history = restored
+            .render_history_card(120, true, &WorkflowHistoryExtras::default())
             .iter()
             .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
             .collect::<String>();
@@ -3480,16 +3469,7 @@ mod tests {
             error: Some("scout failed".to_string()),
             at_ms: 2_100,
         });
-        let lines = {
-            let content_width = usize::from(120u16).max(1);
-            let summary = panel.compact_summary_text(content_width.saturating_sub(2));
-            vec![Line::from(Span::styled(
-                truncate_line_to_width(&format!("▶ {summary}"), content_width),
-                Style::default()
-                    .fg(panel.lifecycle.color())
-                    .add_modifier(Modifier::BOLD),
-            ))]
-        };
+        let lines = panel.render_history_card(120, false, &WorkflowHistoryExtras::default());
         assert_eq!(lines.len(), 1, "compact is a single summary line");
         let joined: String = lines
             .iter()
@@ -3540,18 +3520,7 @@ mod tests {
             spillover_path: Some(PathBuf::from("/tmp/workflow-out.json")),
             verification_summary: None,
         };
-        let lines = {
-            let content_width = usize::from(120u16).max(1);
-            let summary = panel.compact_summary_text(content_width.saturating_sub(2));
-            let mut lines = vec![Line::from(Span::styled(
-                truncate_line_to_width(&format!("▼ {summary}"), content_width),
-                Style::default()
-                    .fg(panel.lifecycle.color())
-                    .add_modifier(Modifier::BOLD),
-            ))];
-            lines.extend(panel.history_expanded_lines(120, &extras));
-            lines
-        };
+        let lines = panel.render_history_card(120, true, &extras);
         let joined: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -3774,22 +3743,14 @@ mod tests {
             "read-only scouts stay on main: {scout_joined}"
         );
 
-        let card = {
-            let extras = WorkflowHistoryExtras {
+        let card = panel.render_history_card(
+            120,
+            true,
+            &WorkflowHistoryExtras {
                 result_summary: Some("no critical issues".to_string()),
                 ..WorkflowHistoryExtras::default()
-            };
-            let content_width = usize::from(120u16).max(1);
-            let summary = panel.compact_summary_text(content_width.saturating_sub(2));
-            let mut lines = vec![Line::from(Span::styled(
-                truncate_line_to_width(&format!("▼ {summary}"), content_width),
-                Style::default()
-                    .fg(panel.lifecycle.color())
-                    .add_modifier(Modifier::BOLD),
-            ))];
-            lines.extend(panel.history_expanded_lines(120, &extras));
-            lines
-        };
+            },
+        );
         let card_text: String = card
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -3968,22 +3929,14 @@ mod tests {
         let header = panel.header_text(140);
         assert!(header.contains("1 fail"), "{header}");
 
-        let card = {
-            let extras = WorkflowHistoryExtras {
+        let card = panel.render_history_card(
+            140,
+            true,
+            &WorkflowHistoryExtras {
                 result_summary: Some("2/3 scouts ok; scout-b failed".to_string()),
                 ..WorkflowHistoryExtras::default()
-            };
-            let content_width = usize::from(140u16).max(1);
-            let summary = panel.compact_summary_text(content_width.saturating_sub(2));
-            let mut lines = vec![Line::from(Span::styled(
-                truncate_line_to_width(&format!("▼ {summary}"), content_width),
-                Style::default()
-                    .fg(panel.lifecycle.color())
-                    .add_modifier(Modifier::BOLD),
-            ))];
-            lines.extend(panel.history_expanded_lines(140, &extras));
-            lines
-        };
+            },
+        );
         let joined: String = card
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))

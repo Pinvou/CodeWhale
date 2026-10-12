@@ -8829,6 +8829,34 @@ diff --git a/src/b.rs b/src/b.rs\n\
     }
 
     #[test]
+    fn ghost_text_hidden_when_input_not_empty() {
+        let mut app = create_test_app();
+        app.prompt_suggestion = Some("A suggestion".to_string());
+        app.input = "hello".to_string();
+        app.cursor_position = 5;
+        let slash_menu_entries = Vec::<SlashMenuEntry>::new();
+        let mention_menu_entries = Vec::<String>::new();
+        let widget = ComposerWidget::new(&app, 5, &slash_menu_entries, &mention_menu_entries);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 5,
+        };
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let has_suggestion = buf
+            .content
+            .iter()
+            .any(|c| c.symbol().contains("A suggestion"));
+        assert!(
+            !has_suggestion,
+            "suggestion should not render when input is non-empty"
+        );
+    }
+
+    #[test]
     fn receipt_settle_cascade_is_bounded_and_ordered() {
         assert!(receipt_is_settling(0, 0));
         assert!(!receipt_is_settling(0, 140));
