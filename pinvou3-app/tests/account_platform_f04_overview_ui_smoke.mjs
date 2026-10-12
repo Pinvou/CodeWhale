@@ -25,5 +25,24 @@ await run('old authority request cannot replace a newer actor projection',async(
 for(const item of [{detail:'model_id',path:'/models',filter:'model_lifecycle_status',value:'PUBLISHED',section:'models',selector:'.adm-model-overview-metric'},{detail:'token_account_id',path:'/token-accounts',filter:'token_health_status',value:'HEALTHY',section:'tokens',selector:'.adm-model-overview-metric:nth-child(2)'}])await run('detail '+item.detail+' overview drilldown reaches collection atomically',async()=>{await page.evaluate(item=>{const url=new URL(location.href);url.searchParams.set(item.detail,'33333333-3333-4333-8333-333333333333');url.searchParams.set('keep_existing','yes');history.replaceState({},'',url);window.dispatchEvent(new PopStateEvent('popstate'));},item);if(item.section==='tokens')await tab('tokenAccounts');await wait();await page.$eval(item.selector,b=>b.click());await page.waitForFunction(item=>!new URL(location.href).searchParams.has(item.detail)&&new URL(location.href).searchParams.get(item.filter)===item.value&&window.overview.calls.some(c=>c.path.endsWith(item.path)&&(item.section==='tokens'||new URLSearchParams(c.query).get('lifecycle_status')===item.value)),{},item);assert.equal(await page.evaluate(()=>new URL(location.href).searchParams.get('keep_existing')),'yes');});
 await run('dual-granted existing 24h route renders provisioning only',async()=>{await page.evaluate(()=>{window.overview.permissions=[...window.overview.permissions,'platform.usage.read'];window.overview.render();});await tab('provisionings');await wait();assert.ok(await page.evaluate(()=>window.overview.calls.some(c=>c.path.endsWith('/overviews/model-operations')&&c.query==='?window=24h')));assert.equal(await page.$$eval('.adm-model-page-overview strong',nodes=>nodes.length),2);});
 
+for (const [language, caption] of [['zh', '所属范围'], ['en', 'Scope'], ['ja', '範囲']]) {
+  await run(language + ' provisioning scope filter has an accessible caption and exact read query', async () => {
+    await page.evaluate(language => { window.overview.language = language; window.overview.render(); }, language);
+    await page.waitForFunction(() => [...document.querySelectorAll('.adm-panel > nav button')].some(button => button.textContent === window.overview.labels().provisionings));
+    await tab('provisionings');
+    await wait();
+    const selector = 'aria/' + caption + '[role="combobox"]';
+    const scope = await page.$(selector);
+    assert.ok(scope, 'The actual scope selector must expose its translated accessible name');
+    assert.equal(await scope.evaluate(node => node.closest('label').querySelector('span').textContent), caption);
+    await scope.select('PERSONAL');
+    await page.$eval('.adm-model-token-filters', form => form.requestSubmit());
+    await page.waitForFunction(() => new URL(location.href).searchParams.get('provisioning_scope_type') === 'PERSONAL' && window.overview.calls.some(call => call.path.endsWith('/provisionings') && new URLSearchParams(call.query).get('scope_type') === 'PERSONAL'));
+    assert.ok(await page.evaluate(() => window.overview.calls.filter(call => call.path.endsWith('/provisionings')).every(call => call.method === 'GET')));
+    await page.$eval('.adm-model-token-filters button.secondary', button => button.click());
+    await page.waitForFunction(() => !new URL(location.href).searchParams.has('provisioning_scope_type') && window.overview.calls.filter(call => call.path.endsWith('/provisionings')).at(-1)?.query.indexOf('scope_type=') === -1);
+  });
+}
+
 console.log(JSON.stringify({cases,counts:{pass:cases.filter(c=>c.status==='PASS').length,fail:cases.filter(c=>c.status==='FAIL').length,skip:0}}));if(process.env.F04_OVERVIEW_REACT_RESULT)fs.writeFileSync(process.env.F04_OVERVIEW_REACT_RESULT,JSON.stringify({cases},null,2));if(cases.some(c=>c.status==='FAIL'))process.exitCode=1;
 }finally{if(browser)await browser.close();if(vite)await vite.close();assert.equal(fs.realpathSync(profile),owned);assert.equal(path.dirname(owned),fs.realpathSync(os.tmpdir()));assert.ok(path.basename(owned).startsWith('pinvou-f04-overview-'));fs.rmSync(owned,{recursive:true});}
