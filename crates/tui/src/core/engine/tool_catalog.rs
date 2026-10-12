@@ -423,7 +423,7 @@ pub(crate) fn remove_toolbox_drops(
 /// catalog itself (disconnect, deny rule, mode switch), so the search-result
 /// recovery contract ("re-search to re-activate") would be a false promise
 /// for it. Oversize drops carry [`toolbox_oversize_reason`] instead.
-const TOOLBOX_STALE_EVICTION_REASON: &str = "Previously active in this conversation but no longer available in the tool catalog; searching cannot re-activate it while it stays unavailable.";
+const TOOLBOX_CATALOG_SHRINK_REASON: &str = "Previously active in this conversation but no longer available in the tool catalog; searching cannot re-activate it while it stays unavailable.";
 
 /// Why a deferred tool stays out of the bounded conversation toolbox: its
 /// serialized schema alone exceeds the per-tool budget, so no search can
@@ -1124,8 +1124,27 @@ pub(super) fn maybe_hydrate_requested_deferred_tool(
         return None;
     }
 
+    // An oversize schema can never enter the bounded toolbox, so the
+    // receipt must not promise a load that the admission would refuse —
+    // that promise turns every retry into another false "has now been
+    // loaded". Refuse up front with the shared oversize reason, the same
+    // statement the child surface makes. The name stays out of the
+    // hydration set, so the batch activation is never asked to admit it.
+    if ToolActivationCache::exceeds_per_tool_budget(def) {
+        return Some(deferred_tool_oversize_hydration_result(def));
+    }
+
     hydrated_tools_this_batch.insert(tool_name.to_string());
     Some(deferred_tool_schema_hydration_result(def, tool_input))
+}
+
+fn deferred_tool_oversize_hydration_result(tool: &Tool) -> ToolResult {
+    ToolResult::success(format!(
+        "Tool `{}` could not enter the bounded conversation toolbox: {}. \
+         The tool was not executed.",
+        tool.name,
+        toolbox_oversize_reason()
+    ))
 }
 
 #[cfg(test)]
@@ -1459,7 +1478,7 @@ fn execute_tool_search_inner(
         }
         let reason = match entry.cause {
             crate::core::session::ToolActivationStaleCause::CatalogShrink => {
-                TOOLBOX_STALE_EVICTION_REASON.to_string()
+                TOOLBOX_CATALOG_SHRINK_REASON.to_string()
             }
             crate::core::session::ToolActivationStaleCause::Oversize => toolbox_oversize_reason(),
         };

@@ -3,8 +3,9 @@ use super::{
     allowlist_is_native_file_and_shell_only, apply_mcp_tool_deferral, apply_native_tool_deferral,
     apply_registry_first_shell_guidance, build_model_tool_catalog_with_surface,
     default_synthetic_catalog_tool_names, ensure_advanced_tooling, execute_tool_search_with_cache,
-    initial_active_tools, is_synthetic_catalog_tool, remove_toolbox_drops, tool_matches_any_rule,
-    toolbox_oversize_reason, touch_cached_tool_after_execution,
+    initial_active_tools, is_synthetic_catalog_tool, maybe_hydrate_requested_deferred_tool,
+    remove_toolbox_drops, tool_matches_any_rule, toolbox_oversize_reason,
+    touch_cached_tool_after_execution,
 };
 use crate::core::session::ToolActivationCache;
 use crate::models::Tool;
@@ -534,7 +535,7 @@ fn search_reports_catalog_stale_evictions_as_unavailable_not_evicted() {
         .expect("the stale eviction must be reported");
     assert_eq!(
         stale_entry["reason"],
-        super::TOOLBOX_STALE_EVICTION_REASON,
+        super::TOOLBOX_CATALOG_SHRINK_REASON,
         "the stale reason must be the catalog-shrink one, not the bounds one: {stale_entry}"
     );
     assert!(
@@ -724,4 +725,119 @@ fn search_reports_oversize_drops_with_the_oversize_reason() {
         "an oversize drop is not a re-activatable eviction: {payload}"
     );
     assert!(!active.contains("deferred-left"));
+}
+
+/// The searched tool itself can be the LRU-front victim of a growth
+/// overflow: revalidation pops it, the admission loop re-admits it, and the
+/// same payload must not name it evicted while also handing it back in
+/// `tool_references`.
+#[test]
+fn search_does_not_name_its_own_admission_as_evicted() {
+    let heavy = |name: &str, description_bytes: usize| {
+        let mut definition = tool(name);
+        definition.defer_loading = Some(true);
+        definition.description = "x".repeat(description_bytes);
+        definition
+    };
+    let catalog_v1 = vec![heavy("deferred-left", 8), heavy("deferred-right", 6_000)];
+    let mut active = initial_active_tools(&catalog_v1);
+    let mut cache = ToolActivationCache::default();
+    execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "deferred", "max_results": 8}),
+        &catalog_v1,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("first search should succeed");
+    assert_eq!(
+        cache.names().collect::<Vec<_>>(),
+        vec!["deferred-left", "deferred-right"]
+    );
+
+    let catalog_v2 = vec![
+        heavy("deferred-left", 12_000),
+        heavy("deferred-right", 6_000),
+    ];
+    let second = execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "^deferred-left", "match": "regex"}),
+        &catalog_v2,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("second search should succeed");
+    let payload: serde_json::Value =
+        serde_json::from_str(&second.content).expect("payload is JSON");
+    let references = payload["tool_references"].as_array().expect("references");
+    assert!(
+        references
+            .iter()
+            .any(|reference| reference["tool_name"] == "deferred-left"),
+        "the searched growth victim must be re-admitted by this very result: {references:?}"
+    );
+    assert_eq!(
+        payload["evicted_tool_references"],
+        json!([{"type": "tool_reference", "tool_name": "deferred-right"}]),
+        "only the net eviction may be named: {payload}"
+    );
+    let note = payload["toolbox_note"].as_str().expect("note");
+    assert!(
+        note.contains("deferred-right") && !note.contains("deferred-left"),
+        "the note must not claim the re-admitted tool is uncallable: {note}"
+    );
+    assert!(active.contains("deferred-left"));
+    assert!(!active.contains("deferred-right"));
+    let metadata = second.metadata.expect("search metadata");
+    assert_eq!(
+        metadata["evicted_tool_references"],
+        json!(["deferred-right"])
+    );
+}
+
+/// A direct call to an oversize deferred tool can never enter the bounded
+/// toolbox, so the hydration receipt must refuse with the shared oversize
+/// reason instead of promising a load the admission would refuse.
+#[test]
+fn hydration_of_an_oversize_tool_reports_the_rejection_not_a_load() {
+    let mut oversize = tool("huge-deferred");
+    oversize.defer_loading = Some(true);
+    oversize.description = "x".repeat(20_000);
+    let catalog = vec![oversize];
+    // An empty active set: in a real turn core tools fill it, and the
+    // single-tool fallback must not pre-activate the tool under test.
+    let active = HashSet::new();
+    let mut hydrated = HashSet::new();
+
+    let receipt = maybe_hydrate_requested_deferred_tool(
+        "huge-deferred",
+        &json!({}),
+        &catalog,
+        &active,
+        &mut hydrated,
+    )
+    .expect("the oversize refusal must still answer the call");
+    assert!(
+        receipt
+            .content
+            .contains("could not enter the bounded conversation toolbox"),
+        "the receipt must refuse the load: {}",
+        receipt.content
+    );
+    assert!(
+        receipt.content.contains(&toolbox_oversize_reason()),
+        "the refusal must carry the shared oversize reason: {}",
+        receipt.content
+    );
+    assert!(
+        !receipt.content.contains("has now been loaded"),
+        "the receipt must not promise a load: {}",
+        receipt.content
+    );
+    assert!(
+        hydrated.is_empty(),
+        "an oversize tool must not be offered to the batch activation: {hydrated:?}"
+    );
 }

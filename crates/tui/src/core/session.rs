@@ -18,8 +18,9 @@ pub(crate) const TOOL_ACTIVATION_CACHE_MAX_NAMES: usize = 8;
 /// Maximum serialized bytes added to requests by cached deferred schemas.
 pub(crate) const TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES: usize = 16 * 1024;
 
-/// Bounded, process-local conversation cache for tools activated by
-/// `tool_search`.
+/// Bounded, process-local conversation cache for deferred tools activated by
+/// `tool_search` or loaded by a direct call (hydration, execution refresh,
+/// retrieval admission).
 ///
 /// Only names are retained. Every turn revalidates them against the currently
 /// filtered catalog, so a disconnected MCP server, changed allow/deny rule, or
@@ -60,6 +61,9 @@ pub(crate) struct ToolActivationDelta {
     /// from this admission, or from revalidation after a cached schema grew
     /// past the budget. The tools are still deferred catalog members, so a
     /// later search can re-activate them — the "evicted" recovery contract.
+    /// A name this same admission re-admitted is netted out, so reporting
+    /// sites can quote the list verbatim without disclaiming a tool the same
+    /// result hands back.
     pub(crate) evicted: Vec<String>,
     /// Unavailable entries dropped by `revalidate` before this admission:
     /// the tool left the deferred catalog or outgrew the per-tool budget,
@@ -127,6 +131,13 @@ impl ToolActivationCache {
         serde_json::to_vec(tool).map_or(usize::MAX, |bytes| bytes.len())
     }
 
+    /// Whether a tool's serialized schema alone exceeds the per-tool toolbox
+    /// budget, so no activation can admit it. Shared by admission,
+    /// revalidation, and hydration planning so the gate cannot drift.
+    pub(crate) fn exceeds_per_tool_budget(tool: &crate::models::Tool) -> bool {
+        Self::serialized_bytes(tool) > TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES
+    }
+
     fn total_serialized_bytes(&self, catalog: &[crate::models::Tool]) -> usize {
         self.names
             .iter()
@@ -153,7 +164,7 @@ impl ToolActivationCache {
             if !tool.defer_loading.unwrap_or(false) {
                 return false;
             }
-            if Self::serialized_bytes(tool) > TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES {
+            if Self::exceeds_per_tool_budget(tool) {
                 removals.stale.push(ToolActivationStale {
                     name: name.clone(),
                     cause: ToolActivationStaleCause::Oversize,
@@ -202,7 +213,7 @@ impl ToolActivationCache {
                 delta.rejected.push(name.clone());
                 continue;
             };
-            if Self::serialized_bytes(tool) > TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES {
+            if Self::exceeds_per_tool_budget(tool) {
                 delta.rejected.push(name.clone());
                 continue;
             }
@@ -225,6 +236,11 @@ impl ToolActivationCache {
             .filter(|name| retained.contains(name))
             .cloned()
             .collect();
+        // A revalidation pop of a name this same activation re-admits (the
+        // searched tool was the LRU-front victim of a growth overflow, for
+        // example) is not an eviction: the result that names it evicted also
+        // hands it back. Net it out so no report lies about it.
+        delta.evicted.retain(|name| !delta.admitted.contains(name));
         delta.evicted.sort();
         delta.evicted.dedup();
         delta
