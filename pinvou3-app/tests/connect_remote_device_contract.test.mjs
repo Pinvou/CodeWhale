@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import vm from 'node:vm';
 import { dict } from './helpers/i18n-all.js';
 import {
   CONTROLLER_UI_STATES,
@@ -190,13 +191,54 @@ test('the controller exposes all seventeen designed UI states', () => {
   }
 });
 
-test('A-side connection status is restored from the backend state machine', () => {
-  assert.ok(bridge.includes('listen("desktop-remote-controller-status"'));
-  assert.ok(bridge.includes('logic.applyControllerStatus(current(), payload)'));
-  assert.ok(bridge.includes('controllerStatus().catch(function () {})'));
+test('A-side connection status is restored from the backend state machine', async () => {
+  const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
+  const sandbox = { window: root, TextEncoder, setTimeout, clearTimeout };
+  vm.createContext(sandbox);
+  vm.runInContext(source('features/remote-control/remote-control-state.js'), sandbox);
+  vm.runInContext(bridge, sandbox);
+  const state = { desktopRemoteControl: root.__PINVOU_REMOTE_CONTROL_STATE__.createState() };
+  const subscriptions = [];
+  const calls = [];
+  const backend = {
+    status: 'connected', claimRequestId: 'claim-current', deviceDisplayName: 'B device',
+    lease: { connectionId: 'connection-current', controllerLeaseId: 'lease-current',
+      leaseEpoch: '1', relayEpoch: 'relay-current', remoteControlGeneration: 'generation-current' },
+  };
+  const feature = root.__PINVOU_TAURI_BRIDGE_FEATURES__['desktop-remote-control']({
+    state, notify() {}, can: () => true,
+    listen(name, callback) {
+      subscriptions.push({ name, callback });
+      return Promise.resolve(() => {});
+    },
+    invoke(command) {
+      calls.push(command);
+      assert.equal(command, 'desktop_remote_controller_status');
+      return Promise.resolve(backend);
+    },
+  });
+  try {
+    feature.subscribe();
+    feature.subscribe();
+    const controllerListeners = subscriptions.filter(entry => entry.name === 'desktop-remote-controller-status');
+    assert.equal(controllerListeners.length, 1);
+    // Initial subscription restores the backend snapshot without a UI query.
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(state.desktopRemoteControl.controllerConnection.status, 'connected');
+    assert.equal(state.desktopRemoteControl.controllerConnection.connectionId, backend.lease.connectionId);
+    assert.equal(state.desktopRemoteControl.controllerConnection.generation, backend.lease.remoteControlGeneration);
+    controllerListeners[0].callback({ payload: { ...backend, status: 'reconnecting' } });
+    assert.equal(state.desktopRemoteControl.controllerConnection.status, 'reconnecting');
+    await feature.controllerStatus();
+    assert.equal(state.desktopRemoteControl.controllerConnection.status, 'connected');
+    assert.deepEqual(calls, ['desktop_remote_controller_status', 'desktop_remote_controller_status']);
+    assert.equal(subscriptions.filter(entry => entry.name === 'desktop-remote-controller-status').length, 1);
+  } finally {
+    feature.stop();
+  }
   assert.ok(bridge.includes('controllerStatusPayload(result)'));
   assert.ok(bridge.includes('if (!sameControllerView(before, current())) return result'));
-  assert.equal((bridge.match(/listen\("desktop-remote-controller-status"/g) || []).length, 1);
 });
 
 test('the shell separates hiding the page section from disconnecting', () => {
