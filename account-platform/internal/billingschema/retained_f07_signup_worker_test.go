@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,9 +24,17 @@ import (
 // Private DRAFT assembly only. External SMS/Identity acknowledgements use the
 // actual repository transitions but controlled authority, not a real provider.
 func TestF07SignupWorkerDurableGift(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("dedicated owned Account/Billing PostgreSQL fixture is not configured")
+	}
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("WORKLOAD_IDENTITY_ISSUER", "")
+	t.Setenv("WORKLOAD_IDENTITY_JWKS_URL", "")
+	t.Setenv("WORKLOAD_IDENTITY_CA_FILE", "")
 	ctx, cancel := context.WithTimeout(context.Background(), 160*time.Second)
 	defer cancel()
-	f := newStageFixture(t, ctx, os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL"))
+	f := newStageFixture(t, ctx, databaseURL)
 	ac := f.database(t, ctx, "account", "account_service")
 	bc := f.database(t, ctx, "billing", "billing_schema_owner")
 	check := func(t *testing.T, step string, err error) {

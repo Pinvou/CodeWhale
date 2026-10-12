@@ -77,7 +77,7 @@ func TestRetainedF04OverviewSessionFlags(t *testing.T) {
 }
 
 func TestRetainedF04OverviewFutureAndMethodDeny(t *testing.T) {
-	for _, path := range []string{"/admin/v1/operations-overview", "/admin/v1/usage-requests", "/admin/v1/reconciliation-cases", "/admin/v1/overviews/unknown", "/admin/v1/overviews/model-catalog/extra"} {
+	for _, path := range []string{"/admin/v1/operations-overview/extra", "/admin/v1/usage-requests/extra", "/admin/v1/reconciliation-cases/extra", "/admin/v1/overviews/unknown", "/admin/v1/overviews/model-catalog/extra"} {
 		if tokenAdminPathAllowed(http.MethodGet, path) {
 			t.Fatalf("future or malformed path allowed %s", path)
 		}

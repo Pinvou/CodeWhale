@@ -28,6 +28,9 @@ func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
 // governed commands, plus F03 reconciliation reads/imports/case commands.
 // Usage repair and later governance paths remain outside this stage.
 func billingAdminPathAllowed(method, resource string) bool {
+	if resource == "/admin/v1/registration-bonus-policy" {
+		return method == http.MethodGet || method == http.MethodPut
+	}
 	if pricingAdminPathAllowed(method, resource) {
 		return true
 	}

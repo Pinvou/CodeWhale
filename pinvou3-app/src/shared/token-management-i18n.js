@@ -2,7 +2,9 @@
 function completeTokenManagementCopy(translations) {
   const additions = {
     zh: {
+      pricingControls: { cancel: '取消', save: '保存', reason: '操作原因', lastUpdated: '最后更新' },
       sourceMissingPolicy: '来源缺失会标记为不可用，不会自动弃用模型或改写会话截止时间。弃用和移除仍须通过受控生命周期审批；来源恢复不会撤销人工设置的生命周期。',
+      scope: '所属范围', enumLabels: { USER_STOPPED: '用户已停止显示' },
       credentialMetadata: '凭据元数据', credentialSafety: '这里只显示凭据状态和元数据。秘密仅在独立安全窗口中输入，不会显示在管理页面。',
       commandErrors: {
         CREDENTIAL_REQUEST_DEADLINE_EXCEEDED: '请求在提交凭据操作前已过期，未执行写入或供应商调用。请重新加载预检后再提交。',
@@ -23,7 +25,9 @@ function completeTokenManagementCopy(translations) {
       },
     },
     en: {
+      pricingControls: { cancel: 'Cancel', save: 'Save', reason: 'Reason', lastUpdated: 'Last updated' },
       sourceMissingPolicy: 'A missing source is marked unavailable without automatically deprecating the model or changing session cutoffs. Deprecation and removal still require governed lifecycle approval; source recovery does not undo the manually selected lifecycle.',
+      scope: 'Scope', enumLabels: { USER_STOPPED: 'Display stopped by user' },
       credentialMetadata: 'Credential metadata', credentialSafety: 'Only credential status and metadata appear here. Secrets are entered in a separate secure window and never shown on this management page.',
       commandErrors: {
         CREDENTIAL_REQUEST_DEADLINE_EXCEEDED: 'The request expired before dispatch. No write or provider call occurred. Reload the precheck before submitting again.',
@@ -44,7 +48,9 @@ function completeTokenManagementCopy(translations) {
       },
     },
     ja: {
+      pricingControls: { cancel: 'キャンセル', save: '保存', reason: '操作理由', lastUpdated: '最終更新' },
       sourceMissingPolicy: 'ソースの欠落は利用不可として記録し、モデルの自動非推奨化やセッション期限の変更は行いません。非推奨化と削除には引き続き管理されたライフサイクル承認が必要です。ソースが復旧しても手動で設定したライフサイクルは取り消しません。',
+      scope: '範囲', enumLabels: { USER_STOPPED: 'ユーザーが表示を停止' },
       credentialMetadata: '認証情報のメタデータ', credentialSafety: 'ここには認証情報の状態とメタデータのみ表示します。秘密情報は独立した安全なウィンドウで入力し、この管理画面には表示しません。',
       commandErrors: {
         CREDENTIAL_REQUEST_DEADLINE_EXCEEDED: '認証情報操作の送信前にリクエストが期限切れになりました。書き込みやプロバイダー呼び出しは行われていません。事前確認を再読み込みしてから送信してください。',
@@ -76,7 +82,9 @@ function completeTokenManagementCopy(translations) {
     copy.pageOverviews.boundaries.modelOperations = provisioningCopy.boundary;
     copy.pageOverviews.unavailable.modelOperations = provisioningCopy.unavailable;
 
-    Object.assign(copy, additions[language], { commandErrors: { ...copy.commandErrors, ...additions[language].commandErrors } });
+    const { pricingControls, ...modelAdditions } = additions[language];
+    Object.assign(translations[language].pricingLifecycle, pricingControls);
+    Object.assign(copy, modelAdditions, { enumLabels: { ...copy.enumLabels, ...additions[language].enumLabels }, commandErrors: { ...copy.commandErrors, ...additions[language].commandErrors } });
   }
   return translations;
 }

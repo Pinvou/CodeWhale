@@ -41,6 +41,10 @@ func (f *addRouteRepository) GetMe(_ context.Context, p identity.Principal) (Me,
 	}
 	return Me{}, nil
 }
+
+func (f *addRouteRepository) GetAuthorizationVersions(context.Context, identity.Principal) (AuthorizationVersions, error) {
+	return AuthorizationVersions{}, nil
+}
 func (f *addRouteRepository) ResolveAuthorizationContext(context.Context, identity.Principal) (AuthorizationContext, error) {
 	panic("unexpected context resolver")
 }

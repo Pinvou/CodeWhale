@@ -98,7 +98,11 @@ func (r *PostgresRepository) ensureWalletWithinTransaction(ctx context.Context, 
 	now := r.now()
 	walletStatus := "ACTIVE"
 	if ownerType == "ORGANIZATION" {
-		if err := tx.QueryRow(ctx, `SELECT CASE status WHEN 'ACTIVE' THEN 'ACTIVE' WHEN 'DELETED' THEN 'CLOSED' ELSE 'FROZEN' END FROM organization_lifecycle_states WHERE organization_id=$1`, ownerID).Scan(&walletStatus); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.QueryRow(ctx, `SELECT CASE status WHEN 'ACTIVE' THEN 'ACTIVE' WHEN 'DELETED' THEN 'CLOSED' ELSE 'FROZEN' END FROM organization_lifecycle_states WHERE organization_id=$1`, ownerID).Scan(&walletStatus); errors.Is(err, pgx.ErrNoRows) {
+			// Only the authenticated lifecycle projection can authorize a new
+			// organization wallet. Missing evidence is not an ACTIVE state.
+			return Wallet{}, false, ErrConflict
+		} else if err != nil {
 			return Wallet{}, false, err
 		}
 	}
@@ -301,6 +305,10 @@ WHERE je.business_reference = $1 AND la.wallet_id = $2`, businessReference, wall
 }
 
 func releasePackageAllocations(ctx context.Context, tx pgx.Tx, holdID uuid.UUID, now time.Time) error {
+	memberScoped, err := validateMemberQuotaHoldAllocations(ctx, tx, holdID, 0)
+	if err != nil {
+		return err
+	}
 	var memberCount int64
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM member_quota_hold_allocations WHERE hold_id=$1 AND settled_microcredits=0 AND released_microcredits=0`, holdID).Scan(&memberCount); err != nil {
 		return err
@@ -375,6 +383,10 @@ WHERE allocation.hold_id=$1 AND allocation.settled_microcredits=0 AND allocation
 		return err
 	}
 	if expected == 0 {
+		// A validated zero-budget member hold has no allocation buckets.
+		if memberScoped {
+			return nil
+		}
 		return ErrConflict
 	}
 	command, err := tx.Exec(ctx, `UPDATE entitlement_components component SET reserved_microcredits=component.reserved_microcredits-allocation.reserved_microcredits,available_microcredits=component.available_microcredits+allocation.reserved_microcredits,status=CASE WHEN component.status IN ('FROZEN','REVOKED','EXPIRED') THEN component.status ELSE 'ACTIVE' END,updated_at=$2 FROM usage_hold_allocations allocation WHERE allocation.hold_id=$1 AND allocation.component_id=component.id AND allocation.settled_microcredits=0 AND allocation.released_microcredits=0 AND component.reserved_microcredits>=allocation.reserved_microcredits`, holdID, now)

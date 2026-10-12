@@ -1,8 +1,10 @@
 # 模型管理首次部署
 
-本叠加层交付模型目录、协议和公式、Token Account/凭据/路由管理、十八项治理策略以及三条审批执行链。目录同步、密钥轮换、默认路由配置和管理取消 worker 为实际生产进程。普通聊天、公开用量、签名 GO、组织和注销尚未交付；共享迁移中的必要对象不表示这些功能已启用。
+本叠加层交付模型目录、协议和公式、Token Account/凭据/路由管理、十九项治理策略以及三条审批执行链。目录同步、密钥轮换、默认路由配置和管理取消 worker 为实际生产进程。个人模型调用和用量入口须另外按 `README.invocation.md` 装配并验收；组织和注销尚未交付，共享迁移中的必要对象不表示这些功能已启用。
 
 按顺序组合 `compose.personal.yaml`、`compose.personal-workload.yaml`、`compose.finance.yaml`、`compose.reconciliation.yaml` 和 `compose.models.yaml`。使用同一已审核源码构造 migrate、Account、Billing、Token Gateway、Portal、独立 credential Portal、Token executor 和 approval-resources 镜像。所有 image 值须固定到审核过的制品，不在生产自动拉取或生成审批资源。数据库、OpenBao、NATS、身份服务、可验证的 HTTPS OTLP 和至少三个独立时间源均须先准备。此前个人/财务运行规则仍适用。
+
+启动上述组合前显式配置 `ACCOUNT_PLATFORM_PROFILE=models`。`compose.models.yaml` 对 Account、Token Gateway 与 `approval-resources` 三者均明确选择 `models`；推荐保持模型叠加最后。即使再叠加 finance 文件，其 operator 也从这个必填变量读取 `models`，不能回落到 `personal`。这是业务运行模式，不是 Docker Compose profile；未配置的直接二进制仍默认 `models`，未知值拒绝，不能用缺失的 Token URL、digest、完整数据库、KMS 或 provider 输入触发个人模式。
 
 ## 数据库和治理
 
@@ -12,7 +14,7 @@ Token 单独数据库和五个部署角色使用 `token-release-prepare` 明确 
 
 本轮 Token 900001 前向硬化收回 Gateway 对审计、业务对象及迁移 ledger 的所有权，补齐不可变语句边界。已安装库在离线预检后，由独立数据库 operator 先执行 `token-storage-hardening-bootstrap.sql` 验证并建立单向 schema owner 到 Gateway 的角色关系，再由普通 migrator 执行 Up；初次空库使用更新后的 `token-database-bootstrap.sql`。该关系只允许 owner 执行原 runtime 所有对象的安全所有权迁移，Gateway 不获得 owner 或政策 deployer 身份；不修改业务资金数据、角色密码或历史 SQL 校验和。不能跳过 bootstrap 使用 runtime 或 superuser 代跑普通迁移，不能用数据库 Down 撤回审计保护。
 
-使用 `token-policy-bootstrap` 提供明确上限、expected version、审计 reason 和稳定 idempotency key；默认不臆造生产配额。Account 和 Token 使用独立核验的当前 PolicySetDigest 与十八项 TokenCommandHandlerDigest。`token-governance` 的 prepare/activate/safe 必须遵循实际命令校验及冻结证据、quiescence 和 CAS；不能因进程 ready 自动激活。后续第十九项用量策略改变集合时必须重新发行并验证，不能把旧 ACTIVE digest 沿用为新集合。
+使用 `token-policy-bootstrap` 提供明确上限、expected version、审计 reason 和稳定 idempotency key；默认不臆造生产配额。Account 和 Token 使用独立核验的当前 PolicySetDigest 与十九项 TokenCommandHandlerDigest，当前集合已包含 `TOKEN_USAGE_RECONCILIATION_RETRY`。`token-governance` 的 prepare/activate/safe 必须遵循实际命令校验及冻结证据、quiescence 和 CAS；不能因进程 ready 自动激活。从十八项集合升级时须重新发行并验证当前集合，不能沿用旧 ACTIVE digest。
 
 ## KMS、凭据和隔离入口
 
@@ -65,7 +67,7 @@ COMMIT;
 
 当前 workload realm emitter 发行原五个身份以及 credential Portal、Token executor 两个独立身份。七个 agent 的 bootstrap、sink 与应用挂载一一对应；receiver rules 使用所交付 Account/Billing/Token 三份有限模板。Credential Portal 只拥有 check，executor 只拥有 execution begin/complete 与 authorization consume，不能借 Portal/Gateway 私密身份执行审批。
 
-离线 `approval-resources render` 读取独立批准的 public identity SHA 生成当前 manifest/authorization.conf；发行 Token executor NKey 和 resource operator 的精确三 durable CREATE/INFO 权限，不发行 Token 普通 outbox producer。先核验并装载实际 NATS TLS 配置及共享 stream，保留原 Billing Q+1 初始化与独立回执。
+离线 `approval-resources render` 读取独立批准的 public identity SHA 生成既有固定六 descriptor manifest/authorization.conf；v2 预留公钥及 renderer ACL 保持原合同。离线输出不联系 broker、不创建 consumer，不证明已安装、ready 或授权激活。它发行 Token executor NKey 和 resource operator 的精确三 durable CREATE/INFO 权限，不发行 Token 普通 outbox producer。`models` 的 live activate/resume 必须核验三条 Billing 加三条 Token；先核验并装载实际 NATS TLS 配置及共享 stream，保留原 Billing Q+1 初始化与独立回执。
 
 使用 approval-operations profile 显式运行 `approval-resources token-consumers initialize`，将三条 Token DeliverAll durable 预置；检查用 `token-consumers check`。两操作都要求实际 public identities/manifest 的独立 SHA、operator 私密 NKey、准确 TLS CA 和已准备的 TOKEN_CONSUMER_PUBLIC_RECEIPT_DIRECTORY。每次回执路径须为空且独立于 Billing receipt/manifest/identity/私密目录；不覆盖已有文件，check 如需另一次证明也使用新的独立路径。运行前可用 Compose 单次环境覆盖 TOKEN_CONSUMER_RESOURCE_RECEIPT_FILE 的新文件名。operator 不更改 Account 控制行、Billing cutover 或金融历史。
 
@@ -76,6 +78,11 @@ COMMIT;
 按数据库迁移成功、独立 agent sink 可用、各服务真实 health/readiness 的依赖启动。Billing 模型定价投影通过其实际本地定价库读取路径启用，未添加虚构的跨服务目录查询。Portal 使用 Token 管理 API；Account 用实际 Token snapshot/proof/effect/result，并保留现有 Billing 三命令。public edge 不直接开放 Token 管理或内部 workload 路径。
 
 当前源码、受控 TLS/HTTP、真实公开 PG schema 与独有 loopback NATS 证明分别记录其输入及限制。未运行真实 Compose/NGINX/OpenBao/Keycloak 发行或完整 E2E；目标系统的 ACL、TLS/DNS、端口隔离、部署审批、required CI 和生产恢复验证仍须实际完成，不能从单测或静态模板推断已通过。
+
+
+## 用量、对账概览与原可信来源协议
+
+Portal 的 page overview flag 优先于旧 aggregate flag。page 模式按当前权限返回 TOKEN_ONLY、USAGE_ONLY 或 TOKEN_AND_USAGE；有用量权限时传递原 24h/7d/30d 窗口，趋势卡片映射实际用量或对账列表，Provisioning 卡片映射原只读列表。aggregate fallback 仍要求 models.read、tokens.read、usage.read 三权限；关闭 flag 不挂载 reader。无效结构、不安全整数、错误或权限不足不显示虚假零计数，旧治理 UNKNOWN/410 恢复保持原契约。
 
 ### F04 model and Token page overviews
 
@@ -89,8 +96,9 @@ or reconciliation trends in this phase. Account/Token permission checks remain
 authoritative. Disabled flags do not mount these readers. Invalid, unavailable,
 or unsafe-integer counts do not become zero or rounded displayed counts.
 
-The legacy aggregate operations overview and usage/reconciliation trends belong
-to the first usage phase F05 and are not forwarded by this F04 Portal whitelist.
+F05 extends this F04 baseline with the aggregate operations overview and
+usage/reconciliation readers described above. Their installed read routes retain
+the existing Account/Token permission checks and trusted-source protocol.
 
 
 Account also requires `OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64` in its existing
@@ -124,3 +132,18 @@ The Portal derives the source using its existing exact trusted-edge policy and
 signs the final method, upstream RequestURI (including query) and canonical IP;
 browser source/signature headers are not forwarded as authority. Actual remote
 deployment and secret injection are not exercised by the finite HTTP proof.
+
+### Original Account command-policy rollback limits
+
+The public Account rollback wrapper rejects original migrations 024, 025, 026
+and the previously guarded 033 before executing their Down SQL. Original 018's
+statement-level immutable-policy trigger already rejects those DELETE statements,
+even when no policy matches. The invariant check runs in the same transaction
+as the original rollback and preserves policy rows, triggers and migration history.
+Historical SQL versions, filenames and checksums remain unchanged.
+
+This guard does not prohibit all policy rollbacks. Original 041 and 044 retain
+their existing behavior; 044 also checks references from approval requests.
+The isolated numeric-history tests are not deployment acceptance or permission
+to erase retained history. They include an empty-history original 031 positive
+control, and do not bypass the current high-numbered forward-only migrations.

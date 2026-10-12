@@ -96,6 +96,56 @@ try {
     await page.evaluate(() => { window.f03.switchIdentity(); }); await page.waitForFunction(() => !document.querySelector('details')); await page.evaluate(() => window.f03.release());
     assert.equal(await page.evaluate(() => [...document.querySelectorAll('[role=status]')].some(value => value.textContent === window.f03.copy().saved)), false);
   });
+  let repairFailures=0;
+  const repairRun=async (name, action) => { try { await caseRun(name,action); } catch(error) { repairFailures++;console.error(`FAIL ${name}: ${error.message}`); } };
+  for (const language of ['zh','en','ja']) {
+    await repairRun(`${language}: current repair all producer types are localized in list and detail`, async()=> {
+      for(const type of ['UNSUPPORTED_PROVIDER_ENTRY','DUPLICATE_TRANSACTION','INTERNAL_PAID_PROVIDER_MISSING','INTERNAL_REFUND_PROVIDER_MISSING','INTERNAL_CHARGEBACK_PROVIDER_MISSING','AMOUNT_MISMATCH','REFUND_AMOUNT_MISMATCH','PAYMENT_LEDGER_INVALID','REFUND_LEDGER_INVALID','CHARGEBACK_LEDGER_INVALID','PAYMENT_PACKAGE_INVALID','PAYMENT_LEDGER_MISSING','REFUND_LEDGER_MISSING','CHARGEBACK_LEDGER_MISSING','PROVIDER_PAID_INTERNAL_MISSING','PROVIDER_REFUND_INTERNAL_MISSING','PROVIDER_CHARGEBACK_INTERNAL_MISSING','REFUND_DATE_UNVERIFIED','CHARGEBACK_DATE_UNVERIFIED','FUTURE_PROVIDER_EVIDENCE']) {
+        await fresh(language);await page.evaluate(type=>{window.f03.caseType=type;},type);await selectCase();
+        const actual=await page.evaluate(type=>({label:window.f03.copy().caseTypes[type],table:document.querySelector('tbody').textContent,detail:document.querySelector('section section h3').textContent}),type);
+        if(type==='FUTURE_PROVIDER_EVIDENCE') {assert.ok(actual.table.includes(type));assert.ok(actual.detail.includes(type));}
+        else {assert.ok(actual.label,`Missing ${type}`);assert.notEqual(actual.label,type);assert.ok(actual.table.includes(actual.label));assert.ok(actual.detail.includes(actual.label));}
+      }
+    });
+    await repairRun(`${language}: current repair validates HTTP input codes without hiding state conflicts`,async()=>{
+      await fresh(language);
+      for(const [status,code,key] of [[400,'INVALID_FILTER','invalid'],[400,'INVALID_REQUEST','invalid'],[400,'PAGINATION_CURSOR_INVALID','sourceChanged'],[400,'UNRECOGNIZED_ERROR','sourceChanged'],[403,'PERMISSION_DENIED','permission'],[503,'AUTHORIZATION_UNAVAILABLE','unavailable']]) {
+        await page.evaluate(value=>{window.f03.readStatus=value.status;window.f03.readCode=value.code;},{status,code});await click('refresh');
+        await page.waitForFunction(key=>document.querySelector('[role=alert]')?.textContent===window.f03.copy()[key],{},key);
+      }
+      for(const [status,code,key] of [[400,'INVALID_REQUEST','invalid'],[409,'BILLING_CONFLICT','sourceChanged'],[503,'COMMAND_RESULT_UNKNOWN','runUnknown']]) {
+        await fresh(language);await page.evaluate(value=>{window.f03.writeStatus=value.status;window.f03.writeCode=value.code;},{status,code});await click('run');
+        await page.waitForFunction(key=>document.querySelector('[role=alert]')?.textContent===window.f03.copy()[key],{},key);
+      }
+    });
+    await repairRun(`${language}: current repair case input rejects remain editable and unknown writes keep the key`,async()=>{
+      await fresh(language);await selectCase();await page.type('section section textarea','Controlled reconciliation claim reason');
+      await page.evaluate(()=>{window.f03.commandStatus=400;window.f03.commandCode='INVALID_REQUEST';});await click('submit');
+      await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f03.copy().invalid);
+      assert.equal(await page.evaluate(()=>document.querySelector('section section textarea').disabled),false);
+      await page.evaluate(()=>{window.f03.commandStatus=503;window.f03.commandCode='COMMAND_RESULT_UNKNOWN';});await click('submit');
+      await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f03.copy().unknown);
+      const unresolved=await page.evaluate(()=>window.f03.calls.filter(value=>value.url.endsWith('/commands')).at(-1));
+      await page.evaluate(()=>{window.f03.commandStatus=400;window.f03.commandCode='INVALID_REQUEST';});await click('retry');
+      await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f03.copy().unknown);
+      await page.evaluate(()=>{window.f03.commandStatus=0;});await click('retry');
+      await page.waitForFunction(()=>document.querySelector('[role=status]')?.textContent===window.f03.copy().saved);
+      const calls=await page.evaluate(()=>window.f03.calls.filter(value=>value.url.endsWith('/commands')).slice(-3));
+      assert.ok(calls.every(value=>value.key===unresolved.key && value.body===unresolved.body));
+    });
+  }
+  for(const language of ['zh','en','ja']) {
+    await repairRun(`${language}: current repair scoped cases capacity requests narrower filters without declaring valid input invalid`,async()=>{
+      await fresh(language);await selectCase();
+      await page.evaluate(()=>{window.f03.readStatus=422;window.f03.readCode='PAGINATION_FILTER_REQUIRED';});await click('refresh');
+      await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f03.copy().narrowFilters);
+      assert.equal(await page.evaluate(()=>[...document.querySelectorAll('input')].some(value=>value.disabled)),false);
+      assert.ok(await page.evaluate(()=>window.f03.calls.at(-1).url.includes('/reconciliation-cases?')));
+      await page.evaluate(()=>{window.f03.readCode='UNRECOGNIZED_ERROR';});await click('refresh');
+      await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f03.copy().unavailable);
+    });
+  }
+  if(repairFailures) throw new Error(`${repairFailures} current repair cases failed`);
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } catch (error) { console.error(`FAIL after ${passed} PASS: ${error.message}`); process.exitCode = 1; }
 finally { if (browser) await browser.close(); if (vite) await vite.close(); fs.rmSync(profile, { recursive: true, force: true }); }

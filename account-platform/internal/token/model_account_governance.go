@@ -596,6 +596,13 @@ RETURNING model_id,base_catalog_version,draft_version,display_name,description,a
 }
 
 func createAccountEffect(ctx context.Context, tx pgx.Tx, request CreateAccountRequest, now time.Time) (TokenAccount, error) {
+	// The effect is shared by direct provisioning and governed creation. Serialize
+	// new organization accounts with disable/delete before writing any resource.
+	if request.OwnerOrganization != nil {
+		if err := lockActiveOrganization(ctx, tx, *request.OwnerOrganization); err != nil {
+			return TokenAccount{}, err
+		}
+	}
 	account := TokenAccount{ID: uuid.Must(uuid.NewV7()), OwnerType: request.OwnerType, OwnerID: request.OwnerID, OwnerOrganization: request.OwnerOrganization, OwnerUnit: request.OwnerUnit, WalletID: request.WalletID, Name: request.Name, Status: "ACTIVE", ShareScope: request.ShareScope, DefaultPriority: request.DefaultPriority, ManagementMode: "PLATFORM"}
 	if request.OwnerUnit != nil && request.OwnerOrganization != nil {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "organization-unit:"+request.OwnerOrganization.String()+":"+request.OwnerUnit.String()); err != nil {

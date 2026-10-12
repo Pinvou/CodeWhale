@@ -272,6 +272,10 @@ func approvalConsumerError(ctx context.Context, err error) error {
 	var postgresError *pgconn.PgError
 	if errors.As(err, &postgresError) {
 		switch postgresError.Code {
+		case "40001":
+			// Keep the existing fail-closed HTTP classification while exposing
+			// the serialization cause to the caller; do not retry it here.
+			return errors.Join(ErrApprovalConsumerBindingUnavailable, err)
 		case "42501":
 			return ErrForbidden
 		case "22023", "23514", "55000", "P0002", "P0003":

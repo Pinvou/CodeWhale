@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { requireFinanceCollection } from './finance-contract.js';
+import { encodeFinanceJSON, requireFinanceCollection } from './finance-contract.js';
 import { localizedProductDisplayName } from './localized-product-display-name.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 
@@ -59,8 +59,10 @@ export function RechargeProductWorkspace({ client, me, copy, language }) {
         body.evidence_id = current.evidence_id;
       }
       facts = { action, id: selected?.catalog_item_id, body, verificationID: verification?.verification_id || '' };
+      // Validate the exact int64 wire representation before retaining an intent.
+      encodeFinanceJSON(body);
       if (!globalThis.confirm(copy.confirmAction)) return;
-      } catch { setValidationError('invalid'); return; }
+      } catch { setValidationError('inputInvalid'); return; }
     }
     const value = await operation.mutate(facts, execute);
     if (value) { await load(); setSelected(null); setInput(empty); setVerifications([]); setReason(''); }

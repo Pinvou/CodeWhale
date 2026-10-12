@@ -113,6 +113,7 @@ services:
     env_file:
       - {path: "${APPROVAL_INITIALIZER_PRIVATE_ENV_FILE:?set only account_migrator initializer DSN file}", required: true, format: raw}
     environment:
+      ACCOUNT_PLATFORM_PROFILE: ${ACCOUNT_PLATFORM_PROFILE:?set personal or models matching selected composition}
       SSL_CERT_FILE: /run/pinvou/trust/ca.crt
       PGPASSFILE: /run/pinvou/database/pgpass
       NATS_URL: ${NATS_URL:?set verified TLS NATS endpoint}

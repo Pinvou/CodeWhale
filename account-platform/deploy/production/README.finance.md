@@ -4,6 +4,8 @@
 
 合并配置顺序为 `compose.personal.yaml`、`compose.personal-workload.yaml`、`compose.finance.yaml`。镜像变量必须指向本阶段的固定源码镜像，不得继续使用 F01 的钱包限定 Billing 或余额限定 Token 镜像。构建入口 `account-platform/Dockerfile` 支持 `SERVICE=approval-resources`、`event-relay` 及 `payment-simulator`；模拟器不在生产 compose 中部署，TestOnly 渠道不得正式收款。Compose 配置检查时不要展开含私密值的环境文件，也不要把完整配置输出到日志。
 
+叠加 finance 前显式配置 `ACCOUNT_PLATFORM_PROFILE=personal`；若同时安装完整 `compose.models.yaml`，则配置 `ACCOUNT_PLATFORM_PROFILE=models` 并保持模型叠加最后。基础 Account/Token 为 `personal`，模型叠加对三服务为 `models`，finance operator 读取必填变量而无默认回落。该变量选择业务运行模式，不能用 `--profile approval-operations` 替代；直接二进制空值仍为 `models`，未知值或缺少该模式必需配置必须停止。
+
 ## 数据库和私有配置
 
 先备份并通过受控迁移角色执行当前 Account、Billing 迁移。`production-new` 仅适用于已核实的新数据库；原部分退款迁移遇到非终态旧退款必须停止，不得清除数据绕过保护。历史数据库必须按迁移入口既有备份证据要求执行，不能把本阶段的迁移演练当作生产授权。
@@ -18,9 +20,11 @@ Billing 私有环境必须配置 `MANUAL_REVIEW_ON_CALL_USER_IDS`、与 Account 
 
 重新渲染三个 workload rules 模板的已核验 subject。Account 只增加 Billing activation/proof/effect/result 读取；Token 只增加个人商品、渠道、订单和权益调用；Billing 向 Account 进行权限验证、人工委托、执行栅栏和授权投递确认。不授予 `internal.*` 通配权限，不给 Token 管理退款或管理商品接口权限。
 
-依照 `../runbooks/nats-resources.md` 离线渲染、独立核验当前公开身份清单、三 consumer manifest 和五身份 broker ACL。F01 双身份 `authorization.conf` 不能用于 F02 executor。broker 只接收核验后的公开配置；每个运行角色只挂载自己的 NKey，公开身份、manifest、receipt 与私钥分别放在独立受控目录。Compose 中三个 SHA 由独立审核输入，不能由运行服务自行计算并信任。
+依照 `../runbooks/nats-resources.md` 离线渲染、独立核验当前公开身份清单、固定六 descriptor consumer manifest、v2 预留公钥和 renderer broker ACL。公共 artifact 是既有固定期望，个人模式不另造三项 manifest、receipt 或 ACL；离线输出不联系 broker、不创建消费者、不证明已安装或 ready。F01 双身份 `authorization.conf` 不能用于 F02 executor。broker 只接收核验后的公开配置；每个运行角色只挂载自己的 NKey，公开身份、manifest、receipt 与私钥分别放在独立受控目录。Compose 中三个 SHA 由独立审核输入，不能由运行服务自行计算并信任。
 
 首次启动先单独完成迁移、预置固定 stream 和 fresh-only 审批初始化，不能直接启动全部服务再让服务自动生成审批资源。使用 `approval-resources` profile 对每步显式传入 `-action` 与当前 `-expected-version`，按 runbook 的 status、quiesce、fence、initialize-consumers、activate、resume 次序执行。初始化前 receipt 目录为空且由操作员 UID 控制；输出 receipt 独立回读核验后再设置 `APPROVAL_RECEIPT_SHA256`。Billing 挂载只读 receipt，缺少真实回执或存在漂移时拒绝启动。Compose 的默认 operator 命令只有 status，不会自动启用审批。已有审批或 NATS 历史必须拒绝 fresh-only 路径，不能删除历史、重置 consumer 或扩大 ACL 来伪装首次安装。
+
+当前 F04 `approval-resources` 的 live `activate` 和 `resume` 按明确模式核验：`personal` 仅原三条 Billing consumer，`token-consumers initialize/check` 明确拒绝且不访问 broker；`models` 联合核验三条 Billing 和三条 Token。模型模式必须在 Billing 的 `initialize-consumers` 完成后、`activate` 前，按 [模型审批资源说明](README.models.md#审批资源和-workload-身份) 显式执行 `token-consumers initialize` 并独立核验其回执。两类初始化分别生成独立 receipt，目录不得合并、覆盖；关闭模型界面或启动 executor 都不能省略模型初始化。个人模式不需要模型数据库、KMS 或 provider，也不声称其运行模型运维功能。
 
 F01 TLS edge 只新增两个精确 POST 回调入口 `/api/v1/payment-callback/token` 和 `/api/v1/payment-callbacks`；回调自身仍执行客户身份、Bearer、provider/merchant/profile 和付款事实检查。Billing 内部与管理接口不向公网代理。Portal 经私网 `BILLING_HTTP_URL` 转发管理员已有授权操作，用户订单仍经 Token 网关校验个人上下文。
 

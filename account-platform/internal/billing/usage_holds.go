@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID uuid.UUID, actual int64, usage map[string]any) (Hold, error) {
@@ -61,6 +63,9 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 	if hold.Status != "ACTIVE" {
 		return Hold{}, ErrUsageAlreadyTerminal
 	}
+	if _, err := validateMemberQuotaHoldAllocations(ctx, tx, hold.ID, 0); err != nil {
+		return Hold{}, err
+	}
 	now := r.now()
 	backedActual := min(actual, hold.MaxMicrocredits)
 	overage := actual - backedActual
@@ -94,6 +99,10 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 			return Hold{}, err
 		}
 		allocations = append(allocations, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Hold{}, err
 	}
 	rows.Close()
 	remaining := backedActual
@@ -198,10 +207,16 @@ func (r *PostgresRepository) ExtendHold(ctx context.Context, usageRequestID, hol
 		return Hold{}, ErrUsageAlreadyTerminal
 	}
 	now := r.now()
-	if !expiresAt.After(now) {
+	if !expiresAt.After(now) || !hold.ExpiresAt.After(now) {
 		return Hold{}, ErrConflict
 	}
 	previousExpiresAt, previousMaximum := hold.ExpiresAt, hold.MaxMicrocredits
+	if _, err := validateMemberQuotaHoldAllocations(ctx, tx, hold.ID, 0); err != nil {
+		return Hold{}, err
+	}
+	if hold.MaxMicrocredits < 0 || additional > math.MaxInt64-hold.MaxMicrocredits {
+		return Hold{}, ErrConflict
+	}
 	if additional > 0 {
 		var organizationID, memberUserID *uuid.UUID
 		var membershipVersion *int64
@@ -218,12 +233,22 @@ func (r *PostgresRepository) ExtendHold(ctx context.Context, usageRequestID, hol
 		} else if err := extendPersonalHold(ctx, tx, hold, additional, now); err != nil {
 			return Hold{}, err
 		}
+		if _, err := validateMemberQuotaHoldAllocations(ctx, tx, hold.ID, additional); err != nil {
+			return Hold{}, err
+		}
 		hold.MaxMicrocredits += additional
 	}
 	if expiresAt.After(hold.ExpiresAt) {
 		hold.ExpiresAt = expiresAt.UTC()
 	}
 	if _, err := tx.Exec(ctx, `UPDATE usage_holds SET expires_at=$2,max_microcredits=$3,updated_at=$4 WHERE id=$1 AND status='ACTIVE'`, hold.ID, hold.ExpiresAt, hold.MaxMicrocredits, now); err != nil {
+		// The database clock can cross expiry after our locked domain check.
+		// Map only this reviewed renewal fence; other trigger failures remain
+		// errors and roll back every reservation/lease mutation.
+		var fence *pgconn.PgError
+		if errors.As(err, &fence) && fence.Code == "55000" && fence.Message == "expired hold cannot be renewed during recovery" {
+			return Hold{}, ErrConflict
+		}
 		return Hold{}, err
 	}
 	if hold.ExpiresAt.After(previousExpiresAt) || hold.MaxMicrocredits != previousMaximum {
@@ -295,40 +320,11 @@ func extendPersonalHold(ctx context.Context, tx pgx.Tx, hold Hold, additional in
 	return nil
 }
 
+// ExpireHolds retains the previous internal method shape but fails closed.
+// Expiry alone is no proof of no dispatch; the trusted recovery worker owns
+// fencing, Release, and confirmed recovery receipts.
 func (r *PostgresRepository) ExpireHolds(ctx context.Context, limit int) (int, error) {
-	if limit < 1 || limit > 1000 {
-		limit = 100
-	}
-	rows, err := r.pool.Query(ctx, `SELECT usage_request_id, id FROM usage_holds WHERE status = 'ACTIVE' AND expires_at <= $1 ORDER BY expires_at LIMIT $2`, r.now(), limit)
-	if err != nil {
-		return 0, err
-	}
-	type candidate struct{ usageID, holdID uuid.UUID }
-	candidates := make([]candidate, 0)
-	for rows.Next() {
-		var item candidate
-		if err := rows.Scan(&item.usageID, &item.holdID); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		candidates = append(candidates, item)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return 0, err
-	}
-	rows.Close()
-	count := 0
-	for _, candidate := range candidates {
-		if hold, err := r.releaseHold(ctx, candidate.usageID, candidate.holdID, "hold lease expired", true); err == nil {
-			if hold.Status == "RELEASED" {
-				count++
-			}
-		} else if !errors.Is(err, ErrUsageAlreadyTerminal) {
-			return count, err
-		}
-	}
-	return count, nil
+	return 0, ErrHoldExpiryProofRequired
 }
 
 func hasMemberQuotaAllocations(ctx context.Context, tx pgx.Tx, holdID, componentID uuid.UUID) (bool, error) {

@@ -1,12 +1,36 @@
 import { secureRequestID } from './request-id.js';
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const fingerprintPattern = /^[0-9a-f]{64}$/;
-function stable(value) {
- if (Array.isArray(value)) return value.map(stable);
- if (!value || typeof value !== 'object') return value;
- return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]));
+function wireString(value) {
+  // Go's JSON decoder replaces isolated UTF-16 surrogates before encoding.
+  return [...value].map(char => {
+    const point = char.codePointAt(0);
+    return point >= 0xd800 && point <= 0xdfff ? '\ufffd' : char;
+  }).join('');
 }
-export function highRiskPayloadKey(value) { return JSON.stringify(stable(value)); }
+function encodedValue(value) {
+  return JSON.stringify(typeof value === 'string' ? wireString(value) : value)
+    ?.replace(/[<>&\u2028\u2029]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+function wireKeyOrder(left, right) {
+  const a = new TextEncoder().encode(left), b = new TextEncoder().encode(right);
+  for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+    if (a[index] !== b[index]) return a[index] - b[index];
+  }
+  return a.length - b.length;
+}
+export function highRiskPayloadKey(value) {
+  if (Array.isArray(value)) return `[${Array.from(value, item => highRiskPayloadKey(item) ?? 'null').join(',')}]`;
+  if (!value || typeof value !== 'object') return encodedValue(value);
+  // Encode directly: rebuilding an object would reorder integer-like keys.
+  // Match the existing Go JSON contract without changing persisted fingerprints.
+  const entries = new Map();
+  for (const key of Object.keys(value)) {
+    const encoded = highRiskPayloadKey(value[key]);
+    if (encoded !== undefined) entries.set(wireString(key), encoded);
+  }
+  return `{${[...entries.keys()].sort(wireKeyOrder).map(key => `${encodedValue(key)}:${entries.get(key)}`).join(',')}}`;
+}
 export function validApprovalRequest(value, expected, statuses) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   if (!uuidPattern.test(String(value.approval_request_id || '').toLowerCase()) || !uuidPattern.test(String(value.requester_user_id || '').toLowerCase())) return false;

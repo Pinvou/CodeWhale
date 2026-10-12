@@ -107,8 +107,8 @@ func TestRegistrationBonusLifetimeEligibilityPostgresIntegration(t *testing.T) {
 	if err != nil || posted != 250000 {
 		t.Fatalf("wallet posted=%d err=%v", posted, err)
 	}
-	err = repository.pool.QueryRow(ctx, `SELECT COALESCE(sum(posting.amount_microcredits),0)
-FROM ledger_postings posting JOIN journal_entries entry ON entry.id=posting.entry_id WHERE entry.reference=$1`, "registration-bonus:"+granted.ClaimID.String()).Scan(&journalBalance)
+	err = repository.pool.QueryRow(ctx, `SELECT COALESCE(sum(posting.delta_microcredits),0)
+FROM ledger_postings posting JOIN journal_entries entry ON entry.id=posting.journal_entry_id WHERE entry.business_reference=$1`, "registration-bonus:"+granted.ClaimID.String()).Scan(&journalBalance)
 	if err != nil || journalBalance != 0 {
 		t.Fatalf("journal balance=%d err=%v", journalBalance, err)
 	}

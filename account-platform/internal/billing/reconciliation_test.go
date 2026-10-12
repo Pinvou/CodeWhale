@@ -9,8 +9,8 @@ import (
 func TestCompareFourWayReconciliationIncludesRefundAndLedgerDifferences(t *testing.T) {
 	orderID := uuid.Must(uuid.NewV7())
 	provider := []ProviderBillEntry{
-		{EntryType: "PAYMENT", ProviderReferenceID: "payment-1", MerchantOrderNo: "order-1", AmountFen: 100, Currency: "CNY"},
-		{EntryType: "REFUND", ProviderReferenceID: "refund-1", MerchantOrderNo: "order-1", AmountFen: 50, Currency: "CNY"},
+		{EntryType: "PAYMENT", ProviderReferenceID: "payment-1", MerchantOrderNo: "order-1", AmountFen: 100, Currency: "CNY", Status: "SUCCESS"},
+		{EntryType: "REFUND", ProviderReferenceID: "refund-1", MerchantOrderNo: "order-1", AmountFen: 50, Currency: "CNY", Status: "SUCCESS"},
 	}
 	internal := []ReconciliationInternalFact{
 		{EntryType: "PAYMENT", ProviderReferenceID: "payment-1", MerchantOrderNo: "order-1", PaymentOrderID: orderID, AmountFen: 100, Currency: "CNY", LedgerPresent: false},

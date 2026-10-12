@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, userID uuid.UUID, keyDigest, fingerprint, adapterVersion string) (CancellationResult, bool, error) {
@@ -26,7 +27,10 @@ func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, u
 	} else if err != nil {
 		return CancellationResult{}, false, err
 	}
-	if usage.UserID != userID {
+	// Personal cancellation is scoped to the persisted resource, under the
+	// same row lock that serializes dispatch. A personal permission never
+	// authorizes cancellation of an organization invocation.
+	if usage.UserID != userID || usage.OrganizationID != nil {
 		return CancellationResult{}, false, ErrNotFound
 	}
 	var storedFingerprint string
@@ -45,6 +49,9 @@ func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, u
 	}
 	now := r.now()
 	if _, err := tx.Exec(ctx, `INSERT INTO usage_cancel_commands(id,usage_request_id,user_id,idempotency_key_digest,request_fingerprint,cancellation_version,created_at) VALUES($1,$2,$3,$4,$5,1,$6)`, uuid.Must(uuid.NewV7()), usageID, userID, keyDigest, fingerprint, now); err != nil {
+		if isCancellationKeyConflict(err) {
+			return CancellationResult{}, false, ErrIdempotencyConflict
+		}
 		return CancellationResult{}, false, err
 	}
 	terminal := usage.ExecutionStatus == "SUCCEEDED" || usage.ExecutionStatus == "FAILED" || usage.ExecutionStatus == "CANCELLED_BEFORE_DISPATCH"
@@ -60,7 +67,7 @@ func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, u
 	if preDispatch {
 		cancelStatus = "CANCEL_REQUESTED"
 	}
-	if _, err := tx.Exec(ctx, `UPDATE usage_requests SET cancel_status=$2,delivery_status='USER_STOPPED',cancellation_origin='USER',cancel_requested_at=$3,user_stopped_at=$3,cancel_reconciliation_deadline=$3 + make_interval(secs=>cancel_reconciliation_seconds),updated_at=$3 WHERE id=$1`, usageID, cancelStatus, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE usage_requests SET cancel_status=$2,delivery_status='USER_STOPPED',cancellation_origin='USER',cancel_requested_at=$3,user_stopped_at=$3,cancel_reconciliation_deadline=$3::timestamptz + make_interval(secs=>cancel_reconciliation_seconds),updated_at=$3 WHERE id=$1`, usageID, cancelStatus, now); err != nil {
 		return CancellationResult{}, false, err
 	}
 	evidence := map[string]any{"capability": "UNSUPPORTED", "pre_dispatch": preDispatch}
@@ -78,6 +85,13 @@ func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, u
 		return CancellationResult{}, false, err
 	}
 	return cancellationSnapshot(usage), preDispatch, nil
+}
+
+func isCancellationKeyConflict(err error) bool {
+	var databaseError *pgconn.PgError
+	return errors.As(err, &databaseError) && databaseError.Code == "23505" &&
+		databaseError.TableName == "usage_cancel_commands" &&
+		databaseError.ConstraintName == "usage_cancel_commands_user_id_idempotency_key_digest_key"
 }
 
 func cancellationFingerprint(usageID uuid.UUID) string {

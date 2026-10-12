@@ -24,11 +24,53 @@ const expectedTokenCommands = [
   'TOKEN_USAGE_RECONCILIATION_RETRY',
 ];
 
+// Keep the declarative route grammar strict, but find every real method
+// selector before parsing it. Mask Go comments/literals with equal-length
+// spaces so examples and raw strings cannot create or hide route candidates.
+function routeDeclarationLines(source) {
+  let code = ''; let masked = ''; let region = '';
+  const blank = char => char === '\n' || char === '\r' ? char : ' ';
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]; const next = source[index + 1];
+    if (region === 'line') {
+      code += blank(char); masked += blank(char);
+      if (char === '\n') region = '';
+    } else if (region === 'block') {
+      code += blank(char); masked += blank(char);
+      if (char === '*' && next === '/') {
+        code += ' '; masked += ' '; index += 1; region = '';
+      }
+    } else if (region) {
+      code += char; masked += blank(char);
+      if (region !== '`' && char === '\\' && next !== undefined) {
+        code += next; masked += blank(next); index += 1;
+      } else if (char === region) region = '';
+    } else if (char === '/' && (next === '/' || next === '*')) {
+      code += '  '; masked += '  '; index += 1;
+      region = next === '/' ? 'line' : 'block';
+    } else if (char === '"' || char === "'" || char === '`') {
+      code += char; masked += ' '; region = char;
+    } else {
+      code += char; masked += char;
+    }
+  }
+  if (region && region !== 'line') fail('unrecognized route source lexical region');
+  const lines = code.split(/\r?\n/);
+  const candidates = new Set();
+  const selectors = /\.\s*(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|Handle|Any|Match|Static|StaticFS|StaticFile|StaticFileFS)\b/g;
+  for (const match of masked.matchAll(selectors)) {
+    if (match[0].includes('\n')) fail('unrecognized route declaration');
+    const lineIndex = masked.slice(0, match.index).split('\n').length - 1;
+    if (candidates.has(lineIndex)) fail('unrecognized multiple route declarations');
+    candidates.add(lineIndex);
+  }
+  return [...candidates].map(index => lines[index].trimEnd());
+}
+
 export function managementRoutes(source) {
   const prefixes = { internal: '/internal/v1', protected: '', admin: '/admin/v1', adminV2: '/admin/v2' };
   const routes = [];
-  for (const line of source.split(/\r?\n/)) {
-    if (!/^\s*\w+\.(GET|POST|PUT|PATCH|DELETE)\(/.test(line)) continue;
+  for (const line of routeDeclarationLines(source)) {
     const match = line.match(/^\s*(internal|protected|admin|adminV2)\.(GET|POST|PUT|PATCH|DELETE)\("([^"]+)",\s*(.*)\)$/);
     if (!match) fail('unrecognized management route declaration');
     const [, group, method, suffix, expression] = match;
@@ -77,8 +119,7 @@ export function commandSpecs(source, handlers) {
 
 export function credentialRoutes(source) {
   const routes = [];
-  for (const line of source.split(/\r?\n/)) {
-    if (!/^\s*router\.(GET|POST|PUT|PATCH|DELETE)\(/.test(line)) continue;
+  for (const line of routeDeclarationLines(source)) {
     const m = line.match(/^\s*router\.(GET|POST)\("([^"]+)", httpserver\.AdaptFunc\(s\.(\w+)\)\)\s*$/);
     if (!m) fail('unrecognized isolated credential route');
     routes.push({ method: m[1].toLowerCase(), path: m[2], handler: m[3] });
@@ -190,7 +231,7 @@ export function loadInputs(base = root) {
     specSource: read('account-platform/internal/token/command_governance.go'),
     handlerSource: read('account-platform/internal/token/governance_handlers.go'),
     credentialSource: read('account-platform/internal/token/credential_origin.go'),
-    dtoSources: Object.fromEntries(['command_governance.go', 'command_precheck.go', 'credential_isolation.go', 'lifecycle_plans.go', 'impact_precheck.go', 'account_provisioning_saga.go', 'approval_recovery_result.go'].map((name) => ['internal/token/' + name, read('account-platform/internal/token/' + name)])),
+    dtoSources: Object.fromEntries(['command_governance.go', 'command_precheck.go', 'credential_isolation.go', 'lifecycle_plans.go', 'impact_precheck.go', 'account_provisioning_saga.go', 'approval_recovery_result.go', 'organization_lifecycle.go', 'organization_unit_blockers.go'].map((name) => ['internal/token/' + name, read('account-platform/internal/token/' + name)])),
     manifest: json('account-platform/deploy/authorization-token-management-entrypoints.json'),
     management: json('account-platform/contracts/openapi/token-management.yaml'),
     credential: json('account-platform/contracts/openapi/token-credential-origin.yaml'),

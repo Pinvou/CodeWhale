@@ -13,7 +13,7 @@ assert.ok(browserPath, 'Browser unavailable; usage UI validation not performed')
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-f05-usage-')); const ownedProfile = fs.realpathSync(profile);
 let vite, browser, page, passed = 0; const errors = [];
 try {
-  vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } }); await vite.listen();
+  vite = await createServer({ root, cacheDir: path.join(profile, 'vite-cache'), configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null, fs: { allow: [root, fs.realpathSync(path.join(root, 'node_modules'))], deny: [] } } }); await vite.listen();
   browser = await puppeteer.launch({ executablePath: browserPath, headless: 'new', userDataDir: profile, args: ['--disable-gpu', '--no-first-run'] });
   page = await browser.newPage(); page.setDefaultTimeout(10000); page.on('pageerror', error => errors.push(error.message));
   const url = `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f05-usage-governance.html`;
@@ -76,6 +76,22 @@ try {
   await caseRun('No usage read authority removes all entry and no extra future page is advertised', async () => {
     await fresh(); await page.evaluate(() => { window.f05Usage.canRead = false; window.f05Usage.canRetry = false; window.f05Usage.render(); }); await page.waitForFunction(() => !document.querySelector('#usage-requests-title'));
     assert.equal(await page.evaluate(() => window.f05Usage.calls.filter(call => /organization|provisioning|audit/.test(call.path)).length), 0);
+  });
+  await caseRun('real provisioning filter retains a localized scope label and exact scope wire query', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await fresh(); await page.evaluate(language => { window.f05Usage.language = language; window.f05Usage.canTokens = true; window.f05Usage.render(); }, language); await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === window.f05Usage.labels().tokenAccounts)); await click('usageRequests'); await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === window.f05Usage.labels().provisionings)); await click('provisionings'); await page.waitForSelector('#provisionings-title');
+      assert.ok(await page.evaluate(() => { const labels = [...document.querySelectorAll('.adm-model-token-filters label')]; return typeof window.f05Usage.labels().scope === 'string' && labels.some(label => label.querySelector('span')?.textContent === window.f05Usage.labels().scope); }));
+      await page.evaluate(() => { const select = [...document.querySelectorAll('.adm-model-token-filters select')].find(select => [...select.options].some(option => option.value === 'PERSONAL')); select.value = 'PERSONAL'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+      await click('search'); await page.waitForFunction(() => window.f05Usage.calls.some(call => call.path.endsWith('/provisionings') && new URLSearchParams(call.query).get('scope_type') === 'PERSONAL'));
+      assert.equal(await page.evaluate(() => window.f05Usage.calls.filter(call => call.method !== 'GET').length), 0);
+    }
+  });
+  await caseRun('actual usage detail localizes USER_STOPPED without claiming execution or settlement stopped', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await fresh(); await page.evaluate(language => { window.f05Usage.language = language; window.f05Usage.delivery = 'USER_STOPPED'; window.f05Usage.render(); }, language); await detail();
+      assert.ok(await page.evaluate(() => { const copy = window.f05Usage.labels(); const text = document.querySelector('.adm-operation-facts').textContent; return typeof copy.enumLabels.USER_STOPPED === 'string' && copy.enumLabels.USER_STOPPED !== 'USER_STOPPED' && text.includes(copy.enumLabels.USER_STOPPED) && text.includes(copy.enumLabels.REVIEW) && !text.includes('USER_STOPPED'); }));
+      assert.equal(await page.evaluate(() => window.f05Usage.calls.filter(call => call.method !== 'GET').length), 0);
+    }
   });
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } catch (error) { console.error(`FAIL after ${passed} PASS: ${error.stack}`); process.exitCode = 1; }

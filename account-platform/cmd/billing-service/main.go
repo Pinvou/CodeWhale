@@ -79,7 +79,11 @@ func main() {
 	if err != nil {
 		log.Fatal("BILLING_MODEL_PRICE_PROJECTION_CONFIGURATION_INVALID")
 	}
-	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(gate).WithAdminModelPriceProjection(modelPriceProjectionEnabled)
+	bonusEligibility, err := billing.NewHTTPRegistrationBonusEligibilityVerifier(os.Getenv("ACCOUNT_HTTP_URL"), credential)
+	if err != nil {
+		log.Fatal("BILLING_REGISTRATION_BONUS_CONFIGURATION_INVALID")
+	}
+	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(gate).WithAdminModelPriceProjection(modelPriceProjectionEnabled).WithRegistrationBonusEligibilityVerifier(bonusEligibility)
 	keys, err := humandelegation.DecodeVerificationKeysJSON(os.Getenv("HUMAN_DELEGATION_VERIFICATION_KEYS_JSON"))
 	if err != nil {
 		log.Fatal("BILLING_HUMAN_DELEGATION_KEYS_INVALID")
@@ -150,7 +154,6 @@ func main() {
 	if err != nil {
 		log.Fatal("BILLING_TEST_ADMISSION_TTL_INVALID")
 	}
-	go observability.RunBackground(ctx, "personal-hold-expiry", billing.NewPersonalHoldExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "package-expiry", billing.NewPackageExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "expired-hold-recovery", billing.NewExpiredHoldRecoveryWorker(repository, expiredHoldClient, time.Minute).Run)
 	go observability.RunBackground(ctx, "product-admission-expiry", billing.NewProductAdmissionExpiryWorker(repository, time.Minute).Run)
