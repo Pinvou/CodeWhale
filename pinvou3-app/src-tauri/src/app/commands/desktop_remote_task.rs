@@ -3,7 +3,7 @@
 //! A08 accepts only authenticated full bindings or B-local semantic intents;
 //! renderer JSON cannot assert A's role. Legacy A07 raw entry points stay closed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -87,11 +87,14 @@ fn capability_allows_skills(
 /// Creates B-authoritative sessions for remote tasks. Only the local session
 /// identity, title and mode lane are persisted; nothing about A crosses this
 /// boundary.
+type PendingRemoteMode = (bool, crate::core::mode_state::SerializableMode);
+
 pub(crate) struct DesktopRemoteSessionProvisioner {
     app: AppHandle,
     store: SessionStore,
     pool: EnginePool,
     acp_pool: Arc<AcpPool>,
+    pending_modes: parking_lot::Mutex<HashMap<String, Option<PendingRemoteMode>>>,
 }
 
 impl DesktopRemoteSessionProvisioner {
@@ -106,11 +109,27 @@ impl DesktopRemoteSessionProvisioner {
             store,
             pool,
             acp_pool,
+            pending_modes: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 }
 
 impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
+    fn create_unclaimed_authoritative_session(
+        &self,
+        title: &str,
+    ) -> std::result::Result<String, String> {
+        let metadata =
+            super::sessions::create_session_record(false, &self.store, &self.pool, None)?;
+        let bounded: String = title.trim().chars().take(120).collect();
+        if !bounded.is_empty() {
+            self.store
+                .set_title(&metadata.id, bounded)
+                .map_err(|_| "task_session_create_failed".to_owned())?;
+        }
+        self.pending_modes.lock().insert(metadata.id.clone(), None);
+        Ok(metadata.id)
+    }
     fn create_authoritative_session(
         &self,
         title: &str,
@@ -130,11 +149,18 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
         self.store
             .set_mode_and_persist(&session_id, permission_mode)
             .map_err(|_| "task_session_create_failed".to_owned())?;
+        self.pending_modes
+            .lock()
+            .insert(session_id.clone(), Some((code_mode, permission_mode)));
         Ok(session_id)
     }
 
     fn session_exists(&self, session_id: &str) -> std::result::Result<bool, String> {
         Ok(controlled_session_exists(&self.store, session_id))
+    }
+
+    fn forget_unclaimed_session(&self, session_id: &str) {
+        self.pending_modes.lock().remove(session_id);
     }
 
     fn claim_execution_lane(
@@ -143,12 +169,18 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
         code_mode: bool,
         workspace: Option<&std::path::Path>,
     ) -> std::result::Result<(), String> {
-        crate::features::remote_control::task_permissions::for_session(
+        // The service holds session_open_lock and invokes this only for the
+        // first trusted lane claim. Negotiation must not select chat policy.
+        let policy = crate::platform::prefs::UserPrefs::load().remote_task_permissions;
+        freeze_first_remote_lane(
             &self.store,
+            &self.pending_modes,
             session_id,
             code_mode,
+            policy,
         )?;
         if !code_mode {
+            self.pending_modes.lock().remove(session_id);
             return Ok(());
         }
         let path = workspace.ok_or_else(|| "task_workspace_required".to_owned())?;
@@ -160,7 +192,9 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
                 crate::features::codex_acp::CodexWorkspaceKind::Project,
                 Some(path.to_path_buf()),
             )
-            .map_err(|_| "task_session_backend_bind_failed".to_owned())
+            .map_err(|_| "task_session_backend_bind_failed".to_owned())?;
+        self.pending_modes.lock().remove(session_id);
+        Ok(())
     }
 
     fn resolve_code_workspace(
@@ -175,6 +209,34 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
         crate::features::codex_acp::validate_codex_project_workspace(&path)
             .map_err(|_| "task_workspace_not_authorized".to_owned())
     }
+}
+
+fn freeze_first_remote_lane(
+    store: &SessionStore,
+    pending: &parking_lot::Mutex<HashMap<String, Option<PendingRemoteMode>>>,
+    session_id: &str,
+    code_mode: bool,
+    policy: crate::platform::prefs::RemoteTaskPermissionPrefs,
+) -> std::result::Result<(), String> {
+    let mode = (if code_mode { policy.code } else { policy.chat })
+        .ok_or_else(|| crate::features::remote_control::task_permissions::REQUIRED.to_owned())?;
+    let mut pending = pending.lock();
+    if let Some(frozen @ None) = pending.get_mut(session_id) {
+        store
+            .set_mode_and_persist(session_id, mode)
+            .map_err(|_| "task_session_backend_bind_failed".to_owned())?;
+        *frozen = Some((code_mode, mode));
+        return Ok(());
+    }
+    if pending
+        .get(session_id)
+        .is_some_and(|frozen| *frozen != Some((code_mode, mode)))
+        || store.durable_mode_entry(session_id) != Some(mode)
+        || store.mode_state(session_id).mode != mode
+    {
+        return Err(crate::features::remote_control::task_permissions::CHANGED.to_owned());
+    }
+    Ok(())
 }
 
 fn controlled_session_exists(store: &SessionStore, session_id: &str) -> bool {
@@ -3827,6 +3889,136 @@ mod tests {
             )
             .unwrap();
         assert!(!controlled_session_exists(&store, &remote.local_session_id));
+    }
+
+    #[test]
+    fn first_remote_lane_freezes_code_only_and_distinct_policy_in_real_store() {
+        use crate::core::mode_state::SerializableMode::{Plan, Yolo};
+        use crate::platform::prefs::UserPrefs;
+        for (json, code, expected) in [
+            (r#"{"remote_task_permissions":{"code":"plan"}}"#, true, Plan),
+            (
+                r#"{"remote_task_permissions":{"chat":"plan","code":"yolo"}}"#,
+                true,
+                Yolo,
+            ),
+            (
+                r#"{"remote_task_permissions":{"chat":"yolo","code":"plan"}}"#,
+                true,
+                Plan,
+            ),
+            (
+                r#"{"remote_task_permissions":{"chat":"yolo","code":"plan"}}"#,
+                false,
+                Yolo,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let store = SessionStore::boot_at_test_dir(root.path()).unwrap();
+            let session = store
+                .create_new("model".into(), None, root.path().join("local"))
+                .unwrap();
+            let id = &session.metadata.id;
+            let prefs: UserPrefs = serde_json::from_str(json).unwrap();
+            let pending = parking_lot::Mutex::new(HashMap::from([(id.clone(), None)]));
+            freeze_first_remote_lane(&store, &pending, id, code, prefs.remote_task_permissions)
+                .unwrap();
+            assert_eq!(store.durable_mode_entry(id), Some(expected));
+            assert_eq!(store.mode_state(id).mode, expected);
+            // An ACP bind failure leaves the logical lane Unknown. The same
+            // trusted first-claim retry may safely persist the identical mode.
+            freeze_first_remote_lane(&store, &pending, id, code, prefs.remote_task_permissions)
+                .unwrap();
+            assert_eq!(store.durable_mode_entry(id), Some(expected));
+            assert_eq!(store.mode_state(id).mode, expected);
+            if prefs.remote_task_permissions.chat.is_none() {
+                assert_eq!(
+                    freeze_first_remote_lane(
+                        &store,
+                        &pending,
+                        id,
+                        false,
+                        prefs.remote_task_permissions
+                    )
+                    .unwrap_err(),
+                    "task_permission_mode_required"
+                );
+                assert_eq!(store.durable_mode_entry(id), Some(expected));
+            }
+            let mut changed = prefs.remote_task_permissions;
+            let opposite = if expected == Plan { Yolo } else { Plan };
+            if code {
+                changed.code = Some(opposite);
+            } else {
+                changed.chat = Some(opposite);
+            }
+            assert_eq!(
+                freeze_first_remote_lane(&store, &pending, id, code, changed).unwrap_err(),
+                "task_permission_mode_changed"
+            );
+            assert_eq!(store.durable_mode_entry(id), Some(expected));
+            pending.lock().clear();
+            assert_eq!(
+                freeze_first_remote_lane(&store, &pending, id, code, changed).unwrap_err(),
+                "task_permission_mode_changed"
+            );
+            assert_eq!(store.durable_mode_entry(id), Some(expected));
+            freeze_first_remote_lane(&store, &pending, id, code, prefs.remote_task_permissions)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn unknown_remote_negotiation_never_selects_chat_permissions() {
+        struct Unclaimed;
+        impl RemoteSessionProvisioner for Unclaimed {
+            fn create_unclaimed_authoritative_session(&self, _: &str) -> Result<String, String> {
+                Ok("unclaimed-session".into())
+            }
+            fn create_authoritative_session(&self, _: &str, _: bool) -> Result<String, String> {
+                Err("task_permission_mode_required".into())
+            }
+            fn session_exists(&self, _: &str) -> Result<bool, String> {
+                Ok(true)
+            }
+        }
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        service.set_session_provisioner(Arc::new(Unclaimed));
+        assert_eq!(
+            service
+                .ensure_unclaimed_remote_session("remote-code", "Code", "generation-0001")
+                .unwrap(),
+            "unclaimed-session"
+        );
+        assert_eq!(
+            service.lane_for_session("unclaimed-session", "generation-0001"),
+            Some(RemoteSessionLane::Unknown)
+        );
+    }
+
+    #[test]
+    fn failed_code_binding_cannot_switch_first_lane_even_with_identical_modes() {
+        use crate::core::mode_state::SerializableMode::Plan;
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::boot_at_test_dir(root.path()).unwrap();
+        let session = store
+            .create_new("model".into(), None, root.path().join("local"))
+            .unwrap();
+        let id = &session.metadata.id;
+        let policy = serde_json::from_str::<crate::platform::prefs::UserPrefs>(
+            r#"{"remote_task_permissions":{"chat":"plan","code":"plan"}}"#,
+        )
+        .unwrap()
+        .remote_task_permissions;
+        let pending = parking_lot::Mutex::new(HashMap::from([(id.clone(), None)]));
+        freeze_first_remote_lane(&store, &pending, id, true, policy).unwrap();
+        assert_eq!(
+            freeze_first_remote_lane(&store, &pending, id, false, policy).unwrap_err(),
+            "task_permission_mode_changed"
+        );
+        assert_eq!(pending.lock().get(id), Some(&Some((true, Plan))));
+        assert_eq!(store.durable_mode_entry(id), Some(Plan));
+        freeze_first_remote_lane(&store, &pending, id, true, policy).unwrap();
     }
 
     #[test]

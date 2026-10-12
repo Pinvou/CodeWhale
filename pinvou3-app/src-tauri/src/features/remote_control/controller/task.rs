@@ -1526,6 +1526,13 @@ impl RemoteSessionMap {
 /// Narrow B-side session provisioning port. The command layer implements it on
 /// top of `SessionStore`/`EnginePool`; tests use a deterministic double.
 pub(crate) trait RemoteSessionProvisioner: Send + Sync {
+    /// Create only the transcript owner; no authenticated lane is selected yet.
+    fn create_unclaimed_authoritative_session(
+        &self,
+        title: &str,
+    ) -> std::result::Result<String, String> {
+        self.create_authoritative_session(title, false)
+    }
     fn create_authoritative_session(
         &self,
         title: &str,
@@ -1533,6 +1540,8 @@ pub(crate) trait RemoteSessionProvisioner: Send + Sync {
     ) -> std::result::Result<String, String>;
 
     fn session_exists(&self, session_id: &str) -> std::result::Result<bool, String>;
+
+    fn forget_unclaimed_session(&self, _session_id: &str) {}
 
     /// Resolve B-owned workspace authority before taking the session lock.
     /// Implementations may consult the controlled-device owner here, but must
@@ -2151,14 +2160,18 @@ impl RemoteTaskService {
         // SessionStore chat records are the common transcript owner. The first
         // trusted task chooses the execution lane; code execution remains ACP.
         let session_id = provisioner
-            .create_authoritative_session(title, false)
+            .create_unclaimed_authoritative_session(title)
             .map_err(|code| provisioner_error(code, "task_session_create_failed"))?;
-        self.sessions.bind(
+        let result = self.sessions.bind(
             remote_ref,
             &session_id,
             generation,
             RemoteSessionLane::Unknown,
-        )
+        );
+        if result.is_err() {
+            provisioner.forget_unclaimed_session(&session_id);
+        }
+        result
     }
 
     /// Only an already authenticated controller task whose complete DEV-13
@@ -2320,11 +2333,21 @@ impl RemoteTaskService {
         let session_id = provisioner
             .create_authoritative_session(title, code_mode)
             .map_err(|code| provisioner_error(code, "task_session_create_failed"))?;
+        if let Err(error) = self.sessions.bind(
+            remote_ref,
+            &session_id,
+            generation,
+            RemoteSessionLane::Unknown,
+        ) {
+            provisioner.forget_unclaimed_session(&session_id);
+            return Err(error);
+        }
         provisioner
             .claim_execution_lane(&session_id, code_mode, workspace)
             .map_err(|code| provisioner_error(code, "task_session_backend_bind_failed"))?;
         self.sessions
-            .bind(remote_ref, &session_id, generation, requested)
+            .ensure_lane(remote_ref, generation, requested, true)?
+            .ok_or_else(|| error("task_session_not_found"))
     }
 
     pub(crate) fn switch_remote_session(
@@ -2344,12 +2367,17 @@ impl RemoteTaskService {
             Ok(false) => return Err(error("task_session_not_found")),
             Err(_) => return Err(error("task_session_lookup_failed")),
         }
-        self.sessions.bind(
+        let previous = self.sessions.session_for(remote_ref, generation);
+        let bound = self.sessions.bind(
             remote_ref,
             session_id,
             generation,
             RemoteSessionLane::Unknown,
-        )
+        )?;
+        if let Some(previous) = previous.filter(|previous| previous != session_id) {
+            provisioner.forget_unclaimed_session(&previous);
+        }
+        Ok(bound)
     }
 
     /// A B-local composer is also an authenticated owner of the current
@@ -2404,7 +2432,11 @@ impl RemoteTaskService {
                 return Err(error("task_session_busy"));
             }
         }
-        Ok(self.sessions.unbind(remote_ref, generation))
+        let removed = self.sessions.unbind(remote_ref, generation);
+        if let (Some(id), Some(provisioner)) = (&removed, self.provisioner.lock().clone()) {
+            provisioner.forget_unclaimed_session(id);
+        }
+        Ok(removed)
     }
 
     pub(crate) fn session_for(&self, remote_ref: &str, generation: &str) -> Option<String> {
@@ -2436,12 +2468,30 @@ impl RemoteTaskService {
 
     pub(crate) fn clear_sessions(&self) {
         let _guard = self.session_open_lock.lock();
+        self.forget_pending_session_modes(None);
         self.sessions.clear();
     }
 
     pub(crate) fn clear_generation_sessions(&self, generation: &str) {
         let _guard = self.session_open_lock.lock();
+        self.forget_pending_session_modes(Some(generation));
         self.sessions.clear_generation(generation);
+    }
+
+    fn forget_pending_session_modes(&self, generation: Option<&str>) {
+        let ids: Vec<String> = self
+            .sessions
+            .forward
+            .lock()
+            .values()
+            .filter(|entry| generation.is_none_or(|generation| entry.1 == generation))
+            .map(|entry| entry.0.clone())
+            .collect();
+        if let Some(provisioner) = self.provisioner.lock().clone() {
+            for id in ids {
+                provisioner.forget_unclaimed_session(&id);
+            }
+        }
     }
 
     pub(crate) fn submit(
@@ -3153,6 +3203,7 @@ impl RemoteTaskService {
     ) -> Vec<RemoteTaskRecord> {
         let _guard = self.session_open_lock.lock();
         let records = self.ledger.interrupt_generation(generation, reason, now_b);
+        self.forget_pending_session_modes(Some(generation));
         self.sessions.clear_generation(generation);
         drop(_guard);
         self.finish_interrupted(records)
@@ -3165,6 +3216,7 @@ impl RemoteTaskService {
 
     pub(crate) fn recover_after_restart(&self, now_b: u64) -> Vec<RemoteTaskRecord> {
         let recovered = self.ledger.recover_after_restart(now_b);
+        self.forget_pending_session_modes(None);
         self.sessions.clear();
         self.finish_interrupted(recovered)
     }
@@ -6130,6 +6182,51 @@ mod tests {
                 true,
                 Some("workspace-0001".to_owned()),
             )]
+        );
+    }
+
+    #[test]
+    fn new_session_failed_first_claim_retries_same_owner_without_duplicate_creation() {
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        let sessions = Arc::new(FakeSessions::default());
+        sessions.fail_claim.store(true, Ordering::SeqCst);
+        service.set_session_provisioner(sessions.clone());
+        let task = request(&code_payload(
+            "new-code-ref",
+            "new-code-task",
+            "new-code-request",
+            "workspace-0001",
+        ));
+        for _ in 0..2 {
+            assert_eq!(
+                service
+                    .ensure_authenticated_task_session(&task, &context("generation-0001"), "Code")
+                    .unwrap_err()
+                    .code,
+                "task_session_backend_bind_failed"
+            );
+            assert_eq!(
+                service
+                    .session_for("new-code-ref", "generation-0001")
+                    .as_deref(),
+                Some("session-0001")
+            );
+            assert_eq!(
+                service.lane_for_session("session-0001", "generation-0001"),
+                Some(RemoteSessionLane::Unknown)
+            );
+        }
+        sessions.fail_claim.store(false, Ordering::SeqCst);
+        assert_eq!(
+            service
+                .ensure_authenticated_task_session(&task, &context("generation-0001"), "Code")
+                .unwrap(),
+            "session-0001"
+        );
+        assert_eq!(sessions.created.lock().len(), 1);
+        assert_eq!(
+            service.lane_for_session("session-0001", "generation-0001"),
+            Some(RemoteSessionLane::Code)
         );
     }
 
