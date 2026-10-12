@@ -6,7 +6,6 @@ const command = (kind, target) => ({ kind, target });
 
 export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("npm", "test:bridge-smoke"),
-  command("npm", "test:account-platform-personal-ui"),
   command("npm", "test:conversation-virtualization"),
   command("npm", "test:code-viewer-ui"),
   command("npm", "test:code-viewer-diff-ui"),
@@ -27,10 +26,13 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("npm", "test:tool-store-import"),
   command("npm", "test:tool-store-recycle-bin"),
   command("npm", "test:webui"),
+  command("npm", "test:account-platform-personal-ui"),
+  command("npm", "test:account-platform-finance-ui"),
 ]);
 
 const CORE_SMOKE = command("npm", "test:ui-smoke");
 const FEATURE_COMMANDS = new Map([
+  ["account-platform", [command("npm", "test:account-platform-personal-ui"), command("npm", "test:account-platform-finance-ui")]],
   ["knowledge", [command("npm", "test:kb-smoke")]],
   ["pet", [command("node", "tests/pet_selector_ui_smoke.js")]],
   ["scheduled", [command("node", "tests/scheduled_tasks_smoke.js")]],

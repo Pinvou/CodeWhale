@@ -14,7 +14,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 )
 
-func TestOrdinaryRelayHealthAndMetricsDoNotAdvertiseFutureExecution(t *testing.T) {
+func TestOrdinaryRelayHealthAndMetricsRemainIndependent(t *testing.T) {
 	metrics := newRelayMetrics("account")
 	metrics.record(events.OutboxStats{Pending: 3, DeadLettered: 1, OldestPendingAge: 2 * time.Second})
 	metrics.recordCycle(events.RelayResult{Published: 2}, nil, time.Second)
@@ -40,8 +40,8 @@ func TestOrdinaryRelayHealthAndMetricsDoNotAdvertiseFutureExecution(t *testing.T
 			t.Fatal("ordinary metric missing")
 		}
 	}
-	if strings.Contains(text, "pinvou_authorization_") {
-		t.Fatal("future authorization metrics advertised")
+	if !strings.Contains(text, `pinvou_authorization_relay_active_handlers{source="account"} 0`) {
+		t.Fatal("authorization gauge must not claim an active publisher")
 	}
 	ready := metrics.server(":0", func(context.Context) error { return nil })
 	response = httptest.NewRecorder()
@@ -51,8 +51,35 @@ func TestOrdinaryRelayHealthAndMetricsDoNotAdvertiseFutureExecution(t *testing.T
 	}
 }
 
+func TestAuthorizationReadinessDoesNotChangeOrdinaryReadiness(t *testing.T) {
+	metrics := newRelayMetrics("account")
+	server := metrics.serverWithApproval(":0", func(context.Context) error { return nil }, func(context.Context) error { return errors.New("private dependency details") })
+	for _, tc := range []struct {
+		path   string
+		status int
+	}{{"/health/ready", 200}, {"/health/ready/approval-authorization", 503}} {
+		response := httptest.NewRecorder()
+		server.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if response.Code != tc.status || strings.Contains(response.Body.String(), "private dependency") {
+			t.Fatal("readiness independence or redaction failed")
+		}
+	}
+	ready := metrics.serverWithApproval(":0", func(context.Context) error { return nil }, func(context.Context) error { return nil })
+	response := httptest.NewRecorder()
+	ready.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/ready/approval-authorization", nil))
+	if response.Code != 200 {
+		t.Fatal("authorization readiness not exposed")
+	}
+	metrics.BeginFrozenPublish()
+	metrics.EndFrozenPublish()
+	metrics.EndFrozenPublish()
+	if metrics.authorizationHandlers.Load() != 0 {
+		t.Fatal("publisher counter underflow")
+	}
+}
+
 func TestOrdinaryRelayRejectsOtherSourcesBeforeDependencies(t *testing.T) {
-	for _, source := range []string{"billing", "token", "ACCOUNT"} {
+	for _, source := range []string{"token", "ACCOUNT", "account,billing"} {
 		err := run(context.Background(), func(key string) string {
 			if key == "EVENT_SOURCE" {
 				return source

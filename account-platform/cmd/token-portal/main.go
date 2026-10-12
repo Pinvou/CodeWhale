@@ -53,7 +53,7 @@ func loadPortalConfig(environment string, getenv func(string) string) (portal.Co
 		name   string
 		target **url.URL
 	}{
-		{"PORTAL_PUBLIC_URL", &cfg.PublicURL}, {"PORTAL_OIDC_AUTHORIZATION_URL", &cfg.AuthorizationURL}, {"PORTAL_OIDC_TOKEN_URL", &cfg.TokenURL}, {"PORTAL_OIDC_ISSUER", &cfg.IssuerURL}, {"PORTAL_OIDC_JWKS_URL", &cfg.JWKSURL}, {"ACCOUNT_HTTP_URL", &cfg.AccountURL}, {"TOKEN_GATEWAY_HTTP_URL", &cfg.TokenGatewayURL},
+		{"PORTAL_PUBLIC_URL", &cfg.PublicURL}, {"PORTAL_OIDC_AUTHORIZATION_URL", &cfg.AuthorizationURL}, {"PORTAL_OIDC_TOKEN_URL", &cfg.TokenURL}, {"PORTAL_OIDC_ISSUER", &cfg.IssuerURL}, {"PORTAL_OIDC_JWKS_URL", &cfg.JWKSURL}, {"ACCOUNT_HTTP_URL", &cfg.AccountURL}, {"TOKEN_GATEWAY_HTTP_URL", &cfg.TokenGatewayURL}, {"BILLING_HTTP_URL", &cfg.BillingURL},
 	}
 	for _, item := range endpoints {
 		parsed, err := url.Parse(strings.TrimSpace(getenv(item.name)))

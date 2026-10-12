@@ -25,3 +25,13 @@
 PR Check 对账号平台路径改动在 Draft、Ready 和 Merge Queue 均执行 Go race 测试与 vet，逐个发现主模块及嵌套工具模块；使用主模块 `go.mod` 锁定的工具链与 `-tags=nomsgpack -mod=readonly`，Linux runner 开启 CGO。相关检查失败、取消或意外跳过均阻断 `required-gate`。本地未提供 C 编译器的 Windows 环境不能证明 race 检测通过，须以实际 Linux CI 结果验证。此门禁不配置真实服务凭据，不替代显式集成测试或部署验收。
 
 密码和真实密钥仅由保管人在受控本机终端输入，不能通过 Agent 或聊天提供。PKI/NKey 的 READY 标记只描述生成制品；解封成功只描述 KMS 状态，均不代表业务部署或发布完成。
+
+## 支付阶段的个人客户同步
+
+支付阶段随客户同步入口安装原 Account `000015_commerce_customer_mapping` 迁移，保留原 SQL 与校验和。它将旧 `mall_user_sync_jobs` 的客户和重试事实转入映射、任务和脱敏证据表；公开 migrator 安装的是同一组文件，不能通过测试夹具补表替代。已有数据库会按未应用版本补装 015，而非只依据最大版本跳过它。
+
+`account-service` 启动时核查并补齐当前供应商映射；注册和手机号修改也使用同一持久任务。配置了供应商适配器时，客户同步 worker 按 ACTIVE 用户、供应商/适配器、映射版本和当前有效租约确认或重试。停用期间同代迟到结果不写 READY，任务保留为 RETRY，启用后重新调用供应商；旧代和 DETACHED 结果不能恢复任务。完成与重试在取得映射及任务锁后核对领取次数和数据库时间，过期或已重领的 worker 不得写映射或证据。尚未交付不可逆注销时，原 015 的任务生命周期版本为 1，代码不依赖未来 `users.subject_lifecycle_version` 列；注销功能首次交付时须同时恢复其用户生命周期栅栏，不能直接沿用本阶段投影。
+
+实际 public-schema 回归覆盖 Bootstrap、Account 侧钱包确认、GetMe、启动映射补齐和 Claim/Retry/Complete，以及停用/启用恢复、旧映射代次、DETACHED、任务过期重领和有数据的晚装迁移。该验证不等同 Billing HTTP、实际供应商或完整 E2E 验收。
+
+Billing 的本地与部署初始化、升级角色前置见 [数据库运行说明](deploy/postgres/README.md)。迁移必须由独立 migrator 执行，服务启动不创建 owner 或扩大权限。

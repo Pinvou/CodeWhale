@@ -1,3 +1,4 @@
+import { parseFinanceJSON, requirePaymentOrder } from './finance-contract.js';
 import { requireSession, requireProfileChange } from './personal-contract.js';
 import { parseBalanceJSON } from './balance-view.js';
 import { mergeObservedVersions } from './authorization-ui.js';
@@ -177,6 +178,7 @@ export class AccountPlatformDesktopClient {
       }
       return parseBalanceJSON(JSON.stringify(response.body));
     }
+    if (area === 'token' && typeof response.bodyText === 'string') return parseFinanceJSON(response.bodyText);
     return response.body;
   }
 
@@ -187,6 +189,27 @@ export class AccountPlatformDesktopClient {
       signal,
     });
   }
+
+  products(signal) { return this.request('token', '/v1/recharge/products', { signal }); }
+  paymentCapabilities(signal) { return this.request('token', '/v1/payment-capabilities', { signal }); }
+  rechargeOrders(signal) { return this.request('token', '/v1/recharge/orders', { signal }); }
+  recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
+  async rechargeOrder(orderID, signal) {
+    return requirePaymentOrder(await this.request('token', `/v1/recharge/orders/${encodeURIComponent(orderID)}`, { signal }), orderID);
+  }
+  async createRecharge(productID, channel, key, signal) {
+    return requirePaymentOrder(await this.request('token', '/v1/recharge/orders', {
+      method: 'POST', idempotencyKey: key,
+      body: { product_id: productID, channel }, signal,
+    }));
+  }
+  async closeRechargeOrder(orderID, signal) {
+    return requirePaymentOrder(await this.request('token', `/v1/recharge/orders/${encodeURIComponent(orderID)}/close`, { method: 'POST', body: {}, signal }), orderID);
+  }
+  addPaymentClaim(orderID, reason, signal) {
+    return this.request('token', `/v1/recharge/orders/${encodeURIComponent(orderID)}/payment-claims`, { method: 'POST', body: { statement: reason }, signal });
+  }
+  entitlementPackages(signal) { return this.request('token', '/v1/me/entitlement-packages', { signal }); }
 
   balance(signal) {
     return this.request('token', '/v1/me/balance?consistency=strong', {

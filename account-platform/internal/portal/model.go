@@ -17,17 +17,18 @@ type SessionHandoff struct {
 }
 
 type Session struct {
-	ID               string    `json:"id"`
-	LineageRoot      string    `json:"lineage_root,omitempty"`
-	AccessToken      string    `json:"access_token"`
-	RefreshToken     string    `json:"refresh_token"`
-	AccessExpiresAt  time.Time `json:"access_expires_at"`
-	RefreshExpiresAt time.Time `json:"refresh_expires_at"`
-	CSRFToken        string    `json:"csrf_token"`
-	CreatedAt        time.Time `json:"created_at"`
-	OIDCClientID     string    `json:"oidc_client_id,omitempty"`
-	Subject          string    `json:"subject"`
-	Nonce            string    `json:"nonce"`
+	ApprovalV2Eligible bool      `json:"approval_v2_eligible,omitempty"`
+	ID                 string    `json:"id"`
+	LineageRoot        string    `json:"lineage_root,omitempty"`
+	AccessToken        string    `json:"access_token"`
+	RefreshToken       string    `json:"refresh_token"`
+	AccessExpiresAt    time.Time `json:"access_expires_at"`
+	RefreshExpiresAt   time.Time `json:"refresh_expires_at"`
+	CSRFToken          string    `json:"csrf_token"`
+	CreatedAt          time.Time `json:"created_at"`
+	OIDCClientID       string    `json:"oidc_client_id,omitempty"`
+	Subject            string    `json:"subject"`
+	Nonce              string    `json:"nonce"`
 }
 
 type TokenResponse struct {

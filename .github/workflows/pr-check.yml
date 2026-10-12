@@ -334,6 +334,7 @@ jobs:
             frontend:
               - 'pinvou3-app/src/**'
               - 'pinvou3-app/tests/**'
+              - 'account-platform/internal/portal/static/**'
               # multiagent_plan_normalize.test.mjs 读取下列 Rust 源做跨语言
               # 契约断言(蜂群契约/同快照不变式/编辑重发等);不列出则
               # Rust-only 改动会静默跳过该 node 门禁(同 resources/** 的
@@ -663,6 +664,12 @@ jobs:
 
       - name: Vite build
         run: npm run build:ui
+
+      - name: Verify embedded Account Portal assets are current
+        run: |
+          npm run build:account-portal
+          git diff --exit-code -- ../account-platform/internal/portal/static
+          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
 
       # Web (relay) build: the startup-bundle layer and the web index contract
       # test (tests/vite_static_assets_contract.test.mjs) only cover the web

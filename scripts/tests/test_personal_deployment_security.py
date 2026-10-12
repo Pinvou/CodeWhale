@@ -71,7 +71,9 @@ kcadm() {
         text = (DEPLOY / "nginx/personal.conf.template").read_text(encoding="utf-8")
         self.assertIn("resolver 127.0.0.11 valid=10s ipv6=off;", text)
         targets = re.findall(r"proxy_pass\s+([^;]+);", text)
-        self.assertEqual(len(targets), 7)
+        self.assertEqual(len(targets), 9)
+        self.assertEqual(targets.count("http://$billing_origin"), 2)
+        self.assertIn("set $billing_origin billing-service:8080;", text)
         self.assertTrue(all(re.fullmatch(r"https?://\$[a-z_]+", target) for target in targets))
         # A URI suffix on variable proxy_pass replaces the rewritten URI.
         for prefix in ["account", "identity", "token"]:

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
@@ -49,6 +50,15 @@ func main() {
 		log.Fatal(err)
 	}
 
+	commerceProviderID := valueOrDefault("COMMERCE_PROVIDER_ID", "h3c_mall")
+	commerceAdapterVersion := valueOrDefault("COMMERCE_ADAPTER_VERSION", "h3c-mall-v1")
+	if err := repository.ConfigureCommerceProvider(commerceProviderID, commerceAdapterVersion); err != nil {
+		log.Fatal("ACCOUNT_COMMERCE_CONFIGURATION_INVALID")
+	}
+	if err := repository.EnsureCommerceProviderMappings(ctx); err != nil {
+		log.Fatal("ACCOUNT_COMMERCE_MAPPINGS_UNAVAILABLE")
+	}
+
 	verify, err := identity.NewOIDCVerifyFuncWithJWKS(ctx, os.Getenv("OIDC_ISSUER"), os.Getenv("OIDC_JWKS_URL"), os.Getenv("OIDC_AUDIENCE"), cfg.Environment)
 	if err != nil {
 		log.Fatal("ACCOUNT_OIDC_CONFIGURATION_INVALID")
@@ -62,6 +72,9 @@ func main() {
 		log.Fatal("ACCOUNT_IDENTITY_AUTHORITY_INVALID")
 	}
 	service := account.NewService(repository, wallets).WithServiceToken(credential)
+	if err := configureApprovals(ctx, repository, service, credential, cfg.Environment); err != nil {
+		log.Fatal(err)
+	}
 	go observability.RunBackground(ctx, "wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run)
 	if enabled("MOBILE_AUTH_ENABLED") {
 		registrationQueryKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("REGISTRATION_QUERY_HMAC_KEY_BASE64")))
@@ -141,13 +154,22 @@ func main() {
 		go observability.RunBackground(ctx, "profile-change", account.NewProfileChangeWorker(profiles, 5*time.Second).Run)
 		go observability.RunBackground(ctx, "registration-recovery", account.NewRegistrationRecoveryWorker(repository, auth, 5*time.Second).Run)
 
+		// Commerce availability does not gate authentication; persisted jobs are
+		// retained until the explicitly configured adapter becomes available.
+		if strings.TrimSpace(os.Getenv("H3C_MALL_BASE_URL")) != "" {
+			adapter, err := h3cmall.New(h3cmall.Config{BaseURL: os.Getenv("H3C_MALL_BASE_URL"), AppKey: os.Getenv("H3C_MALL_APP_KEY"), AppSecret: os.Getenv("H3C_MALL_APP_SECRET"), AllowInsecure: cfg.Environment == "development" || cfg.Environment == "test"})
+			if err != nil {
+				log.Fatal("ACCOUNT_COMMERCE_ADAPTER_INVALID")
+			}
+			go observability.RunBackground(ctx, "commerce-customer-sync", account.NewCommerceCustomerSyncWorker(repository, adapter, commerceProviderID, commerceAdapterVersion, 5*time.Second).Run)
+		}
 	}
 
 	handler, err := account.NewTrustedSourceHandler(service.Handler(verify), os.Getenv("ACCOUNT_TRUSTED_SOURCE_PEER_IPS"))
 	if err != nil {
 		log.Fatal("ACCOUNT_TRUSTED_SOURCE_CONFIGURATION_INVALID")
 	}
-	if err := httpserver.RunWithApplication("account-service", handler, repository.Ping); err != nil {
+	if err := httpserver.RunWithApplicationAndCollectors("account-service", repository.WithApprovalWriterReadiness(handler), repository.Ping, repository.ApprovalPaginationCollectors()...); err != nil {
 		log.Fatal("ACCOUNT_HTTP_SERVER_FAILED")
 	}
 }

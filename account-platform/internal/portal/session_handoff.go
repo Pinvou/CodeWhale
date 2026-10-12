@@ -96,7 +96,7 @@ func (s *Service) createSessionHandoff(w http.ResponseWriter, r *http.Request) {
 	csrfToken, csrfTokenErr := randomToken(32)
 	ticket, ticketErr := randomToken(48)
 	digest := sha256.Sum256([]byte(ticket))
-	session := Session{
+	session := Session{ApprovalV2Eligible: true,
 		ID: sessionID, AccessToken: tokens.AccessToken,
 		AccessExpiresAt:  accessExpiresAt,
 		RefreshExpiresAt: accessExpiresAt,

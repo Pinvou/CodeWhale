@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/billinggovernance"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -17,10 +19,19 @@ import (
 )
 
 type PostgresRepository struct {
-	pool                  *pgxpool.Pool
-	now                   func() time.Time
-	walletPolicyVersion   string
-	walletProvisioningSLA time.Duration
+	pool                        *pgxpool.Pool
+	approvalWriterPool          *pgxpool.Pool
+	approvalWriterCommit        func(context.Context, pgx.Tx) error
+	commerceProviderID          string
+	commerceAdapterVersion      string
+	approvalProofSource         ApprovalProofSource
+	billingGovernanceActivation billinggovernance.Reader
+	approvalPresenterReady      func(approvalpolicy.Policy) bool
+	approvalPagination          approvalPaginationRuntime
+	approvalPaginationMetrics   *ApprovalPaginationMetrics
+	now                         func() time.Time
+	walletPolicyVersion         string
+	walletProvisioningSLA       time.Duration
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {
@@ -38,6 +49,9 @@ func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRe
 	repository := &PostgresRepository{
 		pool: pool, now: func() time.Time { return time.Now().UTC() },
 		walletPolicyVersion: walletProvisioningPolicyVersion, walletProvisioningSLA: walletProvisioningSLA,
+		commerceProviderID: defaultCommerceProviderID, commerceAdapterVersion: defaultCommerceAdapterVersion,
+		approvalPagination:        approvalPaginationRuntime{hardDisabled: true},
+		approvalPaginationMetrics: newApprovalPaginationMetrics(), approvalPresenterReady: approvalPolicyPresenterReady,
 	}
 	if err := repository.Ping(ctx); err != nil {
 		pool.Close()
@@ -66,6 +80,9 @@ func (r *PostgresRepository) userIDByPrincipal(ctx context.Context, principal id
 	return userID, err
 }
 func (r *PostgresRepository) Close() {
+	if r.approvalWriterPool != nil && r.approvalWriterPool != r.pool {
+		r.approvalWriterPool.Close()
+	}
 	if r.pool != nil {
 		r.pool.Close()
 	}
@@ -82,7 +99,7 @@ func (r *PostgresRepository) Bootstrap(ctx context.Context, principal identity.P
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
 		return Me{}, false, err
 	}
-	user, err := loadUserByIdentity(ctx, tx, principal)
+	user, err := loadUserByIdentity(ctx, tx, principal, r.commerceProviderID)
 	created := false
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
@@ -228,7 +245,7 @@ func (r *PostgresRepository) GetMe(ctx context.Context, principal identity.Princ
 	var me Me
 	var organizationID *uuid.UUID
 	err := r.pool.QueryRow(ctx, `
-SELECT u.id, u.user_code, u.status, u.username, u.display_name, u.mobile_e164, u.mobile_verified_at IS NOT NULL,
+SELECT u.id, u.user_code, u.status, u.username, u.display_name, u.mobile_e164, u.mobile_verified_at IS NOT NULL,COALESCE(cm.status,'NOT_CONFIGURED'),
        context.context_type, context.organization_id,
        u.membership_version,context.context_version,
        COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN context.organization_id IS NULL THEN 'PERSONAL' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(context.organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
@@ -261,8 +278,9 @@ FROM identities i
 JOIN users u ON u.id = i.user_id
 JOIN user_sessions s ON s.user_id = u.id AND s.issuer = i.issuer AND s.session_id = $3
 JOIN user_active_contexts context ON context.user_id=u.id
-WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
-		&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified,
+LEFT JOIN commerce_customer_mappings cm ON cm.subject_type='USER' AND cm.subject_id=u.id AND cm.provider_id=$4
+WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, principal.SessionID, r.commerceProviderID).Scan(
+		&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.CommerceCustomerStatus,
 		&me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion,
 		&me.ActiveContext.ContextVersion, &me.ActiveContext.AuthorizationVersion,
 		&me.ActiveContext.PersonalAuthorizationVersion, &me.ActiveContext.PlatformAuthorizationVersion,
@@ -373,9 +391,9 @@ func normalizeActiveScopeAuthorization(resolved *AuthorizationContext) {
 	resolved.Permissions = append([]string(nil), resolved.PersonalPermissions...)
 }
 
-func loadUserByIdentity(ctx context.Context, tx pgx.Tx, principal identity.Principal) (Me, error) {
+func loadUserByIdentity(ctx context.Context, tx pgx.Tx, principal identity.Principal, providerID string) (Me, error) {
 	var me Me
-	err := tx.QueryRow(ctx, `SELECT u.id,u.user_code,u.status,u.username,u.display_name,u.mobile_e164,u.mobile_verified_at IS NOT NULL,u.membership_version FROM identities i JOIN users u ON u.id=i.user_id WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject).Scan(&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.ActiveContext.MembershipVersion)
+	err := tx.QueryRow(ctx, `SELECT u.id,u.user_code,u.status,u.username,u.display_name,u.mobile_e164,u.mobile_verified_at IS NOT NULL,COALESCE((SELECT cm.status FROM commerce_customer_mappings cm WHERE cm.subject_type='USER' AND cm.subject_id=u.id AND cm.provider_id=$3),'NOT_CONFIGURED'),u.membership_version FROM identities i JOIN users u ON u.id=i.user_id WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject, providerID).Scan(&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.CommerceCustomerStatus, &me.ActiveContext.MembershipVersion)
 	me.ActiveContext.Type = "PERSONAL"
 	me.UserCode = FormatUserCode(me.UserCode)
 	me.ActiveContext.ContextVersion = me.ActiveContext.MembershipVersion
@@ -431,4 +449,9 @@ func mapConstraintError(err error) error {
 		return ErrConflict
 	}
 	return err
+}
+
+func (r *PostgresRepository) WithApprovalProofSource(source ApprovalProofSource) *PostgresRepository {
+	r.approvalProofSource = source
+	return r
 }

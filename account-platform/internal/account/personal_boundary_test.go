@@ -98,14 +98,21 @@ func TestPersonalHandlerRejectsInvalidBodiesWithoutMutation(t *testing.T) {
 		{http.MethodDelete, "/admin/v1/users/" + id},
 		{http.MethodPost, "/v1/me/account-closure-requests"},
 		{http.MethodGet, "/v1/me/organizations"},
-		{http.MethodGet, "/v1/me/commerce-customer-mapping"},
-		{http.MethodGet, "/admin/v1/approval-requests"},
 		{http.MethodGet, "/admin/v1/registration-bonus-policy"},
 	} {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest(item.method, item.path, nil))
 		if w.Code != http.StatusNotFound {
 			t.Fatalf("future route became reachable: %s", item.path)
+		}
+	}
+	// F02 activates this read endpoint. Its addition must preserve the
+	// authentication boundary rather than the earlier wave's absent-route check.
+	for _, path := range []string{"/v1/me/commerce-customer-mapping", "/admin/v1/approval-requests"} {
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("activated route accepted an unauthenticated request: %s status=%d", path, w.Code)
 		}
 	}
 }

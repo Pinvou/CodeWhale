@@ -1562,11 +1562,19 @@ fn prepare_request(
     if method == Method::GET && input.body.is_some() {
         return Err("account_platform_request_invalid: GET body is not allowed".to_string());
     }
-    if input.idempotency_key.is_some() {
-        return Err(
-            "account_platform_request_denied: idempotency key is not allowed for this route"
-                .to_string(),
-        );
+    let creates_order =
+        input.area == "token" && method == Method::POST && parsed.path() == "/v1/recharge/orders";
+    match &input.idempotency_key {
+        Some(key)
+            if creates_order
+                && (16..=128).contains(&key.len())
+                && key.bytes().all(|c| c.is_ascii_graphic()) => {}
+        None if !creates_order => {}
+        _ => {
+            return Err(
+                "account_platform_request_denied: invalid idempotency key for route".to_string(),
+            );
+        }
     }
     if let Some(body) = &input.body {
         let size = serde_json::to_vec(body)
@@ -1584,15 +1592,47 @@ fn prepare_request(
         method,
         url,
         body: input.body,
-        idempotency_key: None,
+        idempotency_key: input.idempotency_key,
     })
 }
 
 fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -> bool {
     if area == "token" {
-        return *method == Method::GET
-            && path == "/v1/me/balance"
-            && matches!(query, None | Some("consistency=strong"));
+        if path == "/v1/me/balance" {
+            return *method == Method::GET && matches!(query, None | Some("consistency=strong"));
+        }
+        if query.is_some() {
+            return false;
+        }
+        if *method == Method::GET
+            && matches!(
+                path,
+                "/v1/recharge/products"
+                    | "/v1/payment-capabilities"
+                    | "/v1/recharge/orders"
+                    | "/v1/recharge/orders/recent"
+                    | "/v1/me/entitlement-packages"
+            )
+        {
+            return true;
+        }
+        if *method == Method::POST && path == "/v1/recharge/orders" {
+            return true;
+        }
+        let parts: Vec<_> = path.split('/').collect();
+        return match parts.as_slice() {
+            ["", "v1", "recharge", "orders", id] if *method == Method::GET => {
+                uuid::Uuid::parse_str(id)
+                    .is_ok_and(|value| !value.is_nil() && value.to_string() == *id)
+            }
+            ["", "v1", "recharge", "orders", id, action]
+                if *method == Method::POST && matches!(*action, "close" | "payment-claims") =>
+            {
+                uuid::Uuid::parse_str(id)
+                    .is_ok_and(|value| !value.is_nil() && value.to_string() == *id)
+            }
+            _ => false,
+        };
     }
     if area != "account" || query.is_some() {
         return false;
@@ -1676,7 +1716,12 @@ fn parse_retry_after_seconds(value: &str, now: chrono::DateTime<chrono::Utc>) ->
 }
 
 async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, String> {
-    let balance_response = response.url().path().ends_with("/v1/me/balance");
+    let balance_response = response.url().path().ends_with("/v1/me/balance")
+        || response.url().path().contains("/v1/recharge/")
+        || response
+            .url()
+            .path()
+            .ends_with("/v1/me/entitlement-packages");
     let status = response.status().as_u16();
     let retry_after_seconds = response
         .headers()
@@ -2187,6 +2232,7 @@ mod tests {
             ("account", "POST", "/v1/me/profile-change-requests"),
             ("account", "POST", "/v1/auth/captcha/challenges"),
             ("token", "GET", "/v1/me/balance?consistency=strong"),
+            ("token", "GET", "/v1/recharge/products"),
         ] {
             assert!(
                 prepare_request(
@@ -2206,7 +2252,7 @@ mod tests {
             "https://evil.example/v1/me/balance",
             "/v1/me/balance?consistency=eventual",
             "/v1/models",
-            "/v1/recharge/products",
+            "/v1/recharge/products?future=true",
             "/v1/chat/completions",
             "/v1/me/usage-requests",
             "/metrics",
@@ -2246,6 +2292,43 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn finance_order_create_retains_key_and_denies_unscoped_mutations() {
+        let request = |resource: &str, key: Option<&str>| ApiRequest {
+            area: "token".into(),
+            resource: resource.into(),
+            method: "POST".into(),
+            body: Some(serde_json::json!({"product_id":"personal-base","channel":"ALIPAY"})),
+            idempotency_key: key.map(str::to_owned),
+        };
+        let key = "recharge-11111111-1111-4111-8111-111111111111";
+        let prepared =
+            prepare_request(&config(), request("/v1/recharge/orders", Some(key))).unwrap();
+        assert_eq!(prepared.idempotency_key.as_deref(), Some(key));
+        assert_eq!(prepared.body.unwrap()["product_id"], "personal-base");
+        for invalid in [None, Some("short"), Some("control key with spaces")] {
+            assert!(prepare_request(&config(), request("/v1/recharge/orders", invalid)).is_err());
+        }
+        for resource in [
+            "/v1/recharge/orders/11111111-1111-4111-8111-111111111111/refunds",
+            "/v1/recharge/orders/11111111-1111-4111-8111-111111111111/sync",
+            "/v1/recharge/orders/00000000-0000-0000-0000-000000000000/close",
+            "/v1/recharge/orders/AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA/close",
+        ] {
+            assert!(prepare_request(&config(), request(resource, None)).is_err());
+        }
+        assert!(
+            prepare_request(
+                &config(),
+                request(
+                    "/v1/recharge/orders/11111111-1111-4111-8111-111111111111/close",
+                    Some(key)
+                )
+            )
+            .is_err()
+        );
     }
 
     #[test]

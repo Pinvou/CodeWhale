@@ -223,7 +223,7 @@ if ARGV[1] ~= '' then
   redis.call('SET', 'portal:logout:' .. old_root, '1', 'PX', marker_ttl)
   local members = redis.call('SMEMBERS', 'portal:lineage-members:' .. old_root)
   for _, member in ipairs(members) do
-    redis.call('DEL', 'portal:session:' .. member)
+    redis.call('DEL', 'portal:session:' .. member, 'portal:approval-wire:' .. member)
   end
   redis.call('DEL', 'portal:lineage-members:' .. old_root)
 end
@@ -262,7 +262,7 @@ func (s *RedisStore) ResolveSessionLineageRoot(ctx context.Context, id string) (
 }
 
 func (s *RedisStore) DeleteSession(ctx context.Context, id string) error {
-	return s.client.Del(ctx, "portal:session:"+id).Err()
+	return s.client.Del(ctx, "portal:session:"+id, approvalWireKey(id)).Err()
 }
 
 // LogoutSession is idempotent: it leaves a tombstone even when the session was
@@ -281,11 +281,11 @@ local marker_ttl = math.max(tonumber(ARGV[1]), redis.call('PTTL', 'portal:logout
 redis.call('SET', 'portal:logout:' .. root, '1', 'PX', marker_ttl)
 local members = redis.call('SMEMBERS', 'portal:lineage-members:' .. root)
 for _, member in ipairs(members) do
-  redis.call('DEL', 'portal:session:' .. member)
+  redis.call('DEL', 'portal:session:' .. member, 'portal:approval-wire:' .. member)
 end
-redis.call('DEL', 'portal:lineage-members:' .. root, KEYS[2])
+redis.call('DEL', 'portal:lineage-members:' .. root, KEYS[2], KEYS[3])
 return 1
-`, []string{sessionRootKey(id), sessionKey(id)}, ttl.Milliseconds(), rootHint, id).Err()
+`, []string{sessionRootKey(id), sessionKey(id), approvalWireKey(id)}, ttl.Milliseconds(), rootHint, id).Err()
 }
 
 func (s *RedisStore) Ping(ctx context.Context) error { return s.client.Ping(ctx).Err() }

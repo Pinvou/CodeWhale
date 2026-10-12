@@ -47,6 +47,20 @@ func TestLoggerCollapsesUnknownDynamicMessages(t *testing.T) {
 	}
 }
 
+func TestRecoverySummaryRetainsCountsWithoutRecoverySecrets(t *testing.T) {
+	var output bytes.Buffer
+	NewLogger(&output, Config{Service: "account-approval-recovery", Environment: "test"}).Info("approval recovery pass",
+		"candidates", 2, "confirmed", 1, "pending", 1, "unavailable", 0, "invalidated", 0, "more_candidates", true,
+		"lease_token", "secret-recovery-marker", "idempotency_key", "secret-recovery-marker", "evidence", "secret-recovery-marker")
+	var entry map[string]any
+	if err := json.Unmarshal(output.Bytes(), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry["event"] != "approval_recovery_pass" || entry["candidates"] != float64(2) || entry["confirmed"] != float64(1) || entry["pending"] != float64(1) || entry["more_candidates"] != true || strings.Contains(output.String(), "secret-recovery-marker") {
+		t.Fatalf("unsafe or unusable recovery summary: %s", output.String())
+	}
+}
+
 func TestLoggerKeepsRedactedRegistrationConflictEvidence(t *testing.T) {
 	var output bytes.Buffer
 	logger := NewLogger(&output, Config{Service: "account-service", Environment: "test", Version: "dev", Commit: "test"})

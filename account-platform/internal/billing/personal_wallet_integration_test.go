@@ -6,66 +6,36 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"strings"
 	"sync"
 	"testing"
-	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Uses only the installed migration directory, a unique schema, and actual
+// Uses the current guarded migration wrapper, a unique database, and actual
 // PostgreSQL transactions. Balance fixture funding is explicit SQL setup;
 // it is not payment or ledger-posting acceptance.
 func TestPersonalWalletPostgresIntegration(t *testing.T) {
-	raw := os.Getenv("PINVOU_TEST_BILLING_DATABASE_URL")
-	if raw == "" {
-		t.Skip("PINVOU_TEST_BILLING_DATABASE_URL is required for actual PostgreSQL")
-	}
-	ctx, done := context.WithTimeout(context.Background(), 45*time.Second)
-	defer done()
-	control, err := pgx.Connect(ctx, raw)
+	repository, ctx := retainedFinanceRepository(t)
+	pool := repository.pool
+	config := pool.Config().ConnConfig.Copy()
+	config.User = "billing_migrator"
+	config.Password = ""
+	control, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer control.Close(context.Background())
-	schema := "personal_wallet_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	quoted := pgx.Identifier{schema}.Sanitize()
-	if _, err := control.Exec(ctx, "CREATE SCHEMA "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if _, err := control.Exec(cleanup, "DROP SCHEMA "+quoted+" CASCADE"); err != nil {
-			t.Errorf("cleanup own schema: %v", err)
-		}
-	}()
-	if _, err := control.Exec(ctx, "SET search_path TO "+quoted); err != nil {
+	if _, err := control.Exec(ctx, "SET ROLE billing_service"); err != nil {
 		t.Fatal(err)
 	}
 	installed, err := migrations.Load("../../migrations/billing")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.Up(ctx, control, installed); err != nil {
-		t.Fatal(err)
-	}
-	config, err := pgxpool.ParseConfig(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	repository := NewPostgresRepositoryWithPool(pool)
 	owner := uuid.New()
 	wallet, created, err := repository.EnsureWallet(ctx, "PERSONAL", owner)
 	if err != nil || !created || wallet.ID == uuid.Nil || wallet.OwnerID != owner || wallet.OwnerType != "PERSONAL" || wallet.Status != "ACTIVE" || wallet.Version != 1 || wallet.AvailableMicrocredits != 0 {
@@ -147,7 +117,7 @@ func TestPersonalWalletPostgresIntegration(t *testing.T) {
 		if unauthorized.Code != 401 {
 			t.Fatalf("missing service credential status=%d", unauthorized.Code)
 		}
-		for _, path := range []string{"/internal/v1/holds/reserve", "/internal/v1/registration-bonus-grants", "/internal/v1/recharge/orders", "/internal/v1/approval-command-proofs"} {
+		for _, path := range []string{"/internal/v1/holds/reserve", "/internal/v1/registration-bonus-grants", "/internal/v1/model-mappings", "/internal/v1/organizations"} {
 			out := httptest.NewRecorder()
 			handler.ServeHTTP(out, httptest.NewRequest(http.MethodPost, path, nil))
 			if out.Code != 404 {
@@ -156,7 +126,7 @@ func TestPersonalWalletPostgresIntegration(t *testing.T) {
 		}
 	})
 	t.Run("migration-rerun-preserves-wallet", func(t *testing.T) {
-		if err := migrations.Up(ctx, control, installed); err != nil {
+		if err := billingschema.Up(ctx, control, installed); err != nil {
 			t.Fatal(err)
 		}
 		got, err := repository.GetWallet(ctx, wallet.ID)

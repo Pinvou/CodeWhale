@@ -6,7 +6,15 @@ import react from '@vitejs/plugin-react';
 import * as puppeteer from 'puppeteer-core';
 import { createServer } from 'vite';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const chrome = process.env.CHROME || ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'].find(fs.existsSync);
+const chrome = process.env.CHROME || [
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  '/snap/bin/chromium', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+].find(fs.existsSync);
 if (!chrome) throw new Error('No browser available; UI validation not performed');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-f01-ui-'));
 let vite; let browser; let page; let passed = 0;

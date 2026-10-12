@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvaleffect"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/humandelegation"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
@@ -22,6 +24,9 @@ var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomple
 
 type Service struct {
 	repository       Repository
+	humanDelegations *humandelegation.Signer
+	recoveryResults  ApprovalRecoveryResultReader
+	recoveryEffects  approvaleffect.Reader
 	wallets          WalletProvisioner
 	mobileAuth       *MobileAuthService
 	profiles         *ProfileChangeService
@@ -64,6 +69,21 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
 	internal.POST("/authorization/check", serviceauth.Require("internal.authorization.check"), httpserver.AdaptFunc(s.checkPermission))
+	internal.POST("/authorization/human-delegations", serviceauth.Require("internal.authorization.delegate"), httpserver.AdaptFunc(s.createHumanDelegation))
+	internal.GET("/approval-recovery/plan", serviceauth.Require("internal.approval-recovery.plan"), httpserver.AdaptFunc(s.internalApprovalRecoveryPlan))
+	internal.POST("/approval-recovery/confirm", serviceauth.Require("internal.approval-recovery.confirm"), httpserver.AdaptFunc(s.internalConfirmApprovalRecovery))
+	internal.POST("/approval-recovery/zero-effect", serviceauth.Require("internal.approval-recovery.zero-effect"), httpserver.AdaptFunc(s.internalInvalidateApprovalRecoveryZeroEffect))
+	internal.POST("/approval-requests/:approval_request_id/executions", serviceauth.Require("internal.approval-execution.begin"), approvalpolicy.Require("APPROVAL_EXECUTION_BEGIN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.beginApprovalExecution))
+	internal.POST("/approval-requests/:approval_request_id/executions/complete", serviceauth.Require("internal.approval-execution.complete"), approvalpolicy.Require("APPROVAL_EXECUTION_COMPLETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.completeApprovalExecution))
+	internal.GET("/approval-authorization/events/:event_id/route", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.resolveApprovalAuthorizationRoute))
+	internal.GET("/approval-authorization/events/:event_id/binding", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.resolveApprovalAuthorizationBinding))
+	internal.GET("/approval-authorization/events/:event_id/deliveries/:durable", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.approvalAuthorizationDeliveryState))
+	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/observe", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.observeApprovalAuthorizationDelivery))
+	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/attempts/grant", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.grantApprovalAuthorizationDomainAttempt))
+	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/attempts/failure", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.recordApprovalAuthorizationDomainFailure))
+	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/result", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.recordApprovalAuthorizationResult))
+	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/dlq-puback", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.recordApprovalAuthorizationDLQPubAck))
+	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/terminal", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.recordApprovalAuthorizationTerminal))
 	if s.mobileAuth != nil {
 		router.POST("/v1/auth/registration/precheck", httpserver.AdaptFunc(s.precheckMobileRegistration))
 		router.POST("/v1/auth/captcha/challenges", httpserver.AdaptFunc(s.createSliderCaptcha))
@@ -78,6 +98,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify), s.contextVersionHeaders())
 	protected.POST("/v1/account/bootstrap", httpserver.AdaptFunc(s.bootstrap))
+	protected.GET("/v1/me/commerce-customer-mapping", s.requirePermission(PermissionPersonalProfileRead), httpserver.AdaptFunc(s.getCommerceCustomerMapping))
 	protected.GET("/v1/me", s.requirePermission(PermissionPersonalProfileRead), httpserver.AdaptFunc(s.getMe))
 	protected.GET("/v1/me/authorization-context", s.requirePermission(PermissionPersonalProfileRead), httpserver.AdaptFunc(s.getAuthorizationContext))
 	if s.profiles != nil {
@@ -99,6 +120,24 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 		admin.GET("/profile-change-requests", s.requirePermission(PermissionPlatformProfileChangesRepair), httpserver.AdaptFunc(s.adminProfileChanges))
 		admin.POST("/profile-change-requests/:request_id/actions/retry", s.requirePermission(PermissionPlatformProfileChangesRepair), approvalpolicy.Require("ACCOUNT_PROFILE_CHANGE_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryProfileChange))
 	}
+	admin.GET("/approval-policies", httpserver.AdaptFunc(s.adminApprovalPolicies))
+	admin.GET("/approval-requests", httpserver.AdaptFunc(s.adminApprovalRequests))
+	admin.POST("/approval-requests", approvalpolicy.Require("APPROVAL_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateApprovalDraft))
+	admin.GET("/approval-requests/:approval_request_id", httpserver.AdaptFunc(s.adminApprovalRequest))
+	admin.PUT("/approval-requests/:approval_request_id", approvalpolicy.Require("APPROVAL_DRAFT_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateApprovalDraft))
+	admin.POST("/approval-requests/:approval_request_id/actions/submit", approvalpolicy.Require("APPROVAL_REQUEST_SUBMIT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSubmitApprovalRequest))
+	admin.POST("/approval-requests/:approval_request_id/actions/withdraw", approvalpolicy.Require("APPROVAL_REQUEST_WITHDRAW", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminWithdrawApprovalRequest))
+	admin.POST("/approval-requests/:approval_request_id/actions/decide", approvalpolicy.Require("APPROVAL_REQUEST_DECIDE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDecideApprovalRequest))
+	adminV2 := protected.Group("/admin/v2")
+	adminV2.GET("/approval-capability", httpserver.AdaptFunc(s.adminApprovalCapability))
+	adminV2.GET("/approval-directory", httpserver.AdaptFunc(s.adminApprovalDirectory))
+	adminV2.GET("/approval-requests", httpserver.AdaptFunc(s.adminApprovalRequestsV2))
+	adminV2.POST("/approval-requests", approvalpolicy.Require("APPROVAL_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateApprovalDraftV2))
+	adminV2.GET("/approval-requests/:approval_request_id", httpserver.AdaptFunc(s.adminApprovalRequestV2))
+	adminV2.PUT("/approval-requests/:approval_request_id", approvalpolicy.Require("APPROVAL_DRAFT_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateApprovalDraftV2))
+	adminV2.POST("/approval-requests/:approval_request_id/actions/submit", approvalpolicy.Require("APPROVAL_REQUEST_SUBMIT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSubmitApprovalRequestV2))
+	adminV2.POST("/approval-requests/:approval_request_id/actions/withdraw", approvalpolicy.Require("APPROVAL_REQUEST_WITHDRAW", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminWithdrawApprovalRequestV2))
+	adminV2.POST("/approval-requests/:approval_request_id/actions/decide", approvalpolicy.Require("APPROVAL_REQUEST_DECIDE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDecideApprovalRequestV2))
 	return router
 }
 
@@ -161,6 +200,64 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusForbidden, "ADMIN_BOOTSTRAP_PENDING", "the first administrator must complete secure activation"
 	case errors.Is(err, ErrRecentAuthenticationRequired):
 		status, code, message = http.StatusUnauthorized, "RECENT_AUTHENTICATION_REQUIRED", "recent authentication is required"
+	case errors.Is(err, ErrInvalidApprovalInput):
+		status, code, message = http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "the approval request is invalid"
+	case errors.Is(err, ErrApprovalSelfDecision):
+		status, code, message = http.StatusConflict, "APPROVAL_SELF_DECISION_FORBIDDEN", "the requester cannot decide their own approval request"
+	case errors.Is(err, ErrApprovalExpired):
+		status, code, message = http.StatusGone, "APPROVAL_REQUEST_EXPIRED", "the approval request has expired"
+	case errors.Is(err, ErrApprovalInvalidated):
+		status, code, message = http.StatusConflict, "APPROVAL_REQUEST_INVALIDATED", "the approval request no longer matches current policy, authorization, or resource facts"
+	case errors.Is(err, ErrApprovalRequestNotFound):
+		status, code, message = http.StatusNotFound, "APPROVAL_REQUEST_NOT_FOUND", "the approval request was not found"
+	case errors.Is(err, ErrApprovalAuthorizationChanged):
+		status, code, message = http.StatusConflict, "APPROVAL_AUTHORIZATION_CHANGED", "approval authorization changed while the response was being prepared"
+	case errors.Is(err, ErrApprovalSnapshotTimeout):
+		status, code, message = http.StatusGatewayTimeout, "APPROVAL_SNAPSHOT_TIMEOUT", "the authoritative approval snapshot timed out"
+	case errors.Is(err, ErrApprovalSnapshotUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_SNAPSHOT_UNAVAILABLE", "the authoritative approval snapshot is temporarily unavailable"
+	case errors.Is(err, ErrApprovalWriterUnavailable):
+		w.Header().Set("Retry-After", "5")
+		w.Header().Set("Cache-Control", "no-store")
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_WRITER_UNAVAILABLE", "the approval authorization writer is temporarily unavailable"
+	case errors.Is(err, ErrApprovalProofRejected):
+		status, code, message = http.StatusConflict, "APPROVAL_PROOF_REJECTED", "the authoritative domain proof rejected the approval"
+	case errors.Is(err, ErrApprovalProofInvalid):
+		status, code, message = http.StatusBadGateway, "APPROVAL_PROOF_INVALID", "the authoritative domain proof was invalid"
+	case errors.Is(err, ErrApprovalProofTooLarge):
+		status, code, message = http.StatusBadGateway, "APPROVAL_PROOF_TOO_LARGE", "the authoritative domain proof exceeded the size limit"
+	case errors.Is(err, ErrApprovalProofUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_PROOF_UNAVAILABLE", "the authoritative domain proof is temporarily unavailable"
+	case errors.Is(err, ErrApprovalProofTimeout):
+		status, code, message = http.StatusGatewayTimeout, "APPROVAL_PROOF_TIMEOUT", "the authoritative domain proof timed out"
+	case errors.Is(err, ErrApprovalRequestChanged):
+		status, code, message = http.StatusConflict, "APPROVAL_REQUEST_CHANGED", "the approval request changed after the proof checkpoint"
+	case errors.Is(err, ErrApprovalActionControlChanged):
+		status, code, message = http.StatusConflict, "APPROVAL_ACTION_CONTROL_CHANGED", "approval actions changed; reload the approval detail"
+	case errors.Is(err, ErrApprovalRelayFenced):
+		w.Header().Set("Retry-After", "5")
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_RELAY_FENCED", "approval authorization relay is fenced"
+	case errors.Is(err, ErrApprovalQuiescing):
+		w.Header().Set("Retry-After", "5")
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_QUIESCING", "approval authorization is quiescing"
+	case errors.Is(err, ErrApprovalSafeRollback):
+		w.Header().Set("Retry-After", "5")
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_SAFE_ROLLBACK", "approval authorization is in safe rollback"
+	case errors.Is(err, ErrApprovalSnapshotRejected):
+		status, code, message = http.StatusConflict, "APPROVAL_SNAPSHOT_REJECTED", "the authoritative approval snapshot request was rejected"
+	case errors.Is(err, ErrApprovalCommandNotExecutable):
+		status, code, message = http.StatusConflict, "APPROVAL_COMMAND_NOT_EXECUTABLE", "approval command is not executable"
+	case errors.Is(err, ErrBillingGovernanceInactive):
+		status, code, message = http.StatusServiceUnavailable, "BILLING_COMMAND_GOVERNANCE_INACTIVE", "Billing command governance is not active"
+	case errors.Is(err, ErrApprovalConsumerBindingInvalid):
+		status, code, message = http.StatusConflict, "APPROVAL_AUTHORIZATION_BINDING_INVALID", "the approval authorization binding or delivery state is invalid"
+	case errors.Is(err, ErrApprovalConsumerBindingUnavailable):
+		w.Header().Set("Retry-After", "5")
+		w.Header().Set("Cache-Control", "no-store")
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_AUTHORIZATION_UNAVAILABLE", "approval authorization state is temporarily unavailable"
+	case errors.Is(err, ErrBillingGovernanceInactive), errors.Is(err, ErrBillingGovernanceUnavailable):
+		w.Header().Set("Cache-Control", "no-store")
+		status, code, message = http.StatusServiceUnavailable, "BILLING_COMMAND_GOVERNANCE_UNAVAILABLE", "Billing command governance is unavailable"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }
@@ -234,4 +331,36 @@ func (p *HTTPWalletProvisioner) EnsurePersonalWallet(ctx context.Context, userID
 		return ErrWalletProvisioning
 	}
 	return nil
+}
+
+func (s *Service) WithHumanDelegations(signer *humandelegation.Signer) *Service {
+	s.humanDelegations = signer
+	return s
+}
+
+func (s *Service) WithApprovalRecoveryResults(reader ApprovalRecoveryResultReader) *Service {
+	s.recoveryResults = reader
+	return s
+}
+
+func (s *Service) WithApprovalRecoveryEffects(reader approvaleffect.Reader) *Service {
+	s.recoveryEffects = reader
+	return s
+}
+
+func (s *Service) getCommerceCustomerMapping(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.repository.(interface {
+		GetCommerceCustomerMapping(context.Context, identity.Principal) (CommerceCustomerMapping, error)
+	})
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "COMMERCE_MAPPING_UNAVAILABLE", "commerce mapping is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	mapping, err := repository.GetCommerceCustomerMapping(r.Context(), mustPrincipal(r.Context()))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, mapping)
 }

@@ -1,11 +1,15 @@
 package account
 
-// Only permissions whose complete runtime feature is delivered by F01 can be
+// Only permissions whose complete runtime feature is installed can be
 // advertised or authorized. Later immutable storage seeds confer no authority.
 func f01PermissionAllowed(permission string) bool {
 	switch permission {
 	case PermissionPersonalSessionLogin, PermissionPersonalProfileRead, PermissionPersonalProfileUpdate, PermissionPersonalSecurityManage, PermissionPersonalBillingRead,
 		PermissionPlatformUsersRead, PermissionPlatformUsersStatusManage, PermissionPlatformRegistrationsRepair, PermissionPlatformProfileChangesRepair, PermissionPlatformSMSConfigRead, PermissionPlatformSMSConfigManage:
+		return true
+	case "personal.recharge.create", "personal.recharge.manage":
+		return true
+	case "platform.billing.adjustments.approve", "platform.billing.ledger.read", "platform.billing.orders.sync", "platform.billing.payment-controls.resume.approve", "platform.billing.payment-controls.resume.request", "platform.billing.repairs.approve", "platform.billing.repairs.request", "platform.billing.wallets.read", "platform.products.create", "platform.products.delete", "platform.products.publish", "platform.products.read", "platform.products.unpublish":
 		return true
 	}
 	return false
