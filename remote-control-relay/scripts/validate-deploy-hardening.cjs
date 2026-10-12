@@ -1,20 +1,49 @@
 // Deployment inputs are private operator configuration, never logged or inferred.
-const { lstatSync, readFileSync } = require('node:fs');
-const { resolve, dirname } = require('node:path');
+const { lstatSync, readFileSync, readlinkSync, realpathSync } = require('node:fs');
+const { resolve, dirname, posix } = require('node:path');
+
+// Darwin's OS-owned temporary roots are aliases, not operator-selected links.
+// Do not canonicalize arbitrary input paths: that would hide user symlinks.
+function isTrustedSystemAlias(path, platform, linkTarget, canonicalPath) {
+  const expected = path === '/tmp' ? '/private/tmp' : path === '/var' ? '/private/var' : null;
+  return platform === 'darwin' && expected !== null
+    && posix.resolve(posix.dirname(path), linkTarget) === expected
+    && canonicalPath === expected;
+}
+
+function assertPlainAncestors(path) {
+  for (let current = path; ; current = dirname(current)) {
+    if (lstatSync(current).isSymbolicLink()) throw new Error();
+    if (dirname(current) === current) break;
+  }
+}
+
+function validateInputPath(input) {
+  const path = resolve(input);
+  if (!lstatSync(path).isFile()) throw new Error();
+  for (let current = path; ; current = dirname(current)) {
+    const stat = lstatSync(current);
+    if (stat.isSymbolicLink()) {
+      const canonical = realpathSync(current);
+      if (stat.uid !== 0 || !isTrustedSystemAlias(current, process.platform, readlinkSync(current), canonical)) {
+        throw new Error();
+      }
+      // The fixed /private target and every ancestor must also be plain.
+      assertPlainAncestors(canonical);
+    }
+    if (dirname(current) === current) break;
+  }
+  return path;
+}
 
 const limits = {
   MAX_ROOMS: 2000, ROOM_CREATE_LIMIT: 20, ROOM_CREATE_WINDOW_MS: 60000,
   MAX_PAYLOAD_BYTES: 4194304, MAX_WS_CONNECTIONS: 5000,
   WS_CONNECT_LIMIT: 120, WS_CONNECT_WINDOW_MS: 60000, WS_AUTH_TIMEOUT_MS: 10000,
 };
-try {
-  if (!process.argv[2]) throw new Error();
-  const path = resolve(process.argv[2]);
-  if (!lstatSync(path).isFile()) throw new Error();
-  for (let current = path; ; current = dirname(current)) {
-    if (lstatSync(current).isSymbolicLink()) throw new Error();
-    if (dirname(current) === current) break;
-  }
+function validateConfiguration(input) {
+  if (!input) throw new Error();
+  const path = validateInputPath(input);
   const entries = new Map();
   let section = false;
   for (const raw of readFileSync(path, 'utf8').split(/\r?\n/)) {
@@ -34,7 +63,14 @@ try {
     // Rate windows are not quantity caps: shrinking them weakens protection.
     if (name.endsWith('_WINDOW_MS') && Number(value) !== limit) throw new Error();
   }
-} catch {
-  console.error('deploy_hardening_configuration_invalid');
-  process.exitCode = 64;
+}
+
+module.exports = { isTrustedSystemAlias };
+if (require.main === module) {
+  try {
+    validateConfiguration(process.argv[2]);
+  } catch {
+    console.error('deploy_hardening_configuration_invalid');
+    process.exitCode = 64;
+  }
 }
