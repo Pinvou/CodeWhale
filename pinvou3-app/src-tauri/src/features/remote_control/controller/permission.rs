@@ -376,6 +376,15 @@ impl PermissionAuthority {
         (self.clock)()
     }
 
+    /// Attach after the existing task-retirement sink. Task cleanup fences
+    /// late producers first; this also covers pending entries without a task.
+    pub(crate) fn register_controlled_cleanup(
+        self: &Arc<Self>,
+        manager: &super::controlled::ControlledDeviceManager,
+    ) {
+        manager.register_cleanup_sink(self.clone());
+    }
+
     #[cfg(test)]
     pub(crate) fn with_clock(clock: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
         Self {
@@ -594,6 +603,14 @@ impl PermissionAuthority {
         )
     }
 
+    fn deny_all_for_generation(&self, generation: &str, reason: &str, now_b: u64) -> usize {
+        self.deny_where(
+            |entry| entry.binding.remote_control_generation == generation,
+            reason,
+            now_b,
+        )
+    }
+
     pub(crate) fn sweep_expired(&self, now_b: u64) -> usize {
         let mut pending = self.pending.lock();
         let latencies = Self::compact(&mut pending, now_b);
@@ -777,6 +794,14 @@ fn looks_like_path(value: &str) -> bool {
     }
     let separators = value.matches(['\\', '/']).count();
     separators >= 2 || (separators == 1 && (value.starts_with('/') || value.contains('\\')))
+}
+
+impl super::controlled::ControlledCleanupSink for PermissionAuthority {
+    fn cleanup(&self, generation: &str, scope: super::controlled::ControlledCleanupScope) {
+        if scope.pending_permissions {
+            self.deny_all_for_generation(generation, "remote_control_stopped", self.now_ms());
+        }
+    }
 }
 
 fn bounded_reason(reason: &str) -> String {

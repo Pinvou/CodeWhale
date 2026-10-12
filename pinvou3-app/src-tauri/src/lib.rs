@@ -1297,6 +1297,9 @@ pub fn run() {
                         let temporary_models = commands::desktop_remote_model::shared_model_store();
                         handle.manage(temporary_models.clone());
                         let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
+                        permission_authority.register_controlled_cleanup(
+                            &handle.state::<ControlledDeviceManager>(),
+                        );
                         let permission_telemetry_app = handle.clone();
                         permission_authority.set_telemetry_sink(std::sync::Arc::new(move |metric| {
                             use features::behavior_telemetry::{

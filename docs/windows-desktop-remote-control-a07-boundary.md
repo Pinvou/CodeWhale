@@ -123,3 +123,12 @@ Windows 的 `http://tauri.localhost`。Tauri 在 Linux/macOS 的本地协议是
 `tauri://localhost`；固定 HTTP 来源会先被远端 ACL 拒绝，使测试未抵达命令提取器。
 保留完整错误码和真实 manager 断言，不放宽 ACL、不跳过非 Windows 测试。
 本地 Windows 回执不能代替 Linux/macOS CI 的实际执行结果。
+
+## #1391 权限审批的终端代际清理
+
+连接进入停止、可信远端断开或 watchdog 终端失效时，权限 authority 按请求创建时捕获的
+`remote_control_generation` 拒绝尚未派发的审批。清理不依赖请求已进入任务服务，
+也不按连接 ID 清空替换代际；任务清理先关闭原有执行资源 gate，权限清理随后收口。
+合法的 `Reconnecting` 恢复窗口不触发该终端清理，已经派发的审批与业务历史保持原样。
+本点不重新开放已退役的 renderer 审批入口，不处理模型包、上传或其他材料清理；
+这些职责及 #1391 的其余问题点仍须独立验收。

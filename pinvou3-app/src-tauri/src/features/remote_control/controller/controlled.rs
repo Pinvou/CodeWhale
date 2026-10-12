@@ -2660,6 +2660,176 @@ mod tests {
         }
     }
 
+    fn pending_permission_for_test(
+        authority: &super::super::permission::PermissionAuthority,
+        context: &LeaseContext,
+        task_id: &str,
+    ) -> String {
+        authority
+            .request(
+                context,
+                task_id,
+                super::super::permission::PermissionRequest {
+                    operation_type: "file_write".into(),
+                    risk_level: "medium".into(),
+                    target_scope: "workspace/report.md".into(),
+                    preview: "write report".into(),
+                    expires_at_ms: 60_000,
+                },
+                1_000,
+            )
+            .unwrap()
+            .permission_request_id
+    }
+
+    #[test]
+    fn retirement_denies_pre_admission_permissions_but_keeps_resume_and_dispatch_history() {
+        use super::super::permission::{
+            DecisionAuthority, PermissionAuthority, PermissionDecision,
+        };
+        for terminal in ["stop", "remote_disconnect", "watchdog"] {
+            let manager = ControlledDeviceManager::default();
+            let authority = Arc::new(PermissionAuthority::with_clock(Arc::new(|| 1_000)));
+            authority.register_controlled_cleanup(&manager);
+            let operation = manager.start(None, Vec::new()).unwrap();
+            register(&manager, &operation);
+            enter_handshake(&manager, &operation);
+            manager
+                .complete_connected(operation.clone(), lease(operation.generation()))
+                .unwrap();
+            let context = manager.live_lease().unwrap();
+            // No task service admission exists for this pending record.
+            let pending = pending_permission_for_test(&authority, &context, "pre-admission-task");
+            let mut other = context.clone();
+            other.remote_control_generation.push_str("-other");
+            let unrelated = pending_permission_for_test(&authority, &other, "other-task");
+            let committed = pending_permission_for_test(&authority, &context, "committed-task");
+            let awaiting =
+                pending_permission_for_test(&authority, &context, "awaiting-dispatch-task");
+            authority
+                .decide(
+                    DecisionAuthority::ControllerA,
+                    &context,
+                    "awaiting-dispatch-task",
+                    &awaiting,
+                    PermissionDecision::Allow,
+                    1_000,
+                )
+                .unwrap();
+            authority
+                .decide(
+                    DecisionAuthority::ControllerA,
+                    &context,
+                    "committed-task",
+                    &committed,
+                    PermissionDecision::Allow,
+                    1_000,
+                )
+                .unwrap();
+            authority.commit_dispatch(&committed, 1_000).unwrap();
+            let committed_before =
+                serde_json::to_value(authority.view(&committed).unwrap()).unwrap();
+            manager.mark_transport_disconnected(4_000);
+            assert_eq!(authority.view(&pending).unwrap().state, "pending");
+            match terminal {
+                "stop" => {
+                    manager.stop();
+                }
+                "remote_disconnect" => {
+                    manager
+                        .accept_remote_disconnect_for(&operation, &context)
+                        .unwrap();
+                }
+                _ => {
+                    let deadline = manager.watchdog_deadline_for_test().unwrap();
+                    let status = manager.poll_watchdog(deadline).unwrap();
+                    assert_eq!(status.status, ControlledStatusKind::Error);
+                    assert_eq!(
+                        status.error_code.as_deref(),
+                        Some("desktop_remote_watchdog_expired")
+                    );
+                }
+            }
+            assert_eq!(
+                authority.view(&pending).unwrap().state,
+                "denied",
+                "{terminal}"
+            );
+            assert_eq!(authority.view(&unrelated).unwrap().state, "pending");
+            assert_eq!(authority.view(&awaiting).unwrap().state, "denied");
+            assert_eq!(
+                serde_json::to_value(authority.view(&committed).unwrap()).unwrap(),
+                committed_before
+            );
+            manager.stop();
+            assert_eq!(authority.view(&pending).unwrap().state, "denied");
+        }
+    }
+
+    #[test]
+    fn delayed_permission_retirement_keeps_a_successor_with_reused_connection_fields() {
+        use super::super::permission::PermissionAuthority;
+        struct PausedCleanup {
+            old: String,
+            entered: std::sync::mpsc::Sender<()>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl ControlledCleanupSink for PausedCleanup {
+            fn cleanup(&self, generation: &str, _: ControlledCleanupScope) {
+                if generation == self.old {
+                    self.entered.send(()).unwrap();
+                    self.release
+                        .lock()
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                }
+            }
+        }
+        let manager = Arc::new(ControlledDeviceManager::default());
+        let old = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &old);
+        enter_handshake(&manager, &old);
+        manager
+            .complete_connected(old.clone(), lease(old.generation()))
+            .unwrap();
+        let context = manager.live_lease().unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        manager.register_cleanup_sink(Arc::new(PausedCleanup {
+            old: old.generation().into(),
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        }));
+        let authority = Arc::new(PermissionAuthority::with_clock(Arc::new(|| 1_000)));
+        authority.register_controlled_cleanup(&manager);
+        let pending = pending_permission_for_test(&authority, &context, "old-unadmitted-task");
+        let retiring = manager.clone();
+        let thread =
+            std::thread::spawn(move || retiring.accept_remote_disconnect_for(&old, &context));
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let successor = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &successor);
+        enter_handshake(&manager, &successor);
+        manager
+            .complete_connected(successor.clone(), lease(successor.generation()))
+            .unwrap();
+        let fresh = pending_permission_for_test(
+            &authority,
+            &manager.live_lease().unwrap(),
+            "new-unadmitted-task",
+        );
+        release_tx.send(()).unwrap();
+        thread.join().unwrap().unwrap();
+        assert_eq!(authority.view(&pending).unwrap().state, "denied");
+        assert_eq!(authority.view(&fresh).unwrap().state, "pending");
+        assert_eq!(
+            manager.current_generation().as_deref(),
+            Some(successor.generation())
+        );
+    }
+
     #[test]
     fn watchdog_blackhole_reconnects_then_fails_locally_without_relay() {
         let cleanup = Arc::new(CleanupCounter::default());
