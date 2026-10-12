@@ -166,6 +166,80 @@ mod tests {
         assert!(bank.seal(&record("competing")).is_err());
         assert_eq!(bank.read_anchor().unwrap().unwrap().committed_count, 0);
     }
+
+    #[test]
+    fn two_bank_instances_recheck_duplicate_seal_before_writing_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = bank(temp.path());
+        let second = bank(temp.path());
+        let record = record("race");
+        // Both callers saw an active identity before either seals it.
+        assert!(!first.contains(&record.local_session_id).unwrap());
+        assert!(!second.contains(&record.local_session_id).unwrap());
+        first.seal(&record).unwrap();
+        let before = std::fs::read(first.anchor_path()).unwrap();
+        second.seal(&record).unwrap();
+        assert_eq!(std::fs::read(first.anchor_path()).unwrap(), before);
+        assert_eq!(second.list(None).unwrap().len(), 1);
+        assert!(second.read_anchor().unwrap().unwrap().pending.is_none());
+        assert!(second.require_present().is_ok());
+        assert!(
+            second
+                .require_active_records(std::iter::once(&record))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn seal_identity_and_replay_conflicts_do_not_poison_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let bank = bank(temp.path());
+        let sealed = record("sealed");
+        bank.seal(&sealed).unwrap();
+        bank.hide(&sealed.local_session_id).unwrap();
+        let before = std::fs::read(bank.anchor_path()).unwrap();
+        let mut changed = sealed.clone();
+        changed.ui.title = "Different".into();
+        let mut same_ref = record("other-ref");
+        same_ref.remote_session_ref = sealed.remote_session_ref.clone();
+        let mut same_client = record("other-client");
+        same_client.retired_requests[0].client_request_id =
+            sealed.retired_requests[0].client_request_id.clone();
+        let mut same_task = record("other-task");
+        same_task.retired_requests[0].task_id = sealed.retired_requests[0].task_id.clone();
+        for conflict in [changed, same_ref, same_client, same_task] {
+            assert!(bank.seal(&conflict).is_err());
+            assert_eq!(std::fs::read(bank.anchor_path()).unwrap(), before);
+            bank.require_present().unwrap();
+            assert!(bank.read_anchor().unwrap().unwrap().pending.is_none());
+        }
+        bank.seal(&sealed).unwrap(); // hide never changes immutable record bytes
+        assert_eq!(std::fs::read(bank.anchor_path()).unwrap(), before);
+        assert!(
+            bank.read(&sealed.local_session_id)
+                .unwrap()
+                .unwrap()
+                .ui
+                .hidden
+        );
+        bank.seal(&record("new-valid")).unwrap();
+        assert_eq!(bank.read_anchor().unwrap().unwrap().committed_count, 2);
+    }
+
+    #[test]
+    fn duplicate_seal_never_accepts_missing_committed_tombstones() {
+        let temp = tempfile::tempdir().unwrap();
+        let bank = bank(temp.path());
+        let record = record("missing-id");
+        bank.seal(&record).unwrap();
+        let before = std::fs::read(bank.anchor_path()).unwrap();
+        let db = Connection::open(&bank.path).unwrap();
+        db.execute("DELETE FROM retired_ids", []).unwrap();
+        drop(db);
+        assert!(bank.seal(&record).is_err());
+        assert_eq!(std::fs::read(bank.anchor_path()).unwrap(), before);
+        assert!(bank.read_anchor().unwrap().unwrap().pending.is_none());
+    }
 }
 
 /// Independent of the active JSON byte budget. A durable pending intent is an
@@ -299,6 +373,10 @@ impl ArchiveStore {
         {
             bail!("remote_proxy_archive_unavailable");
         }
+        Self::verify_retired_ids(db, record)
+    }
+
+    fn verify_retired_ids(db: &Connection, record: &RemoteProxyRecord) -> Result<()> {
         let count: i64 = db.query_row(
             "SELECT count(*) FROM retired_ids WHERE local_id=?1",
             [&record.local_session_id],
@@ -513,7 +591,49 @@ impl ArchiveStore {
         if bytes.len() > MAX_REMOTE_PROXY_FILE_BYTES {
             bail!("remote_proxy_byte_budget");
         }
-        self.with_connection(true, |_| {
+        self.with_connection(true, |db| {
+            // The caller's earlier contains() is not authority across processes.
+            // Check both identity and replay domains under this same fd-lock,
+            // before writing an irreversible pending intent. A deterministic
+            // UNIQUE conflict must never poison the recovery journal.
+            let existing: Option<Vec<u8>> = db
+                .query_row(
+                    "SELECT record FROM archives WHERE local_id=?1",
+                    [&record.local_session_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                if existing != bytes {
+                    bail!("remote_proxy_archive_conflict");
+                }
+                Self::verify_retired_ids(db, record)?;
+                return Ok(());
+            }
+            let ref_exists = db
+                .query_row(
+                    "SELECT 1 FROM archives WHERE remote_ref=?1",
+                    [&record.remote_session_ref],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if ref_exists {
+                bail!("remote_proxy_archive_conflict");
+            }
+            for retired in &record.retired_requests {
+                let reused = db
+                    .query_row(
+                        "SELECT 1 FROM retired_ids WHERE client_id=?1 OR task_id=?2 LIMIT 1",
+                        params![retired.client_request_id, retired.task_id],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if reused {
+                    bail!("remote_proxy_archive_conflict");
+                }
+            }
             let mut anchor = self
                 .read_anchor()?
                 .ok_or_else(|| anyhow::anyhow!("missing archive anchor"))?;
