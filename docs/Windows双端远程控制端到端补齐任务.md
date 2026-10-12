@@ -552,7 +552,33 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
   所有值仍是协议枚举名，不含文案、连接码或凭据。
 - **验证**：`cargo test remote_control::` **331 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
 
-### 13.10 当前非阻塞跟进（不算已完成）
+### 13.10 设置页：桌面远程控制迁入独立二级页面（历史 UX 调整）
+
+> 本节保留当时迁移和验证记录，旧侧栏入口、95/7 等计数不是当前验收。当前 A/B 入口已统一到「通用 → 桌面远程控制」的角色分区，B 端不展示端点切换；当前语义与实际验证以生产代码及对应 PR 固定 head 为准。
+
+- **背景**：被控端面板（`ControlledDevicePanel`，含连接码、服务端点切换、工作区授权、只读提示）原先内联在
+  「通用」分区，与外观/通知/语音等常规偏好混排。
+- **改动**：被控端面板整块迁入「通用 → 桌面远程控制」的**二级菜单**（口径与「帮助反馈 → 行为分析」一致：
+  入口行 + 子页 + 返回按钮；子页 id `remote`，不占侧栏顶级项）。三语文案：中文「桌面远程控制」、
+  English「Desktop Remote Control」、日本語「デスクトップ遠隔操作」（中文命名依次经历
+  「双端控制」→「远程控制」→「桌面远程控制」，日文与既有「モバイル遠隔操作」成对）。
+  能力为假（Web 端 allowlist 关闭）时连入口行一起隐藏，避免出现点开即空的分区。
+- **边界（登记）**：本次只做「迁移」，不新增 A 端（控制端）入口——A 端连接入口仍在主界面侧边栏，
+  与设置页解耦；未来若需要从设置页发起连接，需要把主窗口回调下沉为 props。
+- **验证**：`node tests/settings_ui_smoke.js` **ALL 95 PASS**（新增 ①h：独立页面可打开、面板在其中、通用页不再包含面板）；
+  `node --test tests/controlled_device_panel_contract.test.mjs` 7 通过（新增「专属二级页面」契约）；
+  `node --test tests/ui_language_coverage.test.mjs` 通过；`npm run build:ui` 通过；`npm run lint:ui` 0 error；
+  `python scripts/architecture-guard.py` 通过。
+
+### 13.11 启动与注册失败的代际隔离复核（2026-10-07）
+
+- 启动入口直接保留 `desktop_remote_controlled.rs` 的 `desktop_remote_controlled_start()` 中 `manager.start` 返回的 operation，
+  不在另一把锁下重新读取当前代。并发停止并重启后，旧命令的失败只能按原 operation 被拒绝，不覆盖新代。
+- `relay_runtime.rs` 的 `finish_controlled_registration()` 仅让成功注册进入服务循环；失败时先按原代收口，
+  再 drop worker 释放其 generation-bound channel，最后完成命令结果。已停止的旧代即使迟到建通道且注册失败，也不进入未 joined 的长期接收循环。
+- 回归实际执行生产 manager/启动失败 helper，以及生产注册完成分派 helper 的成功/失败分支；oneshot 唤醒探针验证释放先于失败回复。
+  入口绑定同时有源码接线断言。它们不是完整 Tauri/worker/TCP 端到端运行，真实宿主与并发交错覆盖仍按对应 Issue 验收。
+### 13.12 当前非阻塞跟进（不算已完成）
 
 早期断线合成帧的重试分类与 B 面板错误投影已由后续修复覆盖；跨 Relay epoch 的注册复用/迟到响应合同仍由 [#1405](https://github.com/Pinvou/pinvou3/issues/1405#issuecomment-5972681019) 跟踪，不能接受旧 epoch 来恢复注册。[#1431](https://github.com/Pinvou/pinvou3/issues/1431)（P2）保留日志容量、同步 IO、跨进程与权限验收；不恢复自由文本 clientLog。[#1430](https://github.com/Pinvou/pinvou3/issues/1430#issuecomment-6089621468)（P3）补充空 URL 环境变量的选择/来源标记不一致，连接仍失败关闭，不是认证绕过；未知 profile 合同仍开放。这些跟进不代表正式发布或双机验收通过。
 

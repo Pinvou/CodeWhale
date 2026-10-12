@@ -999,6 +999,28 @@ pub(crate) async fn wait_for_registration<P: ControlledRelayPort>(
     }
 }
 
+/// A rejected registration owns no serving lifecycle. Release the worker and
+/// its generation-bound channel before completing the command, including when
+/// an already-stopped generation reaches registration after its stop signal.
+async fn finish_controlled_registration<W, S, F>(
+    worker: W,
+    result: Result<S, String>,
+    done: oneshot::Sender<Result<S, String>>,
+    fail: impl FnOnce(&W, &str),
+    serve: impl FnOnce(W) -> F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    if let Err(error) = &result {
+        fail(&worker, error);
+        drop(worker);
+        let _ = done.send(result);
+        return;
+    }
+    let _ = done.send(result);
+    serve(worker).await;
+}
+
 impl ControlledRelayWorker {
     pub(crate) async fn start(
         app: AppHandle,
@@ -1026,13 +1048,14 @@ impl ControlledRelayWorker {
         };
         tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
-            if let Err(error) = &result {
-                worker.fail_registration(error);
-            }
-            let _ = done_tx.send(result);
-            // Keep the generation-bound receiver alive after registration. Later
-            // E2E tasks install handshake and encrypted business dispatch here.
-            worker.serve().await;
+            finish_controlled_registration(
+                worker,
+                result,
+                done_tx,
+                |worker, error| worker.fail_registration(error),
+                |worker| worker.serve(),
+            )
+            .await;
         });
         Ok(done_rx)
     }
@@ -2749,6 +2772,94 @@ pub(crate) mod reader_resume_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RegistrationDropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for RegistrationDropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    struct RegistrationCompletionProbe {
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        observed: std::sync::atomic::AtomicUsize,
+    }
+
+    impl std::task::Wake for RegistrationCompletionProbe {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            let dropped = self.dropped.load(std::sync::atomic::Ordering::SeqCst);
+            self.observed.store(
+                if dropped { 1 } else { 2 },
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_registration_drops_worker_before_reply_and_never_serves() {
+        for error in ["pairing_registration_failed", "desktop_remote_stale_result"] {
+            let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let completion = std::sync::Arc::new(RegistrationCompletionProbe {
+                dropped: dropped.clone(),
+                observed: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let waker = std::task::Waker::from(completion.clone());
+            let (done_tx, done_rx) = oneshot::channel::<Result<(), String>>();
+            let mut done_rx = Box::pin(done_rx);
+            assert!(
+                std::future::Future::poll(
+                    done_rx.as_mut(),
+                    &mut std::task::Context::from_waker(&waker),
+                )
+                .is_pending()
+            );
+            finish_controlled_registration(
+                RegistrationDropProbe(dropped.clone()),
+                Err(error.to_owned()),
+                done_tx,
+                |worker, failure| {
+                    assert_eq!(failure, error);
+                    assert!(!worker.0.load(std::sync::atomic::Ordering::SeqCst));
+                },
+                |_| async { panic!("failed registration has no serving lifecycle") },
+            )
+            .await;
+            assert_eq!(done_rx.await.unwrap().unwrap_err(), error);
+            assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+            // The actual oneshot wakes synchronously at completion: a mutation
+            // that sends before dropping would observe 2 instead of 1.
+            assert_eq!(
+                completion
+                    .observed
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_registration_replies_before_serving_and_retains_worker() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (done_tx, mut done_rx) = oneshot::channel::<Result<u8, String>>();
+        finish_controlled_registration(
+            RegistrationDropProbe(dropped.clone()),
+            Ok(7),
+            done_tx,
+            |_, _| panic!("successful registration must not fail"),
+            |worker| async move {
+                assert_eq!(done_rx.try_recv().unwrap().unwrap(), 7);
+                assert!(!worker.0.load(std::sync::atomic::Ordering::SeqCst));
+                drop(worker);
+            },
+        )
+        .await;
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[test]
     fn compact_value_fingerprint_preserves_the_original_serialized_bytes() {
