@@ -81,17 +81,22 @@ entry against the current catalog and policy before advertising it again. A
 session sync clears it. The cache cannot resurrect a removed, denied, or
 newly-eager tool.
 
-Every bounds-driven eviction is reported to the model — in the `tool_search`
-result when a search causes it, otherwise appended to a tool result: a
-hydration's note rides the batch's first recorded result (or its error), a
-retrieval activation or a refresh of an executed tool rides the triggering
-result, and a turn's start revalidation parks its note on the session so the
-turn's first recorded result carries it (a refresh only evicts when a cached
-schema grew past the budget since its last activation). Child agents report
-the same way: a hydration receipt and an executed tool's result carry their
-own eviction notes, and a note parked by the child's catalog refresh rides
-the child's next recorded result. An eviction never names a tool that the
-same result re-admits. Tools the model cannot get back by searching are
+Bounds-driven evictions are reported to the model best-effort — in the
+`tool_search` result when a search causes it, otherwise appended to a tool
+result: a hydration's note rides the batch's first recorded result (or its
+error), a retrieval activation or a refresh of an executed tool rides the
+triggering result, and a turn's start revalidation parks its note on the
+session so the turn's first recorded result carries it (a refresh only
+evicts when a cached schema grew past the budget since its last
+activation). A note that never reaches a recorded result — a turn that ends
+without one, or a session sync — is dropped at the next turn's entry rather
+than riding an unrelated later result. Child agents report the same way: a
+hydration receipt and an executed tool's result carry their own eviction
+notes, and a note parked by the child's catalog refresh rides the child's
+next recorded result (or its error); a note a child never delivers dies
+with the child's surface. A note never names a tool the model can call
+again: names a ride re-admits are netted out of it against the live
+activation cache. Tools the model cannot get back by searching are
 reported differently: `tool_search` results surface them as unavailable
 references, naming whether the tool left the catalog (disconnect, deny rule,
 mode switch) or outgrew the per-tool schema budget. A cached tool that became
