@@ -94,7 +94,7 @@ $ErrorActionPreference = 'Stop'
 if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_start') }
 $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:PINVOU_PATHS_B64))
 if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_payload_decoded') }
-$paths = ConvertFrom-Json -InputObject $json
+$paths = Microsoft.PowerShell.Utility\\ConvertFrom-Json -InputObject $json
 if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_decoded') }
 foreach ($target in $paths) {
   $item = Get-Item -LiteralPath ([string]$target) -Force
