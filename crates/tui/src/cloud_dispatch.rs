@@ -15,10 +15,6 @@
 //! the persisted contract, the launcher seam, and the fail-closed gates.
 //! Auto-decide heuristics remain leftover: Codewhale may propose, never
 //! confirm itself.
-//!
-//! A sandbox create receipt is infrastructure identity, not Computer
-//! entitlement. Metering requires [`crate::computer_meter`] admission plus a
-//! provider-accepted active observation.
 
 use std::fs;
 use std::io::Write;
