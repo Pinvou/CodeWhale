@@ -32,6 +32,9 @@ var retainedPermissions = map[int64][]permissionFact{
 // original versions remain in their order; no applied version is skipped based
 // on MAX(version). Every following delivery carries the same seed bytes.
 func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
+	if err := validateClosureReplayACK(input); err != nil {
+		return nil, err
+	}
 	if err := validateRegistrationBonusGuard(input); err != nil {
 		return nil, err
 	}

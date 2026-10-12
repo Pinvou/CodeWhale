@@ -39,7 +39,7 @@ export function requireOrganizationModelPolicy(value, org) {
 export function requireQuotaGrant(value, org, expected = {}) {
  owned(value, org, 'grant_id');
  for (const name of ['member_user_id', 'package_id', 'component_id']) { organizationID(value[name]); if (expected[name] && value[name] !== expected[name]) invalid(); }
- if (expected.grant_id && value.grant_id !== expected.grant_id || !['ACTIVE', 'SUSPENDED', 'EXPIRED', 'REVOKED'].includes(value.status)) invalid();
+ if (expected.grant_id && value.grant_id !== expected.grant_id || !['ACTIVE', 'SUSPENDED', 'EXPIRED', 'REVOKED', 'RECLAIMED_ACCOUNT_CLOSED'].includes(value.status)) invalid();
  for (const name of ['original_microcredits', 'available_microcredits', 'reserved_microcredits', 'used_microcredits', 'expired_microcredits', 'revoked_microcredits']) integerMoney(value[name]);
  organizationVersion(value.membership_version); organizationVersion(value.allocation_version); return value;
 }
@@ -102,6 +102,26 @@ export class OrganizationClient {
   return { items };
  }
  async revokeGrant(org, id, reason, key) { return requireQuotaGrant(await this.request('token', `${orgPath(org)}/quota-grants/${organizationID(id)}/revoke`, 'POST', { reason }, key), org, { grant_id: id }); }
+ async reclaimClosedGrant(org, id, reason, key) {
+  const result = await this.request('token', `${orgPath(org)}/account-closed-grants/${organizationID(id)}/reclaim`, 'POST', { reason }, key);
+  requireQuotaGrant(result?.grant, org, { grant_id: id });
+  if (result.grant.status !== 'RECLAIMED_ACCOUNT_CLOSED' || integerMoney(result.amount_microcredits) <= 0n || integerMoney(result.subject_lifecycle_version) < 2n || typeof result.replayed !== 'boolean') invalid();
+  return result;
+ }
+ async reclaimClosedGrants(org, ids, reason, key) {
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 200 || new Set(ids).size !== ids.length) throw new Error('INVALID_ORGANIZATION_INPUT');
+  ids.forEach(organizationID);
+  const result = await this.request('token', `${orgPath(org)}/account-closed-grants:reclaim-batch`, 'POST', { grant_ids: ids, reason }, key, [207]);
+  if (!Array.isArray(result?.items) || result.items.length !== ids.length) invalid();
+  for (const [index, item] of result.items.entries()) {
+   if (item?.grant_id !== ids[index] || !['SUCCEEDED', 'FAILED'].includes(item.status)) invalid();
+   if (item.status === 'FAILED') { if (item.code !== 'ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED') invalid(); continue; }
+   const receipt = item.result;
+   requireQuotaGrant(receipt?.grant, org, { grant_id: ids[index] });
+   if (receipt.grant.status !== 'RECLAIMED_ACCOUNT_CLOSED' || integerMoney(receipt.amount_microcredits) <= 0n || integerMoney(receipt.subject_lifecycle_version) < 2n || typeof receipt.replayed !== 'boolean') invalid();
+  }
+  return result;
+ }
 }
 
 export class OrganizationAdminClient {

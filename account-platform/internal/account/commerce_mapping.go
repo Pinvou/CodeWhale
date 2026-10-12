@@ -147,13 +147,19 @@ ORDER BY u.id FOR UPDATE OF u`, r.commerceProviderID, r.commerceAdapterVersion)
 }
 
 func enqueueCommerceCustomerSync(ctx context.Context, tx pgx.Tx, subjectType string, subjectID uuid.UUID, mobile, providerID, adapterVersion, taskCategory string, now time.Time) error {
-	// Enqueue records confirmed producer facts; only Claim requires ACTIVE.
-	if _, err := lockCommerceSubjectTx(ctx, tx, subjectType, subjectID); err != nil {
+	status, subjectLifecycleVersion, err := lockCommerceSubjectTx(ctx, tx, subjectType, subjectID)
+	if err != nil {
 		return err
+	}
+	switch status {
+	case "ACTIVE", "DISABLED", "REPAIR_REQUIRED", "PROVISIONING":
+		// Record producer facts; only Claim dispatches ACTIVE subjects.
+	default:
+		return ErrConflict
 	}
 	mappingID := uuid.Must(uuid.NewV7())
 	var mappingVersion int64
-	err := tx.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 INSERT INTO commerce_customer_mappings(id,subject_type,subject_id,provider_id,adapter_version,status,created_at,updated_at)
 VALUES($1,$2,$3,$4,$5,'PENDING',$6,$6)
 ON CONFLICT(subject_type,subject_id,provider_id) DO UPDATE SET
@@ -166,11 +172,7 @@ RETURNING id,version`, mappingID, subjectType, subjectID, providerID, adapterVer
 	if _, err = tx.Exec(ctx, `UPDATE commerce_customer_sync_jobs SET status='COMPLETED',completed_at=$2,updated_at=$2,last_error_code='SUPERSEDED' WHERE mapping_id=$1 AND status IN ('PENDING','RETRY')`, mappingID, now); err != nil {
 		return err
 	}
-	// Original 015 records a job lifecycle version. This personal/payment
-	// delivery has no irreversible account closure or user lifecycle column;
-	// version 1 is its actual invariant. Active user and mapping-version fences
-	// remain authoritative here; closure delivery restores its lifecycle fence.
-	subjectLifecycleVersion := int64(1)
+	// Freeze the same subject generation whose lock protects the mapping write.
 	_, err = tx.Exec(ctx, `
 INSERT INTO commerce_customer_sync_jobs(
     id,mapping_id,mapping_version,subject_type,subject_id,subject_lifecycle_version,provider_id,adapter_version,
@@ -182,14 +184,6 @@ INSERT INTO commerce_customer_sync_jobs(
 
 // All Commerce writers lock USER, mapping, then job. Candidate discovery does
 // not retain a job lock while waiting for its subject or mapping.
-func lockCommerceSubjectTx(ctx context.Context, tx pgx.Tx, subjectType string, subjectID uuid.UUID) (string, error) {
-	if subjectType != "USER" {
-		return "ACTIVE", nil
-	}
-	var status string
-	err := tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 FOR SHARE`, subjectID).Scan(&status)
-	return status, err
-}
 
 func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, providerID, adapterVersion string, lease time.Duration) (*CommerceCustomerSyncJob, error) {
 	tx, err := r.pool.Begin(ctx)
@@ -204,7 +198,7 @@ func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, p
  AND m.subject_type=commerce_customer_sync_jobs.subject_type AND m.subject_id=commerce_customer_sync_jobs.subject_id
  AND m.provider_id=commerce_customer_sync_jobs.provider_id AND m.adapter_version=commerce_customer_sync_jobs.adapter_version
  AND m.version=commerce_customer_sync_jobs.mapping_version AND m.status<>'DETACHED')
- AND (subject_type<>'USER' OR EXISTS(SELECT 1 FROM users WHERE id=subject_id AND status='ACTIVE'))
+ AND (subject_type<>'USER' OR EXISTS(SELECT 1 FROM users WHERE id=subject_id AND status='ACTIVE' AND subject_lifecycle_version=commerce_customer_sync_jobs.subject_lifecycle_version))
  AND ((status IN ('PENDING','RETRY') AND next_attempt_at<=clock_timestamp()) OR (status='LEASED' AND lease_until<clock_timestamp()))
  ORDER BY next_attempt_at,created_at LIMIT 1`, providerID, adapterVersion).Scan(&candidate.ID, &candidate.MappingID, &candidate.SubjectType, &candidate.SubjectID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -213,7 +207,7 @@ func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, p
 	if err != nil {
 		return nil, err
 	}
-	subjectStatus, err := lockCommerceSubjectTx(ctx, tx, candidate.SubjectType, candidate.SubjectID)
+	subjectStatus, lifecycle, err := lockCommerceSubjectTx(ctx, tx, candidate.SubjectType, candidate.SubjectID)
 	if err != nil {
 		return nil, err
 	}
@@ -244,6 +238,9 @@ func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, p
 		return nil, err
 	}
 	eligible := (status == "PENDING" || status == "RETRY") && !next.After(now) || status == "LEASED" && until != nil && until.Before(now)
+	if job.SubjectType == "USER" && lifecycle != job.SubjectLifecycleVersion {
+		return nil, tx.Commit(ctx)
+	}
 	if !eligible || job.MappingID != candidate.MappingID || job.SubjectType != candidate.SubjectType || job.SubjectID != candidate.SubjectID || job.ProviderID != providerID || job.AdapterVersion != adapterVersion {
 		return nil, tx.Commit(ctx)
 	}
@@ -276,11 +273,19 @@ func (r *PostgresRepository) CompleteCommerceCustomerSyncJob(ctx context.Context
 		return err
 	}
 	defer tx.Rollback(ctx)
-	now := r.now()
-	subjectStatus, err := lockCommerceSubjectTx(ctx, tx, job.SubjectType, job.SubjectID)
+	userStatus, lifecycle, err := lockCommerceSubjectTx(ctx, tx, job.SubjectType, job.SubjectID)
 	if err != nil {
 		return err
 	}
+	if job.SubjectType == "USER" && lifecycle != job.SubjectLifecycleVersion || userStatus == "DELETED" || userStatus == "ANONYMIZED" {
+		return ErrConflict
+	}
+	if userStatus != "ACTIVE" && userStatus != "DISABLED" {
+		// Closure owns this generation; late results cannot recreate PII or
+		// append a new external reference after cleanup.
+		return tx.Commit(ctx)
+	}
+	now := r.now()
 	result.ExternalReferenceRedacted = safeExternalReference(result.ExternalReferenceRedacted)
 	var currentProvider, currentAdapter, mappingStatus string
 	var currentVersion int64
@@ -291,7 +296,7 @@ func (r *PostgresRepository) CompleteCommerceCustomerSyncJob(ctx context.Context
 	if err = lockCommerceCustomerSyncLease(ctx, tx, job); err != nil {
 		return err
 	}
-	userActive, userDisabled := subjectStatus == "ACTIVE", subjectStatus == "DISABLED"
+	userActive, userDisabled := userStatus == "ACTIVE", userStatus == "DISABLED"
 	currentMapping := mappingStatus != "DETACHED" && currentProvider == job.ProviderID && currentAdapter == job.AdapterVersion && currentVersion == job.MappingVersion
 	outcome := "SUCCEEDED"
 	if !currentMapping || !userActive {
@@ -358,8 +363,15 @@ func (r *PostgresRepository) RetryCommerceCustomerSyncJob(ctx context.Context, j
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = lockCommerceSubjectTx(ctx, tx, job.SubjectType, job.SubjectID); err != nil {
+	status, lifecycle, err := lockCommerceSubjectTx(ctx, tx, job.SubjectType, job.SubjectID)
+	if err != nil {
 		return err
+	}
+	if job.SubjectType == "USER" && lifecycle != job.SubjectLifecycleVersion || status == "DELETED" || status == "ANONYMIZED" {
+		return ErrConflict
+	}
+	if status != "ACTIVE" && status != "DISABLED" {
+		return tx.Commit(ctx)
 	}
 	var mappingID uuid.UUID
 	if err = tx.QueryRow(ctx, `SELECT id FROM commerce_customer_mappings WHERE id=$1 FOR UPDATE`, job.MappingID).Scan(&mappingID); err != nil {
@@ -383,6 +395,22 @@ func (r *PostgresRepository) RetryCommerceCustomerSyncJob(ctx context.Context, j
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// Non-user mappings retain their original lifecycle contract. For USER all
+// enqueue, claim and callbacks share this lock before mapping/job row locks;
+// closure takes the incompatible user lock before mutating the same records.
+func lockCommerceSubjectTx(ctx context.Context, tx pgx.Tx, subjectType string, subjectID uuid.UUID) (string, int64, error) {
+	if subjectType != "USER" {
+		return "ACTIVE", 1, nil
+	}
+	var status string
+	var lifecycle int64
+	err := tx.QueryRow(ctx, `SELECT status,subject_lifecycle_version FROM users WHERE id=$1 FOR SHARE`, subjectID).Scan(&status, &lifecycle)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", 0, ErrNotFound
+	}
+	return status, lifecycle, err
 }
 
 func (r *PostgresRepository) GetCommerceCustomerMapping(ctx context.Context, principal identity.Principal) (CommerceCustomerMapping, error) {

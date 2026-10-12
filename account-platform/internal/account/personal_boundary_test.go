@@ -105,7 +105,7 @@ func TestPersonalHandlerRejectsInvalidBodiesWithoutMutation(t *testing.T) {
 	}
 	for _, item := range []struct{ method, path string }{
 		{http.MethodDelete, "/admin/v1/users/" + id},
-		{http.MethodPost, "/v1/me/account-closure-requests"},
+		{http.MethodPost, "/v1/me/account-closure-requests/force"},
 		{http.MethodGet, "/admin/v1/registration-bonus-policy"},
 	} {
 		w := httptest.NewRecorder()
@@ -113,6 +113,12 @@ func TestPersonalHandlerRejectsInvalidBodiesWithoutMutation(t *testing.T) {
 		if w.Code != http.StatusNotFound {
 			t.Fatalf("future route became reachable: %s", item.path)
 		}
+	}
+	// F08 installs closure; an unauthenticated write must reach the bearer gate.
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/me/account-closure-requests", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatal("installed closure write lacked bearer protection", w.Code)
 	}
 	// F02 activates this read endpoint. Its addition must preserve the
 	// authentication boundary rather than the earlier wave's absent-route check.
@@ -176,12 +182,12 @@ func TestPersonalPermissionProjectionRejectsFutureAuthority(t *testing.T) {
 	me := Me{ActiveContext: Context{Permissions: input}, PersonalPermissions: input, PlatformPermissions: input}
 	filterMePermissions(&me)
 	for _, values := range [][]string{me.ActiveContext.Permissions, me.PersonalPermissions, me.PlatformPermissions} {
-		if len(values) != 3 {
+		if len(values) != 4 {
 			t.Fatalf("unexpected delivered permissions=%v", values)
 		}
 	}
 	repo := &PostgresRepository{}
-	for _, permission := range input[2:6] {
+	for _, permission := range input[3:6] {
 		if _, err := repo.Authorize(context.Background(), identity.Principal{}, permission, nil, nil); !errors.Is(err, ErrForbidden) {
 			t.Fatal("future permission reached storage")
 		}
