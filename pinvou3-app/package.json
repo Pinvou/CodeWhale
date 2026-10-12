@@ -170,6 +170,8 @@
     "test:account-platform-organization-ui": "node tests/account_platform_organization_ui_smoke.mjs",
     "test:account-platform-member-units": "node --test tests/account_platform_member_units.test.mjs",
     "test:account-platform-member-units-ui": "node tests/account_platform_member_units_ui_smoke.mjs",
+    "test:account-platform-entitlement-correction": "node --test tests/account_platform_entitlement_client.test.mjs tests/account_platform_entitlement_correction.test.mjs",
+    "test:account-platform-entitlement-correction-ui": "node tests/account_platform_entitlement_production_smoke.mjs",
     "test:account-platform-closure-ui": "node tests/account_platform_closure_ui_smoke.mjs && node tests/account_platform_closure_production_smoke.mjs"
   },
   "devDependencies": {

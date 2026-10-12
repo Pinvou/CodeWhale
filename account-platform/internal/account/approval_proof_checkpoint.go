@@ -99,7 +99,7 @@ func (r *PostgresRepository) readApprovalProofCheckpoint(ctx context.Context, pr
 
 func approvalProofNeedsRecentAuthentication(command string) bool {
 	switch command {
-	case "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+	case "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 		return true
 	default:
 		return false

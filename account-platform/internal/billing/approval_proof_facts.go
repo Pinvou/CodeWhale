@@ -47,6 +47,24 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 		return encoded
 	}
 	switch frozen.CommandType {
+	case entitlementComponentAdjustmentCommand:
+		owner, ok := repository.(interface {
+			EntitlementCorrectionProofInput(context.Context, uuid.UUID, uuid.UUID, string) (approvalencoding.LegacyProofInput, error)
+		})
+		var command struct {
+			PackageID      uuid.UUID `json:"package_id"`
+			PaymentOrderID uuid.UUID `json:"payment_order_id"`
+			ReasonCode     string    `json:"reason_code"`
+		}
+		if !ok || json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.PackageID == uuid.Nil || command.PackageID.String() != frozen.TargetResourceID {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		fresh, err := owner.EntitlementCorrectionProofInput(ctx, command.PackageID, command.PaymentOrderID, command.ReasonCode)
+		if err != nil {
+			return current, "", "", err
+		}
+		current = fresh
+		ownerState = "ENTITLEMENT_PACKAGE_ACTIVE"
 	case "WALLET_ADJUSTMENT":
 		var command struct {
 			AdjustmentID       uuid.UUID `json:"adjustment_id"`

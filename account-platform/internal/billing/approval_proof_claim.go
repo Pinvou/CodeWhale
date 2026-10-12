@@ -48,6 +48,18 @@ func (f billingTxProofFacts) confirmedResumeProbe(ctx context.Context, providerI
 	return f.repository.confirmedResumeProbeFrom(ctx, f.tx, providerID, providerVersion, productID, orderID)
 }
 
+func (f billingTxProofFacts) EntitlementCorrectionProofInput(ctx context.Context, packageID, orderID uuid.UUID, reason string) (approvalencoding.LegacyProofInput, error) {
+	plan, err := entitlementCorrectionPlanFrom(ctx, f.tx, f.repository.now(), packageID, orderID)
+	if err != nil {
+		return approvalencoding.LegacyProofInput{}, err
+	}
+	critical, financial := entitlementCorrectionProofProjection(plan)
+	return approvalencoding.LegacyProofInput{CommandType: entitlementComponentAdjustmentCommand, PolicyVersion: 2, SnapshotSchemaVersion: 2,
+		TargetResourceType: "ENTITLEMENT_PACKAGE", TargetResourceID: packageID.String(),
+		NormalizedCommand:        encodeEntitlementCorrectionProjection(map[string]any{"package_id": packageID, "payment_order_id": orderID, "reason_code": reason}),
+		CriticalResourceVersions: critical, FinancialSnapshot: financial}, nil
+}
+
 // ClaimBillingApprovalProof is the last zero-effect authorization boundary.
 // Once committed, a crash or provider failure is an unknown outcome, never
 // permission to run a second probe under a newly issued proof.

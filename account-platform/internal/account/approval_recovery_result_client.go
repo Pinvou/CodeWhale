@@ -199,6 +199,28 @@ func validBillingRecoveryPayload(command string, domainResult, ledgerReferences 
 		return decoder.Decode(target) == nil && decoder.Decode(new(any)) == io.EOF
 	}
 	switch command {
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		var result struct {
+			CorrectionID       uuid.UUID `json:"correction_id"`
+			PackageID          uuid.UUID `json:"package_id"`
+			WalletID           uuid.UUID `json:"wallet_id"`
+			SourceComponentID  uuid.UUID `json:"source_component_id"`
+			SourceLotID        uuid.UUID `json:"source_lot_id"`
+			TargetComponentID  uuid.UUID `json:"target_component_id"`
+			TargetLotID        uuid.UUID `json:"target_lot_id"`
+			SourceType         string    `json:"source_type"`
+			TargetType         string    `json:"target_type"`
+			AmountMicrocredits int64     `json:"amount_microcredits"`
+			JournalEntryID     uuid.UUID `json:"journal_entry_id"`
+			Status             string    `json:"status"`
+		}
+		var ledger struct {
+			JournalEntryID uuid.UUID `json:"journal_entry_id"`
+		}
+		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) && result.CorrectionID != uuid.Nil && result.PackageID != uuid.Nil && result.WalletID != uuid.Nil &&
+			result.SourceComponentID != uuid.Nil && result.SourceLotID != uuid.Nil && result.TargetComponentID != uuid.Nil && result.TargetLotID != uuid.Nil &&
+			(result.SourceType == "BASE" || result.SourceType == "BONUS") && (result.TargetType == "BASE" || result.TargetType == "BONUS") && result.SourceType != result.TargetType &&
+			result.AmountMicrocredits > 0 && result.Status == "SUCCEEDED" && result.JournalEntryID != uuid.Nil && result.JournalEntryID == ledger.JournalEntryID
 	case "WALLET_ADJUSTMENT":
 		var result struct {
 			AdjustmentID uuid.UUID `json:"adjustment_id"`

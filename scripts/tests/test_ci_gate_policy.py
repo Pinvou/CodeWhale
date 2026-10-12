@@ -228,6 +228,14 @@ class CiGatePolicyTests(unittest.TestCase):
             self.assertTrue((ROOT / "pinvou3-app/tests" / filename).is_file())
             self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
 
+    def test_entitlement_correction_production_smoke_is_registered_for_full_and_feature_runs(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-entitlement-correction-ui"
+        self.assertEqual(package["scripts"][command], "node tests/account_platform_entitlement_production_smoke.mjs")
+        self.assertTrue((ROOT / "pinvou3-app/tests/account_platform_entitlement_production_smoke.mjs").is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
     def test_registration_bonus_smokes_resolve_to_both_compiled_browser_suites(self):
         package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
         command = "test:account-platform-registration-bonus-ui"
