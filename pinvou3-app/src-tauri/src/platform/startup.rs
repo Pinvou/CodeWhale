@@ -54,9 +54,48 @@ struct LifecycleReceipt {
 #[derive(Debug, Eq, PartialEq)]
 enum PreviousLifecycle {
     Missing,
-    Clean { pid: u32 },
-    Unclean { pid: u32, state: LifecycleState },
+    Clean {
+        pid: u32,
+        run_id: String,
+        exit_reason: Option<String>,
+    },
+    Unclean {
+        pid: u32,
+        run_id: String,
+        state: LifecycleState,
+        exit_reason: Option<String>,
+    },
     Invalid,
+}
+
+fn previous_lifecycle_marker(previous: &PreviousLifecycle) -> Option<(&'static str, String)> {
+    match previous {
+        PreviousLifecycle::Clean {
+            pid,
+            run_id,
+            exit_reason,
+        } => Some((
+            "lifecycle:previous_clean",
+            format!(
+                "pid={pid} run_id={run_id} reason={}",
+                exit_reason.as_deref().unwrap_or("none")
+            ),
+        )),
+        PreviousLifecycle::Unclean {
+            pid,
+            run_id,
+            state,
+            exit_reason,
+        } => Some((
+            "lifecycle:previous_unclean",
+            format!(
+                "pid={pid} run_id={run_id} state={} reason={}",
+                state.as_str(),
+                exit_reason.as_deref().unwrap_or("none")
+            ),
+        )),
+        PreviousLifecycle::Missing | PreviousLifecycle::Invalid => None,
+    }
 }
 
 struct LifecycleRuntime {
@@ -205,13 +244,20 @@ fn begin_lifecycle_at(
     let mut previous_error = None;
     let mut quarantined_path = None;
     let (previous, persistence_enabled) = match load_lifecycle_receipt(&path) {
-        Ok(Some(receipt)) if receipt.state == LifecycleState::CleanExit => {
-            (PreviousLifecycle::Clean { pid: receipt.pid }, true)
-        }
+        Ok(Some(receipt)) if receipt.state == LifecycleState::CleanExit => (
+            PreviousLifecycle::Clean {
+                pid: receipt.pid,
+                run_id: receipt.run_id,
+                exit_reason: receipt.exit_reason,
+            },
+            true,
+        ),
         Ok(Some(receipt)) => (
             PreviousLifecycle::Unclean {
                 pid: receipt.pid,
+                run_id: receipt.run_id,
                 state: receipt.state,
+                exit_reason: receipt.exit_reason,
             },
             true,
         ),
@@ -297,24 +343,19 @@ pub fn begin_lifecycle() {
         std::process::id(),
         Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     );
-    match &result.previous {
-        PreviousLifecycle::Unclean { pid, state } => mark_with_detail(
-            "rust",
-            "lifecycle:previous_unclean",
-            &format!("pid={pid} state={}", state.as_str()),
-        ),
-        PreviousLifecycle::Clean { pid } => {
-            mark_with_detail("rust", "lifecycle:previous_clean", &format!("pid={pid}"))
-        }
-        PreviousLifecycle::Missing => mark("lifecycle:previous_missing"),
-        PreviousLifecycle::Invalid => mark_with_detail(
+    if let Some((stage, detail)) = previous_lifecycle_marker(&result.previous) {
+        mark_with_detail("rust", stage, &detail);
+    } else if result.previous == PreviousLifecycle::Missing {
+        mark("lifecycle:previous_missing");
+    } else {
+        mark_with_detail(
             "rust",
             "lifecycle:previous_invalid",
             result
                 .previous_error
                 .as_deref()
                 .unwrap_or("invalid receipt"),
-        ),
+        );
     }
     if let Some(quarantined) = result.quarantined_path.as_ref() {
         mark_with_detail(
@@ -485,7 +526,8 @@ mod tests {
     use super::{
         LIFECYCLE_SCHEMA_VERSION, LifecycleReceipt, LifecycleState, LifecycleTransition,
         MAX_LOG_BYTES, PreviousLifecycle, begin_lifecycle_at, clean_field, load_lifecycle_receipt,
-        persist_lifecycle_receipt, rotate_if_oversized, transition_lifecycle_at,
+        persist_lifecycle_receipt, previous_lifecycle_marker, rotate_if_oversized,
+        transition_lifecycle_at,
     };
 
     #[test]
@@ -528,7 +570,9 @@ mod tests {
                 Some((LifecycleState::Starting, None)),
                 PreviousLifecycle::Unclean {
                     pid: 42,
+                    run_id: "previous-run".to_string(),
                     state: LifecycleState::Starting,
+                    exit_reason: None,
                 },
             ),
             (
@@ -536,13 +580,19 @@ mod tests {
                 Some((LifecycleState::Ready, None)),
                 PreviousLifecycle::Unclean {
                     pid: 42,
+                    run_id: "previous-run".to_string(),
                     state: LifecycleState::Ready,
+                    exit_reason: None,
                 },
             ),
             (
                 "clean",
                 Some((LifecycleState::CleanExit, Some("exit_event"))),
-                PreviousLifecycle::Clean { pid: 42 },
+                PreviousLifecycle::Clean {
+                    pid: 42,
+                    run_id: "previous-run".to_string(),
+                    exit_reason: Some("exit_event".to_string()),
+                },
             ),
         ];
 
@@ -577,6 +627,33 @@ mod tests {
             assert_eq!(current.pid, 84, "case {name}");
             assert_eq!(current.state, LifecycleState::Starting, "case {name}");
         }
+    }
+
+    #[test]
+    fn previous_lifecycle_marker_exposes_run_and_first_exit_reason() {
+        assert_eq!(
+            previous_lifecycle_marker(&PreviousLifecycle::Clean {
+                pid: 42,
+                run_id: "previous-run".to_string(),
+                exit_reason: Some("restart".to_string()),
+            }),
+            Some((
+                "lifecycle:previous_clean",
+                "pid=42 run_id=previous-run reason=restart".to_string(),
+            ))
+        );
+        assert_eq!(
+            previous_lifecycle_marker(&PreviousLifecycle::Unclean {
+                pid: 42,
+                run_id: "previous-run".to_string(),
+                state: LifecycleState::Ready,
+                exit_reason: None,
+            }),
+            Some((
+                "lifecycle:previous_unclean",
+                "pid=42 run_id=previous-run state=ready reason=none".to_string(),
+            ))
+        );
     }
 
     #[test]
