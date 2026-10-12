@@ -160,7 +160,7 @@ func TestOrganizationFinanceAuthorityAndWalletScope(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			h := NewService(contexts, wallets, client).WithAuthorizer(auth).Handler(func(context.Context, string) (identity.Principal, error) {
+			h := NewService(contexts, wallets, client).WithManagement(nil, nil, ProviderURLPolicy{}, "owned-service", nil).WithAuthorizer(auth).Handler(func(context.Context, string) (identity.Principal, error) {
 				return identity.Principal{Issuer: "owned", Subject: "owner"}, nil
 			})
 			r := httptest.NewRequest(tc.method, "/v1/organizations/"+org.String()+tc.suffix, strings.NewReader(tc.body))

@@ -7,8 +7,11 @@ import (
 
 func (s *Service) registerOrganizationRoutes(protected, admin *httpserver.RouteGroup) {
 	protected.GET("/v1/me/role-bindings", s.requirePermission(PermissionPersonalProfileRead), httpserver.AdaptFunc(s.listMyRoleBindings))
-	protected.GET("/v1/me/organizations", s.requirePermission(PermissionPersonalProfileRead), httpserver.AdaptFunc(s.listOrganizations))
 	protected.POST("/v1/sessions/current/active-context", s.requirePermission(PermissionPersonalContextSwitch), httpserver.AdaptFunc(s.setActiveContext))
+	// Role bindings and the PERSONAL context remain available without organization facilities.
+	protected = protected.Group("", s.requireOrganizationsEnabled())
+	admin = admin.Group("", s.requireOrganizationsEnabled())
+	protected.GET("/v1/me/organizations", s.requirePermission(PermissionPersonalProfileRead), httpserver.AdaptFunc(s.listOrganizations))
 	protected.GET("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.listUnits))
 	protected.POST("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.createUnit))
 	protected.GET("/v1/organizations/:organization_id/members", httpserver.AdaptFunc(s.listMembers))
