@@ -53,6 +53,7 @@ struct ActiveTurnTiming {
     behavior_turn_id: Option<String>,
     engine_acquire: Option<EngineAcquireTiming>,
     engine_ready_timestamp: Option<i64>,
+    engine_turn_started_timestamp: Option<i64>,
     first_output_timestamp: Option<i64>,
     #[cfg(any(feature = "benchmark-hooks", test))]
     recorded_first_events: HashSet<&'static str>,
@@ -69,6 +70,7 @@ impl ActiveTurnTiming {
             behavior_turn_id: None,
             engine_acquire: None,
             engine_ready_timestamp: None,
+            engine_turn_started_timestamp: None,
             first_output_timestamp: None,
             #[cfg(any(feature = "benchmark-hooks", test))]
             recorded_first_events: HashSet::new(),
@@ -400,6 +402,7 @@ fn finish_turn_internal(
     if let Some(engine_acquire) = active_turn.engine_acquire {
         entry["engine_startup"] = json!({
             "engine_ready_timestamp": active_turn.engine_ready_timestamp,
+            "engine_turn_started_timestamp": active_turn.engine_turn_started_timestamp,
             "first_output_timestamp": active_turn.first_output_timestamp,
             "engine_acquire": engine_acquire,
         });
@@ -464,6 +467,19 @@ pub fn record_engine_ready(session_id: &str, timing: EngineAcquireTiming) {
     {
         active.engine_acquire = Some(timing);
         active.engine_ready_timestamp = Some(now_ms());
+    }
+}
+
+/// Record the foundation's authoritative turn-start instant. CodeWhale emits
+/// this after route resolution and admission, but before request assembly and
+/// provider dispatch, so it separates host/command preparation from model
+/// time-to-first-visible-output without guessing at internal stages.
+pub fn record_engine_turn_started_at(session_id: &str, timestamp: i64) {
+    if let Ok(mut map) = active_turns().lock()
+        && let Some(active) = map.get_mut(session_id).and_then(VecDeque::back_mut)
+        && active.engine_turn_started_timestamp.is_none()
+    {
+        active.engine_turn_started_timestamp = Some(timestamp);
     }
 }
 
@@ -1628,6 +1644,7 @@ mod tests {
                 sync_session_ms: 0,
             },
         );
+        record_engine_turn_started_at(sid, 1_700_000_000_123);
         record_first_output(sid);
         record_first_message_delta(sid);
         finish_turn(sid, "Completed", None);
@@ -1653,6 +1670,10 @@ mod tests {
             321
         );
         assert!(terminal["engine_startup"]["engine_ready_timestamp"].is_i64());
+        assert_eq!(
+            terminal["engine_startup"]["engine_turn_started_timestamp"],
+            1_700_000_000_123_i64
+        );
         assert!(terminal["engine_startup"]["first_output_timestamp"].is_i64());
         assert!(
             !raw.contains("workspace") && !raw.contains("model_name"),
