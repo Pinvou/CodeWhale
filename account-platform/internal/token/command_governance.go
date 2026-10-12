@@ -260,9 +260,6 @@ func completeTokenCommandTx(ctx context.Context, tx pgx.Tx, reference uuid.UUID,
 	if _, err := tx.Exec(ctx, `INSERT INTO token_audit_logs(id,actor_user_id,action,resource_type,resource_id,summary,occurred_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, uuid.Must(uuid.NewV7()), actorID, commandType, targetType, resourceID, summary, now); err != nil {
 		return TokenCommandResult{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at) VALUES($1,'token.management-command.executed.v1',$2,1,$3,$4,$5)`, uuid.Must(uuid.NewV7()), resourceID, summary, auditRequestID, now); err != nil {
-		return TokenCommandResult{}, err
-	}
 	item, err := scanTokenCommandResult(tx.QueryRow(ctx, tokenCommandResultSelect+` WHERE command_reference=$1`, reference))
 	if err != nil {
 		return TokenCommandResult{}, err
