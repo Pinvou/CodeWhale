@@ -27676,3 +27676,63 @@ async fn toolbox_eviction_notes_park_and_combine() {
         "an empty eviction list must not clear the parked note"
     );
 }
+
+/// A note stranded by an interrupted turn must be swept at the next turn's
+/// entry, not ride that turn's first result under a false "this step"
+/// attribution.
+#[tokio::test]
+async fn turn_start_sweeps_a_stranded_eviction_note() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("done")]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    engine.session.pending_toolbox_eviction_note = Some(
+        super::tool_catalog::bounded_toolbox_eviction_note("step", &["ghost-tool".to_string()]),
+    );
+
+    // No eviction happens this turn: the sweep must still clear the
+    // stranded note, and nothing may re-park it.
+    let policy = policy_for_catalog(
+        vec![heavy_deferred_tool("cached-a", 7_000)],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let _ = engine.run_turn(&mut turn, policy, None, None).await;
+
+    assert!(
+        engine.session.pending_toolbox_eviction_note.is_none(),
+        "a stranded note must not survive into the turn to misattribute its evictions"
+    );
+}
+
+/// A batch whose outcomes all flattened away has no result to carry the
+/// parked note; it must be re-parked for a later batch instead of dropped.
+#[tokio::test]
+async fn toolbox_note_survives_a_batch_without_results() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.session.pending_toolbox_eviction_note = Some(
+        super::tool_catalog::bounded_toolbox_eviction_note("step", &["ghost-tool".to_string()]),
+    );
+    let mut catalog = Vec::new();
+    let mut active = HashSet::new();
+    engine
+        .process_tool_results(vec![None, None], &mut catalog, &mut active, &HashMap::new())
+        .await;
+
+    let note = engine
+        .session
+        .pending_toolbox_eviction_note
+        .expect("a resultless batch must re-park the note instead of dropping it");
+    assert!(
+        note.contains("ghost-tool"),
+        "the re-parked note must keep its content: {note}"
+    );
+}
