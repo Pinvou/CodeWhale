@@ -8294,7 +8294,7 @@ impl RuntimeThreadManager {
                 model: route_model.clone(),
                 active_route_limits: route_limits,
                 workspace: thread.workspace.clone(),
-                workspace_roots: armed_workspace_roots,
+                workspace_roots: armed_workspace_roots.clone(),
                 session_id: None,
                 subagent_state_root: None,
                 plugin_registry: thread_plugin_registry.clone(),
@@ -8497,7 +8497,11 @@ impl RuntimeThreadManager {
                         system_prompt_override: thread.system_prompt.is_some(),
                         model: route_model.clone(),
                         workspace: thread.workspace.clone(),
-                        workspace_roots: thread.workspace_roots.clone(),
+                        // Round-40 minor 2: the SAME validated, head-stripped
+                        // set the engine armed with — the raw stored set can
+                        // carry an intake-admitted `..`-spelled head copy
+                        // that every current consumer collapses.
+                        workspace_roots: armed_workspace_roots.clone(),
                         mode: RuntimePolicyProjection::from_persisted(
                             &thread.mode,
                             thread.permission_posture.as_deref(),

@@ -189,7 +189,19 @@ fn compile_repo_law_rules(constitution: RepoConstitution) -> Vec<RepoLawRule> {
             if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(glob) = globset::Glob::new(trimmed) {
+            // Round-40 M1: the law's contract is that it may only ADD
+            // holds, so the globs match case-insensitively on every host —
+            // a wrong-cased create-shaped tail (`VENDOR/new/x.rs` against a
+            // `vendor/**` block) is resolved by the OS onto the protected
+            // directory on case-insensitive filesystems, and the model's
+            // verbatim casing must not bypass the hold. Over-holding two
+            // case-distinct directories on a case-sensitive host is the
+            // contract-safe direction. (Unicode NFC/NFD divergence stays a
+            // disclosed residual — folding case does not normalize.)
+            if let Ok(glob) = globset::GlobBuilder::new(trimmed)
+                .case_insensitive(true)
+                .build()
+            {
                 builder.add(glob);
                 patterns.push(trimmed.to_string());
             }

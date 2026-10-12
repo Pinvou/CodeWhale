@@ -5257,7 +5257,11 @@ mod tests {
             .iter()
             .filter(|id| {
                 let key = format!("{id:?}");
-                key.starts_with("Status") || key.starts_with("Workspace")
+                key.starts_with("Status")
+                    || key.starts_with("Workspace")
+                    || key.starts_with("Fork")
+                    || key.starts_with("Save")
+                    || key.starts_with("Sanitized")
             })
             .collect::<Vec<_>>();
         assert!(

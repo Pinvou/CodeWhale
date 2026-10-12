@@ -16063,11 +16063,17 @@ fn raw_mutation_target_paths(name: &str, input: &Value) -> Vec<String> {
             .map(|preflight| preflight.touched_files)
             .unwrap_or_default();
     }
-    input
-        .get("path")
-        .or_else(|| input.get("output_path"))
-        .and_then(Value::as_str)
-        .map(|path| vec![path.to_string()])
+    // Round-40 minor 4: alias-aware like the session-side collectors
+    // (B22-2's own doctrine) — an aliased spelling must not under-report
+    // the mutation target.
+    crate::tools::file::path_param_value(input)
+        .or_else(|| {
+            input
+                .get("output_path")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .map(|path| vec![path])
         .unwrap_or_default()
 }
 

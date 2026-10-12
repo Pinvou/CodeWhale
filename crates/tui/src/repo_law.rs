@@ -520,6 +520,33 @@ mod tests {
     }
 
     #[test]
+    fn wrong_cased_create_shaped_tail_hits_a_block_glob() {
+        // Round-40 M1: the law may only ADD holds, so the globs match
+        // case-insensitively — on a case-insensitive host the OS resolves
+        // `VENDOR/new/x.rs` onto the protected `vendor/` at create time,
+        // and the model's verbatim casing must not bypass the hold (the
+        // canonicalization legs only catch targets that already exist).
+        let tmp = TempDir::new().unwrap();
+        write_law(
+            tmp.path(),
+            r#"{ "protected_invariants": [
+                { "text": "Vendored tree is read-only", "paths": ["vendor/**"], "action": "block" }
+            ] }"#,
+        );
+        std::fs::create_dir_all(tmp.path().join("vendor")).unwrap();
+
+        let decision = decide(
+            tmp.path(),
+            "write_file",
+            &json!({"path": "VENDOR/new/x.rs", "content": "x"}),
+        );
+        assert!(
+            matches!(decision, Some(RepoLawPlanDecision::Block(_))),
+            "a wrong-cased create-shaped tail must still hit the block: {decision:?}"
+        );
+    }
+
+    #[test]
     fn unprotected_writes_and_non_write_tools_pass() {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);

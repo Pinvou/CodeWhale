@@ -2781,6 +2781,13 @@ pub(crate) async fn run_event_loop(
                                 next = %session_id,
                                 "engine session id diverged from the host session id"
                             );
+                            // Round-40 minor 8: a different conversation id
+                            // with an UNCHANGED workspace skipped the
+                            // workspace-move clear — grants belong to the
+                            // conversation they were approved in (round-37
+                            // M37-6's rule), so clear them here too.
+                            app.approval_session_approved.clear();
+                            app.approval_session_denied.clear();
                         }
                         app.current_session_id = Some(session_id.clone());
                         if app.last_known_goal_state.is_some()

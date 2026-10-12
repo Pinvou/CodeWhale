@@ -443,7 +443,14 @@ pub(super) async fn create_session_from_thread(
         )?;
     }
     session.system_prompt = detail.thread.system_prompt.clone();
-    session.metadata.workspace_roots = detail.thread.workspace_roots.clone();
+    // Round-40 minor 1: the one row-minting lane that skipped intake —
+    // downstream is fail-closed (resume re-validates), but a tolerant
+    // thread row would propagate its poison one row deeper.
+    session.metadata.workspace_roots = codewhale_core::validate_stored_workspace_roots(
+        &session.metadata.workspace,
+        &detail.thread.workspace_roots,
+    )
+    .unwrap_or_default();
 
     if let Some(title) =
         session_title_override(req.title.as_deref(), detail.thread.title.as_deref())

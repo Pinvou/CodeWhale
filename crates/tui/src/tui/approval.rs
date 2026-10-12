@@ -322,11 +322,18 @@ fn param_preview(params: &Value, keys: &[&str], max_len: usize) -> Option<String
         let Some(value) = map.get(*key) else {
             continue;
         };
-        // Round-38 minor: skip Null like the key/check/exec sides (B20-2) —
-        // a `{"cwd": null, "working_dir": "..."}` call previews the
+        // Round-38 minor + round-40 minor 3: skip Null and the empty
+        // string like the key/check/exec sides (B20-2) — a
+        // `{"cwd": null, "working_dir": "..."}` call previews the
         // working_dir operand it will actually run under, not a literal
-        // "null".
+        // "null"; an empty-string operand renders nothing, not a bare
+        // empty preview.
         if value.is_null() {
+            continue;
+        }
+        if let Value::String(text) = value
+            && text.is_empty()
+        {
             continue;
         }
         match value {

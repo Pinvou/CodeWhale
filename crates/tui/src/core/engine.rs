@@ -4189,10 +4189,13 @@ impl Engine {
             .collect();
         if !attached_roots.is_empty() {
             const MAX_LISTED_ROOTS: usize = 5;
+            // Round-40 minor 8: escape the separator so a root spelling
+            // cannot forge the list boundary (a root ending in ", " would
+            // otherwise splice the model's view of the set).
             let listed = attached_roots
                 .iter()
                 .take(MAX_LISTED_ROOTS)
-                .map(|root| root.display().to_string())
+                .map(|root| root.display().to_string().replace(',', "\\,"))
                 .collect::<Vec<_>>()
                 .join(", ");
             let remainder = attached_roots.len().saturating_sub(MAX_LISTED_ROOTS);
