@@ -516,6 +516,21 @@ default payload range. The gateway also enforces browser Origin policy,
 connection/ingress limits, a bounded source bucket table and a strict trusted
 proxy allowlist; untrusted forwarding headers are rejected. Use
 `nginx-enrollment-gateway.conf` for the public route and run
+`node scripts/enrollment-nginx-config.js` from the Relay directory with the
+same protected environment as the gateway and legacy Relay. The checked-in
+nginx file is only the default deployment sample: changing the base path,
+gateway host/port or legacy port requires regenerating it. The offline
+generator emits only exact WS/health locations pointing at the loopback
+Enrollment gateway; it never proxies the legacy Relay or the coverage-control
+listener. It rejects inconsistent legacy URL/bind/PORT inputs, stale public
+entrypoint paths and an immediate proxy missing from the trusted allowlist.
+The legacy `PORT` defaults to 8787; the gateway port must be explicitly set.
+Store the generated fragment in the intended server block, then run
+`node scripts/enrollment-nginx-config.js --check <fragment>` against the same
+environment. The check accepts LF/CRLF but requires the generated content
+otherwise unchanged and exits nonzero on drift; it does not rewrite files.
+This is an offline configuration check, not proof of live listeners or nginx
+syntax/context. Run `nginx -t` before applying configuration and continue to run
 `scripts/enrollment-gateway-preflight.js` with every public entrypoint. The
 preflight fails if a route lacks the gateway marker, is unavailable, the
 anonymous active-denial probe is not rejected, the Relay URL is not literal
