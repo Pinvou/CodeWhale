@@ -435,7 +435,7 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
 `npm --prefix pinvou3-app run build:ui && npm --prefix pinvou3-app run test:settings-ui`
 （当前为 Puppeteer 加载真实 Vite dist、mock Tauri 的浏览器渲染及错误边界断言，不是 jsdom，也不是双机或真实宿主验收）。历史原因：`ControlledDevicePanel` 里新增的
 `bridge.desktopRemoteControl.endpointProfiles()` 在缺少该方法的宿主实现上是**同步抛错**，会让整页被
-错误边界接住（用户侧表现为「设置页面加载失败」），而源码契约测试与 `build:ui` 都发现不了——只有
+错误边界接住（用户侧表现为「设置页加载失败」），而源码契约测试与 `build:ui` 都发现不了——只有
 运行时渲染冒烟才能覆盖此类问题。该记录描述当时故障；当前 B 面板不暴露端点切换，不要求恢复旧下拉。执行时须确认浏览器用例实际运行；浏览器缺失、启动失败或任何 SKIP 都不得记为验证通过。
 
 ## 13. 生产打通与端上排障记录（2026-09-20）
