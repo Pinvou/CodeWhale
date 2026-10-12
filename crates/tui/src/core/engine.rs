@@ -3408,8 +3408,11 @@ impl Engine {
                         // conversation. SyncSession installs a conversation's
                         // identity, history, and workspace (including the
                         // generated-ID new-session path), so never carry the
-                        // previous conversation's toolbox across this edge.
+                        // previous conversation's toolbox across this edge —
+                        // including a parked eviction note whose batch never
+                        // recorded a result.
                         self.session.tool_activation_cache.clear();
+                        self.session.pending_toolbox_eviction_note = None;
                         let plugin_workspace_changed =
                             self.plugin_registry.workspace() != workspace.as_path();
                         let previous_session_id = self.session.id.clone();

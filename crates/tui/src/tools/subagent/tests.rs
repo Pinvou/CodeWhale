@@ -7595,6 +7595,33 @@ fn synthetic_deferred_tool(name: &str, description_bytes: usize) -> Tool {
     }
 }
 
+/// The child hydration receipt is the hydration's only result payload, so a
+/// bounds eviction caused by the load must reach the child model through it.
+#[test]
+fn child_hydration_receipt_carries_the_eviction_note() {
+    // Two large warm activations sit near the collective budget; hydrating a
+    // third overflows the child cache.
+    let warm_catalog = vec![
+        synthetic_deferred_tool("big-a", 8_050),
+        synthetic_deferred_tool("big-b", 8_050),
+        synthetic_deferred_tool("big-c", 8),
+    ];
+    let mut surface =
+        SubAgentToolSurface::new(warm_catalog, &["big-a".to_string(), "big-b".to_string()]);
+
+    let receipt = surface.hydrate("big-c").expect("third activation");
+    assert!(
+        receipt.contains("`big-c` was deferred and has now been loaded"),
+        "the receipt must confirm the load: {receipt}"
+    );
+    assert!(
+        receipt.contains("evicted tools from the bounded conversation toolbox")
+            && receipt.contains("big-a"),
+        "the load receipt must carry the eviction note naming the LRU victim: {receipt}"
+    );
+    assert!(!surface.active_names.contains("big-a"));
+}
+
 #[test]
 fn small_surface_caches_are_independent_bounded_and_revalidated() {
     let mut catalog = (0..9)

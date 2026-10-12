@@ -83,9 +83,15 @@ newly-eager tool.
 
 Every bounds-driven eviction is reported to the model — in the `tool_search`
 result when a search causes it, otherwise appended to the triggering tool
-result (hydration, retrieval activation, or a refresh of an executed tool).
-Tools dropped because they left the catalog itself are surfaced as unavailable
-references instead, since no search can re-activate them.
+result (hydration, retrieval activation, or a refresh of an executed tool; a
+refresh only evicts when a cached schema grew past the budget since its last
+activation). Tools the model cannot get back by searching are reported
+differently: `tool_search` results surface them as unavailable references,
+naming whether the tool left the catalog (disconnect, deny rule, mode switch)
+or outgrew the per-tool schema budget. A cached tool that became eager is not
+reported at all — it stays directly callable. Unavailable drops on non-search
+paths are absorbed silently; the next `tool_search` result is where the model
+learns it cannot re-activate such a tool.
 
 Each subagent gets its own policy-filtered deferred catalog, always-present
 `tool_search`, and bounded activation cache. Forked messages and instructions

@@ -403,43 +403,54 @@ pub(crate) fn initial_active_tools(catalog: &[Tool]) -> HashSet<String> {
     active
 }
 
-/// Remove schemas evicted from the conversation cache without hiding tools
-/// that the current catalog now exposes eagerly.
+/// Remove names the bounded toolbox dropped — unavailable entries and
+/// bounds evictions — from the active set.
 ///
-/// A cached tool can become eager after an explicit `tools_always_load`
-/// change or another policy update. Cache revalidation correctly forgets the
-/// old deferred entry, but the eager catalog entry must remain active.
-pub(crate) fn remove_evicted_cache_activations(
-    catalog: &[Tool],
+/// Eager promotions never appear in these lists: `revalidate` classifies
+/// them out because the tool is directly callable, so removing these names
+/// cannot hide a tool that the current catalog still exposes eagerly.
+pub(crate) fn remove_toolbox_drops(
     active: &mut HashSet<String>,
-    evicted: impl IntoIterator<Item = String>,
+    names: impl IntoIterator<Item = String>,
 ) {
-    for name in evicted {
-        let is_eager_now = catalog
-            .iter()
-            .any(|tool| tool.name == name && !tool.defer_loading.unwrap_or(false));
-        if !is_eager_now {
-            active.remove(&name);
-        }
+    for name in names {
+        active.remove(&name);
     }
 }
 
-/// Why a stale (catalog-shrink) eviction is reported under the unavailable
+/// Why a catalog-shrink stale entry is reported under the unavailable
 /// vocabulary instead of the eviction note: the tool left the deferred
-/// catalog itself, so the search-result recovery contract ("re-search to
-/// re-activate") would be a false promise for it.
-pub(crate) const TOOLBOX_STALE_EVICTION_REASON: &str = "Previously active in this conversation but no longer available in the tool catalog; searching cannot re-activate it while it stays unavailable.";
+/// catalog itself (disconnect, deny rule, mode switch), so the search-result
+/// recovery contract ("re-search to re-activate") would be a false promise
+/// for it. Oversize drops carry [`toolbox_oversize_reason`] instead.
+const TOOLBOX_STALE_EVICTION_REASON: &str = "Previously active in this conversation but no longer available in the tool catalog; searching cannot re-activate it while it stays unavailable.";
+
+/// Why a deferred tool stays out of the bounded conversation toolbox: its
+/// serialized schema alone exceeds the per-tool budget, so no search can
+/// admit it while the schema stays that large. Shared by discovery-time
+/// rejections and revalidation drops so the prose cannot drift from the
+/// real bounds.
+pub(crate) fn toolbox_oversize_reason() -> String {
+    format!(
+        "The tool schema exceeds the bounded conversation toolbox ({} cached \
+         tools, {}KiB of added serialized schemas). Narrow the search or use \
+         a smaller matching tool.",
+        crate::core::session::TOOL_ACTIVATION_CACHE_MAX_NAMES,
+        crate::core::session::TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES / 1024
+    )
+}
 
 /// The model-facing sentence naming a bounds-driven toolbox eviction and the
-/// recovery contract. `trigger` names what caused the admission ("search",
+/// recovery contract. `trigger` names the step that surfaced it ("search",
 /// "step"); the capacity label is derived from the session constants so the
-/// prose cannot drift from the real bounds.
+/// prose cannot drift from the real bounds. The eviction may come from the
+/// admission itself or from revalidation after a cached schema grew, so the
+/// wording stays neutral about the cause.
 pub(crate) fn bounded_toolbox_eviction_note(trigger: &str, evicted: &[String]) -> String {
     format!(
         "This {trigger} evicted tools from the bounded conversation toolbox \
-         ({} cached tools, {}KiB of serialized schemas) by activating other \
-         tools; the evicted tools are no longer callable until a later search \
-         re-activates them: {}",
+         ({} cached tools, {}KiB of serialized schemas); the evicted tools \
+         are no longer callable until a later search re-activates them: {}",
         crate::core::session::TOOL_ACTIVATION_CACHE_MAX_NAMES,
         crate::core::session::TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES / 1024,
         evicted.join(", ")
@@ -448,10 +459,12 @@ pub(crate) fn bounded_toolbox_eviction_note(trigger: &str, evicted: &[String]) -
 
 /// Outcome of a non-search activation against the bounded conversation
 /// toolbox: whether the request-visible tool surface changed, and which
-/// previously active tools this admission bounds-evicted. Staleness
-/// evictions are handled inside the callee and deliberately absent here —
-/// they are reported (where at all) under the unavailable vocabulary, never
-/// under the re-activatable eviction contract.
+/// previously active tools this activation bounds-evicted — from the
+/// admission itself or from revalidation after a cached schema grew.
+/// Unavailable drops are handled inside the callee and deliberately absent
+/// here — they are reported (where at all) under the unavailable vocabulary,
+/// never under the re-activatable eviction contract.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ToolSurfaceUpdate {
     pub(crate) changed: bool,
     pub(crate) evicted: Vec<String>,
@@ -466,14 +479,10 @@ pub(crate) fn touch_cached_tool_after_execution(
     name: &str,
 ) -> ToolSurfaceUpdate {
     if !cache.names().any(|cached| cached == name) {
-        return ToolSurfaceUpdate {
-            changed: false,
-            evicted: Vec::new(),
-        };
+        return ToolSurfaceUpdate::default();
     }
     let delta = cache.activate(catalog, &[name.to_string()]);
-    remove_evicted_cache_activations(catalog, active, delta.stale);
-    remove_evicted_cache_activations(catalog, active, delta.evicted.iter().cloned());
+    remove_toolbox_drops(active, delta.dropped_names().map(str::to_string));
     active.extend(delta.admitted);
     ToolSurfaceUpdate {
         changed: true,
@@ -498,14 +507,10 @@ pub(crate) fn activate_result_dependencies(
         .and_then(Value::as_bool)
         == Some(true);
     if !needs_retrieval {
-        return ToolSurfaceUpdate {
-            changed: false,
-            evicted: Vec::new(),
-        };
+        return ToolSurfaceUpdate::default();
     }
     let delta = cache.activate(catalog, &[TOOL_RESULT_RETRIEVAL_NAME.to_string()]);
-    remove_evicted_cache_activations(catalog, active, delta.stale.iter().cloned());
-    remove_evicted_cache_activations(catalog, active, delta.evicted.iter().cloned());
+    remove_toolbox_drops(active, delta.dropped_names().map(str::to_string));
     active.extend(delta.admitted.iter().cloned());
     ToolSurfaceUpdate {
         changed: !delta.admitted.is_empty() || !delta.evicted.is_empty() || !delta.stale.is_empty(),
@@ -1404,13 +1409,12 @@ fn execute_tool_search_inner(
         unavailable_core_action_tools_with_bm25_like(catalog, query, remaining_results)
     };
 
-    let mut cache_rejected = Vec::new();
+    let mut cache_rejected: Vec<String> = Vec::new();
     let mut cache_evicted = Vec::new();
-    let mut cache_stale = Vec::new();
+    let mut cache_stale = Vec::<crate::core::session::ToolActivationStale>::new();
     if let Some(cache) = cache {
         let delta = cache.activate(catalog, &discovered);
-        remove_evicted_cache_activations(catalog, active_tools, delta.stale.iter().cloned());
-        remove_evicted_cache_activations(catalog, active_tools, delta.evicted.iter().cloned());
+        remove_toolbox_drops(active_tools, delta.dropped_names().map(str::to_string));
         cache_stale = delta.stale;
         cache_evicted = delta.evicted;
         cache_rejected = delta.rejected;
@@ -1438,18 +1442,32 @@ fn execute_tool_search_inner(
         json!({
             "type": "unavailable_tool_reference",
             "tool_name": name,
-            "reason": "The tool schema exceeds the bounded conversation toolbox (8 cached tools, 16KiB of added serialized schemas). Narrow the search or use a smaller matching tool."
+            "reason": toolbox_oversize_reason(),
         })
     }));
-    // A stale eviction means the tool left the deferred catalog itself, so it
-    // travels under the unavailable vocabulary — the eviction note's
-    // "re-search to re-activate" contract would be a false promise for it.
-    unavailable_references.extend(cache_stale.iter().map(|name| {
-        json!({
+    // Stale evictions travel under the unavailable vocabulary — the eviction
+    // note's "re-search to re-activate" contract would be a false promise
+    // for them. The cause picks the truthful reason: a catalog shrink cannot
+    // be searched back, while an oversize drop can return once its schema
+    // shrinks. A tool both oversize-dropped and discovery-rejected is
+    // emitted once — the two entries would carry the same reason.
+    let rejected_names: std::collections::HashSet<&str> =
+        cache_rejected.iter().map(String::as_str).collect();
+    unavailable_references.extend(cache_stale.iter().filter_map(|entry| {
+        if rejected_names.contains(entry.name.as_str()) {
+            return None;
+        }
+        let reason = match entry.cause {
+            crate::core::session::ToolActivationStaleCause::CatalogShrink => {
+                TOOLBOX_STALE_EVICTION_REASON.to_string()
+            }
+            crate::core::session::ToolActivationStaleCause::Oversize => toolbox_oversize_reason(),
+        };
+        Some(json!({
             "type": "unavailable_tool_reference",
-            "tool_name": name,
-            "reason": TOOLBOX_STALE_EVICTION_REASON,
-        })
+            "tool_name": entry.name,
+            "reason": reason,
+        }))
     }));
 
     // Boot-window status (#588): a bare empty result is byte-identical to

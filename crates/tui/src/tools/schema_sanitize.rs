@@ -2580,8 +2580,9 @@ mod kimi_tests {
         sanitize_for_kimi_parameters(&mut grid).expect("items-in-items repair");
         assert_eq!(grid["properties"]["grid"], json!({"type": "array"}));
 
-        // A root `items` keyword beside `$defs`: visiting only the removed
-        // key's node used to leave `$defs` unrepaired and fail the whole tool.
+        // A root `items` keyword beside `$defs`: the repair must visit every
+        // schema-value sibling of the root node, not just the removed key's
+        // own subtree, or `$defs` stays unrepaired and fails the whole tool.
         let mut with_defs = json!({
             "type": "object",
             "items": {},

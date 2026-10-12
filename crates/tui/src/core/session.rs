@@ -30,19 +30,78 @@ pub(crate) struct ToolActivationCache {
     names: VecDeque<String>,
 }
 
+/// Why `revalidate` dropped a cached activation as unavailable. The cause
+/// selects the model-facing reason: a catalog-shrink name cannot come back
+/// while the shrink holds, while an oversize name can return once its
+/// schema shrinks back under the per-tool budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolActivationStaleCause {
+    /// The tool left the filtered catalog entirely (MCP disconnect, deny
+    /// rule, mode switch).
+    CatalogShrink,
+    /// The tool is still in the catalog but its serialized schema exceeds
+    /// the per-tool toolbox budget.
+    Oversize,
+}
+
+/// One cached activation dropped by `revalidate` as unavailable. Eager
+/// promotions are deliberately absent: the tool is directly callable and
+/// stays active, so there is nothing to explain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolActivationStale {
+    pub(crate) name: String,
+    pub(crate) cause: ToolActivationStaleCause,
+}
+
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub(crate) struct ToolActivationDelta {
     pub(crate) admitted: Vec<String>,
-    /// Bounds-driven evictions caused by this admission (LRU overflow or the
-    /// serialized-bytes cap). The tools are still in the catalog, so a later
-    /// search can re-activate them — the "evicted" recovery contract.
+    /// Bounds-driven evictions: collective LRU or serialized-bytes overflow
+    /// from this admission, or from revalidation after a cached schema grew
+    /// past the budget. The tools are still deferred catalog members, so a
+    /// later search can re-activate them — the "evicted" recovery contract.
     pub(crate) evicted: Vec<String>,
-    /// Entries dropped by `revalidate` before this admission: the tool left
-    /// the deferred catalog (disconnect, deny rule, eager promotion,
-    /// oversize), so it is unavailable rather than evicted and no search can
-    /// bring it back while it stays unavailable.
-    pub(crate) stale: Vec<String>,
+    /// Unavailable entries dropped by `revalidate` before this admission:
+    /// the tool left the deferred catalog or outgrew the per-tool budget,
+    /// so it is unavailable rather than evicted. The cause selects the
+    /// truthful model-facing reason.
+    pub(crate) stale: Vec<ToolActivationStale>,
     pub(crate) rejected: Vec<String>,
+}
+
+impl ToolActivationDelta {
+    /// Every name this delta dropped from the active toolbox: unavailable
+    /// entries plus bounds evictions. Eager promotions are classified out
+    /// by `revalidate` and never appear here, so removing these names can
+    /// never hide a tool the catalog still exposes eagerly.
+    pub(crate) fn dropped_names(&self) -> impl Iterator<Item = &str> {
+        self.stale
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .chain(self.evicted.iter().map(String::as_str))
+    }
+}
+
+/// What [`ToolActivationCache::revalidate`] removed, classified by
+/// recoverability so callers can report each bucket truthfully.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub(crate) struct ToolActivationRemovals {
+    /// Unavailable drops: the tool left the deferred catalog or outgrew the
+    /// per-tool budget. See [`ToolActivationStale`].
+    pub(crate) stale: Vec<ToolActivationStale>,
+    /// Collective-bounds victims that are still deferred catalog members:
+    /// a later search can re-activate them.
+    pub(crate) bounds_evicted: Vec<String>,
+}
+
+impl ToolActivationRemovals {
+    /// Every name this removal set dropped from the active toolbox.
+    pub(crate) fn dropped_names(&self) -> impl Iterator<Item = &str> {
+        self.stale
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .chain(self.bounds_evicted.iter().map(String::as_str))
+    }
 }
 
 impl ToolActivationCache {
@@ -77,28 +136,47 @@ impl ToolActivationCache {
     }
 
     /// Drop entries that are no longer deferred members of this turn's
-    /// filtered catalog and enforce both cache bounds.
-    pub(crate) fn revalidate(&mut self, catalog: &[crate::models::Tool]) -> Vec<String> {
-        let mut evicted = Vec::new();
+    /// filtered catalog and enforce both cache bounds, classifying every
+    /// removal by recoverability. A tool that became eager is forgotten
+    /// from the cache without being reported: it is directly callable, and
+    /// the eager catalog entry must stay active.
+    pub(crate) fn revalidate(&mut self, catalog: &[crate::models::Tool]) -> ToolActivationRemovals {
+        let mut removals = ToolActivationRemovals::default();
         self.names.retain(|name| {
-            let keep = Self::catalog_tool(catalog, name).is_some_and(|tool| {
-                Self::serialized_bytes(tool) <= TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES
-            });
-            if !keep {
-                evicted.push(name.clone());
+            let Some(tool) = catalog.iter().find(|tool| tool.name == *name) else {
+                removals.stale.push(ToolActivationStale {
+                    name: name.clone(),
+                    cause: ToolActivationStaleCause::CatalogShrink,
+                });
+                return false;
+            };
+            if !tool.defer_loading.unwrap_or(false) {
+                return false;
             }
-            keep
+            if Self::serialized_bytes(tool) > TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES {
+                removals.stale.push(ToolActivationStale {
+                    name: name.clone(),
+                    cause: ToolActivationStaleCause::Oversize,
+                });
+                return false;
+            }
+            true
         });
         while self.names.len() > TOOL_ACTIVATION_CACHE_MAX_NAMES
             || self.total_serialized_bytes(catalog) > TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES
         {
-            if let Some(name) = self.names.pop_front() {
-                evicted.push(name);
-            } else {
+            let Some(name) = self.names.pop_front() else {
                 break;
-            }
+            };
+            removals.bounds_evicted.push(name);
         }
-        evicted
+        removals
+            .stale
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        removals.stale.dedup();
+        removals.bounds_evicted.sort();
+        removals.bounds_evicted.dedup();
+        removals
     }
 
     /// Touch requested deferred tools in search-result order. An oversized
@@ -109,8 +187,10 @@ impl ToolActivationCache {
         catalog: &[crate::models::Tool],
         requested: &[String],
     ) -> ToolActivationDelta {
+        let revalidated = self.revalidate(catalog);
         let mut delta = ToolActivationDelta {
-            stale: self.revalidate(catalog),
+            stale: revalidated.stale,
+            evicted: revalidated.bounds_evicted,
             ..ToolActivationDelta::default()
         };
         let mut seen = HashSet::new();
@@ -147,7 +227,9 @@ impl ToolActivationCache {
             .collect();
         delta.evicted.sort();
         delta.evicted.dedup();
-        delta.stale.sort();
+        delta
+            .stale
+            .sort_by(|left, right| left.name.cmp(&right.name));
         delta.stale.dedup();
         delta.rejected.sort();
         delta.rejected.dedup();
@@ -533,16 +615,58 @@ mod tests {
     }
 
     #[test]
-    fn revalidate_drops_removed_denied_or_eager_tools() {
-        let catalog = vec![deferred_tool("kept", 8), deferred_tool("gone", 8)];
+    fn revalidate_classifies_catalog_shrink_and_eager_removals() {
+        let catalog = vec![
+            deferred_tool("kept", 8),
+            deferred_tool("disconnected", 8),
+            deferred_tool("promoted", 8),
+        ];
         let mut cache = ToolActivationCache::default();
-        cache.activate(&catalog, &["kept".to_string(), "gone".to_string()]);
-        let mut next_catalog = vec![deferred_tool("kept", 8), deferred_tool("gone", 8)];
+        cache.activate(
+            &catalog,
+            &[
+                "kept".to_string(),
+                "disconnected".to_string(),
+                "promoted".to_string(),
+            ],
+        );
+        let mut next_catalog = vec![deferred_tool("kept", 8), deferred_tool("promoted", 8)];
         next_catalog[1].defer_loading = Some(false);
 
-        let evicted = cache.revalidate(&next_catalog);
+        let removals = cache.revalidate(&next_catalog);
         assert_eq!(cache.names().collect::<Vec<_>>(), vec!["kept"]);
-        assert_eq!(evicted, vec!["gone"]);
+        assert_eq!(
+            removals.stale,
+            vec![ToolActivationStale {
+                name: "disconnected".to_string(),
+                cause: ToolActivationStaleCause::CatalogShrink,
+            }]
+        );
+        // The eager promotion is forgotten from the cache without being
+        // reported: the tool is directly callable, so both the unavailable
+        // and the evicted vocabulary would be false statements.
+        assert!(removals.bounds_evicted.is_empty());
+    }
+
+    #[test]
+    fn revalidate_reports_byte_growth_overflows_as_re_activatable_evictions() {
+        let small = vec![deferred_tool("left", 8), deferred_tool("right", 6 * 1024)];
+        let mut cache = ToolActivationCache::default();
+        cache.activate(&small, &["left".to_string(), "right".to_string()]);
+        // The catalog's schema for `left` grows while it is cached (an MCP
+        // refresh): the collective budget now overflows, but `left` is still
+        // a deferred catalog member under the per-tool cap, so the LRU
+        // victim must pop as a re-activatable eviction, not a stale
+        // unavailability.
+        let grown = vec![
+            deferred_tool("left", 12 * 1024),
+            deferred_tool("right", 6 * 1024),
+        ];
+
+        let removals = cache.revalidate(&grown);
+        assert_eq!(cache.names().collect::<Vec<_>>(), vec!["right"]);
+        assert!(removals.stale.is_empty());
+        assert_eq!(removals.bounds_evicted, vec!["left"]);
     }
 
     #[test]

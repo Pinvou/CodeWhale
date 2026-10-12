@@ -1384,11 +1384,10 @@ impl Engine {
         // Search activations belong to the conversation, not just the user
         // turn. Revalidate names against this turn's already-filtered catalog
         // before exposing them; stale mode/MCP/allow-list entries disappear.
-        let evicted = self.session.tool_activation_cache.revalidate(&tool_catalog);
-        super::tool_catalog::remove_evicted_cache_activations(
-            &tool_catalog,
+        let removals = self.session.tool_activation_cache.revalidate(&tool_catalog);
+        super::tool_catalog::remove_toolbox_drops(
             &mut active_tool_names,
-            evicted,
+            removals.dropped_names().map(str::to_string),
         );
         active_tool_names.extend(
             self.session
@@ -4120,15 +4119,9 @@ impl Engine {
             .session
             .tool_activation_cache
             .activate(tool_catalog, &deferred_tools_hydrated_in_order);
-        super::tool_catalog::remove_evicted_cache_activations(
-            tool_catalog,
+        super::tool_catalog::remove_toolbox_drops(
             active_tool_names,
-            activation.stale.iter().cloned(),
-        );
-        super::tool_catalog::remove_evicted_cache_activations(
-            tool_catalog,
-            active_tool_names,
-            activation.evicted.iter().cloned(),
+            activation.dropped_names().map(str::to_string),
         );
         // Admitting or evicting deferred tools changes the request-visible
         // tool catalog for the rest of this turn. That is a legitimate,
@@ -4144,8 +4137,10 @@ impl Engine {
         // Unlike a `tool_search` result, a hydration has no result payload of
         // its own to name bounds-driven evictions in. Park the note on the
         // session so the first recorded tool result of this batch carries it
-        // to the model; staleness evictions are not reported (the tool left
-        // the catalog itself, so there is nothing to re-activate).
+        // to the model. The evictions may come from the admission itself or
+        // from revalidation after a cached schema grew. Unavailable drops are
+        // not reported here — the next `tool_search` result is where the
+        // model learns it cannot re-activate such a tool.
         if !activation.evicted.is_empty() {
             self.session.pending_toolbox_eviction_note = Some(
                 super::tool_catalog::bounded_toolbox_eviction_note("step", &activation.evicted),
@@ -5003,7 +4998,7 @@ impl Engine {
     /// updates the working set, runs post-edit LSP diagnostics, appends success or
     /// error tool-result messages, and refreshes goal state. Its output is these
     /// side effects; it never plans or executes another tool call.
-    async fn process_tool_results(
+    pub(super) async fn process_tool_results(
         &mut self,
         outcomes: Vec<Option<ToolExecOutcome>>,
         tool_catalog: &mut Vec<crate::models::Tool>,

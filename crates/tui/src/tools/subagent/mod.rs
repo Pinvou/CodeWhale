@@ -35,8 +35,8 @@ use crate::config::MAX_SUBAGENTS;
 use crate::core::engine::tool_catalog::{
     TOOL_SEARCH_NAME, active_tools_for_request, apply_native_tool_deferral,
     bounded_toolbox_eviction_note, ensure_advanced_tooling, execute_tool_search_with_cache,
-    initial_active_tools, is_tool_search_tool, remove_evicted_cache_activations,
-    tool_matches_any_rule, touch_cached_tool_after_execution,
+    initial_active_tools, is_tool_search_tool, remove_toolbox_drops, tool_matches_any_rule,
+    touch_cached_tool_after_execution,
 };
 use crate::core::events::{AgentProgressEventMeta, Event};
 use crate::core::session::ToolActivationCache;
@@ -14149,21 +14149,17 @@ impl SubAgentToolSurface {
 
     fn hydrate(&mut self, name: &str) -> Result<String> {
         let activation = self.cache.activate(&self.catalog, &[name.to_string()]);
-        remove_evicted_cache_activations(
-            &self.catalog,
+        remove_toolbox_drops(
             &mut self.active_names,
-            activation.stale.iter().cloned(),
-        );
-        remove_evicted_cache_activations(
-            &self.catalog,
-            &mut self.active_names,
-            activation.evicted.iter().cloned(),
+            activation.dropped_names().map(str::to_string),
         );
         self.active_names
             .extend(activation.admitted.iter().cloned());
         if activation.admitted.iter().any(|admitted| admitted == name) {
-            // A hydration has no result payload of its own; the load receipt
-            // carries the eviction note to the child model.
+            // The load receipt is the hydration's only result payload, so
+            // the eviction note rides it to the child model. The evictions
+            // may come from the admission itself or from revalidation after
+            // a cached schema grew.
             let mut message = format!(
                 "Tool `{name}` was deferred and has now been loaded. Retry the call with the newly available schema."
             );
