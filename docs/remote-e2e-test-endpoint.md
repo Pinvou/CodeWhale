@@ -33,10 +33,26 @@ Relay 先暂存解包、装依赖才替换目录；新版本健康失败或公�
 
 Controller 私钥、HMAC 与状态位于代码目录之外的独立持久目录；0600 文件、0700 目录，重部署复用。已有安装丢身份但仍有状态/公钥痕迹时拒绝重新生成；legacy 身份只作一次性只读迁移。首次生成的公钥可能不等于内置 test pin，须取回实际公钥并成对配置；自动交叉校验仍见 #1507。
 
-客户端显式选 test profile；自建或轮换身份同时配置 key ID/public key，不能以修改内置信任根或删除状态来绕过配对失败。
+### 桌面 app 指向测试端点
+
+首选内置 profile：地址与信任根同源（`pinvou3-app/src-tauri/src/features/remote_control/manager/` 内置）。
+`run-dev.sh` 在未显式选 profile 时默认选 `test`。只有没有地址/pin 环境覆盖及持久自定义地址时，地址与信任根才同时采用该内置 profile：
 
 ```bash
 PINVOU_REMOTE_ENDPOINT_PROFILE=test ./pinvou3-app/run-dev.sh
+PINVOU_REMOTE_ENDPOINT_PROFILE=production ./pinvou3-app/run-dev.sh
+```
+
+只切 profile 不会清除 runtime/URL/pin 覆盖或用户持久地址；切换前须核对这些更高优先级来源。`scripts/run-remote-control-endpoint.ps1 -Mode Production` 清除进程覆盖但仍保留持久设置，不保证强制指向生产。不得将本节命令当作端点隔离或真实双机验收。自建或轮换身份同时配置 key ID/public key，不能以修改内置信任根或删除状态来绕过配对失败。
+
+仅当自建 Relay 与当前 profile 共用信任根时，才用地址环境变量单独覆盖
+（**只覆盖地址不会同步换信任根**，两端不在同一信任根时 controller 握手会失败关闭）：
+
+```bash
+PINVOU_REMOTE_ENDPOINT_PROFILE=test \
+PINVOU_REMOTE_PUBLIC_URL="https://pinvou.com/pinvou3/remote-test" \
+PINVOU_REMOTE_RELAY_WS_URL="wss://pinvou.com/pinvou3/remote-test/ws" \
+./pinvou3-app/run-dev.sh
 ```
 
 ## 拆除
@@ -49,6 +65,16 @@ bash scripts/deploy-remote-relay-test.sh --teardown
 
 ## 验证边界
 
-`npm --prefix remote-control-relay test` 覆盖 Relay 与离线部署合同；`node scripts/run-windows-relay-tools-tests.mjs` 在原生 Windows PowerShell 5.1 执行属主、身份与 launcher 三组测试，CI 的 `windows-relay-tools-test` 同样执行且禁止零计数或 skip。健康片段覆盖有界重试/请求超时和恢复旧 unit，不代表完整故障矩阵（#1429）。WebUI 浏览器 smoke 使用 `npm --prefix pinvou3-app run test:webui`。这些检查不执行真实 SSH、生产部署、线上回滚或双 Windows 验收。
+- relay 单测：`cd remote-control-relay && npm test`（房间/鉴权/限流/payload 上限等）。
+- 完整 WebUI 浏览器 smoke：`remote-control-relay/test/web-ui.smoke.cjs`，由
+  `npm --prefix pinvou3-app run test:webui` 构建并在桌面/手机视口执行。
+- v2 Relay 与部署契约：`relay.test.js`、`deploy.test.js`、`remote-test-deploy.test.js`；退役的
+  v1 jsdom 页面及对应测试已删除，不再提供旧测试入口，也不属于当前 v2 门禁。
+- 旧 desktop 回路 e2e 条目引用的 `new_headless()` / `e2e_tests` 已不在当前源码中，
+  不能作为当前真实 Node Relay + mobile 回路的测试或 CI 执行证据。
+- 当前 Windows B 端恢复接线回归的宿主入口是 `pinvou3-app/src-tauri/src/app/commands/remote_control/reader_resume_tests.rs` 的 `real_reader_manager_worker_resume_round_trip()`；它调用 `features/remote_control/controller/relay_runtime/reader_resume_tests.rs` 的共享 `resume_round_trip()` 夹具：
+  走真实 WebSocket reader、manager 与 worker，但 Relay 是本地协议模拟端；不替代 Web v2 mobile、真实三角色或双 Windows 验收。
+
+`node scripts/run-windows-relay-tools-tests.mjs` 在原生 Windows PowerShell 5.1 执行属主、身份与 launcher 三组测试，CI 的 `windows-relay-tools-test` 同样执行且禁止零计数或 skip。健康片段覆盖有界重试/请求超时和恢复旧 unit，不代表完整故障矩阵（#1429）。以上检查不执行真实 SSH、生产部署、线上回滚或双 Windows 验收。
 
 真实双机旅程与发布门禁见 [部署说明](Windows双端远程控制服务部署说明.md) 和 [发布与回滚](Windows双端远程控制发布与回滚.md)。敏感信息或未修漏洞按 CONTRIBUTING.md 中的私密安全报告通道处理，不在公开 Issue 粘贴实例值。
