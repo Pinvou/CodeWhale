@@ -351,3 +351,77 @@ fn settled_search_result_carries_no_booting_block() {
         );
     }
 }
+
+/// The activation cache is bounded, so a search that admits new tools can
+/// revoke ones the conversation already used. The result must name those
+/// evictions — a tool that silently vanishes between turns is exactly the
+/// "reference returned but never callable" trap. Searches without evictions
+/// keep the legacy result shape with no eviction block at all.
+#[test]
+fn search_result_names_cache_evictions_instead_of_dropping_them_silently() {
+    let catalog: Vec<Tool> = (0..10)
+        .map(|index| {
+            let mut definition = tool(&format!("deferred-{index}"));
+            definition.defer_loading = Some(true);
+            definition
+        })
+        .collect();
+    let mut active = initial_active_tools(&catalog);
+    let mut cache = ToolActivationCache::default();
+
+    let first = execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "deferred", "max_results": 8}),
+        &catalog,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("first search should succeed");
+    let first_payload: serde_json::Value =
+        serde_json::from_str(&first.content).expect("payload is JSON");
+    assert_eq!(
+        first_payload["tool_references"].as_array().unwrap().len(),
+        8
+    );
+    assert!(
+        first_payload.get("evicted_tool_references").is_none(),
+        "a search without evictions must keep the legacy shape: {first_payload}"
+    );
+    assert!(active.contains("deferred-0"));
+    assert_eq!(cache.names().count(), 8);
+
+    // Naming deferred-8/9 admits two new tools into the full cache and must
+    // evict the two least-recently-used activations.
+    let second = execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "deferred-8 deferred-9", "max_results": 8}),
+        &catalog,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("second search should succeed");
+    let second_payload: serde_json::Value =
+        serde_json::from_str(&second.content).expect("payload is JSON");
+    assert_eq!(
+        second_payload["evicted_tool_references"],
+        json!([
+            {"type": "tool_reference", "tool_name": "deferred-0"},
+            {"type": "tool_reference", "tool_name": "deferred-1"},
+        ])
+    );
+    let note = second_payload["toolbox_note"].as_str().expect("note");
+    assert!(
+        note.contains("deferred-0") && note.contains("no longer callable"),
+        "the note must name the evictions and the recovery contract: {note}"
+    );
+    assert!(!active.contains("deferred-0"));
+    assert!(!active.contains("deferred-1"));
+    assert!(active.contains("deferred-8"));
+    let metadata = second.metadata.expect("search metadata");
+    assert_eq!(
+        metadata["evicted_tool_references"],
+        json!(["deferred-0", "deferred-1"])
+    );
+}

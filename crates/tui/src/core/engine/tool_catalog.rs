@@ -1358,9 +1358,11 @@ fn execute_tool_search_inner(
     };
 
     let mut cache_rejected = Vec::new();
+    let mut cache_evicted = Vec::new();
     if let Some(cache) = cache {
         let delta = cache.activate(catalog, &discovered);
-        remove_evicted_cache_activations(catalog, active_tools, delta.evicted);
+        remove_evicted_cache_activations(catalog, active_tools, delta.evicted.iter().cloned());
+        cache_evicted = delta.evicted;
         cache_rejected = delta.rejected;
         discovered = delta.admitted;
     }
@@ -1401,6 +1403,25 @@ fn execute_tool_search_inner(
         "tool_references": references,
         "unavailable_tool_references": unavailable_references.clone(),
     });
+    // The activation cache is bounded (8 cached tools, 16KiB of serialized
+    // schemas), so admitting new tools can silently revoke ones this
+    // conversation already used. Naming the evictions in the result keeps
+    // the model's picture of its callable toolbox honest — otherwise it sees
+    // a previously working tool disappear between turns with no explanation.
+    if !cache_evicted.is_empty() {
+        payload["evicted_tool_references"] = json!(
+            cache_evicted
+                .iter()
+                .map(|name| json!({"type": "tool_reference", "tool_name": name}))
+                .collect::<Vec<_>>()
+        );
+        payload["toolbox_note"] = json!(format!(
+            "This search evicted tools from the bounded conversation toolbox (8 cached tools) \
+             by activating newer matches; the evicted tools are no longer callable until a \
+             later search re-activates them: {}",
+            cache_evicted.join(", ")
+        ));
+    }
     if let Some(servers) = boot_status {
         payload["mcp_boot"] = json!({
             "status": "connecting",
@@ -1413,6 +1434,10 @@ fn execute_tool_search_inner(
         "tool_references": discovered,
         "unavailable_tool_references": unavailable_references,
     });
+    if !cache_evicted.is_empty() {
+        metadata["evicted_tool_references"] = json!(cache_evicted);
+        metadata["toolbox_note"] = payload["toolbox_note"].clone();
+    }
     if boot_status.is_some() {
         metadata["mcp_boot"] = payload["mcp_boot"].clone();
     }
