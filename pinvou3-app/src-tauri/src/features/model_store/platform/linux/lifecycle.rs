@@ -1776,14 +1776,31 @@ impl ModelManager {
         let env = self.env_for_record(&rec);
         let source = self.local_scripts_source(&rec);
 
-        let output_lines = self.run_card_script(
+        let output_lines = match self.run_card_script(
             &source,
             "enable",
             &env,
             &mut |line| on_progress(line),
             control,
             false,
-        )?;
+        ) {
+            Ok(lines) => lines,
+            Err(error) if deployment_receipt_is_missing(&error.to_string()) => {
+                // “已部署”只是历史数据库状态；卡片自己的部署配置可能被手工清理、
+                // 被旧版卸载遗漏，或因中途失败而从未真正写完。继续保留这个假状态，
+                // 界面就会一直给用户“启用”按钮，而每次都必然失败。
+                //
+                // 退回“已下载”只清部署痕迹，不会删除几十 GB 权重或任何引擎。下次
+                // 点击“部署”会用已保存的脚本与上次选择的 profile 重新生成配置。
+                db::mark_deployment_missing(card_id).map_err(|db_error| {
+                    ModelManagerError::new(format!("修复失效部署状态失败：{db_error}"))
+                })?;
+                return Err(ModelManagerError::new(
+                    "该模型的部署配置已丢失，已恢复为“已下载”。请先点击“部署”，部署完成后再启用。",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
         db::set_running(card_id, true)
             .map_err(|e| ModelManagerError::new(format!("记录运行状态失败：{e}")))?;
 
@@ -2445,6 +2462,24 @@ fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
     found
 }
 
+/// 卡片的 enable 脚本明确说部署配置缺失时，数据库中的“已部署”就是陈旧状态。
+///
+/// 这里不能把任意 enable 失败都降级：显存不足、端口冲突、镜像故障都可能在一次
+/// 重试或排障后恢复，清掉部署状态反而会误导用户。只有脚本同时提到部署凭据及
+/// "missing/not found/缺少" 这类缺失事实时才自愈。
+fn deployment_receipt_is_missing(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    let mentions_receipt = lower.contains(".deploy-env")
+        || lower.contains("deployment configuration")
+        || lower.contains("deployment config");
+    let says_missing = lower.contains("missing")
+        || lower.contains("not found")
+        || message.contains('缺')
+        || message.contains("缺少")
+        || message.contains("不存在");
+    mentions_receipt && says_missing
+}
+
 /// 卡片报上来的对外调用地址是不是指向**本机**。
 ///
 /// 这把尺子在三个地方必须一模一样：入库（本函数）、接入（前端
@@ -2866,6 +2901,27 @@ exit 0
             Some("/models/target")
         );
         assert_eq!(extract_marker(&lines, "LMM_ENGINE_IMAGE="), None);
+    }
+
+    #[test]
+    fn identifies_only_explicit_missing_deployment_receipts() {
+        assert!(deployment_receipt_is_missing(
+            "ERROR: 模型尚未部署，缺少 .deploy-env，请先部署。"
+        ));
+        assert!(deployment_receipt_is_missing(
+            "ERROR: 还没有部署过（缺 .deploy-env），请先完成「部署」"
+        ));
+        assert!(deployment_receipt_is_missing(
+            "deployment configuration missing; deploy the model first"
+        ));
+
+        // 不能把普通的启用故障误降级为“未部署”。这些问题都应该保留原状态，
+        // 让用户修复后直接重试，而不是被迫重新部署。
+        assert!(!deployment_receipt_is_missing("启动服务失败：显存不足"));
+        assert!(!deployment_receipt_is_missing("找不到模型权重"));
+        assert!(!deployment_receipt_is_missing(
+            "deployment configuration is valid, but port 30000 is already in use"
+        ));
     }
 
     /// 防的是「几百 GB 的 rm -rf 被 300 秒静默超时误杀」。

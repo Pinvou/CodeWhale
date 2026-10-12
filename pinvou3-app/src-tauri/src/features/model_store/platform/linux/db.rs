@@ -795,7 +795,7 @@ pub fn set_running(card_id: &str, running: bool) -> rusqlite::Result<()> {
 /// 和 `scripts_content_json` / `assets_content_json`（脚本本地副本）：重新部署
 /// 时要照着它们来，清掉等于让用户把选择重做一遍，而这跟卸载没有关系。
 /// `downloaded_at` 同理不动——权重还在盘上，它什么时候下的没有变。
-pub fn mark_uninstalled(card_id: &str) -> rusqlite::Result<()> {
+fn clear_deployment_state(card_id: &str) -> rusqlite::Result<()> {
     let conn = connect()?;
     conn.execute(
         "UPDATE store_models
@@ -810,6 +810,16 @@ pub fn mark_uninstalled(card_id: &str) -> rusqlite::Result<()> {
         params![card_id],
     )?;
     Ok(())
+}
+
+pub fn mark_uninstalled(card_id: &str) -> rusqlite::Result<()> {
+    clear_deployment_state(card_id)
+}
+
+/// 启用时发现部署配置已不在，就撤销数据库里过期的“已部署”声明。
+/// 权重和引擎保持不动，用户重新部署即可恢复可用状态。
+pub fn mark_deployment_missing(card_id: &str) -> rusqlite::Result<()> {
+    clear_deployment_state(card_id)
 }
 
 /// 记下最近一次成功部署用的是哪套参数方案：下次重新部署/修复时默认沿用
@@ -1335,6 +1345,66 @@ mod tests {
         delete_store_model("card-1").unwrap();
         assert!(get_store_model("card-1").unwrap().is_none());
         assert!(list_api_keys_for_card("card-1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_deployment_receipt_keeps_downloaded_model_and_clears_only_deployment_state() {
+        let _ctx = setup_temp_db();
+        let scripts = std::collections::BTreeMap::from([(
+            "deploy".to_string(),
+            "https://example.com/deploy.sh".to_string(),
+        )]);
+        add_store_model(AddStoreModelParams {
+            card_id: "card-with-missing-receipt",
+            model_name: "qwen38",
+            card_name: "Qwen3.8",
+            org: Some("Qwen"),
+            description: None,
+            engine_name: "sglang",
+            engine_version: Some("v0.5.19"),
+            size_bytes: 1024,
+            quantization: Some("nvfp4"),
+            source_repo_id: Some("owner/model"),
+            source_filename: None,
+            scripts: &scripts,
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: DeployTopology::default(),
+            card_source: "store",
+        })
+        .unwrap();
+        update_store_model_status("card-with-missing-receipt", "deployed", Some("script-hash"))
+            .unwrap();
+        set_running("card-with-missing-receipt", true).unwrap();
+        set_endpoint_info(
+            "card-with-missing-receipt",
+            Some("http://127.0.0.1:30000/v1"),
+            Some("qwen38"),
+        )
+        .unwrap();
+
+        mark_deployment_missing("card-with-missing-receipt").unwrap();
+
+        let record = get_store_model("card-with-missing-receipt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, "downloaded");
+        assert!(!record.running);
+        assert!(record.deployed_at.is_none());
+        assert!(record.deployed_script_sha256.is_none());
+        assert!(record.container_name.is_none());
+        assert!(record.endpoint_url.is_none());
+        assert!(record.endpoint_model.is_none());
+        // 这条自愈不触碰下载物：权重位置、卡片脚本、下载时间都必须还在。
+        assert_eq!(record.source_repo_id.as_deref(), Some("owner/model"));
+        assert!(!record.downloaded_at.is_empty());
+        assert_eq!(
+            record
+                .scripts
+                .get("deploy")
+                .and_then(|script| script.as_deref()),
+            Some("https://example.com/deploy.sh")
+        );
     }
 
     /// `delete_api_key` 还没接到命令和按钮上（见它自己的说明），所以这条测试是
