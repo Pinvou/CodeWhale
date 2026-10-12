@@ -135,6 +135,8 @@ jobs:
           scripts/tests/sync-version.test.mjs
           scripts/tests/select-frontend-smokes.test.mjs
           scripts/tests/pr-check-routing.test.mjs
+          scripts/tests/windows-relay-dacl-routing.test.mjs
+          scripts/tests/windows-relay-dacl-runner.test.mjs
 
       - name: 校验 VERSION 与各版本文件一致
         run: node scripts/sync-version.mjs --check
@@ -381,6 +383,8 @@ jobs:
               - 'remote-control-relay/**'
               - 'scripts/deploy-remote-relay.sh'
               - 'scripts/deploy-remote-relay-test.sh'
+              - 'scripts/run-windows-relay-dacl.mjs'
+              - 'scripts/tests/windows-relay-dacl-*.test.mjs'
               - '.github/workflows/pr-check.yml'
             team_relay_hub:
               - 'team-relay-hub/**'
@@ -740,6 +744,24 @@ jobs:
           bash -n scripts/deploy-remote-relay.sh
           bash -n scripts/deploy-remote-relay-test.sh
           npm --prefix remote-control-relay test
+
+  windows-relay-dacl:
+    name: windows-relay-dacl
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: remote-control-relay/package-lock.json
+      - name: Install Relay dependencies
+        run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
+      - name: Verify real Windows Relay state DACLs
+        run: node scripts/run-windows-relay-dacl.mjs
 
   team-relay-hub-test:
     name: team-relay-hub-test
@@ -2234,6 +2256,7 @@ jobs:
       - fast-gate
       - frontend-test
       - relay-test
+      - windows-relay-dacl
       - team-relay-hub-test
       - update-release-console-test
       - release-contract-test
@@ -2268,6 +2291,7 @@ jobs:
           FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
+          WINDOWS_RELAY_DACL_RESULT: ${{ needs.windows-relay-dacl.result }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
           UPDATE_RELEASE_CONSOLE_RESULT: ${{ needs.update-release-console-test.result }}
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
@@ -2307,6 +2331,7 @@ jobs:
             "backflow-portability:$BACKFLOW_PORTABILITY_RESULT" \
             "frontend-test:$FRONTEND_RESULT" \
             "relay-test:$RELAY_RESULT" \
+            "windows-relay-dacl:$WINDOWS_RELAY_DACL_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
             "update-release-console-test:$UPDATE_RELEASE_CONSOLE_RESULT" \
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \
