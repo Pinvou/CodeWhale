@@ -91,6 +91,9 @@ DO $$ BEGIN
  IF to_regclass('public.ledger_repair_cases') IS NOT NULL THEN
   REVOKE UPDATE,DELETE ON TABLE public.ledger_repair_cases FROM billing_service;
  END IF;
+ IF to_regclass('public.receivable_write_off_cases') IS NOT NULL THEN
+  REVOKE UPDATE,DELETE ON TABLE public.receivable_write_off_cases FROM billing_service;
+ END IF;
 END $$;
 SET ROLE billing_service;`)
 	return err
