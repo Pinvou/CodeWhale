@@ -7641,6 +7641,104 @@ fn child_hydration_receipt_carries_the_eviction_note() {
     assert!(!surface.active_names.contains("big-a"));
 }
 
+/// The oversize hydration rejection runs after the activation, so its
+/// revalidation may have bounds-evicted other tools. This error is the
+/// call's only result payload: the rejection must carry both the shared
+/// oversize reason and those evictions instead of absorbing them.
+#[test]
+fn child_hydrate_rejection_carries_the_revalidations_evictions() {
+    let warm_catalog = vec![
+        synthetic_deferred_tool("big-a", 8_050),
+        synthetic_deferred_tool("big-b", 8_050),
+        synthetic_deferred_tool("big-c", 20_000),
+    ];
+    let mut surface =
+        SubAgentToolSurface::new(warm_catalog, &["big-a".to_string(), "big-b".to_string()]);
+    // The catalog's schema for `big-a` grew after the warm start (a
+    // refresh): the rejection's activation revalidates against it and the
+    // collective budget overflows, while `big-c` itself is per-tool
+    // oversize and is refused.
+    surface.catalog = vec![
+        synthetic_deferred_tool("big-a", 12_000),
+        synthetic_deferred_tool("big-b", 8_050),
+        synthetic_deferred_tool("big-c", 20_000),
+    ];
+
+    let error = surface
+        .hydrate("big-c")
+        .expect_err("big-c is per-tool oversize");
+    let message = error.to_string();
+    assert!(
+        message.contains("could not enter the bounded child toolbox")
+            && message.contains(&toolbox_oversize_reason()),
+        "the rejection must carry the shared oversize reason: {message}"
+    );
+    assert!(
+        message.contains("no longer callable") && message.contains("big-a"),
+        "the rejection must carry the revalidation's eviction note: {message}"
+    );
+    assert!(
+        !message.contains("has now been loaded"),
+        "the rejection must not promise a load: {message}"
+    );
+    assert!(
+        surface.pending_eviction_notes.is_empty(),
+        "the evictions rode the error directly; nothing may stay parked"
+    );
+}
+
+/// The child's ride channel mirrors the parent's: parked notes ride success
+/// and error results alike (a note held back on `Err` would strand until a
+/// later `Ok` — or forever if the child ends first), and names the ride
+/// re-admits are netted out against the child's live cache.
+#[test]
+fn child_parked_note_rides_success_and_error_results_and_nets_re_admissions() {
+    let mut surface = SubAgentToolSurface::new(vec![], &[]);
+    surface.park_eviction_note(
+        ToolboxEvictionTrigger::Step,
+        vec!["big-a".to_string(), "big-b".to_string()].as_slice(),
+    );
+
+    let mut ok = Ok(RichToolResult::plain(ToolResult::success("payload")));
+    surface.ride_pending_eviction_notes(&mut ok);
+    let ok = ok.expect("stays ok");
+    assert!(
+        ok.result.content.contains("payload")
+            && ok.result.content.contains("no longer callable")
+            && ok.result.content.contains("big-a")
+            && ok.result.content.contains("big-b"),
+        "the note rides a success result: {}",
+        ok.result.content
+    );
+
+    surface.park_eviction_note(ToolboxEvictionTrigger::Step, &["big-c".to_string()]);
+    let mut failure: Result<RichToolResult> = Err(anyhow::anyhow!("boom"));
+    surface.ride_pending_eviction_notes(&mut failure);
+    let message = failure.expect_err("stays an error").to_string();
+    assert!(
+        message.contains("boom")
+            && message.contains("no longer callable")
+            && message.contains("big-c"),
+        "the note must ride an error result too: {message}"
+    );
+    assert!(surface.pending_eviction_notes.is_empty());
+
+    // A name the ride hands back is netted out; a fully netted note does
+    // not ride at all.
+    let mut deferred = synthetic_deferred_tool("big-a", 8);
+    deferred.name = "big-a".to_string();
+    surface.cache.activate(&[deferred], &["big-a".to_string()]);
+    surface.park_eviction_note(ToolboxEvictionTrigger::Step, &["big-a".to_string()]);
+    let mut netted = Ok(RichToolResult::plain(ToolResult::success("clean")));
+    surface.ride_pending_eviction_notes(&mut netted);
+    let netted = netted.expect("stays ok");
+    assert!(
+        netted.result.content == "clean",
+        "a note naming only re-admitted tools must be absorbed: {}",
+        netted.result.content
+    );
+}
+
 /// An executed tool's refresh can evict on the collective bounds when a
 /// cached schema grew; the child mirror of the parent's post-execution
 /// channel must append the eviction note to the recorded result.

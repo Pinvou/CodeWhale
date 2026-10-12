@@ -14138,6 +14138,27 @@ impl SubAgentToolSurface {
         park_toolbox_eviction(&mut self.pending_eviction_notes, trigger, evicted);
     }
 
+    /// Attach the parked eviction notes to this result — the child's ride
+    /// channel. Names re-admitted since the park are netted out against the
+    /// child's live cache, so a note never declares a tool uncallable that
+    /// the riding result hands back, and a note emptied by the netting is
+    /// dropped. Error results carry the notes too, mirroring the parent
+    /// engine's error path: a note held back on `Err` would strand until a
+    /// later `Ok` — or forever if the child ends first.
+    fn ride_pending_eviction_notes(&mut self, result: &mut Result<RichToolResult>) {
+        if self.pending_eviction_notes.is_empty() {
+            return;
+        }
+        let mut parked = std::mem::take(&mut self.pending_eviction_notes);
+        let Some(rendered) = render_toolbox_eviction_notes(&mut parked, &self.cache) else {
+            return;
+        };
+        match result.as_mut() {
+            Ok(rich) => rich.result.content.push_str(&format!("\n\n{rendered}")),
+            Err(error) => *error = anyhow!("{error}\n\n{rendered}"),
+        }
+    }
+
     /// Refresh an executed cached tool and append its eviction note to the
     /// recorded result — the child mirror of the parent engine's
     /// post-execution channel.
@@ -14218,11 +14239,21 @@ impl SubAgentToolSurface {
         }
         // The only rejection here is the per-tool budget: a narrower search
         // cannot help, so the recovery hint must say why the tool cannot
-        // enter instead of promising a narrower query would.
-        Err(anyhow!(
+        // enter instead of promising a narrower query would. The rejection
+        // runs after the activation, so revalidation may have bounds-evicted
+        // other tools on the way; this error is the call's only result
+        // payload, so the note rides it instead of being absorbed.
+        let mut message = format!(
             "Tool {name} could not enter the bounded child toolbox: {}",
             toolbox_oversize_reason()
-        ))
+        );
+        if !activation.evicted.is_empty() {
+            message.push_str(&format!(
+                "\n\n{}",
+                bounded_toolbox_eviction_note(ToolboxEvictionTrigger::Step, &activation.evicted)
+            ));
+        }
+        Err(anyhow!(message))
     }
 }
 
@@ -15659,16 +15690,8 @@ impl SubAgentToolRegistry {
         // A note parked by an earlier catalog refresh (request-time
         // revalidation, a warm start) has no payload of its own; it rides
         // the child's next recorded result, mirroring the parent engine's
-        // parked-note channel. Names re-admitted since the park are netted
-        // out against the child's live cache, so the note never declares a
-        // tool uncallable that the riding result hands back.
-        if !surface.pending_eviction_notes.is_empty() {
-            let mut parked = std::mem::take(&mut surface.pending_eviction_notes);
-            let rendered = render_toolbox_eviction_notes(&mut parked, &surface.cache);
-            if let (Ok(rich), Some(note)) = (result.as_mut(), rendered) {
-                rich.result.content.push_str(&format!("\n\n{note}"));
-            }
-        }
+        // parked-note channel.
+        surface.ride_pending_eviction_notes(&mut result);
         result
     }
 
