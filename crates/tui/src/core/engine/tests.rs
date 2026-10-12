@@ -27529,7 +27529,11 @@ async fn session_sync_drops_a_parked_toolbox_eviction_note() {
     // A turn dropped between planning and result processing leaves the note
     // parked. SyncSession installs another conversation: the parked note
     // belongs to the previous one and must never ride the new conversation's
-    // tool results.
+    // tool results. This test pins the composed mutant only: the turn-entry
+    // sweep also masks a missing SyncSession clear (the engine owns the
+    // field behind the op loop, so the clear's effect is not observable
+    // between the sync and the next turn) — the clear is defense in depth
+    // beside that sweep, and removing both is what fails here.
     engine.park_toolbox_eviction_note(
         crate::core::session::ToolboxEvictionTrigger::Step,
         &["ghost-tool".to_string()],
@@ -27883,6 +27887,72 @@ async fn turn_start_sweeps_a_stranded_eviction_note() {
     assert!(
         engine.session.pending_toolbox_eviction_notes.is_empty(),
         "a stranded note must not survive into the turn to misattribute its evictions"
+    );
+}
+
+/// The turn-entry sweep must run before the turn-start park: a note
+/// stranded by the previous turn is dropped while this turn's fresh
+/// eviction note survives. Sweeping after the park would eat the fresh
+/// note and lose the eviction report entirely.
+#[tokio::test]
+async fn turn_entry_sweep_precedes_the_turn_start_park() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("done")]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    // Stranded by an interrupted previous turn.
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["ghost-tool".to_string()],
+    );
+
+    // This turn's start evicts on the collective bounds (a cached schema
+    // grew between turns) and parks its own note.
+    let priming_catalog = vec![
+        heavy_deferred_tool("cached-a", 7_000),
+        heavy_deferred_tool("cached-b", 7_000),
+    ];
+    let cached = vec!["cached-a".to_string(), "cached-b".to_string()];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&priming_catalog, &cached);
+    let grown_catalog = vec![
+        heavy_deferred_tool("cached-a", 12_000),
+        heavy_deferred_tool("cached-b", 7_000),
+    ];
+    let policy = policy_for_catalog(
+        grown_catalog,
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let _ = engine.run_turn(&mut turn, policy, None, None).await;
+
+    let notes = &engine.session.pending_toolbox_eviction_notes;
+    assert_eq!(
+        notes.len(),
+        1,
+        "the stranded note must be swept and the fresh turn-start note must survive: {notes:?}"
+    );
+    assert_eq!(
+        notes[0].trigger,
+        crate::core::session::ToolboxEvictionTrigger::TurnStart
+    );
+    assert!(
+        notes[0].evicted.iter().any(|name| name == "cached-a"),
+        "the fresh note names this turn's victim: {notes:?}"
+    );
+    assert!(
+        !notes[0].evicted.iter().any(|name| name == "ghost-tool"),
+        "the stranded note must not combine into this turn's report: {notes:?}"
     );
 }
 
