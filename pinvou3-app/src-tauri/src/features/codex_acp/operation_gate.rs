@@ -80,6 +80,14 @@ pub(super) fn admit_prompt_turn(
     touch_activity: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     begin_prompt(busy, configuring)?;
+    finish_prompt_admission(busy, session_id, touch_activity)
+}
+
+pub(super) fn finish_prompt_admission(
+    busy: &AtomicBool,
+    session_id: &str,
+    touch_activity: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     if let Err(error) = touch_activity() {
         busy.store(false, Ordering::Release);
         return Err(error);

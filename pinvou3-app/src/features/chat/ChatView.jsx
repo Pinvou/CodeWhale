@@ -94,7 +94,7 @@ import {
   remoteDispatchCases,
 } from '../remote-control/remote-dispatch-ui.mjs';
 import {
-  isControlledDeviceChatActive,
+  isControlledSessionChatActive,
   isTaskTerminal,
   taskStatusKey,
 } from '../remote-control/remote-control-logic.mjs';
@@ -860,8 +860,10 @@ const openChatExternalUrl = (url) => {
       const remoteProxyHistory = remoteProxyForSession(activeSessionId, bs?.remoteProxyHistory);
       const remoteChatActive = !!remoteProxyHistory;
       const controlledDevice = (bs && bs.controlledDevice) || {};
-      const controlledChatActive = isControlledDeviceChatActive(controlledDevice);
       const controlledSession = (bs && bs.controlledSession) || {};
+      const controlledChatActive = isControlledSessionChatActive(
+        controlledDevice, controlledSession, activeSessionId,
+      );
       const [remoteCapabilityBusy, setRemoteCapabilityBusy] = useState(false);
       const [remoteCapabilityError, setRemoteCapabilityError] = useState(null);
       const remoteCapabilityRequesterRef = useRef(null);

@@ -241,7 +241,8 @@ pub fn materialize_session_skills(
     project_workspace: Option<&Path>,
 ) -> Result<(), String> {
     let enabled = enabled_skills_for(scope, project_workspace);
-    materialize_skill_set(session_id, &enabled)
+    materialize_skill_set(session_id, &enabled)?;
+    Ok(())
 }
 
 /// A remote turn's immutable, uniquely owned discovery root. Ordinary B-local
@@ -1207,6 +1208,41 @@ mod tests {
                 "task_skill_snapshot_reused"
             );
             assert!(first.path().is_dir());
+        });
+    }
+
+    #[test]
+    fn private_remote_selection_survives_latest_b_toggle_install_and_uninstall() {
+        with_temp_home("remote-latest-b-skills", || {
+            seed_sources();
+            let sid = "remote-latest-b-skills";
+            let snapshot = materialize_plain_remote_turn_skills(
+                sid,
+                &["user-custom".to_owned()],
+                std::sync::Arc::new(RemoteTurnOwner::default()),
+            )
+            .unwrap();
+            save_disabled_skills_for(ConnectorScope::Plain, &["visualizer".to_owned()]).unwrap();
+            write_skill(&paths::user_skills_dir(), "newly-installed", "new skill");
+            std::fs::remove_dir_all(paths::bundle_skills_dir().join("ima-skills")).unwrap();
+            rewrite_session_skills(sid, ConnectorScope::Plain, None);
+            let names: HashSet<_> = std::fs::read_dir(paths::session_skills_dir(sid))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                names,
+                HashSet::from([
+                    "user-custom".to_owned(),
+                    "government-writing".to_owned(),
+                    "newly-installed".to_owned(),
+                ])
+            );
+            let frozen: Vec<_> = std::fs::read_dir(snapshot.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(frozen, vec![std::ffi::OsString::from("user-custom")]);
         });
     }
 

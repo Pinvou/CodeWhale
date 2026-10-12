@@ -2898,7 +2898,7 @@ mod tests {
                 json!({
                     "v": 1,
                     "type": "controller_resumed",
-                    "request_id": "request-resume-completed-0001",
+                    "request_id": "request-resume-final-0001",
                     "activation_id": "activation-0001",
                     "liveness_epoch_a": "live-a-2",
                     "liveness_epoch_b": "live-b-2",

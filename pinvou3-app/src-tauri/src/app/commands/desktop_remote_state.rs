@@ -168,6 +168,7 @@ mod tests {
                 commands::desktop_remote_permission::desktop_remote_permission_deny_task,
                 commands::desktop_remote_capability::desktop_remote_controller_capability_snapshot,
                 commands::desktop_remote_capability::desktop_remote_controller_capability_send,
+                commands::desktop_remote_capabilities::desktop_remote_controlled_capabilities_snapshot,
                 commands::desktop_remote_task::desktop_remote_task_reserve_a,
                 commands::desktop_remote_task::desktop_remote_task_commit_a,
                 commands::desktop_remote_task::desktop_remote_task_cancel_a,
@@ -181,7 +182,7 @@ mod tests {
         assert!(!is_ready(app.handle()));
         let payload = serde_json::json!({"taskId":"fixture-task", "epoch":"fixture",
             "sequence":0, "remoteSessionRef":"fixture-session", "reason":"fixture",
-            "localSessionId":"fixture-session", "remoteRef":"fixture-ref",
+            "localSessionId":"fixture-session", "remoteRef":"fixture-ref", "sessionId":"fixture-session",
             "request":{"title":"Report","bSessionReference":null},
             "intent":{"kind":"new","text":"hello","mode":"chat","workspaceId":null,
                 "skillIds":[],"modelSource":"controlled_device","selectedModelId":null},
@@ -216,6 +217,7 @@ mod tests {
                 "permission_deny_task",
                 "controller_capability_snapshot",
                 "controller_capability_send",
+                "controlled_capabilities_snapshot",
                 "task_reserve_a",
                 "task_commit_a",
                 "task_cancel_a",
@@ -263,6 +265,53 @@ mod tests {
             );
         } else {
             assert_eq!(response.unwrap_err(), serde_json::json!(expected_error));
+        }
+    }
+
+    #[test]
+    fn controlled_capability_ipc_requires_every_dependency_before_domain_access() {
+        use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
+        use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![
+                commands::desktop_remote_capabilities::desktop_remote_controlled_capabilities_snapshot
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        app.manage(DesktopRemoteReady);
+        let expected = if crate::platform::capabilities::current().desktop_remote_control_supported
+        {
+            UNAVAILABLE
+        } else {
+            "desktop_remote_control_unsupported"
+        };
+        for installed in 0..3 {
+            if installed == 1 {
+                app.manage(ControlledDeviceManager::default());
+            } else if installed == 2 {
+                app.manage(CapabilitySnapshotManager::default());
+            }
+            // The real controlled manager is stopped. A prematurely executed
+            // body would return not_connected instead of detecting the missing
+            // snapshot manager/runtime at the IPC extraction boundary.
+            tauri::test::assert_ipc_response(
+                &window,
+                tauri::webview::InvokeRequest {
+                    cmd: "desktop_remote_controlled_capabilities_snapshot".into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: window.url().unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(
+                        serde_json::json!({"sessionId":"fixture-session"}),
+                    ),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.to_owned(),
+                },
+                Err::<String, String>(expected.to_owned()),
+            );
         }
     }
 }

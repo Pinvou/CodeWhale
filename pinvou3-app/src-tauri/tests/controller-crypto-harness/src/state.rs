@@ -1,7 +1,9 @@
 // Keep the actual manager's parent-module boundary while compiling its local
 // state tests independently of the full product graph.
 pub(crate) use crate::test_support;
-pub(crate) use crate::{crypto, encrypted_lane, liveness, protocol, relay_transport, resume};
+pub(crate) use crate::{
+    crypto, encrypted_lane, liveness, panic_scope, protocol, relay_transport, resume,
+};
 
 #[path = "../../../src/features/remote_control/controller/clock.rs"]
 pub(crate) mod clock;
