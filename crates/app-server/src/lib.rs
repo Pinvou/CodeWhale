@@ -227,9 +227,10 @@ struct RuntimeThreadHint {
 /// additional entries the runtime's create/PATCH intakes expect: entries
 /// equal to `primary` are the row's own head, not declared additions, so
 /// they must not count against the runtime's intake cap. The strip is the
-/// shared LEXICAL core primitive (round-38 M38-3): a `..`-spelled copy of
-/// the head drops with it. A `None` workspace has no head to strip and
-/// passes the set through untouched.
+/// shared core primitive (round-38 M38-3; canonical fallback legs since
+/// round-41): a `..`-spelled or aliased copy of the head drops with it.
+/// A `None` workspace has no head to strip and passes the set through
+/// untouched.
 fn declared_roots_without_primary(primary: Option<&Path>, stored: &[PathBuf]) -> Vec<PathBuf> {
     match primary {
         Some(primary) => codewhale_core::strip_workspace_roots_head(primary, stored),

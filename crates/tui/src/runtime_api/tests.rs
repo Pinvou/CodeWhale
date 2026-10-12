@@ -4453,6 +4453,134 @@ async fn session_resume_thread_carries_persisted_workspace_roots() -> Result<()>
 }
 
 #[tokio::test]
+async fn session_export_degrades_a_refused_thread_root_set_to_the_sanitized_remainder() -> Result<()>
+{
+    // Round-42 minor 7: the export mint's degrade leg — a thread row whose
+    // set fails the validating intake keeps its LEGAL additions (the
+    // sanitized remainder) instead of collapsing to the bare primary.
+    let root = std::env::temp_dir().join(format!("deepseek-export-degrade-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+
+    let Some((addr, runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // Seed a thread whose stored set carries poison (the fs root) beside a
+    // legal additional root — poisoned directly in the store, the shape
+    // every validating face refuses but a tolerant row can carry.
+    let workspace = root.join("ws");
+    fs::create_dir_all(&workspace)?;
+    let shared = root.join("shared");
+    fs::create_dir_all(&shared)?;
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({ "workspace": workspace, "workspace_roots": [shared] }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"].as_str().context("thread id")?.to_string();
+    {
+        let mut row = runtime_threads.get_thread(&thread_id).await?;
+        row.workspace_roots = vec![workspace.clone(), shared.clone(), "/".into()];
+        runtime_threads.test_store().save_thread(&row)?;
+    }
+
+    // Seed one completed user/assistant turn directly in the store — the
+    // export needs message content, not a live engine.
+    {
+        use crate::runtime_threads::{
+            RuntimeTurnStatus, TurnItemKind, TurnItemLifecycleStatus, TurnItemRecord, TurnRecord,
+        };
+        let now = chrono::Utc::now();
+        let turn_id = "turn_seed_0";
+        runtime_threads.test_store().save_item(&TurnItemRecord {
+            schema_version: crate::runtime_threads::CURRENT_RUNTIME_SCHEMA_VERSION,
+            id: "item_user_0".to_string(),
+            turn_id: turn_id.to_string(),
+            kind: TurnItemKind::UserMessage,
+            status: TurnItemLifecycleStatus::Completed,
+            summary: "seed".to_string(),
+            detail: Some("seed".to_string()),
+            metadata: None,
+            artifact_refs: Vec::new(),
+            started_at: Some(now),
+            ended_at: Some(now),
+        })?;
+        let record = TurnRecord {
+            schema_version: crate::runtime_threads::CURRENT_RUNTIME_SCHEMA_VERSION,
+            id: turn_id.to_string(),
+            thread_id: thread_id.clone(),
+            status: RuntimeTurnStatus::Completed,
+            created_at: now,
+            started_at: Some(now),
+            ended_at: Some(now),
+            duration_ms: Some(0),
+            usage: None,
+            permission_posture: None,
+            effective_provider: None,
+            effective_provider_id: None,
+            effective_billing_surface: None,
+            effective_endpoint_fingerprint: None,
+            effective_billing_mode: None,
+            effective_dispatched_at: None,
+            effective_model: None,
+            routed_usage: Vec::new(),
+            routed_usage_source_ids: Vec::new(),
+            routed_usage_dropped_records: 0,
+            error: None,
+            input_summary: "seed".to_string(),
+            item_ids: vec!["item_user_0".to_string()],
+            steer_count: 0,
+            agent_mail_message_id: None,
+        };
+        runtime_threads.test_store().save_turn(&record)?;
+    }
+
+    let resp: serde_json::Value = client
+        .post(format!("http://{addr}/v1/sessions"))
+        .json(&json!({ "thread_id": thread_id }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let session_id = resp["session_id"]
+        .as_str()
+        .context("session id")?
+        .to_string();
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{addr}/v1/sessions/{session_id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let roots = detail["metadata"]["workspace_roots"]
+        .as_array()
+        .context("exported roots")?;
+    assert!(
+        !roots.iter().any(|r| r == "/"),
+        "the poison never reaches the minted row"
+    );
+    assert!(
+        roots
+            .iter()
+            .any(|r| r.as_str() == Some(shared.to_str().unwrap())),
+        "the legal additional root survives the degrade: {roots:?}"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn session_resume_thread_answers_400_for_an_empty_workspace_row() -> Result<()> {
     // Round-39 minor 11: a legacy/hand-edited row with an EMPTY workspace
     // is a client-side record defect — the face's own doctrine is 400 with
@@ -4550,6 +4678,21 @@ async fn session_resume_thread_answers_400_for_an_empty_workspace_row() -> Resul
     assert!(
         body.to_string().contains("non-empty absolute path"),
         "the 400 names the relative-workspace refusal: {body}"
+    );
+
+    // Round-42 minor 6: the refused row mints nothing — no session file
+    // exists for either rejected spelling (the store is the durable
+    // evidence; the guard fires before any create).
+    let mut entries = fs::read_dir(&sessions_dir)?;
+    let mut session_files = 0usize;
+    while let Some(Ok(entry)) = entries.next() {
+        if entry.file_name().to_string_lossy().ends_with(".json") {
+            session_files += 1;
+        }
+    }
+    assert_eq!(
+        session_files, 2,
+        "only the two fixture rows exist — no minted session: {sessions_dir:?}"
     );
 
     handle.abort();

@@ -3368,11 +3368,17 @@ pub(crate) fn apply_loaded_session_with_goal(
             "runtime work is active; wait for the current turn, maintenance, and background tasks to finish, or cancel that specific work before switching sessions".to_string(),
         );
     }
-    if session.metadata.workspace.as_os_str().is_empty() {
-        // A legacy or hand-edited record with an empty workspace would seed
-        // the vacuous containment root (`starts_with("")` accepts every
-        // path); refuse the restore like any other invalid saved state.
-        return Err("saved session workspace must not be empty".to_string());
+    if session.metadata.workspace.as_os_str().is_empty()
+        || !session.metadata.workspace.is_absolute()
+    {
+        // A legacy or hand-edited record with an empty or RELATIVE
+        // workspace would seed the vacuous containment root
+        // (`starts_with("")` accepts every path; a relative primary leaves
+        // every file tool answering PathEscape forever). Refuse the restore
+        // like any other invalid saved state — the same rule ACP
+        // session/load and (since round-41 M41-1) the REST resume-thread
+        // lane apply (round-42 minor 9).
+        return Err("saved session workspace must be a non-empty absolute path".to_string());
     }
     if let Some(goal) = goal {
         goal.validate()

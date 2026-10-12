@@ -488,7 +488,7 @@ fn sort_turn_items_by_start(items: &mut [TurnItemRecord]) {
 /// Bumped to 2 for v0.6.6 after live engine semantics changed. The persisted
 /// thread/turn/item records did not change shape, but a v1 reader on a v2
 /// session should still fail closed rather than silently mis-replay.
-const CURRENT_RUNTIME_SCHEMA_VERSION: u32 = 2;
+pub(crate) const CURRENT_RUNTIME_SCHEMA_VERSION: u32 = 2;
 
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0

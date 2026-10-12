@@ -284,16 +284,30 @@ pub const MAX_WORKSPACE_ROOTS: usize = 64;
 /// A no-op on Unix, where case is significant and no verbatim prefix
 /// exists.
 /// Ancestor test for the intake/sanitizer guards, split by platform
-/// (round-39 B39-2 + the same round's P2 correction): on Unix the NATIVE
-/// component comparison is already correct — `canonicalize` never produces
-/// a verbatim prefix here, so the mixed-spelling hazard does not exist,
-/// and a string boundary heuristic would MISJUDGE legal `:`/`\`-bearing
-/// filenames (a sibling named `data:` is not the ancestor of
-/// `data:archive/ws`). The Windows spelling/boundary rules stay confined
-/// to Windows, where the verbatim-vs-DOS divergence is real.
+/// (round-39 B39-2, its P2 correction, and round-42 M42-4): Unix runs the
+/// NATIVE component comparison over canonicalize-with-lexical-fallback
+/// spellings — the fallback resolves the macOS `/var` ↔ `/private/var`
+/// divergence for mixed-existence pairs (an existing ancestor under a
+/// not-yet-materialized primary) while component semantics keep legal
+/// `:`/`\`-bearing filenames distinct (a sibling named `data:` is never
+/// the ancestor of `data:archive/ws`). Windows compares through the
+/// spelling normalizer, where the verbatim-vs-DOS divergence is real.
 #[cfg(not(target_os = "windows"))]
 fn comparison_is_ancestor_of(primary: &Path, judged: &Path) -> bool {
-    primary.starts_with(judged)
+    // Round-42 M42-4: canonicalize-with-lexical-fallback on BOTH sides
+    // before the native component comparison — macOS resolves /var to
+    // /private/var for existing paths while a nonexistent primary keeps
+    // its /var spelling, and the bare starts_with on the divergent
+    // spellings silently skipped the ancestor guard (the same
+    // mixed-existence class the Windows leg closes). Component semantics
+    // stay native: a sibling named `data:` never contains `data:archive`.
+    let primary_real = primary
+        .canonicalize()
+        .unwrap_or_else(|_| primary.to_path_buf());
+    let judged_real = judged
+        .canonicalize()
+        .unwrap_or_else(|_| judged.to_path_buf());
+    primary_real.starts_with(&judged_real)
 }
 
 #[cfg(target_os = "windows")]
@@ -451,7 +465,9 @@ pub fn strip_workspace_roots_head(primary: &Path, stored: &[PathBuf]) -> Vec<Pat
     let head = normalize_lexical_components(primary);
     // Round-41 M41-2 + the zhuowp Windows follow-up: the head comparison
     // runs CANONICALLY (existing paths canonicalize with a lexical
-    // fallback; the strip only runs on cold move/load faces), and when
+    // fallback; the strip runs on the cold move/load faces AND the
+    // per-turn turn_meta/preview paths — the canonicalize legs are
+    // bounded by the 64-root cap, round-42 minor 1's ledger), and when
     // BOTH sides fall back to lexical spellings — the old directory has
     // disappeared — the comparison goes through the platform's comparison
     // spelling (case-fold + verbatim strip on Windows, identity on Unix),
@@ -498,7 +514,8 @@ fn strip_head_equivalent(real: &Path, head_real: &Path) -> bool {
 /// path) would otherwise be miscounted as an over-cap declaration and
 /// permanently rejected as "corrupt or hand-edited" by exactly the gate
 /// that admits its creation (review #484/CodeWhale round-37 B37-2/B37-3).
-/// The head strip is [`strip_workspace_roots_head`] — lexical.
+/// The head strip is [`strip_workspace_roots_head`] — lexical plus the
+/// canonical fallback legs.
 pub fn validate_stored_workspace_roots(primary: &Path, stored: &[PathBuf]) -> Result<Vec<PathBuf>> {
     validate_workspace_roots(primary, &strip_workspace_roots_head(primary, stored))
 }

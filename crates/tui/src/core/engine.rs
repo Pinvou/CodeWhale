@@ -4180,9 +4180,13 @@ impl Engine {
         // is already named by the workspace line above. Order is the normalized
         // storage order, never re-sorted per turn, so a stable root set keeps
         // the line byte-identical; long sets are truncated to a bound.
-        // Round-41 minor 14: the shared lexical head strip — the model sees
-        // the same attached set the human surfaces list (a `..`-spelled or
-        // otherwise head-equal copy is the head, not an attachment).
+        // Round-41 minor 14 + round-42 minor 1: the shared head strip —
+        // the model sees the same attached set the human surfaces list (a
+        // `..`-spelled or otherwise head-equal copy is the head, not an
+        // attachment). NOTE: this runs PER TURN (turn_meta construction
+        // and preview requests), so the strip's canonicalize legs run
+        // here too — 1 realpath for the head plus one per existing
+        // additional root, bounded by the 64-root cap (ledgered).
         let attached_roots = codewhale_core::strip_workspace_roots_head(
             &self.session.workspace,
             &self.session.workspace_roots,

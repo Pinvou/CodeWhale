@@ -403,10 +403,12 @@ pub(crate) async fn run_exec_agent(
             // refused legitimate resumes against a workspace the lane never
             // adopts and named a `--workspace-roots` flag that does not
             // exist).
-            // Round-24 P3: the old Text-format gate dropped this warning
-            // for JSON consumers entirely — it goes to stderr and never
-            // touches the stdout JSON stream, so the gate suppressed
-            // safety-relevant information for no compatibility gain.
+            // Round-24 P3 + round-41 minor 9: the gate stays — the
+            // warning goes to stderr and never touches the stdout JSON
+            // stream, but JSON consumers parse that stream precisely
+            // because they want machine-clean output, so an unasked-for
+            // stderr warning is noise there (recorded in the round-41
+            // disposition's single-root-visible list).
             if output_format == ExecOutputFormat::Text && !json_output {
                 eprintln!(
                     "Warning: session {} was created in a different workspace ({}). \

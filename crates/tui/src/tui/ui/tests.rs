@@ -3914,12 +3914,12 @@ fn sanitized_roots_receipt_is_localized_and_names_the_count() {
         "no folded-source space runs ship in the receipt: {message:?}"
     );
     assert!(
-        message.contains("/workspace"),
-        "the remedy names the re-attach command: {message}"
+        !message.contains("/workspace"),
+        "the remedy must not name a producer the TUI does not have: {message}"
     );
     assert!(
-        !message.contains("Repair the saved record"),
-        "the unactionable remedy is gone: {message}"
+        message.contains("reload") || message.contains("Reload"),
+        "the remedy names the reload path that actually drops the refused roots: {message}"
     );
 
     // Zero drops stay silent.
@@ -17697,6 +17697,14 @@ fn session_snapshot_and_resume_round_trip_work_state() {
     let manager =
         crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
     let mut app = create_test_app();
+    // Round-42 minor 9: absolute fixture workspace (the restore lane
+    // refuses relative primaries now).
+    app.workspace = std::env::temp_dir()
+        .join(format!("snapshot-roundtrip-{}", std::process::id()))
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            std::env::temp_dir().join(format!("snapshot-roundtrip-{}", std::process::id()))
+        });
     app.api_messages.push(text_message("user", "keep my work"));
     app.api_messages
         .push(text_message("assistant", "continuity captured"));
@@ -17927,7 +17935,10 @@ fn empty_workspace_session_restore_is_rejected_and_leaves_current_session_intact
 
     let err = apply_loaded_session(&mut app, &mut Config::default(), &session).unwrap_err();
 
-    assert!(err.contains("workspace must not be empty"), "{err}");
+    assert!(
+        err.contains("workspace must be a non-empty absolute path"),
+        "{err}"
+    );
     assert_eq!(app.api_messages.len(), 1);
     assert_eq!(app.current_session_id.as_deref(), Some("current-session"));
 }
@@ -18532,6 +18543,9 @@ fn auto_route_receipt_survives_session_snapshot_and_restore() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manager =
         crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
+    // Round-42 minor 9: the restore lane refuses relative primaries now —
+    // pin the app to the absolute fixture workspace real sessions carry.
+    let workspace = tmp.path().canonicalize().expect("canonical workspace");
     let receipt = crate::model_routing::AutoRouteReceipt {
         tier: crate::model_routing::AutoRouteTier::Strong,
         pair: crate::model_routing::AutoRoutePair {
@@ -18545,6 +18559,7 @@ fn auto_route_receipt_survives_session_snapshot_and_restore() {
         ),
     };
     let mut app = create_test_app();
+    app.workspace = workspace.clone();
     app.set_model_selection("auto".to_string());
     app.last_effective_provider = Some(ApiProvider::Zai);
     app.last_effective_provider_identity = Some("zai".to_string());

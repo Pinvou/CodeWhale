@@ -144,12 +144,21 @@ pub(crate) fn load_repo_law_rules(workspace: &Path) -> std::sync::Arc<Vec<RepoLa
     if !path.is_file() {
         return std::sync::Arc::new(Vec::new());
     }
-    if load_context_file(&path).is_err() {
-        eprintln!("[repo-law] constitution read failed (not cached; next call re-reads)");
-        return std::sync::Arc::new(Vec::new());
-    }
+    // Round-42 minor 2: ONE read, and only its success enters the cache.
+    // The probe read + read_repo_constitution's second read raced (the
+    // file could become unreadable in between), and the Ok probe with a
+    // failed second read cached EMPTY rules under the pre-probe key —
+    // repo law silently inert for the process lifetime against this
+    // function's own contract.
+    let raw = match load_context_file(&path) {
+        Ok(raw) => raw,
+        Err(_) => {
+            eprintln!("[repo-law] constitution read failed (not cached; next call re-reads)");
+            return std::sync::Arc::new(Vec::new());
+        }
+    };
     let rules = std::sync::Arc::new(
-        read_repo_constitution(&path)
+        serde_json::from_str::<RepoConstitution>(&raw)
             .map(compile_repo_law_rules)
             .unwrap_or_default(),
     );
@@ -247,14 +256,6 @@ fn discover_repo_constitution_path(workspace: &Path) -> Option<PathBuf> {
         }
     }
     None
-}
-
-/// Read and parse the repo constitution at `path`, best-effort: any read or
-/// parse failure degrades to None, exactly like the old inline walk.
-fn read_repo_constitution(path: &Path) -> Option<RepoConstitution> {
-    load_context_file(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<RepoConstitution>(&raw).ok())
 }
 
 impl RepoConstitution {
