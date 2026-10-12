@@ -95,6 +95,8 @@ pub enum OverrideSource {
     CodexPublicApiLimitStrip,
     /// Per-model context from the fresh Codex account roster.
     CodexRosterCorrection,
+    /// Fresh, route-scoped provider-reported context metadata.
+    ProviderReportedContextWindow,
     /// Conservative all-plan safe floor for a membership-plan route.
     MembershipPlanSafeFloor,
     /// Maximum output documented for one exact provider endpoint/model route.

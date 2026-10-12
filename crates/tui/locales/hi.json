@@ -1776,6 +1776,7 @@
   "StatusMcpConfigured": "{count} कॉन्फ़िगर",
   "StatusContextUsage": "{percent}% उपयोग ({used} / {max} टोकन)",
   "StatusContextSourceConfigured": "कॉन्फ़िगर किया गया",
+  "StatusContextSourceProviderReported": "प्रोवाइडर द्वारा रिपोर्ट किया गया",
   "StatusContextSourceKimiSafeFloor": "Kimi Code की स्थिर सुरक्षित निचली सीमा",
   "StatusContextSourceCatalog": "कैटलॉग",
   "StatusContextSourceModelHint": "मॉडल नाम संकेत (असत्यापित)",

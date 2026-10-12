@@ -1776,6 +1776,7 @@
   "StatusMcpConfigured": "{count}개 구성됨",
   "StatusContextUsage": "{percent}% 사용 중 ({used} / {max} 토큰)",
   "StatusContextSourceConfigured": "구성 값",
+  "StatusContextSourceProviderReported": "공급자 보고",
   "StatusContextSourceKimiSafeFloor": "Kimi Code 정적 안전 하한",
   "StatusContextSourceCatalog": "카탈로그",
   "StatusContextSourceModelHint": "모델 이름 힌트(미검증)",

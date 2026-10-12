@@ -809,6 +809,7 @@ pub(crate) async fn apply_model_picker_choice(
             saved_provider_model,
             Some(config.deepseek_base_url()),
             config.context_window_for_provider_config(app.api_provider),
+            None,
             // The ambient table's dialect — the same table `deepseek_base_url`
             // above resolves — so this receipt cannot disagree with the turn.
             (app.api_provider == ApiProvider::Custom)

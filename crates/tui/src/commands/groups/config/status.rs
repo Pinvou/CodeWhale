@@ -381,6 +381,9 @@ fn context_window_source_label(
             crate::route_runtime::ContextWindowSource::Configured => {
                 MessageId::StatusContextSourceConfigured
             }
+            crate::route_runtime::ContextWindowSource::ProviderReported => {
+                MessageId::StatusContextSourceProviderReported
+            }
             crate::route_runtime::ContextWindowSource::StaticKimiCodeSafeFloor => {
                 MessageId::StatusContextSourceKimiSafeFloor
             }
@@ -846,7 +849,7 @@ mod tests {
         app.ui_locale = Locale::Ja;
         app.approval_mode = ApprovalMode::Bypass;
         app.active_context_window_source =
-            crate::route_runtime::ContextWindowSource::StaticKimiCodeSafeFloor;
+            crate::route_runtime::ContextWindowSource::ProviderReported;
 
         let msg = format_status(&app);
 
@@ -864,7 +867,7 @@ mod tests {
             MessageId::StatusLabelSessionCost,
             MessageId::StatusLabelToolOutputs,
             MessageId::StatusProjectDocsNone,
-            MessageId::StatusContextSourceKimiSafeFloor,
+            MessageId::StatusContextSourceProviderReported,
             MessageId::StatusSessionNotSaved,
             MessageId::StatusToolNone,
             MessageId::StatusSafetyDisabled,

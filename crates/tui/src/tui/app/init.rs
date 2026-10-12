@@ -401,6 +401,7 @@ impl App {
                     saved_provider_model,
                     Some(configured_route_base_url.clone()),
                     active_context_window_override,
+                    None,
                     // The launch identity's dialect — `effective_auth_config`
                     // is scoped to the same identity that resolved
                     // `configured_route_base_url` above, which is not always

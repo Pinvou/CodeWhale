@@ -1776,6 +1776,7 @@
   "StatusMcpConfigured": "{count} konfiguriert",
   "StatusContextUsage": "{percent}% belegt ({used} / {max} Token)",
   "StatusContextSourceConfigured": "konfiguriert",
+  "StatusContextSourceProviderReported": "vom Provider gemeldet",
   "StatusContextSourceKimiSafeFloor": "statische Sicherheitsuntergrenze für Kimi Code",
   "StatusContextSourceCatalog": "Katalog",
   "StatusContextSourceModelHint": "Hinweis aus Modellname (ungeprüft)",

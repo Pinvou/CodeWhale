@@ -947,6 +947,7 @@ pub(crate) fn resolve_loaded_session_route(app: &mut App, config: &Config) {
         saved_provider_model,
         Some(config.deepseek_base_url()),
         context_override,
+        None,
         // The ambient table's dialect — the same table `deepseek_base_url`
         // above resolves — so this receipt cannot disagree with the turn.
         (app.api_provider == ApiProvider::Custom)

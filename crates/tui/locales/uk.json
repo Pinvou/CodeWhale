@@ -1776,6 +1776,7 @@
   "StatusMcpConfigured": "налаштовано: {count}",
   "StatusContextUsage": "використано {percent}% ({used} / {max} токенів)",
   "StatusContextSourceConfigured": "налаштовано",
+  "StatusContextSourceProviderReported": "повідомлено провайдером",
   "StatusContextSourceKimiSafeFloor": "статичний безпечний мінімум Kimi Code",
   "StatusContextSourceCatalog": "каталог",
   "StatusContextSourceModelHint": "підказка з назви моделі (не перевірено)",
