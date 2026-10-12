@@ -1,7 +1,6 @@
 // Deployment inputs are private operator configuration, never logged or inferred.
 const { lstatSync, readFileSync, readlinkSync, realpathSync } = require('node:fs');
 const { resolve, dirname, posix } = require('node:path');
-const { isIP } = require('node:net');
 
 // Darwin's OS-owned temporary roots are aliases, not operator-selected links.
 // Do not canonicalize arbitrary input paths: that would hide user symlinks.
@@ -52,18 +51,12 @@ function validateConfiguration(input) {
     if (!line || line.startsWith('#') || line.startsWith(';')) continue;
     if (line === '[Service]' && !section) { section = true; continue; }
     const match = /^Environment=([A-Z_]+)=([A-Za-z0-9.,]+)$/.exec(line);
-    if (!section || !match || entries.has(match[1])) throw new Error();
+    // Instance addresses have one authority: the protected controller env.
+    // Reject proxy (and all other unknown) keys rather than shadowing it.
+    if (!section || !match || !Object.hasOwn(limits, match[1]) || entries.has(match[1])) throw new Error();
     entries.set(match[1], match[2]);
   }
-  const proxyNames = ['PINVOU_REMOTE_ALLOWED_PROXY_IPS', 'PINVOU_REMOTE_TRUSTED_PROXY_IPS'];
-  const sets = proxyNames.map((name) => {
-    const value = entries.get(name);
-    if (!value) throw new Error();
-    const addresses = value.split(',');
-    if (addresses.some((ip) => isIP(ip) !== 4 || ip === '0.0.0.0' || ip === '255.255.255.255')) throw new Error();
-    return [...new Set(addresses)].sort().join(',');
-  });
-  if (sets[0] !== sets[1] || entries.size !== Object.keys(limits).length + 2) throw new Error();
+  if (entries.size !== Object.keys(limits).length) throw new Error();
   for (const [name, limit] of Object.entries(limits)) {
     const value = entries.get(name);
     if (!/^[1-9][0-9]*$/.test(value ?? '') || Number(value) > limit) throw new Error();

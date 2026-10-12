@@ -2,7 +2,7 @@
 
 > 文档状态：需求确认稿
 >
-> 文档版本：1.6
+> 文档版本：1.8
 >
 > 更新日期：2026-10-01
 >
@@ -18,13 +18,17 @@
 | 1.3 | 2026-09-15 | 改用随机 Finished receipt secret、provisional resume 激活门、码隔离 tombstone、30 秒总心跳预算并补齐 endpoint enrollment 迁移 |
 | 1.4 | 2026-09-15 | 固化 Finished receipt 编码与测试向量、角色隔离 liveness、恢复后存活确认门、tombstone 多密钥轮换及安全回滚下限 |
 | 1.5 | 2026-09-15 | 增加 A→B 端到端加密 liveness 主路径，并以保守跨时钟公式约束 Relay attestation 的 30 秒总预算 |
-| 1.6 | 2026-10-01 | 记录 Finished receipt 固定向量勘误，澄清 reservation 原子提升、模块落位与模型路由判别符，并登记生产容量定标门禁 |
+| 1.6 | 2026-09-22 | 明确 A、B 均可向同一个 B 权威 Session 输入消息，并统一任务接纳、执行状态、journal 投影和精确会话关联 |
+| 1.7 | 2026-09-23 | 固化临时模型规范数字编码、视觉兜底注入、任务接纳与凭据安装原子性、HTTPS/DNS 预校验、客户端能力兼容及最终出站目标未固定的已知风险 |
+| 1.8 | 2026-10-01 | 记录 Finished receipt 固定向量勘误，澄清 reservation 原子提升、模块落位与模型路由判别符，并登记生产容量定标门禁 |
+
+以上版本 1.6～1.8 合并原开发记录与前序勘误：前序文档中 2026-10-01 的“1.6”勘误现列为 1.8，内容仍保留。1.6/1.7 为对应功能的历史补录，不代表 A18 部署波次新增这些实现或取得当前测试/发布证据。
 
 ## 1. 背景
 
 Pinvou Agent 已具备桌面端作为执行权威、浏览器通过 Relay 访问桌面能力的 WebUI v2 架构，但尚不支持两个 Pinvou Windows 桌面客户端之间建立“主控端—被控端”关系。
 
-本需求新增双端远程控制模式：用户在被控端 B 开启远控并获得 7 位连接码，在主控端 A 输入连接码后自动完成公网配对。此后，A 可以在本机 Pinvou 消息窗口向 B 发起任务，B 使用自身执行环境完成模型调用、工具调用、Skill、附件处理和成果生成，任务输入与输出在 A、B 两端同步显示。
+本需求新增双端远程控制模式：用户在被控端 B 开启远控并获得 7 位连接码，在主控端 A 输入连接码后自动完成公网配对。此后，A、B 均可在各自的 Pinvou 消息窗口向同一个 B 权威 Session 发起任务，B 使用自身执行环境完成模型调用、工具调用、Skill、附件处理和成果生成，双方输入、任务状态与输出在 A、B 两端同步显示。
 
 A 还可以选择将自己已经配置的 API-Key 模型作为单次任务的临时模型。该模式下，模型配置和凭证随任务通过端到端加密通道发送到 B，仅在 B 内存中短暂存在，不写入 B 的配置、会话或日志。这里的端到端加密以受信 Relay 完成配对认证和握手 transcript 绑定为前提，目标是避免被动窃听以及日志、存储和普通转发节点泄漏业务明文；首版不宣称抵御已恶意化的 Relay 主动替换双方握手密钥。
 
@@ -37,10 +41,10 @@ A 还可以选择将自己已经配置的 API-Key 模型作为单次任务的临
 1. 支持两台 Windows 设备上的 Pinvou Agent 通过现有 Relay 完成公网配对。
 2. B 开启远控后向 Relay 申请并展示由 Relay 唯一生成的简短、易输入、短期有效且一次性使用的 7 位连接码。
 3. A 输入有效连接码后自动连接 B，不要求 B 再次点击授权。
-4. A 可以远程创建或继续任务，任务实际在 B 的模型、工具、Skill 和文件环境中执行。
+4. A 可以远程创建或继续任务；连接建立后，A、B 的用户输入必须进入同一个 B 权威 Session，并实际在 B 的模型、工具、Skill 和文件环境中执行。
 5. A 可以选择使用 B 当前模型，或将 A 的 API-Key 模型配置作为单次任务临时发送给 B 使用。
 6. A 负责审批远程任务产生的权限请求，B 保留随时终止连接的本地控制权。
-7. 用户消息、模型流式输出、工具过程、权限请求、错误、取消和成果状态在 A、B 两端一致显示。
+7. A、B 任一端提交的用户消息，以及对应的模型流式输出、工具过程、权限请求、错误、取消和成果状态，均在 A、B 两端一致显示。
 8. B 保存权威执行会话，A 保存独立、可离线查看的远程会话历史。
 9. 同一时刻一台 B 只允许一个远程交互客户端控制，禁止静默顶替。
 10. 在不破坏现有 WebUI v2 远控能力的前提下复用已有 Relay、RPC、事件流、附件和 Session 基础设施。
@@ -61,8 +65,8 @@ A 还可以选择将自己已经配置的 API-Key 模型作为单次任务的临
 
 | 名称 | 定义 |
 |---|---|
-| 主控端 A | 输入连接码、发送指令、选择模型来源、审批权限并保存独立历史的 Windows Pinvou 客户端 |
-| 被控端 B | 开启远控、保存权威 Session、执行模型和工具任务、管理本机文件及成果的 Windows Pinvou 客户端 |
+| 主控端 A | 输入连接码、向共享权威会话发送指令、选择模型来源、审批权限并保存独立历史的 Windows Pinvou 客户端 |
+| 被控端 B | 开启远控、保存权威 Session、向同一会话发送本地指令、执行模型和工具任务、管理本机文件及成果的 Windows Pinvou 客户端 |
 | Relay | 复用现有 `remote-control-relay`；它是受信的配对认证与租约控制面，负责端点在线状态、一次性配对、认证、单控制租约和密文转发，但按最小知情原则不持有正常会话解密密钥或业务明文 |
 | 连接码 | Relay 使用 CSPRNG 唯一生成并原子占用的 7 位短期一次性字母数字码；B 只负责申请、解密展示和刷新，不参与随机码生成，也不直接编码 IP 或模型信息 |
 | 配对记录 | Relay 内存中的短期记录，关联连接码摘要、B 端点、过期时间、协议能力和临时握手材料 |
@@ -70,7 +74,7 @@ A 还可以选择将自己已经配置的 API-Key 模型作为单次任务的临
 | 交互租约 | Relay 对 B endpoint 维护的唯一远程交互槽位，租约类型为既有 Web lease 或新增桌面 controller lease，二者互斥 |
 | 控制租约 | Relay 在 A、B 握手确认完成后为已认证 A 签发的桌面 controller lease；B 同时只能存在一个有效交互租约 |
 | 连接会话 | A 与 B 从配对成功到 B 停止/刷新远控或租约终止之间的内存态安全连接 |
-| 任务 | A 向 B 发起的一次用户任务，具有唯一 `task_id`、幂等请求 ID 和完整生命周期 |
+| 任务 | A 或 B 向 B 权威 Session 发起的一次用户任务，具有唯一 `task_id`、幂等请求 ID、明确来源和完整生命周期 |
 | B 模型 | B 本机当前已配置并可用的模型，由 B 的安全存储和模型配置管理 |
 | A 临时模型 | A 随单次任务端到端加密发送给 B 的 API-Key 模型配置，不成为 B 的持久模型 |
 | 权威会话 | B 持久化的实际执行 Session，是任务状态、消息和成果的最终事实源 |
@@ -97,6 +101,7 @@ A 还可以选择将自己已经配置的 API-Key 模型作为单次任务的临
 | 公网注册 | 正式 desktop endpoint enrollment/allowlist 是 P0 发布门禁；生产 Relay 禁止未 enrolled endpoint 首次自注册 |
 | 任务范围 | 支持模型、工具、Skill、附件和成果文件的完整任务能力 |
 | 会话保存 | B 保存权威会话，A 保存独立历史 |
+| 双端输入 | A、B 的输入统一提交到当前映射的 B 权威 Session；不得在 B 另开普通本地 Session 形成两条上下文 |
 | 平台范围 | 首版仅 Windows |
 
 ## 5. 总体架构
@@ -382,6 +387,11 @@ React UI
 | RC-T-010 | A 可以选择 B 能力快照声明的普通工作模式或代码模式，未声明模式必须隐藏 | P0 |
 | RC-T-011 | 代码任务只能绑定到 B 本地用户在开启远控前授权的工作区，不允许 A 通过路径参数扩大范围 | P0 |
 | RC-T-012 | B 主动停止、刷新或立即断开远控时，所有远程来源的在途任务必须取消并产生明确终态 | P0 |
+| RC-T-013 | 能力准备成功前，B 必须为 A 的远程会话引用创建或幂等复用唯一的 B 权威 Session，并把该精确映射投影给 B；A、B 任一端均可成为首个发言方 | P0 |
+| RC-T-014 | B 消息窗口的发送入口必须构造本地受控任务，并复用 A 任务相同的准入、turn lock、执行器、取消、终态和权威 journal；不得退回普通本地聊天发送链路 | P0 |
+| RC-T-015 | A、B 看到的用户消息、任务状态与回复必须来自同一 `task_id + B session_id` 权威链路；向 A 传输时仅将 B session ID 改写为对应 A session reference，不得按当前页面或最近会话猜测关联 | P0 |
+| RC-T-016 | B 的本地任务 ID、请求 ID 和输入摘要必须由可信后端生成；任务输入文本只在接纳成功后作为有界 UI 投影显示，最终由权威 journal 去重替代 | P0 |
+| RC-T-017 | 同一权威 Session 继续保持单任务 turn lock；任一端在已有活动任务时再次提交必须得到明确 `task_session_busy`，保留可重试输入，且不得静默丢弃、另开 Session、重排或重复执行 | P0 |
 
 任务幂等与终态证明使用独立、有界、原子持久化的 B 台账，不代替 `SessionStore` 会话正文。B 启动必须先验证台账并原子关闭全部重启遗留任务，之后才能公开远控运行时；已派发且无法确认结果时只报告 `result_unknown`，不得重派。坏文件或恢复写入失败必须禁用该远控域并明确诊断，不得以空内存台账继续执行，也不得阻止已发布的 Legacy Web 恢复。旧租约标识只用于终态审计，不恢复配对、有效租约、密钥或令牌。
 
@@ -408,10 +418,11 @@ React UI
 | RC-M-008 | B 必须在内存中使用临时模型配置，并在任务终态后主动释放，连接终止时兜底清理 | P0 |
 | RC-M-009 | A 模型调用失败时不得自动回退到 B 模型，必须向两端返回明确错误 | P0 |
 | RC-M-010 | A 本机 loopback、Unix socket 或 B 不可访问的本地模型不得作为可传输模型 | P0 |
-| RC-M-011 | B 必须复用模型 endpoint 安全校验，禁止通过自定义 base URL 访问不允许的本机或内网目标 | P0 |
+| RC-M-011 | B 必须在临时模型执行准备阶段复用模型 endpoint 安全校验；显式本机/内网地址在模型包安装前拒绝，预解析结果包含非公网地址、无结果或超时时，已接纳任务必须在首次模型调用前以明确 `failed` 终态结束；最终请求目标漂移按 10.5 节作为已知风险保留 | P0 |
 | RC-M-012 | 错误信息和诊断必须经过凭证脱敏后才能同步给 A 或写日志 | P0 |
 | RC-M-013 | v1 模型包出现未知字段、未知枚举、缺少必填字段、无效字段组合或无法解析的视觉兜底引用时，B 必须拒绝整个任务，不得忽略或猜测 | P0 |
 | RC-M-014 | `credential_ref`、OAuth、Cookie、订阅登录、设备绑定令牌和网页登录态不得进入模型包；只能发送本次任务使用的 API Key secret | P0 |
+| RC-M-015 | `controller_temporary` 首版只允许普通对话模式；代码模式仍由 ACP 执行器选择模型，在临时模型尚未接入 ACP 前，A、Relay 和 B 都必须拒绝 `mode=code + controller_temporary`，不得静默改用 B 模型 | P0 |
 
 #### 7.6.1 `temporary_model_package/v1` 精确模型
 
@@ -424,7 +435,7 @@ React UI
   binding: {                                           // 必填
     connection_id: string,
     controller_lease_id: string,
-    lease_epoch: uint64,
+    lease_epoch: canonical decimal string,             // 十进制、无前导零
     task_id: string
   },
   primary: RouteV1,                                    // 必填
@@ -444,14 +455,16 @@ RouteV1 = {
   vendor?: "anthropic" | "deepseek" | "doubao" | "gemini" | "glm" | "kimi" |
            "mimo" | "minimax" | "openai" | "qwen" | "tencent" | "xai",
   endpoint_mode?: "full_chat_completions",
-  context_window_tokens?: uint32,
-  max_output_tokens?: uint32,
+  context_window_tokens?: canonical decimal string,    // uint32 范围、无前导零
+  max_output_tokens?: canonical decimal string,        // uint32 范围、无前导零
   reasoning_effort?: "off" | "low" | "medium" | "high" | "max" | "auto",
   image_capability_override: "pinvou" | "enabled" | "disabled"
 }
 ```
 
 `SensitiveString` 是非空 UTF-8 API Key，只能在已认证加密帧的敏感序列化路径出现，默认 `Debug`、普通日志和错误序列化必须脱敏。`RouteV1` 的字符串长度、URL 长度、数值上限和模型包总字节数必须由协议常量限定；`vision_fallback` 只允许一层，不得再次引用视觉模型。即使 `preset` 枚举中存在 `local_vllm`，RC-M-010/011 的可传输判定仍会拒绝 loopback、本机 socket、私网或 B 无法安全访问的 endpoint。所有枚举都按这里列出的 v1 值闭集校验，新增 vendor、endpoint mode 或 reasoning 档位必须提升包版本或完成显式能力协商，不能按任意字符串透传。
+
+规范数字一律按上面的 canonical decimal string 编码；发送 JSON number 或接收时猜测两种编码均不属于 v1。A 只有在双方能力快照都包含 `temporary_model_package_v1` 时才可展示并发送“我的模型”；不具备该能力的旧客户端必须失败关闭或隐藏入口。该能力首次随桌面端 0.10.1 的同批 A/B 升级交付，不能把仅包含旧数字编码实现的中间构建与新版混用。
 
 `SavedModel` 到 v1 包的映射固定如下：
 
@@ -767,10 +780,11 @@ Relay 必须以 B endpoint 的 `interactive_slot_revision` 串行化所有 Web j
 
 ### 10.5 SSRF 与远程执行边界
 
-- B 对 A 临时模型的 base URL 必须执行与本机模型配置一致或更严格的 scheme、host 和重定向校验。
+- B 对 A 临时模型的 base URL 必须执行与本机模型配置一致或更严格的 scheme 和 host 校验；v1 仅允许 HTTPS。
 - 默认拒绝 file、ftp、data 等非批准协议及带内嵌用户凭证的 URL。
 - 公网模型配置不得借 B 访问 loopback、link-local、云元数据地址或未经允许的私有网络目标。
-- DNS 解析和重定向后的最终目标必须再次校验，防止 DNS rebinding 和跨域重定向绕过。
+- B 在临时模型第一次实际调用前解析主模型和视觉模型的全部 DNS 地址；任一结果不是公网地址即拒绝，解析超时或无结果也必须失败关闭。该地址快照只用于 App 层执行准备校验，不注入 CodeWhale 的最终 HTTP 客户端。由于 DNS 解析是异步执行准备的一部分，任务可以先发布 `admitted`、`running`，随后在调用模型前以 endpoint 错误进入 `failed`；该失败必须正常写入权威 Session、同步到双端并清理临时凭据。
+- **已知风险（首版接受）**：最终模型请求由 CodeWhale 自行创建的 HTTP 客户端发送，可能再次解析 DNS、使用进程/系统代理或跟随服务端重定向。因此 App 层预校验不能彻底阻断 DNS rebinding、代理绕行和重定向后的目标变化。首版不为远程控制修改 CodeWhale 底座；发布说明、安全评审和运维风险清单必须保留此项，不得宣称已消除该类 SSRF 风险。
 - A 的审批不能扩大 B 进程本身没有的 OS 权限。
 - B 本地停止远控优先级高于 A 的任务、审批和重连请求。
 
@@ -844,6 +858,7 @@ A 禁止持久化：
 - 连接时间和非敏感设备名称；
 - “立即断开”按钮；
 - 当前远程任务及模型来源提示；
+- 当前共享权威会话内 A、B 双方的用户消息、执行中状态和模型回复；B 的输入框必须发送到该会话，而不是本机普通会话；
 - 代码模式工作区授权状态和允许范围；
 - 不泄露内部地址、endpoint、Token 和原始协议错误的用户提示。
 
@@ -876,6 +891,13 @@ A 禁止持久化：
 - 流式消息、工具调用和审批卡片；
 - 成果列表、预览和下载；
 - A 独立历史状态和最后同步时间。
+
+### 12.3.1 双端消息窗口的一致行为
+
+- 能力准备完成后，A、B 的消息窗口绑定同一条 B 权威 Session；任一端先发送都不得创建第二条上下文。
+- 任一端接纳成功的用户消息必须立即在本端可见，并通过同一权威 journal 在对端可见；后续运行、终态和回复按相同 `task_id` 更新。
+- 连接 generation、session 映射或租约变化时，B 必须清空旧投影并拒绝迟到的旧 session 事件，避免跨连接串消息。
+- 同一 Session 有任务运行时，后续发送必须显示可观测的忙碌失败并保留输入供用户重试，不得伪装成已发送。
 
 ### 12.4 多语言与可访问性
 
@@ -954,6 +976,7 @@ A 禁止持久化：
 |---|---|
 | 输入连接码到连接成功 | P50 ≤ 2 秒，P95 ≤ 5 秒 |
 | A 发送到 B 显示用户消息 | P95 ≤ 500 毫秒 |
+| B 发送后在 A、B 显示用户消息 | P95 ≤ 500 毫秒 |
 | B 产生流式片段到 A 展示 | P95 附加延迟 ≤ 500 毫秒 |
 | 权限请求从 B 到 A 展示 | P95 ≤ 1 秒 |
 | A 审批到 B 收到决定 | P95 ≤ 1 秒 |
@@ -1035,6 +1058,9 @@ A 禁止持久化：
 - A 模型调用失败不会自动切换 B 模型。
 - 在 B 配置、Session、日志、错误、事件和 Relay 内存转储中扫描不到测试 Key 明文。
 - 普通对话、工具调用、Skill、附件和成果任务均能在 B 完成并在两端同步。
+- 分别覆盖 A 首发与 B 首发两种场景，并在同一远程会话中由另一端继续发送；所有消息均落入对应的同一个 B 权威 Session、按同一 turn lock 执行，并在两端显示用户消息、运行状态和回复。
+- B 输入不得出现在另一个普通本地 Session；断开、刷新 generation 或切换远程会话后，旧 session 的迟到任务/journal 事件不得进入当前消息窗口。
+- 同一 Session 任务运行时从另一端发送，必须明确返回 `task_session_busy` 且保留待重试输入；任务结束后重试只执行一次。
 - B 预授权代码工作区后，A 可完成代码任务；未授权时入口隐藏且后端拒绝越界请求。
 - 同一 `client_request_id` 重放不会重复执行任务或工具副作用。
 
@@ -1045,12 +1071,13 @@ A 禁止持久化：
 - A 拒绝、超时、断线、任务取消和租约变化均导致 B 拒绝该权限请求。
 - 首个有效决定唯一生效；同值重试幂等，迟到、冲突、伪造、重放、篡改或跨租约审批响应不能生效。
 - 在受信 Relay 遵循协议的假设下，Relay 转发日志、存储快照和被动网络抓包无法解密测试 Prompt、API Key、附件和输出；验收报告必须同时记录恶意 Relay 主动 MITM 不在首版保证内。
-- 不安全 base URL、重定向和内网目标被 B 拒绝。
+- 非 HTTPS、URL 中内嵌凭据和显式本机/内网 base URL 在安装前被 B 拒绝；DNS 预解析到非公网地址、无结果或超时时，已接纳任务在首次模型调用前按 `admitted → running → failed` 收口；最终请求阶段的 DNS 重绑定、系统代理和重定向目标变化按 10.5 节作为已知风险验收。
 - B 本地“立即断开”在 Relay 或 A 无响应时仍能生效。
 
 ### 17.4 同步与恢复
 
 - A、B 的用户消息、流式文本、工具状态、审批和终态顺序一致。
+- A、B 任一端提交的消息均按精确 session 映射进入同一个 B 权威 Session；A 使用 session reference，B 使用对应权威 session ID，双端投影不得把两者误当作两个会话。
 - 重复事件不会生成重复 UI 项或重复历史。
 - 在 journal 覆盖范围内断线重连后不丢事件。
 - A/B 各自的角色 token 不同且不可互换；双端 prepare 后先进入不承载业务的 provisional，B activation ACK 后只进入 `resume_activated_pending_liveness`。首个 B post-activation liveness 经 Relay 确认且 A/B 各自 ready 后才原子轮换令牌/密钥、恢复租约和开放业务；B 验证最终结果前 watchdog 不取消。任一步骤丢失、单边超时、Relay 重启或进程重启均终止。
@@ -1084,7 +1111,7 @@ A 禁止持久化：
 - 提前 receipt、损坏 Finished、仅一方 receipt、sender 自收、错 role/socket、错 pairing/reservation/transcript/generation、secret 重放和握手超时均不建租约；共同派生 key 不能替代 receipt；
 - `code_wrap_keypair` 与 `handshake_keypair_b` 独立生成、用途/类型隔离、公钥替换和跨用途复用拒绝；
 - `temporary_model_package/v1` 精确 allowlist、全部 `SavedModel` 字段映射/排除、主模型/视觉兜底凭证绑定、未知字段拒绝和全终态清理；
-- base URL、重定向、DNS 和内网目标安全策略；
+- base URL、DNS 预校验、内网目标拒绝、执行准备失败的 `admitted → running → failed` 状态序列，以及未固定最终出站目标的已知风险记录；
 - 权限请求租约绑定、A 唯一授权、首个决定、同值幂等、迟到/冲突决定、B stop 与 A Allow 竞态、超时、拒绝和重放；
 - `encrypted_controller_liveness_a` 的 A→B AEAD 绑定、challenge 一次性、Relay 盲转发、篡改/跨租约/重放拒绝，以及与 transport liveness 的 key/epoch/sequence 域隔离；
 - 直接路径 `30000 - RTT - 1000` 与 attestation `min(remaining_ttl, 30000 - age) - RTT - 1000` 公式边界；覆盖 age=5000/RTT=5000 得 19000 ms、超界拒绝、已安装新 epoch/sequence 替换旧 deadline、未知 epoch 拒绝、同序号只收紧和旧序号拒绝；
@@ -1121,24 +1148,25 @@ A 禁止持久化：
 1. 已 enrolled 的 B 开启，Relay 生成连接码并由 B 展示；
 2. A 配对并进入远程窗口；
 3. 使用 B 模型完成普通任务；
-4. 使用 A 临时模型完成任务；
-5. 触发工具权限并由 A 允许；
-6. 触发第二项权限并由 A 拒绝；
-7. 上传附件并由 B 处理；
-8. B 生成成果，A 预览并下载；
-9. 任务运行中断网并由 A/B 独立 token 双端恢复，验证 pending-liveness 前无业务、首个 B liveness 被双方确认后才 connected；
-10. 隔离 B 网络超过 30 秒并持续制造重连流量，验证本地 watchdog 不被延长、B 取消任务、拒绝审批并清理临时模型，旧令牌无法恢复；
-11. 第二个 A 尝试接入并收到设备忙；
-12. 分别以 WebUI 已连接和桌面已连接状态尝试交叉接入，验证不顶替；另验证 Web-to-Web 既有接管；
-13. 在 B 查看权限请求并确认没有 Allow，制造 A 决定/超时/B stop 竞态并验证唯一终态；
-14. B 立即断开并验证所有凭证和待审批失效；
-15. Relay 重启后验证旧连接不恢复，B 自动申请由 Relay 生成的新码；
-16. B 刷新时验证旧 generation 完整撤销后才显示新码，并注入旧注册/握手迟到回包验证其被丢弃；
-17. A 仅关闭窗口时验证后台任务继续，再显式断开并验证进入 30 秒收尾；
-18. B 重新开启后验证旧 pairing 和旧连接不可恢复；隔离后模拟同字符串新 pairing 时不能关联到旧设备/租约。
-19. 分别隔离 A 与 B：A 断 B 活时 B 心跳不延长任务，B 断 A 活时 Relay 不把 A 心跳当作 B 在线；恢复直连后验证新 A sequence 能推进 deadline，同 sequence 重放不能推进。
-20. 轮换 digest key 后强制 CSPRNG 产生一个只在旧 key tombstone 中命中的码，验证新 key 下仍判碰撞；再演练真实旧 Relay 置于 enrollment gateway 后的安全回滚和裸 v2 回滚拒绝。
-21. 注入直接 E2E liveness RTT=5000 ms，以及 attestation `observed_age_ms=5000`、请求 RTT=5000 ms，验证候选剩余分别为 24000/19000 ms，并从对应 A liveness 观察点断言总存活均不超过 30000 ms。
+4. 由 B 在同一权威 Session 输入下一条消息，验证 A、B 同时显示该消息、执行中状态和回复，且 B 本地不存在第二条普通 Session；
+5. 使用 A 临时模型完成任务；
+6. 触发工具权限并由 A 允许；
+7. 触发第二项权限并由 A 拒绝；
+8. 上传附件并由 B 处理；
+9. B 生成成果，A 预览并下载；
+10. 任务运行中断网并由 A/B 独立 token 双端恢复，验证 pending-liveness 前无业务、首个 B liveness 被双方确认后才 connected；
+11. 隔离 B 网络超过 30 秒并持续制造重连流量，验证本地 watchdog 不被延长、B 取消任务、拒绝审批并清理临时模型，旧令牌无法恢复；
+12. 第二个 A 尝试接入并收到设备忙；
+13. 分别以 WebUI 已连接和桌面已连接状态尝试交叉接入，验证不顶替；另验证 Web-to-Web 既有接管；
+14. 在 B 查看权限请求并确认没有 Allow，制造 A 决定/超时/B stop 竞态并验证唯一终态；
+15. B 立即断开并验证所有凭证和待审批失效；
+16. Relay 重启后验证旧连接不恢复，B 自动申请由 Relay 生成的新码；
+17. B 刷新时验证旧 generation 完整撤销后才显示新码，并注入旧注册/握手迟到回包验证其被丢弃；
+18. A 仅关闭窗口时验证后台任务继续，再显式断开并验证进入 30 秒收尾；
+19. B 重新开启后验证旧 pairing 和旧连接不可恢复；隔离后模拟同字符串新 pairing 时不能关联到旧设备/租约。
+20. 分别隔离 A 与 B：A 断 B 活时 B 心跳不延长任务，B 断 A 活时 Relay 不把 A 心跳当作 B 在线；恢复直连后验证新 A sequence 能推进 deadline，同 sequence 重放不能推进。
+21. 轮换 digest key 后强制 CSPRNG 产生一个只在旧 key tombstone 中命中的码，验证新 key 下仍判碰撞；再演练真实旧 Relay 置于 enrollment gateway 后的安全回滚和裸 v2 回滚拒绝。
+22. 注入直接 E2E liveness RTT=5000 ms，以及 attestation `observed_age_ms=5000`、请求 RTT=5000 ms，验证候选剩余分别为 24000/19000 ms，并从对应 A liveness 观察点断言总存活均不超过 30000 ms。
 
 ### 18.4 必跑回归入口
 
@@ -1216,7 +1244,7 @@ python scripts/architecture-guard.py
 | 单方或伪造握手完成 | 未确认对端即创建租约 | 发送方独立 32 字节 receipt secret、唯一长度前缀 commitment、角色 Finished key、相反角色认证 socket 回传及原子建租约 |
 | code-wrap 与握手密钥复用 | 跨协议攻击扩大密钥暴露影响 | 两套 CSPRNG keypair、类型/用途隔离、互不派生及跨用途替换测试 |
 | A 临时 Key 落盘 | 凭证长期泄露 | 任务级内存上下文、统一清理、日志脱敏和哨兵扫描 |
-| 恶意模型 endpoint | SSRF、访问 B 内网 | URL/DNS/重定向复核和私网目标限制 |
+| 恶意模型 endpoint | SSRF、访问 B 内网 | App 层限制 HTTPS、拒绝内嵌凭据并预解析全部 DNS 地址，发现非公网地址即拒绝；CodeWhale 最终请求仍可能二次解析、使用代理或跟随重定向，此残余风险由首版明确接受并持续登记 |
 | Web 与桌面主控互相顶替 | 会话泄露或控制权劫持 | 共享交互槽位与 revision CAS，跨类型忙碌即拒绝；仅 Web-to-Web 保留既有接管语义 |
 | 旧 Web 在桌面占用时持续重连 | Relay 负载上升 | 接受既有 `desktop_offline` 指数退避，利用 ±20% jitter，并实施每 IP/endpoint/全局限频和廉价前置拒绝 |
 | 断线重试重复任务 | 重复调用模型或工具副作用 | 稳定请求 ID、持久幂等台账和结果未知状态 |
@@ -1269,7 +1297,7 @@ python scripts/architecture-guard.py
 
 1. 第 17 节所有 P0 验收项通过并留有可复现证据。
 2. 第 18 节协议、集成、Windows 双设备和既有 WebUI 回归测试通过。
-3. 独立安全评审确认不存在未认证连接、Relay 明文、Key 落盘、审批绕过和 SSRF 高危问题。
+3. 独立安全评审确认不存在未认证连接、Relay 明文、Key 落盘和审批绕过；SSRF 评审必须明确记录 10.5 节已接受的最终出站目标漂移风险，除此之外不得遗留未登记的高危问题。
 4. A、B、Relay 的异常和回滚路径经过演练。
 5. 新增 UI 完成中文、英文和日文文案及可访问性验收。
 6. 生产部署文档、配置、监控、告警和回滚步骤齐备。

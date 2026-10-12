@@ -50,22 +50,35 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 3. **注册库**：`enrollment-registry.js` 读取 `PINVOU_REMOTE_CONTROLLER_STATE_PATH`（不得与 legacy `PINVOU_REMOTE_STATE_PATH` 同路径）；迁移与覆盖率用 `remote-control-relay/scripts/enrollment-migrate.js` dry-run 取证（要求 100%）。
 4. **验收预检**：对每个公网入口运行 `remote-control-relay/scripts/enrollment-gateway-preflight.js`（校验健康标记、WebSocket upgrade 标记、匿名注册拒绝、Relay URL 为字面 loopback、OS 监听检查无通配绑定）。
 5. **回滚检查**：`scripts/check-enrollment-gated-v2-rollback.mjs` 退出码为 0 才允许启动旧 v2 二进制；裸 v2 回滚一律拒绝。
-6. **运行加固**：`10-hardening.conf` 作为服务单元加固基线；服务账号只读仓库、只写状态目录。
+6. **运行加固**：`10-hardening.conf` 只保存与环境无关的服务单元加固基线；服务账号只读仓库、只写状态目录。反向代理地址必须通过受权限保护的 controller 环境文件显式注入，`PINVOU_REMOTE_ALLOWED_PROXY_IPS` 与 `PINVOU_REMOTE_TRUSTED_PROXY_IPS` 必须是相同的合法 IP 集合，不得写入仓库模板。
 
 ### 2.2 必需配置（来自部署 secret 管理器，禁止入库/入日志）
 
 | 变量 | 说明 |
 |---|---|
-| `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT` | `official` / `self_hosted`（生产不得用 `development`） |
+| `NODE_ENV` | 生产部署必须显式为 `production` |
+| `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT` | 当前已实现的生产 controller dispatcher 仅支持 `self_hosted`；`official` live claim 尚未接线，预检及启动均失败关闭，不得宣称可部署 |
+| `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | 生产部署必须显式为 `false`；拒绝 development/test 环境、development 部署及 TOFU 降级 |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID` / `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY` | registry HMAC（32–4096 字节） |
 | `PINVOU_REMOTE_PAIRING_HMAC_KEY_ID` / `PINVOU_REMOTE_PAIRING_HMAC_KEY` | 连接码摘要 keyring（轮换规则见 `remote-control-relay/ENROLLMENT.md`；发布验收见发布文档第 3 节旅程 20、第 5 节回滚） |
 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64` | Ed25519 PKCS#8 DER base64，签名 pairing transcript |
 | `PINVOU_REMOTE_CONTROLLER_STATE_PATH` / `PINVOU_REMOTE_STATE_PATH` | 新旧状态文件绝对路径，必须不同 |
+| `PINVOU_REMOTE_ALLOWED_PROXY_IPS` / `PINVOU_REMOTE_TRUSTED_PROXY_IPS` | 实际反向代理的 IPv4/IPv6 地址列表；两者必须显式配置且集合完全一致 |
 | 遥测（可选） | enrollment token / device pepper / admin password；未配置即禁用遥测（本机部署即此状态） |
 
 客户端侧必须 pin 同一份公钥（原始 32 字节 base64）。内置 production/test profile 随包提供 key id 与公钥；自建或轮换后的服务需成对设置 `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` + `PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64`。不能把未设置环境变量等同于无信任根；显式覆盖不完整或无效仍失败关闭，服务公钥与客户端 pin 不一致不能配对。
 
 `run-remote-control-endpoint.ps1 -Mode Production` 清除进程级 profile、地址与信任根覆盖，但不修改持久配置。若用户持久选择了 test 或自定义 Relay，清除环境后仍采用该选择；请先在设置中确认端点。Test 模式显式选 test 并清除遗留 runtime 地址覆盖，避免同一进程切换后使用旧地址。
+
+`self_hosted` 生产模式只接纳已由管理员导入或登记的端点；不能以关闭 TOFU 代替存量端点清单、registry 覆盖率 100% 和不可旁路 gateway 的迁移验收。相关发布阻塞仍见 [#1428](https://github.com/Pinvou/pinvou3/issues/1428)。本次门禁修复不代表已修改线上环境或已完成发布验收。
+
+生产部署脚本会在通过 controller 环境文件预检后，以 `root:root`、`0700` 显式创建
+`/var/lib/pinvou-remote-relay/state`。状态存储本身不会创建缺失的父目录，这是为了保留
+软链接、所有权和目录替换检查的失败关闭语义；新服务器不得省略该目录准备步骤。
+
+创建前必须只读检查 `/`、`/var`、`/var/lib` 以及已有的专属根/状态目录：拒绝符号链接、非目录、非 `root:root`、祖先组/其他用户可写和专属目录非 `0700`；不得先 chown/chmod 链接目标后才拒绝。缺失专属目录仅在祖先检查通过后创建。预检与创建间不防御已具备 root 写权限的并发篡改，运维须串行部署。
+
+controller 环境文件使用本预检支持的裸 `KEY=value`：值不加引号、不使用 shell/systemd 转义、续行或变量展开；安全配置中的引号形式会被拒绝。密钥等字段当前仅校验非空，并非全面校验材料格式；不得将文件预检当作 systemd 最终生效环境证明，额外 drop-in 的 Environment/EnvironmentFile 或运行时环境覆盖必须纳入上线检查，禁止打印含密钥的完整环境。
 
 ### 2.3 部署后的验收清单
 
@@ -82,7 +95,7 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 
 生产脚本必须同时配置 `PINVOU_CONFIRM_PRODUCTION_DEPLOY=1`、`PINVOU_REMOTE_DEPLOY_SERVER`、`PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER`、`SSH_KEY`、`PINVOU_REMOTE_DIRECT_URL` 和 `PINVOU_REMOTE_HARDENING_FILE`。两份目标必须一致，不配置或不一致时，在联网、上传前退出。确认标志不是 enrollment、验收或回滚门禁豁免。
 
-硬化文件必须在仓库外受控配置；仓库 `remote-control-relay/10-hardening.conf` 仅为无实例模板，不能直接用于生产。允许/受信代理须是同一非空字面 IPv4 清单，限制条款必须齐全：数量/字节/认证等待不能超过模板上限，两项限流窗口固定为模板的 60000ms（缩短会弱化限流）。文件或父目录不能是链接。缺失、模板占位值、重复/未知条款或不合法限制在任何网络操作前拒绝。上传使用验证后的私有快照，回滚仍恢复原 drop-in；实例值、文件内容与路径不写入提交或 PR。
+硬化文件必须显式指定为本地受控输入，可按仓库 `remote-control-relay/10-hardening.conf` 的无实例通用模板准备；仅接受八项通用限制，禁止代理条款和其他未知条款。代理允许/信任地址唯一来源为服务器受权限保护的 controller 环境文件，保留 IPv4/IPv6 非空且相同集合的远端预检，不在硬化文件中重复配置。数量/字节/认证等待不能超过模板上限，两项限流窗口固定为模板的 60000ms（缩短会弱化限流）。文件或父目录不能是链接。缺失、重复/未知条款或不合法限制在任何网络操作前拒绝。上传使用验证后的私有快照，回滚仍恢复原 drop-in；实例值、文件内容与路径不写入提交或 PR。
 
 测试脚本必须同时配置 `RELAY_SERVER`、`EXPECTED_RELAY_SERVER`、`PROXY_SERVER`、`EXPECTED_PROXY_SERVER` 和 `SSH_KEY`；目标为 SSH 账号与字面 IPv4，登记值从运维清单独立取得，不能从实际目标自动赋值。有跳板时同时配置 `PROXY_SSH_JUMP` 与 `EXPECTED_PROXY_SSH_JUMP`。参见 [测试端点操作说明](remote-e2e-test-endpoint.md)。
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, realpathSync, readlinkSync, lstatSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, realpathSync, readlinkSync, lstatSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -12,6 +12,8 @@ const { isTrustedSystemAlias } = createRequire(import.meta.url)(join(root, 'remo
 const production = readFileSync(join(root, 'scripts/deploy-remote-relay.sh'), 'utf8');
 const testing = readFileSync(join(root, 'scripts/deploy-remote-relay-test.sh'), 'utf8');
 const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash';
+const posixPath = (value) => process.platform === 'win32'
+  ? value.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_, drive) => '/' + drive.toLowerCase()) : value;
 function shell(source, env = {}) {
   const result = spawnSync(bash, ['-c', 'set -euo pipefail\n' + source], {
     env: { ...process.env, ...env }, encoding: 'utf8', timeout: 10_000,
@@ -60,8 +62,7 @@ test('system alias exception is Darwin-only and rejects noncanonical or operator
 test('actual Darwin system temporary roots accept hardening input and reject operator links',
   { skip: process.platform !== 'darwin' }, (t) => {
     const validator = join(root, 'remote-control-relay/scripts/validate-deploy-hardening.cjs');
-    const valid = readFileSync(join(root, 'remote-control-relay/10-hardening.conf'), 'utf8')
-      .replaceAll('REPLACE_WITH_CONFIRMED_PROXY_IP', '192.0.2.20');
+    const valid = readFileSync(join(root, 'remote-control-relay/10-hardening.conf'), 'utf8');
     for (const alias of ['/tmp', '/var']) {
       assert.equal(lstatSync(alias).isSymbolicLink(), true);
       assert.equal(isTrustedSystemAlias(alias, process.platform, readlinkSync(alias), realpathSync(alias)), true);
@@ -93,7 +94,11 @@ test('actual production baseline failure stops before build, upload, or SSH', ()
   assert.match(result.stderr, /TEST_ONLY_BASELINE_FAILURE/);
 });
 
-test('actual remote health loops retry transient failures and bound permanent failures', () => {
+test('actual remote health loops retry transient failures and bound permanent failures', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'pinvou-health-fragment-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const counter = join(directory, 'calls');
+  const bounds = join(directory, 'bad-bound');
   const cases = [
     { source: production, expectedSuccess: 4, expectedFailure: 30 },
     { source: testing, expectedSuccess: 3, expectedFailure: 45 },
@@ -101,24 +106,36 @@ test('actual remote health loops retry transient failures and bound permanent fa
   for (const { source, expectedSuccess, expectedFailure } of cases) {
     const health = fragment(source, /^healthy=0[^]*?(?=^echo "(?:backup=|测试 relay))/m);
     // Execute only the real health/rollback section. All IO boundaries are
-    // in-process functions; no SSH, network, service or filesystem operation.
+    // functions; only a private fixture counter persists across the real curl
+    // command substitution. No SSH, network, service or deployed filesystem IO.
     const stubs = [
       'service=fixture.service; port=8788; base_path=/fixture; test_dir=/fixture; backup=/fixture-backup',
-      'calls=0',
-      'curl() { calls=$((calls+1)); [[ " $* " == *" --connect-timeout 3 "* && " $* " == *" --max-time 5 "* ]] || { echo BAD_BOUND; return 98; }; [[ "$FIXTURE_MODE" == transient && "$calls" -ge 3 ]]; }',
+      'remote_dir="$FIXTURE_DIR"; code_stage="$FIXTURE_DIR"',
+      'curl() { IFS= read -r calls < "$COUNTER_FILE"; calls=$((calls+1)); printf "%s\\n" "$calls" > "$COUNTER_FILE"; [[ " $* " == *" --connect-timeout 3 "* && " $* " == *" --max-time 5 "* ]] || { printf BAD_BOUND > "$BOUND_FILE"; return 98; }; [[ "$FIXTURE_MODE" != permanent && "$calls" -ge 3 ]] || return 1; if [[ "$FIXTURE_MODE" == malformed ]]; then printf invalid-json; elif [[ "$FIXTURE_MODE" == controller-off ]]; then printf \'{"ok":true,"desktop_controller_enabled":false}\'; else printf \'{"ok":true,"desktop_controller_enabled":true}\'; fi; }',
+      'node() { if [[ "$1" == -e ]]; then command node "$@"; else printf "route_smoke\\n"; [[ "$FIXTURE_MODE" != route-failure ]]; fi; }',
       'sleep() { :; }',
       'systemctl() { printf "systemctl:%s\\n" "$*"; }',
       '[() { if [[ "$1" == -d || "$1" == -f ]]; then return 0; fi; builtin [ "$@"; }',
       'rm() { :; }; mv() { :; }',
       'cp() { printf "copy:%s\\n" "$*"; }',
       'rollback() { echo rollback; }',
-      'trap \'printf "calls=%s\\n" "$calls"\' EXIT',
+      'trap \'IFS= read -r calls < "$COUNTER_FILE"; printf "calls=%s\\n" "$calls"\' EXIT',
     ].join('\n');
-    for (const mode of ['transient', 'permanent']) {
-      const result = shell(stubs + '\n' + health, { FIXTURE_MODE: mode });
+    const modes = source === production
+      ? ['transient', 'permanent', 'malformed', 'controller-off', 'route-failure'] : ['transient', 'permanent'];
+    for (const mode of modes) {
+      writeFileSync(counter, '0\n');
+      if (existsSync(bounds)) rmSync(bounds);
+      const result = shell(stubs + '\n' + health, { FIXTURE_MODE: mode, FIXTURE_DIR: posixPath(directory),
+        COUNTER_FILE: posixPath(counter), BOUND_FILE: posixPath(bounds) });
       assert.equal(result.status, mode === 'transient' ? 0 : 1, result.stderr);
-      assert.match(result.stdout, new RegExp('calls=' + (mode === 'transient' ? expectedSuccess : expectedFailure) + '\\b'));
-      assert.doesNotMatch(result.stdout, /BAD_BOUND/);
+      assert.match(result.stdout, new RegExp('calls=' + (mode === 'transient' || mode === 'route-failure' ? expectedSuccess : expectedFailure) + '\\b'));
+      assert.equal(existsSync(bounds), false, 'every curl must retain both request bounds');
+      if (source === production) {
+        assert.equal(result.stdout.includes('route_smoke'), mode === 'transient' || mode === 'route-failure');
+        if (mode !== 'transient') assert.match(result.stdout, /rollback/);
+        if (mode === 'route-failure') assert.match(result.stderr, /controller-v1 路由烟测失败/);
+      }
       if (mode === 'permanent' && source === testing) {
         assert.match(result.stdout, /copy:-a \/etc\/systemd\/system\/fixture.service.bak \/etc\/systemd\/system\/fixture.service/);
         const copy = result.stdout.indexOf('copy:');
@@ -184,13 +201,17 @@ test('private hardening input is explicit, validated and uploaded as a snapshot'
   const validator = join(root, 'remote-control-relay/scripts/validate-deploy-hardening.cjs');
   const template = readFileSync(join(root, 'remote-control-relay/10-hardening.conf'), 'utf8');
   assert.doesNotMatch(template, /(?:\d{1,3}\.){3}\d{1,3}/);
-  const valid = template.replaceAll('REPLACE_WITH_CONFIRMED_PROXY_IP', '192.0.2.20');
+  assert.doesNotMatch(template, /PINVOU_REMOTE_(?:ALLOWED|TRUSTED)_PROXY_IPS=/);
+  const valid = template;
   const input = join(directory, 'operator config.conf');
   const run = (path) => spawnSync(process.execPath, [validator, path], { encoding: 'utf8', timeout: 10_000 });
-  for (const contents of [template, '', valid.replace('MAX_ROOMS=2000', 'MAX_ROOMS=9999'),
+  for (const contents of ['', valid.replace('MAX_ROOMS=2000', 'MAX_ROOMS=9999'),
     valid.replace('ROOM_CREATE_WINDOW_MS=60000', 'ROOM_CREATE_WINDOW_MS=1'),
     valid.replace('WS_CONNECT_WINDOW_MS=60000', 'WS_CONNECT_WINDOW_MS=1'),
-    valid.replace('TRUSTED_PROXY_IPS=192.0.2.20', 'TRUSTED_PROXY_IPS=192.0.2.21'),
+    valid.replace(/^Environment=MAX_ROOMS=2000\r?\n/m, ''),
+    valid + '\nEnvironment=PINVOU_REMOTE_ALLOWED_PROXY_IPS=192.0.2.20\n',
+    valid + '\nEnvironment=PINVOU_REMOTE_TRUSTED_PROXY_IPS=192.0.2.20\n',
+    valid + '\nEnvironment=PINVOU_REMOTE_ALLOWED_PROXY_IPS=2001:db8::20\n',
     valid + '\nExecStart=/fixture\n', valid + '\nEnvironment=MAX_ROOMS=2000\n']) {
     writeFileSync(input, contents);
     const result = run(input);
@@ -218,7 +239,7 @@ test('actual hardening preflight rejects missing config before network and uploa
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const input = join(directory, 'operator.conf');
   const template = readFileSync(join(root, 'remote-control-relay/10-hardening.conf'), 'utf8');
-  writeFileSync(input, template.replaceAll('REPLACE_WITH_CONFIRMED_PROXY_IP', '192.0.2.20'));
+  writeFileSync(input, template);
   const preflight = fragment(production, /^node "\$RELAY_DIR\/scripts\/validate-deploy-hardening.cjs" "\$HARDENING_FILE"[^]*?^node "\$RELAY_DIR\/scripts\/validate-deploy-hardening.cjs" "\$HARDENING_SNAPSHOT"$/m);
   const upload = fragment(production, /^scp -i "\$SSH_KEY" -o BatchMode=yes "\$HARDENING_SNAPSHOT"[^\n]*/m);
   const posixPath = (value) => value.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_, drive) => '/' + drive.toLowerCase());

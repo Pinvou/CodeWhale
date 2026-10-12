@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -8,6 +8,16 @@ import { test } from "node:test";
 
 const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const deployScript = join(repoRoot, "scripts", "deploy-remote-relay.sh");
+const productionHardening = join(repoRoot, "remote-control-relay", "10-hardening.conf");
+
+test("production hardening keeps deployment-specific proxy addresses out of the repository", async () => {
+  const source = await readFile(productionHardening, "utf8");
+  assert.doesNotMatch(source, /PINVOU_REMOTE_(?:ALLOWED|TRUSTED)_PROXY_IPS=/);
+  const preflight = await readFile(join(repoRoot, "remote-control-relay", "scripts", "deploy-controller-preflight.mjs"), "utf8");
+  assert.match(preflight, /"PINVOU_REMOTE_ALLOWED_PROXY_IPS"/);
+  assert.match(preflight, /"PINVOU_REMOTE_TRUSTED_PROXY_IPS"/);
+  assert.match(preflight, /controller_env_proxy_ips_mismatch/);
+});
 
 test("production deployment requires explicit confirmed targets before network or upload", async () => {
   const source = await readFile(deployScript, "utf8");
@@ -58,6 +68,21 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   assert.match(source, /cp -a "\$remote_dir\/web\/dist" "\$backup\/web-dist"/);
   assert.match(source, /mv "\$web_stage" "\$remote_dir\/web\/dist"/);
   assert.match(source, /PINVOU_CONFIRM_PRODUCTION_DEPLOY/);
+  assert.match(source, /desktop_controller_enabled !== true/);
+  assert.match(source, /"\$health" 2>\/dev\/null/);
+  assert.match(source, /40-controller\.conf/);
+  assert.match(source, /EnvironmentFile=%s/);
+  assert.match(source, /pinvou-remote-relay-controller\.env/);
+  assert.match(source, /scripts\/deploy-controller-preflight\.mjs/);
+  assert.match(source, /controller_state_root="\/var\/lib\/pinvou-remote-relay"/);
+  assert.match(source, /controller_state_dir="\$controller_state_root\/state"/);
+  assert.match(source, /install -d -o root -g root -m 700 "\$controller_state_root"/);
+  assert.match(source, /install -d -o root -g root -m 700 "\$controller_state_dir"/);
+  assert.match(source, /scripts\/controller-route-smoke\.mjs/);
+  assert.equal((source.match(/for _ in \$\(seq 1 30\); do/g) || []).length, 2);
+  assert.match(source, /if curl -fsS --connect-timeout 3 --max-time 5 http:\/\/127\.0\.0\.1:8787\/pinvou3\/remote\/healthz >\/dev\/null 2>&1/);
+  assert.match(source, /controller-v1 路由烟测失败/);
+  assert.equal((source.match(/cp -a "\$module" "\$remote_dir\/"/g) || []).length, 3);
   assert.doesNotMatch(source, /PINVOU_ALLOW_LEGACY_REMOTE_DEPLOY/);
   assert.doesNotMatch(source, /nginx -t|systemctl reload nginx/);
 });
@@ -66,19 +91,24 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
   const relayDir = join(repoRoot, "remote-control-relay");
   const root = await mkdtemp(join(relayDir, ".deploy-cold-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const archive = join(root, "relay-code.tar.gz");
   const stage = join(root, "stage");
   await mkdir(stage);
+  // Keep archive bytes on stdio and tar operands relative to cwd on Windows.
   const packed = spawnSync("tar", [
-    "-czf", archive,
-    "-C", relayDir,
+    "-czf", "-",
+    "-C", "remote-control-relay",
     ...(await readdir(relayDir)).filter((name) => name.endsWith(".js")),
-    "-C", repoRoot,
+    "-C", "..",
     "docs/schemas/behavior-telemetry-v1.schema.json",
     "docs/schemas/behavior-telemetry-registries.json",
-  ], { encoding: "utf8", timeout: 10_000 });
-  assert.equal(packed.status, 0, packed.stderr);
-  const extracted = spawnSync("tar", ["-xzf", archive, "-C", stage], { encoding: "utf8", timeout: 10_000 });
+  ], { cwd: repoRoot, timeout: 10_000 });
+  assert.equal(packed.status, 0, packed.stderr?.toString("utf8"));
+  const extracted = spawnSync("tar", ["-xzf", "-"], {
+    cwd: stage,
+    input: packed.stdout,
+    encoding: "utf8",
+    timeout: 10_000,
+  });
   assert.equal(extracted.status, 0, extracted.stderr);
   const loaded = spawnSync(process.execPath, [
     "--input-type=module",
@@ -86,6 +116,44 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
     "await import('./telemetry-service.js')",
   ], { cwd: stage, encoding: "utf8", timeout: 10_000 });
   assert.equal(loaded.status, 0, loaded.stderr);
+});
+
+test("staged controller smoke resolves its protocol after the real module install loop", async (t) => {
+  const relayDir = join(repoRoot, "remote-control-relay");
+  const root = await mkdtemp(join(relayDir, ".deploy-stage-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stage = join(root, "stage");
+  const installed = join(root, "installed");
+  await mkdir(join(stage, "scripts"), { recursive: true });
+  await mkdir(installed);
+  for (const name of (await readdir(relayDir)).filter((entry) => entry.endsWith(".js"))) {
+    await copyFile(join(relayDir, name), join(stage, name));
+  }
+  for (const name of ["controller-route-smoke.mjs", "deploy-controller-preflight.mjs"]) {
+    await copyFile(join(relayDir, "scripts", name), join(stage, "scripts", name));
+  }
+  // Replay the install loop from the actual deployment script, not a test copy.
+  const source = await readFile(deployScript, "utf8");
+  const loop = source.match(/for module in "\$code_stage"\/\*\.js; do[\s\S]*?\r?\ndone/);
+  assert.ok(loop, "the deployment must install the complete root module set");
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const copied = spawnSync(bash, ["-c", `set -euo pipefail\ncode_stage=stage\nremote_dir=installed\n${loop[0]}`], { cwd: root, encoding: "utf8", timeout: 10_000 });
+  assert.equal(copied.status, 0, copied.stderr || String(copied.error));
+  const loaded = spawnSync(process.execPath, [
+    "--input-type=module",
+    "-e",
+    "await import('./stage/scripts/controller-route-smoke.mjs'); await import('./stage/scripts/deploy-controller-preflight.mjs')",
+  ], { cwd: root, encoding: "utf8", timeout: 10_000 });
+  assert.equal(loaded.status, 0, loaded.stderr);
+  assert.equal(await readFile(join(installed, "protocol-controller.js"), "utf8"), await readFile(join(stage, "protocol-controller.js"), "utf8"));
+  assert.equal(await readFile(join(installed, "cli-entrypoint.js"), "utf8"), await readFile(join(stage, "cli-entrypoint.js"), "utf8"));
+  // Replay the deployment's preflight command with invalid input. Its staged
+  // helper dependency must resolve, and the gate must execute before mutation.
+  const command = source.match(/^node "\$code_stage\/scripts\/deploy-controller-preflight\.mjs" "\$controller_env"$/m);
+  assert.ok(command, "exercise the actual staged CLI invocation");
+  const rejected = spawnSync(bash, ["-c", `set -euo pipefail\ncode_stage=stage\ncontroller_env=missing-controller.env\n${command[0]}`], { cwd: root, encoding: "utf8", timeout: 10_000 });
+  assert.equal(rejected.status, 1, rejected.error?.message || rejected.stderr);
+  assert.equal(rejected.stderr.trim(), "ENOENT");
 });
 
 test("deploy module collection does not require mapfile and preserves relative names", async (t) => {

@@ -69,6 +69,8 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_con
 - 裸 v2 回滚（绕过 enrollment gateway 的旧 Relay）一律拒绝；发布前用 `enrollment-gateway-preflight` 预检全入口。
 - 回滚演练需记录：待迁移 endpoint 数、gateway 预检结果、旧 Web 分享链接可用性、桌面能力关闭后的行为。
 
+当前生产脚本的自动回滚只恢复代码/包/Web/schema/drop-in，不备份或还原部署环境文件、registry 与身份；不能把旧代码配上新 self_hosted/TOFU=false 环境就当作业务恢复，空 registry 仍会拒绝存量端点。回滚健康探针弱于部署侧，HTTP 200 或 unit active 不证明 controller/telemetry/存量注册与旧 Web 可用。上述运维验收与故障矩阵继续受 [#1428](https://github.com/Pinvou/pinvou3/issues/1428)、[#1429](https://github.com/Pinvou/pinvou3/issues/1429) 门禁约束，未取证则不得部署/灰度，不通过恢复 TOFU 或裸 v2 绕过。
+
 ## 6. 残余风险与声明
 
 - 信任模型以「受信 Relay」为前提：本功能不声称抵御恶意 Relay 的主动 MITM；该风险在发布说明中保留并明示。
@@ -123,11 +125,15 @@ R15 本地 Windows-gnullvm 另外实际执行该 Wry driver 1 项通过（独立
 
 本节仅保留当次结论，管理入口、登录账号、服务/状态/密钥布局及精确备份定位在不入库的运维清单登记。没有在本轮重新部署或修改线上服务。
 
+A18 已移除生产预检的 development + TOFU 降级门禁：当前必须 `NODE_ENV=production`、`PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=self_hosted`、`PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`；`official` live claim 尚未接线，预检及启动均失败关闭。历史降级没有可沿用的永久豁免：在下次新/重部署或正式发布之前（以先发生者为截止），必须取得端点清单、100% registry 迁移与全入口网关预检证据并关闭 TOFU，仍受 [#1428](https://github.com/Pinvou/pinvou3/issues/1428) 阻断。本次只修复代码与文档，未核验或改变线上状态。
+
 ### 8.1 历史变更与信任根
 
 当次将旧 v2-only Relay 升级为 controller-v1，使用权限受限的环境文件注入密钥与 HMAC，状态保留到代码目录之外。私钥仅在部署环境，0600 文件、0700 目录，不入库、不入日志。
 
 随客户端公开发布的生产信任根继续为 `prod-relay-key-1` / `nGlRK79H+YdNVhmZOwkI2T83uhiEBqfZeFbMrJ28LQM=`；对应 `manager::PRODUCTION_PROFILE`，原提交 `225fa4cd`。脱敏不改变该公钥或用户公开访问地址；密钥轮换必须随客户端更新并验证。
+
+当前脚本的通用托管合同（不是实际线上资产清单）：拒绝 controller 环境文件符号链接，校验 `root:root`、`0600`、production + self_hosted + TOFU=false 以及预检定义的状态路径；原子维护 `40-controller.conf`，本机执行无状态变更的 controller-v1 路由烟测，并在本机与公网健康检查中确认 `desktop_controller_enabled=true`。失败须恢复旧版 JS 模块和 systemd drop-in，不允许新旧模块混装或只以 Web v2 正常作为发布成功。
 
 ### 8.2 历史 TOFU 降级与硬截止
 
