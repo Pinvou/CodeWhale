@@ -240,15 +240,171 @@ pub fn materialize_session_skills(
     scope: ConnectorScope,
     project_workspace: Option<&Path>,
 ) -> Result<(), String> {
-    let target = paths::session_skills_dir(session_id);
     let enabled = enabled_skills_for(scope, project_workspace);
+    materialize_skill_set(session_id, &enabled)
+}
+
+/// A remote turn's immutable, uniquely owned discovery root. Ordinary B-local
+/// materialize/rewrite/self-heal writers never target this directory.
+#[derive(Debug, Default)]
+pub(crate) struct RemoteTurnOwner {
+    snapshot_claimed: std::sync::atomic::AtomicBool,
+}
+
+impl RemoteTurnOwner {
+    fn claim_snapshot(&self) -> Result<(), String> {
+        self.snapshot_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| "task_skill_snapshot_reused".to_owned())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RemoteTurnSkills {
+    directory: tempfile::TempDir,
+    owner: std::sync::Arc<RemoteTurnOwner>,
+}
+
+impl RemoteTurnSkills {
+    pub(crate) fn owner(&self) -> &std::sync::Arc<RemoteTurnOwner> {
+        &self.owner
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+/// Resolve the authenticated selection against B's enabled set and copy into
+/// a private root, including an empty directory for an empty selection. A
+/// cancelled spawn_blocking waiter cannot publish into shared session skills:
+/// when its result is dropped, only this attempt's owned directory is removed.
+pub(crate) fn materialize_remote_turn_skills(
+    session_id: &str,
+    scope: ConnectorScope,
+    project_workspace: Option<&Path>,
+    skill_ids: &[String],
+    owner: std::sync::Arc<RemoteTurnOwner>,
+) -> Result<RemoteTurnSkills, String> {
+    crate::features::sessions::validate_session_id(session_id)
+        .map_err(|_| "task_session_invalid".to_owned())?;
+    owner.claim_snapshot()?;
+    if skill_ids.len() > 32 {
+        return Err("task_skills_invalid".to_owned());
+    }
+    let enabled: HashMap<String, PathBuf> = enabled_skills_for(scope, project_workspace)
+        .into_iter()
+        .collect();
+    let mut seen = HashSet::new();
+    let mut selected = Vec::with_capacity(skill_ids.len());
+    for skill_id in skill_ids {
+        if !seen.insert(skill_id.as_str()) {
+            return Err("task_skills_invalid".to_owned());
+        }
+        let path = enabled
+            .get(skill_id)
+            .cloned()
+            .ok_or_else(|| "task_skill_not_authorized".to_owned())?;
+        selected.push((skill_id.clone(), path));
+    }
+    let shared = paths::session_skills_dir(session_id);
+    let parent = shared
+        .parent()
+        .ok_or_else(|| "task_session_invalid".to_owned())?;
+    std::fs::create_dir_all(parent).map_err(|_| "task_skill_unavailable".to_owned())?;
+    let directory = tempfile::Builder::new()
+        .prefix("remote-turn-skills-")
+        .tempdir_in(parent)
+        .map_err(|_| "task_skill_unavailable".to_owned())?;
+    for (name, source) in selected {
+        copy_skill_dir(&source, &directory.path().join(name))
+            .map_err(|_| "task_skill_unavailable".to_owned())?;
+    }
+    Ok(RemoteTurnSkills { directory, owner })
+}
+
+/// Plain-chat wrappers keep the assistant runtime independent of the
+/// marketplace scope type. Scope selection remains owned by this adapter.
+pub(crate) fn materialize_plain_remote_turn_skills(
+    session_id: &str,
+    skill_ids: &[String],
+    owner: std::sync::Arc<RemoteTurnOwner>,
+) -> Result<RemoteTurnSkills, String> {
+    materialize_remote_turn_skills(session_id, ConnectorScope::Plain, None, skill_ids, owner)
+}
+
+/// Build the private prompt prefix used by ACP, whose protocol has no
+/// `skills_dir` parameter. Resolution uses the same authoritative enabled set
+/// as chat and reads only the explicitly selected skill bodies.
+pub(crate) fn remote_turn_skill_prompt(
+    scope: ConnectorScope,
+    project_workspace: Option<&Path>,
+    skill_ids: &[String],
+) -> Result<String, String> {
+    const MAX_REMOTE_SKILL_PROMPT_BYTES: usize = 512 * 1024;
+    if skill_ids.len() > 32 {
+        return Err("task_skills_invalid".to_owned());
+    }
+    let enabled: HashMap<String, PathBuf> = enabled_skills_for(scope, project_workspace)
+        .into_iter()
+        .collect();
+    let mut seen = HashSet::new();
+    let mut prompt = String::new();
+    for skill_id in skill_ids {
+        if !seen.insert(skill_id.as_str()) {
+            return Err("task_skills_invalid".to_owned());
+        }
+        let path = enabled
+            .get(skill_id)
+            .ok_or_else(|| "task_skill_not_authorized".to_owned())?
+            .join("SKILL.md");
+        let document =
+            std::fs::read_to_string(path).map_err(|_| "task_skill_unavailable".to_owned())?;
+        let body = strip_skill_frontmatter(&document);
+        let section = format!("<selected_skill id=\"{skill_id}\">\n{body}\n</selected_skill>\n");
+        if prompt.len().saturating_add(section.len()) > MAX_REMOTE_SKILL_PROMPT_BYTES {
+            return Err("task_skills_too_large".to_owned());
+        }
+        prompt.push_str(&section);
+    }
+    if prompt.is_empty() {
+        return Ok(prompt);
+    }
+    Ok(format!(
+        "<remote_skill_policy>Only the selected B-authorized skills below are enabled for this turn. Do not load or use unlisted skills.</remote_skill_policy>\n{prompt}"
+    ))
+}
+
+fn strip_skill_frontmatter(document: &str) -> &str {
+    let normalized = document
+        .strip_prefix("---\n")
+        .or_else(|| document.strip_prefix("---\r\n"));
+    let Some(rest) = normalized else {
+        return document;
+    };
+    for marker in ["\n---\n", "\r\n---\r\n"] {
+        if let Some(end) = rest.find(marker) {
+            return rest[end + marker.len()..].trim_start();
+        }
+    }
+    document
+}
+
+fn materialize_skill_set(session_id: &str, enabled: &[(String, PathBuf)]) -> Result<(), String> {
+    let target = paths::session_skills_dir(session_id);
     let parent = target
         .parent()
         .ok_or_else(|| format!("组合目录无父级: {}", target.display()))?;
     std::fs::create_dir_all(parent).map_err(|e| format!("创建会话目录: {e}"))?;
     let staged = staging_dir(&target);
     let _ = std::fs::remove_dir_all(&staged);
-    for (name, src) in &enabled {
+    for (name, src) in enabled {
         let dest = staged.join(name);
         copy_skill_dir(src, &dest).map_err(|e| {
             format!(
@@ -343,6 +499,7 @@ mod tests {
         save_disabled_bundles_for, set_project_skills_enabled,
     };
     use crate::platform::test_support::with_temp_home;
+    use std::sync::Arc;
 
     fn write_skill(root: &Path, name: &str, content: &str) {
         let dir = root.join(name);
@@ -817,6 +974,342 @@ mod tests {
             let enabled = enabled_skills_for(ConnectorScope::Plain, Some(&project));
             assert!(!enabled.iter().any(|(n, _)| n == "project-skill"));
             let _ = std::fs::remove_dir_all(&project);
+        });
+    }
+
+    #[test]
+    fn remote_turn_materializes_only_the_frozen_authorized_selection() {
+        with_temp_home("pinvou3-skillscope", || {
+            seed_sources();
+            // A fresh home is default-all-off per scope (round-31 M8); enable
+            // the whole Plain scope so the frozen-selection assertion below is
+            // driven by the authorized list, not by the default-deny baseline.
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
+            let sid = "remote-session-skills";
+            let selected = materialize_remote_turn_skills(
+                sid,
+                ConnectorScope::Plain,
+                None,
+                &["user-custom".to_owned(), "visualizer".to_owned()],
+                std::sync::Arc::new(RemoteTurnOwner::default()),
+            )
+            .unwrap();
+            let dir = selected.path().to_owned();
+            let names: HashSet<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                names,
+                HashSet::from(["user-custom".to_owned(), "visualizer".to_owned()])
+            );
+            assert!(
+                std::fs::read_to_string(dir.join("visualizer").join("SKILL.md"))
+                    .unwrap()
+                    .contains("user version"),
+                "the exact authoritative source wins when a skill id is frozen"
+            );
+
+            assert_eq!(
+                materialize_remote_turn_skills(
+                    sid,
+                    ConnectorScope::Plain,
+                    None,
+                    &["not-authorized".to_owned()],
+                    std::sync::Arc::new(RemoteTurnOwner::default()),
+                )
+                .unwrap_err(),
+                "task_skill_not_authorized"
+            );
+            assert!(dir.join("user-custom").is_dir());
+            assert!(dir.join("visualizer").is_dir());
+
+            let empty = materialize_remote_turn_skills(
+                sid,
+                ConnectorScope::Plain,
+                None,
+                &[],
+                std::sync::Arc::new(RemoteTurnOwner::default()),
+            )
+            .unwrap();
+            assert!(std::fs::read_dir(empty.path()).unwrap().next().is_none());
+            assert!(
+                dir.join("user-custom").is_dir(),
+                "a newer empty snapshot must not replace its predecessor"
+            );
+            assert_ne!(dir, empty.path());
+            materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
+            assert_eq!(
+                std::fs::read_dir(paths::session_skills_dir(sid))
+                    .unwrap()
+                    .flatten()
+                    .count(),
+                4,
+                "the next B-local turn regains B's full authoritative enabled set"
+            );
+            let before = std::fs::read_to_string(dir.join("visualizer/SKILL.md")).unwrap();
+            rewrite_session_skills(sid, ConnectorScope::Plain, None);
+            let shared = paths::session_skills_dir(sid);
+            // Only this fixture's exact managed shared directory is removed.
+            std::fs::remove_dir_all(&shared).unwrap();
+            ensure_session_skills(sid, ConnectorScope::Plain, None);
+            assert!(shared.is_dir());
+            assert_eq!(
+                before,
+                std::fs::read_to_string(dir.join("visualizer/SKILL.md")).unwrap()
+            );
+            assert!(!dir.join("bundle-skill").exists());
+            assert!(std::fs::read_dir(empty.path()).unwrap().next().is_none());
+            let snapshot = std::sync::Arc::new(selected);
+            let clone = snapshot.clone();
+            drop(snapshot);
+            assert!(dir.is_dir());
+            drop(clone);
+            assert!(
+                !dir.exists(),
+                "last snapshot owner cleans only its private directory"
+            );
+            assert!(shared.is_dir());
+            assert!(empty.path().is_dir());
+        });
+    }
+
+    #[test]
+    fn unicode_remote_selection_reaches_real_chat_and_acp_skill_consumers() {
+        use crate::features::remote_control::controller::capabilities::{
+            CapabilityDescriptor, CapabilitySnapshotManager, CapabilitySource, opaque_skill_id,
+        };
+        use crate::features::remote_control::controller::controlled::ControlledWorkspaceInfo;
+        use crate::features::remote_control::controller::protocol::LeaseContext;
+        with_temp_home("pinvou3-unicode-remote-skills", || {
+            let name = "我的技能";
+            write_skill(&paths::bundle_skills_dir(), name, "中文正文：仅选中技能");
+            std::fs::write(
+                paths::bundle_skills_dir()
+                    .join(name)
+                    .join(".installed-from"),
+                "upload:skill.zip",
+            )
+            .unwrap();
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
+            save_disabled_bundles_for(ConnectorScope::Code, &[]).unwrap();
+            let lease = LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            };
+            let descriptors = vec![CapabilityDescriptor {
+                id: name.into(),
+                display_name: "中文技能".into(),
+            }];
+            let capabilities = CapabilitySnapshotManager::default();
+            capabilities
+                .build(
+                    lease.clone(),
+                    CapabilitySource {
+                        code_agent_ready: true,
+                        tools: vec![],
+                        plain_skills: descriptors.clone(),
+                        code_skills: descriptors,
+                        workspaces: vec![ControlledWorkspaceInfo {
+                            workspace_id: "workspace-1".into(),
+                            display_name: "Project".into(),
+                            code_allowed: true,
+                        }],
+                    },
+                    1_000,
+                )
+                .unwrap();
+            let ids = vec![opaque_skill_id(name)];
+            let chat_names = capabilities
+                .skills_for_task("1", &lease, "chat", &ids, 2_000)
+                .unwrap();
+            let code_names = capabilities
+                .skills_for_task("1", &lease, "code", &ids, 2_000)
+                .unwrap();
+            // Refresh and expiry invalidate further admission, not the exact
+            // selection already captured for these admitted turns.
+            capabilities
+                .build(lease.clone(), CapabilitySource::default(), 40_000)
+                .unwrap();
+            assert!(
+                capabilities
+                    .skills_for_task("1", &lease, "chat", &ids, 50_000)
+                    .is_err()
+            );
+            let skills = materialize_plain_remote_turn_skills(
+                "remote-unicode-skills",
+                &chat_names,
+                Arc::new(RemoteTurnOwner::default()),
+            )
+            .unwrap();
+            assert!(
+                std::fs::read_to_string(skills.path().join(name).join("SKILL.md"))
+                    .unwrap()
+                    .contains("中文正文")
+            );
+            let prompt = remote_turn_skill_prompt(ConnectorScope::Code, None, &code_names).unwrap();
+            assert!(prompt.contains("中文正文"));
+            assert!(
+                !prompt.contains(&ids[0]),
+                "opaque wire IDs are not filesystem identities"
+            );
+            save_disabled_bundles_for(ConnectorScope::Code, &[name.into()]).unwrap();
+            assert_eq!(
+                remote_turn_skill_prompt(ConnectorScope::Code, None, &code_names).unwrap_err(),
+                "task_skill_not_authorized"
+            );
+            save_disabled_bundles_for(ConnectorScope::Plain, &[name.into()]).unwrap();
+            assert_eq!(
+                materialize_plain_remote_turn_skills(
+                    "remote-unicode-disabled",
+                    &chat_names,
+                    Arc::new(RemoteTurnOwner::default()),
+                )
+                .unwrap_err(),
+                "task_skill_not_authorized"
+            );
+            save_disabled_bundles_for(ConnectorScope::Code, &[]).unwrap();
+            std::fs::remove_dir_all(paths::bundle_skills_dir().join(name)).unwrap();
+            assert_eq!(
+                remote_turn_skill_prompt(ConnectorScope::Code, None, &code_names).unwrap_err(),
+                "task_skill_not_authorized"
+            );
+        });
+    }
+
+    #[test]
+    fn remote_snapshot_owner_is_one_shot_and_invalid_ids_fail_before_claim() {
+        with_temp_home("pinvou3-skillscope", || {
+            let owner = std::sync::Arc::new(RemoteTurnOwner::default());
+            for invalid in [
+                "",
+                ".",
+                "..",
+                "trailing.",
+                "trailing ",
+                "a/b",
+                "a\\b",
+                "a:b",
+            ] {
+                assert_eq!(
+                    materialize_plain_remote_turn_skills(invalid, &[], owner.clone()).unwrap_err(),
+                    "task_session_invalid"
+                );
+            }
+            let first =
+                materialize_plain_remote_turn_skills("snapshot-owner", &[], owner.clone()).unwrap();
+            assert_eq!(
+                materialize_plain_remote_turn_skills("snapshot-owner", &[], owner).unwrap_err(),
+                "task_skill_snapshot_reused"
+            );
+            assert!(first.path().is_dir());
+        });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_blocking_snapshot_cannot_publish_over_a_newer_shared_root() {
+        let _env_lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: ENV_LOCK is held for the complete test.
+                unsafe {
+                    match &self.0 {
+                        Some(value) => std::env::set_var("PINVOU3_HOME", value),
+                        None => std::env::remove_var("PINVOU3_HOME"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("PINVOU3_HOME"));
+        // SAFETY: ENV_LOCK is held.
+        unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
+        let sid = "cancelled-snapshot";
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        struct BlockingResult {
+            snapshot: Option<RemoteTurnSkills>,
+            done: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Drop for BlockingResult {
+            fn drop(&mut self) {
+                drop(self.snapshot.take());
+                if let Some(done) = self.done.take() {
+                    let _ = done.send(());
+                }
+            }
+        }
+        let waiter = tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let snapshot = materialize_plain_remote_turn_skills(
+                    sid,
+                    &[],
+                    std::sync::Arc::new(RemoteTurnOwner::default()),
+                )
+                .unwrap();
+                ready_tx.send(snapshot.path().to_path_buf()).unwrap();
+                release_rx.recv().unwrap();
+                // The blocking task completes AFTER its async waiter was
+                // cancelled. Tokio drops this undelivered owned result.
+                BlockingResult {
+                    snapshot: Some(snapshot),
+                    done: Some(done_tx),
+                }
+            })
+            .await;
+            drop(result.unwrap());
+        });
+        let private = ready_rx.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
+        let shared = paths::session_skills_dir(sid);
+        std::fs::write(shared.join("newer-owner-marker"), "newer").unwrap();
+        release_tx.send(()).unwrap();
+        done_rx.await.unwrap();
+        assert!(!private.exists());
+        assert_eq!(
+            std::fs::read_to_string(shared.join("newer-owner-marker")).unwrap(),
+            "newer"
+        );
+    }
+
+    #[test]
+    fn code_remote_prompt_contains_only_selected_authorized_skill_bodies() {
+        with_temp_home("pinvou3-skillscope", || {
+            seed_sources();
+            save_disabled_skills_for(ConnectorScope::Code, &[]).unwrap();
+            let prompt =
+                remote_turn_skill_prompt(ConnectorScope::Code, None, &["visualizer".to_owned()])
+                    .unwrap();
+            assert!(prompt.contains("Only the selected B-authorized skills"));
+            assert!(prompt.contains("user version"));
+            assert!(!prompt.contains("user-custom"));
+            assert!(
+                !prompt.contains("name: visualizer"),
+                "frontmatter is not injected"
+            );
+            assert_eq!(
+                remote_turn_skill_prompt(
+                    ConnectorScope::Code,
+                    None,
+                    &["not-authorized".to_owned()],
+                )
+                .unwrap_err(),
+                "task_skill_not_authorized"
+            );
+            assert_eq!(
+                remote_turn_skill_prompt(ConnectorScope::Code, None, &[]).unwrap(),
+                ""
+            );
         });
     }
 

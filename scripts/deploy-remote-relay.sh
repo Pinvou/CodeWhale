@@ -115,8 +115,12 @@ fi
 ensure_cached_db "$IPV4_DB_CACHE" "$IPV4_DB_URL" "$IPV4_DB_SHA256"
 ensure_cached_db "$IPV6_DB_CACHE" "$IPV6_DB_URL" "$IPV6_DB_SHA256"
 
+relay_modules=()
+while IFS= read -r relay_module; do
+  relay_modules+=("$relay_module")
+done < <(cd "$RELAY_DIR" && printf '%s\n' ./*.js)
 tar -czf - -C "$RELAY_DIR" \
-  server.js telemetry-service.js behavior-telemetry-schema.js \
+  "${relay_modules[@]}" \
   -C "$ROOT" \
   docs/schemas/behavior-telemetry-v1.schema.json \
   docs/schemas/behavior-telemetry-registries.json \
@@ -190,6 +194,11 @@ if [[ -f "$remote_dir/behavior-telemetry-schema.js" ]]; then
 else
   touch "$backup/no-behavior-telemetry-schema"
 fi
+mkdir -p "$backup/code-js"
+for module in "$remote_dir"/*.js; do
+  [[ -f "$module" ]] || continue
+  cp -a "$module" "$backup/code-js/"
+done
 if [[ -d "$remote_dir/docs/schemas" ]]; then
   cp -a "$remote_dir/docs/schemas" "$backup/telemetry-schemas"
 else
@@ -216,6 +225,11 @@ rollback() {
   if [[ -f "$remote_dir/package.json" ]]; then (cd "$remote_dir" && npm ci --omit=dev); fi
   if [[ -f "$backup/no-telemetry-service" ]]; then rm -f "$remote_dir/telemetry-service.js"; else cp -a "$backup/telemetry-service.js" "$remote_dir/telemetry-service.js"; fi
   if [[ -f "$backup/no-behavior-telemetry-schema" ]]; then rm -f "$remote_dir/behavior-telemetry-schema.js"; else cp -a "$backup/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"; fi
+  rm -f "$remote_dir"/*.js
+  for module in "$backup/code-js"/*.js; do
+    [[ -f "$module" ]] || continue
+    cp -a "$module" "$remote_dir/"
+  done
   rm -rf "$remote_dir/docs/schemas"
   if [[ ! -f "$backup/no-telemetry-schemas" ]]; then mkdir -p "$remote_dir/docs"; cp -a "$backup/telemetry-schemas" "$remote_dir/docs/schemas"; fi
   if [[ -f "$backup/no-stats-html" ]]; then rm -f "$remote_dir/web/stats.html"; else cp -a "$backup/stats.html" "$remote_dir/web/stats.html"; fi
@@ -270,6 +284,10 @@ mv "$lock_tmp" "$remote_dir/package-lock.json"
 mv "$code_stage/server.js" "$remote_dir/server.js"
 mv "$code_stage/telemetry-service.js" "$remote_dir/telemetry-service.js"
 mv "$code_stage/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"
+for module in "$code_stage"/*.js; do
+  [[ -f "$module" ]] || continue
+  mv "$module" "$remote_dir/"
+done
 mkdir -p "$remote_dir/docs"
 rm -rf "$remote_dir/docs/schemas"
 mv "$code_stage/docs/schemas" "$remote_dir/docs/schemas"
@@ -324,6 +342,12 @@ if [[ -f "$backup/no-package-lock" ]]; then rm -f "$remote_dir/package-lock.json
 if [[ -f "$remote_dir/package.json" ]]; then (cd "$remote_dir" && npm ci --omit=dev); fi
 if [[ -f "$backup/no-telemetry-service" ]]; then rm -f "$remote_dir/telemetry-service.js"; else cp -a "$backup/telemetry-service.js" "$remote_dir/telemetry-service.js"; fi
 if [[ -f "$backup/no-behavior-telemetry-schema" ]]; then rm -f "$remote_dir/behavior-telemetry-schema.js"; else test -f "$backup/behavior-telemetry-schema.js"; cp -a "$backup/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"; fi
+test -d "$backup/code-js"
+rm -f "$remote_dir"/*.js
+for module in "$backup/code-js"/*.js; do
+  [[ -f "$module" ]] || continue
+  cp -a "$module" "$remote_dir/"
+done
 rm -rf "$remote_dir/docs/schemas"
 if [[ ! -f "$backup/no-telemetry-schemas" ]]; then test -d "$backup/telemetry-schemas"; mkdir -p "$remote_dir/docs"; cp -a "$backup/telemetry-schemas" "$remote_dir/docs/schemas"; fi
 if [[ -f "$backup/no-stats-html" ]]; then rm -f "$remote_dir/web/stats.html"; else cp -a "$backup/stats.html" "$remote_dir/web/stats.html"; fi

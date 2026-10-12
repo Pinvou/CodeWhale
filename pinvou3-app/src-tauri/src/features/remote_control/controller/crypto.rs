@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use aes::Aes256;
 use aes_gcm::aead::{Aead, KeyInit, Payload, consts::U12};
 use aes_gcm::{AesGcm, Nonce};
+use base64::Engine as _;
 use hkdf::Hkdf;
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{self, UnparsedPublicKey};
@@ -403,6 +404,7 @@ impl HandshakeKeyPair {
             business_a_to_b: derive(b"business/A-to-B")?,
             business_b_to_a: derive(b"business/B-to-A")?,
             resume_secret: derive(b"resume")?,
+            liveness_root: derive(b"liveness")?,
         })
     }
 
@@ -481,7 +483,7 @@ pub(crate) enum FrameDirection {
 }
 
 impl FrameDirection {
-    fn wire(self) -> &'static [u8] {
+    pub(crate) fn wire(self) -> &'static [u8] {
         match self {
             Self::AToB => b"a_to_b",
             Self::BToA => b"b_to_a",
@@ -522,6 +524,28 @@ impl ReceiptSecret {
         Ok(commitment)
     }
 
+    /// E2E-02 所需的冻结契约增量：`finished_receipt_ack` 必须把 `sender_role`
+    /// 那一方（即刚收到对端 Finished 的一侧解开的**对端** receipt secret）经已认证
+    /// 角色 socket 回传给 Relay，供它核对对端此前的 commitment
+    /// （`remote-control-relay/controller-lease.js` 的 `acceptReceipt`：按
+    /// `sender_role` 取 commitment 后重算比对）。明文只在此显式路径出 Rust，
+    /// Debug/Display/普通序列化仍全部脱敏。
+    pub(crate) fn to_base64(&self) -> String {
+        base64::engine::general_purpose::STANDARD.encode(&self.0[..])
+    }
+
+    /// 测试用：按 Relay 的校验路径复原 receipt secret（重算 commitment 做同构核对）。
+    #[cfg(test)]
+    pub(crate) fn from_base64_for_test(value: &str) -> CryptoResult<Self> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .map_err(|_| ControllerCryptoError::new("invalid_receipt", "receipt"))?;
+        let secret: [u8; RECEIPT_SECRET_BYTES] = bytes
+            .try_into()
+            .map_err(|_| ControllerCryptoError::new("invalid_receipt", "receipt"))?;
+        Ok(Self(Zeroizing::new(secret)))
+    }
+
     #[cfg(test)]
     fn from_test_bytes(value: [u8; RECEIPT_SECRET_BYTES]) -> Self {
         Self(Zeroizing::new(value))
@@ -535,6 +559,8 @@ pub(crate) struct SessionKeys {
     business_a_to_b: Zeroizing<[u8; 32]>,
     business_b_to_a: Zeroizing<[u8; 32]>,
     resume_secret: Zeroizing<[u8; 32]>,
+    /// E2E-06：与方向无关的存活证明根（A 与 B 派生同一把 liveness 密钥）。
+    liveness_root: Zeroizing<[u8; 32]>,
 }
 
 impl fmt::Debug for SessionKeys {
@@ -544,6 +570,42 @@ impl fmt::Debug for SessionKeys {
 }
 
 impl SessionKeys {
+    /// E2E-02 所需的冻结契约增量：receipt/Finished 阶段发生在 Relay 下发
+    /// `connection_id/controller_lease_id/lease_epoch` 之前，因此必须能在没有
+    /// `LeaseBinding` 的情况下拿到收据收发器。finished 密钥只依赖握手
+    /// transcript 与角色，本方法把这个事实固化进类型：它不接受任何租约参数。
+    pub(crate) fn finished_pair(
+        &self,
+        local_role: ControllerRole,
+    ) -> (FinishedSender, FinishedReceiver) {
+        let (sender_role, receiver_role, sender_key, receiver_key) = match local_role {
+            ControllerRole::A => (
+                ControllerRole::A,
+                ControllerRole::B,
+                &self.finished_a,
+                &self.finished_b,
+            ),
+            ControllerRole::B => (
+                ControllerRole::B,
+                ControllerRole::A,
+                &self.finished_b,
+                &self.finished_a,
+            ),
+        };
+        (
+            FinishedSender {
+                key: sender_key.clone(),
+                transcript_hash: self.transcript_hash,
+                sender: sender_role,
+            },
+            FinishedReceiver {
+                key: receiver_key.clone(),
+                transcript_hash: self.transcript_hash,
+                expected_sender: receiver_role,
+            },
+        )
+    }
+
     pub(crate) fn into_role_ciphers(
         self,
         local_role: ControllerRole,
@@ -556,6 +618,7 @@ impl SessionKeys {
             business_a_to_b,
             business_b_to_a,
             resume_secret,
+            liveness_root,
         } = self;
         let (
             sender_role,
@@ -591,6 +654,11 @@ impl SessionKeys {
         let send_key = derive_business_key(&send_root, &transcript_hash, &binding, send_direction)?;
         let receive_key =
             derive_business_key(&receive_root, &transcript_hash, &binding, receive_direction)?;
+        let resume_confirm = ResumeConfirmCipher {
+            key: resume_secret.clone(),
+            binding: binding.clone(),
+            role: local_role,
+        };
         Ok(RoleCiphers {
             finished_sender: FinishedSender {
                 key: sender_finished,
@@ -611,11 +679,16 @@ impl SessionKeys {
             },
             receive: ReceiveCipher {
                 key: receive_key,
-                binding,
+                binding: binding.clone(),
                 direction: receive_direction,
                 replay: ReplayWindow::default(),
             },
             resume_secret: ResumeSecret(resume_secret),
+            resume_confirm,
+            liveness_a: LivenessCipher {
+                key: liveness_key(&liveness_root, &transcript_hash, &binding)?,
+                binding,
+            },
         })
     }
 }
@@ -648,6 +721,100 @@ pub(crate) struct RoleCiphers {
     pub(crate) send: SendCipher,
     pub(crate) receive: ReceiveCipher,
     pub(crate) resume_secret: ResumeSecret,
+    /// E2E-06：旧上下文里的恢复确认 AEAD（方向无关，角色写在 AAD/明文里）。
+    pub(crate) resume_confirm: ResumeConfirmCipher,
+    /// E2E-06：A→B 存活证明的 AEAD（域与业务帧分离）。
+    pub(crate) liveness_a: LivenessCipher,
+}
+
+/// E2E-06：`encrypted_controller_liveness_a` 的 AEAD。协议只定义 A 的挑战应答，
+/// 因此密钥固定按 A 角色域派生；AAD 绑定租约五元组 + 角色，随机 nonce 前置在密文里
+/// （挑战应答没有业务帧那样的单调序号，重放由 B 的挑战一次性消费保证）。
+pub(crate) struct LivenessCipher {
+    key: Zeroizing<[u8; 32]>,
+    binding: LeaseBinding,
+}
+
+impl fmt::Debug for LivenessCipher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LivenessCipher([REDACTED])")
+    }
+}
+
+impl LivenessCipher {
+    pub(crate) fn seal(&self, plaintext: &[u8]) -> CryptoResult<Vec<u8>> {
+        if plaintext.len() > MAX_DECRYPTED_PAYLOAD_BYTES {
+            return Err(ControllerCryptoError::new("plaintext_too_large", "frame"));
+        }
+        let nonce = random_nonce()?;
+        let aad = liveness_aad(&self.binding)?;
+        let ciphertext = seal_aead(&self.key, nonce, &aad, plaintext, MAX_ENCRYPTED_FRAME_BYTES)?;
+        let mut output = nonce.to_vec();
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
+    }
+
+    pub(crate) fn open(&self, sealed: &[u8]) -> CryptoResult<Vec<u8>> {
+        if sealed.len() < AEAD_NONCE_BYTES + AEAD_TAG_BYTES
+            || sealed.len() > MAX_ENCRYPTED_FRAME_BYTES
+        {
+            return Err(ControllerCryptoError::new("invalid_ciphertext", "frame"));
+        }
+        let (nonce, ciphertext) = sealed.split_at(AEAD_NONCE_BYTES);
+        let nonce: [u8; AEAD_NONCE_BYTES] = nonce
+            .try_into()
+            .map_err(|_| ControllerCryptoError::new("invalid_ciphertext", "frame"))?;
+        let aad = liveness_aad(&self.binding)?;
+        let plaintext = open_aead(
+            &self.key,
+            nonce,
+            &aad,
+            ciphertext,
+            MAX_ENCRYPTED_FRAME_BYTES,
+        )?;
+        if plaintext.len() > MAX_DECRYPTED_PAYLOAD_BYTES {
+            return Err(ControllerCryptoError::new("plaintext_too_large", "frame"));
+        }
+        Ok(plaintext)
+    }
+}
+
+fn liveness_key(
+    root: &[u8; 32],
+    transcript_hash: &[u8; 32],
+    binding: &LeaseBinding,
+) -> CryptoResult<Zeroizing<[u8; 32]>> {
+    let epoch = binding.lease_epoch.to_string();
+    hkdf_expand(
+        root,
+        transcript_hash,
+        b"pinvou-controller-liveness-key-v1",
+        &[
+            binding.connection_id.as_bytes(),
+            binding.controller_lease_id.as_bytes(),
+            epoch.as_bytes(),
+            binding.relay_epoch.as_bytes(),
+            binding.remote_control_generation.as_bytes(),
+            ControllerRole::A.wire(),
+        ],
+    )
+}
+
+/// 存活证明的 AAD：冻结 fixture 的 `aad_binding` 字段顺序（租约五元组 + role）。
+fn liveness_aad(binding: &LeaseBinding) -> CryptoResult<Vec<u8>> {
+    let mut output = b"pinvou-controller-liveness-aad-v1".to_vec();
+    let epoch = binding.lease_epoch.to_string();
+    for value in [
+        binding.connection_id.as_bytes(),
+        binding.controller_lease_id.as_bytes(),
+        epoch.as_bytes(),
+        binding.relay_epoch.as_bytes(),
+        binding.remote_control_generation.as_bytes(),
+        ControllerRole::A.wire(),
+    ] {
+        lp(&mut output, value)?;
+    }
+    Ok(output)
 }
 
 pub(crate) struct ResumeSecret(Zeroizing<[u8; 32]>);
@@ -656,6 +823,152 @@ impl fmt::Debug for ResumeSecret {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ResumeSecret([REDACTED])")
     }
+}
+
+/// E2E-06：`encrypted_resume_confirm` 的 AEAD（跨角色确认旧 E2E 上下文）。
+///
+/// 恢复握手发生在旧的会话密钥上下文里，因此密钥固定取握手派生的 `resume`
+/// 秘密（两侧同值，与业务/存活密钥域分离），AAD 绑定租约五元组与
+/// `activation_id`；明文另带域标签、`activation_id` 与发送角色，接收侧要求
+/// 发送角色等于期望的对端角色，避免把一端的确认重放成另一端的确认。
+pub(crate) struct ResumeConfirmCipher {
+    key: Zeroizing<[u8; 32]>,
+    binding: LeaseBinding,
+    role: ControllerRole,
+}
+
+impl fmt::Debug for ResumeConfirmCipher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ResumeConfirmCipher([REDACTED])")
+    }
+}
+
+const MAX_RESUME_CONFIRM_BYTES: usize = 1024;
+
+impl ResumeConfirmCipher {
+    pub(crate) fn seal(&self, activation_id: &str) -> CryptoResult<Vec<u8>> {
+        if activation_id.is_empty() || activation_id.len() > MAX_BINDING_BYTES {
+            return Err(ControllerCryptoError::new(
+                "invalid_binding",
+                "activation_id",
+            ));
+        }
+        let mut plaintext = Zeroizing::new(b"pinvou-controller-resume-confirm-v1".to_vec());
+        lp(&mut plaintext, activation_id.as_bytes())?;
+        lp(&mut plaintext, self.role.wire())?;
+        let aad = resume_confirm_aad(&self.binding, activation_id)?;
+        let nonce = random_nonce()?;
+        let ciphertext = seal_aead(
+            &self.key,
+            nonce,
+            &aad,
+            &plaintext[..],
+            MAX_RESUME_CONFIRM_BYTES,
+        )?;
+        let mut output = nonce.to_vec();
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
+    }
+
+    /// 只做「来源与绑定确认」：成功不返回任何可复用材料。
+    pub(crate) fn open(
+        &self,
+        sender: ControllerRole,
+        activation_id: &str,
+        sealed: &[u8],
+    ) -> CryptoResult<()> {
+        if activation_id.is_empty()
+            || activation_id.len() > MAX_BINDING_BYTES
+            || sealed.len() < AEAD_NONCE_BYTES + AEAD_TAG_BYTES
+            || sealed.len() > MAX_RESUME_CONFIRM_BYTES
+        {
+            return Err(ControllerCryptoError::new(
+                "invalid_ciphertext",
+                "resume_confirm",
+            ));
+        }
+        let mut nonce = [0_u8; AEAD_NONCE_BYTES];
+        nonce.copy_from_slice(&sealed[..AEAD_NONCE_BYTES]);
+        let aad = resume_confirm_aad(&self.binding, activation_id)?;
+        let mut plaintext = open_aead(
+            &self.key,
+            nonce,
+            &aad,
+            &sealed[AEAD_NONCE_BYTES..],
+            MAX_RESUME_CONFIRM_BYTES,
+        )?;
+        let verified = parse_resume_confirm(&plaintext, sender, activation_id);
+        plaintext.zeroize();
+        verified
+    }
+
+    /// 恢复完成后轮换 resume gate 传输指纹的来源：由 resume 密钥、租约五元组、
+    /// `activation_id` 与本端角色派生。两侧各自可算，且与握手期指纹不同。
+    pub(crate) fn fingerprint(&self, activation_id: &str) -> CryptoResult<[u8; 32]> {
+        if activation_id.is_empty() || activation_id.len() > MAX_BINDING_BYTES {
+            return Err(ControllerCryptoError::new(
+                "invalid_binding",
+                "activation_id",
+            ));
+        }
+        let epoch = self.binding.lease_epoch.to_string();
+        let fingerprint = hkdf_expand(
+            &self.key[..],
+            b"pinvou-controller-resume-salt-v1",
+            b"pinvou-controller-resume-fingerprint-v1",
+            &[
+                self.binding.connection_id.as_bytes(),
+                self.binding.controller_lease_id.as_bytes(),
+                epoch.as_bytes(),
+                self.binding.relay_epoch.as_bytes(),
+                self.binding.remote_control_generation.as_bytes(),
+                activation_id.as_bytes(),
+                self.role.wire(),
+            ],
+        )?;
+        Ok(*fingerprint)
+    }
+}
+
+fn resume_confirm_aad(binding: &LeaseBinding, activation_id: &str) -> CryptoResult<Vec<u8>> {
+    let mut output = b"pinvou-controller-resume-confirm-aad-v1".to_vec();
+    let epoch = binding.lease_epoch.to_string();
+    for value in [
+        binding.connection_id.as_bytes(),
+        binding.controller_lease_id.as_bytes(),
+        epoch.as_bytes(),
+        binding.relay_epoch.as_bytes(),
+        binding.remote_control_generation.as_bytes(),
+        activation_id.as_bytes(),
+    ] {
+        lp(&mut output, value)?;
+    }
+    Ok(output)
+}
+
+fn parse_resume_confirm(
+    plaintext: &[u8],
+    sender: ControllerRole,
+    activation_id: &str,
+) -> CryptoResult<()> {
+    const DOMAIN: &[u8] = b"pinvou-controller-resume-confirm-v1";
+    if !plaintext.starts_with(DOMAIN) {
+        return Err(ControllerCryptoError::new(
+            "invalid_resume_confirm",
+            "domain",
+        ));
+    }
+    let mut cursor = DOMAIN.len();
+    let activation = take_lp(plaintext, &mut cursor)?;
+    let role = take_lp(plaintext, &mut cursor)?;
+    if cursor != plaintext.len() || activation != activation_id.as_bytes() || role != sender.wire()
+    {
+        return Err(ControllerCryptoError::new(
+            "invalid_resume_confirm",
+            "binding",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) struct FinishedSender {
@@ -1153,6 +1466,7 @@ impl Serialize for SensitiveString {
 
 /// Opaque output of an authenticated enrollment/configuration loader. There is
 /// deliberately no raw JSON/string constructor in DEV-05.
+#[derive(Clone)]
 pub(crate) struct AuthenticatedRelayTrustConfig {
     keys: BTreeMap<String, [u8; 32]>,
 }
@@ -1167,6 +1481,54 @@ impl fmt::Debug for AuthenticatedRelayTrustConfig {
 }
 
 impl AuthenticatedRelayTrustConfig {
+    /// E2E-02 所需的冻结契约增量：生产构建需要一个受控入口把管理员预置的
+    /// Relay 签名公钥变成信任根。只接受严格 key id 与 32 字节公钥，任何
+    /// 缺失、畸形或重复都失败关闭；不接受用户输入，也不接受原始 JSON。
+    pub(crate) fn from_pinned_keys(
+        entries: impl IntoIterator<Item = (String, String)>,
+    ) -> CryptoResult<Self> {
+        let mut keys = BTreeMap::new();
+        for (key_id, encoded) in entries {
+            if key_id.is_empty()
+                || key_id.len() > 64
+                || !key_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return Err(ControllerCryptoError::new(
+                    "invalid_pinned_key",
+                    "relay_signing_key_id",
+                ));
+            }
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(encoded.as_bytes())
+                .map_err(|_| {
+                    ControllerCryptoError::new("invalid_pinned_key", "relay_signing_public_key")
+                })?;
+            if raw.len() != 32 {
+                return Err(ControllerCryptoError::new(
+                    "invalid_pinned_key",
+                    "relay_signing_public_key",
+                ));
+            }
+            let mut public_key = [0_u8; 32];
+            public_key.copy_from_slice(&raw);
+            if keys.insert(key_id, public_key).is_some() {
+                return Err(ControllerCryptoError::new(
+                    "invalid_pinned_key",
+                    "relay_signing_key_id",
+                ));
+            }
+        }
+        if keys.is_empty() {
+            return Err(ControllerCryptoError::new(
+                "relay_trust_unconfigured",
+                "relay_signing_public_key",
+            ));
+        }
+        Ok(Self { keys })
+    }
+
     fn verify_relay_signature(
         &self,
         key_id: &str,
@@ -1197,6 +1559,77 @@ impl AuthenticatedRelayTrustConfig {
             keys: entries.into_iter().collect(),
         }
     }
+}
+
+/// Production trust-root entry point. The pin is deployment configuration
+/// (administrator-provisioned), never user input; a missing or malformed pin
+/// fails closed instead of degrading to an unauthenticated transcript.
+pub(crate) fn load_relay_trust_config(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> CryptoResult<AuthenticatedRelayTrustConfig> {
+    // 环境变量优先（运维/CI 覆盖），否则回退到随包内置的端点 profile 信任根，
+    // 使用户不再需要手工配置这两个变量。安全语义：环境变量**要么全给、要么
+    // 全不给**——只给一半视为配置错误并失败关闭，避免"配错一半被内置值兜底"。
+    let profile = crate::features::remote_control::manager::active_endpoint_profile();
+    let env_key_id =
+        lookup("PINVOU_REMOTE_RELAY_SIGNING_KEY_ID").filter(|value| !value.trim().is_empty());
+    let env_public_key = lookup("PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64")
+        .filter(|value| !value.trim().is_empty());
+    let (key_id, public_key) = match (env_key_id, env_public_key) {
+        (Some(key_id), Some(public_key)) => (key_id, public_key),
+        (None, None) => (
+            profile.signing_key_id.to_owned(),
+            profile.signing_public_key_b64.to_owned(),
+        ),
+        (Some(_), None) => {
+            return Err(ControllerCryptoError::new(
+                "relay_trust_unconfigured",
+                "relay_signing_public_key",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(ControllerCryptoError::new(
+                "relay_trust_unconfigured",
+                "relay_signing_key_id",
+            ));
+        }
+    };
+    if key_id.trim().is_empty() || public_key.trim().is_empty() {
+        return Err(ControllerCryptoError::new(
+            "relay_trust_unconfigured",
+            "relay_signing_key_id",
+        ));
+    }
+    AuthenticatedRelayTrustConfig::from_pinned_keys([(
+        key_id.trim().to_owned(),
+        public_key.trim().to_owned(),
+    )])
+}
+
+/// Verifies a parsed `controller_pairing_reserved` transcript against the
+/// pinned trust root and returns the authenticated lease-install context.
+pub(crate) fn authenticate_relay_transcript(
+    trust: &AuthenticatedRelayTrustConfig,
+    parsed: ParsedTranscript,
+) -> Result<LeaseInstallValidationContext> {
+    TranscriptAuthenticator::new(trust.clone()).authenticate(parsed)
+}
+
+/// E2E-02：受控的传输密钥指纹来源。冻结协议只向双方下发同一份签名
+/// transcript，因此用 `transcript_hash` 做 IKM、按角色域分离派生一个稳定的
+/// 指纹；它不承载密钥材料，只在本地 resume gate 中用于证明「同一份认证
+/// transcript 的同一角色」，不会跨角色相等，也不会与任何会话密钥相同。
+pub(crate) fn transport_key_fingerprint(
+    transcript_hash: [u8; 32],
+    role: ControllerRole,
+) -> CryptoResult<[u8; 32]> {
+    let fingerprint = hkdf_expand(
+        &transcript_hash,
+        b"pinvou-controller-transport-salt-v1",
+        b"pinvou-controller-transport-fingerprint-v1",
+        &[role.wire()],
+    )?;
+    Ok(*fingerprint)
 }
 
 pub(crate) fn authenticate_relay_liveness_attestation(
@@ -1235,6 +1668,7 @@ impl TranscriptAuthenticator {
         Ok(LeaseInstallValidationContext::new(VerifiedTranscript {
             request_id: parts.request_id,
             expected_pairing_id: parts.expected_pairing_id,
+            peer_endpoint_id: parts.peer_endpoint_id,
             reservation_id: parts.reservation_id,
             remote_control_generation: parts.remote_control_generation,
             relay_epoch: parts.relay_epoch,
@@ -1242,6 +1676,8 @@ impl TranscriptAuthenticator {
             expected_controller_connection_identity: parts.expected_controller_connection_identity,
             negotiated_capabilities: parts.negotiated_capabilities,
             capability_hash: parts.capability_hash,
+            handshake_public_key_a_b64: parts.handshake_public_key_a_b64,
+            handshake_public_key_b_b64: parts.handshake_public_key_b_b64,
         }))
     }
 }
@@ -1271,6 +1707,7 @@ impl fmt::Debug for TranscriptAuthenticator {
 pub(crate) struct VerifiedTranscript {
     request_id: String,
     expected_pairing_id: String,
+    peer_endpoint_id: String,
     reservation_id: String,
     remote_control_generation: String,
     relay_epoch: String,
@@ -1278,6 +1715,8 @@ pub(crate) struct VerifiedTranscript {
     expected_controller_connection_identity: String,
     negotiated_capabilities: Vec<String>,
     capability_hash: String,
+    handshake_public_key_a_b64: String,
+    handshake_public_key_b_b64: String,
 }
 
 impl VerifiedTranscript {
@@ -1286,6 +1725,9 @@ impl VerifiedTranscript {
     }
     pub(crate) fn expected_pairing_id(&self) -> &str {
         &self.expected_pairing_id
+    }
+    pub(crate) fn peer_endpoint_id(&self) -> &str {
+        &self.peer_endpoint_id
     }
     pub(crate) fn reservation_id(&self) -> &str {
         &self.reservation_id
@@ -1308,6 +1750,12 @@ impl VerifiedTranscript {
     pub(crate) fn capability_hash(&self) -> &str {
         &self.capability_hash
     }
+    pub(crate) fn local_handshake_public_key(&self) -> &str {
+        &self.handshake_public_key_a_b64
+    }
+    pub(crate) fn peer_handshake_public_key(&self) -> &str {
+        &self.handshake_public_key_b_b64
+    }
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -1317,7 +1765,6 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
     use serde_json::Value;
 
     use super::super::protocol::parse_controller_pairing_transcript;
@@ -1390,6 +1837,59 @@ mod tests {
             b.into_role_ciphers(ControllerRole::B, lease(epoch))
                 .unwrap(),
         )
+    }
+
+    /// E2E-02 契约：receipt 阶段必须能在没有租约身份时完成，而业务密钥
+    /// 必须依赖真实租约身份。两条不变量在同一条用例里锁死。
+    #[test]
+    fn finished_keys_ignore_the_lease_binding_while_business_keys_depend_on_it() {
+        let receipt = ReceiptSecret::from_test_bytes([9_u8; 32]);
+        let nonce = [3_u8; 12];
+
+        // 1) finished 收发器可以完全不借助 LeaseBinding 生成，且与
+        //    `into_role_ciphers` 产出的那一份逐字节一致。
+        let (via_pair_keys, peer_keys) = session_pair();
+        let (via_pair_sender, _) = via_pair_keys.finished_pair(ControllerRole::A);
+        let sealed_without_lease = via_pair_sender.seal_with_nonce(&receipt, nonce).unwrap();
+
+        let (via_ciphers_keys, _) = session_pair();
+        let via_ciphers = via_ciphers_keys
+            .into_role_ciphers(ControllerRole::A, lease(7))
+            .unwrap();
+        let sealed_via_ciphers = via_ciphers
+            .finished_sender
+            .seal_with_nonce(&receipt, nonce)
+            .unwrap();
+        assert_eq!(
+            sealed_without_lease, sealed_via_ciphers,
+            "finished output must not depend on the lease binding"
+        );
+
+        // 2) 对端 B 仅凭同一 transcript 的 finished 收发器即可打开它。
+        let peer_receiver = peer_keys.finished_pair(ControllerRole::B).1;
+        peer_receiver.open(&sealed_without_lease).unwrap();
+
+        // 3) 反向约束：业务密钥必须随租约身份变化，且同身份稳定。
+        let root = [4_u8; 32];
+        let transcript_hash = [7_u8; 32];
+        let first = derive_business_key(&root, &transcript_hash, &lease(1), FrameDirection::AToB)
+            .unwrap()
+            .to_vec();
+        let same = derive_business_key(&root, &transcript_hash, &lease(1), FrameDirection::AToB)
+            .unwrap()
+            .to_vec();
+        let other_epoch =
+            derive_business_key(&root, &transcript_hash, &lease(2), FrameDirection::AToB)
+                .unwrap()
+                .to_vec();
+        assert_eq!(
+            first, same,
+            "the same lease identity must derive the same key"
+        );
+        assert_ne!(
+            first, other_epoch,
+            "business keys must be bound to the issued lease epoch"
+        );
     }
 
     fn code_binding() -> CodeWrapBinding {
@@ -1766,6 +2266,164 @@ mod tests {
         require_zeroizing_array(&ciphers.resume_secret.0);
     }
 
+    /// E2E-02 契约：ack 信封携带的 receipt secret 必须能还原成同一份密钥，
+    /// 且其 commitment 与握手期提交的 commitment 一致；调试输出仍脱敏。
+    #[test]
+    fn receipt_secret_round_trips_through_the_ack_envelope_only() {
+        let secret = ReceiptSecret::from_test_bytes([11_u8; 32]);
+        let encoded = secret.to_base64();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .unwrap();
+        assert_eq!(decoded, vec![11_u8; 32]);
+        assert!(!format!("{secret:?}").contains(&encoded));
+
+        let restored = ReceiptSecret::from_test_bytes(decoded.try_into().unwrap());
+        assert_eq!(
+            secret.commitment(&binding(), ControllerRole::A).unwrap(),
+            restored.commitment(&binding(), ControllerRole::A).unwrap(),
+            "the transmitted secret must reproduce the committed receipt"
+        );
+    }
+
+    #[test]
+    fn pinned_trust_config_is_strict_about_shape() {
+        let key = base64::engine::general_purpose::STANDARD.encode([7_u8; 32]);
+        assert_eq!(
+            AuthenticatedRelayTrustConfig::from_pinned_keys(Vec::<(String, String)>::new())
+                .unwrap_err()
+                .code,
+            "relay_trust_unconfigured"
+        );
+        for (key_id, value) in [
+            ("bad id", key.clone()),
+            ("relay-key-1", "not-base64!".to_owned()),
+            (
+                "relay-key-1",
+                base64::engine::general_purpose::STANDARD.encode([7_u8; 31]),
+            ),
+        ] {
+            assert_eq!(
+                AuthenticatedRelayTrustConfig::from_pinned_keys([(key_id.to_owned(), value)])
+                    .unwrap_err()
+                    .code,
+                "invalid_pinned_key"
+            );
+        }
+        assert_eq!(
+            AuthenticatedRelayTrustConfig::from_pinned_keys([
+                ("relay-key-1".to_owned(), key.clone()),
+                ("relay-key-1".to_owned(), key.clone()),
+            ])
+            .unwrap_err()
+            .code,
+            "invalid_pinned_key"
+        );
+        assert!(
+            AuthenticatedRelayTrustConfig::from_pinned_keys([("relay-key-1".to_owned(), key)])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn relay_trust_loader_prefers_env_and_falls_back_to_the_builtin_profile() {
+        // 无环境变量时不再失败关闭：随包内置的端点 profile 提供信任根
+        // （这是"用户不需要配置环境变量"的实现基础）。
+        assert!(load_relay_trust_config(|_| None).is_ok());
+        // 环境变量只给一半（不完整 pin）时仍然失败关闭。
+        assert_eq!(
+            load_relay_trust_config(|name| match name {
+                "PINVOU_REMOTE_RELAY_SIGNING_KEY_ID" => Some("relay-key-1".to_owned()),
+                _ => None,
+            })
+            .unwrap_err()
+            .code,
+            "relay_trust_unconfigured"
+        );
+        assert!(load_relay_trust_config(|_| Some(String::new())).is_ok());
+        assert_eq!(
+            load_relay_trust_config(|name| match name {
+                "PINVOU_REMOTE_RELAY_SIGNING_KEY_ID" => Some("relay-key-1".to_owned()),
+                "PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64" => Some("malformed".to_owned()),
+                _ => None,
+            })
+            .unwrap_err()
+            .code,
+            "invalid_pinned_key"
+        );
+        let public_key = base64::engine::general_purpose::STANDARD.encode([7_u8; 32]);
+        assert!(
+            load_relay_trust_config(|name| match name {
+                "PINVOU_REMOTE_RELAY_SIGNING_KEY_ID" => Some("relay-key-1".to_owned()),
+                "PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64" => Some(public_key.clone()),
+                _ => None,
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn pinned_trust_config_authenticates_the_frozen_transcript() {
+        let fixture = fixture();
+        let vector = &fixture["lease_install_vector"]["verification_input"];
+        let message = serde_json::to_string(&vector["reserved_message"]).unwrap();
+        let trusted_key =
+            fixture["untrusted_authentication_inputs"][1]["value"]["keys"][0]["public_key_b64"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let trust = AuthenticatedRelayTrustConfig::from_pinned_keys([(
+            "relay-key-test-1".to_owned(),
+            trusted_key,
+        )])
+        .unwrap();
+        let context = authenticate_relay_transcript(
+            &trust,
+            parse_controller_pairing_transcript(&message).unwrap(),
+        )
+        .unwrap();
+        assert!(format!("{context:?}").contains("pairing-0001"));
+        // E2E-02 需要读取被认证的上下文来构造握手绑定。
+        assert_eq!(context.pairing_id(), "pairing-0001");
+        assert_eq!(context.reservation_id(), "reservation-0001");
+        assert_eq!(context.relay_epoch(), "epoch-test-1");
+        assert_eq!(context.remote_control_generation(), "generation-0001");
+        assert_eq!(context.transcript_hash_bytes().unwrap().len(), 32);
+        assert!(!context.negotiated_capabilities().is_empty());
+        // E2E-02：A 端必须能从验签后的上下文拿到双方握手公钥（对端用于 ECDH）。
+        for key in [
+            context.local_handshake_public_key(),
+            context.peer_handshake_public_key_b64(),
+        ] {
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(key)
+                    .unwrap()
+                    .len(),
+                32
+            );
+        }
+
+        let attacker_key = fixture["untrusted_authentication_inputs"][2]["value"]["public_key_b64"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let attacker = AuthenticatedRelayTrustConfig::from_pinned_keys([(
+            "relay-key-test-1".to_owned(),
+            attacker_key,
+        )])
+        .unwrap();
+        assert_eq!(
+            authenticate_relay_transcript(
+                &attacker,
+                parse_controller_pairing_transcript(&message).unwrap()
+            )
+            .unwrap_err()
+            .field,
+            "relay_signature_b64"
+        );
+    }
+
     #[test]
     fn enrolled_key_authenticates_attestation_and_rejects_untrusted_signing_material() {
         let fixture = fixture();
@@ -2139,5 +2797,151 @@ mod tests {
                 "this over-limit rejected candidate ran exactly one instance drop"
             );
         }
+    }
+
+    /// E2E-02：传输指纹必须确定、与 transcript 绑定且按角色域分离，否则
+    /// resume gate 会把两个角色、两份 transcript 误判成同一个上下文。
+    #[test]
+    fn transport_key_fingerprint_is_deterministic_and_role_bound() {
+        let transcript = [0x5a_u8; 32];
+        let a_first = transport_key_fingerprint(transcript, ControllerRole::A).unwrap();
+        let a_second = transport_key_fingerprint(transcript, ControllerRole::A).unwrap();
+        let b_role = transport_key_fingerprint(transcript, ControllerRole::B).unwrap();
+        let other_transcript = transport_key_fingerprint([0x5b_u8; 32], ControllerRole::A).unwrap();
+        assert_eq!(
+            a_first, a_second,
+            "the same binding must derive the same value"
+        );
+        assert_ne!(a_first, b_role, "roles must be domain separated");
+        assert_ne!(
+            a_first, other_transcript,
+            "a different transcript must not share a fingerprint"
+        );
+        assert_ne!(a_first, [0_u8; 32]);
+        assert_ne!(
+            a_first, transcript,
+            "the fingerprint is not the raw transcript"
+        );
+    }
+
+    /// E2E-06：A→B 存活证明的 AEAD——双方在同一租约上派生出可互通的密钥，
+    /// 篡改、跨租约与域分离都必须失败。
+    #[test]
+    fn liveness_proof_round_trips_and_is_domain_and_lease_bound() {
+        let (a_session, b_session) = super::super::test_support::paired_session_keys(
+            HandshakeKeyPair::generate().unwrap(),
+            HandshakeKeyPair::generate().unwrap(),
+            &super::super::test_support::pairing_fixture("relay-key-liveness").reservation,
+        );
+        let lease_binding = lease(1);
+        let a_ciphers = a_session
+            .into_role_ciphers(ControllerRole::A, lease_binding.clone())
+            .unwrap();
+        let b_ciphers = b_session
+            .into_role_ciphers(ControllerRole::B, lease_binding.clone())
+            .unwrap();
+        let plaintext = br#"{"v":1,"type":"controller_liveness_a"}"#;
+        let sealed = a_ciphers.liveness_a.seal(plaintext).unwrap();
+        assert_eq!(
+            b_ciphers.liveness_a.open(&sealed).unwrap(),
+            plaintext.to_vec()
+        );
+        // 篡改密文失败关闭。
+        let mut tampered = sealed.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert!(b_ciphers.liveness_a.open(&tampered).is_err());
+        // 同一密钥配不同租约绑定（AAD 变化）必须失败关闭。
+        let foreign = LivenessCipher {
+            key: b_ciphers.liveness_a.key.clone(),
+            binding: lease(2),
+        };
+        assert!(
+            foreign.open(&sealed).is_err(),
+            "the AAD lease binding must stop cross-lease reuse"
+        );
+        // 存活密钥与业务密钥域分离：业务密文不能在存活通道解封。
+        assert!(b_ciphers.liveness_a.open(b"not-a-liveness-frame").is_err());
+    }
+
+    /// E2E-06：恢复确认必须在旧 E2E 上下文的同一租约里跨角色往返，且对
+    /// activation_id、角色、租约与密文篡改全部失败关闭。
+    #[test]
+    fn resume_confirm_round_trips_and_is_activation_role_and_lease_bound() {
+        let (a_session, b_session) = super::super::test_support::paired_session_keys(
+            HandshakeKeyPair::generate().unwrap(),
+            HandshakeKeyPair::generate().unwrap(),
+            &super::super::test_support::pairing_fixture("relay-key-resume").reservation,
+        );
+        let lease_binding = lease(1);
+        let a_ciphers = a_session
+            .into_role_ciphers(ControllerRole::A, lease_binding.clone())
+            .unwrap();
+        let b_ciphers = b_session
+            .into_role_ciphers(ControllerRole::B, lease_binding)
+            .unwrap();
+
+        let sealed = a_ciphers.resume_confirm.seal("activation-0001").unwrap();
+        b_ciphers
+            .resume_confirm
+            .open(ControllerRole::A, "activation-0001", &sealed)
+            .unwrap();
+        // activation_id 不符失败关闭（另一个恢复候选不能复用同一份确认）。
+        assert!(
+            b_ciphers
+                .resume_confirm
+                .open(ControllerRole::A, "activation-0002", &sealed)
+                .is_err()
+        );
+        // 角色不符失败关闭：B 的确认不能被当成 A 的确认。
+        assert!(
+            b_ciphers
+                .resume_confirm
+                .open(ControllerRole::B, "activation-0001", &sealed)
+                .is_err()
+        );
+        // 密文篡改失败关闭。
+        let mut tampered = sealed.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert!(
+            b_ciphers
+                .resume_confirm
+                .open(ControllerRole::A, "activation-0001", &tampered)
+                .is_err()
+        );
+        // 跨租约失败关闭（AAD 绑定租约五元组）。
+        let (_, foreign_session) = super::super::test_support::paired_session_keys(
+            HandshakeKeyPair::generate().unwrap(),
+            HandshakeKeyPair::generate().unwrap(),
+            &super::super::test_support::pairing_fixture("relay-key-resume-2").reservation,
+        );
+        let foreign = foreign_session
+            .into_role_ciphers(ControllerRole::B, lease(2))
+            .unwrap();
+        assert!(
+            foreign
+                .resume_confirm
+                .open(ControllerRole::A, "activation-0001", &sealed)
+                .is_err()
+        );
+        // 两侧各自派生的轮换指纹互不相同，且都不等于握手期指纹。
+        let a_fingerprint = a_ciphers
+            .resume_confirm
+            .fingerprint("activation-0001")
+            .unwrap();
+        let b_fingerprint = b_ciphers
+            .resume_confirm
+            .fingerprint("activation-0001")
+            .unwrap();
+        assert_ne!(a_fingerprint, b_fingerprint);
+        assert_ne!(
+            a_fingerprint,
+            a_ciphers
+                .resume_confirm
+                .fingerprint("activation-0002")
+                .unwrap()
+        );
+        assert!(!format!("{:?}", a_ciphers.resume_confirm).contains("activation"));
     }
 }

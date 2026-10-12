@@ -17,11 +17,11 @@ const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 const MAX_SENSITIVE_STRING_BYTES = 8 * 1024;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "d844a4f207645c4d40d443529b9c982492898c7ae30a810448e3ae46e894df5b";
+export const CONTROLLER_CONTRACT_SHA256 = "11c728929280ade5f529efc38a0fca6d618a77839bba1c7e48938b34e781f889";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
-  "task_v1", "permission_v1", "attachment_v1", "artifact_v1", "snapshot_journal_v1",
+  "task_v1", "temporary_model_package_v1", "permission_v1", "attachment_v1", "artifact_v1", "snapshot_journal_v1",
 ]);
 
 export const CONTROLLER_MESSAGE_TYPES = Object.freeze([
@@ -29,16 +29,20 @@ export const CONTROLLER_MESSAGE_TYPES = Object.freeze([
   "desktop_pairing_revoke", "controller_pairing_claim", "controller_pairing_reserved", "finished_receipt_commit",
   "encrypted_handshake_finished", "finished_receipt_ack", "controller_joined", "controller_liveness",
   "controller_liveness_challenge_a", "encrypted_controller_liveness_a", "controller_liveness_attestation_request_a",
-  "controller_liveness_attestation_a", "controller_resume_prepare", "controller_resume_provisional",
+  "controller_liveness_attestation_a", "controller_liveness_attestation_request_b", "controller_liveness_attestation_b",
+  "controller_resume_prepare", "controller_resume_provisional",
   "encrypted_resume_confirm", "controller_resume_activation_ack", "controller_resume_activation_pending",
   "controller_post_activation_liveness", "controller_post_activation_liveness_confirmed", "controller_resume_ready_ack",
   "controller_resumed", "encrypted_frame", "controller_disconnect", "error",
 ]);
 
 export const CONTROLLER_PAYLOAD_TYPES = Object.freeze([
-  "capability_snapshot_request", "capability_snapshot", "task_submit", "task_cancel", "task_status", "permission_request", "permission_decision", "attachment_begin",
-  "attachment_chunk", "attachment_commit", "artifact_index_request", "artifact_index", "artifact_read_request",
-  "artifact_chunk", "session_snapshot_request", "session_snapshot", "journal_replay_request", "journal_event",
+  "capability_snapshot_request", "capability_snapshot", "capability_snapshot_error", "task_submit", "task_cancel", "task_status",
+  "remote_action_request", "remote_action_result", "session_snapshot_request", "session_snapshot", "journal_replay_request", "journal_event",
+]);
+export const REMOTE_ACTION_OPERATIONS = Object.freeze([
+  "permission_list", "permission_decide", "attachment_begin", "attachment_chunk", "attachment_abort",
+  "artifact_index", "artifact_preview", "artifact_download_begin", "artifact_download_chunk", "artifact_download_abort",
 ]);
 export const LEASE_INSTALL_MESSAGE_TYPES = Object.freeze(["controller_joined"]);
 
@@ -49,6 +53,7 @@ export const TASK_STATUSES = Object.freeze([
 export const CONTROLLER_ERROR_CODES = Object.freeze([
   "pairing_code_invalid", "pairing_code_generation_failed", "controller_busy", "version_incompatible", "endpoint_offline", "enrollment_required",
   "invalid_message", "unsupported_capability", "permission_already_decided", "permission_expired", "result_unknown",
+  "capability_snapshot_unavailable",
 ]);
 
 export const LEGACY_WEB_CONFLICT = Object.freeze({
@@ -98,6 +103,8 @@ const MESSAGE_SCHEMAS = Object.freeze({
   encrypted_controller_liveness_a: schema(["v", "type", ...ROUTING_CONTEXT_FIELDS, "ciphertext_b64", "ciphertext_bytes"], [], ["A"]),
   controller_liveness_attestation_request_a: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "challenge_id", "challenge_b64"], [], ["B"]),
   controller_liveness_attestation_a: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "liveness_epoch_a", "heartbeat_sequence_a", "attestation_sequence", "challenge_id", "challenge_b64", "observed_age_ms", "remaining_ttl_ms", "issued_at_relay", "relay_signing_key_id", "signature_algorithm", "relay_signature_b64"], [], ["relay"]),
+  controller_liveness_attestation_request_b: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "challenge_id", "challenge_b64"], [], ["A"]),
+  controller_liveness_attestation_b: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "liveness_epoch_b", "heartbeat_sequence_b", "attestation_sequence", "challenge_id", "challenge_b64", "observed_age_ms", "remaining_ttl_ms", "issued_at_relay", "relay_signing_key_id", "signature_algorithm", "relay_signature_b64"], [], ["relay"]),
   controller_resume_prepare: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "sender_role", "resume_token_b64", "transport_challenge_b64", "original_deadline_ms"], [], ["A", "B"]),
   controller_resume_provisional: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "original_deadline_ms"], [], ["relay"]),
   encrypted_resume_confirm: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "sender_role", "ciphertext_b64", "ciphertext_bytes"], [], ["A", "B"]),
@@ -113,20 +120,14 @@ const MESSAGE_SCHEMAS = Object.freeze({
 });
 
 const PAYLOAD_SCHEMAS = Object.freeze({
-  capability_snapshot_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "known_revision"], [], ["A"]),
-  capability_snapshot: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "capability_revision", "expires_at_ms", "modes", "tools", "skills", "workspaces"], [], ["B"]),
+  capability_snapshot_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "known_revision"], [], ["A"]),
+  capability_snapshot: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "controlled_session_id", "capability_revision", "expires_at_ms", "modes", "tools", "skills", "workspaces"], ["valid_for_ms"], ["B"]),
+  capability_snapshot_error: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "code"], [], ["B"]),
   task_submit: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "task_id", "client_request_id", "session_id", "capability_revision", "model_source", "mode", "input_digest", "input"], ["temporary_model_package"], ["A"]),
   task_cancel: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "task_id", "session_id"], [], ["A"]),
   task_status: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "task_id", "session_id", "task_status"], ["result_digest"], ["B"]),
-  permission_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "task_id", "permission_request_id", "expires_at_ms", "operation_type", "risk_level", "target_scope", "preview"], [], ["B"]),
-  permission_decision: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "task_id", "permission_request_id", "request_id", "decision"], [], ["A"]),
-  attachment_begin: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "task_id", "session_id", "transfer_id", "file_name", "mime_type", "total_bytes", "sha256"], [], ["A"]),
-  attachment_chunk: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "task_id", "session_id", "transfer_id", "chunk_index", "chunk_b64", "chunk_bytes"], [], ["A"]),
-  attachment_commit: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "task_id", "session_id", "transfer_id", "sha256"], [], ["A"]),
-  artifact_index_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id"], [], ["A"]),
-  artifact_index: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "artifacts"], [], ["B"]),
-  artifact_read_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "artifact_id", "offset", "max_bytes"], [], ["A"]),
-  artifact_chunk: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "artifact_id", "offset", "chunk_b64", "chunk_bytes", "eof"], ["sha256"], ["B"]),
+  remote_action_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "operation", "body"], [], ["A"]),
+  remote_action_result: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "operation", "ok", "body"], ["error_code"], ["B"]),
   session_snapshot_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id"], [], ["A"]),
   session_snapshot: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "journal_epoch", "base_sequence", "snapshot_b64", "snapshot_bytes", "sha256"], [], ["B"]),
   journal_replay_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "journal_epoch", "after_sequence"], [], ["A"]),
@@ -156,18 +157,16 @@ const NESTED_SCHEMAS = Object.freeze({
   route: schema(ROUTE_REQUIRED, ROUTE_OPTIONAL, []),
   credential: schema(["kind", "secret"], [], []),
   tool_descriptor: schema(["tool_id", "display_name"], [], []),
-  skill_descriptor: schema(["skill_id", "display_name"], [], []),
+  skill_descriptor: schema(["skill_id", "display_name", "scopes"], [], []),
   workspace_descriptor: schema(["workspace_id", "display_name", "code_allowed"], [], []),
   artifact_descriptor: schema(["artifact_id", "task_id", "display_name", "mime_type", "size_bytes", "sha256", "preview_mode"], [], []),
   controller_liveness_a: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "role", "liveness_epoch_a", "heartbeat_sequence_a", "challenge_id", "challenge_b64"], [], []),
 });
 
 const PAYLOAD_CAPABILITIES = Object.freeze({
-  capability_snapshot_request: "task_v1", capability_snapshot: "task_v1",
+  capability_snapshot_request: "task_v1", capability_snapshot: "task_v1", capability_snapshot_error: "task_v1",
   task_submit: "task_v1", task_cancel: "task_v1", task_status: "task_v1",
-  permission_request: "permission_v1", permission_decision: "permission_v1",
-  attachment_begin: "attachment_v1", attachment_chunk: "attachment_v1", attachment_commit: "attachment_v1",
-  artifact_index_request: "artifact_v1", artifact_index: "artifact_v1", artifact_read_request: "artifact_v1", artifact_chunk: "artifact_v1",
+  remote_action_request: "task_v1", remote_action_result: "task_v1",
   session_snapshot_request: "snapshot_journal_v1", session_snapshot: "snapshot_journal_v1",
   journal_replay_request: "snapshot_journal_v1", journal_event: "snapshot_journal_v1",
 });
@@ -179,6 +178,7 @@ const OUTER_MESSAGE_CAPABILITIES = Object.freeze({
   finished_receipt_commit: ["finished_receipt_v1"], encrypted_handshake_finished: ["finished_receipt_v1"], finished_receipt_ack: ["finished_receipt_v1"],
   controller_liveness: ["role_liveness_v1"], controller_liveness_challenge_a: ["role_liveness_v1"],
   encrypted_controller_liveness_a: ["role_liveness_v1"], controller_liveness_attestation_request_a: ["role_liveness_v1"], controller_liveness_attestation_a: ["role_liveness_v1"],
+  controller_liveness_attestation_request_b: ["role_liveness_v1"], controller_liveness_attestation_b: ["role_liveness_v1"],
   controller_resume_prepare: ["resume_v1"], controller_resume_provisional: ["resume_v1"], encrypted_resume_confirm: ["resume_v1"],
   controller_resume_activation_ack: ["resume_v1"], controller_resume_activation_pending: ["resume_v1"], controller_post_activation_liveness: ["resume_v1"],
   controller_post_activation_liveness_confirmed: ["resume_v1"], controller_resume_ready_ack: ["resume_v1"], controller_resumed: ["resume_v1"],
@@ -227,12 +227,13 @@ function plainObject(value, label) {
   return value;
 }
 
-function safeFieldName(value) { return /^[A-Za-z0-9_]{1,64}$/u.test(value) ? value : "unknown"; }
-
 function exactObject(value, required, optional, label) {
   const object = plainObject(value, label);
   const allowed = new Set([...required, ...optional]);
-  for (const key of Object.keys(object)) if (!allowed.has(key)) fail("unknown_field", `${label}.${safeFieldName(key)}`);
+  // Object keys are attacker-controlled. Keep the diagnostic useful for
+  // classification without ever copying the rejected key into an error,
+  // crash report, or log projection.
+  for (const key of Object.keys(object)) if (!allowed.has(key)) fail("unknown_field", "schema");
   for (const key of required) if (!Object.hasOwn(object, key)) fail("missing_field", `${label}.${key}`);
   return object;
 }
@@ -344,6 +345,10 @@ function validateNamedField(object, field) {
     oneOf(value, ["a_to_b", "b_to_a"], field);
   } else if (field === "payload_kind") {
     oneOf(value, CONTROLLER_PAYLOAD_TYPES, field);
+  } else if (field === "operation") {
+    oneOf(value, REMOTE_ACTION_OPERATIONS, field);
+  } else if (field === "ok") {
+    if (typeof value !== "boolean") fail("invalid_field", field);
   } else if (field === "model_source") {
     oneOf(value, ["controlled_device", "controller_temporary"], field);
   } else if (field === "mode") {
@@ -390,7 +395,7 @@ function validateNamedField(object, field) {
     base64(value, field, MAX_CONTROL_MESSAGE_BYTES);
   } else if (["type", "reason", "operation_type"].includes(field)) {
     text(value, field, 64, 256);
-  } else if (!["input", "temporary_model_package", "transcript", "modes", "tools", "skills", "workspaces", "artifacts"].includes(field)) {
+  } else if (!["input", "temporary_model_package", "transcript", "modes", "tools", "skills", "workspaces", "artifacts", "body"].includes(field)) {
     identifier(value, field);
   }
 }
@@ -399,11 +404,87 @@ function parseJson(input, maxBytes) {
   if (typeof input === "string") {
     const encodedBytes = Buffer.byteLength(input, "utf8");
     if (encodedBytes > maxBytes) fail("message_too_large", "json");
-    try { return { value: JSON.parse(input), encodedBytes }; } catch { fail("invalid_json", "json"); }
+    return { value: parseControllerWireJson(input), encodedBytes };
   }
   const encoded = JSON.stringify(input);
   if (encoded === undefined || Buffer.byteLength(encoded, "utf8") > maxBytes) fail("message_too_large", "json");
   return { value: input, encodedBytes: Buffer.byteLength(encoded, "utf8") };
+}
+
+// JSON.parse silently keeps the last occurrence of an object key. Scan the raw
+// wire text first so escaped spellings of the same key are rejected as well.
+function parseWireJson(input, allowLegacyDuplicates) {
+  if (typeof input !== "string") fail("invalid_json", "json");
+  let cursor = 0;
+  const whitespace = () => { while (/\s/u.test(input[cursor] ?? "") && cursor < input.length) cursor += 1; };
+  const stringToken = () => {
+    const start = cursor++;
+    while (cursor < input.length) {
+      if (input[cursor] === "\\") { cursor += 2; continue; }
+      if (input[cursor++] === '"') {
+        try { return JSON.parse(input.slice(start, cursor)); } catch { fail("invalid_json", "json"); }
+      }
+    }
+    fail("invalid_json", "json");
+  };
+  const value = (depth) => {
+    if (depth > 128) fail("invalid_json", "json");
+    whitespace();
+    if (input[cursor] === '"') { stringToken(); return; }
+    if (input[cursor] === "{") {
+      cursor += 1;
+      const keys = new Set();
+      whitespace();
+      if (input[cursor] === "}") { cursor += 1; return; }
+      while (cursor < input.length) {
+        whitespace();
+        if (input[cursor] !== '"') fail("invalid_json", "json");
+        const key = stringToken();
+        // Legacy WebUI v2 has historically accepted duplicate fields, but a
+        // repeated version key must never switch a v1 frame into the v2 lane.
+        if (keys.has(key) && (!allowLegacyDuplicates || key === "v")) {
+          fail("invalid_json", "duplicate_field");
+        }
+        keys.add(key);
+        whitespace();
+        if (input[cursor++] !== ":") fail("invalid_json", "json");
+        value(depth + 1);
+        whitespace();
+        const delimiter = input[cursor++];
+        if (delimiter === "}") return;
+        if (delimiter !== ",") fail("invalid_json", "json");
+      }
+      fail("invalid_json", "json");
+    }
+    if (input[cursor] === "[") {
+      cursor += 1;
+      whitespace();
+      if (input[cursor] === "]") { cursor += 1; return; }
+      while (cursor < input.length) {
+        value(depth + 1);
+        whitespace();
+        const delimiter = input[cursor++];
+        if (delimiter === "]") return;
+        if (delimiter !== ",") fail("invalid_json", "json");
+      }
+      fail("invalid_json", "json");
+    }
+    const start = cursor;
+    while (cursor < input.length && !/[\s,}\]]/u.test(input[cursor])) cursor += 1;
+    if (start === cursor) fail("invalid_json", "json");
+  };
+  value(0);
+  whitespace();
+  if (cursor !== input.length) fail("invalid_json", "json");
+  try { return JSON.parse(input); } catch { fail("invalid_json", "json"); }
+}
+
+export function parseControllerWireJson(input) {
+  return parseWireJson(input, false);
+}
+
+export function parseLegacyWebWireJson(input) {
+  return parseWireJson(input, true);
 }
 
 function enforceRoleBindings(object, senderRole) {
@@ -455,6 +536,10 @@ export function validateControllerMessage(input, senderRole, expectedContext) {
   }
   if (result.value.type === "controller_pairing_reserved") validateReservedTranscript(result.value);
   if (result.value.type === "controller_liveness_attestation_a") validateAttestation(result.value, expectedContext);
+  if (result.value.type === "controller_liveness_attestation_b") {
+    decimal(result.value.observed_age_ms, "observed_age_ms", 30_000n);
+    decimal(result.value.remaining_ttl_ms, "remaining_ttl_ms", 30_000n);
+  }
   return result.value;
 }
 
@@ -472,7 +557,9 @@ export function validateControllerPayload(input, senderRole, expectedContext) {
   const result = validateWithSchema(input, senderRole, PAYLOAD_SCHEMAS, MAX_DECRYPTED_PAYLOAD_BYTES, "payload", expectedContext);
   if (result.value.type === "task_submit") validateTaskSubmit(result.value);
   if (result.value.type === "capability_snapshot") validateCapabilitySnapshot(result.value);
-  if (result.value.type === "artifact_index") validateArtifactIndex(result.value);
+  if (result.value.type === "remote_action_request" || result.value.type === "remote_action_result") {
+    validateRemoteAction(result.value, result.value.type === "remote_action_result");
+  }
   return result.value;
 }
 
@@ -583,6 +670,15 @@ export function validateControllerRuntimePayload(input, senderRole, runtimeConte
   enforceNegotiatedPayload(shape.type, runtimeContext);
   const lease = requireRuntimeLease(runtimeContext);
   const payload = validateControllerPayload(input, senderRole, lease);
+  if (payload.type === "remote_action_request" || payload.type === "remote_action_result") {
+    const required = payload.operation.startsWith("permission_") ? "permission_v1"
+      : payload.operation.startsWith("attachment_") ? "attachment_v1" : "artifact_v1";
+    if (!runtimeContext.negotiated_capabilities.includes(required)) fail("unsupported_capability", required);
+  }
+  if (payload.type === "task_submit" && payload.model_source === "controller_temporary"
+      && !runtimeContext.negotiated_capabilities.includes("temporary_model_package_v1")) {
+    fail("unsupported_capability", "temporary_model_package_v1");
+  }
   return payload;
 }
 
@@ -648,6 +744,7 @@ function validateTaskSubmit(payload) {
   if (input.workspace_id !== undefined) identifier(input.workspace_id, "input.workspace_id");
   if (input.text.length === 0 && input.attachment_ids.length === 0) fail("invalid_field", "payload.input");
   if (payload.model_source === "controller_temporary") {
+    if (payload.mode === "code") fail("invalid_field", "payload.model_source");
     if (!Object.hasOwn(payload, "temporary_model_package")) fail("missing_field", "payload.temporary_model_package");
     validateTemporaryModelPackage(payload.temporary_model_package, payload);
   } else if (Object.hasOwn(payload, "temporary_model_package")) {
@@ -676,6 +773,13 @@ function validateDescriptorList(value, field, idField, workspace) {
     ids.add(descriptor[idField]);
     text(descriptor.display_name, `${label}.display_name`, 128, 512);
     if (workspace && typeof descriptor.code_allowed !== "boolean") fail("invalid_field", `${label}.code_allowed`);
+    if (idField === "skill_id") {
+      if (!Array.isArray(descriptor.scopes) || descriptor.scopes.length === 0
+        || descriptor.scopes.length > 2 || new Set(descriptor.scopes).size !== descriptor.scopes.length) {
+        fail("invalid_field", `${label}.scopes`);
+      }
+      for (const scope of descriptor.scopes) oneOf(scope, ["chat", "code"], `${label}.scopes`);
+    }
   }
 }
 
@@ -694,6 +798,91 @@ function validateArtifactIndex(payload) {
     decimal(artifact.size_bytes, `${label}.size_bytes`);
     hex64(artifact.sha256, `${label}.sha256`);
     oneOf(artifact.preview_mode, ["inline_text", "inline_image", "download_only"], `${label}.preview_mode`);
+  }
+}
+
+function validateRemoteActionArtifacts(value) {
+  if (!Array.isArray(value) || value.length > MAX_ARTIFACTS) fail("invalid_field", "body.artifacts");
+  const ids = new Set();
+  for (const item of value) {
+    const artifact = exactObject(item,
+      ["artifact_id", "task_id", "display_name", "mime_type", "total_bytes", "sha256", "preview_kind"],
+      [], "body.artifacts[]");
+    identifier(artifact.artifact_id, "body.artifacts[].artifact_id");
+    identifier(artifact.task_id, "body.artifacts[].task_id");
+    if (ids.has(artifact.artifact_id)) fail("invalid_field", "body.artifacts");
+    ids.add(artifact.artifact_id);
+    text(artifact.display_name, "body.artifacts[].display_name", 255, 1024);
+    if (typeof artifact.mime_type !== "string" || artifact.mime_type.length > 128 || !MIME.test(artifact.mime_type)) fail("invalid_field", "body.artifacts[].mime_type");
+    decimal(artifact.total_bytes, "body.artifacts[].total_bytes");
+    hex64(artifact.sha256, "body.artifacts[].sha256");
+    oneOf(artifact.preview_kind, ["text", "download_only", "unsupported"], "body.artifacts[].preview_kind");
+  }
+}
+
+function validateRemoteAction(payload, result) {
+  const operation = payload.operation;
+  const requests = {
+    permission_list: ["task_id"],
+    permission_decide: ["task_id", "permission_request_id", "decision"],
+    attachment_begin: ["task_id", "file_name", "mime_type", "total_bytes", "sha256"],
+    attachment_chunk: ["task_id", "transfer_id", "chunk_index", "chunk_b64", "chunk_bytes"],
+    attachment_abort: ["task_id", "transfer_id"],
+    artifact_index: [],
+    artifact_preview: ["artifact_id"],
+    artifact_download_begin: ["task_id", "artifact_id"],
+    artifact_download_chunk: ["task_id", "artifact_id", "transfer_id", "chunk_index"],
+    artifact_download_abort: ["task_id", "artifact_id", "transfer_id"],
+  };
+  const responses = {
+    permission_list: [["permissions"], []],
+    permission_decide: [["state"], []],
+    attachment_begin: [["transfer_id", "chunk_bytes", "total_bytes"], []],
+    attachment_chunk: [["state", "received_bytes"], ["sha256"]],
+    attachment_abort: [["aborted"], []],
+    artifact_index: [["artifacts"], []],
+    artifact_preview: [["artifact_id", "preview_kind", "truncated"], ["text"]],
+    artifact_download_begin: [["transfer_id", "chunk_bytes", "total_bytes"], []],
+    artifact_download_chunk: [["chunk_index", "chunk_b64", "chunk_bytes", "received_bytes", "next_chunk", "completed"], []],
+    artifact_download_abort: [["aborted"], []],
+  };
+  if (!Object.hasOwn(requests, operation)) fail("invalid_field", "operation");
+  if (result && payload.ok === false) {
+    if (typeof payload.error_code !== "string" || !/^[a-z_]{1,64}$/u.test(payload.error_code)) fail("invalid_field", "error_code");
+  } else if (result && payload.error_code !== undefined) {
+    fail("invalid_field", "error_code");
+  }
+  const [required, optional] = result
+    ? (payload.ok ? responses[operation] : [[], []])
+    : [requests[operation], []];
+  const body = exactObject(payload.body, required, optional, "body");
+  for (const field of [...required, ...optional]) {
+    if (body[field] === undefined) continue;
+    if (["aborted", "completed", "truncated"].includes(field)) {
+      if (typeof body[field] !== "boolean") fail("invalid_field", `body.${field}`);
+    } else if (field === "permissions") {
+      if (!Array.isArray(body.permissions) || body.permissions.length > 8) fail("invalid_field", "body.permissions");
+      const fields = ["permission_request_id", "task_id", "operation_type", "risk_level", "target_scope", "preview", "expires_at_ms", "state", "dispatch_state"];
+      for (const item of body.permissions) {
+        const permission = exactObject(item, fields, ["decision"], "body.permissions[]");
+        for (const name of [...fields, "decision"]) {
+          if (permission[name] === undefined) continue;
+          if (name === "state" || name === "dispatch_state") text(permission[name], name, 64, 256);
+          else if (name === "decision" && permission[name] === null) continue;
+          else validateNamedField(permission, name);
+        }
+      }
+    } else if (field === "artifacts") {
+      validateRemoteActionArtifacts(body.artifacts);
+    } else if (field === "preview_kind") {
+      oneOf(body.preview_kind, ["text", "download_only", "unsupported"], "body.preview_kind");
+    } else if (field === "text") {
+      text(body.text, "body.text", 16 * 1024, 16 * 1024);
+    } else if (field === "state") {
+      text(body.state, "body.state", 64, 256);
+    } else {
+      validateNamedField(body, field);
+    }
   }
 }
 
@@ -973,6 +1162,21 @@ export function buildLivenessAttestationPreimage(message) {
   return Buffer.concat([Buffer.from("pinvou-controller-liveness-attestation-v1", "ascii"), ...ATTESTATION_FIELDS.map((field) => lp(message[field]))]);
 }
 
+// A's proof of B is direction/domain-separated and covers the entire unsigned
+// envelope, including both correlation IDs. Relay time is signed metadata,
+// never a cross-machine local deadline.
+export function buildPeerLivenessAttestationPreimage(message) {
+  if (message.type !== "controller_liveness_attestation_b") fail("invalid_field", "type");
+  const fields = [
+    "v", "type", "request_id", ...LEASE_CONTEXT_FIELDS,
+    "liveness_epoch_b", "heartbeat_sequence_b", "attestation_sequence",
+    "challenge_id", "challenge_b64", "observed_age_ms", "remaining_ttl_ms",
+    "issued_at_relay", "relay_signing_key_id", "signature_algorithm",
+  ];
+  return Buffer.concat([Buffer.from("pinvou-controller-peer-b-attestation-v1", "ascii"),
+    ...fields.map((field) => lp(String(message[field])))]);
+}
+
 export function controllerAllowedRoles(type) {
   const definition = MESSAGE_SCHEMAS[type];
   return definition ? [...definition.roles] : undefined;
@@ -989,6 +1193,7 @@ export function controllerContractManifest() {
     protocol_version: CONTROLLER_PROTOCOL_VERSION,
     subprotocol: CONTROLLER_SUBPROTOCOL,
     integer_wire_format: "canonical-u64-decimal-string",
+    json_object_keys: "unique-after-unescape",
     limits: {
       max_control_message_bytes: MAX_CONTROL_MESSAGE_BYTES,
       max_encrypted_frame_bytes: MAX_ENCRYPTED_FRAME_BYTES,

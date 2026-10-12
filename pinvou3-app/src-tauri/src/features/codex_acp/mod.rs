@@ -51,7 +51,7 @@ use agent_client_protocol::schema::v1::{
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions,
     SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    StopReason,
+    StopReason, ToolKind,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use agent_probe::{CliProbeCache, CliProbeGates, ResolvedCli};
@@ -843,14 +843,52 @@ pub struct CodexAcpPendingElicitation {
 struct PendingPermission {
     view: CodexAcpPendingPermission,
     option_ids: Vec<String>,
+    option_kinds: HashMap<String, String>,
+    remote_owner: Option<RemotePermissionOwner>,
+    remote_request_id: Option<String>,
+    remote_approval_id: Option<String>,
+    remote_projection: Option<RemotePermissionProjection>,
+    turn_id: Option<String>,
     activity: stall::ActivityClock,
     response_tx: oneshot::Sender<RequestPermissionResponse>,
     bridge: Option<EventBridge>,
     callback: Arc<()>,
 }
 
+/// Exact owner of ACP interactive requests raised by a controller-sourced code
+/// turn. Permission requests remain B-local and are projected through the
+/// remote permission protocol. Form elicitations are not part of that protocol,
+/// so they are cancelled immediately without retaining or projecting their
+/// payload. Local/Web callers can never resolve either kind of request for this
+/// authenticated A lease.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RemotePermissionOwner {
+    /// Durable B admission identity; tuple reuse after pruning is a new owner.
+    pub(crate) task_sequence: u64,
+    pub(crate) session_id: String,
+    pub(crate) task_id: String,
+    pub(crate) lease: crate::features::remote_control::controller::protocol::LeaseContext,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RemoteOwnedPermission {
+    pub(crate) callback_id: String,
+    pub(crate) approval_id: Option<String>,
+    pub(crate) owner: RemotePermissionOwner,
+    pub(crate) projection: RemotePermissionProjection,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RemotePermissionProjection {
+    pub(crate) operation_type: String,
+    pub(crate) risk_level: String,
+    pub(crate) target_scope: String,
+    pub(crate) preview: String,
+}
+
 struct PendingElicitation {
     view: CodexAcpPendingElicitation,
+    remote_owner: Option<RemotePermissionOwner>,
     activity: stall::ActivityClock,
     response_tx: oneshot::Sender<CreateElicitationResponse>,
     bridge: Option<EventBridge>,
@@ -863,6 +901,12 @@ async fn take_pending_permission(
     option_id: &str,
 ) -> Result<PendingPermission> {
     let mut pending = pending.lock().await;
+    if pending
+        .get(&key)
+        .is_some_and(|request| !local_permission_response_allowed(request.remote_owner.as_ref()))
+    {
+        bail!("remote_permission_controller_required");
+    }
     let request = pending
         .remove(&key)
         .context("权限请求已过期、已回复或不属于当前会话")?;
@@ -878,11 +922,44 @@ async fn take_pending_permission(
     Ok(request)
 }
 
+/// Recheck the captured owner only after acquiring the pending-map lock.
+/// Owner release removes the owner before acquiring this lock, so a callback
+/// either participates in that cleanup or is immediately cancelled here.
+async fn insert_pending_permission(
+    pending: &Mutex<HashMap<String, PendingPermission>>,
+    owners: &parking_lot::Mutex<HashMap<String, RemotePermissionOwner>>,
+    key: String,
+    request: PendingPermission,
+) -> bool {
+    let mut pending = pending.lock().await;
+    let bridge = request.bridge.clone();
+    let insert = || {
+        if owners.lock().get(&request.view.session_id) != request.remote_owner.as_ref() {
+            let _ = request.response_tx.send(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+            return false;
+        }
+        pending.insert(key, request);
+        true
+    };
+    match bridge {
+        Some(bridge) => bridge.with_active_runtime(insert).unwrap_or(false),
+        None => insert(),
+    }
+}
+
 async fn take_pending_elicitation(
     pending: &Mutex<HashMap<String, PendingElicitation>>,
     key: &str,
 ) -> Result<PendingElicitation> {
     let mut pending = pending.lock().await;
+    if pending
+        .get(key)
+        .is_some_and(|request| !local_elicitation_response_allowed(request.remote_owner.as_ref()))
+    {
+        bail!("remote_elicitation_controller_required");
+    }
     let request = pending
         .remove(key)
         .context("输入请求已过期、已回复或不属于当前会话")?;
@@ -1338,6 +1415,7 @@ pub struct AcpPool {
     app: AppHandle,
     sessions: Arc<Mutex<HashMap<String, Arc<AcpSession>>>>,
     pending_permissions: Arc<Mutex<HashMap<String, PendingPermission>>>,
+    remote_permission_owners: Arc<parking_lot::Mutex<HashMap<String, RemotePermissionOwner>>>,
     pending_elicitations: Arc<Mutex<HashMap<String, PendingElicitation>>>,
     agents: SessionAgentStore,
     config_defaults: AcpConfigDefaultsStore,
@@ -1638,6 +1716,7 @@ impl AcpPool {
             app,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
+            remote_permission_owners: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pending_elicitations: Arc::new(Mutex::new(HashMap::new())),
             agents,
             config_defaults,
@@ -3637,14 +3716,33 @@ impl AcpPool {
             .map(|_| ())
     }
 
-    /// Retain the exact runtime AND turn identity at admission, before any
-    /// detached prompt can finish or a replacement runtime can be installed.
     async fn send_message_with_owner(
         &self,
         session_id: &str,
         content: String,
         attachments: Vec<crate::features::files::file_ingest::IngestResult>,
         workspace_references: Vec<String>,
+    ) -> Result<remote_turn::OwnedAcpTurn> {
+        self.send_message_with_display_content_owner(
+            session_id,
+            content.clone(),
+            content,
+            attachments,
+            workspace_references,
+            |_| {},
+        )
+        .await
+    }
+
+    /// Capture the admitted runtime and turn before detached submission.
+    async fn send_message_with_display_content_owner(
+        &self,
+        session_id: &str,
+        content: String,
+        display_content: String,
+        attachments: Vec<crate::features::files::file_ingest::IngestResult>,
+        workspace_references: Vec<String>,
+        bind: impl FnOnce(&str) + Send,
     ) -> Result<remote_turn::OwnedAcpTurn> {
         let workspace = self.execution_workspace(session_id)?;
         let workspace_references =
@@ -3678,9 +3776,11 @@ impl AcpPool {
                 // Register the exact turn before yielding or exposing the admitted
                 // request to Stop. `busy == true` therefore always has a turn id that
                 // the cancel fallback can bind to instead of guessing at fire time.
-                let turn_id = runtime
-                    .bridge
-                    .begin_turn(&content, &prepared.display_attachments);
+                let turn_id = runtime.bridge.begin_turn_bound(
+                    &display_content,
+                    &prepared.display_attachments,
+                    bind,
+                );
                 // Start silence measurement when the prompt is sent. Agent activity and
                 // host delivery of card answers or cancellation can reset it afterward.
                 stall::mark_activity(&runtime.activity);
@@ -3698,11 +3798,7 @@ impl AcpPool {
         Ok(owned)
     }
 
-    async fn retire_remote_turn(&self, runtime: Arc<AcpSession>, turn_id: &str, reason: &str) {
-        // No await before fencing. A stale turn on a reused Arc is a no-op.
-        if !runtime.seal_remote_turn(turn_id, reason) {
-            return;
-        }
+    async fn finish_remote_retirement(&self, runtime: Arc<AcpSession>) {
         let captured = runtime.clone();
         tokio::spawn(async move {
             captured.shutdown().await;
@@ -4277,6 +4373,130 @@ impl AcpPool {
             .collect()
     }
 
+    /// Marks the one code turn whose ACP permission prompts are controlled by
+    /// A. A session cannot be borrowed by a second task or lease while the
+    /// first turn is alive.
+    pub(crate) fn claim_remote_permission_owner(&self, owner: RemotePermissionOwner) -> Result<()> {
+        let mut owners = self.remote_permission_owners.lock();
+        match owners.get(&owner.session_id) {
+            Some(current) if current != &owner => bail!("remote_permission_owner_conflict"),
+            Some(_) => Ok(()),
+            None => {
+                owners.insert(owner.session_id.clone(), owner);
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn has_remote_permission_owner(&self, owner: &RemotePermissionOwner) -> bool {
+        self.remote_permission_owners.lock().get(&owner.session_id) == Some(owner)
+    }
+
+    /// Returns only ACP requests captured while this exact remote owner was
+    /// active. The opaque controller request id is distinct from ACP's tool id.
+    pub(crate) async fn pending_remote_permissions(
+        &self,
+        owner: &RemotePermissionOwner,
+    ) -> Vec<RemoteOwnedPermission> {
+        self.pending_permissions
+            .lock()
+            .await
+            .values()
+            .filter_map(|pending| {
+                if !remote_request_owned_by(pending.remote_owner.as_ref(), owner) {
+                    return None;
+                }
+                Some(RemoteOwnedPermission {
+                    callback_id: pending.remote_request_id.clone()?,
+                    approval_id: pending.remote_approval_id.clone(),
+                    owner: owner.clone(),
+                    projection: pending.remote_projection.clone()?,
+                })
+            })
+            .collect()
+    }
+
+    /// Mint and bind the B approval ID while the exact ACP callback and owner
+    /// are held. An A decision cannot observe an unbound approval callback.
+    pub(crate) async fn mint_remote_permission(
+        &self,
+        owner: &RemotePermissionOwner,
+        callback_id: &str,
+        authority: &crate::features::remote_control::controller::permission::PermissionAuthority,
+        ledger: &crate::features::remote_control::controller::task::RemoteTaskLedger,
+        ttl_ms: u64,
+    ) -> Result<crate::features::remote_control::controller::permission::PermissionView> {
+        mint_remote_permission_in_maps(
+            &self.pending_permissions,
+            &self.remote_permission_owners,
+            owner,
+            callback_id,
+            authority,
+            ledger,
+            ttl_ms,
+        )
+        .await
+    }
+
+    /// Terminal/cancel/disconnect cleanup. Removing the owner first closes the
+    /// admission gate; every still-pending ACP responder is then cancelled.
+    pub(crate) async fn release_remote_permission_owner(&self, owner: &RemotePermissionOwner) {
+        if !self.close_remote_permission_owner(owner) {
+            return;
+        }
+        self.finish_remote_permission_cleanup(owner).await;
+    }
+
+    fn close_remote_permission_owner(&self, owner: &RemotePermissionOwner) -> bool {
+        let mut owners = self.remote_permission_owners.lock();
+        if owners.get(&owner.session_id) != Some(owner) {
+            return false;
+        }
+        owners.remove(&owner.session_id);
+        true
+    }
+
+    async fn settle_remote_permission_owner(&self, owner: &RemotePermissionOwner) {
+        // Remove admission synchronously before the bounded owned worker.
+        if !self.close_remote_permission_owner(owner) {
+            return;
+        }
+        let pool = self.clone();
+        let owner = owner.clone();
+        crate::features::remote_control::controller::turn_budget::settle_owned(async move {
+            pool.finish_remote_permission_cleanup(&owner).await;
+        })
+        .await;
+    }
+
+    async fn finish_remote_permission_cleanup(&self, owner: &RemotePermissionOwner) {
+        let mut pending = self.pending_permissions.lock().await;
+        for request in take_remote_owned_permissions(&mut pending, owner) {
+            if let Some(bridge) = &request.bridge {
+                bridge.with_active_runtime(|| {
+                    if request.turn_id.is_some() && bridge.current_turn_id() == request.turn_id {
+                        bridge.emit(
+                            "permission_resolved",
+                            json!({
+                                "toolCallId": request.view.tool_call_id,
+                                "outcome": "cancelled",
+                            }),
+                        );
+                    }
+                });
+            }
+            let _ = request.response_tx.send(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+        }
+        drop(pending);
+        let mut pending = self.pending_elicitations.lock().await;
+        // Remote form elicitations are denied at capture; this is defensive
+        // responder cleanup, not a session-level event on a replacement.
+        cancel_remote_owned_elicitations(&mut pending, owner);
+        drop(pending);
+    }
+
     pub async fn pending_elicitations_for(
         &self,
         session_id: &str,
@@ -4326,6 +4546,71 @@ impl AcpPool {
             .context("Codex ACP 权限请求已关闭")?
     }
 
+    /// Resolves a controller-owned ACP prompt with the exact
+    /// session/task/lease/request tuple. Local/Web callers cannot construct
+    /// this owner and continue to use `respond_permission`, which fails closed.
+    pub(crate) async fn respond_remote_permission(
+        &self,
+        owner: &RemotePermissionOwner,
+        permission_request_id: &str,
+        allow: bool,
+    ) -> Result<()> {
+        let mut pending = self.pending_permissions.lock().await;
+        let owners = self.remote_permission_owners.lock();
+        if owners.get(&owner.session_id) != Some(owner) {
+            bail!("remote_permission_binding_stale");
+        }
+        let key = remote_permission_response_key(&pending, owner, permission_request_id)
+            .context("remote_permission_binding_stale")?;
+        let request = pending
+            .remove(&key)
+            .context("remote_permission_binding_stale")?;
+        let selected = remote_permission_option_id(&request.option_kinds, allow);
+        let (response, option_id, outcome) = if let Some(option_id) = selected {
+            (
+                RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                    SelectedPermissionOutcome::new(option_id.clone()),
+                )),
+                Some(option_id),
+                "selected",
+            )
+        } else if !allow {
+            (
+                RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
+                None,
+                "cancelled",
+            )
+        } else {
+            pending.insert(key, request);
+            bail!("remote_permission_allow_option_missing");
+        };
+        let tool_call_id = request.view.tool_call_id.clone();
+        let bridge = request.bridge.clone().context("remote_permission_closed")?;
+        bridge
+            .with_active_runtime(|| -> Result<()> {
+                if request.turn_id.is_none() || bridge.current_turn_id() != request.turn_id {
+                    bail!("remote_permission_binding_stale");
+                }
+                request
+                    .response_tx
+                    .send(response)
+                    .map_err(|_| anyhow::anyhow!("remote_permission_closed"))?;
+                bridge.emit(
+                    "permission_resolved",
+                    json!({
+                        "toolCallId": tool_call_id,
+                        "optionId": option_id,
+                        "outcome": outcome,
+                    }),
+                );
+                Ok(())
+            })
+            .context("remote_permission_closed")??;
+        drop(owners);
+        drop(pending);
+        Ok(())
+    }
+
     pub async fn respond_elicitation(
         &self,
         session_id: &str,
@@ -4333,6 +4618,7 @@ impl AcpPool {
         action: &str,
         content: serde_json::Value,
     ) -> Result<()> {
+        let key = elicitation_key(session_id, elicitation_id);
         let response = match action {
             "accept" => {
                 let content =
@@ -4344,7 +4630,6 @@ impl AcpPool {
             "cancel" => CreateElicitationResponse::new(ElicitationAction::Cancel),
             _ => bail!("不支持的输入请求操作: {action}"),
         };
-        let key = elicitation_key(session_id, elicitation_id);
         let request = take_pending_elicitation(self.pending_elicitations.as_ref(), &key).await?;
         let bridge = request.bridge.clone().context("Codex ACP 输入请求已关闭")?;
         bridge
@@ -4816,7 +5101,9 @@ impl AcpPool {
         let bridge_for_elicitation = event_bridge.clone();
         let replay_for_notification = replay_suppressed.clone();
         let pending_for_permission = self.pending_permissions.clone();
+        let remote_owners_for_permission = self.remote_permission_owners.clone();
         let pending_for_elicitation = self.pending_elicitations.clone();
+        let remote_owners_for_elicitation = self.remote_permission_owners.clone();
         let pinvou_id_for_permission = pinvou_session_id.to_string();
         let pinvou_id_for_elicitation = pinvou_session_id.to_string();
         let lifecycle_for_connection = lifecycle.clone();
@@ -4849,6 +5136,28 @@ impl AcpPool {
                             .collect::<Vec<_>>();
                         let request_value =
                             serde_json::to_value(&request).unwrap_or(serde_json::Value::Null);
+                        let option_kinds = request_value
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|option| {
+                                Some((
+                                    option.get("optionId")?.as_str()?.to_owned(),
+                                    option.get("kind")?.as_str()?.to_owned(),
+                                ))
+                            })
+                            .collect::<HashMap<_, _>>();
+                        let remote_owner = remote_owners_for_permission
+                            .lock()
+                            .get(&pinvou_id_for_permission)
+                            .cloned();
+                        let remote_request_id = remote_owner
+                            .as_ref()
+                            .map(|_| format!("permission-{}", uuid::Uuid::new_v4().simple()));
+                        let remote_projection = remote_owner
+                            .as_ref()
+                            .map(|_| remote_permission_projection(&request));
                         let view = CodexAcpPendingPermission {
                             session_id: pinvou_id_for_permission.clone(),
                             tool_call_id: tool_call_id.clone(),
@@ -4856,38 +5165,40 @@ impl AcpPool {
                         };
                         let (response_tx, response_rx) = oneshot::channel();
                         let callback = Arc::new(());
-                        let admitted = {
-                            let mut pending = pending_for_permission.lock().await;
-                            bridge_for_permission
-                                .with_active_runtime(|| {
-                                    pending.insert(
-                                        key.clone(),
-                                        PendingPermission {
-                                            view,
-                                            option_ids,
-                                            activity: bridge_for_permission.activity(),
-                                            response_tx,
-                                            bridge: Some(bridge_for_permission.clone()),
-                                            callback: callback.clone(),
-                                        },
-                                    );
-                                    bridge_for_permission.emit(
-                                        "permission_requested",
-                                        json!({
-                                            "toolCallId": tool_call_id,
-                                            "request": request_value,
-                                        }),
-                                    );
-                                    // A permission request is agent activity and resets the silence window.
-                                    bridge_for_permission.note_agent_activity();
-                                })
-                                .is_some()
-                        };
-                        if !admitted {
+                        if !insert_pending_permission(
+                            &pending_for_permission,
+                            &remote_owners_for_permission,
+                            key.clone(),
+                            PendingPermission {
+                                view,
+                                option_ids,
+                                option_kinds,
+                                remote_owner,
+                                remote_request_id,
+                                remote_approval_id: None,
+                                remote_projection,
+                                turn_id: bridge_for_permission.current_turn_id(),
+                                activity: bridge_for_permission.activity(),
+                                response_tx,
+                                bridge: Some(bridge_for_permission.clone()),
+                                callback: callback.clone(),
+                            },
+                        )
+                        .await
+                        {
                             return responder.respond(RequestPermissionResponse::new(
                                 RequestPermissionOutcome::Cancelled,
                             ));
                         }
+                        bridge_for_permission.emit(
+                            "permission_requested",
+                            json!({
+                                "toolCallId": tool_call_id,
+                                "request": request_value,
+                            }),
+                        );
+                        // A permission request is agent activity and resets the silence window.
+                        bridge_for_permission.note_agent_activity();
                         let response = response_rx.await.unwrap_or_else(|_| {
                             RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
                         });
@@ -4907,6 +5218,20 @@ impl AcpPool {
                 )
                 .on_receive_request(
                     async move |request: CreateElicitationRequest, responder, _cx| {
+                        let remote_owner = remote_owners_for_elicitation
+                            .lock()
+                            .get(&pinvou_id_for_elicitation)
+                            .cloned();
+                        // Remote form elicitation has no authenticated A<->B
+                        // action protocol yet. Fail closed *before* storing or
+                        // emitting the request so the ACP call cannot hang and
+                        // form fields, raw content, and B-local paths cannot
+                        // reach the controller journal or local/Web prompt UI.
+                        if remote_elicitation_must_cancel(remote_owner.as_ref()) {
+                            return responder.respond(CreateElicitationResponse::new(
+                                ElicitationAction::Cancel,
+                            ));
+                        }
                         let request_value =
                             serde_json::to_value(&request).unwrap_or(serde_json::Value::Null);
                         let elicitation_id = elicitation_id_for(&request_value);
@@ -4927,6 +5252,7 @@ impl AcpPool {
                                         key.clone(),
                                         PendingElicitation {
                                             view,
+                                            remote_owner,
                                             activity: bridge_for_elicitation.activity(),
                                             response_tx,
                                             bridge: Some(bridge_for_elicitation.clone()),
@@ -5559,6 +5885,224 @@ fn codex_models(options: &[SessionConfigOption]) -> Vec<CodexAcpModel> {
 
 fn permission_key(session_id: &str, tool_call_id: &str) -> String {
     format!("{session_id}\u{1f}{tool_call_id}")
+}
+
+fn remote_permission_option_id(
+    option_kinds: &HashMap<String, String>,
+    allow: bool,
+) -> Option<String> {
+    option_kinds.iter().find_map(|(id, kind)| {
+        let normalized = kind.to_ascii_lowercase().replace(['-', '_'], "");
+        let matches = if allow {
+            normalized == "allowonce"
+        } else {
+            normalized == "rejectonce" || normalized == "denyonce"
+        };
+        matches.then(|| id.clone())
+    })
+}
+
+fn remote_permission_projection(request: &RequestPermissionRequest) -> RemotePermissionProjection {
+    let (operation_type, risk_level) = match request.tool_call.fields.kind {
+        Some(ToolKind::Read | ToolKind::Search | ToolKind::Think) => ("tool_call", "low"),
+        Some(ToolKind::Edit | ToolKind::Move) => ("file_write", "medium"),
+        Some(ToolKind::Delete) => ("file_delete", "high"),
+        Some(ToolKind::Execute) => ("shell_command", "high"),
+        Some(ToolKind::Fetch) => ("network_request", "high"),
+        Some(ToolKind::SwitchMode) => ("tool_call", "medium"),
+        Some(_) | None => ("other", "high"),
+    };
+    let target_scope = request
+        .tool_call
+        .fields
+        .locations
+        .as_ref()
+        .and_then(|locations| locations.first())
+        .map(|location| location.path.to_string_lossy())
+        .map(|path| crate::features::remote_control::controller::permission::sanitize_scope(&path))
+        .unwrap_or_else(|| "[REDACTED]".to_owned());
+    let preview = request
+        .tool_call
+        .fields
+        .title
+        .as_deref()
+        .map(crate::features::remote_control::controller::permission::sanitize_preview)
+        .unwrap_or_default();
+    RemotePermissionProjection {
+        operation_type: operation_type.to_owned(),
+        risk_level: risk_level.to_owned(),
+        target_scope,
+        preview,
+    }
+}
+
+fn local_permission_response_allowed(owner: Option<&RemotePermissionOwner>) -> bool {
+    owner.is_none()
+}
+
+fn remote_request_owned_by(
+    candidate: Option<&RemotePermissionOwner>,
+    expected: &RemotePermissionOwner,
+) -> bool {
+    candidate == Some(expected)
+}
+
+fn take_remote_owned_permissions(
+    pending: &mut HashMap<String, PendingPermission>,
+    owner: &RemotePermissionOwner,
+) -> Vec<PendingPermission> {
+    let keys = pending
+        .iter()
+        .filter(|(_, request)| remote_request_owned_by(request.remote_owner.as_ref(), owner))
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    keys.into_iter()
+        .filter_map(|key| pending.remove(&key))
+        .collect()
+}
+
+fn remote_permission_response_key(
+    pending: &HashMap<String, PendingPermission>,
+    owner: &RemotePermissionOwner,
+    approval_id: &str,
+) -> Option<String> {
+    pending.iter().find_map(|(key, request)| {
+        (remote_request_owned_by(request.remote_owner.as_ref(), owner)
+            && request.remote_approval_id.as_deref() == Some(approval_id))
+        .then(|| key.clone())
+    })
+}
+
+async fn mint_remote_permission_in_maps(
+    pending: &Mutex<HashMap<String, PendingPermission>>,
+    owners: &parking_lot::Mutex<HashMap<String, RemotePermissionOwner>>,
+    owner: &RemotePermissionOwner,
+    callback_id: &str,
+    authority: &crate::features::remote_control::controller::permission::PermissionAuthority,
+    ledger: &crate::features::remote_control::controller::task::RemoteTaskLedger,
+    ttl_ms: u64,
+) -> Result<crate::features::remote_control::controller::permission::PermissionView> {
+    use crate::features::remote_control::controller::task::{RemoteTaskState, TaskLeaseBinding};
+    let mut pending = pending.lock().await;
+    let owners = owners.lock();
+    if owners.get(&owner.session_id) != Some(owner) {
+        bail!("remote_permission_binding_stale");
+    }
+    let request = pending
+        .values_mut()
+        .find(|request| {
+            remote_request_owned_by(request.remote_owner.as_ref(), owner)
+                && request.remote_request_id.as_deref() == Some(callback_id)
+        })
+        .context("remote_permission_binding_stale")?;
+    // Acquire only after the asynchronous pending-map wait, and never wait
+    // on cleanup's resource gate while holding either permission map lock.
+    // The same gate covers the authority mint AND callback binding.
+    ledger
+        .with_task_resources(&owner.task_id, owner.task_sequence, || {
+            let record = ledger
+                .record(&owner.task_id)
+                .map_err(|error| anyhow::anyhow!(error.code))?;
+            if record.session_id != owner.session_id
+                || record.lease != TaskLeaseBinding::from_context(&owner.lease)
+                || !matches!(
+                    record.state,
+                    RemoteTaskState::Running | RemoteTaskState::WaitingPermission
+                )
+            {
+                bail!("remote_permission_binding_stale");
+            }
+            mint_pending_remote_permission(request, owner, callback_id, authority, ttl_ms)
+        })
+        .map_err(|error| anyhow::anyhow!(error.code))?
+}
+
+fn mint_pending_remote_permission(
+    request: &mut PendingPermission,
+    owner: &RemotePermissionOwner,
+    callback_id: &str,
+    authority: &crate::features::remote_control::controller::permission::PermissionAuthority,
+    ttl_ms: u64,
+) -> Result<crate::features::remote_control::controller::permission::PermissionView> {
+    use crate::features::remote_control::controller::permission::PermissionRequest;
+    if !remote_request_owned_by(request.remote_owner.as_ref(), owner)
+        || request.remote_request_id.as_deref() != Some(callback_id)
+    {
+        bail!("remote_permission_binding_stale");
+    }
+    if let Some(approval_id) = request.remote_approval_id.as_deref() {
+        return authority
+            .view(approval_id)
+            .map_err(|error| anyhow::anyhow!(error.code));
+    }
+    let projection = request
+        .remote_projection
+        .as_ref()
+        .context("remote_permission_binding_stale")?;
+    // Approval deadlines belong to the authority's epoch, never the task clock.
+    let now_ms = authority.now_ms();
+    let view = authority
+        .request(
+            &owner.lease,
+            &owner.task_id,
+            PermissionRequest {
+                operation_type: projection.operation_type.clone(),
+                risk_level: projection.risk_level.clone(),
+                target_scope: projection.target_scope.clone(),
+                preview: projection.preview.clone(),
+                expires_at_ms: now_ms.saturating_add(ttl_ms),
+            },
+            now_ms,
+        )
+        .map_err(|error| anyhow::anyhow!(error.code))?;
+    request.remote_approval_id = Some(view.permission_request_id.clone());
+    Ok(view)
+}
+
+fn local_elicitation_response_allowed(owner: Option<&RemotePermissionOwner>) -> bool {
+    owner.is_none()
+}
+
+fn remote_elicitation_must_cancel(owner: Option<&RemotePermissionOwner>) -> bool {
+    owner.is_some()
+}
+
+fn cancel_remote_owned_elicitations(
+    pending: &mut HashMap<String, PendingElicitation>,
+    owner: &RemotePermissionOwner,
+) -> Vec<String> {
+    cancel_elicitations_matching(pending, |request| {
+        remote_request_owned_by(request.remote_owner.as_ref(), owner)
+    })
+}
+
+fn cancel_session_elicitations(
+    pending: &mut HashMap<String, PendingElicitation>,
+    session_id: &str,
+) -> Vec<String> {
+    cancel_elicitations_matching(pending, |request| request.view.session_id == session_id)
+}
+
+fn cancel_elicitations_matching(
+    pending: &mut HashMap<String, PendingElicitation>,
+    mut should_cancel: impl FnMut(&PendingElicitation) -> bool,
+) -> Vec<String> {
+    let keys = pending
+        .iter()
+        .filter(|(_, request)| should_cancel(request))
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let mut cancelled = Vec::with_capacity(keys.len());
+    for key in keys {
+        if let Some(request) = pending.remove(&key) {
+            stall::mark_activity(&request.activity);
+            cancelled.push(request.view.elicitation_id.clone());
+            let _ = request
+                .response_tx
+                .send(CreateElicitationResponse::new(ElicitationAction::Cancel));
+        }
+    }
+    cancelled
 }
 
 fn elicitation_key(session_id: &str, elicitation_id: &str) -> String {
@@ -6395,6 +6939,615 @@ mod tests {
     }
 
     #[test]
+    fn remote_permission_decision_selects_only_matching_option_kind() {
+        let options = HashMap::from([
+            ("allow-once-id".to_owned(), "allow_once".to_owned()),
+            ("reject-once-id".to_owned(), "reject_once".to_owned()),
+        ]);
+        assert_eq!(
+            remote_permission_option_id(&options, true).as_deref(),
+            Some("allow-once-id")
+        );
+        assert_eq!(
+            remote_permission_option_id(&options, false).as_deref(),
+            Some("reject-once-id")
+        );
+        assert_eq!(
+            remote_permission_option_id(
+                &HashMap::from([
+                    ("persistent".to_owned(), "allow_always".to_owned()),
+                    ("unrelated".to_owned(), "ask".to_owned()),
+                ]),
+                true,
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_approval_wait_rechecks_terminal_and_pruned_reused_admission_before_mint() {
+        use crate::features::remote_control::controller::{
+            permission::PermissionAuthority,
+            task::{
+                InMemoryTaskLedgerStore, RemoteTaskLedger, RemoteTaskRequest, RemoteTaskTerminal,
+                TaskLeaseBinding, task_input_digest_for_value,
+            },
+        };
+        for ending in ["live", "busy", "terminal", "reused"] {
+            let lease = crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            };
+            let input = json!({"text": "report", "attachment_ids": [], "skill_ids": []});
+            let submission = RemoteTaskRequest {
+                lease: TaskLeaseBinding::from_context(&lease),
+                task_id: "task-remote".into(),
+                client_request_id: "client-remote".into(),
+                session_id: "session-remote".into(),
+                capability_revision: "7".into(),
+                mode: "chat".into(),
+                workspace_id: None,
+                model_source: "controlled_device".into(),
+                input_digest: task_input_digest_for_value(&input).unwrap(),
+                input,
+            };
+            let ledger = RemoteTaskLedger::new(Arc::new(InMemoryTaskLedgerStore));
+            ledger.admit(&lease, &submission, 1).unwrap();
+            let record = ledger.begin_dispatch(&submission.task_id, 2).unwrap();
+            let owner = RemotePermissionOwner {
+                task_sequence: record.sequence,
+                task_id: record.task_id.clone(),
+                session_id: record.session_id.clone(),
+                lease: lease.clone(),
+            };
+            let (response_tx, _response_rx) = oneshot::channel();
+            let pending = Mutex::new(HashMap::from([(
+                "callback-key".into(),
+                PendingPermission {
+                    view: CodexAcpPendingPermission {
+                        session_id: owner.session_id.clone(),
+                        tool_call_id: "tool-1".into(),
+                        request: Value::Null,
+                    },
+                    option_ids: vec!["allow-once".into()],
+                    option_kinds: HashMap::from([("allow-once".into(), "allow_once".into())]),
+                    remote_owner: Some(owner.clone()),
+                    remote_request_id: Some("private-callback".into()),
+                    remote_approval_id: None,
+                    remote_projection: Some(RemotePermissionProjection {
+                        operation_type: "shell_command".into(),
+                        risk_level: "high".into(),
+                        target_scope: "workspace-1".into(),
+                        preview: "command".into(),
+                    }),
+                    turn_id: None,
+                    activity: stall::new_activity_clock(),
+                    bridge: None,
+                    callback: Arc::new(()),
+                    response_tx,
+                },
+            )]));
+            let owners =
+                parking_lot::Mutex::new(HashMap::from([(owner.session_id.clone(), owner.clone())]));
+            let authority = PermissionAuthority::default();
+            // Drive the actual pool mint helper into the pending-map await.
+            // The ACP owner deliberately remains old while ledger identity changes.
+            let held = pending.lock().await;
+            let mut mint = Box::pin(mint_remote_permission_in_maps(
+                &pending,
+                &owners,
+                &owner,
+                "private-callback",
+                &authority,
+                &ledger,
+                60_000,
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(mint.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            if matches!(ending, "terminal" | "reused") {
+                ledger
+                    .complete(&owner.task_id, RemoteTaskTerminal::Failed, None, 3)
+                    .unwrap();
+            }
+            if ending == "reused" {
+                for index in 0..256 {
+                    let mut filler = submission.clone();
+                    filler.task_id = format!("task-filler-{index}");
+                    filler.client_request_id = format!("client-filler-{index}");
+                    ledger.admit(&lease, &filler, 4).unwrap();
+                    ledger
+                        .complete(&filler.task_id, RemoteTaskTerminal::Succeeded, None, 5)
+                        .unwrap();
+                }
+                assert!(ledger.record(&owner.task_id).is_err());
+                ledger.admit(&lease, &submission, 6).unwrap();
+                let replacement = ledger.begin_dispatch(&owner.task_id, 7).unwrap();
+                assert_ne!(replacement.sequence, owner.task_sequence);
+            }
+            drop(held);
+            let result = if ending == "busy" {
+                // The owner gate is reentrant on one thread. Hold it on a
+                // different thread to exercise genuine publication contention.
+                let busy = std::thread::scope(|scope| {
+                    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+                    let (release_tx, release_rx) = std::sync::mpsc::channel();
+                    let gate_ledger = &ledger;
+                    let gate_owner = &owner;
+                    let holder = scope.spawn(move || {
+                        gate_ledger
+                            .with_task_resources(
+                                &gate_owner.task_id,
+                                gate_owner.task_sequence,
+                                || {
+                                    entered_tx.send(()).unwrap();
+                                    release_rx
+                                        .recv_timeout(std::time::Duration::from_secs(5))
+                                        .unwrap();
+                                },
+                            )
+                            .unwrap();
+                    });
+                    entered_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+                    let outcome = match std::future::Future::poll(mint.as_mut(), &mut cx) {
+                        std::task::Poll::Ready(result) => result,
+                        std::task::Poll::Pending => {
+                            release_tx.send(()).unwrap();
+                            holder.join().unwrap();
+                            panic!("uncontended maps must not block");
+                        }
+                    };
+                    release_tx.send(()).unwrap();
+                    holder.join().unwrap();
+                    outcome
+                });
+                assert_eq!(busy.as_ref().unwrap_err().to_string(), "task_cleanup_busy");
+                assert!(
+                    remote_turn::permission_mint_projection(busy)
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(authority.pending_for_task(&owner.task_id).is_empty());
+                assert!(
+                    pending.lock().await["callback-key"]
+                        .remote_approval_id
+                        .is_none()
+                );
+                mint_remote_permission_in_maps(
+                    &pending,
+                    &owners,
+                    &owner,
+                    "private-callback",
+                    &authority,
+                    &ledger,
+                    60_000,
+                )
+                .await
+            } else {
+                mint.await
+            };
+            let requests = pending.lock().await;
+            if matches!(ending, "live" | "busy") {
+                let view = result.unwrap();
+                assert_eq!(
+                    requests["callback-key"].remote_approval_id.as_deref(),
+                    Some(view.permission_request_id.as_str())
+                );
+                assert_eq!(authority.pending_for_task(&owner.task_id).len(), 1);
+            } else {
+                assert!(result.is_err(), "{ending}");
+                assert_eq!(
+                    remote_turn::permission_mint_projection(result).unwrap_err(),
+                    "permission_binding_stale"
+                );
+                assert!(requests["callback-key"].remote_approval_id.is_none());
+                assert!(authority.pending_for_task(&owner.task_id).is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_approval_mints_once_and_resolves_only_the_exact_callback_owner() {
+        use crate::features::remote_control::controller::permission::{
+            DecisionAuthority, PermissionAuthority, PermissionDecision,
+        };
+        let owner = RemotePermissionOwner {
+            task_sequence: 1,
+            session_id: "session-remote".into(),
+            task_id: "task-remote".into(),
+            lease: crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            },
+        };
+        let (response_tx, response_rx) = oneshot::channel();
+        let mut request = PendingPermission {
+            view: CodexAcpPendingPermission {
+                session_id: owner.session_id.clone(),
+                tool_call_id: "tool-1".into(),
+                request: Value::Null,
+            },
+            option_ids: vec!["allow-once".into()],
+            option_kinds: HashMap::from([("allow-once".into(), "allow_once".into())]),
+            remote_owner: Some(owner.clone()),
+            remote_request_id: Some("private-callback".into()),
+            remote_approval_id: None,
+            remote_projection: Some(RemotePermissionProjection {
+                operation_type: "shell_command".into(),
+                risk_level: "high".into(),
+                target_scope: "workspace-1".into(),
+                preview: "secret command".into(),
+            }),
+            turn_id: None,
+            activity: stall::new_activity_clock(),
+            bridge: None,
+            callback: Arc::new(()),
+            response_tx,
+        };
+        let permission_clock = Arc::new(std::sync::atomic::AtomicU64::new(9_001_000));
+        let observed = Arc::clone(&permission_clock);
+        let authority = PermissionAuthority::with_clock(Arc::new(move || {
+            observed.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        let mut foreign = owner.clone();
+        foreign.lease.controller_lease_id = "foreign-lease".into();
+        assert!(
+            mint_pending_remote_permission(
+                &mut request,
+                &foreign,
+                "private-callback",
+                &authority,
+                60_000
+            )
+            .is_err()
+        );
+        assert!(authority.pending_for_task(&owner.task_id).is_empty());
+        assert!(
+            mint_pending_remote_permission(
+                &mut request,
+                &owner,
+                "wrong-callback",
+                &authority,
+                60_000
+            )
+            .is_err()
+        );
+        let view = mint_pending_remote_permission(
+            &mut request,
+            &owner,
+            "private-callback",
+            &authority,
+            60_000,
+        )
+        .unwrap();
+        assert_ne!(view.permission_request_id, "private-callback");
+        assert_eq!(view.expires_at_ms, 9_061_000);
+        assert_eq!(view.preview, "[REDACTED]");
+        assert_eq!(
+            request.remote_approval_id.as_deref(),
+            Some(view.permission_request_id.as_str())
+        );
+        permission_clock.store(9_001_100, std::sync::atomic::Ordering::SeqCst);
+        let repeated = mint_pending_remote_permission(
+            &mut request,
+            &owner,
+            "private-callback",
+            &authority,
+            600_000,
+        )
+        .unwrap();
+        assert_eq!(repeated.permission_request_id, view.permission_request_id);
+        assert_eq!(repeated.expires_at_ms, view.expires_at_ms);
+        assert_eq!(authority.pending_for_task(&owner.task_id).len(), 1);
+        assert!(authority.view("private-callback").is_err());
+        let mut pending = HashMap::from([("original-callback-key".into(), request)]);
+        for id in ["private-callback", "forged-approval"] {
+            assert!(remote_permission_response_key(&pending, &owner, id).is_none());
+        }
+        assert!(
+            remote_permission_response_key(&pending, &foreign, &view.permission_request_id)
+                .is_none()
+        );
+        authority
+            .decide(
+                DecisionAuthority::ControllerA,
+                &owner.lease,
+                &owner.task_id,
+                &view.permission_request_id,
+                PermissionDecision::Allow,
+                authority.now_ms(),
+            )
+            .unwrap();
+        let key =
+            remote_permission_response_key(&pending, &owner, &view.permission_request_id).unwrap();
+        assert_eq!(key, "original-callback-key");
+        let request = pending.remove(&key).unwrap();
+        let option_id = remote_permission_option_id(&request.option_kinds, true).unwrap();
+        request
+            .response_tx
+            .send(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
+            ))
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(response_rx.await.unwrap()).unwrap()["outcome"]["optionId"],
+            "allow-once"
+        );
+        assert!(
+            remote_permission_response_key(&pending, &owner, &view.permission_request_id).is_none()
+        );
+    }
+
+    #[test]
+    fn remote_permission_projection_maps_acp_metadata_without_leaking_payloads() {
+        let request: RequestPermissionRequest = serde_json::from_value(json!({
+            "sessionId": "session-remote",
+            "toolCall": {
+                "toolCallId": "tool-remote",
+                "kind": "execute",
+                "title": "curl -H 'Authorization: Bearer secret' https://private.example",
+                "locations": [{"path": "C:\\Users\\private\\secret.txt"}],
+                "rawInput": {"command": "never-project-this-command"}
+            },
+            "options": [{
+                "optionId": "allow-once",
+                "name": "Allow once",
+                "kind": "allow_once"
+            }]
+        }))
+        .unwrap();
+        let projection = remote_permission_projection(&request);
+        assert_eq!(projection.operation_type, "shell_command");
+        assert_eq!(projection.risk_level, "high");
+        assert_eq!(projection.target_scope, "[PATH]");
+        assert_eq!(projection.preview, "[REDACTED]");
+        let projected = format!("{projection:?}");
+        assert!(!projected.contains("secret.txt"));
+        assert!(!projected.contains("never-project-this-command"));
+        assert!(!projected.contains("private.example"));
+    }
+
+    #[test]
+    fn remote_permission_projection_uses_only_supported_fixed_enums() {
+        for (kind, expected_operation, expected_risk) in [
+            ("read", "tool_call", "low"),
+            ("search", "tool_call", "low"),
+            ("think", "tool_call", "low"),
+            ("edit", "file_write", "medium"),
+            ("move", "file_write", "medium"),
+            ("delete", "file_delete", "high"),
+            ("execute", "shell_command", "high"),
+            ("fetch", "network_request", "high"),
+            ("switch_mode", "tool_call", "medium"),
+            ("future_kind", "other", "high"),
+        ] {
+            let request: RequestPermissionRequest = serde_json::from_value(json!({
+                "sessionId": "session-remote",
+                "toolCall": {"toolCallId": "tool-remote", "kind": kind},
+                "options": [{
+                    "optionId": "reject-once",
+                    "name": "Reject once",
+                    "kind": "reject_once"
+                }]
+            }))
+            .unwrap();
+            let projection = remote_permission_projection(&request);
+            assert_eq!(projection.operation_type, expected_operation, "kind={kind}");
+            assert_eq!(projection.risk_level, expected_risk, "kind={kind}");
+            assert_eq!(projection.target_scope, "[REDACTED]");
+            assert_eq!(projection.preview, "");
+        }
+    }
+
+    #[test]
+    fn local_interactive_responses_fail_closed_for_remote_owner() {
+        assert!(local_permission_response_allowed(None));
+        let owner = RemotePermissionOwner {
+            task_sequence: 1,
+            session_id: "session-remote".to_owned(),
+            task_id: "task-remote".to_owned(),
+            lease: crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-1".to_owned(),
+                controller_lease_id: "lease-1".to_owned(),
+                lease_epoch: "1".to_owned(),
+                relay_epoch: "relay-1".to_owned(),
+                remote_control_generation: "generation-1".to_owned(),
+            },
+        };
+        assert!(!local_permission_response_allowed(Some(&owner)));
+        assert!(local_elicitation_response_allowed(None));
+        assert!(!local_elicitation_response_allowed(Some(&owner)));
+        assert!(!remote_elicitation_must_cancel(None));
+        assert!(remote_elicitation_must_cancel(Some(&owner)));
+    }
+
+    #[test]
+    fn remote_interactive_cleanup_requires_the_exact_task_session_and_lease() {
+        let owner = RemotePermissionOwner {
+            task_sequence: 1,
+            session_id: "session-remote".to_owned(),
+            task_id: "task-remote".to_owned(),
+            lease: crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-1".to_owned(),
+                controller_lease_id: "lease-1".to_owned(),
+                lease_epoch: "1".to_owned(),
+                relay_epoch: "relay-1".to_owned(),
+                remote_control_generation: "generation-1".to_owned(),
+            },
+        };
+        assert!(remote_request_owned_by(Some(&owner), &owner));
+        assert!(!remote_request_owned_by(None, &owner));
+
+        let mut foreign = owner.clone();
+        foreign.task_sequence += 1;
+        assert!(
+            !remote_request_owned_by(Some(&foreign), &owner),
+            "reused tuple is a different durable admission"
+        );
+        foreign = owner.clone();
+        foreign.task_id = "task-other".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+        foreign = owner.clone();
+        foreign.session_id = "session-other".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+        foreign = owner.clone();
+        foreign.lease.connection_id = "connection-other".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+        foreign = owner.clone();
+        foreign.lease.controller_lease_id = "lease-other".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+        foreign = owner.clone();
+        foreign.lease.lease_epoch = "2".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+        foreign = owner.clone();
+        foreign.lease.relay_epoch = "relay-other".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+        foreign = owner.clone();
+        foreign.lease.remote_control_generation = "generation-other".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+    }
+
+    #[tokio::test]
+    async fn old_permission_cleanup_keeps_new_callback_after_same_tuple_readmission() {
+        let old = RemotePermissionOwner {
+            task_sequence: 1,
+            session_id: "session-1".into(),
+            task_id: "task-1".into(),
+            lease: crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            },
+        };
+        let mut new = old.clone();
+        new.task_sequence = 257;
+        let (response_tx, mut response_rx) = oneshot::channel();
+        let request = PendingPermission {
+            view: CodexAcpPendingPermission {
+                session_id: new.session_id.clone(),
+                tool_call_id: "same-tool-id".into(),
+                request: Value::Null,
+            },
+            option_ids: vec!["allow".into()],
+            option_kinds: HashMap::new(),
+            remote_owner: Some(new.clone()),
+            remote_request_id: Some("new-callback".into()),
+            remote_approval_id: Some("new-approval".into()),
+            remote_projection: None,
+            turn_id: Some("new-turn".into()),
+            activity: stall::new_activity_clock(),
+            response_tx,
+            bridge: None,
+            callback: Arc::new(()),
+        };
+        let mut pending = HashMap::from([("same-key".to_owned(), request)]);
+        assert!(take_remote_owned_permissions(&mut pending, &old).is_empty());
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            response_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(remote_permission_response_key(&pending, &old, "new-approval").is_none());
+        let owned = take_remote_owned_permissions(&mut pending, &new);
+        assert_eq!(owned.len(), 1);
+        for request in owned {
+            request
+                .response_tx
+                .send(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                ))
+                .unwrap();
+        }
+        assert!(response_rx.await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn remote_elicitation_cleanup_unblocks_only_the_exact_owner() {
+        let owner = RemotePermissionOwner {
+            task_sequence: 1,
+            session_id: "session-remote".to_owned(),
+            task_id: "task-remote".to_owned(),
+            lease: crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-1".to_owned(),
+                controller_lease_id: "lease-1".to_owned(),
+                lease_epoch: "1".to_owned(),
+                relay_epoch: "relay-1".to_owned(),
+                remote_control_generation: "generation-1".to_owned(),
+            },
+        };
+        let mut foreign_owner = owner.clone();
+        foreign_owner.task_sequence += 1;
+
+        let make_pending = |id: &str, remote_owner: Option<RemotePermissionOwner>| {
+            let (response_tx, response_rx) = oneshot::channel();
+            (
+                PendingElicitation {
+                    view: CodexAcpPendingElicitation {
+                        session_id: "session-remote".to_owned(),
+                        elicitation_id: id.to_owned(),
+                        request: json!({ "form": { "secretPath": "C:/private/secret.txt" } }),
+                    },
+                    activity: stall::new_activity_clock(),
+                    bridge: None,
+                    callback: Arc::new(()),
+                    remote_owner,
+                    response_tx,
+                },
+                response_rx,
+            )
+        };
+        let (owned, owned_rx) = make_pending("owned", Some(owner.clone()));
+        let (foreign, mut foreign_rx) = make_pending("foreign", Some(foreign_owner));
+        let (local, mut local_rx) = make_pending("local", None);
+        let mut pending = HashMap::from([
+            ("owned".to_owned(), owned),
+            ("foreign".to_owned(), foreign),
+            ("local".to_owned(), local),
+        ]);
+
+        assert_eq!(
+            cancel_remote_owned_elicitations(&mut pending, &owner),
+            vec!["owned"]
+        );
+        let owned_response = owned_rx.await.expect("exact owner must be unblocked");
+        assert_eq!(
+            serde_json::to_value(owned_response).unwrap()["action"],
+            "cancel"
+        );
+        assert!(foreign_rx.try_recv().is_err());
+        assert!(local_rx.try_recv().is_err());
+        assert_eq!(pending.len(), 2);
+
+        // Session cancellation/disconnect is broader than owner release: all
+        // remaining prompts for that B-local session must be unblocked.
+        let mut cancelled = cancel_session_elicitations(&mut pending, "session-remote");
+        cancelled.sort();
+        assert_eq!(cancelled, vec!["foreign", "local"]);
+        assert_eq!(
+            serde_json::to_value(foreign_rx.await.unwrap()).unwrap()["action"],
+            "cancel"
+        );
+        assert_eq!(
+            serde_json::to_value(local_rx.await.unwrap()).unwrap()["action"],
+            "cancel"
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
     fn elicitation_key_is_scoped_and_prefers_tool_call_id() {
         assert_ne!(
             elicitation_key("session-a", "input-1"),
@@ -6683,6 +7836,12 @@ mod tests {
                     request: Value::Null,
                 },
                 option_ids: vec!["allow".to_string()],
+                option_kinds: HashMap::new(),
+                remote_owner: None,
+                remote_request_id: None,
+                remote_approval_id: None,
+                remote_projection: None,
+                turn_id: None,
                 activity: activity.clone(),
                 response_tx,
                 bridge: None,
@@ -6713,6 +7872,68 @@ mod tests {
             "removing a user decision must reset the stall clock immediately"
         );
         drop(request);
+    }
+
+    #[tokio::test]
+    async fn remote_owner_release_before_callback_insert_cancels_without_orphaning() {
+        let owner = RemotePermissionOwner {
+            task_sequence: 1,
+            session_id: "session-remote".into(),
+            task_id: "task-remote".into(),
+            lease: crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            },
+        };
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let owners = Arc::new(parking_lot::Mutex::new(HashMap::from([(
+            owner.session_id.clone(),
+            owner.clone(),
+        )])));
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = PendingPermission {
+            view: CodexAcpPendingPermission {
+                session_id: owner.session_id.clone(),
+                tool_call_id: "tool-1".into(),
+                request: Value::Null,
+            },
+            option_ids: Vec::new(),
+            option_kinds: HashMap::new(),
+            remote_owner: Some(owner.clone()),
+            remote_request_id: Some("callback-1".into()),
+            remote_approval_id: None,
+            remote_projection: None,
+            turn_id: None,
+            activity: stall::new_activity_clock(),
+            bridge: None,
+            callback: Arc::new(()),
+            response_tx,
+        };
+        // Deterministic barrier: the callback has captured its remote owner,
+        // but cannot insert until terminal cleanup has removed that owner.
+        let guard = pending.lock().await;
+        let (started_tx, started_rx) = oneshot::channel();
+        let insert = tokio::spawn({
+            let pending = pending.clone();
+            let owners = owners.clone();
+            async move {
+                started_tx.send(()).unwrap();
+                insert_pending_permission(&pending, &owners, "key-1".into(), request).await
+            }
+        });
+        started_rx.await.unwrap();
+        owners.lock().remove(&owner.session_id);
+        assert!(guard.is_empty());
+        drop(guard);
+        assert!(!insert.await.unwrap());
+        assert!(pending.lock().await.is_empty());
+        assert_eq!(
+            serde_json::to_value(response_rx.await.unwrap()).unwrap()["outcome"]["outcome"],
+            "cancelled"
+        );
     }
 
     /// A late closer must not close another turn.

@@ -17,13 +17,13 @@ pub(crate) struct DesktopCapabilities {
     /// hook is required); on other platforms the native layer is a no-op and
     /// only the in-window Alt fallback is available.
     pub(crate) voice_shortcut_native: bool,
+    /// Windows-only desktop dual-end remote control backend.
+    pub(crate) desktop_remote_control_supported: bool,
     /// The Linux WebView (WebKitGTK) carries no image data to the page in
     /// paste events (an image clipboard surfaces an empty clipboardData), so
     /// composer pastes fall back to a native clipboard read; the macOS/Windows
     /// WebViews carry image items natively and need no fallback.
     pub(crate) paste_image_clipboard_read: bool,
-    /// Windows-only desktop dual-end remote control backend.
-    pub(crate) desktop_remote_control_supported: bool,
 }
 
 fn browser_product_enabled_for(os: &str) -> bool {
@@ -59,8 +59,8 @@ pub(crate) fn current() -> DesktopCapabilities {
         browser_agent_automation: browser_product_enabled(),
         browser_cdp: cfg!(target_os = "windows"),
         voice_shortcut_native: cfg!(target_os = "windows"),
+        desktop_remote_control_supported: desktop_remote_control_enabled(),
         paste_image_clipboard_read: cfg!(target_os = "linux"),
-        desktop_remote_control_supported: supports_desktop_remote_control(std::env::consts::OS),
     }
 }
 
@@ -73,6 +73,43 @@ pub(crate) fn supports_codex_acp(os: &str) -> bool {
 /// pretending to support the feature.
 pub(crate) fn supports_desktop_remote_control(os: &str) -> bool {
     matches!(os, "windows")
+}
+
+/// One client-side release switch shared with the Relay deployment contract.
+///
+/// Windows clients expose the feature by default. Operators can still set the
+/// variable to the exact string `0` to hide the UI and reject every command;
+/// malformed values fail closed. The Relay keeps its separate deployment gate
+/// because enabling its controller runtime also requires enrollment secrets.
+/// Durable registry/tombstone data is not coupled to this switch.
+pub(crate) fn desktop_remote_control_enabled() -> bool {
+    desktop_remote_control_enabled_from_env(
+        std::env::consts::OS,
+        std::env::var("PINVOU_DESKTOP_CONTROLLER_ENABLED"),
+    )
+}
+
+fn desktop_remote_control_enabled_from_env(
+    os: &str,
+    flag: Result<String, std::env::VarError>,
+) -> bool {
+    match flag {
+        Ok(value) => desktop_remote_control_enabled_for(os, Some(&value)),
+        Err(std::env::VarError::NotPresent) => desktop_remote_control_enabled_for(os, None),
+        Err(std::env::VarError::NotUnicode(_)) => false,
+    }
+}
+
+pub(crate) fn ensure_desktop_remote_control_enabled() -> Result<(), String> {
+    if desktop_remote_control_enabled() {
+        Ok(())
+    } else {
+        Err("desktop_remote_control_unsupported".to_owned())
+    }
+}
+
+fn desktop_remote_control_enabled_for(os: &str, flag: Option<&str>) -> bool {
+    supports_desktop_remote_control(os) && matches!(flag, None | Some("1"))
 }
 
 pub(crate) const fn is_windows() -> bool {
@@ -123,12 +160,12 @@ mod tests {
         assert_eq!(capabilities.browser_cdp, is_windows());
         assert_eq!(capabilities.voice_shortcut_native, is_windows());
         assert_eq!(
-            capabilities.paste_image_clipboard_read,
-            cfg!(target_os = "linux")
+            capabilities.desktop_remote_control_supported,
+            desktop_remote_control_enabled()
         );
         assert_eq!(
-            capabilities.desktop_remote_control_supported,
-            supports_desktop_remote_control(std::env::consts::OS)
+            capabilities.paste_image_clipboard_read,
+            cfg!(target_os = "linux")
         );
     }
 
@@ -146,5 +183,34 @@ mod tests {
         assert!(browser_product_enabled_for("linux"));
         assert!(browser_product_enabled_for("macos"));
         assert!(!browser_product_enabled_for("android"));
+    }
+
+    #[test]
+    fn desktop_remote_control_is_default_on_and_windows_only() {
+        assert!(!desktop_remote_control_enabled_from_env(
+            "windows",
+            Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+                "invalid"
+            )))
+        ));
+        assert!(desktop_remote_control_enabled_from_env(
+            "windows",
+            Err(std::env::VarError::NotPresent)
+        ));
+        assert!(desktop_remote_control_enabled_for("windows", None));
+        assert!(desktop_remote_control_enabled_for("windows", Some("1")));
+        for flag in [Some(""), Some("0"), Some("true"), Some("01")] {
+            assert!(!desktop_remote_control_enabled_for("windows", flag));
+        }
+        assert!(!desktop_remote_control_enabled_for("linux", None));
+        assert!(!desktop_remote_control_enabled_for("macos", None));
+        assert!(!desktop_remote_control_enabled_for("linux", Some("1")));
+        assert!(!desktop_remote_control_enabled_for("macos", Some("1")));
+        if !desktop_remote_control_enabled() {
+            assert_eq!(
+                ensure_desktop_remote_control_enabled().unwrap_err(),
+                "desktop_remote_control_unsupported"
+            );
+        }
     }
 }

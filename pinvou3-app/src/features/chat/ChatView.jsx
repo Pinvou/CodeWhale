@@ -59,6 +59,53 @@ import { ComposerAttachmentDropOverlay } from '../attachments/ComposerAttachment
 import { ConversationAttachmentBubble } from '../attachments/ConversationAttachmentBubble.jsx';
 import { splitAttachmentLine } from '../attachments/attachment-message.js';
 import { CHAT_INPUT_MAX_LENGTH, constrainChatInput } from './chat-input-limit.js';
+import {
+  controlledTaskChatItems as projectControlledTaskChatItems,
+  mergeControlledTaskChatItems,
+  remoteChatItems as projectRemoteChatItems,
+} from '../remote-control/chat-transcript-projection.mjs';
+import {
+  liveRemoteProxyBinding,
+  activeLiveRemoteTaskId,
+  remoteProxyHandshakeBinding,
+  remoteProxyLeaseIdentity,
+  remoteProxyComposerIdentity,
+  remoteProxyModelSelectionIdentity,
+  remoteProjectionPollRevision,
+  remoteProxyPresentationState,
+  remoteProjectionLabelKey,
+  newRemoteTaskIntent,
+  remoteProxyChatItems,
+  remoteProxyForSession,
+  selectedExportableRemoteModelId,
+  sameRemoteComposerOwner,
+} from '../remote-control/remote-session-adapter.mjs';
+import {
+  downloadRemoteArtifact,
+  createRemoteTransferGuard,
+  saveRemoteArtifactBlob,
+  uploadRemoteFiles,
+  validateRemoteFiles,
+} from '../remote-control/remote-file-transfer.mjs';
+import {
+  forgetRemoteDispatch,
+  recordRemoteDispatch,
+  markRemoteDispatchPayloadLost,
+  remoteDispatchCases,
+} from '../remote-control/remote-dispatch-ui.mjs';
+import {
+  isControlledDeviceChatActive,
+  isTaskTerminal,
+  taskStatusKey,
+} from '../remote-control/remote-control-logic.mjs';
+import { createCapabilityRequestLoop } from '../remote-control/capability-request-loop.mjs';
+import { permissionOperationCopyKey, permissionRedactionCopyKey } from '../remote-control/controlled-device-panel-state.mjs';
+import {
+  canUseControllerTemporaryModel,
+  clearResolvedRemoteModelRequiredError,
+  normalizeRemoteModelSource,
+  remoteModelSelectionError,
+} from '../remote-control/remote-model-source.mjs';
 import { deriveRunningShellTasks, formatElapsedMs, tailOutputLines } from './background-tasks.js';
 import { useShellTaskCancel } from './shell-task-cancel.js';
 import {
@@ -91,6 +138,47 @@ const prefetchChatPanel = (key) => {
   const loader = CHAT_PANEL_LOADERS[key];
   if (loader) loader().catch(() => {});
 };
+
+// RemoteProxy entries expose one Rust-sanitized display body. Keep this
+// allowlist aligned with system projection kinds and render only that string;
+// never serialize the source entry, whose non-display fields are not UI data.
+const REMOTE_PROXY_SYSTEM_BODY_KINDS = new Set([
+  'approval',
+  'error',
+  'attachment',
+  'artifact',
+]);
+
+function remoteProxySystemBody(item) {
+  if (!REMOTE_PROXY_SYSTEM_BODY_KINDS.has(item?.remoteKind) || typeof item?.text !== 'string') return '';
+  return item.text.trim();
+}
+
+function remoteActionFailureCode(failure) {
+  const candidate = failure?.code || failure?.message || failure;
+  return String(candidate || '') === 'result_unknown' ? 'result_unknown' : 'errorGeneric';
+}
+
+function constrainDialogFocus(event, dialog) {
+  if (event.key !== 'Tab' || !dialog) return;
+  const focusable = [...dialog.querySelectorAll(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  )].filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+  if (!focusable.length) {
+    event.preventDefault();
+    dialog.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
 
 const reportRightDockSelectionFailure = (error) => {
   console.error('[chat] Right Dock selection failed', error);
@@ -618,7 +706,7 @@ const openChatExternalUrl = (url) => {
     };
 
     // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy main view: session/mode/artifact/browser state is highly cohesive; split refactor tracked separately
-    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock }) => {
+    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, onRemoteModelSourceChange, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock, remoteConnection = null, remoteModelSource = 'controller_temporary' }) => {
       const chatCopy = t.uiChat;
       const chatViewCopy = t.uiChatView;
       const sceneCopy = chatCopy.sceneModes;
@@ -766,9 +854,417 @@ const openChatExternalUrl = (url) => {
       // object, but unchanged chatItems are shared by reference; without this layer the downstream
       // projection useMemo would invalidate every render in the empty state ([] literal).
       const chatItems = useMemo(() => (bs ? bs.chatItems : []), [bs]);
+      // 远程模式下 ChatView 只承担输入/正文输出；权威数据仍来自 remote journal，
+      // 本地会话的普通工具/产物流程不参与远程回合。
       const activeSessionId = bs ? bs.activeSessionId : null;
+      const remoteProxyHistory = remoteProxyForSession(activeSessionId, bs?.remoteProxyHistory);
+      const remoteChatActive = !!remoteProxyHistory;
+      const controlledDevice = (bs && bs.controlledDevice) || {};
+      const controlledChatActive = isControlledDeviceChatActive(controlledDevice);
+      const controlledSession = (bs && bs.controlledSession) || {};
+      const [remoteCapabilityBusy, setRemoteCapabilityBusy] = useState(false);
+      const [remoteCapabilityError, setRemoteCapabilityError] = useState(null);
+      const remoteCapabilityRequesterRef = useRef(null);
+      const [remoteSendError, setRemoteSendError] = useState(null);
+      const [remoteDispatchRevision, setRemoteDispatchRevision] = useState(0);
+      const [remoteDispatchAction, setRemoteDispatchAction] = useState(null);
+      const [remoteDispatchActionError, setRemoteDispatchActionError] = useState(null);
+      const [remoteFiles, setRemoteFiles] = useState([]);
+      const [remoteMode, setRemoteMode] = useState('chat');
+      const [remoteWorkspaceId, setRemoteWorkspaceId] = useState('');
+      const [remoteSkillIds, setRemoteSkillIds] = useState([]);
+      const [controlledCapabilities, setControlledCapabilities] = useState(null);
+      const [controlledSkillIds, setControlledSkillIds] = useState([]);
+      const [controlledCapabilityBusy, setControlledCapabilityBusy] = useState(false);
+      const [controlledCapabilityError, setControlledCapabilityError] = useState(null);
+      const controlledCapabilityRequestRef = useRef(0);
+      const [remotePreparedFiles, setRemotePreparedFiles] = useState(null);
+      const [remoteTransfer, setRemoteTransfer] = useState(null);
+      const [remoteTransferGuard] = useState(createRemoteTransferGuard);
+      const [remotePermissions, setRemotePermissions] = useState([]);
+      const [remoteArtifacts, setRemoteArtifacts] = useState([]);
+      const [remoteArtifactPreview, setRemoteArtifactPreview] = useState(null);
+      const [remoteActionError, setRemoteActionError] = useState(null);
+      const remoteFileInputRef = useRef(null);
+      const remoteArtifactPreviewDialogRef = useRef(null);
+      const remoteArtifactPreviewCloseRef = useRef(null);
+      const remoteArtifactPreviewTriggerRef = useRef(null);
+      const remoteTranscriptActive = remoteChatActive || controlledChatActive;
+      const remoteSendIdentity = remoteChatActive
+        ? remoteProxyLeaseIdentity(activeSessionId, remoteConnection)
+        : (controlledChatActive
+          ? `controlled:${controlledDevice.generation || ''}:${controlledSession.sessionId || ''}`
+          : '');
+      const remoteSendIdentityRef = useRef(remoteSendIdentity);
+      // eslint-disable-next-line react-hooks/refs -- async completion checks the latest committed binding
+      remoteSendIdentityRef.current = remoteSendIdentity;
+      const remoteComposerIdentity = remoteChatActive
+        ? remoteProxyComposerIdentity(activeSessionId, remoteConnection)
+        : remoteSendIdentity;
+      const remoteComposerIdentityRef = useRef(remoteComposerIdentity);
+      // eslint-disable-next-line react-hooks/refs -- failed sends restore only the current draft owner
+      remoteComposerIdentityRef.current = remoteComposerIdentity;
+      useEffect(() => {
+        setRemoteSendError(current => (
+          current && current.identity !== remoteSendIdentity ? null : current
+        ));
+      }, [remoteSendIdentity]);
+      const projectedRemoteChatItems = useMemo(
+        () => remoteChatActive
+          ? remoteProxyChatItems(activeSessionId, remoteProxyHistory)
+          : projectRemoteChatItems(
+            controlledChatActive ? { status: 'connected', sessionId: controlledSession.sessionId } : null,
+            bs ? bs.controlledTranscript : [],
+            bs ? bs.controlledTasks : [],
+          ),
+        [
+          remoteChatActive,
+          activeSessionId,
+          remoteProxyHistory,
+          controlledChatActive,
+          controlledSession.sessionId,
+          bs && bs.controlledTranscript,
+          bs && bs.controlledTasks,
+        ],
+      );
+      const projectedControlledTaskItems = useMemo(
+        () => projectControlledTaskChatItems(
+          bs ? bs.controlledTasks : [],
+          t.remoteConversation,
+          controlledSession.sessionId || '',
+        ),
+        [bs && bs.controlledTasks, controlledSession.sessionId, t.remoteConversation],
+      );
+      const controlledSessionChatItems = useMemo(
+        () => mergeControlledTaskChatItems(
+          activeSessionId && activeSessionId === controlledSession.sessionId
+            ? chatItems
+            : projectedRemoteChatItems,
+          projectedControlledTaskItems,
+        ),
+        [
+          activeSessionId,
+          controlledSession.sessionId,
+          chatItems,
+          projectedRemoteChatItems,
+          projectedControlledTaskItems,
+        ],
+      );
+      const displayChatItems = remoteChatActive
+        ? projectedRemoteChatItems
+        : (controlledChatActive ? controlledSessionChatItems : chatItems);
+      const controlledActiveTasks = useMemo(
+        () => ((bs && bs.controlledTasks) || []).filter(task => (
+          task
+          && task.sessionId === controlledSession.sessionId
+          && (!activeSessionId || activeSessionId === controlledSession.sessionId)
+          && !isTaskTerminal(task.status)
+        )),
+        [bs && bs.controlledTasks, controlledSession.sessionId, activeSessionId],
+      );
+      const showControlledTask = controlledDevice.status === 'connected' && controlledActiveTasks.length > 0;
       const activeSessionIdRef = useRef(activeSessionId);
       activeSessionIdRef.current = activeSessionId;
+      const localBusy = bs ? bs.busy : false;
+      const remoteBinding = useMemo(
+        () => liveRemoteProxyBinding(activeSessionId, remoteProxyHistory, remoteConnection),
+        [activeSessionId, remoteProxyHistory, remoteConnection],
+      );
+      const remoteHandshakeBinding = useMemo(
+        () => remoteProxyHandshakeBinding(activeSessionId, remoteProxyHistory, remoteConnection),
+        [activeSessionId, remoteProxyHistory, remoteConnection],
+      );
+      const remoteLinkReady = !!remoteBinding && remoteConnection.capabilityStatus !== 'error';
+      const scopedRemoteConnection = remoteChatActive && remoteConnection?.localSessionId === activeSessionId
+        ? remoteConnection : null;
+      const remotePresentation = remoteProxyPresentationState(activeSessionId, remoteProxyHistory, scopedRemoteConnection);
+      const remoteStatusLabel = remotePresentation === 'ready' ? t.controllerConnection.remoteStatus
+        : remotePresentation === 'reconnecting' ? t.controllerConnection.stateReconnecting
+          : remotePresentation === 'capability_error' ? t.controllerConnection.remoteCapabilityFailed
+            : remotePresentation === 'preparing' ? t.controllerConnection.remoteSessionPreparing
+              : t.remoteConversation.offlineCopy;
+      const remoteTemporaryModelAvailable = canUseControllerTemporaryModel(scopedRemoteConnection);
+      const effectiveRemoteModelSource = remoteMode === 'code'
+        ? 'controlled_device'
+        : normalizeRemoteModelSource(remoteModelSource, scopedRemoteConnection);
+      const remoteModelBindingKey = remoteBinding
+        ? remoteProxyModelSelectionIdentity(activeSessionId, scopedRemoteConnection)
+        : '';
+      const remoteArtifactPollRevision = remoteProjectionPollRevision(remoteProxyHistory,
+        ['artifact', 'status', 'snapshot_marker']);
+      const remotePermissionPollRevision = remoteProjectionPollRevision(remoteProxyHistory,
+        ['approval', 'status', 'snapshot_marker']);
+      const remoteCapabilities = bs?.remoteCapabilities
+        && bs.remoteCapabilities.connectionId === scopedRemoteConnection?.connectionId
+        && bs.remoteCapabilities.controllerLeaseId === scopedRemoteConnection?.controllerLeaseId
+        && String(bs.remoteCapabilities.leaseEpoch || '') === String(scopedRemoteConnection?.leaseEpoch || '')
+        && bs.remoteCapabilities.relayEpoch === scopedRemoteConnection?.relayEpoch
+        && bs.remoteCapabilities.remoteControlGeneration === scopedRemoteConnection?.generation
+        && bs.remoteCapabilities.remoteSessionRef === scopedRemoteConnection?.sessionRef
+        && Number(bs.remoteCapabilities.capabilityRevision) === Number(scopedRemoteConnection?.capabilityRevision)
+        ? bs.remoteCapabilities : null;
+      const remoteModes = Array.isArray(remoteCapabilities?.modes) ? remoteCapabilities.modes : [];
+      const remoteCapabilityFresh = Number(remoteCapabilities?.expiresAtMs) > Date.now();
+      const remoteWorkspaces = Array.isArray(remoteCapabilities?.workspaces)
+        ? remoteCapabilities.workspaces.filter(workspace => workspace?.codeAllowed === true) : [];
+      const remoteSkills = Array.isArray(remoteCapabilities?.skills)
+        ? remoteCapabilities.skills.filter(skill => Array.isArray(skill?.scopes)
+          && skill.scopes.includes(remoteMode)) : [];
+      const remoteTools = Array.isArray(remoteCapabilities?.tools) ? remoteCapabilities.tools : [];
+      const pendingRemoteDispatches = useMemo(
+        () => remoteChatActive ? remoteDispatchCases(activeSessionId, remoteProxyHistory) : [],
+        [activeSessionId, remoteChatActive, remoteDispatchRevision, remoteProxyHistory],
+      );
+      const pendingPermissionCoordinationIds = remotePermissions
+        .filter(permission => permission?.state === 'pending')
+        .map(permission => permission.permissionRequestId);
+      const attachmentCoordinationIds = pendingRemoteDispatches
+        .filter(item => item?.state === 'prepared_not_sent')
+        .map(item => item.taskId);
+      const remoteUiCoordinationId = pendingPermissionCoordinationIds.length === 1
+        ? pendingPermissionCoordinationIds[0]
+        : (attachmentCoordinationIds.length === 1 ? attachmentCoordinationIds[0] : '');
+      const currentRemoteTaskId = useMemo(
+        () => remoteChatActive
+          ? activeLiveRemoteTaskId(activeSessionId, remoteProxyHistory, scopedRemoteConnection)
+          : null,
+        [activeSessionId, remoteChatActive, remoteProxyHistory, scopedRemoteConnection],
+      );
+      const remoteModelListingRequestIdentity = remoteBinding ? remoteSendIdentity : '';
+      const [remoteModelsForBinding, setRemoteModelsForBinding] = useState({ key: '', models: [] });
+      const [remoteModelSelection, setRemoteModelSelection] = useState({ key: '', modelId: '' });
+      useEffect(() => {
+        let cancelled = false;
+        if (!remoteModelBindingKey || !remoteModelListingRequestIdentity
+          || !remoteTemporaryModelAvailable || !bridge.available) return undefined;
+        const listingKey = remoteModelBindingKey;
+        bridge.desktopRemoteControl.listExportableModels()
+          .then(models => {
+            if (!cancelled) setRemoteModelsForBinding({
+              key: listingKey,
+              models: (Array.isArray(models) ? models : []).filter(model => model?.exportable === true),
+            });
+          })
+          .catch(() => {
+            if (!cancelled) setRemoteModelsForBinding({ key: listingKey, models: [] });
+          });
+        return () => { cancelled = true; };
+      }, [remoteModelBindingKey, remoteModelListingRequestIdentity, remoteTemporaryModelAvailable]);
+      useEffect(() => {
+        if (!remoteBinding || !scopedRemoteConnection?.sessionRef || !bridge.available) return undefined;
+        let cancelled = false;
+        bridge.desktopRemoteControl.capabilitiesSnapshot(scopedRemoteConnection.sessionRef)
+          .catch(failure => {
+            if (!cancelled) setRemoteCapabilityError(String(failure?.code || 'capability_snapshot_unavailable'));
+          });
+        return () => { cancelled = true; };
+      }, [remoteModelBindingKey, scopedRemoteConnection?.capabilityRevision, scopedRemoteConnection?.sessionRef]);
+      useEffect(() => {
+        if (!remoteCapabilities || !scopedRemoteConnection?.sessionRef || !bridge.available) return undefined;
+        const expiresAtMs = Number(remoteCapabilities.expiresAtMs);
+        if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= 0) return undefined;
+        let cancelled = false;
+        const refreshDelayMs = Math.max(0, expiresAtMs - Date.now() - 5_000);
+        const timer = setTimeout(() => {
+          if (cancelled) return;
+          setRemoteCapabilityBusy(true);
+          setRemoteCapabilityError(null);
+          bridge.desktopRemoteControl.controllerCapabilitySend(scopedRemoteConnection.sessionRef)
+            .then(() => { if (!cancelled) setRemoteCapabilityError(null); })
+            .catch(failure => {
+              if (!cancelled) setRemoteCapabilityError(String(failure?.code || 'capability_snapshot_unavailable'));
+            })
+            .finally(() => { if (!cancelled) setRemoteCapabilityBusy(false); });
+        }, refreshDelayMs);
+        return () => {
+          cancelled = true;
+          clearTimeout(timer);
+        };
+      }, [
+        remoteCapabilities?.connectionId,
+        remoteCapabilities?.controllerLeaseId,
+        remoteCapabilities?.leaseEpoch,
+        remoteCapabilities?.relayEpoch,
+        remoteCapabilities?.remoteControlGeneration,
+        remoteCapabilities?.remoteSessionRef,
+        remoteCapabilities?.capabilityRevision,
+        remoteCapabilities?.expiresAtMs,
+        scopedRemoteConnection?.sessionRef,
+      ]);
+      useEffect(() => {
+        if (!remoteCapabilities) return;
+        setRemoteMode(current => remoteModes.includes(current) ? current : (remoteModes[0] || 'chat'));
+        setRemoteWorkspaceId(current => remoteWorkspaces.some(item => item.workspaceId === current)
+          ? current : (remoteWorkspaces[0]?.workspaceId || ''));
+        setRemoteSkillIds(current => current.filter(id => remoteSkills.some(item => item.skillId === id)));
+      }, [remoteCapabilities, remoteMode]);
+      const exportableRemoteModels = remoteModelsForBinding.key === remoteModelBindingKey
+        ? remoteModelsForBinding.models : [];
+      const selectedRemoteModelId = selectedExportableRemoteModelId(
+        remoteModelBindingKey, remoteModelsForBinding, remoteModelSelection, bs?.activeModelId,
+      );
+      const remoteModeReady = remoteModes.includes(remoteMode)
+        && (remoteMode !== 'code' || remoteWorkspaces.some(item => item.workspaceId === remoteWorkspaceId));
+      const remoteTaskContextReady = remoteLinkReady && remoteCapabilityFresh && remoteModeReady;
+      const remoteModelError = remoteModelSelectionError(
+        effectiveRemoteModelSource, selectedRemoteModelId,
+      );
+      useEffect(() => {
+        setRemoteSendError(current => clearResolvedRemoteModelRequiredError(
+          current, remoteSendIdentity, remoteModelError,
+        ));
+      }, [remoteModelError, remoteSendIdentity]);
+      const remoteDispatchReady = remoteTaskContextReady && !remoteModelError;
+      const remoteNewDispatchReady = remoteTaskContextReady
+        && !pendingRemoteDispatches.some(item => item.state === 'prepared_not_sent');
+      useEffect(() => {
+        setRemoteFiles([]);
+        setRemoteMode('chat');
+        setRemoteWorkspaceId('');
+        setRemoteSkillIds([]);
+        setRemotePreparedFiles(null);
+        setRemoteTransfer(null);
+        remoteTransferGuard.invalidate();
+        setRemotePermissions([]);
+        setRemoteArtifacts([]);
+        setRemoteArtifactPreview(null);
+        setRemoteActionError(null);
+      }, [remoteComposerIdentity, remoteTransferGuard]);
+      useEffect(() => {
+        if (!remoteArtifactPreview) return undefined;
+        remoteArtifactPreviewCloseRef.current?.focus();
+        return () => {
+          const trigger = remoteArtifactPreviewTriggerRef.current;
+          remoteArtifactPreviewTriggerRef.current = null;
+          if (trigger?.isConnected && typeof trigger.focus === 'function') trigger.focus();
+        };
+      }, [remoteArtifactPreview]);
+      useEffect(() => {
+        if (!remoteBinding || !bridge.available) return undefined;
+        let cancelled = false;
+        bridge.desktopRemoteControl.artifactIndex(remoteBinding.localSessionId, remoteBinding.remoteRef)
+          .then(items => { if (!cancelled) setRemoteArtifacts(Array.isArray(items) ? items : []); })
+          .catch(failure => { if (!cancelled) setRemoteActionError(remoteActionFailureCode(failure)); });
+        return () => { cancelled = true; };
+      }, [remoteModelBindingKey, remoteArtifactPollRevision]);
+      useEffect(() => {
+        if (!remoteBinding || !currentRemoteTaskId || !bridge.available) {
+          setRemotePermissions([]);
+          return undefined;
+        }
+        let cancelled = false;
+        bridge.desktopRemoteControl.permissionList(
+          remoteBinding.localSessionId, remoteBinding.remoteRef, currentRemoteTaskId,
+        ).then(items => {
+          if (!cancelled) setRemotePermissions(Array.isArray(items) ? items : []);
+        }).catch(failure => {
+          if (!cancelled) setRemoteActionError(remoteActionFailureCode(failure));
+        });
+        return () => { cancelled = true; };
+      }, [remoteModelBindingKey, currentRemoteTaskId, remotePermissionPollRevision]);
+      const controlledLinkReady = !!(
+        controlledChatActive
+        && controlledSession.sessionId
+        && controlledSession.generation
+        && String(controlledSession.generation) === String(controlledDevice.generation || '')
+      );
+      const controlledCapabilityBound = !!(
+        controlledCapabilities
+        && controlledCapabilities.sessionId === controlledSession.sessionId
+        && controlledCapabilities.remoteControlGeneration === controlledSession.generation
+        && controlledCapabilities.remoteControlGeneration === controlledDevice.generation
+        && (controlledCapabilities.sessionLane === 'chat' || controlledCapabilities.sessionLane === 'code')
+        && controlledCapabilities.sessionLane === controlledSession.lane
+        && Number.isSafeInteger(Number(controlledCapabilities.capabilityRevision))
+        && Number(controlledCapabilities.expiresAtMs) > Date.now()
+      );
+      const controlledSkills = controlledCapabilityBound && Array.isArray(controlledCapabilities?.skills)
+        ? controlledCapabilities.skills.filter(skill => Array.isArray(skill?.scopes)
+          && skill.scopes.includes(controlledCapabilities.sessionLane)) : [];
+      const loadControlledCapabilities = useCallback(() => {
+        if (!controlledLinkReady || !controlledSession.sessionId || !bridge.available) {
+          return Promise.resolve(null);
+        }
+        const request = controlledCapabilityRequestRef.current + 1;
+        controlledCapabilityRequestRef.current = request;
+        const identity = remoteSendIdentity;
+        setControlledCapabilityBusy(true);
+        setControlledCapabilityError(null);
+        return bridge.desktopRemoteControl.controlledCapabilitiesSnapshot(controlledSession.sessionId)
+          .then(snapshot => {
+            if (controlledCapabilityRequestRef.current !== request
+              || remoteSendIdentityRef.current !== identity) return null;
+            setControlledCapabilities(snapshot || null);
+            setControlledCapabilityError(null);
+            return snapshot;
+          })
+          .catch(failure => {
+            if (controlledCapabilityRequestRef.current === request
+              && remoteSendIdentityRef.current === identity) {
+              setControlledCapabilities(null);
+              setControlledCapabilityError(String(failure?.code || 'capability_snapshot_unavailable'));
+            }
+            return null;
+          })
+          .finally(() => {
+            if (controlledCapabilityRequestRef.current === request
+              && remoteSendIdentityRef.current === identity) setControlledCapabilityBusy(false);
+          });
+      }, [controlledLinkReady, controlledSession.sessionId, remoteSendIdentity]);
+      useEffect(() => {
+        if (!controlledLinkReady || !bridge.available) {
+          controlledCapabilityRequestRef.current += 1;
+          setControlledCapabilities(null);
+          setControlledSkillIds([]);
+          setControlledCapabilityBusy(false);
+          setControlledCapabilityError(null);
+          return undefined;
+        }
+        void loadControlledCapabilities();
+        return undefined;
+      }, [controlledLinkReady, controlledSession.generation, controlledSession.lane, controlledSession.sessionId, loadControlledCapabilities]);
+      useEffect(() => {
+        if (!controlledCapabilityBound) return undefined;
+        const exactSnapshot = controlledCapabilities;
+        // A owns revision renewal. B performs a bounded 1 Hz observation during
+        // the five-second lead window, so it adopts A's new exact snapshot
+        // without minting a competing revision or creating a render storm.
+        const delay = Math.max(1_000, Number(exactSnapshot.expiresAtMs) - Date.now() - 5_000);
+        const timer = setTimeout(() => {
+          if (remoteSendIdentityRef.current !== remoteSendIdentity) return;
+          void loadControlledCapabilities();
+        }, delay);
+        return () => clearTimeout(timer);
+      }, [
+        controlledCapabilityBound,
+        controlledCapabilities?.connectionId,
+        controlledCapabilities?.controllerLeaseId,
+        controlledCapabilities?.leaseEpoch,
+        controlledCapabilities?.relayEpoch,
+        controlledCapabilities?.remoteControlGeneration,
+        controlledCapabilities?.sessionId,
+        controlledCapabilities?.sessionLane,
+        controlledCapabilities?.capabilityRevision,
+        controlledCapabilities?.expiresAtMs,
+        loadControlledCapabilities,
+        remoteSendIdentity,
+      ]);
+      useEffect(() => {
+        setControlledSkillIds(current => current.filter(id => (
+          controlledSkills.some(skill => skill.skillId === id)
+        )));
+      }, [controlledCapabilities]);
+      const busy = remoteChatActive
+        ? (localBusy || remoteCapabilityBusy || !remoteLinkReady)
+        : (controlledChatActive
+          ? (localBusy || controlledCapabilityBusy || !controlledCapabilityBound)
+          : localBusy);
+      // Capability refresh/readiness may block sending without representing an
+      // active turn. A follows its authenticated remote task; B follows only
+      // the actual local generation state so completed turns stay done.
+      const conversationBusy = remoteChatActive
+        ? !!currentRemoteTaskId
+        : (controlledChatActive ? localBusy : busy);
       const computerUseCopy = t.uiComputerUse;
       const computerUseSlice = (bs && bs.computerUse) || null;
       // Fetch the authoritative computer-use state on session mount/switch: the banner and
@@ -805,7 +1301,6 @@ const openChatExternalUrl = (url) => {
         }, 30_000);
         return () => clearInterval(reconciler);
       }, [activeSessionId]);
-      const busy = bs ? bs.busy : false;
       // 停止按钮 single-flight:busy 在首次 cancel_generation 返回前就复位,
       // 双击会发第二个并发取消请求。cancellingSessionIds 在 invoke 完成前禁用
       // **对应 session** 的按钮（按 session 集合记录而非全局布尔或单个 sid：
@@ -815,7 +1310,7 @@ const openChatExternalUrl = (url) => {
       // 按钮误启用。Set 让各会话独立记录，配合后端 turn generation 守护，
       // 消除跨轮误取消窗口）。
       const [cancellingSessionIds, setCancellingSessionIds] = useState(() => new Set());
-      const hasMessages = chatItems.length > 0;
+      const hasMessages = displayChatItems.length > 0;
       const attachments = (bs && bs.attachments) || [];
       const formatAttachmentError = (error) => {
         const limitError = formatAttachmentLimitError(error, t.uiAttachments);
@@ -895,8 +1390,8 @@ const openChatExternalUrl = (url) => {
       const latestArtifact = artifactItems[artifactItems.length - 1] || null;
       // 当前会话仍在运行的后台 shell 任务（编译、下载等），驱动输入框上方的胶囊指示器。
       // chatItems 只含当前会话条目，且由 bridge 轮询保持新鲜，直接派生即可。
-      const runningShellTasks = deriveRunningShellTasks(chatItems);
-      const conversationStarted = chatItems.some(item => item && item.type === 'user') || artifactCount > 0;
+      const runningShellTasks = deriveRunningShellTasks(displayChatItems);
+      const conversationStarted = displayChatItems.some(item => item && item.type === 'user') || (!remoteTranscriptActive && artifactCount > 0);
       const pinvouMode = pinvouModeState.mode;
       const sceneSubtab = pinvouModeState.subtab;
       const designScopeKey = createDesignChangeScopeKey(activeSessionId, activeArtifactPath);
@@ -1169,9 +1664,9 @@ const openChatExternalUrl = (url) => {
         [bs && bs.currentSessionModelId, bs && bs.activeModelId, bs && bs.savedModels, bs && bs.effectiveModelConfig, bs && bs.activeProvider],
       );
       const derivedConversation = useMemo(() => {
-        const visibleChatItems = chatItems.filter((item) => !(item.type === 'memory_candidate' && !item.resolved));
+        const visibleChatItems = displayChatItems.filter((item) => !(item.type === 'memory_candidate' && !item.resolved));
         const latestArtIdByPath = {};
-        chatItems.forEach((item) => {
+        displayChatItems.forEach((item) => {
           if (item.type === 'artifact_card' && item.path) latestArtIdByPath[item.path] = item.id;
         });
         const latestArtifactIds = new Set(Object.values(latestArtIdByPath));
@@ -1182,7 +1677,7 @@ const openChatExternalUrl = (url) => {
           left < right ? -1 : left > right ? 1 : 0
         )).join('\u0000');
         let lastUserId = null;
-        for (let i = chatItems.length - 1; i >= 0; i--) { if (chatItems[i].type === 'user') { lastUserId = chatItems[i].id; break; } }
+        for (let i = displayChatItems.length - 1; i >= 0; i--) { if (displayChatItems[i].type === 'user') { lastUserId = displayChatItems[i].id; break; } }
         // Swarm rework: consecutive spawn-type agent calls aggregate into one
         // count row (annotated with spawnGroup / spawnGroupHidden). Annotation
         // runs once on the projection input; the unified timeline lane reads
@@ -1190,7 +1685,7 @@ const openChatExternalUrl = (url) => {
         const spawnAnnotatedItems = annotateAgentSpawnGroups(visibleChatItems);
         const conversationProjection = projectDeepSeekConversation({
           chatItems: conversationItemsForMode(spawnAnnotatedItems),
-          busy,
+          busy: conversationBusy,
           thinking: chatThinking,
           tokens: ctxTokens,
           sessionId: activeSessionId,
@@ -1207,7 +1702,7 @@ const openChatExternalUrl = (url) => {
           if (turns[i].status === 'running') { activeConversationTurn = turns[i]; break; }
         }
         return { latestArtifactIds, latestArtifactIdsKey, lastUserId, conversationProjection, activeConversationTurn };
-      }, [chatItems, busy, ctxTokens, isScheduledTaskCreationChat, chatThinking, turnTimeline, activeSessionId, modelServiceLanguage, chatModelServiceState]);
+      }, [displayChatItems, conversationBusy, ctxTokens, isScheduledTaskCreationChat, chatThinking, turnTimeline, activeSessionId, modelServiceLanguage, chatModelServiceState]);
       const { latestArtifactIds, latestArtifactIdsKey, lastUserId, conversationProjection, activeConversationTurn } = derivedConversation;
 
       // External entries can prefill the composer and focus its end.
@@ -1273,8 +1768,8 @@ const openChatExternalUrl = (url) => {
       // updates). Follow the last streaming/running item's traits as well.
       let streamingFollowHtml;
       let runningFollowOutputLength;
-      for (let followIdx = chatItems.length - 1; followIdx >= 0; followIdx--) {
-        const followItem = chatItems[followIdx];
+      for (let followIdx = displayChatItems.length - 1; followIdx >= 0; followIdx--) {
+        const followItem = displayChatItems[followIdx];
         if (followItem?.streaming && streamingFollowHtml === undefined) {
           streamingFollowHtml = followItem.html;
         }
@@ -1286,7 +1781,7 @@ const openChatExternalUrl = (url) => {
       useEffect(() => {
         const el = scrollRef.current;
         if (!el) return;
-        const lastItem = chatItems[chatItems.length - 1];
+        const lastItem = displayChatItems[displayChatItems.length - 1];
         // eslint-disable-next-line react-hooks/set-state-in-effect -- synchronously reset the back-to-bottom button when there are no messages
         if (!lastItem) { autoScrollRef.current = true; lastUserSnapLengthRef.current = 0; setShowScrollBottom(false); return; }
         // A mid-turn steered bubble parks a user item LAST while the turn's
@@ -1298,10 +1793,10 @@ const openChatExternalUrl = (url) => {
         if (shouldForceScrollFollow({
           following: autoScrollRef.current,
           lastItemType: lastItem.type,
-          itemCount: chatItems.length,
+          itemCount: displayChatItems.length,
           lastSnapItemCount: lastUserSnapLengthRef.current,
         })) {
-          lastUserSnapLengthRef.current = chatItems.length;
+          lastUserSnapLengthRef.current = displayChatItems.length;
           el.scrollTop = el.scrollHeight;
           autoScrollRef.current = true;
           setShowScrollBottom(false);
@@ -1310,12 +1805,12 @@ const openChatExternalUrl = (url) => {
           setShowScrollBottom(v => v === shouldShow ? v : shouldShow);
         }
       }, [
-        chatItems.length,
-        chatItems[chatItems.length - 1]?.html,
+        displayChatItems.length,
+        displayChatItems[displayChatItems.length - 1]?.html,
         streamingFollowHtml,
         // eslint-disable-next-line react-hooks/exhaustive-deps -- streaming output length is an intentionally narrow conditional-expression dep
-        chatItems[chatItems.length - 1]?.state === 'running'
-          ? chatItems[chatItems.length - 1]?.output?.length
+        displayChatItems[displayChatItems.length - 1]?.state === 'running'
+          ? displayChatItems[displayChatItems.length - 1]?.output?.length
           : 0,
         runningFollowOutputLength,
         composerH,
@@ -1390,7 +1885,7 @@ const openChatExternalUrl = (url) => {
       // Read-only mirror of the swarm mode switch: mood border color of the
       // top-right running overlay (on = purple / off = blue).
       const swarmModeOn = !!(bs && bs.modeState && bs.modeState.multiAgent);
-      const artifactsVisible = Boolean(activeSessionId && artifactsOpen);
+      const artifactsVisible = Boolean(activeSessionId && artifactsOpen && !remoteTranscriptActive);
       const artifactFullscreenPublicationReady = useRightDockOcclusion(
         'artifact-fullscreen',
         artifactsVisible && artifactsFullscreen,
@@ -1703,12 +2198,15 @@ const openChatExternalUrl = (url) => {
       const voiceBusy = isVoiceBusy(voiceInput);
       const hasDraftText = inputText.trim().length > 0;
       const hasReadyAttachment = attachments.some(a => a.status === 'ready');
+      const hasRemoteFile = remoteChatActive && remoteFiles.length > 0;
       const firstTurnPending = !activeSessionId && chatItems.some(item => (
         item && item.type === 'user' && !!item.deliveryState
       ));
       const canSend = !isMultiAgentReadOnly
         && !firstTurnPending
-        && (hasDraftText || hasReadyAttachment);
+        && (remoteChatActive ? (hasDraftText || hasRemoteFile)
+          : (controlledChatActive ? (hasDraftText || hasReadyAttachment)
+            : (hasDraftText || hasReadyAttachment)));
       const sceneCapabilityPreparing = sceneCapabilityStatus && sceneCapabilityStatus.kind === 'preparing';
       const canClearInput = hasDraftText && !voiceActive;
       function handleClearInput() {
@@ -1782,6 +2280,109 @@ const openChatExternalUrl = (url) => {
 
         if (!bridge.available) return false;
         const outgoing = String(text || '').trim();
+        if (controlledChatActive && !remoteChatActive) {
+          if (!controlledLinkReady || !controlledCapabilityBound || controlledCapabilityBusy) return false;
+          const sendIdentity = remoteSendIdentity;
+          const readyAttachments = attachments.filter(attachment => (
+            attachment?.status === 'ready' && attachment.result
+          ));
+          const taskText = outgoing || t.remoteConversation.attachmentOnlyPrompt;
+          try {
+            await bridge.desktopRemoteControl.controlledTaskSend(
+              controlledSession.sessionId,
+              taskText,
+              readyAttachments,
+              controlledSkillIds,
+            );
+            setRemoteSendError(current => (
+              current && current.identity === sendIdentity ? null : current
+            ));
+          } catch (failure) {
+            setRemoteSendError({
+              identity: sendIdentity,
+              code: String((failure && failure.code) || 'errorGeneric'),
+            });
+            throw failure;
+          }
+          return true;
+        }
+        if (remoteChatActive) {
+          // 会话引用只表示 A/B 通道已建立；Rust 仅在能力快照已经应用后才允许
+          // 构造 task intent。发送按钮、回车、语音与欢迎卡片最终都经过这里，
+          // 因此必须在统一入口拦截，不能只依赖按钮 disabled。
+          if (!remoteLinkReady) return false;
+          const sendIdentity = remoteSendIdentity;
+          if (!remoteBinding || !remoteNewDispatchReady) {
+            setRemoteSendError({ identity: sendIdentity, code: 'remote_task_intent_invalid' });
+            return false;
+          }
+          if (remoteModelError) {
+            setRemoteSendError({ identity: sendIdentity, code: remoteModelError });
+            return false;
+          }
+          const transferAttempt = remoteTransferGuard.start(sendIdentity);
+          const currentTransfer = () => remoteTransferGuard.isCurrent(transferAttempt, remoteSendIdentityRef.current);
+          try {
+            const taskText = outgoing || t.remoteConversation.attachmentOnlyPrompt;
+            const intent = newRemoteTaskIntent(
+              taskText,
+              effectiveRemoteModelSource,
+              selectedRemoteModelId,
+              remoteMode,
+              remoteMode === 'code' ? remoteWorkspaceId : null,
+              remoteSkillIds,
+            );
+            if (!intent) return false;
+            const prepared = await bridge.desktopRemoteControl.reserveRemoteTask(
+              remoteBinding.localSessionId, remoteBinding.remoteRef, intent,
+            );
+            const preparedOutcome = recordRemoteDispatch(
+              remoteBinding.localSessionId, remoteBinding.remoteRef, sendIdentity, taskText, prepared,
+              remoteProxyHistory,
+            );
+            setRemoteDispatchRevision(value => value + 1);
+            if (preparedOutcome.state !== 'prepared_not_sent' || !preparedOutcome.handle) return 'held';
+            if (!currentTransfer()) return 'held';
+            const selectedFiles = remoteFiles.slice();
+            setRemotePreparedFiles({ taskId: preparedOutcome.handle.taskId, files: selectedFiles });
+            let attachmentIds = [];
+            if (selectedFiles.length) {
+              setRemoteTransfer({ owner: transferAttempt, state: 'uploading', fileName: selectedFiles[0].name, receivedBytes: 0, totalBytes: selectedFiles[0].size });
+              attachmentIds = await uploadRemoteFiles(
+                bridge.desktopRemoteControl, remoteBinding, preparedOutcome.handle.taskId, selectedFiles,
+                progress => setRemoteTransfer(current => currentTransfer()
+                  ? { owner: transferAttempt, state: 'uploading', ...progress } : current),
+              );
+              if (!currentTransfer()) return 'held';
+              setRemotePreparedFiles({ taskId: preparedOutcome.handle.taskId, files: selectedFiles, attachmentIds });
+            }
+            const report = await bridge.desktopRemoteControl.commitRemoteTask(
+              remoteBinding.localSessionId, remoteBinding.remoteRef, preparedOutcome.handle, attachmentIds,
+            );
+            await bridge.desktopRemoteControl.readRemoteProxyHistory(remoteBinding.localSessionId).catch(() => null);
+            const outcome = recordRemoteDispatch(
+              remoteBinding.localSessionId, remoteBinding.remoteRef, sendIdentity, taskText, report,
+              remoteProxyHistory,
+            );
+            setRemoteDispatchRevision(value => value + 1);
+            setRemoteSendError(current => current?.identity === sendIdentity ? null : current);
+            if (currentTransfer()) {
+              setRemotePreparedFiles(null);
+              setRemoteFiles(current => current === remoteFiles ? [] : current);
+            }
+            if (outcome.state !== 'queued') return 'held';
+          } catch (failure) {
+            if (remoteSendIdentityRef.current === sendIdentity) {
+              setRemoteSendError({ identity: sendIdentity, code: String(failure?.code || 'errorGeneric') });
+            }
+            throw failure;
+          } finally {
+            if (remoteTransferGuard.finish(transferAttempt)) {
+              setRemoteTransfer(current => current?.owner === transferAttempt ? null : current);
+            }
+          }
+          return true;
+        }
         const matchedPersonalWorkbenchDraft = findPersonalWorkbenchTemplateDraft(outgoing);
         const templateId = personalWorkbenchTemplateIdRef.current
           || (matchedPersonalWorkbenchDraft && matchedPersonalWorkbenchDraft.template
@@ -1919,8 +2520,240 @@ const openChatExternalUrl = (url) => {
         // as-is: the voice task lane needs to tell "restored" apart from
         // accepted, while ordinary sends treat both as not-false.
         return dispatchResult;
-      }, [activeSessionId, dataVisualizationSceneActive, documentWritingSceneActive, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, t, visualPosterSceneActive]);
+      }, [activeSessionId, attachments, controlledCapabilityBound, controlledCapabilityBusy, controlledChatActive, controlledLinkReady, controlledSession.sessionId, controlledSkillIds, dataVisualizationSceneActive, documentWritingSceneActive, effectiveRemoteModelSource, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteBinding, remoteChatActive, remoteFiles, remoteMode, remoteModelError, remoteNewDispatchReady, remoteProxyHistory, remoteSendIdentity, remoteSkillIds, remoteTransferGuard, remoteWorkspaceId, selectedRemoteModelId, t, visualPosterSceneActive]);
 
+      // SessionStore mapping/lease establishment is owned by the A-side
+      // authenticated ensure/bind command, never by an implicit ChatView open.
+      useEffect(() => {
+        const requester = createCapabilityRequestLoop({
+          send: (sessionRef) => bridge.desktopRemoteControl.controllerCapabilitySend(sessionRef),
+          onBusy: (busy) => {
+            setRemoteCapabilityBusy(busy);
+            if (busy) setRemoteSendError(null);
+          },
+          onError: setRemoteCapabilityError,
+        });
+        remoteCapabilityRequesterRef.current = requester;
+        return () => {
+          requester.dispose();
+          remoteCapabilityRequesterRef.current = null;
+        };
+      }, []);
+
+      useEffect(() => {
+        const requester = remoteCapabilityRequesterRef.current;
+        if (!requester) return;
+        const sessionRef = remoteConnection?.sessionRef || null;
+        const requestKey = [
+          remoteConnection?.connectionId,
+          remoteConnection?.leaseEpoch,
+          remoteConnection?.remoteControlGeneration,
+          sessionRef,
+        ].map((part) => String(part || '')).join(':');
+        requester.update({
+          enabled: remoteChatActive
+            && !!remoteHandshakeBinding
+            && !!sessionRef
+            && (remoteConnection?.capabilityRevision == null || remoteConnection?.mappingConfirmed !== true)
+            && remoteConnection?.capabilityStatus !== 'error',
+          key: requestKey,
+          sessionRef,
+        });
+      }, [
+        remoteChatActive,
+        remoteHandshakeBinding,
+        remoteConnection?.capabilityRevision,
+        remoteConnection?.capabilityStatus,
+        remoteConnection?.connectionId,
+        remoteConnection?.leaseEpoch,
+        remoteConnection?.remoteControlGeneration,
+        remoteConnection?.sessionRef,
+        remoteConnection?.status,
+      ]);
+      const requestRemoteCapabilities = useCallback(() => {
+        const sessionRef = remoteConnection?.sessionRef;
+        if (!remoteHandshakeBinding || !sessionRef) return;
+        if (remoteCapabilityBusy) return;
+        setRemoteCapabilityBusy(true);
+        setRemoteCapabilityError(null);
+        setRemoteSendError(null);
+        bridge.desktopRemoteControl.controllerCapabilitySend(sessionRef)
+          .then(() => setRemoteCapabilityError(null))
+          .catch((failure) => setRemoteCapabilityError(String((failure && failure.code) || 'errorGeneric')))
+          .finally(() => setRemoteCapabilityBusy(false));
+      }, [remoteHandshakeBinding, remoteCapabilityBusy, remoteConnection]);
+      useEffect(() => {
+        if (remoteConnection?.capabilityError) {
+          setRemoteCapabilityError(String(remoteConnection.capabilityError));
+        } else if (remoteConnection?.capabilityStatus === 'ready') {
+          setRemoteCapabilityError(null);
+        }
+      }, [remoteConnection?.capabilityError, remoteConnection?.capabilityStatus]);
+      const remoteCapabilityMessage = !scopedRemoteConnection ? null
+        : remoteCapabilityError === 'capability_snapshot_timeout'
+          ? t.controllerConnection.remoteCapabilityTimeout
+          : (remoteCapabilityError ? t.controllerConnection.remoteCapabilityFailed : null);
+      const currentRemoteSendError = remoteSendError?.identity === remoteSendIdentity
+        ? remoteSendError.code
+        : null;
+      const activeRemoteDispatchError = remoteDispatchActionError?.localSessionId === activeSessionId
+        ? remoteDispatchActionError.code : null;
+      async function commitPreparedRemoteTask(item) {
+        if (item.origin !== 'process' || item.state !== 'prepared_not_sent'
+          || !item.handle || !remoteDispatchReady || !remoteBinding
+          || item.localSessionId !== remoteBinding.localSessionId
+          || item.remoteRef !== remoteBinding.remoteRef
+          || item.identity !== remoteSendIdentity) return;
+        setRemoteDispatchAction(item.taskId);
+        setRemoteDispatchActionError(null);
+        const transferAttempt = remoteTransferGuard.start(item.identity);
+        const currentTransfer = () => remoteTransferGuard.isCurrent(transferAttempt, remoteSendIdentityRef.current);
+        try {
+          const preparedFiles = remotePreparedFiles?.taskId === item.taskId ? remotePreparedFiles : null;
+          let attachmentIds = preparedFiles?.attachmentIds || [];
+          if (!attachmentIds.length && preparedFiles?.files?.length) {
+            setRemoteTransfer({ owner: transferAttempt, state: 'uploading', receivedBytes: 0, totalBytes: preparedFiles.files[0].size, fileName: preparedFiles.files[0].name });
+            attachmentIds = await uploadRemoteFiles(
+              bridge.desktopRemoteControl, remoteBinding, item.taskId, preparedFiles.files,
+              progress => setRemoteTransfer(current => currentTransfer()
+                ? { owner: transferAttempt, state: 'uploading', ...progress } : current),
+            );
+            if (!currentTransfer()) return;
+            setRemotePreparedFiles({ ...preparedFiles, attachmentIds });
+          }
+          const report = await bridge.desktopRemoteControl.commitRemoteTask(
+            item.localSessionId, item.remoteRef, item.handle, attachmentIds,
+          );
+          await bridge.desktopRemoteControl.readRemoteProxyHistory(item.localSessionId).catch(() => null);
+          const echoed = report?.retryHandle;
+          const sameHandle = echoed?.taskId === item.handle.taskId
+            && echoed?.clientRequestId === item.handle.clientRequestId
+            && echoed?.requestFingerprint === item.handle.requestFingerprint;
+          recordRemoteDispatch(item.localSessionId, item.remoteRef, item.identity, item.text,
+            sameHandle ? report : { state: 'outcome_unknown', retryHandle: item.handle },
+            remoteProxyHistory);
+          if (currentTransfer()) {
+            setRemotePreparedFiles(null);
+            setRemoteFiles(current => current === remoteFiles ? [] : current);
+          }
+          setRemoteDispatchRevision(value => value + 1);
+        } catch (failure) {
+          if (currentTransfer()) setRemoteDispatchActionError({ localSessionId: item.localSessionId, code: String(failure?.code || 'errorGeneric') });
+        } finally {
+          if (remoteTransferGuard.finish(transferAttempt)) {
+            setRemoteTransfer(current => current?.owner === transferAttempt ? null : current);
+            setRemoteDispatchAction(current => current === item.taskId ? null : current);
+          }
+        }
+      }
+      async function abandonRemoteTask(item) {
+        if (item.state !== 'prepared_not_sent' || !item.handle) return;
+        setRemoteDispatchAction(item.taskId);
+        setRemoteDispatchActionError(null);
+        try {
+          await bridge.desktopRemoteControl.abandonRemoteTask(
+            item.localSessionId, item.handle.clientRequestId, item.handle.taskId,
+          );
+          forgetRemoteDispatch(item.localSessionId, item.taskId);
+          if (item.text) {
+            bridge.chat.restoreTaskDraft(item.text, { sessionId: item.localSessionId, restored: false });
+          }
+          setRemoteDispatchRevision(value => value + 1);
+          setRemotePreparedFiles(current => current?.taskId === item.taskId ? null : current);
+          void bridge.desktopRemoteControl.readRemoteProxyHistory(item.localSessionId).catch(() => {});
+        } catch (failure) {
+          markRemoteDispatchPayloadLost(item.localSessionId, item.taskId);
+          await bridge.desktopRemoteControl.readRemoteProxyHistory(item.localSessionId).catch(() => null);
+          setRemoteDispatchRevision(value => value + 1);
+          setRemoteDispatchActionError({ localSessionId: item.localSessionId, code: String(failure?.code || 'errorGeneric') });
+        } finally {
+          setRemoteDispatchAction(null);
+        }
+      }
+      async function cancelCurrentRemoteTask() {
+        if (!remoteBinding || !currentRemoteTaskId || remoteDispatchAction) return;
+        setRemoteDispatchAction(currentRemoteTaskId);
+        setRemoteDispatchActionError(null);
+        try {
+          await bridge.desktopRemoteControl.cancelRemoteTask(
+            remoteBinding.localSessionId, remoteBinding.remoteRef, currentRemoteTaskId,
+          );
+          await bridge.desktopRemoteControl.readRemoteProxyHistory(remoteBinding.localSessionId).catch(() => null);
+        } catch (failure) {
+          setRemoteDispatchActionError({ localSessionId: remoteBinding.localSessionId, code: String(failure?.code || 'errorGeneric') });
+        } finally {
+          setRemoteDispatchAction(null);
+        }
+      }
+      function selectRemoteFiles(event) {
+        try {
+          setRemoteFiles(validateRemoteFiles(event.target.files));
+          setRemoteActionError(null);
+        } catch (failure) {
+          setRemoteActionError(String(failure?.message || 'remote_attachment_invalid'));
+        } finally {
+          event.target.value = '';
+        }
+      }
+      async function decideRemotePermission(permission, decision) {
+        if (!remoteBinding || permission.state !== 'pending') return;
+        setRemoteDispatchAction(permission.permissionRequestId);
+        setRemoteActionError(null);
+        try {
+          await bridge.desktopRemoteControl.permissionDecide(
+            remoteBinding.localSessionId, remoteBinding.remoteRef, permission.taskId,
+            permission.permissionRequestId, decision,
+          );
+          setRemotePermissions(current => current.filter(item => item.permissionRequestId !== permission.permissionRequestId));
+        } catch (failure) {
+          setRemoteActionError(remoteActionFailureCode(failure));
+        } finally {
+          setRemoteDispatchAction(null);
+        }
+      }
+      async function previewRemoteArtifact(artifact) {
+        if (!remoteBinding) return;
+        remoteArtifactPreviewTriggerRef.current = document.activeElement;
+        setRemoteDispatchAction(artifact.artifactId);
+        setRemoteActionError(null);
+        try {
+          const preview = await bridge.desktopRemoteControl.artifactPreview(
+            remoteBinding.localSessionId, remoteBinding.remoteRef, artifact.artifactId,
+          );
+          setRemoteArtifactPreview({ ...preview, displayName: artifact.displayName });
+        } catch (failure) {
+          setRemoteActionError(remoteActionFailureCode(failure));
+        } finally {
+          setRemoteDispatchAction(null);
+        }
+      }
+      function closeRemoteArtifactPreview() {
+        setRemoteArtifactPreview(null);
+      }
+      async function saveRemoteArtifact(artifact) {
+        if (!remoteBinding) return;
+        setRemoteDispatchAction(artifact.artifactId);
+        setRemoteActionError(null);
+        try {
+          const blob = await downloadRemoteArtifact(bridge.desktopRemoteControl, remoteBinding, artifact);
+          saveRemoteArtifactBlob(blob, artifact.displayName);
+        } catch (failure) {
+          setRemoteActionError(remoteActionFailureCode(failure));
+        } finally {
+          setRemoteDispatchAction(null);
+        }
+      }
+      const remoteSendMessage = currentRemoteSendError === 'remote_proxy_byte_budget'
+        ? t.remoteArchive.byteBudget
+        : currentRemoteSendError === 'task_session_busy'
+        ? t.remoteConversation.sessionBusy
+        : (currentRemoteSendError === 'temporary_model_capability_required'
+          ? t.remoteConversation.temporaryModelCapabilityRequired
+          : (currentRemoteSendError === 'remote_model_required'
+            ? t.remoteConversation.modelRequired
+            : (currentRemoteSendError === 'model_credential_unavailable'
+              ? t.remoteConversation.controlledModelCredentialUnavailable
+              : (currentRemoteSendError ? t.remoteConversation.errorGeneric : null))));
       const sendChatMessage = useCallback(async (text, voiceContext) => {
         const operationId = voiceContext?.operationId
           || (bridge.voice?.getVoiceOperationId
@@ -1929,7 +2762,7 @@ const openChatExternalUrl = (url) => {
         if (operationId && bridge.voice?.beginVoiceSubmission) bridge.voice.beginVoiceSubmission(operationId);
         try {
           const accepted = await dispatchChatMessage(text, { voiceOperationId: operationId }, voiceContext?.draftOwner);
-          if ((accepted === false || accepted === 'restored') && operationId
+          if ((accepted === false || accepted === 'restored' || accepted === 'held') && operationId
             && bridge.voice?.completeVoiceSubmission) {
             bridge.voice.completeVoiceSubmission(operationId, null, false);
           }
@@ -1957,7 +2790,7 @@ const openChatExternalUrl = (url) => {
           sessionId={activeSessionId}
           theme={theme}
           t={t}
-          editable={!busy && !isMultiAgentReadOnly && item.id === lastUserId}
+          editable={!busy && !isMultiAgentReadOnly && !item.remote && item.id === lastUserId}
           conversationVariant="unified"
         />
       ), [activeSessionId, busy, isMultiAgentReadOnly, lastUserId, t, theme]);
@@ -2009,7 +2842,7 @@ const openChatExternalUrl = (url) => {
           : raw;
         sendChatMessage(scopedText);
       }, [selectedDesignElement, sendChatMessage]);
-      const primaryVoiceDisabled = !bridge.available || voiceBusy;
+      const primaryVoiceDisabled = !bridge.available || voiceBusy || (remoteChatActive && !remoteLinkReady);
       const voiceAsrSetup = (bs && bs.voiceAsrSetup) || { open: false };
       const voiceAsrSetupPublicationReady = useRightDockOcclusion(
         'voice-asr-setup',
@@ -2391,7 +3224,14 @@ const openChatExternalUrl = (url) => {
 
       async function handleSend() {
         // 不再因 busy 拦截:bridge.chat.sendMessage 在生成中会把这句排队(本轮跑完自动发)。
-        if (isMultiAgentReadOnly || !canSend) return;
+        // 远程能力准备不是生成中的「可排队」状态：快照到达前 Rust 无法构造
+        // task intent，必须保留草稿并等待 remoteLinkReady。
+        if (
+          isMultiAgentReadOnly
+          || !canSend
+          || (remoteChatActive && !remoteNewDispatchReady)
+          || (controlledChatActive && !remoteChatActive && !controlledLinkReady)
+        ) return;
         if (chatVoice && chatVoice.editPreview) {
           await chatVoice.applyVoiceEditPreview({ send: true });
           return;
@@ -2402,6 +3242,11 @@ const openChatExternalUrl = (url) => {
           return;
         }
         const text = constrained.text;
+        const sentSessionId = activeSessionId;
+        const sentRemoteIdentity = remoteComposerIdentity;
+        const mayRestore = () => !remoteTranscriptActive || sameRemoteComposerOwner(
+          sentSessionId, sentRemoteIdentity, activeSessionIdRef.current, remoteComposerIdentityRef.current,
+        );
         // Clear the composer the moment the button is clicked (before the
         // await returns); on failure (reserve conflict etc.) or a notice-only
         // not-dispatched resolution (attachments still parsing, remote-turn
@@ -2417,13 +3262,19 @@ const openChatExternalUrl = (url) => {
         setInputText('');
         try {
           const accepted = await sendChatMessage(text);
-          if (!accepted) {
+          if (!accepted && mayRestore()) {
             if (inputTextRef.current === '') setInputText(text);
             else if (text) bridge.chat.prefillComposer(text, true);
+          } else if (!accepted && remoteTranscriptActive && sentSessionId) {
+            bridge.chat.restoreTaskDraft(text, { sessionId: sentSessionId, restored: false });
           }
         } catch (error) {
-          if (inputTextRef.current === '') setInputText(text);
-          else if (text) bridge.chat.prefillComposer(text, true);
+          if (mayRestore()) {
+            if (inputTextRef.current === '') setInputText(text);
+            else if (text) bridge.chat.prefillComposer(text, true);
+          } else if (remoteTranscriptActive && sentSessionId) {
+            bridge.chat.restoreTaskDraft(text, { sessionId: sentSessionId, restored: false });
+          }
           // Swallow here: the bridge already surfaced the failure (notice +
           // restore), and the primary send paths (Enter / send button) have
           // no catch of their own — a rethrow would only produce an
@@ -2622,7 +3473,7 @@ const openChatExternalUrl = (url) => {
             }
             // Voice task delivery treats "restored" as not accepted (the text
             // is back, not sent); ordinary callers map it through to false.
-            return result === 'restored' ? false : result;
+            return result === 'restored' || result === 'held' ? false : result;
           } catch (error) {
             if (bridge.chat.restoreTaskDraft) bridge.chat.restoreTaskDraft(constrained.text, owner);
             console.warn('[voice-input] task send failed after writeback', error);
@@ -2731,7 +3582,7 @@ const openChatExternalUrl = (url) => {
       }
 
       async function handlePaste(e) {
-        if (isWeb) return;
+        if (isWeb || remoteTranscriptActive) return;
         // WebKit-compatible image filtering + FileReader byte reads (incl. jpeg→jpg normalization) live in the shared module.
         const images = collectClipboardImages(e);
         if (images.length) {
@@ -2792,7 +3643,7 @@ const openChatExternalUrl = (url) => {
         <div className="flex-1 flex flex-row w-full h-full min-h-0 relative z-10 animate-in fade-in duration-300">
           <div ref={chatRootRef} className="flex-1 flex flex-col min-w-0 relative h-full">
             <ComposerAttachmentDropOverlay
-              enabled={bridge.available && (!isWeb || can('deviceFileUpload'))}
+              enabled={!remoteChatActive && bridge.available && (!isWeb || can('deviceFileUpload'))}
               onFiles={files => bridge.attachments.uploadDeviceFiles(files)}
               dark={theme === 'dark'}
               variant={isWeb ? 'web' : 'desktop'}
@@ -2802,6 +3653,49 @@ const openChatExternalUrl = (url) => {
           {/* Top Header (浮动) */}
           <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-center z-20 pointer-events-none">
             <div className="flex items-center gap-2 min-w-0">
+              {controlledChatActive && (
+                <div
+                  data-testid="chat-controlled-status"
+                  role="status"
+                  title={controlledDevice.controllerDeviceName
+                    ? `${t.controlledDevice.controlledStatus}: ${controlledDevice.controllerDeviceName}`
+                    : t.controlledDevice.controlledStatus}
+                  className={`pointer-events-auto flex h-10 min-w-0 items-center gap-1.5 rounded-full border px-3 text-[13px] font-medium ${'border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-300'}`}
+                >
+                  <Monitor size={15} className="shrink-0" />
+                  <span className="shrink-0">{t.controlledDevice.controlledStatus}</span>
+                  {controlledDevice.controllerDeviceName && (
+                    <span className="max-w-[180px] truncate text-[11px] opacity-80">
+                      {controlledDevice.controllerDeviceName}
+                    </span>
+                  )}
+                  {controlledDevice.status === 'reconnecting' && (
+                    <span className="max-w-[180px] truncate text-[11px] opacity-80">
+                      {t.controlledDevice.statusReconnecting}
+                    </span>
+                  )}
+                </div>
+              )}
+              {remoteChatActive && (
+                <div
+                  data-testid="chat-remote-status"
+                  title={scopedRemoteConnection?.deviceName
+                    ? `${remoteStatusLabel}: ${scopedRemoteConnection.deviceName}` : remoteStatusLabel}
+                  className={`pointer-events-auto flex h-10 items-center gap-1.5 rounded-full border px-3 text-[13px] font-medium ${'border-blue-500/20 bg-blue-500/10 text-[#1A73E8] dark:border-blue-400/20 dark:bg-blue-400/10 dark:text-[#8AB4F8]'}`}
+                >
+                  <Monitor size={15} className="shrink-0" />
+                  <span className="max-w-[220px] truncate">{remoteStatusLabel}</span>
+                  <span
+                    className={`text-[11px] ${scopedRemoteConnection?.sessionRef ? 'opacity-80' : 'animate-pulse motion-reduce:animate-none opacity-90'}`}
+                  >
+                    {scopedRemoteConnection?.sessionRef
+                      ? (effectiveRemoteModelSource === 'controller_temporary'
+                        ? t.remoteConversation.modelSourceMine
+                        : t.controllerConnection.modelSourceDevice)
+                      : t.controllerConnection.remoteSessionPreparing}
+                  </span>
+                </div>
+              )}
               {scheduledRunContext && (
                 <button type="button" onClick={onBackScheduledRun}
                   data-testid="scheduled-run-back"
@@ -2838,7 +3732,7 @@ const openChatExternalUrl = (url) => {
                   <span className="max-sm:hidden">{t.uiAuxChat.openLabel}</span>
                 </button>
               )}
-              {activeSessionId && (
+              {activeSessionId && !remoteTranscriptActive && (
                 <RunningAgentsOverlay
                   sessionId={activeSessionId}
                   theme={theme}
@@ -2846,7 +3740,7 @@ const openChatExternalUrl = (url) => {
                   swarmOn={swarmModeOn}
                 />
               )}
-              {activeSessionId && (
+              {activeSessionId && !remoteTranscriptActive && (
                 <ChatRightDockSwitcher
                   theme={theme}
                   artifactsLabel={t.artifacts}
@@ -2867,13 +3761,328 @@ const openChatExternalUrl = (url) => {
           {/* 有消息时底部留白由列表内的实体 spacer 承担，避免 WebKitGTK/Safari
               不把 overflow flex 容器的尾部 padding 完整计入 scrollHeight。
               空态不滚动，仍需 paddingBottom 让欢迎语在悬浮输入框上方居中。 */}
-          <div ref={scrollRef} data-testid="chat-scroll"
+          <div ref={scrollRef} data-testid="chat-scroll" data-coordination-id={remoteUiCoordinationId || undefined}
             style={{
               ...responsiveGutterStyle,
               overflowAnchor: 'none',
               ...(hasMessages ? {} : { paddingBottom: (composerH ? composerH + 48 : 160) + 'px' }),
             }}
             className={`flex-1 min-h-0 min-w-0 overflow-y-auto custom-scrollbar flex flex-col pt-20 max-sm:pt-16 ${hasMessages ? 'justify-start' : 'items-center justify-center'}`}>
+
+            {remoteChatActive && (
+              <div
+                data-testid="chat-remote-status-banner"
+                role="status"
+                aria-live="polite"
+                className={`mb-4 w-full max-w-[800px] px-4 max-sm:px-3 ${hasMessages ? 'mx-auto' : ''}`}
+              >
+                <div className={`flex flex-wrap items-center gap-2 rounded-[20px] border px-4 py-3 text-[13px] font-medium shadow-sm ${'border-blue-500/20 bg-blue-500/10 text-[#174EA6] dark:border-blue-400/20 dark:bg-blue-400/10 dark:text-[#A8C7FA]'}`}>
+                  <Monitor size={16} className="shrink-0" />
+                  <span>{remoteStatusLabel}</span>
+                  {scopedRemoteConnection?.deviceName && (
+                    <span className="min-w-0 truncate opacity-80">· {scopedRemoteConnection.deviceName}</span>
+                  )}
+                  <span className={`text-[12px] ${scopedRemoteConnection?.sessionRef ? 'opacity-80' : 'animate-pulse motion-reduce:animate-none opacity-90'}`}>
+                    {remotePresentation === 'offline' ? t.remoteConversation.offlineHint
+                      : remotePresentation === 'reconnecting' ? t.controllerConnection.stateReconnecting
+                      : scopedRemoteConnection?.capabilityStatus === 'error'
+                      ? t.controllerConnection.remoteCapabilityFailed
+                      : (scopedRemoteConnection?.capabilityRevision != null
+                        ? t.controllerConnection.remoteSessionReady
+                        : (scopedRemoteConnection?.sessionRef ? t.controllerConnection.remoteCapabilityPreparing : t.controllerConnection.remoteSessionPreparing))}
+                  </span>
+                  <div className="ml-auto flex min-w-0 items-center gap-2">
+                    <label className="flex items-center gap-1 text-[12px]">
+                      <span className="opacity-70">{t.remoteConversation.modeLabel}</span>
+                      <select
+                        data-testid="chat-remote-mode"
+                        aria-label={t.remoteConversation.modeLabel}
+                        value={remoteMode}
+                        onChange={(event) => setRemoteMode(event.target.value)}
+                        disabled={remoteCapabilityBusy || !remoteLinkReady || remoteModes.length === 0}
+                        className="min-w-0 max-w-[140px] rounded-full bg-white/80 px-2 py-1 text-[12px] outline-none dark:bg-[#1F2023]"
+                      >
+                        {remoteModes.includes('chat') && <option value="chat">{t.remoteConversation.modeChat}</option>}
+                        {remoteModes.includes('code') && <option value="code">{t.remoteConversation.modeCode}</option>}
+                      </select>
+                    </label>
+                    {remoteMode === 'code' && (
+                      <select
+                        data-testid="chat-remote-workspace"
+                        aria-label={t.remoteConversation.workspaceLabel}
+                        value={remoteWorkspaceId}
+                        onChange={(event) => setRemoteWorkspaceId(event.target.value)}
+                        disabled={!remoteLinkReady || remoteWorkspaces.length === 0}
+                        className="min-w-0 max-w-[180px] rounded-full bg-white/80 px-2 py-1 text-[12px] outline-none dark:bg-[#1F2023]"
+                      >
+                        <option value="">{t.remoteConversation.workspaceRequired}</option>
+                        {remoteWorkspaces.map(workspace => (
+                          <option key={workspace.workspaceId} value={workspace.workspaceId}>
+                            {workspace.displayName || workspace.workspaceId}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <span className="shrink-0 text-[12px] opacity-70">{t.remoteConversation.modelPickerTitle}</span>
+                    <select
+                      data-testid="chat-remote-model-source"
+                      aria-label={t.remoteConversation.modelPickerTitle}
+                      value={effectiveRemoteModelSource}
+                      onChange={(event) => onRemoteModelSourceChange?.(event.target.value)}
+                      disabled={remoteCapabilityBusy || !remoteLinkReady}
+                      className="min-w-0 max-w-[180px] rounded-full bg-white/80 px-2 py-1 text-[12px] outline-none dark:bg-[#1F2023]"
+                    >
+                      <option value="controlled_device">{t.remoteConversation.modelSourceDevice}</option>
+                      {remoteMode === 'chat' && remoteTemporaryModelAvailable && (
+                        <option value="controller_temporary">{t.remoteConversation.modelSourceMine}</option>
+                      )}
+                    </select>
+                    {effectiveRemoteModelSource === 'controller_temporary' && (
+                      <select
+                        data-testid="chat-remote-selected-model"
+                        aria-label={t.remoteConversation.modelPickerTitle}
+                        value={selectedRemoteModelId || ''}
+                        onChange={(event) => setRemoteModelSelection({
+                          key: remoteModelBindingKey, modelId: event.target.value,
+                        })}
+                        disabled={!remoteLinkReady || exportableRemoteModels.length === 0}
+                        className="min-w-0 max-w-[180px] rounded-full bg-white/80 px-2 py-1 text-[12px] outline-none dark:bg-[#1F2023]"
+                      >
+                        <option value="">{t.remoteConversation.modelPickerTitle}</option>
+                        {exportableRemoteModels.map(model => (
+                          <option key={model.modelId} value={model.modelId}>{model.displayName || model.modelId}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </div>
+                {remoteCapabilities && (remoteSkills.length > 0 || remoteTools.length > 0) && (
+                  <div data-testid="chat-remote-capabilities" className="mt-2 rounded-xl border border-blue-500/15 px-3 py-2 text-[12px]">
+                    {remoteSkills.length > 0 && (
+                      <fieldset className="flex flex-wrap items-center gap-2">
+                        <legend className="mr-1 font-medium">{t.remoteConversation.skillsLabel}</legend>
+                        {remoteSkills.map(skill => (
+                          <label key={skill.skillId} className="inline-flex items-center gap-1">
+                            <input type="checkbox" checked={remoteSkillIds.includes(skill.skillId)}
+                              onChange={(event) => setRemoteSkillIds(current => event.target.checked
+                                ? [...new Set([...current, skill.skillId])]
+                                : current.filter(id => id !== skill.skillId))} />
+                            <span>{skill.displayName || skill.skillId}</span>
+                          </label>
+                        ))}
+                      </fieldset>
+                    )}
+                    {remoteTools.length > 0 && (
+                      <div className="mt-1" aria-label={t.remoteConversation.toolsLabel}>
+                        <span className="font-medium">{t.remoteConversation.toolsLabel}: </span>
+                        <span>{remoteTools.map(tool => tool.displayName || tool.toolId).join(' · ')}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {remoteCapabilityMessage && (
+                  <div role="alert" className="mt-2 flex items-center gap-2 px-1 text-[12px] text-[#EA4335]">
+                    <span>{remoteCapabilityMessage}</span>
+                    {remoteCapabilityMessage && scopedRemoteConnection?.sessionRef && (
+                      <button
+                        type="button"
+                        onClick={requestRemoteCapabilities}
+                        disabled={remoteCapabilityBusy}
+                        className="rounded-full border border-[#EA4335]/40 px-2 py-0.5 disabled:opacity-60"
+                      >
+                        {t.controllerConnection.remoteCapabilityRetry}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {remoteTranscriptActive && remoteSendMessage && (
+              <div
+                data-testid="chat-remote-send-error"
+                role="alert"
+                className={`mb-4 w-full max-w-[800px] px-5 text-[12px] text-[#EA4335] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}
+              >
+                {remoteSendMessage}
+              </div>
+            )}
+
+            {remoteChatActive && bs?.remoteProxyDraftError === activeSessionId && (
+              <div role="alert" className={`mb-4 w-full max-w-[800px] px-5 text-[12px] text-[#EA4335] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
+                {t.remoteConversation.draftCapacityExceeded}
+              </div>
+            )}
+
+            {controlledChatActive && (controlledSkills.length > 0 || controlledCapabilityBusy || controlledCapabilityError) && (
+              <fieldset
+                data-testid="chat-controlled-capabilities"
+                className={`mb-4 w-full max-w-[800px] rounded-xl border border-emerald-500/20 px-4 py-3 text-[12px] ${hasMessages ? 'mx-auto' : ''}`}
+              >
+                <legend className="px-1 font-medium">{t.remoteConversation.skillsLabel}</legend>
+                <div className="flex flex-wrap items-center gap-2">
+                  {controlledSkills.map(skill => (
+                    <label key={skill.skillId} className="inline-flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={controlledSkillIds.includes(skill.skillId)}
+                        onChange={(event) => setControlledSkillIds(current => event.target.checked
+                          ? [...new Set([...current, skill.skillId])]
+                          : current.filter(id => id !== skill.skillId))}
+                      />
+                      <span>{skill.displayName || skill.skillId}</span>
+                    </label>
+                  ))}
+                  {controlledCapabilityBusy && (
+                    <span role="status">{t.controllerConnection.remoteCapabilityPreparing}</span>
+                  )}
+                  {controlledCapabilityError && (
+                    <span role="alert" className="inline-flex items-center gap-2 text-[#EA4335]">
+                      {t.controllerConnection.remoteCapabilityFailed}
+                      <button type="button" onClick={() => { void loadControlledCapabilities(); }}
+                        disabled={controlledCapabilityBusy}
+                        className="rounded-full border border-current px-2 py-0.5 disabled:opacity-60">
+                        {t.controllerConnection.remoteCapabilityRetry}
+                      </button>
+                    </span>
+                  )}
+                </div>
+              </fieldset>
+            )}
+
+            {remoteChatActive && (currentRemoteTaskId || remotePermissions.length > 0) && (
+              <section data-testid="chat-remote-task-actions" data-coordination-id={remoteUiCoordinationId || undefined} aria-label={t.remoteConversation.taskActions}
+                className={`mb-4 w-full max-w-[800px] px-5 text-[12px] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
+                {currentRemoteTaskId && (
+                  <div className="mb-2 flex items-center gap-2 rounded-xl border border-blue-500/20 bg-blue-500/10 px-3 py-2">
+                    <span className="min-w-0 flex-1 truncate">{t.remoteConversation.runningTask}: {currentRemoteTaskId}</span>
+                    <button type="button" onClick={cancelCurrentRemoteTask} disabled={!!remoteDispatchAction}
+                      aria-label={t.remoteConversation.cancelTask}
+                      className="rounded-full border border-current px-2 py-1 disabled:opacity-50">
+                      {t.remoteConversation.cancelTask}
+                    </button>
+                  </div>
+                )}
+                {remotePermissions.map(permission => (
+                  <div key={permission.permissionRequestId} role="alert" data-coordination-id={permission.permissionRequestId} className="mb-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                    <div className="font-medium">{t.remoteConversation.permissionRequest}: {t.controlledDevice[permissionOperationCopyKey(permission.operationType)]}</div>
+                    {permissionRedactionCopyKey(permission.preview) && <p className="mt-1 whitespace-pre-wrap break-words">{t.controlledDevice[permissionRedactionCopyKey(permission.preview)]}</p>}
+                    {permissionRedactionCopyKey(permission.targetScope) && <p className="mt-1 opacity-70">{t.controlledDevice[permissionRedactionCopyKey(permission.targetScope)]}</p>}
+                    {permission.state === 'pending' ? (
+                      <div className="mt-2 flex gap-2">
+                        <button type="button" data-testid="chat-remote-permission-allow" data-coordination-id={permission.permissionRequestId} onClick={() => decideRemotePermission(permission, 'allow')} disabled={!!remoteDispatchAction}
+                          className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.permissionAllow}</button>
+                        <button type="button" data-testid="chat-remote-permission-deny" data-coordination-id={permission.permissionRequestId} onClick={() => decideRemotePermission(permission, 'deny')} disabled={!!remoteDispatchAction}
+                          className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.permissionDeny}</button>
+                      </div>
+                    ) : <div className="mt-1 text-amber-700 dark:text-amber-300">{t.remoteConversation.permissionTimedOut}</div>}
+                  </div>
+                ))}
+              </section>
+            )}
+
+            {remoteChatActive && remoteArtifacts.length > 0 && (
+              <section data-testid="chat-remote-artifacts" aria-label={t.remoteConversation.artifacts}
+                className={`mb-4 w-full max-w-[800px] px-5 text-[12px] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
+                <div className="rounded-xl border border-black/10 bg-black/[0.02] px-3 py-2 dark:border-white/10 dark:bg-white/[0.04]">
+                  <div className="mb-2 font-medium">{t.remoteConversation.artifacts}</div>
+                  {remoteArtifacts.map(artifact => (
+                    <div key={artifact.artifactId} className="flex items-center gap-2 border-t border-black/5 py-2 first:border-t-0 dark:border-white/10">
+                      <FileText size={15} aria-hidden="true" />
+                      <span className="min-w-0 flex-1 truncate">{artifact.displayName}</span>
+                      {artifact.previewKind === 'text' && (
+                        <button type="button" data-testid="chat-remote-artifact-preview" onClick={() => previewRemoteArtifact(artifact)} disabled={!!remoteDispatchAction}
+                          className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.previewArtifact}</button>
+                      )}
+                      <button type="button" data-testid="chat-remote-artifact-download" onClick={() => saveRemoteArtifact(artifact)} disabled={!!remoteDispatchAction}
+                        className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.downloadArtifact}</button>
+                      {artifact.previewKind === 'download_only' && (
+                        <span className="text-[11px] opacity-70">{t.remoteConversation.artifactDownloadOnly}</span>
+                      )}
+                      {artifact.previewKind === 'unsupported' && (
+                        <span className="text-[11px] opacity-70">{t.remoteConversation.artifactPreviewUnsupported}</span>
+                      )}
+                    </div>
+                  ))}
+                  {remoteArtifactPreview && (
+                    <div ref={remoteArtifactPreviewDialogRef} role="dialog" aria-modal="true"
+                      aria-labelledby="chat-remote-artifact-preview-title" tabIndex={-1}
+                      onKeyDown={event => {
+                        if (event.key === 'Escape') {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          closeRemoteArtifactPreview();
+                          return;
+                        }
+                        constrainDialogFocus(event, remoteArtifactPreviewDialogRef.current);
+                      }}
+                      className="mt-2 rounded-lg bg-black/5 p-3 dark:bg-white/5">
+                      <div className="flex items-center gap-2 font-medium">
+                        <span id="chat-remote-artifact-preview-title" className="min-w-0 flex-1 truncate">{remoteArtifactPreview.displayName}</span>
+                        <button ref={remoteArtifactPreviewCloseRef} data-testid="chat-remote-artifact-preview-close" type="button" onClick={closeRemoteArtifactPreview} aria-label={t.uiArtifacts.closePreviewAria}><X size={15} /></button>
+                      </div>
+                      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words">{remoteArtifactPreview.text || t.remoteConversation.previewUnavailable}</pre>
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
+
+            {remoteChatActive && remoteActionError && (
+              <div role="alert" data-testid="chat-remote-action-error" className={`mb-4 w-full max-w-[800px] px-5 text-[12px] text-[#EA4335] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
+                {remoteActionError === 'result_unknown'
+                  ? t.remoteConversation.actionResultUnknown
+                  : t.remoteConversation.actionFailed}
+              </div>
+            )}
+
+            {remoteChatActive && pendingRemoteDispatches.length > 0 && (
+              <div data-testid="chat-remote-pending-dispatches" className={`mb-4 w-full max-w-[800px] px-5 text-[12px] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
+                {pendingRemoteDispatches.map(item => (
+                  <div key={item.taskId} role="status" className="mb-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                    <div>{item.state === 'prepared_not_sent'
+                      ? (item.origin === 'history' ? t.remoteConversation.preparedPayloadLost : t.remoteConversation.preparedNotSent)
+                      : t.remoteConversation.outcomeUnknownNoResend}</div>
+                    {item.handle && <div className="mt-1 font-mono opacity-70">{item.handle.taskId}</div>}
+                    {item.state === 'prepared_not_sent' && item.handle && (
+                      <div className="mt-2 flex gap-2">
+                        {item.origin === 'process' && item.identity === remoteSendIdentity && remoteDispatchReady && (
+                          <button type="button" onClick={() => commitPreparedRemoteTask(item)} disabled={!!remoteDispatchAction}
+                            className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.commitPreparedTask}</button>
+                        )}
+                        <button type="button" onClick={() => abandonRemoteTask(item)} disabled={!!remoteDispatchAction || !remoteLinkReady}
+                          className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.abandonPreparedTask}</button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {activeRemoteDispatchError && <div role="alert">{t.remoteConversation.pendingActionFailed}</div>}
+              </div>
+            )}
+
+            {showControlledTask && (
+              <div
+                data-testid="chat-controlled-task-banner"
+                role="status"
+                aria-live="polite"
+                className={`mb-4 w-full max-w-[800px] px-4 max-sm:px-3 ${hasMessages ? 'mx-auto' : ''}`}
+              >
+                <div className="rounded-[20px] border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-[#174EA6] shadow-sm dark:border-blue-400/20 dark:bg-blue-400/10 dark:text-[#A8C7FA]">
+                  <div className="flex items-center gap-2 text-[13px] font-medium">
+                    <Monitor size={16} className="shrink-0" />
+                    <span>{t.controlledDevice.runningTasks(controlledActiveTasks.length)}</span>
+                    <span className="ml-auto text-[12px] opacity-75">
+                      {t.remoteConversation[taskStatusKey(controlledActiveTasks[0].status)]}
+                    </span>
+                  </div>
+                  {controlledActiveTasks[0].text && (
+                    <p className="mt-2 line-clamp-3 whitespace-pre-wrap break-words text-[13px] text-[#1F1F1F] dark:text-[#E3E3E3]">
+                      {controlledActiveTasks[0].text}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
 
             {!hasMessages && !welcomeToolId && (
               /* Gemini Style Centered Empty State */
@@ -3024,10 +4233,10 @@ const openChatExternalUrl = (url) => {
             style={responsiveGutterStyle}
           >
             <div className="max-w-[800px] w-full mx-auto">
-              {COMPUTER_USE_ENABLED && (
+              {!remoteTranscriptActive && COMPUTER_USE_ENABLED && (
                 <ComputerUseBanner slice={computerUseSlice} copy={computerUseCopy} />
               )}
-              {!scheduledRunContext && !conversationStarted && (
+              {!remoteTranscriptActive && !scheduledRunContext && !conversationStarted && (
                 <HomeModeSwitcher
                   mode={pinvouMode}
                   codeSupported={codeModeAvailable}
@@ -3041,7 +4250,7 @@ const openChatExternalUrl = (url) => {
                 attachments and scene metadata. Engine-injected steer chips
                 are mutated only after the bridge confirms their withdrawal.
                 ⚡ remains the explicit interrupt-and-send action. */}
-            {(queued.length > 0 || queuedActionError) && (
+            {!remoteTranscriptActive && (queued.length > 0 || queuedActionError) && (
               <div className={`mb-2 rounded-2xl border shadow-lg backdrop-blur-xl overflow-hidden max-h-[40vh] overflow-y-auto ${'border-black/[0.06] bg-white/90 dark:border-white/10 dark:bg-[#161618]/90'}`}>
                 {queued.map((q, index) => (
                   <div key={q.id}
@@ -3149,7 +4358,25 @@ const openChatExternalUrl = (url) => {
             )}
             {/* 模型选择器/知识库挂载已挪进下方底栏(ComposerModelSelector/ComposerKbSelector) */}
             {/* 附件 chips */}
-            <AttachmentChips
+            {remoteChatActive && remoteFiles.length > 0 && (
+              <div data-testid="chat-remote-attachments" data-coordination-id={remoteUiCoordinationId || undefined} className="mb-2 flex flex-wrap gap-2 px-2">
+                {remoteFiles.map((file, index) => (
+                  <div key={`${file.name}:${file.size}:${index}`} className="flex max-w-full items-center gap-2 rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1.5 text-[12px]">
+                    <Paperclip size={14} aria-hidden="true" />
+                    <span className="max-w-[240px] truncate">{file.name}</span>
+                    <button type="button" data-testid="chat-remote-attachment-remove" onClick={() => setRemoteFiles(files => files.filter((_, itemIndex) => itemIndex !== index))}
+                      disabled={remoteTransfer?.state === 'uploading'} aria-label={t.remoteConversation.removeAttachment(file.name)}
+                      className="rounded-full p-0.5 disabled:opacity-50"><X size={13} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {remoteChatActive && remoteTransfer?.state === 'uploading' && (
+              <div role="status" aria-live="polite" className="mb-2 px-3 text-[12px] text-[#1A73E8] dark:text-[#8AB4F8]">
+                {t.remoteConversation.uploadingAttachment(remoteTransfer.fileName || '', remoteTransfer.receivedBytes || 0, remoteTransfer.totalBytes || 0)}
+              </div>
+            )}
+            {!remoteChatActive && <AttachmentChips
               attachments={attachments}
               onRemove={id => bridge.attachments.removeAttachment(id)}
               dark={theme === 'dark'}
@@ -3159,15 +4386,15 @@ const openChatExternalUrl = (url) => {
               removeLabel={t.uiAttachments.remove}
               formatError={formatAttachmentError}
               className="mb-2 px-2"
-            />
-            {imageInputWarning && (
+            />}
+            {!remoteTranscriptActive && imageInputWarning && (
               <div data-testid="image-capability-warning"
                 className="flex items-center gap-2 mb-2 px-3 py-2 rounded-2xl text-[12px] leading-5 bg-amber-500/10 text-amber-700 dark:text-amber-300">
                 <AlertTriangle size={14} className="shrink-0 text-amber-500" />
                 <span className="min-w-0">{imageInputWarning}</span>
               </div>
             )}
-            {imagePrivacyHint && (
+            {!remoteTranscriptActive && imagePrivacyHint && (
               <div data-testid="image-privacy-hint"
                 className="mb-2 px-3 text-[11px] leading-4 text-black/45 dark:text-white/45">
                 {imagePrivacyHint}
@@ -3318,6 +4545,7 @@ const openChatExternalUrl = (url) => {
                 onChange={e => handleComposerInputChange(e.target.value)}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
+                readOnly={remoteChatActive && !remoteLinkReady}
                 maxLength={CHAT_INPUT_MAX_LENGTH}
                 placeholder={composerPlaceholder}
                 rows={1}
@@ -3332,7 +4560,8 @@ const openChatExternalUrl = (url) => {
               )}
               <div className="flex items-center justify-between mt-1.5 gap-2">
                 <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                  <ComposerAttachButton t={t} compact={composerCompact} />
+                  {!remoteTranscriptActive && <>
+                    <ComposerAttachButton t={t} compact={composerCompact} />
                   {/* Draft-mode workspace selector (matching the code mode draft
                       selector): desktop only + draft mode; the Web bridge lacks
                       sessions.setDraftWorkspace/pickDraftWorkspace and the
@@ -3367,7 +4596,23 @@ const openChatExternalUrl = (url) => {
                       entry hides up front instead of erroring on click. */}
                   <ComposerModelSelector t={t} bs={bs} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} multiAgentAvailable={!scheduledRunContext} />
                   <ComposerToolMenu t={t} onGotoTools={onGotoTools} sessionId={bs && bs.activeSessionId} compact={composerCompact} activeSkill={bs && bs.activeSkill} />
-                  <ComposerKbSelector t={t} bs={bs} compact={composerCompact} />
+                    <ComposerKbSelector t={t} bs={bs} compact={composerCompact} />
+                  </>}
+                  {controlledChatActive && !remoteChatActive && (
+                    <ComposerAttachButton t={t} compact={composerCompact} />
+                  )}
+                  {remoteChatActive && (
+                    <>
+                      <input ref={remoteFileInputRef} data-testid="chat-remote-attachment-input" data-coordination-id={remoteUiCoordinationId || undefined} type="file" multiple className="hidden" onChange={selectRemoteFiles}
+                        aria-label={t.remoteConversation.addAttachment} />
+                      <button type="button" onClick={() => remoteFileInputRef.current?.click()}
+                        disabled={!remoteLinkReady || !!remoteDispatchAction || remoteTransfer?.state === 'uploading'}
+                        aria-label={t.remoteConversation.addAttachment} title={t.remoteConversation.addAttachment}
+                        className="flex h-9 items-center gap-1 rounded-full px-2 text-[#5F6368] hover:bg-black/5 disabled:opacity-50 dark:text-[#C4C7C5] dark:hover:bg-white/10">
+                        <Paperclip size={17} /><span className={composerCompact ? 'sr-only' : ''}>{t.remoteConversation.addAttachment}</span>
+                      </button>
+                    </>
+                  )}
                 </div>
                 {hasDraftText && (
                   <button onClick={handleClearInput} disabled={!canClearInput} aria-label={t.clearInput} title={t.clearInput}
@@ -3409,18 +4654,22 @@ const openChatExternalUrl = (url) => {
                   // funneled into the preview card (apply and send), so buttons based on
                   // inputText cannot send the raw text or double-send during the preview.
 
-                  const ready = canSend && !sceneCapabilityPreparing && !chatVoice.editPreview;
+                  const ready = canSend
+                    && !sceneCapabilityPreparing
+                    && !chatVoice.editPreview
+                    && (!remoteChatActive || remoteNewDispatchReady)
+                    && (!controlledChatActive || remoteChatActive || controlledLinkReady);
                   const isQueue = busy && ready;
                   return (
                     <div className="flex items-center gap-1">
-                      {busy && (
+                      {busy && !remoteTranscriptActive && (
                         <button type="button" onClick={handleCancel} disabled={cancellingSessionIds.has(activeSessionId)}
                           className="w-9 h-9 shrink-0 rounded-full flex items-center justify-center bg-black/5 dark:bg-white/10 text-[#C5221F] dark:text-[#F28B82] hover:bg-black/10 dark:hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
                           <StopCircle size={20} />
                         </button>
                       )}
                       {(!busy || hasDraftText || hasReadyAttachment) && (
-                        <button type="button" onClick={handleSend} disabled={!ready}
+                        <button type="button" data-testid="chat-composer-send" onClick={handleSend} disabled={!ready}
                           aria-label={busy ? t.queueMsg : t.sendMsg}
                           title={busy ? (can('interruptSend') ? t.queueMsgTip : t.queueMsg) : t.sendMsg}
                           className={`w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-all ${ready ? (isQueue ? 'bg-gradient-to-b from-[#47A1FF] to-[#007AFF] text-white shadow-md ring-2 ring-amber-300 dark:ring-amber-400' : 'bg-gradient-to-b from-[#47A1FF] to-[#007AFF] text-white shadow-md hover:-translate-y-0.5 active:translate-y-0') : 'bg-black/5 dark:bg-white/10 text-gray-400 cursor-not-allowed'}`}>
@@ -3833,7 +5082,11 @@ const openChatExternalUrl = (url) => {
       }
       const actBtn = 'text-[#9AA0A6] hover:text-[#444746] hover:bg-black/[0.06] dark:text-[#8E8E8E] dark:hover:text-[#E3E3E3] dark:hover:bg-white/10';
       // 附件行拆出正文,附件以独立小气泡显示在正文气泡上方(纯附件消息只显示附件气泡)
-      const { text: bodyText, attachments: attachmentNames } = splitAttachmentLine(item.text);
+      // An A RemoteProxy message is not a local attachment message. A B-authored
+      // line that resembles the local attachment marker must stay plain text.
+      const { text: bodyText, attachments: attachmentNames } = item.remoteProxy
+        ? { text: item.text, attachments: [] }
+        : splitAttachmentLine(item.text);
       return (
         <div className="flex justify-end group min-w-0 max-w-full">
           <div className="flex flex-col items-end max-w-[85%] min-w-0 max-w-full">
@@ -3879,6 +5132,7 @@ const openChatExternalUrl = (url) => {
               )}
               {bodyText}
             </div>}
+            {item.remoteProxy && <span className="sr-only">{t.remoteConversation.projectionUser}</span>}
             {deliveryState && (
               <div data-testid={`message-delivery-${deliveryState}`} title={item.deliveryError || undefined} className={`mt-1 flex items-center gap-1.5 pr-1 text-[11px] ${
                 deliveryState === 'failed' || deliveryState === 'unknown'
@@ -4035,6 +5289,30 @@ const openChatExternalUrl = (url) => {
       const syntaxVersion = useSyncExternalStore(subscribeSyntaxHighlight, getSyntaxHighlightVersion);
       void syntaxVersion;
 
+      if (item.remoteProxy && item.type === 'system') {
+        const copy = t.remoteConversation;
+        const label = copy[remoteProjectionLabelKey(item.remoteKind)] || copy.projectionEvent;
+        const systemBody = remoteProxySystemBody(item);
+        return (
+          <div className="flex justify-center">
+            <div data-testid="chat-remote-projection-entry" data-kind={item.remoteKind}
+              role="status"
+              aria-label={label}
+              className="max-w-[85%] min-w-0 rounded-2xl border border-blue-500/20 bg-blue-500/[0.06] px-4 py-3 text-[14px] leading-6 text-[#1F1F1F] forced-colors:border-[CanvasText] dark:text-[#E3E3E3]">
+              <div className="text-[11px] font-semibold">{label}</div>
+              {systemBody && (
+                <div className="mt-1 whitespace-pre-wrap break-words text-[13px]" data-testid="chat-remote-projection-body">
+                  {systemBody}
+                </div>
+              )}
+              {item.remoteAttachments?.length > 0 && (
+                <div className="mt-1 text-[12px]">{copy.projectionAttachmentCount(item.remoteAttachments.length)}</div>
+              )}
+            </div>
+          </div>
+        );
+      }
+
       if (item.type === 'artifact_card') return <ArtifactCard item={item} theme={theme} t={t} isLatest={isLatestArtifact} />;
       if (item.type === 'plan_card') return <PlanCard item={item} t={t} onPrefill={onPrefill} />;
       if (item.type === 'plan_stuck') return <PlanStuckCard item={item} t={t} onGo={onPlanStuckGo} />;
@@ -4068,7 +5346,11 @@ const openChatExternalUrl = (url) => {
         // parseAssistantBubblesCached): even when the memo is defeated
         // (streaming delta / syntaxVersion bump) only bubbles that actually
         // changed reparse.
-        const { pd, cq } = parseAssistantBubblesCached(item, html, !!item.streaming, allowScheduledTaskDraft, streamingDraftLabel);
+        // Remote content keeps the normal Markdown/code renderer, but must not
+        // manufacture local persona/question actions from a B-authored message.
+        const { pd, cq } = item.remoteProxy
+          ? { pd: { draft: null }, cq: { q: null, html } }
+          : parseAssistantBubblesCached(item, html, !!item.streaming, allowScheduledTaskDraft, streamingDraftLabel);
         const assistantCopyAvailable = !item.streaming
           && [item.text, item.html].some(value => String(value || '').trim());
         // 草稿是否已存入(按名字在已加载的卡池里找同名自制卡 → 派生"已存入",免单独持久化)
@@ -4092,6 +5374,7 @@ const openChatExternalUrl = (url) => {
                 }}
                 dangerouslySetInnerHTML={{ __html: cq.html || '' }}
               />
+              {item.remoteProxy && <span className="sr-only">{t.remoteConversation.projectionAssistant}</span>}
               <SelectionCopyButton hostRef={assistantSelectionHostRef} targetRef={assistantSelectionTargetRef} theme={theme} t={t} />
               {cq.q ? (
                 <div className="mt-2 w-full" style={{ fontFamily:'-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif' }}>

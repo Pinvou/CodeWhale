@@ -1,12 +1,16 @@
-//! Anchored, private B-session upload staging. No app, Tauri or session-store
-//! dependency: the host injects a session isolation-root resolver.
+//! Anchored private upload staging and protected completed-file publication.
+// architecture-guard: allow-target-cfg -- Windows tests exercise mandatory sharing leases; runtime OS selection stays in platform::filesystem.
 use super::core::{
     CompletedTransfer, TransferContext, TransferDirection, TransferHandle, TransferMetadata,
     is_safe_publication_file_name,
 };
-use super::limits::MAX_TRANSFER_BYTES;
 use super::upload::UploadStaging;
-use crate::platform::filesystem::{PrivateFileDirectory, open_private_file_directory};
+use crate::features::files::file_ingest::MAX_FILE_BYTES;
+use crate::platform::filesystem::{
+    PrivateFileDirectory, PrivatePublicationCleanup, PublishedPrivateFile,
+    open_private_file_directory, publish_private_read_path, supports_private_read_path_publication,
+    take_private_publication_cleanup,
+};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,7 +32,10 @@ struct StagedUpload {
     file: Option<std::fs::File>,
     file_name: String,
     staging_name: String,
+    directory_path: PathBuf,
     total_bytes: u64,
+    published: Option<Arc<PublishedPrivateFile>>,
+    rejected_publication: Option<PrivatePublicationCleanup>,
 }
 
 impl SessionIsolationStaging {
@@ -57,24 +64,21 @@ impl SessionIsolationStaging {
     }
 }
 
-impl UploadStaging for SessionIsolationStaging {
-    fn begin(
+impl SessionIsolationStaging {
+    fn begin_raw(
         &self,
-        handle: &TransferHandle,
+        handle_id: &str,
         context: &TransferContext,
         metadata: &TransferMetadata,
     ) -> Result<(), String> {
-        if handle.direction() != TransferDirection::Upload
-            || context.direction != TransferDirection::Upload
-        {
-            return Err("transfer_direction_mismatch".to_owned());
-        }
-        let handle_id = handle.id();
         Self::validate_handle(handle_id)?;
         if !is_safe_publication_file_name(&metadata.file_name) {
             return Err("transfer_file_name_invalid".to_owned());
         }
         let file_name = metadata.file_name.clone();
+        if !supports_private_read_path_publication() {
+            return Err("unsupported".to_owned());
+        }
         let mut sessions = self.sessions.lock();
         if sessions.contains_key(handle_id) {
             return Err("transfer_staging_failed".to_owned());
@@ -82,24 +86,27 @@ impl UploadStaging for SessionIsolationStaging {
         if sessions.len() >= MAX_STAGED_SESSIONS {
             return Err("transfer_capacity".to_owned());
         }
-        if metadata.total_bytes == 0 || metadata.total_bytes > MAX_TRANSFER_BYTES {
+        if metadata.total_bytes == 0 || metadata.total_bytes > MAX_FILE_BYTES {
             return Err("transfer_staging_failed".to_owned());
         }
-        let root = (self.resolve_root)(&context.binding.session_id)?;
-        let root =
-            open_private_file_directory(&root).map_err(|_| "transfer_staging_failed".to_owned())?;
+        let root_path = (self.resolve_root)(&context.binding.session_id)?;
+        if !root_path.is_absolute() {
+            return Err("transfer_staging_failed".to_owned());
+        }
+        let root = open_private_file_directory(&root_path)
+            .map_err(|_| "transfer_staging_failed".to_owned())?;
         let parent = root
             .create_private_child_directory(std::ffi::OsStr::new(STAGING_DIR))
             .map_err(|_| "transfer_staging_failed".to_owned())?;
         let directory = parent
             .create_private_child_directory(std::ffi::OsStr::new(handle_id))
             .map_err(|_| "transfer_staging_failed".to_owned())?;
+        let directory_path = root_path.join(STAGING_DIR).join(handle_id);
         let mut staging_name = format!(".pinvou-upload-{}", uuid::Uuid::new_v4().simple());
         if staging_name == file_name {
             staging_name.push_str("-part");
         }
-        // Retain the directory authority before file allocation. A failed
-        // create/cleanup must still be reachable by the owner's exact abort.
+        // Reserve the exact directory authority before allocating its file.
         sessions.insert(
             handle_id.to_owned(),
             StagedUpload {
@@ -108,33 +115,33 @@ impl UploadStaging for SessionIsolationStaging {
                 file: None,
                 file_name,
                 staging_name,
+                directory_path,
                 total_bytes: metadata.total_bytes,
+                published: None,
+                rejected_publication: None,
             },
         );
         let entry = sessions
             .get_mut(handle_id)
             .ok_or_else(|| "transfer_staging_failed".to_owned())?;
-        let file = entry
-            .directory
-            .as_ref()
-            .ok_or_else(|| "transfer_staging_failed".to_owned())?
-            .create_delete_on_close_file(&entry.staging_name)
-            .map_err(|_| "transfer_staging_failed".to_owned())?;
-        entry.file = Some(file);
+        entry.file = Some(
+            entry
+                .directory
+                .as_ref()
+                .ok_or_else(|| "transfer_staging_failed".to_owned())?
+                .create_delete_on_close_file(&entry.staging_name)
+                .map_err(|_| "transfer_staging_failed".to_owned())?,
+        );
         Ok(())
     }
 
-    fn accept_chunk(
+    fn accept_chunk_raw(
         &self,
-        handle: &TransferHandle,
+        handle_id: &str,
         _chunk_index: u64,
         bytes: &[u8],
     ) -> Result<(), String> {
         use std::io::{Seek as _, Write as _};
-        if handle.direction() != TransferDirection::Upload {
-            return Err("transfer_direction_mismatch".to_owned());
-        }
-        let handle_id = handle.id();
         let mut sessions = self.sessions.lock();
         let entry = sessions
             .get_mut(handle_id)
@@ -156,14 +163,17 @@ impl UploadStaging for SessionIsolationStaging {
             .map_err(|_| "transfer_staging_failed".to_owned())
     }
 
-    fn commit(&self, transfer: &CompletedTransfer) -> Result<(), String> {
+    fn commit(&self, transfer: &CompletedTransfer) -> Result<PathBuf, String> {
         use sha2::{Digest as _, Sha256};
         use std::io::{Read as _, Seek as _, Write as _};
         let mut sessions = self.sessions.lock();
         let entry = sessions
             .get_mut(&transfer.handle_id)
             .ok_or_else(|| "transfer_unknown".to_owned())?;
-        if transfer.bytes != entry.total_bytes || transfer.bytes > MAX_TRANSFER_BYTES {
+        if entry.rejected_publication.is_some() {
+            return Err("transfer_staging_failed".to_owned());
+        }
+        if transfer.bytes != entry.total_bytes || transfer.bytes > MAX_FILE_BYTES {
             return Err("transfer_staging_failed".to_owned());
         }
         let file = entry
@@ -184,14 +194,38 @@ impl UploadStaging for SessionIsolationStaging {
         if bytes.len() as u64 != entry.total_bytes || digest != transfer.sha256 {
             return Err("transfer_staging_failed".to_owned());
         }
-        entry
-            .directory
-            .as_ref()
-            .ok_or_else(|| "transfer_unknown".to_owned())?
-            .atomic_write_private_file(std::ffi::OsStr::new(&entry.file_name), &bytes)
+        // A fresh anchor is acquired while the original chain is still pinned.
+        let publication_directory = open_private_file_directory(&entry.directory_path)
             .map_err(|_| "transfer_staging_failed".to_owned())?;
-        sessions.remove(&transfer.handle_id);
-        Ok(())
+        let published = match publish_private_read_path(
+            publication_directory,
+            std::ffi::OsStr::new(&entry.file_name),
+            &bytes,
+        ) {
+            Ok(published) => published,
+            Err(mut error) => {
+                entry.rejected_publication = take_private_publication_cleanup(&mut error);
+                return Err("transfer_staging_failed".to_owned());
+            }
+        };
+        let path = published.path().to_owned();
+        entry.published = Some(Arc::new(published));
+        // The anonymous part can close now, but published receipts stay
+        // revocable through the same pinned directory until owner cleanup.
+        entry.file.take();
+        Ok(path)
+    }
+
+    fn published_read_owner(
+        &self,
+        handle_id: &str,
+    ) -> Option<Arc<dyn crate::features::files::file_ingest::AttachmentReadOwner>> {
+        self.sessions
+            .lock()
+            .get(handle_id)?
+            .published
+            .clone()
+            .map(|owner| owner as Arc<dyn crate::features::files::file_ingest::AttachmentReadOwner>)
     }
 
     fn abort(&self, handle_id: &str) -> Result<(), String> {
@@ -199,9 +233,29 @@ impl UploadStaging for SessionIsolationStaging {
         let Some(entry) = sessions.get_mut(handle_id) else {
             return Ok(());
         };
+        if let Some(cleanup) = entry.rejected_publication.as_mut() {
+            cleanup
+                .cleanup()
+                .map_err(|_| "transfer_staging_cleanup_failed".to_owned())?;
+        }
+        entry.rejected_publication.take();
+        if entry
+            .published
+            .as_ref()
+            .is_some_and(|owner| Arc::strong_count(owner) > 1)
+        {
+            return Err("transfer_staging_cleanup_failed".to_owned());
+        }
+        if let Some(owner) = entry.published.as_ref() {
+            owner
+                .cleanup()
+                .map_err(|_| "transfer_staging_cleanup_failed".to_owned())?;
+        }
+        entry.published.take();
         entry.file.take();
         if let Some(directory) = entry.directory.as_ref() {
-            for name in [entry.staging_name.as_str(), entry.file_name.as_str()] {
+            // A failed publication never makes a replacement final leaf ours.
+            for name in [entry.staging_name.as_str()] {
                 directory
                     .remove_plain_file(std::ffi::OsStr::new(name))
                     .map_err(|_| "transfer_staging_cleanup_failed".to_owned())?;
@@ -219,80 +273,55 @@ impl UploadStaging for SessionIsolationStaging {
 
 const MAX_STAGED_SESSIONS: usize = 64;
 
-#[cfg(test)]
+impl UploadStaging for SessionIsolationStaging {
+    fn max_upload_bytes(&self) -> u64 {
+        MAX_FILE_BYTES
+    }
+    fn begin(
+        &self,
+        handle: &TransferHandle,
+        context: &TransferContext,
+        metadata: &TransferMetadata,
+    ) -> Result<(), String> {
+        if handle.direction() != TransferDirection::Upload
+            || context.direction != TransferDirection::Upload
+        {
+            return Err("transfer_direction_mismatch".into());
+        }
+        self.begin_raw(handle.id(), context, metadata)
+    }
+    fn accept_chunk(
+        &self,
+        handle: &TransferHandle,
+        index: u64,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        if handle.direction() != TransferDirection::Upload {
+            return Err("transfer_direction_mismatch".into());
+        }
+        self.accept_chunk_raw(handle.id(), index, bytes)
+    }
+    fn commit(&self, transfer: &CompletedTransfer) -> Result<PathBuf, String> {
+        self.commit(transfer)
+    }
+    fn published_read_owner(
+        &self,
+        id: &str,
+    ) -> Option<Arc<dyn crate::features::files::file_ingest::AttachmentReadOwner>> {
+        self.published_read_owner(id)
+    }
+    fn abort(&self, id: &str) -> Result<(), String> {
+        self.abort(id)
+    }
+}
+
+#[cfg(all(test, windows))]
 mod tests {
-    use super::super::core::TransferRegistry;
     use super::super::upload::AttachmentUploads;
     use super::*;
     use crate::features::remote_control::controller::protocol::LeaseContext;
+    use crate::features::remote_control::controller::transfer::TransferDirection;
     use std::path::Path;
-
-    struct TestRuntime {
-        uploads: AttachmentUploads,
-    }
-
-    #[test]
-    fn terminal_and_generation_cleanup_remove_real_staging_directories() {
-        let root = tempfile::tempdir().unwrap();
-        let runtime = runtime(root.path().to_owned());
-        let context = TransferContext::new(
-            &lease(),
-            "session-0001",
-            "task-0001",
-            TransferDirection::Upload,
-        )
-        .unwrap();
-        let first = runtime
-            .uploads
-            .begin(context.clone(), metadata(b"unfinished"), 1_000)
-            .unwrap();
-        let path = root.path().join(STAGING_DIR).join(&first.handle_id);
-        assert!(path.is_dir());
-        assert_eq!(runtime.uploads.cleanup_for_task("task-0001"), 1);
-        assert!(!path.exists());
-        let second = runtime
-            .uploads
-            .begin(context, metadata(b"unfinished"), 1_001)
-            .unwrap();
-        let path = root.path().join(STAGING_DIR).join(&second.handle_id);
-        assert_eq!(runtime.uploads.cleanup_for_generation("generation-0001"), 1);
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn real_directory_cleanup_failure_is_retained_until_reaper_retry() {
-        let root = tempfile::tempdir().unwrap();
-        let runtime = runtime(root.path().to_owned());
-        let context = TransferContext::new(
-            &lease(),
-            "session-0001",
-            "task-0001",
-            TransferDirection::Upload,
-        )
-        .unwrap();
-        let begin = runtime
-            .uploads
-            .begin(context, metadata(b"unfinished"), 1_000)
-            .unwrap();
-        let path = root.path().join(STAGING_DIR).join(&begin.handle_id);
-        let blocker = path.join("injected-foreign-entry");
-        std::fs::write(&blocker, b"fixture").unwrap();
-        assert_eq!(runtime.uploads.cleanup_for_task("task-0001"), 1);
-        assert!(
-            path.is_dir(),
-            "nonempty directory is not recursively deleted"
-        );
-        std::fs::remove_file(blocker).unwrap();
-        runtime.uploads.reap(1_001);
-        assert!(
-            !path.exists(),
-            "retry keeps the exact private directory authority"
-        );
-    }
-
-    fn upload_handle(id: &str) -> TransferHandle {
-        TransferHandle::from_id(id).expect("valid upload fixture handle")
-    }
 
     fn lease() -> LeaseContext {
         LeaseContext {
@@ -304,13 +333,24 @@ mod tests {
         }
     }
 
-    fn runtime(root: PathBuf) -> Arc<TestRuntime> {
+    use super::super::core::TransferRegistry;
+    struct TestUploadRuntime {
+        uploads: AttachmentUploads,
+    }
+    impl TestUploadRuntime {
+        fn new(uploads: AttachmentUploads) -> Arc<Self> {
+            Arc::new(Self { uploads })
+        }
+    }
+
+    fn runtime(root: PathBuf) -> Arc<TestUploadRuntime> {
         let stager = Arc::new(SessionIsolationStaging::new(Arc::new(
             move |_session_id: &str| Ok(root.clone()),
         )));
-        Arc::new(TestRuntime {
-            uploads: AttachmentUploads::new(Arc::new(TransferRegistry::default()), stager),
-        })
+        TestUploadRuntime::new(AttachmentUploads::new(
+            Arc::new(TransferRegistry::default()),
+            stager,
+        ))
     }
 
     fn metadata(bytes: &[u8]) -> TransferMetadata {
@@ -326,14 +366,22 @@ mod tests {
         }
     }
 
+    fn context() -> TransferContext {
+        TransferContext::new(
+            &lease(),
+            "session-0001",
+            "task-0001",
+            TransferDirection::Upload,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn anonymous_staging_does_not_collide_with_part_bin_publication() {
         let directory = tempfile::tempdir().unwrap();
         let (stager, handle, context) = started_stager(directory.path(), b"part");
         stager.sessions.lock().get_mut(&handle).unwrap().file_name = "part.bin".into();
-        stager
-            .accept_chunk(&upload_handle(&handle), 0, b"part")
-            .unwrap();
+        stager.accept_chunk_raw(&handle, 0, b"part").unwrap();
         stager
             .commit(&completion(handle.clone(), context, b"part"))
             .unwrap();
@@ -348,6 +396,67 @@ mod tests {
             .unwrap(),
             b"part"
         );
+        assert!(stager.sessions.lock().get(&handle).unwrap().file.is_none());
+        stager.abort(&handle).unwrap();
+        assert!(stager.sessions.lock().is_empty());
+    }
+
+    #[test]
+    fn completed_cleanup_keeps_foreign_entries_and_can_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let (stager, handle, context) = started_stager(directory.path(), b"new");
+        stager.accept_chunk_raw(&handle, 0, b"new").unwrap();
+        let published = stager
+            .commit(&completion(handle.clone(), context, b"new"))
+            .unwrap();
+        assert_eq!(std::fs::read(&published).unwrap(), b"new");
+        assert!(stager.sessions.lock().get(&handle).unwrap().file.is_none());
+        let foreign = published.parent().unwrap().join("foreign.txt");
+        std::fs::write(&foreign, b"untouched").unwrap();
+        assert_eq!(
+            stager.abort(&handle).unwrap_err(),
+            "transfer_staging_cleanup_failed"
+        );
+        assert!(!published.exists());
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"untouched");
+        assert!(stager.sessions.lock().contains_key(&handle));
+        std::fs::remove_file(&foreign).unwrap();
+        stager.abort(&handle).unwrap();
+        assert!(stager.sessions.lock().is_empty());
+    }
+
+    #[test]
+    fn completed_owner_cleanup_releases_the_staging_capacity() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        let stager = SessionIsolationStaging::new(Arc::new(move |_| Ok(root.clone())));
+        let mut handles = Vec::new();
+        for _ in 0..MAX_STAGED_SESSIONS {
+            let handle = format!("ctr-up-{}", uuid::Uuid::new_v4().simple());
+            let context = context();
+            stager
+                .begin_raw(&handle, &context, &metadata(b"x"))
+                .unwrap();
+            stager.accept_chunk_raw(&handle, 0, b"x").unwrap();
+            stager
+                .commit(&completion(handle.clone(), context, b"x"))
+                .unwrap();
+            handles.push(handle);
+        }
+        let next = format!("ctr-up-{}", uuid::Uuid::new_v4().simple());
+        assert_eq!(
+            stager
+                .begin_raw(&next, &context(), &metadata(b"x"))
+                .unwrap_err(),
+            "transfer_capacity"
+        );
+        for handle in handles {
+            stager.abort(&handle).unwrap();
+        }
+        stager
+            .begin_raw(&next, &context(), &metadata(b"x"))
+            .unwrap();
+        stager.abort(&next).unwrap();
         assert!(stager.sessions.lock().is_empty());
     }
 
@@ -366,7 +475,7 @@ mod tests {
         )
         .unwrap();
         stager
-            .begin(&upload_handle(&handle), &context, &metadata(bytes))
+            .begin_raw(&handle, &context, &metadata(bytes))
             .unwrap();
         (stager, handle, context)
     }
@@ -377,6 +486,7 @@ mod tests {
             context,
             bytes: bytes.len() as u64,
             sha256: metadata(bytes).sha256,
+            metadata: metadata(bytes),
         }
     }
 
@@ -396,14 +506,14 @@ mod tests {
         for _ in 0..MAX_STAGED_SESSIONS {
             let handle = format!("ctr-up-{}", uuid::Uuid::new_v4().simple());
             stager
-                .begin(&upload_handle(&handle), &context, &metadata(b"x"))
+                .begin_raw(&handle, &context, &metadata(b"x"))
                 .unwrap();
             handles.push(handle);
         }
         let rejected = "ctr-up-capacity-rejected";
         assert_eq!(
             stager
-                .begin(&upload_handle(rejected), &context, &metadata(b"x"))
+                .begin_raw(rejected, &context, &metadata(b"x"))
                 .unwrap_err(),
             "transfer_capacity"
         );
@@ -442,11 +552,7 @@ mod tests {
         .unwrap();
         assert!(
             stager
-                .begin(
-                    &upload_handle("ctr-up-linked-directory"),
-                    &context,
-                    &metadata(b"x")
-                )
+                .begin_raw("ctr-up-linked-directory", &context, &metadata(b"x"))
                 .is_err()
         );
         assert!(stager.sessions.lock().is_empty());
@@ -474,9 +580,7 @@ mod tests {
             assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
             return;
         }
-        stager
-            .accept_chunk(&upload_handle(&handle), 0, b"new")
-            .unwrap();
+        stager.accept_chunk_raw(&handle, 0, b"new").unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
         assert!(
             stager.abort(&handle).is_err(),
@@ -505,9 +609,7 @@ mod tests {
             stager.abort(&handle).unwrap();
             return;
         }
-        stager
-            .accept_chunk(&upload_handle(&handle), 0, b"new")
-            .unwrap();
+        stager.accept_chunk_raw(&handle, 0, b"new").unwrap();
         stager.commit(&completion(handle, context, b"new")).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
         assert_eq!(std::fs::read(&published).unwrap(), b"new");
@@ -533,9 +635,7 @@ mod tests {
             eprintln!("fixture unavailable: replacement parent link creation");
             return;
         }
-        stager
-            .accept_chunk(&upload_handle(&handle), 0, b"new")
-            .unwrap();
+        stager.accept_chunk_raw(&handle, 0, b"new").unwrap();
         stager
             .commit(&completion(handle.clone(), context, b"new"))
             .unwrap();
@@ -560,11 +660,7 @@ mod tests {
         let (stager, handle, _) = started_stager(directory.path(), b"new");
         stager.sessions.lock().get_mut(&handle).unwrap().file =
             Some(std::fs::File::open(&outside).unwrap());
-        assert!(
-            stager
-                .accept_chunk(&upload_handle(&handle), 0, b"new")
-                .is_err()
-        );
+        assert!(stager.accept_chunk_raw(&handle, 0, b"new").is_err());
         stager.abort(&handle).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
         assert!(stager.sessions.lock().is_empty());
@@ -575,9 +671,7 @@ mod tests {
             .join(&handle)
             .join("report.txt");
         std::fs::create_dir(&blocked).unwrap();
-        stager
-            .accept_chunk(&upload_handle(&handle), 0, b"new")
-            .unwrap();
+        stager.accept_chunk_raw(&handle, 0, b"new").unwrap();
         assert!(
             stager
                 .commit(&completion(handle.clone(), context, b"new"))
@@ -600,9 +694,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         for wrong_length in [true, false] {
             let (stager, handle, context) = started_stager(directory.path(), b"new");
-            stager
-                .accept_chunk(&upload_handle(&handle), 0, b"new")
-                .unwrap();
+            stager.accept_chunk_raw(&handle, 0, b"new").unwrap();
             let mut transfer = completion(handle.clone(), context, b"new");
             if wrong_length {
                 transfer.bytes += 1;
@@ -652,13 +744,15 @@ mod tests {
         }
         let published = parent.join("report.txt");
         std::fs::hard_link(&outside, &published).unwrap();
+        stager.accept_chunk_raw(&handle, 0, b"new").unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
         stager
-            .accept_chunk(&upload_handle(&handle), 0, b"new")
+            .commit(&completion(handle.clone(), context, b"new"))
             .unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
-        stager.commit(&completion(handle, context, b"new")).unwrap();
-        assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
         assert_eq!(std::fs::read(&published).unwrap(), b"new");
+        stager.abort(&handle).unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
         assert!(stager.sessions.lock().is_empty());
     }
 
@@ -721,12 +815,167 @@ mod tests {
     }
 
     #[test]
+    fn completed_receipts_cleanup_without_deadlocking_their_own_read_owner() {
+        for consumed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(directory.path().to_owned());
+            let begin = runtime
+                .uploads
+                .begin(context(), metadata(b"new"), 1)
+                .unwrap();
+            runtime
+                .uploads
+                .accept_chunk(&begin.handle_id, 0, b"new", 2)
+                .unwrap();
+            let path = directory
+                .path()
+                .join(STAGING_DIR)
+                .join(&begin.handle_id)
+                .join("report.txt");
+            let descriptors = if consumed {
+                runtime
+                    .uploads
+                    .consume_completed(
+                        std::slice::from_ref(&begin.handle_id),
+                        &lease(),
+                        "session-0001",
+                        "task-0001",
+                    )
+                    .unwrap()
+            } else {
+                Vec::new()
+            };
+            if consumed {
+                assert_eq!(runtime.uploads.cleanup_for_task("task-0001"), 1);
+                assert!(path.exists(), "an executing reader must retain the object");
+                assert_eq!(std::fs::read(&path).unwrap(), b"new");
+                assert_eq!(
+                    runtime
+                        .uploads
+                        .require_upload_binding(
+                            &begin.handle_id,
+                            &lease(),
+                            "session-0001",
+                            "task-0001"
+                        )
+                        .unwrap_err(),
+                    "transfer_unknown"
+                );
+                drop(descriptors);
+                runtime.uploads.expire(u64::MAX);
+            } else {
+                assert_eq!(runtime.uploads.expire(u64::MAX), 1);
+            }
+            assert!(!path.exists());
+            assert!(!path.parent().unwrap().exists());
+        }
+    }
+
+    #[test]
+    fn rejected_publication_retains_cleanup_identity_for_reaper_and_releases_capacity() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_WRITE, FILE_SHARE_READ};
+        for replace in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().to_owned();
+            let stager = Arc::new(SessionIsolationStaging::new(Arc::new(move |_| {
+                Ok(root.clone())
+            })));
+            let uploads =
+                AttachmentUploads::new(Arc::new(TransferRegistry::default()), stager.clone());
+            let begin = uploads.begin(context(), metadata(b"new"), 1).unwrap();
+            let blocker = Arc::new(Mutex::new(None));
+            let captured_blocker = blocker.clone();
+            crate::platform::filesystem::PRIVATE_PUBLICATION_BEFORE_READ.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |path| {
+                    *captured_blocker.lock() = Some(
+                        std::fs::OpenOptions::new()
+                            .access_mode(FILE_GENERIC_WRITE)
+                            .share_mode(FILE_SHARE_READ)
+                            .open(path)
+                            .unwrap(),
+                    );
+                }));
+            });
+            assert_eq!(
+                uploads
+                    .accept_chunk(&begin.handle_id, 0, b"new", 2)
+                    .unwrap_err(),
+                "transfer_staging_failed"
+            );
+            let path = directory
+                .path()
+                .join(STAGING_DIR)
+                .join(&begin.handle_id)
+                .join("report.txt");
+            assert!(path.exists());
+            {
+                let entries = stager.sessions.lock();
+                let entry = entries.get(&begin.handle_id).unwrap();
+                assert!(entry.rejected_publication.is_some());
+                assert!(
+                    entry.published.is_none(),
+                    "rejected content has no read owner"
+                );
+            }
+            uploads.expire(u64::MAX);
+            assert!(stager.sessions.lock().contains_key(&begin.handle_id));
+            blocker.lock().take();
+            if replace {
+                let saved = path.with_extension("original");
+                std::fs::rename(&path, &saved).unwrap();
+                std::fs::write(&path, b"foreign").unwrap();
+                uploads.expire(u64::MAX);
+                assert_eq!(std::fs::read(&path).unwrap(), b"foreign");
+                assert_eq!(std::fs::read(&saved).unwrap(), b"new");
+                assert!(
+                    stager
+                        .sessions
+                        .lock()
+                        .get(&begin.handle_id)
+                        .unwrap()
+                        .rejected_publication
+                        .is_some()
+                );
+                // Fixture restores the original object; the reaper never deletes the replacement.
+                std::fs::remove_file(&path).unwrap();
+                std::fs::rename(saved, &path).unwrap();
+            }
+            uploads.expire(u64::MAX);
+            assert!(!path.parent().unwrap().exists());
+            assert!(stager.sessions.lock().is_empty());
+            // All 64 slots, not just a task's protocol budget, are reusable.
+            let mut handles = Vec::new();
+            for _ in 0..MAX_STAGED_SESSIONS {
+                let handle = format!("ctr-up-{}", uuid::Uuid::new_v4().simple());
+                stager
+                    .begin_raw(&handle, &context(), &metadata(b"x"))
+                    .unwrap();
+                handles.push(handle);
+            }
+            for handle in handles {
+                stager.abort(&handle).unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod portable_staging_tests {
+    use super::*;
+    #[test]
     fn device_and_stream_names_fail_before_resolving_or_allocating() {
         let stager = SessionIsolationStaging::new(Arc::new(|_| {
             panic!("invalid name must not resolve a root")
         }));
         let context = TransferContext::new(
-            &lease(),
+            &crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-0001".into(),
+                controller_lease_id: "lease-0001".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-epoch-0001".into(),
+                remote_control_generation: "generation-0001".into(),
+            },
             "session-0001",
             "task-0001",
             TransferDirection::Upload,
@@ -743,23 +992,72 @@ mod tests {
             "a.txt:stream",
             "a.txt::$DATA",
         ] {
-            let mut meta = metadata(b"x");
+            let mut meta = TransferMetadata {
+                file_name: "report.txt".into(),
+                mime_type: "text/plain".into(),
+                total_bytes: 1,
+                sha256: "0".repeat(64),
+            };
             meta.file_name = name.into();
             assert_eq!(
                 stager
-                    .begin(&upload_handle("ctr-up-invalid-name"), &context, &meta)
+                    .begin_raw("ctr-up-invalid-name", &context, &meta)
                     .unwrap_err(),
                 "transfer_file_name_invalid"
             );
             assert!(stager.sessions.lock().is_empty());
         }
-        let mut meta = metadata(b"x");
+        let mut meta = TransferMetadata {
+            file_name: "report.txt".into(),
+            mime_type: "text/plain".into(),
+            total_bytes: 1,
+            sha256: "0".repeat(64),
+        };
         meta.file_name = "a".repeat(201);
         assert_eq!(
             stager
-                .begin(&upload_handle("ctr-up-long-name"), &context, &meta)
+                .begin_raw("ctr-up-long-name", &context, &meta)
                 .unwrap_err(),
             "transfer_file_name_invalid"
+        );
+        assert!(stager.sessions.lock().is_empty());
+    }
+
+    #[test]
+    fn unsupported_read_path_publication_is_rejected_before_root_resolution() {
+        if supports_private_read_path_publication() {
+            return;
+        }
+        use crate::features::remote_control::controller::protocol::LeaseContext;
+        use crate::features::remote_control::controller::transfer::TransferDirection;
+        let stager = SessionIsolationStaging::new(Arc::new(|_| {
+            panic!("must not allocate filesystem resources")
+        }));
+        let lease = LeaseContext {
+            connection_id: "connection-0001".into(),
+            controller_lease_id: "lease-0001".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "relay-epoch-0001".into(),
+            remote_control_generation: "generation-0001".into(),
+        };
+        let context = TransferContext::new(
+            &lease,
+            "session-0001",
+            "task-0001",
+            TransferDirection::Upload,
+        )
+        .unwrap();
+        let metadata = TransferMetadata {
+            file_name: "report.txt".into(),
+            mime_type: "text/plain".into(),
+            total_bytes: 1,
+            sha256: "0".repeat(64),
+        };
+        assert_eq!(
+            stager
+                .begin_raw("ctr-up-unsupported", &context, &metadata)
+                .unwrap_err(),
+            "unsupported"
         );
         assert!(stager.sessions.lock().is_empty());
     }

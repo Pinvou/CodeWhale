@@ -7,8 +7,9 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde::Serialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::controlled::ControlledWorkspaceInfo;
@@ -67,6 +68,7 @@ pub(crate) struct RemoteCapabilityTool {
 pub(crate) struct RemoteCapabilitySkill {
     skill_id: String,
     display_name: String,
+    scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
@@ -96,6 +98,7 @@ pub(crate) struct CapabilitySnapshot {
 #[derive(Default)]
 pub(crate) struct CapabilitySnapshotManager {
     state: Mutex<CapabilityState>,
+    admission_gate: CapabilityAdmissionGate,
 }
 
 #[derive(Default)]
@@ -131,6 +134,92 @@ pub(crate) fn opaque_skill_id(name: &str) -> String {
         id.push(HEX[(byte & 15) as usize] as char);
     }
     id
+}
+
+#[derive(Default)]
+struct CapabilityAdmissionGate {
+    state: Mutex<CapabilityAdmissionGateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct CapabilityAdmissionGateState {
+    active_admissions: usize,
+    refreshing: bool,
+    failed: bool,
+}
+
+/// A short-lived consistency token. It does not hold a mutex while the ledger
+/// persists its record, but it makes snapshot replacement linearize after the
+/// admission finishes. This closes the validate/refresh/admit TOCTOU without
+/// carrying a capability mutex across filesystem I/O.
+pub(crate) struct CapabilityAdmissionGuard<'a> {
+    gate: &'a CapabilityAdmissionGate,
+}
+
+impl std::fmt::Debug for CapabilityAdmissionGuard<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CapabilityAdmissionGuard(..)")
+    }
+}
+
+struct CapabilityRefreshGuard<'a> {
+    gate: &'a CapabilityAdmissionGate,
+}
+
+impl CapabilityAdmissionGate {
+    fn begin_admission(&self) -> Result<CapabilityAdmissionGuard<'_>> {
+        let mut state = self.state.lock();
+        while state.refreshing && !state.failed {
+            self.changed.wait(&mut state);
+        }
+        if state.failed {
+            return Err(CapabilityError::new("capability_admission_corrupt"));
+        }
+        state.active_admissions = state
+            .active_admissions
+            .checked_add(1)
+            .ok_or_else(|| CapabilityError::new("capability_admission_capacity"))?;
+        Ok(CapabilityAdmissionGuard { gate: self })
+    }
+
+    fn begin_refresh(&self) -> Result<CapabilityRefreshGuard<'_>> {
+        let mut state = self.state.lock();
+        while (state.refreshing || state.active_admissions != 0) && !state.failed {
+            self.changed.wait(&mut state);
+        }
+        if state.failed {
+            return Err(CapabilityError::new("capability_admission_corrupt"));
+        }
+        state.refreshing = true;
+        Ok(CapabilityRefreshGuard { gate: self })
+    }
+}
+
+impl Drop for CapabilityAdmissionGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.gate.state.lock();
+        let Some(remaining) = state.active_admissions.checked_sub(1) else {
+            // A broken ownership invariant cannot reopen the admission gate.
+            // Wake waiters so they fail closed instead of waiting indefinitely.
+            state.failed = true;
+            self.gate.changed.notify_all();
+            log::error!("capability admission guard underflow; gate failed closed");
+            return;
+        };
+        state.active_admissions = remaining;
+        if state.active_admissions == 0 {
+            self.gate.changed.notify_all();
+        }
+    }
+}
+
+impl Drop for CapabilityRefreshGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.gate.state.lock();
+        state.refreshing = false;
+        self.gate.changed.notify_all();
+    }
 }
 
 impl CapabilitySnapshotManager {
@@ -171,6 +260,8 @@ impl CapabilitySnapshotManager {
         if bindings.len() > MAX_DESCRIPTORS {
             return Err(CapabilityError::new("capability_descriptor_capacity"));
         }
+        // Publish the snapshot and its private map only after active ledger admission ends.
+        let _refresh = self.admission_gate.begin_refresh()?;
         let expires_at_ms = now_b
             .checked_add(SNAPSHOT_TTL_MS)
             .ok_or_else(|| CapabilityError::new("capability_expiry_overflow"))?;
@@ -208,6 +299,11 @@ impl CapabilitySnapshotManager {
                 .map(|(id, skill)| RemoteCapabilitySkill {
                     skill_id: id.clone(),
                     display_name: skill.display_name.clone(),
+                    scopes: ["chat", "code"]
+                        .into_iter()
+                        .filter(|mode| skill.modes.contains(mode))
+                        .map(str::to_owned)
+                        .collect(),
                 })
                 .collect(),
             workspaces: code_workspaces
@@ -234,6 +330,26 @@ impl CapabilitySnapshotManager {
         now_b: u64,
     ) -> Result<CapabilitySnapshot> {
         let state = self.state.lock();
+        Ok(validated_snapshot(&state, revision, context, now_b)?
+            .snapshot
+            .clone())
+    }
+
+    /// Reuse an unexpired snapshot for the exact lease without discovering or
+    /// advancing a new revision. The private mapping is published atomically.
+    pub(crate) fn current_for_context(
+        &self,
+        context: &LeaseContext,
+        now_b: u64,
+    ) -> Result<CapabilitySnapshot> {
+        let state = self.state.lock();
+        let revision = state
+            .current
+            .as_ref()
+            .ok_or_else(|| CapabilityError::new("capability_snapshot_missing"))?
+            .snapshot
+            .capability_revision
+            .as_str();
         Ok(validated_snapshot(&state, revision, context, now_b)?
             .snapshot
             .clone())
@@ -271,6 +387,55 @@ impl CapabilitySnapshotManager {
             .collect()
     }
 
+    /// 冻结 wire 形状的 `capability_snapshot`（B → A）。字段名与 PROTOCOL.md 的
+    /// exact-object schema 一致，只含 opaque id、显示名、模式、revision 与有效期；
+    /// 调用方（B 端派发层）负责再用运行时校验器自检。
+    pub(crate) fn wire_capability_snapshot(
+        &self,
+        snapshot: &CapabilitySnapshot,
+        request_id: &str,
+    ) -> Value {
+        serde_json::json!({
+            "v": 1,
+            "type": "capability_snapshot",
+            "connection_id": snapshot.connection_id,
+            "controller_lease_id": snapshot.controller_lease_id,
+            "lease_epoch": snapshot.lease_epoch,
+            "relay_epoch": snapshot.relay_epoch,
+            "remote_control_generation": snapshot.remote_control_generation,
+            "request_id": request_id,
+            "capability_revision": snapshot.capability_revision,
+            "expires_at_ms": snapshot.expires_at_ms,
+            "modes": snapshot.modes,
+            "tools": snapshot
+                .tools
+                .iter()
+                .map(|tool| serde_json::json!({
+                    "tool_id": tool.tool_id,
+                    "display_name": tool.display_name,
+                }))
+                .collect::<Vec<_>>(),
+            "skills": snapshot
+                .skills
+                .iter()
+                .map(|skill| serde_json::json!({
+                    "skill_id": skill.skill_id,
+                    "display_name": skill.display_name,
+                    "scopes": skill.scopes,
+                }))
+                .collect::<Vec<_>>(),
+            "workspaces": snapshot
+                .workspaces
+                .iter()
+                .map(|workspace| serde_json::json!({
+                    "workspace_id": workspace.workspace_id,
+                    "display_name": workspace.display_name,
+                    "code_allowed": workspace.code_allowed,
+                }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
     /// Resolve only the opaque workspace ID. Task admission must still ask the
     /// B workspace owner to recheck the live path identity and authorization.
     pub(crate) fn workspace_for_task(
@@ -287,6 +452,121 @@ impl CapabilitySnapshotManager {
             .find(|workspace| workspace.workspace_id == workspace_id)
             .map(|workspace| workspace.workspace_id.clone())
             .ok_or_else(|| CapabilityError::new("capability_workspace_not_authorized"))
+    }
+
+    /// Validate a B-local selection against the exact unexpired snapshot and
+    /// the lane that will execute it. The runtime still re-resolves every
+    /// selected skill from the live marketplace before reading its body.
+    pub(crate) fn validate_skills_for_mode(
+        &self,
+        context: &LeaseContext,
+        mode: &str,
+        skill_ids: &[String],
+        now_b: u64,
+    ) -> Result<()> {
+        if !matches!(mode, "chat" | "code") || skill_ids.len() > 32 {
+            return Err(CapabilityError::new("task_skill_invalid"));
+        }
+        let snapshot = self.current_for_context(context, now_b)?;
+        let mut seen = HashSet::new();
+        if skill_ids.iter().any(|skill_id| {
+            !seen.insert(skill_id.as_str())
+                || !snapshot.skills.iter().any(|skill| {
+                    skill.skill_id == *skill_id && skill.scopes.iter().any(|scope| scope == mode)
+                })
+        }) {
+            return Err(CapabilityError::new("task_skill_invalid"));
+        }
+        Ok(())
+    }
+
+    /// Validate every capability-dependent task field against one exact,
+    /// unexpired snapshot. The returned token must be kept alive until the
+    /// ledger admission call returns; while it is alive a policy refresh may
+    /// be prepared, but cannot publish a replacement snapshot.
+    pub(crate) fn pin_task_admission(
+        &self,
+        revision: &str,
+        context: &LeaseContext,
+        mode: &str,
+        skill_ids: &[String],
+        workspace_id: Option<&str>,
+        now_b: u64,
+    ) -> Result<CapabilityAdmissionGuard<'_>> {
+        let guard = self.admission_gate.begin_admission()?;
+        self.validate_task_selection(revision, context, mode, skill_ids, workspace_id, now_b)?;
+        Ok(guard)
+    }
+
+    /// Read-only preflight used before mapping/preparation. Final admission
+    /// must still use `pin_task_admission` because this call intentionally does
+    /// not keep a consistency token alive.
+    pub(crate) fn validate_task_selection(
+        &self,
+        revision: &str,
+        context: &LeaseContext,
+        mode: &str,
+        skill_ids: &[String],
+        workspace_id: Option<&str>,
+        now_b: u64,
+    ) -> Result<()> {
+        if !matches!(mode, "chat" | "code") || skill_ids.len() > 32 {
+            return Err(CapabilityError::new("task_skill_invalid"));
+        }
+        let snapshot = self.validate(revision, context, now_b)?;
+        if !snapshot.modes.iter().any(|available| available == mode) {
+            return Err(CapabilityError::new("task_mode_unsupported"));
+        }
+        let mut seen = HashSet::new();
+        if skill_ids.iter().any(|skill_id| {
+            !seen.insert(skill_id.as_str())
+                || !snapshot.skills.iter().any(|skill| {
+                    skill.skill_id == *skill_id && skill.scopes.iter().any(|scope| scope == mode)
+                })
+        }) {
+            return Err(CapabilityError::new("task_skill_invalid"));
+        }
+        match (mode, workspace_id) {
+            ("chat", None) => Ok(()),
+            ("chat", Some(_)) => Err(CapabilityError::new("task_workspace_unexpected")),
+            ("code", Some(workspace_id))
+                if snapshot.workspaces.iter().any(|workspace| {
+                    workspace.code_allowed && workspace.workspace_id == workspace_id
+                }) =>
+            {
+                Ok(())
+            }
+            ("code", Some(_)) => Err(CapabilityError::new("capability_workspace_not_authorized")),
+            ("code", None) => Err(CapabilityError::new("task_workspace_required")),
+            _ => Err(CapabilityError::new("task_mode_unsupported")),
+        }
+    }
+
+    /// Convert B's monotonic expiry into an absolute UI deadline without
+    /// changing the wire snapshot or minting another capability revision.
+    pub(crate) fn controlled_ui_projection(
+        &self,
+        snapshot: &CapabilitySnapshot,
+        now_b: u64,
+        now_wall_ms: u64,
+    ) -> Result<Value> {
+        let deadline_b = snapshot
+            .expires_at_ms
+            .parse::<u64>()
+            .map_err(|_| CapabilityError::new("capability_snapshot_invalid"))?;
+        let remaining = deadline_b.saturating_sub(now_b);
+        if remaining == 0 {
+            return Err(CapabilityError::new("capability_snapshot_expired"));
+        }
+        let mut projection = serde_json::to_value(snapshot)
+            .map_err(|_| CapabilityError::new("capability_snapshot_invalid"))?;
+        projection["expiresAtMs"] = Value::String(
+            now_wall_ms
+                .checked_add(remaining)
+                .ok_or_else(|| CapabilityError::new("capability_expiry_overflow"))?
+                .to_string(),
+        );
+        Ok(projection)
     }
 }
 
@@ -393,6 +673,40 @@ fn validate_display(value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn admission_underflow_poison_rejects_both_admission_and_refresh() {
+        let gate = super::CapabilityAdmissionGate::default();
+        // An invalid guard models a broken ownership invariant, not an input
+        // reachable through the public pin API.
+        drop(super::CapabilityAdmissionGuard { gate: &gate });
+        assert!(gate.state.lock().failed);
+        assert_eq!(
+            gate.begin_admission().unwrap_err().code,
+            "capability_admission_corrupt"
+        );
+        assert_eq!(
+            gate.begin_refresh().err().unwrap().code,
+            "capability_admission_corrupt"
+        );
+        assert!(!gate.state.lock().refreshing);
+    }
+
+    #[test]
+    fn balanced_admission_release_preserves_refresh_and_never_poison_gates() {
+        let gate = super::CapabilityAdmissionGate::default();
+        let first = gate.begin_admission().unwrap();
+        let second = gate.begin_admission().unwrap();
+        assert_eq!(gate.state.lock().active_admissions, 2);
+        drop(first);
+        assert_eq!(gate.state.lock().active_admissions, 1);
+        drop(second);
+        assert_eq!(gate.state.lock().active_admissions, 0);
+        let refresh = gate.begin_refresh().unwrap();
+        assert!(gate.state.lock().refreshing);
+        drop(refresh);
+        assert!(!gate.state.lock().failed);
+        drop(gate.begin_admission().unwrap());
+    }
     use super::*;
 
     fn context(generation: &str) -> LeaseContext {
@@ -641,10 +955,18 @@ mod tests {
         assert_eq!(snapshot.modes, vec!["chat".to_owned(), "code".to_owned()]);
         assert_eq!(snapshot.tools.len(), 1);
         assert_eq!(snapshot.skills.len(), 2);
+        assert_eq!(snapshot.skills[0].scopes, vec!["code".to_owned()]);
+        assert_eq!(snapshot.skills[1].scopes, vec!["chat".to_owned()]);
         assert_eq!(snapshot.workspaces.len(), 1);
         assert_eq!(
             manager
                 .validate("1", &context("generation-0001"), 2_000)
+                .unwrap(),
+            snapshot
+        );
+        assert_eq!(
+            manager
+                .current_for_context(&context("generation-0001"), 2_000)
                 .unwrap(),
             snapshot
         );
@@ -674,6 +996,234 @@ mod tests {
                 .code,
             "capability_snapshot_stale"
         );
+    }
+
+    #[test]
+    fn one_skill_can_preserve_both_execution_scopes() {
+        let manager = CapabilitySnapshotManager::default();
+        let mut source = fixture_source();
+        source.plain_skills = vec![CapabilityDescriptor {
+            id: "skill-shared".into(),
+            display_name: "Shared Skill".into(),
+        }];
+        source.code_skills = source.plain_skills.clone();
+        let snapshot = manager
+            .build(context("generation-0001"), source, 1_000)
+            .unwrap();
+        assert_eq!(snapshot.skills.len(), 1);
+        assert_eq!(snapshot.skills[0].skill_id, opaque_skill_id("skill-shared"));
+        assert_eq!(snapshot.skills[0].scopes, vec!["chat", "code"]);
+        manager
+            .validate_skills_for_mode(
+                &context("generation-0001"),
+                "chat",
+                &[opaque_skill_id("skill-shared")],
+                2_000,
+            )
+            .unwrap();
+        manager
+            .validate_skills_for_mode(
+                &context("generation-0001"),
+                "code",
+                &[opaque_skill_id("skill-shared")],
+                2_000,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn final_chat_admission_rechecks_expiry_revision_mode_and_skill_scope() {
+        let manager = CapabilitySnapshotManager::default();
+        manager
+            .build(context("generation-0001"), fixture_source(), 1_000)
+            .unwrap();
+        manager
+            .pin_task_admission(
+                "1",
+                &context("generation-0001"),
+                "chat",
+                &[opaque_skill_id("skill-plain")],
+                None,
+                30_999,
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .pin_task_admission(
+                    "1",
+                    &context("generation-0001"),
+                    "chat",
+                    &[opaque_skill_id("skill-code")],
+                    None,
+                    2_000,
+                )
+                .unwrap_err()
+                .code,
+            "task_skill_invalid"
+        );
+        assert_eq!(
+            manager
+                .pin_task_admission("1", &context("generation-other"), "chat", &[], None, 2_000,)
+                .unwrap_err()
+                .code,
+            "capability_snapshot_stale"
+        );
+        // Models an A reserve followed by an attachment upload that outlives
+        // the 30 second snapshot: B rejects at commit/admission, not dispatch.
+        assert_eq!(
+            manager
+                .pin_task_admission("1", &context("generation-0001"), "chat", &[], None, 31_000,)
+                .unwrap_err()
+                .code,
+            "capability_snapshot_expired"
+        );
+    }
+
+    #[test]
+    fn policy_refresh_invalidates_old_revision_and_removed_chat_skill() {
+        let manager = CapabilitySnapshotManager::default();
+        manager
+            .build(context("generation-0001"), fixture_source(), 1_000)
+            .unwrap();
+        let mut refreshed = fixture_source();
+        refreshed.plain_skills = vec![CapabilityDescriptor {
+            id: "skill-new".into(),
+            display_name: "New Skill".into(),
+        }];
+        manager
+            .build(context("generation-0001"), refreshed, 2_000)
+            .unwrap();
+        assert_eq!(
+            manager
+                .pin_task_admission("1", &context("generation-0001"), "chat", &[], None, 2_001,)
+                .unwrap_err()
+                .code,
+            "capability_snapshot_stale"
+        );
+        assert_eq!(
+            manager
+                .pin_task_admission(
+                    "2",
+                    &context("generation-0001"),
+                    "chat",
+                    &[opaque_skill_id("skill-plain")],
+                    None,
+                    2_001,
+                )
+                .unwrap_err()
+                .code,
+            "task_skill_invalid"
+        );
+    }
+
+    #[test]
+    fn code_admission_keeps_workspace_and_scope_checks() {
+        let manager = CapabilitySnapshotManager::default();
+        manager
+            .build(context("generation-0001"), fixture_source(), 1_000)
+            .unwrap();
+        manager
+            .pin_task_admission(
+                "1",
+                &context("generation-0001"),
+                "code",
+                &[opaque_skill_id("skill-code")],
+                Some("workspace-0001"),
+                2_000,
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .pin_task_admission(
+                    "1",
+                    &context("generation-0001"),
+                    "code",
+                    &[opaque_skill_id("skill-plain")],
+                    Some("workspace-0001"),
+                    2_000,
+                )
+                .unwrap_err()
+                .code,
+            "task_skill_invalid"
+        );
+        assert_eq!(
+            manager
+                .pin_task_admission(
+                    "1",
+                    &context("generation-0001"),
+                    "code",
+                    &[opaque_skill_id("skill-code")],
+                    Some("workspace-other"),
+                    2_000,
+                )
+                .unwrap_err()
+                .code,
+            "capability_workspace_not_authorized"
+        );
+
+        let unavailable = CapabilitySnapshotManager::default();
+        let mut chat_only = fixture_source();
+        chat_only.code_agent_ready = false;
+        unavailable
+            .build(context("generation-0001"), chat_only, 1_000)
+            .unwrap();
+        assert_eq!(
+            unavailable
+                .pin_task_admission(
+                    "1",
+                    &context("generation-0001"),
+                    "code",
+                    &[],
+                    Some("workspace-0001"),
+                    2_000,
+                )
+                .unwrap_err()
+                .code,
+            "task_mode_unsupported"
+        );
+    }
+
+    #[test]
+    fn concurrent_refresh_cannot_replace_snapshot_during_admission() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        let manager = Arc::new(CapabilitySnapshotManager::default());
+        manager
+            .build(context("generation-0001"), fixture_source(), 1_000)
+            .unwrap();
+        let admission = manager
+            .pin_task_admission(
+                "1",
+                &context("generation-0001"),
+                "chat",
+                &[opaque_skill_id("skill-plain")],
+                None,
+                2_000,
+            )
+            .unwrap();
+        let refreshing = Arc::clone(&manager);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let refreshed = refreshing
+                .build(context("generation-0001"), fixture_source(), 2_100)
+                .unwrap();
+            done_tx.send(refreshed.capability_revision).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert_eq!(
+            manager
+                .current_for_context(&context("generation-0001"), 2_100)
+                .unwrap()
+                .capability_revision,
+            "1"
+        );
+        drop(admission);
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap(), "2");
+        worker.join().unwrap();
     }
 
     #[test]
@@ -731,5 +1281,45 @@ mod tests {
                 .code,
             "capability_id_invalid"
         );
+    }
+
+    /// E2E-04：wire 投影必须是冻结形状，且通过运行时校验器（角色 B + 租约 +
+    /// 协商能力），否则 A 端会在解密后再被拒。
+    #[test]
+    fn wire_capability_snapshot_matches_the_frozen_protocol_shape() {
+        let manager = CapabilitySnapshotManager::default();
+        let lease = context("generation-0001");
+        let snapshot = manager
+            .build(lease.clone(), fixture_source(), 1_000)
+            .unwrap();
+        let mut payload = manager.wire_capability_snapshot(&snapshot, "request-snapshot-1");
+        // The business adapter binds both session identities before encryption.
+        payload["session_id"] = serde_json::json!("remote-ref-1");
+        payload["controlled_session_id"] = serde_json::json!("b-session-1");
+        let capabilities = vec![
+            "encrypted_frames_v1".to_owned(),
+            "pairing_v1".to_owned(),
+            "task_v1".to_owned(),
+        ];
+        let encoded = payload.to_string();
+        super::super::protocol::validate_controller_runtime_payload_json(
+            &encoded,
+            super::super::protocol::SenderRole::ControlledB,
+            Some(&super::super::protocol::RuntimeValidationContext {
+                lease: Some(lease),
+                negotiated_capabilities: capabilities,
+            }),
+        )
+        .expect("wire capability snapshot must satisfy the frozen runtime contract");
+        assert_eq!(payload["type"], "capability_snapshot");
+        assert_eq!(payload["request_id"], "request-snapshot-1");
+        assert_eq!(payload["session_id"], "remote-ref-1");
+        assert_eq!(payload["controlled_session_id"], "b-session-1");
+        assert_eq!(payload["capability_revision"], "1");
+        // 序列化文本不得包含宿主路径或凭证关键字。
+        let text = payload.to_string();
+        assert!(!text.contains("D:\\"));
+        assert!(!text.contains("api_key"));
+        assert_eq!(payload["skills"][0]["scopes"], serde_json::json!(["code"]));
     }
 }

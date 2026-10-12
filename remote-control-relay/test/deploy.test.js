@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -14,6 +14,13 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   assert.match(source, /PINVOU_REMOTE_PUBLIC_BASE_PATH="\$BASE_PATH" npm run build:web/);
   assert.match(source, /tar -czf - -C "\$RELAY_DIR\/web\/dist" \./);
   assert.match(source, /behavior-telemetry-schema\.js/);
+  assert.doesNotMatch(source, /\bmapfile\b/);
+  assert.match(source, /while IFS= read -r relay_module; do/);
+  assert.match(source, /relay_modules\+=\("\$relay_module"\)/);
+  assert.match(source, /"\$\{relay_modules\[@\]\}"/);
+  assert.match(source, /mkdir -p "\$backup\/code-js"/);
+  assert.match(source, /for module in "\$code_stage"\/\*\.js/);
+  assert.equal((source.match(/for module in "\$backup\/code-js"\/\*\.js/g) || []).length, 2);
   assert.match(source, /docs\/schemas\/behavior-telemetry-v1\.schema\.json/);
   assert.match(source, /docs\/schemas\/behavior-telemetry-registries\.json/);
   assert.match(source, /await import\('\.\/telemetry-service\.js'\)/);
@@ -40,7 +47,7 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
   const packed = spawnSync("tar", [
     "-czf", archive,
     "-C", relayDir,
-    "server.js", "telemetry-service.js", "behavior-telemetry-schema.js",
+    ...(await readdir(relayDir)).filter((name) => name.endsWith(".js")),
     "-C", repoRoot,
     "docs/schemas/behavior-telemetry-v1.schema.json",
     "docs/schemas/behavior-telemetry-registries.json",
@@ -54,6 +61,29 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
     "await import('./telemetry-service.js')",
   ], { cwd: stage, encoding: "utf8" });
   assert.equal(loaded.status, 0, loaded.stderr);
+});
+
+test("deploy module collection does not require mapfile and preserves relative names", async (t) => {
+  const source = await readFile(deployScript, "utf8");
+  const collection = source.match(/^relay_modules=\(\)[\s\S]*?^done < <\(cd "\$RELAY_DIR" && printf '%s\\n' \.\/\*\.js\)/m);
+  assert.ok(collection, "exercise the actual deployment module collection");
+  const root = await mkdtemp(join(tmpdir(), "pinvou-relay-modules-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const relayDir = join(root, "relay with spaces");
+  await mkdir(relayDir);
+  for (const name of ["server.js", "extra module.js", "ignored.txt"]) {
+    await writeFile(join(relayDir, name), "");
+  }
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const collected = spawnSync(bash, ["-c", [
+    "set -euo pipefail",
+    "enable -n mapfile 2>/dev/null || true",
+    'RELAY_DIR="$1"',
+    collection[0],
+    'printf \'%s\\n\' "${relay_modules[@]}"',
+  ].join("\n"), "collect", relayDir.replaceAll("\\", "/")], { encoding: "utf8" });
+  assert.equal(collected.status, 0, collected.error?.message || collected.stderr);
+  assert.deepEqual(collected.stdout.trim().split(/\r?\n/), ["./extra module.js", "./server.js"]);
 });
 
 async function executable(path, content) {

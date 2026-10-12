@@ -36,3 +36,18 @@ Tauri 命令按 `app/commands/<domain>.rs` 组织，`app/mod.rs` 与 `app/comman
 （`platform/connector_state.rs`、`platform/connector_skills.rs`）和路径安全策略
 （`platform/path_policy.rs`）属于跨功能基础设施，位于 `platform/`；内置资源 bundle
 的解包由 `features/runtime_bundle/` 承担。
+
+## 远程对话轮次的 Skills 与引擎所有权
+
+远程选择在 assistant 适配层对照 B 的已启用集合解析，复制到每次尝试独占的
+Skills 目录（空选择也保留空目录）。它不改写普通会话的共享目录；共享物化、
+增量重写和自愈不能扩大该轮次的选择。这里的冻结是应用写入隔离，不是 OS
+只读沙箱。目录缺失时发送失败，不回退到共享 Skills。
+
+`Pinvou3Bridge` / `AppEngine` 克隆持有快照资源；pool 的复用与远程终态清理
+必须匹配同一个不可复用 owner。旧 owner 没有 entry 或遇到 replacement 时不操作
+新轮次、共享 Skills 或新 reservation。所有远程模型来源遵循同一清理边界。
+冷启动在生成引擎之前加载会话，先将 SyncSession 入队，再公开 entry；
+未公开引擎由专用 guard 在取消/失败时停止 forwarder 并发送有界清理操作。
+Shutdown 入队不等于底座/provider 已 join；崩溃遗留目录和 Windows 打开文件导致
+的删除失败也不在自动清理保证内，不可将这些局限描述为已验证的完整释放。

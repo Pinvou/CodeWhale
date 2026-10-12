@@ -264,6 +264,7 @@ struct TranscriptFallback {
 pub(crate) struct TurnReservation {
     lifecycle: Arc<TurnLifecycle>,
     reservation_id: u64,
+    generation: u64,
     base_transcript_revision: Option<String>,
     transcript: Option<ReservedTranscript>,
     admission_metadata: Option<TurnAdmissionMetadata>,
@@ -271,10 +272,11 @@ pub(crate) struct TurnReservation {
 }
 
 impl TurnReservation {
-    fn new(lifecycle: Arc<TurnLifecycle>, reservation_id: u64) -> Self {
+    fn new(lifecycle: Arc<TurnLifecycle>, reservation_id: u64, generation: u64) -> Self {
         Self {
             lifecycle,
             reservation_id,
+            generation,
             base_transcript_revision: None,
             transcript: None,
             admission_metadata: None,
@@ -288,6 +290,12 @@ impl TurnReservation {
 
     pub(crate) fn base_transcript_revision(&self) -> Option<&str> {
         self.base_transcript_revision.as_deref()
+    }
+
+    /// Stable identity of the reserved session turn. Unlike transcript indices,
+    /// this survives persistence compaction and is unique for the session.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub(crate) fn set_transcript(
@@ -342,15 +350,6 @@ impl TurnReservation {
     pub(crate) fn ensure_active(&self) -> Result<()> {
         self.lifecycle
             .ensure_reservation_active(self.reservation_id)
-    }
-
-    /// Capture this reservation's epoch, not whichever turn is active later.
-    pub(crate) fn generation(&self) -> Result<u64> {
-        let state = self.lifecycle.state.lock();
-        if !state.active || state.active_reservation_id != Some(self.reservation_id) {
-            anyhow::bail!("turn reservation is no longer active");
-        }
-        Ok(state.turn_epoch)
     }
 
     fn prepare_actual_user_content(&self, actual_user_content: String) -> Result<()> {
@@ -670,18 +669,20 @@ impl TurnLifecycle {
         }
     }
 
-    /// Side effects for a remote cancellation must share the epoch check's lock.
+    /// Run a synchronous side effect only for this still-active generation.
+    /// The callback must not re-enter this lifecycle or await. Holding the
+    /// state lock prevents a forwarder-created successor between validation
+    /// and capturing the old turn's shell scope.
     pub(crate) fn with_active_generation<T>(
         &self,
         generation: u64,
         action: impl FnOnce() -> T,
     ) -> Option<T> {
         let state = self.state.lock();
-        if state.turn_epoch == generation && (state.active || state.terminal_closing) {
-            Some(action())
-        } else {
-            None
+        if state.turn_epoch != generation || (!state.active && !state.terminal_closing) {
+            return None;
         }
+        Some(action())
     }
 
     /// 当前活动轮是否已提交（`SendMessage` 已入队 / `TurnStarted` 已抵达）。
@@ -732,7 +733,7 @@ impl TurnLifecycle {
     }
 
     pub(crate) fn reserve(self: &Arc<Self>) -> Result<TurnReservation> {
-        let reservation_id = {
+        let (reservation_id, generation) = {
             let mut state = self.state.lock();
             if state.active || state.terminal_closing {
                 anyhow::bail!("session_turn_in_progress");
@@ -750,10 +751,14 @@ impl TurnLifecycle {
             state.active_reservation_id = Some(reservation_id);
             state.pending_cancel = None;
             state.submission_id = None;
-            reservation_id
+            (reservation_id, state.turn_epoch)
         };
         crate::features::connectors::visibility::turn_submitted();
-        Ok(TurnReservation::new(self.clone(), reservation_id))
+        Ok(TurnReservation::new(
+            self.clone(),
+            reservation_id,
+            generation,
+        ))
     }
 
     fn install_transcript_rule(
@@ -1637,7 +1642,7 @@ impl AppEngine {
     ///
     /// [`build_engine_config_for_session`]: crate::features::assistant::platform::bridge::Pinvou3Bridge::build_engine_config_for_session
     /// [`EnginePool`]: crate::features::assistant::engine_pool::EnginePool
-    pub(crate) async fn spawn_for_session(
+    pub(crate) fn spawn_for_session(
         app: AppHandle,
         store: SessionStore,
         bridge: Pinvou3Bridge,
@@ -1835,6 +1840,12 @@ impl AppEngine {
             turn_shell_tasks: None,
             scheduled_disallowed_tools,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bind_test_session(&mut self, session_id: &str, lifecycle: Arc<TurnLifecycle>) {
+        self.session_id = session_id.to_owned();
+        self.turn_lifecycle = lifecycle;
     }
 
     /// Turn submission for headless harnesses (L1 integration harness, live
@@ -2252,17 +2263,31 @@ impl AppEngine {
     /// 都是 disk-API-限制的副作用,现在彻底走掉。
     pub async fn sync_session(&self, session_id: String, messages: Vec<Message>) -> Result<()> {
         self.handle
-            .send(Op::SyncSession {
-                session_id: Some(session_id),
-                messages,
-                system_prompt: None,
-                system_prompt_override: false,
-                model: self.bridge.model(),
-                workspace: self.workspace.clone(),
-                mode: AppMode::Agent,
-            })
+            .send(self.sync_session_op(session_id, messages))
             .await?;
         Ok(())
+    }
+
+    /// Queue mandatory identity/history in a fresh mailbox before publication.
+    pub(crate) fn try_sync_new_session(
+        &self,
+        session_id: String,
+        messages: Vec<Message>,
+    ) -> Result<()> {
+        self.handle
+            .try_send(self.sync_session_op(session_id, messages))
+    }
+
+    fn sync_session_op(&self, session_id: String, messages: Vec<Message>) -> Op {
+        Op::SyncSession {
+            session_id: Some(session_id),
+            messages,
+            system_prompt: None,
+            system_prompt_override: false,
+            model: self.bridge.model(),
+            workspace: self.workspace.clone(),
+            mode: AppMode::Agent,
+        }
     }
 }
 
@@ -2759,6 +2784,28 @@ mod turn_lifecycle_tests {
 
         // 防 Drop 副作用。
         reservation2.mark_submitted(None);
+    }
+
+    #[test]
+    fn generation_guard_holds_state_lock_and_rejects_a_successor() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let old = lifecycle.reserve().unwrap();
+        let old_generation = old.generation();
+        assert_eq!(
+            lifecycle.with_active_generation(old_generation, || {
+                assert!(lifecycle.state.try_lock().is_none());
+                "captured under lock"
+            }),
+            Some("captured under lock")
+        );
+        drop(old);
+        let successor = lifecycle.reserve().unwrap();
+        assert!(
+            lifecycle
+                .with_active_generation(old_generation, || panic!("must not cancel new scope"))
+                .is_none()
+        );
+        assert!(successor.ensure_active().is_ok());
     }
 
     #[test]

@@ -18,11 +18,43 @@ const MAX_SECONDS: u64 = 24 * 60 * 60;
 // forever. The original identity remains mandatory even after this bounded wait.
 pub(crate) const CANCEL_SETTLE_BUDGET: Duration = Duration::from_secs(5);
 
+/// Timeout bounds the caller, not cleanup ownership. Dropping a JoinHandle
+/// detaches the exact-owner cleanup instead of dropping its pending future.
+pub(crate) async fn settle_owned(cleanup: impl Future<Output = ()> + Send + 'static) {
+    let mut cleanup = tokio::spawn(cleanup);
+    let _ = tokio::time::timeout(CANCEL_SETTLE_BUDGET, &mut cleanup).await;
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct TurnBudget {
     deadline: Instant,
 }
 
+tokio::task_local! {
+    static ADMITTED_TURN_BUDGET: TurnBudget;
+}
+
 impl TurnBudget {
+    pub(crate) fn current_or_new() -> Result<Self, String> {
+        ADMITTED_TURN_BUDGET
+            .try_with(|budget| *budget)
+            .map(Ok)
+            .unwrap_or_else(|_| Self::from_environment())
+    }
+
+    pub(crate) async fn scope<T>(&self, future: impl Future<Output = T>) -> T {
+        ADMITTED_TURN_BUDGET.scope(*self, future).await
+    }
+    pub(crate) fn checkpoint(&self, cancel: &CancellationToken) -> Result<(), String> {
+        if cancel.is_cancelled() {
+            Err(TURN_CANCELLED_CODE.into())
+        } else if Instant::now() >= self.deadline {
+            Err(TURN_TIMEOUT_CODE.into())
+        } else {
+            Ok(())
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(duration: Duration) -> Self {
         Self {
@@ -84,6 +116,48 @@ fn timeout_seconds(value: Option<&str>) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn admitted_budget_is_inherited_without_reset_by_adapter_or_capture() {
+        let budget = TurnBudget::for_test(Duration::from_secs(10));
+        tokio::time::advance(Duration::from_secs(9)).await;
+        let result = budget
+            .scope(async {
+                TurnBudget::current_or_new()
+                    .unwrap()
+                    .run(&CancellationToken::new(), async {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        Ok(())
+                    })
+                    .await
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), TURN_TIMEOUT_CODE);
+        assert_eq!(
+            budget.checkpoint(&CancellationToken::new()).unwrap_err(),
+            TURN_TIMEOUT_CODE
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn settle_timeout_detaches_but_does_not_drop_exact_owner_cleanup() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let finished = Arc::new(AtomicBool::new(false));
+        let observed = finished.clone();
+        let (release, blocked) = tokio::sync::oneshot::channel::<()>();
+        settle_owned(async move {
+            blocked.await.unwrap();
+            observed.store(true, Ordering::SeqCst);
+        })
+        .await;
+        assert!(!finished.load(Ordering::SeqCst));
+        release.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(finished.load(Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn ready_submission_after_deadline_must_not_be_accepted() {

@@ -251,13 +251,14 @@ gate and must be provided before exposing unrestricted endpoint registration to
 an untrusted network; protocol v2 intentionally does not design or enable that
 registration authority.
 
-## Desktop controller protocol v1 (frozen, not yet enabled)
+## Desktop controller protocol v1 (feature gated)
 
 ### DEV-00 normative contract (supersedes summaries below)
 
 The rules in this subsection are normative where an older summary later in
-this section differs. DEV-00 freezes the contract but does not register it in
-the live WebSocket dispatcher; WebUI v2 behavior remains unchanged.
+this section differs. DEV-00 freezes the contract; later tasks connect it to
+the live WebSocket dispatcher behind `PINVOU_DESKTOP_CONTROLLER_ENABLED=1`.
+WebUI v2 behavior remains unchanged when the controller is disabled.
 
 Desktop peers use subprotocol `pinvou-desktop-controller-v1`, JSON `v: 1`, and
 the exact capability registry frozen in `protocol-controller.js`. Unknown
@@ -265,6 +266,12 @@ versions, message/payload types, fields, enum values, capabilities, duplicates
 and role combinations fail closed. Capability negotiation is
 intersection-only: Relay sorts the exact A/B intersection bytewise, rejects an
 empty intersection, and never inserts a capability absent from either side.
+Duplicate object keys are rejected from the original JSON text at every depth,
+including escaped spellings of the same key; they fail locally as `invalid_json`
+before the schema validator or controller dispatcher sees a collapsed object.
+Legacy WebUI v2 keeps its existing duplicate-field parsing, except that any
+repeated `v` key (including escaped spellings) is rejected before routing. A
+mixed `v: 1` / `v: 2` object can therefore never enter the v2 lane.
 General validation has two entry modes. Shape-only parsing checks schema, size,
 role and any supplied lease context without assuming negotiation state. Runtime
 state-machine dispatch requires a validation context containing the frozen
@@ -305,7 +312,7 @@ deduplicate an invalid inbound context on its behalf.
 The capability hash is SHA-256 of ASCII
 `pinvou-controller-capabilities-v1` followed by every negotiated capability in
 bytewise sorted order as `LP(UTF-8(value))`. Its complete-v1 digest is
-`a8cb9f552292fa1bf84874a8cf025dcfdf1b1e103f9a21de845e513830164cb9`.
+`92368be252a01acfed541dcd7109ec74bb92777728d445b729060b9b67b77d61`.
 
 `desktop_pairing_register` carries both a transport `request_id` and a stable
 `registration_request_id`. B creates a new registration ID only after changing
@@ -328,8 +335,8 @@ must match it. This independent registration context is not a lease context.
 Reusing a stable registration ID with a different generation, endpoint,
 identity, public key, algorithm or capability list is `invalid_message`.
 
-DEV-04 provides a disconnected claim/reservation authority; `server.js` does
-not route live traffic through it until DEV-06 composes the handshake. A claim
+The claim/reservation authority is connected by the later Relay composition
+when the controller feature flag is enabled. A claim
 normalizes ASCII case and removes whitespace/hyphen separators before applying
 the seven-character alphabet. Source, socket and global fixed-window limits run
 before code lookup, and their bounded source/socket maps fail closed when full.
@@ -481,6 +488,71 @@ only a greater value is accepted. The state layer may replace the deadline when
 the attestation advances and A's heartbeat advances; an equal A heartbeat may
 only tighten the existing deadline.
 
+### A's authenticated proof of B and recovery cutoff
+
+A's own `controller_liveness` transport admission is not evidence that B is
+alive and MUST NOT renew A's local lifetime. A instead sends
+`controller_liveness_attestation_request_b` to Relay with its current full
+lease context, `request_id`, and a fresh one-shot `challenge_id/challenge_b64`.
+Only authenticated A may request this proof. Relay signs
+`controller_liveness_attestation_b` from its latest strictly increasing
+heartbeat received on the currently bound B socket, never from A activity or
+the initial sequence-zero seed. B evidence older than 5 seconds is rejected.
+This is explicitly a trusted-Relay observation of authenticated B socket
+activity, not an end-to-end signature made by B. It neither proves task progress
+nor authorizes any business operation. The Relay trust root pinned for pairing
+also verifies these proofs for the lifetime of that same connection.
+
+The proof uses domain `pinvou-controller-peer-b-attestation-v1`, followed by
+LP-encoded `v` (decimal text), `type, request_id, connection_id,
+controller_lease_id, lease_epoch, relay_epoch, remote_control_generation,
+liveness_epoch_b, heartbeat_sequence_b, attestation_sequence, challenge_id,
+challenge_b64, observed_age_ms, remaining_ttl_ms, issued_at_relay,
+relay_signing_key_id, signature_algorithm`. It is distinct from the A-proof
+signature domain. B-proof sequences and bounded consumed challenge-ID history
+are independent of A-proof state; reusing an ID with different bytes is still
+a replay within the 30-second validity window.
+
+A retains at most one pending challenge bound to its local send time, exact
+lease/generation, B epoch, and both correlation IDs. It verifies the pinned
+Relay signature, full context, schema, capability, sequence floors and pending
+challenge before committing any state. The local candidate cutoff is
+`receive_time + min(remaining_ttl_ms, 30000 - observed_age_ms) - full_RTT - 1000`;
+RTT and observation age may each be at most 5000 ms. Relay wall-clock time is
+signed metadata, never a local deadline. The timer is anchored to receipt,
+excluding signature-validation and scheduling cost. New B heartbeat sequences
+may replace the cutoff; equal sequences may only tighten it, and older B or
+replayed proof sequences are rejected. Failed admission, unanswered requests,
+bare B challenges and A heartbeats grant no lifetime.
+The Rust B worker produces ordinary role-B heartbeats from its verified
+joined/final-resumed lease every control poll. The full original operation and
+lease stay locked through enqueue; transport disconnect, resume admission and
+retired workers cannot publish them. A successful enqueue alone is not proof
+for A: only the Relay's authenticated B socket observation can be signed. B's
+own watchdog for A is never renewed by these heartbeats. Resume installs B's
+validated new epoch and restarts the role sequence only after the final gate.
+An exact pending proof-request `error` consumes only that request without
+changing the cutoff or failing another capability/journal request. The keeper
+pins its original connection intent and transport; a replaced keeper cannot
+send through the replacement transport, commit evidence, or clear its lane.
+
+Initial authenticated join starts one finite 30-second cycle. The first
+transport disconnect freezes the last valid local cutoff and clears pending
+proofs. In-flight proofs, retry traffic and repeated disconnects never extend
+it. Only a fully authenticated final resume, consistent with the confirmed B
+epoch and successfully reinstalled transport authority, starts a fresh cycle.
+This unreleased desktop protocol is upgraded atomically with its contract hash;
+mixed implementations fail closed without falling back to self-TX renewal.
+
+B business preparation may run on a serial worker while control/resume polling
+continues. Final task admission pins the exact connected five-field lease,
+capability revision and session mapping through durable ledger admission and
+task-resource installation. Workspace authority is resolved before the session
+lock; lock order remains owner → session → ledger. Journal and cleanup callbacks
+run only after releasing those locks. A transient disconnect preserves an
+already admitted task and its idempotency record; lifecycle cleanup before
+dispatch prevents executor entry.
+
 `controller_pairing_reserved` delivers the same strict
 `controller_pairing_transcript/v1` object to both peers. Its ordered fields are
 `schema, relay_epoch, pairing_id, reservation_id, endpoint_id,
@@ -513,10 +585,19 @@ algorithm below; Rust constructs it from individual fields rather than hashing
 a fixture-supplied preimage.
 
 Every decrypted payload carries full lease context. A requests B's runtime
-allowlist with `capability_snapshot_request {request_id,known_revision}`; B
-returns `capability_snapshot {request_id,capability_revision,expires_at_ms,
-modes,tools,skills,workspaces}`. Tool/Skill entries contain only an opaque ID
-and display name. Workspace entries contain only opaque ID, display name and
+allowlist with `capability_snapshot_request {request_id,session_id,known_revision}`;
+`session_id` is A's Rust-generated RemoteProxy reference. B first resolves the
+current generation's authoritative local Session and returns
+`capability_snapshot {request_id,session_id,controlled_session_id,
+capability_revision,expires_at_ms,modes,tools,skills,workspaces}`. A accepts
+the B Session mapping only after encrypted authentication and exact request,
+reference and lease checks. `valid_for_ms` is optional TTL metadata, not a
+mapping fallback. If snapshot construction fails, B returns
+`capability_snapshot_error {request_id,session_id,code}` with
+the bounded `capability_snapshot_unavailable` code. Tool entries contain only an opaque ID and
+display name. Skill entries additionally contain a non-empty, duplicate-free `scopes` array whose
+values are `chat` and/or `code`; one opaque skill ID can therefore be advertised for both lanes
+without collapsing their authorization scopes. Workspace entries contain only opaque ID, display name and
 `code_allowed`; paths, configuration, source and credentials are forbidden.
 Lists are bounded to 256 unique entries, revisions are canonical decimal
 strings, and a task binds the exact `capability_revision` it consumed.
@@ -569,7 +650,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`d844a4f207645c4d40d443529b9c982492898c7ae30a810448e3ae46e894df5b`.
+`11c728929280ade5f529efc38a0fca6d618a77839bba1c7e48938b34e781f889`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
@@ -588,16 +669,22 @@ generation/endpoint identifiers, keys, nonces, secrets, tokens, ciphertext,
 task input, model packages and credentials, attachments, artifacts, snapshots
 and journal data.
 
-This section freezes the desktop-to-desktop controller contract before its
-state machines and cryptography are implemented. The current `server.js` does
-not route any message in this section. Implementations must not advertise or
-accept this protocol until the enrollment, pairing, lease and encryption tasks
-are complete.
+DEV-00 froze the desktop-to-desktop controller contract before its state
+machines and cryptography were implemented. Later tasks connected the protocol
+through the Relay and Tauri paths. The Relay routes controller messages only
+when `PINVOU_DESKTOP_CONTROLLER_ENABLED=1`; DEV-00 itself enables no business
+path.
 
 Controller clients select the WebSocket subprotocol
-`pinvou-desktop-controller-v1` and send `controller_capabilities` as their first
-application message. That declaration is not authentication: before role
-binding, a B candidate may proceed only to `desktop_endpoint_claim`, and an A
+`pinvou-desktop-controller-v1`. The frozen schema includes an explicit
+`controller_capabilities` declaration intended as the first controller-v1
+application message. The current feature-gated live router has not connected
+that standalone declaration, so clients must not send it to the live router.
+Instead, B's `desktop_pairing_register` and A's `controller_pairing_claim`
+carry their capability lists; the Relay takes their exact intersection.
+When the standalone declaration is connected, it is not authentication. In
+that intended v1 flow, before role binding a B candidate may proceed only to
+`desktop_endpoint_claim`, and an A
 candidate only to `controller_pairing_claim`. B becomes authenticated only when
 its enrollment proof succeeds; A becomes the temporary authenticated A identity
 only when the Relay atomically binds the successful claim socket to its
@@ -606,6 +693,24 @@ exact integer `v: 1`; it is a separate namespace from the existing WebUI v2
 protocol. A socket without this subprotocol remains a WebUI v2 socket and its
 wire behavior above is unchanged. There is no automatic downgrade between the
 two protocols.
+In the current live composition, B's enrollment proof is the existing v2
+`desktop_endpoint_register` on the negotiated desktop socket. The frozen v1
+`desktop_endpoint_claim` schema is not yet a separate live authentication path.
+The controlled desktop's persistent endpoint socket negotiates this subprotocol
+because it carries controller v1 frames, while its existing v2
+`desktop_endpoint_register` and WebUI forwarding continue on that same socket.
+An ordinary browser socket does not negotiate the controller subprotocol and
+cannot submit controller v1 frames. The Relay binds a controlled controller
+identity only to a negotiated desktop socket.
+If an older Relay or proxy omits the requested subprotocol in its upgrade
+response, the desktop opens a fresh v2-only connection to preserve WebUI
+access. That connection cannot carry controller v1 traffic: already queued v1
+frames are discarded with a bounded `desktop_controller_unavailable` signal,
+and new v1 sends fail immediately. The enrollment gateway negotiates a
+controller subprotocol downstream only after its actual upstream connection
+has negotiated the same value. Its first-frame authorization and subsequent
+text forwarding in both directions reject repeated `v` keys before forwarding
+raw JSON; ordinary duplicate v2 fields retain their legacy behavior.
 
 The two authenticated desktop roles are:
 
@@ -621,6 +726,7 @@ lease never changes the role authenticated by the socket.
 
 The frozen capability values are `pairing_v1`, `encrypted_frames_v1`,
 `finished_receipt_v1`, `role_liveness_v1`, `resume_v1`, `task_v1`,
+`temporary_model_package_v1`,
 `permission_v1`, `attachment_v1`, `artifact_v1` and
 `snapshot_journal_v1`. Unknown capabilities, message types, payload types,
 enum values or object fields are errors. All required fields must be present;
@@ -698,18 +804,18 @@ JSON shape is valid. Pairing registration additionally uses the stable
 `request_id`, while refresh/stop must change generation and registration ID.
 
 The frozen decrypted `encrypted_frame` payload kinds are
-`capability_snapshot_request`, `capability_snapshot`, `task_submit`,
-`task_cancel`, `task_status`, `permission_request`, `permission_decision`,
-`attachment_begin`, `attachment_chunk`, `attachment_commit`,
-`artifact_index_request`, `artifact_index`, `artifact_read_request`,
-`artifact_chunk`, `session_snapshot_request`, `session_snapshot`,
-`journal_replay_request` and `journal_event`. A sends capability, task, cancel,
-approval, upload, read and replay requests. B sends capability snapshots, task
-states, permission requests, artifact indexes/chunks, snapshots and journal events. The parser
+`capability_snapshot_request`, `capability_snapshot`, `capability_snapshot_error`, `task_submit`,
+`task_cancel`, `task_status`, `remote_action_request`, `remote_action_result`,
+`session_snapshot_request`, `session_snapshot`, `journal_replay_request` and
+`journal_event`. A sends capability, task, cancel, closed operation-specific
+actions and replay requests. B sends capability snapshots/errors, task states,
+correlated action results, snapshots and journal events. The parser
 rejects these payloads when presented by the opposite role. Every task,
 permission, attachment, artifact, snapshot and journal operation is bound to
 the same `connection_id + controller_lease_id + lease_epoch`; task and transfer
-messages additionally carry their exact task/session/request identifiers.
+messages additionally carry their exact task/session/request identifiers. The
+action envelope requires `task_v1`; after decryption, permission, attachment
+and artifact operations also require their own negotiated capability.
 The outer gate maps pairing messages to `pairing_v1`, receipt/Finished messages
 to `finished_receipt_v1`, liveness messages to `role_liveness_v1`, resume
 messages to `resume_v1`, and encrypted frames/disconnect to
@@ -771,17 +877,17 @@ The fixed compatibility vector is:
 The exact preimage hex is frozen in the shared fixture and asserted by both JS
 and Rust tests.
 
-### DEV-05 cryptographic profile (implemented, not yet routed)
+### DEV-05 cryptographic profile (feature gated in the live path)
 
-The disconnected Rust controller crypto module uses X25519, HKDF-SHA-256,
+The Rust controller crypto module uses X25519, HKDF-SHA-256,
 AES-256-GCM, Ed25519 verification, an OS CSPRNG, and zeroizing secret owners.
-These primitives are not registered with the live Relay or Tauri command path
-in DEV-05. Production Relay JavaScript receives no A/B handshake private key,
+Later tasks connected them to the Relay and Tauri command path behind the
+controller feature gate. Production Relay JavaScript receives no A/B handshake private key,
 HKDF output, Finished key, business key, resume secret, or business plaintext.
 Its helpers recompute and constant-time compare the receipt commitment and
-validate the frozen sealed-code structure/vector. DEV-03 now provides the
-disconnected one-shot Relay sealed-code encryptor, persistent pairing store and
-registration handler. They remain outside the live dispatcher until DEV-06.
+validate the frozen sealed-code structure/vector. DEV-03 provides the one-shot
+Relay sealed-code encryptor, persistent pairing store and registration handler;
+later Relay composition connects them when the feature gate is enabled.
 The handler first runs the injected authenticated-endpoint gate. A successful
 allocation atomically persists the stable registration result and a code-digest
 tombstone before returning the code to the handler; persistence failure returns
@@ -957,7 +1063,8 @@ partial post-rotation hook installation.
 Controller error envelopes use only these codes: `pairing_code_invalid`,
 `pairing_code_generation_failed`, `controller_busy`, `version_incompatible`, `endpoint_offline`,
 `enrollment_required`, `invalid_message`, `unsupported_capability`,
-`permission_already_decided`, `permission_expired` and `result_unknown`.
+`permission_already_decided`, `permission_expired`, `result_unknown` and
+`capability_snapshot_unavailable`.
 Malformed schema errors are local parser failures and are mapped to the bounded
 `invalid_message` envelope before the later dispatcher closes the socket.
 Non-local pairing failures (missing, expired, consumed, revoked, wrong

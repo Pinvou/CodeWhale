@@ -478,7 +478,7 @@ assert.ok(
     /scheduledRunHistory\.map/.test(indexHtml) &&
     /<RecentItem[\s\S]{0,900}chat=\{chat\}[\s\S]{0,900}handleOpenScheduledRunShortcut\(c\.scheduledRun\)/.test(indexHtml) &&
     /onContextMenu=\{openContextMenu\}/.test(indexHtml) &&
-    /onTogglePinned && onTogglePinned\(chat\.id, !chat\.pinned\)/.test(indexHtml) &&
+    /onTogglePinned && <button[\s\S]{0,200}onTogglePinned\(chat\.id, !chat\.pinned\)/.test(indexHtml) &&
     /setConfirming\(true\)/.test(indexHtml) &&
     /renameSession\(id, title\)/.test(indexHtml),
   'scheduled run record operations belong to the sidebar RecentItem, not the scheduled task definition list'
@@ -507,7 +507,7 @@ assert.ok(
   'an older autosave completion must not flash an error over newer pending edits'
 );
 assert.ok(
-  /editable=\{!busy && !isMultiAgentReadOnly && item\.id === lastUserId\}/.test(indexHtml) &&
+  /editable=\{!busy && !isMultiAgentReadOnly && !item\.remote && item\.id === lastUserId\}/.test(indexHtml) &&
     !/async function editLastTurn\(newText\)[\s\S]{0,420}isScheduledRunSession\(state\.activeSessionId\)\) return false/.test(tauriBridge) &&
     !indexHtml.includes('定时运行使用创建时锁定的模型'),
   'a scheduled run opened from history should use the ordinary chat editor and composer controls'
@@ -1153,6 +1153,10 @@ async function lostFirstWebSessionChunkStillHasCancellableLease() {
 async function subscriptionSnapshotsAvoidTranscriptDeepClone() {
   var harness = createBridgeHarness();
   var bridge = harness.bridge;
+  // The desktop remote-control feature restores its authoritative controller
+  // status in a microtask when the bridge is installed. Let that startup
+  // publication settle so this assertion measures only createNewSession.
+  await tick();
   var chatUpdates = [];
   var combinedUpdates = [];
   var unsubscribeChat = bridge.state.subscribe("chat", function (snapshot) {
@@ -1272,6 +1276,7 @@ async function reentrantSubscriptionNotificationsStayOrdered() {
 async function persistentSubscriptionSnapshotsPreserveJsonEdges() {
   var harness = createBridgeHarness();
   var bridge = harness.bridge;
+  await tick(); // settle the bridge's initial desktop controller-status publication
   var snapshots = [];
   var negativeZero = true;
   function settingsResult() {

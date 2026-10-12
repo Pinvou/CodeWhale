@@ -19,10 +19,11 @@ use zeroize::Zeroizing;
 
 use super::protocol::{
     LeaseContext, MAX_CONTROL_MESSAGE_BYTES, MAX_ENCRYPTED_WIRE_BYTES, RuntimeValidationContext,
-    SenderRole, validate_controller_message_json, validate_controller_runtime_message_json,
+    SenderRole, is_valid_identifier, validate_controller_message_json,
+    validate_controller_runtime_message_json,
 };
 use crate::features::remote_control::relay_client::{
-    MAX_RELAY_FRAME_BYTES, ReconnectBackoff, relay_websocket_config,
+    MAX_RELAY_FRAME_BYTES, ReconnectBackoff, controller_websocket_request, relay_websocket_config,
 };
 
 const CONTROL_QUEUE_CAPACITY: usize = 64;
@@ -100,11 +101,16 @@ impl TransportClock for MonotonicTransportClock {
 pub(crate) struct ControllerTransportConfig {
     pub(crate) relay_url: String,
     pub(crate) role: ControllerRole,
-    pub(crate) remote_control_generation: String,
+    /// E2E-02：`remote_control_generation` 由 B 拥有，A 只能在验签 transcript
+    /// 之后才知道它。sender 与 transport 任务共享同一个单元格，因此受控的
+    /// `bind_generation` 绑定结果对两侧同时生效。
+    pub(crate) remote_control_generation: Arc<RwLock<String>>,
     pub(crate) clock: Arc<dyn TransportClock>,
 }
 
 impl ControllerTransportConfig {
+    /// `remote_control_generation` 为空表示「尚未绑定」：只有 A 端在验签
+    /// transcript 之后才允许通过 `bind_generation` 一次性补齐。
     pub(crate) fn new(
         relay_url: impl Into<String>,
         role: ControllerRole,
@@ -113,9 +119,14 @@ impl ControllerTransportConfig {
         Self {
             relay_url: relay_url.into(),
             role,
-            remote_control_generation: remote_control_generation.into(),
+            remote_control_generation: Arc::new(RwLock::new(remote_control_generation.into())),
             clock: Arc::new(MonotonicTransportClock::default()),
         }
+    }
+
+    /// 当前生效的 generation；未绑定时为空串。
+    pub(crate) fn generation(&self) -> String {
+        self.remote_control_generation.read().clone()
     }
 }
 
@@ -160,9 +171,15 @@ pub(crate) enum ControllerSendError {
     Serialization,
     Unauthenticated,
     InvalidFrame(String),
-    FrameTooLarge { bytes: usize, limit: usize },
+    FrameTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
     ByteBudgetExhausted,
     QueueFull(FramePriority),
+    /// E2E-02：transport 的 `remote_control_generation` 已经被绑定过，或已被
+    /// 已安装租约锁定，无法再次绑定。
+    GenerationAlreadyBound,
     Closed,
 }
 
@@ -182,6 +199,9 @@ impl fmt::Display for ControllerSendError {
                 formatter.write_str("controller outbound byte budget exhausted")
             }
             Self::QueueFull(priority) => write!(formatter, "controller {priority:?} queue is full"),
+            Self::GenerationAlreadyBound => {
+                formatter.write_str("controller transport generation is already bound")
+            }
             Self::Closed => formatter.write_str("controller transport is closed"),
         }
     }
@@ -221,6 +241,7 @@ impl WirePayload {
 
 #[derive(Debug)]
 struct QueuedFrame {
+    flushed: Option<tokio::sync::oneshot::Sender<()>>,
     priority: FramePriority,
     transport_epoch: u64,
     lease_context: Option<LeaseContext>,
@@ -261,13 +282,13 @@ impl QueuedFrame {
 #[derive(Clone)]
 pub(crate) struct ControllerTransportSender {
     role: ControllerRole,
-    remote_control_generation: String,
+    remote_control_generation: Arc<RwLock<String>>,
     control_tx: mpsc::Sender<QueuedFrame>,
     business_tx: mpsc::Sender<QueuedFrame>,
     total_budget: Arc<Semaphore>,
     business_budget: Arc<Semaphore>,
     lease: Arc<RwLock<Option<AuthenticatedLease>>>,
-    // Recovery binding is not runtime/TX authority.
+    // A disconnected lease is a resume-frame binding only, never business or TX authority.
     resume_lease: Arc<RwLock<Option<AuthenticatedLease>>>,
     resume_install: Arc<RwLock<Option<ResumeInstallAuthority>>>,
     transport_epoch: Arc<AtomicU64>,
@@ -275,11 +296,37 @@ pub(crate) struct ControllerTransportSender {
 }
 
 impl ControllerTransportSender {
+    /// E2E-02 受控绑定：A 端在验签 transcript 之后才有权把 transport 的
+    /// generation 固定为 B 的 generation。只允许一次，且必须在安装租约之前；
+    /// 空值、非法 id、重复绑定或已安装租约都失败关闭，绝不覆盖既有绑定。
+    pub(crate) fn bind_generation(&self, generation: &str) -> Result<(), ControllerSendError> {
+        if !is_valid_identifier(generation) {
+            return Err(ControllerSendError::InvalidFrame(
+                "remote_control_generation".into(),
+            ));
+        }
+        if self.lease.read().is_some() {
+            return Err(ControllerSendError::GenerationAlreadyBound);
+        }
+        let mut current = self.remote_control_generation.write();
+        if !current.is_empty() {
+            return Err(ControllerSendError::GenerationAlreadyBound);
+        }
+        *current = generation.to_owned();
+        Ok(())
+    }
+
+    /// 当前生效的 generation；未绑定时为空串。
+    pub(crate) fn generation(&self) -> String {
+        self.remote_control_generation.read().clone()
+    }
+
     pub(crate) fn install_authenticated_lease(
         &self,
         lease: AuthenticatedLease,
     ) -> Result<(), ControllerSendError> {
-        if lease.context.remote_control_generation != self.remote_control_generation {
+        let bound = self.generation();
+        if bound.is_empty() || lease.context.remote_control_generation != bound {
             return Err(ControllerSendError::InvalidFrame(
                 "remote_control_generation".into(),
             ));
@@ -294,14 +341,21 @@ impl ControllerTransportSender {
         Ok(())
     }
 
-    /// Only the exact final received on the current socket epoch can authorize
-    /// installation. Domain owners must still validate the E2E resume state.
+    /// Consume the final frame's one-shot authority on the exact receiving
+    /// socket epoch. A queued final from a subsequently closed socket cannot
+    /// reopen TX, even if another socket has already reconnected.
     pub(crate) fn install_authenticated_lease_after_resume(
         &self,
         lease: AuthenticatedLease,
         activation_id: &str,
         request_id: &str,
     ) -> Result<(), ControllerSendError> {
+        let bound = self.generation();
+        if bound.is_empty() || lease.context.remote_control_generation != bound {
+            return Err(ControllerSendError::InvalidFrame(
+                "remote_control_generation".into(),
+            ));
+        }
         let mut current = self.lease.write();
         let mut saved = self.resume_lease.write();
         let mut authority = self.resume_install.write();
@@ -386,14 +440,15 @@ impl ControllerTransportSender {
     fn suspend_authenticated_lease(&self) {
         let mut current = self.lease.write();
         self.transport_epoch.fetch_add(1, Ordering::AcqRel);
-        let mut saved = self.resume_lease.write();
+        let mut resume = self.resume_lease.write();
         *self.resume_install.write() = None;
         if self.is_stopped() {
             *current = None;
-            *saved = None;
+            *resume = None;
         } else if let Some(previous) = current.take() {
-            *saved = Some(previous);
+            *resume = Some(previous);
         }
+        // Repeated failed reconnects preserve the original binding, not a new lease.
     }
 
     pub(crate) fn authenticated_lease(&self) -> Option<AuthenticatedLease> {
@@ -417,6 +472,23 @@ impl ControllerTransportSender {
         &self,
         value: &T,
     ) -> Result<(), ControllerSendError> {
+        self.enqueue_authenticated_control(value, None)
+    }
+
+    pub(crate) fn send_control_with_receipt<T: Serialize>(
+        &self,
+        value: &T,
+    ) -> Result<tokio::sync::oneshot::Receiver<()>, ControllerSendError> {
+        let (sent, receipt) = tokio::sync::oneshot::channel();
+        self.enqueue_authenticated_control(value, Some(sent))?;
+        Ok(receipt)
+    }
+
+    fn enqueue_authenticated_control<T: Serialize>(
+        &self,
+        value: &T,
+        flushed: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<(), ControllerSendError> {
         let text = serde_json::to_string(value).map_err(|_| ControllerSendError::Serialization)?;
         enforce_frame_limit(text.len(), MAX_CONTROL_MESSAGE_BYTES)?;
         let lease = self
@@ -438,10 +510,12 @@ impl ControllerTransportSender {
         if validated.get("type").and_then(Value::as_str) == Some("encrypted_frame") {
             return Err(ControllerSendError::InvalidFrame("message.type".into()));
         }
-        self.try_enqueue(
+        self.try_enqueue_with_receipt(
             FramePriority::Control,
             WirePayload::Plain(text),
             Some(lease_context),
+            flushed,
+            false,
         )
     }
 
@@ -496,10 +570,11 @@ impl ControllerTransportSender {
         if !inbound_context_matches(&validated, Some(lease)) {
             return Err(ControllerSendError::InvalidFrame("lease_context".into()));
         }
-        self.try_enqueue_bound(
+        self.try_enqueue_with_receipt(
             FramePriority::Control,
             WirePayload::Sensitive(text),
             Some(lease.context.clone()),
+            None,
             true,
         )
     }
@@ -540,6 +615,25 @@ impl ControllerTransportSender {
         self.clear_authenticated_lease();
     }
 
+    pub(crate) fn with_business_authority(
+        &self,
+        expected: &LeaseContext,
+        action: &mut dyn FnMut(),
+    ) -> bool {
+        // Clearing/suspending the lease takes the writer lock. A stop cannot
+        // finish retirement across an already admitted synchronous mutation.
+        let lease = self.lease.read();
+        if self.is_stopped()
+            || !lease
+                .as_ref()
+                .is_some_and(|lease| &lease.context == expected)
+        {
+            return false;
+        }
+        action();
+        true
+    }
+
     pub(crate) fn is_stopped(&self) -> bool {
         self.shutdown.is_cancelled()
     }
@@ -555,14 +649,15 @@ impl ControllerTransportSender {
         payload: WirePayload,
         lease_context: Option<LeaseContext>,
     ) -> Result<(), ControllerSendError> {
-        self.try_enqueue_bound(priority, payload, lease_context, false)
+        self.try_enqueue_with_receipt(priority, payload, lease_context, None, false)
     }
 
-    fn try_enqueue_bound(
+    fn try_enqueue_with_receipt(
         &self,
         priority: FramePriority,
         payload: WirePayload,
         lease_context: Option<LeaseContext>,
+        flushed: Option<tokio::sync::oneshot::Sender<()>>,
         resume_only: bool,
     ) -> Result<(), ControllerSendError> {
         if self.shutdown.is_cancelled() {
@@ -594,6 +689,7 @@ impl ControllerTransportSender {
             None
         };
         let frame = QueuedFrame {
+            flushed,
             priority,
             transport_epoch: self.transport_epoch.load(Ordering::Acquire),
             lease_context,
@@ -613,7 +709,7 @@ impl ControllerTransportSender {
     }
 }
 
-struct ControllerTransportReceiver {
+pub(crate) struct ControllerTransportReceiver {
     control_rx: mpsc::Receiver<QueuedFrame>,
     business_rx: mpsc::Receiver<QueuedFrame>,
 }
@@ -634,9 +730,30 @@ impl ControllerTransportReceiver {
     }
 }
 
-fn transport_channels(
+/// 测试用便捷构造：新建一个独立 generation 单元格。生产调用必须走
+/// `spawn_controller_transport`，否则 transport 任务与配置不会共享绑定结果。
+#[cfg(test)]
+pub(crate) fn transport_channels(
     role: ControllerRole,
     remote_control_generation: impl Into<String>,
+    control_capacity: usize,
+    business_capacity: usize,
+    total_byte_budget: usize,
+    control_reserved_bytes: usize,
+) -> (ControllerTransportSender, ControllerTransportReceiver) {
+    transport_channels_shared(
+        role,
+        Arc::new(RwLock::new(remote_control_generation.into())),
+        control_capacity,
+        business_capacity,
+        total_byte_budget,
+        control_reserved_bytes,
+    )
+}
+
+fn transport_channels_shared(
+    role: ControllerRole,
+    remote_control_generation: Arc<RwLock<String>>,
     control_capacity: usize,
     business_capacity: usize,
     total_byte_budget: usize,
@@ -651,7 +768,7 @@ fn transport_channels(
     (
         ControllerTransportSender {
             role,
-            remote_control_generation: remote_control_generation.into(),
+            remote_control_generation,
             control_tx,
             business_tx,
             total_budget,
@@ -673,7 +790,7 @@ pub(crate) fn spawn_controller_transport(
     config: ControllerTransportConfig,
     sink: Arc<dyn ControllerEventSink>,
 ) -> ControllerTransportSender {
-    let (sender, receiver) = transport_channels(
+    let (sender, receiver) = transport_channels_shared(
         config.role,
         config.remote_control_generation.clone(),
         CONTROL_QUEUE_CAPACITY,
@@ -696,11 +813,15 @@ async fn run_transport(
 ) {
     let mut reconnect = ReconnectBackoff::default();
     loop {
-        let connection = connect_async_with_config(
-            &config.relay_url,
-            Some(relay_websocket_config(MAX_CONTROLLER_INBOUND_TEXT_BYTES)),
-            false,
-        );
+        let connection = async {
+            let request = controller_websocket_request(&config.relay_url)?;
+            connect_async_with_config(
+                request,
+                Some(relay_websocket_config(MAX_CONTROLLER_INBOUND_TEXT_BYTES)),
+                false,
+            )
+            .await
+        };
         tokio::pin!(connection);
         let connected = tokio::select! {
             biased;
@@ -713,7 +834,7 @@ async fn run_transport(
                 // Nothing was put on the wire. Keep queued pairing frames for
                 // the next attempt instead of invalidating their epoch.
                 sink.emit(ControllerTransportEvent::Disconnected {
-                    remote_control_generation: config.remote_control_generation.clone(),
+                    remote_control_generation: config.generation(),
                     lease_epoch: current_lease_epoch(&sender),
                     error: format!("connect Relay: {error}"),
                 });
@@ -726,7 +847,7 @@ async fn run_transport(
         let (mut write, mut read) = socket.split();
         reconnect.reset();
         sink.emit(ControllerTransportEvent::Connected {
-            remote_control_generation: config.remote_control_generation.clone(),
+            remote_control_generation: config.generation(),
             lease_epoch: current_lease_epoch(&sender),
         });
 
@@ -747,6 +868,15 @@ async fn run_transport(
             return;
         }
     }
+}
+
+fn frame_is_task_submit(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .is_some_and(|frame| {
+            frame.get("type").and_then(Value::as_str) == Some("encrypted_frame")
+                && frame.get("payload_kind").and_then(Value::as_str) == Some("task_submit")
+        })
 }
 
 /// One absolute limit covers readiness, enqueue and flush; progress cannot
@@ -807,8 +937,24 @@ where
                 let result = bounded_write(write, Message::Text(frame.text().to_owned().into()), &sender.shutdown, WRITE_TIMEOUT).await;
                 if sender.is_stopped() { return None; }
                 match result {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        if frame_is_task_submit(frame.text()) {
+                            crate::features::remote_control::controller::relay_runtime::log_controller_event(
+                                "task_submit_socket_written",
+                                "sent",
+                            );
+                        }
+                        if let Some(flushed) = frame.flushed {
+                            let _ = flushed.send(());
+                        }
+                    }
                     Err(error) => {
+                        if frame_is_task_submit(frame.text()) {
+                            crate::features::remote_control::controller::relay_runtime::log_controller_event(
+                                "task_submit_socket_write_failed",
+                                "write_failed",
+                            );
+                        }
                         break format!("send Relay frame: {error}");
                     }
                 }
@@ -835,7 +981,7 @@ where
                     Ok(Message::Pong(payload)) => {
                         if let Some(millis) = rtt_sample(config.clock.as_ref(), payload.as_ref()) {
                             sink.emit(ControllerTransportEvent::RttSample {
-                                remote_control_generation: config.remote_control_generation.clone(),
+                                remote_control_generation: config.generation(),
                                 millis,
                             });
                         }
@@ -894,7 +1040,7 @@ fn emit_disconnected(
     error: String,
 ) {
     let event = ControllerTransportEvent::Disconnected {
-        remote_control_generation: config.remote_control_generation.clone(),
+        remote_control_generation: config.generation(),
         lease_epoch: current_lease_epoch(sender),
         error,
     };
@@ -924,11 +1070,7 @@ fn dispatch_inbound(
     let Ok(shape) = serde_json::from_str::<Value>(text) else {
         return;
     };
-    if shape
-        .get("remote_control_generation")
-        .and_then(Value::as_str)
-        .is_some_and(|generation| generation != config.remote_control_generation)
-    {
+    if !generation_admits(&config.generation(), &shape) {
         return;
     }
     let kind = shape.get("type").and_then(Value::as_str);
@@ -957,7 +1099,13 @@ fn dispatch_inbound(
         validate_controller_message_json(text, SenderRole::Relay).is_ok()
             || validate_controller_message_json(text, config.role.peer_role()).is_ok()
     };
-    if !validated || !inbound_context_matches(&shape, lease.as_ref().or(resume_lease.as_ref())) {
+    let context_matches = inbound_context_matches(&shape, lease.as_ref())
+        || (lease.is_none()
+            && is_inbound_resume_frame(kind, config.role)
+            && sender.resume_lease.read().as_ref().is_some_and(|saved| {
+                super::resume::resume_frame_matches_lease(&saved.context, &shape)
+            }));
+    if !validated || !context_matches {
         return;
     }
     if kind == Some("controller_resumed") && !sender.record_resume_install(&shape, inbound_epoch) {
@@ -965,13 +1113,61 @@ fn dispatch_inbound(
     }
     sink.emit(ControllerTransportEvent::Frame {
         priority,
-        remote_control_generation: config.remote_control_generation.clone(),
+        remote_control_generation: config.generation(),
         lease_epoch: lease
             .as_ref()
             .or(resume_lease.as_ref())
             .map(|value| value.context.lease_epoch.clone()),
         json: text.to_owned(),
     });
+}
+
+/// Test adapters exercise the real suspension and reader validation paths;
+/// they never manufacture or directly install reader authority.
+#[cfg(test)]
+pub(super) fn disconnect_test_transport(sender: &ControllerTransportSender) {
+    let config =
+        ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
+    emit_disconnected(&config, sender, &|_| {}, "test socket closed".into());
+}
+
+#[cfg(test)]
+pub(super) fn dispatch_test_transport_frame(sender: &ControllerTransportSender, frame: &Value) {
+    let config =
+        ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
+    dispatch_inbound(&config, sender, &|_| {}, &frame.to_string());
+}
+
+/// 未绑定 generation 的 transport（A 端 claim 之前）只按类型准入，绑定之后
+/// 一律按 B 的 generation 硬门过滤；缺少 generation 字段的同生成期报文仍然
+/// 允许通过，最终由各状态机自行校验绑定。
+fn generation_admits(bound: &str, value: &Value) -> bool {
+    bound.is_empty()
+        || value
+            .get("remote_control_generation")
+            .and_then(Value::as_str)
+            .is_none_or(|generation| generation == bound)
+}
+
+fn is_inbound_resume_frame(kind: Option<&str>, role: ControllerRole) -> bool {
+    matches!(
+        kind,
+        Some(
+            "controller_resume_provisional"
+                | "encrypted_resume_confirm"
+                | "controller_resume_activation_pending"
+                | "controller_resumed"
+        )
+    ) || matches!(
+        (kind, role),
+        (
+            Some("controller_post_activation_liveness_confirmed"),
+            ControllerRole::ControllerA
+        ) | (
+            Some("controller_post_activation_liveness" | "controller_resume_ready_ack"),
+            ControllerRole::ControlledB
+        )
+    )
 }
 
 fn inbound_context_matches(value: &Value, lease: Option<&AuthenticatedLease>) -> bool {
@@ -1029,16 +1225,156 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
     use tokio::net::TcpListener;
-    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::accept_hdr_async;
+    use tokio_tungstenite::tungstenite::http::{HeaderValue, header::SEC_WEBSOCKET_PROTOCOL};
 
     use super::*;
     use crate::features::remote_control::controller::{
         controlled::ControlledDeviceManager, controlling::ControllingDeviceManager,
     };
 
+    #[test]
+    fn task_submit_write_telemetry_uses_encrypted_envelope_kind() {
+        assert!(frame_is_task_submit(
+            &json!({"type":"encrypted_frame", "payload_kind":"task_submit"}).to_string()
+        ));
+        for frame in [
+            json!({"type":"encrypted_frame", "payload_kind":"task_status"}),
+            json!({"type":"task_submit", "message_type":"task_submit"}),
+            json!({"payload_kind":"task_submit"}),
+        ] {
+            assert!(!frame_is_task_submit(&frame.to_string()));
+        }
+        assert!(!frame_is_task_submit("not JSON"));
+    }
+
     struct PendingSink {
         block_ready: bool,
         sent: usize,
+    }
+
+    struct ReceiptSink {
+        flush_state: Arc<AtomicU64>,
+        sent: Arc<AtomicU64>,
+    }
+
+    impl Sink<Message> for ReceiptSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn start_send(self: std::pin::Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+            self.sent.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            match self.flush_state.load(Ordering::SeqCst) {
+                1 => std::task::Poll::Ready(Ok(())),
+                2 => std::task::Poll::Ready(Err(std::io::Error::other("test flush failure"))),
+                _ => std::task::Poll::Pending,
+            }
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flush_receipt_requires_success_and_is_never_sent_on_error_timeout_or_stop() {
+        for case in ["success", "error", "timeout", "stop"] {
+            let (sender, mut receiver) = transport_channels(
+                ControllerRole::ControllerA,
+                "generation-0001",
+                2,
+                1,
+                8192,
+                1024,
+            );
+            sender
+                .install_authenticated_lease(lease("7", "generation-0001"))
+                .unwrap();
+            let mut receipt = sender
+                .send_control_with_receipt(&json!({
+                    "v":1, "type":"controller_liveness", "sender_role":"A",
+                    "connection_id":"connection-0001", "controller_lease_id":"lease-0001",
+                    "lease_epoch":"7", "relay_epoch":"relay-epoch-0001",
+                    "remote_control_generation":"generation-0001",
+                    "liveness_epoch":"liveness-0001", "heartbeat_sequence":"1",
+                }))
+                .unwrap();
+            let flush_state = Arc::new(AtomicU64::new(0));
+            let sent = Arc::new(AtomicU64::new(0));
+            let mut write = ReceiptSink {
+                flush_state: flush_state.clone(),
+                sent: sent.clone(),
+            };
+            let mut read = futures_util::stream::pending::<Result<Message, std::io::Error>>();
+            let config = ControllerTransportConfig::new(
+                "ws://127.0.0.1:1",
+                ControllerRole::ControllerA,
+                "generation-0001",
+            );
+            let sink = |_: ControllerTransportEvent| {};
+            let connected = run_connected_transport(
+                &config,
+                &sink,
+                &sender,
+                &mut receiver,
+                &mut write,
+                &mut read,
+            );
+            futures_util::pin_mut!(connected);
+            assert!(futures_util::poll!(connected.as_mut()).is_pending());
+            assert_eq!(sent.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                receipt.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            );
+            match case {
+                "success" => {
+                    flush_state.store(1, Ordering::SeqCst);
+                    assert!(futures_util::poll!(connected.as_mut()).is_pending());
+                    assert_eq!(receipt.try_recv(), Ok(()));
+                    sender.stop();
+                    assert!(connected.await.is_none());
+                }
+                "error" => {
+                    flush_state.store(2, Ordering::SeqCst);
+                    assert!(connected.await.unwrap().contains("test flush failure"));
+                }
+                "timeout" => {
+                    tokio::time::advance(WRITE_TIMEOUT).await;
+                    assert!(
+                        connected
+                            .await
+                            .unwrap()
+                            .contains("controller_transport_write_timeout")
+                    );
+                }
+                _ => {
+                    sender.stop();
+                    assert!(connected.await.is_none());
+                }
+            }
+            if case != "success" {
+                assert_eq!(
+                    receipt.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed),
+                    "{case}"
+                );
+            }
+            assert_eq!(sender.total_budget.available_permits(), 8192);
+        }
     }
 
     impl Sink<Message> for PendingSink {
@@ -1232,8 +1568,12 @@ mod tests {
                     operation.clone(),
                     ControllerLease {
                         context: current.context.clone(),
+                        peer_endpoint_id: "endpoint-0001".into(),
+                        reservation_id: "reservation-0001".into(),
                         device_display_name: "B".into(),
                         liveness_epoch_a: "live-a-1".into(),
+                        liveness_epoch_b: "live-b-1".into(),
+                        negotiated_capabilities: current.negotiated_capabilities.clone(),
                         resume_deadline_b: 30_000,
                         resume_token: [1; 32],
                         transport_key_fingerprint: [2; 32],
@@ -1318,12 +1658,15 @@ mod tests {
                     "request-resume-0001"
                 },
                 if case == "expired" { 30_000 } else { 12_000 },
-                match case {
-                    "epoch-empty" => "",
-                    "epoch-space" => "invalid epoch",
-                    "epoch-tilde" => "live~a-2",
-                    _ => "live-a-2",
-                },
+                (
+                    match case {
+                        "epoch-empty" => "",
+                        "epoch-space" => "invalid epoch",
+                        "epoch-tilde" => "live~a-2",
+                        _ => "live-a-2",
+                    },
+                    "live-b-2",
+                ),
                 if case == "token" { [1; 32] } else { [3; 32] },
                 if case == "key" { [2; 32] } else { [4; 32] },
                 if case == "deadline-zero" { 0 } else { 60_000 },
@@ -1341,7 +1684,7 @@ mod tests {
                             "activation-0001",
                             "request-resume-0001",
                             13_000,
-                            "live-a-2",
+                            ("live-a-2", "live-b-2"),
                             [3; 32],
                             [4; 32],
                             60_000
@@ -1364,7 +1707,7 @@ mod tests {
     #[test]
     fn controlled_resume_restores_only_the_exact_reader_authorized_lease() {
         use crate::features::remote_control::controller::controlled::{
-            ControlledLease, ControlledRegistration, ControlledResumeStep,
+            ControlledLease, ControlledRegistration, ControlledResumeStep, ControlledStatusKind,
         };
         for case in [
             "valid",
@@ -1396,13 +1739,15 @@ mod tests {
                     1_000,
                 )
                 .unwrap();
-            manager.mark_claimed(operation.clone()).unwrap();
+            manager.mark_pairing_reserved(operation.clone()).unwrap();
+            manager.mark_handshake_pending(operation.clone()).unwrap();
             let current = lease("7", &generation);
             manager
                 .complete_connected(
                     operation.clone(),
                     ControlledLease {
                         context: current.context.clone(),
+                        negotiated_capabilities: current.negotiated_capabilities.clone(),
                         controller_device_name: "A".into(),
                         liveness_epoch_a: "live-a-1".into(),
                         resume_deadline_b: 30_000,
@@ -1490,6 +1835,7 @@ mod tests {
                 } else {
                     "request-resume-0001"
                 },
+                if case == "expired" { 33_000 } else { 12_000 },
                 match case {
                     "epoch-empty" => "",
                     "epoch-space" => "invalid epoch",
@@ -1498,13 +1844,12 @@ mod tests {
                 },
                 if case == "token" { [1; 32] } else { [3; 32] },
                 if case == "key" { [2; 32] } else { [4; 32] },
-                if case == "expired" { 33_000 } else { 12_000 },
                 if case == "deadline-zero" { 0 } else { 60_000 },
             );
             if case == "valid" {
                 let resumed = serde_json::to_value(result.unwrap()).unwrap();
                 assert_eq!(resumed["status"], "connected");
-                assert_eq!(resumed["watchdogDeadlineB"], 42_000);
+                assert!(resumed.get("watchdogDeadlineB").is_none());
                 assert_eq!(sender.authenticated_lease(), Some(current));
                 assert!(
                     manager
@@ -1512,13 +1857,21 @@ mod tests {
                             operation,
                             "activation-0001",
                             "request-resume-0001",
+                            13_000,
                             "live-a-2",
                             [3; 32],
                             [4; 32],
-                            13_000,
                             60_000
                         )
                         .is_err()
+                );
+                assert_eq!(
+                    manager.poll_watchdog(41_999).unwrap().kind(),
+                    ControlledStatusKind::Reconnecting
+                );
+                assert_eq!(
+                    manager.poll_watchdog(42_000).unwrap().kind(),
+                    ControlledStatusKind::Error
                 );
             } else {
                 assert_eq!(
@@ -1563,6 +1916,248 @@ mod tests {
             "protocol_version": 1,
             "capabilities": ["encrypted_frames_v1", "task_v1"]
         })
+    }
+
+    fn resume_final(context: &LeaseContext, activation_id: &str) -> Value {
+        json!({
+            "v": 1, "type": "controller_resumed", "request_id": "request-resume-final",
+            "activation_id": activation_id,
+            "connection_id": context.connection_id,
+            "controller_lease_id": context.controller_lease_id,
+            "lease_epoch": context.lease_epoch, "relay_epoch": context.relay_epoch,
+            "remote_control_generation": context.remote_control_generation,
+            "liveness_epoch_a": "live-a-2", "liveness_epoch_b": "live-b-2",
+            "resume_deadline_ms": "60000",
+            "new_resume_token_b64": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+        })
+    }
+
+    #[test]
+    fn resume_install_is_activation_bound_one_shot_and_closed_by_next_socket_epoch() {
+        for lose_socket in [false, true] {
+            let expected = lease("1", "generation-0001");
+            let (sender, _) = transport_channels(
+                ControllerRole::ControllerA,
+                "generation-0001",
+                2,
+                2,
+                8192,
+                1024,
+            );
+            sender
+                .install_authenticated_lease(expected.clone())
+                .unwrap();
+            sender.suspend_authenticated_lease();
+            let config = ControllerTransportConfig::new(
+                "ws://127.0.0.1:1",
+                ControllerRole::ControllerA,
+                "generation-0001",
+            );
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let capture = events.clone();
+            let sink = move |event| capture.lock().unwrap().push(event);
+            validate_controller_message_json(
+                &resume_final(&expected.context, "activation-0001").to_string(),
+                SenderRole::Relay,
+            )
+            .unwrap();
+            dispatch_inbound(
+                &config,
+                &sender,
+                &sink,
+                &resume_final(&expected.context, "activation-0001").to_string(),
+            );
+            assert_eq!(
+                events.lock().unwrap().len(),
+                1,
+                "final must really pass RX admission"
+            );
+            assert_eq!(
+                sender.install_authenticated_lease_after_resume(
+                    expected.clone(),
+                    "activation-other",
+                    "request-resume-final"
+                ),
+                Err(ControllerSendError::Unauthenticated)
+            );
+            if lose_socket {
+                emit_disconnected(&config, &sender, &sink, "closed".into());
+                assert_eq!(
+                    sender.install_authenticated_lease_after_resume(
+                        expected,
+                        "activation-0001",
+                        "request-resume-final"
+                    ),
+                    Err(ControllerSendError::Unauthenticated)
+                );
+                assert!(sender.authenticated_lease().is_none());
+            } else {
+                sender
+                    .install_authenticated_lease_after_resume(
+                        expected.clone(),
+                        "activation-0001",
+                        "request-resume-final",
+                    )
+                    .unwrap();
+                assert!(sender.authenticated_lease().is_some());
+                assert_eq!(
+                    sender.install_authenticated_lease_after_resume(
+                        expected,
+                        "activation-0001",
+                        "request-resume-final"
+                    ),
+                    Err(ControllerSendError::Unauthenticated)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn verified_resume_reinstalls_real_transport_only_at_final_gate_and_fails_closed() {
+        use crate::features::remote_control::controller::controlling::{
+            ControllerLease, ControllingStatusKind, ResumeStep,
+        };
+        for (generation, stopped, close_after_final) in [
+            ("generation-0001", false, false),
+            ("generation-replaced", false, false),
+            ("generation-0001", true, false),
+            ("generation-0001", false, true),
+        ] {
+            let manager = ControllingDeviceManager::default();
+            let operation = manager.connect("234-4567").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            let expected = lease("1", "generation-0001");
+            manager
+                .complete_connected(
+                    operation.clone(),
+                    ControllerLease {
+                        context: expected.context.clone(),
+                        peer_endpoint_id: "endpoint-0001".into(),
+                        reservation_id: "reservation-0001".into(),
+                        device_display_name: "remote-device".into(),
+                        liveness_epoch_a: "live-a-1".into(),
+                        liveness_epoch_b: "live-b-1".into(),
+                        resume_deadline_b: 30_000,
+                        resume_token: [1; 32],
+                        transport_key_fingerprint: [2; 32],
+                        negotiated_capabilities: expected.negotiated_capabilities.clone(),
+                    },
+                )
+                .unwrap();
+            let (sender, mut receiver) =
+                transport_channels(ControllerRole::ControllerA, generation, 2, 2, 8192, 1024);
+            if generation == "generation-0001" {
+                sender
+                    .install_authenticated_lease(expected.clone())
+                    .unwrap();
+            }
+            manager.replace_transport(sender.clone());
+            sender.suspend_authenticated_lease();
+            if stopped {
+                sender.stop();
+            }
+            manager.mark_transport_disconnected(1_000, Some(30_000));
+            manager.begin_resume(operation.clone(), 2_000).unwrap();
+            let activation = "activation-0001";
+            let frame = json!({
+                "v":1, "type":"encrypted_frame", "connection_id":"connection-0001",
+                "controller_lease_id":"lease-0001", "lease_epoch":"1", "relay_epoch":"relay-epoch-0001",
+                "remote_control_generation":"generation-0001", "frame_sequence":"1", "direction":"a_to_b",
+                "payload_kind":"task_submit", "ciphertext_b64":"AQID", "ciphertext_bytes":"3"
+            });
+            for (step, at) in [
+                (
+                    ResumeStep::Provisional {
+                        activation_id: activation,
+                    },
+                    3_000,
+                ),
+                (
+                    ResumeStep::Confirmed {
+                        activation_id: activation,
+                    },
+                    4_000,
+                ),
+                (
+                    ResumeStep::ActivationPending {
+                        activation_id: activation,
+                    },
+                    5_000,
+                ),
+                (
+                    ResumeStep::LivenessConfirmed {
+                        activation_id: activation,
+                    },
+                    6_000,
+                ),
+                (
+                    ResumeStep::ReadyAcknowledged {
+                        activation_id: activation,
+                    },
+                    7_000,
+                ),
+            ] {
+                manager.advance_resume(operation.clone(), step, at).unwrap();
+                assert!(sender.authenticated_lease().is_none());
+                assert_eq!(
+                    sender.try_send_business(&frame),
+                    Err(ControllerSendError::Unauthenticated)
+                );
+                assert!(receiver.business_rx.try_recv().is_err());
+            }
+            let config = ControllerTransportConfig::new(
+                "ws://127.0.0.1:1",
+                ControllerRole::ControllerA,
+                generation,
+            );
+            dispatch_inbound(
+                &config,
+                &sender,
+                &|_| {},
+                &resume_final(&expected.context, activation).to_string(),
+            );
+            if close_after_final {
+                // Final Frame was already delivered, but the socket closed
+                // before the manager consumed it from its event queue.
+                emit_disconnected(&config, &sender, &|_| {}, "closed".into());
+            }
+            let result = manager.complete_resumed(
+                operation,
+                activation,
+                "request-resume-final",
+                8_000,
+                ("live-a-2", "live-b-2"),
+                [3; 32],
+                [4; 32],
+                60_000,
+            );
+            if generation != "generation-0001" || stopped || close_after_final {
+                assert!(result.is_err());
+                assert_eq!(manager.status().kind(), ControllingStatusKind::Error);
+                assert!(manager.live_lease().is_err());
+                assert!(sender.authenticated_lease().is_none());
+                assert!(sender.is_stopped());
+                continue;
+            }
+            result.unwrap();
+            assert_eq!(
+                sender.authenticated_lease().unwrap().context,
+                expected.context
+            );
+            sender.try_send_business(&frame).unwrap();
+            let queued = receiver.business_rx.try_recv().unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(queued.payload.as_str()).unwrap(),
+                frame
+            );
+            assert_eq!(queued.lease_context, Some(expected.context));
+            sender.try_send_business(&frame).unwrap();
+            sender.try_send_business(&frame).unwrap();
+            assert_eq!(
+                sender.try_send_business(&frame),
+                Err(ControllerSendError::QueueFull(FramePriority::Business))
+            );
+        }
     }
 
     #[test]
@@ -1724,6 +2319,112 @@ mod tests {
             ))
         );
         assert!(sender.authenticated_lease().is_none());
+    }
+
+    /// E2E-02 第 1 步：A 端在验签 transcript 之前不知道 B 的 generation，
+    /// 因此未绑定的 transport 只能靠受控 `bind_generation` 一次性补齐；
+    /// 空值/非法 id/重复绑定/已安装租约都必须失败关闭。
+    #[test]
+    fn generation_binding_is_controlled_and_one_shot() {
+        let (sender, _receiver) = transport_channels_shared(
+            ControllerRole::ControllerA,
+            Arc::new(RwLock::new(String::new())),
+            1,
+            1,
+            8192,
+            1024,
+        );
+        assert_eq!(sender.generation(), "");
+        // 未绑定前不得安装租约。
+        assert_eq!(
+            sender.install_authenticated_lease(lease("7", "generation-0001")),
+            Err(ControllerSendError::InvalidFrame(
+                "remote_control_generation".into()
+            ))
+        );
+        for invalid in ["", " leading-space", "generation with space", "-dash-first"] {
+            assert_eq!(
+                sender.bind_generation(invalid),
+                Err(ControllerSendError::InvalidFrame(
+                    "remote_control_generation".into()
+                )),
+                "{invalid:?} must fail closed"
+            );
+        }
+        sender.bind_generation("generation-0001").unwrap();
+        assert_eq!(sender.generation(), "generation-0001");
+        // 只允许绑定一次：重复绑定（即使同值）也必须拒绝。
+        assert_eq!(
+            sender.bind_generation("generation-0001"),
+            Err(ControllerSendError::GenerationAlreadyBound)
+        );
+        assert_eq!(
+            sender.bind_generation("generation-0002"),
+            Err(ControllerSendError::GenerationAlreadyBound)
+        );
+        assert_eq!(sender.generation(), "generation-0001");
+
+        // 绑定后可以用同一 generation 安装租约，旧 generation 仍被拒绝。
+        sender
+            .install_authenticated_lease(lease("7", "generation-0001"))
+            .unwrap();
+        assert!(sender.authenticated_lease().is_some());
+        assert_eq!(
+            sender.bind_generation("generation-0003"),
+            Err(ControllerSendError::GenerationAlreadyBound)
+        );
+        assert_eq!(
+            sender.install_authenticated_lease(lease("7", "generation-old")),
+            Err(ControllerSendError::InvalidFrame(
+                "remote_control_generation".into()
+            ))
+        );
+        assert_eq!(
+            sender
+                .authenticated_lease()
+                .map(|value| value.context.remote_control_generation),
+            Some("generation-0001".to_owned())
+        );
+    }
+
+    /// 共享单元格：sender 的绑定立刻对 transport 任务可见（同一 Arc）。
+    #[test]
+    fn generation_binding_is_shared_with_the_transport_task() {
+        let config = ControllerTransportConfig::new(
+            "wss://example.test/ws",
+            ControllerRole::ControllerA,
+            String::new(),
+        );
+        let (sender, _receiver) = transport_channels_shared(
+            config.role,
+            config.remote_control_generation.clone(),
+            1,
+            1,
+            8192,
+            1024,
+        );
+        assert_eq!(config.generation(), "");
+        sender.bind_generation("generation-0001").unwrap();
+        assert_eq!(config.generation(), "generation-0001");
+    }
+
+    /// 未绑定 generation 的 transport 只按类型准入（否则 A 端连
+    /// `controller_pairing_reserved` 都收不到）；绑定后一律硬门过滤。
+    #[test]
+    fn unbound_transport_admits_frames_then_filters_by_bound_generation() {
+        let frame = json!({
+            "v": 1,
+            "type": "controller_joined",
+            "remote_control_generation": "generation-0001"
+        });
+        assert!(generation_admits("", &frame));
+        assert!(generation_admits("generation-0001", &frame));
+        assert!(!generation_admits("generation-0002", &frame));
+        // 不带 generation 的同生成期报文仍由各状态机自行校验绑定。
+        assert!(generation_admits(
+            "generation-0001",
+            &json!({ "v": 2, "type": "desktop_endpoint_registered" })
+        ));
     }
 
     #[test]
@@ -1991,13 +2692,28 @@ mod tests {
         for kind in [
             "controller_resume_provisional",
             "controller_resume_activation_pending",
-            "controller_post_activation_liveness_confirmed",
+            "controller_resume_ready_ack",
             "encrypted_resume_confirm",
             "controller_resumed",
         ] {
-            dispatch_inbound(&config, &sender, &sink, &resume_control(kind).to_string());
+            let mut incoming = resume_control(kind);
+            if kind == "controller_resume_ready_ack" {
+                incoming["sender_role"] = json!("A");
+            }
+            dispatch_inbound(&config, &sender, &sink, &incoming.to_string());
         }
         assert_eq!(events.lock().len(), 5);
+        dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &resume_control("controller_post_activation_liveness_confirmed").to_string(),
+        );
+        assert_eq!(
+            events.lock().len(),
+            5,
+            "A-only liveness confirmation is rejected by B"
+        );
         let mut wrong = ack.clone();
         wrong["lease_epoch"] = json!("6");
         assert!(sender.try_send_sensitive_resume_control(&wrong).is_err());
@@ -2142,6 +2858,32 @@ mod tests {
         assert!(!wait_reconnect(&token, &mut backoff).await);
     }
 
+    struct ControllerSubprotocolCallback;
+
+    // The upstream Callback trait owns the handshake ErrorResponse ABI.
+    // Implement that fixed interface directly; the test only accepts the
+    // controller subprotocol and retains the assertion on the real request.
+    impl tokio_tungstenite::tungstenite::handshake::server::Callback for ControllerSubprotocolCallback {
+        fn on_request(
+            self,
+            request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+            mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+        ) -> std::result::Result<
+            tokio_tungstenite::tungstenite::handshake::server::Response,
+            tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+        > {
+            assert_eq!(
+                request.headers().get(SEC_WEBSOCKET_PROTOCOL).unwrap(),
+                super::super::protocol::CONTROLLER_SUBPROTOCOL
+            );
+            response.headers_mut().insert(
+                SEC_WEBSOCKET_PROTOCOL,
+                HeaderValue::from_static(super::super::protocol::CONTROLLER_SUBPROTOCOL),
+            );
+            Ok(response)
+        }
+    }
+
     #[tokio::test]
     async fn websocket_reconnects_and_delivers_new_generation_frames() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2150,7 +2892,9 @@ mod tests {
             let mut requests = Vec::new();
             for _ in 0..2 {
                 let (stream, _) = listener.accept().await.unwrap();
-                let mut socket = accept_async(stream).await.unwrap();
+                let mut socket = accept_hdr_async(stream, ControllerSubprotocolCallback)
+                    .await
+                    .unwrap();
                 let message = socket.next().await.unwrap().unwrap();
                 let Message::Text(text) = message else {
                     panic!("expected controller text frame");
@@ -2202,86 +2946,112 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loopback_reconnect_keeps_business_closed_until_exact_resume_final_installation() {
+    async fn resume_provisional_crosses_real_websocket_after_disconnect_clears_lease() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
+        let provisional = json!({
+            "v": 1, "type": "controller_resume_provisional", "request_id": "request-resume-1",
+            "connection_id": "connection-0001", "controller_lease_id": "lease-0001",
+            "lease_epoch": "7", "relay_epoch": "relay-epoch-0001",
+            "remote_control_generation": "generation-0001", "activation_id": "activation-0001",
+            "original_deadline_ms": "30000"
+        });
+        validate_controller_message_json(&provisional.to_string(), SenderRole::Relay).unwrap();
+        let expected = provisional.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut first = accept_async(stream).await.unwrap();
-            assert!(matches!(
-                first.next().await.unwrap().unwrap(),
-                Message::Text(_)
-            ));
-            first.send(Message::Close(None)).await.unwrap();
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut resumed = accept_async(stream).await.unwrap();
-            let Message::Text(ack) = resumed.next().await.unwrap().unwrap() else {
-                panic!("resume ACK");
-            };
-            assert_eq!(
-                serde_json::from_str::<Value>(ack.as_str()).unwrap()["type"],
-                "controller_resume_activation_ack"
-            );
-            resumed
-                .send(Message::Text(
-                    resume_control("controller_resumed").to_string().into(),
-                ))
+            let mut socket = accept_hdr_async(stream, ControllerSubprotocolCallback)
                 .await
                 .unwrap();
-            let Message::Text(business) = resumed.next().await.unwrap().unwrap() else {
-                panic!("authenticated business");
+            assert!(matches!(
+                socket.next().await.unwrap().unwrap(),
+                Message::Text(_)
+            ));
+            socket.send(Message::Close(None)).await.unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_hdr_async(stream, ControllerSubprotocolCallback)
+                .await
+                .unwrap();
+            let Message::Text(prepare) = socket.next().await.unwrap().unwrap() else {
+                panic!("expected resume prepare");
             };
             assert_eq!(
-                serde_json::from_str::<Value>(business.as_str()).unwrap()["type"],
-                "encrypted_frame"
+                serde_json::from_str::<Value>(prepare.as_str()).unwrap()["type"],
+                "controller_resume_prepare"
             );
+            let mut stale = provisional.clone();
+            stale["remote_control_generation"] = json!("generation-stale");
+            socket
+                .send(Message::Text(stale.to_string().into()))
+                .await
+                .unwrap();
+            let mut wrong_lease = provisional.clone();
+            wrong_lease["controller_lease_id"] = json!("lease-other");
+            socket
+                .send(Message::Text(wrong_lease.to_string().into()))
+                .await
+                .unwrap();
+            // Even during resume, unauthenticated encrypted business stays closed.
+            socket.send(Message::Text(json!({
+                "v":1, "type":"encrypted_frame", "connection_id":"connection-0001",
+                "controller_lease_id":"lease-0001", "lease_epoch":"7", "relay_epoch":"relay-epoch-0001",
+                "remote_control_generation":"generation-0001", "frame_sequence":"1", "direction":"b_to_a",
+                "payload_kind":"task_status", "ciphertext_b64":"AQID", "ciphertext_bytes":"3"
+            }).to_string().into())).await.unwrap();
+            socket
+                .send(Message::Text(provisional.to_string().into()))
+                .await
+                .unwrap();
+            let _ = socket.next().await;
         });
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let sender = spawn_controller_transport(
-            ControllerTransportConfig::new(url, ControllerRole::ControlledB, "generation-0001"),
+            ControllerTransportConfig::new(url, ControllerRole::ControllerA, "generation-0001"),
             Arc::new(move |event| {
                 let _ = event_tx.send(event);
             }),
         );
-        tokio::time::timeout(Duration::from_secs(8), async {
-            let mut connections = 0;
+        let delivered = tokio::time::timeout(Duration::from_secs(8), async {
+            while !matches!(
+                event_rx.recv().await.unwrap(),
+                ControllerTransportEvent::Connected { .. }
+            ) {}
+            sender
+                .install_authenticated_lease(lease("7", "generation-0001"))
+                .unwrap();
+            sender
+                .try_send_control(&control("request-initial-1"))
+                .unwrap();
+            while !matches!(
+                event_rx.recv().await.unwrap(),
+                ControllerTransportEvent::Disconnected { .. }
+            ) {}
+            assert!(sender.authenticated_lease().is_none());
+            while !matches!(
+                event_rx.recv().await.unwrap(),
+                ControllerTransportEvent::Connected { .. }
+            ) {}
+            sender.try_send_sensitive_resume_control(&json!({
+                "v":1, "type":"controller_resume_prepare", "request_id":"request-resume-1",
+                "connection_id":"connection-0001", "controller_lease_id":"lease-0001",
+                "lease_epoch":"7", "relay_epoch":"relay-epoch-0001",
+                "remote_control_generation":"generation-0001", "sender_role":"A",
+                "resume_token_b64":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+                "transport_challenge_b64":"AAAAAAAAAAAAAAAAAAAAAA==", "original_deadline_ms":"30000"
+            })).unwrap();
             loop {
-                match event_rx.recv().await.unwrap() {
-                    ControllerTransportEvent::Connected { .. } => {
-                        connections += 1;
-                        if connections == 1 {
-                            sender.install_authenticated_lease(lease("7", "generation-0001")).unwrap();
-                            let mut capabilities = control("request-0001");
-                            capabilities["sender_role"] = json!("B");
-                            capabilities["client_role"] = json!("desktop_controlled_endpoint");
-                            sender.try_send_control(&capabilities).unwrap();
-                        } else {
-                            assert!(sender.authenticated_lease().is_none());
-                            assert_eq!(sender.try_send_business(&control("closed-business")), Err(ControllerSendError::Unauthenticated));
-                            sender.try_send_sensitive_resume_control(&resume_control("controller_resume_activation_ack")).unwrap();
-                        }
-                    }
-                    ControllerTransportEvent::Frame { json, .. } => {
-                        let final_frame: Value = serde_json::from_str(&json).unwrap();
-                        assert_eq!(final_frame["type"], "controller_resumed");
-                        assert!(sender.try_send_business(&control("still-closed")).is_err());
-                        sender.install_authenticated_lease_after_resume(lease("7", "generation-0001"),
-                            final_frame["activation_id"].as_str().unwrap(), final_frame["request_id"].as_str().unwrap()).unwrap();
-                        let business = json!({
-                            "v": 1, "type": "encrypted_frame", "connection_id": "connection-0001",
-                            "controller_lease_id": "lease-0001", "lease_epoch": "7",
-                            "relay_epoch": "relay-epoch-0001", "remote_control_generation": "generation-0001",
-                            "frame_sequence": "1", "direction": "b_to_a", "payload_kind": "task_status",
-                            "ciphertext_b64": "AQID", "ciphertext_bytes": "3"
-                        });
-                        sender.try_send_business(&business).unwrap();
-                        break;
-                    }
-                    _ => {}
+                if let ControllerTransportEvent::Frame { json, .. } = event_rx.recv().await.unwrap()
+                {
+                    return serde_json::from_str::<Value>(&json).unwrap();
                 }
             }
-            server.await.unwrap();
-        }).await.expect("loopback recovery must complete without reopening old runtime authority");
+        })
+        .await;
         sender.stop();
+        server.abort();
+        assert_eq!(
+            delivered.expect("valid resume must cross real transport admission"),
+            expected
+        );
     }
 }

@@ -4,3 +4,5 @@ pub(crate) use crate::legacy_protocol as protocol;
 
 #[path = "../../../src/features/remote_control/relay_client.rs"]
 pub(crate) mod relay_client;
+
+pub(crate) use crate::features::remote_control::controller;

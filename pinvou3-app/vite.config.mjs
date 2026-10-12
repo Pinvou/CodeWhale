@@ -24,6 +24,9 @@ export const staticRuntimeScripts = new Set([
   'features/attachments/attachment-drop-controller.js',
   'features/personas/personas-i18n.js',
   'features/updater/update-notice-logic.js',
+  // Windows 双端远程控制的纯状态模块（DEV-20）：index.html 经典脚本，
+  // 由 tauri bridge feature 同步消费。
+  'features/remote-control/remote-control-state.js',
   'platform/tauri/bridge.js',
   'platform/web/bootstrap.js',
   'platform/web/bridge.js',
@@ -583,13 +586,40 @@ export default defineConfig(({ mode }) => {
             // chunk from rolldown's automatic splitting, so this only applies
             // to the web mode.
             codeSplitting: {
-              groups: [{
-                name: 'vendor',
-                test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/,
-              }],
+              groups: [
+                {
+                  name: 'vendor',
+                  test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/,
+                },
+                {
+                  // Markdown rendering is only needed after a conversation view
+                  // loads. Keep its parser, sanitizer, and syntax highlighter out
+                  // of the Web shell's startup chunk.
+                  name: 'markdown-vendor',
+                  test: /node_modules[\\/](marked|dompurify|highlight\.js)[\\/]/,
+                },
+                {
+                  // Keep ChatView statically imported so the desktop/web shell
+                  // and source-contract tests retain the same startup semantics,
+                  // while preventing the large component module from inflating
+                  // the entry chunk beyond its per-chunk budget.
+                  name: 'chat-view',
+                  test: /[\\/]features[\\/]chat[\\/]ChatView\.jsx$/,
+                },
+              ],
             },
           }
-        : undefined,
+        : {
+            codeSplitting: {
+              groups: [{
+                // The desktop multi-entry build shares dependencies
+                // automatically, but ChatView itself still needs an explicit
+                // static group to keep the main entry within budget.
+                name: 'chat-view',
+                test: /[\\/]features[\\/]chat[\\/]ChatView\.jsx$/,
+              }],
+            },
+          },
     },
   },
   };

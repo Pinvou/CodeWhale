@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import vm from 'node:vm';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const browserView = readFileSync(
@@ -206,6 +207,20 @@ test('normal mode uses one Right Dock switcher for artifact and browser entries'
   assert.match(browserCommands, /#\[tauri::command\(async\)\]\s+pub fn browser_hand_back_to_agent/);
   assert.match(browserManager, /pub async fn prepare_for_user/);
   assert.match(nativeHost, /pub fn prepare_unclaimed/);
+});
+
+test('remote connection modal waits for its native surface hide publication', () => {
+  const intent = main.match(/const browserOverlayIntent = (\[[\s\S]*?\]\.filter\(Boolean\)\.join\('\|'\));/);
+  assert.ok(intent, 'the real overlay intent expression must be available');
+  const context = { archiveConfirm: false, searchOverlayOpen: false, personaEditor: false,
+    savedConfirm: false, webAccessOpen: false, apiKeyGateOpen: false, bs: {},
+    isCompactShell: false, isSidebarOpen: false, mobileMoreOpen: false,
+    moveToProjectSession: null, rebindDraft: null, remoteConversationOpen: true,
+    can: (capability) => capability === 'desktopRemoteControl' };
+  assert.equal(vm.runInNewContext(intent[1], context), 'remote-connection');
+  assert.equal(vm.runInNewContext(intent[1], { ...context, remoteConversationOpen: false }), '');
+  assert.equal(vm.runInNewContext(intent[1], { ...context, can: () => false }), '');
+  assert.match(main, /can\('desktopRemoteControl'\) && remoteConversationOpen && browserOverlayPublicationReady && \(/);
 });
 
 test('native surface suspension is centrally derived for every occlusion path', () => {
@@ -654,7 +669,7 @@ test('Linux WebDriver safely rebinds with a host marker without injecting remote
   );
   assert.match(marker, /BINDING_MARKER_PREFIX/);
   // The literal value is owned by the shared platform constant; the local name is an alias of it.
-  assert.match(nativePlatform, /HOST_BLANK_MARKER_WEBDRIVER_BIND_PREFIX: &str =\n\s*"about:blank#pinvou-webdriver-bind-";/);
+  assert.match(nativePlatform, /HOST_BLANK_MARKER_WEBDRIVER_BIND_PREFIX: &str =\r?\n\s*"about:blank#pinvou-webdriver-bind-";/);
   assert.match(linuxAutomation, /BINDING_MARKER_PREFIX: &str = super::HOST_BLANK_MARKER_WEBDRIVER_BIND_PREFIX;/);
   assert.match(
     linuxAutomation,

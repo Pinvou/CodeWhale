@@ -1,6 +1,7 @@
 // Keep the actual manager's parent-module boundary while compiling its local
 // state tests independently of the full product graph.
-pub(crate) use crate::{crypto, liveness, protocol, relay_transport, resume};
+pub(crate) use crate::test_support;
+pub(crate) use crate::{crypto, encrypted_lane, liveness, protocol, relay_transport, resume};
 
 #[path = "../../../src/features/remote_control/controller/clock.rs"]
 pub(crate) mod clock;
@@ -11,8 +12,17 @@ pub(crate) mod controlled;
 #[path = "../../../src/features/remote_control/controller/controlling.rs"]
 pub(crate) mod controlling;
 
+#[path = "../../../src/features/remote_control/controller/controlling_handshake.rs"]
+pub(crate) mod controlling_handshake;
+
+#[path = "../../../src/features/remote_control/controller/controlled_handshake.rs"]
+pub(crate) mod controlled_handshake;
+
+#[path = "../../../src/features/remote_control/controller/controlling_session.rs"]
+mod controlling_session;
+
 #[path = "../../../src/features/remote_control/controller/permission.rs"]
-mod permission;
+pub(crate) mod permission;
 
 // Compile the real task producer and journal consumer together: a fabricated
 // event sequence cannot prove that production transitions reach the journal.
@@ -22,6 +32,7 @@ pub(crate) mod task;
 #[path = "../../../src/features/remote_control/controller/journal.rs"]
 pub(crate) mod journal;
 
+pub(crate) use crate::transfer;
 #[path = "../../../src/features/remote_control/controller/redaction.rs"]
 pub(crate) mod redaction;
 

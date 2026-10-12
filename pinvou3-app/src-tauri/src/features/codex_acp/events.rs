@@ -921,9 +921,21 @@ impl EventBridge {
     }
 
     pub fn begin_turn(&self, content: &str, attachments: &[CodexDisplayAttachment]) -> String {
+        self.begin_turn_bound(content, attachments, |_| {})
+    }
+
+    /// Bind a private remote observer before publishing this exact turn's
+    /// first event. A session-level first-event race cannot choose its owner.
+    pub(super) fn begin_turn_bound(
+        &self,
+        content: &str,
+        attachments: &[CodexDisplayAttachment],
+        bind: impl FnOnce(&str),
+    ) -> String {
         let serial = self.turn_serial.fetch_add(1, Ordering::AcqRel) + 1;
         let turn_id = format!("turn-{}-{serial}", Utc::now().timestamp_millis());
         *self.current_turn.write() = Some(turn_id.clone());
+        bind(&turn_id);
         self.emit_with_turn(
             Some(turn_id.clone()),
             "user_message",

@@ -181,6 +181,7 @@
     // 当前会话未发送的输入草稿。只存内存，随 session working set 切换；
     // 不落盘，避免把敏感的未发送内容带到下次启动。
     composerDraft: "",
+    remoteProxyDraftError: null,
     messages: [],      // Anthropic Messages schema
     chatItems: [],     // display items for React
     // DeepSeek Turn 生命周期(user_start / assistant_done)，来自 timing_events.jsonl；
@@ -295,11 +296,16 @@
     // 保证 getMany 不抛 unknown slice；真正的 UI 入口由 desktopRemoteControl
     // capability=false 隐藏。
     controlledDevice: null,
+    controlledSession: { sessionId: null, sessionRef: null, generation: null },
     controllerConnection: null,
     remoteCapabilities: null,
     remoteModels: [],
-    remoteHistories: [],
-    tasks: [],
+    remoteProxyHistories: [],
+    remoteProxyHistory: null,
+    remoteProxyNotice: null,
+    controlledTasks: [],
+    controlledTranscript: [],
+    remotePermissions: [],
     // 依赖体检(设置页): deps = [{key, installed, apt}], null = 尚未检测
     deps: null,
     depsChecking: false,

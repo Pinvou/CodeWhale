@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import { EnrollmentRegistry, loadEnrollmentRegistryConfig } from "../enrollment-registry.js";
 import { createEnrollmentGateway, validateLegacyRollbackTopology } from "../enrollment-gateway.js";
 import {
@@ -567,6 +567,71 @@ test("self-hosted CLI is machine-readable, private-file only, and never prints c
   assert.equal(JSON.parse(output.at(-1)).applied, false);
 });
 
+// DEV-02 审核修复：回滚门禁的验收是“未满足门禁时自动失败”，但此前测试只做了
+// check-enrollment-gated-v2-rollback.mjs 的源码字符串断言，脚本行为从未被执行。
+// 下面直接以子进程运行门禁脚本，覆盖两条必须失败的路径。
+async function runRollbackGate(env) {
+  const repoRoot = dirname(relayDir);
+  return new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      [join(repoRoot, "scripts", "check-enrollment-gated-v2-rollback.mjs")],
+      { cwd: repoRoot, env, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.once("error", (error) => resolve({ code: null, stdout, stderr: `${stderr}${error?.message}` }));
+    child.once("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+test("rollback gate refuses without an inventory and never reports safe", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-rollback-gate-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const result = await runRollbackGate({
+    ...process.env,
+    ...environment(root, "self_hosted"),
+    PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY: "",
+  });
+  assert.equal(result.code, 1);
+  const failure = JSON.parse(result.stderr.trim().split(/\r?\n/u).at(-1));
+  assert.equal(failure.ok, false);
+  assert.equal(failure.safe_to_run_legacy_v2, false);
+  assert.equal(failure.code, "legacy_endpoint_inventory_required");
+  assert.doesNotMatch(result.stdout, /safe_to_run_legacy_v2/u);
+});
+
+test("rollback gate fails closed when its coverage input is unusable", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-rollback-gate-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const inventory = join(root, "inventory.json");
+  await writeFile(
+    inventory,
+    JSON.stringify({ schema: "not-a-legacy-inventory", version: 1, endpoint_ids: [] }),
+    "utf8",
+  );
+  if (process.platform === "win32") await protectWindowsPath(inventory, "file");
+  else await chmod(inventory, 0o600);
+  const result = await runRollbackGate({
+    ...process.env,
+    ...environment(root, "self_hosted"),
+    PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY: inventory,
+  });
+  assert.equal(result.code, 1);
+  const failure = JSON.parse(result.stderr.trim().split(/\r?\n/u).at(-1));
+  assert.equal(failure.ok, false);
+  assert.equal(failure.safe_to_run_legacy_v2, false);
+  // Both codes are fail-closed for the same reason: the coverage step refused
+  // before the gateway preflight could ever report success.
+  assert.ok(
+    ["inventory_document_invalid", "input_permissions_unsafe"].includes(failure.code),
+    `unexpected gate failure code: ${failure.code}`,
+  );
+  assert.doesNotMatch(result.stdout, /safe_to_run_legacy_v2/u);
+});
+
 function freePort() {
   return new Promise((resolve, reject) => {
     const server = http.createServer();
@@ -591,7 +656,8 @@ async function waitForHealth(url, child) {
 
 function openSocket(url, options) {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url, options);
+    const { protocol, ...socketOptions } = options || {};
+    const socket = new WebSocket(url, protocol, socketOptions);
     socket.once("open", () => resolve(socket));
     socket.once("error", reject);
   });
@@ -634,6 +700,99 @@ function nextMessageMatching(socket, predicate) {
     socket.on("message", onMessage);
   });
 }
+
+test("gateway does not echo controller protocol absent upstream and rejects mixed versions", async (t) => {
+  const received = [];
+  const oldServer = http.createServer();
+  const oldWss = new WebSocketServer({ server: oldServer, handleProtocols: () => false });
+  oldWss.on("connection", (socket) => {
+    socket.on("message", (raw) => {
+      const message = String(raw);
+      received.push(message);
+      if (message.includes('"request_id":"downstream-mixed"')) {
+        socket.send('{"v":1,"v":2,"type":"desktop_endpoint_registered"}');
+      } else if (message.includes('"request_id":"downstream-escaped"')) {
+        socket.send('{"v":2,"\\u0076":1,"type":"desktop_endpoint_registered"}');
+      } else {
+        // Legacy v2 ordinary duplicate fields remain accepted downstream.
+        socket.send('{"v":2,"type":"desktop_endpoint_registered",'
+          + '"endpoint_id":"old-endpoint","endpoint_id":"old-endpoint"}');
+      }
+    });
+  });
+  await new Promise((resolve) => oldServer.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    for (const socket of oldWss.clients) socket.terminate();
+    await new Promise((resolve) => oldServer.close(resolve));
+  });
+  const oldPort = oldServer.address().port;
+  const gateway = createEnrollmentGateway({
+    registry: {
+      async authorizeWebRegistration() {},
+      async authorizeDesktopRegistration() {},
+    },
+    upstreamUrl: `ws://127.0.0.1:${oldPort}/pinvou3/remote/ws`,
+  });
+  const address = await gateway.listen({ host: "127.0.0.1", port: 0 });
+  t.after(() => gateway.close());
+  const gatewayWs = `ws://127.0.0.1:${address.port}/pinvou3/remote/ws`;
+
+  await assert.rejects(openSocket(gatewayWs, { protocol: "pinvou-desktop-controller-v1" }),
+    /Server sent no subprotocol/u);
+  const mixed = await openSocket(gatewayWs);
+  t.after(() => mixed.terminate());
+  const denied = nextMessage(mixed);
+  const mixedClosed = socketClosed(mixed);
+  mixed.send('{"v":1,"v":2,"type":"desktop_endpoint_register",'
+    + '"endpoint_id":"old-endpoint","access_token":"test-token"}');
+  assert.equal((await denied).code, "endpoint_not_found");
+  assert.equal(await mixedClosed, 1008);
+  const escaped = await openSocket(gatewayWs);
+  t.after(() => escaped.terminate());
+  const escapedDenied = nextMessage(escaped);
+  const escapedClosed = socketClosed(escaped);
+  escaped.send('{"v":1,"\\u0076":2,"type":"desktop_endpoint_register",'
+    + '"endpoint_id":"old-endpoint","access_token":"test-token"}');
+  assert.equal((await escapedDenied).code, "endpoint_not_found");
+  assert.equal(await escapedClosed, 1008);
+  assert.deepEqual(received, []);
+
+  const legacy = await openSocket(gatewayWs);
+  t.after(() => legacy.terminate());
+  const registered = nextMessage(legacy);
+  const duplicateOrdinaryField = '{"v":2,"type":"desktop_endpoint_register",'
+    + '"endpoint_id":"old-endpoint","endpoint_id":"old-endpoint",'
+    + '"access_token":"test-token","desktop_secret":"test-desktop-secret"}';
+  legacy.send(duplicateOrdinaryField);
+  assert.equal((await registered).type, "desktop_endpoint_registered");
+  assert.deepEqual(received, [duplicateOrdinaryField]);
+  const subsequentDenied = nextMessage(legacy);
+  const legacyClosed = socketClosed(legacy);
+  legacy.send('{"v":1,"v":2,"type":"rpc_request"}');
+  assert.equal((await subsequentDenied).code, "endpoint_not_found");
+  assert.equal(await legacyClosed, 1008);
+  assert.deepEqual(received, [duplicateOrdinaryField]);
+
+  for (const requestId of ["downstream-mixed", "downstream-escaped"]) {
+    const downstream = await openSocket(gatewayWs);
+    t.after(() => downstream.terminate());
+    const ordinaryReply = nextMessage(downstream);
+    downstream.send('{"v":2,"type":"desktop_endpoint_register",'
+      + '"endpoint_id":"old-endpoint","access_token":"test-token",'
+      + '"desktop_secret":"test-desktop-secret"}');
+    assert.equal((await ordinaryReply).type, "desktop_endpoint_registered");
+    const rejectedReply = nextMessage(downstream);
+    const downstreamClosed = socketClosed(downstream);
+    downstream.send(JSON.stringify({ v: 2, type: "rpc_request", request_id: requestId }));
+    assert.equal((await rejectedReply).code, "endpoint_not_found");
+    assert.equal(await downstreamClosed, 1008);
+    assert.equal(received.at(-1).includes(requestId), true);
+  }
+  for (let attempt = 0; attempt < 50 && oldWss.clients.size > 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(oldWss.clients.size, 0);
+});
 
 test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t) => {
   const { root, registry } = await fixture(t);
@@ -761,6 +920,39 @@ test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t
   payloadOverflow.send("x".repeat(4 * 1024 * 1024 + 1));
   assert.equal(await payloadClosed, 1009);
   assert.equal((await fetch(`${gatewayHttp}/healthz`)).ok, true);
+
+  // B reuses its v2 desktop endpoint for controller traffic. The gateway
+  // must preserve the negotiated protocol on both sides of its proxy hop.
+  const controllerDesktop = await openSocket(gatewayWs,
+    { protocol: "pinvou-desktop-controller-v1" });
+  t.after(() => controllerDesktop.terminate());
+  assert.equal(controllerDesktop.protocol, "pinvou-desktop-controller-v1");
+  // Replacing B while Web stays connected also emits a v2 presence notice.
+  // Subscribe before registration and consume it before expecting the v1
+  // rejection; otherwise packet timing can make nextMessage read the notice.
+  const controllerWebConnected = nextMessageMatching(controllerDesktop,
+    (message) => message.v === 2 && message.type === "web_client_connected");
+  const controllerRegistered = nextMessage(controllerDesktop);
+  controllerDesktop.send(JSON.stringify({
+    v: 2,
+    type: "desktop_endpoint_register",
+    endpoint_id: "legacy-preserved-endpoint",
+    access_token: ACCESS_A,
+    desktop_secret: DESKTOP_SECRET,
+  }));
+  const controllerRegistration = await controllerRegistered;
+  assert.equal(controllerRegistration.type, "desktop_endpoint_registered");
+  assert.equal(controllerRegistration.web_client_connected, true);
+  const controllerWebNotice = await controllerWebConnected;
+  assert.equal(controllerWebNotice.endpoint_id, "legacy-preserved-endpoint");
+  assert.equal(controllerWebNotice.lease_id, controllerRegistration.lease_id);
+  // Match the v1 rejection even if an unrelated v2 notice is queued.
+  const controllerDisabled = nextMessageMatching(controllerDesktop,
+    (message) => message.code === "desktop_controller_unavailable");
+  const controllerClosed = socketClosed(controllerDesktop);
+  controllerDesktop.send(JSON.stringify({ v: 1, type: "controller_capabilities" }));
+  assert.equal((await controllerDisabled).code, "desktop_controller_unavailable");
+  assert.equal(await controllerClosed, 1008);
 
   const constrained = createEnrollmentGateway({
     registry,

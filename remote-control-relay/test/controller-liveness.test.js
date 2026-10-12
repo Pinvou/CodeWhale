@@ -3,7 +3,7 @@ import crypto, { createHash } from "node:crypto";
 import test from "node:test";
 
 import { ControllerLivenessHooks } from "../controller-liveness.js";
-import { buildLivenessAttestationPreimage } from "../protocol-controller.js";
+import { buildLivenessAttestationPreimage, buildPeerLivenessAttestationPreimage } from "../protocol-controller.js";
 
 const lease = Object.freeze({
   connection_id: "connection-0001",
@@ -13,6 +13,7 @@ const lease = Object.freeze({
   remote_control_generation: "generation-0001",
   liveness_epoch_a: "live-a-1",
   liveness_epoch_b: "live-b-1",
+  negotiated_capabilities: Object.freeze(["role_liveness_v1"]),
   sockets: Object.freeze({ A: "socket-A", B: "socket-B" }),
 });
 
@@ -57,6 +58,83 @@ function encryptedLiveness() {
     ciphertext_bytes: "3",
   };
 }
+
+function peerRequest(id = "challenge-peer-1") {
+  return { ...challenge("request-peer-1"), type: "controller_liveness_attestation_request_b", challenge_id: id };
+}
+
+test("B proof requests fail closed when role liveness was not negotiated", async () => {
+  const hooks = new ControllerLivenessHooks({ clock: () => 1_000 });
+  const unavailable = { ...lease, negotiated_capabilities: [] };
+  await hooks.onLeaseCreated(unavailable);
+  await assert.rejects(hooks.handle({ message: peerRequest(), role: "A", socket_identity: "socket-A", lease: unavailable }), { code: "unsupported_capability" });
+});
+
+test("A cannot obtain B proof from its own activity, wrong role or old B socket", async () => {
+  const value = await started();
+  await value.hooks.handle({ message: heartbeat("A", 1), socket_identity: "socket-A", role: "A", lease });
+  const send = (message = peerRequest(), role = "A", socket = "socket-A", context = lease) => value.hooks.handle({message, role, socket_identity: socket, lease: context});
+  await assert.rejects(() => send(), /controller_liveness_attestation_stale/u);
+  await value.hooks.handle({ message: heartbeat("B", 1), socket_identity: "socket-B", role: "B", lease });
+  await assert.rejects(() => send(peerRequest(), "B", "socket-B"), /role/u);
+  await assert.rejects(() => send(peerRequest(), "A", "socket-old"), /controller_socket_invalid/u);
+  for (const field of ["connection_id", "controller_lease_id", "relay_epoch", "remote_control_generation"]) {
+    await assert.rejects(() => send({ ...peerRequest(), [field]: "wrong-context" }));
+  }
+  value.now = 5_001;
+  await value.hooks.handle({ message: heartbeat("A", 2), socket_identity: "socket-A", role: "A", lease });
+  await assert.rejects(() => send(), /controller_liveness_attestation_stale/u);
+});
+
+test("B proof signs every envelope field in a distinct domain and consumes its challenge ID", async () => {
+  const value = await started();
+  await value.hooks.handle({ message: heartbeat("B", 3), socket_identity: "socket-B", role: "B", lease });
+  value.now = 2_000;
+  const result = await value.hooks.handle({ message: peerRequest(), socket_identity: "socket-A", role: "A", lease });
+  const proof = result.deliveries[0].message;
+  assert.equal(result.deliveries[0].role, "A");
+  assert.equal(proof.heartbeat_sequence_b, "3");
+  assert.equal(proof.attestation_sequence, "1");
+  assert.equal(proof.observed_age_ms, "2000");
+  assert.equal(proof.remaining_ttl_ms, "28000");
+  const signature = Buffer.from(proof.relay_signature_b64, "base64");
+  assert.equal(crypto.verify(null, buildPeerLivenessAttestationPreimage(proof), value.publicKey, signature), true);
+  for (const field of Object.keys(proof).filter((name) => name !== "relay_signature_b64")) {
+    const tampered = { ...proof, [field]: field === "v" ? 2 : `${proof[field]}x` };
+    if (field === "type") assert.throws(() => buildPeerLivenessAttestationPreimage(tampered));
+    else assert.equal(crypto.verify(null, buildPeerLivenessAttestationPreimage(tampered), value.publicKey, signature), false, field);
+  }
+  await assert.rejects(() => value.hooks.handle({ message: {...peerRequest(), challenge_b64: "AQEBAQEBAQEBAQEBAQEBAQ=="}, socket_identity: "socket-A", role: "A", lease }), /controller_liveness_challenge_replay/u);
+  await value.hooks.onSocketClosed({ lease });
+  await assert.rejects(() => value.hooks.handle({ message: peerRequest("challenge-peer-2"), socket_identity: "socket-A", role: "A", lease }), /controller_liveness_state_not_found/u);
+});
+
+test("B proof history is bounded, pruned and resets only with a new authenticated cycle", async () => {
+  const value = await started();
+  await value.hooks.handle({ message: heartbeat("B", 1), socket_identity: "socket-B", role: "B", lease });
+  for (let i = 0; i < 64; i++) {
+    const result = await value.hooks.handle({message: peerRequest(`challenge-peer-${i}`), role: "A", socket_identity: "socket-A", lease});
+    assert.equal(result.deliveries[0].message.attestation_sequence, String(i + 1));
+    assert.equal(result.deliveries[0].message.heartbeat_sequence_b, "1");
+  }
+  await assert.rejects(() => value.hooks.handle({message: peerRequest("challenge-over-capacity"), role: "A", socket_identity: "socket-A", lease}), /controller_liveness_challenge_capacity/u);
+  value.now = 30_001;
+  await value.hooks.handle({ message: heartbeat("B", 2), socket_identity: "socket-B", role: "B", lease });
+  const later = await value.hooks.handle({message: peerRequest("challenge-fresh"), role: "A", socket_identity: "socket-A", lease});
+  assert.equal(later.deliveries[0].message.attestation_sequence, "65");
+  assert.equal(later.deliveries[0].message.heartbeat_sequence_b, "2");
+  const rotated = {...lease, liveness_epoch_b: "live-b-2", sockets: {A: "socket-new-A", B: "socket-new-B"}};
+  await value.hooks.onLeaseCreated(rotated);
+  await assert.rejects(() => value.hooks.handle({message: heartbeat("B", 3), role: "B", socket_identity: "socket-B", lease: rotated}), /controller_socket_invalid/u);
+  await assert.rejects(() => value.hooks.handle({message: peerRequest("challenge-rotated"), role: "A", socket_identity: "socket-new-A", lease: rotated}), /controller_liveness_attestation_stale/u);
+});
+
+test("unconfigured signer refuses B proof even when B heartbeat is fresh", async () => {
+  const hooks = new ControllerLivenessHooks({ clock: () => 0 });
+  await hooks.onLeaseCreated(lease);
+  await hooks.handle({message: heartbeat("B", 1), role: "B", socket_identity: "socket-B", lease});
+  await assert.rejects(() => hooks.handle({message: peerRequest(), role: "A", socket_identity: "socket-A", lease}), /controller_liveness_attestation_unavailable/u);
+});
 
 function fixture({ now = 0 } = {}) {
   const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");

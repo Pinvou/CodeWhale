@@ -275,6 +275,7 @@ pub(crate) fn is_controller_handle_id(value: &str) -> bool {
 pub(crate) struct CompletedTransfer {
     pub(crate) handle_id: String,
     pub(crate) context: TransferContext,
+    pub(crate) metadata: TransferMetadata,
     pub(crate) sha256: String,
     pub(crate) bytes: u64,
 }
@@ -498,6 +499,7 @@ impl TransferRegistry {
         let completed = CompletedTransfer {
             handle_id: handle.id.clone(),
             context,
+            metadata: state.metadata.clone(),
             sha256: digest,
             bytes: total,
         };
@@ -557,6 +559,31 @@ impl TransferRegistry {
         Ok(())
     }
 
+    /// A handle is not authority by itself. The B action receiver must bind
+    /// it to the authenticated lease, B session and task before chunk/abort.
+    pub(crate) fn require_upload_binding(
+        &self,
+        handle: &TransferHandle,
+        live: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<()> {
+        let inner = self.inner.lock();
+        let state = inner
+            .transfers
+            .get(&handle.id)
+            .ok_or_else(|| error("transfer_unknown"))?;
+        if handle.direction != TransferDirection::Upload
+            || state.context.direction != TransferDirection::Upload
+            || !state.context.binding.matches(live)
+            || state.context.binding.session_id != session_id
+            || state.context.binding.task_id != task_id
+        {
+            return Err(error("transfer_binding_stale"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify_session(&self, handle: &TransferHandle, session_id: &str) -> Result<()> {
         let inner = self.inner.lock();
         let state = inner
@@ -572,6 +599,14 @@ impl TransferRegistry {
     pub(crate) fn take_expired(&self, now_b: u64) -> Vec<RevokedTransfer> {
         let ttl = self.limits.ttl.as_millis() as u64;
         self.take_where(|state| now_b.saturating_sub(state.updated_at_ms) >= ttl)
+    }
+
+    pub(crate) fn take_expired_downloads(&self, now_b: u64) -> Vec<RevokedTransfer> {
+        let ttl = self.limits.ttl.as_millis() as u64;
+        self.take_where(|state| {
+            state.context.direction == TransferDirection::Download
+                && now_b.saturating_sub(state.updated_at_ms) >= ttl
+        })
     }
 
     pub(crate) fn take_for_task(&self, task_id: &str) -> Vec<RevokedTransfer> {
