@@ -2178,7 +2178,8 @@ jobs:
     # rust-test verifies the combined tree; check does not link, so no
     # signing/packaging/frontend artifacts are needed (same as windows-rust-test: verified
     # empirically on macOS in 2026-08 that cargo check --all-targets does not depend on
-    # node_modules, hence no node/npm install).
+    # node_modules or npm install). The independent deployment regression below
+    # needs only Node itself and does not extend this job's applicability.
     if: >-
       ${{
         !cancelled() &&
@@ -2215,6 +2216,22 @@ jobs:
         uses: actions/checkout@v7
         with:
           submodules: false
+
+      - name: Node.js (isolated macOS deployment regression)
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: macOS temporary-root hardening and deployment regression
+        run: |
+          set -euo pipefail
+          hardening_log="$RUNNER_TEMP/remote-deployment-regression.tap"
+          node --test --test-reporter=tap remote-control-relay/test/deployment-incidents.test.js | tee "$hardening_log"
+          grep -qE '^# tests [1-9][0-9]*$' "$hardening_log"
+          grep -qx '# fail 0' "$hardening_log"
+          grep -qx '# skipped 0' "$hardening_log"
+          grep -qx '# todo 0' "$hardening_log"
+          grep -qE '^ok [1-9][0-9]* - actual Darwin system temporary roots accept hardening input and reject operator links$' "$hardening_log"
 
       - name: Init CodeWhale submodule
         run: git submodule update --init --recursive -- CodeWhale
