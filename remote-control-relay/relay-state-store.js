@@ -91,12 +91,15 @@ foreach ($rule in $actual) {
 
 const WINDOWS_REPARSE_VERIFY_SCRIPT = `
 $ErrorActionPreference = 'Stop'
+if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_start') }
 $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:PINVOU_PATHS_B64))
 $paths = ConvertFrom-Json -InputObject $json
+if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_decoded') }
 foreach ($target in $paths) {
   $item = Get-Item -LiteralPath ([string]$target) -Force
   if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'reparse point rejected' }
 }
+if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_checked') }
 [Console]::Out.Write('ok')
 `;
 
@@ -133,18 +136,47 @@ async function runWindowsAclScript(script, target, kind) {
   if (stdout !== "ok") fail("relay_state_acl_unverified");
 }
 
-export async function verifyWindowsAncestors(paths) {
+export async function verifyWindowsAncestors(paths, { onDiagnostic } = {}) {
   const encodedPaths = Buffer.from(JSON.stringify(paths), "utf8").toString("base64");
-  const { stdout } = await execFileAsync(windowsPowerShellExecutable(), [
-    "-NoLogo", "-NoProfile", "-NonInteractive",
-    "-EncodedCommand", encodedPowerShell(WINDOWS_REPARSE_VERIFY_SCRIPT),
-  ], {
-    windowsHide: true,
-    env: windowsChildEnvironment({ PINVOU_PATHS_B64: encodedPaths }),
-    timeout: 15_000,
-    maxBuffer: 64 * 1024,
-  });
-  if (stdout !== "ok") fail("relay_state_path_component_unsafe");
+  const diagnostic = typeof onDiagnostic === "function";
+  const complete = "pinvou_ancestor_start\npinvou_ancestor_decoded\npinvou_ancestor_checked\n";
+  const normalize = (output) => typeof output === "string" && Buffer.byteLength(output, "utf8") <= 512
+    ? output.replace(/\r\n/gu, "\n") : undefined;
+  const observe = (output) => {
+    if (!diagnostic) return;
+    let phase = "unknown";
+    const normalized = normalize(output);
+      if (normalized === "pinvou_ancestor_start\n") phase = "script_started";
+      if (normalized === "pinvou_ancestor_start\npinvou_ancestor_decoded\n") phase = "paths_decoded";
+      if (normalized === complete || normalized === `${complete}ok`) phase = "checks_completed";
+    try { onDiagnostic(phase); } catch { /* Diagnostics cannot change validation. */ }
+  };
+  const observeResult = (value) => {
+    let output;
+    try { output = value?.stdout; } catch { /* No exception payload is emitted. */ }
+    observe(output);
+  };
+  let result;
+  try {
+    result = await execFileAsync(windowsPowerShellExecutable(), [
+      "-NoLogo", "-NoProfile", "-NonInteractive",
+      "-EncodedCommand", encodedPowerShell(WINDOWS_REPARSE_VERIFY_SCRIPT),
+    ], {
+      windowsHide: true,
+      env: windowsChildEnvironment({ PINVOU_PATHS_B64: encodedPaths,
+        ...(diagnostic ? { PINVOU_ANCESTOR_DIAGNOSTIC: "1" } : {}) }),
+      timeout: 15_000,
+      maxBuffer: 64 * 1024,
+    });
+  } catch (error) {
+    if (diagnostic) observeResult(error);
+    throw error;
+  }
+  const stdout = result.stdout;
+  if (diagnostic) observe(stdout);
+  if (diagnostic ? normalize(stdout) !== `${complete}ok` : stdout !== "ok") {
+    fail("relay_state_path_component_unsafe");
+  }
 }
 
 export async function protectWindowsPath(target, kind) {

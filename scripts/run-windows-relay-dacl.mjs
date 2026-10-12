@@ -12,8 +12,10 @@ if (process.platform !== 'win32') {
 }
 
 let stage = 'base_resolve';
+let verifierPhase = 'unknown';
 function reportFailure(error) {
   const diagnostic = { stage, code: 'unknown' };
+  if (stage.endsWith('_reparse')) diagnostic.verifier_phase = verifierPhase;
   // Never stringify an exception: it may carry command, path or environment data.
   const read = (field) => {
     try { return error?.[field]; }
@@ -49,7 +51,11 @@ async function verifiedCanonical(original, scope) {
     ancestors.push(current);
   }
   stage = `${scope}_reparse`;
-  await verifyWindowsAncestors(ancestors);
+  verifierPhase = 'unknown';
+  await verifyWindowsAncestors(ancestors, { onDiagnostic: (phase) => {
+    verifierPhase = typeof phase === 'string'
+      && ['script_started', 'paths_decoded', 'checks_completed'].includes(phase) ? phase : 'unknown';
+  } });
   stage = `${scope}_realpath`;
   return realpath(original);
 }
