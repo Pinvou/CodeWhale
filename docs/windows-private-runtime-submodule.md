@@ -69,6 +69,9 @@ commit；更新 checkout 时显式禁用 LFS smudge，一致且工作树中不�
 缓存外置 Git LFS objects 和 `pinvou3-app/src-tauri/target/windows-runtime` 中已验证的 staging。缓存 schema、gitlink 或
 主仓库 runtime lock 任一变化都会生成新键。
 
+同一工作区上的并发初始化与 staging 调用通过 `target/windows-runtime/.resolver.lock` 串行化；等待方最多阻塞 120 秒，
+超时即失败退出，稍后重试即可（元数据缓存与 staging 复用让重试代价很低）。
+
 Jenkins 的 `CheckoutSubmodule` 阶段只负责准备 submodule，不再单独执行 `runtime:windows:validate`。后续直接运行
 `npm --prefix pinvou3-app run build:nsis`：统一的 `build.js` 入口只执行一次 runtime 校验和 staging，读取
 `runtime-descriptor.json`，再由 Windows installer adapter 为 NSIS 原子准备经过校验的 VC++ 引导程序。
