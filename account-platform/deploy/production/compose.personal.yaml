@@ -1,0 +1,249 @@
+# F01 business processes. Dependencies are separately provisioned, authenticated
+# Postgres, Redis, NATS and the verified user/workload Keycloak realms.
+# Private env files must never be expanded into command output or checked in.
+name: pinvou-personal
+x-runtime: &runtime
+  pull_policy: never
+  user: "65532:65532"
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 256m
+  cpus: 0.5
+  pids_limit: 96
+  ulimits:
+    core: {soft: 0, hard: 0}
+  tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700"]
+  logging:
+    driver: local
+    options: {max-size: "10m", max-file: "3"}
+  healthcheck:
+    test: [CMD, /healthcheck]
+    interval: 10s
+    timeout: 3s
+    start_period: 20s
+    retries: 6
+  networks: [backend]
+x-http: &http
+  APP_ENV: production
+  PORT: "8080"
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:?set independently verified HTTPS OTLP endpoint}
+  TRUSTED_TIME_SOURCES: ${TRUSTED_TIME_SOURCES:?set at least three independently verified time sources}
+  SSL_CERT_FILE: /run/pinvou/trust/ca.crt
+  WORKLOAD_IDENTITY_ISSUER: ${WORKLOAD_IDENTITY_ISSUER:?set verified workload realm issuer}
+  WORKLOAD_IDENTITY_JWKS_URL: ${WORKLOAD_IDENTITY_JWKS_URL:?set verified workload JWKS endpoint}
+  WORKLOAD_IDENTITY_AUDIENCE: pinvou-account-platform-internal
+  WORKLOAD_IDENTITY_CA_FILE: /run/pinvou/trust/ca.crt
+  WORKLOAD_IDENTITY_TOKEN_FILE: /run/pinvou/workload/token
+  INTERNAL_SERVICE_TOKEN: ""
+x-trust: &trust
+  type: bind
+  source: ${INFRA_CA_DIRECTORY:?set independently verified CA directory}
+  target: /run/pinvou/trust
+  read_only: true
+  bind: {create_host_path: false}
+services:
+  account-migrate:
+    <<: *runtime
+    image: ${MIGRATE_IMAGE:?set same-source F01 migration image}
+    restart: "no"
+    command: [--dir, /migrations/account]
+    healthcheck: {disable: true}
+    env_file:
+      - {path: "${ACCOUNT_MIGRATION_PRIVATE_ENV_FILE:?set private migration DSN role and backup evidence file}", required: true, format: raw}
+    volumes:
+      - *trust
+      - {type: bind, source: "${ACCOUNT_MIGRATION_DATABASE_DIRECTORY:?set private pgpass directory}", target: /run/pinvou/database, read_only: true, bind: {create_host_path: false}}
+    environment:
+      PINVOU_DEPLOYMENT_ENVIRONMENT: production-new
+      PGPASSFILE: /run/pinvou/database/pgpass
+  billing-migrate:
+    <<: *runtime
+    image: ${MIGRATE_IMAGE:?set same-source F01 migration image}
+    restart: "no"
+    command: [--dir, /migrations/billing]
+    healthcheck: {disable: true}
+    env_file:
+      - {path: "${BILLING_MIGRATION_PRIVATE_ENV_FILE:?set private migration DSN role and backup evidence file}", required: true, format: raw}
+    volumes:
+      - *trust
+      - {type: bind, source: "${BILLING_MIGRATION_DATABASE_DIRECTORY:?set private pgpass directory}", target: /run/pinvou/database, read_only: true, bind: {create_host_path: false}}
+    environment:
+      PINVOU_DEPLOYMENT_ENVIRONMENT: production-new
+      PGPASSFILE: /run/pinvou/database/pgpass
+  account-service:
+    <<: *runtime
+    image: ${ACCOUNT_SERVICE_IMAGE:?set same-source F01 Account image}
+    env_file:
+      - {path: "${ACCOUNT_SERVICE_PRIVATE_ENV_FILE:?set private Account HMAC SMS DSN and workload rules file}", required: true, format: raw}
+    environment:
+      <<: *http
+      MOBILE_AUTH_ENABLED: "true"
+      ACCOUNT_TRUSTED_SOURCE_PEER_IPS: "${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP},${PERSONAL_PORTAL_BACKEND_IP:?set fixed verified Portal peer IP},${PERSONAL_KEYCLOAK_BACKEND_IP:?set fixed verified Keycloak peer IP}"
+      OIDC_ISSUER: ${USER_OIDC_ISSUER:?set exact public user realm issuer}
+      OIDC_JWKS_URL: ${USER_OIDC_JWKS_URL:?set verified user JWKS endpoint}
+      OIDC_AUDIENCE: ${USER_OIDC_AUDIENCE:?set verified existing client audience}
+      BILLING_HTTP_URL: http://billing-service:8080
+      IDENTITY_HTTP_URL: http://identity-service:8080
+      PGPASSFILE: /run/pinvou/database/pgpass
+    volumes:
+      - *trust
+      - {type: bind, source: "${ACCOUNT_SERVICE_DATABASE_DIRECTORY:?set private pgpass directory}", target: /run/pinvou/database, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${ACCOUNT_SERVICE_WORKLOAD_DIRECTORY:?set only Account projected token directory}", target: /run/pinvou/workload, read_only: true, bind: {create_host_path: false}}
+    depends_on:
+      account-migrate: {condition: service_completed_successfully}
+      billing-service: {condition: service_healthy}
+      identity-service: {condition: service_healthy}
+  identity-service:
+    <<: *runtime
+    networks:
+      backend:
+        ipv4_address: ${PERSONAL_IDENTITY_BACKEND_IP:?set fixed private Identity peer IP}
+    image: ${IDENTITY_SERVICE_IMAGE:?set same-source F01 Identity image}
+    env_file:
+      - {path: "${IDENTITY_SERVICE_PRIVATE_ENV_FILE:?set private identity HMAC risk Redis and workload rules file}", required: true, format: raw}
+    environment:
+      <<: *http
+      MOBILE_AUTH_ENABLED: "true"
+      AUTH_RISK_REDIS_CA_FILE: /run/pinvou/trust/ca.crt
+      IDENTITY_TRUSTED_PROXY_IPS: ${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP}
+      KEYCLOAK_CA_FILE: /run/pinvou/trust/ca.crt
+      KEYCLOAK_ADMIN_API_URL: ${KEYCLOAK_PRIVATE_ORIGIN:?set private verified HTTPS Keycloak origin}
+      KEYCLOAK_PROVISIONER_TOKEN_URL: ${KEYCLOAK_PRIVATE_TOKEN_URL:?set private verified HTTPS realm token URL}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:?set verified user realm name}
+      KEYCLOAK_PROVISIONER_CLIENT_ID: ${KEYCLOAK_PROVISIONER_CLIENT_ID:?set verified provisioner client}
+      KEYCLOAK_PROVISIONER_CLIENT_SECRET_FILE: /run/pinvou/provisioner/client-secret
+    volumes:
+      - *trust
+      - {type: bind, source: "${IDENTITY_PROVISIONER_DIRECTORY:?set only provisioner secret directory}", target: /run/pinvou/provisioner, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${IDENTITY_SERVICE_WORKLOAD_DIRECTORY:?set only Identity projected token directory}", target: /run/pinvou/workload, read_only: true, bind: {create_host_path: false}}
+  billing-service:
+    <<: *runtime
+    image: ${BILLING_SERVICE_IMAGE:?set same-source F01 wallet-only Billing image}
+    env_file:
+      - {path: "${BILLING_SERVICE_PRIVATE_ENV_FILE:?set private Billing DSN and workload rules file}", required: true, format: raw}
+    environment:
+      <<: *http
+      PGPASSFILE: /run/pinvou/database/pgpass
+    volumes:
+      - *trust
+      - {type: bind, source: "${BILLING_SERVICE_DATABASE_DIRECTORY:?set private pgpass directory}", target: /run/pinvou/database, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${BILLING_SERVICE_WORKLOAD_DIRECTORY:?set only Billing projected token directory}", target: /run/pinvou/workload, read_only: true, bind: {create_host_path: false}}
+    depends_on:
+      billing-migrate: {condition: service_completed_successfully}
+  token-gateway:
+    <<: *runtime
+    image: ${TOKEN_GATEWAY_IMAGE:?set same-source F01 balance-only Token image}
+    env_file:
+      - {path: "${TOKEN_GATEWAY_PRIVATE_ENV_FILE:?set private Token workload rules file}", required: true, format: raw}
+    environment:
+      <<: *http
+      OIDC_ISSUER: ${USER_OIDC_ISSUER:?set exact public user realm issuer}
+      OIDC_JWKS_URL: ${USER_OIDC_JWKS_URL:?set verified user JWKS endpoint}
+      OIDC_AUDIENCE: ${USER_OIDC_AUDIENCE:?set verified existing client audience}
+      ACCOUNT_HTTP_URL: http://account-service:8080
+      BILLING_HTTP_URL: http://billing-service:8080
+    volumes:
+      - *trust
+      - {type: bind, source: "${TOKEN_GATEWAY_WORKLOAD_DIRECTORY:?set only Token projected token directory}", target: /run/pinvou/workload, read_only: true, bind: {create_host_path: false}}
+    depends_on:
+      account-service: {condition: service_healthy}
+      billing-service: {condition: service_healthy}
+  token-portal:
+    <<: *runtime
+    networks:
+      backend:
+        ipv4_address: ${PERSONAL_PORTAL_BACKEND_IP:?set fixed private Portal peer IP}
+    image: ${TOKEN_PORTAL_IMAGE:?set same-source F01 Portal with generated static assets}
+    env_file:
+      - {path: "${TOKEN_PORTAL_PRIVATE_ENV_FILE:?set private Portal Redis connection and endpoints file}", required: true, format: raw}
+    environment:
+      APP_ENV: production
+      PORT: "8080"
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:?set independently verified HTTPS OTLP endpoint}
+      SSL_CERT_FILE: /run/pinvou/trust/ca.crt
+      TRUSTED_TIME_SOURCES: ${TRUSTED_TIME_SOURCES:?set at least three independently verified time sources}
+      REDIS_CA_FILE: /run/pinvou/trust/ca.crt
+      PORTAL_PRIVATE_CA_FILE: /run/pinvou/trust/ca.crt
+      PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:?set exact public HTTPS origin}
+      PORTAL_OIDC_ISSUER: ${USER_OIDC_ISSUER:?set exact public user realm issuer}
+      PORTAL_OIDC_JWKS_URL: ${USER_OIDC_JWKS_URL:?set verified user JWKS endpoint}
+      PORTAL_OIDC_AUTHORIZATION_URL: ${USER_OIDC_AUTHORIZATION_URL:?set public HTTPS authorization URL}
+      PORTAL_OIDC_TOKEN_URL: ${KEYCLOAK_PRIVATE_TOKEN_URL:?set private verified HTTPS realm token URL}
+      PORTAL_OIDC_CLIENT_ID: ${PORTAL_OIDC_CLIENT_ID:?set public online PKCE client}
+      PORTAL_HANDOFF_OIDC_CLIENT_ID: ${PORTAL_HANDOFF_OIDC_CLIENT_ID:?set access-only confidential handoff client}
+      PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE: /run/pinvou/handoff/client-secret
+      PORTAL_SESSION_HANDOFF: "true"
+      PORTAL_TRUSTED_PROXY_IPS: ${PERSONAL_EDGE_BACKEND_IP:?set fixed private edge peer IP}
+      ACCOUNT_HTTP_URL: http://account-service:8080
+      TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080
+    volumes:
+      - *trust
+      - {type: bind, source: "${PORTAL_HANDOFF_DIRECTORY:?set only handoff secret directory}", target: /run/pinvou/handoff, read_only: true, bind: {create_host_path: false}}
+    depends_on:
+      account-service: {condition: service_healthy}
+      token-gateway: {condition: service_healthy}
+  account-event-relay:
+    <<: *runtime
+    image: ${EVENT_RELAY_IMAGE:?set same-source F01 ordinary Account relay}
+    env_file:
+      - {path: "${EVENT_RELAY_PRIVATE_ENV_FILE:?set private Account DSN file}", required: true, format: raw}
+    environment:
+      APP_ENV: production
+      EVENT_SOURCE: account
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:?set independently verified HTTPS OTLP endpoint}
+      SSL_CERT_FILE: /run/pinvou/trust/ca.crt
+      HEALTHCHECK_URL: http://127.0.0.1:9090/health/ready
+      PGPASSFILE: /run/pinvou/database/pgpass
+      NATS_URL: ${NATS_URL:?set verified TLS NATS endpoint}
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+    volumes:
+      - *trust
+      - {type: bind, source: "${EVENT_RELAY_DATABASE_DIRECTORY:?set private Account pgpass directory}", target: /run/pinvou/database, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${EVENT_RELAY_NATS_DIRECTORY:?set only relay NKey seed directory}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+    depends_on:
+      account-migrate: {condition: service_completed_successfully}
+  event-resources:
+    <<: *runtime
+    image: ${EVENT_RESOURCES_IMAGE:?set same-source F01 resource operator}
+    profiles: [event-operations]
+    restart: "no"
+    command: []
+    healthcheck: {disable: true}
+    environment:
+      NATS_URL: ${NATS_URL:?set verified TLS NATS endpoint}
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+    volumes:
+      - *trust
+      - {type: bind, source: "${EVENT_OPERATOR_NATS_DIRECTORY:?set only operator NKey seed directory}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+  personal-edge:
+    image: ${NGINX_IMAGE:?set independently verified NGINX image digest}
+    pull_policy: never
+    user: "65532:65532"
+    entrypoint: [nginx, -c, /etc/pinvou/nginx.conf, -g, "daemon off;"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700"]
+    volumes:
+      - {type: bind, source: "${PERSONAL_NGINX_CONFIG_FILE:?set verified rendered F01 nginx config}", target: /etc/pinvou/nginx.conf, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${PUBLIC_TLS_DIRECTORY:?set public leaf certificate directory}", target: /run/pinvou/public-tls, read_only: true, bind: {create_host_path: false}}
+      - *trust
+    ports: ["${PERSONAL_EDGE_BIND_ADDRESS:?set public bind address}:${PERSONAL_EDGE_BIND_PORT:?set public TLS port}:8443"]
+    networks:
+      backend:
+        ipv4_address: ${PERSONAL_EDGE_BACKEND_IP:?set fixed private edge peer IP}
+      edge: {}
+    depends_on:
+      token-portal: {condition: service_healthy}
+networks:
+  backend:
+    external: true
+    name: ${PERSONAL_BACKEND_NETWORK:?set independently provisioned private service dependency network}
+  edge:
+    external: true
+    name: ${PERSONAL_EDGE_NETWORK:?set independently provisioned ingress network}

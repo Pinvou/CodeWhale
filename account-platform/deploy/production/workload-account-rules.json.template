@@ -1,0 +1,4 @@
+[
+  {"subject":"__TOKEN_WORKLOAD_SUBJECT__","service":"token-gateway","permissions":["internal.authorization.check"]},
+  {"subject":"__KEYCLOAK_WORKLOAD_SUBJECT__","service":"keycloak-mobile-authenticator","permissions":["internal.authorization.check","internal.auth.sms.verify"]}
+]

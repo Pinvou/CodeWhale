@@ -433,6 +433,7 @@ export const lazyChunkContracts = {
   monitor: ['features/monitor/MonitorView.jsx', 'MonitorView'],
   search: ['features/search/SearchView.jsx', 'SearchView'],
   teamRelay: ['features/team-relay/TeamRelayView.jsx', 'TeamRelayView'],
+  accountPlatformPopover: ['features/account-platform/AccountPlatformPopover.jsx', 'AccountPlatformPopover'],
   searchOverlay: ['features/search/SearchOverlay.jsx', 'SearchOverlay'],
   moveToProjectDialog: ['features/projects/MoveToProjectDialog.jsx', 'MoveToProjectDialog'],
   rebindFolderDialog: ['features/projects/RebindFolderDialog.jsx', 'RebindFolderDialog'],
@@ -530,6 +531,7 @@ function enforceMainEntryBudget() {
 
 export default defineConfig(({ mode }) => {
   const webBuild = mode === 'web';
+  const accountPortalBuild = mode === 'account-portal';
   return {
   root: 'src',
   // The Relay and Vite build intentionally share one deployment variable;
@@ -543,14 +545,10 @@ export default defineConfig(({ mode }) => {
   },
   plugins: [
     react(),
-    copyRuntimeAssets(),
-    enforceLazyChunks(),
-    enforceMainEntryBudget(),
-    conditionalPlatformScripts(webBuild),
-    bundleClassicStartup(webBuild),
+    ...(accountPortalBuild ? [] : [copyRuntimeAssets(), enforceLazyChunks(), enforceMainEntryBudget(), conditionalPlatformScripts(webBuild), bundleClassicStartup(webBuild)]),
   ],
   build: {
-    outDir: webBuild ? '../../remote-control-relay/web/dist' : '../dist',
+    outDir: accountPortalBuild ? '../../account-platform/internal/portal/static' : webBuild ? '../../remote-control-relay/web/dist' : '../dist',
     emptyOutDir: true,
     // Minimum supported WebViews: macOS 11 WKWebView is Safari 14.0 — the
     // default "baseline-widely-available" target emits syntax it cannot parse
@@ -563,7 +561,9 @@ export default defineConfig(({ mode }) => {
     target: 'safari14',
     cssTarget: 'safari14',
     rolldownOptions: {
-      input: webBuild
+      input: accountPortalBuild
+        ? { account: resolve(sourceRoot, 'account.html'), admin: resolve(sourceRoot, 'admin.html'), handoff: resolve(sourceRoot, 'portal-session-handoff.html') }
+        : webBuild
         ? { main: resolve(sourceRoot, 'index.html') }
         : {
             main: resolve(sourceRoot, 'index.html'),

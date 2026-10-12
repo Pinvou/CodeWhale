@@ -1,0 +1,1 @@
+DROP INDEX wallet_provisioning_leased_idx;

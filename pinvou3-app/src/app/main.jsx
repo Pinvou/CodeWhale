@@ -19,13 +19,15 @@ import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shou
 import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewport.js';
 import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
 import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, resolveTheme } from '../shared/color-scheme.js';
-import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG } from '../shared/i18n.js';
+import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, accountPlatformCopy } from '../shared/i18n.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
 import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfirm, unavailableProjectRootPaths, WORKSPACE_KIND_BOUND } from '../features/projects/projectGrouping.js';
 import { ProjectGroupHeader } from '../features/projects/ProjectGroupHeader.jsx';
 import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
 import { runSessionBatch } from '../shared/session-management.js';
 import { isLlmApiAccountVisible } from '../shared/model-options.js';
+const LazyAccountPlatformPopover = lazy(() => VIEW_LOADERS.accountPlatformPopover().then(module => ({ default: module.AccountPlatformPopover })));
+import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
 import { can, isWeb } from '../shared/platform.js';
 import { errorCode, localizedErrorMessage } from '../shared/user-facing-error.js';
 import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
@@ -502,6 +504,9 @@ const NAV_PREFETCH = {
       const [colorScheme, setColorScheme] = useState('system');
       const activeTheme = resolveTheme(colorScheme, systemDark);
       const [accountPopoverOpen, setAccountPopoverOpen] = useState(false);
+      const [personalAccountOpen, setPersonalAccountOpen] = useState(false);
+      const personalAccountClient = useMemo(() => bridge.available && bridge.accountPlatform
+        ? new AccountPlatformDesktopClient(bridge.accountPlatform) : null, []);
       const [llmApiLoading, setLlmApiLoading] = useState(false);
       const [llmApiErrorCode, setLlmApiErrorCode] = useState(null);
       const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
@@ -622,6 +627,7 @@ const NAV_PREFETCH = {
       const browserSessionId = activeChat || (bs && bs.activeSessionId) || null;
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const browserNativeDisplayAvailable = !!platformCapabilities.browserNativeDisplay;
+      const personalAccountAvailable = can('accountPlatform') && platformCapabilities.accountPlatformSupported === true && personalAccountClient !== null;
       const browserSessionIdRef = useRef(browserSessionId);
       browserSessionIdRef.current = browserSessionId;
       const browserPaneState = browserPaneStateFor(browserPaneStates, browserSessionId);
@@ -4350,6 +4356,17 @@ const NAV_PREFETCH = {
 
             {/* Footer Profile */}
             <div className={`p-3 mt-auto ${isSidebarOpen ? 'space-y-2' : 'flex flex-col items-center gap-3 pb-6'}`}>
+              {personalAccountAvailable && <div className="relative">
+                <button type="button" data-testid="personal-account-button"
+                  onClick={() => setPersonalAccountOpen(value => !value)}
+                  title={accountPlatformCopy[language].title}
+                  className={`flex items-center rounded-xl px-2 py-1.5 gap-3 ${isSidebarOpen ? 'w-full' : 'justify-center w-10 h-10'}`}>
+                  <User size={18} />{isSidebarOpen && <span>{accountPlatformCopy[language].title}</span>}
+                </button>
+                <Suspense fallback={null}><LazyAccountPlatformPopover open={personalAccountOpen} client={personalAccountClient}
+                  copy={accountPlatformCopy[language]} language={language} onLanguageChange={handleSetLanguage}
+                  onClose={() => setPersonalAccountOpen(false)} /></Suspense>
+              </div>}
               {llmAccountVisible && (
               <div className={`relative ${isSidebarOpen ? 'w-full' : ''}`}>
                 <button

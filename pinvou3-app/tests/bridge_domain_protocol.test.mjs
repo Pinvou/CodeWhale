@@ -62,6 +62,7 @@ function extractCalls(source, callee, normalize = true) {
 }
 
 const protocolSources = {
+  accountPlatform: ['bridge/account-platform.js'],
   orchestration: ['bridge.js'],
   artifacts: ['bridge/artifact-tracker.js', 'bridge/artifacts.js'],
   auxChat: ['bridge/aux-chat.js'],
@@ -85,6 +86,8 @@ const protocolSources = {
 };
 
 const expectedProtocolHashes = {
+  // F01's personal-account domain delegates exactly twelve Native commands.
+  accountPlatform: 'eb8b68ee5e1e9414423b7a51eaad1e36e97ef09116edf0ad93b766625282a1ea',
   // Aux-chat domain debut (community #433 backflow): three commands —
   // get_or_create_aux_session / discard_aux_session / reset_aux_session —
   // plus the desktop send dispatch chat(restrictTools:true); buffer loading
@@ -226,7 +229,8 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 }
 
 const featureRegistry = new Proxy({}, {
-  get() {
+  get(target, name) {
+    if (Object.prototype.hasOwnProperty.call(target, name)) return target[name];
     return () => new Proxy({}, { get: () => function () {} });
   },
 });
@@ -252,6 +256,7 @@ const context = vm.createContext({
   URL,
   Blob,
 });
+vm.runInContext(read('bridge/account-platform.js'), context, { filename: 'bridge/account-platform.js' });
 vm.runInContext(read('bridge.js'), context, { filename: 'bridge.js' });
 
 const api = windowObject.TauriBridge;
