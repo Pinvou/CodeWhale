@@ -61,6 +61,9 @@ location = ${basePath}/ws {
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
+    # Explicit transport budget; keepalive does not renew authorization.
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
     proxy_set_header Host $host;
     # Overwrite rather than append the immediate proxy source.
     proxy_set_header X-Forwarded-For $remote_addr;

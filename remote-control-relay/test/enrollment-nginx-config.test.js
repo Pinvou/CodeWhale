@@ -48,6 +48,8 @@ test("custom routes and independent ports target only the guarded gateway", () =
     assert.doesNotMatch(rendered, /9321|pinvou3\/remote|location\s+\//u);
     assert.match(rendered, /proxy_set_header X-Forwarded-For \$remote_addr;/u);
     assert.match(rendered, /proxy_set_header Host \$host;/u);
+    assert.match(rendered, /proxy_read_timeout 75s;/u);
+    assert.match(rendered, /proxy_send_timeout 75s;/u);
   }
 });
 
@@ -97,6 +99,10 @@ test("offline check rejects stale routes, widened locations and direct legacy by
     assert.equal(await main(["--check", file], env(), io), 0);
   }
   for (const invalid of [original.replaceAll("8790", "8787"),
+    original.replace("    proxy_read_timeout 75s;\n", ""),
+    original.replace("    proxy_send_timeout 75s;\n", ""),
+    original.replace("proxy_read_timeout 75s;", "proxy_read_timeout 1s;"),
+    original.replace("proxy_send_timeout 75s;", "proxy_send_timeout 1s;"),
     original.replaceAll("/pinvou3/remote", "/stale"),
     original.replace("location =", "location"), original + "location / { proxy_pass http://127.0.0.1:8787; }\n"]) {
     await writeFile(file, invalid);
@@ -125,6 +131,25 @@ test("actual CLI generates and checks without disclosing unrelated credential in
     (error) => error.code === 1 && error.stdout === ""
       && JSON.parse(error.stderr).code === "gateway_nginx_config_drift"
       && !error.stderr.includes("test-only-sensitive-marker"));
+});
+
+test("actual custom CLI retains the explicit WS transport budgets", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "pinvou-nginx-timeout-cli-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, "gateway.conf");
+  const cli = fileURLToPath(new URL("../scripts/enrollment-nginx-config.js", import.meta.url));
+  const values = { ...process.env, ...env({
+    PINVOU_REMOTE_PUBLIC_BASE_PATH: "/custom/remote-v2",
+    PINVOU_REMOTE_LEGACY_RELAY_URL: "ws://127.0.0.1:8787/custom/remote-v2/ws",
+    PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON: '["https://example.invalid/custom/remote-v2"]',
+  }) };
+  const generated = await execFileAsync(process.execPath, [cli], { env: values, timeout: 10_000 });
+  assert.match(generated.stdout, /location = \/custom\/remote-v2\/ws/u);
+  assert.match(generated.stdout, /proxy_read_timeout 75s;/u);
+  assert.match(generated.stdout, /proxy_send_timeout 75s;/u);
+  await writeFile(file, generated.stdout);
+  const checked = await execFileAsync(process.execPath, [cli, "--check", file], { env: values, timeout: 10_000 });
+  assert.deepEqual(JSON.parse(checked.stdout), { ok: true, gateway_nginx_config: "consistent" });
 });
 
 test("generated custom health and WS routes reach the real gateway and retain enrollment denial", async (t) => {
