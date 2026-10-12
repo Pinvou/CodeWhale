@@ -1234,9 +1234,14 @@ class CiGatePolicyTests(unittest.TestCase):
         )[1]
 
         def assert_reader_execution(block):
-            loop = block.split("for filter in ", maxsplit=1)[1].split("done", maxsplit=1)[0]
+            loop = block.split("for filter in ", maxsplit=1)[1].split(
+                "done", maxsplit=1
+            )[0]
             filters, commands = loop.split("; do", maxsplit=1)
-            self.assertEqual(filters.count("'app::commands::remote_control::reader_resume_tests::'"), 1)
+            self.assertEqual(
+                filters.count("'app::commands::remote_control::reader_resume_tests::'"),
+                1,
+            )
             self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
@@ -1244,7 +1249,8 @@ class CiGatePolicyTests(unittest.TestCase):
             self.assertNotIn("continue-on-error", block)
 
         assert_reader_execution(regression)
-        # These negative mutations verify wiring, not the Wry runtime itself.
+        # Static guard negatives: a compile-only or broad/zero-match replacement
+        # cannot satisfy this wiring contract. These are not Wry runtime evidence.
         for old, new in (
             ("'app::commands::remote_control::reader_resume_tests::'", "'features::remote_control::'"),
             ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),

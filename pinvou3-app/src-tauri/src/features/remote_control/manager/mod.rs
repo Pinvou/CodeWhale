@@ -1265,7 +1265,9 @@ impl RemoteControlManager {
         self.clear_controller_channel(generation);
     }
 
-    /// Stop only a test-owned loopback connection, without durable revocation.
+    /// Stop only a test-owned loopback connection, without durable revocation
+    /// or a detached retry against a production profile. The regular start,
+    /// reader, routing and controller channel remain the production path.
     #[cfg(test)]
     pub(crate) fn shutdown_loopback_test_endpoint(&self) {
         let endpoint = {

@@ -72,3 +72,47 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_con
 - 信任模型以「受信 Relay」为前提：本功能不声称抵御恶意 Relay 的主动 MITM；该风险在发布说明中保留并明示。
 - 连接码是 5 分钟短期凭证，不承诺 7 位字符串永久作废；UI 文案不得使用「永久作废」表述。
 - 首版仅 Windows 声明能力；macOS/Linux 返回 `unsupported` 并隐藏入口。
+
+## 7. 端到端补齐（E2E-00～E2E-08）登记项分类
+
+> 历史普通文本 pilot 登记，依据 `Windows双端远程控制端到端补齐任务.md` 第 4 节与第 11 节整理。以下“已隐藏”、实现限制和旧测试数量仅记录当时阶段，不代表当前完整双端闭环的功能范围或当前 head 验证；当前功能边界以《Windows双端远程控制开发任务拆分》为准。真实双 Windows、生产等价部署与 DEV-25 发布验收仍须实际取得证据，不因本次传播视为完成。
+
+### 7.1 本轮 blocker（未取得证据前不得进入灰度）
+
+| 项 | 现状 | 需要的证据 |
+|---|---|---|
+| 真实双机 E2E 旅程（本文件第 3 节 21 条） | 未执行（环境受限：需要两台隔离 Windows 设备与生产等价 TLS/网关） | 每条旅程的可复现 trace（不含敏感正文），重点 9～10/11～13/16/19～21 |
+| 三个 UI 面浏览器冒烟（B 面板、A 连接壳、远程会话窗口） | 当时未执行；当时证据为源码契约（`remote_control_ui_closure` 等，历史计数 36 条）与 `vite build`，不代表当前测试数量 | 真实渲染/交互记录：键盘可达性、焦点、aria-live、倒计时节流 |
+| 真机断线恢复演练（E2E-06 出口的 30 秒预算） | 未执行；当前证据为同进程双端恢复序列用例 | 单边断网/Relay 重启下 resume 完成或失败关闭的 trace，确认无半恢复状态 |
+
+### 7.2 已隐藏（首版不暴露，开关之外无半通路）
+
+| 项 | 处置 |
+|---|---|
+| A 端临时模型、代码模式、附件与成果导出 | UI 按首版开关隐藏；能力未声明时不暴露入口 |
+| 远程普通会话的工具审批 | 未闭环前禁用工具，B 侧不出现 Allow 入口 |
+| 历史登记：Relay WS 子协议与 `controller_capabilities` 首帧 | **子协议限制已被后续实现取代（superseded）**：当前 A 端通过 `relay_client::controller_websocket_request` 声明 `pinvou-desktop-controller-v1`，Relay 通过 `remote-control-relay/server.js` 的 `handleProtocols` 协商。独立 `controller_capabilities` handler 仍未接入，当前能力通过 register/claim 与 `controller_joined` 协商；不再以本历史行声称当前客户端不声明子协议，也不将其视为发布验收。 |
+
+### 7.3 后续排期（不阻断首版灰度）
+
+| 项 | 说明 |
+|---|---|
+| 设备显示名 | 冻结协议 v1 的 `controller_joined`/`pairing_register` 不携带对端显示名，A 端用占位 `remote-device`、B 端留空由 UI 兜底；需协议扩展 |
+| B 回复非流式 | 首版在轮次结束后从 B 的 `SessionStore` 取文本，A 端看到的是整轮完成后的回复 |
+| A 端快照引导 | 首次收到 journal 事件时直接从该事件起算；完整快照引导属可选优化 |
+| 附件/成果事件回传 | wire `event_kind` 只用冻结闭集，进行中状态、附件与快照不回传（属后续任务） |
+| 跨 lease 任务清理语义 | B 端 `cancel` 只校验帧租约与任务存在性；旧 lease 遗留任务由 stop/refresh/远端断开的清理端口负责 |
+| `DesktopControlledCleanup` 适配器测试 | 仓库无 `mock_app` 先例，当前由 manager 侧三条路径用例覆盖触发面，Tauri 级测试列入后续 |
+| remote_control 之外的既有失败 | 全量 `cargo test --lib` 有 6～8 条与本功能无关的既有失败（进程树终止超时、marketplace 工具缺失等），属环境限制，已在任务文档登记 |
+
+### 7.4 当前自动化恢复接线回归的证据边界
+
+`app/commands/remote_control/reader_resume_tests.rs` 的独立子进程创建真实 Windows Wry 宿主，调用 feature 中的共享恢复夹具，经真实 RelayClient reader、RemoteControlManager 和 ControlledRelayWorker 执行恢复。前序 A08 的宿主分层、断线 prepared 屏障、错误 final liveness 拒绝、retained epoch 非空断言和旧 reader 围栏在 A13 中继续保留；不重新启用旧 feature 内宿主初始化，也不以非 Connected 投影的 `None == None` 声称覆盖内部 epoch。
+
+此用例仅在 Windows 编译与执行，须取得当前提交适用 Windows 原生 CI 的真实执行结果；Linux / macOS 的条件排除或 Draft skip 不是该用例的通过证据。子进程整体 15 秒、父进程 25 秒和局部等待 3 秒均为失败退出的 watchdog，不是平台启动性能承诺；本轮未完成冷启动及高负载 Windows runner 的时限余量验收。
+
+R15 核实此前 `windows-rust-test` 的 `--no-run` 只编译此用例，回归列表未包含宿主 driver；本轮补入精确 `app::commands::remote_control::reader_resume_tests::` 筛选，复用已嵌清单的 exe、pipefail 和非零命中断言。静态门禁及其负向变异只证明 CI 接线，不代替 Windows 实际执行；Draft 路由不变，仍须在适用的 Ready 原生 CI 取得证据。
+
+R15 本地 Windows-gnullvm 另外实际执行该 Wry driver 1 项通过（独立子进程及非零匹配证明），影响范围 `features::remote_control::` 588 项通过；这是本地固定树回归，不是 MSVC CI、冷启动压力、renderer/provider 或双 Windows 发布验收。
+
+它使用真实 loopback WebSocket 与认证测试材料，没有真实 renderer、在线 provider、生产网关或双 Windows 设备，不能替代第 7.1 节的发布验收。测试数量以当前提交实际输出为准。

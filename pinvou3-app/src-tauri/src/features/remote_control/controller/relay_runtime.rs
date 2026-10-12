@@ -789,7 +789,8 @@ pub(crate) struct ControlledRelayWorker {
     processed_frames: Option<tokio::sync::mpsc::Sender<Value>>,
 }
 
-/// Completion observation only; all routing and decisions stay production.
+/// Test-only completion observation: follows the exact production branch,
+/// including its continue/return paths, without injecting a routing shortcut.
 #[cfg(test)]
 struct ProcessedControllerFrame {
     sink: Option<tokio::sync::mpsc::Sender<Value>>,
@@ -1188,7 +1189,8 @@ impl ControlledRelayWorker {
                     };
                     #[cfg(test)]
                     let _processed = ProcessedControllerFrame {
-                        sink: self.processed_frames.clone(), frame: message.clone(),
+                        sink: self.processed_frames.clone(),
+                        frame: message.clone(),
                     };
                     if message.get("type").and_then(Value::as_str) == Some("desktop_controller_stop") {
                         break 'serve;
@@ -2306,7 +2308,11 @@ pub(crate) enum ControlledResumeOutcome {
 
 /// E2E-06：`desktop socket` 掉线后启动 B 端恢复：投影 reconnecting、取恢复材料，
 /// 并按冻结协议发出 `controller_resume_prepare`。任一步失败返回 false，调用方
-/// 必须结束本代通道（此时管理器的恢复失败路径已经清理租约与本代凭证）。
+/// 必须结束本代通道。管理器内部的恢复失败会立即清理租约与本代凭证；构造或
+/// 入队等管理器外失败由已冻结的 watchdog 截止及命令层
+/// `desktop_remote_controlled::spawn_watchdog_reaper`（应用 setup 注册、独立每秒轮询）
+/// 有界收口；它独立于本 worker 的两秒 poll，不随本 worker 退出而停止。
+/// 不表示所有返回 false 的路径都已经完成清理，也不会因恢复而延长截止。
 pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
     port: &P,
     manager: &ControlledDeviceManager,
@@ -2735,8 +2741,8 @@ fn sanitize_error(value: &str) -> String {
     }
 }
 
-// The real Windows Wry host is used without creating windows. Unsupported
-// platforms do not run a simulated desktop-control adapter.
+// This integration uses the real Windows Wry host without creating windows;
+// unsupported desktop-control platforms do not run a simulated Wry adapter.
 #[cfg(test)]
 pub(crate) mod reader_resume_tests;
 
