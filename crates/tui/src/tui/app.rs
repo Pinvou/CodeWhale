@@ -852,9 +852,6 @@ impl Default for ComposerState {
     }
 }
 
-/// Compatibility name retained for the first Tideline header slice. New
-/// surfaces register [`crate::tui::tideline::InteractionAction`] directly.
-
 /// Viewport/scroll state — fields related to transcript scrolling and caching.
 pub struct ViewportState {
     pub transcript_scroll: TranscriptScroll,
