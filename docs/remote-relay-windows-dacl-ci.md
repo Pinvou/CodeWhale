@@ -4,6 +4,8 @@
 
 本地同等入口：`node scripts/run-windows-relay-dacl.mjs`。先安装项目 Relay lockfile 依赖；脚本在非 Windows 显式拒绝，而不是报告 skip。
 
+Runner 先对原临时目录每级检查真实目录、非 symlink，并调用生产 Windows reparse verifier；通过后才取 realpath，创建独立的随机临时根并核验身份和规范路径。子进程 TEMP/TMP 均指向该专用根，不修改父进程环境。成功、资格失败或启动异常后均执行清理；删除前再次验证真实目录、reparse、规范路径、父目录、名称及 dev/ino 身份，无法证明归属时拒绝删除并报告失败。这样避免真实 8.3 短名让严格祖先拼写检查提前拒绝，又不靠盲目 realpath 隐藏 junction。生产路径守卫与权限测试不改变。
+
 本点仅接线既有真实用例：生产 RelayStateStore 默认保护/核验，无注入权限替身；随后真实 Get-Acl 读取专属目录、marker、primary、backup 与 lock，检查 owner、protected DACL、主体集合、FullControl 及继承规则。状态与临时测试目录由原 fixture 管理，不接触应用运行目录。
 
 其他 Windows 单元测试中的 protect/verify 注入错误仅为错误控制流证据，不能冒称真实 DACL。权限篡改后的异常状态保全、其它 Windows Relay 生命周期及已知 rollback / gateway readiness 失败仍需独立验收；此点不是整个 Windows Relay、部署或跨机器资格。
