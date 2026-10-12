@@ -449,9 +449,24 @@ pub fn validate_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
 /// M38-3).
 pub fn strip_workspace_roots_head(primary: &Path, stored: &[PathBuf]) -> Vec<PathBuf> {
     let head = normalize_lexical_components(primary);
+    // Round-41 M41-2: the head comparison also runs CANONICALLY (existing
+    // paths canonicalize with a lexical fallback; the strip only runs on
+    // cold move/load faces). A symlink alias of the OLD primary — or, on
+    // case-insensitive hosts, a case-folded spelling — is admitted at
+    // intake (the ancestor rejection exempts equality) and survives a pure
+    // lexical strip, re-arming the abandoned directory after a move; the
+    // canonical leg drops it with the head.
+    let head_real = primary.canonicalize().unwrap_or_else(|_| head.clone());
     stored
         .iter()
-        .filter(|root| normalize_lexical_components(root.as_path()) != head)
+        .filter(|root| {
+            let lexical = normalize_lexical_components(root.as_path());
+            if lexical != head {
+                let real = root.canonicalize().unwrap_or_else(|_| lexical.clone());
+                return real != head_real;
+            }
+            false
+        })
         .cloned()
         .collect()
 }
@@ -4052,24 +4067,42 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn intake_rejects_a_mixed_spelling_ancestor_on_windows() {
-        // Round-39 B39-2 pin (runs on the required windows-latest check):
-        // canonicalize returns a verbatim `\\?\`-prefixed path while the
-        // lexical fallback keeps the DOS form — the two spellings must
-        // still compare as the same path, or the ancestor guard silently
-        // skipped whenever exactly one side canonicalized (the fail-open:
-        // an existing primary d:\work\proj plus a not-yet-materialized
-        // d:\work ancestor was admitted).
+    fn intake_and_sanitize_reject_mixed_spelling_ancestors_on_windows() {
+        // Round-41 M41-6 rework of the round-39 pin: the MIXED-EXISTENCE
+        // shapes are what the normalizer rescues — an EXISTING primary
+        // canonicalizes to the verbatim form while a not-yet-materialized
+        // ancestor stays in lexical DOS form, and the pre-fix verbatim-vs-
+        // DOS comparison silently skipped the guard (the fail-open: the
+        // ancestor was admitted, and the sanitizer reported zero drops).
+        // Both sides existing makes the pre-fix predicate pass too — the
+        // old fixture was vacuous.
         let temp = tempfile::tempdir().expect("tempdir");
         let primary = temp.path().join("proj");
-        std::fs::create_dir_all(&primary).expect("primary dir");
-        let ancestor = temp.path().to_path_buf();
+        std::fs::create_dir_all(&primary).expect("primary dir (canonical/verbatim side)");
+        let ancestor = temp.path().join("not-yet-created");
 
-        let err = validate_workspace_roots(&primary, &[ancestor])
-            .expect_err("a mixed-spelling ancestor must be rejected on Windows");
+        let err = validate_workspace_roots(&primary, std::slice::from_ref(&ancestor))
+            .expect_err("a mixed-existence ancestor must be rejected on Windows");
         assert!(
             err.to_string().contains("contains the primary root"),
             "the rejection names the widening: {err}"
+        );
+
+        // The sanitize leg on the same mixed shape: the poison entry drops
+        // and the count names it (the round-39 sanitizer silently kept it).
+        let (clean, dropped) = sanitize_workspace_roots(&primary, &[primary.clone(), ancestor]);
+        assert_eq!(clean, vec![primary.clone()]);
+        assert_eq!(dropped, 1, "the drop is counted, not silent");
+
+        // The inverted mixed shape: a NONEXISTENT primary (lexical DOS
+        // fallback) with an EXISTING ancestor (canonical verbatim).
+        let ghost_primary = temp.path().join("ghost").join("ws");
+        let real_ancestor = temp.path().to_path_buf();
+        let err = validate_workspace_roots(&ghost_primary, std::slice::from_ref(&real_ancestor))
+            .expect_err("the inverted mixed-existence ancestor is rejected too");
+        assert!(
+            err.to_string().contains("contains the primary root"),
+            "both mixed directions close: {err}"
         );
     }
 
@@ -4733,6 +4766,41 @@ mod tests {
             .expect("read fork")
             .expect("fork persisted");
         assert_eq!(persisted.workspace_roots, forked.thread.workspace_roots);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_move_strips_a_symlink_alias_of_the_old_primary() {
+        // Round-41 M41-2: intake admits a root canonicalizing EQUAL to the
+        // primary (the ancestor rejection exempts equality; the normalizer
+        // dedups raw only) — a symlink alias of the primary rides the stored
+        // set, and a pure lexical strip let it survive the move, re-arming
+        // the abandoned directory. The canonical leg drops it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let old_ws = temp.path().join("repo");
+        std::fs::create_dir_all(&old_ws).expect("old workspace");
+        let alias = temp.path().join("repo-alias");
+        std::os::unix::fs::symlink(&old_ws, &alias).expect("primary alias");
+        let new_ws = temp.path().join("moved");
+        std::fs::create_dir_all(&new_ws).expect("new workspace");
+        let keep = temp.path().join("keep");
+        std::fs::create_dir_all(&keep).expect("keep root");
+
+        let stripped = strip_workspace_roots_head(&old_ws, &[old_ws.clone(), alias, keep.clone()]);
+        assert_eq!(
+            stripped,
+            vec![keep.clone()],
+            "the symlink alias of the old primary drops with the head"
+        );
+
+        // And through a real move face: the re-validated set on the new
+        // primary carries keep, never the abandoned directory.
+        let moved = validate_workspace_roots(&new_ws, &stripped).expect("re-validate");
+        assert_eq!(moved, vec![new_ws.clone(), keep]);
+        assert!(
+            !moved.contains(&old_ws),
+            "the abandoned primary is not re-armed through any spelling"
+        );
     }
 
     #[test]

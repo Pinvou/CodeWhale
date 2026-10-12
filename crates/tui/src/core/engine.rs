@@ -4180,13 +4180,13 @@ impl Engine {
         // is already named by the workspace line above. Order is the normalized
         // storage order, never re-sorted per turn, so a stable root set keeps
         // the line byte-identical; long sets are truncated to a bound.
-        let attached_roots: Vec<&Path> = self
-            .session
-            .workspace_roots
-            .iter()
-            .skip(1)
-            .map(PathBuf::as_path)
-            .collect();
+        // Round-41 minor 14: the shared lexical head strip — the model sees
+        // the same attached set the human surfaces list (a `..`-spelled or
+        // otherwise head-equal copy is the head, not an attachment).
+        let attached_roots = codewhale_core::strip_workspace_roots_head(
+            &self.session.workspace,
+            &self.session.workspace_roots,
+        );
         if !attached_roots.is_empty() {
             const MAX_LISTED_ROOTS: usize = 5;
             // Round-40 minor 8: escape the separator so a root spelling

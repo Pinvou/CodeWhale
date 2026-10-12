@@ -1608,8 +1608,8 @@ impl AcpServer {
             // workspace would arm the vacuous containment root for every
             // tool call in the rehydrated session (relative: every file
             // tool answers PathEscape forever); refuse to load it, the
-            // same rule `session/new` applies (round-40 minor 6 — the REST
-            // lane 400s the same row).
+            // same rule `session/new` applies (round-40 minor 6; the REST
+            // resume-thread lane 400s the same row since round-41 M41-1).
             return Err(AcpError::invalid_params(format!(
                 "session {session_id} has an empty or relative workspace"
             )));

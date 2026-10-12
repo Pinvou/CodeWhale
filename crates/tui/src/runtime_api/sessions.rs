@@ -443,14 +443,26 @@ pub(super) async fn create_session_from_thread(
         )?;
     }
     session.system_prompt = detail.thread.system_prompt.clone();
-    // Round-40 minor 1: the one row-minting lane that skipped intake —
-    // downstream is fail-closed (resume re-validates), but a tolerant
-    // thread row would propagate its poison one row deeper.
-    session.metadata.workspace_roots = codewhale_core::validate_stored_workspace_roots(
+    // Round-40 minor 1 + round-41 minor 1: the one row-minting lane that
+    // skipped intake — downstream is fail-closed (resume re-validates), but
+    // a tolerant thread row would propagate its poison one row deeper. A
+    // refused set now degrades to the SANITIZED remainder (matching the
+    // tolerant-load faces: cap-truncate, drop the refused entries) instead
+    // of a bare empty set that silently discards legal additions too.
+    session.metadata.workspace_roots = match codewhale_core::validate_stored_workspace_roots(
         &session.metadata.workspace,
         &detail.thread.workspace_roots,
-    )
-    .unwrap_or_default();
+    ) {
+        Ok(roots) => roots,
+        Err(reason) => {
+            tracing::warn!("session export degraded the source thread's root set: {reason}");
+            let (sanitized, _dropped) = codewhale_core::sanitize_workspace_roots(
+                &session.metadata.workspace,
+                &detail.thread.workspace_roots,
+            );
+            sanitized
+        }
+    };
 
     if let Some(title) =
         session_title_override(req.title.as_deref(), detail.thread.title.as_deref())
@@ -850,10 +862,13 @@ pub(super) async fn save_current_session(
                 // primary root. Both fields come from the same snapshot,
                 // re-normalized so the pair is consistent by construction.
                 updated.metadata.workspace = snapshot.workspace.clone();
-                updated.metadata.workspace_roots = codewhale_core::normalize_workspace_roots(
+                // Round-41 minor 2: the sanitize belt the TUI autosave runs
+                // (launder prevention) instead of the bare normalizer.
+                let (sanitized_put_roots, _dropped) = codewhale_core::sanitize_workspace_roots(
                     &snapshot.workspace,
                     &snapshot.workspace_roots,
                 );
+                updated.metadata.workspace_roots = sanitized_put_roots;
                 updated
             }
             Err(e) => {

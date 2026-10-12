@@ -407,12 +407,14 @@ pub(crate) async fn run_exec_agent(
             // for JSON consumers entirely — it goes to stderr and never
             // touches the stdout JSON stream, so the gate suppressed
             // safety-relevant information for no compatibility gain.
-            eprintln!(
-                "Warning: session {} was created in a different workspace ({}). \
-                 Resuming in the session's own workspace.",
-                truncate_id(&saved_id),
-                saved.metadata.workspace.display(),
-            );
+            if output_format == ExecOutputFormat::Text && !json_output {
+                eprintln!(
+                    "Warning: session {} was created in a different workspace ({}). \
+                     Resuming in the session's own workspace.",
+                    truncate_id(&saved_id),
+                    saved.metadata.workspace.display(),
+                );
+            }
         }
 
         engine_handle

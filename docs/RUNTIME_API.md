@@ -643,7 +643,16 @@ canonicalized before the comparison, so a symlink spelling — and, on
 case-insensitive filesystems, a case-folded spelling — of the primary's
 ancestor is rejected; a declared root that does not exist yet keeps the
 lexical judgment (materialization stays the delivery lane's job; the
-same-disk TOCTOU is the disclosed inherent one).
+same-disk TOCTOU is the disclosed inherent one). Disclosed residuals
+(round-41): the comparisons fold ASCII case only (non-Unicode), matching the
+block-only law contract's safe direction; and on Windows an SMB/UNC alias
+spelling of the primary's existing ancestor (`\\localhost\C$\…` for a
+`C:\…` primary, share reachable) canonicalizes to the UNC form the
+drive-letter comparison never unifies, so the ancestor rejection is defeated
+for that class — exploitability is tempered (a share of the ancestor
+directory; `C$` needs admin), and exec-policy scope matching treats the UNC
+operand as POSIX-rooted, so primary-scoped rules do not span the alias
+either.
 
 Stored rows persist the cwd-first full form (primary first, up to 64
 additional entries — 65 stored). Every resume/fork/load face that
