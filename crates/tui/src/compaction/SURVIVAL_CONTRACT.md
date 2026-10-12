@@ -79,7 +79,13 @@ Rust now:
   satisfied by the summary the rewrite itself just wrote.
 - `validate_survival_contract` also refuses a missing checkpoint receipt,
   duplicated prior summaries, dropped `/anchor` text, or a placeholder-only
-  checkpoint.
+  checkpoint. The receipt count reads the replacement in its own era: a
+  replacement carrying the provenance-stamped receipt counts only stamped
+  receipts, so a user turn that pastes the bare summary header survives
+  recompaction, retention, and `/edit` as content. Histories without a
+  stamped carrier predate the stamp, where a pasted header is
+  indistinguishable from the saved bare carrier, and keep the loose
+  recognition the fixture matrix pins.
 - `compact_messages_safe` never mutates the caller's live history; the host
   commits only after `Ok`.
 

@@ -45,7 +45,9 @@ fn has_compaction_summary_header(text: &str) -> bool {
 /// *begins* with the header is therefore still read as a carrier here. Request
 /// rewriting does not share that reading — see
 /// [`is_generated_compaction_checkpoint`] — so such a turn is never moved or
-/// merged on the wire.
+/// merged on the wire, and history-aware consumers reclassify through
+/// [`CheckpointEra`], which reads the loose form only when the history has no
+/// stamped carrier.
 #[must_use]
 pub(crate) fn is_compaction_checkpoint_message(message: &Message) -> bool {
     let [
@@ -89,4 +91,50 @@ pub(crate) fn is_generated_compaction_checkpoint(message: &Message) -> bool {
         return false;
     };
     provenance == COMPACTION_CHECKPOINT_PROVENANCE && is_compaction_checkpoint_message(message)
+}
+
+/// Which checkpoint shape a saved history's recognition family may match.
+///
+/// The provenance stamp is the era signal: once any message in a history
+/// carries the engine-written provenance block, the history postdates
+/// stamping, every carrier in it is stamped, and a user turn that merely
+/// pastes the summary header is genuine content. A history without a stamped
+/// carrier predates the stamp (or never compacted); there the pasted header
+/// is indistinguishable from the saved bare carrier, so the loose predicate
+/// keeps applying. Derive the era once per history with [`Self::of_history`]
+/// and route every per-message checkpoint classification through
+/// [`Self::is_checkpoint`] — classifying messages one at a time without the
+/// history is exactly the trap that let a pasted turn be dropped,
+/// mis-edited, and unretained (issue pinvou-agent#594).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CheckpointEra {
+    post_provenance: bool,
+}
+
+impl CheckpointEra {
+    /// The pre-provenance era: loose recognition. For callers that classify a
+    /// message with no history in sight, and for tests pinning the legacy
+    /// shape; history-aware callers must derive the era instead.
+    pub(crate) const LEGACY: Self = Self {
+        post_provenance: false,
+    };
+
+    #[must_use]
+    pub(crate) fn of_history(history: &[Message]) -> Self {
+        Self {
+            post_provenance: history.iter().any(is_generated_compaction_checkpoint),
+        }
+    }
+
+    /// Whether `message` is a compaction checkpoint of this history. In a
+    /// post-provenance history only the stamped carrier qualifies; a bare
+    /// header-prefixed turn is user content.
+    #[must_use]
+    pub(crate) fn is_checkpoint(&self, message: &Message) -> bool {
+        if self.post_provenance {
+            is_generated_compaction_checkpoint(message)
+        } else {
+            is_compaction_checkpoint_message(message)
+        }
+    }
 }

@@ -769,10 +769,13 @@ impl CompactionAnchor {
 /// summary relocation; the three used to be near-copies that had already
 /// drifted on which messages count as a prompt.
 pub(crate) fn compaction_anchor(messages: &[Message], before: usize) -> Option<CompactionAnchor> {
+    let checkpoints = crate::history_recognition::CheckpointEra::of_history(messages);
     let window = messages.get(..before)?;
     window
         .iter()
-        .rposition(|message| classify_user_turn_prompt(message) != UserTurnPromptKind::NotPrompt)
+        .rposition(|message| {
+            classify_user_turn_prompt_in_era(checkpoints, message) != UserTurnPromptKind::NotPrompt
+        })
         .map(CompactionAnchor::Prompt)
         .or_else(|| {
             window
@@ -1326,9 +1329,10 @@ fn is_compaction_topology_carrier(message: &Message) -> bool {
 /// carrier is misplaced when it trails its own summary or directly follows a
 /// tool result — the two shapes the pre-fix releases saved.
 fn restored_topology_anchor(messages: &[Message], index: usize) -> Option<usize> {
+    let checkpoints = crate::history_recognition::CheckpointEra::of_history(messages);
     let summary_before = messages[..index]
         .iter()
-        .rposition(crate::history_recognition::is_compaction_checkpoint_message);
+        .rposition(|message| checkpoints.is_checkpoint(message));
     let follows_tool_result = index > 0 && carries_tool_result(&messages[index - 1]);
     if summary_before.is_none() && !follows_tool_result {
         return None;
@@ -1337,7 +1341,7 @@ fn restored_topology_anchor(messages: &[Message], index: usize) -> Option<usize>
         .or_else(|| {
             messages[index + 1..]
                 .iter()
-                .position(crate::history_recognition::is_compaction_checkpoint_message)
+                .position(|message| checkpoints.is_checkpoint(message))
                 .map(|offset| index + 1 + offset)
         })
         .unwrap_or(messages.len());
@@ -1414,8 +1418,16 @@ pub enum EditLastTurnTarget {
 }
 
 /// Classify `message` for edit-last-turn and admitted-display handling.
+///
+/// `checkpoints` is the recognition era of the history the message came from
+/// ([`crate::history_recognition::CheckpointEra::of_history`]): in a
+/// post-provenance history only the stamped carrier is runtime-owned, so a
+/// turn pasting the bare summary header classifies as the user turn it is.
 #[must_use]
-pub(crate) fn classify_user_turn_prompt(message: &Message) -> UserTurnPromptKind {
+pub(crate) fn classify_user_turn_prompt_in_era(
+    checkpoints: crate::history_recognition::CheckpointEra,
+    message: &Message,
+) -> UserTurnPromptKind {
     if message.role != Role::User {
         return UserTurnPromptKind::NotPrompt;
     }
@@ -1429,7 +1441,7 @@ pub(crate) fn classify_user_turn_prompt(message: &Message) -> UserTurnPromptKind
     }) {
         return UserTurnPromptKind::NotPrompt;
     }
-    if is_runtime_owned_user_message(message) {
+    if is_runtime_owned_user_message(checkpoints, message) {
         return UserTurnPromptKind::NotPrompt;
     }
 
@@ -1443,15 +1455,24 @@ pub(crate) fn classify_user_turn_prompt(message: &Message) -> UserTurnPromptKind
     }
 }
 
+/// [`classify_user_turn_prompt_in_era`] under the legacy era: any
+/// header-prefixed turn reads as the saved summary. Only for callers with no
+/// history in sight; pass a derived era when the history is available.
+#[must_use]
+pub(crate) fn classify_user_turn_prompt(message: &Message) -> UserTurnPromptKind {
+    classify_user_turn_prompt_in_era(crate::history_recognition::CheckpointEra::LEGACY, message)
+}
+
 /// Locate the latest real user boundary without skipping unsupported content.
 #[must_use]
 pub fn edit_last_turn_target(messages: &[Message]) -> EditLastTurnTarget {
+    let checkpoints = crate::history_recognition::CheckpointEra::of_history(messages);
     messages
         .iter()
         .enumerate()
         .rev()
         .find_map(
-            |(index, message)| match classify_user_turn_prompt(message) {
+            |(index, message)| match classify_user_turn_prompt_in_era(checkpoints, message) {
                 UserTurnPromptKind::NotPrompt => None,
                 UserTurnPromptKind::Editable => Some(EditLastTurnTarget::Editable(index)),
                 UserTurnPromptKind::Unsupported => Some(EditLastTurnTarget::Unsupported),
@@ -1461,6 +1482,13 @@ pub fn edit_last_turn_target(messages: &[Message]) -> EditLastTurnTarget {
 }
 
 /// True when `message` is an editable, genuine user-authored turn prompt.
+///
+/// Single-message form: any header-prefixed turn reads as the saved summary,
+/// because without the history there is no era to decide otherwise.
+/// History-aware callers (replacement retention, `/edit` targeting, anchor
+/// placement) must use [`classify_user_turn_prompt_in_era`] with
+/// [`crate::history_recognition::CheckpointEra::of_history`] so a turn that
+/// pastes the bare header stays user-authored in a post-provenance history.
 ///
 /// Host integrations that mutate history should use [`edit_last_turn_target`]
 /// when selecting a cut point so an unsupported latest user turn cannot be
@@ -1474,13 +1502,20 @@ pub fn is_user_turn_prompt(message: &Message) -> bool {
 /// user-authored. Runtime authority is accepted only from the engine-owned
 /// structural `<turn_meta>` block, never from arbitrary user text that happens
 /// to resemble a runtime envelope or metadata marker.
-fn is_runtime_owned_user_message(message: &Message) -> bool {
+///
+/// Era-aware: `checkpoints` decides whether a header-prefixed turn is the
+/// saved summary (pre-provenance histories) or user content (post-provenance
+/// histories). See [`crate::history_recognition::CheckpointEra`].
+fn is_runtime_owned_user_message(
+    checkpoints: crate::history_recognition::CheckpointEra,
+    message: &Message,
+) -> bool {
     restored_subagent_checkpoint_display(message).is_some()
         || has_non_authoritative_turn_provenance(message)
         // The compaction checkpoint is engine-written history, so `/edit` must
         // not treat it as the turn to truncate at: doing so deletes the summary
         // the session is built on. Structure decides, not the marker substring.
-        || crate::history_recognition::is_compaction_checkpoint_message(message)
+        || checkpoints.is_checkpoint(message)
 }
 
 /// Return engine-owned metadata in either the current trailing shape or the
@@ -1765,6 +1800,46 @@ mod tests {
             edit_last_turn_target(&[prompt, checkpoint]),
             EditLastTurnTarget::Editable(0),
             "/edit must truncate at the prompt, not delete the summary"
+        );
+    }
+
+    /// Issue pinvou-agent#594 residual 3: `/edit` derives the history's era,
+    /// so in a post-provenance history a turn pasting the bare summary
+    /// header is the editable turn it selected — not skipped in favor of an
+    /// older prompt. A pre-provenance history keeps the loose reading, where
+    /// the bare form is indistinguishable from the saved carrier.
+    #[test]
+    fn edit_target_reads_a_pasted_header_turn_post_provenance() {
+        let prompt_message = |text: &str| Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+        };
+        let pasted_text = crate::compaction::build_compaction_summary_block_text("pasted note", "");
+        let pasted = prompt_message(&pasted_text);
+        let stamped_checkpoint =
+            crate::compaction::compaction_checkpoint_message(&crate::models::SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("handoff", ""),
+            ));
+
+        let modern = vec![
+            prompt_message("Ship the release"),
+            stamped_checkpoint,
+            pasted.clone(),
+        ];
+        assert_eq!(
+            edit_last_turn_target(&modern),
+            EditLastTurnTarget::Editable(2),
+            "the pasted turn is the latest editable user turn: {modern:?}"
+        );
+
+        let legacy = vec![prompt_message("Ship the release"), pasted];
+        assert_eq!(
+            edit_last_turn_target(&legacy),
+            EditLastTurnTarget::Editable(0),
+            "without a stamped carrier the bare header turn reads as the old summary: {legacy:?}"
         );
     }
 
