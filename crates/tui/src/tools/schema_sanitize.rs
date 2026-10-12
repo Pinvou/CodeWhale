@@ -1272,6 +1272,14 @@ fn sanitize_kimi_parameters_candidate(
     // only adjusts valid nested unions.
     sanitize_for_kimi(parameters);
 
+    // JSON Schema reads an empty `items` schema as "items are unconstrained",
+    // which is exactly the MFJS-legal shape with the keyword absent. MFJS
+    // itself has no empty schema node and fails the whole tool with
+    // MissingType, so repair the equivalent shape instead of dropping the
+    // tool from the request (the Pinvou browser `evaluate_script` catalog
+    // historically shipped `args: {"type": "array", "items": {}}`).
+    remove_empty_mfjs_items_schemas(parameters);
+
     let Some(root) = parameters.as_object() else {
         return Err(KimiParameterSchemaError::RootMustBeObject);
     };
@@ -1285,6 +1293,51 @@ fn sanitize_kimi_parameters_candidate(
     }
 
     Ok(constraint_note)
+}
+
+/// Drop every empty `items` schema node (`"items": {}`) from a Kimi
+/// parameters document.
+///
+/// Empty-schema nodes sit exactly where schema values live: property values,
+/// `items`, object-form `additionalProperties`, `anyOf` branches, and `$defs`
+/// entries. `properties` itself is a name map, so its own emptiness is legal
+/// and only its values are visited. Removal is semantics-preserving (an
+/// absent `items` keyword already means unconstrained items) and must be
+/// idempotent because it runs after every other compatibility pass.
+fn remove_empty_mfjs_items_schemas(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if obj
+        .get("items")
+        .is_some_and(|items| items.as_object().is_some_and(Map::is_empty))
+    {
+        obj.shift_remove("items");
+        return;
+    }
+    if let Some(properties) = obj.get_mut("properties").and_then(Value::as_object_mut) {
+        for child in properties.values_mut() {
+            remove_empty_mfjs_items_schemas(child);
+        }
+    }
+    if let Some(definitions) = obj.get_mut("$defs").and_then(Value::as_object_mut) {
+        for child in definitions.values_mut() {
+            remove_empty_mfjs_items_schemas(child);
+        }
+    }
+    if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
+        for branch in branches.iter_mut() {
+            remove_empty_mfjs_items_schemas(branch);
+        }
+    }
+    if let Some(additional) = obj.get_mut("additionalProperties")
+        && additional.is_object()
+    {
+        remove_empty_mfjs_items_schemas(additional);
+    }
+    if let Some(items) = obj.get_mut("items") {
+        remove_empty_mfjs_items_schemas(items);
+    }
 }
 
 fn inline_internal_kimi_root_ref(parameters: &mut Value) -> Result<(), KimiParameterSchemaError> {
@@ -2448,6 +2501,59 @@ mod kimi_tests {
         });
         assert_eq!(
             sanitize_for_kimi_parameters(&mut invalid).unwrap_err(),
+            KimiParameterSchemaError::MissingType
+        );
+    }
+
+    #[test]
+    fn kimi_parameters_repairs_empty_items_as_unconstrained() {
+        // The Pinvou browser `evaluate_script` catalog shipped
+        // `args: {"type": "array", "items": {}}`. JSON Schema reads the empty
+        // items schema as unconstrained, but MFJS fails it with MissingType
+        // and the request builder silently dropped the whole tool — the model
+        // kept seeing a tool_search reference it could never call. The
+        // MFJS-legal equivalent shape drops the keyword instead.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "function": {"type": "string"},
+                "args": {"type": "array", "items": {}}
+            },
+            "required": ["function"],
+            "additionalProperties": true
+        });
+        sanitize_for_kimi_parameters(&mut schema)
+            .expect("empty items must repair to the keyword being absent");
+        assert_eq!(schema["properties"]["args"], json!({"type": "array"}));
+
+        // Nested occurrences repair too; other untyped schema nodes still
+        // fail closed because no semantics-preserving MFJS shape exists.
+        let mut nested = json!({
+            "type": "object",
+            "properties": {
+                "outer": {
+                    "type": "object",
+                    "properties": {
+                        "inner": {"type": "array", "items": {}}
+                    },
+                    "required": ["inner"]
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut nested).expect("nested empty items repair");
+        assert_eq!(
+            nested["properties"]["outer"]["properties"]["inner"],
+            json!({"type": "array"})
+        );
+
+        let mut described_only = json!({
+            "type": "object",
+            "properties": {
+                "args": {"type": "array", "items": {"description": "anything"}}
+            }
+        });
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut described_only).unwrap_err(),
             KimiParameterSchemaError::MissingType
         );
     }
