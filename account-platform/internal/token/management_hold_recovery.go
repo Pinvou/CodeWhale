@@ -69,3 +69,14 @@ func definitiveBillingFailure(err error) bool {
 		return false
 	}
 }
+
+// The existing initial member Reserve returns a stored matching hold before
+// checking lifecycle facts. This exact rejection can close initial admission;
+// it is not evidence about an earlier hold during cancellation recovery.
+func definitiveInitialBillingFailure(err error) bool {
+	if definitiveBillingFailure(err) {
+		return true
+	}
+	var failure *BillingHTTPError
+	return errors.As(err, &failure) && failure.Status == http.StatusConflict && failure.Code == "MEMBER_LIFECYCLE_CONFLICT"
+}

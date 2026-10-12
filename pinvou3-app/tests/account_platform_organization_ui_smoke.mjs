@@ -12,7 +12,7 @@ assert.ok(chrome,'Browser unavailable; no UI validation performed');
 const profile=fs.mkdtempSync(path.join(os.tmpdir(),'pinvou-f06-ui-'));
 let vite,browser,page,passed=0;const errors=[];
 try{
- vite=await createServer({root,configFile:false,appType:'mpa',logLevel:'error',plugins:[react()],server:{host:'127.0.0.1',port:0,watch:null}});await vite.listen();
+ vite=await createServer({root,cacheDir:process.env.F06_VITE_CACHE||path.join(root,'node_modules/.vite-f06-org'),configFile:false,appType:'mpa',logLevel:'error',plugins:[react()],server:{host:'127.0.0.1',port:0,watch:null}});await vite.listen();
  browser=await puppeteer.launch({executablePath:chrome,headless:'new',userDataDir:profile,args:['--disable-gpu','--no-first-run']});page=await browser.newPage();page.setDefaultTimeout(10000);page.on('pageerror',error=>errors.push(error.message));
  const url=`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-organization.html`;
  const fresh=async language=>{errors.length=0;await page.goto(url);await page.waitForFunction(()=>window.f06);await page.evaluate(language=>{window.f06.language=language;window.f06.render();},language);await page.waitForFunction(()=>document.body.textContent.includes('Controlled Unit'));};

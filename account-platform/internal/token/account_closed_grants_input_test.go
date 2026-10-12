@@ -52,6 +52,8 @@ func TestClosedGrantInputsThroughInstalledTokenRoutes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			service, _, close := newModelUsageAuthorizationService(t, AuthorizationContext{UserID: user, ContextType: "ORGANIZATION", OrganizationID: &org})
 			defer close()
+			// These organization routes belong to the models management assembly.
+			service.WithManagement(nil, nil, ProviderURLPolicy{}, "", nil)
 			client := &closedGrantInputClient{}
 			service.billing = client
 			handler := service.Handler(func(context.Context, string) (identity.Principal, error) {
@@ -107,6 +109,7 @@ func TestClosedGrantKeysUsePublishedCharacterBounds(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/batch=%v", keyCase.name, batch), func(t *testing.T) {
 				service, _, close := newModelUsageAuthorizationService(t, AuthorizationContext{UserID: user, ContextType: "ORGANIZATION", OrganizationID: &org})
 				defer close()
+				service.WithManagement(nil, nil, ProviderURLPolicy{}, "", nil)
 				client := &closedGrantInputClient{}
 				service.billing = client
 				handler := service.Handler(func(context.Context, string) (identity.Principal, error) {
@@ -145,5 +148,41 @@ func TestClosedGrantKeysUsePublishedCharacterBounds(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestClosedGrantRoutesRequireManagementAssembly(t *testing.T) {
+	org, user, grant := uuid.New(), uuid.New(), uuid.New()
+	for _, batch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("personal/batch=%v", batch), func(t *testing.T) {
+			// The personal production factory never calls WithManagement. Keep
+			// an otherwise authorized actor and usable Billing facade here so
+			// the assertion verifies absent routes, rather than a later denial.
+			service, _, close := newModelUsageAuthorizationService(t, AuthorizationContext{UserID: user, ContextType: "ORGANIZATION", OrganizationID: &org})
+			defer close()
+			client := &closedGrantInputClient{}
+			service.billing = client
+			handler := service.Handler(func(context.Context, string) (identity.Principal, error) {
+				return identity.Principal{Issuer: "owned", Subject: "owner"}, nil
+			})
+			path := "/v1/organizations/" + org.String() + "/account-closed-grants/" + grant.String() + "/reclaim"
+			body := map[string]any{"reason": "回收"}
+			if batch {
+				path = "/v1/organizations/" + org.String() + "/account-closed-grants:reclaim-batch"
+				body["grant_ids"] = []uuid.UUID{grant}
+			}
+			raw, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(raw)))
+			req.Header.Set("Authorization", "Bearer owned")
+			req.Header.Set("Idempotency-Key", "closed-grant-owned-key")
+			out := httptest.NewRecorder()
+			handler.ServeHTTP(out, req)
+			if out.Code != http.StatusNotFound || len(client.ids) != 0 {
+				t.Fatalf("personal installed organization route: status=%d calls=%d", out.Code, len(client.ids))
+			}
+		})
 	}
 }

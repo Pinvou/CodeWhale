@@ -157,6 +157,7 @@ try {
     ['transport-lost-ack-browser-retry-stable-key', '10000', '1', '9007199254740993', 'transport'],
     ['unknown-stepup-keeps-original-key-and-shows-current-policy', '10000', '1', '9007199254740993', 'http-reauth'],
     ['unknown-originating-actor-is-not-replayed-by-another-administrator', '10000', '1', '9007199254740993', 'http-actor'],
+    ['unknown-manage-revoked-preserves-evidence-and-never-replays', '10000', '1', '9007199254740993', 'http-revoked'],
   ];
   let failures = 0;
   for (const [name, microcredits, expectedPoints, revision = '2', lostAck = false] of cases) {
@@ -187,6 +188,18 @@ try {
           assert.equal(await page.evaluate(() => Boolean(document.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.pending.0199a100-0001-7000-8000-000000000101'))), true, 'original actor recovery evidence remains preserved');
           console.log(JSON.stringify({ action: 'pass', test: name }));
           continue;
+        }
+        if (lostAck === 'http-revoked') {
+          const recoveryKey = `pinvou.admin.registration-bonus.pending.${currentUserID}`;
+          const originalPending = await page.evaluate(key => document.defaultView.sessionStorage.getItem(key), recoveryKey);
+          permissions = ['platform.registration-bonus.read'];
+          await page.reload({ waitUntil: 'networkidle0' });
+          await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"] button');
+          assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"] button', node => node.disabled), true);
+          await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"] button', node => node.click());
+          assert.equal(writes.length, 1); assert.equal(mutations, 1);
+          assert.equal(await page.evaluate(key => document.defaultView.sessionStorage.getItem(key), recoveryKey), originalPending, 'revoked manage cannot discard unresolved evidence');
+          console.log(JSON.stringify({ action: 'pass', test: name })); continue;
         }
         await page.reload({ waitUntil: 'networkidle0' });
         await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"] button');

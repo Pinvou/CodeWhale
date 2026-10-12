@@ -1,0 +1,11 @@
+{
+  "name": "pinvou-account-closure-contracts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:closure-contracts": "node --test test/contract/account-closure-saga.test.mjs test/contract/account-closure-cleanup.test.mjs"
+  },
+  "devDependencies": {
+    "yaml": "2.9.0"
+  }
+}

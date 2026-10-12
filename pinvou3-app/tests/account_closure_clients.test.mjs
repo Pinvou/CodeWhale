@@ -7,11 +7,25 @@ import { OrganizationClient } from '../src/features/account-platform/organizatio
 import { parseClosedGrantsJSON } from '../src/features/account-platform/account-closed-grants-contract.js';
 import { readClosureIntent, saveClosureIntent, clearClosureIntent, closureRepairIntents, closureGrantIntents } from '../src/features/account-platform/closure-intent.js';
 import { accountClosureCopy, accountClosedGrantCopy } from '../src/shared/i18n.js';
+import { requireAccountClosure } from '../src/features/account-platform/account-closure-contract.js';
 
 const actor = '11111111-1111-4111-8111-111111111111';
 const other = '22222222-2222-4222-8222-222222222222';
 const grant = '33333333-3333-4333-8333-333333333333';
 const key = 'closure-original-command-key';
+for (const [name, value] of [['missing', undefined], ['null', null], ['numeric', 123], ['empty', ''], ['timezone missing', '2026-10-13T12:00:00'], ['date overflow', '2026-02-31T12:00:00Z'], ['invalid hour', '2026-10-13T24:01:00Z'], ['whitespace', ' 2026-10-13T12:00:00Z']]) {
+  test(`closure receipt ${name} SLA is unconfirmed rather than a known ACK`, () => {
+    const item = { closure_request_id: actor, status: 'IN_PROGRESS', stage: 'CLOSURE_REQUESTED', blockers: [], sla_expires_at: value };
+    assert.throws(() => requireAccountClosure(item), error => error.code === 'COMMAND_RESULT_UNKNOWN');
+  });
+}
+for (const value of ['1970-01-01T00:00:00Z', '2030-01-01T08:00:00.123456789+08:00', '2024-02-29t20:30:59z', '2016-12-31T23:59:60Z']) {
+  test(`closure receipt keeps valid RFC3339 SLA ${value} without a deadline policy`, () => {
+    const item = { closure_request_id: actor, status: 'COMPLETED', stage: 'COMPLETED', blockers: [], sla_expires_at: value };
+    assert.equal(requireAccountClosure(item), item);
+    assert.equal(item.sla_expires_at, value);
+  });
+}
 const memory = () => { const values = new Map(); return { get length() { return values.size; }, key: index => [...values.keys()][index], getItem: name => values.get(name) ?? null, setItem: (name, value) => values.set(name, value), removeItem: name => values.delete(name) }; };
 
 test('closure intent survives new client, isolates actor/resource and cannot replace uncertain facts', () => {

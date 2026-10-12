@@ -27,6 +27,18 @@ func TestRetainedPolicyRollbackGuard(t *testing.T) {
 	}
 }
 
+func TestRetainedOrganizationGovernanceRollbackGuard(t *testing.T) {
+	if err := retainedRollbackGuard(context.Background(), nil, migrations.Migration{Version: 39}); err == nil || !strings.Contains(err.Error(), "original scope-version SQL cannot compare void results") {
+		t.Fatalf("unsupported retained organization rollback was allowed: %v", err)
+	}
+}
+
+func TestRetainedAccountClosureCleanupRollbackGuard(t *testing.T) {
+	if err := retainedRollbackGuard(context.Background(), nil, migrations.Migration{Version: 28}); err == nil || !strings.Contains(err.Error(), "preserve lifecycle, cleanup and retention evidence") {
+		t.Fatalf("incomplete retained account cleanup rollback was allowed: %v", err)
+	}
+}
+
 type executionGuardTx struct {
 	pgx.Tx
 	sql []string

@@ -615,23 +615,13 @@ func (s *Service) adminDeleteOrganizationResource(w http.ResponseWriter, r *http
 		return
 	}
 	if len(s.organizationLifecycle) > 0 {
-		currentAssessment, currentErr := s.applyOrganizationLifecycleProjection(r.Context(), resourceID, "DISABLED", state.Version)
-		if currentErr != nil || !currentAssessment.Ready {
-			s.writeOrganizationLifecycleFailure(w, r, currentAssessment, currentErr)
-			return
-		}
-		preflightAssessment, preflightErr := s.preflightOrganizationLifecycleProjection(r.Context(), resourceID, "DELETED", state.Version+1)
-		if preflightErr != nil || !preflightAssessment.Ready {
-			s.writeOrganizationLifecycleFailure(w, r, preflightAssessment, preflightErr)
-			return
-		}
-		assessment, lifecycleErr := s.applyOrganizationLifecycleProjection(r.Context(), resourceID, "DELETED", state.Version+1)
+		assessment, lifecycleErr := s.confirmOrganizationDeletionProjection(r.Context(), resourceID, state.Version)
 		if lifecycleErr != nil || !assessment.Ready {
 			s.writeOrganizationLifecycleFailure(w, r, assessment, lifecycleErr)
 			return
 		}
 	}
-	err = repository.AdminDeleteOrganization(r.Context(), principal, resourceID, reason)
+	err = repository.AdminDeleteOrganization(r.Context(), principal, resourceID, state.Version, reason)
 
 	if err != nil {
 		s.writeError(w, r, err)

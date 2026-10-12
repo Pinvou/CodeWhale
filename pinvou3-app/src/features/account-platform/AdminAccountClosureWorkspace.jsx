@@ -22,7 +22,7 @@ function ClosureRepair({ client, owner, item, copy, closureCopy, canRepair, onCh
     if (result) onChanged();
   };
   return <article><p>{item.closure_request_id} · {item.recovery_only ? closureCopy.recoveryPending : `${closureCopy.statuses[item.status]} · ${closureCopy.stages[item.stage]}`}</p>
-    {operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
+    {operation.error && <p role="alert">{needsAuthentication && !operation.unknown ? closureCopy.recentAuthenticationRequired : operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
     {needsAuthentication && canRepair && <><p>{closureCopy.recentAuthenticationRequired}</p><button onClick={() => client.reauthenticate('/admin.html?section=closures')}>{closureCopy.reauthenticate}</button></>}
     {canRepair && <><label>{copy.reason}<textarea value={operation.pendingFacts?.reason || reason} disabled={operation.busy || operation.unknown || operation.blocked} onChange={event => setReason(event.target.value)} /></label><button disabled={operation.busy || operation.blocked || (!operation.unknown && !reason.trim())} onClick={() => void retry()}>{copy.retry}</button></>}
   </article>;

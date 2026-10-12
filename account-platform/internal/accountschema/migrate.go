@@ -38,6 +38,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if err := validateRegistrationBonusGuard(input); err != nil {
 		return nil, err
 	}
+	if err := validateMemberUnitAssignments(input); err != nil {
+		return nil, err
+	}
 	if err := validateExecutionGuard(input); err != nil {
 		return nil, err
 	}
