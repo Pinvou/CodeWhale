@@ -308,6 +308,8 @@ impl ControllingSessionManager {
     /// Dispatch/cancel commits acquire intents before the authenticated owner,
     /// just like capability mapping. Keep the exact mapping stable through the
     /// commit, but never acquire intents from inside an owner-held closure.
+    /// Callbacks must not re-enter this manager; the shared order is session
+    /// intents -> connection owner -> encrypted lane -> durable Store.
     pub(crate) fn with_state_for_lease<T>(
         &self,
         remote_ref: &str,

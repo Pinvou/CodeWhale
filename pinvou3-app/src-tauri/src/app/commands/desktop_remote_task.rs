@@ -1652,6 +1652,23 @@ pub(super) fn with_current_dispatch_binding<T>(
         })
 }
 
+// Acquire session intents before owner/lane, like capability snapshot commits.
+// Keeping the intent held also prevents close/reopen from replacing its wire ID
+// between the read and the exact live-binding/attempted-task validation.
+fn bound_cancel_session_id(
+    sessions: &ControllingSessionManager,
+    remote_ref: &str,
+    lease: &LeaseContext,
+    validate: impl FnOnce() -> Result<(), UseCaseError>,
+) -> Result<String, UseCaseError> {
+    sessions
+        .with_state_for_lease(remote_ref, lease, |session| {
+            validate()?;
+            Ok(session.session_id.clone())
+        })
+        .map_err(|_| dispatch_error("remote_binding_mismatch"))?
+}
+
 impl RemoteTaskDispatchPort for DesktopRemoteTaskDispatchPort {
     fn send_bound_cancel(
         &self,
@@ -1666,16 +1683,13 @@ impl RemoteTaskDispatchPort for DesktopRemoteTaskDispatchPort {
         let (lease, _, _) = manager
             .authenticated_remote_proxy_identity()
             .map_err(|_| dispatch_error("remote_binding_mismatch"))?;
-        let session_id = sessions
-            .with_state_for_lease(remote_ref, &lease, |session| {
-                with_current_dispatch_binding(&self.app, live, || {
-                    store
-                        .require_attempted_remote_task(local_session_id, remote_ref, live, task_id)
-                        .map_err(|_| "remote_task_not_cancellable".to_owned())?;
-                    Ok(session.session_id.clone())
-                })
+        let session_id = bound_cancel_session_id(&sessions, remote_ref, &lease, || {
+            with_current_dispatch_binding(&self.app, live, || {
+                store
+                    .require_attempted_remote_task(local_session_id, remote_ref, live, task_id)
+                    .map_err(|_| "remote_task_not_cancellable".to_owned())
             })
-            .map_err(|_| dispatch_error("remote_binding_mismatch"))??;
+        })?;
         let request_id = format!("request-{}", Uuid::new_v4().simple());
         let payload = build_bound_task_cancel_payload(&lease, &session_id, &request_id, task_id)
             .map_err(|_| dispatch_error("remote_request_invalid"))?;
@@ -2194,6 +2208,164 @@ pub async fn desktop_remote_task_abandon_prepared_a<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bound_cancel_and_capability_snapshot_take_session_before_connection_owner() {
+        use crate::features::remote_control::controller::controlling::ControllerLease;
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let lease = LeaseContext {
+            connection_id: "connection-0001".into(),
+            controller_lease_id: "lease-0001".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "relay-0001".into(),
+            remote_control_generation: "generation-0001".into(),
+        };
+        let caps = vec![
+            "encrypted_frames_v1".into(),
+            "pairing_v1".into(),
+            "task_v1".into(),
+        ];
+        let manager = Arc::new(ControllingDeviceManager::default());
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(
+                operation.clone(),
+                ControllerLease {
+                    context: lease.clone(),
+                    peer_endpoint_id: "endpoint-0001".into(),
+                    reservation_id: "reservation-0001".into(),
+                    device_display_name: "Device".into(),
+                    liveness_epoch_a: "live-a-1".into(),
+                    liveness_epoch_b: "live-b-1".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [1; 32],
+                    transport_key_fingerprint: [2; 32],
+                    negotiated_capabilities: caps.clone(),
+                },
+            )
+            .unwrap();
+        let sessions = Arc::new(ControllingSessionManager::default());
+        let (session, _) = sessions
+            .open_with_outcome(None, "Session", "chat", &lease, &caps)
+            .unwrap();
+        let request = sessions
+            .capability_request(&session.session_ref, &lease)
+            .unwrap();
+        let snapshot = json!({"v":1,"type":"capability_snapshot",
+            "connection_id":lease.connection_id,"controller_lease_id":lease.controller_lease_id,
+            "lease_epoch":lease.lease_epoch,"relay_epoch":lease.relay_epoch,
+            "remote_control_generation":lease.remote_control_generation,
+            "request_id":request.request_id,"session_id":session.session_id,
+            "controlled_session_id":"b-session-1","capability_revision":"1",
+            "expires_at_ms":"30000","modes":["chat"],"tools":[],"skills":[],"workspaces":[]});
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mapping_sessions = sessions.clone();
+        let mapping_owner = manager.clone();
+        let mapping_lease = lease.clone();
+        let mapping_operation = operation.clone();
+        let mapping = std::thread::spawn(move || {
+            mapping_sessions.apply_capability_snapshot_for_lease_with_mapping_and_guard(
+                &mapping_lease, &snapshot,
+                |_, _| {
+                    held_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                },
+                |commit| mapping_owner.with_lane_owner(&mapping_operation, commit)
+                    .map_err(|_| crate::features::remote_control::controller::controlling_session::SessionError::new("session_context_stale")),
+            )
+        });
+        held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let cancel_sessions = sessions.clone();
+        let cancel_owner = manager.clone();
+        let cancel_lease = lease.clone();
+        let cancel_operation = operation.clone();
+        let remote_ref = session.session_ref.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (validation_tx, validation_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let cancel = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result =
+                bound_cancel_session_id(&cancel_sessions, &remote_ref, &cancel_lease, || {
+                    cancel_owner
+                        .with_lane_owner(&cancel_operation, || validation_tx.send(()).unwrap())
+                        .map_err(|_| dispatch_error("remote_binding_mismatch"))
+                });
+            done_tx.send(result).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let before_release = validation_rx.recv_timeout(Duration::from_millis(200));
+        // A third thread proves cancellation has not taken inner while waiting
+        // for the snapshot's intents lock. All failures are bounded, not hangs.
+        let (probe_tx, probe_rx) = mpsc::channel();
+        let probe_owner = manager.clone();
+        let probe_operation = operation.clone();
+        let probe = std::thread::spawn(move || {
+            probe_owner.with_lane_owner(&probe_operation, || probe_tx.send(()).unwrap())
+        });
+        let available = probe_rx.recv_timeout(Duration::from_secs(3));
+        release_tx.send(()).unwrap();
+        assert!(
+            before_release.is_err(),
+            "cancel entered owner before the session lock"
+        );
+        assert!(
+            available.is_ok(),
+            "cancel inverted intents/owner lock order"
+        );
+        assert!(mapping.join().unwrap().is_ok());
+        assert!(probe.join().unwrap().is_ok());
+        assert_eq!(
+            done_rx
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .unwrap(),
+            session.session_id
+        );
+        cancel.join().unwrap();
+        // Preserve fail-closed errors from the real attempted-task/owner gate.
+        assert_eq!(
+            bound_cancel_session_id(&sessions, &session.session_ref, &lease, || Err(
+                dispatch_error("remote_task_not_cancellable")
+            ))
+            .unwrap_err()
+            .code(),
+            "remote_task_not_cancellable"
+        );
+        let mut stale = lease.clone();
+        stale.lease_epoch = "2".into();
+        assert_eq!(
+            bound_cancel_session_id(&sessions, &session.session_ref, &stale, || panic!(
+                "stale context entered owner"
+            ))
+            .unwrap_err()
+            .code(),
+            "remote_binding_mismatch"
+        );
+        sessions.close(&session.session_ref).unwrap();
+        assert!(
+            bound_cancel_session_id(&sessions, &session.session_ref, &lease, || panic!(
+                "closed intent entered owner"
+            ))
+            .is_err()
+        );
+        let source = include_str!("desktop_remote_task.rs");
+        let command = source
+            .split("    fn send_bound_cancel(")
+            .nth(1)
+            .unwrap()
+            .split("    fn reserve_pending(")
+            .next()
+            .unwrap();
+        assert!(command.contains("bound_cancel_session_id(&sessions"));
+        assert!(command.contains("with_current_dispatch_binding(&self.app"));
+        assert!(command.contains("require_attempted_remote_task("));
+        assert!(!command.contains(".state(remote_ref"));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_dispatch_blocking_worker_does_not_occupy_the_async_executor() {
