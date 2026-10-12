@@ -28,6 +28,96 @@ fn make_store(root: &std::path::Path) -> SessionStore {
 }
 
 #[test]
+fn duplicate_archive_cleans_exact_cross_instance_active_residue() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = make_store(temp.path());
+    let opened = first
+        .test_commit_remote_proxy_open(None, &context())
+        .unwrap();
+    let second = make_store(temp.path());
+    assert!(
+        second
+            .remote_proxy_snapshot(&opened.local_session_id)
+            .is_some()
+    );
+    assert!(
+        first
+            .archive_remote_proxy(&opened.local_session_id, None)
+            .unwrap()
+    );
+    assert!(
+        second
+            .archive_remote_proxy(&opened.local_session_id, None)
+            .unwrap()
+    );
+    assert!(
+        second
+            .remote_proxy_snapshot(&opened.local_session_id)
+            .is_none()
+    );
+    assert!(second.remote_proxies.lock().openings.is_empty());
+    assert!(
+        make_store(temp.path())
+            .read_remote_proxy_history(&opened.local_session_id)
+            .is_some()
+    );
+    assert!(
+        second
+            .prepare_remote_proxy_open(Some(&opened.local_session_id), &context())
+            .is_err()
+    );
+}
+
+#[test]
+fn duplicate_archive_rejects_changed_active_residue_without_reopening_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = make_store(temp.path());
+    let opened = first
+        .test_commit_remote_proxy_open(None, &context())
+        .unwrap();
+    let second = make_store(temp.path());
+    assert!(
+        first
+            .archive_remote_proxy(&opened.local_session_id, None)
+            .unwrap()
+    );
+    second
+        .remote_proxies
+        .lock()
+        .records
+        .get_mut(&opened.local_session_id)
+        .unwrap()
+        .ui
+        .title = "Changed".into();
+    assert_eq!(
+        second
+            .archive_remote_proxy(&opened.local_session_id, None)
+            .unwrap_err()
+            .to_string(),
+        "remote_proxy_archive_conflict"
+    );
+    assert!(
+        second
+            .remote_proxy_snapshot(&opened.local_session_id)
+            .is_some()
+    );
+    assert!(
+        second
+            .require_live_remote_mutation(
+                &opened.local_session_id,
+                &opened.remote_session_ref,
+                &context()
+            )
+            .is_err()
+    );
+    assert!(
+        make_store(temp.path())
+            .read_remote_proxy_history(&opened.local_session_id)
+            .is_some()
+    );
+}
+
+#[test]
 fn exact_byte_budget_admission_reserves_fingerprint_attempt_projection_and_terminal() {
     let temp = tempfile::tempdir().unwrap();
     let store = make_store(temp.path());
