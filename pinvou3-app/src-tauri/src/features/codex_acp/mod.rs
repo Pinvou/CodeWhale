@@ -7856,6 +7856,17 @@ mod tests {
     }
 
     #[test]
+    fn rebind_acp_production_probe_is_line_ending_independent() {
+        let lf = include_str!("mod.rs").replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        let production = production_source(&lf);
+        assert_eq!(production, production_source(&crlf));
+        assert!(!production.contains("fn rebind_acp_production_closures_read_prompt_pending"));
+        assert!(production.contains("pub async fn rebind_blocking_sessions"));
+        assert!(production.contains("pub async fn evict_if_idle_for_rebind"));
+    }
+
+    #[test]
     fn rebind_acp_production_closures_read_prompt_pending() {
         // Round-26 MAJOR-3: cut at the test module exactly like projects.rs's
         // `production_source` (round-18) — an unanchored find over the WHOLE

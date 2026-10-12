@@ -164,6 +164,15 @@ export class ControllerLivenessHooks {
     // specialized handler expects. A B socket cannot request proof as A.
     validateControllerMessage(message, role, context);
 
+    // Enforce the existing evidence cutoff before any update, proof or forward.
+    // The periodic cleanup tick may run late; a late authenticated heartbeat
+    // must not turn an expired cycle back into a resumable lease.
+    const deadline = Math.min(state.last_liveness_a.at, state.last_liveness_b.at) + TOTAL_BUDGET_MS;
+    if (now >= deadline) {
+      await this.#expireState(context.controller_lease_id, state);
+      fail("controller_liveness_expired");
+    }
+
     if (message.type === "controller_liveness") {
       return this.#acceptTransportHeartbeat({ message, role, context, state, now });
     }
@@ -245,9 +254,8 @@ export class ControllerLivenessHooks {
     return Object.freeze({ deliveries: Object.freeze([delivery("A", validated)]) });
   }
 
-  #forwardEncryptedLiveness({ message, context, state, now }) {
+  #forwardEncryptedLiveness({ message, context }) {
     const validated = validateControllerMessage(message, "A", context);
-    state.last_encrypted_liveness_at = now;
     return Object.freeze({ deliveries: Object.freeze([delivery("B", validated)]) });
   }
 
@@ -349,18 +357,22 @@ export class ControllerLivenessHooks {
     for (const [controllerLeaseId, state] of this.#states) {
       const deadline = Math.min(state.last_liveness_a.at, state.last_liveness_b.at) + TOTAL_BUDGET_MS;
       if (now >= deadline) {
-        try {
-          if (this.#leaseManager) await this.#leaseManager.terminateLease({
-            controllerLeaseId, expectedLease: state.leaseOwner, reason: "controller_liveness_expired",
-          });
-        } finally {
-          if (this.#states.get(controllerLeaseId) === state) this.#states.delete(controllerLeaseId);
-        }
+        await this.#expireState(controllerLeaseId, state);
         expired += 1;
       } else {
         pruneChallenges(state, now);
       }
     }
     return expired;
+  }
+
+  async #expireState(controllerLeaseId, state) {
+    // Revoke synchronously, before awaiting callbacks, so concurrent late
+    // messages cannot renew evidence. Only retire the captured lease owner;
+    // callbacks may install a replacement with the same lease ID.
+    if (this.#states.get(controllerLeaseId) === state) this.#states.delete(controllerLeaseId);
+    if (this.#leaseManager) await this.#leaseManager.terminateLease({
+      controllerLeaseId, expectedLease: state.leaseOwner, reason: "controller_liveness_expired",
+    });
   }
 }

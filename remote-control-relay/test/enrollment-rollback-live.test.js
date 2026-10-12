@@ -43,27 +43,116 @@ function run(script, env, timeout = 30_000) {
   });
 }
 
-async function gatewayFixture(t) {
+// Keep both candidates reserved together, after the upstream is listening.
+// Releasing a port cannot guarantee ownership across a process boundary;
+// startup below retries only an observed, structured EADDRINUSE.
+async function reserveGatewayPorts() {
+  const servers = [];
+  try {
+    for (let index = 0; index < 2; index += 1) {
+      const server = net.createServer();
+      servers.push(server);
+      server.listen(0, "127.0.0.1");
+      await once(server, "listening");
+    }
+    return {
+      ports: servers.map((server) => server.address().port),
+      release: () => Promise.all(servers.map((server) => new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      }))),
+    };
+  } catch (error) {
+    await Promise.all(servers.filter((server) => server.listening)
+      .map((server) => new Promise((resolve) => server.close(resolve))));
+    throw error;
+  }
+}
+
+function gatewayStartup(child, expectedPort) {
+  return new Promise((resolve, reject) => {
+    const limit = 4096;
+    let stdout = "";
+    let stderr = "";
+    let stderrOverflow = false;
+    const failure = (code = "test_gateway_start_failed") => {
+      // Never publish raw child output: even an unexpected exception may
+      // contain an environment value, path or credential.
+      reject(Object.assign(new Error(`test gateway startup failed: ${code}`), { code }));
+    };
+    const timer = setTimeout(() => failure("test_gateway_start_timeout"), 30_000);
+    child.stdout.on("data", (chunk) => {
+      stdout = (stdout + String(chunk)).slice(0, limit);
+      for (const line of stdout.split(/\r?\n/u)) {
+        try {
+          const record = JSON.parse(line);
+          if (record.ok === true && record.enrollment_gateway === "v1"
+              && record.host === "127.0.0.1" && record.port === expectedPort) {
+            clearTimeout(timer);
+            resolve();
+          }
+        } catch {}
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      const next = stderr + String(chunk);
+      stderrOverflow ||= next.length > limit;
+      stderr = next.slice(0, limit);
+    });
+    child.once("close", () => {
+      clearTimeout(timer);
+      const allowed = new Set(["EADDRINUSE", "EACCES", "gateway_host_not_loopback", "gateway_port_invalid"]);
+      if (!stderrOverflow) {
+        try {
+          const record = JSON.parse(stderr.trim());
+          if (record && !Array.isArray(record) && record.ok === false
+              && Object.keys(record).length === 2 && allowed.has(record.code)) {
+            failure(record.code);
+            return;
+          }
+        } catch {}
+      }
+      failure();
+    });
+    child.once("error", () => { clearTimeout(timer); failure(); });
+  });
+}
+
+async function gatewayFixture(t, { beforeSpawn = () => {} } = {}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "pinvou-rollback-live-")));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const gatewayPort = await freePort();
-  const controlPort = await freePort();
+  const children = [];
   const upstream = http.createServer((_request, response) => response.end("test loopback listener"));
+  t.after(async () => {
+    for (const child of children) {
+      if (!child.pid || child.exitCode !== null || child.signalCode !== null) continue;
+      const exited = once(child, "exit", { signal: AbortSignal.timeout(5_000) });
+      child.kill();
+      try {
+        await exited;
+      } catch {
+        if (child.exitCode !== null || child.signalCode !== null) continue;
+        // Only this captured test child; a stuck graceful shutdown must not
+        // leave a listening process alive after the fixture has failed.
+        const killed = once(child, "exit", { signal: AbortSignal.timeout(5_000) });
+        child.kill("SIGKILL");
+        await killed;
+      }
+    }
+    if (upstream.listening) await new Promise((resolve) => upstream.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
   upstream.listen(0, "127.0.0.1");
   await once(upstream, "listening");
-  t.after(() => new Promise((resolve) => upstream.close(resolve)));
   const env = {
     NODE_ENV: "test", PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted",
     PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID: "rollback-test-key",
     PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: crypto.randomBytes(32).toString("hex"),
     PINVOU_REMOTE_CONTROLLER_STATE_PATH: join(directory, "controller", "state.json"),
     PINVOU_REMOTE_STATE_PATH: join(directory, "legacy.json"),
-    PINVOU_REMOTE_GATEWAY_HOST: "127.0.0.1", PINVOU_REMOTE_GATEWAY_PORT: String(gatewayPort),
-    PINVOU_REMOTE_GATEWAY_CONTROL_HOST: "127.0.0.1", PINVOU_REMOTE_GATEWAY_CONTROL_PORT: String(controlPort),
+    PINVOU_REMOTE_GATEWAY_HOST: "127.0.0.1",
+    PINVOU_REMOTE_GATEWAY_CONTROL_HOST: "127.0.0.1",
     PINVOU_REMOTE_GATEWAY_CONTROL_KEY: crypto.randomBytes(32).toString("hex"),
     PINVOU_REMOTE_LEGACY_RELAY_URL: `ws://127.0.0.1:${upstream.address().port}/pinvou3/remote/ws`,
     PINVOU_REMOTE_LEGACY_RELAY_BIND_HOST: "127.0.0.1",
-    PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON: JSON.stringify([`http://127.0.0.1:${gatewayPort}/pinvou3/remote`]),
     PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY: join(directory, "inventory.json"),
   };
   const config = loadEnrollmentRegistryConfig(env);
@@ -78,28 +167,93 @@ async function gatewayFixture(t) {
     schema: "pinvou-legacy-endpoint-inventory", version: 1, endpoint_ids: ["legacy-rollback-endpoint"],
   }), { mode: 0o600 });
   if (process.platform === "win32") await protectWindowsPath(env.PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY, "file");
-  const child = spawn(process.execPath, [join(relay, "scripts", "enrollment-gateway-server.js")], {
-    cwd: root, env: { ...process.env, ...env }, windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  t.after(async () => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    const exited = once(child, "exit");
-    child.kill();
-    await exited;
-  });
-  await new Promise((resolve, reject) => {
-    let output = "";
-    const timer = setTimeout(() => reject(new Error("test gateway startup timeout")), 30_000);
-    child.stdout.on("data", (chunk) => {
-      output += chunk;
-      if (output.includes('"enrollment_gateway":"v1"')) { clearTimeout(timer); resolve(); }
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const reservation = await reserveGatewayPorts();
+    const [gatewayPort, controlPort] = reservation.ports;
+    assert.equal(new Set([gatewayPort, controlPort, upstream.address().port]).size, 3);
+    env.PINVOU_REMOTE_GATEWAY_PORT = String(gatewayPort);
+    env.PINVOU_REMOTE_GATEWAY_CONTROL_PORT = String(controlPort);
+    env.PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON = JSON.stringify([`http://127.0.0.1:${gatewayPort}/pinvou3/remote`]);
+    await reservation.release();
+    // Test-only deterministic interleaving, never a production startup hook.
+    await beforeSpawn({ env, attempt });
+    const child = spawn(process.execPath, [join(relay, "scripts", "enrollment-gateway-server.js")], {
+      cwd: root, env: { ...process.env, ...env }, windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"],
     });
-    child.once("exit", () => { clearTimeout(timer); reject(new Error("test gateway startup failed")); });
-    child.once("error", (error) => { clearTimeout(timer); reject(error); });
-  });
-  return { env, config, child };
+    children.push(child);
+    try {
+      await gatewayStartup(child, gatewayPort);
+      return { env, config, child, attempts: attempt };
+    } catch (error) {
+      if (error.code !== "EADDRINUSE" || attempt === 3) throw error;
+    }
+  }
 }
+
+test("rollback fixture retries a real occupied port and still runs the full coverage CLI", {
+  timeout: 90_000,
+}, async (t) => {
+  const blocker = net.createServer();
+  t.after(() => new Promise((resolve) => blocker.close(resolve)));
+  const fixture = await gatewayFixture(t, {
+    beforeSpawn: async ({ env, attempt }) => {
+      if (attempt !== 1) return;
+      blocker.listen(Number(env.PINVOU_REMOTE_GATEWAY_PORT), "127.0.0.1");
+      await once(blocker, "listening");
+    },
+  });
+  assert.equal(fixture.attempts, 2);
+  const result = await run(join(root, "scripts", "check-enrollment-gated-v2-rollback.mjs"), fixture.env);
+  assert.equal(result.code, 0);
+  const output = JSON.parse(result.stdout.trim());
+  assert.equal(output.safe_to_run_legacy_v2, true);
+  assert.equal(output.coverage_percent, 100);
+});
+
+test("rollback fixture bounds retries when every selected port is occupied", {
+  timeout: 90_000,
+}, async (t) => {
+  const blockers = [];
+  const attempts = [];
+  t.after(() => Promise.all(blockers.map((server) => new Promise((resolve) => server.close(resolve)))));
+  await assert.rejects(gatewayFixture(t, {
+    beforeSpawn: async ({ env, attempt }) => {
+      attempts.push(attempt);
+      const server = net.createServer();
+      blockers.push(server);
+      server.listen(Number(env.PINVOU_REMOTE_GATEWAY_CONTROL_PORT), "127.0.0.1");
+      await once(server, "listening");
+    },
+  }), { code: "EADDRINUSE" });
+  assert.deepEqual(attempts, [1, 2, 3]);
+});
+
+test("rollback fixture never retries a configuration failure", { timeout: 90_000 }, async (t) => {
+  let attempts = 0;
+  await assert.rejects(gatewayFixture(t, {
+    beforeSpawn: ({ env }) => {
+      attempts += 1;
+      env.PINVOU_REMOTE_GATEWAY_HOST = "0.0.0.0";
+    },
+  }), { code: "gateway_host_not_loopback" });
+  assert.equal(attempts, 1);
+});
+
+test("rollback fixture bounds unknown stderr and never echoes it or retries", { timeout: 90_000 }, async (t) => {
+  let attempts = 0;
+  await assert.rejects(gatewayFixture(t, {
+    beforeSpawn: ({ env }) => {
+      attempts += 1;
+      env.NODE_OPTIONS = `--stderr-private-marker-${"x".repeat(5_000)}`;
+    },
+  }), (error) => {
+    assert.equal(error.code, "test_gateway_start_failed");
+    assert.equal(error.message, "test gateway startup failed: test_gateway_start_failed");
+    assert.doesNotMatch(error.message, /stderr-private-marker/u);
+    return true;
+  });
+  assert.equal(attempts, 1);
+});
 
 test("rollback live gate: a real registry revocation during the preflight barrier cannot reuse initial coverage",
   { timeout: 90_000 }, async (t) => {
