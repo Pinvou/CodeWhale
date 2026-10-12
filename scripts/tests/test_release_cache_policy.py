@@ -98,8 +98,14 @@ class ReleaseCachePolicyTests(unittest.TestCase):
                 self.assertIn(
                     'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"', job_env
                 )
+                # size-policy flags(与 docs/binary-size-optimization.md 一致):
+                # lld(BFD OOM + 无 ICF)、--icf=safe(lld 同码折叠,保守层)、
+                # remap-path-prefix(制品内嵌路径规一化,顶层 rustc flag)。
                 self.assertIn(
-                    'RUSTFLAGS: "-C link-arg=-fuse-ld=lld"', job_env
+                    'RUSTFLAGS: "-C link-arg=-fuse-ld=lld '
+                    '-C link-arg=-Wl,--icf=safe '
+                    '--remap-path-prefix=${{ github.workspace }}=/"',
+                    job_env,
                 )
                 self.assertIn("build-essential pkg-config cmake lld", job)
 
