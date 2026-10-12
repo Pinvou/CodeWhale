@@ -190,9 +190,12 @@ async function heartbeat(value, lease, role, sequence) {
 test("long healthy connection freezes latest authenticated role cutoffs, not the wire identity", async () => {
   const value = fixture();
   const committed = await createLease(value);
-  value.clock = 34_000;
+  value.clock = 29_000;
   await heartbeat(value, committed.lease, "A", 1);
   await heartbeat(value, committed.lease, "B", 1);
+  value.clock = 34_000;
+  await heartbeat(value, committed.lease, "A", 2);
+  await heartbeat(value, committed.lease, "B", 2);
   value.clock = 35_000;
   const provisionalResult = await provisional(value, committed);
   assert.equal(provisionalResult.deliveries.length, 2);
@@ -200,8 +203,8 @@ test("long healthy connection freezes latest authenticated role cutoffs, not the
   // Even later authenticated heartbeats on either role cannot reset a frozen
   // recovery cycle. Repeated close and prepare retry share the same cutoff.
   value.clock = 50_000;
-  await heartbeat(value, committed.lease, "A", 2);
-  await heartbeat(value, committed.lease, "B", 2);
+  await heartbeat(value, committed.lease, "A", 3);
+  await heartbeat(value, committed.lease, "B", 3);
   await detached(value, committed);
   value.clock = 64_000;
   assert.equal(await value.hooks.expire(), 1);
@@ -212,9 +215,12 @@ test("missing or expired A evidence fails closed and B activity cannot create re
   for (const missing of [false, true]) {
     const value = fixture();
     const committed = await createLease(value);
-    value.clock = 31_000;
+    value.clock = 29_000;
     await heartbeat(value, committed.lease, "B", 1);
     if (missing) await value.liveness.onSocketClosed({ lease: committed.lease });
+    value.clock = 31_000;
+    await assert.rejects(heartbeat(value, committed.lease, "B", 2),
+      { code: missing ? "controller_liveness_state_not_found" : "controller_liveness_expired" });
     const evidenceDeadline = value.liveness.resumeDeadline(committed.lease);
     assert.equal(evidenceDeadline, null);
     const result = await value.hooks.onSocketClosed({ socket_identity: "old-socket-A", role: "A",

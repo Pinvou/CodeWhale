@@ -80,6 +80,14 @@ pub(super) fn admit_prompt_turn(
     touch_activity: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     begin_prompt(busy, configuring)?;
+    finish_prompt_admission(busy, session_id, touch_activity)
+}
+
+pub(super) fn finish_prompt_admission(
+    busy: &AtomicBool,
+    session_id: &str,
+    touch_activity: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     if let Err(error) = touch_activity() {
         busy.store(false, Ordering::Release);
         return Err(error);
@@ -133,7 +141,10 @@ impl SessionConfigChange<'_> {
     }
 }
 
-fn verify_remote_mode_ack(options: &[super::SessionConfigOption], desired: &str) -> Result<()> {
+pub(super) fn verify_remote_mode_ack(
+    options: &[super::SessionConfigOption],
+    desired: &str,
+) -> Result<()> {
     if !super::config_option_supports(options, "mode", desired)
         || super::current_config_value(options, "mode").as_deref() != Some(desired)
     {
@@ -158,12 +169,18 @@ impl AcpPool {
             bail!("task_permission_mode_unsupported");
         }
         let desired = crate::features::remote_control::task_permissions::codex_mode(mode);
-        let guard = runtime
-            .bridge
-            .with_active_runtime(|| {
-                begin_configuration(&runtime.busy, &runtime.configuring, "task_session_busy")
-            })
-            .context("task_permission_mode_unsupported")??;
+        let guard = {
+            let owners = self.remote_permission_owners.lock();
+            runtime
+                .bridge
+                .with_active_runtime(|| {
+                    if owners.has_custody(session_id) || runtime.identity.has_live_prompt() {
+                        bail!("task_session_busy");
+                    }
+                    begin_configuration(&runtime.busy, &runtime.configuring, "task_session_busy")
+                })
+                .context("task_permission_mode_unsupported")??
+        };
         if !super::config_option_supports(&runtime.config_options.read(), "mode", desired) {
             bail!("task_permission_mode_unsupported");
         }

@@ -13,6 +13,7 @@ import {
   controllerConnectionUiState,
   pairingCodeInputState,
   isControlledDeviceChatActive,
+  isControlledSessionChatActive,
   normalizePairingCode,
   openControlledDeviceChatWithRetry,
 } from '../src/features/remote-control/remote-control-logic.mjs';
@@ -366,9 +367,24 @@ test('the controlled side opens chat once per connection and shows its own statu
   assert.ok(main.includes('bridge.sessions.switchToSession(controlledTaskSessionId)'));
   assert.ok(main.includes('setActiveChat(controlledTaskSessionId)'));
   assert.ok(main.includes("channel: 'session'"));
-  assert.ok(chatView.includes('isControlledDeviceChatActive(controlledDevice)'));
+  assert.match(chatView, /isControlledSessionChatActive\(\s*controlledDevice, controlledSession, activeSessionId,/);
   assert.ok(chatView.includes('data-testid="chat-controlled-status"'));
   assert.ok(chatView.includes('t.controlledDevice.controlledStatus'));
+});
+
+test('B controlled chat ownership stays on its exact active session through recovery', () => {
+  const controlled = { sessionId: 'b-session' };
+  for (const status of ['connected', 'reconnecting', 'resume_provisional',
+    'resume_activated_pending_liveness']) {
+    const device = { status };
+    assert.equal(isControlledSessionChatActive(device, controlled, 'b-session'), true);
+    for (const activeId of ['local-session', '', null, undefined]) {
+      assert.equal(isControlledSessionChatActive(device, controlled, activeId), false);
+    }
+    assert.equal(isControlledSessionChatActive(device, null, 'b-session'), false);
+    assert.equal(isControlledSessionChatActive(device, {}, 'b-session'), false);
+  }
+  assert.equal(isControlledSessionChatActive({ status: 'stopped' }, controlled, 'b-session'), false);
 });
 
 test('controlled-side auto-open marks success only after navigation succeeds', async () => {

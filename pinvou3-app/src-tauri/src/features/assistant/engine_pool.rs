@@ -9956,7 +9956,8 @@ mod scheduled_model_tests {
 
     #[test]
     fn rebind_engine_take_production_closure_reads_turn_and_scheduled_state() {
-        // Normalize checkout line endings, not the production tokens/assertions.
+        // Git may materialize CRLF on Windows; preserve the exact test-module
+        // cutoff and production assertions without making checkout EOL semantic.
         let src = include_str!("engine_pool.rs").replace("\r\n", "\n");
         // Round-26 MAJOR-3: cut at the test module exactly like projects.rs's
         // `production_source` (round-18) — an unanchored find over the WHOLE

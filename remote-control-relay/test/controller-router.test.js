@@ -5,7 +5,7 @@ import { ControllerRouter } from "../controller-router.js";
 import { ControllerLivenessHooks } from "../controller-liveness.js";
 import { ControllerResumeHooks } from "../controller-resume.js";
 
-function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "task_v1"] } = {}) {
+function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "task_v1"], realLeaseHooks = false } = {}) {
   const sent = new Map([["socket-A", []], ["socket-B", []]]);
   const aborted = [];
   const terminated = [];
@@ -49,6 +49,8 @@ function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "tas
     setTerminationObserver: (observer) => { terminationObserver = observer; },
     terminateLease: async (input) => { leaseAlive = false; terminated.push(input); await terminationObserver({ controller_lease_id: activeLease.controller_lease_id, reason: input.reason }, activeLease); return true; },
     abortHandshakesBySocket: async () => 0,
+    verifyResumeToken: () => { throw new Error("unexpected prepare in heartbeat regression"); },
+    completeResume: () => { throw new Error("unexpected resume commit in heartbeat regression"); },
     isPendingHandshake: () => true,
     abortBySocket: async (input) => {
       leaseAlive = false;
@@ -56,8 +58,8 @@ function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "tas
       return { handshakes: 1, leases: 0 };
     },
   };
-  const liveness = new ControllerLivenessHooks({ clock });
-  const resume = new ControllerResumeHooks({ clock });
+  const liveness = new ControllerLivenessHooks({ clock, ...(realLeaseHooks ? { leaseManager: leases } : {}) });
+  const resume = new ControllerResumeHooks({ clock, ...(realLeaseHooks ? { leaseManager: leases } : {}) });
   const router = new ControllerRouter({
     pairingRegistrationHandler: {
       register: async (message) => ({
@@ -126,16 +128,18 @@ test("real close hooks snapshot evidence before deleting it and freeze only the 
   let clock = 1_000;
   const value = fixture({ clock: () => clock, capabilities: ["encrypted_frames_v1", "task_v1", "role_liveness_v1", "resume_v1"] });
   await joined(value);
-  clock = 34_000;
-  for (const role of ["A", "B"]) {
-    const lease = value.activeLease;
-    await value.router.handle({ socketIdentity: `socket-${role}`, message: {
-      v: 1, type: "controller_liveness", connection_id: lease.connection_id,
-      controller_lease_id: lease.controller_lease_id, lease_epoch: lease.lease_epoch,
-      relay_epoch: lease.relay_epoch, remote_control_generation: lease.remote_control_generation,
-      sender_role: role, liveness_epoch: role === "A" ? lease.liveness_epoch_a : lease.liveness_epoch_b,
-      heartbeat_sequence: "1",
-    } });
+  for (const [at, sequence] of [[29_000, "1"], [34_000, "2"]]) {
+    clock = at;
+    for (const role of ["A", "B"]) {
+      const lease = value.activeLease;
+      await value.router.handle({ socketIdentity: `socket-${role}`, message: {
+        v: 1, type: "controller_liveness", connection_id: lease.connection_id,
+        controller_lease_id: lease.controller_lease_id, lease_epoch: lease.lease_epoch,
+        relay_epoch: lease.relay_epoch, remote_control_generation: lease.remote_control_generation,
+        sender_role: role, liveness_epoch: role === "A" ? lease.liveness_epoch_a : lease.liveness_epoch_b,
+        heartbeat_sequence: sequence,
+      } });
+    }
   }
   clock = 35_000;
   assert.equal((await value.router.removeSocket("socket-A")).leases, 0);
@@ -149,6 +153,86 @@ test("real close hooks snapshot evidence before deleting it and freeze only the 
   assert.equal(await value.resume.expire(), 0);
   clock = 64_000;
   assert.equal(await value.resume.expire(), 1);
+});
+
+test("router rejects a late heartbeat and retires only the expired connected lease before cleanup tick", async () => {
+  for (const lateRole of ["A", "B"]) {
+    let clock = 0;
+    const value = fixture({ clock: () => clock, realLeaseHooks: true,
+      capabilities: ["encrypted_frames_v1", "task_v1", "role_liveness_v1", "resume_v1"] });
+    await joined(value);
+    const lease = value.activeLease;
+    const message = (role) => ({
+      v: 1, type: "controller_liveness", connection_id: lease.connection_id,
+      controller_lease_id: lease.controller_lease_id, lease_epoch: lease.lease_epoch,
+      relay_epoch: lease.relay_epoch, remote_control_generation: lease.remote_control_generation,
+      sender_role: role, liveness_epoch: role === "A" ? lease.liveness_epoch_a : lease.liveness_epoch_b,
+      heartbeat_sequence: "1",
+    });
+    const freshRole = lateRole === "A" ? "B" : "A";
+    clock = 29_000;
+    await value.router.handle({ socketIdentity: `socket-${freshRole}`, message: message(freshRole) });
+    const deliveries = value.sent.get(`socket-${freshRole}`).length;
+    clock = 30_000;
+    await assert.rejects(value.router.handle({ socketIdentity: `socket-${lateRole}`, message: message(lateRole) }),
+      { code: "controller_liveness_expired" });
+    assert.equal(value.sent.get(`socket-${freshRole}`).length, deliveries);
+    assert.equal(value.leases.lease(lease.controller_lease_id), null);
+    assert.equal(value.liveness.resumeDeadline(lease), null);
+    assert.equal(value.resume.phase(lease.controller_lease_id), null);
+    assert.equal(value.terminated.length, 1);
+    assert.equal(value.terminated[0].expectedLease, lease);
+    assert.equal(value.terminated[0].reason, "controller_liveness_expired");
+    assert.equal((await value.router.removeSocket(`socket-${lateRole}`)).leases, 0);
+    assert.equal(value.terminated.length, 1);
+  }
+});
+
+test("surviving role heartbeats during recovery neither error nor extend the frozen deadline", async () => {
+  for (const closedRole of ["A", "B"]) {
+    let clock = 1_000;
+    const value = fixture({ clock: () => clock, realLeaseHooks: true,
+      capabilities: ["encrypted_frames_v1", "task_v1", "role_liveness_v1", "resume_v1"] });
+    await joined(value);
+    const lease = value.activeLease;
+    const survivor = closedRole === "A" ? "B" : "A";
+    const heartbeat = (role, sequence) => ({
+      v: 1, type: "controller_liveness",
+      connection_id: lease.connection_id, controller_lease_id: lease.controller_lease_id,
+      lease_epoch: lease.lease_epoch, relay_epoch: lease.relay_epoch,
+      remote_control_generation: lease.remote_control_generation, sender_role: role,
+      liveness_epoch: role === "A" ? lease.liveness_epoch_a : lease.liveness_epoch_b,
+      heartbeat_sequence: String(sequence),
+    });
+    clock = 2_000;
+    for (const role of ["A", "B"]) {
+      await value.router.handle({ socketIdentity: `socket-${role}`, message: heartbeat(role, 1) });
+    }
+    clock = 3_000;
+    await value.router.removeSocket(`socket-${closedRole}`);
+    assert.equal(value.resume.phase(lease.controller_lease_id), "awaiting_prepare");
+    for (const sequence of [2, 3, 4]) {
+      clock = 3_000 + sequence * 2_000;
+      const before = value.sent.get(`socket-${survivor}`).length;
+      await value.router.handle({ socketIdentity: `socket-${survivor}`,
+        message: heartbeat(survivor, sequence) });
+      assert.equal(value.sent.get(`socket-${survivor}`).length, before);
+      assert.equal(value.leases.lease(lease.controller_lease_id), lease);
+      assert.equal(value.terminated.length, 0);
+    }
+    // Shape, role, epoch and socket ownership still fail closed in this window.
+    for (const patch of [{ sender_role: closedRole }, { liveness_epoch: "old-epoch" },
+      { heartbeat_sequence: "0" }, { connection_id: "other-connection" }]) {
+      await assert.rejects(value.router.handle({ socketIdentity: `socket-${survivor}`,
+        message: { ...heartbeat(survivor, 5), ...patch } }));
+      assert.equal(value.leases.lease(lease.controller_lease_id), lease);
+    }
+    clock = 31_999;
+    assert.equal(await value.resume.expire(), 0);
+    clock = 32_000;
+    assert.equal(await value.resume.expire(), 1);
+    assert.equal(value.leases.lease(lease.controller_lease_id), null);
+  }
 });
 
 test("snapshot exceptions and invalid clocks cannot skip peer, hook or lease cleanup", async () => {

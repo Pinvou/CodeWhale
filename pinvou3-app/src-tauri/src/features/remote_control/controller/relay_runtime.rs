@@ -1398,6 +1398,7 @@ impl ControlledRelayWorker {
                 if self.channel.try_send(frame).is_ok() {
                     evidence.outstanding = Some((challenge_id, challenge_b64, now_b));
                     evidence.escalated = false;
+                    evidence.attestation_sent_at_b = None;
                     log_controlled_event("liveness_challenge", "sent");
                 } else {
                     manager.cancel_liveness_challenge(&challenge_id);
@@ -1421,7 +1422,7 @@ impl ControlledRelayWorker {
                     return;
                 };
                 if self.channel.try_send(frame).is_ok() {
-                    evidence.escalated = true;
+                    evidence.record_attestation_sent(now_b);
                     log_controlled_event("liveness_attestation", "requested");
                 }
             }
@@ -1430,6 +1431,7 @@ impl ControlledRelayWorker {
                     manager.cancel_liveness_challenge(&challenge_id);
                 }
                 evidence.escalated = false;
+                evidence.attestation_sent_at_b = None;
                 log_controlled_event("liveness_challenge", "expired");
             }
         }
@@ -1495,6 +1497,7 @@ impl ControlledRelayWorker {
             Ok(()) => {
                 evidence.outstanding = None;
                 evidence.escalated = false;
+                evidence.attestation_sent_at_b = None;
                 log_controlled_event("liveness_direct", "accepted");
             }
             Err(error) => log_controlled_event("liveness_direct", error.code),
@@ -1504,12 +1507,9 @@ impl ControlledRelayWorker {
     /// E2E-06：接受 Relay 签名 attestation 续期本端 watchdog（挑战与请求时间
     /// 由本端记录，跨机时间一律不用）。
     fn accept_liveness_attestation(&self, message: &Value, evidence: &mut LivenessEvidenceState) {
-        let Some((challenge_id, _, sent_at_b)) = evidence.outstanding.clone() else {
+        let Some(sent_at_b) = evidence.attestation_request_start(message) else {
             return;
         };
-        if message.get("challenge_id").and_then(Value::as_str) != Some(challenge_id.as_str()) {
-            return;
-        }
         let Ok(trust) = load_relay_trust_config(|name| std::env::var(name).ok()) else {
             // Missing/invalid administrator pins cannot authorize liveness or
             // consume the outstanding challenge. The watchdog remains closed.
@@ -1521,6 +1521,7 @@ impl ControlledRelayWorker {
             Ok(()) => {
                 evidence.outstanding = None;
                 evidence.escalated = false;
+                evidence.attestation_sent_at_b = None;
                 log_controlled_event("liveness_attestation", "accepted");
             }
             Err(error) => log_controlled_event("liveness_attestation", error.code),
@@ -1619,6 +1620,8 @@ impl ControlledRelayWorker {
 
     fn fail_runtime(&self, error: &str) {
         let manager = self.app.state::<ControlledDeviceManager>();
+        // Exact operation validation precedes all cleanup. A retired worker
+        // must not clear the replacement generation's keys or projection.
         if let Ok(status) = manager.fail_operation(self.operation.clone(), sanitize_error(error)) {
             emit_controlled_status(&self.app, &status);
         }
@@ -1761,10 +1764,7 @@ async fn dispatch_controlled_business_job(
     });
 }
 
-/// E2E-06：证据轮询间隔（远小于 30 秒预算）。
-pub(crate) const LIVENESS_EVIDENCE_POLL_MS: u64 = 2_000;
-/// 挑战发出后多久升级到 Relay 签名 attestation 兜底（直接应答尚未接线）。
-pub(crate) const LIVENESS_ATTESTATION_ESCALATION_MS: u64 = 2_500;
+pub(crate) use super::liveness::{LIVENESS_ATTESTATION_ESCALATION_MS, LIVENESS_EVIDENCE_POLL_MS};
 /// 挑战的最长等待：超过后作废并重新发起。
 pub(crate) const LIVENESS_CHALLENGE_TIMEOUT_MS: u64 = 8_000;
 
@@ -1786,6 +1786,26 @@ pub(crate) enum LivenessEvidenceAction {
 pub(crate) struct LivenessEvidenceState {
     pub(crate) outstanding: Option<(String, String, u64)>,
     pub(crate) escalated: bool,
+    // Separate request RTT from the original direct challenge age. Neither
+    // timestamp changes the frozen disconnect/recovery deadline.
+    pub(crate) attestation_sent_at_b: Option<u64>,
+}
+
+impl LivenessEvidenceState {
+    fn record_attestation_sent(&mut self, now_b: u64) {
+        self.escalated = true;
+        self.attestation_sent_at_b = Some(now_b);
+    }
+
+    fn attestation_request_start(&self, message: &Value) -> Option<u64> {
+        let (challenge_id, _, _) = self.outstanding.as_ref()?;
+        if !self.escalated
+            || message.get("challenge_id").and_then(Value::as_str) != Some(challenge_id.as_str())
+        {
+            return None;
+        }
+        self.attestation_sent_at_b
+    }
 }
 
 /// 依据 watchdog 的需求与当前未完成挑战推导本轮动作。
@@ -1801,6 +1821,18 @@ pub(crate) fn liveness_evidence_action(
         None => LivenessEvidenceAction::Challenge,
         Some((_, _, sent_at)) => {
             let age = now_b.saturating_sub(*sent_at);
+            if state.escalated {
+                // Preserve a full fallback request RTT without changing the
+                // original challenge validity or frozen recovery cutoff.
+                return if age >= super::liveness::LIVENESS_TOTAL_BUDGET_MS
+                    || state.attestation_sent_at_b.is_none_or(|request_start| {
+                        now_b.saturating_sub(request_start) > super::liveness::MAX_LIVENESS_RTT_MS
+                    }) {
+                    LivenessEvidenceAction::Reset
+                } else {
+                    LivenessEvidenceAction::Idle
+                };
+            }
             if age >= LIVENESS_CHALLENGE_TIMEOUT_MS {
                 return LivenessEvidenceAction::Reset;
             }
@@ -4399,6 +4431,7 @@ mod tests {
         let outstanding = LivenessEvidenceState {
             outstanding: Some(("challenge-1".to_owned(), "AAAA".to_owned(), 1_000)),
             escalated: false,
+            attestation_sent_at_b: None,
         };
         assert_eq!(
             liveness_evidence_action(true, &outstanding, 2_000),
@@ -4411,6 +4444,7 @@ mod tests {
         );
         let escalated = LivenessEvidenceState {
             escalated: true,
+            attestation_sent_at_b: Some(3_500),
             ..outstanding.clone()
         };
         assert_eq!(
@@ -4426,6 +4460,186 @@ mod tests {
         assert_eq!(
             liveness_evidence_action(false, &outstanding, 12_000),
             LivenessEvidenceAction::Idle
+        );
+    }
+
+    #[test]
+    fn controlled_role_heartbeat_matches_relay_fixture_and_fences_replaced_lease() {
+        use super::super::controlled_heartbeat::{
+            ControlledHeartbeat,
+            test_support::{CapturePort, connect},
+        };
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/controller_role_b_heartbeat.json"
+        ))
+        .unwrap();
+        let lease = LeaseContext {
+            connection_id: "connection-0001".into(),
+            controller_lease_id: "lease-0001".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "epoch-test-1".into(),
+            remote_control_generation: "generation-0001".into(),
+        };
+        assert_eq!(
+            super::super::liveness::build_controller_liveness(
+                &lease,
+                SenderRole::ControlledB,
+                "live-b-1",
+                1,
+            )
+            .unwrap(),
+            expected,
+            "the shared production builder must match the Relay fixture exactly"
+        );
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        let mut owned_lease = lease;
+        owned_lease.remote_control_generation = operation.generation().into();
+        connect(
+            &manager,
+            &operation,
+            owned_lease.clone(),
+            "live-a-1",
+            vec!["role_liveness_v1".into()],
+        );
+        let port = CapturePort::default();
+        let mut state = ControlledHeartbeat::default();
+        state.pump(&manager, &operation, false, &port).unwrap();
+        assert!(port.frames.lock().is_empty());
+        state.install(owned_lease.clone(), "live-b-1").unwrap();
+        state.pump(&manager, &operation, false, &port).unwrap();
+        let mut owned_expected = expected;
+        owned_expected["remote_control_generation"] = json!(operation.generation());
+        assert_eq!(port.frames.lock()[0], owned_expected);
+        state.pump(&manager, &operation, false, &port).unwrap();
+        assert_eq!(port.frames.lock()[1]["heartbeat_sequence"], "2");
+        state.install(owned_lease.clone(), "live-b-1").unwrap();
+        state.pump(&manager, &operation, false, &port).unwrap();
+        assert_eq!(port.frames.lock()[2]["heartbeat_sequence"], "3");
+        let mut replacement = owned_lease.clone();
+        replacement.remote_control_generation = "generation-0002".into();
+        state.install(replacement, "live-b-1").unwrap();
+        assert!(state.pump(&manager, &operation, false, &port).is_err());
+        assert_eq!(port.frames.lock().len(), 3);
+        state.install(owned_lease, "live-b-2").unwrap();
+        state.pump(&manager, &operation, false, &port).unwrap();
+        let resumed = port.frames.lock()[3].clone();
+        assert_eq!(resumed["liveness_epoch"], "live-b-2");
+        assert_eq!(resumed["heartbeat_sequence"], "1");
+        manager.stop();
+        manager.start(None, Vec::new()).unwrap();
+        assert!(state.pump(&manager, &operation, false, &port).is_err());
+        assert_eq!(port.frames.lock().len(), 4);
+        // Sequence overflow and failed-enqueue retry are covered by the same
+        // producer's tests; do not reintroduce a weaker test-only builder.
+    }
+
+    #[test]
+    fn fallback_request_rtt_does_not_include_direct_wait_or_reset_challenge_age() {
+        let mut state = LivenessEvidenceState {
+            outstanding: Some((
+                "challenge-1".into(),
+                "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+                1_000,
+            )),
+            ..Default::default()
+        };
+        let response = json!({"challenge_id": "challenge-1"});
+        assert!(state.attestation_request_start(&response).is_none());
+        // A 2.5s threshold on a 2s pump escalates after a 4s direct wait.
+        state.record_attestation_sent(5_000);
+        assert_eq!(state.attestation_request_start(&response), Some(5_000));
+        assert_eq!(state.outstanding.as_ref().unwrap().2, 1_000);
+        assert!(
+            state
+                .attestation_request_start(&json!({"challenge_id": "other"}))
+                .is_none()
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &state, 9_000),
+            LivenessEvidenceAction::Idle
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &state, 10_000),
+            LivenessEvidenceAction::Idle
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &state, 10_001),
+            LivenessEvidenceAction::Reset
+        );
+    }
+
+    #[test]
+    fn quantized_poll_preserves_full_fallback_rtt_and_frozen_authentication_cutoff() {
+        use super::super::liveness::{ControllerLivenessWatchdog, LivenessWatchdogState};
+        let mut watchdog = ControllerLivenessWatchdog::authenticated_cycle("live-a-1", 0).unwrap();
+        assert!(!watchdog.needs_evidence(2_000));
+        assert!(watchdog.needs_evidence(4_000));
+        let nonce = "AAAAAAAAAAAAAAAAAAAAAA==";
+        watchdog
+            .register_challenge("challenge-1", nonce, 4_000)
+            .unwrap();
+        let frozen = watchdog.freeze_deadline(4_000);
+        let mut state = LivenessEvidenceState {
+            outstanding: Some(("challenge-1".into(), nonce.into(), 4_000)),
+            ..Default::default()
+        };
+        assert_eq!(
+            liveness_evidence_action(true, &state, 6_000),
+            LivenessEvidenceAction::Idle
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &state, 8_000),
+            LivenessEvidenceAction::Escalate
+        );
+        state.record_attestation_sent(8_000);
+        // At the original 8s challenge timeout the fallback still has 1s left.
+        assert_eq!(
+            liveness_evidence_action(true, &state, 12_000),
+            LivenessEvidenceAction::Idle
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &state, 13_000),
+            LivenessEvidenceAction::Idle
+        );
+        let response = json!({
+            "v": 1, "type": "controller_liveness_attestation_a", "request_id": "request-1",
+            "connection_id": "connection-0001", "controller_lease_id": "lease-0001", "lease_epoch": "1",
+            "relay_epoch": "epoch-test-1", "remote_control_generation": "generation-0001",
+            "liveness_epoch_a": "live-a-1", "heartbeat_sequence_a": "1", "attestation_sequence": "1",
+            "challenge_id": "challenge-1", "challenge_b64": nonce,
+            "observed_age_ms": "5000", "remaining_ttl_ms": "25000", "issued_at_relay": "9000",
+            "relay_signing_key_id": "relay-key-test-1", "signature_algorithm": "ed25519",
+            "relay_signature_b64": format!("{}==", "A".repeat(86)),
+        });
+        let lease = LeaseContext {
+            connection_id: "connection-0001".into(),
+            controller_lease_id: "lease-0001".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "epoch-test-1".into(),
+            remote_control_generation: "generation-0001".into(),
+        };
+        watchdog
+            .accept_attestation_json(
+                &response.to_string(),
+                &lease,
+                state.attestation_request_start(&response).unwrap(),
+                13_000,
+            )
+            .unwrap();
+        assert_eq!(
+            watchdog.deadline_b(),
+            frozen,
+            "proof cannot extend a frozen cutoff"
+        );
+        assert_eq!(watchdog.state(13_000), LivenessWatchdogState::Healthy);
+        assert_eq!(
+            liveness_evidence_action(true, &state, 13_001),
+            LivenessEvidenceAction::Reset
+        );
+        assert_eq!(
+            watchdog.state(frozen.unwrap()),
+            LivenessWatchdogState::Expired
         );
     }
 }
