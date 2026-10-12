@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import react from '@vitejs/plugin-react';import * as puppeteer from 'puppeteer-core';import {createServer} from 'vite';
-const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');const chrome=['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'].find(fs.existsSync);assert.ok(chrome);const profile=fs.mkdtempSync(path.join(os.tmpdir(),'pinvou-f04-overview-'));const owned=fs.realpathSync(profile);let vite,browser,page;const cases=[],errors=[];
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');const chrome = process.env.CHROME || [
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/snap/bin/chromium',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+].find(fs.existsSync);
+assert.ok(chrome && fs.existsSync(chrome), 'Browser unavailable; UI validation not performed');
+const profile=fs.mkdtempSync(path.join(os.tmpdir(),'pinvou-f04-overview-'));const owned=fs.realpathSync(profile);let vite,browser,page;const cases=[],errors=[];
 try{vite=await createServer({root,configFile:false,appType:'mpa',logLevel:'error',plugins:[react()],server:{host:'127.0.0.1',port:0,watch:null,fs:{deny:[],allow:[root,fs.realpathSync(path.join(root,'node_modules'))]}}});await vite.listen();browser=await puppeteer.launch({executablePath:chrome,headless:'new',userDataDir:profile,args:['--disable-gpu','--no-first-run']});page=await browser.newPage();page.setDefaultTimeout(2500);page.on('pageerror',e=>errors.push(e.message));const url=`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f04-overview.html`;
 const fresh=async()=>{errors.length=0;await page.goto(url);await page.waitForFunction(()=>window.overview);};const run=async(name,fn)=>{try{await fresh();await fn();assert.deepEqual(errors,[]);cases.push({name,status:'PASS'});console.log('PASS '+name);}catch(e){cases.push({name,status:'FAIL',error:e.message});console.log('FAIL '+name+': '+e.message);}};
 const wait=()=>page.waitForSelector('.adm-model-page-overview strong');const tab=key=>page.evaluate(key=>{const text=window.overview.labels()[key];const button=[...document.querySelectorAll('.adm-panel > nav button')].find(b=>b.textContent===text);if(!button)throw Error('missing '+key);button.click();},key);
