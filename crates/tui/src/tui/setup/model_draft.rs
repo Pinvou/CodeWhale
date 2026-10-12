@@ -410,6 +410,8 @@ mod tests {
                 thinking: r#"Maybe {"about":"A half-formed scratchpad draft."}"#.to_string(),
                 signature: None,
                 state: None,
+                redacted_data: None,
+                reasoning_details: None,
             },
         );
         mock.push_message_response(response);

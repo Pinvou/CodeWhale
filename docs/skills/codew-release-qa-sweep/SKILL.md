@@ -21,6 +21,11 @@ gate sweep plus the three manual QA targets is the evidence bar. No sweep, no
 
 Run from the repo root, in order. Stop on the first failure and report it.
 
+This sweep complements but does not replace the cw-gates ladder: for a release,
+its rungs — including `cargo clippy --workspace --all-targets --all-features
+--locked`, the full nextest suite, and the dead-code budget checks — still
+apply.
+
 ```bash
 # 0. Confirm you are on the real release head, not a main-based assumption.
 git branch --show-current          # expect e.g. <release-branch>
@@ -107,7 +112,7 @@ explicitly — do not imply coverage you do not have.
   comments, and checks.
 - When the sweep clears a harvested PR, preserve contributor credit: cherry-pick
   keeps the original author, otherwise add `Co-authored-by: Name <email>` and
-  `Harvested-from: PR #N by @handle` so the auto-close-at-main workflow credits
-  the contributor.
+  `Harvested from PR #N by @handle` so the `auto-close-harvested.yml` workflow
+  credits the contributor.
 - Keep any contributor-facing comment positive and crediting; gates stay
   dry-run/advisory unless Hunter approves enforcement.

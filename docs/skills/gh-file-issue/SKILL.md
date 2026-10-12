@@ -31,12 +31,13 @@ noise; concrete ones become fixes with credit.
 2. **Check for duplicates / related work.** Search open issues and PRs before
    filing; if one exists, comment there instead, or cross-link as `Related: #N`.
    ```bash
-   gh issue list --repo Hmbown/CodeWhale --state all --search "keyword in:title,body" --limit 30
-   gh pr list --repo Hmbown/CodeWhale --state all --search "keyword" --limit 20
+   gh issue list --repo codewhale-hq/Codewhale --state all --search "keyword in:title,body" --limit 30
+   gh pr list --repo codewhale-hq/Codewhale --state all --search "keyword" --limit 20
    ```
 3. **Write a title that names the gap**, not the vibe. Match the house pattern
-   `vX.Y.Z: <imperative gap>`, e.g. `v0.8.62: Isolate provider/model selection
-   per TUI session and make route changes atomic`. Good: a maintainer knows the
+   `vX.Y.Z: <imperative gap>`, e.g. `vX.Y.Z: Isolate provider/model selection
+   per TUI session and make route changes atomic` (take the version from the
+   live milestone set, not from this example). Good: a maintainer knows the
    fix from the title alone.
 4. **Write the body in sections** (skip none that apply):
    - **Why this matters** — who it affects (multi-terminal QA, Fleet workers,
@@ -55,18 +56,22 @@ noise; concrete ones become fixes with credit.
    labels: `bug`, `enhancement`, `documentation`. Area labels e.g. `tui`,
    `tools`, `security`, `sandbox`, `context`, `subagents`, `responses-api`,
    `workflow-runtime`. Severity `release-blocker` only when it truly blocks the
-   next release. The current target milestone is `v0.8.62`.
+   next release. Discover the target milestone at runtime, never hardcode it:
+   list open milestones with their open-issue counts (command below), ignore
+   entries with zero open issues and non-version titles such as `Backlog`,
+   then treat the choice as a maintainer decision — propose the best-fit
+   version and confirm before filing.
    ```bash
-   gh label list --repo Hmbown/CodeWhale --limit 100
-   gh api repos/Hmbown/CodeWhale/milestones --jq '.[] | "\(.title)\topen:\(.open_issues)"'
+   gh label list --repo codewhale-hq/Codewhale --limit 100
+   gh api repos/codewhale-hq/Codewhale/milestones --jq '.[] | "\(.title)\topen:\(.open_issues)"'
    ```
 6. **Create the issue.** Pipe the body from stdin (this skill writes no files);
    `--milestone` and repeatable `--label` take live names verbatim:
    ```bash
-   gh issue create --repo Hmbown/CodeWhale \
-     --title "v0.8.62: Isolate provider/model selection per TUI session" \
+   gh issue create --repo codewhale-hq/Codewhale \
+     --title "<X.Y.Z>: Isolate provider/model selection per TUI session" \
      --label bug --label tui --label reliability \
-     --milestone "v0.8.62" \
+     --milestone "<milestone-title-from-step-5>" \
      --body-file -   # then paste/heredoc the sectioned body
    ```
 7. **Cross-link after filing.** Add `Related: #N` comments on the issues/PRs/

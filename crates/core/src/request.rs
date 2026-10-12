@@ -175,6 +175,25 @@ pub enum ContentBlock {
         /// readable `thinking` text or carry it across a route/model switch.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         state: Option<OpaqueReasoningState>,
+        /// Anthropic `redacted_thinking` payload (`data`): the encrypted
+        /// replacement for a whole thinking block that the provider withheld
+        /// for safety reasons. It must be replayed byte-exact — the API
+        /// decrypts it to restore the turn's reasoning — and is mutually
+        /// exclusive with readable `thinking` text and with `signature`.
+        /// Stored on the same variant (instead of a sibling one) so existing
+        /// sessions and matches keep compiling; the serde field is absent
+        /// for every non-redacted block.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        redacted_data: Option<String>,
+        /// OpenRouter `reasoning_details` entries (`reasoning.text`,
+        /// `reasoning.encrypted`, `reasoning.summary`), stored verbatim as
+        /// received. OpenRouter requires the entire sequence to be passed
+        /// back unmodified on later turns (tool-calling continuity), and the
+        /// encrypted form carries payloads that `reasoning_content` text
+        /// cannot. Captured only on OpenRouter routes and replayed only on
+        /// OpenRouter routes; every other dialect never emits the field.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        reasoning_details: Option<Vec<serde_json::Value>>,
     },
     #[serde(rename = "tool_use")]
     ToolUse {
@@ -225,6 +244,8 @@ impl ContentBlock {
             thinking: thinking.into(),
             signature: None,
             state: None,
+            redacted_data: None,
+            reasoning_details: None,
         }
     }
 }

@@ -2834,7 +2834,9 @@ configure reasoning effort.
 - `--plugins` — scaffold `~/.codewhale/plugins/` with a `README.md` and an
   `example/plugin.toml` plus a namespaced example Skill. Bundles are discovered
   read-only, untrusted, and disabled; review them through `/plugin` before
-  enabling. v0.9.1 activates only declared Skills and MCP servers. See
+  enabling. Skills, MCP servers, Commands, Agent profiles, and Hooks activate;
+  LSP servers, native extensions, filesystem roots, and lifecycle mutation
+  stay inventory-only. See
   [PLUGIN_BUNDLES.md](PLUGIN_BUNDLES.md).
 - `--all` now scaffolds MCP + skills + tools + plugins together.
 - `--clean` — list `~/.codewhale/sessions/checkpoints/latest.json` and

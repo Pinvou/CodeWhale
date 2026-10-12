@@ -5129,6 +5129,15 @@ impl Config {
     }
 
     /// Return the exact non-secret key for an active provider route.
+    ///
+    /// A custom provider whose table key exactly names a built-in slug
+    /// (e.g. `openai-codex`) deliberately shadows that built-in route and
+    /// therefore also inherits its identity: payloads stay replay-compatible
+    /// with a plain endpoint mirror of the built-in API. Pointing the same
+    /// key at a gateway with different payload semantics is a
+    /// misconfiguration this key cannot detect — encrypted reasoning
+    /// captured on the built-in route would then be replayed to the shadow
+    /// and rejected there. Distinct gateways must use distinct keys.
     #[must_use]
     pub(crate) fn provider_identity_for(&self, provider: ApiProvider) -> String {
         if provider == ApiProvider::Custom
