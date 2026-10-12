@@ -1,0 +1,36 @@
+package billinggovernance
+
+import "testing"
+
+func TestInstalledPaymentActivationContract(t *testing.T) {
+	for _, state := range []string{"INACTIVE", "ACTIVE"} {
+		t.Run(state, func(t *testing.T) {
+			s := entitlementFirstDeliverySnapshot()
+			for i := range s.Activations {
+				if s.Activations[i].CommandType == "PAYMENT_FINANCIAL_REPAIR" {
+					s.Activations[i].State = state
+				}
+			}
+			if e := ValidateSnapshot(s); e != nil {
+				t.Fatal(e)
+			}
+			a, ok := s.Find("PAYMENT_FINANCIAL_REPAIR", 1, 1)
+			if !ok || a.State != state {
+				t.Fatal("installed p1/s1 lost")
+			}
+		})
+	}
+	for _, command := range []string{"REFUND_EXCEPTION_REPAIR", "CHARGEBACK_FINANCIAL_REPAIR", "RECONCILIATION_FINANCIAL_REPAIR", "USAGE_SETTLEMENT_REPAIR"} {
+		t.Run("future-"+command, func(t *testing.T) {
+			s := entitlementFirstDeliverySnapshot()
+			for i := range s.Activations {
+				if s.Activations[i].CommandType == command {
+					s.Activations[i].State = "ACTIVE"
+				}
+			}
+			if ValidateSnapshot(s) == nil {
+				t.Fatal("future command became executable")
+			}
+		})
+	}
+}

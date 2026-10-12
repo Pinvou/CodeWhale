@@ -20,6 +20,7 @@ func TestAuthorizationCommandTargetClosedSet(t *testing.T) {
 		{"PAYMENT_PRODUCT_RESUME", "PAYMENT_PRODUCT_CONTROL", 1},
 		{ledgerRepairCommand, "LEDGER_POSTING", 1},
 		{receivableWriteOffCommand, "RECEIVABLE", 1},
+		{paymentFinancialRepairCommand, "PAYMENT_ORDER", 1},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			event := approvalencoding.AuthorizationEvent{CommandType: tc.command, PolicyVersion: tc.policy, TargetResourceType: tc.target, TargetResourceID: id}
@@ -40,6 +41,10 @@ func TestAuthorizationCommandTargetClosedSet(t *testing.T) {
 		{"wrong-target", receivableWriteOffCommand, "LEDGER_POSTING", id, 1},
 		{"noncanonical", receivableWriteOffCommand, "RECEIVABLE", strings.ToUpper(id), 1},
 		{"zero-id", receivableWriteOffCommand, "RECEIVABLE", uuid.Nil.String(), 1},
+		{"payment-wrong-policy", paymentFinancialRepairCommand, "PAYMENT_ORDER", id, 2},
+		{"payment-wrong-target", paymentFinancialRepairCommand, "RECEIVABLE", id, 1},
+		{"payment-noncanonical", paymentFinancialRepairCommand, "PAYMENT_ORDER", strings.ToUpper(id), 1},
+		{"payment-zero-id", paymentFinancialRepairCommand, "PAYMENT_ORDER", uuid.Nil.String(), 1},
 		{"unknown-command", "FUTURE_COMMAND", "RECEIVABLE", id, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

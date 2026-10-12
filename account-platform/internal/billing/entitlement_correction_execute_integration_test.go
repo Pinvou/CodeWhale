@@ -398,15 +398,7 @@ func entitlementRepositoryToVersion(t *testing.T, ctx context.Context, raw strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	selected := make([]migrations.Migration, 0, len(loaded))
-	for _, migration := range loaded {
-		if migration.Version == 900013 && maximum != 0 && maximum < 59 {
-			continue
-		}
-		if maximum == 0 || migration.Version < 56 || migration.Version > 59 || migration.Version <= maximum {
-			selected = append(selected, migration)
-		}
-	}
+	selected := selectEntitlementFixtureStage(loaded, maximum)
 	if err = billingschema.Up(ctx, connection, selected); err != nil {
 		t.Fatal(err)
 	}
@@ -426,4 +418,25 @@ func entitlementRepositoryToVersion(t *testing.T, ctx context.Context, raw strin
 	}
 	t.Cleanup(pool.Close)
 	return NewPostgresRepositoryWithPool(pool), "public"
+}
+
+func selectEntitlementFixtureStage(loaded []migrations.Migration, maximum int64) []migrations.Migration {
+	selected := make([]migrations.Migration, 0, len(loaded))
+	for _, migration := range loaded {
+		// High forward stages use a real installation prefix. The historical
+		// 56-59 correction fixtures below keep their original selection rules.
+		if maximum >= 900000 {
+			if migration.Version <= maximum {
+				selected = append(selected, migration)
+			}
+			continue
+		}
+		if migration.Version == 900013 && maximum != 0 && maximum < 59 {
+			continue
+		}
+		if maximum == 0 || migration.Version < 56 || migration.Version > 59 || migration.Version <= maximum {
+			selected = append(selected, migration)
+		}
+	}
+	return selected
 }

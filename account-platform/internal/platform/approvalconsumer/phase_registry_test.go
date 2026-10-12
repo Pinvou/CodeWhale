@@ -4,6 +4,7 @@ import "testing"
 
 func TestInstalledBillingConsumptionAndRecoveryFences(t *testing.T) {
 	want := map[string]Descriptor{
+		"PAYMENT_FINANCIAL_REPAIR":         {CommandType: "PAYMENT_FINANCIAL_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-financial-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 		"RECEIVABLE_WRITE_OFF":             {CommandType: "RECEIVABLE_WRITE_OFF", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-receivable-write-off-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 		"ENTITLEMENT_COMPONENT_ADJUSTMENT": {CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-entitlement-component-adjustment-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 		"LEDGER_REPAIR":                    {CommandType: "LEDGER_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-ledger-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
@@ -15,7 +16,7 @@ func TestInstalledBillingConsumptionAndRecoveryFences(t *testing.T) {
 		"TOKEN_CREDENTIAL_REVOKE":          {CommandType: "TOKEN_CREDENTIAL_REVOKE", PolicyVersion: 1, ExecutorIdentity: TokenWorkload, Durable: "token-credential-revoke-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},
 	}
 	all := All()
-	if len(all) != len(want) || len(BillingCommands()) != 6 || len(TokenCommands()) != 3 {
+	if len(all) != len(want) || len(BillingCommands()) != 7 || len(TokenCommands()) != 3 {
 		t.Fatal("installed consumer set differs")
 	}
 	seen := make(map[string]bool)

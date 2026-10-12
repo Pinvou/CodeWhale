@@ -17,14 +17,14 @@ function errorFromResponse(response, payload) {
   error.retryAfterSeconds = responseRetryAfter(payload, response.headers.get('Retry-After'));
   return error;
 }
-// Only the installed write-off legacy rows use these int64 versions. Preserve
+// Only the installed write-off and payment repair legacy rows use these int64 versions. Preserve
 // the original decoding of every other legacy command, including ENT's codec.
 function parseWriteOffApprovalJSON(text, fallback = JSON.parse) {
   const original = fallback(text);
-  if (original?.command_type === 'RECEIVABLE_WRITE_OFF') return parseFinanceJSON(text);
-  if (!original?.items?.some(item => item?.command_type === 'RECEIVABLE_WRITE_OFF')) return original;
+  if (['RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR'].includes(original?.command_type)) return parseFinanceJSON(text);
+  if (!original?.items?.some(item => ['RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR'].includes(item?.command_type))) return original;
   const exact = parseFinanceJSON(text);
-  return { ...original, items: original.items.map((item, i) => item?.command_type === 'RECEIVABLE_WRITE_OFF' ? exact.items[i] : item) };
+  return { ...original, items: original.items.map((item, i) => ['RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR'].includes(item?.command_type) ? exact.items[i] : item) };
 }
 function abortRequestError() {
   if (typeof globalThis.DOMException === 'function') return new globalThis.DOMException('The operation was aborted.', 'AbortError');
@@ -210,7 +210,7 @@ export class AdminPlatformClient {
     return this.mutate('account', '/admin/v2/approval-command-prechecks', 'POST', input, '', signal, 200,
       input?.command_type === ENTITLEMENT_CORRECTION_COMMAND
         ? { encode: encodeEntitlementCorrectionJSON, decode: parseEntitlementCorrectionJSON }
-        : { encode: encodeFinanceJSON, decode: parseFinanceJSON });
+        : { encode: encodeFinanceJSON, decode: text => parseFinanceJSON(text, { paymentIntegers: input?.command_type === 'PAYMENT_FINANCIAL_REPAIR' }) });
   }
 
 
@@ -405,7 +405,7 @@ export class AdminPlatformClient {
       const response = await fetch(`${this.baseURL}/api/admin/approvals/requests${path}`, {
         headers: { Accept: 'application/json' }, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
       });
-      const payload = response.ok ? parseApprovalEntitlementJSON(await response.text()) : await response.json().catch(() => ({}));
+      const payload = response.ok ? parseApprovalEntitlementJSON(await response.text(), text => parseWriteOffApprovalJSON(text, value => parseFinanceJSON(value, { paymentIntegers: false }))) : await response.json().catch(() => ({}));
       if (!response.ok) {
         if (payload?.code === 'APPROVAL_ACTION_CONTROL_CHANGED' || payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE') {
           this.invalidateApprovalControl(lineage);

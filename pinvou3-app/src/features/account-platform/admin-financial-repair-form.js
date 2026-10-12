@@ -25,6 +25,10 @@ export const financialRepairInputs = Object.freeze({
     { key: 'write_off_microcredits', kind: 'integer' },
     { key: 'expected_version', kind: 'integer' },
   ]),
+  PAYMENT_FINANCIAL_REPAIR: Object.freeze([
+    { key: 'target_resource_id', kind: 'uuid' },
+    { key: 'payment_evidence_id', kind: 'uuid' },
+  ]),
 
 });
 
