@@ -16,7 +16,13 @@ const end = source.indexOf('\nexport {', start);
 assert.notStrictEqual(start, -1, 'baseUrlIsLoopback must exist');
 assert.notStrictEqual(end, -1, 'credential helper boundary must exist');
 
-const context = { URL, isBuiltInAccountPlatformModel: model => model?.id === 'builtin_account_platform' || model?.kind === 'builtin_account_platform' };
+const modelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'model-options.js'), 'utf8');
+const helperStart = modelSource.indexOf('function isBuiltInAccountPlatformModel(');
+const helperEnd = modelSource.indexOf('\n}', helperStart) + 2;
+assert.notStrictEqual(helperStart, -1);
+const context = { URL };
+vm.createContext(context);
+vm.runInContext(modelSource.slice(helperStart, helperEnd), context);
 vm.createContext(context);
 vm.runInContext(
   `${source.slice(start, end)}

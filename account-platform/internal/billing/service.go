@@ -58,8 +58,8 @@ func (s *Service) WithRechargeProductCatalog(catalog RechargeProductCatalogRepos
 func NewService(repository Repository) *Service {
 	service := &Service{repository: repository, now: func() time.Time { return time.Now().UTC() }, modelPriceProjectionMetrics: newModelPriceProjectionMetrics()}
 	service.impactPricing, _ = repository.(impactPriceRepository)
-	service.approvalEffects, _ = repository.(ApprovalEffectReader)
 	service.registrationBonuses, _ = repository.(registrationBonusRepository)
+	service.approvalEffects, _ = repository.(ApprovalEffectReader)
 	return service
 }
 
@@ -109,12 +109,13 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		protected.POST("/internal/v1/reconciliation/runs", serviceauth.Require("internal.billing.reconciliation.run"), httpserver.AdaptFunc(s.runReconciliation))
 	}
 	protected.GET("/internal/v1/approval-command-activations", serviceauth.Require("internal.billing.approval-activation.read"), httpserver.AdaptFunc(s.approvalCommandActivations))
+	protected.POST("/internal/v1/approval-command-prechecks", serviceauth.Require("internal.billing.approval-proof.read"), httpserver.AdaptFunc(s.internalBillingApprovalPrecheck))
 	protected.POST("/internal/v1/approval-command-proofs", serviceauth.Require("internal.billing.approval-proof.read"), httpserver.AdaptFunc(s.internalBillingApprovalProof))
 	protected.GET("/internal/v1/approval-effects/:approval_request_id", serviceauth.Require("internal.billing.approval-effect.read"), httpserver.AdaptFunc(s.approvalEffectObservation))
 	protected.GET("/internal/v1/approval-recovery/results/:approval_request_id", serviceauth.Require("internal.billing.approval-result.read"), httpserver.AdaptFunc(s.billingApprovalRecoveryResult))
+	protected.POST("/internal/v1/registration-bonus-grants", serviceauth.Require("internal.billing.registration-bonus.provision"), httpserver.AdaptFunc(s.internalProvisionRegistrationBonus))
 	s.registerOrganizationRoutes(protected)
 	protected.POST("/internal/v1/wallets/ensure", serviceauth.Require("internal.billing.wallet.ensure"), httpserver.AdaptFunc(s.ensureWallet))
-	protected.POST("/internal/v1/registration-bonus-grants", serviceauth.Require("internal.billing.registration-bonus.provision"), httpserver.AdaptFunc(s.internalProvisionRegistrationBonus))
 	protected.GET("/internal/v1/wallets/:wallet_id/balance", serviceauth.Require("internal.billing.wallet.read"), httpserver.AdaptFunc(s.getBalance))
 	if _, supported := s.repository.(managementHoldRepository); supported {
 		protected.POST("/internal/v1/holds/reserve", serviceauth.Require("internal.billing.hold.reserve"), httpserver.AdaptFunc(s.reserve))
@@ -180,6 +181,8 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	if len(adminVerify) > 0 && adminVerify[0] != nil && s.authorizer != nil {
 		admin := router.Group("/admin/v1")
 		admin.Use(identity.GinMiddleware(adminVerify[0]))
+		admin.PUT("/registration-bonus-policy", s.authorizer.Require("platform.registration-bonus.manage"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_REGISTRATION_BONUS_POLICY_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateRegistrationBonusPolicy))
+		admin.GET("/registration-bonus-policy", s.authorizer.Require("platform.registration-bonus.read"), httpserver.AdaptFunc(s.adminRegistrationBonusPolicy))
 		admin.GET("/reconciliation-runs", s.authorizer.Require("platform.billing.reconciliation.read"), httpserver.AdaptFunc(s.adminReconciliationRuns))
 		admin.POST("/reconciliation-runs", s.authorizer.Require("platform.billing.reconciliation.run"), approvalpolicy.Require("BILLING_RECONCILIATION_RUN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRunReconciliation))
 		admin.POST("/reconciliation-imports", s.authorizer.Require("platform.billing.reconciliation.run"), approvalpolicy.Require("BILLING_PROVIDER_BILL_IMPORT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminImportReconciliation))
@@ -187,8 +190,6 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.GET("/reconciliation-runs/:run_id/cases", s.authorizer.Require("platform.billing.reconciliation.read"), httpserver.AdaptFunc(s.adminReconciliationCases))
 		admin.POST("/reconciliation-cases/:case_id/commands", s.authorizer.Require("platform.billing.reconciliation.manage"), approvalpolicy.Require("BILLING_RECONCILIATION_CASE_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateReconciliationCase))
 		admin.GET("/overview", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminOverview))
-		admin.GET("/registration-bonus-policy", s.authorizer.Require("platform.registration-bonus.read"), httpserver.AdaptFunc(s.adminRegistrationBonusPolicy))
-		admin.PUT("/registration-bonus-policy", s.authorizer.Require("platform.registration-bonus.manage"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_REGISTRATION_BONUS_POLICY_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateRegistrationBonusPolicy))
 		admin.GET("/finance-overviews/accounts", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminFinanceAccountsOverview))
 		admin.GET("/finance-overviews/payments", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminFinancePaymentsOverview))
 		admin.GET("/finance-overviews/products", s.authorizer.Require("platform.products.read"), httpserver.AdaptFunc(s.adminFinanceProductsOverview))

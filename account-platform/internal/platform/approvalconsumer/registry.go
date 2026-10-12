@@ -29,6 +29,7 @@ type Descriptor struct {
 
 var descriptors = []Descriptor{
 	{CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-entitlement-component-adjustment-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
+	{CommandType: "LEDGER_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-ledger-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "WALLET_ADJUSTMENT", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-wallet-adjustment-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "PAYMENT_PROVIDER_RESUME", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-provider-resume-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "PAYMENT_PRODUCT_RESUME", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-product-resume-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
@@ -64,7 +65,7 @@ func Match(descriptor Descriptor, commandType string, policyVersion int64, execu
 		descriptor.PolicyVersion == policyVersion && descriptor.ExecutorIdentity == executorIdentity
 }
 
-// MatchRoute accepts the historical shared Billing durable's three frozen
+// MatchRoute accepts the historical shared Billing durable's five frozen
 // command mappings in addition to the one-command physical durables. It is for
 // read-only shared-subject routing only; Match remains the execution mapping.
 func MatchRoute(descriptor Descriptor, commandType string, policyVersion int64, executorIdentity string) bool {
@@ -80,7 +81,7 @@ func MatchRoute(descriptor Descriptor, commandType string, policyVersion int64, 
 }
 
 func BillingCommands() []Descriptor {
-	result := make([]Descriptor, 0, 3)
+	result := make([]Descriptor, 0, 5)
 	for _, descriptor := range descriptors {
 		if descriptor.Workload == BillingWorkload {
 			result = append(result, descriptor)

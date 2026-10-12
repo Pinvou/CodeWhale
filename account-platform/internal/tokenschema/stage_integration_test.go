@@ -16,14 +16,15 @@ import (
 )
 
 func TestManagementPublicMigrationInstallation(t *testing.T) {
-	t.Run("fresh", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 0) })
-	t.Run("legacy-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, true, 0) })
-	t.Run("installed-29-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 29) })
-	t.Run("installed-30-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 30) })
-	t.Run("installed-f05-34-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 34) })
-	t.Run("installed-f07-36-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 36) })
+	t.Run("fresh", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 0, false) })
+	t.Run("legacy-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, true, 0, false) })
+	t.Run("installed-29-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 29, false) })
+	t.Run("installed-30-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 30, false) })
+	t.Run("installed-f05-34-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 34, false) })
+	t.Run("retained-management-lifecycle-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 34, true) })
+	t.Run("installed-f07-36-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 36, false) })
 }
-func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previousStage int) {
+func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previousStage int, retainedManagement bool) {
 	dsn := os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("PINVOU_TEST_TOKEN_DATABASE_URL is not configured")
@@ -144,6 +145,8 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if err != nil {
 		t.Fatal(err)
 	}
+	var retainedHistory string
+	var retainedVersions []int64
 	var previousAccountFacts string
 	if previousStage > 0 {
 		previous := []migrations.Migration{}
@@ -167,6 +170,15 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 			if e = connection.QueryRow(ctx, `SELECT to_jsonb(account)::text FROM token_accounts account WHERE id='11111111-1111-4111-8111-111111111111'`).Scan(&previousAccountFacts); e != nil {
 				t.Fatal(e)
 			}
+		}
+		if retainedManagement {
+			for _, migration := range previous {
+				retainedVersions = append(retainedVersions, migration.Version)
+			}
+			if err = connection.QueryRow(ctx, `SELECT coalesce(jsonb_agg(to_jsonb(history) ORDER BY version),'[]'::jsonb)::text FROM schema_migrations history`).Scan(&retainedHistory); err != nil {
+				t.Fatal(err)
+			}
+			testRetainedLifecycleMigrationRollback(t, ctx, connection, loaded)
 		}
 	}
 	if legacy {
@@ -260,6 +272,12 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if err != nil || verification.AppliedCount != len(installed) {
 		t.Fatalf("public migration verification: %+v err=%v", verification, err)
 	}
+	if retainedManagement {
+		var history string
+		if err = connection.QueryRow(ctx, `SELECT coalesce(jsonb_agg(to_jsonb(history) ORDER BY version),'[]'::jsonb)::text FROM schema_migrations history WHERE version=ANY($1)`, retainedVersions).Scan(&history); err != nil || history != retainedHistory {
+			t.Fatalf("retained ledger rows changed: equal=%v err=%v", history == retainedHistory, err)
+		}
+	}
 	var runtimeCanCreate bool
 	if err = connection.QueryRow(ctx, `SELECT has_schema_privilege('token_gateway','public','CREATE')`).Scan(&runtimeCanCreate); err != nil || runtimeCanCreate {
 		t.Fatalf("overview migration must not retain runtime schema CREATE: %v err=%v", runtimeCanCreate, err)
@@ -289,9 +307,9 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if err = connection.QueryRow(ctx, `SELECT state FROM public.token_command_governance_activation WHERE singleton`).Scan(&activation); err != nil || activation != "PRE_ACTIVATION" {
 		t.Fatalf("migration must not fabricate runtime authority: %q err=%v", activation, err)
 	}
-	var readiness, usageHistory, organization, units, future bool
-	if err = connection.QueryRow(ctx, `SELECT to_regclass('client_readiness_attestations') IS NOT NULL,to_regclass('usage_history_groups') IS NOT NULL,to_regclass('organization_lifecycle_states') IS NOT NULL,to_regclass('organization_unit_lifecycle_states') IS NOT NULL,to_regclass('usage_request_anonymization_commands') IS NOT NULL`).Scan(&readiness, &usageHistory, &organization, &units, &future); err != nil || !readiness || !usageHistory || !organization || !units || future {
-		t.Fatalf("propagated F06 stages or future boundary mismatch: readiness=%v usage=%v future=%v err=%v", readiness, usageHistory, future, err)
+	var readiness, usageHistory, organization, units, replayFence, futureStorage bool
+	if err = connection.QueryRow(ctx, `SELECT to_regclass('client_readiness_attestations') IS NOT NULL,to_regclass('usage_history_groups') IS NOT NULL,to_regclass('organization_lifecycle_states') IS NOT NULL,to_regclass('organization_unit_governance_blockers') IS NOT NULL AND to_regclass('organization_unit_lifecycle_states') IS NOT NULL,to_regclass('usage_replay_anonymized_users') IS NOT NULL,to_regclass('usage_request_anonymization_commands') IS NOT NULL`).Scan(&readiness, &usageHistory, &organization, &units, &replayFence, &futureStorage); err != nil || !readiness || !usageHistory || !organization || !units || !replayFence || futureStorage {
+		t.Fatalf("installed lifecycle/replay storage mismatch: readiness=%v usage=%v org=%v unit=%v replay=%v future=%v err=%v", readiness, usageHistory, organization, units, replayFence, futureStorage, err)
 	}
 	migrations.Unlock(ctx, connection)
 	config.User = admin.Config().User
@@ -324,6 +342,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		}
 		defer runtime.Close(context.Background())
 		assertTokenRuntimeStorage(t, ctx, runtime)
+		assertTokenHistoryAuthority(t, ctx, runtime)
 		verified, e := migrations.VerifyApplied(ctx, runtime, loaded)
 		if e != nil || verified.AppliedCount != len(installed) {
 			t.Fatal("independent runtime migration verification", verified, e)

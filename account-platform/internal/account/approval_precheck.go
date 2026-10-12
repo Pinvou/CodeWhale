@@ -41,16 +41,21 @@ var (
 // a different resource.
 var approvalPrecheckTargetResourceTypes = map[string]string{
 	"ENTITLEMENT_COMPONENT_ADJUSTMENT": "ENTITLEMENT_PACKAGE",
+	"LEDGER_REPAIR":                    "LEDGER_POSTING",
 }
 
 // ApprovalPrecheckRequest is the closed precheck input. It mirrors the owner
 // wire exactly; empty optional references are dropped instead of being sent as
 // zero values, so the forwarded body carries only the facts the page supplied.
 type ApprovalPrecheckRequest struct {
-	CommandType      string `json:"command_type"`
-	TargetResourceID string `json:"target_resource_id"`
-	PaymentOrderID   string `json:"payment_order_id"`
-	ReasonCode       string `json:"reason_code"`
+	CommandType            string `json:"command_type"`
+	TargetResourceID       string `json:"target_resource_id"`
+	PaymentOrderID         string `json:"payment_order_id,omitempty"`
+	ReasonCode             string `json:"reason_code"`
+	TargetJournalEntryID   string `json:"target_journal_entry_id,omitempty"`
+	WrongLedgerAccountID   string `json:"wrong_ledger_account_id,omitempty"`
+	CorrectLedgerAccountID string `json:"correct_ledger_account_id,omitempty"`
+	AmountMicrocredits     int64  `json:"amount_microcredits,omitempty"`
 }
 
 func (s *Service) WithApprovalPrechecks(source ApprovalPrecheckSource) *Service {
@@ -190,7 +195,7 @@ func decodeApprovalPrecheckResponse(raw []byte, request ApprovalPrecheckRequest)
 	}
 	expectedTargetType, ok := approvalPrecheckTargetResourceTypes[request.CommandType]
 	if !ok || wire.CommandType != request.CommandType || wire.TargetResourceType != expectedTargetType ||
-		wire.TargetResourceID != request.TargetResourceID || wire.PolicyVersion != 2 || wire.SnapshotSchemaVersion != 2 {
+		wire.TargetResourceID != request.TargetResourceID || !validPrecheckVersion(request.CommandType, wire.PolicyVersion, wire.SnapshotSchemaVersion) {
 		return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 	}
 	if _, valid := closedApprovalPrecheckDocument(wire.NormalizedCommand); !valid {
@@ -202,7 +207,7 @@ func decodeApprovalPrecheckResponse(raw []byte, request ApprovalPrecheckRequest)
 	if _, valid := closedApprovalPrecheckDocument(wire.FinancialSnapshot); !valid {
 		return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 	}
-	// Validate the same closed v2/s2 documents used by approval proof creation.
+	// Validate the same command-versioned closed documents used by approval proof creation.
 	// Transport-level objects alone are not sufficient owner evidence.
 	input := approvalencoding.LegacyProofInput{
 		CommandType: wire.CommandType, PolicyVersion: wire.PolicyVersion,
@@ -214,15 +219,32 @@ func decodeApprovalPrecheckResponse(raw []byte, request ApprovalPrecheckRequest)
 	if _, err := approvalencoding.ConvertLegacyProofInput(input); err != nil {
 		return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 	}
-	var selected struct {
-		PackageID      string `json:"package_id"`
-		PaymentOrderID string `json:"payment_order_id"`
-		ReasonCode     string `json:"reason_code"`
-	}
-	if json.Unmarshal(wire.NormalizedCommand, &selected) != nil ||
-		selected.PackageID != request.TargetResourceID || selected.PaymentOrderID != request.PaymentOrderID || selected.ReasonCode != request.ReasonCode {
+	switch request.CommandType {
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		var selected struct {
+			PackageID      string `json:"package_id"`
+			PaymentOrderID string `json:"payment_order_id,omitempty"`
+			ReasonCode     string `json:"reason_code"`
+		}
+		if json.Unmarshal(wire.NormalizedCommand, &selected) != nil || selected.PackageID != request.TargetResourceID || selected.PaymentOrderID != request.PaymentOrderID || selected.ReasonCode != request.ReasonCode {
+			return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
+		}
+	case "LEDGER_REPAIR":
+		var selected struct {
+			TargetPostingID        string `json:"target_posting_id"`
+			TargetJournalEntryID   string `json:"target_journal_entry_id"`
+			WrongLedgerAccountID   string `json:"wrong_ledger_account_id"`
+			CorrectLedgerAccountID string `json:"correct_ledger_account_id"`
+			AmountMicrocredits     int64  `json:"amount_microcredits"`
+			ReasonCode             string `json:"reason_code"`
+		}
+		if json.Unmarshal(wire.NormalizedCommand, &selected) != nil || selected.TargetPostingID != request.TargetResourceID || selected.TargetJournalEntryID != request.TargetJournalEntryID || selected.WrongLedgerAccountID != request.WrongLedgerAccountID || selected.CorrectLedgerAccountID != request.CorrectLedgerAccountID || selected.AmountMicrocredits != request.AmountMicrocredits || selected.ReasonCode != request.ReasonCode {
+			return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
+		}
+	default:
 		return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 	}
+
 	return ApprovalPrecheckProjection{
 		CommandType: wire.CommandType, PolicyVersion: wire.PolicyVersion, SnapshotSchemaVersion: wire.SnapshotSchemaVersion,
 		TargetResourceType: wire.TargetResourceType, TargetResourceID: wire.TargetResourceID,
@@ -244,18 +266,29 @@ func closedApprovalPrecheckDocument(raw json.RawMessage) (json.RawMessage, bool)
 	return raw, true
 }
 
+func validPrecheckVersion(command string, policy int64, snapshot int) bool {
+	return command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" && policy == 2 && snapshot == 2 || command == "LEDGER_REPAIR" && policy == 1 && snapshot == 1
+}
+
 func validApprovalPrecheckRequest(request ApprovalPrecheckRequest) bool {
-	if request.CommandType != "ENTITLEMENT_COMPONENT_ADJUSTMENT" {
-		return false
-	}
 	if _, ok := validPrecheckIdentifier(request.TargetResourceID); !ok {
 		return false
 	}
-	if _, ok := validPrecheckIdentifier(request.PaymentOrderID); !ok {
-		return false
+	switch request.CommandType {
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		if _, ok := validPrecheckIdentifier(request.PaymentOrderID); !ok {
+			return false
+		}
+		return request.ReasonCode != "" && strings.TrimSpace(request.ReasonCode) == request.ReasonCode && len(request.ReasonCode) <= 80 && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0
+	case "LEDGER_REPAIR":
+		for _, id := range []string{request.TargetJournalEntryID, request.WrongLedgerAccountID, request.CorrectLedgerAccountID} {
+			if _, ok := validPrecheckIdentifier(id); !ok {
+				return false
+			}
+		}
+		return request.PaymentOrderID == "" && request.WrongLedgerAccountID != request.CorrectLedgerAccountID && request.AmountMicrocredits > 0 && request.ReasonCode == "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT"
 	}
-	return request.ReasonCode != "" && strings.TrimSpace(request.ReasonCode) == request.ReasonCode &&
-		len(request.ReasonCode) <= 80
+	return false
 }
 
 func validPrecheckIdentifier(value string) (uuid.UUID, bool) {

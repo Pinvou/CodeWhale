@@ -37,7 +37,7 @@ type activationSpec struct {
 var billingApprovalActivationSpecs = map[string]activationSpec{
 	"CHARGEBACK_FINANCIAL_REPAIR":      {1, 1, false},
 	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {1, 1, false},
-	"LEDGER_REPAIR":                    {1, 1, false},
+	"LEDGER_REPAIR":                    {1, 1, true},
 	"PAYMENT_FINANCIAL_REPAIR":         {1, 1, false},
 	"PAYMENT_PRODUCT_RESUME":           {1, 1, true},
 	"PAYMENT_PROVIDER_RESUME":          {2, 1, true},

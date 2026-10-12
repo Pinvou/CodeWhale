@@ -523,7 +523,7 @@ for (const lane of ['desktop', 'web']) {
         if (prefillPending) {
           ctx.prefill = h.state.composerPrefill.text;
           ctx.prefillAppend = h.state.composerPrefill.append;
-          const effectStart = chat.indexOf('      useEffect(() => {\n        if (prefill)');
+          const effectStart = chat.search(/      useEffect\(\(\) => \{\r?\n        if \(prefill\)/);
           const effectEnd = chat.indexOf('}, [prefill, prefillAppend]);', effectStart) + '}, [prefill, prefillAppend]);'.length;
           vm.runInContext(chat.slice(effectStart, effectEnd), ctx);
         } else if (draftSyncPending) {

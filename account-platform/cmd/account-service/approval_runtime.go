@@ -17,8 +17,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/tokengovernance"
 )
 
-// Models installs the three Billing and three Token approval commands; personal
-// retains the original Billing-only authorities. Missing independent
+// The four Billing and three Token approval commands are installed. Missing independent
 // writer availability closes APPROVE, while historical reads/rejection and
 // ordinary account operations remain available through the mature pool.
 func configureApprovals(ctx context.Context, repository *account.PostgresRepository, service *account.Service, credential, environment string) error {

@@ -1278,50 +1278,6 @@
       "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
     },
     {
-      "source": "account-platform/internal/account/service.go",
-      "receiver": "protected",
-      "method": "GET",
-      "path": "/v1/me/account-closure-request",
-      "scope": "personal",
-      "strategy": "domain.account-closure-owned-receipt",
-      "permissions": [
-        "personal.account.close.read"
-      ]
-    },
-    {
-      "source": "account-platform/internal/account/service.go",
-      "receiver": "protected",
-      "method": "POST",
-      "path": "/v1/me/account-closure-requests",
-      "scope": "personal",
-      "strategy": "domain.account-closure-owned-receipt",
-      "permissions": [
-        "personal.account.close.request"
-      ]
-    },
-    {
-      "source": "account-platform/internal/account/service.go",
-      "receiver": "admin",
-      "method": "GET",
-      "path": "/account-closure-requests",
-      "scope": "platform",
-      "strategy": "domain.account-closure-owned-receipt",
-      "permissions": [
-        "platform.account-closures.read"
-      ]
-    },
-    {
-      "source": "account-platform/internal/account/service.go",
-      "receiver": "admin",
-      "method": "POST",
-      "path": "/account-closure-requests/:closure_request_id/actions/retry",
-      "scope": "platform",
-      "strategy": "domain.account-closure-owned-receipt",
-      "permissions": [
-        "platform.account-closures.repair"
-      ]
-    },
-    {
       "source": "account-platform/internal/token/organization_finance_routes.go",
       "receiver": "routes",
       "method": "POST",

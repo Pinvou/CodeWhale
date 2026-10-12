@@ -49,7 +49,7 @@ export async function submitAccountClosure({ client, confirmation, key, returnTo
   } catch (reason) {
     if (!accountPlatformErrorCodes(reason).includes('RECENT_AUTHENTICATION_REQUIRED')) throw reason;
     if (typeof client.reauthenticate !== 'function') return { status: 'recent-authentication-required' };
-    client.reauthenticate(returnTo);
+    await client.reauthenticate(returnTo);
     return { status: 'reauthenticating' };
   }
 }

@@ -66,15 +66,15 @@ test('new lazy global mounts contain chunk failures without exposing protected c
   // it must cover chat not only while the chunk loads but also after a chunk
   // failure (React.lazy caches the rejection, so the boundary's in-flow error
   // card must not be able to expose chat either).
-  const gateMountAt = mainSource.indexOf('{modelAccessGateOpen && browserOverlayPublicationReady && (');
-  assert.ok(gateMountAt >= 0, 'the API key gate mount must exist');
-  const gateMount = mainSource.slice(gateMountAt, gateMountAt + 1500);
+  const gateMountAt = mainSource.indexOf('modelAccessGateOpen && browserOverlayPublicationReady && (');
+  assert.ok(gateMountAt >= 0, 'the model access gate mount must exist');
+  const gateMount = mainSource.slice(gateMountAt, mainSource.indexOf('<LazyModelAccessGate', gateMountAt));
   const backdropAt = gateMount.indexOf('fixed inset-0 z-[2147483647]');
   const boundaryAt = gateMount.indexOf('<ViewErrorBoundary t={t}>');
-  const suspenseAt = gateMount.indexOf('<Suspense fallback=');
+  const suspenseAt = gateMount.indexOf('<Suspense fallback={<div role="status"');
   assert.ok(
     backdropAt >= 0 && boundaryAt > backdropAt && suspenseAt > boundaryAt,
-    'the API key gate backdrop must wrap the error boundary and Suspense, so it survives chunk failures',
+    'the model access gate backdrop must wrap the error boundary and Suspense, so it survives chunk failures',
   );
   assert.ok(
     gateMount.includes('role="dialog"') && gateMount.includes('aria-modal="true"'),

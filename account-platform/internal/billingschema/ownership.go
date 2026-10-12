@@ -79,14 +79,17 @@ func finishBillingMigration(ctx context.Context, tx pgx.Tx, migration migrations
 	if !hardened {
 		return nil
 	}
-	// The frozen generic hardener predates the correction receipt. Preserve its
-	// registered append-only INSERT/SELECT contract after every later migration,
+	// The frozen generic hardener predates these correction receipts. Preserve
+	// their registered append-only INSERT/SELECT contract after every later migration,
 	// rather than changing installed SQL or relying only on row triggers.
 	_, err := tx.Exec(ctx, `SET ROLE billing_schema_owner;
 SELECT public.harden_billing_runtime_objects();
 DO $$ BEGIN
  IF to_regclass('public.entitlement_component_corrections') IS NOT NULL THEN
   REVOKE UPDATE,DELETE ON TABLE public.entitlement_component_corrections FROM billing_service;
+ END IF;
+ IF to_regclass('public.ledger_repair_cases') IS NOT NULL THEN
+  REVOKE UPDATE,DELETE ON TABLE public.ledger_repair_cases FROM billing_service;
  END IF;
 END $$;
 SET ROLE billing_service;`)
