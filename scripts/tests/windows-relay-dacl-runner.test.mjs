@@ -10,7 +10,7 @@ function invoke(platform, result, { temporary, verifyFails = false, verifyFailur
   failure = {}, spawnThrows = false, accessorMode, verifierOutput = 'private-path-token-sentinel', successVerifierOutput } = {}) {
   const originalTemporary = temporary || tmpdir();
   const mockSystemRoot = resolve(tmpdir(), 'pinvou-dacl-mock-system-root');
-  const markerOutput = 'pinvou_ancestor_start\npinvou_ancestor_decoded\npinvou_ancestor_checked\nok';
+  const markerOutput = 'pinvou_ancestor_start\npinvou_ancestor_payload_decoded\npinvou_ancestor_decoded\npinvou_ancestor_checked\nok';
   const successfulOutput = successVerifierOutput ?? markerOutput;
   const program = `import child from 'node:child_process';
     import assert from 'node:assert/strict';
@@ -131,8 +131,10 @@ test('verifier phase diagnostics accept only complete ordered fixed markers', ()
   for (const [verifierOutput, phase] of [
     ['', 'unknown'],
     ['pinvou_ancestor_start\r\n', 'script_started'],
-    ['pinvou_ancestor_start\npinvou_ancestor_decoded\n', 'paths_decoded'],
-    ['pinvou_ancestor_start\npinvou_ancestor_decoded\npinvou_ancestor_checked\n', 'checks_completed'],
+    ['pinvou_ancestor_start\npinvou_ancestor_payload_decoded\n', 'payload_decoded'],
+    ['pinvou_ancestor_start\npinvou_ancestor_payload_decoded\npinvou_ancestor_decoded\n', 'paths_decoded'],
+    ['pinvou_ancestor_start\npinvou_ancestor_payload_decoded\npinvou_ancestor_decoded\npinvou_ancestor_checked\n', 'checks_completed'],
+    ['pinvou_ancestor_start\npinvou_ancestor_decoded\npinvou_ancestor_checked\n', 'unknown'],
     ['pinvou_ancestor_decoded\npinvou_ancestor_start\n', 'unknown'],
     ['pinvou_ancestor_start\npinvou_ancestor_start\n', 'unknown'],
     ['pinvou_ancestor_start\nprivate-path-token-sentinel\n', 'unknown'],
@@ -150,7 +152,8 @@ test('verifier phase diagnostics accept only complete ordered fixed markers', ()
 
 test('opted verifier rejects incomplete or polluted successful output before qualification', () => {
   for (const successVerifierOutput of ['ok', 'pinvou_ancestor_start\n',
-    'pinvou_ancestor_start\npinvou_ancestor_decoded\npinvou_ancestor_checked\nokprivate-path-token-sentinel']) {
+    'pinvou_ancestor_start\npinvou_ancestor_decoded\npinvou_ancestor_checked\nok',
+    'pinvou_ancestor_start\npinvou_ancestor_payload_decoded\npinvou_ancestor_decoded\npinvou_ancestor_checked\nokprivate-path-token-sentinel']) {
     const result = invoke('win32', {}, { successVerifierOutput });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /windows_relay_dacl_temporary_unsafe/);

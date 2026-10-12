@@ -93,6 +93,7 @@ const WINDOWS_REPARSE_VERIFY_SCRIPT = `
 $ErrorActionPreference = 'Stop'
 if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_start') }
 $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:PINVOU_PATHS_B64))
+if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_payload_decoded') }
 $paths = ConvertFrom-Json -InputObject $json
 if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_decoded') }
 foreach ($target in $paths) {
@@ -139,16 +140,17 @@ async function runWindowsAclScript(script, target, kind) {
 export async function verifyWindowsAncestors(paths, { onDiagnostic } = {}) {
   const encodedPaths = Buffer.from(JSON.stringify(paths), "utf8").toString("base64");
   const diagnostic = typeof onDiagnostic === "function";
-  const complete = "pinvou_ancestor_start\npinvou_ancestor_decoded\npinvou_ancestor_checked\n";
+  const complete = "pinvou_ancestor_start\npinvou_ancestor_payload_decoded\npinvou_ancestor_decoded\npinvou_ancestor_checked\n";
   const normalize = (output) => typeof output === "string" && Buffer.byteLength(output, "utf8") <= 512
     ? output.replace(/\r\n/gu, "\n") : undefined;
   const observe = (output) => {
     if (!diagnostic) return;
     let phase = "unknown";
     const normalized = normalize(output);
-      if (normalized === "pinvou_ancestor_start\n") phase = "script_started";
-      if (normalized === "pinvou_ancestor_start\npinvou_ancestor_decoded\n") phase = "paths_decoded";
-      if (normalized === complete || normalized === `${complete}ok`) phase = "checks_completed";
+    if (normalized === "pinvou_ancestor_start\n") phase = "script_started";
+    if (normalized === "pinvou_ancestor_start\npinvou_ancestor_payload_decoded\n") phase = "payload_decoded";
+    if (normalized === "pinvou_ancestor_start\npinvou_ancestor_payload_decoded\npinvou_ancestor_decoded\n") phase = "paths_decoded";
+    if (normalized === complete || normalized === `${complete}ok`) phase = "checks_completed";
     try { onDiagnostic(phase); } catch { /* Diagnostics cannot change validation. */ }
   };
   const observeResult = (value) => {

@@ -54,7 +54,7 @@ async function verifiedCanonical(original, scope) {
   verifierPhase = 'unknown';
   await verifyWindowsAncestors(ancestors, { onDiagnostic: (phase) => {
     verifierPhase = typeof phase === 'string'
-      && ['script_started', 'paths_decoded', 'checks_completed'].includes(phase) ? phase : 'unknown';
+      && ['script_started', 'payload_decoded', 'paths_decoded', 'checks_completed'].includes(phase) ? phase : 'unknown';
   } });
   stage = `${scope}_realpath`;
   return realpath(original);
