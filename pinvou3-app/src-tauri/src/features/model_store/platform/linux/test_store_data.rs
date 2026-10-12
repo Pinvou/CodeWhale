@@ -296,6 +296,7 @@ pub fn test_cards() -> Vec<TestCard> {
                 // 三件事叠起来 = 镜像站上的副本被换过，这条链路上没有任何一环会发现。
                 // 补 weights.sha256 并锁死 revision 之后，把这里改成 Sha256sums。
                 weight_verification: WeightVerification::None,
+                resource_requirements: Default::default(),
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
             },
@@ -344,6 +345,7 @@ pub fn test_cards() -> Vec<TestCard> {
                 // 字节 / 99.97% 的体量；剩下十个几 KB 的配置文件官方只给 git blob sha1，
                 // 由 lmm_model_complete 查存在（common.sh:85-99）。
                 weight_verification: WeightVerification::Sha256sums,
+                resource_requirements: Default::default(),
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
             },
@@ -383,6 +385,7 @@ pub fn test_cards() -> Vec<TestCard> {
                 // _ornith15_model_complete 只查分片文件存在（download_model.sh:34-50），
                 // install_engine.sh:116 是 HF_REVISION=main，下载经设置里的镜像站。
                 weight_verification: WeightVerification::None,
+                resource_requirements: Default::default(),
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
             },
@@ -426,6 +429,7 @@ pub fn test_cards() -> Vec<TestCard> {
                 // revision 锁死、且固定走官方 Hub 不经镜像（download_model.sh:20-26），
                 // 但清单和权重同源，上游那一份本身是坏的时候发现不了。
                 weight_verification: WeightVerification::Manifest,
+                resource_requirements: Default::default(),
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
             },
@@ -458,6 +462,7 @@ pub fn test_cards() -> Vec<TestCard> {
                 // 弱路的存在**排除了** Sha256sums（做不到逐文件比对官方摘要），
                 // 而联网那条路按定义本就是 Manifest，于是两条路的上界就是 Manifest。
                 weight_verification: WeightVerification::Manifest,
+                resource_requirements: Default::default(),
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
             },
@@ -505,6 +510,7 @@ pub fn test_cards() -> Vec<TestCard> {
                 // （package/deploy.sh:15）。三个来源仓库里两个锁了 commit SHA，
                 // 第三个（RealESRGAN）是 main，但它的内容同样被清单钉死了。
                 weight_verification: WeightVerification::Sha256sums,
+                resource_requirements: Default::default(),
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
             },

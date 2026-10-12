@@ -35,8 +35,8 @@ pub async fn model_store_availability() -> Result<StoreAvailability, String> {
 // ---------------------------------------------------------------- 只读查询
 
 #[tauri::command]
-pub async fn model_store_cards(test_mode: Option<bool>) -> Result<Value, String> {
-    model_store::list_cards(test_mode.unwrap_or(false)).await
+pub async fn model_store_cards() -> Result<Value, String> {
+    model_store::list_cards().await
 }
 
 #[tauri::command]
@@ -49,6 +49,30 @@ pub async fn model_store_library(
 #[tauri::command]
 pub async fn model_store_model_detail(card_id: String) -> Result<Value, String> {
     model_store::model_detail(card_id).await
+}
+
+#[tauri::command]
+pub async fn model_store_installed_engines() -> Result<Value, String> {
+    model_store::installed_engines().await
+}
+
+#[tauri::command]
+pub async fn model_store_local_resources() -> Result<Value, String> {
+    model_store::local_resources().await
+}
+
+#[tauri::command]
+pub async fn model_store_memory_admission(card_id: String) -> Result<Value, String> {
+    model_store::memory_admission(card_id).await
+}
+
+#[tauri::command]
+pub async fn model_store_delete_engine(
+    service: State<'_, Arc<ModelStoreService>>,
+    engine_name: String,
+    engine_version: Option<String>,
+) -> Result<Value, String> {
+    model_store::delete_engine(&service, engine_name, engine_version).await
 }
 
 #[tauri::command]
@@ -100,21 +124,36 @@ pub fn model_store_start_card_update(
 // ---------------------------------------------------------------- 长操作
 
 #[tauri::command]
-pub fn model_store_start_download(
+pub fn model_store_start_card_scripts(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
-    test_mode: Option<bool>,
+    confirmed: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::start_download(&service, card_id, test_mode.unwrap_or(false))
+    model_store::start_card_scripts(&service, card_id, confirmed.unwrap_or(false))
 }
 
 #[tauri::command]
-pub fn model_store_start_deploy(
+pub fn model_store_start_download(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+) -> Result<Value, String> {
+    model_store::start_download(&service, card_id)
+}
+
+#[tauri::command]
+pub async fn model_store_start_deploy(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
     profile_id: Option<String>,
+    memory_confirmed: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::start_deploy(&service, card_id, profile_id)
+    model_store::start_deploy(
+        &service,
+        card_id,
+        profile_id,
+        memory_confirmed.unwrap_or(false),
+    )
+    .await
 }
 
 /// 启用 / 停用 / 卸载。
@@ -123,13 +162,21 @@ pub fn model_store_start_deploy(
 /// 参数缺席命中。「卸载」保留权重并把卡片退回「已下载」，「删除」才连权重一起清掉
 /// 并把卡片移出模型库。
 #[tauri::command]
-pub fn model_store_start_lifecycle(
+pub async fn model_store_start_lifecycle(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
     action: String,
     purge_weights: Option<bool>,
+    memory_confirmed: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::start_lifecycle(&service, card_id, action, purge_weights.unwrap_or(false))
+    model_store::start_lifecycle(
+        &service,
+        card_id,
+        action,
+        purge_weights.unwrap_or(false),
+        memory_confirmed.unwrap_or(false),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -153,6 +200,26 @@ pub async fn model_store_run_log(
     // 克隆 Arc 再进 await：State 的借用不能跨过 await 点。
     let service = Arc::clone(&service);
     model_store::run_log(service, run_id, from, wait).await
+}
+
+/// 在文件管理器里打开模型商店的运行日志目录（`~/.pinvou3/model-store/logs/`）。
+///
+/// 只"打开目录"、不"把日志读回前端"：那几 MB 文本走 IPC 再塞进一个浮动任务卡没有
+/// 任何意义，用户真正要做的是把文件发给别人。
+#[tauri::command]
+pub fn model_store_reveal_run_logs_dir() -> Result<Value, String> {
+    model_store::reveal_run_logs_dir()
+}
+
+/// 导出一次运行的日志。导出那份比落盘那份多过一道脱敏（内网地址 + 全仓通用的
+/// 凭证尺子）——它会离开这台机器。
+/// r26 P2-4：4MiB 上限全文件逐行脱敏 + snapshot IPC 回传从主线程挪到
+/// spawn_blocking——同步版最坏 ~0.3-1.5s UI 冻结（files.rs:269 先例同款）。
+#[tauri::command]
+pub async fn model_store_export_run_log(run_id: String) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || model_store::export_run_log(run_id))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -202,24 +269,33 @@ pub fn model_store_create_api_key(card_id: String, label: Option<String>) -> Res
     model_store::create_api_key(card_id, label)
 }
 
-// ---------------------------------------------------------------- 测试商店
-
 #[tauri::command]
-pub fn model_store_test_store_state() -> Result<Value, String> {
-    model_store::test_store_state()
+pub async fn model_store_lan_status(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+) -> Result<Value, String> {
+    model_store::lan_status(&service, card_id).await
+}
+#[tauri::command]
+pub async fn model_store_set_lan_sharing(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+    enabled: bool,
+    address: Option<String>,
+    port: u16,
+) -> Result<Value, String> {
+    model_store::set_lan_sharing(&service, card_id, enabled, address, port).await
+}
+#[tauri::command]
+pub fn model_store_revoke_api_key(key_id: String) -> Result<Value, String> {
+    model_store::revoke_api_key(key_id)
 }
 
-/// 口令错**不是**错误：回 `{"ok": false}`，让前端能区分「输错了」和「保存失败」。
-/// 都压成 Err 的话这两件事在界面上长得一模一样。
-#[tauri::command]
-pub fn model_store_unlock_test_store(password: String) -> Result<Value, String> {
-    model_store::unlock_test_store(password)
-}
-
-#[tauri::command]
-pub fn model_store_disable_test_store() -> Result<Value, String> {
-    model_store::disable_test_store()
-}
+// 这里原来有 `model_store_test_store_state` / `model_store_unlock_test_store` /
+// `model_store_disable_test_store` 三个命令，服务的是内置测试商店那个隐藏开关。
+// 内置测试商店 2026-09-30 整体拿掉，三个命令连同 lib.rs 里的注册、前端
+// `model-store-api.js` 里的调用方一起删干净了（非 Linux 那边的同名桩也删了，
+// 不留孤儿）。
 
 // ------------------------------------------------------ 启动时回收残留进程
 
