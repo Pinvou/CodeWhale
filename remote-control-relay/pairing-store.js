@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isExampleHmacKey } from "./hmac-key-config.js";
 import { validateControllerMessage } from "./protocol-controller.js";
 import { isControllerIdentifier } from "./identifier-contract.js";
 
@@ -139,7 +140,8 @@ function keyring(value) {
   const keys = new Map();
   for (const entry of value.keys) {
     const bytes = typeof entry?.key === "string" ? Buffer.byteLength(entry.key, "utf8") : 0;
-    if (!KEY_ID.test(entry?.keyId) || bytes < 32 || bytes > 4096 || keys.has(entry.keyId)) fail("pairing_keyring_invalid");
+    if (!KEY_ID.test(entry?.keyId) || bytes < 32 || bytes > 4096
+      || isExampleHmacKey(entry.key) || keys.has(entry.keyId)) fail("pairing_keyring_invalid");
     keys.set(entry.keyId, entry.key);
   }
   if (!keys.has(value.activeKeyId)) fail("pairing_keyring_invalid");

@@ -43,6 +43,15 @@ Set these variables before opening the registry:
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON` | Optional secret JSON array of `{ "key_id": "...", "key": "..." }` for verification-only old keys. At most seven, unique IDs distinct from the active ID; each secret has the same 32–4096 UTF-8 byte bounds. Maximum JSON input is 65536 bytes. |
 | `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | Optional `1`/`true`; accepted only with `deployment=development` and `NODE_ENV=development` or `test`. |
 
+The example defaults for both HMAC secrets are empty and fail validation. The two
+old public `replace-with-at-least-32-...` placeholder values are also rejected,
+including when copied into the other role. Generate each secret independently
+with a cryptographic random generator (for example, 32 random bytes encoded as
+base64), import it directly into the deployment secret manager, and inject it at
+startup. Do not reuse enrollment/pairing secrets or capture secret output in logs,
+shell history, PRs or repository files. The 32–4096 UTF-8 byte check and placeholder
+rejection do not establish entropy for arbitrary administrator-supplied values.
+
 `official` and `self_hosted` always reject an unknown endpoint. A production
 runtime refuses both development deployment mode and the development TOFU
 switch. Self-hosted production therefore uses an explicit administrator import

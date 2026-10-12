@@ -182,6 +182,27 @@ test("credential transport: development TOFU applies the fresh rule and preserve
   assert.deepEqual(registry.exportSnapshot(), before);
 });
 
+test("enrollment HMAC configuration rejects known example placeholders without exposing them", () => {
+  for (const key of ["replace-with-at-least-32-random-bytes",
+    "replace-with-at-least-32-independent-random-bytes", "", "a".repeat(31), "a".repeat(4097)]) {
+    assert.throws(() => loadEnrollmentRegistryConfig(environment({
+      PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: key,
+    })), error => error.code === "enrollment_hmac_key_invalid" && error.message === error.code
+      && error.cause === undefined);
+  }
+  for (const key of ["a".repeat(32), "a".repeat(4096), "界".repeat(11)]) {
+    assert.doesNotThrow(() => loadEnrollmentRegistryConfig(environment({
+      PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: key,
+    })));
+  }
+  assert.throws(() => loadEnrollmentRegistryConfig(environment({
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "a".repeat(32),
+    PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON: JSON.stringify([
+      { key_id: "test-key-old", key: "replace-with-at-least-32-random-bytes" },
+    ]),
+  })), error => error.code === "enrollment_hmac_previous_keys_invalid");
+});
+
 function resourcesFor(t) {
   let resources = TEST_RESOURCES.get(t);
   if (!resources) {

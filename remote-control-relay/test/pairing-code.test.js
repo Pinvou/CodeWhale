@@ -76,6 +76,23 @@ function keyring(activeKeyId = "digest-key-1", includeOld = true) {
   return { activeKeyId, keys };
 }
 
+test("pairing HMAC configuration rejects known example placeholders before reading or writing state", async () => {
+  for (const key of ["replace-with-at-least-32-random-bytes",
+    "replace-with-at-least-32-independent-random-bytes", "", "a".repeat(31), "a".repeat(4097)]) {
+    const store = new MemoryStateStore();
+    await assert.rejects(PairingStore.open({ stateStore: store,
+      digestKeyring: { activeKeyId: "digest-key-1", keys: [{ keyId: "digest-key-1", key }] },
+    }), { code: "pairing_keyring_invalid" });
+    assert.equal(store.revision, "0");
+    assert.equal(store.value, null);
+  }
+  for (const key of ["a".repeat(32), "a".repeat(4096), "界".repeat(11)]) {
+    await PairingStore.open({ stateStore: new MemoryStateStore(),
+      digestKeyring: { activeKeyId: "digest-key-1", keys: [{ keyId: "digest-key-1", key }] },
+    });
+  }
+});
+
 function deterministicEntropy(byte = 0) {
   return (size) => Buffer.alloc(size, byte);
 }
