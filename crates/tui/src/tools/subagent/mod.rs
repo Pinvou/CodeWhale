@@ -35,11 +35,12 @@ use crate::config::MAX_SUBAGENTS;
 use crate::core::engine::tool_catalog::{
     TOOL_SEARCH_NAME, active_tools_for_request, apply_native_tool_deferral,
     bounded_toolbox_eviction_note, ensure_advanced_tooling, execute_tool_search_with_cache,
-    initial_active_tools, is_tool_search_tool, remove_toolbox_drops, tool_matches_any_rule,
-    toolbox_oversize_reason, touch_cached_tool_after_execution,
+    initial_active_tools, is_tool_search_tool, park_toolbox_eviction, remove_toolbox_drops,
+    render_toolbox_eviction_notes, tool_matches_any_rule, toolbox_oversize_reason,
+    touch_cached_tool_after_execution,
 };
 use crate::core::events::{AgentProgressEventMeta, Event};
-use crate::core::session::ToolActivationCache;
+use crate::core::session::{PendingToolboxEviction, ToolActivationCache, ToolboxEvictionTrigger};
 use crate::dependencies::{ExternalTool, Git};
 /// Compatibility re-export: the closed role set lives in
 /// `crate::fleet::role`, the lightweight role surface every spawn path
@@ -14110,7 +14111,7 @@ struct SubAgentToolSurface {
     catalog: Vec<Tool>,
     active_names: std::collections::HashSet<String>,
     cache: ToolActivationCache,
-    pending_eviction_note: Option<String>,
+    pending_eviction_notes: Vec<PendingToolboxEviction>,
 }
 
 impl SubAgentToolSurface {
@@ -14123,30 +14124,18 @@ impl SubAgentToolSurface {
             catalog,
             active_names,
             cache,
-            pending_eviction_note: None,
+            pending_eviction_notes: Vec::new(),
         };
         // A warm start that overflows the bounds must not evict silently;
         // park the note for the child's first result.
-        surface.park_eviction_note("step", &activation.evicted);
+        surface.park_eviction_note(ToolboxEvictionTrigger::Step, &activation.evicted);
         surface
     }
 
     /// Park (or combine with an already parked) bounded-toolbox eviction
     /// note; it rides the child's next recorded result.
-    fn park_eviction_note(&mut self, trigger: &str, evicted: &[String]) {
-        if evicted.is_empty() {
-            return;
-        }
-        let note = bounded_toolbox_eviction_note(trigger, evicted);
-        self.pending_eviction_note = Some(match self.pending_eviction_note.take() {
-            Some(existing) => format!("{existing}\n\n{note}"),
-            None => note,
-        });
-    }
-
-    /// Take any parked eviction note so it can ride a recorded result.
-    fn take_pending_eviction_note(&mut self) -> Option<String> {
-        self.pending_eviction_note.take()
+    fn park_eviction_note(&mut self, trigger: ToolboxEvictionTrigger, evicted: &[String]) {
+        park_toolbox_eviction(&mut self.pending_eviction_notes, trigger, evicted);
     }
 
     /// Refresh an executed cached tool and append its eviction note to the
@@ -14167,7 +14156,7 @@ impl SubAgentToolSurface {
         {
             rich.result.content.push_str(&format!(
                 "\n\n{}",
-                bounded_toolbox_eviction_note("step", &update.evicted)
+                bounded_toolbox_eviction_note(ToolboxEvictionTrigger::Step, &update.evicted,)
             ));
         }
     }
@@ -14177,7 +14166,7 @@ impl SubAgentToolSurface {
         // A refresh that grew a cached schema past the collective bounds
         // evicts here, outside any result payload — park the note.
         let removals = self.cache.revalidate(&self.catalog);
-        self.park_eviction_note("step", &removals.bounds_evicted);
+        self.park_eviction_note(ToolboxEvictionTrigger::Step, &removals.bounds_evicted);
         let mut active_names = initial_active_tools(&self.catalog);
         active_names.extend(self.cache.names().map(str::to_string));
         self.active_names = active_names;
@@ -14219,7 +14208,10 @@ impl SubAgentToolSurface {
             if !activation.evicted.is_empty() {
                 message.push_str(&format!(
                     "\n\n{}",
-                    bounded_toolbox_eviction_note("step", &activation.evicted)
+                    bounded_toolbox_eviction_note(
+                        ToolboxEvictionTrigger::Step,
+                        &activation.evicted,
+                    )
                 ));
             }
             return Ok(message);
@@ -15667,11 +15659,15 @@ impl SubAgentToolRegistry {
         // A note parked by an earlier catalog refresh (request-time
         // revalidation, a warm start) has no payload of its own; it rides
         // the child's next recorded result, mirroring the parent engine's
-        // parked-note channel.
-        if let Ok(rich) = result.as_mut()
-            && let Some(note) = surface.take_pending_eviction_note()
-        {
-            rich.result.content.push_str(&format!("\n\n{note}"));
+        // parked-note channel. Names re-admitted since the park are netted
+        // out against the child's live cache, so the note never declares a
+        // tool uncallable that the riding result hands back.
+        if !surface.pending_eviction_notes.is_empty() {
+            let mut parked = std::mem::take(&mut surface.pending_eviction_notes);
+            let rendered = render_toolbox_eviction_notes(&mut parked, &surface.cache);
+            if let (Ok(rich), Some(note)) = (result.as_mut(), rendered) {
+                rich.result.content.push_str(&format!("\n\n{note}"));
+            }
         }
         result
     }

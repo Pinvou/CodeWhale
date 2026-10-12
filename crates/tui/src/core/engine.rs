@@ -3412,7 +3412,7 @@ impl Engine {
                         // including a parked eviction note whose batch never
                         // recorded a result.
                         self.session.tool_activation_cache.clear();
-                        self.session.pending_toolbox_eviction_note = None;
+                        self.session.pending_toolbox_eviction_notes.clear();
                         let plugin_workspace_changed =
                             self.plugin_registry.workspace() != workspace.as_path();
                         let previous_session_id = self.session.id.clone();

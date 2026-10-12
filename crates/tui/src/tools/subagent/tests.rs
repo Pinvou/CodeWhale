@@ -7676,7 +7676,7 @@ fn child_execution_refresh_eviction_note_rides_the_child_result() {
     );
     assert!(!surface.active_names.contains("big-a"));
     assert!(
-        surface.pending_eviction_note.is_none(),
+        surface.pending_eviction_notes.is_empty(),
         "the touch eviction rides the result directly, not the parked slot"
     );
 }
@@ -7693,7 +7693,7 @@ fn child_parked_note_rides_the_next_result_and_refresh_parks_one() {
     let mut surface =
         SubAgentToolSurface::new(warm_catalog, &["big-a".to_string(), "big-b".to_string()]);
     assert!(
-        surface.pending_eviction_note.is_none(),
+        surface.pending_eviction_notes.is_empty(),
         "a warm start inside the bounds must not park anything"
     );
 
@@ -7711,19 +7711,21 @@ fn child_parked_note_rides_the_next_result_and_refresh_parks_one() {
         !tools.iter().any(|tool| tool.name == "big-a"),
         "the evicted tool must leave the child's request surface"
     );
-    let parked = surface
-        .pending_eviction_note
-        .as_ref()
-        .expect("the refresh eviction must park a note");
+    let parked = &surface.pending_eviction_notes;
+    assert_eq!(
+        parked.len(),
+        1,
+        "the refresh eviction must park a note: {parked:?}"
+    );
     assert!(
-        parked.contains("big-a"),
-        "the parked note must name the LRU victim: {parked}"
+        parked[0].evicted.iter().any(|name| name == "big-a"),
+        "the parked note must name the LRU victim: {parked:?}"
     );
 
     // Taking the note hands it to the result carrier and empties the slot.
-    let taken = surface.take_pending_eviction_note().expect("take");
-    assert!(taken.contains("big-a"));
-    assert!(surface.pending_eviction_note.is_none());
+    let taken = std::mem::take(&mut surface.pending_eviction_notes);
+    assert!(taken[0].evicted.iter().any(|name| name == "big-a"));
+    assert!(surface.pending_eviction_notes.is_empty());
 }
 
 #[test]

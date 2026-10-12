@@ -86,6 +86,41 @@ impl ToolActivationDelta {
     }
 }
 
+/// Which step surfaced a toolbox eviction, so the model-facing note can
+/// attribute it to the step that caused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolboxEvictionTrigger {
+    /// A `tool_search` result naming the evictions in its own payload.
+    ToolSearch,
+    /// A non-search activation step: a hydration batch, a retrieval
+    /// admission, or an executed tool's refresh.
+    Step,
+    /// The turn-entry revalidation.
+    TurnStart,
+}
+
+impl ToolboxEvictionTrigger {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ToolSearch => "search",
+            Self::Step => "step",
+            Self::TurnStart => "turn's start",
+        }
+    }
+}
+
+/// A toolbox eviction parked for a later result to carry, with its names
+/// still structured. Names stay unresolved until ride time so the attaching
+/// channel can net out names the model can call again by then: between the
+/// park and the ride, a search, a hydration, or a retrieval may have
+/// re-admitted a victim, and a note naming it "no longer callable" would
+/// contradict the very result that hands it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingToolboxEviction {
+    pub(crate) trigger: ToolboxEvictionTrigger,
+    pub(crate) evicted: Vec<String>,
+}
+
 /// What [`ToolActivationCache::revalidate`] removed, classified by
 /// recoverability so callers can report each bucket truthfully.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
@@ -255,6 +290,11 @@ impl ToolActivationCache {
     pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
         self.names.iter().map(String::as_str)
     }
+
+    /// Whether `name` is currently cached, and thus callable again.
+    pub(crate) fn contains(&self, name: &str) -> bool {
+        self.names.iter().any(|cached| cached == name)
+    }
 }
 
 /// Session state for the engine.
@@ -291,13 +331,13 @@ pub struct Session {
     /// reason while an undeclared mid-loop change is reported as drift and the
     /// pin holds. `None` means "no declared change since the last request".
     pub pending_prefix_change_reason: Option<String>,
-    /// Eviction note set when a non-search activation (a batch's hydration of
-    /// directly-called deferred tools) evicted bounded-toolbox entries. The
-    /// next recorded tool result carries it to the model, because unlike a
-    /// `tool_search` result there is no result payload of its own to name the
-    /// evictions in. Taken and cleared by the turn loop when the note is
-    /// attached.
-    pub(super) pending_toolbox_eviction_note: Option<String>,
+    /// Evictions parked by non-search activations (a batch's hydration of
+    /// directly-called deferred tools, the turn-entry revalidation) that
+    /// have no result payload of their own. The next recorded tool result
+    /// carries them to the model; names a ride re-admits are netted out at
+    /// attach time because the model can call them again. Taken and cleared
+    /// by the turn loop when the notes are attached.
+    pub(super) pending_toolbox_eviction_notes: Vec<PendingToolboxEviction>,
     /// The explicit prompt inputs (model, mode, goal, route, translation,
     /// verbosity) the pinned system prompt was composed from. At each new user
     /// turn the engine recomposes: if these inputs are unchanged but the
@@ -444,7 +484,7 @@ impl Session {
             },
             last_system_prompt_hash: None,
             pending_prefix_change_reason: None,
-            pending_toolbox_eviction_note: None,
+            pending_toolbox_eviction_notes: Vec::new(),
             pinned_prompt_context: None,
             context_update_baseline: None,
             working_set: WorkingSet::default(),

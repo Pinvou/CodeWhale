@@ -18,7 +18,7 @@ use crate::models::Tool;
 use crate::tools::spec::{ToolError, ToolResult, optional_str, optional_u64, required_str};
 use crate::tui::app::AppMode;
 
-use crate::core::session::ToolActivationCache;
+use crate::core::session::{PendingToolboxEviction, ToolActivationCache, ToolboxEvictionTrigger};
 use crate::dependencies::ExternalTool;
 use crate::regex_cache::compile_user_regex;
 
@@ -441,20 +441,68 @@ pub(crate) fn toolbox_oversize_reason() -> String {
 }
 
 /// The model-facing sentence naming a bounds-driven toolbox eviction and the
-/// recovery contract. `trigger` names the step that surfaced it ("search",
-/// "step"); the capacity label is derived from the session constants so the
-/// prose cannot drift from the real bounds. The eviction may come from the
-/// admission itself or from revalidation after a cached schema grew, so the
-/// wording stays neutral about the cause.
-pub(crate) fn bounded_toolbox_eviction_note(trigger: &str, evicted: &[String]) -> String {
+/// recovery contract. `trigger` names the step that surfaced it; the capacity
+/// label is derived from the session constants so the prose cannot drift from
+/// the real bounds. The eviction may come from the admission itself or from
+/// revalidation after a cached schema grew, so the wording stays neutral
+/// about the cause.
+pub(crate) fn bounded_toolbox_eviction_note(
+    trigger: ToolboxEvictionTrigger,
+    evicted: &[String],
+) -> String {
     format!(
-        "This {trigger} evicted tools from the bounded conversation toolbox \
+        "This {} evicted tools from the bounded conversation toolbox \
          ({} cached tools, {}KiB of serialized schemas); the evicted tools \
          are no longer callable until a later search re-activates them: {}",
+        trigger.label(),
         crate::core::session::TOOL_ACTIVATION_CACHE_MAX_NAMES,
         crate::core::session::TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES / 1024,
         evicted.join(", ")
     )
+}
+
+/// Park a bounds-driven toolbox eviction for a later result to carry,
+/// combining with any note already parked — turn-start revalidation and a
+/// hydration batch can both evict before a result records. Shared by the
+/// parent engine and the child surface so the combine contract is stated
+/// and pinned once.
+pub(crate) fn park_toolbox_eviction(
+    notes: &mut Vec<PendingToolboxEviction>,
+    trigger: ToolboxEvictionTrigger,
+    evicted: &[String],
+) {
+    if evicted.is_empty() {
+        return;
+    }
+    notes.push(PendingToolboxEviction {
+        trigger,
+        evicted: evicted.to_vec(),
+    });
+}
+
+/// Net and render the parked toolbox eviction notes for the result they
+/// ride. A name that is back in the activation cache is callable again, so
+/// it must not be declared "no longer callable" by the very result that
+/// carries it back: such names are dropped, and a note emptied by the
+/// netting is dropped with them. Returns `None` when nothing remains to
+/// report.
+pub(crate) fn render_toolbox_eviction_notes(
+    notes: &mut [PendingToolboxEviction],
+    cache: &ToolActivationCache,
+) -> Option<String> {
+    for note in notes.iter_mut() {
+        note.evicted.retain(|name| !cache.contains(name));
+    }
+    let rendered: Vec<String> = notes
+        .iter()
+        .filter(|note| !note.evicted.is_empty())
+        .map(|note| bounded_toolbox_eviction_note(note.trigger, &note.evicted))
+        .collect();
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered.join("\n\n"))
+    }
 }
 
 /// Outcome of a non-search activation against the bounded conversation
@@ -1512,7 +1560,10 @@ fn execute_tool_search_inner(
                 .map(|name| json!({"type": "tool_reference", "tool_name": name}))
                 .collect::<Vec<_>>()
         );
-        payload["toolbox_note"] = json!(bounded_toolbox_eviction_note("search", &cache_evicted));
+        payload["toolbox_note"] = json!(bounded_toolbox_eviction_note(
+            ToolboxEvictionTrigger::ToolSearch,
+            &cache_evicted
+        ));
     }
     if let Some(servers) = boot_status {
         payload["mcp_boot"] = json!({

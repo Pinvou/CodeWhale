@@ -4,8 +4,8 @@ use super::{
     apply_registry_first_shell_guidance, build_model_tool_catalog_with_surface,
     default_synthetic_catalog_tool_names, ensure_advanced_tooling, execute_tool_search_with_cache,
     initial_active_tools, is_synthetic_catalog_tool, maybe_hydrate_requested_deferred_tool,
-    remove_toolbox_drops, tool_matches_any_rule, toolbox_oversize_reason,
-    touch_cached_tool_after_execution,
+    remove_toolbox_drops, render_toolbox_eviction_notes, tool_matches_any_rule,
+    toolbox_oversize_reason, touch_cached_tool_after_execution,
 };
 use crate::core::session::ToolActivationCache;
 use crate::models::Tool;
@@ -839,5 +839,52 @@ fn hydration_of_an_oversize_tool_reports_the_rejection_not_a_load() {
     assert!(
         hydrated.is_empty(),
         "an oversize tool must not be offered to the batch activation: {hydrated:?}"
+    );
+}
+
+/// Ride-time netting: a parked note must not name a tool the riding result
+/// hands back. Names back in the activation cache are dropped from the note,
+/// a note emptied by the netting is dropped entirely, and the surviving note
+/// keeps its own trigger attribution.
+#[test]
+fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
+    let mut deferred = tool("deferred-x");
+    deferred.defer_loading = Some(true);
+    let catalog = vec![deferred];
+    let mut cache = ToolActivationCache::default();
+    cache.activate(&catalog, &["deferred-x".to_string()]);
+
+    let note = |trigger, names| crate::core::session::PendingToolboxEviction {
+        trigger,
+        evicted: names,
+    };
+    use crate::core::session::ToolboxEvictionTrigger;
+    let mut notes = vec![
+        note(
+            ToolboxEvictionTrigger::TurnStart,
+            vec!["deferred-x".to_string(), "deferred-y".to_string()],
+        ),
+        note(ToolboxEvictionTrigger::Step, vec!["deferred-x".to_string()]),
+    ];
+    let rendered =
+        render_toolbox_eviction_notes(&mut notes, &cache).expect("deferred-y is still evicted");
+    assert!(
+        rendered.contains("deferred-y") && !rendered.contains("deferred-x"),
+        "re-admitted names must be netted out of the note: {rendered}"
+    );
+    assert!(
+        rendered.contains("This turn's start evicted"),
+        "the surviving note keeps its own trigger attribution: {rendered}"
+    );
+
+    // A note whose every name is re-admitted is fully absorbed: reporting
+    // it would claim a callable tool is uncallable.
+    let mut notes = vec![note(
+        ToolboxEvictionTrigger::Step,
+        vec!["deferred-x".to_string()],
+    )];
+    assert!(
+        render_toolbox_eviction_notes(&mut notes, &cache).is_none(),
+        "a fully netted note must not ride at all"
     );
 }

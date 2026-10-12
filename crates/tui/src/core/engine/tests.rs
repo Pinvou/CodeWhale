@@ -27324,8 +27324,9 @@ fn recorded_tool_result_content(engine: &Engine, tool_use_id: &str) -> String {
 #[tokio::test]
 async fn hydration_eviction_note_rides_the_batch_first_result() {
     let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
-    engine.session.pending_toolbox_eviction_note = Some(
-        super::tool_catalog::bounded_toolbox_eviction_note("step", &["ghost-tool".to_string()]),
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["ghost-tool".to_string()],
     );
     let mut catalog = Vec::new();
     let mut active = HashSet::new();
@@ -27364,8 +27365,9 @@ async fn hydration_eviction_note_rides_the_batch_first_result() {
 #[tokio::test]
 async fn hydration_eviction_note_survives_a_leading_error_result() {
     let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
-    engine.session.pending_toolbox_eviction_note = Some(
-        super::tool_catalog::bounded_toolbox_eviction_note("step", &["ghost-tool".to_string()]),
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["ghost-tool".to_string()],
     );
     let mut catalog = Vec::new();
     let mut active = HashSet::new();
@@ -27526,8 +27528,9 @@ async fn session_sync_drops_a_parked_toolbox_eviction_note() {
     // parked. SyncSession installs another conversation: the parked note
     // belongs to the previous one and must never ride the new conversation's
     // tool results.
-    engine.session.pending_toolbox_eviction_note = Some(
-        super::tool_catalog::bounded_toolbox_eviction_note("step", &["ghost-tool".to_string()]),
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["ghost-tool".to_string()],
     );
     let run_task = tokio::spawn(engine.run());
 
@@ -27637,13 +27640,77 @@ async fn turn_start_revalidation_parks_an_eviction_note_for_the_turn() {
             .any(|name| name == "cached-a"),
         "the turn-start eviction must drop the LRU victim from the cache"
     );
-    let note = engine
-        .session
-        .pending_toolbox_eviction_note
-        .expect("the turn-start eviction must park its note for the turn's first result");
+    let notes = &engine.session.pending_toolbox_eviction_notes;
+    assert_eq!(
+        notes.len(),
+        1,
+        "the turn-start eviction must park its note for the turn's first result: {notes:?}"
+    );
+    assert_eq!(
+        notes[0].trigger,
+        crate::core::session::ToolboxEvictionTrigger::TurnStart
+    );
     assert!(
-        note.contains("turn's start") && note.contains("cached-a"),
-        "the parked note must name the trigger and the victim: {note}"
+        notes[0].evicted.iter().any(|name| name == "cached-a"),
+        "the parked note must name the victim: {notes:?}"
+    );
+}
+
+/// The ride-time netting pin: a note parked at the turn's start must not
+/// name a tool that the very result carrying it re-admits. The natural
+/// retry — the model calling the tool the turn-start eviction just dropped
+/// — hydrates it back into the cache before any result records (the batch
+/// admission in `plan_tool_calls`), so the receipt the note rides must not
+/// declare it uncallable.
+#[tokio::test]
+async fn turn_start_note_does_not_name_a_tool_the_result_re_admits() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::TurnStart,
+        &["cached-a".to_string()],
+    );
+    // The batch hydration re-admitted the victim before any result recorded:
+    // plan_tool_calls admits the directly-called deferred tool into the cache
+    // when the model retries it, under the per-tool budget.
+    let catalog = vec![heavy_deferred_tool("cached-a", 100)];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&catalog, &["cached-a".to_string()]);
+
+    // The batch's catalog (the refresh channel revalidates against it, so it
+    // must be the same catalog the hydration admitted from).
+    let mut surface_catalog = vec![heavy_deferred_tool("cached-a", 100)];
+    let mut active = HashSet::new();
+    engine
+        .process_tool_results(
+            vec![Some(synthetic_toolbox_outcome(
+                "retry-victim",
+                "cached-a",
+                Ok(ToolResult::success(
+                    "Tool `cached-a` was deferred and has now been loaded. \
+                     Retry the call with its visible schema.",
+                )),
+            ))],
+            &mut surface_catalog,
+            &mut active,
+            &HashMap::new(),
+        )
+        .await;
+
+    assert!(
+        engine.session.pending_toolbox_eviction_notes.is_empty(),
+        "the note rode the first result (fully netted); it must not stay parked: {:?}",
+        engine.session.pending_toolbox_eviction_notes
+    );
+    let receipt = recorded_tool_result_content(&engine, "retry-victim");
+    assert!(
+        receipt.contains("has now been loaded"),
+        "the hydration receipt must reach the model: {receipt}"
+    );
+    assert!(
+        !receipt.contains("no longer callable"),
+        "the receipt must not declare a tool uncallable that the same result re-admits: {receipt}"
     );
 }
 
@@ -27652,28 +27719,34 @@ async fn turn_start_revalidation_parks_an_eviction_note_for_the_turn() {
 #[tokio::test]
 async fn toolbox_eviction_notes_park_and_combine() {
     let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
-    engine.park_toolbox_eviction_note("turn's start", &["turn-victim".to_string()]);
-    engine.park_toolbox_eviction_note("step", &["step-victim".to_string()]);
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::TurnStart,
+        &["turn-victim".to_string()],
+    );
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["step-victim".to_string()],
+    );
 
-    let note = engine
-        .session
-        .pending_toolbox_eviction_note
-        .clone()
-        .expect("the combined note must stay parked");
-    assert!(
-        note.contains("This turn's start evicted") && note.contains("turn-victim"),
-        "the turn-start note must survive a later park: {note}"
+    let notes = &engine.session.pending_toolbox_eviction_notes;
+    assert_eq!(notes.len(), 2, "both notes must stay parked: {notes:?}");
+    assert_eq!(
+        notes[0].trigger,
+        crate::core::session::ToolboxEvictionTrigger::TurnStart
     );
-    assert!(
-        note.contains("This step evicted") && note.contains("step-victim"),
-        "the hydration note must combine with the parked one: {note}"
+    assert!(notes[0].evicted.iter().any(|name| name == "turn-victim"));
+    assert_eq!(
+        notes[1].trigger,
+        crate::core::session::ToolboxEvictionTrigger::Step
     );
+    assert!(notes[1].evicted.iter().any(|name| name == "step-victim"));
 
     // An empty eviction list parks nothing and must not clobber the slot.
-    engine.park_toolbox_eviction_note("step", &[]);
-    assert!(
-        engine.session.pending_toolbox_eviction_note.is_some(),
-        "an empty eviction list must not clear the parked note"
+    engine.park_toolbox_eviction_note(crate::core::session::ToolboxEvictionTrigger::Step, &[]);
+    assert_eq!(
+        engine.session.pending_toolbox_eviction_notes.len(),
+        2,
+        "an empty eviction list must not clear the parked notes"
     );
 }
 
@@ -27692,8 +27765,9 @@ async fn turn_start_sweeps_a_stranded_eviction_note() {
         &Config::default(),
         client,
     );
-    engine.session.pending_toolbox_eviction_note = Some(
-        super::tool_catalog::bounded_toolbox_eviction_note("step", &["ghost-tool".to_string()]),
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["ghost-tool".to_string()],
     );
 
     // No eviction happens this turn: the sweep must still clear the
@@ -27708,7 +27782,7 @@ async fn turn_start_sweeps_a_stranded_eviction_note() {
     let _ = engine.run_turn(&mut turn, policy, None, None).await;
 
     assert!(
-        engine.session.pending_toolbox_eviction_note.is_none(),
+        engine.session.pending_toolbox_eviction_notes.is_empty(),
         "a stranded note must not survive into the turn to misattribute its evictions"
     );
 }
@@ -27718,8 +27792,9 @@ async fn turn_start_sweeps_a_stranded_eviction_note() {
 #[tokio::test]
 async fn toolbox_note_survives_a_batch_without_results() {
     let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
-    engine.session.pending_toolbox_eviction_note = Some(
-        super::tool_catalog::bounded_toolbox_eviction_note("step", &["ghost-tool".to_string()]),
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["ghost-tool".to_string()],
     );
     let mut catalog = Vec::new();
     let mut active = HashSet::new();
@@ -27727,12 +27802,14 @@ async fn toolbox_note_survives_a_batch_without_results() {
         .process_tool_results(vec![None, None], &mut catalog, &mut active, &HashMap::new())
         .await;
 
-    let note = engine
-        .session
-        .pending_toolbox_eviction_note
-        .expect("a resultless batch must re-park the note instead of dropping it");
+    let notes = &engine.session.pending_toolbox_eviction_notes;
+    assert_eq!(
+        notes.len(),
+        1,
+        "a resultless batch must re-park the note instead of dropping it: {notes:?}"
+    );
     assert!(
-        note.contains("ghost-tool"),
-        "the re-parked note must keep its content: {note}"
+        notes[0].evicted.iter().any(|name| name == "ghost-tool"),
+        "the re-parked note must keep its content: {notes:?}"
     );
 }

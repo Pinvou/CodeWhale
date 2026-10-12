@@ -1386,7 +1386,7 @@ impl Engine {
         // this turn's first result; drop it before revalidating. SyncSession
         // already clears it at the conversation edge — this covers the
         // same-conversation case.
-        self.session.pending_toolbox_eviction_note = None;
+        self.session.pending_toolbox_eviction_notes.clear();
         // Search activations belong to the conversation, not just the user
         // turn. Revalidate names against this turn's already-filtered catalog
         // before exposing them; stale mode/MCP/allow-list entries disappear.
@@ -1399,7 +1399,10 @@ impl Engine {
         // cached schema grew between turns (an MCP refresh, for example).
         // Like a hydration it has no result payload of its own: park the
         // note so the turn's first recorded result carries it.
-        self.park_toolbox_eviction_note("turn's start", &removals.bounds_evicted);
+        self.park_toolbox_eviction_note(
+            crate::core::session::ToolboxEvictionTrigger::TurnStart,
+            &removals.bounds_evicted,
+        );
         active_tool_names.extend(
             self.session
                 .tool_activation_cache
@@ -4155,7 +4158,10 @@ impl Engine {
         // drop left the catalog entirely and no later search can name it —
         // the model learns of those only when a search for the capability
         // misses.
-        self.park_toolbox_eviction_note("step", &activation.evicted);
+        self.park_toolbox_eviction_note(
+            crate::core::session::ToolboxEvictionTrigger::Step,
+            &activation.evicted,
+        );
         PlannedToolCalls {
             plans,
             hook_contexts,
@@ -5005,16 +5011,16 @@ impl Engine {
     /// Park a bounded-toolbox eviction note for the next recorded tool
     /// result, combining with any note already parked — turn-start
     /// revalidation and a hydration batch can both evict in the same turn.
-    pub(super) fn park_toolbox_eviction_note(&mut self, trigger: &str, evicted: &[String]) {
-        if evicted.is_empty() {
-            return;
-        }
-        let note = super::tool_catalog::bounded_toolbox_eviction_note(trigger, evicted);
-        self.session.pending_toolbox_eviction_note =
-            Some(match self.session.pending_toolbox_eviction_note.take() {
-                Some(existing) => format!("{existing}\n\n{note}"),
-                None => note,
-            });
+    pub(super) fn park_toolbox_eviction_note(
+        &mut self,
+        trigger: crate::core::session::ToolboxEvictionTrigger,
+        evicted: &[String],
+    ) {
+        super::tool_catalog::park_toolbox_eviction(
+            &mut self.session.pending_toolbox_eviction_notes,
+            trigger,
+            evicted,
+        );
     }
 
     /// Commit collected tool outcomes to the session and related runtime state.
@@ -5038,9 +5044,12 @@ impl Engine {
         // sidebar "Goal:" line stays stale for the whole (possibly long)
         // goal-loop turn while get_goal already reflects the new objective.
         let mut goal_tool_ran = false;
-        // Hydration-time toolbox evictions have no result payload of their
-        // own; the note rides the first recorded result of this batch.
-        let mut pending_eviction_note = self.session.pending_toolbox_eviction_note.take();
+        // Hydration-time and turn-start toolbox evictions have no result
+        // payload of their own; the notes ride the first recorded result of
+        // this batch. They stay structured until that attach so names the
+        // riding result re-admits can be netted out.
+        let mut pending_eviction_notes =
+            std::mem::take(&mut self.session.pending_toolbox_eviction_notes);
 
         for outcome in outcomes.into_iter().flatten() {
             let tool_input = outcome.input.clone();
@@ -5155,16 +5164,24 @@ impl Engine {
                         }
                         None => output_for_context,
                     };
-                    // The batch's hydration note and this result's own
+                    // The batch's parked notes and this result's own
                     // retrieval/touch evictions share one channel to the
-                    // model: the recorded result content.
+                    // model: the recorded result content. The parked notes
+                    // net against the live cache at attach so a name this
+                    // result hands back is never declared uncallable.
                     let mut eviction_notes = Vec::new();
-                    if let Some(note) = pending_eviction_note.take() {
-                        eviction_notes.push(note);
+                    if !pending_eviction_notes.is_empty() {
+                        if let Some(rendered) = super::tool_catalog::render_toolbox_eviction_notes(
+                            &mut pending_eviction_notes,
+                            &self.session.tool_activation_cache,
+                        ) {
+                            eviction_notes.push(rendered);
+                        }
+                        pending_eviction_notes.clear();
                     }
                     if !evicted_this_result.is_empty() {
                         eviction_notes.push(super::tool_catalog::bounded_toolbox_eviction_note(
-                            "step",
+                            crate::core::session::ToolboxEvictionTrigger::Step,
                             &evicted_this_result,
                         ));
                     }
@@ -5220,9 +5237,18 @@ impl Engine {
                         Some(&error),
                         &self.session.workspace,
                     );
-                    // A pending hydration-eviction note must still reach the
-                    // model when the batch's first result is an error.
-                    let error = match pending_eviction_note.take() {
+                    // A pending eviction note must still reach the model when
+                    // the batch's first result is an error, netted the same
+                    // way as on the success path.
+                    let mut note_text = None;
+                    if !pending_eviction_notes.is_empty() {
+                        note_text = super::tool_catalog::render_toolbox_eviction_notes(
+                            &mut pending_eviction_notes,
+                            &self.session.tool_activation_cache,
+                        );
+                        pending_eviction_notes.clear();
+                    }
+                    let error = match note_text {
                         Some(note) => format!("{error}\n\n{note}"),
                         None => error,
                     };
@@ -5242,12 +5268,12 @@ impl Engine {
         }
 
         // A batch whose outcomes all flattened away (a benchmark final-only
-        // skip, for example) has no result to carry the note. Re-park it so
-        // a later batch of this turn still delivers it; a turn that ends
-        // without another batch strands it, and the next turn's entry sweep
-        // drops it rather than letting it ride an unrelated result.
-        if let Some(note) = pending_eviction_note {
-            self.session.pending_toolbox_eviction_note = Some(note);
+        // skip, for example) has no result to carry the notes. Re-park them
+        // so a later batch of this turn still delivers them; a turn that ends
+        // without another batch strands them, and the next turn's entry sweep
+        // drops them rather than letting them ride an unrelated result.
+        if !pending_eviction_notes.is_empty() {
+            self.session.pending_toolbox_eviction_notes = pending_eviction_notes;
         }
 
         // Reflect a mid-turn goal change on the sidebar immediately (idempotent:
