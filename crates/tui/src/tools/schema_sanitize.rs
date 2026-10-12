@@ -2592,6 +2592,37 @@ mod kimi_tests {
         sanitize_for_kimi_parameters(&mut with_defs).expect("root items beside $defs repair");
         assert!(with_defs.get("items").is_none());
         assert_eq!(with_defs["$defs"]["rows"], json!({"type": "array"}));
+
+        // Every schema-value position the validator recurses into must be
+        // visited: an empty `items` inside an object-form
+        // `additionalProperties` or an `anyOf` branch repairs too, and a
+        // walker that skips either position would strand the node and fail
+        // the whole tool with MissingType.
+        let mut nested_positions = json!({
+            "type": "object",
+            "properties": {
+                "map": {
+                    "type": "object",
+                    "additionalProperties": {"type": "array", "items": {}}
+                },
+                "choice": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {}}
+                    ]
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut nested_positions)
+            .expect("additionalProperties and anyOf empty items repair");
+        assert_eq!(
+            nested_positions["properties"]["map"]["additionalProperties"],
+            json!({"type": "array"})
+        );
+        assert_eq!(
+            nested_positions["properties"]["choice"]["anyOf"][1],
+            json!({"type": "array"})
+        );
     }
 
     #[test]
