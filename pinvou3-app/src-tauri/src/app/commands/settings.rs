@@ -1,5 +1,6 @@
 use super::prelude::*;
 use crate::platform::credential_store::CredentialReference;
+use crate::platform::prefs::ModelSelectionRef;
 
 /// 从 disk 读最新 UserPrefs。
 /// 注意走 disk 而非 engine.bridge.prefs——如果用户手改 settings.json，
@@ -11,7 +12,7 @@ pub async fn get_settings() -> Result<UserPrefs, String> {
 
 fn prepare_prefs_for_save(mut prefs: UserPrefs) -> Result<UserPrefs, String> {
     let store = SystemCredentialStore::new();
-    prefs.ensure_builtin_llmapi_model();
+    prefs.ensure_builtin_account_platform_model();
     prefs.normalize_saved_model_metadata();
     let migration = prefs.migrate_plaintext_api_keys_with_store(&store);
     if !migration.failed_model_ids.is_empty() || !migration.failed_search_providers.is_empty() {
@@ -233,12 +234,12 @@ pub struct ModelListItem {
 
 impl From<SavedModel> for ModelListItem {
     fn from(model: SavedModel) -> Self {
-        let builtin_llmapi = model.is_builtin_llmapi();
+        let builtin_account_platform = model.is_builtin_account_platform();
         Self {
             model,
-            readonly: builtin_llmapi,
-            system: builtin_llmapi,
-            kind: builtin_llmapi.then(|| "builtin_llmapi".to_string()),
+            readonly: builtin_account_platform,
+            system: builtin_account_platform,
+            kind: builtin_account_platform.then(|| "builtin_account_platform".to_string()),
         }
     }
 }
@@ -247,6 +248,7 @@ impl From<SavedModel> for ModelListItem {
 pub struct ModelsView {
     pub models: Vec<ModelListItem>,
     pub active_model_id: Option<String>,
+    pub default_model_ref: Option<ModelSelectionRef>,
 }
 
 #[tauri::command]
@@ -261,6 +263,7 @@ pub async fn list_models() -> Result<ModelsView, String> {
             .map(ModelListItem::from)
             .collect(),
         active_model_id: prefs.advanced.active_model_id.clone(),
+        default_model_ref: prefs.advanced.default_model_ref.clone(),
     })
 }
 
@@ -347,7 +350,7 @@ pub async fn reveal_model_api_key(id: String) -> Result<Option<String>, String> 
 /// 需要确证时用户可在表单里手动「测试图片能力」。
 #[tauri::command]
 pub async fn save_model(model: SavedModel, pool: State<'_, EnginePool>) -> Result<(), String> {
-    if model.is_builtin_llmapi() {
+    if model.is_builtin_account_platform() {
         return Err("内置模型不可编辑".to_string());
     }
     let model_id = model.id.clone();
@@ -389,7 +392,7 @@ pub(super) fn save_model_inner(
     Ok(())
 }
 
-/// 删一条模型。至少保留一条;删到当前 active 会自动回退列表首条。
+/// 删一条用户模型；内置 Account Platform 模型始终保留。
 #[tauri::command]
 pub async fn delete_model(id: String) -> Result<(), String> {
     delete_model_inner(&id, &SystemCredentialStore::new())
@@ -404,7 +407,7 @@ pub(super) fn delete_model_inner(id: &str, store: &dyn CredentialStore) -> Resul
     UserPrefs::update_transaction(|prefs| {
         if prefs
             .model_by_id(id)
-            .is_some_and(|model| model.is_builtin_llmapi())
+            .is_some_and(|model| model.is_builtin_account_platform())
         {
             return Err("内置模型不可删除".to_string());
         }
@@ -436,11 +439,13 @@ pub(super) fn delete_model_inner(id: &str, store: &dyn CredentialStore) -> Resul
 #[tauri::command]
 pub async fn set_active_model(id: String, app: AppHandle) -> Result<(), String> {
     UserPrefs::update_transaction(|prefs| {
-        if prefs.model_by_id(&id).is_none() {
-            return Err(format!("model not found: {id}"));
+        let model = prefs
+            .model_by_id(&id)
+            .ok_or_else(|| format!("model not found: {id}"))?;
+        if model.is_builtin_account_platform() {
+            return Err("select a concrete Account Platform catalog model".to_string());
         }
-        prefs.advanced.active_model_id = Some(id.clone());
-        Ok(())
+        prefs.set_default_model_ref(ModelSelectionRef::local(&id))
     })
     .map_err(|e| sanitize_command_error("set_active_model", e))?;
     if let Some(model) = UserPrefs::load().model_by_id(&id) {
@@ -509,6 +514,16 @@ pub async fn get_session_model_id(
     store: State<'_, SessionStore>,
 ) -> Result<Option<String>, String> {
     Ok(store.session_model_id(&session_id))
+}
+
+/// Source-aware selection frozen for this session. Legacy callers can keep
+/// using `get_session_model_id`, which exposes the runtime SavedModel carrier.
+#[tauri::command]
+pub async fn get_session_model_ref(
+    session_id: String,
+    store: State<'_, SessionStore>,
+) -> Result<Option<ModelSelectionRef>, String> {
+    Ok(store.session_model_ref(&session_id))
 }
 
 /// 当前有效模型的图片输入能力(设计 §6.3/§9.2,阶段 G)。前端选图即时警告据此
@@ -1448,6 +1463,9 @@ fn apply_general_settings_patch(current: &mut UserPrefs, patch: GeneralSettingsP
         // 模型列表和激活项有各自的专用写命令。即使高级设置来自旧快照，也无权覆盖它们。
         advanced.saved_models = current.advanced.saved_models.clone();
         advanced.active_model_id = current.advanced.active_model_id.clone();
+        advanced.default_model_ref = current.advanced.default_model_ref.clone();
+        advanced.account_platform_default_model =
+            current.advanced.account_platform_default_model.clone();
         current.advanced = advanced;
     }
 }

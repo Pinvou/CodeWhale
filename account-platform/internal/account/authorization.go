@@ -1,0 +1,417 @@
+package account
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	platformauthorization "github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+)
+
+const (
+	PermissionPlatformUsersRead            = "platform.users.read"
+	PermissionPlatformUsersStatusManage    = "platform.users.status.manage"
+	PermissionPlatformRegistrationsRepair  = "platform.registrations.repair"
+	PermissionPlatformProfileChangesRepair = "platform.profile-changes.repair"
+	PermissionPlatformSMSConfigRead        = "platform.sms-config.read"
+	PermissionPlatformSMSConfigManage      = "platform.sms-config.manage"
+	PermissionPersonalBillingRead          = "personal.billing.read"
+	PermissionPersonalSessionLogin         = "personal.session.login"
+	PermissionPersonalProfileRead          = "personal.profile.read"
+	PermissionPersonalProfileUpdate        = "personal.profile.update"
+	PermissionPersonalSecurityManage       = "personal.security.manage"
+)
+
+type AuthorizationDecision struct {
+	Allowed                          bool       `json:"allowed"`
+	UserID                           uuid.UUID  `json:"user_id"`
+	UserStatus                       string     `json:"user_status"`
+	Permission                       string     `json:"permission"`
+	PermissionScope                  string     `json:"permission_scope"`
+	OrganizationID                   *uuid.UUID `json:"organization_id,omitempty"`
+	ContextVersion                   int64      `json:"context_version"`
+	AuthorizationVersion             int64      `json:"authorization_version"`
+	PersonalAuthorizationVersion     int64      `json:"personal_authorization_version"`
+	PlatformAuthorizationVersion     int64      `json:"platform_authorization_version"`
+	OrganizationAuthorizationVersion int64      `json:"organization_authorization_version"`
+	GrantedPermissions               []string   `json:"granted_permissions,omitempty"`
+}
+
+type PermissionCheck struct {
+	Issuer         string     `json:"issuer"`
+	Subject        string     `json:"subject"`
+	Permission     string     `json:"permission"`
+	AnyPermissions []string   `json:"any_permissions,omitempty"`
+	AllPermissions []string   `json:"all_permissions,omitempty"`
+	OrganizationID *uuid.UUID `json:"target_organization_id,omitempty"`
+	UnitID         *uuid.UUID `json:"target_unit_id,omitempty"`
+}
+
+type authorizationRepository interface {
+	Authorize(context.Context, identity.Principal, string, *uuid.UUID, *uuid.UUID) (AuthorizationDecision, error)
+}
+
+type compositeAuthorizationRepository interface {
+	AuthorizeComposite(context.Context, identity.Principal, []string, []string) (AuthorizationDecision, error)
+}
+
+func (r *PostgresRepository) Authorize(ctx context.Context, principal identity.Principal, permission string, organizationID, unitID *uuid.UUID) (AuthorizationDecision, error) {
+	permission = canonicalPermissionCode(permission)
+	if !f01PermissionAllowed(permission) || organizationID != nil || unitID != nil {
+		return AuthorizationDecision{}, ErrForbidden
+	}
+	var decision AuthorizationDecision
+	var roleGranted bool
+	decision.Permission = permission
+	decision.OrganizationID = organizationID
+	err := r.pool.QueryRow(ctx, `
+WITH permission_definition AS (
+    SELECT scope FROM permissions WHERE code=$3
+)
+SELECT u.id,u.status,COALESCE(active.context_version,1),COALESCE(pd.scope,''),
+       COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id AND scope='PERSONAL' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1),
+       COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id AND scope='PLATFORM' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1),
+       COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id AND scope='ORGANIZATION' AND scope_id=$4),1),
+       EXISTS(
+         SELECT 1
+         FROM role_assignments ra
+         JOIN roles ro ON ro.code=ra.role_code
+         JOIN role_permissions rp ON rp.role_code=ra.role_code AND rp.permission_code=$3
+         WHERE ra.user_id=u.id
+	       AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
+           AND (
+             (pd.scope='PERSONAL' AND $4::uuid IS NULL AND $5::uuid IS NULL AND ro.scope='PERSONAL' AND ra.organization_id IS NULL AND ra.unit_id IS NULL)
+             OR (pd.scope='PLATFORM' AND $4::uuid IS NULL AND $5::uuid IS NULL AND ro.scope='PLATFORM' AND ra.organization_id IS NULL AND ra.unit_id IS NULL)
+
+           )
+       )
+FROM identities i
+JOIN users u ON u.id=i.user_id
+LEFT JOIN user_active_contexts active ON active.user_id=u.id
+LEFT JOIN permission_definition pd ON true
+WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject, permission, organizationID, unitID).Scan(
+		&decision.UserID, &decision.UserStatus, &decision.ContextVersion, &decision.PermissionScope,
+		&decision.PersonalAuthorizationVersion, &decision.PlatformAuthorizationVersion,
+		&decision.OrganizationAuthorizationVersion, &roleGranted,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AuthorizationDecision{}, ErrForbidden
+	}
+	if err != nil {
+		return AuthorizationDecision{}, err
+	}
+	decision.Allowed = roleGranted && permissionAllowedForUserStatus(decision.UserStatus, permission)
+	switch decision.PermissionScope {
+	case "PERSONAL":
+		decision.AuthorizationVersion = decision.PersonalAuthorizationVersion
+	case "PLATFORM":
+		decision.AuthorizationVersion = decision.PlatformAuthorizationVersion
+	case "ORGANIZATION", "UNIT":
+		decision.AuthorizationVersion = decision.OrganizationAuthorizationVersion
+	default:
+		decision.AuthorizationVersion = 1
+	}
+	return decision, nil
+}
+
+func canonicalPermissionSet(values []string) ([]string, error) {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = canonicalPermissionCode(value)
+		if value == "" {
+			return nil, ErrForbidden
+		}
+		if _, exists := seen[value]; !exists {
+			seen[value] = struct{}{}
+			result = append(result, value)
+		}
+	}
+	if len(result) > 16 {
+		return nil, ErrForbidden
+	}
+	return result, nil
+}
+
+// AuthorizeComposite evaluates a platform permission expression from one
+// PostgreSQL statement, so grants and the authorization version are one
+// indivisible snapshot. It intentionally supports only platform permissions.
+func (r *PostgresRepository) AuthorizeComposite(ctx context.Context, principal identity.Principal, anyPermissions, allPermissions []string) (AuthorizationDecision, error) {
+	anyPermissions, err := canonicalPermissionSet(anyPermissions)
+	if err != nil {
+		return AuthorizationDecision{}, ErrForbidden
+	}
+	allPermissions, err = canonicalPermissionSet(allPermissions)
+	if err != nil || len(anyPermissions)+len(allPermissions) == 0 {
+		return AuthorizationDecision{}, ErrForbidden
+	}
+	requested, err := canonicalPermissionSet(append(append([]string{}, anyPermissions...), allPermissions...))
+	if err != nil {
+		return AuthorizationDecision{}, ErrForbidden
+	}
+	for _, permission := range requested {
+		if !f01PermissionAllowed(permission) {
+			return AuthorizationDecision{}, ErrForbidden
+		}
+	}
+	var decision AuthorizationDecision
+	var allPlatform bool
+	err = r.pool.QueryRow(ctx, `
+WITH requested(permission) AS (SELECT DISTINCT unnest($3::text[])),
+principal AS (
+  SELECT account_user.id,account_user.status,COALESCE(active.context_version,1) context_version,
+         COALESCE((SELECT version FROM authorization_versions WHERE user_id=account_user.id AND scope='PERSONAL' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1) personal_version,
+         COALESCE((SELECT version FROM authorization_versions WHERE user_id=account_user.id AND scope='PLATFORM' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1) platform_version
+  FROM identities identity_record
+  JOIN users account_user ON account_user.id=identity_record.user_id
+  LEFT JOIN user_active_contexts active ON active.user_id=account_user.id
+  WHERE identity_record.issuer=$1 AND identity_record.subject=$2
+), evaluated AS (
+  SELECT requested.permission,permission.scope,
+         EXISTS(
+           SELECT 1 FROM role_assignments assignment
+           JOIN roles role ON role.code=assignment.role_code AND role.scope='PLATFORM'
+           JOIN role_permissions edge ON edge.role_code=assignment.role_code AND edge.permission_code=requested.permission
+           WHERE assignment.user_id=principal.id AND assignment.organization_id IS NULL AND assignment.unit_id IS NULL
+             AND assignment.revoked_at IS NULL AND assignment.starts_at<=transaction_timestamp()
+             AND (assignment.expires_at IS NULL OR assignment.expires_at>transaction_timestamp())
+         ) granted
+  FROM principal CROSS JOIN requested LEFT JOIN permissions permission ON permission.code=requested.permission
+)
+SELECT principal.id,principal.status,principal.context_version,principal.personal_version,principal.platform_version,
+       COALESCE(array_agg(evaluated.permission ORDER BY evaluated.permission) FILTER (WHERE evaluated.granted),'{}'::text[]),
+       COALESCE(bool_and(evaluated.scope='PLATFORM'),false)
+FROM principal CROSS JOIN evaluated
+GROUP BY principal.id,principal.status,principal.context_version,principal.personal_version,principal.platform_version`, principal.Issuer, principal.Subject, requested).Scan(
+		&decision.UserID, &decision.UserStatus, &decision.ContextVersion, &decision.PersonalAuthorizationVersion,
+		&decision.PlatformAuthorizationVersion, &decision.GrantedPermissions, &allPlatform,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AuthorizationDecision{}, ErrForbidden
+	}
+	if err != nil {
+		return AuthorizationDecision{}, err
+	}
+	if !allPlatform {
+		return AuthorizationDecision{}, ErrForbidden
+	}
+	decision.PermissionScope = "PLATFORM"
+	decision.AuthorizationVersion = decision.PlatformAuthorizationVersion
+	granted := make(map[string]struct{}, len(decision.GrantedPermissions))
+	for _, permission := range decision.GrantedPermissions {
+		granted[permission] = struct{}{}
+	}
+	allGranted := true
+	for _, permission := range allPermissions {
+		_, ok := granted[permission]
+		allGranted = allGranted && ok
+	}
+	// An omitted branch is the identity element for its operator: an empty
+	// any-of branch is satisfied while an empty all-of branch is satisfied.
+	// The whole expression is still rejected above when both are empty.
+	anyGranted := len(anyPermissions) == 0
+	for _, permission := range anyPermissions {
+		_, ok := granted[permission]
+		anyGranted = anyGranted || ok
+	}
+	statusPermission := ""
+	if len(anyPermissions) > 0 {
+		statusPermission = anyPermissions[0]
+	}
+	if len(allPermissions) > 0 {
+		statusPermission = allPermissions[0]
+	}
+	decision.Allowed = permissionAllowedForUserStatus(decision.UserStatus, statusPermission) && allGranted && anyGranted
+	return decision, nil
+}
+
+func canonicalPermissionCode(permission string) string {
+	switch strings.TrimSpace(permission) {
+	case "model.invoke":
+		return "org.model.invoke"
+	case "organization.grant.reclaim_closed":
+		return "org.grants.reclaim_closed"
+	default:
+		return strings.TrimSpace(permission)
+	}
+}
+
+func permissionAllowedForUserStatus(status, permission string) bool {
+	switch status {
+	case "ACTIVE":
+		return true
+	case "PROVISIONING", "REPAIR_REQUIRED":
+		switch permission {
+		case PermissionPersonalSessionLogin, PermissionPersonalProfileRead, PermissionPersonalProfileUpdate, PermissionPersonalSecurityManage:
+			return true
+		}
+	case "CLOSING":
+		return false
+	}
+	return false
+}
+
+func (s *Service) contextVersionHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		principal, ok := identity.FromContext(c.Request.Context())
+		if !ok {
+			c.Next()
+			return
+		}
+		versions, err := readAuthorizationVersions(c.Request.Context(), s.repository, principal)
+		if err == nil {
+			c.Header("X-Context-Version", stringInt64(versions.ContextVersion))
+			c.Header("X-Authorization-Version", stringInt64(versions.AuthorizationVersion))
+			c.Header("X-Personal-Authorization-Version", stringInt64(versions.PersonalAuthorizationVersion))
+			c.Header("X-Platform-Authorization-Version", stringInt64(versions.PlatformAuthorizationVersion))
+			c.Header("X-Organization-Authorization-Version", stringInt64(versions.OrganizationAuthorizationVersion))
+		}
+		c.Next()
+	}
+}
+
+func (s *Service) requirePermission(permission string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		repository, ok := s.repository.(authorizationRepository)
+		principal, authenticated := identity.FromContext(c.Request.Context())
+		if !ok || !authenticated {
+			api.WriteError(c.Writer, http.StatusForbidden, "PERMISSION_DENIED", "the requested permission is not granted", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		decision, err := repository.Authorize(c.Request.Context(), principal, permission, nil, nil)
+		if err != nil && !errors.Is(err, ErrForbidden) {
+			api.WriteError(c.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		if err != nil || !decision.Allowed {
+			if auditor, auditOK := s.repository.(interface {
+				RecordPermissionDenial(context.Context, identity.Principal, string, string) error
+			}); auditOK {
+				_ = auditor.RecordPermissionDenial(c.Request.Context(), principal, permission, c.Request.URL.Path)
+			}
+			api.WriteError(c.Writer, http.StatusForbidden, "PERMISSION_DENIED", "the requested permission is not granted", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		writeAuthorizationVersions(c.Writer.Header(), decision)
+		c.Next()
+	}
+}
+
+func (s *Service) requireAnyPermission(permissions ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		repository, ok := s.repository.(authorizationRepository)
+		principal, authenticated := identity.FromContext(c.Request.Context())
+		if !ok || !authenticated {
+			api.WriteError(c.Writer, http.StatusForbidden, "PERMISSION_DENIED", "none of the requested permissions is granted", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		granted := make([]string, 0, len(permissions))
+		var lastDecision AuthorizationDecision
+		for _, permission := range permissions {
+			decision, err := repository.Authorize(c.Request.Context(), principal, permission, nil, nil)
+			if err != nil {
+				api.WriteError(c.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(c.Request.Context()))
+				c.Abort()
+				return
+			}
+			lastDecision = decision
+			if decision.Allowed {
+				granted = append(granted, permission)
+			}
+		}
+		if len(granted) == 0 {
+			api.WriteError(c.Writer, http.StatusForbidden, "PERMISSION_DENIED", "none of the requested permissions is granted", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		writeAuthorizationVersions(c.Writer.Header(), lastDecision)
+		c.Request = c.Request.WithContext(platformauthorization.WithGrantedPermissions(c.Request.Context(), granted...))
+		c.Next()
+	}
+}
+
+func (r *PostgresRepository) RecordPermissionDenial(ctx context.Context, principal identity.Principal, permission, resourcePath string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	actorID, err := adminActorID(ctx, tx, principal)
+	if err != nil {
+		return err
+	}
+	if err := appendAdminAuditResult(ctx, tx, actorID, principal, nil, "authorization.permission.denied", "http_route", resourcePath, "DENIED", map[string]any{"permission": strings.TrimSpace(permission)}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func writeAuthorizationVersions(header http.Header, decision AuthorizationDecision) {
+	header.Set("X-Context-Version", strings.TrimSpace(stringInt64(decision.ContextVersion)))
+	header.Set("X-Authorization-Version", strings.TrimSpace(stringInt64(decision.AuthorizationVersion)))
+	header.Set("X-Personal-Authorization-Version", strings.TrimSpace(stringInt64(decision.PersonalAuthorizationVersion)))
+	header.Set("X-Platform-Authorization-Version", strings.TrimSpace(stringInt64(decision.PlatformAuthorizationVersion)))
+	header.Set("X-Organization-Authorization-Version", strings.TrimSpace(stringInt64(decision.OrganizationAuthorizationVersion)))
+}
+
+func stringInt64(value int64) string {
+	if value < 1 {
+		value = 1
+	}
+	return strconv.FormatInt(value, 10)
+}
+
+func (s *Service) checkPermission(w http.ResponseWriter, r *http.Request) {
+	var request PermissionCheck
+	if err := api.DecodeJSON(w, r, &request); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid permission check", httpserver.RequestID(r.Context()))
+		return
+	}
+	request.Issuer = strings.TrimSpace(request.Issuer)
+	request.Subject = strings.TrimSpace(request.Subject)
+	request.Permission = strings.TrimSpace(request.Permission)
+	composite := len(request.AnyPermissions) > 0 || len(request.AllPermissions) > 0
+	if request.Issuer == "" || request.Subject == "" || (request.Permission == "") == !composite || (request.UnitID != nil && request.OrganizationID == nil) || (composite && (request.OrganizationID != nil || request.UnitID != nil)) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid permission check", httpserver.RequestID(r.Context()))
+		return
+	}
+	repository, ok := s.repository.(authorizationRepository)
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	var decision AuthorizationDecision
+	var err error
+	if composite {
+		compositeRepository, available := s.repository.(compositeAuthorizationRepository)
+		if !available {
+			api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
+		decision, err = compositeRepository.AuthorizeComposite(r.Context(), identity.Principal{Issuer: request.Issuer, Subject: request.Subject}, request.AnyPermissions, request.AllPermissions)
+	} else {
+		decision, err = repository.Authorize(r.Context(), identity.Principal{Issuer: request.Issuer, Subject: request.Subject}, request.Permission, request.OrganizationID, request.UnitID)
+	}
+	if err != nil && !errors.Is(err, ErrForbidden) {
+		s.writeError(w, r, err)
+		return
+	}
+	if errors.Is(err, ErrForbidden) {
+		decision = AuthorizationDecision{Allowed: false, Permission: request.Permission, OrganizationID: request.OrganizationID}
+	}
+	writeAuthorizationVersions(w.Header(), decision)
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, decision)
+}

@@ -85,6 +85,17 @@ function jobBlock(name) {
   return match[0];
 }
 
+// Read one named step; another gate in the same job must never become part
+// of its isolated fixture, regardless of the step's position in the job.
+function stepRun(job, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const step = job.match(new RegExp(`^ {6}- name: ${escaped}\\r?\\n[\\s\\S]*?(?=^ {6}- |$(?![\\s\\S]))`, "m"));
+  assert.ok(step, `step '${name}' not found`);
+  const run = step[0].match(/^ {8}run: \|\r?\n([\s\S]*)/m);
+  assert.ok(run, `step '${name}' has no literal run block`);
+  return run[1].replace(/^ {10}/gm, "");
+}
+
 const bash = process.platform === "win32" && existsSync("C:/Program Files/Git/bin/bash.exe")
   ? "C:/Program Files/Git/bin/bash.exe" : "bash";
 
@@ -123,7 +134,7 @@ test("container CI uses immutable official cache images without losing either bu
 
 test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
   const paths = filterPaths(workflow, "account_platform");
-  for (const path of ["account-platform/**", "scripts/account-platform*", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
+  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
     assert.ok(paths.includes(path), `Go routing must cover ${path}`);
   }
   assert.match(workflow, /account_platform: \$\{\{ steps\.filter\.outputs\.account_platform \}\}/);
@@ -133,12 +144,23 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
   assert.match(job, /go-version-file: account-platform\/go\.mod/);
   assert.match(job, /GOTOOLCHAIN: local/);
   assert.match(job, /CGO_ENABLED: "1"/);
+  const run = stepRun(job, "Verify Token management authorization contracts");
+  assert.deepEqual(run.trim().split(/\r?\n/), [
+    "node scripts/check-token-management-authorization-coverage.mjs",
+    "node --test scripts/tests/token-management-authorization-coverage.test.mjs",
+  ]);
+  for (const [checkerStatus, formalStatus, expectedOutput, expectedStatus] of [[7, 0, "checker", 7], [0, 8, "checkerformal", 8], [0, 0, "checkerformal", 0]]) {
+    const fixture = `node() { if [[ "$1" == scripts/check-token-management-authorization-coverage.mjs ]]; then printf checker; return ${checkerStatus}; else printf formal; return ${formalStatus}; fi; };\n`;
+    const result = spawnSync(bash, ["-e", "-c", fixture + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, expectedStatus, result.stderr);
+    assert.equal(result.stdout, expectedOutput);
+  }
   assert.doesNotMatch(job, /secrets\.|services:|continue-on-error:/);
 });
 
 test("Go gate executes test and vet for root and future nested modules, and fails on errors", () => {
   const job = jobBlock("account-platform-test");
-  const run = job.match(/        run: \|\r?\n([\s\S]*)/)[1].replace(/^ {10}/gm, "");
+  const run = stepRun(job, "Test and vet all Account Platform Go modules");
   const directory = mkdtempSync(join(tmpdir(), "pinvou-go-gate-"));
   try {
     for (const module of ["account-platform", "account-platform/tools/kms-recovery", "account-platform/tools/future tool"]) {
@@ -163,6 +185,28 @@ test("Go gate executes test and vet for root and future nested modules, and fail
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("Keycloak contract gate invokes the existing suite and propagates failure", () => {
+  const run = stepRun(jobBlock("account-platform-test"), "Keycloak provisioning and theme contracts");
+  const prefix = "python3() { printf '%s|%s\\n' \"$PINVOU_TEST_BASH\" \"$*\"; }; export -f python3;\n";
+  const result = spawnSync(bash, ["-c", prefix + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+  assert.equal(result.status, 0, result.stderr);
+  const calls = result.stdout.trim().split("\n");
+  assert.equal(calls.length, 1, result.stdout);
+  const [shell, script] = calls[0].split("|");
+  assert.ok(shell, "the suite must receive an explicit POSIX shell");
+  assert.equal(script, "account-platform/deploy/keycloak/test/provision_mobile_auth_test.py");
+  const failed = spawnSync(bash, ["-c", "python3() { return 7; }; export -f python3;\n" + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+  assert.equal(failed.status, 7, "a failing Keycloak contract must fail the gate");
+});
+
+test("named step fixtures exclude later steps and fail closed on missing names", () => {
+  const job = jobBlock("account-platform-test");
+  const name = "Test and vet all Account Platform Go modules";
+  const later = "      - name: Unrelated fixture\n        run: |\n          exit 99\n";
+  assert.equal(stepRun(job + later, name), stepRun(job, name));
+  assert.throws(() => stepRun(job, "Missing gate"), /not found/);
 });
 
 test("required-gate rejects skipped applicable Go checks and permits unrelated skips", () => {

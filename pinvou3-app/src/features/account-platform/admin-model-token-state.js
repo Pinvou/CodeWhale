@@ -1,0 +1,77 @@
+
+export function initialAdminSourceState() {
+  return { items: [], loading: false, error: null, retryAt: 0, page: null, updatedAt: null, queryKey: '', requestID: 0 };
+}
+
+export function visibleAdminSourceState(state, queryKey, enabled) {
+  if (state.queryKey === queryKey) return state;
+  return {
+    ...state,
+    items: [],
+    page: null,
+    updatedAt: null,
+    loading: Boolean(enabled),
+    error: null,
+    retryAt: 0,
+    queryKey,
+  };
+}
+
+export function reduceAdminSourceState(state, event) {
+  if (event.type === 'start') {
+    const sameQuery = state.queryKey === event.queryKey;
+    return {
+      ...state,
+      items: sameQuery ? state.items : [],
+      page: sameQuery ? state.page : null,
+      updatedAt: sameQuery ? state.updatedAt : null,
+      queryKey: event.queryKey,
+      requestID: event.requestID,
+      loading: true,
+      error: null,
+      retryAt: 0,
+    };
+  }
+  if (event.requestID !== state.requestID || event.queryKey !== state.queryKey) return state;
+  if (event.type === 'success') {
+    const payload = event.payload || {};
+    return {
+      ...state,
+      items: Array.isArray(payload.items) ? payload.items : [],
+      loading: false,
+      error: null,
+      retryAt: 0,
+      page: {
+        nextCursor: typeof payload.next_cursor === 'string' ? payload.next_cursor : '',
+        hasMore: Boolean(payload.has_more),
+        limit: Number(payload.limit || 50),
+        asOf: payload.as_of || null,
+        expiresAt: payload.snapshot_expires_at || null,
+      },
+      updatedAt: payload.as_of || event.completedAt,
+    };
+  }
+  if (event.type === 'failure') {
+    const retryAfterSeconds = Number(event.error?.retryAfterSeconds || 0);
+    const completedAt = Date.parse(event.completedAt || '');
+    return {
+      ...state,
+      loading: false,
+      error: event.error,
+      retryAt: retryAfterSeconds > 0 && Number.isFinite(completedAt) ? completedAt + retryAfterSeconds * 1000 : 0,
+    };
+  }
+  return state;
+}
+
+export async function executeAdminSourceRequest({ requestID, queryKey, query, load, signal, transition, now = () => new Date().toISOString() }) {
+  transition({ type: 'start', requestID, queryKey });
+  try {
+    const payload = await load(query, signal);
+    if (signal?.aborted) return;
+    transition({ type: 'success', requestID, queryKey, payload, completedAt: now() });
+  } catch (error) {
+    if (signal?.aborted || error?.name === 'AbortError') return;
+    transition({ type: 'failure', requestID, queryKey, error, completedAt: now() });
+  }
+}

@@ -1,0 +1,100 @@
+# Render public host and private Keycloak DNS origin from verified site metadata.
+# Keep the rendered file private; do not render secret env files or request logs.
+worker_processes 1;
+pid /tmp/nginx.pid;
+error_log /dev/null crit;
+events { worker_connections 1024; }
+http {
+    access_log off;
+    client_body_temp_path /tmp/client_body;
+    proxy_temp_path /tmp/proxy;
+    server_tokens off;
+    # Docker's embedded resolver refreshes recreated upstream containers.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    resolver_timeout 2s;
+    map $keycloak_origin $keycloak_tls_name {
+        ~^(?<keycloak_dns_name>[^:]+)(?::[0-9]+)?$ $keycloak_dns_name;
+        default "";
+    }
+    server {
+        listen 8443 ssl;
+        server_name __PUBLIC_HOST__;
+        set $account_origin account-service:8080;
+        set $identity_origin identity-service:8080;
+        set $token_origin token-gateway:8080;
+        set $portal_origin token-portal:8080;
+        set $billing_origin billing-service:8080;
+        set $keycloak_origin __KEYCLOAK_ORIGIN__;
+        ssl_certificate /run/pinvou/public-tls/server.crt;
+        ssl_certificate_key /run/pinvou/public-tls/server.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        client_max_body_size 2m;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Port __PUBLIC_TLS_PORT__;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Pinvou-Client-Source $remote_addr;
+        proxy_buffering off;
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /run/pinvou/trust/ca.crt;
+        proxy_ssl_server_name on;
+        proxy_ssl_name $keycloak_tls_name;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+        location = /account/internal { return 404; }
+        location ^~ /account/internal/ { return 404; }
+        location = /account/admin { return 404; }
+        location ^~ /account/admin/ { return 404; }
+        location = /token/admin { return 404; }
+        location ^~ /token/admin/ { return 404; }
+        location = /token/internal { return 404; }
+        location ^~ /identity/internal/ { return 404; }
+        location ^~ /token/internal/ { return 404; }
+        location ^~ /internal/ { return 404; }
+        location ^~ /admin/ { return 404; }
+        # Only the authenticated provider callback pair reaches Billing.
+        # Wallet/admin/internal routes remain private to the service network.
+        location = /api/v1/payment-callback/token {
+            limit_except POST { deny all; }
+            proxy_pass http://$billing_origin;
+        }
+        location = /api/v1/payment-callbacks {
+            limit_except POST { deny all; }
+            proxy_pass http://$billing_origin;
+        }
+        location /billing/ { return 404; }
+        # Token admission must run before forwarding a user token grant.
+        location = /realms/pinvou/protocol/openid-connect/token {
+            proxy_pass http://$identity_origin;
+        }
+        # Only realm and static-theme public paths reach Keycloak. Its admin
+        # API and management listener are never exposed by this edge.
+        location /realms/pinvou/ { proxy_pass https://$keycloak_origin; }
+        location /realms/ { return 404; }
+        location /resources/ { proxy_pass https://$keycloak_origin; }
+        location /account/ {
+            rewrite ^/account/(.*)$ /$1 break;
+            proxy_pass http://$account_origin;
+        }
+        location = /identity/v1/registration/password-prechecks {
+            rewrite ^/identity/(.*)$ /$1 break;
+            proxy_pass http://$identity_origin;
+        }
+        location /identity/ { return 404; }
+        location /token/ {
+            rewrite ^/token/(.*)$ /$1 break;
+            proxy_pass http://$token_origin;
+        }
+        # Large imports still pass through Portal session/CSRF and Billing RBAC.
+        location = /api/admin/billing/admin/v1/reconciliation-imports {
+            limit_except POST { deny all; }
+            client_max_body_size 64m;
+            proxy_pass http://$portal_origin;
+        }
+        location / { proxy_pass http://$portal_origin; }
+    }
+}

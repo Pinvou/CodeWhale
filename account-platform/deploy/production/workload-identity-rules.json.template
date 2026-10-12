@@ -1,0 +1,3 @@
+[
+  {"subject":"__ACCOUNT_WORKLOAD_SUBJECT__","service":"account-service","permissions":["internal.identity.password-reference.validate","internal.identity.user.create","internal.identity.registration.read","internal.identity.user.disable","internal.identity.username.update","internal.identity.mobile.update","internal.identity.password.reset","internal.identity.sessions.revoke"]}
+]

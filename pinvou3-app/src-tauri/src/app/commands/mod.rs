@@ -17,6 +17,7 @@
 //! - `get_or_create_aux_session(session_id)` / `discard_aux_session(session_id)`
 //! - `reset_aux_session(session_id)` (atomic discard+recreate, M6)
 
+pub(crate) mod account_platform;
 pub(crate) mod acp_providers;
 pub(crate) mod artifacts;
 pub(crate) mod assistant_response;
@@ -34,7 +35,7 @@ pub(crate) mod diagnostics;
 pub(crate) mod files;
 pub(crate) mod interaction;
 pub(crate) mod knowledge;
-pub(crate) mod llmapi;
+// Legacy source is retained for migration history; no runtime/invoke consumer remains.
 pub(crate) mod marketplace;
 pub(crate) mod memory;
 pub(crate) mod model_store;

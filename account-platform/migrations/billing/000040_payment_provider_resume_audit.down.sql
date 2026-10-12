@@ -1,0 +1,3 @@
+DROP TRIGGER IF EXISTS payment_provider_resume_executions_immutable ON payment_provider_resume_executions;
+DROP FUNCTION IF EXISTS protect_payment_provider_resume_execution();
+DROP TABLE IF EXISTS payment_provider_resume_executions;

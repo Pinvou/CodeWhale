@@ -1,0 +1,194 @@
+# Add after personal/workload/finance/reconciliation overlays. Only F04 management.
+name: pinvou-personal
+x-model-runtime: &runtime
+  pull_policy: never
+  user: "65532:65532"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 256m
+  cpus: 0.5
+  pids_limit: 96
+  ulimits: {core: {soft: 0, hard: 0}}
+  tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700"]
+  logging: {driver: local, options: {max-size: "10m", max-file: "3"}}
+  networks: [backend]
+x-model-http: &http
+  APP_ENV: production
+  PORT: "8080"
+  HEALTHCHECK_URL: http://127.0.0.1:8080/health/ready
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:?set verified HTTPS OTLP endpoint}
+  TRUSTED_TIME_SOURCES: ${TRUSTED_TIME_SOURCES:?set at least three verified independent time sources}
+  SSL_CERT_FILE: /run/pinvou/trust/ca.crt
+  WORKLOAD_IDENTITY_ISSUER: ${WORKLOAD_IDENTITY_ISSUER:?set verified workload realm issuer}
+  WORKLOAD_IDENTITY_JWKS_URL: ${WORKLOAD_IDENTITY_JWKS_URL:?set verified workload JWKS endpoint}
+  WORKLOAD_IDENTITY_AUDIENCE: pinvou-account-platform-internal
+  WORKLOAD_IDENTITY_CA_FILE: /run/pinvou/trust/ca.crt
+  WORKLOAD_IDENTITY_TOKEN_FILE: /run/pinvou/workload/token
+  INTERNAL_SERVICE_TOKEN: ""
+x-model-trust: &trust
+  type: bind
+  source: ${INFRA_CA_DIRECTORY:?set verified combined public/private CA directory}
+  target: /run/pinvou/trust
+  read_only: true
+  bind: {create_host_path: false}
+x-token-database: &database
+  type: bind
+  source: ${TOKEN_DATABASE_DIRECTORY:?set only Token pgpass directory}
+  target: /run/pinvou/database
+  read_only: true
+  bind: {create_host_path: false}
+x-token-kms: &kms
+  type: bind
+  source: ${TOKEN_KMS_TOKEN_DIRECTORY:?set only Gateway projected transit token directory}
+  target: /run/pinvou/kms
+  read_only: true
+  bind: {create_host_path: false}
+services:
+  token-migrate:
+    <<: *runtime
+    image: ${MIGRATE_IMAGE:?set reviewed same-source migration image}
+    restart: "no"
+    command: [--dir, /migrations/token]
+    env_file:
+      - {path: "${TOKEN_MIGRATION_PRIVATE_ENV_FILE:?set only Token migrator DSN and verified backup evidence}", required: true, format: raw}
+    environment:
+      PINVOU_DEPLOYMENT_ENVIRONMENT: production-new
+      PGPASSFILE: /run/pinvou/database/pgpass
+      SSL_CERT_FILE: /run/pinvou/trust/ca.crt
+    volumes: [*trust, *database]
+    healthcheck: {disable: true}
+  account-service:
+    environment:
+      ACCOUNT_PLATFORM_PROFILE: models
+      TOKEN_HTTP_URL: http://token-gateway:8080
+      TOKEN_GOVERNANCE_POLICY_SET_DIGEST: ${TOKEN_GOVERNANCE_POLICY_SET_DIGEST:?set independently approved current policy digest}
+      TOKEN_GOVERNANCE_HANDLER_SET_DIGEST: ${TOKEN_GOVERNANCE_HANDLER_SET_DIGEST:?set independently approved nineteen-handler digest}
+  billing-service:
+    environment:
+      BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED: "true"
+      TOKEN_HOLD_EXPIRY_URL: ${TOKEN_HOLD_EXPIRY_URL:?set verified HTTPS Token internal endpoint for expiry recovery}
+  token-portal:
+    image: ${TOKEN_PORTAL_IMAGE:?set reviewed same-source F04 Portal image including current generated assets}
+    environment:
+      PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED: "true"
+      PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED: "true"
+      PORTAL_ADMIN_TOKEN_DETAILS_ENABLED: "true"
+      TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080
+      CREDENTIAL_PORTAL_PUBLIC_URL: ${CREDENTIAL_PORTAL_PUBLIC_URL:?set approved separate HTTPS credentials origin}
+  token-gateway:
+    image: ${TOKEN_GATEWAY_IMAGE:?set reviewed same-source F04 management image}
+    networks: [backend, kms]
+    environment:
+      <<: *http
+      ACCOUNT_PLATFORM_PROFILE: models
+      ACCOUNT_HTTP_URL: http://account-service:8080
+      BILLING_HTTP_URL: http://billing-service:8080
+      PGPASSFILE: /run/pinvou/database/pgpass
+      TOKEN_SECRET_PROVIDER: vault-transit
+      TOKEN_SECRET_PROVIDER_URL: ${TOKEN_SECRET_PROVIDER_URL:?set private verified transit HTTPS endpoint}
+      TOKEN_SECRET_PROVIDER_TOKEN_FILE: /run/pinvou/kms/token
+      TOKEN_SECRET_PROVIDER_CA_FILE: /run/pinvou/trust/ca.crt
+      TOKEN_SECRET_KEY_ID: ${TOKEN_SECRET_KEY_ID:?set current approved transit key version}
+      TOKEN_PROVIDER_CA_FILE: /run/pinvou/trust/ca.crt
+      TOKEN_PROVIDER_ALLOWED_HOSTS: ${TOKEN_PROVIDER_ALLOWED_HOSTS:?set exact allowed model provider DNS hosts}
+      TOKEN_CREDENTIAL_ISOLATION_ENABLED: "true"
+      TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED: "true"
+      TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED: "true"
+      TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED: "true"
+      TOKEN_ADMIN_PAGINATION_ENABLED: "true"
+    volumes: [*database, *kms]
+    depends_on:
+      token-migrate: {condition: service_completed_successfully}
+  approval-resources:
+    environment:
+      ACCOUNT_PLATFORM_PROFILE: models
+      TOKEN_CONSUMER_RESOURCE_RECEIPT_FILE: /run/pinvou/token-consumer-receipt/receipt.json
+    volumes:
+      - {type: bind, source: "${TOKEN_CONSUMER_PUBLIC_RECEIPT_DIRECTORY:?set independent empty Token resource receipt directory}", target: /run/pinvou/token-consumer-receipt, bind: {create_host_path: false}}
+  token-credential-portal:
+    <<: *runtime
+    networks: [backend, kms]
+    image: ${TOKEN_CREDENTIAL_PORTAL_IMAGE:?set reviewed same-source isolated credential image}
+    restart: unless-stopped
+    env_file:
+      - {path: "${TOKEN_CREDENTIAL_PRIVATE_ENV_FILE:?set only isolated Portal DSN and receiver rules file}", required: true, format: raw}
+    environment:
+      <<: *http
+      ACCOUNT_HTTP_URL: http://account-service:8080
+      PGPASSFILE: /run/pinvou/database/pgpass
+      TOKEN_SECRET_PROVIDER: vault-transit
+      TOKEN_SECRET_PROVIDER_URL: ${TOKEN_SECRET_PROVIDER_URL:?set verified private transit endpoint}
+      TOKEN_SECRET_KEY_ID: ${TOKEN_SECRET_KEY_ID:?set approved transit key version}
+      TOKEN_SECRET_PROVIDER_TOKEN_FILE: /run/pinvou/kms/token
+      TOKEN_SECRET_PROVIDER_CA_FILE: /run/pinvou/trust/ca.crt
+      TOKEN_PROVIDER_ALLOWED_HOSTS: ${TOKEN_PROVIDER_ALLOWED_HOSTS:?set exact approved provider hosts}
+      TOKEN_PROVIDER_CA_FILE: /run/pinvou/trust/ca.crt
+      CREDENTIAL_PORTAL_PUBLIC_URL: ${CREDENTIAL_PORTAL_PUBLIC_URL:?set separate approved credentials HTTPS origin}
+      PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:?set verified actual Portal origin}
+      OIDC_ISSUER: ${USER_OIDC_ISSUER:?set exact public user realm issuer}
+      CREDENTIAL_OIDC_AUTHORIZATION_URL: ${USER_OIDC_AUTHORIZATION_URL:?set same issuer authorization endpoint}
+      CREDENTIAL_OIDC_TOKEN_URL: ${USER_OIDC_TOKEN_URL:?set same issuer token endpoint}
+      OIDC_JWKS_URL: ${USER_OIDC_JWKS_URL:?set same issuer JWKS endpoint}
+      CREDENTIAL_OIDC_CLIENT_ID: ${CREDENTIAL_OIDC_CLIENT_ID:-pinvou-credentials}
+      CREDENTIAL_OIDC_AUDIENCE: ${CREDENTIAL_OIDC_CLIENT_ID:-pinvou-credentials}
+    volumes:
+      - *trust
+      - *database
+      - {type: bind, source: "${CREDENTIAL_KMS_TOKEN_DIRECTORY:?set only isolated credential Portal transit token directory}", target: /run/pinvou/kms, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${CREDENTIAL_WORKLOAD_TOKEN_DIRECTORY:?set only isolated Portal workload token directory}", target: /run/pinvou/workload, read_only: true, bind: {create_host_path: false}}
+    healthcheck: {test: [CMD, /healthcheck], interval: 10s, timeout: 3s, start_period: 20s, retries: 6}
+    depends_on:
+      token-migrate: {condition: service_completed_successfully}
+      token-credential-portal-workload-agent: {condition: service_healthy}
+  token-command-executor:
+    <<: *runtime
+    image: ${TOKEN_COMMAND_EXECUTOR_IMAGE:?set reviewed same-source nineteen-policy executor image}
+    restart: unless-stopped
+    env_file:
+      - {path: "${TOKEN_EXECUTOR_PRIVATE_ENV_FILE:?set only executor receiver rules file}", required: true, format: raw}
+    environment:
+      <<: *http
+      TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080
+      ACCOUNT_HTTP_URL: http://account-service:8080
+      NATS_URL: ${NATS_URL:?set verified TLS NATS endpoint}
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+    volumes:
+      - *trust
+      - {type: bind, source: "${TOKEN_EXECUTOR_NATS_DIRECTORY:?set only Token executor private NKey directory}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${TOKEN_EXECUTOR_WORKLOAD_TOKEN_DIRECTORY:?set only executor workload token directory}", target: /run/pinvou/workload, read_only: true, bind: {create_host_path: false}}
+    healthcheck: {test: [CMD, /healthcheck], interval: 10s, timeout: 3s, start_period: 20s, retries: 6}
+    depends_on:
+      token-gateway: {condition: service_healthy}
+      token-command-executor-workload-agent: {condition: service_healthy}
+  credential-edge:
+    image: ${PERSONAL_EDGE_IMAGE:?set pinned verified unprivileged nginx image}
+    pull_policy: never
+    user: "101:101"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    ulimits: {core: {soft: 0, hard: 0}}
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m,uid=101,gid=101,mode=0700"]
+    command: [nginx, -g, "daemon off;"]
+    ports:
+      - "${CREDENTIAL_EDGE_BIND_IP:?set independently verified credentials ingress address}:443:8443"
+    volumes:
+      - {type: bind, source: "${CREDENTIAL_EDGE_CONFIG_FILE:?set reviewed rendered credential nginx config}", target: /etc/nginx/nginx.conf, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${CREDENTIAL_EDGE_TLS_DIRECTORY:?set only credentials site certificate directory}", target: /run/pinvou/tls, read_only: true, bind: {create_host_path: false}}
+    logging: {driver: none}
+    depends_on:
+      token-credential-portal: {condition: service_healthy}
+    networks: [backend]
+networks:
+  backend:
+    external: true
+    name: ${PERSONAL_BACKEND_NETWORK:?set independently provisioned private dependency network}
+  kms:
+    external: true
+    name: ${OPENBAO_NETWORK:?set separately provisioned isolated transit network}

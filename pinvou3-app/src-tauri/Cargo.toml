@@ -88,6 +88,7 @@ tauri-plugin-notification = "2"
 
 # 异步 / 错误
 anyhow = "1.0"
+axum = { version = "0.8.5", features = ["json"] }
 async-trait = "0.1" # impl 底座 ToolSpec(kb_search Agentic 工具)
 agent-backend-api = { path = "../../pinvou-cli/crates/agent-backend-api", optional = true }
 tokio = { version = "1.49", features = ["full"] }
@@ -130,7 +131,7 @@ codewhale-execpolicy = { path = "../../CodeWhale/crates/execpolicy" }
 # Windows 系统代理设置(非环境变量)。此前 default-features=false 把它关掉,
 # 导致用「系统代理」模式(非 TUN)的用户模型请求直连而被代理工具的路由规则
 # 绕过。显式启用后,reqwest 在 Client::build() 时自动注入系统代理 matcher。
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "blocking", "stream", "query", "multipart", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "blocking", "stream", "query", "form", "multipart", "system-proxy"] }
 wait-timeout = "0.2"
 
 # rustls 直依赖:仅为在启动时调 aws_lc_rs::default_provider().install_default()

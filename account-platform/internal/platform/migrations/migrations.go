@@ -32,6 +32,11 @@ type Migration struct {
 // complete transaction back before the ledger can advance. Both hooks start as
 // the original migration role; elevated hooks must select authority explicitly.
 type UpHooks struct {
+	// ApplySQL may execute a checksum-pinned compatibility representation without
+	// changing the immutable source or the checksum recorded in the ledger.
+	ApplySQL func(context.Context, pgx.Tx, Migration) error
+	// LedgerRole separates migration history writes from runtime DML authority.
+	LedgerRole  string
 	BeforeApply func(context.Context, pgx.Tx, Migration) error
 	AfterApply  func(context.Context, pgx.Tx, Migration) error
 }
@@ -129,7 +134,11 @@ func UpWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migrati
 			err = setMigrationRole(ctx, tx, role)
 		}
 		if err == nil {
-			_, err = tx.Exec(ctx, migration.UpSQL)
+			if hooks.ApplySQL != nil {
+				err = hooks.ApplySQL(ctx, tx, migration)
+			} else {
+				_, err = tx.Exec(ctx, migration.UpSQL)
+			}
 		}
 		// Migration SQL may legitimately end under a trusted owner. Hooks are
 		// always entered as the original ledger/migration role; a hook that needs
@@ -144,11 +153,17 @@ func UpWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migrati
 		if err == nil {
 			err = setMigrationRole(ctx, tx, role)
 		}
+		if err == nil && hooks.LedgerRole != "" {
+			err = setMigrationRole(ctx, tx, hooks.LedgerRole)
+		}
 		if err == nil {
 			_, err = tx.Exec(ctx,
 				`INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)`,
 				migration.Version, migration.Name, migration.Checksum,
 			)
+		}
+		if err == nil && hooks.LedgerRole != "" {
+			err = setMigrationRole(ctx, tx, role)
 		}
 		if err != nil {
 			_ = tx.Rollback(ctx)
@@ -217,6 +232,13 @@ func checksum(value string) string {
 }
 
 func DownOne(ctx context.Context, connection *pgx.Conn, migrations []Migration) error {
+	return DownOneWithGuard(ctx, connection, migrations, nil)
+}
+
+// DownOneWithGuard checks domain-owned rollback invariants in the same
+// transaction as the original Down SQL and ledger removal. A rejected guard
+// leaves both data and migration history unchanged.
+func DownOneWithGuard(ctx context.Context, connection *pgx.Conn, migrations []Migration, guard func(context.Context, pgx.Tx, Migration) error) error {
 	if err := prepare(ctx, connection); err != nil {
 		return err
 	}
@@ -243,7 +265,14 @@ func DownOne(ctx context.Context, connection *pgx.Conn, migrations []Migration) 
 		if err != nil {
 			return fmt.Errorf("begin rollback %d: %w", version, err)
 		}
-		if err = setMigrationRole(ctx, tx, role); err == nil {
+		if err = setMigrationRole(ctx, tx, role); err == nil && guard != nil {
+			err = guard(ctx, tx, migration)
+		}
+		// A trusted guard must not choose the identity of the original SQL.
+		if err == nil {
+			err = setMigrationRole(ctx, tx, role)
+		}
+		if err == nil {
 			if _, err = tx.Exec(ctx, migration.DownSQL); err == nil {
 				if err = setMigrationRole(ctx, tx, role); err == nil {
 					_, err = tx.Exec(ctx, `DELETE FROM schema_migrations WHERE version = $1`, version)
