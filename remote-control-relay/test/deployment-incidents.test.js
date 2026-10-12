@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, realpathSync, readlinkSync, lstatSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+const { isTrustedSystemAlias } = createRequire(import.meta.url)(join(root, 'remote-control-relay/scripts/validate-deploy-hardening.cjs'));
 const production = readFileSync(join(root, 'scripts/deploy-remote-relay.sh'), 'utf8');
 const testing = readFileSync(join(root, 'scripts/deploy-remote-relay-test.sh'), 'utf8');
 const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash';
@@ -41,6 +43,45 @@ test('actual production confirmation and base gates reject before any operations
   }
   assert.equal(shell(base, { BASE_PATH: '/pinvou3/remote' }).status, 0);
 });
+
+test('system alias exception is Darwin-only and rejects noncanonical or operator links', () => {
+  for (const [path, expected] of [['/tmp', '/private/tmp'], ['/var', '/private/var']]) {
+    assert.equal(isTrustedSystemAlias(path, 'darwin', expected, expected), true);
+    assert.equal(isTrustedSystemAlias(path, 'darwin', expected.slice(1), expected), true);
+    for (const platform of ['linux', 'win32']) {
+      assert.equal(isTrustedSystemAlias(path, platform, expected, expected), false);
+    }
+    assert.equal(isTrustedSystemAlias(path, 'darwin', '/operator-link', expected), false);
+    assert.equal(isTrustedSystemAlias(path, 'darwin', expected, '/operator-link'), false);
+  }
+  for (const path of ['/etc', '/operator/tmp', '/tmp/operator-link', '/private/tmp']) {
+    assert.equal(isTrustedSystemAlias(path, 'darwin', '/private/tmp', '/private/tmp'), false);
+  }
+});
+
+test('actual Darwin system temporary roots accept hardening input and reject operator links',
+  { skip: process.platform !== 'darwin' }, (t) => {
+    const validator = join(root, 'remote-control-relay/scripts/validate-deploy-hardening.cjs');
+    const valid = readFileSync(join(root, 'remote-control-relay/10-hardening.conf'), 'utf8');
+    for (const alias of ['/tmp', '/var']) {
+      assert.equal(lstatSync(alias).isSymbolicLink(), true);
+      assert.equal(isTrustedSystemAlias(alias, process.platform, readlinkSync(alias), realpathSync(alias)), true);
+    }
+    for (const parent of ['/tmp', tmpdir()]) {
+      const directory = mkdtempSync(join(parent, 'pinvou-hardening-darwin-'));
+      t.after(() => rmSync(directory, { recursive: true, force: true }));
+      const input = join(directory, 'operator.conf');
+      writeFileSync(input, valid);
+      const run = (path) => spawnSync(process.execPath, [validator, path], { encoding: 'utf8', timeout: 10_000 });
+      assert.equal(run(input).status, 0);
+      const leaf = join(directory, 'linked.conf');
+      symlinkSync(input, leaf);
+      assert.equal(run(leaf).status, 64);
+      const link = join(directory, 'linked-parent');
+      symlinkSync(realpathSync(directory), link, 'dir');
+      assert.equal(run(join(link, 'operator.conf')).status, 64);
+    }
+  });
 
 test('actual production baseline failure stops before build, upload, or SSH', () => {
   const gate = fragment(production, /^if ! verify_public baseline; then[^]*?^fi/m);
@@ -155,7 +196,7 @@ test('actual test public rollback restores the old unit before restarting and bo
 });
 
 test('private hardening input is explicit, validated and uploaded as a snapshot', (t) => {
-  const directory = mkdtempSync(join(tmpdir(), 'pinvou-hardening-check-'));
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'pinvou-hardening-check-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const validator = join(root, 'remote-control-relay/scripts/validate-deploy-hardening.cjs');
   const template = readFileSync(join(root, 'remote-control-relay/10-hardening.conf'), 'utf8');
@@ -194,7 +235,7 @@ test('private hardening input is explicit, validated and uploaded as a snapshot'
 });
 
 test('actual hardening preflight rejects missing config before network and uploads exact validated content', (t) => {
-  const directory = mkdtempSync(join(tmpdir(), 'pinvou-hardening-preflight-'));
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'pinvou-hardening-preflight-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const input = join(directory, 'operator.conf');
   const template = readFileSync(join(root, 'remote-control-relay/10-hardening.conf'), 'utf8');
@@ -202,12 +243,25 @@ test('actual hardening preflight rejects missing config before network and uploa
   const preflight = fragment(production, /^node "\$RELAY_DIR\/scripts\/validate-deploy-hardening.cjs" "\$HARDENING_FILE"[^]*?^node "\$RELAY_DIR\/scripts\/validate-deploy-hardening.cjs" "\$HARDENING_SNAPSHOT"$/m);
   const upload = fragment(production, /^scp -i "\$SSH_KEY" -o BatchMode=yes "\$HARDENING_SNAPSHOT"[^\n]*/m);
   const posixPath = (value) => value.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_, drive) => '/' + drive.toLowerCase());
+  // Execute the production fragment with the exact parent Node, even when the
+  // child PATH deliberately has no node. No product environment knob is added.
+  const node = [
+    'fixture_mktemp="$(command -v mktemp)"; fixture_cp="$(command -v cp)"',
+    'fixture_cmp="$(command -v cmp)"; fixture_rm="$(command -v rm)"',
+    'PATH="$FIXTURE_EMPTY_PATH"; export PATH; hash -r',
+    'if command -v node >/dev/null 2>&1; then exit 98; fi',
+    'node() { "$FIXTURE_NODE" "$@"; }',
+    'mktemp() { "$fixture_mktemp" "$@"; }; cp() { "$fixture_cp" "$@"; }',
+    'cmp() { "$fixture_cmp" "$@"; }; rm() { "$fixture_rm" "$@"; }',
+  ].join('\n') + '\n';
   for (const path of ['', join(directory, 'missing'), input]) {
-    const result = shell(preflight + '\nSSH_KEY=fixture; SERVER=fixture.invalid; REMOTE_HARDENING_TMP=/fixture\n'
+    const result = shell(node + preflight + '\nSSH_KEY=fixture; SERVER=fixture.invalid; REMOTE_HARDENING_TMP=/fixture\n'
       + 'scp() { [[ "$1" == -i && "$2" == fixture && "$3" == -o && "$4" == BatchMode=yes ]]; cmp "$5" "$HARDENING_FILE"; echo exact_upload; }\n'
       + upload, { RELAY_DIR: process.platform === 'win32' ? posixPath(join(root, 'remote-control-relay')) : join(root, 'remote-control-relay'),
         HARDENING_FILE: process.platform === 'win32' ? posixPath(path) : path,
-        TMPDIR: process.platform === 'win32' ? posixPath(directory) : directory });
+        TMPDIR: process.platform === 'win32' ? posixPath(directory) : directory,
+        FIXTURE_NODE: process.platform === 'win32' ? posixPath(process.execPath) : process.execPath,
+        FIXTURE_EMPTY_PATH: process.platform === 'win32' ? posixPath(directory) : directory });
     assert.equal(result.status, path === input ? 0 : 64, result.stderr);
     assert.equal(result.stdout.trim(), path === input ? 'exact_upload' : '');
   }
