@@ -21,6 +21,7 @@ func TestManagementPublicMigrationInstallation(t *testing.T) {
 	t.Run("installed-29-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 29) })
 	t.Run("installed-30-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 30) })
 	t.Run("installed-f05-34-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 34) })
+	t.Run("installed-f07-36-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 36) })
 }
 func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previousStage int) {
 	dsn := os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL")
@@ -143,10 +144,11 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if err != nil {
 		t.Fatal(err)
 	}
+	var previousAccountFacts string
 	if previousStage > 0 {
 		previous := []migrations.Migration{}
 		for _, m := range loaded {
-			if m.Version != 8 && m.Version != 9 && (previousStage == 34 || ((m.Version < 900002 || (previousStage == 30 && m.Version == 900002)) && m.Version != 16 && m.Version != 17 && m.Version != 34)) {
+			if m.Version != 900004 && (previousStage == 36 || (m.Version != 8 && m.Version != 9 && (previousStage == 34 || ((m.Version < 900002 || (previousStage == 30 && m.Version == 900002)) && m.Version != 16 && m.Version != 17 && m.Version != 34)))) {
 				previous = append(previous, m)
 			}
 		}
@@ -157,6 +159,14 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		verified, e := migrations.VerifyApplied(ctx, connection, previous)
 		if e != nil || verified.AppliedCount != previousStage {
 			t.Fatal("installed previous stage fixture verification", verified, e)
+		}
+		if previousStage == 36 {
+			if _, e = connection.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at,management_mode) VALUES('11111111-1111-4111-8111-111111111111','USER','22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333','retained closure account','ACTIVE',100,'22222222-2222-4222-8222-222222222222','2026-01-01','2026-01-01','PLATFORM')`); e != nil {
+				t.Fatal("preclosure runtime account fixture", e)
+			}
+			if e = connection.QueryRow(ctx, `SELECT to_jsonb(account)::text FROM token_accounts account WHERE id='11111111-1111-4111-8111-111111111111'`).Scan(&previousAccountFacts); e != nil {
+				t.Fatal(e)
+			}
 		}
 	}
 	if legacy {
@@ -239,6 +249,12 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	}
 	if err = Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
+	}
+	if previousAccountFacts != "" {
+		var current string
+		if err = connection.QueryRow(ctx, `SELECT to_jsonb(account)::text FROM token_accounts account WHERE id='11111111-1111-4111-8111-111111111111'`).Scan(&current); err != nil || current != previousAccountFacts {
+			t.Fatal("closure upgrade changed existing account facts", err)
+		}
 	}
 	verification, err := migrations.VerifyApplied(ctx, connection, loaded)
 	if err != nil || verification.AppliedCount != len(installed) {

@@ -58,6 +58,22 @@ pub(super) fn allowed(area: &str, method: &Method, path: &str, query: Option<&st
         return false;
     }
     match p.as_slice() {
+        [
+            "",
+            "v1",
+            "organizations",
+            org,
+            "account-closed-grants",
+            grant,
+            "reclaim",
+        ] if id(org) && id(grant) && query.is_none() => *method == Method::POST,
+        [
+            "",
+            "v1",
+            "organizations",
+            org,
+            "account-closed-grants:reclaim-batch",
+        ] if id(org) && query.is_none() => *method == Method::POST,
         ["", "v1", "organizations", org, "quota-grants"] if id(org) && *method == Method::GET => {
             query.is_none_or(|q| q.strip_prefix("member_user_id=").is_some_and(id))
         }
@@ -328,5 +344,34 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn account_closed_grant_routes_are_exact_keyed_operations() {
+        let org = "11111111-1111-4111-8111-111111111111";
+        let grant = "22222222-2222-4222-8222-222222222222";
+        let single = format!("/v1/organizations/{org}/account-closed-grants/{grant}/reclaim");
+        let batch = format!("/v1/organizations/{org}/account-closed-grants:reclaim-batch");
+        for path in [&single, &batch] {
+            assert!(allowed("token", &Method::POST, path, None));
+            assert!(keyed("token", &Method::POST, path));
+            assert!(!allowed("token", &Method::GET, path, None));
+            assert!(!allowed("token", &Method::POST, path, Some("force=1")));
+            assert!(!allowed("account", &Method::POST, path, None));
+            assert!(!allowed(
+                "token",
+                &Method::POST,
+                &format!("{path}/extra"),
+                None
+            ));
+        }
+        assert!(valid_key("token", "closed-grant-original-key"));
+        assert!(!valid_key("token", "short"));
+        assert!(!allowed(
+            "token",
+            &Method::POST,
+            &single.replace(grant, "00000000-0000-0000-0000-000000000000"),
+            None
+        ));
     }
 }

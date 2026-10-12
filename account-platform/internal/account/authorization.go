@@ -17,17 +17,21 @@ import (
 )
 
 const (
-	PermissionPlatformUsersRead            = "platform.users.read"
-	PermissionPlatformUsersStatusManage    = "platform.users.status.manage"
-	PermissionPlatformRegistrationsRepair  = "platform.registrations.repair"
-	PermissionPlatformProfileChangesRepair = "platform.profile-changes.repair"
-	PermissionPlatformSMSConfigRead        = "platform.sms-config.read"
-	PermissionPlatformSMSConfigManage      = "platform.sms-config.manage"
-	PermissionPersonalBillingRead          = "personal.billing.read"
-	PermissionPersonalSessionLogin         = "personal.session.login"
-	PermissionPersonalProfileRead          = "personal.profile.read"
-	PermissionPersonalProfileUpdate        = "personal.profile.update"
-	PermissionPersonalSecurityManage       = "personal.security.manage"
+	PermissionPersonalAccountClosureRead    = "personal.account.close.read"
+	PermissionPersonalAccountClosureRequest = "personal.account.close.request"
+	PermissionPlatformAccountClosuresRead   = "platform.account-closures.read"
+	PermissionPlatformAccountClosuresRepair = "platform.account-closures.repair"
+	PermissionPlatformUsersRead             = "platform.users.read"
+	PermissionPlatformUsersStatusManage     = "platform.users.status.manage"
+	PermissionPlatformRegistrationsRepair   = "platform.registrations.repair"
+	PermissionPlatformProfileChangesRepair  = "platform.profile-changes.repair"
+	PermissionPlatformSMSConfigRead         = "platform.sms-config.read"
+	PermissionPlatformSMSConfigManage       = "platform.sms-config.manage"
+	PermissionPersonalBillingRead           = "personal.billing.read"
+	PermissionPersonalSessionLogin          = "personal.session.login"
+	PermissionPersonalProfileRead           = "personal.profile.read"
+	PermissionPersonalProfileUpdate         = "personal.profile.update"
+	PermissionPersonalSecurityManage        = "personal.security.manage"
 )
 
 type AuthorizationDecision struct {
@@ -262,7 +266,7 @@ func permissionAllowedForUserStatus(status, permission string) bool {
 			return true
 		}
 	case "CLOSING":
-		return false
+		return permission == "personal.account.close.read" || permission == "personal.account.close.request"
 	}
 	return false
 }

@@ -39,11 +39,12 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("npm", "test:account-platform-organization-ui"),
   command("npm", "test:account-platform-member-units-ui"),
   command("npm", "test:account-platform-registration-bonus-ui"),
+  command("npm", "test:account-platform-closure-ui"),
 ]);
 
 const CORE_SMOKE = command("npm", "test:ui-smoke");
 const FEATURE_COMMANDS = new Map([
-  ["account-platform", [command("npm", "test:account-platform-personal-ui"), command("npm", "test:account-platform-finance-ui"), command("npm", "test:account-platform-reconciliation-ui"), command("npm", "test:account-platform-management-ui"), command("npm", "test:account-platform-model-selection-ui"),command("npm", "test:account-platform-native-code-ui"),command("npm", "test:account-platform-billing-notice-ui"),command("npm", "test:account-platform-usage-ui"), command("npm", "test:account-platform-usage-governance-ui"), command("npm", "test:account-platform-model-overviews"), command("npm", "test:account-platform-organization-ui"), command("npm", "test:account-platform-member-units-ui"), command("npm", "test:account-platform-registration-bonus-ui")]],
+  ["account-platform", [command("npm", "test:account-platform-personal-ui"), command("npm", "test:account-platform-finance-ui"), command("npm", "test:account-platform-reconciliation-ui"), command("npm", "test:account-platform-management-ui"), command("npm", "test:account-platform-model-selection-ui"),command("npm", "test:account-platform-native-code-ui"),command("npm", "test:account-platform-billing-notice-ui"),command("npm", "test:account-platform-usage-ui"), command("npm", "test:account-platform-usage-governance-ui"), command("npm", "test:account-platform-model-overviews"), command("npm", "test:account-platform-organization-ui"), command("npm", "test:account-platform-member-units-ui"), command("npm", "test:account-platform-registration-bonus-ui"), command("npm", "test:account-platform-closure-ui")]],
   ["knowledge", [command("npm", "test:kb-smoke")]],
   ["pet", [command("node", "tests/pet_selector_ui_smoke.js")]],
   ["scheduled", [command("node", "tests/scheduled_tasks_smoke.js")]],

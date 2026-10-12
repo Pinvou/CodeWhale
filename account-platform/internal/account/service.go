@@ -74,6 +74,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
+	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account.closure.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.GET("/client-compatibility", serviceauth.Require("internal.client-compatibility.read"), httpserver.AdaptFunc(s.internalClientCompatibility))
 	internal.GET("/registration-bonus-eligibility/readiness", serviceauth.Require("internal.registration-bonus-eligibility.read"), httpserver.AdaptFunc(s.internalRegistrationBonusEligibilityReadiness))
 	internal.POST("/token-owner-authority", serviceauth.Require("internal.token-owner-authority.read"), httpserver.AdaptFunc(s.internalTokenOwnerAuthority))
@@ -107,6 +108,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	}
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify), s.contextVersionHeaders())
+	protected.GET("/v1/me/account-closure-request", s.requirePermission("personal.account.close.read"), httpserver.AdaptFunc(s.getAccountClosure))
+	protected.POST("/v1/me/account-closure-requests", s.requirePermission("personal.account.close.request"), httpserver.AdaptFunc(s.createAccountClosure))
 	protected.POST("/v1/account/bootstrap", httpserver.AdaptFunc(s.bootstrap))
 	protected.GET("/v1/me/commerce-customer-mapping", s.requirePermission(PermissionPersonalProfileRead), httpserver.AdaptFunc(s.getCommerceCustomerMapping))
 	protected.GET("/v1/me", s.requirePermission(PermissionPersonalProfileRead), httpserver.AdaptFunc(s.getMe))
@@ -119,6 +122,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 		protected.GET("/v1/me/profile-change-requests/:request_id", s.requirePermission(PermissionPersonalProfileUpdate), httpserver.AdaptFunc(s.getProfileChange))
 	}
 	admin := protected.Group("/admin/v1")
+	admin.GET("/account-closure-requests", s.requirePermission("platform.account-closures.read"), httpserver.AdaptFunc(s.adminAccountClosures))
+	admin.POST("/account-closure-requests/:closure_request_id/actions/retry", s.requirePermission("platform.account-closures.repair"), approvalpolicy.Require("ACCOUNT_CLOSURE_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryAccountClosure))
 	admin.GET("/users", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUsers))
 	admin.PATCH("/users/:user_id/status", s.requirePermission(PermissionPlatformUsersStatusManage), approvalpolicy.Require("ACCOUNT_USER_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetUserStatus))
 	admin.GET("/registration-operations", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminRegistrationOperations))
@@ -193,6 +198,8 @@ func (s *Service) getAuthorizationContext(w http.ResponseWriter, r *http.Request
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the request could not be completed"
 	switch {
+	case errors.Is(err, ErrInvalidAccountClosureRequest):
+		status, code, message = http.StatusBadRequest, "INVALID_REQUEST", "invalid account closure command"
 	case errors.Is(err, ErrNotFound):
 		status, code, message = http.StatusNotFound, "NOT_FOUND", "the requested account resource was not found"
 	case errors.Is(err, ErrForbidden):
