@@ -31,7 +31,7 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_con
 
 ## 2. 灰度步骤
 
-1. **Registry 覆盖率**：先统计已迁移 endpoint 比例（`scripts/enrollment-migrate.js` 的 dry-run 输出）。未达到 100% 之前不开启公网强制门禁。
+1. **Registry 覆盖率**：在仓库根目录运行 `remote-control-relay/scripts/enrollment-migrate.js` 的 dry-run，统计已迁移 endpoint 比例。未达到 100% 之前不开启公网强制门禁。
 2. **打开桌面控制能力开关**：只打开 `desktop_remote_control` 能力，不动 enrollment registry、pairing tombstone 与 digest keyring。
 3. **自托管升级说明**：自托管 Relay 必须先升级到 registry-aware 版本，或在所有入口前挂 enrollment gateway（无旁路）。
 4. **容量与限流**：确认连接码领取、claim、握手速率限制与告警阈值生效；观察爆破告警与容量水位。
@@ -40,6 +40,8 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_con
 ## 3. 真实双机 E2E 旅程
 
 必须使用两台隔离 Windows 设备与生产等价 TLS/网关环境，逐条执行需求 18.3 的 21 个旅程；其中以下条目最容易假通过，需要保留可复现 trace（不含敏感正文）：
+
+> 逐条的前置、操作、预期观测点与 trace 字段见 `Windows双端远程控制双机演练清单.md`；无需部署的本地单机自测见 `scripts/remote-control-local-selftest.ps1`。
 
 - 旅程 9～10、19、21：断线恢复、30 秒预算、RTT/attestation 余量（24000ms / 19000ms）。
 - 旅程 11～12：第二个 A、Web/controller 交叉接入、Web-to-Web 既有接管。
@@ -116,3 +118,29 @@ R15 核实此前 `windows-rust-test` 的 `--no-run` 只编译此用例，回归�
 R15 本地 Windows-gnullvm 另外实际执行该 Wry driver 1 项通过（独立子进程及非零匹配证明），影响范围 `features::remote_control::` 588 项通过；这是本地固定树回归，不是 MSVC CI、冷启动压力、renderer/provider 或双 Windows 发布验收。
 
 它使用真实 loopback WebSocket 与认证测试材料，没有真实 renderer、在线 provider、生产网关或双 Windows 设备，不能替代第 7.1 节的发布验收。测试数量以当前提交实际输出为准。
+
+## 8. 生产 controller lane 启用历史记录（2026-09-19，不是当前安全豁免）
+
+本节仅保留当次结论，管理入口、登录账号、服务/状态/密钥布局及精确备份定位在不入库的运维清单登记。没有在本轮重新部署或修改线上服务。
+
+### 8.1 历史变更与信任根
+
+当次将旧 v2-only Relay 升级为 controller-v1，使用权限受限的环境文件注入密钥与 HMAC，状态保留到代码目录之外。私钥仅在部署环境，0600 文件、0700 目录，不入库、不入日志。
+
+随客户端公开发布的生产信任根继续为 `prod-relay-key-1` / `nGlRK79H+YdNVhmZOwkI2T83uhiEBqfZeFbMrJ28LQM=`；对应 `manager::PRODUCTION_PROFILE`，原提交 `225fa4cd`。脱敏不改变该公钥或用户公开访问地址；密钥轮换必须随客户端更新并验证。
+
+### 8.2 历史 TOFU 降级与硬截止
+
+当次 legacy 状态只有 version 与 revoked_endpoints，没有完整端点清单，不能证明 registry 覆盖率 100%。历史上经确认临时使用 development + TOFU 接纳未登记客户端；这不是当前部署方案或永久豁免。
+
+在下次新/重部署或正式发布之前（以先发生者为截止），必须取得端点清单、100% registry 迁移及全入口网关预检证据，使用 official/self_hosted 并关闭 TOFU。未完成就阻断，不因本次文档修改宣称完成迁移。
+
+### 8.3 历史备份、回滚与验收边界
+
+当次有完整备份和脚本版本快照；准确定位与恢复命令仅在受控运维清单保存，不在本文提供能直接针对真实部署执行的删除、停启或覆盖命令。历史曾通过关闭 controller lane 或还原旧代码恢复服务，但不是当前允许沿用的裸 v2 回滚路径。
+
+当前任何回滚必须先按第 2 节证明 enrollment gateway 不可旁路，并通过 `scripts/check-enrollment-gated-v2-rollback.mjs`。关闭 controller、旧裸 v2 或 TOFU 均不能替代此门禁；不能因健康接口成功宣称安全回滚合格。
+
+当次记录包含服务 active、公开 healthz 成功、存量 v2 用户重连、故意不完整 controller claim 返回 invalid_message，以及一次健康误判触发自动回滚。上述是历史观测，不是当前部署、完整配对或发布验收。当前生产脚本执行最多 30 次健康重试，每次请求有超时；这不是总计 30 秒的截止时间或启动性能保证。
+
+仍需真实双 Windows 21 条旅程、三面 UI smoke、端点清单/registry 迁移与关闭 TOFU；未取得证据不得发布。历史设置页 profile 切换尚未实现的记录不作为当前功能范围，当前源码及端点配置才是实际依据。

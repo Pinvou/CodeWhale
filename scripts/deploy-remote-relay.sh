@@ -12,11 +12,23 @@ if [[ "${PINVOU_CONFIRM_PRODUCTION_DEPLOY:-0}" != "1" ]]; then
 fi
 
 RELAY_DIR="$ROOT/remote-control-relay"
-SERVER="${PINVOU_REMOTE_DEPLOY_SERVER:-root@47.120.8.237}"
+# 运维目标与私钥只来自本地受控配置，不在仓库登记实例值。
+SERVER="${PINVOU_REMOTE_DEPLOY_SERVER:-}"
+EXPECTED_SERVER="${PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER:-}"
+SSH_KEY="${SSH_KEY:-}"
+HARDENING_FILE="${PINVOU_REMOTE_HARDENING_FILE:-}"
 REMOTE_DIR="${PINVOU_REMOTE_DEPLOY_DIR:-/opt/pinvou-remote-relay}"
 SERVICE="${PINVOU_REMOTE_DEPLOY_SERVICE:-pinvou-remote-relay.service}"
 PUBLIC_URL="${PINVOU_REMOTE_PUBLIC_URL:-https://pinvou.com/pinvou3/remote}"
-DIRECT_URL="${PINVOU_REMOTE_DIRECT_URL:-http://47.120.8.237:8787/pinvou3/remote}"
+DIRECT_URL="${PINVOU_REMOTE_DIRECT_URL:-}"
+if [[ -z "$SERVER" || -z "$EXPECTED_SERVER" || -z "$SSH_KEY" || -z "$DIRECT_URL" ]]; then
+  echo "拒绝执行：必须显式提供部署目标、独立确认目标、SSH_KEY 与直连预检地址。" >&2
+  exit 64
+fi
+if [[ "$SERVER" != "$EXPECTED_SERVER" || ! "$SERVER" =~ ^[A-Za-z_][A-Za-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
+  echo "拒绝执行：部署目标格式无效或与独立确认目标不一致。" >&2
+  exit 64
+fi
 BASE_PATH="${PINVOU_REMOTE_PUBLIC_BASE_PATH:-/pinvou3/remote}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 REMOTE_CODE_TMP="/tmp/pinvou-remote-code-$STAMP.tar.gz"
@@ -42,6 +54,14 @@ if [[ "$BASE_PATH" != "/pinvou3/remote" ]]; then
   exit 64
 fi
 
+# 实例允许列表只能来自本地受控文件；仓库模板不可直接用于生产。
+# 先验证来源，再验证私有快照，上传只消费这份已验证的内容。
+node "$RELAY_DIR/scripts/validate-deploy-hardening.cjs" "$HARDENING_FILE"
+HARDENING_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/pinvou-hardening.XXXXXXXX")"
+trap 'rm -f "$HARDENING_SNAPSHOT"' EXIT
+cp "$HARDENING_FILE" "$HARDENING_SNAPSHOT"
+node "$RELAY_DIR/scripts/validate-deploy-hardening.cjs" "$HARDENING_SNAPSHOT"
+
 ensure_cached_db() {
   local path="$1"
   local url="$2"
@@ -60,7 +80,7 @@ ensure_cached_db() {
 verify_public() {
   local expected="$1"
   local health page
-  if ! health="$(curl -fsS "$PUBLIC_URL/healthz")"; then
+  if ! health="$(curl -fsS --connect-timeout 10 --max-time 30 "$PUBLIC_URL/healthz")"; then
     VERIFY_ERROR="公网健康检查失败：$PUBLIC_URL/healthz"
     return 1
   fi
@@ -68,14 +88,14 @@ verify_public() {
     VERIFY_ERROR="公网健康检查返回格式不符合预期"
     return 1
   fi
-  if ! page="$(curl -fsSL "$PUBLIC_URL/r/deploy-check")"; then
+  if ! page="$(curl -fsSL --connect-timeout 10 --max-time 30 "$PUBLIC_URL/r/deploy-check")"; then
     VERIFY_ERROR="手机页面检查失败：$PUBLIC_URL/r/deploy-check"
     return 1
   fi
   if [[ "$expected" == "release" ]]; then
     if [[ "$page" != *'<title>PINVOU 智能助手'* \
       || "$page" != *'<base href="/pinvou3/remote/">'* \
-      || "$page" != *'/pinvou3/remote/platform/tauri/bridge.js'* ]]; then
+      || "$page" != *'/pinvou3/remote/assets/'* ]]; then
       VERIFY_ERROR="公网页面未命中完整 WebUI v2 或生产 base path"
       return 1
     fi
@@ -105,10 +125,7 @@ if [[ "${SKIP_WEB_BUILD:-0}" != "1" ]]; then
 else
   echo "使用已构建并验证的共享 WebUI 产物"
 fi
-test -f "$RELAY_DIR/web/dist/index.html"
-test -f "$RELAY_DIR/web/dist/platform/tauri/bridge.js"
-grep -Fq '<base href="/pinvou3/remote/">' "$RELAY_DIR/web/dist/index.html"
-grep -Fq '/pinvou3/remote/platform/tauri/bridge.js' "$RELAY_DIR/web/dist/index.html"
+node "$RELAY_DIR/verify-web-dist-cli.js" "$RELAY_DIR/web/dist" "$BASE_PATH"
 if [[ "${SKIP_LOCAL_TESTS:-0}" != "1" ]]; then
   (cd "$RELAY_DIR" && npm test)
 fi
@@ -124,17 +141,17 @@ tar -czf - -C "$RELAY_DIR" \
   -C "$ROOT" \
   docs/schemas/behavior-telemetry-v1.schema.json \
   docs/schemas/behavior-telemetry-registries.json \
-  | ssh "$SERVER" "cat > '$REMOTE_CODE_TMP'"
-# dist 内包含带哈希的 JS/CSS、桥接脚本和本地 vendor，必须作为一个版本整体上传。
-tar -czf - -C "$RELAY_DIR/web/dist" . | ssh "$SERVER" "cat > '$REMOTE_WEB_TMP'"
-scp "$RELAY_DIR/web/stats.html" "$SERVER:$REMOTE_STATS_TMP"
-scp "$RELAY_DIR/10-hardening.conf" "$SERVER:$REMOTE_HARDENING_TMP"
-scp "$RELAY_DIR/package.json" "$SERVER:$REMOTE_PACKAGE_TMP"
-scp "$RELAY_DIR/package-lock.json" "$SERVER:$REMOTE_LOCK_TMP"
-scp "$IPV4_DB_CACHE" "$SERVER:$REMOTE_IPV4_DB_TMP"
-scp "$IPV6_DB_CACHE" "$SERVER:$REMOTE_IPV6_DB_TMP"
+  | ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" "cat > '$REMOTE_CODE_TMP'"
+# dist 包含带哈希的 JS/CSS、启动脚本和本地 vendor，必须作为一个版本整体上传。
+tar -czf - -C "$RELAY_DIR/web/dist" . | ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" "cat > '$REMOTE_WEB_TMP'"
+scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/web/stats.html" "$SERVER:$REMOTE_STATS_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$HARDENING_SNAPSHOT" "$SERVER:$REMOTE_HARDENING_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/package.json" "$SERVER:$REMOTE_PACKAGE_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/package-lock.json" "$SERVER:$REMOTE_LOCK_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$IPV4_DB_CACHE" "$SERVER:$REMOTE_IPV4_DB_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$IPV6_DB_CACHE" "$SERVER:$REMOTE_IPV6_DB_TMP"
 
-deploy_output="$(ssh "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$STAMP" "$REMOTE_CODE_TMP" "$REMOTE_WEB_TMP" "$REMOTE_STATS_TMP" "$REMOTE_HARDENING_TMP" "$REMOTE_PACKAGE_TMP" "$REMOTE_LOCK_TMP" "$REMOTE_IPV4_DB_TMP" "$REMOTE_IPV6_DB_TMP" <<'REMOTE'
+deploy_output="$(ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$STAMP" "$REMOTE_CODE_TMP" "$REMOTE_WEB_TMP" "$REMOTE_STATS_TMP" "$REMOTE_HARDENING_TMP" "$REMOTE_PACKAGE_TMP" "$REMOTE_LOCK_TMP" "$REMOTE_IPV4_DB_TMP" "$REMOTE_IPV6_DB_TMP" <<'REMOTE'
 set -Eeuo pipefail
 remote_dir="$1"
 service="$2"
@@ -162,6 +179,8 @@ rm -rf "$code_stage"
 mkdir -p "$code_stage"
 tar --no-same-owner --no-same-permissions -xzf "$code_tmp" -C "$code_stage"
 rm -f "$code_tmp"
+# 暂存验证使用本次上传的 ESM 声明，不依赖现役 package 或 Node 语法探测。
+cp "$package_tmp" "$code_stage/package.json"
 node --check "$code_stage/server.js"
 node --check "$code_stage/telemetry-service.js"
 node --check "$code_stage/behavior-telemetry-schema.js"
@@ -175,10 +194,7 @@ chown -R root:root "$web_stage"
 find "$web_stage" -type d -exec chmod 755 {} +
 find "$web_stage" -type f -exec chmod 644 {} +
 rm -f "$web_tmp"
-test -f "$web_stage/index.html"
-test -f "$web_stage/platform/tauri/bridge.js"
-grep -Fq '<base href="/pinvou3/remote/">' "$web_stage/index.html"
-grep -Fq '/pinvou3/remote/platform/tauri/bridge.js' "$web_stage/index.html"
+node "$code_stage/verify-web-dist-cli.js" "$web_stage" "/pinvou3/remote"
 mkdir -p "$backup"
 if [[ -f "$remote_dir/server.js" ]]; then cp -a "$remote_dir/server.js" "$backup/server.js"; else touch "$backup/no-server"; fi
 if [[ -d "$remote_dir/web/dist" ]]; then cp -a "$remote_dir/web/dist" "$backup/web-dist"; else touch "$backup/no-web-dist"; fi
@@ -306,9 +322,18 @@ if ! systemctl restart "$service" || ! systemctl is-active --quiet "$service"; t
   exit 1
 fi
 
-sleep 1
-if ! curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null \
-  || ! curl -fsS http://127.0.0.1:8787/pinvou3/telemetry/healthz >/dev/null; then
+# 有界重试：新版启动（含 controller runtime 初始化）可能超过 1 秒，固定 sleep 会把
+# 「启动稍慢」误判成失败并触发回滚（2026-09-19 实测踩坑）。
+healthy=0
+for _ in $(seq 1 30); do
+  if curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null \
+    && curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8787/pinvou3/telemetry/healthz >/dev/null; then
+    healthy=1
+    break
+  fi
+  sleep 1
+done
+if [ "$healthy" != "1" ]; then
   trap - ERR
   rollback
   echo "健康检查失败，已从 $backup 回滚" >&2
@@ -317,13 +342,19 @@ fi
 trap - ERR
 echo "backup=$backup"
 REMOTE
-)"
+)" || {
+  # 远程步骤失败时把它的 stdout 一并回显，否则 set -e 会在赋值处静默退出，
+  # 现场只剩一个 exit code（2026-09-19 实测踩坑）。
+  printf '%s\n' "$deploy_output" >&2
+  echo "远程部署步骤失败，请检查上方输出" >&2
+  exit 1
+}
 echo "$deploy_output"
 
 backup="$REMOTE_DIR/backups/$STAMP"
 
 rollback_remote() {
-  ssh "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$backup" <<'REMOTE'
+  ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$backup" <<'REMOTE'
 set -euo pipefail
 remote_dir="$1"
 service="$2"
@@ -360,7 +391,7 @@ fi
 systemctl daemon-reload
 systemctl restart "$service"
 systemctl is-active --quiet "$service"
-curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null
+curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null
 echo "已恢复备份：$backup"
 REMOTE
 }
