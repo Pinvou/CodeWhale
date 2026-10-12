@@ -14,6 +14,8 @@ Gateway 对 Billing 增加且仅增加 `internal.billing.hold.extend`、`interna
 
 Gateway 已有私有 `TOKEN_GATEWAY_PRIVATE_ENV_FILE` 需提供 `CLIENT_READINESS_ATTESTATION_PRIVATE_KEY_BASE64`（32字节 seed 或64字节 Ed25519 private key 的标准 Base64）、`TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN` 和真实 compatibility release manifest 配置。NEW_API 只读 evidence actor 的 `TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID` 同样由该私有 env_file 提供；可选 `TOKEN_RECONCILIATION_NEWAPI_BASE_URL` 也可置于该文件，缺省时沿用原 provider base URL。叠加层不应以空 shell 默认值覆盖这些私有文件值，不额外要求重复 export，也不把模板验证当作真实 Docker 部署。文件只读、私有权限、仅该进程可读；公开模板仅保存 key ID、版本与时间策略，不打印 env 或秘密。`CLIENT_READINESS_ATTESTATION_KEY_ID` 与该密钥的公开核验身份一致。客户端必须验证签名、环境、制品 SHA、版本和到期事实，不能把普通 HTTP health 作为 GO。
 
+readiness 签发、release manifest 和发布 CLI 的版本格式与排序统一采用 [SemVer 2.0.0](https://semver.org/spec/v2.0.0.html)：核心三段及数字预发布标识不允许前导零，空标识、空白或非法字符拒绝；同核心版本的预发布版低于正式版，数字按完整数值比较而非浮点数。构建元数据只在排序时忽略，签名、制品和版本身份仍核对完整原字符串，不把不同 build 当成同一个签名身份。release manifest 仍保留原 N/N-1/N-2 支持与公告期限，发布 CLI 按实际最低和最高版本判断，不新增“所有预发布版一律禁止”的策略。`clientcompat.Policy.Wrap` 的写入检查沿用既有读取及精确集成路径例外；本波没有新增该中间件的生产挂载，当前生产接线是 compatibility 元数据、readiness 签发及发布 CLI，不能用中间件单测声称所有线上 HTTP 写入已受该门禁保护。
+
 供应商必须为已经准入的准确 origin，CA 与模型调用和 evidence 查询一致。NEW_API 使用真实只读 evidence actor/user ID/token；OPENAI_COMPATIBLE 没有可信查询证据时保留 UNKNOWN/REVIEW，不推断外部成功。私有管理 origin 不暴露到浏览器。现有公共 `/token/` edge 仍剥除内部和管理前缀，仅经用户身份/个人权限调用所交付 `/v1` 路径。
 
 Gateway 启动真实 usage reconciliation、replay retention、usage history projection 和 Token review SLA worker；Billing 同进程启动现有 hold expiry 处理。JSON/SSE 的可信用量先持久化，再提交 Billing 一次性 hold/ledger 回执；缺失或不可证用量保留资金未知和对账，不以响应已送达认定已结算。
