@@ -1301,20 +1301,20 @@ fn sanitize_kimi_parameters_candidate(
 /// Empty-schema nodes sit exactly where schema values live: property values,
 /// `items`, object-form `additionalProperties`, `anyOf` branches, and `$defs`
 /// entries. `properties` itself is a name map, so its own emptiness is legal
-/// and only its values are visited. Removal is semantics-preserving (an
-/// absent `items` keyword already means unconstrained items) and must be
-/// idempotent because it runs after every other compatibility pass.
+/// and only its values are visited. `oneOf` needs no visit: this runs after
+/// `normalize_kimi_compatibility` has converted every non-root `oneOf` to
+/// `anyOf`, and root composition was already flattened before that.
+///
+/// Children are visited before the node's own `items` check so a nested
+/// repair can empty the parent (`"items": {"items": {}}` is vacuously true
+/// once the inner keyword is gone, so dropping the outer keyword is still
+/// semantics-preserving). Every removal keeps the document equivalent: an
+/// absent `items` keyword already means unconstrained items, so a legal
+/// document passes through unchanged.
 fn remove_empty_mfjs_items_schemas(value: &mut Value) {
     let Some(obj) = value.as_object_mut() else {
         return;
     };
-    if obj
-        .get("items")
-        .is_some_and(|items| items.as_object().is_some_and(Map::is_empty))
-    {
-        obj.shift_remove("items");
-        return;
-    }
     if let Some(properties) = obj.get_mut("properties").and_then(Value::as_object_mut) {
         for child in properties.values_mut() {
             remove_empty_mfjs_items_schemas(child);
@@ -1337,6 +1337,12 @@ fn remove_empty_mfjs_items_schemas(value: &mut Value) {
     }
     if let Some(items) = obj.get_mut("items") {
         remove_empty_mfjs_items_schemas(items);
+    }
+    if obj
+        .get("items")
+        .is_some_and(|items| items.as_object().is_some_and(Map::is_empty))
+    {
+        obj.shift_remove("items");
     }
 }
 
@@ -2556,6 +2562,35 @@ mod kimi_tests {
             sanitize_for_kimi_parameters(&mut described_only).unwrap_err(),
             KimiParameterSchemaError::MissingType
         );
+    }
+
+    #[test]
+    fn kimi_parameters_repairs_nested_and_sibling_empty_items() {
+        // items-in-items: the inner keyword repairs to nothing, which empties
+        // the outer node; `{"items": X}` is vacuously true for non-arrays and
+        // `{"items": {}}` accepts everything, so dropping the outer keyword
+        // preserves the accepted set. The emptiness check must run after the
+        // recursion or the parent is stranded as `{}` and fails MissingType.
+        let mut grid = json!({
+            "type": "object",
+            "properties": {
+                "grid": {"type": "array", "items": {"items": {}}}
+            }
+        });
+        sanitize_for_kimi_parameters(&mut grid).expect("items-in-items repair");
+        assert_eq!(grid["properties"]["grid"], json!({"type": "array"}));
+
+        // A root `items` keyword beside `$defs`: visiting only the removed
+        // key's node used to leave `$defs` unrepaired and fail the whole tool.
+        let mut with_defs = json!({
+            "type": "object",
+            "items": {},
+            "$defs": {"rows": {"type": "array", "items": {}}},
+            "properties": {"rows": {"$ref": "#/$defs/rows"}}
+        });
+        sanitize_for_kimi_parameters(&mut with_defs).expect("root items beside $defs repair");
+        assert!(with_defs.get("items").is_none());
+        assert_eq!(with_defs["$defs"]["rows"], json!({"type": "array"}));
     }
 
     #[test]
