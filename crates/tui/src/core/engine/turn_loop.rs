@@ -4123,15 +4123,33 @@ impl Engine {
         super::tool_catalog::remove_evicted_cache_activations(
             tool_catalog,
             active_tool_names,
+            activation.stale.iter().cloned(),
+        );
+        super::tool_catalog::remove_evicted_cache_activations(
+            tool_catalog,
+            active_tool_names,
             activation.evicted.iter().cloned(),
         );
         // Admitting or evicting deferred tools changes the request-visible
         // tool catalog for the rest of this turn. That is a legitimate,
         // nameable header change — declare it so the prefix pin re-pins under
         // `change:tool_surface` instead of tripping the C5 drift guard.
-        if !activation.admitted.is_empty() || !activation.evicted.is_empty() {
+        if !activation.admitted.is_empty()
+            || !activation.evicted.is_empty()
+            || !activation.stale.is_empty()
+        {
             active_tool_names.extend(activation.admitted.iter().cloned());
             self.session.pending_prefix_change_reason = Some("tool_surface".to_string());
+        }
+        // Unlike a `tool_search` result, a hydration has no result payload of
+        // its own to name bounds-driven evictions in. Park the note on the
+        // session so the first recorded tool result of this batch carries it
+        // to the model; staleness evictions are not reported (the tool left
+        // the catalog itself, so there is nothing to re-activate).
+        if !activation.evicted.is_empty() {
+            self.session.pending_toolbox_eviction_note = Some(
+                super::tool_catalog::bounded_toolbox_eviction_note("step", &activation.evicted),
+            );
         }
         PlannedToolCalls {
             plans,
@@ -5000,6 +5018,9 @@ impl Engine {
         // sidebar "Goal:" line stays stale for the whole (possibly long)
         // goal-loop turn while get_goal already reflects the new objective.
         let mut goal_tool_ran = false;
+        // Hydration-time toolbox evictions have no result payload of their
+        // own; the note rides the first recorded result of this batch.
+        let mut pending_eviction_note = self.session.pending_toolbox_eviction_note.take();
 
         for outcome in outcomes.into_iter().flatten() {
             let tool_input = outcome.input.clone();
@@ -5011,21 +5032,23 @@ impl Engine {
             }
             match result {
                 Ok(output) => {
-                    let mut tool_surface_changed =
-                        super::tool_catalog::activate_result_dependencies(
+                    let dependency = super::tool_catalog::activate_result_dependencies(
+                        tool_catalog,
+                        active_tool_names,
+                        &mut self.session.tool_activation_cache,
+                        &output,
+                    );
+                    let mut tool_surface_changed = dependency.changed;
+                    let mut evicted_this_result = dependency.evicted;
+                    if output.success {
+                        let touch = super::tool_catalog::touch_cached_tool_after_execution(
                             tool_catalog,
                             active_tool_names,
                             &mut self.session.tool_activation_cache,
-                            &output,
+                            &outcome.name,
                         );
-                    if output.success {
-                        tool_surface_changed |=
-                            super::tool_catalog::touch_cached_tool_after_execution(
-                                tool_catalog,
-                                active_tool_names,
-                                &mut self.session.tool_activation_cache,
-                                &outcome.name,
-                            );
+                        tool_surface_changed |= touch.changed;
+                        evicted_this_result.extend(touch.evicted);
                     }
                     // A runtime MCP connection change — a completed login OR
                     // a live 401 that dropped one — rewrites the callable
@@ -5112,6 +5135,24 @@ impl Engine {
                         }
                         None => output_for_context,
                     };
+                    // The batch's hydration note and this result's own
+                    // retrieval/touch evictions share one channel to the
+                    // model: the recorded result content.
+                    let mut eviction_notes = Vec::new();
+                    if let Some(note) = pending_eviction_note.take() {
+                        eviction_notes.push(note);
+                    }
+                    if !evicted_this_result.is_empty() {
+                        eviction_notes.push(super::tool_catalog::bounded_toolbox_eviction_note(
+                            "step",
+                            &evicted_this_result,
+                        ));
+                    }
+                    let output_for_context = if eviction_notes.is_empty() {
+                        output_for_context
+                    } else {
+                        format!("{output_for_context}\n\n{}", eviction_notes.join("\n\n"))
+                    };
 
                     let content_blocks = outcome.content_blocks;
                     let content_blocks = content_blocks
@@ -5150,6 +5191,12 @@ impl Engine {
                         .find(|tool| tool.name == outcome.name)
                         .map(|tool| &tool.input_schema);
                     let error = format_tool_error_with_schema(&e, &outcome.name, input_schema);
+                    // A pending hydration-eviction note must still reach the
+                    // model when the batch's first result is an error.
+                    let error = match pending_eviction_note.take() {
+                        Some(note) => format!("{error}\n\n{note}"),
+                        None => error,
+                    };
                     self.session.working_set.observe_tool_call(
                         &tool_name_for_ws,
                         &tool_input,

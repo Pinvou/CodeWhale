@@ -81,6 +81,12 @@ entry against the current catalog and policy before advertising it again. A
 session sync clears it. The cache cannot resurrect a removed, denied, or
 newly-eager tool.
 
+Every bounds-driven eviction is reported to the model — in the `tool_search`
+result when a search causes it, otherwise appended to the triggering tool
+result (hydration, retrieval activation, or a refresh of an executed tool).
+Tools dropped because they left the catalog itself are surfaced as unavailable
+references instead, since no search can re-activate them.
+
 Each subagent gets its own policy-filtered deferred catalog, always-present
 `tool_search`, and bounded activation cache. Forked messages and instructions
 remain in context, but the child cache starts empty and discovers tools locally;

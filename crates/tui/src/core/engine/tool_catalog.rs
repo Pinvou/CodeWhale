@@ -424,6 +424,39 @@ pub(crate) fn remove_evicted_cache_activations(
     }
 }
 
+/// Why a stale (catalog-shrink) eviction is reported under the unavailable
+/// vocabulary instead of the eviction note: the tool left the deferred
+/// catalog itself, so the search-result recovery contract ("re-search to
+/// re-activate") would be a false promise for it.
+pub(crate) const TOOLBOX_STALE_EVICTION_REASON: &str = "Previously active in this conversation but no longer available in the tool catalog; searching cannot re-activate it while it stays unavailable.";
+
+/// The model-facing sentence naming a bounds-driven toolbox eviction and the
+/// recovery contract. `trigger` names what caused the admission ("search",
+/// "step"); the capacity label is derived from the session constants so the
+/// prose cannot drift from the real bounds.
+pub(crate) fn bounded_toolbox_eviction_note(trigger: &str, evicted: &[String]) -> String {
+    format!(
+        "This {trigger} evicted tools from the bounded conversation toolbox \
+         ({} cached tools, {}KiB of serialized schemas) by activating other \
+         tools; the evicted tools are no longer callable until a later search \
+         re-activates them: {}",
+        crate::core::session::TOOL_ACTIVATION_CACHE_MAX_NAMES,
+        crate::core::session::TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES / 1024,
+        evicted.join(", ")
+    )
+}
+
+/// Outcome of a non-search activation against the bounded conversation
+/// toolbox: whether the request-visible tool surface changed, and which
+/// previously active tools this admission bounds-evicted. Staleness
+/// evictions are handled inside the callee and deliberately absent here —
+/// they are reported (where at all) under the unavailable vocabulary, never
+/// under the re-activatable eviction contract.
+pub(crate) struct ToolSurfaceUpdate {
+    pub(crate) changed: bool,
+    pub(crate) evicted: Vec<String>,
+}
+
 /// Promote a successfully executed deferred tool only when this conversation
 /// had already activated it. Execution can update recency, never grant a name.
 pub(crate) fn touch_cached_tool_after_execution(
@@ -431,14 +464,21 @@ pub(crate) fn touch_cached_tool_after_execution(
     active: &mut HashSet<String>,
     cache: &mut ToolActivationCache,
     name: &str,
-) -> bool {
+) -> ToolSurfaceUpdate {
     if !cache.names().any(|cached| cached == name) {
-        return false;
+        return ToolSurfaceUpdate {
+            changed: false,
+            evicted: Vec::new(),
+        };
     }
     let delta = cache.activate(catalog, &[name.to_string()]);
-    remove_evicted_cache_activations(catalog, active, delta.evicted);
+    remove_evicted_cache_activations(catalog, active, delta.stale);
+    remove_evicted_cache_activations(catalog, active, delta.evicted.iter().cloned());
     active.extend(delta.admitted);
-    true
+    ToolSurfaceUpdate {
+        changed: true,
+        evicted: delta.evicted,
+    }
 }
 
 /// Make the recovery schema visible on the next provider step when a tool
@@ -450,7 +490,7 @@ pub(crate) fn activate_result_dependencies(
     active: &mut HashSet<String>,
     cache: &mut ToolActivationCache,
     result: &ToolResult,
-) -> bool {
+) -> ToolSurfaceUpdate {
     let needs_retrieval = result
         .metadata
         .as_ref()
@@ -458,12 +498,19 @@ pub(crate) fn activate_result_dependencies(
         .and_then(Value::as_bool)
         == Some(true);
     if !needs_retrieval {
-        return false;
+        return ToolSurfaceUpdate {
+            changed: false,
+            evicted: Vec::new(),
+        };
     }
     let delta = cache.activate(catalog, &[TOOL_RESULT_RETRIEVAL_NAME.to_string()]);
+    remove_evicted_cache_activations(catalog, active, delta.stale.iter().cloned());
     remove_evicted_cache_activations(catalog, active, delta.evicted.iter().cloned());
     active.extend(delta.admitted.iter().cloned());
-    !delta.admitted.is_empty() || !delta.evicted.is_empty()
+    ToolSurfaceUpdate {
+        changed: !delta.admitted.is_empty() || !delta.evicted.is_empty() || !delta.stale.is_empty(),
+        evicted: delta.evicted,
+    }
 }
 
 fn active_tool_list_from_catalog(catalog: &[Tool], active: &HashSet<String>) -> Vec<Tool> {
@@ -1359,9 +1406,12 @@ fn execute_tool_search_inner(
 
     let mut cache_rejected = Vec::new();
     let mut cache_evicted = Vec::new();
+    let mut cache_stale = Vec::new();
     if let Some(cache) = cache {
         let delta = cache.activate(catalog, &discovered);
+        remove_evicted_cache_activations(catalog, active_tools, delta.stale.iter().cloned());
         remove_evicted_cache_activations(catalog, active_tools, delta.evicted.iter().cloned());
+        cache_stale = delta.stale;
         cache_evicted = delta.evicted;
         cache_rejected = delta.rejected;
         discovered = delta.admitted;
@@ -1391,6 +1441,16 @@ fn execute_tool_search_inner(
             "reason": "The tool schema exceeds the bounded conversation toolbox (8 cached tools, 16KiB of added serialized schemas). Narrow the search or use a smaller matching tool."
         })
     }));
+    // A stale eviction means the tool left the deferred catalog itself, so it
+    // travels under the unavailable vocabulary — the eviction note's
+    // "re-search to re-activate" contract would be a false promise for it.
+    unavailable_references.extend(cache_stale.iter().map(|name| {
+        json!({
+            "type": "unavailable_tool_reference",
+            "tool_name": name,
+            "reason": TOOLBOX_STALE_EVICTION_REASON,
+        })
+    }));
 
     // Boot-window status (#588): a bare empty result is byte-identical to
     // "no server configured", which is how a transient connect window
@@ -1415,12 +1475,7 @@ fn execute_tool_search_inner(
                 .map(|name| json!({"type": "tool_reference", "tool_name": name}))
                 .collect::<Vec<_>>()
         );
-        payload["toolbox_note"] = json!(format!(
-            "This search evicted tools from the bounded conversation toolbox (8 cached tools) \
-             by activating newer matches; the evicted tools are no longer callable until a \
-             later search re-activates them: {}",
-            cache_evicted.join(", ")
-        ));
+        payload["toolbox_note"] = json!(bounded_toolbox_eviction_note("search", &cache_evicted));
     }
     if let Some(servers) = boot_status {
         payload["mcp_boot"] = json!({

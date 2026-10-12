@@ -34,9 +34,9 @@ use crate::client::DeepSeekClient;
 use crate::config::MAX_SUBAGENTS;
 use crate::core::engine::tool_catalog::{
     TOOL_SEARCH_NAME, active_tools_for_request, apply_native_tool_deferral,
-    ensure_advanced_tooling, execute_tool_search_with_cache, initial_active_tools,
-    is_tool_search_tool, remove_evicted_cache_activations, tool_matches_any_rule,
-    touch_cached_tool_after_execution,
+    bounded_toolbox_eviction_note, ensure_advanced_tooling, execute_tool_search_with_cache,
+    initial_active_tools, is_tool_search_tool, remove_evicted_cache_activations,
+    tool_matches_any_rule, touch_cached_tool_after_execution,
 };
 use crate::core::events::{AgentProgressEventMeta, Event};
 use crate::core::session::ToolActivationCache;
@@ -14149,13 +14149,31 @@ impl SubAgentToolSurface {
 
     fn hydrate(&mut self, name: &str) -> Result<String> {
         let activation = self.cache.activate(&self.catalog, &[name.to_string()]);
-        remove_evicted_cache_activations(&self.catalog, &mut self.active_names, activation.evicted);
+        remove_evicted_cache_activations(
+            &self.catalog,
+            &mut self.active_names,
+            activation.stale.iter().cloned(),
+        );
+        remove_evicted_cache_activations(
+            &self.catalog,
+            &mut self.active_names,
+            activation.evicted.iter().cloned(),
+        );
         self.active_names
             .extend(activation.admitted.iter().cloned());
         if activation.admitted.iter().any(|admitted| admitted == name) {
-            return Ok(format!(
+            // A hydration has no result payload of its own; the load receipt
+            // carries the eviction note to the child model.
+            let mut message = format!(
                 "Tool `{name}` was deferred and has now been loaded. Retry the call with the newly available schema."
-            ));
+            );
+            if !activation.evicted.is_empty() {
+                message.push_str(&format!(
+                    "\n\n{}",
+                    bounded_toolbox_eviction_note("step", &activation.evicted)
+                ));
+            }
+            return Ok(message);
         }
         Err(anyhow!(
             "Tool {name} could not enter the bounded child toolbox; use tool_search with a narrower query"

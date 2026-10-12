@@ -6402,6 +6402,50 @@ mod tests {
         }
     }
 
+    /// The live-found browser catalog shape (`evaluate_script.args = {"type":
+    /// "array", "items": {}}`) used to fail MFJS validation and silently
+    /// disappear from every Kimi request. The wire must carry the tool with
+    /// the empty `items` keyword repaired away, not drop it.
+    #[tokio::test]
+    async fn moonshot_keeps_empty_items_tool_on_the_wire() {
+        for streaming in [false, true] {
+            let mut request =
+                k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), streaming);
+            let mut browser = test_tool("mcp_browser_evaluate_script");
+            browser.input_schema = json!({
+                "type": "object",
+                "properties": {
+                    "function": {"type": "string"},
+                    "args": {"type": "array", "items": {}}
+                },
+                "required": ["function"],
+                "additionalProperties": true
+            });
+            request.tools = Some(vec![browser]);
+            request.tool_choice = Some(json!("auto"));
+
+            let body = capture_moonshot_chat_request_body(
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K3_MODEL,
+                request,
+            )
+            .await;
+            let tools = body["tools"]
+                .as_array()
+                .expect("the empty-items tool must stay on the wire");
+            assert_eq!(
+                tools.len(),
+                1,
+                "the repaired tool must not be dropped (streaming={streaming}): {body}"
+            );
+            assert_eq!(
+                tools[0]["function"]["parameters"]["properties"]["args"],
+                json!({"type": "array"}),
+                "the empty items keyword must be repaired to absent: {body}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn moonshot_rejects_named_choice_for_omitted_tool() {
         for streaming in [false, true] {

@@ -33,7 +33,15 @@ pub(crate) struct ToolActivationCache {
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub(crate) struct ToolActivationDelta {
     pub(crate) admitted: Vec<String>,
+    /// Bounds-driven evictions caused by this admission (LRU overflow or the
+    /// serialized-bytes cap). The tools are still in the catalog, so a later
+    /// search can re-activate them — the "evicted" recovery contract.
     pub(crate) evicted: Vec<String>,
+    /// Entries dropped by `revalidate` before this admission: the tool left
+    /// the deferred catalog (disconnect, deny rule, eager promotion,
+    /// oversize), so it is unavailable rather than evicted and no search can
+    /// bring it back while it stays unavailable.
+    pub(crate) stale: Vec<String>,
     pub(crate) rejected: Vec<String>,
 }
 
@@ -102,7 +110,7 @@ impl ToolActivationCache {
         requested: &[String],
     ) -> ToolActivationDelta {
         let mut delta = ToolActivationDelta {
-            evicted: self.revalidate(catalog),
+            stale: self.revalidate(catalog),
             ..ToolActivationDelta::default()
         };
         let mut seen = HashSet::new();
@@ -139,6 +147,8 @@ impl ToolActivationCache {
             .collect();
         delta.evicted.sort();
         delta.evicted.dedup();
+        delta.stale.sort();
+        delta.stale.dedup();
         delta.rejected.sort();
         delta.rejected.dedup();
         delta
@@ -183,6 +193,13 @@ pub struct Session {
     /// reason while an undeclared mid-loop change is reported as drift and the
     /// pin holds. `None` means "no declared change since the last request".
     pub pending_prefix_change_reason: Option<String>,
+    /// Eviction note set when a non-search activation (a batch's hydration of
+    /// directly-called deferred tools) evicted bounded-toolbox entries. The
+    /// next recorded tool result carries it to the model, because unlike a
+    /// `tool_search` result there is no result payload of its own to name the
+    /// evictions in. Taken and cleared by the turn loop when the note is
+    /// attached.
+    pub(super) pending_toolbox_eviction_note: Option<String>,
     /// The explicit prompt inputs (model, mode, goal, route, translation,
     /// verbosity) the pinned system prompt was composed from. At each new user
     /// turn the engine recomposes: if these inputs are unchanged but the
@@ -329,6 +346,7 @@ impl Session {
             },
             last_system_prompt_hash: None,
             pending_prefix_change_reason: None,
+            pending_toolbox_eviction_note: None,
             pinned_prompt_context: None,
             context_update_baseline: None,
             working_set: WorkingSet::default(),
