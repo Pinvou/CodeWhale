@@ -337,7 +337,7 @@ impl AcpPool {
                     Arc::downgrade(&runtime),
                     &runtime.busy,
                     &runtime.configuring,
-                    configuration.take().expect("remote configuration guard"),
+                    configuration.take(),
                     || {
                         verify_frozen_remote_mode(
                             &self.session_store,
@@ -502,9 +502,11 @@ fn reserve_configured_remote_turn(
     runtime: Weak<AcpSession>,
     busy: &AtomicBool,
     configuring: &AtomicBool,
-    configuration: operation_gate::ConfigurationGuard<'_>,
+    configuration: Option<operation_gate::ConfigurationGuard<'_>>,
     validate: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
+    let configuration =
+        configuration.ok_or_else(|| anyhow::anyhow!("task_permission_mode_unsupported"))?;
     validate()?;
     drop(configuration);
     registry.reserve(owner, identity, runtime, busy, configuring)
@@ -612,7 +614,7 @@ mod tests {
                 Weak::new(),
                 &busy,
                 &configuring,
-                configuration,
+                Some(configuration),
                 || operation_gate::verify_remote_mode_ack(&options, "agent"),
             );
             assert!(!configuring.load(Ordering::Acquire));
@@ -649,6 +651,55 @@ mod tests {
     }
 
     #[test]
+    fn missing_configuration_guard_cannot_admit_or_release_another_configuration() {
+        for other_configuration in [false, true] {
+            let mut registry = RemoteTurnRegistry::default();
+            let identity = Arc::new(RuntimeIdentity::default());
+            let busy = AtomicBool::new(false);
+            let configuring = AtomicBool::new(false);
+            let other_guard = if other_configuration {
+                Some(operation_gate::begin_configuration(&busy, &configuring, "busy").unwrap())
+            } else {
+                None
+            };
+            let validated = std::cell::Cell::new(false);
+            let selected = owner("missing-configuration");
+            let error = reserve_configured_remote_turn(
+                &mut registry,
+                selected.clone(),
+                &identity,
+                Weak::new(),
+                &busy,
+                &configuring,
+                None,
+                || {
+                    validated.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "task_permission_mode_unsupported");
+            assert!(!validated.get());
+            assert!(!busy.load(Ordering::Acquire));
+            assert_eq!(configuring.load(Ordering::Acquire), other_configuration);
+            assert!(registry.0.is_empty());
+            assert!(!identity.has_live_prompt());
+            assert!(
+                registry
+                    .bind(
+                        &selected,
+                        &identity,
+                        "never-started",
+                        &tokio_util::sync::CancellationToken::new()
+                    )
+                    .is_none()
+            );
+            drop(other_guard);
+            assert!(!configuring.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
     fn policy_change_during_configuration_rolls_back_before_remote_admission() {
         let mut registry = RemoteTurnRegistry::default();
         let identity = Arc::new(RuntimeIdentity::default());
@@ -664,7 +715,7 @@ mod tests {
             Weak::new(),
             &busy,
             &configuring,
-            configuration,
+            Some(configuration),
             || bail!("task_permission_mode_changed"),
         )
         .unwrap_err();
