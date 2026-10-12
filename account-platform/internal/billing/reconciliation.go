@@ -222,7 +222,7 @@ func CompareFourWayReconciliation(provider []ProviderBillEntry, internal []Recon
 	for index := range provider {
 		item := provider[index]
 		entryType, reference := normalizedBillEntryType(item), billReference(item)
-		if (entryType != "PAYMENT" && entryType != "REFUND" && entryType != "CHARGEBACK") || (strings.TrimSpace(item.Status) != "" && !successfulBillEntryStatus(item)) {
+		if (entryType != "PAYMENT" && entryType != "REFUND" && entryType != "CHARGEBACK") || !successfulBillEntryStatus(item) {
 			copy := item
 			differences = append(differences, ReconciliationDifference{MerchantOrderNo: item.MerchantOrderNo, CaseType: "UNSUPPORTED_PROVIDER_ENTRY", Severity: "P0", Provider: &copy})
 			continue
@@ -345,23 +345,6 @@ ORDER BY 1,2`, channel, start, end, providerID, providerVersion, references)
 	}
 	rows.Close()
 	return classifyReversalEventDates(ctx, querier, facts, channel, start, end, providerID, providerVersion, supplied)
-}
-
-func (p *PaymentCoordinator) listPaidOrders(ctx context.Context, channel string, start, end time.Time) ([]PaymentOrder, error) {
-	rows, err := p.repository.pool.Query(ctx, `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),primary_provider_transaction_id,expires_at,paid_at,provider_id,provider_version FROM payment_orders WHERE channel=$1 AND paid_at >= $2 AND paid_at < $3 AND fulfillment_status='CREDITED' ORDER BY paid_at,merchant_order_no`, channel, start, end)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := make([]PaymentOrder, 0)
-	for rows.Next() {
-		var item PaymentOrder
-		if err := rows.Scan(&item.ID, &item.MerchantOrderNo, &item.RequesterID, &item.BeneficiaryOrganizationID, &item.WalletID, &item.ProductID, &item.Channel, &item.AmountFen, &item.Currency, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaymentURL, &item.PrimaryProviderTransactionID, &item.ExpiresAt, &item.PaidAt, &item.ProviderID, &item.ProviderVersion); err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
 }
 
 type scheduledPaymentReconciler interface {

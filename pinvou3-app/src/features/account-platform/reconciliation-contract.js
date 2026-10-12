@@ -44,3 +44,20 @@ export function reconciliationCommand(action, fields) {
   if (action === 'RESOLVE' || action === 'IGNORE') { if (!fields.review.trim()) throw new Error('INVALID_RECONCILIATION_INPUT'); body.review_result = fields.review.trim(); }
   return body;
 }
+
+// Only explicit input-validation responses describe editable request fields.
+// A cursor or state conflict still requires rereading the existing facts.
+export function reconciliationReadError(error) {
+  if (error.status === 403) return 'permissions';
+  if (error.status === 422 && error.code === 'PAGINATION_FILTER_REQUIRED') return 'narrowFilters';
+  if (error.status === 400 && ['INVALID_REQUEST', 'INVALID_FILTER'].includes(error.code)) return 'invalid';
+  if (error.status === 400 || error.status === 409) return 'sourceChanged';
+  return 'unavailable';
+}
+export function reconciliationWriteError(error) {
+  if (error.message === 'INVALID_RECONCILIATION_INPUT') return 'invalid';
+  if (error.code === 'COMMAND_RESULT_UNKNOWN' || !error.status || error.status >= 500) return 'runUnknown';
+  if (error.status === 403) return 'permission';
+  if (error.status === 400 && ['INVALID_REQUEST', 'INVALID_FILTER'].includes(error.code)) return 'invalid';
+  return 'sourceChanged';
+}

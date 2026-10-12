@@ -4,6 +4,8 @@
 
 按顺序组合 `compose.personal.yaml`、`compose.personal-workload.yaml`、`compose.finance.yaml`、`compose.reconciliation.yaml` 和 `compose.models.yaml`。使用同一已审核源码构造 migrate、Account、Billing、Token Gateway、Portal、独立 credential Portal、Token executor 和 approval-resources 镜像。所有 image 值须固定到审核过的制品，不在生产自动拉取或生成审批资源。数据库、OpenBao、NATS、身份服务、可验证的 HTTPS OTLP 和至少三个独立时间源均须先准备。此前个人/财务运行规则仍适用。
 
+启动上述组合前显式配置 `ACCOUNT_PLATFORM_PROFILE=models`。`compose.models.yaml` 对 Account、Token Gateway 与 `approval-resources` 三者均明确选择 `models`；推荐保持模型叠加最后。即使再叠加 finance 文件，其 operator 也从这个必填变量读取 `models`，不能回落到 `personal`。这是业务运行模式，不是 Docker Compose profile；未配置的直接二进制仍默认 `models`，未知值拒绝，不能用缺失的 Token URL、digest、完整数据库、KMS 或 provider 输入触发个人模式。
+
 ## 数据库和治理
 
 Token 单独数据库和五个部署角色使用 `token-release-prepare` 明确 prepare 操作建立；不能复用 Account/Billing runtime 凭据。该操作的数据库静默、角色和 membership 守卫失败时停止。人工部署须满足同一五角色和 membership 约束，不能借 superuser 给日常 migrator。独立数据库 operator 对空库执行 `token-database-bootstrap.sql`：仅预装原迁移需要的 pgcrypto、明确 public schema 所有权，并授予 token_migrator 统计可见性供离线治理切换查验；Gateway 不获得数据库 CREATE 或统计角色。
@@ -65,7 +67,7 @@ COMMIT;
 
 当前 workload realm emitter 发行原五个身份以及 credential Portal、Token executor 两个独立身份。七个 agent 的 bootstrap、sink 与应用挂载一一对应；receiver rules 使用所交付 Account/Billing/Token 三份有限模板。Credential Portal 只拥有 check，executor 只拥有 execution begin/complete 与 authorization consume，不能借 Portal/Gateway 私密身份执行审批。
 
-离线 `approval-resources render` 读取独立批准的 public identity SHA 生成当前 manifest/authorization.conf；发行 Token executor NKey 和 resource operator 的精确三 durable CREATE/INFO 权限，不发行 Token 普通 outbox producer。先核验并装载实际 NATS TLS 配置及共享 stream，保留原 Billing Q+1 初始化与独立回执。
+离线 `approval-resources render` 读取独立批准的 public identity SHA 生成既有固定六 descriptor manifest/authorization.conf；v2 预留公钥及 renderer ACL 保持原合同。离线输出不联系 broker、不创建 consumer，不证明已安装、ready 或授权激活。它发行 Token executor NKey 和 resource operator 的精确三 durable CREATE/INFO 权限，不发行 Token 普通 outbox producer。`models` 的 live activate/resume 必须核验三条 Billing 加三条 Token；先核验并装载实际 NATS TLS 配置及共享 stream，保留原 Billing Q+1 初始化与独立回执。
 
 使用 approval-operations profile 显式运行 `approval-resources token-consumers initialize`，将三条 Token DeliverAll durable 预置；检查用 `token-consumers check`。两操作都要求实际 public identities/manifest 的独立 SHA、operator 私密 NKey、准确 TLS CA 和已准备的 TOKEN_CONSUMER_PUBLIC_RECEIPT_DIRECTORY。每次回执路径须为空且独立于 Billing receipt/manifest/identity/私密目录；不覆盖已有文件，check 如需另一次证明也使用新的独立路径。运行前可用 Compose 单次环境覆盖 TOKEN_CONSUMER_RESOURCE_RECEIPT_FILE 的新文件名。operator 不更改 Account 控制行、Billing cutover 或金融历史。
 
@@ -130,3 +132,18 @@ The Portal derives the source using its existing exact trusted-edge policy and
 signs the final method, upstream RequestURI (including query) and canonical IP;
 browser source/signature headers are not forwarded as authority. Actual remote
 deployment and secret injection are not exercised by the finite HTTP proof.
+
+### Original Account command-policy rollback limits
+
+The public Account rollback wrapper rejects original migrations 024, 025, 026
+and the previously guarded 033 before executing their Down SQL. Original 018's
+statement-level immutable-policy trigger already rejects those DELETE statements,
+even when no policy matches. The invariant check runs in the same transaction
+as the original rollback and preserves policy rows, triggers and migration history.
+Historical SQL versions, filenames and checksums remain unchanged.
+
+This guard does not prohibit all policy rollbacks. Original 041 and 044 retain
+their existing behavior; 044 also checks references from approval requests.
+The isolated numeric-history tests are not deployment acceptance or permission
+to erase retained history. They include an empty-history original 031 positive
+control, and do not bypass the current high-numbered forward-only migrations.

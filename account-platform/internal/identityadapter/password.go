@@ -133,6 +133,14 @@ type operationPasswordBinding struct {
 	handle      string
 }
 
+// DefaultPasswordReferenceCapacity bounds plaintext-bearing accepted handles.
+// At the maximum 128-byte password size the raw payload budget is 512 KiB;
+// allocation overhead is measured separately in the regression suite.
+const DefaultPasswordReferenceCapacity = 4096
+const MaximumPasswordReferenceCapacity = 65536
+
+var ErrPasswordReferenceCapacity = errors.New("password reference capacity reached")
+
 type PasswordVault struct {
 	mu         sync.Mutex
 	records    map[string]*passwordRecord
@@ -141,9 +149,17 @@ type PasswordVault struct {
 	directory  UserDirectory
 	now        func() time.Time
 	ttl        time.Duration
+	capacity   int
 }
 
 func NewPasswordVault(hmacKey []byte, directory UserDirectory) (*PasswordVault, error) {
+	return NewPasswordVaultWithCapacity(hmacKey, directory, DefaultPasswordReferenceCapacity)
+}
+
+func NewPasswordVaultWithCapacity(hmacKey []byte, directory UserDirectory, capacity int) (*PasswordVault, error) {
+	if capacity < 1 || capacity > MaximumPasswordReferenceCapacity {
+		return nil, errors.New("password reference capacity is outside the bounded range")
+	}
 	if len(hmacKey) < 32 {
 		return nil, errors.New("password reference HMAC key must contain at least 32 bytes")
 	}
@@ -152,7 +168,7 @@ func NewPasswordVault(hmacKey []byte, directory UserDirectory) (*PasswordVault, 
 	}
 	return &PasswordVault{
 		records: make(map[string]*passwordRecord), operations: make(map[uuid.UUID]operationPasswordBinding), hmacKey: append([]byte(nil), hmacKey...),
-		directory: directory, now: func() time.Time { return time.Now().UTC() }, ttl: 15 * time.Minute,
+		directory: directory, now: func() time.Time { return time.Now().UTC() }, ttl: 15 * time.Minute, capacity: capacity,
 	}, nil
 }
 
@@ -193,6 +209,9 @@ func (v *PasswordVault) Precheck(password string) (PasswordReference, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.removeExpiredLocked()
+	if len(v.records) >= v.capacity {
+		return PasswordReference{}, ErrPasswordReferenceCapacity
+	}
 	v.records[handle] = &passwordRecord{password: password, fingerprint: fingerprint, expiresAt: expiresAt}
 	return PasswordReference{Handle: handle, PolicyVersion: PasswordPolicyVersion, ExpiresAt: expiresAt}, nil
 }

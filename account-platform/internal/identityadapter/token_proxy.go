@@ -9,8 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -162,11 +162,12 @@ func incrementFailure(ctx context.Context, client *redis.Client, key string) (in
 }
 
 type TokenProxy struct {
-	endpoint  string
-	client    *http.Client
-	admission tokenAdmission
-	now       func() time.Time
-	floor     time.Duration
+	endpoint        string
+	client          *http.Client
+	admission       tokenAdmission
+	now             func() time.Time
+	floor           time.Duration
+	trustedProxyIPs map[netip.Addr]struct{}
 }
 
 const maxUpstreamRetryAfterSeconds = 300
@@ -200,7 +201,12 @@ func (p *TokenProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", 0)
 		return
 	}
-	d := tokenRiskDimensions{action: action, source: tokenClientSource(r), device: boundedDimension(r.Header.Get("X-Device-ID"), "device:absent"), identifier: strings.ToLower(strings.TrimSpace(r.Form.Get("username")))}
+	source, validSource := p.tokenClientSource(r)
+	if !validSource {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", 0)
+		return
+	}
+	d := tokenRiskDimensions{action: action, source: source, device: boundedDimension(r.Header.Get("X-Device-ID"), "device:absent"), identifier: strings.ToLower(strings.TrimSpace(r.Form.Get("username")))}
 	if grant == "refresh_token" {
 		d.session = r.Form.Get("refresh_token")
 		d.identifier = "refresh-session"
@@ -322,20 +328,6 @@ func tokenSubject(body []byte) string {
 		return ""
 	}
 	return boundedDimension(claims.Subject, "")
-}
-
-func tokenClientSource(r *http.Request) string {
-	forwarded := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
-	for index := len(forwarded) - 1; index >= 0; index-- {
-		if value := strings.TrimSpace(forwarded[index]); net.ParseIP(value) != nil {
-			return value
-		}
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return boundedDimension(r.RemoteAddr, "source:unknown")
 }
 
 func boundedDimension(value, fallback string) string {

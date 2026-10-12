@@ -5,6 +5,7 @@ import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
 import { requireReconciliationDate, requireReconciliationRun } from './reconciliation-contract.js';
 import { responseRetryAfter } from './auth-error.js';
+import { beforeFinanceDispatch, financeNotDispatched } from './finance-operation-state.js';
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
   error.code = payload?.code || 'REQUEST_FAILED';
@@ -49,6 +50,9 @@ function waitForSharedRead(entry, signal) {
   });
 }
 
+function encodeFinanceRequest(body) {
+  try { return encodeFinanceJSON(body); } catch (error) { throw financeNotDispatched(error, true); }
+}
 function approvalControlChanged() { return Object.assign(new Error('approval control changed'), { code: 'APPROVAL_ACTION_CONTROL_CHANGED' }); }
 function approvalControlKey(value) { return JSON.stringify([value?.control?.version, value?.control?.epoch, value?.control?.authorization_relay_epoch, value?.session_approval_wire_version]); }
 function billingCollectionQuery(filters = {}, { keys = [], dateTimeKeys = [] } = {}) {
@@ -71,6 +75,7 @@ export class AdminPlatformClient {
     this.inflightReads = new Map();
     this.approvalControl = null;
     this.approvalControllers = new Set();
+    this.approvalControlGeneration = 0;
   }
 
   onAuthorizationVersion(listener) {
@@ -96,11 +101,11 @@ export class AdminPlatformClient {
       cache: 'no-store',
       signal,
     });
-    if (response.status === 401) { if (this.csrfToken) this.financeSessionEpoch++; this.csrfToken = ''; return { authenticated: false }; }
+    if (response.status === 401) { if (this.csrfToken) this.financeSessionEpoch++; this.csrfToken = ''; this.invalidateApprovalControl(); return { authenticated: false }; }
     if (!response.ok) throw errorFromResponse(response, await response.json().catch(() => ({})));
     const payload = await response.json();
     const current = requireSession(payload);
-    if (this.csrfToken !== current.csrf_token) this.financeSessionEpoch++;
+    if (this.csrfToken !== current.csrf_token) { this.financeSessionEpoch++; this.invalidateApprovalControl(); }
     this.csrfToken = current.csrf_token;
     return current;
   }
@@ -155,12 +160,15 @@ export class AdminPlatformClient {
       'X-CSRF-Token': this.csrfToken,
     };
     if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
+    let encodedBody;
+    try { encodedBody = body === undefined ? undefined : codec ? codec.encode(body) : area === 'billing' ? encodeFinanceJSON(body) : JSON.stringify(body); }
+    catch (error) { throw financeNotDispatched(error, true); }
     const options = {
       method,
       headers,
       credentials: 'same-origin',
       cache: 'no-store',
-      body: body === undefined ? undefined : codec ? codec.encode(body) : area === 'billing' ? encodeFinanceJSON(body) : JSON.stringify(body),
+      body: encodedBody,
       signal,
     };
     const response = await fetch(`${this.baseURL}/api/admin/${area}${resource}`, options);
@@ -291,44 +299,68 @@ export class AdminPlatformClient {
   approvalRequest(requestID, signal) {
     return this.request('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}`, signal);
   }
+  approvalLineage() {
+    return { generation: this.approvalControlGeneration, sessionEpoch: this.financeSessionEpoch,
+      csrfToken: this.csrfToken, control: this.approvalControl };
+  }
+
+  approvalLineageMatches(lineage) {
+    return lineage.generation === this.approvalControlGeneration && lineage.sessionEpoch === this.financeSessionEpoch &&
+      lineage.csrfToken === this.csrfToken && lineage.control === this.approvalControl;
+  }
+
+  invalidateApprovalControl(lineage) {
+    // A retired read must not invalidate the authority adopted by a newer read
+    // or session. The same rule applies to late error responses from mutations.
+    if (lineage && !this.approvalLineageMatches(lineage)) return;
+    this.approvalControlGeneration++;
+    this.approvalControl = null;
+    for (const controller of this.approvalControllers) controller.abort();
+    this.approvalControllers.clear();
+  }
+
   async governedApprovalCapability(signal) {
+    const lineage = this.approvalLineage();
     const response = await fetch(`${this.baseURL}/api/admin/approvals/capability`, {
       headers: { Accept: 'application/json' }, credentials: 'same-origin', cache: 'no-store', signal,
     });
     const payload = await response.json().catch(() => ({}));
+    if (!this.approvalLineageMatches(lineage)) {
+      // Parallel reads may confirm the exact current tuple, but no retired
+      // response can replace it or restore authority after invalidation.
+      if (response.ok && this.approvalControl && lineage.sessionEpoch === this.financeSessionEpoch &&
+        lineage.csrfToken === this.csrfToken && approvalControlKey(payload) === approvalControlKey(this.approvalControl)) return this.approvalControl;
+      throw approvalControlChanged();
+    }
     if (!response.ok) {
-      if (payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE' || payload?.code === 'APPROVAL_CAPABILITY_UNAVAILABLE') {
-        this.approvalControl = null;
-        for (const controller of this.approvalControllers) controller.abort();
-        this.approvalControllers.clear();
-      }
+      if (payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE' || payload?.code === 'APPROVAL_CAPABILITY_UNAVAILABLE') this.invalidateApprovalControl(lineage);
       throw errorFromResponse(response, payload);
     }
     const control = payload?.control;
     if (!Number.isSafeInteger(control?.version) || control.version < 1 ||
       !Number.isSafeInteger(control?.epoch) || control.epoch < 1 ||
       !Number.isSafeInteger(control?.authorization_relay_epoch) || control.authorization_relay_epoch < 1 ||
-      ![1, 2].includes(payload?.session_approval_wire_version)) throw approvalControlChanged();
-    const current = this.approvalControl;
-    if (current && control.version < current.control.version) {
+      ![1, 2].includes(payload?.session_approval_wire_version)) {
+      this.invalidateApprovalControl(lineage);
       throw approvalControlChanged();
     }
-    if (current && control.version === current.control.version && approvalControlKey(payload) !== approvalControlKey(current)) {
-      this.approvalControl = null;
-      for (const controller of this.approvalControllers) controller.abort();
-      this.approvalControllers.clear();
+    const current = this.approvalControl;
+    if (current && (control.version < current.control.version ||
+      (control.version === current.control.version && approvalControlKey(payload) !== approvalControlKey(current)))) {
+      this.invalidateApprovalControl(lineage);
       throw approvalControlChanged();
     }
     if (!current || approvalControlKey(payload) !== approvalControlKey(current)) {
+      this.invalidateApprovalControl(lineage);
       this.approvalControl = payload;
-      for (const controller of this.approvalControllers) controller.abort();
-      this.approvalControllers.clear();
     }
-    return payload;
+    return this.approvalControl;
   }
   async governedApprovalRead(path, { detail = false, signal } = {}) {
     const capability = await this.governedApprovalCapability(signal);
     const key = approvalControlKey(capability);
+    const lineage = this.approvalLineage();
+    if (lineage.control !== capability) throw approvalControlChanged();
     const controller = new AbortController();
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
@@ -341,12 +373,11 @@ export class AdminPlatformClient {
       const payload = response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
       if (!response.ok) {
         if (payload?.code === 'APPROVAL_ACTION_CONTROL_CHANGED' || payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE') {
-          this.approvalControl = null;
-          for (const active of this.approvalControllers) active.abort();
+          this.invalidateApprovalControl(lineage);
         }
         throw errorFromResponse(response, payload);
       }
-      if (approvalControlKey(this.approvalControl) !== key) throw approvalControlChanged();
+      if (!this.approvalLineageMatches(lineage) || approvalControlKey(this.approvalControl) !== key) throw approvalControlChanged();
       if (!detail) {
         return { ...payload, items: (payload.items || []).map(item => ({ ...item, allowed_actions: [] })) };
       }
@@ -378,6 +409,8 @@ export class AdminPlatformClient {
   async governedApprovalDirectory(signal) {
     const capability = await this.governedApprovalCapability(signal);
     const key = approvalControlKey(capability);
+    const lineage = this.approvalLineage();
+    if (lineage.control !== capability) throw approvalControlChanged();
     const controller = new AbortController();
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
@@ -390,7 +423,7 @@ export class AdminPlatformClient {
       const payload = response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
       if (!response.ok) throw errorFromResponse(response, payload);
       const header = response.headers.get('X-Platform-Authorization-Version');
-      if (approvalControlKey(this.approvalControl) !== key || payload?.schema_version !== 1 ||
+      if (!this.approvalLineageMatches(lineage) || approvalControlKey(this.approvalControl) !== key || payload?.schema_version !== 1 ||
         !Number.isSafeInteger(payload?.platform_authorization_version) || payload.platform_authorization_version < 1 ||
         !Array.isArray(payload?.items) || !/^[1-9][0-9]*$/.test(header || '') ||
         Number(header) !== payload.platform_authorization_version) throw approvalControlChanged();
@@ -401,10 +434,12 @@ export class AdminPlatformClient {
     }
   }
   async decideGovernedApproval(requestID, detail, decision, reason, signal) {
-    const capability = await this.governedApprovalCapability(signal);
+    const capability = await beforeFinanceDispatch(() => this.governedApprovalCapability(signal));
+    const lineage = this.approvalLineage();
+    if (lineage.control !== capability) throw financeNotDispatched(approvalControlChanged());
     const version = detail?.action_control_version;
     if (detail?.approval_request_id !== requestID || !Number.isSafeInteger(version) || version !== capability.control.version ||
-      !Number.isSafeInteger(detail?.version) || detail.version < 1) throw approvalControlChanged();
+      !Number.isSafeInteger(detail?.version) || detail.version < 1) throw financeNotDispatched(approvalControlChanged());
     const body = { expected_version: detail.version, decision, reason };
     if (capability.session_approval_wire_version === 2) body.action_control_version = version;
     else body.observed_versions = detail.critical_resource_versions || {};
@@ -417,17 +452,16 @@ export class AdminPlatformClient {
       const response = await fetch(`${this.baseURL}/api/admin/approvals/requests/${encodeURIComponent(requestID)}/actions/decide`, {
         method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json',
           'X-CSRF-Token': this.csrfToken, 'X-Pinvou-Approval-Action-Control-Version': String(version) },
-        credentials: 'same-origin', cache: 'no-store', body: encodeFinanceJSON(body), signal: controller.signal,
+        credentials: 'same-origin', cache: 'no-store', body: encodeFinanceRequest(body), signal: controller.signal,
       });
       const payload = response.status === 204 ? {} : await response.json().catch(() => ({}));
       if (!response.ok) {
         if (payload?.code === 'APPROVAL_ACTION_CONTROL_CHANGED' || payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE') {
-          this.approvalControl = null;
-          for (const active of this.approvalControllers) active.abort();
+          this.invalidateApprovalControl(lineage);
         }
         throw errorFromResponse(response, payload);
       }
-      if (approvalControlKey(this.approvalControl) !== approvalControlKey(capability)) throw approvalControlChanged();
+      if (!this.approvalLineageMatches(lineage) || approvalControlKey(this.approvalControl) !== approvalControlKey(capability)) throw approvalControlChanged();
       if (response.status !== 204) throw approvalControlChanged();
       return null; // A successful decision must be followed by a fresh detail read.
     } finally {
@@ -436,11 +470,13 @@ export class AdminPlatformClient {
     }
   }
   async writeGovernedApproval(kind, requestID, detail, draft, signal) {
-    const capability = await this.governedApprovalCapability(signal);
+    const capability = await beforeFinanceDispatch(() => this.governedApprovalCapability(signal));
+    const lineage = this.approvalLineage();
+    if (lineage.control !== capability) throw financeNotDispatched(approvalControlChanged());
     const version = capability.control.version;
     if (kind !== 'create' && (detail?.approval_request_id !== requestID ||
       !Number.isSafeInteger(detail?.action_control_version) || detail.action_control_version !== version ||
-      !Number.isSafeInteger(detail?.version) || detail.version < 1)) throw approvalControlChanged();
+      !Number.isSafeInteger(detail?.version) || detail.version < 1)) throw financeNotDispatched(approvalControlChanged());
     const body = kind === 'create' ? { ...draft } : kind === 'update'
       ? { ...draft, expected_version: detail.version } : { expected_version: detail.version };
     const suffix = kind === 'create' ? '' : kind === 'update' ? `/${encodeURIComponent(requestID)}`
@@ -455,17 +491,16 @@ export class AdminPlatformClient {
         method: kind === 'update' ? 'PUT' : 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json',
           'X-CSRF-Token': this.csrfToken, 'X-Pinvou-Approval-Action-Control-Version': String(version) },
-        credentials: 'same-origin', cache: 'no-store', body: encodeFinanceJSON(body), signal: controller.signal,
+        credentials: 'same-origin', cache: 'no-store', body: encodeFinanceRequest(body), signal: controller.signal,
       });
       const payload = response.status === 204 ? {} : await response.json().catch(() => ({}));
       if (!response.ok) {
         if (payload?.code === 'APPROVAL_ACTION_CONTROL_CHANGED' || payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE') {
-          this.approvalControl = null;
-          for (const active of this.approvalControllers) active.abort();
+          this.invalidateApprovalControl(lineage);
         }
         throw errorFromResponse(response, payload);
       }
-      if (approvalControlKey(this.approvalControl) !== approvalControlKey(capability)) throw approvalControlChanged();
+      if (!this.approvalLineageMatches(lineage) || approvalControlKey(this.approvalControl) !== approvalControlKey(capability)) throw approvalControlChanged();
       if (kind === 'create') {
         if (response.status !== 201) throw approvalControlChanged();
         requireFinanceID(payload.approval_request_id);
@@ -592,12 +627,14 @@ export class AdminPlatformClient {
       if (confirmation.status === 401) {
         this.csrfToken = '';
         this.financeSessionEpoch++;
+        this.invalidateApprovalControl();
         return null;
       }
     }
     if (!response.ok) throw errorFromResponse(response, payload);
     this.csrfToken = '';
     this.financeSessionEpoch++;
+    this.invalidateApprovalControl();
     return payload;
   }
 

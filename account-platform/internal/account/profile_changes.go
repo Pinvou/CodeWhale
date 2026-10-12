@@ -601,7 +601,7 @@ func (r *PostgresRepository) CreateProfileChange(ctx context.Context, principal 
 	}
 	if field == "USERNAME" {
 		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE username=$1 AND status<>'DELETED')`, value).Scan(&exists); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE lower(username)=lower($1) AND status<>'DELETED')`, value).Scan(&exists); err != nil {
 			return ProfileChange{}, err
 		}
 		if exists {
@@ -1166,7 +1166,7 @@ FOR UPDATE OF u`, principal.Issuer, principal.Subject, PermissionPersonalSecurit
 	if _, err = tx.Exec(ctx, `INSERT INTO password_reset_operations(id,user_id,identity_issuer,identity_subject,method,status,mobile_e164,password_handle,password_policy_version,fence_version,next_attempt_at,sla_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'AUTHENTICATED','VERIFIED',$5,$6,$7,$8,$9::timestamptz+interval '30 seconds',$9::timestamptz+interval '30 minutes',$9,$9)`, id, userID, principal.Issuer, subject, mobile, handle, policyVersion, fenceVersion, now); err != nil {
 		return PasswordResetOperation{}, err
 	}
-	if err = appendAudit(ctx, tx, userID, principal.Subject, nil, "account.password_change.verified", "password_reset", id.String(), "SUCCEEDED", map[string]any{"method": "RECENT_AUTHENTICATION"}); err != nil {
+	if err = appendAudit(ctx, tx, userID, principal.SessionID, nil, "account.password_change.verified", "password_reset", id.String(), "SUCCEEDED", map[string]any{"method": "RECENT_AUTHENTICATION"}); err != nil {
 		return PasswordResetOperation{}, err
 	}
 	operation := PasswordResetOperation{ID: id, UserID: userID, IdentitySubject: subject, Mobile: mobile, PasswordHandle: handle, PasswordPolicyVersion: policyVersion, FenceVersion: fenceVersion, Status: "VERIFIED"}

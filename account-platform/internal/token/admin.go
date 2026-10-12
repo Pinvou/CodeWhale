@@ -160,12 +160,29 @@ func (s *Service) requireAdminRepository(w http.ResponseWriter, r *http.Request)
 	return repository, ok
 }
 
+type legacyAdminOverviewRepository interface {
+	AdminOverview(context.Context) (AdminOverview, error)
+	reserveAdminOverviewRate(context.Context, uuid.UUID, string, string) error
+}
+
 func (s *Service) adminOverview(w http.ResponseWriter, r *http.Request) {
-	repository, ok := s.requireAdminRepository(w, r)
+	repository, ok := s.repository.(legacyAdminOverviewRepository)
 	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "token administration is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	result, err := repository.AdminOverview(r.Context())
+	ctx, cancel, err := adminPaginationContext(r.Context(), AdminSnapshotBuildBudget)
+	if err != nil {
+		writeAdminQueryError(w, r, err)
+		return
+	}
+	defer cancel()
+	r = r.WithContext(ctx)
+	if err := repository.reserveAdminOverviewRate(ctx, adminSubject(r), "legacy-overview", s.trustedAdminQuerySource(r)); err != nil {
+		writeAdminQueryError(w, r, err)
+		return
+	}
+	result, err := repository.AdminOverview(ctx)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -261,8 +278,14 @@ func (s *Service) adminTokenAccountV2(w http.ResponseWriter, r *http.Request) {
 }
 
 func (r *PostgresRepository) AdminOverview(ctx context.Context) (AdminOverview, error) {
+	ctx, cancel, err := adminPaginationContext(ctx, AdminSnapshotBuildBudget)
+	if err != nil {
+		return AdminOverview{}, err
+	}
+	defer cancel()
 	var result AdminOverview
-	err := r.pool.QueryRow(ctx, `
+	err = r.withModelTokenPageOverviewTx(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
 SELECT
   (SELECT count(*) FROM token_accounts),
   (SELECT count(*) FROM token_accounts WHERE status='ACTIVE'),
@@ -273,10 +296,11 @@ SELECT
   (SELECT count(*) FROM usage_requests WHERE status IN ('SETTLEMENT_PENDING','REVIEW')),
   (SELECT count(*) FROM usage_requests WHERE status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NULL),
   (SELECT count(*) FROM usage_requests WHERE status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NOT NULL)`).Scan(
-		&result.TokenAccounts, &result.ActiveAccounts, &result.ActiveCredentials, &result.Routes,
-		&result.HealthyRoutes, &result.UsageRequests, &result.ReviewUsageRequests,
-		&result.ReconciliationPending, &result.ReconciliationStopped,
-	)
+			&result.TokenAccounts, &result.ActiveAccounts, &result.ActiveCredentials, &result.Routes,
+			&result.HealthyRoutes, &result.UsageRequests, &result.ReviewUsageRequests,
+			&result.ReconciliationPending, &result.ReconciliationStopped,
+		)
+	})
 	return result, err
 }
 

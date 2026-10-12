@@ -205,6 +205,7 @@ jobs:
               - 'account-platform/**'
               - 'scripts/account-platform*'
               - 'scripts/check-token-management-authorization-coverage.mjs'
+              - 'scripts/tests/token-management-authorization-coverage.test.mjs'
               - '.github/workflows/pr-check.yml'
               - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
@@ -787,7 +788,9 @@ jobs:
           node-version: "24"
 
       - name: Verify Token management authorization contracts
-        run: node scripts/check-token-management-authorization-coverage.mjs
+        run: |
+          node scripts/check-token-management-authorization-coverage.mjs
+          node --test scripts/tests/token-management-authorization-coverage.test.mjs
 
       - name: Keycloak provisioning and theme contracts
         shell: bash
