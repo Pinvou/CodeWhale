@@ -82,16 +82,24 @@ session sync clears it. The cache cannot resurrect a removed, denied, or
 newly-eager tool.
 
 Every bounds-driven eviction is reported to the model — in the `tool_search`
-result when a search causes it, otherwise appended to the triggering tool
-result (hydration, retrieval activation, or a refresh of an executed tool; a
-refresh only evicts when a cached schema grew past the budget since its last
-activation). Tools the model cannot get back by searching are reported
-differently: `tool_search` results surface them as unavailable references,
-naming whether the tool left the catalog (disconnect, deny rule, mode switch)
-or outgrew the per-tool schema budget. A cached tool that became eager is not
-reported at all — it stays directly callable. Unavailable drops on non-search
-paths are absorbed silently; the next `tool_search` result is where the model
-learns it cannot re-activate such a tool.
+result when a search causes it, otherwise appended to a tool result: a
+hydration's note rides the batch's first recorded result (or its error), a
+retrieval activation or a refresh of an executed tool rides the triggering
+result, and a turn's start revalidation parks its note on the session so the
+turn's first recorded result carries it (a refresh only evicts when a cached
+schema grew past the budget since its last activation). Child agents report
+the same way: a hydration receipt and an executed tool's result carry their
+own eviction notes, and a note parked by the child's catalog refresh rides
+the child's next recorded result. An eviction never names a tool that the
+same result re-admits. Tools the model cannot get back by searching are
+reported differently: `tool_search` results surface them as unavailable
+references, naming whether the tool left the catalog (disconnect, deny rule,
+mode switch) or outgrew the per-tool schema budget. A cached tool that became
+eager is not reported at all — it stays directly callable. Unavailable drops
+observed by non-search paths are absorbed silently: an oversize drop is
+re-reported with its reason the next time a search matches the tool, while a
+catalog-shrink drop left the catalog entirely and no later search can name
+it — the model learns of those only when a search for the capability misses.
 
 Each subagent gets its own policy-filtered deferred catalog, always-present
 `tool_search`, and bounded activation cache. Forked messages and instructions
