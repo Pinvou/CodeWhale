@@ -1,12 +1,18 @@
 export const ledgerRepairCopy = {
   "zh": {
     "title": "发起财务修复审批",
+    "writeOffTitle": "应收核销",
     "lead": "选择命令并填写目标引用，读取服务端冻结事实后再提交审批草稿。页面不会自行推算任何金额或账务事实。",
     "command": "修复命令",
     "targets": {
-      "LEDGER_REPAIR": "目标过账 ID"
+      "LEDGER_REPAIR": "目标过账 ID",
+      "RECEIVABLE_WRITE_OFF": "应收 ID"
     },
     "fields": {
+      "receivable_id": "应收 ID",
+      "write_off_microcredits": "核销金额（微积分）",
+      "expected_version": "预期应收版本",
+      "expected_receivable_version": "预期应收版本",
       "target_journal_entry_id": "账目分录 ID",
       "target_posting_id": "过账 ID",
       "wrong_ledger_account_id": "错误平台账户 ID",
@@ -26,7 +32,7 @@ export const ledgerRepairCopy = {
     "reason": "申请理由",
     "reasonHint": "理由需 10 到 2000 字符，写入审批审计。",
     "requestKey": "请求键",
-    "requestKeyHint": "请求键用于幂等，同一目标请复用同一键。",
+    "requestKeyHint": "请求键连同 approval: 前缀最多 120 个 UTF-8 字节；同一目标请复用同一键。",
     "createDraft": "创建审批草稿",
     "creating": "正在创建…",
     "createdHint": "已创建审批草稿：",
@@ -36,12 +42,18 @@ export const ledgerRepairCopy = {
   },
   "en": {
     "title": "Start a financial repair approval",
+    "writeOffTitle": "Receivable write-off",
     "lead": "Choose the command, enter the target references, read the server-frozen facts, then submit the approval draft. The page never derives an amount or an accounting fact.",
     "command": "Repair command",
     "targets": {
-      "LEDGER_REPAIR": "Target posting ID"
+      "LEDGER_REPAIR": "Target posting ID",
+      "RECEIVABLE_WRITE_OFF": "Receivable ID"
     },
     "fields": {
+      "receivable_id": "Receivable ID",
+      "write_off_microcredits": "Write-off amount (microcredits)",
+      "expected_version": "Expected receivable version",
+      "expected_receivable_version": "Expected receivable version",
       "target_journal_entry_id": "Journal entry ID",
       "target_posting_id": "Posting ID",
       "wrong_ledger_account_id": "Wrong ledger account ID",
@@ -61,7 +73,7 @@ export const ledgerRepairCopy = {
     "reason": "Reason",
     "reasonHint": "The reason must be 10 to 2000 characters and is written to the approval audit.",
     "requestKey": "Request key",
-    "requestKeyHint": "The request key makes the action idempotent; reuse the same key for the same target.",
+    "requestKeyHint": "The request key, including the approval: prefix, allows up to 120 UTF-8 bytes; reuse the same key for the same target.",
     "createDraft": "Create approval draft",
     "creating": "Creating…",
     "createdHint": "Approval draft created:",
@@ -71,12 +83,18 @@ export const ledgerRepairCopy = {
   },
   "ja": {
     "title": "財務修復の承認を起動",
+    "writeOffTitle": "売掛金の償却",
     "lead": "コマンドを選び対象参照を入力し、サーバーが固定した事実を読み込んでから承認ドラフトを提出します。画面は金額や会計事実を推計しません。",
     "command": "修復コマンド",
     "targets": {
-      "LEDGER_REPAIR": "対象仕訳転記 ID"
+      "LEDGER_REPAIR": "対象仕訳転記 ID",
+      "RECEIVABLE_WRITE_OFF": "売掛金 ID"
     },
     "fields": {
+      "receivable_id": "売掛金 ID",
+      "write_off_microcredits": "償却額（マイクロクレジット）",
+      "expected_version": "予想売掛金版",
+      "expected_receivable_version": "予想売掛金版",
       "target_journal_entry_id": "仕訳 ID",
       "target_posting_id": "転記 ID",
       "wrong_ledger_account_id": "誤った勘定 ID",
@@ -96,7 +114,7 @@ export const ledgerRepairCopy = {
     "reason": "申請理由",
     "reasonHint": "理由は 10〜2000 文字で、承認監査に記録されます。",
     "requestKey": "リクエストキー",
-    "requestKeyHint": "リクエストキーは冪等性のためです。同じ対象では同じキーを使用してください。",
+    "requestKeyHint": "リクエストキーは approval: 接頭辞を含めて UTF-8 で 120 バイト以内です。同じ対象では同じキーを使用してください。",
     "createDraft": "承認ドラフトを作成",
     "creating": "作成中…",
     "createdHint": "承認ドラフトを作成しました:",

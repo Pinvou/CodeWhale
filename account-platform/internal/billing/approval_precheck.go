@@ -37,6 +37,8 @@ type billingApprovalPrecheckRequest struct {
 	WrongLedgerAccountID   string `json:"wrong_ledger_account_id,omitempty"`
 	CorrectLedgerAccountID string `json:"correct_ledger_account_id,omitempty"`
 	AmountMicrocredits     int64  `json:"amount_microcredits,omitempty"`
+	WriteOffMicrocredits   int64  `json:"write_off_microcredits,omitempty"`
+	ExpectedVersion        int64  `json:"expected_version,omitempty"`
 }
 
 // billingApprovalPrecheckResponse is the closed projection the Portal renders.
@@ -78,7 +80,7 @@ func precheckBillingApprovalCommand(ctx context.Context, repository billingAppro
 	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 		packageID, packageOK := validPrecheckUUID(request.TargetResourceID)
 		orderID, orderOK := validPrecheckUUID(request.PaymentOrderID)
-		if !packageOK || !orderOK || request.ReasonCode == "" || strings.TrimSpace(request.ReasonCode) != request.ReasonCode || len(request.ReasonCode) > 80 || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 {
+		if !packageOK || !orderOK || request.ReasonCode == "" || strings.TrimSpace(request.ReasonCode) != request.ReasonCode || len(request.ReasonCode) > 80 || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 {
 			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
 		}
 		return repository.EntitlementCorrectionProofInput(ctx, packageID, orderID, request.ReasonCode)
@@ -87,7 +89,7 @@ func precheckBillingApprovalCommand(ctx context.Context, repository billingAppro
 		posting, postingOK := validPrecheckUUID(request.TargetResourceID)
 		wrong, wrongOK := validPrecheckUUID(request.WrongLedgerAccountID)
 		correct, correctOK := validPrecheckUUID(request.CorrectLedgerAccountID)
-		if !journalOK || !postingOK || !wrongOK || !correctOK || wrong == correct || request.AmountMicrocredits < 1 || request.PaymentOrderID != "" || request.ReasonCode != "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" {
+		if !journalOK || !postingOK || !wrongOK || !correctOK || wrong == correct || request.AmountMicrocredits < 1 || request.PaymentOrderID != "" || request.ReasonCode != "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" || request.WriteOffMicrocredits != 0 || request.ExpectedVersion != 0 {
 			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
 		}
 		owner, ok := repository.(interface {
@@ -97,6 +99,18 @@ func precheckBillingApprovalCommand(ctx context.Context, repository billingAppro
 			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
 		}
 		return owner.LedgerRepairProofInput(ctx, LedgerRepairCommandInput{TargetJournalEntryID: journal, TargetPostingID: posting, WrongLedgerAccountID: wrong, CorrectLedgerAccountID: correct, AmountMicrocredits: request.AmountMicrocredits}, request.ReasonCode)
+	case receivableWriteOffCommand:
+		receivableID, ok := validPrecheckUUID(request.TargetResourceID)
+		if !ok || request.WriteOffMicrocredits < 1 || request.ExpectedVersion < 1 || request.ReasonCode != receivableWriteOffReason || request.PaymentOrderID != "" || request.TargetJournalEntryID != "" || request.WrongLedgerAccountID != "" || request.CorrectLedgerAccountID != "" || request.AmountMicrocredits != 0 {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		owner, ok := repository.(interface {
+			ReceivableWriteOffProofInput(context.Context, ReceivableWriteOffCommandInput) (approvalencoding.LegacyProofInput, error)
+		})
+		if !ok {
+			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
+		}
+		return owner.ReceivableWriteOffProofInput(ctx, ReceivableWriteOffCommandInput{ReceivableID: receivableID, WriteOffMicrocredits: request.WriteOffMicrocredits, ExpectedReceivableVersion: request.ExpectedVersion})
 	}
 	return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
 }

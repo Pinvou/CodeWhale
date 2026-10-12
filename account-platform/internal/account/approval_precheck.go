@@ -42,6 +42,7 @@ var (
 var approvalPrecheckTargetResourceTypes = map[string]string{
 	"ENTITLEMENT_COMPONENT_ADJUSTMENT": "ENTITLEMENT_PACKAGE",
 	"LEDGER_REPAIR":                    "LEDGER_POSTING",
+	"RECEIVABLE_WRITE_OFF":             "RECEIVABLE",
 }
 
 // ApprovalPrecheckRequest is the closed precheck input. It mirrors the owner
@@ -56,6 +57,8 @@ type ApprovalPrecheckRequest struct {
 	WrongLedgerAccountID   string `json:"wrong_ledger_account_id,omitempty"`
 	CorrectLedgerAccountID string `json:"correct_ledger_account_id,omitempty"`
 	AmountMicrocredits     int64  `json:"amount_microcredits,omitempty"`
+	WriteOffMicrocredits   int64  `json:"write_off_microcredits,omitempty"`
+	ExpectedVersion        int64  `json:"expected_version,omitempty"`
 }
 
 func (s *Service) WithApprovalPrechecks(source ApprovalPrecheckSource) *Service {
@@ -241,6 +244,16 @@ func decodeApprovalPrecheckResponse(raw []byte, request ApprovalPrecheckRequest)
 		if json.Unmarshal(wire.NormalizedCommand, &selected) != nil || selected.TargetPostingID != request.TargetResourceID || selected.TargetJournalEntryID != request.TargetJournalEntryID || selected.WrongLedgerAccountID != request.WrongLedgerAccountID || selected.CorrectLedgerAccountID != request.CorrectLedgerAccountID || selected.AmountMicrocredits != request.AmountMicrocredits || selected.ReasonCode != request.ReasonCode {
 			return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 		}
+	case "RECEIVABLE_WRITE_OFF":
+		var selected struct {
+			ReceivableID              string `json:"receivable_id"`
+			WriteOffMicrocredits      int64  `json:"write_off_microcredits"`
+			ExpectedReceivableVersion int64  `json:"expected_receivable_version"`
+			ReasonCode                string `json:"reason_code"`
+		}
+		if json.Unmarshal(wire.NormalizedCommand, &selected) != nil || selected.ReceivableID != request.TargetResourceID || selected.WriteOffMicrocredits != request.WriteOffMicrocredits || selected.ExpectedReceivableVersion != request.ExpectedVersion || selected.ReasonCode != request.ReasonCode {
+			return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
+		}
 	default:
 		return ApprovalPrecheckProjection{}, ErrApprovalPrecheckInvalid
 	}
@@ -267,7 +280,7 @@ func closedApprovalPrecheckDocument(raw json.RawMessage) (json.RawMessage, bool)
 }
 
 func validPrecheckVersion(command string, policy int64, snapshot int) bool {
-	return command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" && policy == 2 && snapshot == 2 || command == "LEDGER_REPAIR" && policy == 1 && snapshot == 1
+	return command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" && policy == 2 && snapshot == 2 || (command == "LEDGER_REPAIR" || command == "RECEIVABLE_WRITE_OFF") && policy == 1 && snapshot == 1
 }
 
 func validApprovalPrecheckRequest(request ApprovalPrecheckRequest) bool {
@@ -279,14 +292,16 @@ func validApprovalPrecheckRequest(request ApprovalPrecheckRequest) bool {
 		if _, ok := validPrecheckIdentifier(request.PaymentOrderID); !ok {
 			return false
 		}
-		return request.ReasonCode != "" && strings.TrimSpace(request.ReasonCode) == request.ReasonCode && len(request.ReasonCode) <= 80 && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0
+		return request.ReasonCode != "" && strings.TrimSpace(request.ReasonCode) == request.ReasonCode && len(request.ReasonCode) <= 80 && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0 && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
 	case "LEDGER_REPAIR":
 		for _, id := range []string{request.TargetJournalEntryID, request.WrongLedgerAccountID, request.CorrectLedgerAccountID} {
 			if _, ok := validPrecheckIdentifier(id); !ok {
 				return false
 			}
 		}
-		return request.PaymentOrderID == "" && request.WrongLedgerAccountID != request.CorrectLedgerAccountID && request.AmountMicrocredits > 0 && request.ReasonCode == "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT"
+		return request.PaymentOrderID == "" && request.WrongLedgerAccountID != request.CorrectLedgerAccountID && request.AmountMicrocredits > 0 && request.ReasonCode == "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" && request.WriteOffMicrocredits == 0 && request.ExpectedVersion == 0
+	case "RECEIVABLE_WRITE_OFF":
+		return request.WriteOffMicrocredits > 0 && request.ExpectedVersion > 0 && request.ReasonCode == "APPROVED_RECEIVABLE_WRITE_OFF" && request.PaymentOrderID == "" && request.TargetJournalEntryID == "" && request.WrongLedgerAccountID == "" && request.CorrectLedgerAccountID == "" && request.AmountMicrocredits == 0
 	}
 	return false
 }
