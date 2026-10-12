@@ -1162,9 +1162,13 @@ impl ModelManager {
             false,
         )?;
 
-        // 已经在库里的话保留原有状态（比如已部署过），不要因为重新走了一遍
-        // 下载就把状态退回"仅下载"；只有全新记录才用 "downloaded" 起步。
-        let status = existing_status.unwrap_or_else(|| "downloaded".to_string());
+        // 重新下载时只保留真实的“已部署”状态；“权重不完整”必须在本次成功后
+        // 恢复成已下载。若原样保留 incomplete，用户即使补齐了文件，界面仍只能
+        // 看见“继续下载”，又会造出另一种假状态。
+        let status = match existing_status.as_deref() {
+            Some("deployed") => "deployed".to_string(),
+            _ => "downloaded".to_string(),
+        };
         db::add_store_model(db::AddStoreModelParams {
             card_id: &card.summary.id,
             model_name: &model_name,
@@ -1745,14 +1749,31 @@ impl ModelManager {
             env.insert("LMM_DEPLOY_PROFILE".into(), pid.clone());
         }
 
-        self.run_card_script(
+        match self.run_card_script(
             &source,
             "deploy",
             &env,
             &mut |line| on_progress(line),
             control,
             false,
-        )?;
+        ) {
+            Ok(_) => {}
+            Err(error) if model_weights_are_incomplete(&error.to_string()) => {
+                // DB 的 downloaded 只是一份历史投影；用户可以在应用外清目录，旧版也
+                // 曾在下载中断后留下错误记录。部署脚本已经给出了“文件不完整”的
+                // 物理事实，立刻把状态归正，下一次界面刷新就必须给“继续下载”。
+                //
+                // 绝不删模型目录：下载脚本负责断点续传，清掉分片反而会浪费用户已经
+                // 下完的几十 GB。
+                db::mark_weights_incomplete(card_id).map_err(|db_error| {
+                    ModelManagerError::new(format!("修复模型下载状态失败：{db_error}"))
+                })?;
+                return Err(ModelManagerError::new(
+                    "模型文件未完整下载，已切换为“继续下载”。已下载的部分会保留；请点击“继续下载”补齐文件后再部署。",
+                ));
+            }
+            Err(error) => return Err(error),
+        }
         // 记下这次用的 deploy 脚本版本：以后脚本一更新，界面就能准确判断
         // 「这个模型需要重新部署」，而不是对所有已部署模型都常驻一个按钮。
         db::update_store_model_status(card_id, "deployed", source.script_hash("deploy").as_deref())
@@ -1785,6 +1806,16 @@ impl ModelManager {
             false,
         ) {
             Ok(lines) => lines,
+            Err(error) if model_weights_are_incomplete(&error.to_string()) => {
+                // 已部署模型同样可能在应用外被清走权重。不能让它一直顶着
+                // “启用”按钮反复失败；跟 deploy 路径一样，归正为可续传的下载状态。
+                db::mark_weights_incomplete(card_id).map_err(|db_error| {
+                    ModelManagerError::new(format!("修复模型下载状态失败：{db_error}"))
+                })?;
+                return Err(ModelManagerError::new(
+                    "模型文件未完整下载，已切换为“继续下载”。已下载的部分会保留；请点击“继续下载”补齐文件后再部署。",
+                ));
+            }
             Err(error) if deployment_receipt_is_missing(&error.to_string()) => {
                 // “已部署”只是历史数据库状态；卡片自己的部署配置可能被手工清理、
                 // 被旧版卸载遗漏，或因中途失败而从未真正写完。继续保留这个假状态，
@@ -2480,6 +2511,33 @@ fn deployment_receipt_is_missing(message: &str) -> bool {
     mentions_receipt && says_missing
 }
 
+/// deploy 脚本已经确认权重不完整时，数据库中的“已下载”就是陈旧状态。
+///
+/// 只识别“模型/权重 + 不完整/缺失”这一组强信号；不能把网络、显存、端口等普通
+/// 部署故障降级成下载问题，否则用户会被错误引导去重下几十 GB。
+fn model_weights_are_incomplete(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    let explicit_english = [
+        "weights incomplete",
+        "weight files incomplete",
+        "model weights are incomplete",
+        "model directory is incomplete",
+        "model files are incomplete",
+        "model weights missing",
+        "missing model weights",
+    ];
+    explicit_english.iter().any(|needle| lower.contains(needle))
+        || [
+            "模型权重不完整",
+            "权重不完整",
+            "模型文件不完整",
+            "权重缺失",
+            "请先下载模型",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle))
+}
+
 /// 卡片报上来的对外调用地址是不是指向**本机**。
 ///
 /// 这把尺子在三个地方必须一模一样：入库（本函数）、接入（前端
@@ -2921,6 +2979,20 @@ exit 0
         assert!(!deployment_receipt_is_missing("找不到模型权重"));
         assert!(!deployment_receipt_is_missing(
             "deployment configuration is valid, but port 30000 is already in use"
+        ));
+    }
+
+    #[test]
+    fn identifies_explicit_incomplete_weight_errors_without_misclassifying_runtime_errors() {
+        assert!(model_weights_are_incomplete(
+            "ERROR: download finished but the model directory is incomplete"
+        ));
+        assert!(model_weights_are_incomplete("模型权重不完整，请先下载模型"));
+        assert!(model_weights_are_incomplete("missing model weights"));
+        assert!(!model_weights_are_incomplete("网络连接失败，请稍后重试"));
+        assert!(!model_weights_are_incomplete("启动服务失败：显存不足"));
+        assert!(!model_weights_are_incomplete(
+            "port 30000 is already in use"
         ));
     }
 

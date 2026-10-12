@@ -731,7 +731,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
               model={model}
               copy={copy}
               busyKind={
-                model.state === 'available'
+                model.state === 'available' || model.state === 'incomplete'
                   ? (runningTask(downloadTaskKey(model.id))?.kind || null)
                   : (runningTask(lifecycleTaskKey(model.id))?.kind || null)
               }

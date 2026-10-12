@@ -105,12 +105,34 @@ test('只在本地库里的也要出现（商店可能已经下架了这张卡�
   assert.equal(merged[0].state, 'running');
 });
 
-test('三档已下载状态各自对得上', () => {
+test('已验证、待部署和需继续下载三档各自对得上', () => {
   const base = { card_id: 'x', card_name: 'X' };
   const stateOf = (extra) => mergeModels([], { models: [{ ...base, ...extra }] })[0].state;
   assert.equal(stateOf({ running: true, status: 'deployed' }), 'running');
-  assert.equal(stateOf({ running: false, status: 'deployed' }), 'deployed');
-  assert.equal(stateOf({ running: false, status: 'pending' }), 'downloaded', '下完但没部署');
+  assert.equal(
+    stateOf({ running: false, status: 'deployed', weights_ready_at: '2026-10-12T00:00:00Z' }),
+    'deployed'
+  );
+  assert.equal(
+    stateOf({ running: false, status: 'downloaded', weights_ready_at: '2026-10-12T00:00:00Z' }),
+    'downloaded',
+    '脚本成功确认过权重完整，才可进入待部署状态'
+  );
+  assert.equal(
+    stateOf({ running: false, status: 'downloaded' }),
+    'incomplete',
+    '旧记录没有物理凭据时不能冒充可部署，应引导继续下载/检查'
+  );
+  assert.equal(
+    stateOf({ running: false, status: 'deployed' }),
+    'incomplete',
+    '旧的 deployed 记录也不能绕过权重完整性凭据，避免继续显示“部署”'
+  );
+  assert.equal(
+    stateOf({ running: false, status: 'incomplete', weights_ready_at: null }),
+    'incomplete',
+    '部署发现权重缺失后必须稳定地留在继续下载状态'
+  );
 });
 
 test('脏数据不许让整页崩掉', () => {
@@ -155,10 +177,11 @@ test('sortModels：能用的排前面，同档按名字', () => {
     { id: 'b', name: '已部署', state: 'deployed' },
     { id: 'a', name: '运行中', state: 'running' },
     { id: 'c', name: '已下载', state: 'downloaded' },
+    { id: 'e', name: '需继续下载', state: 'incomplete' },
   ];
-  assert.deepEqual(sortModels(models).map((m) => m.id), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(sortModels(models).map((m) => m.id), ['a', 'b', 'c', 'e', 'd']);
   // 不改入参：调用方常常把同一个数组同时喂给别的地方
-  assert.deepEqual(models.map((m) => m.id), ['d', 'b', 'a', 'c']);
+  assert.deepEqual(models.map((m) => m.id), ['d', 'b', 'a', 'c', 'e']);
 });
 
 test('sortModels：未知状态排到最后而不是插队', () => {

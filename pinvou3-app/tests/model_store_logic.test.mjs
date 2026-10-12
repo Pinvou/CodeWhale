@@ -245,14 +245,25 @@ test('uninstallDoneText：结果缺失时退回"已保留"，宁可少说也不�
 // 就是个空按钮；用户真正想要的（腾磁盘）叫「删除」。这一档是卸载之后的落点，
 // 所以这条线走得通不通，直接决定用户能不能把盘收回来。
 test('uninstallOptionsFor：已部署 / 运行中给两个选项', () => {
-  assert.equal(uninstallOptionsFor({ status: 'deployed', running: false }), 'uninstall-or-delete');
+  assert.equal(
+    uninstallOptionsFor({ status: 'deployed', running: false, weights_ready_at: '2026-10-12T00:00:00Z' }),
+    'uninstall-or-delete'
+  );
   assert.equal(uninstallOptionsFor({ status: 'deployed', running: true }), 'uninstall-or-delete');
   // running 为真时即便 status 还没跟上，也算已部署——判据跟 libraryStateOf 同源
   assert.equal(uninstallOptionsFor({ status: 'downloaded', running: true }), 'uninstall-or-delete');
 });
 
 test('uninstallOptionsFor：只下载过、没部署过时只给「删除」', () => {
-  assert.equal(uninstallOptionsFor({ status: 'downloaded', running: false }), 'delete-only');
+  assert.equal(
+    uninstallOptionsFor({ status: 'downloaded', running: false, weights_ready_at: '2026-10-12T00:00:00Z' }),
+    'delete-only'
+  );
+  assert.equal(
+    uninstallOptionsFor({ status: 'incomplete', running: false }),
+    'delete-only',
+    '权重未完整时没有服务可卸载，只能删除或继续下载'
+  );
   // 卸载之后 LMM 把记录退回这个状态，此时再点垃圾桶应当只剩「删除」
   assert.equal(uninstallOptionsFor({ status: 'downloaded' }), 'delete-only');
   assert.equal(uninstallOptionsFor({}), 'delete-only');

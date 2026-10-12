@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS store_models (
     script_stop TEXT,
     script_uninstall TEXT,
     downloaded_at TEXT NOT NULL,
+    -- 最后一次由卡片下载脚本确认“权重已完整”的时间。历史记录没有这一列/值时，
+    -- 不能把数据库里的 downloaded 当成磁盘事实，界面应先引导“继续下载/检查”。
+    weights_ready_at TEXT,
     deployed_at TEXT,
     endpoint_url TEXT,
     endpoint_model TEXT,
@@ -97,6 +100,9 @@ const MIGRATION_COLUMNS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("endpoint_url", "TEXT"),
             ("endpoint_model", "TEXT"),
+            // 下载脚本成功返回才写入。存量记录保持 NULL，让它们在下一次使用前
+            // 重新经卡片脚本确认，避免“磁盘已删、界面仍说可部署”。
+            ("weights_ready_at", "TEXT"),
             ("description", "TEXT"),
             ("profiles_json", "TEXT"),
             ("active_profile_id", "TEXT"),
@@ -506,6 +512,9 @@ pub struct StoreModelRecord {
     pub running: bool,
     pub scripts: std::collections::BTreeMap<String, Option<String>>,
     pub downloaded_at: String,
+    /// 最近一次由卡片下载脚本确认权重完整的时间。None 代表旧记录或已发现
+    /// 权重不完整；它们必须走“继续下载”，不能直接给“部署”按钮。
+    pub weights_ready_at: Option<String>,
     pub deployed_at: Option<String>,
     /// enable 脚本报上来的容器名。判断"某个容器是不是本应用起的"只认它——
     /// 镜像不是身份，别人用同一个镜像起的容器跟我们的长得一模一样。
@@ -575,6 +584,7 @@ impl StoreModelRecord {
             running: row.get::<_, i64>("running")? != 0,
             scripts,
             downloaded_at: row.get("downloaded_at")?,
+            weights_ready_at: row.get("weights_ready_at")?,
             deployed_at: row.get("deployed_at")?,
             container_name: row.get("container_name")?,
             endpoint_url: row.get("endpoint_url")?,
@@ -657,10 +667,10 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
         "INSERT INTO store_models
             (card_id, model_name, card_name, org, description, engine_name, engine_version,
              size_bytes, quantization, source_repo_id, source_filename, status,
-             script_install_engine, script_deploy, script_download_model,
-             script_enable, script_stop, script_uninstall,
-             downloaded_at, deployed_at, profiles_json, deploy_topology, card_source)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+              script_install_engine, script_deploy, script_download_model,
+              script_enable, script_stop, script_uninstall,
+              downloaded_at, weights_ready_at, deployed_at, profiles_json, deploy_topology, card_source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
          ON CONFLICT(card_id) DO UPDATE SET
              model_name=excluded.model_name, card_name=excluded.card_name,
              org=excluded.org, description=excluded.description, engine_name=excluded.engine_name,
@@ -670,10 +680,11 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
              script_install_engine=excluded.script_install_engine,
              script_deploy=excluded.script_deploy,
              script_download_model=excluded.script_download_model,
-             script_enable=excluded.script_enable, script_stop=excluded.script_stop,
-             script_uninstall=excluded.script_uninstall,
-             downloaded_at=excluded.downloaded_at,
-             deployed_at=COALESCE(excluded.deployed_at, store_models.deployed_at),
+              script_enable=excluded.script_enable, script_stop=excluded.script_stop,
+              script_uninstall=excluded.script_uninstall,
+              downloaded_at=excluded.downloaded_at,
+              weights_ready_at=excluded.weights_ready_at,
+              deployed_at=COALESCE(excluded.deployed_at, store_models.deployed_at),
              profiles_json=excluded.profiles_json,
              deploy_topology=excluded.deploy_topology,
              card_source=excluded.card_source",
@@ -696,7 +707,10 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
             p.scripts.get("enable"),
             p.scripts.get("stop"),
             p.scripts.get("uninstall"),
-            now,
+            &now,
+            // 调用方只会在 download_model 成功返回后走到这里；“成功”是卡片
+            // 对完整性（文件存在/大小/摘要）的最终声明。把凭据落库，之后才可部署。
+            &now,
             deployed_at,
             profiles_json,
             // 存成 "single" / "dual"，跟 DeployTopology 的 serde 表示一致
@@ -820,6 +834,28 @@ pub fn mark_uninstalled(card_id: &str) -> rusqlite::Result<()> {
 /// 权重和引擎保持不动，用户重新部署即可恢复可用状态。
 pub fn mark_deployment_missing(card_id: &str) -> rusqlite::Result<()> {
     clear_deployment_state(card_id)
+}
+
+/// 部署时发现权重缺失或不完整，撤销“已经下载好”的过期声明。
+///
+/// 这不是删除：卡片信息、脚本副本、模型目录和任何可续传的分片都必须原封不动。
+/// 下一步应当是“继续下载”，而不是再次让用户点部署后才看见同一个失败。
+pub fn mark_weights_incomplete(card_id: &str) -> rusqlite::Result<()> {
+    let conn = connect()?;
+    conn.execute(
+        "UPDATE store_models
+            SET status = 'incomplete',
+                weights_ready_at = NULL,
+                running = 0,
+                deployed_at = NULL,
+                deployed_script_sha256 = NULL,
+                container_name = NULL,
+                endpoint_url = NULL,
+                endpoint_model = NULL
+          WHERE card_id = ?1",
+        params![card_id],
+    )?;
+    Ok(())
 }
 
 /// 记下最近一次成功部署用的是哪套参数方案：下次重新部署/修复时默认沿用
@@ -1389,6 +1425,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(record.status, "downloaded");
+        assert!(
+            record.weights_ready_at.is_some(),
+            "正常下载落库的模型必须有权重已就绪凭据，界面才可显示“部署”"
+        );
         assert!(!record.running);
         assert!(record.deployed_at.is_none());
         assert!(record.deployed_script_sha256.is_none());
@@ -1404,6 +1444,57 @@ mod tests {
                 .get("deploy")
                 .and_then(|script| script.as_deref()),
             Some("https://example.com/deploy.sh")
+        );
+    }
+
+    #[test]
+    fn incomplete_weights_recover_to_resume_without_deleting_the_model_record() {
+        let _ctx = setup_temp_db();
+        let scripts = std::collections::BTreeMap::from([(
+            "download_model".to_string(),
+            "https://example.com/download_model.sh".to_string(),
+        )]);
+        add_store_model(AddStoreModelParams {
+            card_id: "card-with-missing-weights",
+            model_name: "qwen38",
+            card_name: "Qwen3.8",
+            org: Some("Qwen"),
+            description: None,
+            engine_name: "sglang",
+            engine_version: Some("v0.5.19"),
+            size_bytes: 1024,
+            quantization: Some("nvfp4"),
+            source_repo_id: Some("owner/model"),
+            source_filename: None,
+            scripts: &scripts,
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: DeployTopology::default(),
+            card_source: "store",
+        })
+        .unwrap();
+        update_store_model_status("card-with-missing-weights", "deployed", Some("script-hash"))
+            .unwrap();
+        set_running("card-with-missing-weights", true).unwrap();
+
+        mark_weights_incomplete("card-with-missing-weights").unwrap();
+
+        let record = get_store_model("card-with-missing-weights")
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, "incomplete");
+        assert!(record.weights_ready_at.is_none());
+        assert!(!record.running);
+        assert!(record.deployed_at.is_none());
+        assert!(record.deployed_script_sha256.is_none());
+        assert_eq!(record.source_repo_id.as_deref(), Some("owner/model"));
+        assert_eq!(
+            record
+                .scripts
+                .get("download_model")
+                .and_then(|script| script.as_deref()),
+            Some("https://example.com/download_model.sh"),
+            "恢复为继续下载时必须保留下载脚本和所有可续传文件"
         );
     }
 

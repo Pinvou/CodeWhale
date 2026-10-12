@@ -249,17 +249,23 @@ function filterStoreCards(cards, query) {
     .some((field) => String(field ?? '').toLowerCase().includes(keyword)));
 }
 
-/** 一个模型在用户眼里的四种状态，按「离能用有多远」从近到远排。 */
-const MODEL_STATES = ['running', 'deployed', 'downloaded', 'available'];
+/** 一个模型在用户眼里的五种状态，按「离能用有多远」从近到远排。 */
+const MODEL_STATES = ['running', 'deployed', 'downloaded', 'incomplete', 'available'];
 
 /**
  * 库记录落在哪一档状态。
  * @param {object} record - 库记录。
- * @returns {'running'|'deployed'|'downloaded'} 状态。
+ * @returns {'running'|'deployed'|'downloaded'|'incomplete'} 状态。
  */
 function libraryStateOf(record) {
   if (record?.running) return 'running';
-  return record?.status === 'deployed' ? 'deployed' : 'downloaded';
+  // “已下载”必须有一次成功脚本校验留下的物理凭据。升级前的记录没有
+  // weights_ready_at；部署刚发现权重缺失的记录也会清掉它。两类都应当让用户
+  // “继续下载”，即使旧数据库仍写着 deployed 也不能例外。卡片脚本会复用
+  // 已经落盘的分片，而不是从头再传。
+  if (record?.status === 'incomplete' || !record?.weights_ready_at) return 'incomplete';
+  if (record?.status === 'deployed') return 'deployed';
+  return 'downloaded';
 }
 
 /**
@@ -276,7 +282,8 @@ function libraryStateOf(record) {
  * @returns {'uninstall-or-delete'|'delete-only'} 对话框形态。
  */
 function uninstallOptionsFor(record) {
-  return libraryStateOf(record) === 'downloaded' ? 'delete-only' : 'uninstall-or-delete';
+  const state = libraryStateOf(record);
+  return state === 'downloaded' || state === 'incomplete' ? 'delete-only' : 'uninstall-or-delete';
 }
 
 /** 算作「这个字段是空的」的几种取值。库记录里三种都出现过。 */
