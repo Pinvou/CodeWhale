@@ -4504,8 +4504,52 @@ async fn session_resume_thread_answers_400_for_an_empty_workspace_row() -> Resul
     );
     let body: serde_json::Value = resp.json().await?;
     assert!(
-        body.to_string().contains("workspace must not be empty"),
-        "the 400 carries the producer reason: {body}"
+        body.to_string().contains("non-empty absolute path"),
+        "the 400 carries the face's unified refusal: {body}"
+    );
+
+    // Round-41 M41-1 endpoint-level regression: the RELATIVE spelling
+    // refuses on the same face — forwarding it used to collapse the
+    // declared set to empty and mint a relative-primary thread (201).
+    let relative = json!({
+        "schema_version": 1,
+        "metadata": {
+            "id": "sess_relative_ws",
+            "title": "Relative workspace",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:10:00Z",
+            "message_count": 1,
+            "total_tokens": 10,
+            "model": "deepseek-v4-pro",
+            "workspace": "relative/dir",
+            "workspace_roots": ["/srv/data"],
+            "mode": "agent"
+        },
+        "messages": [
+            { "role": "user", "content": [{ "type": "text", "text": "hi" }] }
+        ],
+        "system_prompt": null
+    });
+    fs::write(
+        sessions_dir.join("sess_relative_ws.json"),
+        serde_json::to_string_pretty(&relative)?,
+    )?;
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/sessions/sess_relative_ws/resume-thread"
+        ))
+        .json(&json!({ "model": "deepseek-v4-pro" }))
+        .send()
+        .await?;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a relative-workspace row must not mint a collapsed thread"
+    );
+    let body: serde_json::Value = resp.json().await?;
+    assert!(
+        body.to_string().contains("non-empty absolute path"),
+        "the 400 names the relative-workspace refusal: {body}"
     );
 
     handle.abort();

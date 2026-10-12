@@ -315,6 +315,19 @@ pub(super) async fn resume_session_thread(
             .unwrap_or_else(|| "agent".to_string())
     });
 
+    // Round-41 M41-1: a RELATIVE workspace row refuses here like every
+    // sibling intake (ACP session/load, session/new, the core resume/fork
+    // lanes) — forwarding it verbatim lets create_thread's degenerate
+    // collapse silently destroy the declared root set and persist a
+    // relative-primary thread no other intake will load (A28-1's class).
+    if session.metadata.workspace.as_os_str().is_empty()
+        || !session.metadata.workspace.is_absolute()
+    {
+        return Err(ApiError::bad_request(
+            "Failed to create thread: session workspace must be a non-empty absolute path",
+        ));
+    }
+
     // The session row persists the cwd-first full form (primary included),
     // but `create_thread` validates its `workspace_roots` as DECLARED
     // additional entries under the intake cap — re-declaring the row's own

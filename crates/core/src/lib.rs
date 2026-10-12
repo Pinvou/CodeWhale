@@ -4068,21 +4068,24 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn intake_and_sanitize_reject_mixed_spelling_ancestors_on_windows() {
-        // Round-41 M41-6 rework of the round-39 pin: the MIXED-EXISTENCE
-        // shapes are what the normalizer rescues — an EXISTING primary
-        // canonicalizes to the verbatim form while a not-yet-materialized
-        // ancestor stays in lexical DOS form, and the pre-fix verbatim-vs-
-        // DOS comparison silently skipped the guard (the fail-open: the
-        // ancestor was admitted, and the sanitizer reported zero drops).
-        // Both sides existing makes the pre-fix predicate pass too — the
-        // old fixture was vacuous.
+        // Round-41 M41-6 rework (review-corrected): the REALIZABLE
+        // mixed-existence shape is a nonexistent primary (lexical DOS
+        // fallback) under an existing ancestor (canonical verbatim) —
+        // the pre-fix comparison skipped the guard there. An existing
+        // primary plus a not-yet-created SIBLING is a legal declaration,
+        // not an ancestor, and the first draft wrongly expected its
+        // rejection.
         let temp = tempfile::tempdir().expect("tempdir");
-        let primary = temp.path().join("proj");
-        std::fs::create_dir_all(&primary).expect("primary dir (canonical/verbatim side)");
-        let ancestor = temp.path().join("not-yet-created");
 
-        let err = validate_workspace_roots(&primary, std::slice::from_ref(&ancestor))
-            .expect_err("a mixed-existence ancestor must be rejected on Windows");
+        // The realizable mixed-existence shape (round-41 review): a
+        // NONEXISTENT primary keeps its lexical DOS spelling while its
+        // EXISTING ancestor canonicalizes to the verbatim form — the
+        // pre-fix verbatim-vs-DOS comparison silently skipped the guard
+        // and admitted the ancestor.
+        let ghost_primary = temp.path().join("ghost").join("ws");
+        let real_ancestor = temp.path().to_path_buf();
+        let err = validate_workspace_roots(&ghost_primary, std::slice::from_ref(&real_ancestor))
+            .expect_err("the mixed-existence ancestor must be rejected on Windows");
         assert!(
             err.to_string().contains("contains the primary root"),
             "the rejection names the widening: {err}"
@@ -4090,20 +4093,10 @@ mod tests {
 
         // The sanitize leg on the same mixed shape: the poison entry drops
         // and the count names it (the round-39 sanitizer silently kept it).
-        let (clean, dropped) = sanitize_workspace_roots(&primary, &[primary.clone(), ancestor]);
-        assert_eq!(clean, vec![primary.clone()]);
+        let (clean, dropped) =
+            sanitize_workspace_roots(&ghost_primary, &[ghost_primary.clone(), real_ancestor]);
+        assert_eq!(clean, vec![ghost_primary.clone()]);
         assert_eq!(dropped, 1, "the drop is counted, not silent");
-
-        // The inverted mixed shape: a NONEXISTENT primary (lexical DOS
-        // fallback) with an EXISTING ancestor (canonical verbatim).
-        let ghost_primary = temp.path().join("ghost").join("ws");
-        let real_ancestor = temp.path().to_path_buf();
-        let err = validate_workspace_roots(&ghost_primary, std::slice::from_ref(&real_ancestor))
-            .expect_err("the inverted mixed-existence ancestor is rejected too");
-        assert!(
-            err.to_string().contains("contains the primary root"),
-            "both mixed directions close: {err}"
-        );
     }
 
     #[test]
