@@ -10426,24 +10426,40 @@ async fn forkguard_turn_started_composer_shell_self_start_stays_none() {
         .expect("queue composer shell command");
     {
         let mut rx = handle.rx_event.write().await;
-        loop {
+        let started_turn_id = loop {
             let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
                 .await
                 .expect("timed out waiting for the composer shell turn")
                 .expect("engine event");
-            if let Event::TurnStarted { submission_id, .. } = event {
+            if let Event::TurnStarted {
+                turn_id,
+                submission_id,
+                ..
+            } = event
+            {
                 assert!(
                     submission_id.is_none(),
                     "a composer shell turn has no host submission to echo"
                 );
-                break;
+                break turn_id;
             }
-        }
+        };
         while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
             .await
             .expect("timed out waiting for the composer shell completion")
         {
-            if let Event::TurnComplete { status, error, .. } = event {
+            if let Event::TurnComplete {
+                turn_id,
+                submission_id,
+                compaction_id,
+                status,
+                error,
+                ..
+            } = event
+            {
+                assert_eq!(turn_id.as_deref(), Some(started_turn_id.as_str()));
+                assert!(submission_id.is_none());
+                assert!(compaction_id.is_none());
                 assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
                 break;
             }
