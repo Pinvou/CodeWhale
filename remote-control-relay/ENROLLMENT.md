@@ -524,6 +524,10 @@ generator emits only exact WS/health locations pointing at the loopback
 Enrollment gateway; it never proxies the legacy Relay or the coverage-control
 listener. It rejects inconsistent legacy URL/bind/PORT inputs, stale public
 entrypoint paths and an immediate proxy missing from the trusted allowlist.
+Base paths use nonempty ASCII letter/digit/underscore/hyphen segments separated
+by a single slash; repeated slashes are rejected because nginx normally merges
+them before exact-location selection. This validation does not change the
+gateway's existing runtime path parser.
 The legacy `PORT` defaults to 8787; the gateway port must be explicitly set.
 Store the generated fragment in the intended server block, then run
 `node scripts/enrollment-nginx-config.js --check <fragment>` against the same

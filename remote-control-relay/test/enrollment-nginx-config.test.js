@@ -76,6 +76,15 @@ test("unsafe or inconsistent deployment inputs reject without emitting configura
   }
 });
 
+test("nginx-normalized ambiguous paths reject even when every env route agrees", () => {
+  for (const basePath of ["//custom", "/custom//remote", "/custom///remote"]) {
+    const values = env({ PINVOU_REMOTE_PUBLIC_BASE_PATH: basePath,
+      PINVOU_REMOTE_LEGACY_RELAY_URL: `ws://127.0.0.1:8787${basePath}/ws`,
+      PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON: JSON.stringify([`https://example.invalid${basePath}`]) });
+    assert.throws(() => renderEnrollmentNginxConfig(values), { code: "gateway_base_path_invalid" });
+  }
+});
+
 test("offline check rejects stale routes, widened locations and direct legacy bypass", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "pinvou-nginx-contract-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

@@ -14,7 +14,9 @@ function port(value, code) {
 
 export function loadEnrollmentNginxConfig(env) {
   const basePath = env.PINVOU_REMOTE_PUBLIC_BASE_PATH || "/pinvou3/remote";
-  if (!/^\/[A-Za-z0-9/_-]*[A-Za-z0-9_-]$/u.test(basePath)) fail("gateway_base_path_invalid");
+  // nginx normally merges adjacent slashes before selecting an exact location.
+  // Reject that ambiguous input instead of generating an unreachable location.
+  if (!/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/u.test(basePath)) fail("gateway_base_path_invalid");
   const host = env.PINVOU_REMOTE_GATEWAY_HOST;
   if (host !== "127.0.0.1" && host !== "::1") fail("gateway_host_not_loopback");
   const gatewayPort = port(env.PINVOU_REMOTE_GATEWAY_PORT, "gateway_port_invalid");
