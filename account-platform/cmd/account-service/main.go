@@ -79,10 +79,14 @@ func main() {
 	service.WithTokenOwnerCandidateCursorKey(ownerCandidateCursorKey)
 	clear(ownerCandidateCursorKey)
 
+	if err := configureOrganizationLifecycle(service, credential); err != nil {
+		log.Fatal("ACCOUNT_ORGANIZATION_AUTHORITY_INVALID")
+	}
 	if err := configureApprovals(ctx, repository, service, credential, cfg.Environment); err != nil {
 		log.Fatal(err)
 	}
 	go observability.RunBackground(ctx, "wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run)
+	go observability.RunBackground(ctx, "role-binding-expiry", account.NewRoleBindingExpiryWorker(repository, time.Minute).Run)
 	if enabled("MOBILE_AUTH_ENABLED") {
 		registrationQueryKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("REGISTRATION_QUERY_HMAC_KEY_BASE64")))
 		if decodeErr != nil {

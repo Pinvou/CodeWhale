@@ -96,7 +96,7 @@ func TestPersonalHandlerRejectsInvalidBodiesWithoutMutation(t *testing.T) {
 	}
 	// Commerce mapping was delivered with F02. It remains protected rather
 	// than being advertised as an absent future route.
-	for _, path := range []string{"/v1/me/commerce-customer-mapping", "/admin/v1/approval-requests"} {
+	for _, path := range []string{"/v1/me/commerce-customer-mapping", "/admin/v1/approval-requests", "/v1/me/organizations"} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusUnauthorized {
@@ -106,7 +106,6 @@ func TestPersonalHandlerRejectsInvalidBodiesWithoutMutation(t *testing.T) {
 	for _, item := range []struct{ method, path string }{
 		{http.MethodDelete, "/admin/v1/users/" + id},
 		{http.MethodPost, "/v1/me/account-closure-requests"},
-		{http.MethodGet, "/v1/me/organizations"},
 		{http.MethodGet, "/admin/v1/registration-bonus-policy"},
 	} {
 		w := httptest.NewRecorder()

@@ -19,8 +19,9 @@ export function PersonalUsageWorkspace({ client, me, language }) {
   const [unavailable, setUnavailable] = useState(false);
   const generation = useRef(0);
   const cancelIntents = useRef(new Map());
-  const owner = `${me.user_id}:${me.active_context?.context_version || 0}:${me.active_context?.personal_authorization_version || 0}`;
-  const canRead = hasPermission(me, 'personal.usage.read');
+  const organizational = me.active_context?.context_type === 'ORGANIZATION';
+  const owner = `${me.user_id}:${me.active_context?.context_version || 0}:${me.active_context?.organization_id || ''}:${me.active_context?.personal_authorization_version || 0}:${me.active_context?.organization_authorization_version || 0}`;
+  const canRead = hasPermission(me, organizational ? 'org.usage.read.self' : 'personal.usage.read');
   const canCancel = hasPermission(me, 'personal.usage.cancel');
   const load = async (cursor, targetPage, stamp, signal) => {
     const result = requirePage(await client.usageHistory(cursor, signal));

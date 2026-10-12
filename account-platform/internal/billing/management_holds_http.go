@@ -59,10 +59,20 @@ func (s *Service) reserve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if body.OrganizationID != nil || body.MemberUserID != nil {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "organization holds are not installed", httpserver.RequestID(r.Context()))
-		return
-	}
-	if pricing != nil {
+		member, ok := s.repository.(interface {
+			ReserveMemberQuota(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64, int64, *uuid.UUID, time.Time) (Hold, error)
+			ReserveMemberQuotaPriced(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64, int64, *uuid.UUID, time.Time, *HoldPricingContext) (Hold, error)
+		})
+		if !ok || body.OrganizationID == nil || *body.OrganizationID == uuid.Nil || body.MemberUserID == nil || *body.MemberUserID == uuid.Nil || body.MembershipVersion < 1 {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid member quota reservation", httpserver.RequestID(r.Context()))
+			return
+		}
+		if pricing != nil {
+			hold, err = member.ReserveMemberQuotaPriced(r.Context(), body.UsageRequestID, body.WalletID, *body.OrganizationID, *body.MemberUserID, body.MembershipVersion, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second), pricing)
+		} else {
+			hold, err = member.ReserveMemberQuota(r.Context(), body.UsageRequestID, body.WalletID, *body.OrganizationID, *body.MemberUserID, body.MembershipVersion, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second))
+		}
+	} else if pricing != nil {
 		hold, err = repository.ReservePriced(r.Context(), body.UsageRequestID, body.WalletID, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second), pricing)
 	} else {
 		hold, err = repository.Reserve(r.Context(), body.UsageRequestID, body.WalletID, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second))
