@@ -304,14 +304,19 @@ async fn run_plugin_child_raw(
         if let Ok(parsed) = serde_json::from_str::<ToolResult>(&stdout) {
             Ok(parsed)
         } else if super::process::drain_truncated(&output) {
-            // This surface reports stdout only, so the runner's
-            // truncation note on stderr would otherwise vanish: an
+            // This surface reports stdout only, so a truncation note in
+            // the captured tail (a drain that outlived the grace, or the
+            // size cap stopping the capture) would otherwise vanish: an
             // unparseable, possibly cut-off output must not pass as a
-            // silent success.
+            // silent success. The echo is bounded — the capture can be
+            // 16 MiB of capture, and none of it needs to reach the
+            // transcript.
             Err(ToolError::execution_failed(format!(
-                "plugin script stdout did not parse as a tool result and the output \
-                 pipes did not close after the interpreter exited (the captured \
-                 output may be truncated): {stdout}"
+                "plugin script stdout did not parse as a tool result and the \
+                 captured output is truncated (the pipes did not close after \
+                 the interpreter exited, or the size cap stopped the capture); \
+                 first characters: {}",
+                codewhale_hooks::bounded_text(&stdout, 512)
             )))
         } else {
             Ok(ToolResult::success(stdout))
@@ -746,6 +751,36 @@ echo hello
             );
             std::thread::sleep(std::time::Duration::from_millis(100));
             attempts += 1;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capped_plugin_stdout_is_refused_instead_of_passing_as_success() {
+        let dir = TempDir::new().unwrap();
+        let script = dir.path().join("flood.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n# name: flood\nhead -c 17000000 /dev/zero\n",
+        )
+        .unwrap();
+
+        // 17 MiB of NUL bytes trips the drain capture cap and cannot parse
+        // as a tool result: this surface must refuse the output as truncated
+        // instead of reporting the cut capture as a silent success.
+        let (interpreter, args) = script_command_parts(&script, &[]);
+        let err = run_plugin_child(&interpreter, &args, "flood", serde_json::json!({}))
+            .await
+            .expect_err("a capped, unparseable stdout must not pass as a success");
+        match err {
+            ToolError::ExecutionFailed { message } => {
+                assert!(
+                    message.contains("truncated") && message.contains("size cap"),
+                    "the error must name the truncation evidence: {}",
+                    &message[..message.len().min(400)]
+                );
+            }
+            other => panic!("expected an execution failure; got {other:?}"),
         }
     }
 

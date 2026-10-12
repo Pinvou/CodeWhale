@@ -7543,6 +7543,9 @@ mod tests {
 
     fn turn_complete_event() -> EngineEvent {
         EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: crate::models::Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -8029,6 +8032,9 @@ mod tests {
             ..crate::models::Usage::default()
         };
         controller.observe_engine_event(&EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
             usage: usage.clone(),
             status: TurnOutcomeStatus::Completed,
             error: None,

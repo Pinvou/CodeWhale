@@ -52,6 +52,19 @@ fn runtime_session_fallback_retains_non_unicode_explicit_home_boundary() {
 }
 
 #[test]
+fn server_task_config_opts_tasks_into_answerable_human_waits() {
+    // The HTTP server is the one host that can deliver a decision to its
+    // tasks (`/v1/approvals/`, `/v1/user-input/`), so its config must opt
+    // in explicitly; everywhere else (`from_runtime`, the TUI's private
+    // runtime) the safe default is unanswerable.
+    let cfg = server_task_config(&Config::default(), PathBuf::from("."), 2);
+    assert!(
+        cfg.human_waits_answerable,
+        "server task config must arm answerable human waits"
+    );
+}
+
+#[test]
 fn thread_route_credential_error_is_bad_request_not_not_found() {
     let credential = map_thread_err(anyhow::anyhow!("DeepSeek API key not found"));
     assert_eq!(credential.status, StatusCode::BAD_REQUEST);
@@ -969,6 +982,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
             allow_shell: false,
             trust_mode: false,
             execution_limits: crate::task_manager::TaskExecutionLimits::default(),
+            human_waits_answerable: false,
         },
         Arc::new(MockExecutor),
     )
@@ -2560,6 +2574,9 @@ async fn compatibility_stream_closes_losslessly_across_replay_live_handoff() -> 
             .await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 3,
                     output_tokens: 1,
@@ -2813,6 +2830,9 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
         harness
             .tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage::default(),
                 status: TurnOutcomeStatus::Completed,
                 error: None,
@@ -3173,6 +3193,9 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                         .await;
                     let _ = tx_event
                         .send(EngineEvent::TurnComplete {
+                            turn_id: None,
+                            submission_id: None,
+                            compaction_id: None,
                             usage: Usage {
                                 input_tokens: 10,
                                 output_tokens: 5,
@@ -3188,6 +3211,9 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                 Op::CompactContext { .. } => {
                     let _ = tx_event
                         .send(EngineEvent::TurnComplete {
+                            turn_id: None,
+                            submission_id: None,
+                            compaction_id: None,
                             usage: Usage {
                                 input_tokens: 0,
                                 output_tokens: 0,
@@ -3329,6 +3355,9 @@ async fn turn_endpoint_operation_key_returns_original_and_conflicts_on_mismatch(
             sleep(Duration::from_millis(20)).await;
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
+                    turn_id: None,
+                    submission_id: None,
+                    compaction_id: None,
                     usage: Usage::default(),
                     status: TurnOutcomeStatus::Completed,
                     error: None,
@@ -3434,6 +3463,9 @@ async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
             .await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 5,
                     output_tokens: 3,
@@ -3654,6 +3686,9 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
         sleep(Duration::from_millis(60)).await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 2,
                     output_tokens: 1,
@@ -3927,6 +3962,7 @@ async fn stream_compat_mapping_handles_expected_runtime_events() -> Result<()> {
             "approval_id": "approval_test",
             "decision": "allow",
             "remember": false,
+            "posture": "auto_review",
             "internal_secret": "approval-decision-secret",
         }),
     };
@@ -3940,6 +3976,9 @@ async fn stream_compat_mapping_handles_expected_runtime_events() -> Result<()> {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("event: approval.decided"));
     assert!(text.contains("\"decision\":\"allow\""));
+    // The execution-policy explanation must reach compat clients so an
+    // auto_review denial is distinguishable from a plain auto-deny.
+    assert!(text.contains("\"posture\":\"auto_review\""));
     assert!(!text.contains("approval-decision-secret"));
 
     // An interrupted resolution (turn interrupt / engine death / runtime
@@ -4071,6 +4110,9 @@ async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
             .await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 4,
                     output_tokens: 2,
@@ -4790,6 +4832,9 @@ async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
             .await;
         let _ = tx_event
             .send(EngineEvent::TurnComplete {
+                turn_id: None,
+                submission_id: None,
+                compaction_id: None,
                 usage: Usage {
                     input_tokens: 2,
                     output_tokens: 1,

@@ -94,7 +94,7 @@ pub fn js_execution_tool_definition() -> Tool {
         tool_type: Some(JS_EXECUTION_TOOL_TYPE.to_string()),
         name: JS_EXECUTION_TOOL_NAME.to_string(),
         description:
-            "Execute JavaScript code with the local Node.js runtime in the workspace and return stdout/stderr/return_code as JSON."
+            "Execute JavaScript code with the local Node.js runtime in the workspace and return stdout/stderr/return_code as JSON. Hard timeout of 10 minutes: on timeout the call fails with a timeout error and no partial output."
                 .to_string(),
         input_schema: json!({
             "type": "object",

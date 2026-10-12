@@ -8000,14 +8000,9 @@ fn run_sessions_export(
         );
     }
 
-    let artifacts_dir = if skip_artifacts {
-        None
-    } else {
-        session_export::session_artifacts_dir(manager.sessions_dir(), &session.metadata.id)
-    };
     let summary = write_session_archive(
         &session,
-        artifacts_dir.as_deref(),
+        Some(manager.sessions_dir()),
         &output_path,
         SessionArchiveOptions {
             include_artifacts: !skip_artifacts,
@@ -8027,8 +8022,8 @@ fn run_sessions_export(
         format_bytes(summary.total_member_bytes()),
         format_bytes(summary.compressed_bytes())
     );
-    if artifacts_dir.is_none() && !skip_artifacts {
-        println!("  (no artifacts directory found for this session)");
+    if !skip_artifacts && !summary.includes_artifacts {
+        println!("  (no artifacts included for this session)");
     }
     println!(
         "  Restore (full fidelity): /load <extracted session.json> inside the TUI; /resume imports the conversation only"

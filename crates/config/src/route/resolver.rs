@@ -27,6 +27,7 @@
 //! There is deliberately no prompt-text / freeform field on [`RouteRequest`],
 //! which structurally bars prompt-content routing.
 
+use super::RequestProtocol;
 use super::candidate::{
     LimitField, PricingSku, ReadyRouteCandidate, ResolvedAuthSource, ResolvedEndpoint,
     SourcedLimitOverride, ValidationReport,
@@ -62,6 +63,15 @@ pub struct RouteRequest {
     /// for adjusting a route's effective limits: the candidate itself is
     /// immutable once minted.
     pub limit_overrides: Vec<SourcedLimitOverride>,
+    /// Explicit wire-format override for `ProviderKind::Custom` routes.
+    ///
+    /// The Custom descriptor's static policy is Chat Completions for backward
+    /// compatibility; a per-config `[providers.<name>] wire = "responses" |
+    /// "anthropic" | "chat"` table must mint a wire-true candidate so the
+    /// billing receipt, preflight, and the per-turn client binding all read
+    /// the same protocol. Ignored for every other kind: built-ins keep their
+    /// descriptor policy.
+    pub wire_override: Option<RequestProtocol>,
 }
 
 /// Resolves [`RouteRequest`]s into [`ReadyRouteCandidate`]s.
@@ -251,6 +261,27 @@ impl RouteResolver {
             selected.capabilities = RouteCapabilities::default();
             selected.pricing = PricingSku::UnknownOrStale;
         }
+        // The Custom-only wire channel, bound once: the endpoint-key remap
+        // here and the protocol selection further down must read the same
+        // override, or a future edit to one `Custom` gate silently desyncs
+        // the key from the protocol. Built-ins keep their descriptor policy
+        // even if a stray override is set.
+        let wire_override = (provider_kind == ProviderKind::Custom)
+            .then_some(req.wire_override)
+            .flatten();
+        if let Some(protocol_override) = wire_override {
+            // A per-config `wire` override names the endpoint the custom
+            // table actually serves; the static descriptor policy stays Chat
+            // Completions for backward compatibility, so the candidate's
+            // endpoint key and protocol must come from the override (the
+            // tui route layer reads `[providers.<name>] wire` into the
+            // request; see `route_runtime::custom_wire_override_for`).
+            selected.endpoint_key = match protocol_override {
+                RequestProtocol::Responses => "responses".to_string(),
+                RequestProtocol::AnthropicMessages => "messages".to_string(),
+                RequestProtocol::ChatCompletions => selected.endpoint_key,
+            };
+        }
         if provider_kind == ProviderKind::Zai {
             let effective_base_url = req
                 .base_url_override
@@ -274,8 +305,8 @@ impl RouteResolver {
             );
         }
 
-        let protocol = descriptor
-            .protocol_for_endpoint(&selected.endpoint_key)
+        let protocol = wire_override
+            .or_else(|| descriptor.protocol_for_endpoint(&selected.endpoint_key))
             .ok_or_else(|| RouteError::UnsupportedModelProtocol {
                 provider: provider_id.clone(),
                 model: selected.wire_model_id.as_str().to_string(),

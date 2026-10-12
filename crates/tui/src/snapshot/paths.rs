@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 ///
 /// Returns `$STATE_DIR/snapshots/<project_hash>/<worktree_hash>/` where
 /// `$STATE_DIR` is resolved via `codewhale_config::resolve_state_dir`.
-/// The caller is responsible for creating it on disk; we purposefully
-/// don't touch the filesystem here so this is cheap to call repeatedly.
+/// The caller is responsible for creating it on disk. Resolution is not
+/// free: it runs the workspace canonicalization under a bounded probe
+/// (see below), so callers on hot paths should cache the result.
 ///
 /// The `project_hash` is derived from the canonicalized workspace path
 /// after stripping any `.worktrees/<name>` suffix — multiple worktrees
@@ -29,9 +30,19 @@ pub fn snapshot_dir_for(workspace: &Path) -> PathBuf {
 /// Used by tests so they never touch the user's real state directory.
 pub fn snapshot_dir_with_home(workspace: &Path, home: Option<PathBuf>) -> PathBuf {
     let home = home.unwrap_or_else(|| PathBuf::from("."));
-    let canonical = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
+    // The canonicalization here is the bounded probe, not an assumption
+    // that a caller already canonicalized the workspace: any path reaching
+    // this function gets the same bound. On a wedged mount it fails fast
+    // to the raw-path fallback, and for an already canonical input the
+    // raw path hashes identically.
+    let canonical = super::repo::canonicalize_bounded(
+        workspace,
+        super::repo::WORKSPACE_PROBE_TIMEOUT,
+    )
+    .unwrap_or_else(|err| {
+        tracing::warn!(target: "snapshot", "workspace canonicalization fell back to the raw path: {err}");
+        workspace.to_path_buf()
+    });
     let project_root = strip_worktree_suffix(&canonical);
     let project_hash = stable_hex(&project_root);
     let worktree_hash = stable_hex(&canonical);

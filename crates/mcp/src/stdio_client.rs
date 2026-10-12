@@ -757,6 +757,12 @@ struct Connection {
 
 impl Connection {
     fn send(&mut self, message: &Value) -> Result<()> {
+        // Known unbounded leg (deliberate, disclosed debt): the write below
+        // is blocking std I/O while the connection mutex is held, so a
+        // server that never drains its stdin can park this leg past every
+        // budget — unlike the read leg, which `request_with_timeout`
+        // bounds. Fixing it needs an async or threaded writer and is
+        // tracked as follow-up scale, not silently assumed safe.
         let stdin = self
             .stdin
             .as_ref()
@@ -896,6 +902,26 @@ impl Drop for Connection {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod budget_pins {
+    // The engine-side stdio proxy has no behavioral timeout tests (the
+    // budgets are compile-time constants), so pin the wiring values: a
+    // drift here silently re-bounds every MCP `tools/call` the engine
+    // proxy carries. CALL_TOOL_TIMEOUT must mirror the TUI pool's default
+    // execute timeout (1800s), and the generic request budget must stay
+    // separate and much shorter.
+    use super::{CALL_TOOL_TIMEOUT, HANDSHAKE_TIMEOUT, REQUEST_TIMEOUT};
+    use std::time::Duration;
+
+    #[test]
+    fn call_tool_budget_mirrors_the_pool_default_and_stays_separate() {
+        assert_eq!(CALL_TOOL_TIMEOUT, Duration::from_secs(1800));
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(120));
+        assert!(CALL_TOOL_TIMEOUT > REQUEST_TIMEOUT);
+        assert_eq!(HANDSHAKE_TIMEOUT, Duration::from_secs(30));
     }
 }
 

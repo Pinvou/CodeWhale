@@ -19,6 +19,7 @@ fn req(provider: Option<ProviderKind>, model: Option<&str>) -> RouteRequest {
         saved_provider_model: None,
         base_url_override: None,
         limit_overrides: Vec::new(),
+        wire_override: None,
     }
 }
 
@@ -431,6 +432,7 @@ fn resolver_routes_only_official_deepseek_flash_over_responses() {
             saved_provider_model: None,
             base_url_override: Some("https://compatible.example/v1".to_string()),
             limit_overrides: Vec::new(),
+            wire_override: None,
         })
         .expect("custom compatible Flash route remains pass-through");
     assert_eq!(custom.protocol(), RequestProtocol::ChatCompletions);
@@ -455,6 +457,7 @@ fn resolver_routes_deepseek_vision_exp_over_chat_with_image_input() {
                 saved_provider_model: None,
                 base_url_override: base_url_override.map(str::to_string),
                 limit_overrides: Vec::new(),
+                wire_override: None,
             })
             .expect("experimental vision route resolves");
 
@@ -493,6 +496,7 @@ fn resolver_keeps_custom_deepseek_same_name_capabilities_unverified() {
             saved_provider_model: None,
             base_url_override: Some("https://deepseek-proxy.example.test/v1".to_string()),
             limit_overrides: Vec::new(),
+            wire_override: None,
         })
         .expect("same-name custom proxy route resolves");
 
@@ -775,6 +779,7 @@ fn resolver_direct_owned_row_match_survives_casing_mismatch() {
         saved_provider_model: None,
         base_url_override: Some("https://compatible.example.test/v1".to_string()),
         limit_overrides: Vec::new(),
+        wire_override: None,
     };
     let out = r
         .resolve(&custom)
@@ -841,6 +846,7 @@ fn resolver_custom_endpoint_allows_namespaced_selector_for_strict_provider() {
         saved_provider_model: None,
         base_url_override: Some("https://example.local/v1".to_string()),
         limit_overrides: Vec::new(),
+        wire_override: None,
     };
     let out = r
         .resolve(&request)
@@ -864,6 +870,7 @@ fn resolver_treats_every_official_deepseek_endpoint_as_strict_direct() {
             saved_provider_model: None,
             base_url_override: Some(base_url.to_string()),
             limit_overrides: Vec::new(),
+            wire_override: None,
         };
         assert!(
             matches!(
@@ -884,6 +891,7 @@ fn resolver_does_not_trust_deepseek_hostname_substrings() {
         saved_provider_model: None,
         base_url_override: Some("https://api.deepseek.com.evil.example/v1".to_string()),
         limit_overrides: Vec::new(),
+        wire_override: None,
     };
     let route = resolver
         .resolve(&request)
@@ -903,6 +911,7 @@ fn resolver_explicit_custom_with_base_url_override_passes_model_through_verbatim
         saved_provider_model: None,
         base_url_override: Some("https://api.example.com/v1".to_string()),
         limit_overrides: Vec::new(),
+        wire_override: None,
     };
     let out = r
         .resolve(&request)
@@ -1054,6 +1063,7 @@ fn together_custom_endpoint_preserves_its_explicit_model_id() {
             saved_provider_model: None,
             base_url_override: Some("http://127.0.0.1:8000/v1".to_string()),
             limit_overrides: Vec::new(),
+            wire_override: None,
         })
         .expect("custom Together-compatible endpoint should resolve");
 
@@ -1089,6 +1099,7 @@ fn openrouter_custom_endpoint_preserves_qwen37_alias() {
             saved_provider_model: None,
             base_url_override: Some("https://gateway.example.test/v1".to_string()),
             limit_overrides: Vec::new(),
+            wire_override: None,
         })
         .expect("custom OpenRouter-compatible endpoint should resolve");
 
@@ -1144,6 +1155,7 @@ fn opencode_go_resolver_rejects_messages_models_even_on_custom_base_urls() {
                     saved_provider_model: None,
                     base_url_override,
                     limit_overrides: Vec::new(),
+                    wire_override: None,
                 };
                 assert!(
                     matches!(
@@ -1228,6 +1240,7 @@ fn opencode_zen_resolver_fails_closed_for_unproven_protocols() {
                 saved_provider_model: None,
                 base_url_override,
                 limit_overrides: Vec::new(),
+                wire_override: None,
             };
             assert!(
                 matches!(
@@ -1284,6 +1297,7 @@ fn resolver_empty_saved_provider_model_is_empty_model_error() {
         saved_provider_model: Some(WireModelId::from("")),
         base_url_override: None,
         limit_overrides: Vec::new(),
+        wire_override: None,
     };
     assert!(matches!(r.resolve(&request), Err(RouteError::EmptyModel)));
 }
@@ -1479,6 +1493,7 @@ fn provider_native_web_search_requires_exact_direct_endpoint_offering() {
             saved_provider_model: None,
             base_url_override: Some("https://gateway.example.test/v1".to_string()),
             limit_overrides: Vec::new(),
+            wire_override: None,
         })
         .expect("custom compatible endpoint resolves");
     assert_eq!(
@@ -1520,6 +1535,7 @@ fn mimo_native_search_is_exact_to_documented_chat_models() {
             saved_provider_model: None,
             base_url_override: Some("https://compatible.example.test/v1".to_string()),
             limit_overrides: Vec::new(),
+            wire_override: None,
         })
         .expect("custom MiMo-compatible route resolves");
     assert_eq!(
@@ -1544,6 +1560,7 @@ fn zai_native_search_requires_exact_general_api_product() {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.to_string()),
                 limit_overrides: Vec::new(),
+                wire_override: None,
             })
             .expect("general API route resolves");
         assert_eq!(
@@ -1565,6 +1582,7 @@ fn zai_native_search_requires_exact_general_api_product() {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.to_string()),
                 limit_overrides: Vec::new(),
+                wire_override: None,
             })
             .expect("adjacent route resolves");
         assert_eq!(
@@ -1614,6 +1632,7 @@ fn qwen_native_search_is_exact_to_token_plan_responses_routes() {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.to_string()),
                 limit_overrides: Vec::new(),
+                wire_override: None,
             })
             .expect("alternate product route resolves");
         assert_eq!(
@@ -1643,6 +1662,7 @@ fn moonshot_native_search_requires_exact_product_model_pair() {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.to_string()),
                 limit_overrides: Vec::new(),
+                wire_override: None,
             })
             .expect("documented Moonshot/Kimi route resolves");
         assert_eq!(
@@ -1665,6 +1685,7 @@ fn moonshot_native_search_requires_exact_product_model_pair() {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.to_string()),
                 limit_overrides: Vec::new(),
+                wire_override: None,
             })
             .expect("adjacent Moonshot/Kimi route resolves");
         assert_eq!(
@@ -1707,6 +1728,7 @@ fn custom_endpoint_does_not_inherit_first_party_pricing() {
             saved_provider_model: None,
             base_url_override: Some("https://deepseek-proxy.example.test/v1".to_string()),
             limit_overrides: Vec::new(),
+            wire_override: None,
         })
         .expect("same-name custom proxy route resolves");
 
@@ -1756,6 +1778,7 @@ fn req_with_base(provider: ProviderKind, model: &str, base_url: &str) -> RouteRe
         saved_provider_model: None,
         base_url_override: Some(base_url.to_string()),
         limit_overrides: Vec::new(),
+        wire_override: None,
     }
 }
 
@@ -1821,5 +1844,139 @@ fn https_endpoint_has_no_warning() {
         out.validation().messages.is_empty(),
         "https must not warn, got {:?}",
         out.validation().messages
+    );
+}
+
+/// A `Custom` route's per-config `wire` override must mint a wire-true
+/// candidate: the protocol and endpoint key come from the override, not the
+/// descriptor's backward-compatible Chat Completions static policy.
+#[test]
+fn custom_wire_override_mints_a_wire_true_candidate() {
+    let resolver = RouteResolver::new();
+    let base = |wire: Option<RequestProtocol>| RouteRequest {
+        explicit_provider: Some(ProviderKind::Custom),
+        model_selector: Some(LogicalModelRef::from("gpt-6-sol".to_string())),
+        saved_provider_model: None,
+        base_url_override: Some("https://api.openai.com/v1".to_string()),
+        limit_overrides: Vec::new(),
+        wire_override: wire,
+    };
+
+    let responses = resolver
+        .resolve(&base(Some(RequestProtocol::Responses)))
+        .expect("responses override resolves");
+    assert_eq!(responses.protocol(), RequestProtocol::Responses);
+    assert_eq!(responses.endpoint().endpoint_key, "responses");
+    assert_eq!(responses.endpoint().base_url, "https://api.openai.com/v1");
+    assert_eq!(responses.wire_model_id().as_str(), "gpt-6-sol");
+
+    let anthropic = resolver
+        .resolve(&base(Some(RequestProtocol::AnthropicMessages)))
+        .expect("anthropic override resolves");
+    assert_eq!(anthropic.protocol(), RequestProtocol::AnthropicMessages);
+    assert_eq!(anthropic.endpoint().endpoint_key, "messages");
+
+    // An explicit `chat` override is the third arm of the dialect: it must
+    // resolve exactly like the absent case (the static Chat policy), not fall
+    // out of the override block with a stale endpoint key.
+    let explicit_chat = resolver
+        .resolve(&base(Some(RequestProtocol::ChatCompletions)))
+        .expect("explicit chat override resolves");
+    assert_eq!(explicit_chat.protocol(), RequestProtocol::ChatCompletions);
+    assert_eq!(explicit_chat.endpoint().endpoint_key, "chat");
+
+    // No override keeps the documented backward-compatible default.
+    let chat = resolver.resolve(&base(None)).expect("default resolves");
+    assert_eq!(chat.protocol(), RequestProtocol::ChatCompletions);
+    assert_eq!(chat.endpoint().endpoint_key, "chat");
+}
+
+/// The override channel is Custom-only: built-ins keep their descriptor
+/// policy even when a request carries a wire override, so a stray override
+/// cannot silently rewire a first-party route.
+#[test]
+fn wire_override_is_ignored_for_builtin_kinds() {
+    let resolver = RouteResolver::new();
+    let out = resolver
+        .resolve(&RouteRequest {
+            explicit_provider: Some(ProviderKind::Openai),
+            model_selector: Some(LogicalModelRef::from("gpt-6-sol".to_string())),
+            saved_provider_model: None,
+            base_url_override: None,
+            limit_overrides: Vec::new(),
+            wire_override: Some(RequestProtocol::Responses),
+        })
+        .expect("builtin route resolves");
+    assert_eq!(
+        out.protocol(),
+        RequestProtocol::ChatCompletions,
+        "the builtin openai policy stays Chat Completions"
+    );
+}
+
+/// The override's edges: it mints the wire even with the descriptor's
+/// placeholder base URL, it never resurrects unowned offering facts on a
+/// custom endpoint, and a Responses-descriptor built-in ignores a Chat
+/// override exactly like the Chat-policy kind ignores a Responses override.
+#[test]
+fn custom_wire_override_edges_stay_fail_closed() {
+    let resolver = RouteResolver::new();
+
+    // No base_url_override: the wire still comes from the override while the
+    // endpoint stays the Custom descriptor's loopback placeholder — failing
+    // closed locally instead of guessing a public host.
+    let placeholder = resolver
+        .resolve(&RouteRequest {
+            explicit_provider: Some(ProviderKind::Custom),
+            model_selector: Some(LogicalModelRef::from("gpt-6-sol".to_string())),
+            saved_provider_model: None,
+            base_url_override: None,
+            limit_overrides: Vec::new(),
+            wire_override: Some(RequestProtocol::Responses),
+        })
+        .expect("override resolves without a base URL override");
+    assert_eq!(placeholder.protocol(), RequestProtocol::Responses);
+    assert_eq!(placeholder.endpoint().endpoint_key, "responses");
+    assert_eq!(placeholder.endpoint().base_url, "http://localhost/v1");
+
+    // A wire-true custom candidate must not restore capability or pricing
+    // facts the custom endpoint never proved, even when the override makes
+    // the route look first-party Responses.
+    let wire_true = resolver
+        .resolve(&RouteRequest {
+            explicit_provider: Some(ProviderKind::Custom),
+            model_selector: Some(LogicalModelRef::from("gpt-6-sol".to_string())),
+            saved_provider_model: None,
+            base_url_override: Some("https://api.openai.com/v1".to_string()),
+            limit_overrides: Vec::new(),
+            wire_override: Some(RequestProtocol::Responses),
+        })
+        .expect("wire-true custom candidate resolves");
+    assert_eq!(
+        wire_true.capabilities(),
+        RouteCapabilities::default(),
+        "the override must not resurrect capability facts"
+    );
+    assert!(matches!(
+        wire_true.pricing(),
+        Some(super::candidate::PricingSku::UnknownOrStale)
+    ));
+
+    // Demotion is structurally impossible: a built-in whose descriptor
+    // already serves Responses keeps its protocol under a Chat override.
+    let zen = resolver
+        .resolve(&RouteRequest {
+            explicit_provider: Some(ProviderKind::OpencodeZen),
+            model_selector: Some(LogicalModelRef::from("gpt-5.6-sol".to_string())),
+            saved_provider_model: None,
+            base_url_override: None,
+            limit_overrides: Vec::new(),
+            wire_override: Some(RequestProtocol::ChatCompletions),
+        })
+        .expect("zen route resolves");
+    assert_eq!(
+        zen.protocol(),
+        RequestProtocol::Responses,
+        "a Chat override cannot demote a Responses-descriptor builtin"
     );
 }

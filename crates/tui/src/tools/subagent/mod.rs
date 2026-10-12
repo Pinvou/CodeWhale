@@ -8428,14 +8428,14 @@ impl ToolSpec for AgentTool {
             "Start with action=start and prompt; returns a turn-owned agent_id immediately. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
             "Use multiple starts for independent parallel tasks. ",
             "type selects the Fleet role: general (full tool access), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture); legacy aliases are still accepted. ",
-            "profile runs the child as a named Fleet role or an exact prompt-only profile explicitly presented by the embedding host — pass it only when the task needs that identity. Without a profile the child inherits the parent's model; per-call model or thinking overrides are not part of this surface. ",
+            "profile runs the child as a named Fleet role or an exact prompt-only profile explicitly presented by the embedding host — pass it only when the task needs that identity. The child follows the operator's per-role model configuration, else the parent's model; model or thinking overrides are not advertised (parse-accepted for compatibility). ",
             "Use action=roster to inspect the Fleet roles and the host-presented prompt-only profiles (if any), with their descriptions, before choosing a type or profile. The host-profile listing is capped and unpaged — search a large pool with profile_query. ",
-            "Child run budgets (model turns, wall time) come from Fleet role defaults and operator [subagents] config, not per-call fields. ",
+            "Child run budgets (model turns, wall time) come from Fleet role defaults and operator [subagents] config; budget fields are not advertised (parse-accepted for compatibility). ",
             "worktree=true gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
-            "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative directory trees) so parallel children claim disjoint scope. ",
+            "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative paths) so parallel children claim disjoint scope. ",
             "Prefer type=implement for write work and type=test (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
             "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait blocks without changing child state, and until=\"all\" joins a whole fan-out in one call. ",
-            "action=claim widens your own enforced write scope: pass write_roots (and optionally exact_files, coordination_contracts) before mutating anything a fail-closed write refusal named. It records a durable claim receipt and fails on contention with a peer claim; it never touches another agent's scope. ",
+            "action=claim widens your own enforced write scope: pass write_roots before mutating anything a fail-closed write refusal named. It records a durable claim receipt and fails on contention with a peer claim; it never touches another agent's scope. ",
             "Action contract: start requires prompt; message/followup require a target and message; peek/interrupt/cancel require a target; claim requires at least one scope entry; roster, status, and wait are unscoped. ",
             "This is the whole model-facing sub-agent surface; there is no second transport. ",
             "In Operate, use detached=true only for independent or long work that must outlive the active turn; a write-capable root start defaults write scope to the parent workspace unless narrowed with write_roots; arbitrary shell remains gated. ",
@@ -8503,7 +8503,7 @@ impl ToolSpec for AgentTool {
                 },
                 "profile": {
                     "type": "string",
-                    "description": "Optional Fleet selector. Use a role from action=roster or an exact prompt-only profile id explicitly presented by the embedding host; unknown and ambient saved-profile values are refused. The resolved role supplies the child's posture. There is no per-call model override on this surface."
+                    "description": "Optional Fleet selector. Use a role from action=roster or an exact prompt-only profile id explicitly presented by the embedding host; unknown and ambient saved-profile values are refused. The resolved role supplies the child's posture. No per-call model override is advertised on this surface (parse-accepted for compatibility)."
                 },
                 "profile_query": {
                     "type": "string",
@@ -8516,7 +8516,7 @@ impl ToolSpec for AgentTool {
                 "write_roots": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Repo-relative directory trees a write-capable agent may mutate. On action=start: the scope this child claims, defaulting to the parent workspace ('.') when omitted. On action=claim: the trees to add to your own enforced scope, which you must do before mutating anything outside it. Paths outside the parent workspace are refused."
+                    "description": "Repo-relative paths (files or directory trees) a write-capable agent may mutate. On action=start: the scope this child claims, defaulting to the parent workspace ('.') when omitted. On action=claim: the paths to add to your own enforced scope, which you must do before mutating anything outside it. Paths outside the parent workspace are refused."
                 },
                 "resume_from": {
                     "type": "string",

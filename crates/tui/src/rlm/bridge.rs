@@ -147,8 +147,10 @@ impl RlmBridge {
     }
 
     /// Override the per-child-completion wall-clock budget (seconds).
+    /// Values below one second are floored at one: `0` would build a tokio
+    /// timeout that fires immediately and kill every child query.
     pub(crate) fn with_sub_query_timeout_secs(mut self, secs: u64) -> Self {
-        self.sub_query_timeout = Duration::from_secs(secs);
+        self.sub_query_timeout = Duration::from_secs(secs.max(1));
         self
     }
 
@@ -491,19 +493,38 @@ mod tests {
         // The session's sub_query_timeout_secs was historically stored but
         // never read (the bridge always used its 120s const); this pins the
         // configured budget actually governing the deadline, including the
-        // timeout message naming the configured value.
+        // timeout message naming the configured value. The outer deadline
+        // keeps a regression back to the 120s const failing within seconds
+        // instead of hanging the suite for two minutes.
         let client: Arc<dyn RlmLlmClient> = Arc::new(HangingChildClient);
         let bridge = RlmBridge::new(Arc::clone(&client), "child-model".to_string(), 1)
             .with_sub_query_timeout_secs(1);
 
-        let response = bridge
-            .dispatch_llm("hang forever".to_string(), None, None, None)
-            .await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            bridge.dispatch_llm("hang forever".to_string(), None, None, None),
+        )
+        .await
+        .expect("the configured budget must fire well within the outer deadline");
 
         let error = response.error.expect("hanging child must time out");
         assert!(
             error.contains("timed out after 1s"),
             "timeout must reflect the configured budget; got {error}"
+        );
+    }
+
+    #[test]
+    fn sub_query_timeout_floors_at_one_second() {
+        // `0` would build a tokio timeout that fires immediately and kill
+        // every child query, so the setter must floor the budget at 1s.
+        let client: Arc<dyn RlmLlmClient> = Arc::new(HangingChildClient);
+        let bridge =
+            RlmBridge::new(client, "child-model".to_string(), 1).with_sub_query_timeout_secs(0);
+        assert_eq!(
+            bridge.sub_query_timeout,
+            Duration::from_secs(1),
+            "a zero budget must be floored at one second"
         );
     }
 

@@ -948,6 +948,11 @@ pub(crate) fn resolve_loaded_session_route(app: &mut App, config: &Config) {
         Some(config.deepseek_base_url()),
         context_override,
         None,
+        // The ambient table's dialect — the same table `deepseek_base_url`
+        // above resolves — so this receipt cannot disagree with the turn.
+        (app.api_provider == ApiProvider::Custom)
+            .then(|| crate::route_runtime::custom_wire_override_for(config))
+            .flatten(),
     ) {
         Ok(resolution) => {
             app.set_active_route_resolution(

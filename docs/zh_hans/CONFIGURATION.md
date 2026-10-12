@@ -1392,7 +1392,7 @@ allowed_sandbox_modes = ["read-only", "workspace-write"]
 
 - `--status`——打印紧凑的单屏状态(api key、base URL、模型、MCP/skills/tools/plugins 计数、沙箱、`.env` 存在)。只读且无网络；在 CI 中安全。如果工作区中 `.env` 缺失而 `.env.example` 存在，状态输出指向 `cp .env.example .env`。
 - `--tools`——用描述自描述 frontmatter 约定(`# name:` / `# description:` / `# usage:`)的 `README.md` 和一个遵循它的 `example.sh`，搭建 `~/.codewhale/tools/`。该目录刻意不自动加载；通过 MCP、hooks 或 skills 把单个脚本接入智能体。
-- `--plugins`——用 `README.md` 和 `example/plugin.toml` 加一个命名空间示例 Skill 搭建 `~/.codewhale/plugins/`。包被只读、不可信、禁用地发现；启用前通过 `/plugin` 审查。v0.9.1 只激活声明的 Skills 和 MCP 服务器。见 [PLUGIN_BUNDLES.md](../PLUGIN_BUNDLES.md)。
+- `--plugins`——用 `README.md` 和 `example/plugin.toml` 加一个命名空间示例 Skill 搭建 `~/.codewhale/plugins/`。包被只读、不可信、禁用地发现；启用前通过 `/plugin` 审查。Skills、MCP 服务器、Commands、Agent profiles 和 Hooks 会激活；LSP 服务器、原生扩展、文件系统根和生命周期变更保持仅登记。见 [PLUGIN_BUNDLES.md](../PLUGIN_BUNDLES.md)。
 - `--all` 现在一起搭建 MCP + skills + tools + plugins。
 - `--clean`——列出 `~/.codewhale/sessions/checkpoints/latest.json` 和 `offline_queue.json`(若存在)。旧 `~/.deepseek/sessions/checkpoints/` 文件不自动扫描；一次性旧版清理设置 `CODEWHALE_HOME=~/.deepseek`。传 `--force` 才实际移除匹配文件。这从不触碰真实会话历史或任务队列。
 
