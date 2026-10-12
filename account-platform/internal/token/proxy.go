@@ -968,6 +968,79 @@ func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, 
 	_, _ = w.Write(payload)
 }
 
+const streamAggregateLimit = 32 << 20
+
+// Bound only the retained replay aggregate; ordinary SSE delivery and persisted
+// event forwarding keep their existing per-line and execution-time contracts.
+type streamReplayAggregate struct {
+	data     []byte
+	events   int
+	exceeded bool
+}
+
+func streamAggregateBytesFit(retained, additional int) bool {
+	return retained >= 0 && additional >= 0 && retained <= streamAggregateLimit && additional <= streamAggregateLimit-retained
+}
+
+func (a *streamReplayAggregate) discard() {
+	a.data = nil
+	a.events = 0
+	a.exceeded = true
+}
+
+func (a *streamReplayAggregate) append(payload []byte) {
+	if a.exceeded {
+		return
+	}
+	// RawMessage marshaling preserves the old compacting and HTML escaping.
+	// The existing scanner bounds this temporary event encoding to one line.
+	encoded, err := json.Marshal(json.RawMessage(payload))
+	if err != nil {
+		a.discard()
+		return
+	}
+	if a.data == nil {
+		a.data = []byte(`{"events":[`)
+	}
+	if a.events != 0 {
+		if !streamAggregateBytesFit(len(a.data), 1) {
+			a.discard()
+			return
+		}
+		a.data = append(a.data, ',')
+	}
+	if !streamAggregateBytesFit(len(a.data), len(encoded)) {
+		a.discard()
+		return
+	}
+	a.data = append(a.data, encoded...)
+	a.events++
+}
+
+func streamAggregateSuffix(usage Usage, lastSequence int64) ([]byte, error) {
+	fields, err := json.Marshal(map[string]any{"usage": usage, "last_sequence": lastSequence})
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte("],"), fields[1:]...), nil
+}
+
+func (a *streamReplayAggregate) fits(usage Usage, lastSequence int64) bool {
+	suffix, err := streamAggregateSuffix(usage, lastSequence)
+	return !a.exceeded && a.data != nil && err == nil && streamAggregateBytesFit(len(a.data), len(suffix))
+}
+
+func (a *streamReplayAggregate) result(usage Usage, lastSequence int64) ([]byte, error) {
+	suffix, err := streamAggregateSuffix(usage, lastSequence)
+	if err != nil {
+		return nil, err
+	}
+	if a.exceeded || a.data == nil || !streamAggregateBytesFit(len(a.data), len(suffix)) {
+		return nil, errors.New("stream aggregate limit exceeded")
+	}
+	return append(a.data, suffix...), nil
+}
+
 func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, price PriceVersion, body io.Reader, renewalFailed <-chan struct{}, authorizedMaximum int64, contexts ...billingNoticeContext) {
 	flusher, _ := w.(http.Flusher)
 	controller := http.NewResponseController(w)
@@ -976,7 +1049,7 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 	var usage Usage
 	usageFound := false
 	var lastSequence int64
-	aggregate := make([]json.RawMessage, 0)
+	aggregate := streamReplayAggregate{}
 	deliveryConnected := true
 	doneFound := false
 	streamFailed := false
@@ -1023,7 +1096,7 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 				streamFailed = true
 			}
 			if json.Valid(payload) {
-				aggregate = append(aggregate, append(json.RawMessage(nil), payload...))
+				aggregate.append(payload)
 			}
 			if parsed, ok := s.executionUpstream.ParseUsage(payload); ok {
 				usage, usageFound = parsed, true
@@ -1088,6 +1161,22 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 		_ = s.repository.MarkReview(background, usageID, reason, map[string]any{"stream_error": streamErr != nil, "usage_found": usageFound, "done_found": doneFound})
 		return
 	}
+	// Account for the complete JSON wrapper and the real final usage before
+	// any additional Billing authorization. A supported insufficient-balance
+	// notice may add one sequence, so reserve its possible sequence width.
+	receiptEvents := int64(1)
+	if supportsBillingNotice(r) {
+		if actual, costErr := Cost(price, usage); costErr == nil && actual > authorizedMaximum {
+			if _, supported := s.executionBilling.(SnapshotRenewalBillingClient); supported {
+				receiptEvents++
+			}
+		}
+	}
+	if lastSequence > (1<<63-1)-receiptEvents || !aggregate.fits(usage, lastSequence+receiptEvents) {
+		aggregate.discard()
+		_ = s.repository.MarkReview(background, usageID, "stream_aggregate_limit_exceeded", map[string]any{"usage": usage, "usage_found": usageFound, "done_found": doneFound, "last_sequence": lastSequence, "aggregate_limit_bytes": streamAggregateLimit})
+		return
+	}
 	_, insufficientCode, authorized := s.authorizeAdditional(background, usageID, holdID, price, usage, authorizedMaximum)
 	if !authorized {
 		if terminal() {
@@ -1126,7 +1215,7 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 		_ = s.repository.MarkReview(background, usageID, "usage_invalid", map[string]any{"usage": usage})
 		return
 	}
-	aggregatePayload, err := json.Marshal(map[string]any{"events": aggregate, "usage": usage, "last_sequence": lastSequence})
+	aggregatePayload, err := aggregate.result(usage, lastSequence)
 	if err != nil || s.repository.SaveReplayResult(background, usageID, ReplayResult{Kind: "STREAM_AGGREGATE", HTTPStatus: http.StatusOK, ContentType: "application/json", Payload: aggregatePayload, ResponseReceived: true, ResponseDisposition: responseDispositionTrustedUsage, FinalUsage: &usage, ActualMicrocredits: &actual, SettlementSnapshot: settlementSnapshot, LastSequence: lastSequence}) != nil {
 		_ = s.repository.MarkReview(background, usageID, "result_persistence_failed", map[string]any{"last_sequence": lastSequence})
 		return

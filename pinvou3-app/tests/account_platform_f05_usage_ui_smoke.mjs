@@ -11,7 +11,7 @@ const chrome = process.env.CHROME || process.env.CHROMIUM || ['C:/Program Files/
 if (!chrome) throw new Error('Browser unavailable; no UI validation performed');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-f05-usage-')); let vite; let browser; let page; let passed = 0;
 try {
-  vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } }); await vite.listen();
+  vite = await createServer({ root, cacheDir: path.join(profile, 'vite-cache'), configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } }); await vite.listen();
   browser = await puppeteer.launch({ executablePath: chrome, headless: 'new', userDataDir: profile, args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] }); page = await browser.newPage();
   const errors = []; page.on('pageerror', error => errors.push(error.name));
   const fresh = async () => { errors.length = 0; await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f05-usage.html`); await page.waitForFunction(() => window.f05 && document.body.textContent.includes('public-user-a')); };
@@ -25,6 +25,25 @@ try {
   await run('unknown cancellation ACK retries the same logical cancellation identity', async () => { await fresh(); await page.evaluate(() => { window.f05.active = true; window.f05.unknownCancel = true; window.f05.version++; window.f05.render(); }); await settled(); await click('stopDelivery'); await page.waitForFunction(() => window.f05.calls.filter(call => call.method === 'POST').length === 1); await settled(); await click('stopDelivery'); await page.waitForFunction(() => window.f05.calls.filter(call => call.method === 'POST').length === 2); await settled(); assert.ok(await page.evaluate(() => { const posts = window.f05.calls.filter(call => call.method === 'POST'); return posts[0].key === posts[1].key && posts[0].resource === posts[1].resource; })); });
   await run('identity/version switch rejects a late previous identity page', async () => { await fresh(); await page.evaluate(() => { window.f05.delayed = true; window.f05.version++; window.f05.render(); }); await page.waitForFunction(() => window.f05.pending.length === 1); await page.evaluate(() => { window.f05.user = 'public-user-b'; window.f05.version++; window.f05.render(); }); await page.waitForFunction(() => document.body.textContent.includes('public-user-b')); await page.evaluate(() => window.f05.resolve()); await settled(); assert.ok(await page.evaluate(() => document.body.textContent.includes('public-user-b') && !document.body.textContent.includes('public-user-a'))); });
   await run('invalid page is reported instead of an empty successful history', async () => { await fresh(); await page.evaluate(() => { window.f05.invalid = true; window.f05.version++; window.f05.render(); }); await page.waitForFunction(() => document.querySelector('[role=alert]')); assert.ok(await page.evaluate(() => !document.body.textContent.includes(window.f05.copy().noUsage))); });
+  await run('known execution and settlement states render in each shared locale without rewriting wire states', async () => {
+    const execution = ['RECEIVED', 'HOLD_RESERVING', 'HOLD_RESERVED', 'DISPATCH_INTENT_PERSISTED', 'UPSTREAM_DISPATCHING', 'STREAMING', 'SETTLEMENT_PENDING', 'SUCCEEDED', 'FAILED', 'CANCELLED_BEFORE_DISPATCH', 'REVIEW'];
+    const settlement = ['HOLD_PENDING', 'HOLD_ACTIVE', 'USAGE_PENDING', 'SETTLED', 'RELEASED', 'REVIEW'];
+    await fresh();
+    for (const language of ['zh', 'en', 'ja']) for (const [field, values] of [['execution', execution], ['settlement', settlement]]) for (const value of values) {
+      await page.evaluate(({ language, field, value }) => { window.f05.language = language; window.f05[field] = value; window.f05.version++; window.f05.render(); }, { language, field, value });
+      await settled();
+      assert.ok(await page.evaluate(({ field, value }) => {
+        const labels = window.f05.copy()[field === 'execution' ? 'executionStatuses' : 'settlementStatuses'];
+        return typeof labels?.[value] === 'string' && labels[value] !== value && document.querySelector('.ap-usage-row').textContent.includes(labels[value]) && window.f05[field] === value;
+      }, { field, value }), `${language}:${field}:${value}`);
+    }
+    assert.ok(await page.evaluate(() => window.f05.calls.every(call => call.method === 'GET')));
+  });
+  await run('unknown usage state remains visible diagnostic data rather than an invented known status', async () => {
+    await fresh(); for (const language of ['zh', 'en', 'ja']) { await page.evaluate(language => { window.f05.language = language; window.f05.execution = 'CONTROLLED_UNKNOWN_EXECUTION'; window.f05.settlement = 'CONTROLLED_UNKNOWN_SETTLEMENT'; window.f05.version++; window.f05.render(); }, language); await settled();
+    assert.ok(await page.evaluate(() => document.querySelector('.ap-usage-row').textContent.includes('CONTROLLED_UNKNOWN_EXECUTION') && document.querySelector('.ap-usage-row').textContent.includes('CONTROLLED_UNKNOWN_SETTLEMENT'))); }
+    assert.ok(await page.evaluate(() => window.f05.calls.every(call => call.method === 'GET')));
+  });
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } catch (error) { console.error(`FAIL after ${passed} PASS: ${error.name}`); process.exitCode = 1; }
 finally { if (browser) await browser.close(); if (vite) await vite.close(); if (fs.existsSync(profile)) fs.rmSync(profile, { recursive: true, force: true }); }
