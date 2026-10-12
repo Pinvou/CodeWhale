@@ -1,6 +1,7 @@
 package billingschema
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -223,6 +224,18 @@ func TestF02CommerceConfirmedProducersPreserveStatuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(r.Close)
+	// F07 requires the same fingerprint and readiness setup as its real signup
+	// worker fixture; retain the original registration and dispatch assertions.
+	if err = r.ConfigureRegistrationBonusFingerprint("f07-commerce-synthetic", bytes.Repeat([]byte{7}, 32)); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := r.PrepareRegistrationBonusEligibility(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.Status != "READY" || ready.CompletedAt == nil || ready.RecoverableRegistrationCount != 0 || ready.UnrecoverableRegistrationCount != 0 {
+		t.Fatal("fresh registration bonus eligibility is not ready")
+	}
 	if err = r.ConfigureCommerceProvider("controlled-commerce", "v1"); err != nil {
 		t.Fatal(err)
 	}

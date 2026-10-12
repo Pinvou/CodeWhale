@@ -6,6 +6,7 @@ import { secureRequestID } from './request-id.js';
 import { requireReconciliationDate, requireReconciliationRun } from './reconciliation-contract.js';
 import { responseRetryAfter } from './auth-error.js';
 import { beforeFinanceDispatch, financeNotDispatched } from './finance-operation-state.js';
+import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON } from './registration-bonus-contract.js';
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
   error.code = payload?.code || 'REQUEST_FAILED';
@@ -151,6 +152,17 @@ export class AdminPlatformClient {
     if (!entry) return;
     entry.abandon();
     entry.controller.abort();
+  }
+
+  registrationBonusPolicy(signal, { fresh = false } = {}) {
+    const resource = '/admin/v1/registration-bonus-policy';
+    if (fresh) this.invalidateRead('billing', resource);
+    return this.request('billing', resource, signal, parseRegistrationBonusJSON);
+  }
+
+  updateRegistrationBonusPolicy(body, idempotencyKey, signal) {
+    if (typeof idempotencyKey !== 'string' || idempotencyKey.length < 16 || idempotencyKey.length > 128) throw new Error('INVALID_REGISTRATION_BONUS_REQUEST');
+    return this.mutate('billing', '/admin/v1/registration-bonus-policy', 'PUT', body, idempotencyKey, signal, 200, { decode: parseRegistrationBonusJSON, encode: encodeRegistrationBonusJSON });
   }
 
   async mutate(area, resource, method, body, idempotencyKey = '', signal, expectedStatus = 0, codec = null) {
