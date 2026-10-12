@@ -967,7 +967,15 @@ impl SessionStore {
         source_message_count: usize,
         source_turn_id: String,
         replacement_model_ref: String,
+        replacement_title_suffix: String,
+        default_chat_title: String,
     ) -> Result<(SavedSession, ReplacementBranchLineage)> {
+        anyhow::ensure!(
+            [&replacement_title_suffix, &default_chat_title]
+                .iter()
+                .all(|value| !value.trim().is_empty() && !value.chars().any(char::is_control)),
+            "replacement branch title copy is invalid"
+        );
         validate_session_id(source_id)?;
         let source = self
             .manager
@@ -992,7 +1000,17 @@ impl SessionStore {
             None,
             None,
         );
-        branch.metadata.title = format!("{} · 替代模型分支", source.metadata.title);
+        // Only the existing bare new-chat markers are localized. User titles,
+        // including titles that resemble a branch suffix, remain verbatim.
+        let source_title = if matches!(
+            source.metadata.title.as_str(),
+            NEW_CHAT_TITLE | "New chat" | "新しいチャット"
+        ) {
+            &default_chat_title
+        } else {
+            &source.metadata.title
+        };
+        branch.metadata.title = format!("{source_title} · {replacement_title_suffix}");
         branch.metadata.parent_session_id = Some(source_id.to_string());
         branch.metadata.forked_from_message_count = Some(source_message_count);
         self.set_session_model_ref(

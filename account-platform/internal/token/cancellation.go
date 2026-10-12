@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, userID uuid.UUID, keyDigest, fingerprint, adapterVersion string) (CancellationResult, bool, error) {
@@ -48,6 +49,9 @@ func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, u
 	}
 	now := r.now()
 	if _, err := tx.Exec(ctx, `INSERT INTO usage_cancel_commands(id,usage_request_id,user_id,idempotency_key_digest,request_fingerprint,cancellation_version,created_at) VALUES($1,$2,$3,$4,$5,1,$6)`, uuid.Must(uuid.NewV7()), usageID, userID, keyDigest, fingerprint, now); err != nil {
+		if isCancellationKeyConflict(err) {
+			return CancellationResult{}, false, ErrIdempotencyConflict
+		}
 		return CancellationResult{}, false, err
 	}
 	terminal := usage.ExecutionStatus == "SUCCEEDED" || usage.ExecutionStatus == "FAILED" || usage.ExecutionStatus == "CANCELLED_BEFORE_DISPATCH"
@@ -81,6 +85,13 @@ func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, u
 		return CancellationResult{}, false, err
 	}
 	return cancellationSnapshot(usage), preDispatch, nil
+}
+
+func isCancellationKeyConflict(err error) bool {
+	var databaseError *pgconn.PgError
+	return errors.As(err, &databaseError) && databaseError.Code == "23505" &&
+		databaseError.TableName == "usage_cancel_commands" &&
+		databaseError.ConstraintName == "usage_cancel_commands_user_id_idempotency_key_digest_key"
 }
 
 func cancellationFingerprint(usageID uuid.UUID) string {
