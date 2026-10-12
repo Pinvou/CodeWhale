@@ -2145,16 +2145,23 @@ async function expand(page) {
     await emit('chat:tool_start', { session_id:'s1', id:'live-shell', name:'exec_shell', args:{ command:'validator --json' } });
     await emit('chat:tool_delta', { session_id:'s1', id:'live-shell', stream:'stdout', content:'downloaded 42%\n' + Array.from({ length: 80 }, (_, i) => 'progress line ' + i).join('\n') + '\nlive progress tail' });
   });
-  await sleep(200);
-  const liveShell = await page.evaluate(() => {
+  const liveShell = await page.evaluate(async () => {
+    // Tool output notification and live-card expansion are asynchronous. Wait
+    // for the same running state and visible output without emitting tool_end.
+    const ready = await window.__uiWait__(() => {
+      const item = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(item => item.toolId === 'live-shell');
+      return item && item.state === 'running' && typeof item.output === 'string'
+        && item.output.includes('downloaded 42%') && document.body.innerText.includes('downloaded 42%');
+    });
     const item = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(item => item.toolId === 'live-shell');
     return {
+      ready,
       running: item && item.state === 'running',
       output: item && item.output,
       visible: document.body.innerText.includes('downloaded 42%'),
     };
   });
-  rec('live exec_shell output is visible before tool_end', liveShell.running && liveShell.output.includes('downloaded 42%') && liveShell.visible, JSON.stringify(liveShell));
+  rec('live exec_shell output is visible before tool_end', liveShell.ready && liveShell.running && liveShell.output.includes('downloaded 42%') && liveShell.visible, JSON.stringify(liveShell));
   await page.evaluate(async () => {
     async function emit(name, payload) {
       const handlers = window.__TAURI_EVENT_HANDLERS__[name] || [];
@@ -2163,16 +2170,23 @@ async function expand(page) {
     await emit('chat:tool_start', { session_id:'s1', id:'live-shell-wait', name:'exec_shell_wait', args:{ task_id:'shell-task-1', wait:true } });
     await emit('chat:tool_delta', { session_id:'s1', id:'live-shell-wait', stream:'stdout', content:'tick 42\n' });
   });
-  await sleep(100);
-  const liveShellWait = await page.evaluate(() => {
+  const liveShellWait = await page.evaluate(async () => {
+    // Tool output notification and live-card expansion are asynchronous. Wait
+    // for the same running state and visible output without emitting tool_end.
+    const ready = await window.__uiWait__(() => {
+      const item = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(item => item.toolId === 'live-shell-wait');
+      return item && item.state === 'running' && typeof item.output === 'string'
+        && item.output.includes('tick 42') && document.body.innerText.includes('tick 42');
+    });
     const item = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(item => item.toolId === 'live-shell-wait');
     return {
+      ready,
       running: item && item.state === 'running',
       output: item && item.output,
       visible: document.body.innerText.includes('tick 42'),
     };
   });
-  rec('live exec_shell_wait output is visible before tool_end', liveShellWait.running && liveShellWait.output.includes('tick 42') && liveShellWait.visible, JSON.stringify(liveShellWait));
+  rec('live exec_shell_wait output is visible before tool_end', liveShellWait.ready && liveShellWait.running && liveShellWait.output.includes('tick 42') && liveShellWait.visible, JSON.stringify(liveShellWait));
   await page.evaluate(async () => {
     async function emit(name, payload) {
       const handlers = window.__TAURI_EVENT_HANDLERS__[name] || [];
