@@ -27,7 +27,7 @@ const expectedTokenCommands = [
 // Keep the declarative route grammar strict, but find every real method
 // selector before parsing it. Mask Go comments/literals with equal-length
 // spaces so examples and raw strings cannot create or hide route candidates.
-function routeDeclarationLines(source) {
+function lexicalRouteSource(source) {
   let code = ''; let masked = ''; let region = '';
   const blank = char => char === '\n' || char === '\r' ? char : ' ';
   for (let index = 0; index < source.length; index += 1) {
@@ -55,7 +55,11 @@ function routeDeclarationLines(source) {
     }
   }
   if (region && region !== 'line') fail('unrecognized route source lexical region');
-  const lines = code.split(/\r?\n/);
+  return { lines: code.split(/\r?\n/), masked };
+}
+
+function routeDeclarationLines(source) {
+  const { lines, masked } = lexicalRouteSource(source);
   const candidates = new Set();
   const selectors = /\.\s*(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|Handle|Any|Match|Static|StaticFS|StaticFile|StaticFileFS)\b/g;
   for (const match of masked.matchAll(selectors)) {
@@ -100,6 +104,33 @@ export function managementRoutes(source) {
     routes.push({ method: method.toLowerCase(), path: (prefixes[group] + suffix).replace(/\/:([a-z_]+)/g, '/{$1}'), handler: adapt[1], authority, gates, ...(policy ? { policy: { command: policy[1], mode: policy[2] } } : {}) });
   }
   if (!routes.length) fail('empty management route set');
+  return sorted(routes);
+}
+
+
+export function organizationFinanceRoutes(source, handlers) {
+  if (!/if !s\.managementEnabled \{\s*return\s*\}/.test(lexicalRouteSource(source).masked)) fail('organization management assembly gate missing');
+  const routes = routeDeclarationLines(source).map(line => {
+    const match = line.match(/^\s*routes\.(GET|POST|PUT)\("([^"]+)",\s*(.*)\)$/);
+    if (!match) fail('unrecognized organization route declaration');
+    const [, method, suffix, expression] = match;
+    const handler = expression.match(/httpserver\.AdaptFunc\(s\.(\w+)\)$/)?.[1];
+    if (!handler || !/^(?:approvalpolicy\.Require\("[A-Z_]+", approvalpolicy\.\w+\), )?httpserver\.AdaptFunc\(s\.\w+\)$/.test(expression)) fail('unrecognized organization handler');
+    const body = handlers.match(new RegExp('func \\(s \\*Service\\) ' + handler + '\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}'))?.[1];
+    if (!body) fail('organization handler source missing');
+    let permission;
+    if (handler === 'organizationModelPolicy') {
+      if (!/permission := "org\.models\.read"/.test(body) || !/if r\.Method == http\.MethodPut \{\s*permission = "org\.models\.manage"/.test(body)
+        || !body.includes('AuthorizedOrganizationUserID(r.Context(), principal, permission, organizationID)')) fail('organization model authority changed');
+      permission = method === 'PUT' ? 'org.models.manage' : 'org.models.read';
+    } else permission = body.match(/resolveOrganizationBilling\(w, r, "(org\.[a-z.]+)"\)/)?.[1];
+    if (!permission) fail('organization permission source missing');
+    const policy = expression.match(/approvalpolicy\.Require\("([^"]+)", approvalpolicy\.(\w+)\)/);
+    return { method: method.toLowerCase(), path: '/v1' + suffix.replace(/\/:([a-z_]+)/g, '/{$1}'), handler,
+      authority: { kind: 'bearer_organization', all: [permission] }, gates: ['MANAGEMENT_ENABLED'],
+      ...(policy ? { policy: { command: policy[1], mode: policy[2] } } : {}) };
+  });
+  if (!routes.length) fail('empty organization route set');
   return sorted(routes);
 }
 
@@ -165,8 +196,32 @@ const requiredParameters = {
   adminTokenCredentialImpact: ['query:action'],
 };
 
-export function checkCoverage({ routeSource, specSource, handlerSource, credentialSource, dtoSources, manifest, management, credential }) {
+export function checkCoverage({ routeSource, specSource, handlerSource, credentialSource, dtoSources, manifest, management, credential, organizationFinanceSource, organizationHandlerSource, organizationFinance }) {
   const routes = managementRoutes(routeSource);
+  const organization = organizationFinanceRoutes(organizationFinanceSource, organizationHandlerSource);
+  assert.deepEqual(sorted(manifest.organizationFinanceRoutes), organization, 'organization route authority coverage drift');
+  const organizationOps = operations(organizationFinance);
+  assert.deepEqual(organizationOps.map(({ op, ...entry }) => entry), organization.map(({ method, path }) => ({ method, path })), 'organization OpenAPI path drift');
+  for (const { method, path: url, op } of organizationOps) {
+    const route = organization.find(item => item.method === method && item.path === url);
+    assert.deepEqual(op['x-authority'], route.authority, 'organization permission drift');
+    assert.deepEqual(op['x-governance-gates'], route.gates, 'organization gate drift');
+    assert.equal(op['x-go-handler'], route.handler, 'organization handler drift');
+    assert.deepEqual(op['x-approval-policy'], route.policy, 'organization approval policy drift');
+    assert.deepEqual(op.security, [{ UserBearer: [] }], 'organization authentication drift');
+    assert.deepEqual((op.parameters || []).filter(p => p.in === 'path').map(p => p.name).sort(), [...url.matchAll(/\{(\w+)\}/g)].map(m => m[1]).sort(), 'organization path parameter drift');
+    for (const parameter of op.parameters.filter(p => p.in === 'path')) assert.equal(parameter.required, true, 'organization path required');
+    if (method !== 'get') assert.equal(op.parameters.find(p => p.in === 'header' && p.name === 'Idempotency-Key')?.required, true, 'organization key missing');
+    if (method !== 'get') {
+      const handlerBody = organizationHandlerSource.match(new RegExp('func \\(s \\*Service\\) ' + route.handler + '\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}'))?.[1];
+      const requestFields = [...(handlerBody?.match(/var body struct \{([\s\S]*?)\n\t\}/)?.[1] || '').matchAll(/`json:"([^",]+)(?:,[^"]*)?"`/g)].map(match => match[1]);
+      const schemaName = op.requestBody?.content?.['application/json']?.schema?.$ref?.split('/').at(-1);
+      assert.ok(requestFields.length && op.requestBody.required === true, 'organization request body missing');
+      assert.deepEqual(Object.keys(organizationFinance.components.schemas[schemaName]?.properties || {}).sort(), requestFields.sort(), 'organization request fields drift');
+    }
+
+  }
+  validateRefs(organizationFinance);
   const commands = commandSpecs(specSource, handlerSource);
   const isolated = credentialRoutes(credentialSource);
   assert.deepEqual(sorted(manifest.routes), routes, 'management authority/handler coverage drift');
@@ -220,7 +275,7 @@ export function checkCoverage({ routeSource, specSource, handlerSource, credenti
   assert.deepEqual(credential.components.schemas.LaunchForm.required, ['launch_id']);
   validateRefs(management);
   validateRefs(credential);
-  return { managementRoutes: routes.length, credentialRoutes: isolated.length, commands: commands.length };
+  return { managementRoutes: routes.length, credentialRoutes: isolated.length, commands: commands.length, organizationFinanceRoutes: organization.length };
 }
 
 export function loadInputs(base = root) {
@@ -228,6 +283,9 @@ export function loadInputs(base = root) {
   const json = (relative) => JSON.parse(read(relative));
   return {
     routeSource: read('account-platform/internal/token/management_routes.go'),
+    organizationFinanceSource: read('account-platform/internal/token/organization_finance_routes.go'),
+    organizationHandlerSource: read('account-platform/internal/token/organization_billing.go') + '\n' + read('account-platform/internal/token/organization_model_policy.go'),
+    organizationFinance: json('account-platform/contracts/openapi/organization-finance.yaml'),
     specSource: read('account-platform/internal/token/command_governance.go'),
     handlerSource: read('account-platform/internal/token/governance_handlers.go'),
     credentialSource: read('account-platform/internal/token/credential_origin.go'),

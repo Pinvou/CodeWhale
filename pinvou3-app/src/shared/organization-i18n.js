@@ -1,5 +1,6 @@
 export const organizationCopy = {
  zh: {
+  inputInvalid: '请检查输入的标识、版本、时间与金额。', invitationUnavailable: '邀请已失效或不可用，请刷新邀请列表。', invitationUnknown: '邀请接受结果尚未确认，请刷新邀请及当前身份后核实。', invitationAcceptedRefreshUnknown: '邀请已接受，但当前身份尚未刷新确认。请刷新后继续。',
   memberUnits: '普通成员归属', roleUnit: 'UNIT_ADMIN 角色范围', replaceMemberUnits: '替换成员归属', unscopedUnits: '未选择单元表示无归属范围。',
   modelPolicy: '组织模型政策', modelPolicyMode: '模型范围', models: '模型', ALLOW_ALL: '允许全部模型', ALLOW_LIST: '只允许所选模型', DENY_LIST: '禁止所选模型',
   testCollection: '当前为受控测试付款，不是正式收款。', formalCollection: '当前提供正式收款渠道。', collectionUnavailable: '当前渠道未获正式收款准入，请核实付款用途。', noPurchaseChannel: '当前没有可用付款渠道。',
@@ -13,6 +14,7 @@ export const organizationCopy = {
   create: '创建组织', rename: '修改名称', disable: '停用', enable: '启用', delete: '删除组织', readiness: '检查删除条件', blockers: '阻断条件', addMember: '添加成员', renameUnit: '修改单元名称', deleteUnit: '删除单元', previous: '上一页', next: '下一页', search: '搜索名称',
  },
  en: {
+  inputInvalid: 'Check identifiers, versions, times and amounts.', invitationUnavailable: 'The invitation is expired or unavailable. Refresh invitations.', invitationUnknown: 'Invitation acceptance is unconfirmed. Refresh invitations and the current identity to verify.', invitationAcceptedRefreshUnknown: 'The invitation was accepted, but the current identity refresh is unconfirmed. Refresh before continuing.',
   memberUnits: 'Ordinary member units', roleUnit: 'UNIT_ADMIN role scope', replaceMemberUnits: 'Replace member units', unscopedUnits: 'No selected unit means an unscoped membership.',
   modelPolicy: 'Organization model policy', modelPolicyMode: 'Model scope', models: 'Models', ALLOW_ALL: 'Allow all models', ALLOW_LIST: 'Allow selected models only', DENY_LIST: 'Deny selected models',
   testCollection: 'Controlled test payments only; this is not formal collection.', formalCollection: 'Formal collection channels are currently available.', collectionUnavailable: 'This provider is not admitted for formal collection. Verify the payment purpose.', noPurchaseChannel: 'No payment channel is currently available.',
@@ -26,6 +28,7 @@ export const organizationCopy = {
   create: 'Create organization', rename: 'Rename', disable: 'Disable', enable: 'Enable', delete: 'Delete organization', readiness: 'Check deletion conditions', blockers: 'Blocking conditions', addMember: 'Add member', renameUnit: 'Rename unit', deleteUnit: 'Delete unit', previous: 'Previous page', next: 'Next page', search: 'Search names',
  },
  ja: {
+  inputInvalid: '識別子、バージョン、日時、金額を確認してください。', invitationUnavailable: '招待は期限切れか利用できません。招待一覧を更新してください。', invitationUnknown: '招待の受諾結果は未確認です。招待と現在のコンテキストを更新して確認してください。', invitationAcceptedRefreshUnknown: '招待は受諾済みですが、現在のコンテキストの更新は未確認です。更新してから続行してください。',
   memberUnits: '通常メンバーの所属単位', roleUnit: 'UNIT_ADMIN ロールの範囲', replaceMemberUnits: 'メンバーの所属単位を置換', unscopedUnits: '単位を選択しない場合は所属範囲なしになります。',
   modelPolicy: '組織のモデルポリシー', modelPolicyMode: 'モデル範囲', models: 'モデル', ALLOW_ALL: 'すべてのモデルを許可', ALLOW_LIST: '選択したモデルのみ許可', DENY_LIST: '選択したモデルを禁止',
   testCollection: '現在は管理されたテスト決済であり、正式な集金ではありません。', formalCollection: '正式な集金手段を利用できます。', collectionUnavailable: '正式な集金の認可がありません。決済目的を確認してください。', noPurchaseChannel: '現在利用可能な決済手段がありません。',

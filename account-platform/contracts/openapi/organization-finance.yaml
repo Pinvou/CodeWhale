@@ -1,0 +1,809 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Token organization finance and model policy",
+    "version": "1.0.0",
+    "description": "Finite11 existing models-management assembly operations. Personal factory does not install these paths (404); bearer identity plus current Account organization permissions are independently verified. No new authority or runtime behavior. Read Billing projections are explicitly partial, monetary JSON int64 must be decoded losslessly; signed readiness and personal invocation remain separate."
+  },
+  "paths": {
+    "/v1/organizations/{organization_id}/model-policy": {
+      "get": {
+        "operationId": "organizationModelPolicyGet",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "organizationModelPolicy",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.models.read"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current successful response; quota batch may include failed items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationModelPolicy"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+          }
+        }
+      },
+      "put": {
+        "operationId": "organizationModelPolicyPut",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "organizationModelPolicy",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.models.manage"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Original same-key request identity passed to the owning command/Billing operation."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current successful response; quota batch may include failed items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationModelPolicy"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelPolicyWrite"
+              }
+            }
+          }
+        },
+        "x-approval-policy": {
+          "command": "TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE",
+          "mode": "AuditOnly"
+        }
+      }
+    },
+    "/v1/organizations/{organization_id}/balance": {
+      "get": {
+        "operationId": "getOrganizationBalanceGet",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "getOrganizationBalance",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.wallet.read"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current successful response; quota batch may include failed items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartialProjection"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+          }
+        }
+      }
+    },
+    "/v1/organizations/{organization_id}/entitlement-packages": {
+      "get": {
+        "operationId": "getOrganizationEntitlementPackagesGet",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "getOrganizationEntitlementPackages",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.wallet.read"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current successful response; quota batch may include failed items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartialProjection"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+          }
+        }
+      }
+    },
+    "/v1/organizations/{organization_id}/recharge/products": {
+      "get": {
+        "operationId": "getOrganizationRechargeProductsGet",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "getOrganizationRechargeProducts",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.entitlements.purchase"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current successful response; quota batch may include failed items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartialProjection"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+          }
+        }
+      }
+    },
+    "/v1/organizations/{organization_id}/payment-capabilities": {
+      "get": {
+        "operationId": "getOrganizationPaymentCapabilitiesGet",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "getOrganizationPaymentCapabilities",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.entitlements.purchase"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current successful response; quota batch may include failed items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartialProjection"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+          }
+        }
+      }
+    },
+    "/v1/organizations/{organization_id}/recharge/orders": {
+      "post": {
+        "operationId": "createOrganizationRechargeOrderPost",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "createOrganizationRechargeOrder",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.entitlements.purchase"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Original same-key request identity passed to the owning command/Billing operation."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Current successful response; quota batch may include failed items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartialProjection"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RechargeOrderWrite"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizations/{organization_id}/recharge/orders/{order_id}": {
+      "get": {
+        "operationId": "getOrganizationRechargeOrderGet",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "getOrganizationRechargeOrder",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.entitlements.purchase"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current successful response; quota batch may include failed items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartialProjection"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+          }
+        }
+      }
+    },
+    "/v1/organizations/{organization_id}/quota-grants": {
+      "get": {
+        "operationId": "listOrganizationQuotaGrantsGet",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "listOrganizationQuotaGrants",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.quota.read.self"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "member_user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Used only with org.quota.read.all; otherwise scope remains the current actor. Missing with read.all lists organization grants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current successful response; quota batch may include failed items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartialProjection"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+          }
+        }
+      }
+    },
+    "/v1/organizations/{organization_id}/quota-grants:batch": {
+      "post": {
+        "operationId": "allocateOrganizationQuotaBatchPost",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "allocateOrganizationQuotaBatch",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.quota.allocate"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Original same-key request identity passed to the owning command/Billing operation."
+          }
+        ],
+        "responses": {
+          "207": {
+            "description": "Current successful response; quota batch may include failed items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartialProjection"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuotaBatchWrite"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/organizations/{organization_id}/quota-grants/{grant_id}/revoke": {
+      "post": {
+        "operationId": "revokeOrganizationQuotaGrantPost",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "revokeOrganizationQuotaGrant",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.quota.revoke"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Original same-key request identity passed to the owning command/Billing operation."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current successful response; quota batch may include failed items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartialProjection"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuotaRevokeWrite"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "UserBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "PartialProjection": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Existing Billing projection forwarded without inventing fields; financial integer values are JSON int64, consumers must decode losslessly."
+      },
+      "OrganizationModelPolicy": {
+        "type": "object",
+        "properties": {
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "ALLOW_ALL",
+              "ALLOW_LIST",
+              "DENY_LIST"
+            ]
+          },
+          "model_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "authorization_version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "organization_id",
+          "version",
+          "mode",
+          "model_ids",
+          "authorization_version"
+        ]
+      },
+      "ModelPolicyWrite": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "mode",
+          "reason"
+        ],
+        "properties": {
+          "expected_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "default": 0,
+            "description": "Current Go decoder defaults omission to zero, valid only for the initial absent policy; subsequent writes must match the frozen version."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "ALLOW_ALL",
+              "ALLOW_LIST",
+              "DENY_LIST"
+            ]
+          },
+          "model_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "default": [],
+            "description": "Current owner normalizes omission/null to the empty selection. ALLOW_ALL accepts only an empty selection.",
+            "nullable": true
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "RechargeOrderWrite": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "product_id",
+          "channel"
+        ],
+        "properties": {
+          "product_id": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          }
+        }
+      },
+      "QuotaBatchWrite": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QuotaItem"
+            },
+            "minItems": 1,
+            "maxItems": 200
+          }
+        }
+      },
+      "QuotaItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "member_user_id",
+          "membership_version",
+          "package_id",
+          "component_id",
+          "component_type",
+          "amount_microcredits"
+        ],
+        "properties": {
+          "member_user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "membership_version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "package_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "component_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "component_type": {
+            "type": "string",
+            "enum": [
+              "BASE",
+              "BONUS",
+              "PLAN"
+            ]
+          },
+          "amount_microcredits": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "QuotaRevokeWrite": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

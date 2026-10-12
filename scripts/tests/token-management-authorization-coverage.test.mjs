@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs';
 import { checkCoverage, loadInputs } from '../check-token-management-authorization-coverage.mjs';
 
 const inputs = loadInputs();
@@ -25,6 +26,7 @@ test('actual complete F04 inputs retain exact declared routes and policies', () 
     managementRoutes: inputs.manifest.routes.length,
     credentialRoutes: inputs.manifest.credentialRoutes.length,
     commands: inputs.manifest.commands.length,
+    organizationFinanceRoutes: inputs.manifest.organizationFinanceRoutes.length,
   });
 });
 
@@ -78,4 +80,45 @@ test('real CRLF route sources preserve declaration offsets and complete inventor
     routeSource: inputs.routeSource.replace(/\r?\n/g, '\r\n'),
     credentialSource: inputs.credentialSource.replace(/\r?\n/g, '\r\n'),
   }), checkCoverage(inputs));
+});
+
+test('organization finance registration cannot disappear outside the management inventory', () => {
+  const result = checkCoverage(inputs);
+  assert.equal(result.organizationFinanceRoutes, 11);
+});
+
+test('organization finance path and authority drift are rejected against frozen manifest', () => {
+  assert.throws(() => checkCoverage({ ...inputs, organizationFinanceSource: fs.readFileSync(new URL('../../account-platform/internal/token/organization_finance_routes.go', import.meta.url), 'utf8').replace('/balance', '/balance-unclassified') }), /organization/);
+});
+
+for (const [name, change] of Object.entries({
+ omitted: value => value.replace(/.*routes.GET\("\/organizations\/:organization_id\/balance".*\r?\n/, ''),
+ method: value => value.replace('routes.GET("/organizations/:organization_id/balance"', 'routes.POST("/organizations/:organization_id/balance"'),
+ gate: value => value.replace('!s.managementEnabled', 's.managementEnabled'),
+ conditional: value => value.replace('routes.GET("/organizations/:organization_id/balance",', 'if true { routes.GET("/organizations/:organization_id/balance",'),
+ methodValue: value => value + '\n register := routes.GET\n',
+})) test(`organization finance rejects ${name} registration drift`, () => {
+ assert.throws(() => checkCoverage({ ...inputs, organizationFinanceSource: change(inputs.organizationFinanceSource) }));
+});
+test('organization finance verifies permission inside the installed handler, not only declarations', () => {
+ assert.throws(() => checkCoverage({ ...inputs, organizationHandlerSource: inputs.organizationHandlerSource.replace('resolveOrganizationBilling(w, r, "org.wallet.read")', 'resolveOrganizationBilling(w, r, "org.units.read")') }), /organization/);
+});
+for (const part of ['path', 'authority', 'key', 'approval']) test(`organization finance OpenAPI ${part} drift fails closed`, () => {
+ const contract = structuredClone(inputs.organizationFinance), op = contract.paths['/v1/organizations/{organization_id}/model-policy'].put;
+ if (part === 'path') delete contract.paths['/v1/organizations/{organization_id}/balance'];
+ if (part === 'authority') op['x-authority'].all = ['org.members.manage'];
+ if (part === 'key') op.parameters = op.parameters.filter(p => p.name !== 'Idempotency-Key');
+ if (part === 'approval') delete op['x-approval-policy'];
+ assert.throws(() => checkCoverage({ ...inputs, organizationFinance: contract }), /organization/);
+});
+
+test('organization request properties match the actual handler body decoder', () => {
+ const contract = structuredClone(inputs.organizationFinance);
+ delete contract.components.schemas.ModelPolicyWrite.properties.expected_version;
+ assert.throws(() => checkCoverage({ ...inputs, organizationFinance: contract }), /organization request fields/);
+});
+
+test('a commented-out organization assembly gate does not satisfy the checker', () => {
+ const source = inputs.organizationFinanceSource.replace('if !s.managementEnabled {', '/* if !s.managementEnabled { return } */ if s.managementEnabled {');
+ assert.throws(() => checkCoverage({ ...inputs, organizationFinanceSource: source }), /organization management/);
 });
