@@ -3893,77 +3893,82 @@ mod tests {
     fn first_remote_lane_freezes_code_only_and_distinct_policy_in_real_store() {
         use crate::core::mode_state::SerializableMode::{Plan, Yolo};
         use crate::platform::prefs::UserPrefs;
-        for (json, code, expected) in [
-            (r#"{"remote_task_permissions":{"code":"plan"}}"#, true, Plan),
-            (
-                r#"{"remote_task_permissions":{"chat":"plan","code":"yolo"}}"#,
-                true,
-                Yolo,
-            ),
-            (
-                r#"{"remote_task_permissions":{"chat":"yolo","code":"plan"}}"#,
-                true,
-                Plan,
-            ),
-            (
-                r#"{"remote_task_permissions":{"chat":"yolo","code":"plan"}}"#,
-                false,
-                Yolo,
-            ),
-        ] {
-            let root = tempfile::tempdir().unwrap();
-            let store = SessionStore::boot_at_test_dir(root.path()).unwrap();
-            let session = store
-                .create_new("model".into(), None, root.path().join("local"))
-                .unwrap();
-            let id = &session.metadata.id;
-            let prefs: UserPrefs = serde_json::from_str(json).unwrap();
-            let pending = parking_lot::Mutex::new(HashMap::from([(id.clone(), None)]));
-            freeze_first_remote_lane(&store, &pending, id, code, prefs.remote_task_permissions)
-                .unwrap();
-            assert_eq!(store.durable_mode_entry(id), Some(expected));
-            assert_eq!(store.mode_state(id).mode, expected);
-            // An ACP bind failure leaves the logical lane Unknown. The same
-            // trusted first-claim retry may safely persist the identical mode.
-            freeze_first_remote_lane(&store, &pending, id, code, prefs.remote_task_permissions)
-                .unwrap();
-            assert_eq!(store.durable_mode_entry(id), Some(expected));
-            assert_eq!(store.mode_state(id).mode, expected);
-            if prefs.remote_task_permissions.chat.is_none() {
+        crate::features::sessions::with_isolated_store_restoring_home(|store| {
+            let root = store.manager.sessions_dir().parent().unwrap();
+            assert_eq!(
+                store.manager.sessions_dir(),
+                crate::platform::paths::sessions_root()
+            );
+            for (json, code, expected) in [
+                (r#"{"remote_task_permissions":{"code":"plan"}}"#, true, Plan),
+                (
+                    r#"{"remote_task_permissions":{"chat":"plan","code":"yolo"}}"#,
+                    true,
+                    Yolo,
+                ),
+                (
+                    r#"{"remote_task_permissions":{"chat":"yolo","code":"plan"}}"#,
+                    true,
+                    Plan,
+                ),
+                (
+                    r#"{"remote_task_permissions":{"chat":"yolo","code":"plan"}}"#,
+                    false,
+                    Yolo,
+                ),
+            ] {
+                let session = store
+                    .create_new("model".into(), None, root.join("local"))
+                    .unwrap();
+                let id = &session.metadata.id;
+                let prefs: UserPrefs = serde_json::from_str(json).unwrap();
+                let pending = parking_lot::Mutex::new(HashMap::from([(id.clone(), None)]));
+                freeze_first_remote_lane(store, &pending, id, code, prefs.remote_task_permissions)
+                    .unwrap();
+                assert_eq!(store.durable_mode_entry(id), Some(expected));
+                assert_eq!(store.mode_state(id).mode, expected);
+                // An ACP bind failure leaves the logical lane Unknown. The same
+                // trusted first-claim retry may safely persist the identical mode.
+                freeze_first_remote_lane(store, &pending, id, code, prefs.remote_task_permissions)
+                    .unwrap();
+                assert_eq!(store.durable_mode_entry(id), Some(expected));
+                assert_eq!(store.mode_state(id).mode, expected);
+                if prefs.remote_task_permissions.chat.is_none() {
+                    assert_eq!(
+                        freeze_first_remote_lane(
+                            store,
+                            &pending,
+                            id,
+                            false,
+                            prefs.remote_task_permissions
+                        )
+                        .unwrap_err(),
+                        "task_permission_mode_required"
+                    );
+                    assert_eq!(store.durable_mode_entry(id), Some(expected));
+                }
+                let mut changed = prefs.remote_task_permissions;
+                let opposite = if expected == Plan { Yolo } else { Plan };
+                if code {
+                    changed.code = Some(opposite);
+                } else {
+                    changed.chat = Some(opposite);
+                }
                 assert_eq!(
-                    freeze_first_remote_lane(
-                        &store,
-                        &pending,
-                        id,
-                        false,
-                        prefs.remote_task_permissions
-                    )
-                    .unwrap_err(),
-                    "task_permission_mode_required"
+                    freeze_first_remote_lane(store, &pending, id, code, changed).unwrap_err(),
+                    "task_permission_mode_changed"
                 );
                 assert_eq!(store.durable_mode_entry(id), Some(expected));
+                pending.lock().clear();
+                assert_eq!(
+                    freeze_first_remote_lane(store, &pending, id, code, changed).unwrap_err(),
+                    "task_permission_mode_changed"
+                );
+                assert_eq!(store.durable_mode_entry(id), Some(expected));
+                freeze_first_remote_lane(store, &pending, id, code, prefs.remote_task_permissions)
+                    .unwrap();
             }
-            let mut changed = prefs.remote_task_permissions;
-            let opposite = if expected == Plan { Yolo } else { Plan };
-            if code {
-                changed.code = Some(opposite);
-            } else {
-                changed.chat = Some(opposite);
-            }
-            assert_eq!(
-                freeze_first_remote_lane(&store, &pending, id, code, changed).unwrap_err(),
-                "task_permission_mode_changed"
-            );
-            assert_eq!(store.durable_mode_entry(id), Some(expected));
-            pending.lock().clear();
-            assert_eq!(
-                freeze_first_remote_lane(&store, &pending, id, code, changed).unwrap_err(),
-                "task_permission_mode_changed"
-            );
-            assert_eq!(store.durable_mode_entry(id), Some(expected));
-            freeze_first_remote_lane(&store, &pending, id, code, prefs.remote_task_permissions)
-                .unwrap();
-        }
+        });
     }
 
     #[test]
@@ -3997,26 +4002,31 @@ mod tests {
     #[test]
     fn failed_code_binding_cannot_switch_first_lane_even_with_identical_modes() {
         use crate::core::mode_state::SerializableMode::Plan;
-        let root = tempfile::tempdir().unwrap();
-        let store = SessionStore::boot_at_test_dir(root.path()).unwrap();
-        let session = store
-            .create_new("model".into(), None, root.path().join("local"))
-            .unwrap();
-        let id = &session.metadata.id;
-        let policy = serde_json::from_str::<crate::platform::prefs::UserPrefs>(
-            r#"{"remote_task_permissions":{"chat":"plan","code":"plan"}}"#,
-        )
-        .unwrap()
-        .remote_task_permissions;
-        let pending = parking_lot::Mutex::new(HashMap::from([(id.clone(), None)]));
-        freeze_first_remote_lane(&store, &pending, id, true, policy).unwrap();
-        assert_eq!(
-            freeze_first_remote_lane(&store, &pending, id, false, policy).unwrap_err(),
-            "task_permission_mode_changed"
-        );
-        assert_eq!(pending.lock().get(id), Some(&Some((true, Plan))));
-        assert_eq!(store.durable_mode_entry(id), Some(Plan));
-        freeze_first_remote_lane(&store, &pending, id, true, policy).unwrap();
+        crate::features::sessions::with_isolated_store_restoring_home(|store| {
+            let root = store.manager.sessions_dir().parent().unwrap();
+            assert_eq!(
+                store.manager.sessions_dir(),
+                crate::platform::paths::sessions_root()
+            );
+            let session = store
+                .create_new("model".into(), None, root.join("local"))
+                .unwrap();
+            let id = &session.metadata.id;
+            let policy = serde_json::from_str::<crate::platform::prefs::UserPrefs>(
+                r#"{"remote_task_permissions":{"chat":"plan","code":"plan"}}"#,
+            )
+            .unwrap()
+            .remote_task_permissions;
+            let pending = parking_lot::Mutex::new(HashMap::from([(id.clone(), None)]));
+            freeze_first_remote_lane(store, &pending, id, true, policy).unwrap();
+            assert_eq!(
+                freeze_first_remote_lane(store, &pending, id, false, policy).unwrap_err(),
+                "task_permission_mode_changed"
+            );
+            assert_eq!(pending.lock().get(id), Some(&Some((true, Plan))));
+            assert_eq!(store.durable_mode_entry(id), Some(Plan));
+            freeze_first_remote_lane(store, &pending, id, true, policy).unwrap();
+        });
     }
 
     #[test]

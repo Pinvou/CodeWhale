@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::platform::paths;
-use crate::platform::paths::tests::ENV_LOCK;
+use crate::platform::paths::tests::{ENV_LOCK, EnvVarGuard};
 use crate::platform::prefs::UserPrefs;
 use anyhow::Result;
 use chrono::Utc;
@@ -30,6 +30,10 @@ use super::validators::generate_session_id;
 /// the guard; the lock is released only when the guard drops.
 fn isolated_store() -> (SessionStore, std::sync::MutexGuard<'static, ()>) {
     let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    (boot_isolated_store_locked(), guard)
+}
+
+fn boot_isolated_store_locked() -> SessionStore {
     // pid + in-process counter: paths::tests::ENV_LOCK doc warns nanos-only
     // names can collide across two concurrent cargo test processes (the
     // lock only serializes in-process) — a collision shares the dir, and
@@ -44,7 +48,59 @@ fn isolated_store() -> (SessionStore, std::sync::MutexGuard<'static, ()>) {
     let store = SessionStore::boot_with_scheduled_root(tmp.join("scheduled")).expect("boot");
     // Note: no remove_var — the lock has not dropped yet, and the assertions
     // below need PINVOU3_HOME to still be this value.
-    (store, guard)
+    store
+}
+
+/// A synchronous test scope: restore HOME after dropping the store and before
+/// releasing ENV_LOCK. The historical isolated_store contract stays unchanged.
+pub(crate) fn with_isolated_store_restoring_home<R>(action: impl FnOnce(&SessionStore) -> R) -> R {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    with_isolated_store_restoring_home_locked(&guard, action)
+}
+
+fn with_isolated_store_restoring_home_locked<R>(
+    _guard: &std::sync::MutexGuard<'static, ()>,
+    action: impl FnOnce(&SessionStore) -> R,
+) -> R {
+    let previous = std::env::var_os("PINVOU3_HOME");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _home = EnvVarGuard::capture(&["PINVOU3_HOME"]);
+        let store = boot_isolated_store_locked();
+        action(&store)
+    }));
+    // Both normal and unwinding exits restore the exact Option<OsString>
+    // while the caller still holds the same process-level environment lock.
+    assert_eq!(std::env::var_os("PINVOU3_HOME"), previous);
+    match outcome {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+#[test]
+fn isolated_store_scope_restores_existing_and_absent_home_on_success_and_panic() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _outer = EnvVarGuard::capture(&["PINVOU3_HOME"]);
+    let owned_home = tempfile::tempdir().unwrap();
+    for initial in [None, Some(owned_home.path().as_os_str().to_owned())] {
+        // SAFETY: ENV_LOCK is held until the outer restore guard has dropped.
+        match &initial {
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        for panic in [false, true] {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_isolated_store_restoring_home_locked(&guard, |store| {
+                    assert_eq!(store.manager.sessions_dir(), paths::sessions_root());
+                    if panic {
+                        std::panic::panic_any("owned-test-scope-unwind");
+                    }
+                });
+            }));
+            assert_eq!(result.is_err(), panic);
+            assert_eq!(std::env::var_os("PINVOU3_HOME"), initial);
+        }
+    }
 }
 
 fn record_session_deletions(store: &SessionStore) -> Arc<std::sync::Mutex<Vec<String>>> {
