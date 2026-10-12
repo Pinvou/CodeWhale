@@ -634,7 +634,8 @@ or bare IPv6, fragment, whitespace, or backslash. The suffix is an optional
 each percent escape is exactly `%` plus two uppercase hex digits. Lowercase
 escapes and malformed escapes fail rather than normalize.
 
-The `artifact_index` operation returns bounded metadata in `body.artifacts`
+The `artifact_index` operation returns bounded metadata (at most 256 artifacts,
+the `MAX_ARTIFACTS` limit) in `body.artifacts`
 of a successful `remote_action_result`, never as a standalone payload.
 Each item is exactly `artifact_id, task_id, display_name, mime_type,
 total_bytes, sha256, preview_kind`; preview kinds are `text`,

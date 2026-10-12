@@ -24,6 +24,46 @@ const productionStaging = productionAst
 // actual cleanup branches, ordering and ownership checks are not duplicated.
 const productionCleanup = `$cleanupNode=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.ScriptBlockExpressionAst] -and $n.Extent.Text.Contains('$remoteCleanupErrors =')},$true)|Sort-Object {$_.Extent.Text.Length})[0];if(-not $cleanupNode){throw 'production-cleanup-missing'};$cleanupText=$cleanupNode.Extent.Text;$cleanup=[scriptblock]::Create($cleanupText.Substring(1,$cleanupText.Length-2).Replace('$using:','$')); `;
 
+// Execute the real legacy-flow parameter binder and try/finally without running
+// the top-level orchestrator. Only the external trusted-driver boundary is fake.
+for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : ['pwsh']) {
+  test(`production legacy flow binds and forwards the owned process ID [${shell}]`, () => {
+    const script = `$ErrorActionPreference='Stop'; ${productionAst}
+      $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.ScriptBlockExpressionAst] -and $n.Extent.Text.Contains('legacy-configure-gateway') -and $n.Extent.Text.Contains('legacy-deconfigure-gateway') -and $n.Extent.Text.Contains('$configureExitCode')},$true));
+      if($nodes.Count -ne 1){throw 'legacy-flow-not-unique'};
+      $text=$nodes[0].Extent.Text;$flow=[scriptblock]::Create($text.Substring(1,$text.Length-2));
+      $global:PinvouE2ERunRoot=[IO.Path]::GetTempPath();$global:PinvouE2EOutput=[IO.Path]::GetTempPath();
+      foreach($name in @('Invoke-RestMethod','Invoke-WebRequest','Invoke-Command','New-PSSession','Enter-PSSession','Start-Process','ssh','scp')){
+        Set-Item -LiteralPath ('Function:'+ $name) -Value {throw 'external-operation-forbidden'};
+      };
+      $script:calls=@();$script:pidForwards=0;$script:counter=0;
+      function Invoke-PinvouTrustedGuard {
+        param($FilePath,$Arguments,$AdditionalFilePaths)
+        $script:calls+=@($Arguments[0]);$global:LASTEXITCODE=0;
+        if($Arguments[0] -in @('legacy-configure-gateway','legacy-traffic-counter','legacy-probe')){
+          $index=[Array]::IndexOf($Arguments,'--expected-pid');
+          if($index -lt 0 -or $Arguments[$index+1] -cne '43210'){throw 'owned-pid-not-forwarded'};
+          $script:pidForwards++;
+        };
+        switch($Arguments[0]){
+          'legacy-configure-gateway' {@{route_activated=$true;mock=$false;original_state_digest='original';canonical_input_state_digest='canonical';control_plane_state_before_digest='before';route_state_digest='route'}|ConvertTo-Json -Compress}
+          'legacy-traffic-counter' {@{schema='pinvou-legacy-relay-traffic-counter';pid=43210;count=$script:counter;mock=$false}|ConvertTo-Json -Compress;$script:counter++}
+          'legacy-probe' {@{pid=43210;mock=$false}|ConvertTo-Json -Compress}
+          'legacy-bare-v2-probe' {@{schema='pinvou-legacy-bare-v2-rejection';gateway_url_sha256='gateway-sha';request_nonce='nonce';response_kind='upgrade_rejected';rejected=$true;mock=$false}|ConvertTo-Json -Compress}
+          'legacy-deconfigure-gateway' {@{owned_route_removed=$true;public_route_withdrawn=$true;restored_state_digest='original';mock=$false}|ConvertTo-Json -Compress}
+          default {throw 'unexpected-driver-command'}
+        }
+      };
+      $result=(& $flow 'fixture-gateway' 'gateway-sha' 'route-sha' 'route-id' 'run-nonce' 43210 43211 'nonce' 'commit')|ConvertFrom-Json;
+      if(($script:calls -join ',') -cne 'legacy-configure-gateway,legacy-traffic-counter,legacy-probe,legacy-traffic-counter,legacy-bare-v2-probe,legacy-deconfigure-gateway'){throw 'legacy-flow-order-invalid'};
+      if($script:pidForwards -ne 4 -or $result.counter_before -ne 0 -or $result.counter_after -ne 1 -or $result.restoration.owned_route_removed -ne $true){throw 'legacy-flow-incomplete'};
+      [Console]::Out.Write('production-legacy-flow-binding-pass');`;
+    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: 30000 });
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+    assert.equal(result.stdout, 'production-legacy-flow-binding-pass');
+  });
+}
+
 test("production orchestrator functions enforce measured elapsed time and route state binding", () => {
   const digest = "a".repeat(64);
   const combined = crypto.createHash("sha256").update(JSON.stringify(["pinvou-gateway-state-v1", digest, digest])).digest("hex");
