@@ -20,6 +20,7 @@ func TestManagementPublicMigrationInstallation(t *testing.T) {
 	t.Run("legacy-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, true, 0) })
 	t.Run("installed-29-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 29) })
 	t.Run("installed-30-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 30) })
+	t.Run("installed-f05-34-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 34) })
 }
 func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previousStage int) {
 	dsn := os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL")
@@ -99,7 +100,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		t.Fatal(err)
 	}
 	config.Database = database
-	owner, err := pgx.ConnectConfig(ctx, config)
+	owner, err := connectManagementFixture(t, ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	owner.Close(context.Background())
 	config.User = "token_migrator"
 	config.Password = ""
-	connection, err := pgx.ConnectConfig(ctx, config)
+	connection, err := connectManagementFixture(t, ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +146,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if previousStage > 0 {
 		previous := []migrations.Migration{}
 		for _, m := range loaded {
-			if (m.Version < 900002 || (previousStage == 30 && m.Version == 900002)) && m.Version != 16 && m.Version != 17 && m.Version != 34 {
+			if m.Version != 8 && m.Version != 9 && (previousStage == 34 || ((m.Version < 900002 || (previousStage == 30 && m.Version == 900002)) && m.Version != 16 && m.Version != 17 && m.Version != 34)) {
 				previous = append(previous, m)
 			}
 		}
@@ -161,7 +162,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if legacy {
 		operatorConfig := config.Copy()
 		operatorConfig.User = admin.Config().User
-		op, e := pgx.ConnectConfig(ctx, operatorConfig)
+		op, e := connectManagementFixture(t, ctx, operatorConfig)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -171,11 +172,11 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		}
 		old := []migrations.Migration{}
 		for _, m := range loaded {
-			if m.Version < 900001 && m.Version != 16 && m.Version != 17 && m.Version != 34 {
+			if m.Version < 900001 && m.Version != 8 && m.Version != 9 && m.Version != 16 && m.Version != 17 && m.Version != 34 {
 				old = append(old, m)
 			}
 		}
-		if e = migrations.UpWithHooks(ctx, connection, old, migrations.UpHooks{BeforeApply: lendOverviewIndexDDL, AfterApply: revokeOverviewIndexDDL}); e != nil {
+		if e = migrations.UpWithHooks(ctx, connection, old, migrations.UpHooks{BeforeApply: lendPinnedMigrationDDL, AfterApply: revokePinnedMigrationDDL}); e != nil {
 			t.Fatal("legacy installation", e)
 		}
 		migrations.Unlock(ctx, connection)
@@ -185,7 +186,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		migrations.Unlock(ctx, connection)
 		var count int
 		var marker bool
-		if e = connection.QueryRow(ctx, `SELECT (SELECT count(*) FROM schema_migrations),to_regclass('public.token_runtime_hardening') IS NOT NULL`).Scan(&count, &marker); e != nil || count != 28 || marker {
+		if e = connection.QueryRow(ctx, `SELECT (SELECT count(*) FROM schema_migrations),to_regclass('public.token_runtime_hardening') IS NOT NULL`).Scan(&count, &marker); e != nil || count != 28 || count != len(old) || marker {
 			t.Fatal("failed upgrade changed history", count, marker, e)
 		}
 		artifact, e := os.ReadFile("../../deploy/production/token-storage-hardening-bootstrap.sql")
@@ -201,6 +202,40 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		if _, e = op.Exec(ctx, string(artifact)); e != nil {
 			t.Fatal("legacy operator provisioning", e)
 		}
+
+		t.Run("failed-organization-DDL-rolls-back-temporary-create", func(t *testing.T) {
+			tx, e := connection.Begin(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer tx.Rollback(context.Background())
+			var selected migrations.Migration
+			for _, m := range loaded {
+				if m.Version == 8 {
+					selected = m
+				}
+			}
+			if e = lendPinnedMigrationDDL(ctx, tx, selected); e != nil {
+				t.Fatal(e)
+			}
+			var allowed bool
+			if e = tx.QueryRow(ctx, `SELECT has_schema_privilege('token_gateway','public','CREATE')`).Scan(&allowed); e != nil || !allowed {
+				t.Fatal("temporary DDL privilege missing", e)
+			}
+			if _, e = tx.Exec(ctx, `SELECT public.controlled_missing_organization_ddl_function()`); e == nil {
+				t.Fatal("controlled migration failure expected")
+			}
+			if e = tx.Rollback(ctx); e != nil {
+				t.Fatal(e)
+			}
+			if e = connection.QueryRow(ctx, `SELECT has_schema_privilege('token_gateway','public','CREATE')`).Scan(&allowed); e != nil || allowed {
+				t.Fatal("failed migration leaked schema CREATE", e)
+			}
+			var absent bool
+			if e = connection.QueryRow(ctx, `SELECT to_regclass('public.organization_lifecycle_states') IS NULL AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=8)`).Scan(&absent); e != nil || !absent {
+				t.Fatal("failed migration changed organization history", e)
+			}
+		})
 	}
 	if err = Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
@@ -218,7 +253,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	migrations.Unlock(ctx, connection)
 	probeConfig := config.Copy()
 	probeConfig.User = admin.Config().User
-	probe, err := pgx.ConnectConfig(ctx, probeConfig)
+	probe, err := connectManagementFixture(t, ctx, probeConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,13 +273,13 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if err = connection.QueryRow(ctx, `SELECT state FROM public.token_command_governance_activation WHERE singleton`).Scan(&activation); err != nil || activation != "PRE_ACTIVATION" {
 		t.Fatalf("migration must not fabricate runtime authority: %q err=%v", activation, err)
 	}
-	var future bool
-	if err = connection.QueryRow(ctx, `SELECT to_regclass('organization_lifecycle_states') IS NOT NULL`).Scan(&future); err != nil || future {
-		t.Fatalf("future private stages must remain absent: %v err=%v", future, err)
+	var readiness, usageHistory, organization, units, future bool
+	if err = connection.QueryRow(ctx, `SELECT to_regclass('client_readiness_attestations') IS NOT NULL,to_regclass('usage_history_groups') IS NOT NULL,to_regclass('organization_lifecycle_states') IS NOT NULL,to_regclass('organization_unit_lifecycle_states') IS NOT NULL,to_regclass('usage_request_anonymization_commands') IS NOT NULL`).Scan(&readiness, &usageHistory, &organization, &units, &future); err != nil || !readiness || !usageHistory || !organization || !units || future {
+		t.Fatalf("propagated F06 stages or future boundary mismatch: readiness=%v usage=%v future=%v err=%v", readiness, usageHistory, future, err)
 	}
 	migrations.Unlock(ctx, connection)
 	config.User = admin.Config().User
-	operator, err := pgx.ConnectConfig(ctx, config)
+	operator, err := connectManagementFixture(t, ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +302,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		runtimeConfig := config.Copy()
 		runtimeConfig.User = "token_gateway"
 		runtimeConfig.Password = ""
-		runtime, err := pgx.ConnectConfig(ctx, runtimeConfig)
+		runtime, err := connectManagementFixture(t, ctx, runtimeConfig)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -349,7 +384,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	})
 	t.Run("subsequent-low-version-migration-rehardens-storage", func(t *testing.T) {
 		// The generic migration engine is exercised with a synthetic next-stage DDL;
-		// Ordered still rejects this unsupported version in the production F04 set.
+		// Ordered still rejects this unsupported version after the F06 stage union.
 		next := migrations.Migration{Version: 35, Name: "controlled_future_storage", UpSQL: `CREATE TABLE public.controlled_future_storage(id UUID PRIMARY KEY); CREATE INDEX controlled_future_usage_idx ON usage_requests(id); SET ROLE token_schema_owner; GRANT CREATE ON SCHEMA public TO token_cap_policy_deployer; SET ROLE token_cap_policy_deployer; CREATE TABLE public.controlled_future_policy(id UUID PRIMARY KEY); SET ROLE token_schema_owner; REVOKE CREATE ON SCHEMA public FROM token_cap_policy_deployer; SET ROLE token_gateway;`}
 		if err := migrations.UpWithHooks(ctx, connection, []migrations.Migration{next}, migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); err != nil {
 			t.Fatal(err)
@@ -372,7 +407,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		runtimeConfig := config.Copy()
 		runtimeConfig.User = "token_gateway"
 		runtimeConfig.Password = ""
-		runtime, err := pgx.ConnectConfig(ctx, runtimeConfig)
+		runtime, err := connectManagementFixture(t, ctx, runtimeConfig)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -418,4 +453,18 @@ func assertTokenHistoryAuthority(t *testing.T, ctx context.Context, c *pgx.Conn)
 	if e := c.QueryRow(ctx, `SELECT processed,complete FROM public.backfill_usage_history_projection(100)`).Scan(&processed, &complete); e != nil || processed != 0 || !complete {
 		t.Fatal("bounded history worker authority", processed, complete, e)
 	}
+}
+
+// Fixture-only timings distinguish an exhausted prior DDL budget from a slow
+// connection. They expose no endpoint, credential or persisted business data.
+func connectManagementFixture(t *testing.T, ctx context.Context, config *pgx.ConnConfig) (*pgx.Conn, error) {
+	t.Helper()
+	deadline, bounded := ctx.Deadline()
+	if bounded {
+		t.Logf("fixture connection budget remaining: %s", time.Until(deadline).Round(time.Millisecond))
+	}
+	started := time.Now()
+	c, err := pgx.ConnectConfig(ctx, config)
+	t.Logf("fixture connection elapsed: %s", time.Since(started).Round(time.Millisecond))
+	return c, err
 }

@@ -35,17 +35,24 @@ const expiredHoldRecoveryDownChecksum = "f309bf2ac39e67860593585e5db72236b1109b9
 const meteringDeactivationVersion int64 = 900010
 const meteringDeactivationChecksum = "c07c9f04924cb761d6473e614f6ae42e466234359c793b138b62140c8a21f4b8"
 const meteringDeactivationDownChecksum = "9be8bea9e561d6ab85646a1fe3712ac264332cef41f7ac01d36e05131a40aee8"
+const memberIdentityVersion int64 = 900011
+const memberIdentityChecksum = "af4a63ed0592a0e60d5f4744176e15cc5013c3633c6f0f414f7580b7132b2aa8"
+const memberIdentityDownChecksum = "051eae7b8cf15c7708fbfe88aa096c4d85a284e35465f0684a1ff25fe3af6925"
 
 // Ordered installs the new forward-only fence immediately after original 006.
 // The migration engine checks each applied version, so later delivery of lower
 // numeric versions remains possible after the high-numbered fence is recorded.
 // The same validation is required before DownOne to prevent rollback-file edits.
 func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
+	if err := validateMemberFinancialReviewReason(input); err != nil {
+		return nil, err
+	}
 	var fence *migrations.Migration
 	var intent *migrations.Migration
 	var pricingReceipt *migrations.Migration
 	var expiredHoldRecovery *migrations.Migration
 	var meteringDeactivation *migrations.Migration
+	var memberIdentity *migrations.Migration
 	seen := make(map[int64]bool, len(input))
 	for _, migration := range input {
 		if seen[migration.Version] {
@@ -55,6 +62,10 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 		if migration.Version == generationVersion {
 			copy := migration
 			fence = &copy
+		}
+		if migration.Version == memberIdentityVersion {
+			copy := migration
+			memberIdentity = &copy
 		}
 		if migration.Version == pricingReceiptVersion {
 			copy := migration
@@ -84,6 +95,12 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	}
 	if intent != nil && (intent.Checksum != intentChecksum || sqlChecksum(intent.UpSQL) != intentChecksum || sqlChecksum(intent.DownSQL) != intentDownChecksum) {
 		return nil, errors.New("billing anomaly intents are not the frozen forward-only migration")
+	}
+	if seen[20] != (memberIdentity != nil) {
+		return nil, errors.New("billing membership projection requires lifecycle schema and event identity fence together")
+	}
+	if memberIdentity != nil && (memberIdentity.Checksum != memberIdentityChecksum || sqlChecksum(memberIdentity.UpSQL) != memberIdentityChecksum || sqlChecksum(memberIdentity.DownSQL) != memberIdentityDownChecksum) {
+		return nil, errors.New("billing member identity is not the frozen forward-only migration")
 	}
 	if seen[51] != (pricingReceipt != nil) {
 		return nil, errors.New("billing pricing delivery requires immutable operation receipts")
@@ -121,12 +138,15 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	})
 	result := make([]migrations.Migration, 0, len(ordered))
 	for _, migration := range ordered {
-		if migration.Version == generationVersion || migration.Version == intentVersion || migration.Version == pricingReceiptVersion {
+		if migration.Version == generationVersion || migration.Version == intentVersion || migration.Version == pricingReceiptVersion || migration.Version == memberIdentityVersion {
 			continue
 		}
 		result = append(result, migration)
 		if migration.Version == 6 {
 			result = append(result, *fence)
+		}
+		if migration.Version == 20 {
+			result = append(result, *memberIdentity)
 		}
 		if migration.Version == 51 {
 			result = append(result, *pricingReceipt)

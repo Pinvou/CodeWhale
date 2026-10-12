@@ -118,9 +118,9 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 			return Hold{}, memberErr
 		}
 		if memberBacked {
-			// F06 first delivers member-quota settlement. Preserve existing
-			// member-backed facts without mutating them as personal credit.
-			return Hold{}, ErrConflict
+			if err := settleMemberQuotaComponent(ctx, tx, hold.ID, item.componentID, settled, now); err != nil {
+				return Hold{}, err
+			}
 		} else {
 			command, err := tx.Exec(ctx, `UPDATE entitlement_components SET reserved_microcredits=reserved_microcredits-$2,used_microcredits=used_microcredits+$3,available_microcredits=available_microcredits+$4,status=CASE WHEN status IN ('FROZEN','REVOKED','EXPIRED') THEN status WHEN reserved_microcredits-$2=0 AND available_microcredits+$4+active_grant_microcredits+suspended_grant_microcredits=0 THEN 'CONSUMED' ELSE 'ACTIVE' END,updated_at=$5 WHERE id=$1 AND reserved_microcredits>=$2`, item.componentID, item.reserved, settled, released, now)
 			if err != nil {
@@ -210,8 +210,12 @@ func (r *PostgresRepository) ExtendHold(ctx context.Context, usageRequestID, hol
 			return Hold{}, err
 		}
 		if organizationID != nil || memberUserID != nil || membershipVersion != nil {
-			// Organization producer and quota extension first belong to F06.
-			return Hold{}, ErrConflict
+			if organizationID == nil || memberUserID == nil || membershipVersion == nil {
+				return Hold{}, ErrConflict
+			}
+			if err := r.extendMemberQuotaHold(ctx, tx, hold, *organizationID, *memberUserID, *membershipVersion, additional, now); err != nil {
+				return Hold{}, err
+			}
 		} else if err := extendPersonalHold(ctx, tx, hold, additional, now); err != nil {
 			return Hold{}, err
 		}

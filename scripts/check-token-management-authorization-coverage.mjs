@@ -231,7 +231,7 @@ export function loadInputs(base = root) {
     specSource: read('account-platform/internal/token/command_governance.go'),
     handlerSource: read('account-platform/internal/token/governance_handlers.go'),
     credentialSource: read('account-platform/internal/token/credential_origin.go'),
-    dtoSources: Object.fromEntries(['command_governance.go', 'command_precheck.go', 'credential_isolation.go', 'lifecycle_plans.go', 'impact_precheck.go', 'account_provisioning_saga.go', 'approval_recovery_result.go'].map((name) => ['internal/token/' + name, read('account-platform/internal/token/' + name)])),
+    dtoSources: Object.fromEntries(['command_governance.go', 'command_precheck.go', 'credential_isolation.go', 'lifecycle_plans.go', 'impact_precheck.go', 'account_provisioning_saga.go', 'approval_recovery_result.go', 'organization_lifecycle.go', 'organization_unit_blockers.go'].map((name) => ['internal/token/' + name, read('account-platform/internal/token/' + name)])),
     manifest: json('account-platform/deploy/authorization-token-management-entrypoints.json'),
     management: json('account-platform/contracts/openapi/token-management.yaml'),
     credential: json('account-platform/contracts/openapi/token-credential-origin.yaml'),

@@ -1,5 +1,5 @@
 // Package tokenschema pins the installed personal execution and management storage.
-// Organization lifecycle, event replay and privacy stages remain excluded.
+// F06 organization lifecycle is installed; later replay/privacy stages remain excluded.
 package tokenschema
 
 import (
@@ -23,12 +23,16 @@ var installed = map[int64]identity{
 	5:      {name: "platform_managed_routes", checksum: "8f883d69bd354f3df610cbec935620147c10d2953a43b1306da9b912532e014c", downChecksum: "58be33664d79125fe58b26eb7d96e16382991dc6b69b0cfb52df9b98d0052e3c"},
 	6:      {name: "usage_reconciliation", checksum: "fbe6f72000c39b0eb730a28c297f8336655fa084f48ebf2309388cad96f4e52b", downChecksum: "5fea6a6d5473a6673808b218e42a7942926dad5756bc15d163ab06253f153da4"},
 	7:      {name: "gateway_operations", checksum: "edf07b129b426eaca42ff452c77b8f835754071c05263de89ba895fca89c66c0", downChecksum: "e0eeb8bdf985867d519bee2116f58a6ffad0e33bf9fb1fba513f5251ec9caf34"},
+	8:      {name: "organization_lifecycle", checksum: "eb4fa4e06482ca9a29e8d9eb95d0b83a07e12d1c9771a0afed7174713b5268a5", downChecksum: "f7238ab3f21eeb95df0eac6ec66ff8c0b6380adc10cffcf42f2273048d973f3e"},
+	9:      {name: "organization_unit_blockers", checksum: "ec8be96b67b071aeed1280a71c459465a935d0fddb5542edbf6f876935b8178f", downChecksum: "3808826093f96cde619ab7a9836925da286b478c77abe5f1f48a3d6c48164186"},
 	10:     {name: "protocol_formula_versions", checksum: "40a37eb1ab122daa40b27ba2554c1dcfda0b066ed174705be1adfc2164fa3734", downChecksum: "8d2e3d5efe27c742dd9580b14e392ae0a7724dd17b93db912916214d3d8c09b4"},
 	11:     {name: "gateway_adapter_neutrality", checksum: "368c439e88cc3aafd1a173d049f68522c1b83013cb6c3abd65308f141e62fc90", downChecksum: "0ae06c1a023e4afa6982f6a86234c9a54eeec903748ece2f2888f16a46a5b006"},
 	12:     {name: "model_catalog_lifecycle", checksum: "dda62680bc527e56036b3c8e7d1c05efea45da8aa1f667676708f41e4f3cffe4", downChecksum: "09ac8b24d9163faff505a464608602f0d96637029f8b201c6339cc0ef4b054c2"},
 	13:     {name: "route_provisioning", checksum: "3a47b52f1258f67781cb123fafa86ec9dea4d2a03707ed57a14cc8f562d4996e", downChecksum: "40f46c41dcfc933a680f9c0d4cc7a0c5a96e85356eec75dd09f431ea93ae0cfa"},
 	14:     {name: "usage_execution_replay", checksum: "50a85bb91fc6e15c9a0630d1b28f4effd54d8550492a30c8b1cc371f267fa69a", downChecksum: "92cbc8a1f4d521008ec001aaa70f73a6a9c915fc32b13de56b7a6252c7e059a0"},
 	15:     {name: "usage_cancellation_convergence", checksum: "59c817da9f5f1a7acf8651008e6da260de1ec03fdce86a003cc53a516ed500ed", downChecksum: "3c759ce74e539f5dcf63c0564d8f34487d8f9d2c329ca6db5c9de68825bf7a77"},
+	16:     {name: "client_readiness", checksum: "c87acabfbc2f0048d50c8d58af1b5a9ecf2ce0cbe9789df90c92192e60a692c5", downChecksum: "d9aeecb29706b1e11db1962815e738de870c1356fb153abe1ee7577a0f85bbe1"},
+	17:     {name: "usage_admission_indexes", checksum: "fcd9960bf027d6daa6be4c02b109a520398a9515b142f73abd6b9ef5007d09dd", downChecksum: "b61e971e2c5fcff420de457c3da870331ec721abd321f11ae6971de6790108ce"},
 	19:     {name: "usage_convergence_evidence", checksum: "3844bfb85919334ce4a5a4ed50c9d6129d28ccccef640bc2ab0cafe0007af02f", downChecksum: "6b3714b510e0aa9266b8aa50a80ef8d7ebff53197021de3d98a9b0ddae5ad9d9"},
 	20:     {name: "manual_review_sla", checksum: "fe03a8e88cb8047884f38bc5ebde9aa711c0cd976a0d344041b097d6b66dd773", downChecksum: "4d489550f7e75cd791f3be53970714d6b1f774d6c120f4fd998b5ac5fb4e9e9e"},
 	21:     {name: "model_emergency_cancellation", checksum: "a6db7a849a5621d9c4b87caab044e8351a03a62240f6e5fc22f5d4c4a8e922f4", downChecksum: "d0633e0ed04950dc8752d5951f9e73b2d93b4227c0072d876b12d6bde6355fa6"},
@@ -44,11 +48,9 @@ var installed = map[int64]identity{
 	31:     {name: "token_command_governance_activation", checksum: "d957f8cac9de3566b1e30ab286458f80e78acd2cc9d61917e3367a0c8280ee16", downChecksum: "ffea99c31ae50300e5b055ff867d9c36b203c1db61553f8f6a157f192bcf3d07"},
 	32:     {name: "token_account_owner_cap_lock", checksum: "cabd925dcab9b2f4e00e35281f807fd4cb2c25f550d84ae0d13da01368e19ca4", downChecksum: "88094ab65e8a81c9aee6b4d9de8b791b869a51c2da83adaef7fcca426eb301f5"},
 	33:     {name: "model_token_page_overview_indexes", checksum: "a17e2fb2855c376b3a0b41961aa3ad0bc45f4193ebd445d6f4db31c430d3e0d6", downChecksum: "e064ed383496dad953f2d555bfafa501232ad3f50b35648d1bdbe9ec9dc47fd9"},
+	34:     {name: "usage_history_groups", checksum: "8f25256da33ce045b00f5f96471dee1169f92047a82fefa42d5485add44a4948", downChecksum: "7ffd599821fb4aa220ca06ef305af84527cbd5b3f27a9fbc9dbadf803f6099c0"},
 	900001: {name: "runtime_storage_hardening", checksum: "4590d925d2575b0b1076c864f9cfe3b9a8115a9eee864a8a19fba48003f85bac", downChecksum: "3d4e34c2499153f8d63292ccdae47c3cf4bb5a2ba93ad5093cc0cfdbcd4ada92"},
 	900002: {name: "hold_expiry_dispatch_fence", checksum: "70e1ab2e4df09da798f8960aef356fb91ed6cef675dcb0613b5e7f303839af55", downChecksum: "718410daef7dece72847123a0db47c6636ce7a7c008c4fd4d15470ddd058581d"},
-	16:     {name: "client_readiness", checksum: "c87acabfbc2f0048d50c8d58af1b5a9ecf2ce0cbe9789df90c92192e60a692c5", downChecksum: "d9aeecb29706b1e11db1962815e738de870c1356fb153abe1ee7577a0f85bbe1"},
-	17:     {name: "usage_admission_indexes", checksum: "fcd9960bf027d6daa6be4c02b109a520398a9515b142f73abd6b9ef5007d09dd", downChecksum: "b61e971e2c5fcff420de457c3da870331ec721abd321f11ae6971de6790108ce"},
-	34:     {name: "usage_history_groups", checksum: "8f25256da33ce045b00f5f96471dee1169f92047a82fefa42d5485add44a4948", downChecksum: "7ffd599821fb4aa220ca06ef305af84527cbd5b3f27a9fbc9dbadf803f6099c0"},
 	900003: {name: "usage_history_storage_compatibility", checksum: "4bb49b9651b476a0eb6496e775c89e4a3f9da9c53d683064317d5364841bc840", downChecksum: "96991acf88092a3cbbd9eaf7c8d90743d919cca342c364aac59498db78506194"},
 }
 
@@ -118,13 +120,14 @@ func Up(ctx context.Context, c *pgx.Conn, loaded []migrations.Migration) error {
 	})
 }
 
-// Original 029 removes runtime schema CREATE; original 033 later creates an
-// index on the runtime-owned routing table. Lend only that schema privilege
-// inside 033's transaction, then revoke it before recording its ledger row.
+// Original 029 removes runtime schema CREATE. Late delivered organization
+// 008/009, readiness 016/017 and overview 033 need that privilege for DDL.
+// Lend it only inside each pinned migration transaction and revoke before
+// recording its ledger row.
 // The immutable original SQL and the runtime's steady-state authority stay
 // unchanged. A failed statement or hook rolls back the grant with the DDL.
-func lendOverviewIndexDDL(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {
-	if m.Version != 33 && m.Version != 16 && m.Version != 17 {
+func lendPinnedMigrationDDL(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {
+	if m.Version != 33 && m.Version != 16 && m.Version != 17 && m.Version != 8 && m.Version != 9 {
 		return nil
 	}
 	if m.Version != 33 {
@@ -144,17 +147,17 @@ func lendOverviewIndexDDL(ctx context.Context, tx pgx.Tx, m migrations.Migration
 		return err
 	}
 	if !permitted {
-		return fmt.Errorf("Token overview migration requires the isolated deployment identity")
+		return fmt.Errorf("Token pinned migration requires the isolated deployment identity")
 	}
 	_, err := tx.Exec(ctx, `SET ROLE token_schema_owner; GRANT CREATE ON SCHEMA public TO token_gateway`)
 	return err
 }
 
-func revokeOverviewIndexDDL(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {
-	if m.Version != 33 && m.Version != 16 && m.Version != 17 {
+func revokePinnedMigrationDDL(ctx context.Context, tx pgx.Tx, m migrations.Migration) error {
+	if m.Version != 33 && m.Version != 16 && m.Version != 17 && m.Version != 8 && m.Version != 9 {
 		return nil
 	}
-	if m.Version == 16 || m.Version == 17 {
+	if m.Version == 16 || m.Version == 17 || m.Version == 8 || m.Version == 9 {
 		var previouslyRestricted bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=29)`).Scan(&previouslyRestricted); err != nil {
 			return err

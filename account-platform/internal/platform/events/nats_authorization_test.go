@@ -63,7 +63,7 @@ func TestNATSFixedAuthorizationAndOverlap(t *testing.T) {
 		}
 	}
 	operator := fixedNATSPermissions("event-resource-operator")
-	if len(operator.Publish) != 11 || !reflect.DeepEqual(operator.Subscribe, []string{"_INBOX.event-resource-operator.>"}) {
+	if len(operator.Publish) != 13 || !reflect.DeepEqual(operator.Subscribe, []string{"_INBOX.event-resource-operator.>"}) {
 		t.Fatal("operator permissions")
 	}
 	for _, subject := range operator.Publish {

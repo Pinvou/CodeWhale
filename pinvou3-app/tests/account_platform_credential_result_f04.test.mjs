@@ -8,6 +8,28 @@ const id = '11111111-1111-4111-8111-111111111111';
 const expected = { commandType: 'TOKEN_CREDENTIAL_VALIDATE', targetResourceType: 'PROVIDER_CREDENTIAL', targetResourceID: id };
 const receipt = { command_reference: id, command_type: expected.commandType, policy_version: 1, actor_user_id: id, actor_permission: 'platform.tokens.credentials.validate', authorization_version: 1, idempotency_fingerprint: 'a'.repeat(64), target_resource_type: expected.targetResourceType, target_resource_id: id, status: 'FAILED', redacted_result: {}, stable_error_code: 'CREDENTIAL_PROBE_OUTCOME_UNKNOWN', approval_request_id: null, audit_request_id: id, created_at: '2026-10-08T00:00:00Z', completed_at: '2026-10-08T00:00:01Z' };
 
+test('propagated Token resource404 remains a known no-write rejection', () => {
+  const command = { idempotencyKey: 'controlled-frozen-key' };
+  const actual = classifyHighRiskFailure(command, { status: 404, code: 'TOKEN_NOT_FOUND' });
+  assert.equal(actual.provenNoWrite, true);
+  assert.equal(actual.unknown, false);
+  assert.equal(actual.locked, false);
+  assert.equal(actual.error.code, 'TOKEN_NOT_FOUND');
+  for (const error of [{ status: 500, code: 'TOKEN_NOT_FOUND' }, { status: 504, code: 'TOKEN_NOT_FOUND' }, { status: 404, code: 'TOKEN_NOT_FOUND_OTHER' }]) {
+    const unknown = classifyHighRiskFailure(command, error);
+    assert.equal(unknown.provenNoWrite, false);
+    assert.equal(unknown.unknown, true);
+    assert.equal(unknown.idempotencyKey, command.idempotencyKey);
+  }
+});
+
+test('propagated Token resource error has explicit copy in every supported language', () => {
+  for (const language of ['zh', 'en', 'ja']) {
+    assert.equal(typeof tokenManagementCopy[language].modelToken.commandErrors.TOKEN_NOT_FOUND, 'string');
+    assert.notEqual(tokenManagementCopy[language].modelToken.commandErrors.TOKEN_NOT_FOUND, tokenManagementCopy[language].modelToken.commandErrors.TOKEN_ACCOUNT_NOT_FOUND);
+  }
+});
+
 test('only the exact before-dispatch deadline error establishes no write', () => {
   const command = { idempotencyKey: 'controlled-frozen-key' };
   const actual = classifyHighRiskFailure(command, { status: 503, code: 'CREDENTIAL_REQUEST_DEADLINE_EXCEEDED' });

@@ -9,6 +9,10 @@ func f01PermissionAllowed(permission string) bool {
 	case PermissionPersonalSessionLogin, PermissionPersonalProfileRead, PermissionPersonalProfileUpdate, PermissionPersonalSecurityManage, PermissionPersonalBillingRead,
 		PermissionPlatformUsersRead, PermissionPlatformUsersStatusManage, PermissionPlatformRegistrationsRepair, PermissionPlatformProfileChangesRepair, PermissionPlatformSMSConfigRead, PermissionPlatformSMSConfigManage:
 		return true
+	case PermissionPlatformOrganizationsRead, PermissionPlatformOrganizationsCreate, PermissionPlatformOrganizationsProfileManage, PermissionPlatformOrganizationsStatusManage, PermissionPlatformOrganizationsMembersManage, PermissionPlatformOrganizationsUnitsManage, PermissionPlatformOrganizationsDelete, PermissionPlatformOrganizationsOwnerTransfer, PermissionPersonalContextSwitch, PermissionPersonalInvitationsRead, PermissionPersonalInvitationsAccept, PermissionOrganizationProfileRead, PermissionOrganizationUnitsRead, PermissionOrganizationUnitsManage, PermissionOrganizationMembersRead, PermissionOrganizationMembersManage, PermissionOrganizationRolesAssign, PermissionOrganizationOwnerTransfer, PermissionOrganizationQuotaAllocate:
+		return true
+	case "org.model.invoke", "org.models.read", "org.models.manage", "org.usage.read.self", "org.usage.read.all", "org.wallet.read", "org.entitlements.purchase", "org.quota.read.self", "org.quota.read.all", "org.quota.revoke", "org.roles.read":
+		return true
 	case "platform.usage.read", "platform.usage.reconcile.retry", "platform.billing.reconciliation.read", "platform.billing.reconciliation.run", "platform.billing.reconciliation.manage":
 		return true
 	case "personal.models.read", "personal.model.invoke", "personal.usage.read", "personal.usage.cancel":

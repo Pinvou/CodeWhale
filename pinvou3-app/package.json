@@ -164,7 +164,11 @@
     "test:account-platform-usage-ui": "node tests/account_platform_f05_usage_ui_smoke.mjs && node tests/account_platform_usage_overview_ui_smoke.mjs",
     "test:account-platform-usage-governance-ui": "node tests/account_platform_f05_usage_governance_ui_smoke.mjs",
     "test:account-platform-model-overviews": "node --test tests/account_platform_f04_overview.test.mjs && node tests/account_platform_f04_overview_ui_smoke.mjs",
-    "test:account-platform-management-ui": "node tests/account_platform_f04_management_ui_smoke.mjs"
+    "test:account-platform-management-ui": "node tests/account_platform_f04_management_ui_smoke.mjs",
+    "test:account-platform-organization": "node --test tests/account_platform_organization.test.mjs",
+    "test:account-platform-organization-ui": "node tests/account_platform_organization_ui_smoke.mjs",
+    "test:account-platform-member-units": "node --test tests/account_platform_member_units.test.mjs",
+    "test:account-platform-member-units-ui": "node tests/account_platform_member_units_ui_smoke.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.10",

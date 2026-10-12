@@ -108,6 +108,7 @@ type streamBillingFake struct {
 
 type memberQuotaBillingFake struct {
 	ModelExecutionBillingClient
+	BillingClient
 	membershipVersion int64
 }
 
@@ -263,16 +264,23 @@ func TestBillingNoticeCapabilityAndWalletInsufficientClassification(t *testing.T
 	}
 }
 
-func TestPersonalExecutionDoesNotCreateFutureOrganizationHold(t *testing.T) {
+func TestOrganizationExecutionReservesFrozenLocalMemberQuota(t *testing.T) {
 	organizationID := uuid.New()
 	membershipVersion := int64(7)
 	snapshot, _ := json.Marshal(frozenUsageSnapshot{ContextType: "ORGANIZATION", OrganizationID: &organizationID, OrganizationMembershipVersion: &membershipVersion, MembershipVersion: 19})
 	billing := &memberQuotaBillingFake{}
-	service := &Service{cancellationBilling: billing}
+	service := &Service{billing: billing, cancellationBilling: billing}
 	usage := UsageRequest{ID: uuid.New(), UserID: uuid.New(), OrganizationID: &organizationID, WalletID: uuid.New(), MaximumMicrocredits: 10, RequestSnapshot: snapshot}
 	_, err := service.ensureUsageHold(context.Background(), usage, DispatchEnvelope{Price: PriceVersion{ID: uuid.New(), FormulaVersionID: uuid.New()}})
+	if err != nil || billing.membershipVersion != membershipVersion {
+		t.Fatalf("local membership version lost: %v membership=%d", err, billing.membershipVersion)
+	}
+	snapshot, _ = json.Marshal(frozenUsageSnapshot{ContextType: "ORGANIZATION", OrganizationID: &organizationID, MembershipVersion: 19})
+	usage.RequestSnapshot = snapshot
+	billing.membershipVersion = 0
+	_, err = service.ensureUsageHold(context.Background(), usage, DispatchEnvelope{Price: PriceVersion{ID: uuid.New(), FormulaVersionID: uuid.New()}})
 	if !errors.Is(err, ErrForbidden) || billing.membershipVersion != 0 {
-		t.Fatalf("future organization hold accepted: %v membership=%d", err, billing.membershipVersion)
+		t.Fatalf("global membership version used for local quota: %v membership=%d", err, billing.membershipVersion)
 	}
 }
 

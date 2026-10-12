@@ -80,10 +80,24 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 	if err := decodeAccountAuthority(response.Body, 1<<20, &body); err != nil {
 		return AuthorizationContext{}, err
 	}
-	if body.UserID == uuid.Nil || body.ContextType != "PERSONAL" || body.OrganizationID != nil || body.ContextVersion < 1 || body.AuthorizationVersion < 1 {
+	if body.UserID == uuid.Nil || body.ContextVersion < 1 || body.AuthorizationVersion < 1 {
 		return AuthorizationContext{}, ErrForbidden
 	}
-	return AuthorizationContext{UserID: body.UserID, Mobile: body.Mobile, MobileVerified: body.MobileVerified, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, ContextVersion: body.ContextVersion, AuthorizationVersion: body.AuthorizationVersion, Roles: body.PersonalRoles, Permissions: body.PersonalPermissions}, nil
+	roles, permissions := body.PersonalRoles, body.PersonalPermissions
+	switch body.ContextType {
+	case "PERSONAL":
+		if body.OrganizationID != nil {
+			return AuthorizationContext{}, ErrForbidden
+		}
+	case "ORGANIZATION":
+		if body.OrganizationID == nil || *body.OrganizationID == uuid.Nil || body.OrganizationMembershipVersion == nil || *body.OrganizationMembershipVersion < 1 || len(body.Roles) == 0 {
+			return AuthorizationContext{}, ErrForbidden
+		}
+		roles, permissions = body.Roles, body.Permissions
+	default:
+		return AuthorizationContext{}, ErrForbidden
+	}
+	return AuthorizationContext{UserID: body.UserID, Mobile: body.Mobile, MobileVerified: body.MobileVerified, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, OrganizationMembershipVersion: body.OrganizationMembershipVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, ContextVersion: body.ContextVersion, AuthorizationVersion: body.AuthorizationVersion, Roles: roles, Permissions: permissions}, nil
 }
 
 // Retain the reviewed A11 authority boundary: the complete body is bounded
