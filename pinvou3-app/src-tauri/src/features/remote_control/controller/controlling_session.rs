@@ -308,6 +308,21 @@ impl ControllingSessionManager {
         Ok(intent.projection())
     }
 
+    /// Keep the exact session intent stable before entering a connection owner
+    /// guard. Callbacks must not re-enter this manager: the common lock order is
+    /// session intents -> connection owner -> encrypted lane -> durable Store.
+    pub(crate) fn with_state<T>(
+        &self,
+        remote_ref: &str,
+        lease: &LeaseContext,
+        action: impl FnOnce(ControllingSessionProjection) -> T,
+    ) -> Result<T> {
+        let mut intents = self.intents.lock();
+        let intent = find_intent(&mut intents, remote_ref)?;
+        ensure_context(intent, lease)?;
+        Ok(action(intent.projection()))
+    }
+
     /// Read only A's authenticated, still-live capability projection for the
     /// exact remote ref and lease. B's local CapabilitySnapshotManager is not
     /// consulted and no raw protocol payload crosses to the WebView.

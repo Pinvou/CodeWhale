@@ -13,6 +13,21 @@ impl super::super::SessionStore {
         let mut state = self.remote_proxies.lock();
         state.require_available()?;
         if state.archives.contains(id)? {
+            if let Some(record) = state.records.get(id) {
+                let mut archived = state
+                    .archives
+                    .read(id)?
+                    .ok_or_else(|| anyhow::anyhow!("remote_proxy_archive_unavailable"))?;
+                // Another cooperating instance may have sealed this exact
+                // residue after our active JSON was loaded. Hidden is a separate
+                // archive UI flag; every immutable field must still match.
+                archived.ui.hidden = record.ui.hidden;
+                if archived != *record {
+                    bail!("remote_proxy_archive_conflict");
+                }
+                state.records.remove(id);
+                state.openings.remove(id);
+            }
             return Ok(state.persist().is_ok());
         }
         let record = state

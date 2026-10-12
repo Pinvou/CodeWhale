@@ -1326,6 +1326,8 @@ impl RemoteControlManager {
         self.handle_connection(&endpoint_id, false, None, old);
         self.forward_controller_relay_frame(&error, None, Some(old));
         self.handle_relay_message(error.clone(), old);
+        // Also fence an old revocation after a same-ID reader replacement.
+        self.handle_revoked(&endpoint_id, old);
         assert_eq!(self.inner.lock().endpoint.as_ref().unwrap().status, status);
         assert!(matches!(
             channel.receiver.try_recv(),
@@ -2661,7 +2663,7 @@ impl RemoteControlManager {
             "event_subscribe" => self.handle_event_subscription(&value, true),
             "event_unsubscribe" => self.handle_event_subscription(&value, false),
             "client_ready" => self.synchronize_client_from_value(&value),
-            "desktop_endpoint_revoked" => self.handle_revoked(endpoint_id),
+            "desktop_endpoint_revoked" => self.handle_revoked(endpoint_id, reader_owner),
             "desktop_endpoint_replaced" => self.handle_replaced(endpoint_id),
             _ => {}
         }
@@ -2780,17 +2782,16 @@ impl RemoteControlManager {
         self.emit_status();
     }
 
-    fn handle_revoked(&self, endpoint_id: &str) {
+    fn handle_revoked(&self, endpoint_id: &str, reader_owner: &RelaySender) {
         let revoked = {
             let mut inner = self.inner.lock();
-            if inner
-                .endpoint
-                .as_ref()
-                .is_none_or(|endpoint| endpoint.config.endpoint_id != endpoint_id)
-            {
+            if inner.endpoint.as_ref().is_none_or(|endpoint| {
+                endpoint.config.endpoint_id != endpoint_id
+                    || !endpoint.sender.same_channel(reader_owner)
+            }) {
                 return;
             }
-            let revoked = inner.endpoint.take();
+            let revoked = take_retired_endpoint(&mut inner);
             inner.rpc_ledger = RpcLedger::default();
             reset_web_state(&mut inner);
             inner.stream.reset();
