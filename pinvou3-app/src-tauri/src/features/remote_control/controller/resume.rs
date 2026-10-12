@@ -66,7 +66,6 @@ impl std::fmt::Debug for ResumeMaterial {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct ControllerResumeGate {
     role: ControllerRole,
     lease: LeaseContext,
@@ -77,6 +76,18 @@ pub(crate) struct ControllerResumeGate {
     current: ResumeMaterial,
     retired: Option<ResumeMaterial>,
     resumed_liveness_epoch: Option<String>,
+}
+
+impl std::fmt::Debug for ControllerResumeGate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ControllerResumeGate")
+            .field("role", &self.role)
+            .field("phase", &self.phase)
+            .field("current", &self.current)
+            .field("has_retired_material", &self.retired.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ControllerResumeGate {
@@ -587,6 +598,41 @@ mod tests {
     use super::*;
     use crate::features::remote_control::controller::liveness::ControllerLivenessWatchdog;
 
+    #[test]
+    fn resume_debug_redacts_current_and_retired_material() {
+        let mut gate = ControllerResumeGate::new(
+            ControllerRole::ControlledB,
+            lease(),
+            [113; 32],
+            [127; 32],
+            30_000,
+        );
+        gate.retired = Some(ResumeMaterial {
+            token: Zeroizing::new([149; 32]),
+            key_fingerprint: [163; 32],
+        });
+        gate.activation_id = Some("private-activation-sentinel".into());
+        for debug in [
+            format!("{gate:?}"),
+            format!("{:?}", gate.current),
+            format!("{:?}", gate.retired),
+        ] {
+            assert!(debug.contains("[REDACTED]"));
+            for bytes in [[113u8; 32], [127; 32], [149; 32], [163; 32]] {
+                assert!(!debug.contains(&format!("{bytes:?}")));
+                assert!(!debug.contains(&base64::engine::general_purpose::STANDARD.encode(bytes)));
+                let hex = bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                assert!(!debug.contains(&hex));
+            }
+            assert!(!debug.contains("private-activation-sentinel"));
+            assert!(!debug.contains("connection-0001"));
+        }
+        assert_eq!(gate.current_token(), [113; 32]);
+    }
+
     fn lease() -> LeaseContext {
         LeaseContext {
             connection_id: "connection-0001".into(),
@@ -646,7 +692,14 @@ mod tests {
             "ResumeMaterial { token: \"[REDACTED]\", key_fingerprint: \"[REDACTED]\" }"
         );
         let gate_debug = format!("{gate:?}");
-        assert_eq!(gate_debug.matches("[REDACTED]").count(), 4);
+        // A09 deliberately omits retired material from the gate projection.
+        // Its own formatter must still redact it if formatted directly.
+        assert_eq!(gate_debug.matches("[REDACTED]").count(), 2);
+        assert!(gate_debug.contains("has_retired_material: true"));
+        assert_eq!(
+            format!("{:?}", gate.retired.as_ref().unwrap()),
+            material_debug
+        );
         for bytes in [[0xa5_u8; 32], [0xb6; 32], [0xc7; 32], [0xd8; 32]] {
             assert!(!gate_debug.contains(&format!("{bytes:?}")));
         }

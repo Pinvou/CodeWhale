@@ -698,7 +698,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
 
     fn admit_and_dispatch(&self, prepared: PreparedControlledTask) -> Result<Value, UseCaseError> {
         log_task_submit_boundary("controlled_submission_admission_entered");
-        dispatch_prepared_attachment_origin(
+        route_prepared_controlled_task(
             prepared,
             |prepared| {
                 super::desktop_remote_task::submit_prepared_bound_task(
@@ -726,7 +726,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
 
 /// Preserve the authoritative input origin through final admission. `None`
 /// means wire upload receipts; `Some`, including an empty vector, is B-local.
-fn dispatch_prepared_attachment_origin<T>(
+fn route_prepared_controlled_task<T>(
     mut prepared: PreparedControlledTask,
     remote: impl FnOnce(&PreparedControlledTask) -> Result<T, String>,
     local: impl FnOnce(
@@ -771,10 +771,12 @@ async fn run_controlled_submission_worker<T: Send + 'static>(
     work: impl FnOnce(TurnBudget) -> Result<T, UseCaseError> + Send + 'static,
 ) -> Result<T, UseCaseError> {
     tokio::task::spawn_blocking(move || {
-        budget
-            .checkpoint(&tokio_util::sync::CancellationToken::new())
-            .map_err(|code| submit_error(&code))?;
-        work(budget)
+        crate::features::remote_control::controller::panic_scope::run(|| {
+            budget
+                .checkpoint(&tokio_util::sync::CancellationToken::new())
+                .map_err(|code| submit_error(&code))?;
+            work(budget)
+        })
     })
     .await
     .map_err(|_| UseCaseError::new("controlled_submission_worker_failed", false))?
@@ -1412,7 +1414,7 @@ mod dev19_replay_tests {
             payload: json!({"input":{"attachment_ids":["not-a-local-receipt"]}}),
             local_attachments: Some(Vec::new()),
         };
-        let local = dispatch_prepared_attachment_origin(
+        let local = route_prepared_controlled_task(
             prepared,
             |_| panic!("empty B-local descriptors must not consume remote receipts"),
             |_, attachments| Ok(attachments),
@@ -1508,7 +1510,7 @@ mod dev19_replay_tests {
         };
         // These are the production port's actual Some/None dispatch semantics,
         // with real upload receipt ownership and real anchored published bytes.
-        let attachments = dispatch_prepared_attachment_origin(
+        let attachments = route_prepared_controlled_task(
             prepared(None),
             |task| {
                 let ids = task.payload["input"]["attachment_ids"]
@@ -1543,13 +1545,87 @@ mod dev19_replay_tests {
                 )
                 .is_err()
         );
-        let local = dispatch_prepared_attachment_origin(
+        let local = route_prepared_controlled_task(
             prepared(Some(Vec::new())),
             |_| panic!("even empty B-local descriptors must not consume wire receipts"),
             |_, attachments| Ok(attachments),
         )
         .unwrap();
         assert!(local.is_empty());
+        drop(attachments);
+        uploads.cleanup_for_task("task-1");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remote_admission_source_consumes_a_completed_receipt_exactly_once() {
+        use crate::features::remote_control::controller::transfer::{
+            core::TransferRegistry, limits::TransferLimits, staging::SessionIsolationStaging,
+            upload::AttachmentUploads,
+        };
+        use sha2::{Digest, Sha256};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let staging = Arc::new(SessionIsolationStaging::new(Arc::new(move |_| {
+            Ok(root.clone())
+        })));
+        let uploads = AttachmentUploads::new(
+            Arc::new(TransferRegistry::new(TransferLimits::default()).unwrap()),
+            staging,
+        );
+        let live = lease();
+        let bytes = b"actual completed wire attachment";
+        let begun = uploads
+            .begin(
+                TransferContext::new(&live, "session-1", "task-1", TransferDirection::Upload)
+                    .unwrap(),
+                TransferMetadata {
+                    file_name: "wire.txt".into(),
+                    mime_type: "text/plain".into(),
+                    total_bytes: bytes.len() as u64,
+                    sha256: Sha256::digest(bytes)
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect(),
+                },
+                1_000,
+            )
+            .unwrap();
+        uploads
+            .accept_chunk(&begun.handle_id, 0, bytes, 1_100)
+            .unwrap();
+        use crate::features::sessions::application::submit_controlled::resolve_controlled_attachments;
+        let ids = vec![begun.handle_id];
+        assert_eq!(
+            resolve_controlled_attachments(&ids, Some(Vec::new()), || {
+                panic!("local mismatch must not consume an A upload")
+            })
+            .unwrap_err(),
+            "task_attachments_invalid"
+        );
+        let attachments = resolve_controlled_attachments(&ids, None, || {
+            uploads.consume_completed(&ids, &live, "session-1", "task-1")
+        })
+        .unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].handle_id, ids[0]);
+        assert_eq!(attachments[0].bytes, bytes.len() as u64);
+        assert_eq!(
+            attachments[0]
+                .read_owner
+                .as_ref()
+                .unwrap()
+                .read_bounded(bytes.len() as u64)
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(
+            resolve_controlled_attachments(&ids, None, || {
+                uploads.consume_completed(&ids, &live, "session-1", "task-1")
+            })
+            .unwrap_err(),
+            "transfer_binding_stale"
+        );
         drop(attachments);
         uploads.cleanup_for_task("task-1");
     }
@@ -1797,6 +1873,70 @@ mod submit_boundary_tests {
         mapped: AtomicUsize,
         admitted: AtomicUsize,
         identity: Mutex<Option<(String, String, String)>>,
+    }
+
+    #[test]
+    fn prepared_desktop_admission_routes_remote_and_local_attachment_sources() {
+        use crate::features::files::file_ingest::PublishedAttachment;
+        for (local, ids) in [
+            (None, Vec::new()),
+            (None, vec!["uploaded-handle".to_owned()]),
+            (Some(Vec::new()), Vec::new()),
+            (Some(Vec::new()), vec!["uploaded-handle".to_owned()]),
+            (
+                Some(vec![PublishedAttachment {
+                    handle_id: "local-handle".to_owned(),
+                    path: std::path::PathBuf::from("fixture.txt"),
+                    display_name: "fixture.txt".to_owned(),
+                    mime_type: "text/plain".to_owned(),
+                    bytes: 1,
+                    sha256: "0".repeat(64),
+                    read_owner: None,
+                }]),
+                vec!["local-handle".to_owned()],
+            ),
+        ] {
+            let is_local = local.is_some();
+            let count = local.as_ref().map(Vec::len);
+            let mut payload = remote_frame("chat");
+            payload["input"]["attachment_ids"] = json!(ids);
+            let prepared = PreparedControlledTask {
+                remote_ref: "opaque-ref".to_owned(),
+                b_session_id: "b-session".to_owned(),
+                task_id: "task-a".to_owned(),
+                client_request_id: "client-a".to_owned(),
+                input_digest: "digest".to_owned(),
+                payload: payload.clone(),
+                local_attachments: local,
+            };
+            let verify = |prepared: &PreparedControlledTask| {
+                assert_eq!(prepared.payload, payload);
+                assert_eq!(prepared.b_session_id, "b-session");
+                assert_eq!(prepared.remote_ref, "opaque-ref");
+                assert_eq!(prepared.task_id, "task-a");
+                assert_eq!(prepared.client_request_id, "client-a");
+                assert_eq!(prepared.input_digest, "digest");
+            };
+            let routed = super::route_prepared_controlled_task(
+                prepared,
+                |prepared| {
+                    assert!(
+                        !is_local,
+                        "local source cannot enter remote receipt admission"
+                    );
+                    verify(prepared);
+                    Ok("remote")
+                },
+                |prepared, attachments| {
+                    assert!(is_local, "remote source cannot become Some(empty)");
+                    verify(prepared);
+                    assert_eq!(Some(attachments.len()), count);
+                    Ok("local")
+                },
+            )
+            .unwrap();
+            assert_eq!(routed, if is_local { "local" } else { "remote" });
+        }
     }
 
     struct RecordingPort(Arc<SubmissionTrace>);

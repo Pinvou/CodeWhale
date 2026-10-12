@@ -51,3 +51,16 @@ Skills 目录（空选择也保留空目录）。它不改写普通会话的共�
 未公开引擎由专用 guard 在取消/失败时停止 forwarder 并发送有界清理操作。
 Shutdown 入队不等于底座/provider 已 join；崩溃遗留目录和 Windows 打开文件导致
 的删除失败也不在自动清理保证内，不可将这些局限描述为已验证的完整释放。
+
+ACP 远程 code 回合在 `codex_acp/remote_ownership.rs` 持有独占预留。真实 busy/config
+接纳与本地发送共用门控；尚未结束的 SDK prompt 即使被 watchdog 本地收口，仍禁止
+远程复用该连接。预检失败回滚 Reserved，只有绑定实际 turn 与连接身份后才允许
+远程审批；Reserved、Closing、退休连接和迟到回调都明确取消，不回退成本地审批。
+取消、卡片清理和事件转发匹配同一个 task/lease、不可复用 turn ID 与实际连接；
+缺失权威终态明确失败。卡片响应后的清理还匹配单次 callback，避免复用 tool ID
+时误删后继卡片。
+
+远程结束会退休该 ACP 实例，持久会话、工作区及配置保留，后续调用按正常流程恢复；
+因此后续回合可能冷启动。普通本地回合仅增加实际 prompt 存活记账，不改变既有
+watchdog/Stop 策略。退休关闭宿主连接及其直接子进程，不等于完整 provider/后代
+进程树已终止或 join；该底座局限仍按 Issue #254 跟进。

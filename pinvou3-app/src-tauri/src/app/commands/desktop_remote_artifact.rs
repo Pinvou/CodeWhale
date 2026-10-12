@@ -39,6 +39,9 @@ const MAX_TASK_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PROJECT_CAPTURE_FILES: usize = 4_096;
 const MAX_PROJECT_CAPTURE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_CODE_CAPTURES: usize = 64;
+// Bound retained chat inventory registrations, including terminal tasks whose
+// completion worker has not finished. This is not a bound on worker queues.
+const MAX_CHAT_CAPTURES: usize = 64;
 
 /// Managed state for artifact access (DEV-20 registers it).
 pub(crate) struct DesktopRemoteArtifactRuntime {
@@ -345,6 +348,9 @@ impl DesktopRemoteArtifactRuntime {
                 return Ok(());
             }
             return Err("artifact_capture_binding_mismatch".to_owned());
+        }
+        if captures.len() >= MAX_CHAT_CAPTURES {
+            return Err("artifact_capture_capacity".to_owned());
         }
         captures.insert(
             task_id.to_owned(),
@@ -1616,6 +1622,190 @@ mod tests {
     }
 
     #[test]
+    fn chat_capture_registration_budget_preserves_owners_and_recovers_after_exact_release() {
+        crate::platform::test_support::with_temp_home("pinvou3-chat-capture-quota", || {
+            let project = tempfile::tempdir().unwrap();
+            let store =
+                SessionStore::boot_at_test_dir(&crate::platform::paths::pinvou3_home()).unwrap();
+            let session = store
+                .create_new("model".into(), None, project.path().into())
+                .unwrap()
+                .metadata
+                .id;
+            let ledger = store.session_roots(&session).unwrap().ledger;
+            std::fs::create_dir_all(&ledger).unwrap();
+            let evidence = ledger.join("partial.txt");
+            std::fs::write(&evidence, b"retained partial evidence").unwrap();
+            let ledger_path = crate::platform::paths::pinvou3_home().join("quota-task-ledger.json");
+            let tasks = Arc::new(RemoteTaskService::new(Arc::new(
+                RemoteTaskLedger::open_recovered(ledger_path.clone(), 1_000).unwrap(),
+            )));
+            let runtime = bound_runtime_with_tasks(&session, tasks);
+            let lease = test_lease();
+            let mut first_sequence = 0;
+            // Literal contract boundary, independent of the implementation constant.
+            for index in 0..64 {
+                let task = format!("task-chat-quota-{index}");
+                admit_task(&runtime, &session, &task);
+                let sequence = runtime.tasks.status(&task).unwrap().sequence;
+                if index == 0 {
+                    first_sequence = sequence;
+                }
+                runtime
+                    .begin_task_capture(&store, &lease, &session, &task, sequence, &|| Ok(()))
+                    .unwrap();
+                if index == 63 {
+                    // Idempotent registration at capacity does not allocate a slot.
+                    runtime
+                        .begin_task_capture(&store, &lease, &session, &task, sequence, &|| Ok(()))
+                        .unwrap();
+                    assert_eq!(runtime.captures.lock().len(), 64);
+                }
+                // The real ledger frees admission capacity before the artifact
+                // completion worker consumes its retained capture registration.
+                runtime
+                    .tasks
+                    .complete(&task, RemoteTaskTerminal::Failed, None, 1_100)
+                    .unwrap();
+            }
+            let owners = runtime
+                .captures
+                .lock()
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            admit_task(&runtime, &session, "task-chat-quota-next");
+            let next_sequence = runtime
+                .tasks
+                .status("task-chat-quota-next")
+                .unwrap()
+                .sequence;
+            assert_eq!(
+                runtime
+                    .begin_task_capture(
+                        &store,
+                        &lease,
+                        &session,
+                        "task-chat-quota-next",
+                        next_sequence,
+                        &|| Ok(())
+                    )
+                    .unwrap_err(),
+                "artifact_capture_capacity"
+            );
+            assert_eq!(
+                runtime
+                    .captures
+                    .lock()
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                owners
+            );
+            assert_eq!(
+                std::fs::read(&evidence).unwrap(),
+                b"retained partial evidence"
+            );
+            // Feed the actual capture refusal into the production pre-dispatch
+            // boundary, rather than manually completing the rejected admission.
+            let ready = runtime
+                .begin_task_capture(
+                    &store,
+                    &lease,
+                    &session,
+                    "task-chat-quota-next",
+                    next_sequence,
+                    &|| Ok(()),
+                )
+                .map_err(|_| "artifact_capture_failed");
+            let mut handed_off = false;
+            let outcome = super::super::desktop_remote_task::finish_admitted_task_ready(
+                ready,
+                &runtime.tasks,
+                "task-chat-quota-next",
+                next_sequence,
+                || 1_100,
+                &mut handed_off,
+            )
+            .unwrap();
+            match outcome {
+                super::super::desktop_remote_task::AdmittedTaskReady::Failed(status) => {
+                    assert_eq!(status["task_status"], "failed");
+                }
+                super::super::desktop_remote_task::AdmittedTaskReady::Ready(_) => {
+                    panic!("quota refusal must return before task dispatch");
+                }
+            }
+            assert!(handed_off);
+            assert_eq!(runtime.tasks.ledger().live_task_count(), 0);
+            let recovered = RemoteTaskLedger::open_recovered(ledger_path, 1_101).unwrap();
+            let rejected = recovered.record("task-chat-quota-next").unwrap();
+            assert_eq!(
+                rejected.terminal_reason.as_deref(),
+                Some("artifact_capture_failed")
+            );
+            assert!(rejected.is_terminal());
+            assert_eq!(recovered.live_task_count(), 0);
+            assert_eq!(
+                runtime
+                    .captures
+                    .lock()
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                owners
+            );
+            // Rejection frees the task's live slot without evicting a capture.
+            admit_task(&runtime, &session, "task-chat-quota-recovered");
+            let recovered_sequence = runtime
+                .tasks
+                .status("task-chat-quota-recovered")
+                .unwrap()
+                .sequence;
+            assert_eq!(runtime.tasks.ledger().live_task_count(), 1);
+            // A stale cleanup does not create capacity by retiring a different owner.
+            drop(OwnedTaskCapture::new(
+                Arc::clone(&runtime),
+                &lease,
+                &session,
+                "task-chat-quota-0",
+                first_sequence + 1,
+            ));
+            assert_eq!(runtime.captures.lock().len(), 64);
+            drop(OwnedTaskCapture::new(
+                Arc::clone(&runtime),
+                &lease,
+                &session,
+                "task-chat-quota-0",
+                first_sequence,
+            ));
+            runtime
+                .begin_task_capture(
+                    &store,
+                    &lease,
+                    &session,
+                    "task-chat-quota-recovered",
+                    recovered_sequence,
+                    &|| Ok(()),
+                )
+                .unwrap();
+            let current = runtime.captures.lock();
+            assert_eq!(current.len(), 64);
+            for owner in owners
+                .iter()
+                .filter(|owner| owner.as_str() != "task-chat-quota-0")
+            {
+                assert!(current.contains_key(owner));
+            }
+            assert!(current.contains_key("task-chat-quota-recovered"));
+            assert_eq!(
+                std::fs::read(&evidence).unwrap(),
+                b"retained partial evidence"
+            );
+        });
+    }
+
+    #[test]
     fn concurrent_connection_cleanup_does_not_lose_publication_revisions() {
         let runtime = runtime();
         std::thread::scope(|scope| {
@@ -1670,6 +1860,13 @@ mod tests {
         let tasks = Arc::new(RemoteTaskService::new(Arc::new(
             RemoteTaskLedger::in_memory(),
         )));
+        bound_runtime_with_tasks(session_id, tasks)
+    }
+
+    fn bound_runtime_with_tasks(
+        session_id: &str,
+        tasks: Arc<RemoteTaskService>,
+    ) -> Arc<DesktopRemoteArtifactRuntime> {
         tasks.set_session_provisioner(Arc::new(ExistingSession(session_id.to_owned())));
         tasks
             .switch_remote_session(

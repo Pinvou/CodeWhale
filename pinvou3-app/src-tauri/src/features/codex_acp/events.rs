@@ -693,6 +693,7 @@ pub struct EventBridge {
     current_turn: Arc<RwLock<Option<String>>>,
     retirement: Arc<super::lifecycle::RuntimeRetirementGate>,
     event_order: Arc<Mutex<()>>,
+    retired: Arc<AtomicBool>,
     web_delivery: OrderedWebDelivery,
     tools: Arc<Mutex<HashMap<String, ToolCall>>>,
     timeline_writer: Arc<Mutex<TimelineWriter>>,
@@ -767,6 +768,7 @@ impl EventBridge {
             current_turn: Arc::new(RwLock::new(None)),
             retirement: Arc::new(super::lifecycle::RuntimeRetirementGate::default()),
             event_order: Arc::new(Mutex::new(())),
+            retired: Arc::new(AtomicBool::new(false)),
             web_delivery: OrderedWebDelivery::new(last_seq),
             tools: Arc::new(Mutex::new(HashMap::new())),
             timeline_writer,
@@ -850,19 +852,15 @@ impl EventBridge {
         self.flush_journal();
     }
 
-    /// Hold the same identity lock used by begin/finish across a synchronous
-    /// turn-bound side effect. No await or bridge re-entry is allowed in action.
+    /// Only a synchronous, non-reentrant action may run here. Holding the
+    /// current-turn read guard makes verification and cancellation one action;
+    /// it must not emit events, persist data, or await while holding the guard.
     pub(super) fn with_current_turn<T>(
         &self,
         turn_id: &str,
         action: impl FnOnce() -> T,
     ) -> Option<T> {
-        let current = self.current_turn.read();
-        if current.as_deref() == Some(turn_id) {
-            Some(action())
-        } else {
-            None
-        }
+        with_owned_turn(&self.current_turn, turn_id, action)
     }
 
     /// Record inbound Agent activity (notifications or permission/elicitation requests).
@@ -934,6 +932,25 @@ impl EventBridge {
     ) -> String {
         let serial = self.turn_serial.fetch_add(1, Ordering::AcqRel) + 1;
         let turn_id = format!("turn-{}-{serial}", Utc::now().timestamp_millis());
+        self.begin_turn_with_id_bound(turn_id, content, attachments, bind)
+    }
+
+    pub(super) fn begin_turn_with_id(
+        &self,
+        turn_id: String,
+        content: &str,
+        attachments: &[CodexDisplayAttachment],
+    ) -> String {
+        self.begin_turn_with_id_bound(turn_id, content, attachments, |_| {})
+    }
+
+    fn begin_turn_with_id_bound(
+        &self,
+        turn_id: String,
+        content: &str,
+        attachments: &[CodexDisplayAttachment],
+        bind: impl FnOnce(&str),
+    ) -> String {
         *self.current_turn.write() = Some(turn_id.clone());
         bind(&turn_id);
         self.emit_with_turn(
@@ -1181,13 +1198,22 @@ impl EventBridge {
                 version: EVENT_VERSION,
                 session_id: self.pinvou_session_id.clone(),
                 turn_id,
-                seq: self.seq.fetch_add(1, Ordering::AcqRel) + 1,
+                seq: if self.retired.load(Ordering::Acquire) {
+                    self.seq.load(Ordering::Acquire)
+                } else {
+                    self.seq.fetch_add(1, Ordering::AcqRel) + 1
+                },
                 timestamp: Utc::now().to_rfc3339(),
                 event: AcpEvent {
                     event_type: event_type.to_string(),
                     data,
                 },
             };
+            // A retired bridge can be held by late SDK/stdio tasks. They must
+            // neither allocate/persist a new sequence nor publish an old event.
+            if self.retired.load(Ordering::Acquire) {
+                return envelope;
+            }
             // Turn boundaries are the journal's crash-recovery anchors: they
             // flush synchronously so resume and orphan-turn recovery never
             // depend on buffered chunk bytes.
@@ -1261,6 +1287,14 @@ impl EventBridge {
     /// Failures are swallowed: the reader falls back to whatever is durable.
     pub fn flush_journal(&self) {
         let _ = self.timeline_writer.lock().flush();
+    }
+
+    pub(super) fn retire_journal(&self) {
+        let _order = self.event_order.lock();
+        self.retired.store(true, Ordering::Release);
+        // Same best-effort durability contract as existing runtime replacement;
+        // this boundary stops future old-bridge writes, not a fsync guarantee.
+        self.flush_journal();
     }
 }
 
@@ -1728,9 +1762,44 @@ fn load_web_timeline_page_from_path(
     })
 }
 
+fn with_owned_turn<T>(
+    current: &parking_lot::RwLock<Option<String>>,
+    turn_id: &str,
+    action: impl FnOnce() -> T,
+) -> Option<T> {
+    let current = current.read();
+    (current.as_deref() == Some(turn_id)).then(action)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_turn_action_holds_the_real_guard_and_cannot_cancel_a_successor() {
+        let current = parking_lot::RwLock::new(Some("remote-owned".to_owned()));
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        assert_eq!(
+            with_owned_turn(&current, "remote-owned", || {
+                assert!(
+                    current.try_write().is_none(),
+                    "cannot replace turn between check and cancel"
+                );
+                calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                "sent"
+            }),
+            Some("sent")
+        );
+        *current.write() = Some("local-successor".into());
+        assert!(
+            with_owned_turn(&current, "remote-owned", || {
+                calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            })
+            .is_none()
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert_eq!(current.read().as_deref(), Some("local-successor"));
+    }
 
     static NEXT_TIMELINE_ID: AtomicU64 = AtomicU64::new(1);
 

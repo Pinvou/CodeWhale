@@ -69,6 +69,36 @@ pub(crate) const CONTROLLED_SESSION_EVENT: &str = "desktop-remote-controlled-ses
 const CONTROLLED_JOURNAL_EVENT: &str = "desktop-remote-controlled-journal";
 const TASK_CONTENT_EVENT: &str = "desktop-remote-task-content";
 
+/// Existing post-admission readiness boundary, before any task dispatch.
+/// Persistence errors stay fallible; cleanup transfers only after failure commits.
+pub(super) enum AdmittedTaskReady<T> {
+    Ready(T),
+    Failed(Value),
+}
+
+pub(super) fn finish_admitted_task_ready<T>(
+    ready: Result<T, &'static str>,
+    service: &RemoteTaskService,
+    task_id: &str,
+    task_sequence: u64,
+    now_b: impl FnOnce() -> u64,
+    handed_off: &mut bool,
+) -> Result<AdmittedTaskReady<T>, String> {
+    match ready {
+        Ok(ready) => Ok(AdmittedTaskReady::Ready(ready)),
+        Err(reason) => {
+            service
+                .fail_admitted(task_id, task_sequence, reason, now_b())
+                .map_err(|error| error.code.to_owned())?;
+            *handed_off = true;
+            service
+                .status_payload(task_id)
+                .map(AdmittedTaskReady::Failed)
+                .map_err(|error| error.code.to_owned())
+        }
+    }
+}
+
 fn capability_allows_skills(
     capability: &crate::features::remote_control::controller::controlling_session::ControllerCapabilityProjection,
     mode: &str,
@@ -795,7 +825,9 @@ pub async fn desktop_remote_controlled_task_send(
             .map(|roots| roots.ledger)
             .map_err(|_| "task_session_not_found".to_owned())?;
         let attachments = tokio::task::spawn_blocking(move || {
-            local_controlled_attachments(&session_root, attachments)
+            crate::features::remote_control::controller::panic_scope::run(|| {
+                local_controlled_attachments(&session_root, attachments)
+            })
         })
         .await
         .map_err(|_| "task_attachments_invalid".to_owned())??;
@@ -1055,20 +1087,24 @@ impl Drop for AdmittedTaskCleanup {
             // This guard is constructed only after the manager owner lock
             // has been released. Cleanup hooks may re-enter that owner.
             let closed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.service.fail_admitted(
-                    &self.task_id,
-                    self.sequence,
-                    "controlled_submission_worker_failed",
-                    controlled_monotonic_millis(),
-                )
+                crate::features::remote_control::controller::panic_scope::run(|| {
+                    self.service.fail_admitted(
+                        &self.task_id,
+                        self.sequence,
+                        "controlled_submission_worker_failed",
+                        controlled_monotonic_millis(),
+                    )
+                })
             }));
             if !matches!(closed, Ok(Ok(_))) {
                 // A hook can unwind after durable terminal persistence. Do
                 // not unwind from Drop; retry only that exact terminal's
                 // idempotent cleanup, never a replacement sequence.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.service
-                        .retry_terminal_cleanup(&self.task_id, self.sequence)
+                    crate::features::remote_control::controller::panic_scope::run(|| {
+                        self.service
+                            .retry_terminal_cleanup(&self.task_id, self.sequence)
+                    })
                 }));
             }
         }
@@ -1264,19 +1300,8 @@ fn admit_and_dispatch(
                     .ok_or("task_attachments_invalid")?;
                 // A handle is only a reference. Consume completed B receipts
                 // once, under the current B lease gate, after admission.
-                let attachments = if let Some(attachments) = local_attachments {
-                    let exact = attachment_ids.len() == attachments.len()
-                        && attachment_ids
-                            .iter()
-                            .zip(&attachments)
-                            .all(|(id, attachment)| id == &attachment.handle_id);
-                    if !exact {
-                        return Err("task_attachments_invalid");
-                    }
-                    attachments
-                } else if attachment_ids.is_empty() {
-                    Vec::new()
-                } else {
+                let attachments = crate::features::sessions::application::submit_controlled::resolve_controlled_attachments(
+                    &attachment_ids, local_attachments, || {
                     let controlled = app.state::<ControlledDeviceManager>();
                     let uploads = app.state::<
                         Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>,
@@ -1294,9 +1319,13 @@ fn admit_and_dispatch(
                                 task_sequence,
                             )
                         })
-                        .map_err(|_| "task_generation_stale")?
-                        .map_err(|_| "task_attachments_invalid")?
-                };
+                        .map_err(|_| "task_generation_stale".to_owned())?
+                        .map_err(|_| "task_attachments_invalid".to_owned())
+                    },
+                ).map_err(|code| {
+                    if code == "task_generation_stale" { "task_generation_stale" }
+                    else { "task_attachments_invalid" }
+                })?;
                 let projected_model_source = RemoteTaskModelSource::from_record(&ticket.record)
                     .ok_or("task_model_source_invalid")?;
                 if model_source == TASK_MODEL_SOURCE_TEMPORARY {
@@ -1372,22 +1401,16 @@ fn admit_and_dispatch(
                 artifact_runtime,
                 capture_private_artifacts,
                 capture_cleanup,
-            ) = match ready {
-                Ok(ready) => ready,
-                Err(reason) => {
-                    service
-                        .fail_admitted(
-                            &task_id,
-                            task_sequence,
-                            reason,
-                            controlled_monotonic_millis(),
-                        )
-                        .map_err(|error| error.code.to_owned())?;
-                    admission_cleanup.handed_off = true;
-                    return service
-                        .status_payload(&task_id)
-                        .map_err(|error| error.code.to_owned());
-                }
+            ) = match finish_admitted_task_ready(
+                ready,
+                &service,
+                &task_id,
+                task_sequence,
+                controlled_monotonic_millis,
+                &mut admission_cleanup.handed_off,
+            )? {
+                AdmittedTaskReady::Ready(ready) => ready,
+                AdmittedTaskReady::Failed(status) => return Ok(status),
             };
             if model_source == TASK_MODEL_SOURCE_TEMPORARY {
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
@@ -1446,76 +1469,81 @@ fn admit_and_dispatch(
                 // Session persistence, capture hashing and final attachment
                 // cleanup are blocking work, not a Tokio executor poll.
                 let completion = tokio::task::spawn_blocking(move || {
-                    use crate::features::remote_control::controller::relay_runtime::{
-                        log_artifact_capture_failure, log_controlled_event,
-                        log_task_persist_failure,
-                    };
-                    let _local_attachment_cleanup = local_attachment_cleanup;
-                    let _capture_cleanup = capture_cleanup;
-                    match dispatch_result {
-                        Ok(record) => {
-                            if record.wire_status() != "succeeded" {
-                                let reason = record
-                                    .terminal_reason
-                                    .as_deref()
-                                    .unwrap_or_else(|| record.wire_status());
-                                if let Err(error) = persist_remote_task_failure(
+                    crate::features::remote_control::controller::panic_scope::run(|| {
+                        use crate::features::remote_control::controller::relay_runtime::{
+                            log_artifact_capture_failure, log_controlled_event,
+                            log_task_persist_failure,
+                        };
+                        let _local_attachment_cleanup = local_attachment_cleanup;
+                        let _capture_cleanup = capture_cleanup;
+                        match dispatch_result {
+                            Ok(record) => {
+                                if record.wire_status() != "succeeded" {
+                                    let reason = record
+                                        .terminal_reason
+                                        .as_deref()
+                                        .unwrap_or_else(|| record.wire_status());
+                                    if let Err(error) = persist_remote_task_failure(
+                                        &session_store,
+                                        &task_session_id,
+                                        baseline_messages,
+                                        &prompt,
+                                        reason,
+                                    ) {
+                                        log_task_persist_failure(false, &error);
+                                    }
+                                }
+                                log_controlled_event(
+                                    "task_execution_finished",
+                                    record.wire_status(),
+                                );
+                            }
+                            Err(error) => {
+                                if let Err(persist_error) = persist_remote_task_failure(
                                     &session_store,
                                     &task_session_id,
                                     baseline_messages,
                                     &prompt,
-                                    reason,
+                                    error.code,
                                 ) {
-                                    log_task_persist_failure(false, &error);
+                                    log_task_persist_failure(true, &persist_error);
                                 }
+                                log_controlled_event("task_execution_failed", error.code);
+                                log_controlled_event("task_dispatch_rejected", "rejected");
                             }
-                            log_controlled_event("task_execution_finished", record.wire_status());
                         }
-                        Err(error) => {
-                            if let Err(persist_error) = persist_remote_task_failure(
-                                &session_store,
-                                &task_session_id,
-                                baseline_messages,
-                                &prompt,
-                                error.code,
+                        if capture_private_artifacts {
+                            match artifact_runtime.finish_task_capture(
+                                &artifact_store,
+                                &artifact_lease,
+                                &artifact_session_id,
+                                &artifact_task_id,
+                                task_sequence,
+                                &|| budget.checkpoint(&CancellationToken::new()),
                             ) {
-                                log_task_persist_failure(true, &persist_error);
-                            }
-                            log_controlled_event("task_execution_failed", error.code);
-                            log_controlled_event("task_dispatch_rejected", "rejected");
-                        }
-                    }
-                    if capture_private_artifacts {
-                        match artifact_runtime.finish_task_capture(
-                            &artifact_store,
-                            &artifact_lease,
-                            &artifact_session_id,
-                            &artifact_task_id,
-                            task_sequence,
-                            &|| budget.checkpoint(&CancellationToken::new()),
-                        ) {
-                            Ok(descriptors) => {
-                                for descriptor in descriptors {
-                                    artifact_events.emit_committed_artifact(
-                                        task_sequence,
-                                        &artifact_session_id,
-                                        &artifact_task_id,
-                                        json!({
-                                            "artifact_id": descriptor.artifact_id,
-                                            "display_name": descriptor.display_name,
-                                            "mime_type": descriptor.mime_type,
-                                            "total_bytes": descriptor.total_bytes,
-                                            "sha256": descriptor.sha256,
-                                            "preview_kind": descriptor.preview_kind,
-                                        }),
-                                    );
+                                Ok(descriptors) => {
+                                    for descriptor in descriptors {
+                                        artifact_events.emit_committed_artifact(
+                                            task_sequence,
+                                            &artifact_session_id,
+                                            &artifact_task_id,
+                                            json!({
+                                                "artifact_id": descriptor.artifact_id,
+                                                "display_name": descriptor.display_name,
+                                                "mime_type": descriptor.mime_type,
+                                                "total_bytes": descriptor.total_bytes,
+                                                "sha256": descriptor.sha256,
+                                                "preview_kind": descriptor.preview_kind,
+                                            }),
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    log_artifact_capture_failure(&error);
                                 }
                             }
-                            Err(error) => {
-                                log_artifact_capture_failure(&error);
-                            }
                         }
-                    }
+                    })
                 });
                 if completion.await.is_err() {
                     crate::features::remote_control::controller::relay_runtime::log_controlled_event(
@@ -1658,9 +1686,9 @@ fn bound_cancel_session_id(
     validate: impl FnOnce() -> Result<(), UseCaseError>,
 ) -> Result<String, UseCaseError> {
     sessions
-        .with_state(remote_ref, lease, |session| {
+        .with_state_for_lease(remote_ref, lease, |session| {
             validate()?;
-            Ok(session.session_id)
+            Ok(session.session_id.clone())
         })
         .map_err(|_| dispatch_error("remote_binding_mismatch"))?
 }
@@ -3249,27 +3277,21 @@ mod tests {
             service.hooks().set_model_scope(model.clone());
             service.hooks().set_transfer_scope(transfer.clone());
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let (outcome, cleanup) =
-                    finish_prepared_admission_owned(&service, prepared).unwrap();
-                assert!(
-                    !installation_failed,
-                    "installation failure never returns a ticket"
-                );
-                let _cleanup = cleanup;
-                let ticket = match outcome {
-                    AdmissionOutcome::Admitted(ticket) => ticket,
-                    _ => panic!("new task must be admitted"),
-                };
-                service
-                    .fail_admitted(
-                        &ticket.record.task_id,
-                        ticket.record.sequence,
-                        "task_turn_timeout",
-                        3_600,
-                    )
-                    .unwrap();
+                let finished = finish_prepared_admission_owned(&service, prepared);
+                if installation_failed {
+                    assert!(
+                        matches!(finished, Err(ref code) if code == "task_test_installation_failed")
+                    );
+                } else {
+                    let (outcome, cleanup) = finished.unwrap();
+                    assert!(matches!(outcome, AdmissionOutcome::Admitted(_)));
+                    // Production ready failure returns before handing the
+                    // guard to background dispatch. Drop performs the exact
+                    // admitted cleanup; contained hook failure is not panic.
+                    drop(cleanup);
+                }
             }));
-            assert!(result.is_err());
+            assert!(result.is_ok(), "cleanup hook panic must remain contained");
             assert_eq!(
                 service.status("task-admission").unwrap().state,
                 RemoteTaskState::Failed
