@@ -9,7 +9,7 @@
 use super::*;
 use crate::platform::paths;
 use crate::platform::paths::tests::ENV_LOCK;
-use crate::platform::prefs::UserPrefs;
+use crate::platform::prefs::{BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, ModelSelectionRef, UserPrefs};
 use anyhow::Result;
 use chrono::Utc;
 use deepseek_tui::models::{ContentBlock, ImageUrlContent, Message, SystemPrompt};
@@ -57,6 +57,60 @@ fn record_session_deletions(store: &SessionStore) -> Arc<std::sync::Mutex<Vec<St
             .push(session_id.to_string());
     }));
     seen
+}
+
+#[test]
+fn replacement_branch_preserves_source_and_records_lineage() {
+    let (store, _guard) = isolated_store();
+    let source = store
+        .create_new("removed-model".into(), None, PathBuf::from("workspace"))
+        .unwrap();
+    let source_id = source.metadata.id.clone();
+    store
+        .update_messages(&source_id, vec![user_text("first"), user_text("second")])
+        .unwrap();
+    let (branch, lineage) = store
+        .create_replacement_branch(
+            &source_id,
+            1,
+            "message:0".into(),
+            "replacement-model".into(),
+        )
+        .unwrap();
+    assert_ne!(branch.metadata.id, source_id);
+    assert_eq!(branch.messages.len(), 1);
+    assert_eq!(store.load(&source_id).unwrap().messages.len(), 2);
+    assert_eq!(lineage.source_conversation_id, source_id);
+    assert_eq!(lineage.original_model_ref, "removed-model");
+    assert_eq!(lineage.replacement_model_ref, "replacement-model");
+    let lineage_path = store.manager.sessions_dir().join(format!(
+        "{}.account-platform-branch.json",
+        branch.metadata.id
+    ));
+    assert!(lineage_path.exists());
+    store.delete(&branch.metadata.id).unwrap();
+    assert!(!lineage_path.exists());
+    assert_eq!(store.load(&source_id).unwrap().messages.len(), 2);
+}
+
+#[test]
+fn session_model_ref_keeps_platform_catalog_id_distinct_from_runtime_carrier() {
+    let (store, _guard) = isolated_store();
+    store
+        .set_session_model_ref(
+            "typed-model-test",
+            Some(ModelSelectionRef::account_platform("catalog-model-v2")),
+        )
+        .expect("persist typed session model");
+
+    assert_eq!(
+        store.session_model_ref("typed-model-test"),
+        Some(ModelSelectionRef::account_platform("catalog-model-v2"))
+    );
+    assert_eq!(
+        store.session_model_id("typed-model-test").as_deref(),
+        Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+    );
 }
 
 fn user_text(text: &str) -> Message {
@@ -1184,7 +1238,7 @@ fn scheduled_conversation_model_override_precedes_profile_fallback() {
     store
         .session_models
         .write()
-        .insert(id.clone(), "legacy-model-id".to_string());
+        .insert(id.clone(), ModelSelectionRef::local("legacy-model-id"));
 
     assert_eq!(
         store.session_model_id(&id).as_deref(),
@@ -1911,10 +1965,10 @@ fn scheduled_sessions_wait_for_coordinated_run_retention() {
             .mode_states
             .write()
             .insert(scheduled.metadata.id.clone(), SessionModeState::default());
-        store
-            .session_models
-            .write()
-            .insert(scheduled.metadata.id.clone(), "stale-model".to_string());
+        store.session_models.write().insert(
+            scheduled.metadata.id.clone(),
+            ModelSelectionRef::local("stale-model"),
+        );
         store
             .pinned_sessions
             .write()
@@ -2050,10 +2104,10 @@ fn retention_notifies_hook_when_record_commit_precedes_cleanup_error() {
             .save_session_atomic(&session)
             .expect("seed session without eager retention");
     }
-    store
-        .session_models
-        .write()
-        .insert(oldest_id.to_string(), "stale-model".to_string());
+    store.session_models.write().insert(
+        oldest_id.to_string(),
+        ModelSelectionRef::local("stale-model"),
+    );
     let deletions = record_session_deletions(&store);
     store
         .inject_post_record_delete_fault(oldest_id, ErrorKind::PermissionDenied)
@@ -2105,10 +2159,10 @@ fn boot_prunes_only_stale_scheduled_runtime_sidecars() {
         .metadata
         .id;
     for (id, suffix) in [(&live, "live"), (&stale, "stale")] {
-        store
-            .session_models
-            .write()
-            .insert(id.clone(), format!("{suffix}-model"));
+        store.session_models.write().insert(
+            id.clone(),
+            ModelSelectionRef::local(format!("{suffix}-model")),
+        );
         store
             .pinned_sessions
             .write()
@@ -4936,6 +4990,29 @@ fn aux_session_inherits_parent_model_override() {
         .create_aux_session(&main2.metadata.id)
         .expect("create aux 2");
     assert!(store.session_model_override(&aux2.id).is_none());
+}
+
+#[test]
+fn aux_session_inherits_parent_account_platform_model_ref() {
+    let (store, _g) = isolated_store();
+    let main = store
+        .create_new("/model".into(), None, std::env::temp_dir())
+        .expect("create main");
+    let selection = ModelSelectionRef::account_platform("catalog-model-x");
+    store
+        .set_session_model_ref(&main.metadata.id, Some(selection.clone()))
+        .expect("set parent Account Platform model");
+
+    let aux = store
+        .create_aux_session(&main.metadata.id)
+        .expect("create aux");
+    assert_eq!(
+        store.session_model_ref_override(&aux.id),
+        Some(selection.clone()),
+        "the aux binding must retain the catalog model and its source"
+    );
+    store.load_session_models();
+    assert_eq!(store.session_model_ref_override(&aux.id), Some(selection));
 }
 
 /// When the retention policy evicts a main session it cascade-evicts its

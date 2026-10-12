@@ -35,14 +35,17 @@ type circuit struct {
 	reopenCount         int
 	halfOpenProbes      int
 	halfOpenSuccesses   int
+	generation          uint64
+	pendingProbes       map[uint64]struct{}
 }
 
 // Breaker isolates state by provider + capability/action + route. Business
 // rejections remain observable samples but never contribute to failures.
 type Breaker struct {
-	mu    sync.Mutex
-	now   func() time.Time
-	items map[string]*circuit
+	mu         sync.Mutex
+	now        func() time.Time
+	items      map[string]*circuit
+	nextPermit uint64
 }
 
 func NewBreaker() *Breaker {
@@ -54,35 +57,64 @@ func Key(provider, capability, route string) string {
 }
 
 func (b *Breaker) Before(key string) error {
-	return b.before(key, true)
+	_, err := b.admit(key, true, false)
+	return err
 }
 
 // BeforeHighRisk never turns an original payment, refund, or model dispatch
 // into a half-open probe after an uncertain result. Recovery must use a
 // separate read-only capability probe or explicit review workflow.
 func (b *Breaker) BeforeHighRisk(key string) error {
-	return b.before(key, false)
+	_, err := b.admit(key, false, false)
+	return err
 }
 
-func (b *Breaker) before(key string, allowHalfOpen bool) error {
+// BeforeReadOnly reserves a query probe. Cancel is only for an error before
+// provider dispatch; it is idempotent and cannot release a newer generation.
+// A dispatched call must use Record for its actual provider outcome instead.
+func (b *Breaker) BeforeReadOnly(key string) (func(), error) {
+	return b.admit(key, true, true)
+}
+
+func (b *Breaker) admit(key string, allowHalfOpen, tracked bool) (func(), error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
 	item := b.item(key)
 	if item.openUntil.IsZero() {
-		return nil
+		return func() {}, nil
 	}
 	if now.Before(item.openUntil) {
-		return &CircuitOpenError{RetryAfter: item.openUntil.Sub(now)}
+		return nil, &CircuitOpenError{RetryAfter: item.openUntil.Sub(now)}
 	}
 	if !allowHalfOpen {
-		return &CircuitOpenError{RetryAfter: time.Second}
+		return nil, &CircuitOpenError{RetryAfter: time.Second}
 	}
 	if item.halfOpenProbes >= 3 {
-		return &CircuitOpenError{RetryAfter: time.Second}
+		return nil, &CircuitOpenError{RetryAfter: time.Second}
 	}
 	item.halfOpenProbes++
-	return nil
+	if !tracked {
+		return func() {}, nil
+	}
+	b.nextPermit++
+	permit, generation := b.nextPermit, item.generation
+	if item.pendingProbes == nil {
+		item.pendingProbes = map[uint64]struct{}{}
+	}
+	item.pendingProbes[permit] = struct{}{}
+	return func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if item.generation != generation {
+			return
+		}
+		if _, exists := item.pendingProbes[permit]; !exists {
+			return
+		}
+		delete(item.pendingProbes, permit)
+		item.halfOpenProbes--
+	}, nil
 }
 
 func (b *Breaker) Record(key string, outcome Outcome) {
@@ -96,7 +128,7 @@ func (b *Breaker) Record(key string, outcome Outcome) {
 		if outcome == Success || outcome == BusinessRejection {
 			item.halfOpenSuccesses++
 			if item.halfOpenSuccesses >= 3 {
-				*item = circuit{}
+				*item = circuit{generation: item.generation + 1}
 			}
 			return
 		}
@@ -145,6 +177,8 @@ func (b *Breaker) open(item *circuit, now time.Time) {
 	backoff := 30 * time.Second * time.Duration(1<<min(item.reopenCount, 5))
 	item.reopenCount++
 	item.openUntil = now.Add(min(backoff, 15*time.Minute))
+	item.generation++
+	item.pendingProbes = nil
 	item.halfOpenProbes = 0
 	item.halfOpenSuccesses = 0
 }

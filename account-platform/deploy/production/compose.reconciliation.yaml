@@ -1,0 +1,13 @@
+# Apply after the reviewed personal and finance overlays. This adds no
+# service identity, global proxy, or future financial-repair consumer.
+services:
+  account-service:
+    # F03 phase permissions must match the Billing and Portal interfaces.
+    image: ${ACCOUNT_SERVICE_IMAGE:?set independently reviewed F03 Account image}
+  billing-service:
+    image: ${BILLING_SERVICE_IMAGE:?set independently reviewed F03 Billing image}
+    # Existing provider capability gates select daily bill reconciliation.
+    # Credentials and the reviewed F02 merchant/customer/SKU mappings remain
+    # in the original private env/mounts. Unsupported bill APIs are not called.
+  token-portal:
+    image: ${TOKEN_PORTAL_IMAGE:?set independently reviewed F03 Portal image}

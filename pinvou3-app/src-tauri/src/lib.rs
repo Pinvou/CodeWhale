@@ -27,6 +27,7 @@ pub use features::assistant::product_runtime::{agentic_task, headless_bridge};
 
 use crate::app::commands;
 use crate::features::{
+    account_platform::AccountPlatformState,
     assistant::{engine_pool::EnginePool, platform::bridge},
     connectors::{connector_cli, eip, zhidao},
     files::file_watcher,
@@ -874,6 +875,33 @@ pub fn run() {
             }
             startup::mark("retired_features:done");
 
+            // The Account Platform model cutover owns only client-local data.
+            // It must complete before SessionStore loads per-session model IDs.
+            startup::mark("account_platform_model_migrate:start");
+            match crate::features::account_platform::client_migration::migrate_if_needed() {
+                Ok(report) => {
+                    eprintln!(
+                        "[pinvou3-app] account platform model migration state={:?} session_bindings={} scheduled_profiles={} credentials_removed={} cleanup_errors={}",
+                        report.state,
+                        report.session_bindings_migrated,
+                        report.scheduled_profiles_migrated,
+                        report.credentials_removed,
+                        report.cleanup_errors.len()
+                    );
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[pinvou3-app] account platform model migration failed (will retry next boot): {error:#}"
+                    );
+                    startup::mark_with_detail(
+                        "rust",
+                        "account_platform_model_migrate:error",
+                        &error.to_string(),
+                    );
+                }
+            }
+            startup::mark("account_platform_model_migrate:done");
+
             // 多对话历史 store：用 ~/.pinvou3/sessions/ 隔离 deepseek-tui 全局目录。
             // 必须先 boot 这个，engine forwarder 需要它跟踪 active session 的 mode_state
             // 以便 TurnComplete 时判定是否 emit chat:plan_ready。
@@ -1127,7 +1155,9 @@ pub fn run() {
                 tool_factory,
                 tool_policy,
                 std::sync::Arc::new(
-                    crate::features::llmapi_hub::runtime_model::LlmApiRuntimeModelProvider,
+                    crate::features::account_platform::runtime_model::AccountPlatformRuntimeModelProvider::new(
+                        handle.clone(),
+                    ),
                 ),
             ) {
                 Ok(mut pool) => {
@@ -1270,6 +1300,9 @@ pub fn run() {
 
             // CLI 连接器连接编排状态(按连接器 id 存长驻子进程 PID + 取消标志),
             // 飞书 / 企微共用,供 *_connect_begin / *_cancel 用。
+            app.handle().manage(
+                AccountPlatformState::new().map_err(std::io::Error::other)?,
+            );
             app.handle().manage(connector_cli::ConnectorConn::default());
 
             // EIP 连接编排状态:SSO 登录单飞门闩(进行中复用 / 取消 / 抢占有状态机,
@@ -1355,6 +1388,22 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::account_platform::account_platform_session,
+            commands::account_platform::account_platform_open_portal,
+            commands::account_platform::account_platform_login,
+            commands::account_platform::account_platform_send_sms,
+            commands::account_platform::account_platform_create_slider_captcha,
+            commands::account_platform::account_platform_precheck_mobile_registration,
+            commands::account_platform::account_platform_register_mobile,
+            commands::account_platform::account_platform_registration_status,
+            commands::account_platform::account_platform_login_sms,
+            commands::account_platform::account_platform_reset_password,
+            commands::account_platform::account_platform_logout,
+            commands::account_platform::account_platform_request,
+            commands::account_platform::account_platform_model_catalog,
+            commands::account_platform::account_platform_select_catalog_model,
+            commands::account_platform::account_platform_select_session_model,
+            commands::account_platform::account_platform_branch_replacement_session,
             commands::chat::chat,
             commands::chat::steer_chat,
             commands::chat::withdraw_steer,
@@ -1474,15 +1523,6 @@ pub fn run() {
             commands::sessions::clear_session,
             commands::monitor::get_monitor_snapshot,
             commands::monitor::get_backend_status,
-            commands::llmapi::ensure_llmapi_binding,
-            commands::llmapi::login_llmapi_user,
-            commands::llmapi::save_llmapi_user_session,
-            commands::llmapi::get_llmapi_status,
-            commands::llmapi::get_llmapi_models,
-            commands::llmapi::set_llmapi_default_model,
-            commands::llmapi::retry_llmapi_provisioning,
-            commands::llmapi::set_llmapi_user_enabled,
-            commands::llmapi::get_llmapi_admin_overview,
             commands::monitor::discover_local_vllm,
             commands::model_store::model_store_availability,
             commands::model_store::model_store_cards,
@@ -1512,6 +1552,7 @@ pub fn run() {
             commands::settings::set_active_model,
             commands::settings::set_session_model,
             commands::settings::get_session_model_id,
+            commands::settings::get_session_model_ref,
             commands::settings::get_image_input_capability,
             commands::codex::list_acp_agents,
             commands::codex::get_acp_agent_status,

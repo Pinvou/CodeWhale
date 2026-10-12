@@ -127,6 +127,29 @@ function timelineUsage(usage) {
 export function timelineUserError(event, options = {}) {
   const existing = event && (event.user_error || event.userError);
   if (existing && typeof existing === 'object') return existing;
+  const notice = event && event.billing_notice;
+  if (notice && notice.schema_version === 1
+    && ['WALLET_INSUFFICIENT', 'MEMBER_QUOTA_INSUFFICIENT'].includes(notice.code)
+    && (notice.context_type === 'PERSONAL' && notice.code === 'WALLET_INSUFFICIENT'
+      || notice.context_type === 'ORGANIZATION' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(notice.organization_id || '')))) {
+    const contextType = notice.context_type || '';
+    const organizationId = String(notice.organization_id || '').trim();
+    const action = contextType === 'PERSONAL' && notice.action === 'OPEN_RECHARGE'
+      ? 'OPEN_RECHARGE'
+      : contextType === 'ORGANIZATION' && ['OPEN_ORGANIZATION_RECHARGE', 'CONTACT_ORG_ADMIN'].includes(notice.action)
+        ? notice.action : '';
+    return {
+      kind: 'wallet_insufficient',
+      severity: notice.turn_outcome === 'COMPLETED' ? 'warning' : 'error',
+      stage: notice.stage || '',
+      turnOutcome: notice.turn_outcome || '',
+      settlementStatus: notice.settlement_status || '',
+      action,
+      contextType,
+      organizationId,
+      errorCode: notice.code,
+    };
+  }
   const error = event && event.error;
   const helper = globalThis.PinvouModelServiceErrors;
   if (!error || !helper || typeof helper.build !== 'function') return null;

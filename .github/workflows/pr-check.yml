@@ -204,6 +204,8 @@ jobs:
             account_platform:
               - 'account-platform/**'
               - 'scripts/account-platform*'
+              - 'scripts/check-token-management-authorization-coverage.mjs'
+              - 'scripts/tests/token-management-authorization-coverage.test.mjs'
               - '.github/workflows/pr-check.yml'
               - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
@@ -334,6 +336,7 @@ jobs:
             frontend:
               - 'pinvou3-app/src/**'
               - 'pinvou3-app/tests/**'
+              - 'account-platform/internal/portal/static/**'
               # multiagent_plan_normalize.test.mjs 读取下列 Rust 源做跨语言
               # 契约断言(蜂群契约/同快照不变式/编辑重发等);不列出则
               # Rust-only 改动会静默跳过该 node 门禁(同 resources/** 的
@@ -664,6 +667,12 @@ jobs:
       - name: Vite build
         run: npm run build:ui
 
+      - name: Verify embedded Account Portal assets are current
+        run: |
+          npm run build:account-portal
+          git diff --exit-code -- ../account-platform/internal/portal/static
+          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
+
       # Web (relay) build: the startup-bundle layer and the web index contract
       # test (tests/vite_static_assets_contract.test.mjs) only cover the web
       # dist when it exists, so build it unconditionally here instead of
@@ -772,6 +781,22 @@ jobs:
         with:
           go-version-file: account-platform/go.mod
           cache-dependency-path: account-platform/**/go.sum
+
+      - name: Node.js for Token authorization contracts
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Verify Token management authorization contracts
+        run: |
+          node scripts/check-token-management-authorization-coverage.mjs
+          node --test scripts/tests/token-management-authorization-coverage.test.mjs
+
+      - name: Keycloak provisioning and theme contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          PINVOU_TEST_BASH="$(command -v bash)" python3 account-platform/deploy/keycloak/test/provision_mobile_auth_test.py
 
       - name: Test and vet all Account Platform Go modules
         shell: bash

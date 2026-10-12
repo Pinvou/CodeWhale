@@ -1,0 +1,136 @@
+# Apply after compose.personal.yaml and compose.personal-workload.yaml.
+# Artifact digests come from independent review; runtime never creates them.
+name: pinvou-personal
+x-finance-trust: &finance-trust
+  type: bind
+  source: ${INFRA_CA_DIRECTORY:?set independently verified CA directory}
+  target: /run/pinvou/trust
+  read_only: true
+  bind: {create_host_path: false}
+x-public-identities: &public-identities
+  type: bind
+  source: ${APPROVAL_PUBLIC_IDENTITY_DIRECTORY:?set verified public identity-only directory}
+  target: /run/pinvou/approval-identities
+  read_only: true
+  bind: {create_host_path: false}
+x-public-manifest: &public-manifest
+  type: bind
+  source: ${APPROVAL_PUBLIC_MANIFEST_DIRECTORY:?set verified manifest-only directory}
+  target: /run/pinvou/approval-manifest
+  read_only: true
+  bind: {create_host_path: false}
+x-public-receipt: &public-receipt
+  type: bind
+  source: ${APPROVAL_PUBLIC_RECEIPT_DIRECTORY:?set independently checked receipt-only directory}
+  target: /run/pinvou/approval-receipt
+  read_only: true
+  bind: {create_host_path: false}
+services:
+  billing-service:
+    environment:
+      ACCOUNT_HTTP_URL: http://account-service:8080
+      OIDC_ISSUER: ${USER_OIDC_ISSUER:?set exact public user realm issuer}
+      OIDC_JWKS_URL: ${USER_OIDC_JWKS_URL:?set verified user JWKS endpoint}
+      OIDC_AUDIENCE: ${USER_OIDC_AUDIENCE:?set verified existing client audience}
+      NATS_URL: ${NATS_URL:?set verified TLS NATS endpoint}
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+      BILLING_APPROVAL_CONSUMER_PUBLIC_KEYS_FILE: /run/pinvou/approval-identities/current.json
+      BILLING_APPROVAL_CONSUMER_PUBLIC_KEYS_SHA256: ${APPROVAL_PUBLIC_KEYS_SHA256:?set independently verified identity SHA256}
+      BILLING_APPROVAL_CONSUMER_MANIFEST_FILE: /run/pinvou/approval-manifest/manifest.json
+      BILLING_APPROVAL_CONSUMER_MANIFEST_SHA256: ${APPROVAL_MANIFEST_SHA256:?set independently verified manifest SHA256}
+      BILLING_APPROVAL_CONSUMER_RECEIPT_FILE: /run/pinvou/approval-receipt/receipt.json
+      # May be empty during the explicit initializer window; Billing itself
+      # rejects an empty digest, so this never enables an unverified consumer.
+      BILLING_APPROVAL_CONSUMER_RECEIPT_SHA256: ${APPROVAL_RECEIPT_SHA256:-}
+      # Creation remains an explicit business decision, not a startup default.
+      BILLING_NORMAL_REFUND_CREATION_ENABLED: ${BILLING_NORMAL_REFUND_CREATION_ENABLED:-false}
+    volumes:
+      - {type: bind, source: "${BILLING_EXECUTOR_NATS_DIRECTORY:?set only current Billing executor NKey directory}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+      - *public-identities
+      - *public-manifest
+      - *public-receipt
+  token-portal:
+    environment:
+      BILLING_HTTP_URL: http://billing-service:8080
+  account-event-relay:
+    environment:
+      APPROVAL_RELAY_NATS_NKEY_SEED_FILE: /run/pinvou/approval-nats/nkey.seed
+      APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE: /run/pinvou/approval-identities/current.json
+      APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256: ${APPROVAL_PUBLIC_KEYS_SHA256:?set independently verified identity SHA256}
+    volumes:
+      - {type: bind, source: "${ACCOUNT_APPROVAL_RELAY_NATS_DIRECTORY:?set only Account authorization publisher NKey directory}", target: /run/pinvou/approval-nats, read_only: true, bind: {create_host_path: false}}
+      - *public-identities
+  billing-event-relay:
+    image: ${EVENT_RELAY_IMAGE:?set same-source finance event relay image}
+    pull_policy: never
+    user: "65532:65532"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 96
+    ulimits: {core: {soft: 0, hard: 0}}
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700"]
+    logging: {driver: local, options: {max-size: "10m", max-file: "3"}}
+    env_file:
+      - {path: "${BILLING_RELAY_PRIVATE_ENV_FILE:?set only Billing outbox relay DSN file}", required: true, format: raw}
+    environment:
+      APP_ENV: production
+      EVENT_SOURCE: billing
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:?set independently verified HTTPS OTLP endpoint}
+      SSL_CERT_FILE: /run/pinvou/trust/ca.crt
+      HEALTHCHECK_URL: http://127.0.0.1:9090/health/ready
+      PGPASSFILE: /run/pinvou/database/pgpass
+      NATS_URL: ${NATS_URL:?set verified TLS NATS endpoint}
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+    volumes:
+      - *finance-trust
+      - {type: bind, source: "${BILLING_RELAY_DATABASE_DIRECTORY:?set only Billing relay pgpass directory}", target: /run/pinvou/database, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${BILLING_RELAY_NATS_DIRECTORY:?set only Billing publisher NKey directory}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+    healthcheck: {test: [CMD, /healthcheck], interval: 10s, timeout: 3s, start_period: 20s, retries: 6}
+    depends_on:
+      billing-migrate: {condition: service_completed_successfully}
+    networks: [backend]
+  approval-resources:
+    image: ${APPROVAL_RESOURCES_IMAGE:?set same-source fresh approval operator image}
+    pull_policy: never
+    user: "65532:65532"
+    profiles: [approval-operations]
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 96
+    ulimits: {core: {soft: 0, hard: 0}}
+    healthcheck: {disable: true}
+    command: [-action, status, -expected-version, "1"]
+    env_file:
+      - {path: "${APPROVAL_INITIALIZER_PRIVATE_ENV_FILE:?set only account_migrator initializer DSN file}", required: true, format: raw}
+    environment:
+      ACCOUNT_PLATFORM_PROFILE: ${ACCOUNT_PLATFORM_PROFILE:?set personal or models matching selected composition}
+      SSL_CERT_FILE: /run/pinvou/trust/ca.crt
+      PGPASSFILE: /run/pinvou/database/pgpass
+      NATS_URL: ${NATS_URL:?set verified TLS NATS endpoint}
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+      APPROVAL_RESOURCE_CURRENT_PUBLIC_KEYS_FILE: /run/pinvou/approval-identities/current.json
+      APPROVAL_RESOURCE_CURRENT_PUBLIC_KEYS_SHA256: ${APPROVAL_PUBLIC_KEYS_SHA256:?set independently verified identity SHA256}
+      APPROVAL_RESOURCE_MANIFEST_FILE: /run/pinvou/approval-manifest/manifest.json
+      APPROVAL_RESOURCE_MANIFEST_SHA256: ${APPROVAL_MANIFEST_SHA256:?set independently verified manifest SHA256}
+      APPROVAL_RESOURCE_RECEIPT_FILE: /run/pinvou/approval-receipt/receipt.json
+      # Empty before initialization. Required by activate/resume afterwards.
+      APPROVAL_RESOURCE_RECEIPT_SHA256: ${APPROVAL_RECEIPT_SHA256:-}
+    volumes:
+      - *finance-trust
+      - *public-identities
+      - *public-manifest
+      - {type: bind, source: "${APPROVAL_PUBLIC_RECEIPT_DIRECTORY:?set controlled empty receipt-only directory for initialize}", target: /run/pinvou/approval-receipt, bind: {create_host_path: false}}
+      - {type: bind, source: "${APPROVAL_INITIALIZER_DATABASE_DIRECTORY:?set only initializer pgpass directory}", target: /run/pinvou/database, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${EVENT_OPERATOR_NATS_DIRECTORY:?set only resource operator NKey directory}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+    networks: [backend]

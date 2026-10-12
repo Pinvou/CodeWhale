@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 50 commits, eight maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 clean re-fork guard: 51 commits, eight maintained themes (r3 closed at pinvou-v0.9.12-r3; the local reviewed A04 patch is not yet published).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
-EXPECTED_HEAD="44921cf028f12ffed33beb4760621a8598de48fc"
-EXPECTED_COMMITS=50
+EXPECTED_HEAD="8b5a863908bf4178a8c5876c11c5884919119615"
+EXPECTED_COMMITS=51
 # 过渡期锚点：不可变 r1 tag 的收口 commit。层 0 断言它是当前 head 的祖先，
-# 即维护分支自 r1 收口线性前进而非另起分叉（r3 收口后 gitlink=分支头=tag）。
+# 当前登记头继承维护历史；本地检查不证明该头已公开推送，公开门禁另行执行。
 R1_CLOSURE="1fafee7e26b60a59457a43bce50c63aa2ad9dbaf"
 FAST_ONLY=0
 
@@ -25,10 +25,10 @@ bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 
 fail=0
 
-bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 35 个登记提交，r3 收口后过渡期）──"
+bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 36 个登记提交，A04 本地补丁尚未推送）──"
 actual_head="$(git -C "$CODEWHALE" rev-parse HEAD 2>/dev/null || true)"
 if [[ "$actual_head" == "$EXPECTED_HEAD" ]]; then
-  green "  ✓ CodeWhale gitlink 指向登记 head ${EXPECTED_HEAD}（过渡期内领先钉在 r3 收口的 tag；公开维护祖先关系由独立门禁验证）"
+  green "  ✓ CodeWhale gitlink 指向登记 head ${EXPECTED_HEAD}（本地登记匹配；CI 另核公开维护历史）"
 else
   red "  ✗ CodeWhale HEAD 为 ${actual_head:-<unreadable>}，登记 head 为 $EXPECTED_HEAD"
   fail=1
@@ -42,7 +42,7 @@ else
 fi
 
 if git -C "$CODEWHALE" merge-base --is-ancestor "$R1_CLOSURE" HEAD 2>/dev/null; then
-  green "  ✓ 线性前进成立：r1 收口是当前 head 的祖先（过渡期内 gitlink=分支头，领先钉在 r3 收口的 tag）"
+  green "  ✓ 线性前进成立：r1 收口是当前 head 的祖先（本地补丁继承原公开维护历史；不代替公开可达性门禁）"
 else
   red "  ✗ r1 收口 $R1_CLOSURE 不是当前 head 的祖先，线性前进关系断裂"
   fail=1
@@ -59,6 +59,22 @@ fi
 bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
+  "T2|历史 r6 容器修复现行生产实现       |CodeWhale/crates/tui/src/core/engine/dispatch.rs|pub(super) fn normalize_schema_json_containers("
+  "T2|历史 r6 容器修复现行工具执行接线   |CodeWhale/crates/tui/src/core/engine/turn_loop.rs|normalize_schema_json_containers("
+  "T2|现行嵌套容器真实工具校验回归       |CodeWhale/crates/tui/src/core/engine/dispatch.rs|fn decodes_nested_containers_and_passes_tool_validation()"
+  "T2|现行原语错误类型及超限保护回归     |CodeWhale/crates/tui/src/core/engine/dispatch.rs|fn leaves_primitives_wrong_types_and_unbounded_strings_unchanged()"
+  "T1|宿主模型调用幂等仅显式路由启用    |CodeWhale/crates/tui/src/config.rs|pub request_idempotency_header: Option<String>"
+  "T1|模型调用身份跨传输重试边界         |CodeWhale/crates/tui/src/core/runtime_contract/model.rs|async fn create_message_stream_for_operation("
+  "T1|模型调用身份按实际 wire 事实区分   |CodeWhale/crates/tui/src/client.rs|fn stream_operation_identity("
+  "T1|HTTP 重试与独立相同调用结果回归    |CodeWhale/crates/tui/src/client/operation_tests.rs|fn forkguard_model_operation_http_retry_and_new_calls"
+  "T1|普通路由及 header 安全边界回归     |CodeWhale/crates/tui/src/client/operation_tests.rs|fn forkguard_model_operation_opt_in_and_wire_identity"
+  "T1|引擎内外两层流重试身份结果回归     |CodeWhale/crates/tui/src/core/engine/operation_tests.rs|fn forkguard_model_operation_inner_and_outer_stream_retries"
+  "T1|工具后继模型调用新身份结果回归     |CodeWhale/crates/tui/src/core/engine/operation_tests.rs|fn forkguard_model_operation_tool_followup_gets_new_id"
+  "T1|保留部分输出改变调用身份结果回归   |CodeWhale/crates/tui/src/core/engine/operation_tests.rs|fn forkguard_model_operation_preserved_partial_changes_call"
+  "T1|幂等账户调用不走进程内正文缓存     |CodeWhale/crates/tui/src/client.rs|let cacheable = self.request_idempotency_header.is_none()"
+  "T1|HTTP1 流式发送保持调用身份回归     |CodeWhale/crates/tui/src/client/operation_tests.rs|fn forkguard_model_operation_http1_stream_keeps_id"
+  "T1|子代理外层重试保持调用身份回归     |CodeWhale/crates/tui/src/tools/subagent/tests/operation_identity.rs|fn forkguard_model_operation_child_retries_keep_id"
+  "T1|视觉 HTTP 重试保持调用身份回归    |CodeWhale/crates/tui/src/vision/tools.rs|fn forkguard_model_operation_vision_http_retry_keeps_id"
   "T2|Unix shell guidance preservation test|CodeWhale/crates/tui/src/tools/shell/guidance.rs|fn shell_guidance_preserves_unix_shell_contracts"
   "T2|Windows PowerShell policy bypass flags|CodeWhale/crates/tui/src/shell_dispatcher.rs|fn powershell_build_command_includes_no_profile_and_command_flags"
   "T2|Windows PowerShell encoded fallback builder|CodeWhale/crates/tui/src/shell_dispatcher.rs|fn forkguard_powershell_encoded_fallback_avoids_the_script_file"

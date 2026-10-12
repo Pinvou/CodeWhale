@@ -60,7 +60,7 @@ use std::sync::atomic::AtomicU64;
 
 pub use crate::core::mode_state::{ModeLane, SerializableMode};
 use crate::platform::paths;
-use crate::platform::prefs::{CodePermissionPrefs, ModeDefaultPrefs};
+use crate::platform::prefs::{CodePermissionPrefs, ModeDefaultPrefs, ModelSelectionRef};
 use parking_lot::{Mutex, RwLock};
 
 /// Re-export the session-domain mode-state types so they are owned by the
@@ -168,15 +168,12 @@ pub struct SessionStore {
     pub(crate) active: Arc<RwLock<Option<String>>>,
     /// Per-session runtime mode state (mode, plan, persona, ...).
     pub(crate) mode_states: Arc<RwLock<HashMap<String, SessionModeState>>>,
-    /// Per-session model binding: session_id → SavedModel.id. An entry exists
-    /// only for a session that has explicitly chosen a model; the rest fall
-    /// back to the global active_model_id. Persisted to
-    /// `_session_models.json`; the upstream SavedSession cannot gain fields, so
-    /// this lives in an independent sidecar.
-    pub(crate) session_models: Arc<RwLock<HashMap<String, String>>>,
-    /// Pin table for conversation history: session_id -> pinned_at. Persisted
-    /// independently to `_pinned_sessions.json` without changing the
-    /// SavedSession structure.
+    /// per-session 模型绑定:session_id → SavedModel.id。某 session 显式选过模型
+    /// 才有条目;没选的回退全局 active_model_id。落盘到 `_session_models.json`
+    /// 底座 SavedSession 不能加字段，故通过独立 sidecar 存储。
+    pub(crate) session_models: Arc<RwLock<HashMap<String, ModelSelectionRef>>>,
+    /// 历史对话置顶表:session_id -> pinned_at。独立落盘到 `_pinned_sessions.json`,
+    /// 不改 SavedSession 结构。
     pub(crate) pinned_sessions: Arc<RwLock<HashMap<String, String>>>,
     /// Whether the boot-time load of `_pinned_sessions.json` actually produced
     /// the file's contents.
@@ -386,4 +383,13 @@ pub fn session_roots_for(session_id: &str, bound_project_root: Option<PathBuf>) 
             bound: false,
         },
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReplacementBranchLineage {
+    pub source_conversation_id: String,
+    pub source_turn_id: String,
+    pub original_model_ref: String,
+    pub replacement_model_ref: String,
+    pub created_at: String,
 }

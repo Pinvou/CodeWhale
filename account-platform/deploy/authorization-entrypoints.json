@@ -1,0 +1,1059 @@
+{
+  "version": 1,
+  "http_sources": [
+    "account-platform/cmd/event-relay/metrics.go",
+    "account-platform/internal/account/service.go",
+    "account-platform/internal/billing/service.go",
+    "account-platform/internal/identityadapter/service.go",
+    "account-platform/internal/paymentsim/service.go",
+    "account-platform/internal/platform/httpserver/server.go",
+    "account-platform/internal/portal/service.go",
+    "account-platform/internal/token/credential_origin.go",
+    "account-platform/internal/token/management_routes.go",
+    "account-platform/internal/token/personal_execution_routes.go",
+    "account-platform/internal/token/service.go"
+  ],
+  "http_policies": [
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/v1/auth/registration/precheck",
+      "scope": "public",
+      "strategy": "protocol.registration.precheck"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/v1/auth/captcha/challenges",
+      "scope": "public",
+      "strategy": "protocol.registration.slider-challenge"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/v1/auth/sms/challenges",
+      "scope": "public",
+      "strategy": "protocol.registration.sms-challenge"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/v1/auth/register",
+      "scope": "public",
+      "strategy": "protocol.registration.verified-saga"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/v1/auth/registration-operations/:operation_id",
+      "scope": "public",
+      "strategy": "protocol.registration.signed-recovery-token"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/v1/auth/password-resets",
+      "scope": "public",
+      "strategy": "protocol.password-recovery.sms-proof"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/v1/account/bootstrap",
+      "scope": "authenticated",
+      "strategy": "authenticated.oidc-bootstrap"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/approval-requests",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v1"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/approval-requests",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v1"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/approval-requests/:approval_request_id",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v1"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "admin",
+      "method": "PUT",
+      "path": "/approval-requests/:approval_request_id",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v1"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/approval-requests/:approval_request_id/actions/submit",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v1"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/approval-requests/:approval_request_id/actions/withdraw",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v1"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/approval-requests/:approval_request_id/actions/decide",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v1"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
+      "method": "POST",
+      "path": "/approval-requests/:approval_request_id/actions/decide",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v1"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
+      "method": "POST",
+      "path": "/approval-requests",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-write"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
+      "method": "PUT",
+      "path": "/approval-requests/:approval_request_id",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-write"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
+      "method": "POST",
+      "path": "/approval-requests/:approval_request_id/actions/submit",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-write"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
+      "method": "POST",
+      "path": "/approval-requests/:approval_request_id/actions/withdraw",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-write"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
+      "method": "GET",
+      "path": "/approval-directory",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-directory"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
+      "method": "GET",
+      "path": "/approval-capability",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-capability"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
+      "method": "GET",
+      "path": "/approval-requests",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-list"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
+      "method": "GET",
+      "path": "/approval-requests/:approval_request_id",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-detail"
+    },
+    {
+      "source": "account-platform/internal/billing/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/internal/payment/notifications",
+      "scope": "public",
+      "strategy": "protocol.payment-simulator.hmac-notification"
+    },
+    {
+      "source": "account-platform/internal/billing/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/api/v1/payment-callback/token",
+      "scope": "public",
+      "strategy": "protocol.payment-callback.client-credentials"
+    },
+    {
+      "source": "account-platform/internal/billing/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/api/v1/payment-callbacks",
+      "scope": "public",
+      "strategy": "protocol.payment-callback.bearer-profile"
+    },
+    {
+      "source": "account-platform/internal/token/credential_origin.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/assets/credential.css",
+      "scope": "public",
+      "strategy": "protocol.credential-isolation-static-style"
+    },
+    {
+      "source": "account-platform/internal/token/credential_origin.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/assets/credential-auth.js",
+      "scope": "public",
+      "strategy": "protocol.credential-isolation-static-authentication"
+    },
+    {
+      "source": "account-platform/internal/token/credential_origin.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/assets/credential-submit.js",
+      "scope": "public",
+      "strategy": "protocol.credential-isolation-static-submit"
+    },
+    {
+      "source": "account-platform/internal/token/credential_origin.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/launch",
+      "scope": "public",
+      "strategy": "protocol.one-time-credential-launch-consumption"
+    },
+    {
+      "source": "account-platform/internal/token/credential_origin.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/session",
+      "scope": "authenticated",
+      "strategy": "protocol.credential-session-oidc-start"
+    },
+    {
+      "source": "account-platform/internal/token/credential_origin.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/oidc/callback",
+      "scope": "public",
+      "strategy": "protocol.credential-session-oidc-callback"
+    },
+    {
+      "source": "account-platform/internal/token/credential_origin.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/credentials",
+      "scope": "authenticated",
+      "strategy": "protocol.recent-auth-credential-isolation-submit"
+    },
+    {
+      "source": "account-platform/internal/identityadapter/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/v1/registration/password-prechecks",
+      "scope": "public",
+      "strategy": "protocol.registration.password-reference"
+    },
+    {
+      "source": "account-platform/internal/identityadapter/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/realms/pinvou/protocol/openid-connect/token",
+      "scope": "public",
+      "strategy": "protocol.oidc.risk-admitted-token"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/auth/login",
+      "scope": "public",
+      "strategy": "protocol.oidc.pkce-start"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/auth/callback",
+      "scope": "public",
+      "strategy": "protocol.oidc.pkce-callback"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/health/session-lineage",
+      "scope": "public",
+      "strategy": "protocol.read-only-session-lineage-rollout-status"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/portal-session-handoff",
+      "scope": "public",
+      "strategy": "protocol.desktop-session-handoff-page"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/portal-session-handoff",
+      "scope": "authenticated",
+      "strategy": "authenticated.desktop-access-token-exchange"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/portal-session-handoff/consume",
+      "scope": "public",
+      "strategy": "protocol.one-time-session-handoff-consumption"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/api/session",
+      "scope": "authenticated",
+      "strategy": "authenticated.portal-server-session"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/api/admin/approvals/capability",
+      "scope": "authenticated",
+      "strategy": "authenticated.portal-approval-capability"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/api/admin/approvals/directory",
+      "scope": "authenticated",
+      "strategy": "authenticated.portal-approval-directory-account-authorized"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/api/admin/approvals/requests",
+      "scope": "authenticated",
+      "strategy": "authenticated.portal-approval-requests-account-authorized"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/api/admin/approvals/requests",
+      "scope": "authenticated",
+      "strategy": "authenticated.portal-approval-draft-csrf-account-authorized"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/api/logout",
+      "scope": "authenticated",
+      "strategy": "authenticated.portal-session-csrf"
+    },
+    {
+      "source": "account-platform/internal/paymentsim/service.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/pay/:token",
+      "scope": "public",
+      "strategy": "protocol.payment-simulator.signed-pay-token"
+    },
+    {
+      "source": "account-platform/internal/paymentsim/service.go",
+      "receiver": "router",
+      "method": "POST",
+      "path": "/pay/:token/complete",
+      "scope": "public",
+      "strategy": "protocol.payment-simulator.signed-pay-token"
+    },
+    {
+      "source": "account-platform/internal/platform/httpserver/server.go",
+      "receiver": "health",
+      "method": "GET",
+      "path": "/health/live",
+      "scope": "public",
+      "strategy": "protocol.read-only-health-probe"
+    },
+    {
+      "source": "account-platform/internal/platform/httpserver/server.go",
+      "receiver": "health",
+      "method": "GET",
+      "path": "/health/ready",
+      "scope": "public",
+      "strategy": "protocol.read-only-health-probe"
+    },
+    {
+      "source": "account-platform/cmd/event-relay/metrics.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/metrics",
+      "scope": "public",
+      "strategy": "protocol.internal-observability-listener"
+    },
+    {
+      "source": "account-platform/cmd/event-relay/metrics.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/health/live",
+      "scope": "public",
+      "strategy": "protocol.read-only-health-probe"
+    },
+    {
+      "source": "account-platform/cmd/event-relay/metrics.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/health/ready",
+      "scope": "public",
+      "strategy": "protocol.read-only-health-probe"
+    },
+    {
+      "source": "account-platform/cmd/event-relay/metrics.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/health/ready/approval-authorization",
+      "scope": "public",
+      "strategy": "protocol.read-only-health-probe"
+    },
+    {
+      "source": "account-platform/internal/token/management_routes.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/commands:precheck",
+      "scope": "platform",
+      "strategy": "domain.approval-policy.dynamic-command-permission-preactivation"
+    },
+    {
+      "source": "account-platform/internal/token/management_routes.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/commands",
+      "scope": "platform",
+      "strategy": "domain.approval-policy.dynamic-command-permission-preactivation"
+    },
+    {
+      "source": "account-platform/internal/token/management_routes.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/commands/by-idempotency-key",
+      "scope": "platform",
+      "permissions": [
+        "platform.tokens.manage",
+        "platform.tokens.owner-candidates.read"
+      ],
+      "strategy": "domain.actor-command-key-bound-result-command-specific-permissions"
+    },
+    {
+      "source": "account-platform/internal/token/management_routes.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/commands/recovery-queue",
+      "scope": "platform",
+      "permissions": [
+        "platform.tokens.manage",
+        "platform.tokens.owner-candidates.read"
+      ],
+      "strategy": "domain.token-account-provisioning-recovery"
+    },
+    {
+      "source": "account-platform/internal/token/management_routes.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/commands/:command_reference",
+      "scope": "platform",
+      "strategy": "domain.approval-policy.actor-bound-result-preactivation"
+    },
+    {
+      "source": "account-platform/internal/token/management_routes.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/commands/:command_reference/recovery-actions",
+      "scope": "platform",
+      "permissions": [
+        "platform.tokens.manage",
+        "platform.tokens.owner-candidates.read"
+      ],
+      "strategy": "domain.token-account-provisioning-recovery"
+    },
+    {
+      "source": "account-platform/internal/token/management_routes.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/commands/:command_reference/recovery-actions/by-idempotency-key",
+      "scope": "platform",
+      "permissions": [
+        "platform.tokens.manage",
+        "platform.tokens.owner-candidates.read"
+      ],
+      "strategy": "domain.actor-command-key-bound-recovery-result"
+    },
+    {
+      "source": "account-platform/internal/token/management_routes.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/commands/:command_reference/recovery-actions/:action_id",
+      "scope": "platform",
+      "permissions": [
+        "platform.tokens.manage",
+        "platform.tokens.owner-candidates.read"
+      ],
+      "strategy": "domain.actor-command-bound-recovery-result"
+    },
+    {
+      "source": "account-platform/internal/token/management_routes.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/admin/v1/credential-results/:result_ref/revoke-window",
+      "scope": "authenticated",
+      "strategy": "domain.actor-bound-credential-launch-cleanup"
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/approval-policies",
+      "scope": "authenticated",
+      "strategy": "authenticated.approval-policy-discovery"
+    },
+    {
+      "source": "account-platform/internal/portal/service.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/credential-handoff",
+      "scope": "public",
+      "strategy": "protocol.static-credential-handoff"
+    },
+    {
+      "source": "account-platform/internal/token/personal_execution_routes.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/models",
+      "scope": "personal",
+      "strategy": "domain.personal-context-and-subject-owned-execution",
+      "permissions": [
+        "personal.models.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/personal_execution_routes.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/model-protocols",
+      "scope": "personal",
+      "strategy": "domain.personal-context-and-subject-owned-execution",
+      "permissions": [
+        "personal.models.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/personal_execution_routes.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/chat/completions",
+      "scope": "personal",
+      "strategy": "domain.personal-context-and-subject-owned-execution",
+      "permissions": [
+        "personal.model.invoke"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/personal_execution_routes.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/usage-requests/:usage_request_id",
+      "scope": "personal",
+      "strategy": "domain.personal-context-and-subject-owned-execution",
+      "permissions": [
+        "personal.usage.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/personal_execution_routes.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/usage-requests/by-idempotency-key",
+      "scope": "personal",
+      "strategy": "domain.personal-permission-and-subject-owned-cancellation",
+      "permissions": [
+        "personal.usage.cancel"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/personal_execution_routes.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/usage-requests/:usage_request_id/cancel",
+      "scope": "personal",
+      "strategy": "domain.personal-permission-and-subject-owned-cancellation",
+      "permissions": [
+        "personal.usage.cancel"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/personal_execution_routes.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/me/usage-requests",
+      "scope": "personal",
+      "strategy": "domain.personal-context-and-subject-owned-execution",
+      "permissions": [
+        "personal.usage.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/personal_execution_routes.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/me/usage-turns",
+      "scope": "personal",
+      "strategy": "domain.personal-context-and-subject-owned-execution",
+      "permissions": [
+        "personal.usage.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/personal_execution_routes.go",
+      "receiver": "router",
+      "method": "GET",
+      "path": "/v1/client-compatibility",
+      "scope": "public",
+      "strategy": "protocol.client-compatibility.read-only"
+    },
+    {
+      "source": "account-platform/internal/token/service.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/me/balance",
+      "scope": "personal",
+      "strategy": "domain.personal-wallet-and-subject-owned-billing",
+      "permissions": [
+        "personal.billing.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/service.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/recharge/products",
+      "scope": "personal",
+      "strategy": "domain.personal-wallet-and-subject-owned-billing",
+      "permissions": [
+        "personal.billing.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/service.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/payment-capabilities",
+      "scope": "personal",
+      "strategy": "domain.personal-wallet-and-subject-owned-billing",
+      "permissions": [
+        "personal.billing.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/service.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/recharge/orders",
+      "scope": "personal",
+      "strategy": "domain.personal-wallet-and-subject-owned-billing",
+      "permissions": [
+        "personal.recharge.create"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/service.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/recharge/orders",
+      "scope": "personal",
+      "strategy": "domain.personal-wallet-and-subject-owned-billing",
+      "permissions": [
+        "personal.billing.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/service.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/recharge/orders/recent",
+      "scope": "personal",
+      "strategy": "domain.personal-wallet-and-subject-owned-billing",
+      "permissions": [
+        "personal.billing.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/service.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/recharge/orders/:order_id",
+      "scope": "personal",
+      "strategy": "domain.personal-wallet-and-subject-owned-billing",
+      "permissions": [
+        "personal.billing.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/service.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/recharge/orders/:order_id/close",
+      "scope": "personal",
+      "strategy": "domain.personal-wallet-and-subject-owned-billing",
+      "permissions": [
+        "personal.recharge.manage"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/service.go",
+      "receiver": "protected",
+      "method": "POST",
+      "path": "/recharge/orders/:order_id/payment-claims",
+      "scope": "personal",
+      "strategy": "domain.personal-wallet-and-subject-owned-billing",
+      "permissions": [
+        "personal.recharge.manage"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/service.go",
+      "receiver": "protected",
+      "method": "GET",
+      "path": "/me/entitlement-packages",
+      "scope": "personal",
+      "strategy": "domain.personal-wallet-and-subject-owned-billing",
+      "permissions": [
+        "personal.billing.read"
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "source": "account-platform/cmd/account-service/main.go",
+      "name": "wallet-provisioning",
+      "permission": "internal.job.wallet-provisioning"
+    },
+    {
+      "source": "account-platform/cmd/account-service/main.go",
+      "name": "profile-change",
+      "permission": "internal.job.profile-change"
+    },
+    {
+      "source": "account-platform/cmd/account-service/main.go",
+      "name": "registration-recovery",
+      "permission": "internal.job.registration-recovery"
+    },
+    {
+      "source": "account-platform/cmd/account-service/main.go",
+      "name": "commerce-customer-sync",
+      "permission": "internal.job.commerce-customer-sync"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "name": "expired-payment-reconciliation",
+      "permission": "internal.job.expired-payment-reconciliation"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "name": "payment-notification-inbox",
+      "permission": "internal.job.payment-notification-inbox"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "name": "package-expiry",
+      "permission": "internal.job.package-expiry"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "name": "product-admission-expiry",
+      "permission": "internal.job.product-admission-expiry"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "name": "product-admission-verification",
+      "permission": "internal.job.product-admission-verification"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "name": "manual-review-sla",
+      "permission": "internal.job.manual-review-sla"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "name": "admin-pagination-cleanup",
+      "permission": "internal.job.admin-pagination-cleanup"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "name": "daily-payment-reconciliation",
+      "permission": "internal.job.daily-payment-reconciliation"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "name": "archive-blind-recovery",
+      "permission": "internal.job.archive-blind-recovery"
+    },
+    {
+      "source": "account-platform/cmd/token-gateway/main.go",
+      "name": "secret-rotation",
+      "permission": "internal.job.secret-rotation"
+    },
+    {
+      "source": "account-platform/cmd/token-gateway/main.go",
+      "name": "model-catalog-sync",
+      "permission": "internal.job.model-catalog-sync"
+    },
+    {
+      "source": "account-platform/cmd/token-gateway/main.go",
+      "name": "default-route-provisioning",
+      "permission": "internal.job.default-route-provisioning"
+    },
+    {
+      "source": "account-platform/cmd/token-gateway/main.go",
+      "name": "route-health-probe",
+      "permission": "internal.job.route-health-probe"
+    },
+    {
+      "source": "account-platform/cmd/token-gateway/main.go",
+      "name": "token-governance-supervisor",
+      "permission": "internal.job.token-governance-supervisor"
+    },
+    {
+      "source": "account-platform/cmd/token-gateway/main.go",
+      "name": "admin-pagination-cleanup",
+      "permission": "internal.job.admin-pagination-cleanup"
+    },
+    {
+      "source": "account-platform/cmd/token-gateway/main.go",
+      "name": "model-emergency-cancellation",
+      "permission": "internal.job.model-emergency-cancellation"
+    },
+    {
+      "source": "account-platform/cmd/account-service/approval_runtime.go",
+      "name": "approval-expiry",
+      "permission": "internal.job.approval-expiry"
+    },
+    {
+      "source": "account-platform/cmd/account-service/approval_runtime.go",
+      "name": "approval-pagination-cleanup",
+      "permission": "internal.job.approval-pagination-cleanup"
+    },
+    {
+      "source": "account-platform/cmd/account-service/approval_runtime.go",
+      "name": "manual-review-sla",
+      "permission": "internal.job.manual-review-sla"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "name": "expired-hold-recovery",
+      "permission": "internal.job.expired-hold-recovery"
+    },
+    {
+      "source": "account-platform/cmd/account-service/main.go",
+      "name": "mobile-retention",
+      "permission": "internal.job.mobile-retention"
+    },
+    {
+      "source": "account-platform/cmd/token-gateway/personal_execution.go",
+      "name": "usage-reconciliation",
+      "permission": "internal.job.usage-reconciliation"
+    },
+    {
+      "source": "account-platform/cmd/token-gateway/personal_execution.go",
+      "name": "usage-replay-retention",
+      "permission": "internal.job.usage-replay-retention"
+    },
+    {
+      "source": "account-platform/cmd/token-gateway/personal_execution.go",
+      "name": "usage-history-projection",
+      "permission": "internal.job.usage-history-projection"
+    },
+    {
+      "source": "account-platform/cmd/token-gateway/personal_execution.go",
+      "name": "token-manual-review-sla",
+      "permission": "internal.job.token-manual-review-sla"
+    }
+  ],
+  "events": [
+    {
+      "source": "account-platform/internal/token/approval_consumer_supervisor.go",
+      "durable": "token-model-lifecycle-executor-v1",
+      "subject": "account.approval-command.authorized.v1",
+      "permission": "internal.event.consume.account-approval-command-authorized"
+    },
+    {
+      "source": "account-platform/internal/token/approval_consumer_supervisor.go",
+      "durable": "token-catalog-rollback-executor-v1",
+      "subject": "account.approval-command.authorized.v1",
+      "permission": "internal.event.consume.account-approval-command-authorized"
+    },
+    {
+      "source": "account-platform/internal/token/approval_consumer_supervisor.go",
+      "durable": "token-credential-revoke-executor-v1",
+      "subject": "account.approval-command.authorized.v1",
+      "permission": "internal.event.consume.account-approval-command-authorized"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "durable": "billing-refund-executor-v1",
+      "subject": "billing.refund.requested.v1",
+      "permission": "internal.event.consume.billing-refund-requested"
+    },
+    {
+      "source": "account-platform/cmd/event-relay/main.go",
+      "durable": "source-bound-outbox-relay",
+      "subject": "account|billing|token.>",
+      "permission": "internal.event.publish.source-bound"
+    },
+    {
+      "source": "account-platform/cmd/event-relay/main.go",
+      "durable": "account-approval-relay",
+      "subject": "account.approval-command.authorized.v1",
+      "permission": "internal.event.publish.account-approval-command-authorized"
+    }
+  ],
+  "cli": [
+    {
+      "name": "event-resources",
+      "source": "account-platform/cmd/event-resources/main.go",
+      "strategy": "protocol.offline-fixed-nats-authorization-or-workload-fixed-resources"
+    },
+    {
+      "name": "workload-token-agent",
+      "source": "account-platform/cmd/workload-token-agent/main.go",
+      "strategy": "workload.single-client-verified-token-projection"
+    },
+    {
+      "name": "account-security",
+      "source": "account-platform/cmd/account-security/main.go",
+      "strategy": "protocol.controlled-security-terminal"
+    },
+    {
+      "name": "account-service",
+      "source": "account-platform/cmd/account-service/main.go",
+      "strategy": "workload.http-and-task-host"
+    },
+    {
+      "name": "billing-service",
+      "source": "account-platform/cmd/billing-service/main.go",
+      "strategy": "workload.http-event-and-task-host"
+    },
+    {
+      "name": "event-relay",
+      "source": "account-platform/cmd/event-relay/main.go",
+      "strategy": "workload.source-bound-event-relay"
+    },
+    {
+      "name": "healthcheck",
+      "source": "account-platform/cmd/healthcheck/main.go",
+      "strategy": "protocol.read-only-health-probe"
+    },
+    {
+      "name": "token-policy-bootstrap",
+      "source": "account-platform/cmd/token-policy-bootstrap/main.go",
+      "strategy": "workload.deployment-owner-cap-policy-bootstrap-and-readiness"
+    },
+    {
+      "name": "token-governance",
+      "source": "account-platform/cmd/token-governance/main.go",
+      "strategy": "workload.deployment-governance-cas-and-readiness"
+    },
+    {
+      "name": "token-release-prepare",
+      "source": "account-platform/cmd/token-release-prepare/main.go",
+      "strategy": "workload.explicit-dba-release-role-preparation-and-fence"
+    },
+    {
+      "name": "token-command-executor",
+      "source": "account-platform/cmd/token-command-executor/main.go",
+      "strategy": "workload.approval-authorized-token-command-executor"
+    },
+    {
+      "name": "identity-service",
+      "source": "account-platform/cmd/identity-service/main.go",
+      "strategy": "workload.http-host"
+    },
+    {
+      "name": "migrate",
+      "source": "account-platform/cmd/migrate/main.go",
+      "strategy": "workload.deployment-migration-identity"
+    },
+    {
+      "name": "payment-simulator",
+      "source": "account-platform/cmd/payment-simulator/main.go",
+      "strategy": "protocol.development-only.payment-simulator"
+    },
+    {
+      "name": "token-credential-portal",
+      "source": "account-platform/cmd/token-credential-portal/main.go",
+      "strategy": "workload.isolated-credential-origin-host"
+    },
+    {
+      "name": "token-gateway",
+      "source": "account-platform/cmd/token-gateway/main.go",
+      "strategy": "workload.http-and-task-host"
+    },
+    {
+      "name": "token-portal",
+      "source": "account-platform/cmd/token-portal/main.go",
+      "strategy": "workload.portal-host"
+    },
+    {
+      "name": "approval-resources",
+      "source": "account-platform/cmd/approval-resources/main.go",
+      "strategy": "workload.bounded-provisioned-approval-resource-administration"
+    },
+    {
+      "name": "newapi-tls",
+      "source": "account-platform/cmd/newapi-tls/main.go",
+      "strategy": "workload.isolated-newapi-tls-proxy-host"
+    },
+    {
+      "name": "account-approval-recovery",
+      "source": "account-platform/cmd/account-approval-recovery/main.go",
+      "strategy": "workload.dedicated-account-approval-recovery-role"
+    }
+  ]
+}

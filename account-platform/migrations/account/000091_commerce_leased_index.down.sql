@@ -1,0 +1,1 @@
+DROP INDEX commerce_customer_sync_jobs_leased_idx;

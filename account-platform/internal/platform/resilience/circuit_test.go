@@ -144,3 +144,78 @@ func TestHalfOpenBusinessRejectionsCompleteHealthyProbes(t *testing.T) {
 		t.Fatalf("healthy business responses left circuit stuck: %v", err)
 	}
 }
+
+// The fallback exercises the unchanged a483 breaker in the counterfactual
+// private copy. Production uses BeforeReadOnly directly, never this adapter.
+func testReadAdmission(b *Breaker, key string) (func(), error) {
+	if cancellable, ok := any(b).(interface{ BeforeReadOnly(string) (func(), error) }); ok {
+		return cancellable.BeforeReadOnly(key)
+	}
+	return func() {}, b.Before(key)
+}
+
+func TestReadAdmissionCancellationIsGenerationBound(t *testing.T) {
+	for _, name := range []string{"local errors return budget", "duplicate cancellation", "stale generation", "closed admission"} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+			b := NewBreaker()
+			b.now = func() time.Time { return now }
+			key := Key("provider", "ORDER_QUERY", "route")
+			var closedCancel func()
+			if name == "closed admission" {
+				var err error
+				closedCancel, err = testReadAdmission(b, key)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			for range 5 {
+				b.Record(key, InfrastructureFailure)
+			}
+			now = now.Add(30 * time.Second)
+			if name == "local errors return budget" {
+				for range 3 {
+					cancel, err := testReadAdmission(b, key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					cancel()
+				}
+				if _, err := testReadAdmission(b, key); err != nil {
+					t.Fatalf("local pre-dispatch errors exhausted probes: %v", err)
+				}
+				return
+			}
+			old, err := testReadAdmission(b, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == "duplicate cancellation" {
+				old()
+				if _, err = testReadAdmission(b, key); err != nil {
+					t.Fatal(err)
+				}
+				old()
+			}
+			if name == "stale generation" {
+				b.Record(key, InfrastructureFailure)
+				now = now.Add(time.Minute)
+				if _, err = testReadAdmission(b, key); err != nil {
+					t.Fatal(err)
+				}
+				old()
+			}
+			for range 2 {
+				if _, err = testReadAdmission(b, key); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if closedCancel != nil {
+				closedCancel()
+			}
+			if _, err = testReadAdmission(b, key); !errors.Is(err, ErrCircuitOpen) {
+				t.Fatalf("stale cancellation freed an unrelated probe: %v", err)
+			}
+		})
+	}
+}
