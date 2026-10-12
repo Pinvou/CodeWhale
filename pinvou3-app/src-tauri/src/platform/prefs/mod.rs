@@ -648,6 +648,31 @@ pub struct CodePermissionPrefs {
     pub yolo_confirmed: bool,
 }
 
+/// Explicit B-local remote authorization, independent of interactive lane defaults.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct RemoteTaskPermissionPrefs {
+    pub chat: Option<SerializableMode>,
+    pub code: Option<SerializableMode>,
+}
+
+impl<'de> Deserialize<'de> for RemoteTaskPermissionPrefs {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mode = |field| match value.get(field).and_then(serde_json::Value::as_str) {
+            Some("plan") => Some(SerializableMode::Plan),
+            Some("yolo") => Some(SerializableMode::Yolo),
+            _ => None,
+        };
+        // Invalid remote policy disables only its lane, never the rest of UserPrefs.
+        Ok(Self {
+            chat: mode("chat"),
+            code: mode("code"),
+        })
+    }
+}
+
 /// The work lane's global default mode.
 /// Parallel to the code lane (`code_permission.last_mode`) — each workspace
 /// lane keeps an independent global default; written only by an explicit
@@ -689,6 +714,7 @@ pub struct UserPrefs {
     pub pet: PetPrefs,
     pub sidebar: SidebarPrefs,
     pub code_permission: CodePermissionPrefs,
+    pub remote_task_permissions: RemoteTaskPermissionPrefs,
     pub mode_defaults: ModeDefaultPrefs,
     /// Global Alt voice shortcut switch (native keyboard hook, currently
     /// effective on Windows only; other platforms keep the in-window Alt
@@ -2806,6 +2832,7 @@ mod tests {
             pet: PetPrefs::default(),
             sidebar: SidebarPrefs::default(),
             code_permission: CodePermissionPrefs::default(),
+            remote_task_permissions: RemoteTaskPermissionPrefs::default(),
             mode_defaults: ModeDefaultPrefs::default(),
             voice_shortcut_enabled: false,
             computer_use: ComputerUsePrefs::default(),

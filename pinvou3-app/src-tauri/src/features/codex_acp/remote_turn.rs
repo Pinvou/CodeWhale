@@ -705,6 +705,11 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
         if cancel.is_cancelled() {
             return Err(TASK_CANCELLED_CODE.to_owned());
         }
+        crate::features::remote_control::task_permissions::for_session(
+            &self.pool.session_store,
+            session_id,
+            true,
+        )?;
         if !self.authorizations.is_authorized(
             session_id,
             workspace_id,
@@ -848,12 +853,24 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
                             content,
                             attachments,
                             Vec::new(),
+                            Some(
+                                crate::features::remote_control::task_permissions::for_session(
+                                    &self.pool.session_store,
+                                    session_id,
+                                    true,
+                                )?,
+                            ),
                             move |turn_id| {
                                 bound_relay.lock().turn_id = Some(turn_id.to_owned());
                             },
                         )
                         .await
-                        .map_err(|_| "task_engine_unavailable".to_owned())?,
+                        .map_err(|error| {
+                            crate::features::assistant::remote_turn::remote_engine_error_code(
+                                &error,
+                            )
+                            .to_owned()
+                        })?,
                 );
 
                 // The ACP prompt is submitted in the background, so wait for the busy

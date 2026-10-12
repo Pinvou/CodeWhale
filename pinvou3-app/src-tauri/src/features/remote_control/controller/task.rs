@@ -92,6 +92,16 @@ fn error(code: &'static str) -> RemoteTaskError {
     RemoteTaskError::new(code)
 }
 
+fn provisioner_error(code: String, fallback: &'static str) -> RemoteTaskError {
+    // Only bounded policy codes cross the transport; local errors remain private.
+    error(match code.as_str() {
+        "task_permission_mode_required" => "task_permission_mode_required",
+        "task_permission_mode_changed" => "task_permission_mode_changed",
+        "task_permission_mode_unsupported" => "task_permission_mode_unsupported",
+        _ => fallback,
+    })
+}
+
 /// Frozen extension boundary between the controller transport and task
 /// execution (declared by DEV-07, consumed by the DEV-13 adapters).
 pub(crate) trait ControllerTaskEventSink: Send + Sync {
@@ -2099,7 +2109,7 @@ impl RemoteTaskService {
             .ok_or_else(|| error("task_session_provisioner_unavailable"))?;
         let session_id = provisioner
             .create_authoritative_session(title, code_mode)
-            .map_err(|_| error("task_session_create_failed"))?;
+            .map_err(|code| provisioner_error(code, "task_session_create_failed"))?;
         self.sessions.bind(
             remote_ref,
             &session_id,
@@ -2142,7 +2152,7 @@ impl RemoteTaskService {
         // trusted task chooses the execution lane; code execution remains ACP.
         let session_id = provisioner
             .create_authoritative_session(title, false)
-            .map_err(|_| error("task_session_create_failed"))?;
+            .map_err(|code| provisioner_error(code, "task_session_create_failed"))?;
         self.sessions.bind(
             remote_ref,
             &session_id,
@@ -2294,7 +2304,7 @@ impl RemoteTaskService {
             if current == RemoteSessionLane::Unknown && allow_unknown_claim {
                 provisioner
                     .claim_execution_lane(&session_id, code_mode, workspace)
-                    .map_err(|_| error("task_session_backend_bind_failed"))?;
+                    .map_err(|code| provisioner_error(code, "task_session_backend_bind_failed"))?;
             }
             let claimed = self.sessions.ensure_lane(
                 remote_ref,
@@ -2309,10 +2319,10 @@ impl RemoteTaskService {
         }
         let session_id = provisioner
             .create_authoritative_session(title, code_mode)
-            .map_err(|_| error("task_session_create_failed"))?;
+            .map_err(|code| provisioner_error(code, "task_session_create_failed"))?;
         provisioner
             .claim_execution_lane(&session_id, code_mode, workspace)
-            .map_err(|_| error("task_session_backend_bind_failed"))?;
+            .map_err(|code| provisioner_error(code, "task_session_backend_bind_failed"))?;
         self.sessions
             .bind(remote_ref, &session_id, generation, requested)
     }
@@ -2372,7 +2382,7 @@ impl RemoteTaskService {
                 .ok_or_else(|| error("task_session_provisioner_unavailable"))?;
             provisioner
                 .claim_execution_lane(session_id, false, None)
-                .map_err(|_| error("task_session_backend_bind_failed"))?;
+                .map_err(|code| provisioner_error(code, "task_session_backend_bind_failed"))?;
         }
         let claimed = self
             .sessions
@@ -3429,6 +3439,28 @@ fn bounded_reason_owned(reason: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_policy_errors_are_public_but_local_failures_stay_bounded() {
+        for code in [
+            "task_permission_mode_required",
+            "task_permission_mode_changed",
+            "task_permission_mode_unsupported",
+        ] {
+            assert_eq!(
+                provisioner_error(code.to_owned(), "task_session_create_failed").code,
+                code
+            );
+        }
+        assert_eq!(
+            provisioner_error(
+                "local private failure".to_owned(),
+                "task_session_create_failed"
+            )
+            .code,
+            "task_session_create_failed"
+        );
+    }
     use crate::features::remote_control::controller::protocol::SenderRole;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

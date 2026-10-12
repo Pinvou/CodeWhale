@@ -3930,13 +3930,19 @@ impl EnginePool {
         owner: Arc<super::skill_materialization::RemoteTurnOwner>,
         reservation: TurnReservation,
     ) -> Result<()> {
+        let mode = crate::features::remote_control::task_permissions::for_session(
+            &self.store,
+            session_id,
+            false,
+        )
+        .map_err(anyhow::Error::msg)?;
         let prepared = prepare_remote_send(session_id, skill_ids, model_override, owner).await?;
         let display_message = user_display_message(content.clone());
         self.send_reserved_user_message_with_model_override(
             session_id,
             content,
             display_message,
-            AppMode::Agent,
+            mode.to_app_mode(),
             false,
             None,
             Vec::new(),
@@ -3967,6 +3973,12 @@ impl EnginePool {
         };
         use crate::features::assistant::image_capability::ImageInputMode;
 
+        let mode = crate::features::remote_control::task_permissions::for_session(
+            &self.store,
+            session_id,
+            false,
+        )
+        .map_err(anyhow::Error::msg)?;
         if attachments.is_empty() {
             return self
                 .send_remote_user_message(
@@ -4024,7 +4036,7 @@ impl EnginePool {
             session_id,
             engine_content,
             user_display_message(display_content),
-            AppMode::Agent,
+            mode.to_app_mode(),
             false,
             None,
             Vec::new(),

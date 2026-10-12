@@ -6,6 +6,53 @@ use super::*;
 /// 安装进度事件名(前端 composer 用它刷新「正在安装 X…」)。
 const INSTALL_PROGRESS_EVENT: &str = "acp:install-progress";
 
+/// Do not promise the pinned on-request mode semantics for arbitrary ACP binaries.
+/// Resolve the actual spawned adapter's package, including npm .bin shims.
+pub(super) fn supports_remote_permission_contract(adapter: &Path) -> bool {
+    let Ok(adapter) = adapter.canonicalize() else {
+        return false;
+    };
+    adapter
+        .ancestors()
+        .find_map(|root| {
+            let package = if root.file_name().and_then(|name| name.to_str()) == Some("node_modules")
+            {
+                root.join("@agentclientprotocol")
+                    .join("codex-acp")
+                    .join("package.json")
+            } else if root.file_name().and_then(|name| name.to_str()) == Some("codex-acp") {
+                root.join("package.json")
+            } else {
+                return None;
+            };
+            let package_root = package.parent()?;
+            let entry = package_root.join("dist/index.js").canonicalize().ok()?;
+            let direct_entry = adapter == entry;
+            let shim = root.join(".bin").join(platform::managed_adapter_name());
+            let is_package_shim = root.file_name().and_then(|name| name.to_str())
+                == Some("node_modules")
+                && shim.canonicalize().ok().as_ref() == Some(&adapter)
+                && std::fs::read_to_string(&adapter)
+                    .ok()
+                    .is_some_and(|script| {
+                        script
+                            .replace('\\', "/")
+                            .contains("@agentclientprotocol/codex-acp/dist/index.js")
+                    });
+            if !direct_entry && !is_package_shim {
+                return Some(false);
+            }
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(package).ok()?).ok()?;
+            Some(
+                value.get("name").and_then(serde_json::Value::as_str) == Some(CODEX_ACP_PACKAGE)
+                    && value.get("version").and_then(serde_json::Value::as_str)
+                        == Some(CODEX_ACP_ADAPTER_VERSION),
+            )
+        })
+        .unwrap_or(false)
+}
+
 pub(super) fn managed_runtime_dir() -> PathBuf {
     crate::platform::paths::pinvou3_home()
         .join("runtimes")
@@ -1029,6 +1076,51 @@ pub(super) fn node_major_version(version: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_permission_contract_requires_pinned_codex_package() {
+        let root = std::env::temp_dir().join(format!(
+            "pinvou-remote-mode-package-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let package = root.join("node_modules/@agentclientprotocol/codex-acp");
+        std::fs::create_dir_all(package.join("dist")).unwrap();
+        let entry = package.join("dist/index.js");
+        let shim = root
+            .join("node_modules/.bin")
+            .join(platform::managed_adapter_name());
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "// known package entry").unwrap();
+        std::fs::write(
+            &shim,
+            "node ../@agentclientprotocol/codex-acp/dist/index.js",
+        )
+        .unwrap();
+        let sibling = root.join("node_modules/unknown/index.js");
+        std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+        std::fs::write(&sibling, "// unrelated program").unwrap();
+        let manifest = package.join("package.json");
+        for (name, version, expected) in [
+            (CODEX_ACP_PACKAGE, CODEX_ACP_ADAPTER_VERSION, true),
+            (CODEX_ACP_PACKAGE, "1.6.1", false),
+            ("unknown-provider", CODEX_ACP_ADAPTER_VERSION, false),
+        ] {
+            std::fs::write(
+                &manifest,
+                serde_json::json!({"name":name,"version":version}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(supports_remote_permission_contract(&entry), expected);
+            assert_eq!(supports_remote_permission_contract(&shim), expected);
+            assert!(!supports_remote_permission_contract(&sibling));
+        }
+        std::fs::write(&manifest, b"invalid").unwrap();
+        assert!(!supports_remote_permission_contract(&entry));
+        assert!(!supports_remote_permission_contract(
+            &root.join("replacement.exe")
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     pub(super) fn managed_path_is_versioned() {

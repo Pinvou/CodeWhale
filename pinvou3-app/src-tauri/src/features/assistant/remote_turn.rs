@@ -457,7 +457,16 @@ impl EnginePoolChatEngine {
     }
 }
 
-pub(super) fn remote_engine_error_code(error: &anyhow::Error) -> &'static str {
+pub(crate) fn remote_engine_error_code(error: &anyhow::Error) -> &'static str {
+    for code in [
+        "task_permission_mode_required",
+        "task_permission_mode_changed",
+        "task_permission_mode_unsupported",
+    ] {
+        if error.chain().any(|cause| cause.to_string() == code) {
+            return code;
+        }
+    }
     if error
         .chain()
         .any(|cause| cause.to_string() == "model_credential_unavailable")

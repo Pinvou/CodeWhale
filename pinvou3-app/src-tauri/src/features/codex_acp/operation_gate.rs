@@ -133,7 +133,48 @@ impl SessionConfigChange<'_> {
     }
 }
 
+fn verify_remote_mode_ack(options: &[super::SessionConfigOption], desired: &str) -> Result<()> {
+    if !super::config_option_supports(options, "mode", desired)
+        || super::current_config_value(options, "mode").as_deref() != Some(desired)
+    {
+        bail!("task_permission_mode_unsupported");
+    }
+    Ok(())
+}
+
 impl AcpPool {
+    /// Remote configuration is task-local and never updates interactive defaults.
+    /// Only the pinned Codex ACP adapter's documented on-request modes qualify.
+    pub(super) async fn configure_remote_permission_mode<'a>(
+        &self,
+        session_id: &str,
+        runtime: &'a AcpSession,
+        mode: crate::core::mode_state::SerializableMode,
+    ) -> Result<ConfigurationGuard<'a>> {
+        if self.backend(session_id) != super::AgentBackend::CodexAcp
+            || runtime.backend != super::AgentBackend::CodexAcp
+            || !runtime.remote_permission_contract
+        {
+            bail!("task_permission_mode_unsupported");
+        }
+        let desired = crate::features::remote_control::task_permissions::codex_mode(mode);
+        let guard = runtime
+            .bridge
+            .with_active_runtime(|| {
+                begin_configuration(&runtime.busy, &runtime.configuring, "task_session_busy")
+            })
+            .context("task_permission_mode_unsupported")??;
+        if !super::config_option_supports(&runtime.config_options.read(), "mode", desired) {
+            bail!("task_permission_mode_unsupported");
+        }
+        runtime
+            .set_config_option("mode", desired)
+            .await
+            .map_err(|_| anyhow::anyhow!("task_permission_mode_unsupported"))?;
+        verify_remote_mode_ack(&runtime.config_options.read(), desired)?;
+        Ok(guard)
+    }
+
     fn remember_config_choice(&self, session_id: &str, config_id: &str, value_id: &str) {
         let backend = self.backend(session_id);
         let mut errors = Vec::new();
@@ -222,6 +263,21 @@ impl AcpPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_mode_ack_cannot_keep_inherited_full_access_or_omit_capability() {
+        let options = |current| {
+            vec![serde_json::from_value::<super::super::SessionConfigOption>(json!({
+            "id":"mode", "name":"Mode", "type":"select", "currentValue":current,
+            "options":[{"value":"read-only","name":"Read-only"},{"value":"agent","name":"Agent"},{"value":"agent-full-access","name":"Full access"}]
+        })).unwrap()]
+        };
+        assert!(verify_remote_mode_ack(&options("read-only"), "read-only").is_ok());
+        assert!(verify_remote_mode_ack(&options("agent"), "agent").is_ok());
+        assert!(verify_remote_mode_ack(&options("agent-full-access"), "agent").is_err());
+        assert!(verify_remote_mode_ack(&options("agent"), "read-only").is_err());
+        assert!(verify_remote_mode_ack(&[], "agent").is_err());
+    }
 
     #[test]
     fn prompt_and_configuration_slots_are_mutually_exclusive() {

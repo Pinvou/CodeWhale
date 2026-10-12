@@ -972,6 +972,7 @@ struct AcpSession {
     acp_session_id: String,
     bridge: EventBridge,
     backend: AgentBackend,
+    remote_permission_contract: bool,
     busy: AtomicBool,
     configuring: AtomicBool,
     /// Count of senders between resolving this runtime for a prompt and
@@ -3729,6 +3730,7 @@ impl AcpPool {
             content,
             attachments,
             workspace_references,
+            None,
             |_| {},
         )
         .await
@@ -3742,18 +3744,35 @@ impl AcpPool {
         display_content: String,
         attachments: Vec<crate::features::files::file_ingest::IngestResult>,
         workspace_references: Vec<String>,
+        remote_mode: Option<crate::core::mode_state::SerializableMode>,
         bind: impl FnOnce(&str) + Send,
     ) -> Result<remote_turn::OwnedAcpTurn> {
         let workspace = self.execution_workspace(session_id)?;
         let workspace_references =
             workspace::resolve_workspace_references(&workspace, &workspace_references)?;
+        if remote_mode.is_some()
+            && (self.backend(session_id) != AgentBackend::CodexAcp
+                || !self
+                    .resolve_adapter()
+                    .is_some_and(|adapter| install::supports_remote_permission_contract(&adapter)))
+        {
+            bail!("task_permission_mode_unsupported");
+        }
         let runtime = self.get_or_spawn(session_id).await?;
+        let _admission = PromptAdmissionGuard::new(&runtime.prompt_pending);
+        let mut remote_configuration = if let Some(mode) = remote_mode {
+            Some(
+                self.configure_remote_permission_mode(session_id, &runtime, mode)
+                    .await?,
+            )
+        } else {
+            None
+        };
         // Hold the pre-admission window open for rebind eviction from here to
         // admission (review #463 round-8 M1): `prepare_codex_prompt` reads and
         // encodes every image attachment synchronously and is not bounded, so
         // an eviction landing in between would remove and shut down the
         // runtime this sender is about to prompt. Drop releases on every path.
-        let _admission = PromptAdmissionGuard::new(&runtime.prompt_pending);
         let prepared = prepare_codex_prompt(
             &content,
             &attachments,
@@ -3768,6 +3787,20 @@ impl AcpPool {
                 {
                     bail!("ACP runtime 已退休，请重试新实例");
                 }
+                if let Some(mode) = remote_mode {
+                    let current = crate::features::remote_control::task_permissions::for_session(
+                        &self.session_store,
+                        session_id,
+                        true,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    if current != mode {
+                        bail!("task_permission_mode_changed");
+                    }
+                }
+                // The bridge lifecycle lock makes configuration -> prompt admission
+                // atomic with local configuration entry points. No global defaults change.
+                drop(remote_configuration.take());
                 admit_prompt_turn(&runtime.busy, &runtime.configuring, session_id, || {
                     self.session_store
                         .touch_activity(session_id)
@@ -3788,6 +3821,7 @@ impl AcpPool {
             })
             .context("ACP runtime 已退休，请重试新实例")??;
         drop(_admission);
+        drop(remote_configuration);
         let owned = remote_turn::OwnedAcpTurn::new(runtime.clone(), turn_id.clone());
         let pool = self.clone();
         tokio::spawn(async move {
@@ -5021,6 +5055,8 @@ impl AcpPool {
             AgentBackend::Deepseek => bail!("当前会话不是 ACP 会话"),
         };
         let workspace = self.execution_workspace(pinvou_session_id)?;
+        let remote_permission_contract = backend == AgentBackend::CodexAcp
+            && install::supports_remote_permission_contract(&adapter);
         if self.agents.get(pinvou_session_id).workspace_kind == CodexWorkspaceKind::Temporary {
             tokio::fs::create_dir_all(&workspace).await?;
         }
@@ -5485,6 +5521,7 @@ impl AcpPool {
         let pending_elicitations = self.pending_elicitations.clone();
         Ok(AcpSession {
             connection,
+            remote_permission_contract,
             kimi_session_id: (backend == AgentBackend::KimiAcp).then(|| acp_session_id.clone()),
             acp_session_id,
             bridge: event_bridge,

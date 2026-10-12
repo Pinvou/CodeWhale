@@ -116,6 +116,8 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
         title: &str,
         code_mode: bool,
     ) -> std::result::Result<String, String> {
+        let permission_mode =
+            crate::features::remote_control::task_permissions::configured(code_mode)?;
         let metadata =
             super::sessions::create_session_record(false, &self.store, &self.pool, None)?;
         let session_id = metadata.id.clone();
@@ -125,11 +127,9 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
                 .set_title(&session_id, bounded)
                 .map_err(|_| "task_session_create_failed".to_owned())?;
         }
-        if code_mode {
-            self.store
-                .set_mode(&session_id, crate::core::mode_state::SerializableMode::Yolo)
-                .map_err(|_| "task_session_create_failed".to_owned())?;
-        }
+        self.store
+            .set_mode_and_persist(&session_id, permission_mode)
+            .map_err(|_| "task_session_create_failed".to_owned())?;
         Ok(session_id)
     }
 
@@ -143,6 +143,11 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
         code_mode: bool,
         workspace: Option<&std::path::Path>,
     ) -> std::result::Result<(), String> {
+        crate::features::remote_control::task_permissions::for_session(
+            &self.store,
+            session_id,
+            code_mode,
+        )?;
         if !code_mode {
             return Ok(());
         }
