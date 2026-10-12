@@ -8,6 +8,9 @@ export function useClosureOperation(owner, copy, client, scope, storageAdapter) 
   const readIntent = storageAdapter?.read || readClosureIntent;
   const saveIntent = storageAdapter?.save || saveClosureIntent;
   const clearIntent = storageAdapter?.clear || clearClosureIntent;
+  const clearRecord = record => storageAdapter?.clearRecord
+    ? storageAdapter.clearRecord(record)
+    : clearIntent(record.actor, record.scope, record.key);
   const actor = owner.split(':')[0];
   const generation = useRef(0), running = useRef(false), intent = useRef(null);
   const authority = useRef(null);
@@ -27,7 +30,10 @@ export function useClosureOperation(owner, copy, client, scope, storageAdapter) 
     const hadUnresolved = Boolean(intent.current);
     let current;
     try {
-      current = intent.current || { actor, scope, key: `closure-${secureRequestID()}`, facts: JSON.parse(JSON.stringify(facts)) };
+      const frozenFacts = intent.current ? null : JSON.parse(JSON.stringify(facts));
+      current = intent.current || (storageAdapter?.createIntent
+        ? storageAdapter.createIntent(actor, scope, frozenFacts)
+        : { actor, scope, key: `closure-${secureRequestID()}`, facts: frozenFacts });
       intent.current = saveIntent(current);
     } catch { setBlocked(true); setError('recoveryUnavailable'); return; }
     running.current = true; setBusy(true); setError(''); setMessage('');
@@ -35,7 +41,7 @@ export function useClosureOperation(owner, copy, client, scope, storageAdapter) 
       const result = await action(current.facts, current.key);
       const noReceipt = ['reauthenticating', 'recent-authentication-required', 'cancelled', 'confirmation-mismatch'].includes(result?.status);
       if (!noReceipt || !hadUnresolved) {
-        try { clearIntent(actor, scope, current.key); }
+        try { clearRecord(current); }
         catch {
           if (stamp === generation.current) { setBlocked(true); setUnknown(true); setError('recoveryUnavailable'); }
           return;
@@ -48,7 +54,7 @@ export function useClosureOperation(owner, copy, client, scope, storageAdapter) 
       if (stamp !== generation.current) return;
       const uncertain = hadUnresolved || !Number.isInteger(reason.status) || reason.status >= 500 || reason.code === 'COMMAND_RESULT_UNKNOWN';
       if (!uncertain) {
-        try { clearIntent(actor, scope, current.key); intent.current = null; }
+        try { clearRecord(current); intent.current = null; }
         catch { setBlocked(true); setError('recoveryUnavailable'); return; }
       }
       setUnknown(uncertain); setError(uncertain ? 'unknown' : reason.status === 403 ? 'permissions' : 'sourceChanged');

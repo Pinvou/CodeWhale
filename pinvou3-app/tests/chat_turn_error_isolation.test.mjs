@@ -1188,6 +1188,12 @@ const managedState = {
   currentSessionModelId: 'builtin_account_platform',
   savedModels: [{ id: 'builtin_account_platform', kind: 'builtin_account_platform' }],
 };
+const sourceAwareManagedState = {
+  activeSessionId: 'managed-session',
+  activeModelId: 'custom-openai',
+  currentSessionModelId: 'custom-openai',
+  currentSessionModelRef: { source: 'ACCOUNT_PLATFORM', model_id: 'deepseek-flash' },
+};
 assert.match(
   read('src', 'features', 'codex', 'CodexAcpView.jsx'),
   /modelServiceState: sessionId === activeIdRef\.current \? eventContext\.modelServiceState : null/,
@@ -1217,6 +1223,13 @@ for (const [language, actionable, accessTitle, capacityTitle] of [
   assert.equal(historical.providerLabel, 'DeepSeek', 'historical provider evidence beats current built-in selection');
   assert.doesNotMatch(historical.message, /管理员|administrator|管理者/);
 }
+assert.equal(
+  modelErrors.build('SSE stream request failed: HTTP 401 unauthorized', {
+    language: 'en', modelServiceState: sourceAwareManagedState,
+  }).title,
+  'Built-in model is temporarily inaccessible',
+  'source-aware account-platform sessions must use managed remediation even when legacy ids are stale',
+);
 const customSessionCard = modelErrors.build('SSE stream request failed: HTTP 401 invalid API key', {
   language: 'en', modelServiceState: { activeModelId: 'builtin_account_platform', currentSessionModelId: 'custom' },
 });

@@ -1,5 +1,6 @@
 import { parseUsageJSON, encodeUsageJSON } from './admin-usage-governance.js';
 import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder, integerMoney } from './finance-contract.js';
+import { ENTITLEMENT_CORRECTION_COMMAND, parseEntitlementCorrectionJSON, encodeEntitlementCorrectionJSON, parseApprovalEntitlementJSON } from './admin-entitlement-correction.js';
 import { requireSession } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
@@ -7,7 +8,6 @@ import { requireReconciliationDate, requireReconciliationRun } from './reconcili
 import { responseRetryAfter } from './auth-error.js';
 import { beforeFinanceDispatch, financeNotDispatched } from './finance-operation-state.js';
 import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON } from './registration-bonus-contract.js';
-import { parseEntitlementCorrectionJSON, encodeEntitlementCorrectionJSON, ENTITLEMENT_CORRECTION_COMMAND } from './admin-entitlement-correction.js';
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
   error.code = payload?.code || 'REQUEST_FAILED';
@@ -166,7 +166,7 @@ export class AdminPlatformClient {
     return this.request('billing', resource, signal, parseRegistrationBonusJSON);
   }
 
-  updateRegistrationBonusPolicy(body, idempotencyKey, signal) {
+  updateRegistrationBonusPolicy(body, idempotencyKey = `registration-bonus-${secureRequestID()}`, signal) {
     if (typeof idempotencyKey !== 'string' || idempotencyKey.length < 16 || idempotencyKey.length > 128) throw new Error('INVALID_REGISTRATION_BONUS_REQUEST');
     return this.mutate('billing', '/admin/v1/registration-bonus-policy', 'PUT', body, idempotencyKey, signal, 200, { decode: parseRegistrationBonusJSON, encode: encodeRegistrationBonusJSON });
   }
@@ -196,6 +196,14 @@ export class AdminPlatformClient {
     if (expectedStatus && !(Array.isArray(expectedStatus) ? expectedStatus.includes(response.status) : response.status === expectedStatus)) throw new Error('INVALID_MUTATION_ACK');
     return payload;
   }
+
+  approvalCommandPrecheck(input, signal) {
+    return this.mutate('account', '/admin/v2/approval-command-prechecks', 'POST', input, '', signal, 200,
+      input?.command_type === ENTITLEMENT_CORRECTION_COMMAND
+        ? { encode: encodeEntitlementCorrectionJSON, decode: parseEntitlementCorrectionJSON }
+        : { encode: encodeFinanceJSON, decode: parseFinanceJSON });
+  }
+
 
   async authorization(signal) {
     const response = await fetch(`${this.baseURL}/api/account/v1/account/bootstrap`, {
@@ -312,10 +320,10 @@ export class AdminPlatformClient {
   approvalRequests(filters = {}, signal) {
     const query = new URLSearchParams({ limit: '200' });
     for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value);
-    return this.request('account', `/admin/v1/approval-requests?${query}`, signal);
+    return this.request('account', `/admin/v1/approval-requests?${query}`, signal, text => parseApprovalEntitlementJSON(text, JSON.parse));
   }
   approvalRequest(requestID, signal) {
-    return this.request('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}`, signal);
+    return this.request('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}`, signal, text => parseApprovalEntitlementJSON(text, JSON.parse));
   }
   approvalLineage() {
     return { generation: this.approvalControlGeneration, sessionEpoch: this.financeSessionEpoch,
@@ -388,12 +396,7 @@ export class AdminPlatformClient {
       const response = await fetch(`${this.baseURL}/api/admin/approvals/requests${path}`, {
         headers: { Accept: 'application/json' }, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
       });
-      let payload;
-      if (response.ok) {
-        const raw = await response.text();
-        payload = parseFinanceJSON(raw);
-        if (payload?.command_type === ENTITLEMENT_CORRECTION_COMMAND) payload = parseEntitlementCorrectionJSON(raw);
-      } else payload = await response.json().catch(() => ({}));
+      const payload = response.ok ? parseApprovalEntitlementJSON(await response.text()) : await response.json().catch(() => ({}));
       if (!response.ok) {
         if (payload?.code === 'APPROVAL_ACTION_CONTROL_CHANGED' || payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE') {
           this.invalidateApprovalControl(lineage);

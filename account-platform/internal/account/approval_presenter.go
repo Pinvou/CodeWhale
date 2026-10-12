@@ -101,11 +101,22 @@ type approvalCredentialSummary struct {
 	CredentialVersion      string    `json:"credential_version"`
 }
 
+type approvalLedgerRepairSummary struct {
+	TargetJournalEntryID   uuid.UUID `json:"target_journal_entry_id"`
+	TargetPostingID        uuid.UUID `json:"target_posting_id"`
+	WrongLedgerAccountID   uuid.UUID `json:"wrong_ledger_account_id"`
+	CorrectLedgerAccountID uuid.UUID `json:"correct_ledger_account_id"`
+	EntryType              string    `json:"entry_type"`
+	AmountMicrocredits     string    `json:"amount_microcredits"`
+	PostingSetDigest       string    `json:"posting_set_digest"`
+	ReasonCode             string    `json:"reason_code"`
+}
+
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
 	switch command {
 	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 		return policyVersion == 2 && snapshotVersion == 2
-	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
+	case "LEDGER_REPAIR", "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "PAYMENT_PROVIDER_RESUME":
 		return policyVersion == 2 && snapshotVersion == 1
@@ -189,6 +200,15 @@ func approvalV2Command(item ApprovalRequest) any {
 		}
 		return approvalProductSummary{ProductID: value}
 
+	case "LEDGER_REPAIR":
+		if item.TargetResourceType != "LEDGER_POSTING" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id == uuid.Nil || id.String() != value {
+			return nil
+		}
+		return approvalLedgerRepairSummary{TargetPostingID: id}
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
 		if item.TargetResourceType != "MODEL" {
 			return nil
@@ -258,7 +278,15 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			ExpectedAccountVersion  string     `json:"expected_account_version"`
 			CredentialVersion       string     `json:"credential_version"`
 			SourceCatalogVersion    string     `json:"source_catalog_version"`
+			TargetJournalEntryID    uuid.UUID  `json:"target_journal_entry_id"`
+			TargetPostingID         uuid.UUID  `json:"target_posting_id"`
+			WrongLedgerAccountID    uuid.UUID  `json:"wrong_ledger_account_id"`
+			CorrectLedgerAccountID  uuid.UUID  `json:"correct_ledger_account_id"`
 		} `json:"normalized_command"`
+		Critical struct {
+			EntryType        string `json:"entry_type"`
+			PostingSetDigest string `json:"posting_set_digest"`
+		} `json:"critical_resource_versions"`
 	}
 	if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil {
 		return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
@@ -283,6 +311,18 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		target.ProductControlVersion = proof.Normalized.ProductControlVersion
 		command = target
 
+	case approvalLedgerRepairSummary:
+		if proof.Normalized.TargetJournalEntryID == uuid.Nil || proof.Normalized.TargetPostingID != target.TargetPostingID || proof.Normalized.WrongLedgerAccountID == uuid.Nil || proof.Normalized.CorrectLedgerAccountID == uuid.Nil || proof.Normalized.WrongLedgerAccountID == proof.Normalized.CorrectLedgerAccountID || proof.Critical.EntryType == "" || !approvalPaginationHexDigest(proof.Critical.PostingSetDigest) || proof.Normalized.ReasonCode != "ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT" {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.TargetJournalEntryID = proof.Normalized.TargetJournalEntryID
+		target.WrongLedgerAccountID = proof.Normalized.WrongLedgerAccountID
+		target.CorrectLedgerAccountID = proof.Normalized.CorrectLedgerAccountID
+		target.EntryType = proof.Critical.EntryType
+		target.AmountMicrocredits = proof.Normalized.AmountMicrocredits
+		target.PostingSetDigest = proof.Critical.PostingSetDigest
+		target.ReasonCode = proof.Normalized.ReasonCode
+		command = target
 	case approvalLifecycleSummary:
 		if proof.Normalized.ModelID != target.ModelID {
 			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable

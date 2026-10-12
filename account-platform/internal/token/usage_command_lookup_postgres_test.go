@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -95,14 +96,17 @@ func TestUsageCommandLookupThroughCurrentHandler(t *testing.T) {
 		}
 
 		foreign := uuid.New()
+		var expectedPermission atomic.Value
+		expectedPermission.Store("platform.usage.reconcile.retry")
 		authority := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 			var query struct {
 				Subject     string   `json:"subject"`
 				Permissions []string `json:"all_permissions"`
 			}
-			if json.NewDecoder(request.Body).Decode(&query) != nil || len(query.Permissions) != 1 || query.Permissions[0] != "platform.usage.reconcile.retry" {
-				t.Error("lookup did not request current command permission")
-				w.WriteHeader(400)
+			permission := expectedPermission.Load().(string)
+			if json.NewDecoder(request.Body).Decode(&query) != nil || len(query.Permissions) != 1 || query.Permissions[0] != permission {
+				t.Errorf("lookup permission %v differs from exact current command permission %s", query.Permissions, permission)
+				w.WriteHeader(http.StatusForbidden)
 				return
 			}
 			user, allowed := actor, true
@@ -125,18 +129,19 @@ func TestUsageCommandLookupThroughCurrentHandler(t *testing.T) {
 			return identity.Principal{Issuer: "https://issuer.example", Subject: bearer, SessionID: "controlled", AuthenticatedAt: time.Now()}, nil
 		}, http.HandlerFunc(lookup.adminTokenCommandByIdempotencyKey))
 		for _, check := range []struct {
-			name, subject, key, command string
-			status                      int
+			name, subject, key, command, permission string
+			status                                  int
 		}{
-			{"same-actor-original-key", "actor", input.IdempotencyKey, "TOKEN_USAGE_RECONCILIATION_RETRY", 200},
-			{"foreign-actor-cannot-read", "foreign", input.IdempotencyKey, "TOKEN_USAGE_RECONCILIATION_RETRY", 404},
-			{"permission-denied", "denied", input.IdempotencyKey, "TOKEN_USAGE_RECONCILIATION_RETRY", 403},
-			{"missing-original-key", "actor", uuid.NewString(), "TOKEN_USAGE_RECONCILIATION_RETRY", 404},
-			{"short-key", "actor", "short", "TOKEN_USAGE_RECONCILIATION_RETRY", 400},
-			{"future-runtime-denied", "actor", input.IdempotencyKey, "TOKEN_USAGE_FUTURE_RUNTIME", 400},
-			{"unknown-command-denied", "actor", input.IdempotencyKey, "TOKEN_FUTURE_UNKNOWN", 400},
+			{"same-actor-original-key", "actor", input.IdempotencyKey, "TOKEN_USAGE_RECONCILIATION_RETRY", "platform.usage.reconcile.retry", 200},
+			{"foreign-actor-cannot-read", "foreign", input.IdempotencyKey, "TOKEN_USAGE_RECONCILIATION_RETRY", "platform.usage.reconcile.retry", 404},
+			{"permission-denied", "denied", input.IdempotencyKey, "TOKEN_USAGE_RECONCILIATION_RETRY", "platform.usage.reconcile.retry", 403},
+			{"missing-original-key", "actor", uuid.NewString(), "TOKEN_USAGE_RECONCILIATION_RETRY", "platform.usage.reconcile.retry", 404},
+			{"short-key", "actor", "short", "TOKEN_USAGE_RECONCILIATION_RETRY", "platform.usage.reconcile.retry", 400},
+			{"installed-other-command-cannot-read-usage-receipt", "actor", input.IdempotencyKey, "TOKEN_ROUTE_PROVISIONING_REPAIR", "platform.tokens.manage", 404},
+			{"unknown-command-denied", "actor", input.IdempotencyKey, "TOKEN_FUTURE_UNKNOWN", "platform.usage.reconcile.retry", 400},
 		} {
 			t.Run(check.name, func(t *testing.T) {
+				expectedPermission.Store(check.permission)
 				request := httptest.NewRequest(http.MethodGet, "/admin/v1/commands/by-idempotency-key?command_type="+check.command, nil)
 				request.Header.Set("Authorization", "Bearer "+check.subject)
 				request.Header.Set("Idempotency-Key", check.key)

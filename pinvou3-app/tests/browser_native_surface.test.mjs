@@ -28,7 +28,7 @@ const nativeState = readFileSync(
 const nativePlatform = readFileSync(
   path.join(projectRoot, 'src-tauri', 'src', 'features', 'browser', 'platform', 'mod.rs'),
   'utf8',
-);
+).replace(/\r\n/g, '\n');
 const linuxAutomation = readFileSync(
   path.join(
     projectRoot,
@@ -40,7 +40,7 @@ const linuxAutomation = readFileSync(
     'linux_automation.rs',
   ),
   'utf8',
-);
+).replace(/\r\n/g, '\n');
 const linuxSurface = readFileSync(
   path.join(
     projectRoot,

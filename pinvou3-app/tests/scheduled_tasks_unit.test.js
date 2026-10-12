@@ -740,9 +740,6 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
         cmd === "list_scheduled_runs") return [];
     if (cmd === "get_mode_state") return { mode: "yolo" };
     if (cmd === "get_memory_overview") return {};
-    if (cmd === "get_llmapi_status") {
-      return { backend_user_exists: false, backend_user_state: "not_exists", stale: false };
-    }
     if (cmd === "session_mounted_collections_snapshot") return { revision: 0, collections: [] };
     if (cmd === "session_mounted_collections") return [];
     if (cmd === "session_mounted_collection" || cmd === "get_active_persona" ||

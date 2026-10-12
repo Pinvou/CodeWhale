@@ -20,6 +20,7 @@ const grantID = '0199a100-0001-7000-8000-000000000401';
 let actor = actorA, csrf = 'csrf-initial', mode = 'personal', writes = [], effects = 0, auths = 0;
 let readOnly = false;
 let immediateReceipt = false;
+let unknownBatchItem = false;
 const closure = status => ({ closure_request_id: closureID, status, stage: status === 'COMPLETED' ? 'COMPLETED' : 'CLOSURE_REQUESTED', blockers: status === 'BLOCKED' ? [{ code: 'FORCED_REFUND_UNRESOLVED', domain: 'BILLING', resource_type: 'FORCED_REFUND', user_action: 'FINISH_REFUND' }] : [], sla_expires_at: '2026-10-12T00:00:00Z' });
 const grant = reclaimed => ({ grant_id: grantID, organization_id: organizationID, member_user_id: actorA, package_id: closureID, component_id: closureID, status: reclaimed ? 'RECLAIMED_ACCOUNT_CLOSED' : 'SUSPENDED', suspension_reason: reclaimed ? null : 'ACCOUNT_CLOSED', membership_version: 2, allocation_version: 2, original_microcredits: 10, available_microcredits: reclaimed ? 0 : 10, reserved_microcredits: 0, used_microcredits: 0, expired_microcredits: 0, revoked_microcredits: reclaimed ? 10 : 0 });
 const grantReceipt = () => ({ grant: grant(true), amount_microcredits: 10, subject_lifecycle_version: 2, replayed: true });
@@ -43,7 +44,11 @@ const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const facts = JSON.parse(Buffer.concat(chunks).toString('utf8')), key = request.headers['idempotency-key'];
     writes.push({ actor, key, facts });
-    if (writes.length === 1) { effects++; return json(response, { code: 'COMMAND_RESULT_UNKNOWN' }, 503); }
+    if (writes.length === 1) {
+      effects++;
+      if (unknownBatchItem && mode === 'org-batch') return json(response, { items: [{ grant_id: grantID, status: 'FAILED', code: 'COMMAND_RESULT_UNKNOWN' }] }, 207);
+      return json(response, { code: 'COMMAND_RESULT_UNKNOWN' }, 503);
+    }
     assert.equal(key, writes[0].key); assert.deepEqual(facts, writes[0].facts);
     if (writes.length === 2) return json(response, { code: 'PERMISSION_DENIED' }, mode === 'org-batch' ? 409 : 403);
     return mode === 'org-batch' ? json(response, { items: [{ grant_id: grantID, status: 'SUCCEEDED', result: grantReceipt() }] }, 207) : json(response, grantReceipt());
@@ -117,17 +122,18 @@ try {
   assert.equal(writes.length, 3); assert.equal(effects, 1); passed++;
   console.log('PASS compiled admin completed case absent from list retains original reason/key across authentication/reload');
   await page.close();
-  for (const orgMode of ['org-single', 'org-batch']) {
-    mode = orgMode; actor = actorA; readOnly = false; effects = 0; writes = []; csrf = 'csrf-initial';
+  for (const orgMode of ['org-single', 'org-batch', 'org-batch-unknown-item']) {
+    unknownBatchItem = orgMode === 'org-batch-unknown-item';
+    mode = orgMode === 'org-single' ? orgMode : 'org-batch'; actor = actorA; readOnly = false; effects = 0; writes = []; csrf = 'csrf-initial';
     const orgPage = await browser.newPage();
     await orgPage.evaluateOnNewDocument(() => localStorage.setItem('pinvou.account.language', 'en'));
     orgPage.on('dialog', dialog => dialog.accept());
     await orgPage.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
-    if (orgMode === 'org-batch') {
+    if (orgMode !== 'org-single') {
       await orgPage.waitForSelector('select[multiple]');
       await orgPage.select('select[multiple]', grantID);
     }
-    await click(orgPage, orgMode === 'org-batch' ? accountClosedGrantCopy.en.batch : accountClosedGrantCopy.en.single);
+    await click(orgPage, orgMode !== 'org-single' ? accountClosedGrantCopy.en.batch : accountClosedGrantCopy.en.single);
     await orgPage.waitForFunction(text => document.body.textContent.includes(text), {}, organizationCopy.en.unknown);
     await orgPage.reload({ waitUntil: 'networkidle0' });
     assert.equal(writes.length, 1); assert.equal(effects, 1);

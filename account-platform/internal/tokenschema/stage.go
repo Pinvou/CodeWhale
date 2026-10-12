@@ -73,8 +73,8 @@ func Ordered(loaded []migrations.Migration) ([]migrations.Migration, error) {
 	return result, nil
 }
 
-// Validate the existing ledger before applying anything. In particular an
-// F08 privacy/anonymization history cannot be run through the F04 runtime.
+// Validate every existing ledger identity before applying anything. Only the
+// installed lifecycle, replay and management migration package is accepted.
 func Up(ctx context.Context, c *pgx.Conn, loaded []migrations.Migration) error {
 	ordered, err := Ordered(loaded)
 	if err != nil {

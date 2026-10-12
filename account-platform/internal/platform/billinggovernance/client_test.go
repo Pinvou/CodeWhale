@@ -34,6 +34,17 @@ func compatibleSnapshot() Snapshot {
 	return value
 }
 
+// Preserve the required v1 history while appending the separately installed v2.
+func compatibleSnapshotWithEntitlementV2(state string) Snapshot {
+	value := compatibleSnapshot()
+	newer := value.Activations[1]
+	newer.PolicyVersion, newer.SnapshotSchemaVersion, newer.State = 2, 2, state
+	rows := append([]Activation(nil), value.Activations[:2]...)
+	rows = append(rows, newer)
+	value.Activations = append(rows, value.Activations[2:]...)
+	return value
+}
+
 func encodeSnapshot(t *testing.T, value Snapshot) string {
 	t.Helper()
 	raw, err := json.Marshal(value)
@@ -60,8 +71,12 @@ func TestActivationClientClosedAuthoritativeRead(t *testing.T) {
 	}{
 		{"current", valid, "no-store", 200, true},
 		{"existing inactive", strings.ReplaceAll(valid, `"state":"ACTIVE"`, `"state":"INACTIVE"`), "no-store", 200, true},
-		{"future entitlement v2", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
+		{"installed entitlement v2 inactive", encodeSnapshot(t, compatibleSnapshotWithEntitlementV2("INACTIVE")), "no-store", 200, true},
+		{"entitlement v2 cannot replace mandatory v1", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
 			value.Activations[1].PolicyVersion, value.Activations[1].SnapshotSchemaVersion = 2, 2
+		})), "no-store", 200, false},
+		{"duplicate entitlement v2", encodeSnapshot(t, mutateSnapshot(compatibleSnapshotWithEntitlementV2("ACTIVE"), func(value *Snapshot) {
+			value.Activations = append(value.Activations[:3], append([]Activation{value.Activations[2]}, value.Activations[3:]...)...)
 		})), "no-store", 200, false},
 		{"mixed entitlement version", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
 			value.Activations[1].PolicyVersion = 2
@@ -69,10 +84,7 @@ func TestActivationClientClosedAuthoritativeRead(t *testing.T) {
 		{"unknown entitlement version", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
 			value.Activations[1].PolicyVersion, value.Activations[1].SnapshotSchemaVersion = 3, 3
 		})), "no-store", 200, false},
-		{"activated entitlement v2", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
-			value.Activations[1].PolicyVersion, value.Activations[1].SnapshotSchemaVersion = 2, 2
-			value.Activations[1].State = "ACTIVE"
-		})), "no-store", 200, false},
+		{"activated entitlement v2", encodeSnapshot(t, compatibleSnapshotWithEntitlementV2("ACTIVE")), "no-store", 200, true},
 		{"activated entitlement v1 history", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
 			value.Activations[1].State = "ACTIVE"
 		})), "no-store", 200, false},
@@ -135,7 +147,11 @@ func TestActivationClientClosedAuthoritativeRead(t *testing.T) {
 				t.Fatalf("success=%v error=%v", tc.success, err)
 			}
 			if tc.success {
-				if len(got.Activations) != 11 || got.SchemaVersion != 1 {
+				var expected Snapshot
+				if err := json.Unmarshal([]byte(tc.body), &expected); err != nil {
+					t.Fatal(err)
+				}
+				if len(got.Activations) != len(expected.Activations) || got.SchemaVersion != 1 {
 					t.Fatal("valid read lost the complete compatibility projection")
 				}
 			} else if !errors.Is(err, ErrUnavailable) || got.SchemaVersion != 0 || len(got.Activations) != 0 {

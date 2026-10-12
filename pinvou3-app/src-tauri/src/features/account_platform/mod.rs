@@ -2270,6 +2270,70 @@ mod tests {
     }
 
     #[test]
+    fn personal_closure_canonical_routes_require_original_key() {
+        for (method, path, key, want) in [
+            ("GET", "/v1/me/account-closure-request", None, true),
+            (
+                "POST",
+                "/v1/me/account-closure-requests",
+                Some("original-closure-key"),
+                true,
+            ),
+            ("POST", "/v1/me/account-closure-requests", None, false),
+            (
+                "POST",
+                "/v1/me/account-closure-requests",
+                Some("short"),
+                false,
+            ),
+            (
+                "POST",
+                "/v1/me/account-closure-requests",
+                Some("invalid space key"),
+                false,
+            ),
+            ("GET", "/v1/me/account-closure-requests", None, false),
+            (
+                "POST",
+                "/v1/me/account-closure-request",
+                Some("original-closure-key"),
+                false,
+            ),
+            (
+                "POST",
+                "/v1/me/account-closure-requests?force=1",
+                Some("original-closure-key"),
+                false,
+            ),
+            (
+                "POST",
+                "/v1/me/account-closure-requests/extra",
+                Some("original-closure-key"),
+                false,
+            ),
+            (
+                "POST",
+                "/admin/v1/account-closure-requests",
+                Some("original-closure-key"),
+                false,
+            ),
+        ] {
+            let input = ApiRequest {
+                area: "account".into(),
+                method: method.into(),
+                resource: path.into(),
+                body: None,
+                idempotency_key: key.map(str::to_string),
+            };
+            assert_eq!(
+                prepare_request(&config(), input).is_ok(),
+                want,
+                "{method} {path}"
+            );
+        }
+    }
+
+    #[test]
     fn account_platform_is_the_only_supported_desktop_path() {
         assert_eq!(account_platform_enabled(), platform_supported());
     }

@@ -113,6 +113,7 @@ type EntitlementComponent struct {
 	ID                            uuid.UUID `json:"component_id"`
 	ComponentType                 string    `json:"component_type"`
 	OriginalMicrocredits          int64     `json:"original_microcredits"`
+	ReclassifiedOutMicrocredits   int64     `json:"reclassified_out_microcredits"`
 	EffectiveOriginalMicrocredits int64     `json:"effective_original_microcredits"`
 	AvailableMicrocredits         int64     `json:"available_microcredits"`
 	ReservedMicrocredits          int64     `json:"reserved_microcredits"`

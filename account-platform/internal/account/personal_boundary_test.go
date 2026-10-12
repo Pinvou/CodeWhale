@@ -114,11 +114,15 @@ func TestPersonalHandlerRejectsInvalidBodiesWithoutMutation(t *testing.T) {
 			t.Fatalf("future route became reachable: %s", item.path)
 		}
 	}
-	// F08 installs closure; an unauthenticated write must reach the bearer gate.
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/me/account-closure-requests", nil))
-	if w.Code != http.StatusUnauthorized {
-		t.Fatal("installed closure write lacked bearer protection", w.Code)
+	for _, item := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/me/account-closure-requests"},
+		{http.MethodGet, "/v1/me/organizations"},
+	} {
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(item.method, item.path, nil))
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("installed personal route lacked bearer protection: %s status=%d", item.path, w.Code)
+		}
 	}
 	// F02 activates this read endpoint. Its addition must preserve the
 	// authentication boundary rather than the earlier wave's absent-route check.

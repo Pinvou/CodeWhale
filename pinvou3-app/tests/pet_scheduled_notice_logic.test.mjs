@@ -21,8 +21,11 @@ copyFileSync(path.join(here, '..', 'src', 'shared', 'entitlement-correction-i18n
 copyFileSync(path.join(here, '..', 'src', 'shared', 'finance-i18n.js'), path.join(dir, 'shared', 'finance-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'reconciliation-i18n.js'), path.join(dir, 'shared', 'reconciliation-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'token-management-i18n.js'), path.join(dir, 'shared', 'token-management-i18n.js'));
-copyFileSync(path.join(here, '..', 'src', 'shared', 'organization-i18n.js'), path.join(dir, 'shared', 'organization-i18n.js'));
-copyFileSync(path.join(here, '..', 'src', 'shared', 'model-usage-i18n.js'), path.join(dir, 'shared', 'model-usage-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'ledger-repair-i18n.js'), path.join(dir, 'shared', 'ledger-repair-i18n.js'));
+// Include every current shared/i18n.js domain re-export in the isolated tree.
+for (const name of ['organization-i18n.js', 'model-usage-i18n.js', 'account-closure-i18n.js', 'entitlement-correction-i18n.js', 'account-closed-grants-i18n.js']) {
+  copyFileSync(path.join(here, '..', 'src', 'shared', name), path.join(dir, 'shared', name));
+}
 // i18n.js 现按语言拆分（zh 内嵌），临时副本需带上 zh 词典才能解析。
 mkdirSync(path.join(dir, 'shared', 'i18n'), { recursive: true });
 for (const f of ['zh.js', 'browser.js']) {
