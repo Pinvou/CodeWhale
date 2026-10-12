@@ -20,8 +20,11 @@ use super::import_scan;
 use super::proc_timeout;
 use super::script_runner::{self, RunScriptOptions, ScriptProgress};
 use super::store_client::{
-    DeployProfile, DeployTopology, StoreCardDetail, StoreCardSummary, StoreClient, StoreSource,
+    DeployProfile, DeployTopology, HINT_CHECK_INTERNET_ACCESS, HINT_CONNECT_FAILED,
+    HINT_CONNECT_TIMEOUT, StoreCardDetail, StoreCardSummary, StoreClient, StoreSource,
 };
+use crate::features::monitor::current_ram_snapshot;
+use crate::platform::process_resources::ProcessResourceSampler;
 
 mod versions;
 
@@ -55,6 +58,11 @@ if [ -n "$TARGET_HOME" ]; then
 fi
 echo "ollama 已卸载"
 "#;
+
+/// 驭光原生引擎的稳定身份键。`engine_label` 才是给用户展示的文案；不能再把
+/// 展示名的改动当成一次新引擎安装。版本取二进制 SHA-256 的前 8 位，和引擎
+/// 实际落盘目录一一对应。
+const NATIVE_TACHYON_ENGINE_NAME: &str = "驭光（H3C自研推理引擎）";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DownloadResult {
@@ -104,10 +112,9 @@ pub struct UninstallOutcome {
     pub purged_weights: bool,
     /// 卡片是不是还在模型库里。
     ///
-    /// 今天它恒等于 `!purged_weights`，但仍然单独回一个字段：这两件事问的不是
-    /// 同一个问题（一个问磁盘、一个问库记录），而调用方拿它决定的是**界面动作**
-    /// ——留着这张卡刷新成「已下载」，还是整行移走。让界面去推断"删了权重所以
-    /// 记录大概也没了"，等于把一条内部约定钉死在两边。
+    /// 删除权重时只有在后验核对确认文件确实都已清掉，才会是 false。若脚本返回
+    /// 成功但仍有残留，记录必须保留并变成 `cleanup_required`，让用户能继续处理，
+    /// 绝不能把几十 GB 文件变成列表里看不见的孤儿。
     pub record_kept: bool,
     /// **实测**释放量：脚本跑之前和跑完之后，对同一批候选目录各量一次的差值。
     ///
@@ -139,8 +146,46 @@ pub struct InstalledEngineInfo {
     pub engine_name: String,
     pub engine_version: Option<String>,
     pub docker_image: Option<String>,
-    pub size_bytes: u64,
+    /// docker/ollama 可以精确统计；厂商交付的二进制引擎只在探针验证过存在时列出，
+    /// 但未必有安全的通用方式统计其全部附属文件。
+    pub size_bytes: Option<u64>,
     pub affected_models: Vec<String>,
+    /// 只有当前客户端知道如何安全删除的引擎才允许点删除。
+    pub cleanup_supported: bool,
+}
+
+/// 已运行模型的实际进程树占用。它是“现在已经占了多少”的观测值，不拿来替代卡片
+/// 的峰值预算：模型加载后的 KV cache 会继续增长，二者是互补关系。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunningModelMemory {
+    pub card_id: String,
+    pub card_name: String,
+    pub rss_bytes: Option<u64>,
+}
+
+/// 启用前的统一内存准入快照。所有字节数都用字节交给前端，避免 GiB/GB 换算混乱。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryAdmission {
+    pub card_id: String,
+    /// None means system sampling failed, never zero bytes of physical RAM.
+    pub total_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+    pub safety_reserve_bytes: Option<u64>,
+    pub hard_reserve_bytes: Option<u64>,
+    pub candidate_peak_bytes: Option<u64>,
+    pub projected_available_bytes: Option<u64>,
+    /// Conservative reserve for running models. RSS is not a unified-memory
+    /// accounting metric, so it must not be subtracted from a unified budget.
+    /// None means at least one workload has no usable budget.
+    pub running_growth_bytes: Option<u64>,
+    pub running_models: Vec<RunningModelMemory>,
+    /// green / caution / warning / unknown。unknown 是“卡片尚未给出可信峰值”，不是 0。
+    pub level: String,
+    /// Stable reason for the translated UI; message remains for older clients.
+    pub reason: String,
+    pub requires_confirmation: bool,
+    /// 直接可显示给用户的一句话，不暴露 docker / /proc 等实现细节。
+    pub message: String,
 }
 
 /// `delete_engine` 的结果。跟 `UninstallOutcome` 是同一个理由：**如实说出这次
@@ -247,9 +292,9 @@ enum ScriptsSource {
         assets: BTreeMap<String, String>,
         asset_sha256: Option<BTreeMap<String, String>>,
         profiles: Vec<DeployProfile>,
-        /// 这些"URL"其实是本地文件路径（内置测试商店：它没有服务器，路径是应用
-        /// 自己刚写到 data_dir 下的）。真实商店一律为 false，`fetch_script_content`
-        /// 会据此拒绝一切非 https 的地址——见 `script_runner::FetchPolicy`。
+        /// 这些"URL"其实是本地文件路径。生产上**恒为 false**——见
+        /// `ModelManager::local_script_paths` 的说明，那里讲了为什么它不再是一个
+        /// 生产开关。`fetch_script_content` 据此拒绝一切非 https 的地址。
         local_paths: bool,
     },
 }
@@ -264,6 +309,60 @@ enum ScriptsSource {
 /// 被校验过的内容。
 fn may_run_as_root(script_type: &str) -> bool {
     script_type == "install_engine"
+}
+
+/// 返回卡片固化的驭光版本；缺失版本时才使用完整 SHA 的前 8 位。
+///
+/// 这不是通用 Shell 解析器：只接受驭光交付包里那条明确的
+/// `ENGINE_BIN_SHA256="..."` 声明，并同时要求脚本写明 tachyon-serve 的受管
+/// 目录。任何不满足格式的旧卡都不迁移，宁可保留旧关联，不能把其他厂商的引擎
+/// 误归为驭光。
+fn native_tachyon_version(record: &db::StoreModelRecord) -> Option<String> {
+    let install = &record.scripts_content.get("install_engine")?.content;
+    native_tachyon_identity(
+        install,
+        record
+            .assets_content
+            .get("common.sh")
+            .map(|blob| blob.content.as_str()),
+        record.engine_version.as_deref(),
+    )
+    .map(|(version, _)| version)
+}
+
+fn declared_native_sha(script: &str) -> Option<String> {
+    let value = script.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("ENGINE_BIN_SHA256=")?;
+        Some(value.trim().trim_matches(['\"', '\'']))
+    })?;
+    (value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_lowercase())
+}
+
+fn native_tachyon_identity(
+    install: &str,
+    common: Option<&str>,
+    version: Option<&str>,
+) -> Option<(String, String)> {
+    // 厂商卡片把版本与目录声明放在 common.sh；旧单文件卡才内联在入口里。
+    let script = if install.contains("$CARD_DIR/common.sh") {
+        common?
+    } else {
+        install
+    };
+    if !script.contains("tachyon-serve") || !script.contains("local-model-manager/engines") {
+        return None;
+    }
+    let value = declared_native_sha(script)?;
+    // 非空的卡片版本可能是研发构建批次（如 7fca766a），并不等于文件 SHA。
+    // 保留这类版本，只为历史上遗漏版本的卡片补二进制指纹。
+    Some((
+        version
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| value[..8].to_string()),
+        value,
+    ))
 }
 
 /// 一张卡片抓下来的完整脚本包：六个入口脚本 + 附属文件。
@@ -295,8 +394,7 @@ fn validate_remote_assets(assets: &BTreeMap<String, String>) -> Result<(), Model
 }
 
 impl ScriptsSource {
-    /// `local_paths` 来自 `ModelManager::builtin_store`：只有内置测试商店的
-    /// scripts/assets 值是本地文件路径，真实商店必须是 https 链接。
+    /// `local_paths` 来自 `ModelManager::local_script_paths`，生产上恒为 false。
     fn from_card(card: &StoreCardDetail, local_paths: bool) -> Self {
         Self::Remote {
             scripts: card.scripts.clone(),
@@ -343,6 +441,27 @@ impl ScriptsSource {
         }
     }
 
+    /// 取一份可随已安装引擎长期保存的可选脚本。`uninstall_engine` 不属于模型
+    /// 生命周期必须的六类脚本：老卡片没有它不能妨碍下载；新卡片提供它时，则
+    /// 在引擎安装完成的同一事务里固化，之后即使模型记录被删除也还有安全的清理
+    /// 契约可用。
+    fn optional_script_blob(
+        &self,
+        script_type: &str,
+    ) -> Result<Option<db::ScriptBlob>, ModelManagerError> {
+        match self {
+            Self::Local { blobs, .. } => Ok(blobs.get(script_type).cloned()),
+            Self::Remote { scripts, .. } if !scripts.contains_key(script_type) => Ok(None),
+            Self::Remote { .. } => {
+                let content = self.entry_content(script_type, self.fetch_policy(script_type))?;
+                Ok(Some(db::ScriptBlob {
+                    sha256: script_runner::sha256_hex(&content),
+                    content,
+                }))
+            }
+        }
+    }
+
     /// 卡片是不是带附属文件（也就是「多文件包」形态）。
     fn has_assets(&self) -> bool {
         match self {
@@ -375,33 +494,56 @@ impl ScriptsSource {
         // card_id 来自商店响应，直接 join 的话 `../` 或绝对路径会整体逃出 cards 目录。
         let safe_id = config::safe_path_component(card_id)
             .map_err(|e| ModelManagerError::new(format!("卡片 id 不合法：{e}")))?;
-        let cards_dir = config::data_dir().join("cards");
-        let dir = cards_dir.join(safe_id);
+        let dir = config::data_dir().join("cards").join(safe_id);
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&dir)
+        }
+        .map_err(|e| ModelManagerError::new(format!("创建卡片目录失败：{e}")))?;
+
         let mut assets = self.asset_contents(policy)?;
+        // Legacy local imports captured generated native runtime state; never
+        // replay it over live CARD_DIR/.runtime content.
         if matches!(self, Self::Local { .. }) {
             assets.retain(|name, _| !super::card_assets::is_mutable_runtime_asset(name));
         }
+        // Native multi-file cards use CARD_DIR/.runtime. Initialize before any
+        // entry script (including health logging); existing directories are
+        // unchanged and remain subject to the script's identity/mode checks.
         if assets.contains_key("native_engine_process.py") {
-            use std::os::unix::fs::DirBuilderExt;
-            std::fs::create_dir_all(&cards_dir)
-                .map_err(|e| ModelManagerError::new(e.to_string()))?;
-            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(ModelManagerError::new(error.to_string())),
-            }
             super::native_runtime::prepare(&dir).map_err(ModelManagerError::new)?;
-        } else {
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| ModelManagerError::new(format!("创建卡片目录失败：{e}")))?;
         }
         script_runner::materialize_assets(&dir, &assets)?;
 
         // 入口脚本也按固定文件名写进包里，这样包内其它脚本也能互相引用
-        let entry_content = self.entry_content(script_type, policy)?;
-        let mut one = BTreeMap::new();
-        one.insert(entry_name.clone(), entry_content);
-        script_runner::materialize_assets(&dir, &one)?;
+        let mut entries = BTreeMap::new();
+        if let Self::Local { blobs, .. } = self {
+            // Sibling scripts (enable -> stop, deploy -> enable) must come from
+            // the same DB snapshot as common.sh, not an older materialization.
+            for (kind, blob) in blobs {
+                if ![
+                    "install_engine",
+                    "download_model",
+                    "deploy",
+                    "enable",
+                    "stop",
+                    "uninstall",
+                    "uninstall_engine",
+                ]
+                .contains(&kind.as_str())
+                {
+                    return Err(ModelManagerError::new(
+                        "本地卡片包含未知脚本入口，请检查卡片更新；未执行任何脚本。",
+                    ));
+                }
+                entries.insert(format!("{kind}.sh"), blob.content.clone());
+            }
+        }
+        entries.insert(entry_name.clone(), self.entry_content(script_type, policy)?);
+        script_runner::materialize_assets(&dir, &entries)?;
 
         Ok(PreparedScript {
             entry: dir.join(&entry_name),
@@ -498,9 +640,23 @@ pub type ProgressFn<'a> = dyn FnMut(&str) + Send + 'a;
 pub struct ModelManager {
     pub settings: Settings,
     store: Box<dyn StoreSource>,
-    /// 数据源是不是"打包在应用里"的测试商店。决定了固化脚本要不要跟着应用升级
-    /// 自动刷新——测试商店没有服务器，应用升级就等于脚本升级。
-    builtin_store: bool,
+    /// 卡片给的 scripts/assets 值是**本地文件路径**而不是 https 链接。
+    ///
+    /// **生产上恒为 false，而且没有任何生产代码能把它置真**——唯一的写入口是下面
+    /// 那个 `#[cfg(test)]` 的 `with_local_script_paths`。
+    ///
+    /// 它原来叫 `builtin_store`，是一位真正的生产开关：内置测试商店没有服务器，
+    /// 卡片详情里的"URL"就是应用自己刚写到 `data_dir()/test_store_scripts/` 下的
+    /// 文件路径。内置测试商店 2026-09-30 整体拿掉之后，这条能力在生产上再无合法
+    /// 用途，而它的危险没变——一张被改过的卡片只要把 URL 写成任意一个本地路径，
+    /// 就能让应用去读它、再把读到的内容当脚本执行，install_engine 那条还经 pkexec
+    /// 提权。
+    ///
+    /// 那为什么不干脆删掉这一位：下载编排那四条集成测试（`local_script_card` 起
+    /// 头的那一组）靠它在不起服务器的前提下把整段真跑一遍，包括"登记哈希对不上
+    /// 就中止"这条只在 fetch 路径上才成立的判据。留一位只有测试能置真的字段，比
+    /// 让这几条测试消失、或者为它们另造一套 https 假服务器都更诚实。
+    local_script_paths: bool,
 }
 
 /// 长时间不出声也属正常的脚本，允许多久没有输出。
@@ -585,29 +741,124 @@ const DOCKER_RMI_TIMEOUT: Duration = Duration::from_secs(600);
 /// 每次续传前先看取消信号（用户随时能停），次数用尽仍失败才抛给用户。
 const DOWNLOAD_RESUME_LIMIT: u32 = 30;
 
-impl ModelManager {
-    /// 连接**测试模型商店**（卡片和脚本都打包在应用本地，不发网络请求）的
-    /// 管理器。业务逻辑与真实商店完全一致，只是换了数据来源。
-    pub fn new_test_store() -> Self {
-        let mut mgr = Self::new(
-            None,
-            Some(Box::new(super::store_client::LocalStoreClient::new())),
-        );
-        mgr.builtin_store = true;
-        mgr
-    }
+/// 引擎清理契约补取的会话级负缓存（见 `refresh_native_engine_cleanup_contracts`）。
+/// ModelManager 每次调用都是新实例，进程级 static 是唯一能跨调用记住失败的层。
+static CONTRACT_SYNC_FAILED_CARDS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
 
-    /// `store` 用于注入自定义的商店数据源（比如测试模型商店），不传则按设置里
-    /// 的 store_url 连接真正的商店服务器，业务逻辑完全一致。
+/// reconcile 端点探测的正结果缓存（r19 评审 P2-7）：card_id -> 最近一次探到
+/// 端点活着的时刻。
+///
+/// `reconcile_running_status` 是 `library()` 的第一步（service.rs 每次 library()
+/// 都触发），反向认领要对每张 deployed + OpenAI 端点的未运行卡逐张探
+/// `/v1/models`——串行、单张最长蹲满一个超时，K 张卡 = K×超时/刷新，卡多的
+/// 设备上商店列表就是K 个超时叠出来的转圈。缓存**只记成功**（端点活着），
+/// 60 秒内直接复用；失败不缓存——死讯会挡住刚恢复的服务，宁可下一秒再探。
+/// 放行方向本来也只是「不改状态」，60 秒的陈旧度换掉 K 次串行探测是划算的。
+///
+/// 与 CONTRACT_SYNC_FAILED_CARDS 同款进程级 static：ModelManager 每次调用都
+/// 是新实例，只有进程级状态能跨调用记住；键是 card_id，条目数上界就是卡数。
+static RECONCILE_ALIVE_ENDPOINTS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Instant>>> =
+    std::sync::OnceLock::new();
+
+/// [`RECONCILE_ALIVE_ENDPOINTS`] 的有效期。
+const RECONCILE_PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// 存量设备的目录链安全迁移（2026-10-22 根治）。
+///
+/// 旧客户端用不带 mode 的 `create_dir_all` 在 umask 0002 下把模型商店自有目录
+/// 建成了 **775（组可写）**；新版安全脚本（安全卸载 / v3 生命周期）按设计拒绝在
+/// 组可写目录下操作——不迁移的话存量设备一更新脚本就撞「删除路径父链不安全」，
+/// 且无自助出路（用户设备实锤）。每次启动执行，幂等：
+/// - 范围：商店根目录、cards/、logs/、模型权重根目录，以及 cards 与权重根下的
+///   **一级子目录**（每张卡一个，数量有限）；不递归更深——卡片/权重内部由脚本
+///   自己管。
+/// - 只做**收紧**：属主是当前用户且带组/其他写位的目录去掉这些写位
+///   （775→755）。不放宽任何目录、不碰属主不是自己的目录、不改文件。
+/// - 失败只记日志不拦流程：迁移尽力而为，真正的安全判定仍在卡片脚本侧
+///   fail-closed。
+fn tighten_store_directory_permissions(settings: &Settings) {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    // SAFETY: getuid() 无参数、无失败路径（libc 直接读进程凭证），调用安全。
+    let uid = unsafe { libc::getuid() };
+    // 权重根取**原始配置路径**而不是 models_path()：后者读值即建目录（0700），
+    // 会让「构造一个管理器」这个只读动作在用户配置的目录上产生副作用，也会
+    // 抢在下载目录重叠校验之前把还不该存在的候选根物化出来（主线
+    // stage_target_protects_* 套件钉的就是这个时序）。收紧只对**已存在**的
+    // 目录生效，缺席直接跳过即可。
+    let mut roots = vec![
+        config::data_dir(),
+        config::data_dir().join("cards"),
+        config::data_dir().join("logs"),
+        {
+            let trimmed = settings.models_dir.trim();
+            if trimmed.is_empty() {
+                config::data_dir().join("models")
+            } else {
+                PathBuf::from(trimmed)
+            }
+        },
+    ];
+    // 一级子目录（cards/<card> 与 models/<model>）
+    for root in roots.clone() {
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    roots.push(entry.path());
+                }
+            }
+        }
+    }
+    for dir in roots {
+        let Ok(meta) = std::fs::metadata(&dir) else {
+            continue;
+        };
+        if !meta.is_dir() || meta.uid() != uid {
+            continue;
+        }
+        let mode = meta.permissions().mode();
+        if mode & 0o022 == 0 {
+            continue; // 无组/其他写位，无需收紧
+        }
+        let tightened =
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode & !0o022));
+        if let Err(error) = tightened {
+            eprintln!(
+                "[model-store] 目录安全迁移失败（{}）：{error}",
+                dir.display()
+            );
+        }
+    }
+}
+
+impl ModelManager {
+    /// `store` 用于在测试里注入假的商店数据源；不传则连生产商店
+    /// （`config::STORE_URL`，固定地址，见那里的说明）。
+    ///
+    /// 这里原来还有一个 `new_test_store()`——连**内置测试商店**（6 张卡片的脚本
+    /// 用 `include_str!` 编进二进制）。2026-09-30 整体拿掉了：内置副本和生产在架
+    /// 卡片已经分叉，而改内置脚本又不触发 CI 的 rust-test。生产商店是唯一数据源。
     pub fn new(settings: Option<Settings>, store: Option<Box<dyn StoreSource>>) -> Self {
         let settings = settings.unwrap_or_else(config::load_settings);
-        let store = store.unwrap_or_else(|| Box::new(StoreClient::new(&settings.store_url)));
+        let store = store.unwrap_or_else(|| Box::new(StoreClient::new(config::STORE_URL)));
         let _ = db::init_db();
+        tighten_store_directory_permissions(&settings);
         Self {
             settings,
             store,
-            builtin_store: false,
+            local_script_paths: false,
         }
+    }
+
+    /// 放行"脚本地址是本地文件路径"。**只有测试能调**，见
+    /// [`ModelManager::local_script_paths`]。
+    #[cfg(test)]
+    fn with_local_script_paths(mut self) -> Self {
+        self.local_script_paths = true;
+        self
     }
 
     // ---------------- 模型商店 ----------------
@@ -631,11 +882,15 @@ impl ModelManager {
     /// 记录，它引擎对应的 docker 镜像是不是真的还有活着的容器，不是就把标记
     /// 纠正回来。每次打开/刷新"本地模型库"都会跑一遍，返回被纠正的卡片名列表。
     ///
-    /// docker 不可用（比如探测超时/命令缺失）时直接跳过，不做任何判断——
-    /// 没有可靠信号就不误纠正，宁可漏判也不能错判。
+    /// docker 不可用（比如探测超时/命令缺失）时不判断容器卡；Ollama 与厂商原生
+    /// 引擎仍按各自本机健康端点核对。没有可靠信号就不误纠正，宁可漏判也不能错判。
     pub fn reconcile_running_status(&self) -> Vec<String> {
         let mut corrected = Vec::new();
-        let Ok(records) = db::list_store_models() else {
+        // 本批评审 P2-4：核对逻辑只消费 8 个小字段（容器认领/镜像比对/返回值，
+        // 列集见 list_store_models_reconcile_columns），此前 list_store_models 把
+        // scripts/assets 两个 MB 级正文列整表拉出来又全程不消费——本函数是
+        // library() 的第一步，等于每次刷新模型库都白读一遍全库正文。
+        let Ok(records) = db::list_store_models_reconcile_columns() else {
             return corrected;
         };
         if records.is_empty() {
@@ -645,20 +900,25 @@ impl ModelManager {
         // `library()` 的第一步——用户看到的会是**整个模型商店永久转圈**，而不是
         // 「拿不到运行状态」。同一文件里 ollama 那条分支早就设了 5 秒超时，
         // 这两处没设，标准不一致本身就是漏了的信号。
-        let Some(stdout) =
-            proc_timeout::query("docker", &["ps", "--format", "{{.Names}}\t{{.Image}}"])
-        else {
-            return corrected;
-        };
+        // docker 不可用时不能据此把容器卡判成已停止，但原生引擎和 Ollama 仍各有
+        // 自己可靠的健康检查；不能因为 daemon 挂了就跳过整张模型库的状态纠正。
+        // 用 `ps -a` 而不是只看运行中的：无 container_name 的 docker 卡要按
+        // 「容器存在与否 + 状态」认领（见下方 owned_running 分支）， exited 的
+        // 容器也得能看见。
+        let docker_rows =
+            proc_timeout::query("docker", &["ps", "-a", "--format", DOCKER_PS_A_FORMAT])
+                .map(|stdout| parse_docker_ps_a(&stdout));
         let mut live_images: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut live_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for line in stdout.lines() {
-            let mut parts = line.splitn(2, '\t');
-            if let Some(n) = parts.next() {
-                live_names.insert(n.trim().to_string());
-            }
-            if let Some(i) = parts.next() {
-                live_images.insert(i.trim().to_string());
+        if let Some(rows) = docker_rows.as_ref() {
+            for row in rows {
+                if !row.running {
+                    continue;
+                }
+                live_names.insert(row.name.clone());
+                if !row.image.is_empty() {
+                    live_images.insert(row.image.clone());
+                }
             }
         }
 
@@ -672,6 +932,28 @@ impl ModelManager {
             image_of.insert(rec.card_id.clone(), image);
         }
 
+        // card_id -> 是否有活着的自有容器。键取两个都等于 card_id 的身份：
+        // compose 项目名（部署时我们的脚本定的，如 ornith15-bf16 的容器
+        // ornith15-api）和容器名（z-image-turbo 直接拿 card_id 当容器名）。
+        // 之所以需要：没有 container_name 的老记录（迁移前部署的卡）在设备
+        // 重启后会被 docker 的 restart 策略自己拉起来（unless-stopped），商店
+        // 对此失明的话用户看到的就是「内存被占着、商店却全部离线」（真机
+        // 实锤：ornith15-api 重启后照常服务，DB 里全部 running=0），再启用
+        // 别的模型时内存预算也把这 76G 漏掉了。
+        let mut owned_running: HashMap<String, bool> = HashMap::new();
+        if let Some(rows) = docker_rows.as_ref() {
+            for row in rows {
+                let keys = [row.compose_project.as_deref(), Some(row.name.as_str())];
+                for key in keys.into_iter().flatten() {
+                    if key.is_empty() {
+                        continue;
+                    }
+                    let slot = owned_running.entry(key.to_string()).or_insert(false);
+                    *slot = *slot || row.running;
+                }
+            }
+        }
+
         for rec in records {
             // 有容器名就只认容器名——那是启用时脚本亲口报上来的，是确定的身份。
             if let Some(name) = rec
@@ -680,6 +962,10 @@ impl ModelManager {
                 .map(str::trim)
                 .filter(|n| !n.is_empty())
             {
+                // docker daemon 此刻不可查时，状态未知而不是“容器不存在”。
+                if docker_rows.is_none() {
+                    continue;
+                }
                 let alive = live_names.contains(name);
                 if rec.running && !alive {
                     let _ = db::set_running(&rec.card_id, false);
@@ -688,7 +974,7 @@ impl ModelManager {
                     // 启用脚本被静默超时误杀、而 `compose up -d` 是分离式的、
                     // 容器照样起来了——这种要认领回来，否则卡片一直显示「启用」
                     // 按钮，那个容器还会被当成外部容器列出来。
-                    let _ = db::set_running(&rec.card_id, true);
+                    let _ = db::set_running_if_was_stopped(&rec.card_id); // P2-6: 条件写避免竞态
                     corrected.push(rec.card_name);
                 }
                 continue;
@@ -714,10 +1000,75 @@ impl ModelManager {
                 continue;
             }
 
+            // 厂商原生引擎（例如驭光）没有 docker 容器名，过去会直接落到下面的
+            // "没有镜像就 continue"，因此设备重启或进程崩溃后仍会永久显示为运行中；
+            // 反过来，启用第二张卡时又会拿这条假状态去作内存判断。它们已经由 enable
+            // 脚本交回了本机 OpenAI 兼容端点，直接轻量探测 /v1/models 才是可靠判据。
+            // 仍然只做“记录说在跑、实际已不在”的纠正，不凭一个端口把外部服务认领为
+            // 本模型商店的运行实例。
+            // 但这个探测只对 OpenAI 风格的端点成立（路径为空或 /v1 开头）：z-image
+            // 这类文生图卡报的是 /generate，把路径改写成 /v1/models 去探必然 404，
+            // 会把正在运行的服务误判成已停止——真机上踩过：容器 healthy 而 UI
+            // 永远显示未启用。非 OpenAI 端点不做主动探测，落到下面的镜像比对。
+            if let Some(endpoint) = rec.endpoint_url.as_deref() {
+                if endpoint_path_is_openai_style(endpoint) {
+                    // 探测走 60s TTL 缓存（r19 评审 P2-7，见
+                    // openai_endpoint_alive_cached）：本函数每次刷新列表都会跑，
+                    // 不能让 K 张卡各蹲一次串行超时。
+                    if rec.running && !openai_endpoint_alive_cached(&rec.card_id, endpoint) {
+                        let _ = db::set_running(&rec.card_id, false);
+                        corrected.push(rec.card_name);
+                        continue;
+                    }
+                    // 任务 G（收编）：记录说没在跑、端点实际有服务、且身份核验
+                    // 通过（.runtime/serve.identity.json 的 PID 活着）→ 认领为
+                    // 运行中。运维常在终端手动跑 enable.sh 恢复模型，商店对此
+                    // 失明的话用户再点启用就是双实例（sglang 双负载致整机崩溃
+                    // 已实锤）。身份核验确保不把外来服务误认为自己的实例。
+                    if !rec.running
+                        && rec.status == "deployed"
+                        && openai_endpoint_alive_cached(&rec.card_id, endpoint)
+                    {
+                        // r22 P3-3：safe_path_component 失败时 join("") 得到的
+                        // 仍是 cards/ 本身（永非空），旧守卫防不了「探测整目录」；
+                        // 换成校验失败直接跳过（:3084 同款先例）。
+                        if let Ok(safe_id) = config::safe_path_component(&rec.card_id) {
+                            let card_dir = config::data_dir().join("cards").join(safe_id);
+                            if native_engine_identity_alive(&card_dir) {
+                                let _ = db::set_running_if_was_stopped(&rec.card_id); // P2-6: 条件写避免竞态
+                                corrected.push(rec.card_name.clone());
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            // 无 container_name、端点也不适用（非 OpenAI 路径或根本没报端点）的
+            // docker 卡：按上面的 owned_running 认领，双向都纠正。项目名/容器名
+            // == card_id 是我们自己的部署约定，同事用同款镜像跑**别的**模型不会
+            // 撞上这两个名——镜像比对那条路当初不敢反向认领的理由在这里不成立。
+            // docker 查不动时不认领也不清除（状态未知，保留原值）。
+            if docker_rows.is_some() {
+                if let Some(alive) = owned_running.get(&rec.card_id) {
+                    if *alive && !rec.running && rec.status == "deployed" {
+                        let _ = db::set_running_if_was_stopped(&rec.card_id); // P2-6: 条件写避免竞态
+                        corrected.push(rec.card_name.clone());
+                    } else if !*alive && rec.running {
+                        let _ = db::set_running(&rec.card_id, false);
+                        corrected.push(rec.card_name);
+                    }
+                    continue;
+                }
+            }
+
             // 没有容器名（这一版之前启用的老记录）：退回按镜像判断，但**只做
             // 「说在跑其实没跑」这一个方向**。反向认领在这里是危险的：别人用
             // 同款镜像起的容器会让我们把自己的卡误标成运行中——真机上就撞见过
             // 同事用同一个 vllm 镜像跑了另一个模型。宁可让用户自己点一下启用。
+            if docker_rows.is_none() {
+                continue;
+            }
             let Some(image) = image_of.get(&rec.card_id).cloned().flatten() else {
                 continue;
             };
@@ -957,10 +1308,15 @@ impl ModelManager {
         // huggingface_hub 的开关，用原名才能对**所有**卡片生效——包括厂商自带的、
         // 我们不改也改不动的那些下载脚本。
         env.insert("HF_HUB_DISABLE_XET".into(), "1".into());
-        env.insert(
-            "LMM_HF_TOKEN".into(),
-            config::get_hf_token().unwrap_or_default(),
-        );
+        // 🔴 把 token 按**确切值**登记给落盘脱敏。
+        //
+        // 这一条注给**所有卡片的所有操作**，而卡片来自网络、可能被投毒：脚本里一句
+        // `set -x` 就会把它原样打进输出。输出在落盘之前是看过就没了，落盘之后同一句
+        // `set -x` 就是一个持久的凭证泄漏。按前缀（`hf_`）匹配只是当前约定、不是
+        // 规范；而这里恰好知道确切值，按确切值匹配是能给出的最强保证。
+        let hf_token = config::get_hf_token().unwrap_or_default();
+        super::run_log_store::register_secret(&hf_token);
+        env.insert("LMM_HF_TOKEN".into(), hf_token);
         env.insert(
             "LMM_STAGING_DIR".into(),
             self.settings.staging_path().to_string_lossy().to_string(),
@@ -1025,7 +1381,7 @@ impl ModelManager {
         if let Some(existing) =
             db::get_store_model(card_id).map_err(|e| ModelManagerError::new(e.to_string()))?
         {
-            if !self.builtin_store
+            if !self.local_script_paths
                 && (existing.running
                     || existing.status == "deployed"
                     || existing.active_version_id.is_some())
@@ -1034,7 +1390,7 @@ impl ModelManager {
                     "该模型已有部署，请通过检查更新或历史版本升级，避免覆盖当前配置。",
                 ));
             }
-            if !self.builtin_store {
+            if !self.local_script_paths {
                 let evidence = self.remote_weight_evidence(&existing, &card, Some(&control))?;
                 if !super::card_update::compatibility(&existing, &card, evidence.as_ref())
                     .can_update
@@ -1106,7 +1462,10 @@ impl ModelManager {
                 on_progress(
                     "提示：未能一次性取到完整脚本，改为按需获取（商店不稳定时下载可能中断）",
                 );
-                (ScriptsSource::from_card(&card, self.builtin_store), None)
+                (
+                    ScriptsSource::from_card(&card, self.local_script_paths),
+                    None,
+                )
             }
         };
 
@@ -1212,15 +1571,33 @@ impl ModelManager {
             let install_lines = self.install_engine(
                 &source,
                 &env,
-                &mut |line| on_progress(&format!("[安装引擎] {line}")),
+                &mut |line| on_progress(&script_runner::prefix_log_line("[安装引擎] ", line)),
                 control.clone(),
                 probe.need_root,
             )?;
             // install_engine 可以打印 LMM_ENGINE_IMAGE= 这一行告诉 LMM 这个引擎
             // 实际用的 docker 镜像是哪个（不是所有引擎都是 docker 镜像，比如
             // ollama 就没有），供"已安装引擎"的删除功能精确 docker rmi。
-            docker_image = extract_marker(&install_lines, "LMM_ENGINE_IMAGE=");
+            // stdout 是卡片作者可控的输入，先过形式白名单、且不覆盖共享行里
+            // 已登记的不同镜像名（r19 评审 P2-1，判据见 engine_image_to_record）。
+            docker_image = engine_image_to_record(
+                &card.summary.engine_name,
+                card.summary.engine_version.as_deref(),
+                extract_marker(&install_lines, "LMM_ENGINE_IMAGE="),
+            );
         }
+        // 独立清理脚本不是下载前提：老卡片没有它、或弱网下一次补取失败，都不能
+        // 让已经验证好的模型权重下载功亏一篑。缺失时只是不开放“删除原生引擎”。
+        let cleanup_script = match source.optional_script_blob("uninstall_engine") {
+            Ok(script) => script,
+            Err(error) => {
+                eprintln!(
+                    "[download] 未能固化原生引擎清理脚本（{}）：{error}",
+                    card.summary.id
+                );
+                None
+            }
+        };
         db::mark_engine_installed(
             &card.summary.engine_name,
             card.summary.engine_version.as_deref(),
@@ -1228,6 +1605,7 @@ impl ModelManager {
             // 记下这次跑的 install_engine 是哪个版本；下次比对哈希决定要不要
             // 为了刷新部署包再跑一遍
             current_hash.as_deref(),
+            cleanup_script.as_ref(),
         )
         .map_err(|e| ModelManagerError::new(format!("记录引擎安装状态失败：{e}")))?;
 
@@ -1263,9 +1641,8 @@ impl ModelManager {
             // 宿主这一层的职责只有三件：扫描、把结果通过 LMM_IMPORT_DIRS /
             // LMM_IMPORT_CANDIDATES 交给卡片脚本、把找到了什么写进日志。
             // **复用与否完全取决于卡片脚本自己**，而卡片脚本不归这个仓库管：
-            // - 正式商店的远端卡片会复用（2026-09-21 起在架的 7 张全部消费
-            //   LMM_IMPORT_DIRS，拿不到才回落到脚本自带的硬编码清单）；
-            // - 内置测试商店那批卡片没接（`data/test-store/` 下零命中）。
+            // 2026-09-21 起在架的 7 张全部消费 LMM_IMPORT_DIRS，拿不到才回落到
+            // 脚本自带的硬编码清单——但这是**当时在架那一批**的情况，不是保证。
             //
             // 这里原来写的是"当前没有任何一张卡这么做"——那句话是**在本仓库里
             // grep 之后得出的**，而这正是它错的原因：正式卡片的脚本源在商店
@@ -1309,7 +1686,7 @@ impl ModelManager {
         self.run_card_script_with_retry(
             &source,
             &env,
-            &mut |line| on_progress(&format!("[下载模型] {line}")),
+            &mut |line| on_progress(&script_runner::prefix_log_line("[下载模型] ", line)),
             control.clone(),
             reservation.script_lease(),
         )?;
@@ -1319,9 +1696,13 @@ impl ModelManager {
             .confirm_stopped()
             .map_err(ModelManagerError::new)?;
 
-        // 已经在库里的话保留原有状态（比如已部署过），不要因为重新走了一遍
-        // 下载就把状态退回"仅下载"；只有全新记录才用 "downloaded" 起步。
-        let status = existing_status.unwrap_or_else(|| "downloaded".to_string());
+        // 重新下载时只保留真实的“已部署”状态；“权重不完整”必须在本次成功后
+        // 恢复成已下载。若原样保留 incomplete，用户即使补齐了文件，界面仍只能
+        // 看见“继续下载”，又会造出另一种假状态。
+        let status = match existing_status.as_deref() {
+            Some("deployed") => "deployed".to_string(),
+            _ => "downloaded".to_string(),
+        };
         let quota_lock = super::version_store::wait_quota_reservation_lock(
             || control.cancelled(),
             || on_progress("等待提交模型下载记录，可取消…"),
@@ -1344,17 +1725,22 @@ impl ModelManager {
                 status: &status,
                 profiles: &card.profiles,
                 deploy_topology: card.summary.deploy_topology,
-                card_source: if self.builtin_store {
-                    "builtin"
-                } else {
-                    "store"
-                },
+                card_source: "store",
             },
             &reservation.root.to_string_lossy(),
         )
         .map_err(|e| ModelManagerError::new(format!("记录模型下载状态失败：{e}")))?;
         reservation.complete().map_err(ModelManagerError::new)?;
         drop(quota_lock);
+        // 内存档位随这次成功下载的卡片一起固化；启用时不再依赖商店网络，也不会把
+        // 权重文件大小误当作内存预算。空结构的语义是“当前卡片没有给可信预算”。
+        // 这个档位只影响后续的启用前提醒，不能把已经完成的下载误报成失败。
+        // 写入失败时保守地回退到“需要用户确认”的未知档位即可。
+        if let Err(e) =
+            db::set_resource_requirements(&card.summary.id, &card.summary.resource_requirements)
+        {
+            eprintln!("[model-store] 保存模型内存档位失败（将使用保守提示）：{e}");
+        }
 
         // 把六类脚本的正文固化到本地：从这一刻起，这个模型的部署/启用/停用/
         // 卸载全部用本地副本执行，不再依赖商店可达——商店重启、上架、改脚本
@@ -1469,6 +1855,14 @@ impl ModelManager {
         // 代价是提权路径失去了断点续传的自动重试。可以接受：install_engine 拉的是
         // 容器镜像，docker 自己就有分层重试和断点续传；真正需要 30 次续传的是
         // download_model 那条几百 GB 的路，它不提权。
+        //
+        // 「拉的是容器镜像」这个假设在 2026-10-29 被 cube-5059 打破：驭光
+        // （tachyon-serve）的 install_engine 是 curl 拉 230MB 的 engine.tar.gz。
+        // 设备换 IP 后出网走客户自装的代理（Clash TUN）路径劣化，普通用户身份
+        // curl 92（HTTP/2 流被 CANCEL）→ 落进兜底提权整段重跑 → root 身份再
+        // curl 18（partial file）→ 终态失败，全程没有一次续传。所以**普通用户
+        // 身份**这条路上的传输中断改为自动断点续传（见下面那个分支）；提权那条
+        // 仍单次——pkexec 授权是一次性的，续传循环弹 N 个密码框比失败本身更糟。
         if need_root {
             return self.run_card_script(source, "install_engine", env, on_line, control, true);
         }
@@ -1484,6 +1878,36 @@ impl ModelManager {
             // 用户点了取消、磁盘满这类错误，提权重跑一遍也是一样的结果，
             // 别拿一个多余的密码框去骚扰用户。
             Err(e) if Self::is_fatal_failure(&e.to_string()) => Err(e),
+            // 网络类失败同样不提权（.48 真机案例，见 network_unreachable_failure
+            // 的注释）——密码框解决不了路由不通，只会把明确失败拖成授权挂死。
+            // 这里把"为什么不再重试/用户该做什么"说在错误里，而不是让用户
+            // 对着一个没出现的弹窗等半小时。
+            Err(e) if Self::network_unreachable_failure(&e.to_string()) => {
+                on_line("失败原因是网络不可达，管理员权限解决不了，不再弹授权窗口。");
+                Err(ModelManagerError::new(format!(
+                    "{e}\n提示：设备当前无法访问外网（或镜像源不可达）。请把设备接入可出网的网络后重试；\
+                     或在有外网的机器上 docker save 导出引擎镜像，用 U 盘拷到本机 docker load 导入后再试。"
+                )))
+            }
+            // HTTP 层失败（curl 22/404/403 等）：地址或权限在服务端，本地提权无意义
+            //（2026-11-17 客户事故：引擎包 404 弹了管理员密码框）。指引走卡片更新。
+            Err(e) if Self::http_url_failure(&e.to_string()) => {
+                on_line(
+                    "失败原因是下载地址返回错误（404/403），不是本地权限问题，不再弹授权窗口。",
+                );
+                Err(ModelManagerError::new(format!(
+                    "{e}\n提示：引擎包下载地址不可用（多为源站文件缺失或卡片配置过旧）。\
+                     请先在模型列表点「检查卡片更新」获取最新配置后重试；若更新后仍失败，\
+                     请把本条错误（含 404/403 字样）反馈给商店维护方排查源站。"
+                )))
+            }
+            // 传输中断（curl 18/92/连接被重置）：路通着但断流，断点就在磁盘上。
+            // 既不是权限问题（提权解决不了，别弹框），也不该终止（重跑即续传），
+            // 按 download_model 同款策略自动续传。见函数头 2026-10-29 复盘。
+            Err(e) if Self::transfer_interrupted_failure(&e.to_string()) => {
+                on_line("失败原因是传输中断（不是权限问题），不弹授权窗口，自动从断点续传…");
+                self.install_engine_resume_after_interrupt(source, env, on_line, control, e)
+            }
             Err(e) => {
                 eprintln!("[download] 普通用户身份安装引擎失败，改用管理员权限重试：{e}");
                 on_line(
@@ -1491,6 +1915,72 @@ impl ModelManager {
                 );
                 // 同样只跑一次：这是**兜底提权**，不是重试循环。理由同上面那段。
                 self.run_card_script(source, "install_engine", env, on_line, control, true)
+            }
+        }
+    }
+
+    /// install_engine 专用的断点续传循环：只在错误**仍是传输中断**时接着跑。
+    ///
+    /// 为什么不直接复用 [`Self::run_card_script_with_retry`]：那个循环对一切
+    /// 非致命错误都续传，而这里非传输类失败（权限、磁盘、脚本自身 bug）要立刻
+    /// 上抛，让下一次用户操作重新走一遍分类——该提权提权、该报错报错，不能拿
+    /// 传输中断的耐心硬扛。循环骨架（上限、退避、取消响应、每轮日志）与那边
+    /// 一致，改动时两边同步。
+    fn install_engine_resume_after_interrupt(
+        &self,
+        source: &ScriptsSource,
+        env: &HashMap<String, String>,
+        on_line: &mut dyn FnMut(&str),
+        control: script_runner::RunControl,
+        first_error: ModelManagerError,
+    ) -> Result<Vec<String>, ModelManagerError> {
+        let mut attempt = 0u32;
+        let mut error = first_error;
+        loop {
+            // 致命错误与用户取消按原样上抛，一次都不多跑。首个错误在进循环前
+            // 已被调用方分过类（致命/网络不可达都到不了这里），这道检查防的是
+            // 续传中途换出的新致命错误。
+            if Self::is_fatal_failure(&error.to_string()) || control.cancelled() {
+                return Err(error);
+            }
+            attempt += 1;
+            if attempt > DOWNLOAD_RESUME_LIMIT {
+                return Err(ModelManagerError::new(format!(
+                    "{error}\n\n已自动续传 {DOWNLOAD_RESUME_LIMIT} 次仍未完成。\
+                     已下载的部分都在本地，重新点击「下载」会从断点继续，不会重头开始。"
+                )));
+            }
+            on_line(&format!(
+                "传输中断（{}），第 {attempt}/{DOWNLOAD_RESUME_LIMIT} 次从断点续传…",
+                error.to_string().lines().next().unwrap_or("原因未知")
+            ));
+            // 指数退避封顶 16 秒，取消信号分片可中断，同 run_card_script_with_retry
+            let backoff = Duration::from_secs(2u64.saturating_pow(attempt.min(4)));
+            let deadline = Instant::now() + backoff;
+            while Instant::now() < deadline {
+                if control.cancelled() {
+                    return Err(error);
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            match self.run_card_script(
+                source,
+                "install_engine",
+                env,
+                on_line,
+                control.clone(),
+                false,
+            ) {
+                Ok(lines) => return Ok(lines),
+                // 仍是传输中断 → 记下错误进下一轮；换了个不相干的新错误 →
+                // 按原样上抛，交回上层分类处理
+                Err(e) => {
+                    if Self::transfer_interrupted_failure(&e.to_string()) {
+                        error = e;
+                    } else {
+                        return Err(e);
+                    }
+                }
             }
         }
     }
@@ -1595,6 +2085,104 @@ impl ModelManager {
             "系统找不到授权代理",
         ];
         FATAL.iter().any(|k| msg.contains(k))
+    }
+
+    /// 网络类失败：**提权解决不了**，兜底 pkexec 重跑前必须拦下。
+    ///
+    /// 192.168.10.48 真机实锤（2026-10-27）：设备无默认路由（出不了外网），
+    /// digest 钉死的引擎镜像不在本地 → docker pull 超时失败 → 这里没把网络类
+    /// 失败归为"别提权"→ 弹 pkexec 重试 → 现场没人输密码 → 1800 秒无输出被
+    /// idle 判死。一个明确的两分钟失败被拖成半小时挂死，且死因文案（"判定为
+    /// 卡死"）与真相（在等授权）完全脱节。
+    ///
+    /// 注意与 [`Self::is_fatal_failure`] 的分工：网络失败**可以**走断点续传重试
+    /// （网络抖一下就该重试），所以不进 FATAL 清单；它只是**不配**触发提权——
+    /// 权限给得再高，路由也不通。
+    pub(crate) fn network_unreachable_failure(msg: &str) -> bool {
+        // 小写比对：docker/DNS 的报错在句首会大写（"Temporary failure resolving"），
+        // 中文标记不受影响。
+        const MARKERS: &[&str] = &[
+            // docker / registry 原文（docker pull、dial 系列）
+            "i/o timeout",
+            "dial tcp",
+            "no route to host",
+            "network is unreachable",
+            "failed to resolve reference",
+            "connection refused",
+            "context deadline exceeded",
+            // DNS 原文
+            "could not resolve host",
+            "temporary failure resolving",
+            // 客户端已 humanize 的中文形态（errors.rs / store_client.rs）。
+            // 引用 store_client 的常量而不是在这里抄字面量：文案与判据分家后，
+            // 那边改一个字、这边还在匹配旧文本，守卫就静默失效（r19 评审 P2-2）。
+            HINT_CONNECT_TIMEOUT,
+            HINT_CONNECT_FAILED,
+            HINT_CHECK_INTERNET_ACCESS,
+        ];
+        let lowered = msg.to_lowercase();
+        MARKERS.iter().any(|k| lowered.contains(k))
+    }
+
+    /// install_engine 的 HTTP 层失败（curl 22：URL 返回了 4xx/5xx）。
+    ///
+    /// 2026-11-17 客户事故：image 卡引擎包 by-hash 地址在源站侧短暂缺失（404），
+    /// curl 22 落进兜底提权——密码框解决不了「地址不存在」，既吓用户又把明确
+    /// 失败拖成授权挂死。HTTP 错误 = 服务端/卡片配置问题，与本地权限无关，
+    /// 分类为不提权、给出「检查卡片更新」的行动指引。
+    pub(crate) fn http_url_failure(msg: &str) -> bool {
+        const MARKERS: &[&str] = &[
+            // curl --fail 的原文（客户 0.10.17 实录：curl: (22) The requested
+            // URL returned error: 404）；403 同族（HF gated/源站拒绝）。
+            "curl: (22)",
+            "returned error: 4",
+            "returned error: 5",
+            // wget 形态，脚本族里偶用
+            "error 404: not found",
+            "http status 4",
+            "http status 5",
+        ];
+        let lowered = msg.to_lowercase();
+        MARKERS.iter().any(|k| lowered.contains(k))
+    }
+
+    /// 传输中断类失败：下载**已经在传**、中途被掐断（curl 18/92、连接被重置）。
+    ///
+    /// 与 [`Self::network_unreachable_failure`] 的分工：那边是"路不通"（连不上、
+    /// 解析不了），重试无意义，治法是让用户换网络；这边是"路通着但断流"，断点
+    /// 就在磁盘上，重跑脚本即从断点续传。两类都不配触发提权。
+    ///
+    /// 2026-10-29 cube-5059 实锤：换 IP 后出网走客户自装的代理（Clash TUN），
+    /// 路径劣化成 14KB/s，驭光引擎包（curl 拉的 230MB tarball，不是 docker
+    /// 镜像）先 curl 92（HTTP/2 流被 CANCEL）、兜底提权整段重跑又 curl 18
+    /// （partial file）后终态失败——三次全是传输中断，全都有断点可续。
+    pub(crate) fn transfer_interrupted_failure(msg: &str) -> bool {
+        // 小写比对：curl 原文的 "HTTP/2"、"Transferred" 都在句中大写。
+        const MARKERS: &[&str] = &[
+            // 卡片脚本 humanize 后的中文形态（驭光 install_engine 自己打印的）。
+            // r21 P2-7：按「退出码 N」收而不是「curl 退出码 N」——通用包装器
+            // `脚本执行失败（退出码 18）：{summary}`（script_runner 的失败路径）
+            // 没有 curl 前缀，卡片未透出 curl 原文时此前必 miss。误收面只有
+            // 「别的工具恰好也用 18/92 当退出码」，代价是多几次断点续传重试，
+            // 不涉及安全。
+            "退出码 18",
+            "退出码 92",
+            // curl 原文（卡片没 humanize 时直接透出）
+            "transferred a partial file",
+            "http/2 stream",
+            // 同族中断：连接被对端重置（curl 56 / docker read reset）
+            "connection reset by peer",
+            // r21 P2-7：curl/docker 断流的三个原文形态，此前全部 miss、落
+            // pkexec 整段重跑，正是 cube-5059 要消灭的路径——整段被掐
+            // （curl 18 原文 `transfer closed with N bytes remaining`）、
+            // 连接重置的无 by peer 变体（`Connection was reset`）、对端半途
+            // 关流（`unexpected EOF`）。
+            "transfer closed with",
+            "connection was reset",
+            "unexpected eof",
+        ];
+        let lowered = msg.to_lowercase();
+        MARKERS.iter().any(|k| lowered.contains(k))
     }
 
     /// 跑卡片脚本；网络类失败自动从断点续传，最多 [`DOWNLOAD_RESUME_LIMIT`] 次。
@@ -1741,43 +2329,13 @@ impl ModelManager {
             assets: BTreeMap::new(),
             asset_sha256: None,
             profiles: rec.profiles.clone(),
-            local_paths: self.builtin_store,
+            local_paths: self.local_script_paths,
         })
     }
 
     /// 抓取卡片六类脚本的正文并固化到本地。只在两个时刻调用：下载模型成功后、
     /// 用户主动点「检查卡片更新」时。抓取过程中任何一个脚本失败都整体放弃，
     /// 不留下半套新半套旧的副本。
-    /// 把内置（测试商店）卡片的固化脚本刷新成应用当前版本，返回刷新过的卡片名。
-    ///
-    /// 应用启动时跑一次。测试商店的脚本打包在二进制里，应用升级就等于脚本升级，
-    /// 不该还要用户手动点一次「更新脚本」——真机上就因为这个白查过一轮：推了新
-    /// 应用、脚本改动一个都没生效，卡片跑的还是下载那天固化的旧脚本。
-    ///
-    /// 只碰 `card_source = 'builtin'` 的记录（判断在 db 层），失败不影响启动。
-    pub fn refresh_builtin_cards() -> Vec<String> {
-        let mut refreshed = Vec::new();
-        let store = super::store_client::LocalStoreClient::new();
-        for card in super::test_store_data::test_cards() {
-            let Ok(detail) = store.get_card(&card.summary.id) else {
-                continue;
-            };
-            // 内置卡的 scripts/assets 值是本地文件路径，fetch 就是读文件，不联网
-            let mgr = Self::new_test_store();
-            let Ok(pkg) = mgr.fetch_and_store_scripts(&detail, None) else {
-                continue;
-            };
-            // 只在"确实刷新了"时记一笔；Ok(false)（没变化）和 Err（这张卡刷不动）
-            // 都不该打断其余卡片。
-            if let Ok(true) =
-                db::refresh_builtin_card_scripts(&card.summary.id, &pkg.scripts, &pkg.assets)
-            {
-                refreshed.push(card.summary.name.clone());
-            }
-        }
-        refreshed
-    }
-
     fn fetch_and_store_scripts(
         &self,
         card: &StoreCardDetail,
@@ -1787,7 +2345,7 @@ impl ModelManager {
         // 来源校验必须在**抓取的这一刻**做：抓完就固化成 Local 副本，之后
         // install_engine 直接跑副本、不再有任何 fetch 可校验。副本里的 sha256
         // 是按内容自算的，证明不了"内容是对的"，只能证明"内容没再变过"。
-        let local_paths = self.builtin_store;
+        let local_paths = self.local_script_paths;
         let fetch = |url: &str,
                      expected: Option<&str>,
                      root_capable: bool|
@@ -1835,6 +2393,330 @@ impl ModelManager {
         }
         super::native_card_compat::apply(&mut assets).map_err(ModelManagerError::new)?;
         Ok(CardPackage { scripts, assets })
+    }
+
+    /// 跟商店同步一次目录状态：哪些卡片是新上架的、哪些已下架、以及**已下载
+    /// 的模型有没有更新的脚本**。
+    ///
+    /// Catalog-wide update notifications are not wired yet. Explicit updates
+    /// are available in model details through `change_card_scripts`; merely
+    /// opening the store never replaces a cached script package.
+    ///
+    /// 设计意图保持不变：只读，不改任何本地副本——检测到有更新只是提醒用户，
+    /// 换不换由用户点「检查卡片更新」决定，免得他正用着的部署脚本在背后被悄悄
+    pub fn change_card_scripts(
+        &self,
+        card_id: &str,
+        control: &script_runner::RunControl,
+    ) -> Result<bool, ModelManagerError> {
+        let rec = self.get_record(card_id)?;
+        self.require_stopped_for_script_update(&rec)?;
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消，原脚本未修改。"));
+        }
+        let pkg = {
+            let card = self.store.get_card(card_id)?;
+            let empty = BTreeMap::new();
+            super::card_update::validate_inventory(
+                &card.scripts,
+                card.script_sha256.as_ref().unwrap_or(&empty),
+                &card.assets,
+                card.asset_sha256.as_ref().unwrap_or(&empty),
+            )
+            .map_err(ModelManagerError::new)?;
+            // Updating scripts is not an implicit migration to different weights,
+            // engines or profiles. Those require a separate deployment workflow.
+            if card.summary.id != rec.card_id
+                || card.source_repo_id != rec.source_repo_id
+                || card.source_filename != rec.source_filename
+                || card.summary.size_bytes != rec.size_bytes.max(0) as u64
+                || card.summary.deploy_topology != rec.deploy_topology
+                || serde_json::to_value(&card.profiles).ok()
+                    != serde_json::to_value(&rec.profiles).ok()
+            {
+                return Err(ModelManagerError::new(
+                    "卡片的权重或部署方案已改变，不能仅更新脚本。已保留本地资源，请联系维护者提供兼容升级。",
+                ));
+            }
+            let pkg = self.fetch_and_store_scripts(&card, Some(control))?;
+            if rec.assets_content.get("weights.sha256").is_some_and(|old| {
+                pkg.assets.get("weights.sha256").map(|new| &new.sha256) != Some(&old.sha256)
+            }) {
+                return Err(ModelManagerError::new(
+                    "卡片权重校验清单已改变，不能仅更新脚本。已保留原版本和权重，请联系维护者提供兼容升级。",
+                ));
+            }
+            // 引擎版本变化不拦（含已部署状态，2026-10-22 根治）：部署流程会按
+            // 本地缓存脚本探测并补装正确引擎（prepare_deployment_engine），「先换
+            // 脚本→重部署」是安全路径。此前在此拦截迫使更新链先卸载，而卸载一步
+            // 又可能被危险旧脚本拦截器/旧运行时结构/组可写目录卡住，形成设备无
+            // 自助出路的死锁（用户设备实锤三连）。更新脚本会重置
+            // deployed_script_sha256，界面据此提示重新部署。
+            pkg
+        };
+        let urls = |files: &BTreeMap<String, db::ScriptBlob>| {
+            files
+                .keys()
+                .map(|key| (key.clone(), "https://local.invalid/validated-cache".into()))
+                .collect()
+        };
+        let hashes = |files: &BTreeMap<String, db::ScriptBlob>| {
+            files
+                .iter()
+                .map(|(key, blob)| (key.clone(), blob.sha256.clone()))
+                .collect()
+        };
+        super::card_update::validate_inventory(
+            &urls(&pkg.scripts),
+            &hashes(&pkg.scripts),
+            &urls(&pkg.assets),
+            &hashes(&pkg.assets),
+        )
+        .map_err(ModelManagerError::new)?;
+        for blob in pkg.scripts.values().chain(pkg.assets.values()) {
+            if script_runner::sha256_hex(&blob.content) != blob.sha256 {
+                return Err(ModelManagerError::new("脚本包校验失败，已保留原版本。"));
+            }
+        }
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消，原脚本未修改。"));
+        }
+        self.require_stopped_for_script_update(&rec)?;
+        db::replace_card_package(&rec, &pkg.scripts, &pkg.assets).map_err(ModelManagerError::new)
+    }
+
+    fn require_stopped_for_script_update(
+        &self,
+        rec: &db::StoreModelRecord,
+    ) -> Result<(), ModelManagerError> {
+        self.require_actually_stopped(rec, "更新脚本")
+    }
+
+    /// 权重不完整归位前的等价停验（本批评审 P2-1）。
+    ///
+    /// deploy/enable 撞上「权重不完整」时走 [`db::mark_weights_incomplete`] 归位，
+    /// 而它会连 running/container_name/endpoint_url/endpoint_model 一起抹掉。
+    /// reconcile 的两条反向认领臂（容器名认领、端点+身份文件认领）都要求
+    /// status=="deployed" 且这些身份字段还在——容器其实活着却被抹掉身份的卡，
+    /// 从此进程照旧占着内存/端口，应用内却再也没有停止入口。所以抹身份前先做
+    /// 与卸载预检同款的真实验验（复用 [`Self::require_actually_stopped`]：容器
+    /// inspect / 原生进程指纹 / 端口存活三重核验）：真不在才抹；仍在或查不动，
+    /// 就保留原记录，把「权重不完整但实例仍在」如实报给用户并指引自助恢复。
+    /// 认领臂的 status 条件不动——那会放宽认领面，停验才是保守的那一侧。
+    fn require_instance_gone_for_weights_reset(
+        &self,
+        card_id: &str,
+    ) -> Result<(), ModelManagerError> {
+        // 重新读一遍记录：deploy/enable 脚本可能已经跑了很久，落库前按最新
+        // 状态判定，而不是拿进入函数时的旧快照。
+        let rec = self.get_record(card_id)?;
+        if let Err(alive) = self.require_actually_stopped(&rec, "继续下载") {
+            return Err(ModelManagerError::new(format!(
+                "模型文件未完整下载，但该模型仍有实例在运行或无法确认已停止，\
+                 已保留原有运行记录不做改动。请先停用该模型，再点击「继续下载」\
+                 补齐文件后重新部署。（停验未通过：{alive}）"
+            )));
+        }
+        Ok(())
+    }
+
+    /// 三重真实核验（容器 inspect / 原生进程指纹 / 端口存活）+ DB 标志，
+    /// `action` 只用于错误文案（"更新脚本" / "卸载"）。
+    ///
+    /// 为什么不能只信 `rec.running`：stop 半成功（`stop.sh || echo 继续` 模式）时
+    /// 标志已是 false 而进程还活——只看标志会在活进程脚下更新脚本/卸载（评审 P2：
+    /// 智能更新流 stop→uninstall→card_scripts 串行正踩这条路径）。
+    pub fn require_actually_stopped(
+        &self,
+        rec: &db::StoreModelRecord,
+        action: &str,
+    ) -> Result<(), ModelManagerError> {
+        if rec.running {
+            return Err(ModelManagerError::new(format!(
+                "请先停用此模型，再{action}；不会自动停止模型。"
+            )));
+        }
+        if let Some(name) = rec.container_name.as_deref() {
+            match proc_timeout::query(
+                "docker",
+                &["inspect", "--format", "{{.State.Running}}", name],
+            ) {
+                Some(state) if state.trim() == "false" => return Ok(()),
+                // 容器不存在 = 已停止（2026-10-22 用户验证实锤：sglang0519 的
+                // container_name 留在库里而容器早已删掉，inspect 报 No such object，
+                // 此前落入"无法确认"分支把更新链整个拒掉）。用 ps -a 精确名字过滤
+                // 区分「不存在」与「真的查不动」。
+                //
+                // r18 P2-1：`ps -a` 自己也返回 None（daemon 卡死/宕机）时是「查不动」，
+                // 不是「不存在」——此前 is_some_and 把两种 None 混为一谈，live-restore
+                // 下活容器会被宣告已停。与 reconcile_running_status 的 None=未知口径
+                // 对齐：查不动就拒绝，宁可让用户重试。
+                _ => {
+                    let Some(ps_stdout) = proc_timeout::query(
+                        "docker",
+                        &[
+                            "ps",
+                            "-a",
+                            "--filter",
+                            &format!("name=^/{name}$"),
+                            "--format",
+                            "{{.Names}}",
+                        ],
+                    ) else {
+                        return Err(ModelManagerError::new(format!(
+                            "暂时查不到 Docker 状态（守护进程无响应），无法确认容器已停止，请稍后再试或先检查 Docker，再{action}。"
+                        )));
+                    };
+                    let exists = ps_stdout.lines().any(|l| l.trim() == name);
+                    if !exists {
+                        return Ok(());
+                    }
+                    return Err(ModelManagerError::new(format!(
+                        "模型容器仍在运行或无法确认已停止，再{action}。探测到容器「{name}」\
+                         仍在运行：请先在模型列表停用对应卡片（本应用之外启动的实例，\
+                         也请用它的启动方式停掉或重启设备后再试）"
+                    )));
+                }
+            }
+        }
+        if let Some((_, fingerprint)) =
+            rec.scripts_content
+                .get("install_engine")
+                .and_then(|install| {
+                    native_tachyon_identity(
+                        &install.content,
+                        rec.assets_content
+                            .get("common.sh")
+                            .map(|b| b.content.as_str()),
+                        rec.engine_version.as_deref(),
+                    )
+                })
+        {
+            // r21 P2-2：先看卡片自己的身份文件。mark_weights_incomplete /
+            // mark_cleanup_required 会把 endpoint_model/container_name 一并抹掉，
+            // 下面那套「进程 --model-id ↔ endpoint_model（model_name 兜底）」的
+            // 比对从此失去目标（model_name 兜底六卡实测无一命中）——本 PR 创造的
+            // incomplete/cleanup_required 两态上被重新拉起的实例认不出，purge
+            // 预检放行，r19 P1-1 修的洞换个状态重现。身份文件
+            // （.runtime/serve.identity.json）在卡片目录里、不随 DB 状态复位消失，
+            // 且带 start_ticks/uid 防 PID 复用——与 reconcile 的收编臂同源同判据。
+            // r22 P3-3 同款：校验失败直接跳过身份判据，不再探测 cards/ 整目录。
+            if let Ok(safe_id) = config::safe_path_component(&rec.card_id) {
+                let card_dir = config::data_dir().join("cards").join(safe_id);
+                if native_engine_identity_alive(&card_dir) {
+                    return Err(ModelManagerError::new(format!(
+                        "此原生引擎仍有运行实例或状态无法确认，请先停用使用该引擎的模型再{action}。"
+                    )));
+                }
+            }
+            let snapshot = super::native_process::discover();
+            if !snapshot.complete
+                || snapshot.processes.iter().any(|process| {
+                    let fingerprint_match = process
+                        .executable
+                        .parent()
+                        .and_then(std::path::Path::file_name)
+                        .and_then(|p| p.to_str())
+                        == fingerprint.get(..8);
+                    if !fingerprint_match {
+                        return false;
+                    }
+                    // 同一引擎二进制被多张卡共用（两张驭光卡同指纹）：只有**属于
+                    // 本卡**的运行实例才拦（2026-10-22 用户实锤：Ornith 在跑时
+                    // 更新 Qwen 卡被误拦——纯脚本更新/卸载不碰引擎，跨引擎风险
+                    // 跨引擎场景由部署时的引擎补装把关）。归属无法确认（进程无
+                    // --model-id）的保守起见仍然拦。
+                    native_process_owned_by_card(
+                        process.model_id.as_deref(),
+                        rec.endpoint_model.as_deref(),
+                        &rec.model_name,
+                    )
+                })
+            {
+                return Err(ModelManagerError::new(format!(
+                    "此原生引擎仍有运行实例或状态无法确认，请先停用使用该引擎的模型再{action}。"
+                )));
+            }
+        } else if rec.status == "deployed" {
+            // Unknown deployment must not be treated as safely stopped just
+            // because a stale database flag says false.
+            //
+            // r19 P1-2：ollama 卡不走下面的 docker 判据——它既没有
+            // container_name 也没有 docker 镜像，docker_owned_container_state
+            // 只会得到 Absent，又因 ollama 引擎登记不出 docker_image 兜不回
+            // 来，必落 _ 臂拒绝；而这个分支提前 return，下面的端口探测不可达。
+            // 停用后 status 仍是 deployed。判据与 reconcile_running_status 的
+            // ollama 分支同口径：ollama 服务不在 = 这台机器上任何 ollama 模型
+            // 都不可能在服务 = 已停；服务还在时不能就此放行，也不该一刀切拒绝
+            // （r21 P2-5：daemon 是系统服务常态存活，一刀切让稳态更新/卸载全部
+            // 确定性失败）——继续按 /api/ps 查这个模型是否仍被加载。
+            if matches!(
+                deployed_stopped_evidence(&rec.engine_name),
+                DeployedStoppedEvidence::OllamaService
+            ) {
+                if !ollama_alive(&self.settings.ollama_host) {
+                    return Ok(());
+                }
+                // r21 P2-5：服务在 ≠ 这个模型在服务。ollama 卡的 deployed 是永态
+                // （stop 只清 running 标志），daemon 是系统服务常态存活——只按
+                // 服务判停，稳态下更新脚本/卸载全部确定性拒绝，正文原先宣称的
+                // 「不再锁死」只在 daemon 已死时成立。对破坏性操作真正危险的
+                // 是**这个模型此刻被加载在显存里**；判据改查 /api/ps 该模型
+                // 是否加载（与 ollama_runtime_lines 同口径按 name 匹配）：
+                // 未加载 → 放行；已加载或查不动 → 保守拒绝。
+                return match ollama_model_loaded(&self.settings.ollama_host, &rec.model_name) {
+                    Some(false) => Ok(()),
+                    Some(true) => Err(ModelManagerError::new(format!(
+                        "该模型仍加载在 Ollama 服务中，请先停用再{action}。"
+                    ))),
+                    None => Err(ModelManagerError::new(format!(
+                        "Ollama 服务仍在运行且无法确认该模型是否已卸载，请先停用再{action}。"
+                    ))),
+                };
+            }
+            // 例外（2026-10-27 真机实锤）：无 container_name 的 docker 卡——
+            // z-image-turbo 停用五天后点「更新脚本」，一路落到这里被「无法确认」
+            // 拦死，设备从此没有自助出路。docker 卡的运行形态只有容器：按
+            // compose 项目名/容器名 == card_id 找得到容器（任何状态）就按容器
+            // 状态下结论；找不到而引擎登记过 docker 镜像，同样没有别的运行
+            // 形态，视为已停。其余（docker 查不动、又无镜像记录）保留原护栏。
+            return match docker_owned_container_state(&rec.card_id) {
+                DockerOwnedContainerState::Running => Err(ModelManagerError::new(format!(
+                    "模型容器仍在运行，请先停用再{action}。"
+                ))),
+                DockerOwnedContainerState::Stopped => Ok(()),
+                DockerOwnedContainerState::Absent
+                    if db::get_installed_engine(
+                        &rec.engine_name,
+                        rec.engine_version.as_deref(),
+                    )
+                    .ok()
+                    .flatten()
+                    .and_then(|e| e.docker_image)
+                    .is_some() =>
+                {
+                    Ok(())
+                }
+                _ => Err(ModelManagerError::new(format!(
+                    "无法可靠确认此部署已停止，请先停用后再{action}。"
+                ))),
+            };
+        }
+        // 端口存活只对**无容器名**的记录有意义（原生引擎）：docker 卡的存活性由
+        // 上面的容器分支负责，而且同端口可能被别的服务占着——z-image 默认 8000
+        // 与品悟内置 vLLM 同端口，拿 endpoint_url 探测会把停用已久的卡误判成
+        // 「端口仍有服务」（2026-10-22 用户验证实锤）。
+        if rec.container_name.is_none()
+            && rec
+                .endpoint_url
+                .as_deref()
+                .is_some_and(openai_compatible_endpoint_alive)
+        {
+            return Err(ModelManagerError::new(format!(
+                "模型端口仍有服务或状态无法确认，请先停用后再{action}。"
+            )));
+        }
+        Ok(())
     }
 
     /// Read-only check; only a changed weight manifest may be fetched and verified.
@@ -1909,7 +2791,7 @@ impl ModelManager {
         if control.cancelled() {
             return Err(ModelManagerError::new("已取消"));
         }
-        db::replace_card_package(&rec, &card, &pkg.scripts, &pkg.assets)
+        db::commit_card_update_package(&rec, &card, &pkg.scripts, &pkg.assets)
             .map_err(ModelManagerError::new)?;
         on_progress("卡片已更新。请重新部署以刷新引擎和运行配置，然后启用模型。");
         Ok(serde_json::json!({"changed": true, "needs_redeploy": true}))
@@ -1919,6 +2801,77 @@ impl ModelManager {
         db::get_store_model(card_id)
             .map_err(|e| ModelManagerError::new(format!("读取模型记录失败：{e}")))?
             .ok_or_else(|| ModelManagerError::new("该模型尚未下载"))
+    }
+
+    /// A cached package may require a new engine after an explicit script update.
+    /// Probe that package rather than trusting the historical installed-engine row.
+    /// Reuse existing weights and never fetch a newer package during deployment.
+    fn prepare_deployment_engine(
+        &self,
+        rec: &db::StoreModelRecord,
+        source: &ScriptsSource,
+        env: &HashMap<String, String>,
+        on_progress: &mut ProgressFn<'_>,
+        control: script_runner::RunControl,
+    ) -> Result<(), ModelManagerError> {
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消部署。"));
+        }
+        // 卡片包不携带 install_engine（ollama/docker 等自管引擎形态）时，部署期
+        // 引擎补装无事可做：缺不缺引擎由部署脚本自己判断。没有这一条，没有安装
+        // 脚本的卡片会在 deploy 前被误报「请先检查卡片更新」。
+        if source.optional_script_blob("install_engine")?.is_none() {
+            return Ok(());
+        }
+        let probe = self.engine_probe(source, &rec.card_id, env);
+        if probe.installed {
+            return Ok(());
+        }
+        if rec.running {
+            return Err(ModelManagerError::new(
+                "模型仍在运行且无法确认引擎依赖，请先停用模型再重新部署。",
+            ));
+        }
+        on_progress("检查发现当前脚本所需引擎尚未就绪，先安装引擎；已有模型权重将保留。");
+        if probe.need_root {
+            on_progress("安装此引擎需要管理员权限，请在系统授权窗口中确认。");
+        }
+        let lines = self.install_engine(
+            source,
+            env,
+            &mut |line| on_progress(&script_runner::prefix_log_line("[安装引擎] ", line)),
+            control.clone(),
+            probe.need_root,
+        )?;
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消部署，未继续执行部署脚本。"));
+        }
+        // Native cards implement an exact binary checksum probe. A zero installer
+        // exit alone must not turn a missing/corrupt engine into a successful deploy.
+        if native_tachyon_version(rec).is_some()
+            && !self.engine_probe(source, &rec.card_id, env).installed
+        {
+            return Err(ModelManagerError::new(
+                "引擎安装后仍未通过完整性检查，已停止部署；请查看安装引擎日志。",
+            ));
+        }
+        let cleanup_script = source.optional_script_blob("uninstall_engine")?;
+        // 同 download 路径：自报镜像名先过白名单、不覆盖已登记的不同值
+        // （r19 评审 P2-1）。
+        let docker_image = engine_image_to_record(
+            &rec.engine_name,
+            rec.engine_version.as_deref(),
+            extract_marker(&lines, "LMM_ENGINE_IMAGE="),
+        );
+        db::mark_engine_installed(
+            &rec.engine_name,
+            rec.engine_version.as_deref(),
+            docker_image.as_deref(),
+            source.script_hash("install_engine").as_deref(),
+            cleanup_script.as_ref(),
+        )
+        .map_err(|error| ModelManagerError::new(format!("记录引擎安装状态失败：{error}")))?;
+        Ok(())
     }
 
     /// profile_id 不传时：已经部署过就沿用上次用的方案（重新部署/修复场景），
@@ -1939,6 +2892,23 @@ impl ModelManager {
         .map_err(ModelManagerError::new)?;
         let rec = self.get_record(card_id)?;
         versions::ensure_not_deleting(&rec)?;
+        // 状态门（r21 P1-1，对照 enable 的 status 门）。此前 deploy 对任何状态都
+        // 直接跑脚本：cleanup_required 的卡在弹窗被误点「部署模型」（mark_cleanup_
+        // required 不清 weights_ready_at，前端矩阵落在 enabled 部署格）后，脚本
+        // 一报权重残缺，错误路径的 mark_weights_incomplete 会把 cleanup_required
+        // **静默改写成 incomplete**——正是 db.rs 注释禁止的「用继续下载掩盖清理态」。
+        // incomplete / 缺 weights_ready_at（升级前的老库）同理：权重未就绪时部署
+        // 必然失败，门在跑脚本之前把指引给对（先继续下载补齐）。
+        if rec.status == "cleanup_required" {
+            return Err(ModelManagerError::new(
+                "该模型上一次删除没有清理完，请先点「继续清理」完成清理（或明确选择仅从列表移除），再部署。",
+            ));
+        }
+        if rec.status == "incomplete" || rec.weights_ready_at.is_none() {
+            return Err(ModelManagerError::new(
+                "模型权重尚未就绪，请先点「继续下载」补齐文件后再部署。",
+            ));
+        }
         let source = self.local_scripts_source(&rec)?;
         let profiles = source.profiles();
         let resolved_profile_id = profile_id.map(|s| s.to_string()).or_else(|| {
@@ -1960,11 +2930,24 @@ impl ModelManager {
             on_progress("正在更新引擎及部署包；模型权重保留。需要管理员权限时会弹出授权窗口…");
             let lines =
                 self.install_engine(&source, &env, on_progress, control.clone(), probe.need_root)?;
+            // PR 并集：第 5 参固化独立清理脚本（uninstall_engine），缺失不阻断。
+            let cleanup_script = source
+                .optional_script_blob("uninstall_engine")
+                .ok()
+                .flatten();
+            // r38 P1-3：与 download 路径（:2828）同守卫——自报镜像先过白名单、
+            // 不覆盖已登记的不同值，不能因走 card_update_pending 臂就裸传。
+            let docker_image = engine_image_to_record(
+                &rec.engine_name,
+                rec.engine_version.as_deref(),
+                extract_marker(&lines, "LMM_ENGINE_IMAGE="),
+            );
             db::mark_engine_installed(
                 &rec.engine_name,
                 rec.engine_version.as_deref(),
-                extract_marker(&lines, "LMM_ENGINE_IMAGE=").as_deref(),
+                docker_image.as_deref(),
                 source.script_hash("install_engine").as_deref(),
+                cleanup_script.as_ref(),
             )
             .map_err(|e| ModelManagerError::new(format!("记录引擎更新失败：{e}")))?;
         }
@@ -1974,14 +2957,37 @@ impl ModelManager {
 
         super::version_store::current_measurements::invalidate(card_id)
             .map_err(ModelManagerError::new)?;
-        self.run_card_script(
+        self.prepare_deployment_engine(&rec, &source, &env, on_progress, control.clone())?;
+
+        match self.run_card_script(
             &source,
             "deploy",
             &env,
             &mut |line| on_progress(line),
             control,
             false,
-        )?;
+        ) {
+            Ok(_) => {}
+            Err(error) if model_weights_are_incomplete(&error.to_string()) => {
+                // DB 的 downloaded 只是一份历史投影；用户可以在应用外清目录，旧版也
+                // 曾在下载中断后留下错误记录。部署脚本已经给出了“文件不完整”的
+                // 物理事实，立刻把状态归正，下一次界面刷新就必须给“继续下载”。
+                //
+                // 绝不删模型目录：下载脚本负责断点续传，清掉分片反而会浪费用户已经
+                // 下完的几十 GB。
+                //
+                // 本批评审 P2-1：归位会连运行身份一起抹掉，抹前先做与卸载预检
+                // 同款的真实验验；实例仍在就保留记录、如实报错。
+                self.require_instance_gone_for_weights_reset(card_id)?;
+                db::mark_weights_incomplete(card_id).map_err(|db_error| {
+                    ModelManagerError::new(format!("修复模型下载状态失败：{db_error}"))
+                })?;
+                return Err(ModelManagerError::new(
+                    "模型文件未完整下载，已切换为“继续下载”。已下载的部分会保留；请点击“继续下载”补齐文件后再部署。",
+                ));
+            }
+            Err(error) => return Err(error),
+        }
         // 记下这次用的 deploy 脚本版本：以后脚本一更新，界面就能准确判断
         // 「这个模型需要重新部署」，而不是对所有已部署模型都常驻一个按钮。
         db::mark_deployed(
@@ -2015,8 +3021,60 @@ impl ModelManager {
         if rec.status != "deployed" {
             return Err(ModelManagerError::new("该模型尚未部署，请先部署再启用"));
         }
+        // 本批评审 P2-8：启用前的廉价在跑守卫。卸载侧有三重停验，启用此前只有
+        // 内存准入——一张被遗留脚本 fail-open 启过的卡（老版 enable.sh 半途失败
+        // 仍报成功、或运维照卡片文档手工跑过脚本），库里 running=0 而服务真在跑，
+        // 再点「启用」就是第二个实例（sglang 双负载拖垮整机已实锤）。
+        //
+        // r36 P1-2 终裁（合并语义）：原第 1) 臂「DB 已说在跑 → 拒绝」删除，对齐
+        // main 的 enable 语义——**enable 是幂等接管**：服务层每次启用前经内存准入
+        // 的 reconcile 纠正陈旧 running 标志（陈标志才是双实例的真源头），此后
+        // running=true 意味着「这是本应用自己的活实例」，用户此刻再点启用 = 显式
+        // 重启/接管意图（main 的 context-repair 二次启用与修订通知流都依赖它）——
+        // 自己的实例端点有响应是常态，不构成拒绝理由。
+        // 保留第 2) 臂（条件收窄为 !rec.running）：**running=false 而端点有响应**
+        // = 遗留/外来实例（reconcile 无身份可认领），仍拒绝并指引自助恢复——r19
+        // 的双实例防护在这条臂上不变。
+        // 修复意图（repair_due）对 2) 臂短路：修复语义恰恰要在端点存活时再启用。
+        let repair_intent = super::linked_models::repair_due(card_id);
+        if !rec.running && rec.engine_name != "ollama" && !repair_intent {
+            if let Some(endpoint) = rec.endpoint_url.as_deref() {
+                // repair_intent 先判（短路左优先）：修复路径根本不该探活——
+                // 测试夹具以「服务端收到的请求数」为断言，多探一次就是多一个。
+                if endpoint_path_is_openai_style(endpoint)
+                    && openai_compatible_endpoint_alive(endpoint)
+                {
+                    return Err(ModelManagerError::new(
+                        "该模型的服务端口仍有响应（可能是旧版脚本或手工操作启动的遗留\
+                         实例），已取消本次启用以避免出现双实例。请先停用该模型，\
+                         再重新启用；若确认没有实例在跑，请稍后重试。",
+                    ));
+                }
+            }
+        }
         let env = self.env_for_record(&rec);
         let source = self.local_scripts_source(&rec)?;
+
+        // r41 P1-3：script-only 更新后的门。「停止→更新脚本」会把
+        // deployed_script_sha256 置空串（replace_card_package），此刻页脚已出现
+        // 「重新部署」；若放行启用，新 enable 脚本会跑在旧部署回执上——与
+        // card_update_pending 硬门不对称。判据严格取哈希不一致（两侧均在且不同，
+        // 空串=刚被脚本更新清掉）；老记录无哈希时不拦（页脚的「重新部署」仍是
+        // 建议性提示，与 needs_redeploy_light 的时间戳回退各司其职）。
+        if rec.status == "deployed" {
+            let script_stale = match (
+                rec.deployed_script_sha256.as_deref(),
+                source.script_hash("deploy").as_deref(),
+            ) {
+                (Some(deployed), Some(current)) => deployed != current,
+                _ => false,
+            };
+            if script_stale {
+                return Err(ModelManagerError::new(
+                    "卡片脚本已更新，请先重新部署，再启用模型。",
+                ));
+            }
+        }
 
         let output_lines = match self.run_card_script(
             &source,
@@ -2027,6 +3085,20 @@ impl ModelManager {
             false,
         ) {
             Ok(lines) => lines,
+            Err(error) if model_weights_are_incomplete(&error.to_string()) => {
+                // 已部署模型同样可能在应用外被清走权重。不能让它一直顶着
+                // “启用”按钮反复失败；跟 deploy 路径一样，归正为可续传的下载状态。
+                //
+                // 本批评审 P2-1：enable 撞权重不完整时这张卡多半刚部署过、
+                // 容器还活着的概率不低，抹身份前的等价停验尤其不能省。
+                self.require_instance_gone_for_weights_reset(card_id)?;
+                db::mark_weights_incomplete(card_id).map_err(|db_error| {
+                    ModelManagerError::new(format!("修复模型下载状态失败：{db_error}"))
+                })?;
+                return Err(ModelManagerError::new(
+                    "模型文件未完整下载，已切换为“继续下载”。已下载的部分会保留；请点击“继续下载”补齐文件后再部署。",
+                ));
+            }
             Err(error) if deployment_receipt_is_missing(&error.to_string()) => {
                 // “已部署”只是历史数据库状态；卡片自己的部署配置可能被手工清理、
                 // 被旧版卸载遗漏，或因中途失败而从未真正写完。继续保留这个假状态，
@@ -2034,12 +3106,40 @@ impl ModelManager {
                 //
                 // 退回“已下载”只清部署痕迹，不会删除几十 GB 权重或任何引擎。下次
                 // 点击“部署”会用已保存的脚本与上次选择的 profile 重新生成配置。
+                // r39 P2-5：与姊妹 weights 臂对称——receipt 缺失同样意味着状态
+                // 与真实世界脱节，抹部署身份前先做等价停验（容器还活着就别把
+                // 「已部署」标记抹掉，让用户走停用而不是留下无主实例）。
+                self.require_instance_gone_for_weights_reset(card_id)?;
                 db::mark_deployment_missing(card_id).map_err(|db_error| {
                     ModelManagerError::new(format!("修复失效部署状态失败：{db_error}"))
                 })?;
                 return Err(ModelManagerError::new(
                     "该模型的部署配置已丢失，已恢复为“已下载”。请先点击“部署”，部署完成后再启用。",
                 ));
+            }
+            Err(error) if engine_startup_failed(&error.to_string()) => {
+                // Other running models are context, not proof of an OOM. Keep
+                // the actual error and qualify the resource-pressure suggestion.
+                let running = db::list_store_models()
+                    .map_err(|db_error| {
+                        ModelManagerError::new(format!("读取运行模型失败：{db_error}"))
+                    })?
+                    .into_iter()
+                    .filter(|model| model.running && model.card_id != card_id)
+                    .map(|model| model.card_name)
+                    .collect::<Vec<_>>();
+                if running.is_empty() {
+                    return Err(error);
+                }
+                let names = running
+                    .iter()
+                    .map(|name| format!("「{name}」"))
+                    .collect::<Vec<_>>()
+                    .join("、");
+                return Err(ModelManagerError::new(format!(
+                    "无法启用「{}」：{}。同时检测到{}正在运行，可能增加运行资源压力，但尚不能据此确定失败原因。请检查诊断日志；如内存紧张，可先停用其他模型后重试，不要直接重新下载权重。",
+                    rec.card_name, error, names
+                )));
             }
             Err(error) => return Err(error),
         };
@@ -2171,6 +3271,35 @@ impl ModelManager {
                 .map_err(|error| ModelManagerError::new(error.to_string()))?;
         }
         let rec = self.get_record(card_id)?;
+        let source = self.local_scripts_source(&rec)?;
+        let uninstall = source.entry_content("uninstall", source.fetch_policy("uninstall"))?;
+        // Exact published-body backstop for a confirmed destructive version.
+        // Hash the bytes, not cached metadata or the card name. This is NOT a
+        // safety certification for arbitrary other/new card scripts.
+        if script_runner::sha256_hex(&uninstall)
+            == "184de35d3e0844a4a43c8ffc6ab481aeeb65a06843d68410c18fe0f869ec349c"
+        {
+            return Err(ModelManagerError::new(
+                "已拦截存在已知删除风险的旧版卸载脚本：该版本忽略保留权重选项，停用失败后仍会继续删除。\
+                 本次未执行脚本、未停止模型或删除文件。请先获取经过修复的模型卡片包，再继续更新或卸载；无需重新下载现有权重。",
+            ));
+        }
+        // Old URL-only records have no sibling assets. Pin the checked entry
+        // in memory so a second HTTP response cannot replace it after preflight.
+        let source = match source {
+            ScriptsSource::Remote { profiles, .. } => ScriptsSource::Local {
+                blobs: BTreeMap::from([(
+                    "uninstall".into(),
+                    db::ScriptBlob {
+                        sha256: script_runner::sha256_hex(&uninstall),
+                        content: uninstall,
+                    },
+                )]),
+                assets: BTreeMap::new(),
+                profiles,
+            },
+            local => local,
+        };
         let mut env = self.env_for_record(&rec);
         // Isolated weights belong to the host's version manager. The card only
         // removes its service; shared-reference/ownership/process checks must
@@ -2187,7 +3316,6 @@ impl ModelManager {
             "LMM_PURGE_WEIGHTS".into(),
             if script_purge { "1" } else { "0" }.into(),
         );
-        let source = self.local_scripts_source(&rec)?;
 
         // Read before scripts or database deletion can commit. These shared
         // roots remain quota-visible after full deletion, but are disclosure
@@ -2200,7 +3328,10 @@ impl ModelManager {
         // 先量一次基线。**必须在跑脚本之前量**：脚本一跑完目录就没了，事后再
         // 想知道"刚才那儿有多少字节"已经无处可查，只剩下 card.json 里那个标称
         // 值可以拿来充数——而那正是要杜绝的事。
-        let candidates = self.candidate_paths(&rec);
+        //
+        // 清单 = 猜的候选 + `.deploy-env` 记录的实际部署目录：猜错方向的代价
+        // 见 `deployed_weights_hint`（量不到真权重 → "实测释放"虚报为 0）。
+        let candidates = self.owned_candidate_paths(&rec);
         let before = if managed_purge {
             versions::allocated_exclusive_paths(&candidates)?
         } else {
@@ -2217,62 +3348,124 @@ impl ModelManager {
             control,
             false,
         )?;
-        // 记录留还是删，取决于用户按的是哪个按钮——这是两个动作**唯一**的语义
-        // 差别，也是它们在界面上叫不同名字的原因：
+
+        // `cards/<card-id>` 由 LMM 自己创建，里面只有这张卡下载的脚本、厂商附属包
+        // 与标记文件。用户选择“删除模型数据”后，这些文件也在删除范围内；不能让
+        // 卡片脚本各自记得删，否则脚本升级/回滚一次就会留下看不见的部署包。
         //
-        //   仅卸载：只是把模型从引擎上撤下来。权重还在盘上，卡片就该还在库里，
-        //           退回「已下载」，按钮变回「部署」。
-        //   彻底删除：权重都没了，留着记录就是一条指向空气的死数据。
-        //
-        // 以前两条路径都走 delete_store_model，于是「仅卸载」会把卡片从库里抹掉，
-        // 盘上几十 GB 权重从此没有任何界面管得到——用户要么手工 rm，要么重下一遍
-        // 才能重新接管。那不是"保留"，是把东西弄丢在原地。
-        if purge_weights {
+        // r23 P1-1：这里**不再提前删除**卡目录。旧序先删再判定，会把
+        // `vendor/.deploy-env` 消歧提示一起带走——首次 purge 失败进入
+        // 「需要继续清理」后，重试轮的 owned_candidate_paths 读不到提示，
+        // 猜测路径消歧不了同名后缀目录（…-unsloth 形态），残留被误判为空，
+        // 记录删除、真实权重孤儿化。新序：判定时豁免卡目录（它的清理由下方
+        // 成功分支强制执行、成败即结果）；失败路径不删卡目录，提示留给重试。
+        let own_card_dir = config::safe_path_component(&rec.card_id)
+            .ok()
+            .map(|safe_id| config::data_dir().join("cards").join(safe_id));
+
+        // 受管（版本化）布局由应用直接删除——卡片卸载脚本只懂旧式布局，删不了
+        // .versions 隔离根。主线语义：purge 失败在动任何记录之前如实报错。
+        if purge_weights && managed_purge {
             versions::purge_current_storage(&rec, &self.settings.models_path())?;
-            db::delete_store_model(card_id).map_err(|error| match error {
-                db::DeleteStoreModelError::RetainedVersions => {
-                    ModelManagerError::new(error.to_string())
+        }
+
+        let after = if managed_purge {
+            versions::allocated_exclusive_paths(&candidates)?
+        } else {
+            total_size(&candidates)
+        };
+        let freed_bytes = before.saturating_sub(after);
+        // 残留判定前先摘掉**其他在库卡片**拥有的路径：猜的权重目录可能跟别的卡
+        // 碰名（repo 末段相同）或共用同一个 blob 根（ollama 全家）。不摘的话，
+        // 本卡删得再干净也会被判"尚未全部删除"，而那个目录恰恰是别的卡的活
+        // 权重，重试一万次也删不掉——用户最后只能走强制移除，还被提示去手动
+        // 清理那个目录，一下就把保留卡的权重删了（2026-11-03 真机剧本）。
+        let other_cards_paths = self.paths_owned_by_other_cards(card_id);
+        // 本卡在版本登记册里的根（隔离存储根 / 资源目录 / 运行卡目录）是
+        // **已登记**路径：删除后走披露，不构成阻塞——否则显式登记的旧版资源
+        // 会让 purge 永远卡进「需要继续清理」（主线 contract）。未登记的猜测
+        // 路径残留仍照旧阻塞（2026-11-03 真机剧本的保护不动）。
+        let mut registered_version_paths: Vec<PathBuf> = Vec::new();
+        for version in super::version_store::list(Some(card_id))
+            .map_err(|e| ModelManagerError::new(e.to_string()))?
+        {
+            registered_version_paths.extend(version.models_root.into_iter().map(PathBuf::from));
+            registered_version_paths.extend(version.resource_dir.into_iter().map(PathBuf::from));
+            if let Ok(id) = config::safe_path_component(&version.runtime_card_id) {
+                registered_version_paths.push(config::data_dir().join("cards").join(id));
+            }
+        }
+        let mut remaining_paths: Vec<String> = candidates
+            .iter()
+            .filter(|p| {
+                // 受管 purge 走「登记路径无法确认缺失即残留」的保守判据：
+                // 隔离根/外部设备上 stat 失败不能当“已删干净”。
+                // r39 P2-1：legacy（非受管）臂同口径——`Path::exists()` 把 stat
+                // 权限错/EIO/僵挂挂载折算成「已删」，判空成功即 delete_store_model，
+                // 权重永久孤儿且无重试入口。换成只会更保守的同一助手。
+                residual_path_may_exist(p)
+                    && !other_cards_paths.contains(p)
+                    && !registered_version_paths.contains(p)
+                    // 卡目录自身不计入残留：它还在只说明"还没轮到删"，删除发生在
+                    // 下方成功分支，删失败会走「需要继续清理」而不是靠 exists 判定。
+                    && !own_card_dir.as_deref().is_some_and(|d| d == p.as_path())
+            })
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        // 删除是否完成必须由**删除后的磁盘事实**决定，不能根据脚本退出码猜。
+        // 先落状态再决定是否移除记录：任何残留都会进入“需要继续清理”，卡片仍在
+        // 模型库中，用户可重试、打开日志或明确选择“仅从列表移除”。
+        if purge_weights {
+            if remaining_paths.is_empty() {
+                // 提示的使命到此完成（消歧已用于上方判定），此刻删除卡目录；
+                // 删不掉本身也是残留——落「需要继续清理」而非删除记录。
+                if let Some(card_dir) = own_card_dir.as_ref() {
+                    // r39 P2-1：同上——exists() 的 stat 错误折叠为 false 会跳过
+                    // 删除尝试、记录照删，目录成孤儿。无法确认缺失就试着删，
+                    // 删不动自然落「需要继续清理」。
+                    if residual_path_may_exist(card_dir) {
+                        on_progress("正在清理此模型的本地脚本与部署文件…");
+                        if let Err(error) = std::fs::remove_dir_all(card_dir) {
+                            on_progress(&format!("本地脚本与部署文件尚未清理：{error}"));
+                            db::mark_cleanup_required(card_id).map_err(|e| {
+                                ModelManagerError::new(format!("保留待清理模型记录失败：{e}"))
+                            })?;
+                            return Err(ModelManagerError::new(format!(
+                                "本地脚本与部署文件尚未清理：{error}。已保留在模型库中，请点击“继续清理”重试。"
+                            )));
+                        }
+                    }
                 }
-                db::DeleteStoreModelError::Database(error) => {
-                    ModelManagerError::new(format!("删除模型记录失败：{error}"))
-                }
-                // 事务内刷新下载根登记测量失败：记录尚未删除（事务中止），
-                // 按配额核算的失败关闭口径如实上报，修复读取问题后重试。
-                db::DeleteStoreModelError::Measurement(error) => ModelManagerError::new(format!(
-                    "刷新下载目录登记大小失败，未删除模型记录：{error}"
-                )),
-            })?;
+                db::delete_store_model(card_id).map_err(|error| match error {
+                    db::DeleteStoreModelError::RetainedVersions => {
+                        ModelManagerError::new(error.to_string())
+                    }
+                    db::DeleteStoreModelError::Database(error) => {
+                        ModelManagerError::new(format!("删除模型记录失败：{error}"))
+                    }
+                    // 事务内刷新下载根登记测量失败：记录尚未删除（事务中止），
+                    // 按配额核算的失败关闭口径如实上报，修复读取问题后重试。
+                    db::DeleteStoreModelError::Measurement(error) => ModelManagerError::new(
+                        format!("刷新下载目录登记大小失败，未删除模型记录：{error}"),
+                    ),
+                })?;
+            } else {
+                db::mark_cleanup_required(card_id)
+                    .map_err(|e| ModelManagerError::new(format!("保留待清理模型记录失败：{e}")))?;
+                return Err(ModelManagerError::new(format!(
+                    "模型数据尚未全部删除。已保留在模型库中，请点击“继续清理”重试；如仍失败，可打开日志目录并反馈。仍需处理：{}",
+                    remaining_paths.join("、")
+                )));
+            }
         } else {
             db::mark_uninstalled(card_id)
                 .map_err(|e| ModelManagerError::new(format!("更新模型状态失败：{e}")))?;
         }
 
-        let (freed_bytes, measurement_uncertain) = if managed_purge {
-            match versions::allocated_exclusive_paths(&candidates) {
-                Ok(after) => (before.saturating_sub(after), false),
-                // Deletion and its database commit already succeeded. An
-                // unreadable remainder cannot be treated as zero occupancy.
-                Err(error) => {
-                    on_progress(&format!(
-                        "无法确认清理后目录占用，释放量按 0 字节报告：{error}"
-                    ));
-                    (0, true)
-                }
-            }
-        } else {
-            (before.saturating_sub(total_size(&candidates)), false)
-        };
-        let mut remaining_paths: Vec<String> = candidates
-            .iter()
-            .filter(|p| {
-                if managed_purge {
-                    residual_path_may_exist(p)
-                } else {
-                    p.exists()
-                }
-            })
-            .map(|p| p.to_string_lossy().to_string())
-            .collect();
+        // 共享下载根与登记版本根的折叠披露放在**删除闸门之后**：登记路径是
+        // 配额口径的共享/在册资源（别的卡、缓存、版本登记册都能解释它），存在
+        // 只构成披露、不构成本卡删除的阻塞——否则共享根/登记旧版资源永远让
+        // purge 卡进「需要继续清理」。
         let mut shared_download_roots_remain = false;
         for root in download_roots {
             if residual_path_may_exist(&root) {
@@ -2286,6 +3479,33 @@ impl ModelManager {
                 }
             }
         }
+        for root in &registered_version_paths {
+            if residual_path_may_exist(root) {
+                // 登记版本根按**精确条目**披露，不做父子折叠：回退后残留的钉定
+                // 存储根常常是已登记下载根的子目录，若被父条目吞掉，用户看到的
+                // 残留就不再是版本登记里钉住的那个确切路径。
+                let exact = root.to_string_lossy().into_owned();
+                if !remaining_paths.contains(&exact) {
+                    remaining_paths.push(exact);
+                }
+            }
+        }
+
+        // 删除落定后的复核核算（受管 purge 走登记差异；读不动按 0 字节+不确定
+        // 口径，不谎报“释放了多少”）。
+        let (freed_bytes, measurement_uncertain) = if managed_purge {
+            match versions::allocated_exclusive_paths(&candidates) {
+                Ok(after) => (before.saturating_sub(after), false),
+                Err(error) => {
+                    on_progress(&format!(
+                        "无法确认清理后目录占用，释放量按 0 字节报告：{error}"
+                    ));
+                    (0, true)
+                }
+            }
+        } else {
+            (freed_bytes, false)
+        };
 
         let freed_text = disk::format_bytes(freed_bytes as f64);
         let mut summary = if purge_weights {
@@ -2379,7 +3599,20 @@ impl ModelManager {
     /// 走这条方法/这个端点，普通卸载不会拐到这里来。
     pub fn force_remove_record(&self, card_id: &str) -> Result<ForcedRemoval, ModelManagerError> {
         let rec = self.get_record(card_id)?;
-        let mut paths = self.candidate_paths(&rec);
+        // r32 P2-1：running 标志为真即拒——不查 require_actually_stopped（那是
+        // 三重停验，查不动 docker daemon 时会破坏本操作的逃生口用途）；
+        // 但 rec.running 标志在（卸载失败时 reconcile 已回灌），**用户没停
+        // 服务就强删记录**的孤儿实例再造路径必须堵住。
+        if rec.running {
+            return Err(ModelManagerError::new(
+                "模型服务仍在运行，请先停止后再强制移除（否则将产生无人认领的孤儿实例）",
+            ));
+        }
+        // 残留点名 = 本卡候选（含 `.deploy-env` 实际部署目录）+ 版本历史的
+        // 隔离根/资源目录 + 下载根。摘掉其他在库卡片拥有的路径：把保留卡的
+        // 活权重列进去等于教用户删错东西（2026-11-03 真机剧本）。
+        let other_cards_paths = self.paths_owned_by_other_cards(card_id);
+        let mut paths = self.owned_candidate_paths(&rec);
         paths
             .extend(super::version_store::download_paths(card_id).map_err(ModelManagerError::new)?);
         for version in super::version_store::list(Some(card_id)).map_err(ModelManagerError::new)? {
@@ -2391,7 +3624,7 @@ impl ModelManager {
         }
         let mut residual_paths = Vec::new();
         for path in paths {
-            if residual_path_may_exist(&path) {
+            if residual_path_may_exist(&path) && !other_cards_paths.contains(&path) {
                 let path = path.to_string_lossy().into_owned();
                 if !residual_paths.contains(&path) {
                     residual_paths.push(path);
@@ -2426,11 +3659,16 @@ impl ModelManager {
     /// 正因为是猜的，才必须用 `exists()` 过滤一遍：报一个根本不存在的路径，用户
     /// 去 `ls` 发现没有，下次就不信这条提示了。反过来，漏报也比误报安全——
     /// `force_remove_records_only` 警告码对应的"请自行核实"文案就是为漏报兜底的。
+    /// 残留路径点名（回归测试用）：候选 ∩ 存在 − 他卡路径。生产路径的
+    /// force_remove_record 已改为「候选 + 版本登记 + 下载根」的全量口径并内联
+    /// 判定，这个收窄版只服务 versions 的隔离残留断言。
+    #[cfg(test)]
     fn residual_paths(&self, rec: &db::StoreModelRecord) -> Vec<String> {
+        let other_cards_paths = self.paths_owned_by_other_cards(&rec.card_id);
         let mut out: Vec<String> = Vec::new();
-        for p in self.candidate_paths(rec) {
+        for p in self.owned_candidate_paths(rec) {
             let s = p.to_string_lossy().to_string();
-            if p.exists() && !out.contains(&s) {
+            if p.exists() && !other_cards_paths.contains(&p) && !out.contains(&s) {
                 out.push(s);
             }
         }
@@ -2506,12 +3744,104 @@ impl ModelManager {
         if let Ok(safe_id) = config::safe_path_component(&rec.card_id) {
             candidates.push(config::data_dir().join("cards").join(safe_id));
         }
+        // ollama 卡的权重不落 models_dir，blob 全在 `~/.ollama/models` 下（常有
+        // 几十 GB）。漏掉它的话：`residual_paths` 对强制移除报"没有残留"，
+        // `uninstall` 前后差值也量不到真实释放——用户听到的"已清干净/释放 0 字节"
+        // 都是假的（r19 评审 P2-4）。目录解析跟 `ollama_size` 同一份逻辑
+        // （`ollama_home_dir`），不能各写各的 HOME 拼法。
+        if rec.engine_name == "ollama" {
+            if let Some(ollama_dir) = ollama_home_dir() {
+                candidates.push(ollama_dir);
+            }
+        }
 
         let mut out: Vec<PathBuf> = Vec::new();
         for p in candidates {
             if !out.iter().any(|parent| p.starts_with(parent)) {
                 out.retain(|child| !child.starts_with(&p));
                 out.push(p);
+            }
+        }
+        out
+    }
+
+    /// 这张卡**实际部署时**用的权重目录，从部署脚本落下的 `.deploy-env` 里读。
+    ///
+    /// 为什么需要它：[`Self::candidate_paths`] 是按卡片脚本约定**猜**的（repo 末段
+    /// /模型名），而猜有两个已知的错方向——
+    /// - 同名异源：`unsloth/Qwen3.8-27B-NVFP4` 与 `RadixArk/Qwen3.8-27B-NVFP4`
+    ///   猜出来是**同一条** `models_dir/Qwen3.8-27B-NVFP4`；
+    /// - 消歧后缀：厂商部署脚本会自己在末段上加后缀（真机 2026-11-03：
+    ///   实际部署在 `Qwen3.8-27B-NVFP4-unsloth`，猜的路径两头都对不上）。
+    ///
+    /// 后一种让"实测释放"量不到真权重；前一种见 `paths_owned_by_other_cards`。
+    ///
+    /// 只信一种形态：`MODEL_DIR="<models_dir>/<单个安全段>"`（多行取最后一行，
+    /// 与卸载脚本自己的读法一致）。`.deploy-env` 是卡片脚本写的文件，内容不可
+    /// 信——逃出 models_dir、带路径分隔符或校验不过的一律当没有。这里的结果
+    /// 只用于测量与残留报告，不做删除，但校验仍然先行。
+    fn deployed_weights_hint(&self, rec: &db::StoreModelRecord) -> Option<PathBuf> {
+        let safe_id = config::safe_path_component(&rec.card_id).ok()?;
+        let env_file = config::data_dir()
+            .join("cards")
+            .join(safe_id)
+            .join("vendor")
+            .join(".deploy-env");
+        let content = std::fs::read_to_string(env_file).ok()?;
+        let last = content.lines().rev().find_map(|line| {
+            line.strip_prefix("MODEL_DIR=\"")
+                .and_then(|rest| rest.strip_suffix('"'))
+        })?;
+        let models_dir = self.settings.models_path();
+        let candidate = PathBuf::from(last);
+        let leaf = candidate.file_name()?.to_str()?;
+        if candidate.parent() != Some(models_dir.as_path()) {
+            return None;
+        }
+        // safe_path_component 是校验不是改写：过不了就当没有。
+        if config::safe_path_component(leaf).ok()? != leaf {
+            return None;
+        }
+        Some(candidate)
+    }
+
+    /// 本卡候选 + 实际部署目录，去重——`uninstall` 的前后计量与残留判定、
+    /// `residual_paths` 的残留点名必须用**同一份**清单，否则"释放了多少"和
+    /// "还剩什么"各说各话。
+    fn owned_candidate_paths(&self, rec: &db::StoreModelRecord) -> Vec<PathBuf> {
+        let mut candidates = self.candidate_paths(rec);
+        if let Some(actual) = self.deployed_weights_hint(rec) {
+            if !candidates.contains(&actual) {
+                candidates.push(actual);
+            }
+        }
+        candidates
+    }
+
+    /// 其他在库卡片的候选路径：这些目录不属于本卡，即便"存在"也不能算本卡的
+    /// 删除残留。两类现实场景（都是把用户逼到「强制移除」逃生口的真机事故）：
+    ///
+    /// - repo 末段碰撞（2026-11-03 真机，cube-9fde）：删 A 卡时它猜的权重目录
+    ///   恰是 B 卡的**活权重**——A 自己的东西全删干净了，收尾判定却永远看见
+    ///   B 的 21G"仍在磁盘上"，卡进「需要继续清理」死循环，重试不可能成功；
+    /// - ollama 家族：所有 ollama 卡的 blob 同住 `~/.ollama`，多卡互为 purge
+    ///   残留，谁也删不干净（r21 登记的 P3 死循环）。
+    ///
+    /// 归属以「其他记录按同一套约定会猜到它」为准——宁可少报残留也不把别的卡
+    /// 的活权重说成本卡欠的账；漏报由 force_remove 的"请自行核实"兜底。
+    fn paths_owned_by_other_cards(&self, card_id: &str) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        let Ok(rows) = db::list_store_models_light() else {
+            return out;
+        };
+        for row in rows {
+            if row.record.card_id == card_id {
+                continue;
+            }
+            for p in self.candidate_paths(&row.record) {
+                if !out.contains(&p) {
+                    out.push(p);
+                }
             }
         }
         out
@@ -2525,39 +3855,385 @@ impl ModelManager {
     // "引擎和模型是两个独立的东西"这句话对 docker 形态成立，**对 ollama 不成立**
     // ——它的引擎和模型数据同住 `~/.ollama`，删引擎就是删模型。见 delete_engine。
     //
-    // **这一节（list_installed_engines / delete_engine）目前零调用点**：命令
-    // 未注册，界面上也没有"已安装引擎"这一块，留待后续分期接线。注意
-    // delete_engine 虽然用户够不着，它里面的超时/幂等问题仍然照修——接线那天
-    // 才发现，代价是真机上删到一半的镜像和删不掉的引擎记录。
+    // 推理引擎页调用这一节时，数据库只作为候选来源，展示前必须验明实体仍在。
+    // 否则用户会看到“0 B、删不掉”的幽灵记录；删除入口也只会开放给已经解除
+    // 全部模型绑定、且客户端有明确清理契约的引擎。
 
     pub fn list_installed_engines(&self) -> Vec<InstalledEngineInfo> {
+        // 先把历史上“展示名误作身份键”的驭光记录迁到二进制真实版本。迁移只
+        // 改数据库关联，不移动、更不删除任何引擎目录；随后仍以探针确认实体。
+        self.migrate_native_engine_identities();
+        // 存量用户不应为取得一份几 KB 的清理契约而重新下载几十 GB 模型权重。
+        // 这里仅在本机已有对应原生引擎、且记录尚未有契约时，从商店按哈希补取。
+        // 网络不可用就维持“不可自动删除”，绝不退化成猜路径删除。
+        self.refresh_native_engine_cleanup_contracts();
         let Ok(records) = db::list_installed_engines() else {
             return Vec::new();
         };
+        let models = db::list_store_models().unwrap_or_default();
         records
             .into_iter()
-            .map(|rec| {
-                let size = if let Some(image) = &rec.docker_image {
-                    docker_image_size(image)
+            .filter_map(|rec| {
+                // 数据库只说明“过去装过”，不代表实体仍在。先验实际 docker 镜像、
+                // ollama 目录或卡片的只读探针；旧记录/残缺目录绝不能在用户眼前伪装
+                // 成一个 0 B 的可管理引擎。
+                let (size, cleanup_supported) = if let Some(image) = &rec.docker_image {
+                    let size = docker_image_size(image);
+                    if size == 0 {
+                        return None;
+                    }
+                    (Some(size), true)
                 } else if rec.engine_name == "ollama" {
-                    ollama_size()
+                    let size = ollama_size();
+                    if size == 0 {
+                        return None;
+                    }
+                    (Some(size), true)
+                } else if let Some(cleanup_script) = rec.cleanup_script.as_ref() {
+                    // 新版原生引擎必须用随引擎固化的清理契约探测。它能在模型
+                    // 记录已经删掉后依然验明实体、给出真实大小，不能再依赖一张
+                    // 恰好仍留在数据库里的模型卡片。
+                    match native_engine_cleanup_probe(cleanup_script) {
+                        Ok((false, _)) => return None,
+                        Ok((true, size)) => (size, true),
+                        Err(error) => {
+                            // 探测失败不等于不存在：保留一条不可删除的待核实记录。
+                            eprintln!(
+                                "[model-store] 无法探测原生引擎 {}：{error}",
+                                rec.engine_name
+                            );
+                            (None, false)
+                        }
+                    }
                 } else {
-                    0
+                    let Some(model) = models.iter().find(|model| {
+                        model.engine_name == rec.engine_name
+                            && model.engine_version == rec.engine_version
+                            && !model.scripts_content.is_empty()
+                    }) else {
+                        return None;
+                    };
+                    let Ok(source) = self.local_scripts_source(model) else {
+                        return None;
+                    };
+                    if !self
+                        .engine_probe(&source, &model.card_id, &self.env_for_record(model))
+                        .installed
+                    {
+                        return None;
+                    }
+                    // 老版原生引擎尚未下发独立清理契约；显示真实存在的实体，但
+                    // 绝不猜路径 `rm -rf`。用户重新下载/更新到含清理契约的卡片
+                    // 后，新的安装记录会接管这一项。
+                    (None, false)
                 };
                 let affected = db::list_model_names_using_engine(
                     &rec.engine_name,
                     rec.engine_version.as_deref(),
                 )
                 .unwrap_or_default();
-                InstalledEngineInfo {
+                Some(InstalledEngineInfo {
                     engine_name: rec.engine_name,
                     engine_version: rec.engine_version,
                     docker_image: rec.docker_image,
                     size_bytes: size,
                     affected_models: affected,
-                }
+                    cleanup_supported,
+                })
             })
             .collect()
+    }
+
+    /// 从已固化的 install_engine 脚本读取驭光二进制的内容指纹，并将历史记录
+    /// 迁到稳定的 (engine_name, engine_version) 键。不能按卡片名称、目录名或
+    /// 仅 8 位前缀猜测：只有卡片自己锁定的完整 SHA-256 才足以说明两者是同一
+    /// 个原生二进制。
+    fn migrate_native_engine_identities(&self) {
+        // r19 评审 P2-6：这里只做指纹提取，改走只取 install_engine/common.sh
+        // 两段的轻量查询，不再为整张表把六类脚本+附属文件正文拉出库。
+        let Ok(models) = db::list_store_models_install_columns() else {
+            return;
+        };
+        for model in models {
+            let Some(install) = model.install_engine.as_deref() else {
+                continue;
+            };
+            let Some(version) = native_tachyon_identity(
+                install,
+                model.common_sh.as_deref(),
+                model.engine_version.as_deref(),
+            )
+            .map(|(version, _)| version) else {
+                continue;
+            };
+            if let Err(error) = db::migrate_engine_identity(
+                &model.card_id,
+                NATIVE_TACHYON_ENGINE_NAME,
+                Some(&version),
+            ) {
+                // 迁移只是兼容修复；列表不能因为某一条旧数据写不进去而整体不可用。
+                eprintln!(
+                    "[model-store] 迁移原生引擎身份失败（{}）：{error}",
+                    model.card_id
+                );
+            }
+        }
+    }
+
+    /// 为旧安装记录补取原生引擎的独立清理契约。
+    ///
+    /// 卡片的六类日常脚本下载成功时会固化进模型记录；`uninstall_engine` 是后加的
+    /// 可选契约，老记录自然没有。只同步它本身（并强制校验商店下发的哈希），不
+    /// 重跑安装、不会碰权重、不会改变部署状态。
+    fn refresh_native_engine_cleanup_contracts(&self) {
+        // r19 评审 P2-6：同 migrate_native_engine_identities——指纹比对只要
+        // install_engine/common.sh 两段，走轻量查询。
+        let Ok(models) = db::list_store_models_install_columns() else {
+            return;
+        };
+        for model in models {
+            let Some(install) = model.install_engine.as_deref() else {
+                continue;
+            };
+            // 指纹（显示版本 + 完整 SHA-256）一次算出：开头判要不要补契约、
+            // 后面跟商店脚本比对用的都是这一份，不再对同一段正文算两遍。
+            let Some((version, local_sha)) = native_tachyon_identity(
+                install,
+                model.common_sh.as_deref(),
+                model.engine_version.as_deref(),
+            ) else {
+                continue;
+            };
+            let already_present =
+                db::get_installed_engine(NATIVE_TACHYON_ENGINE_NAME, Some(&version))
+                    .ok()
+                    .flatten()
+                    .is_some_and(|engine| engine.cleanup_script.is_some());
+            if already_present {
+                continue;
+            }
+            // 会话级负缓存（评审 P2）：商店不可达时 get_card 的 3 次重试+退避
+            // ≈18s/卡，而引擎管理页每次打开都无条件走一遍——离线存量设备每进
+            // 一次页就再撞一轮。失败的卡本进程内不再重试；重启即清。
+            let failed: &std::sync::Mutex<std::collections::HashSet<String>> =
+                CONTRACT_SYNC_FAILED_CARDS.get_or_init(Default::default);
+            if failed.lock().is_ok_and(|set| set.contains(&model.card_id)) {
+                continue;
+            }
+            let card = match self.store.get_card(&model.card_id) {
+                Ok(card) => card,
+                Err(error) => {
+                    eprintln!(
+                        "[model-store] 无法同步原生引擎清理契约（{}）：{error}",
+                        model.card_id
+                    );
+                    if let Ok(mut set) = failed.lock() {
+                        set.insert(model.card_id.clone());
+                    }
+                    continue;
+                }
+            };
+            // 商店若不是同一套二进制，绝不能把它的清理脚本安到当前引擎记录上。
+            if card.summary.engine_name != NATIVE_TACHYON_ENGINE_NAME
+                || card.summary.engine_version.as_deref() != Some(version.as_str())
+            {
+                continue;
+            }
+            let source = ScriptsSource::from_card(&card, self.local_script_paths);
+            let cleanup_script = match source.optional_script_blob("uninstall_engine") {
+                Ok(Some(script)) => script,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "[model-store] 原生引擎清理契约校验失败（{}）：{error}",
+                        model.card_id
+                    );
+                    continue;
+                }
+            };
+            // 显示版本可能被服务器复用；必须再比对完整二进制指纹，不能仅凭
+            // 相同的卡片名/版本给历史引擎装上另一套二进制的删除脚本。
+            // （指纹 local_sha 已在循环开头与 version 一次算出。）
+            if declared_native_sha(&cleanup_script.content) != Some(local_sha) {
+                eprintln!(
+                    "[model-store] 原生引擎清理契约与本地二进制指纹不符（{}），保留现有记录",
+                    model.card_id
+                );
+                continue;
+            }
+            if let Err(error) = db::set_engine_cleanup_script(
+                NATIVE_TACHYON_ENGINE_NAME,
+                Some(&version),
+                &cleanup_script,
+            ) {
+                eprintln!(
+                    "[model-store] 保存原生引擎清理契约失败（{}）：{error}",
+                    model.card_id
+                );
+            }
+        }
+    }
+
+    /// 启用前读取一次真实系统内存与当前受本模型商店管理的运行模型。
+    ///
+    /// 首个模型不因缺少峰值元数据被拦截；系统已处于低内存或已知预算超出余量时
+    /// 仍提示风险并允许用户确认继续。已有模型但预算不全时必须确认，不用权重
+    /// 体积冒充运行内存，也不拿进程树 RSS 抵扣统一内存预算。
+    pub fn memory_admission(&self, card_id: &str) -> Result<MemoryAdmission, ModelManagerError> {
+        let candidate = db::get_store_model(card_id)
+            .map_err(|e| ModelManagerError::new(format!("读取模型记录失败：{e}")))?
+            .ok_or_else(|| ModelManagerError::new("模型不存在，请先下载并部署"))?;
+        let ram =
+            current_ram_snapshot().filter(|ram| ram.total_kib > 0 && ram.used_kib <= ram.total_kib);
+        let total_bytes = ram.as_ref().map(|ram| ram.total_kib.saturating_mul(1024));
+        let available_bytes = ram.as_ref().map(|ram| {
+            ram.total_kib
+                .saturating_sub(ram.used_kib)
+                .saturating_mul(1024)
+        });
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let safety_reserve_bytes = total_bytes.map(|total| (total / 100 * 15).max(12 * GIB));
+        let hard_reserve_bytes = total_bytes.map(|total| (total / 100 * 10).max(6 * GIB));
+
+        // Reconcile store ownership, then sample container trees and native
+        // engines by executable fingerprint/model ID, never by a stale PID file.
+        self.reconcile_running_status();
+        // 本批评审 P2-4：这里连同上面的 reconcile 此前是连续两遍 list_store_models
+        // 全量正文读。真正要的是运行中卡片的小字段 + install_engine/common.sh 两段
+        // （算原生进程指纹）+ 内存预算，改走库内 json_extract 的窄投影，且只取
+        // 运行中的卡（running 过滤已推进到 SQL 里）。
+        let running_records = db::list_running_store_models_admission_columns()
+            .map_err(|e| ModelManagerError::new(format!("读取运行模型失败：{e}")))?
+            .into_iter()
+            .filter(|model| model.card_id != candidate.card_id)
+            .collect::<Vec<_>>();
+        let native_snapshot = super::native_process::discover();
+        let native_processes = &native_snapshot.processes;
+        let roots = running_records
+            .iter()
+            .filter_map(|model| {
+                let pid = if let Some(name) = model.container_name.as_deref() {
+                    docker_container_pid(name)
+                } else {
+                    // 指纹两段正文来自窄投影的库内提取（见上面的查询），
+                    // 语义与整表解析后取 install_engine/common.sh 相同。
+                    let (_, fingerprint) = native_tachyon_identity(
+                        model.install_engine.as_deref()?,
+                        model.common_sh.as_deref(),
+                        model.engine_version.as_deref(),
+                    )?;
+                    super::native_process::matching_pid(
+                        native_processes,
+                        &fingerprint,
+                        model.endpoint_model.as_deref(),
+                        model
+                            .endpoint_url
+                            .as_deref()
+                            .and_then(|url| reqwest::Url::parse(url).ok())
+                            .and_then(|url| url.port_or_known_default()),
+                    )
+                };
+                pid.map(|pid| (model.card_id.clone(), pid))
+            })
+            .collect::<Vec<_>>();
+        let mut sampler = ProcessResourceSampler::default();
+        let mut sample_roots = roots.iter().map(|(_, pid)| *pid).collect::<Vec<_>>();
+        sample_roots.extend(native_processes.iter().map(|process| process.pid));
+        sample_roots.sort_unstable();
+        sample_roots.dedup();
+        let sampled = sampler.sample_trees(&sample_roots);
+        let mut running_models = running_records
+            .iter()
+            .map(|model| {
+                let pid = roots
+                    .iter()
+                    .find(|(card, _)| card == &model.card_id)
+                    .map(|(_, pid)| *pid);
+                RunningModelMemory {
+                    card_id: model.card_id.clone(),
+                    card_name: model.card_name.clone(),
+                    rss_bytes: pid.and_then(|pid| {
+                        sampled
+                            .get(&pid)
+                            .filter(|usage| usage.process_count > 0 && usage.rss_bytes > 0)
+                            .map(|usage| usage.rss_bytes)
+                    }),
+                }
+            })
+            .collect::<Vec<_>>();
+        // External native inference is still a competing workload, not a reason
+        // to report "first model". Do not adopt it into the model-store database.
+        for process in native_processes {
+            if roots.iter().any(|(_, pid)| *pid == process.pid) {
+                continue;
+            }
+            // A matching model name alone is NOT identity: another instance
+            // may use the same weights/name on a different port. Include every
+            // unmatched process conservatively instead of hiding its load.
+            running_models.push(RunningModelMemory {
+                card_id: format!("native-{}-{}", process.pid, process.start_ticks),
+                card_name: process
+                    .model_id
+                    .clone()
+                    .unwrap_or_else(|| "tachyon-serve".into()),
+                rss_bytes: sampled
+                    .get(&process.pid)
+                    .filter(|usage| usage.process_count > 0 && usage.rss_bytes > 0)
+                    .map(|usage| usage.rss_bytes),
+            });
+        }
+        let candidate_peak_bytes = candidate
+            .resource_requirements
+            .admission_peak_mib()
+            .map(|mib| mib.saturating_mul(1024 * 1024));
+        let running_growth_bytes = running_records
+            .iter()
+            .try_fold(0u64, |sum, record| {
+                let peak = record
+                    .resource_requirements
+                    .admission_peak_mib()?
+                    .checked_mul(1024 * 1024)?;
+                // RSS can double-count shared pages and omit GPU allocations.
+                // Until a comparable, isolated accounting source is available,
+                // reserve the whole budget rather than underestimating growth.
+                sum.checked_add(peak)
+            })
+            .filter(|_| native_snapshot.complete && running_models.len() == running_records.len());
+        let decision = match (available_bytes, safety_reserve_bytes, hard_reserve_bytes) {
+            (Some(available), Some(safety), Some(hard)) => super::memory_policy::evaluate(
+                available,
+                safety,
+                hard,
+                candidate_peak_bytes,
+                running_models.len(),
+                running_growth_bytes,
+            ),
+            _ => super::memory_policy::Decision::sampling_unavailable(),
+        };
+        let message = match decision.reason {
+            "measurement_unavailable" => "暂时无法读取系统内存，不能评估本次启动的风险。建议稍后重试；如仍要继续，请明确确认。",
+            "insufficient" => "当前或预计内存低于安全下限，可能导致设备卡顿或服务退出。建议先停用其他模型。",
+            "limited" => "启用后内存余量较小，已为正在运行的模型预留后续增长空间。建议先停用其他模型。",
+            "sufficient" => "按当前模型配置和内存预算，设备余量充足。",
+            "first_unverified" => "允许尝试启用首个模型；尚无可信峰值预算，不能保证所有负载下均有足够内存。",
+            _ => "模型峰值预算或当前占用数据不完整，无法可靠预测多模型能否同时运行。建议先停用其他模型。",
+        }.to_string();
+
+        Ok(MemoryAdmission {
+            card_id: candidate.card_id,
+            total_bytes,
+            available_bytes,
+            safety_reserve_bytes,
+            hard_reserve_bytes,
+            candidate_peak_bytes,
+            projected_available_bytes: decision.projected_available,
+            running_growth_bytes,
+            running_models,
+            level: decision.level.into(),
+            reason: decision.reason.into(),
+            requires_confirmation: decision.confirmation,
+            message,
+        })
     }
 
     /// 删掉引擎本身。**后果按引擎形态分两种，措辞绝不能混用**：
@@ -2575,8 +4251,7 @@ impl ModelManager {
     /// 所以返回的是 [`EngineRemoval`] 而不是一个字节数：`purged_model_data` 和
     /// `affected_models` 是这次操作的后果本身，调用方（接线那天的确认框）必须先
     /// 把"哪些模型受影响、权重会不会跟着没"摆给用户看，不能只说一句"删除引擎"。
-    /// 本层**不**自行拦截——拦不拦、怎么确认是界面的事，这里只负责把后果如实算
-    /// 出来交上去。
+    /// 本层再次检查模型绑定，不能只依赖界面禁用按钮。
     ///
     /// docker 镜像形态的引擎不需要 root（docker rmi 本来就是普通用户能跑的
     /// 命令）；ollama 是系统级二进制 + systemd 服务，删除必须走 pkexec 提权。
@@ -2608,12 +4283,51 @@ impl ModelManager {
         // 权重被一起删掉），但两条都得把它带给调用方。`list_installed_engines`
         // 早就在算同一份名单了，删除这一侧不能算完就扔。
         //
-        // 取不到就按空名单继续删——删除本身已经是用户点过的动作，为了一句提示
-        // 语把它拦下来更糟；代价是那一次确认框会少列几个模型名。
+        // 查不到绑定关系就停止，不能把数据库读取失败当成“没有模型使用”。
         let affected =
-            db::list_model_names_using_engine(engine_name, engine_version).unwrap_or_default();
+            db::list_model_names_using_engine(engine_name, engine_version).map_err(|e| {
+                ModelManagerError::new(format!("无法确认引擎关联的模型，未执行删除：{e}"))
+            })?;
+        if !affected.is_empty() {
+            return Err(ModelManagerError::new(format!(
+                "该引擎仍被以下模型绑定，不能删除：{}。请先处理这些模型。",
+                affected.join("、")
+            )));
+        }
 
         if let Some(image) = &rec.docker_image {
+            // 本批评审 P2-5：rmi 前按镜像字符串反查引用。docker_image 的来源是
+            // install_engine 输出的 LMM_ENGINE_IMAGE= 自报标记——一张被投毒的卡片
+            // 可以让自己的**新**引擎行自报受害者正在用的真实镜像（形式合法就过
+            // 白名单，「不覆盖」只保护同 (name,version) 已有不同值的行）。上面的
+            // affected 名单只查本引擎行的绑定，对这种冒名视而不见；真放行 rmi，
+            // 受害卡下次部署就得重新拉几十 GB 镜像，界面上还看不出任何异常。
+            // 查不到引用名单（库读失败）同样停手：不能把读取失败当成「没人用」。
+            let sharing =
+                db::find_docker_image_users(image, engine_name, engine_version).map_err(|e| {
+                    ModelManagerError::new(format!("无法核对镜像引用，未执行删除：{e}"))
+                })?;
+            if !sharing.is_empty() {
+                let described = sharing
+                    .iter()
+                    .map(|r| {
+                        let engine = match r.engine_version.as_deref() {
+                            Some(v) if !v.is_empty() => format!("{} {}", r.engine_name, v),
+                            _ => r.engine_name.clone(),
+                        };
+                        if r.model_names.is_empty() {
+                            engine
+                        } else {
+                            format!("{engine}（模型：{}）", r.model_names.join("、"))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("；");
+                return Err(ModelManagerError::new(format!(
+                    "镜像 {image} 同时被以下引擎/模型引用，不能删除：{described}。\
+                     请先处理这些模型，或联系卡片提供方修正引擎的镜像声明。"
+                )));
+            }
             let freed = docker_image_size(image);
             // 带时限。这里原来是裸 `Command::output()`，而 `output()` 是无限期
             // 阻塞的：docker daemon 卡死时 `docker rmi` 跟 `docker ps` 一样，
@@ -2704,8 +4418,25 @@ impl ModelManager {
             });
         }
 
+        if let Some(cleanup_script) = rec.cleanup_script.as_ref() {
+            let freed = remove_native_engine(cleanup_script)?;
+            db::delete_installed_engine(engine_name, engine_version)
+                .map_err(|e| ModelManagerError::new(format!("删除引擎记录失败：{e}")))?;
+            return Ok(EngineRemoval {
+                engine_name: engine_name.to_string(),
+                engine_version: engine_version.map(str::to_string),
+                freed_bytes: freed,
+                purged_model_data: false,
+                affected_models: affected,
+                summary: format!(
+                    "已删除推理引擎，释放约 {}。模型权重和部署配置没有动；下次下载需要它的模型时会自动重新安装。",
+                    disk::format_bytes(freed as f64),
+                ),
+            });
+        }
+
         Err(ModelManagerError::new(format!(
-            "暂不支持自动清理该类型的引擎：{engine_name}"
+            "该引擎尚未提供安全的独立清理方式：{engine_name}。请更新模型卡片后再试，不能通过猜测目录自动删除。"
         )))
     }
 
@@ -2730,12 +4461,11 @@ impl ModelManager {
                 runtime_note: String::new(),
             });
         }
+        let (runtime_lines, runtime_note) = model_runtime_lines(&rec);
         Ok(ModelDetail {
             record: rec,
-            runtime_lines: gpu_runtime_lines(),
-            runtime_note: "以下是设备 GPU 整体状态，不是精确到这一个模型的占用\
-                           （同一时间通常只跑一个大模型，仅供参考）"
-                .into(),
+            runtime_lines,
+            runtime_note,
         })
     }
 
@@ -2859,6 +4589,160 @@ fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
     found
 }
 
+/// `LMM_ENGINE_IMAGE=` marker 的长度上限（本批评审 P2-5）。真实镜像引用最长
+/// 也就 `registry/repo:tag@sha256:<64 hex>` 一两百字节的量级，512 已是数倍
+/// 宽裕；没有上限的话，脚本不小心 echo 出的一整行日志也会被当成候选镜像
+/// 走一遍白名单与查库比对。
+const ENGINE_IMAGE_MARKER_MAX_BYTES: usize = 512;
+
+/// `LMM_ENGINE_IMAGE=` 自报值的形式判据（r19 评审 P2-1）。
+///
+/// 这个值最终会写进 installed_engines 里 (name,version) 相同的共享行，并由
+/// `delete_engine` 拿去拼 `docker rmi <image>`——而 install_engine 的 stdout 是
+/// 卡片作者可控的输入，一行伪造的 marker 就能把别的卡正在用的镜像名覆盖掉，
+/// 之后的「删除引擎」会 rmi 掉被冒名的镜像。白名单收口：
+///
+/// - 首字符必须是字母数字：`-` 开头会被 docker 当成选项吞掉（`docker rmi -f`
+///   就是这么拼出来的），`/`、`:`、`@`、`.` 开头说明没有 repo 名；
+/// - 字符集只放行镜像引用（`registry/repo:tag@sha256:…`）会用到的
+///   `[A-Za-z0-9._:/@-]`：空白、引号、`$`、`;`、`|` 一律出局——镜像引用是
+///   一个 token，混进这些字符它就不是镜像名而是别的什么东西了。
+/// - 长度不得超过 [`ENGINE_IMAGE_MARKER_MAX_BYTES`]（本批评审 P2-5）。
+///
+/// 刻意停在「形式像不像」这一层，不去联网验证镜像真的存在：那要花几十秒，
+/// 不该挡在下载主流程上。形式不合法的值在这里挡掉；「合法但编造」的值有两道
+/// 后手——同 (name,version) 行已有不同镜像时由 [`engine_image_to_record`] 的
+/// 不覆盖规则保住旧值，**新**引擎行自报别人正在用的镜像则由 `delete_engine`
+/// 删除前的镜像引用反查（`db::find_docker_image_users`，本批评审 P2-5）拦下
+/// rmi。此前注释宣称「由不覆盖规则兜住」，那句话不成立：不覆盖只保护同
+/// (name,version) 已有不同值的行，冒名者开新行就绕开了它。
+fn engine_image_marker_is_wellformed(value: &str) -> bool {
+    if !value.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    if value.len() > ENGINE_IMAGE_MARKER_MAX_BYTES {
+        return false;
+    }
+    value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':' | '@'))
+}
+
+/// 算出这次要登记进 installed_engines 的镜像名（r19 评审 P2-1）。
+///
+/// 两道保守防线：
+/// 1. 形式不合法的 marker 直接丢弃并留日志，绝不让它靠近 docker rmi；
+/// 2. 引擎行已有**不同**的镜像名时不覆盖、保留旧值——两个名字都是卡片脚本
+///    自报的、没有第三方权威，但旧值至少跟着这行记录被用过，新值可能只是
+///    另一张卡的脚本在抢写共享行。返回 None 即可：`mark_engine_installed`
+///    的 COALESCE 会保留库里的旧值。这比弹框让用户裁决侵入性小，先做保守版。
+///    注意这一道只保护同 (name,version) 且已有不同值的行——**新**引擎行自报
+///    别的卡正在用的镜像拦不住，那一路由 `delete_engine` 删除前的镜像引用
+///    反查兜底（本批评审 P2-5，见 [`db::find_docker_image_users`]）。
+///
+/// 空值（ollama、厂商二进制引擎都不报镜像）维持原行为，同样交给 COALESCE。
+fn engine_image_to_record(
+    engine_name: &str,
+    engine_version: Option<&str>,
+    marker: Option<String>,
+) -> Option<String> {
+    let candidate = marker?;
+    if !engine_image_marker_is_wellformed(&candidate) {
+        eprintln!(
+            "[engine] 丢弃形式不合法的 LMM_ENGINE_IMAGE 标记（{engine_name}）：{candidate:?}"
+        );
+        return None;
+    }
+    if let Ok(Some(existing)) = db::get_installed_engine(engine_name, engine_version) {
+        if let Some(old) = existing.docker_image {
+            if old != candidate {
+                eprintln!(
+                    "[engine] 引擎 {engine_name} 已登记镜像 {old}，忽略脚本自报的不同镜像 \
+                     {candidate}，保留原记录"
+                );
+                return None;
+            }
+        }
+    }
+    Some(candidate)
+}
+
+/// 用厂商随引擎提供的独立清理脚本做只读探测。
+///
+/// 约定：`LMM_PROBE_ONLY=1` 时，输出 `LMM_ENGINE_PRESENT=0/1` 并退出 0，
+/// 存在时可选输出 `LMM_ENGINE_SIZE_BYTES=<bytes>`；非 0 表示探测失败而非不存在。这样“模型已经删了、
+/// 引擎仍在”的场景不必借一张模型卡片来猜目录，也不会扫描/删除用户任意路径。
+fn native_engine_cleanup_probe(
+    script: &db::ScriptBlob,
+) -> Result<(bool, Option<u64>), ModelManagerError> {
+    if script_runner::sha256_hex(&script.content) != script.sha256 {
+        return Err(ModelManagerError::new(
+            "引擎清理脚本校验失败，请刷新卡片后重试。",
+        ));
+    }
+    let script_path = write_temp_script(&script.content)?;
+    let mut env = HashMap::new();
+    env.insert("LMM_PROBE_ONLY".to_string(), "1".to_string());
+    let result = script_runner::run_script(
+        &script_path,
+        &env,
+        RunScriptOptions {
+            label: Some("检查本机推理引擎".to_string()),
+            timeout: Some(Duration::from_secs(30)),
+            idle_timeout: Some(Duration::from_secs(10)),
+            ..Default::default()
+        },
+    );
+    let _ = std::fs::remove_file(&script_path);
+    let lines = result?;
+    let present = match extract_marker(&lines, "LMM_ENGINE_PRESENT=").as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => {
+            return Err(ModelManagerError::new(
+                "无法确认推理引擎是否存在，已保留管理记录。",
+            ));
+        }
+    };
+    Ok((
+        present,
+        extract_marker(&lines, "LMM_ENGINE_SIZE_BYTES=")
+            .and_then(|value| value.parse::<u64>().ok()),
+    ))
+}
+
+/// 执行已经固化的原生引擎清理契约，并以同一份脚本后验确认实体确实消失。
+///
+/// 不能在此处根据 `$HOME` / 目录名自行拼 `rm -rf`：唯一获准删除的路径必须由
+/// 随该引擎版本签发并校验过的脚本决定。
+fn remove_native_engine(script: &db::ScriptBlob) -> Result<u64, ModelManagerError> {
+    let (present, _) = native_engine_cleanup_probe(script)?;
+    if !present {
+        return Ok(0);
+    }
+    let script_path = write_temp_script(&script.content)?;
+    let result = script_runner::run_script(
+        &script_path,
+        &HashMap::new(),
+        RunScriptOptions {
+            label: Some("删除本机推理引擎".to_string()),
+            timeout: Some(LONG_RUNNING_IDLE_TIMEOUT),
+            idle_timeout: Some(LONG_RUNNING_IDLE_TIMEOUT),
+            ..Default::default()
+        },
+    );
+    let _ = std::fs::remove_file(&script_path);
+    let lines = result?;
+    if native_engine_cleanup_probe(script)?.0 {
+        return Err(ModelManagerError::new(
+            "推理引擎清理脚本已经结束，但后验检查发现引擎文件仍在；为避免留下无法管理的残留，未移除引擎记录。",
+        ));
+    }
+    Ok(extract_marker(&lines, "LMM_ENGINE_FREED_BYTES=")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0))
+}
+
 /// 卡片的 enable 脚本明确说部署配置缺失时，数据库中的“已部署”就是陈旧状态。
 ///
 /// 这里不能把任意 enable 失败都降级：显存不足、端口冲突、镜像故障都可能在一次
@@ -2875,6 +4759,44 @@ fn deployment_receipt_is_missing(message: &str) -> bool {
         || message.contains("缺少")
         || message.contains("不存在");
     mentions_receipt && says_missing
+}
+
+/// deploy 脚本已经确认权重不完整时，数据库中的“已下载”就是陈旧状态。
+///
+/// 只识别“模型/权重 + 不完整/缺失”这一组强信号；不能把网络、显存、端口等普通
+/// 部署故障降级成下载问题，否则用户会被错误引导去重下几十 GB。
+fn model_weights_are_incomplete(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    let explicit_english = [
+        "weights incomplete",
+        "weight files incomplete",
+        "model weights are incomplete",
+        "model directory is incomplete",
+        "model files are incomplete",
+        "model weights missing",
+        "missing model weights",
+    ];
+    explicit_english.iter().any(|needle| lower.contains(needle))
+        || [
+            "模型权重不完整",
+            "权重不完整",
+            "模型文件不完整",
+            "权重缺失",
+            "请先下载模型",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle))
+}
+
+/// enable 脚本把引擎的原始末尾日志一并带回来了。对于“权重已加载、服务在最后
+/// 初始化阶段退出”的情况，既可能是引擎自己的 `startup failed`，也可能已被
+/// `errors::humanize_script_message` 归一成中文；两种形态都要识别到。
+fn engine_startup_failed(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("server failed during startup")
+        || lower.contains("startup failed")
+        || message.contains("推理服务启动失败")
+        || message.contains("推理服务启动未完成")
 }
 
 /// 卡片报上来的对外调用地址是不是指向**本机**。
@@ -2961,6 +4883,303 @@ fn ollama_alive(host: &str) -> bool {
     }
 }
 
+/// `/api/ps` 里这个模型当前是否仍被加载（r21 P2-5）。
+///
+/// 三态：`Some(true)` 在跑；`Some(false)` 服务在但这个模型未加载；`None` 查不动
+/// （请求失败/应答不是合法 JSON——保守侧）。与 reconcile 的 ollama 分支刻意不是
+/// 同一把尺子：那边纠 running 标志不能用 /api/ps（ollama 空闲 5 分钟自动把模型
+/// 卸出显存，按它纠会把正常待机报成故障，见 reconcile 里的注释）；这边是破坏性
+/// 操作（删权重/换脚本）前的停验，问的就是「此刻在不在显存里」——正是 /api/ps
+/// 回答的问题，与 [`ModelManager::ollama_runtime_lines`] 的匹配口径一致（按
+/// `name` 全等比对 `model_name`）。
+fn ollama_model_loaded(host: &str, model_name: &str) -> Option<bool> {
+    let url = format!("{}/api/ps", host.trim_end_matches('/'));
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .no_proxy()
+        .build()
+        .and_then(|client| client.get(&url).send())
+        .ok()?;
+    let data = response.json::<serde_json::Value>().ok()?;
+    let models = data.get("models")?.as_array()?;
+    // P2-4（r24）：ollama 的 name 带 tag（`qwen2.5:latest`），而客户端的
+    // model_name 通常不带——精确等值在生产恒 miss → Some(false) → 显存
+    // 加载中的模型被放行更新/卸载。改为双臂匹配：精确等值（老行为）或
+    // ollama 名以 `{model_name}:` 开头（tag 后缀任意）。
+    Some(models.iter().any(|m| {
+        m.get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|n| n == model_name || n.starts_with(&format!("{model_name}:")))
+    }))
+}
+
+/// 原生引擎给模型商店的 endpoint 是 OpenAI 兼容的 chat-completions 地址。
+/// 运行状态探测不能向它发一次聊天请求（那会触发真正推理），只访问轻量的
+/// `/v1/models`。无法确定的网络错误一律保留原状态，避免一时负载过高就把
+/// 正在运行的服务错标成已停止。
+fn endpoint_path_is_openai_style(endpoint_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint_url) else {
+        // 解析不了的地址不探测，保留原状态。
+        return false;
+    };
+    let path = url.path();
+    path.is_empty() || path == "/" || path.starts_with("/v1")
+}
+
+fn openai_compatible_endpoint_alive(endpoint_url: &str) -> bool {
+    let Ok(mut url) = reqwest::Url::parse(endpoint_url) else {
+        return true;
+    };
+    url.set_path("/v1/models");
+    url.set_query(None);
+    let ok = reqwest::blocking::Client::builder()
+        // 2 秒（r19 评审 P2-7，由 5 秒收敛）：这个探测串行发生在 reconcile
+        // （library() 的第一步）里，K 张卡就是 K×超时。/v1/models 是本机或
+        // 局域网推理端点的轻量请求，正常路径毫秒级返回，2 秒已经足够覆盖
+        // 「确实没响应」之外的一切慢。而超时属于"不确定"失败，
+        // probe_failure_means_nothing_listening 判它为活着、保留原状态——
+        // 收紧超时不会把重负载下响应慢的端点误纠正成已停止。
+        .timeout(Duration::from_secs(2))
+        .no_proxy()
+        .build()
+        .and_then(|client| client.get(url).send())
+        .map(|response| response.status().is_success());
+    match ok {
+        Ok(alive) => alive,
+        Err(error) => !probe_failure_means_nothing_listening(&error),
+    }
+}
+
+/// [`openai_compatible_endpoint_alive`] 的带缓存包装（r19 评审 P2-7）。
+///
+/// 命中缓存（60 秒内探到过端点活着）直接返回 true；**只有探测成功才写
+/// 缓存**，失败不缓存——一条过期的死讯会把刚恢复的服务挡到 TTL 到期，
+/// 而多探一次的成本只是一次毫秒级的 /v1/models。
+fn openai_endpoint_alive_cached(card_id: &str, endpoint_url: &str) -> bool {
+    let cache = RECONCILE_ALIVE_ENDPOINTS.get_or_init(Default::default);
+    if let Ok(cached) = cache.lock() {
+        if let Some(seen_at) = cached.get(card_id) {
+            if seen_at.elapsed() < RECONCILE_PROBE_CACHE_TTL {
+                return true;
+            }
+        }
+    }
+    let alive = openai_compatible_endpoint_alive(endpoint_url);
+    if alive {
+        if let Ok(mut cached) = cache.lock() {
+            cached.insert(card_id.to_string(), Instant::now());
+        }
+    }
+    alive
+}
+
+/// 任务 G（收编）：读卡片 `.runtime/serve.identity.json` 核验进程身份。
+///
+/// 端点活着只能说明「这个端口上有服务」，不能说明是我们的实例——身份核验
+/// 靠 PID 存活检查。`.runtime` 目录由 enable.sh 写入（卡片脚本自管），格式
+/// `{"version":1, "process":{"pid":N, "start_ticks":N, "uid":N}, ...}`。
+/// 文件缺失/损坏/PID 不活 → false（不认领，可能是外来服务或残留端口占用）。
+fn native_engine_identity_alive(card_dir: &std::path::Path) -> bool {
+    let Some(identity) = native_identity_process(card_dir) else {
+        return false;
+    };
+    identity_process_alive(&identity)
+}
+
+/// /proc/{pid}/stat 存在 = 进程活着；不需要解析内容。
+fn pid_alive(pid: i64) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}/stat")).exists()
+}
+
+/// identity 文件里记录的进程身份。start_ticks/uid 老文件可能缺——缺了就
+/// 只能退回「PID 在不在」，带了就比对（见 [`identity_process_alive`]）。
+struct NativeIdentity {
+    pid: i64,
+    start_ticks: Option<u64>,
+    uid: Option<u32>,
+}
+
+/// 从 `.runtime/serve.identity.json` 读出记录的进程身份；文件缺失/损坏/没有
+/// 合法 PID 都返回 None（调用方据此判定「无身份」，不认领、不编数据）。
+fn native_identity_process(card_dir: &std::path::Path) -> Option<NativeIdentity> {
+    let identity_path = card_dir.join(".runtime").join("serve.identity.json");
+    let content = std::fs::read_to_string(&identity_path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    let pid = value["process"]["pid"].as_i64()?;
+    if pid <= 0 {
+        return None;
+    }
+    Some(NativeIdentity {
+        pid,
+        start_ticks: value["process"]["start_ticks"].as_u64(),
+        uid: value["process"]["uid"].as_u64().map(|u| u as u32),
+    })
+}
+
+/// PID 存在**不等于**还是那个进程——PID 会被内核复用（r18 P2-2：仅凭 PID
+/// 文件判活违反 native_process 自己立的规矩，`matching_pid` 在 60 行外就有
+/// 现成机制）。identity 带了 start_ticks/uid 就比对：start_ticks 换了 =
+/// 同号新进程；uid 换了 = 别的用户起的。老 identity 缺字段时保守退回仅
+/// PID 存在（比误杀好——这条只影响「认领」方向，正向纠正另有端点判据）。
+fn identity_process_alive(identity: &NativeIdentity) -> bool {
+    if !pid_alive(identity.pid) {
+        return false;
+    }
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat", pid = identity.pid)) {
+        Ok(stat) => stat,
+        Err(_) => return false,
+    };
+    if let Some(expected) = identity.start_ticks {
+        if super::native_process::start_ticks(&stat) != Some(expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = identity.uid {
+        match std::fs::metadata(format!("/proc/{pid}", pid = identity.pid)) {
+            Ok(meta) => {
+                use std::os::unix::fs::MetadataExt;
+                if meta.uid() != expected {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// `docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label ...}}'`
+/// 的一行。`running` 只认 `state == "running"`（restarted/paused 都不算在服务）；
+/// compose 项目名是 `docker run` 起的容器和外来的容器没有的标签，用 None 表示。
+struct DockerPsRow {
+    name: String,
+    image: String,
+    running: bool,
+    compose_project: Option<String>,
+}
+
+fn parse_docker_ps_a(stdout: &str) -> Vec<DockerPsRow> {
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut parts = line.splitn(4, '\t');
+            let name = parts.next().unwrap_or_default().trim().to_string();
+            let image = parts.next().unwrap_or_default().trim().to_string();
+            let state = parts.next().unwrap_or_default().trim();
+            let project = parts
+                .next()
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty());
+            DockerPsRow {
+                name,
+                image,
+                running: state == "running",
+                compose_project: project,
+            }
+        })
+        .collect()
+}
+
+/// `docker ps -a` 喂给 [`parse_docker_ps_a`] 的四字段格式（名字、镜像、状态、
+/// compose 项目名）——解析端按这个顺序 splitn(4)。
+///
+/// 抽成常量给所有查询共用是 r19 P1-3 的教训：此前「自有容器判停」带镜像
+/// 字段、「详情页容器名」没带，后者的三个字段被 splitn(4) 整体左移解析
+/// （state 吃到项目标签、compose_project 恒 None），compose 卡（容器名 ≠
+/// card_id）在详情页拿不到自己的容器名。共用一份，格式再漂移单测就能抓住。
+const DOCKER_PS_A_FORMAT: &str =
+    "{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}";
+
+/// `require_actually_stopped` 对「无 container_name 的 docker 卡」的结论。
+enum DockerOwnedContainerState {
+    /// 找到本卡容器且有运行中的。
+    Running,
+    /// 找到本卡容器但全部处于退出/暂停等非运行状态。
+    Stopped,
+    /// 没有任何容器以本卡 card_id 为 compose 项目名或容器名。
+    Absent,
+    /// docker 查不动（超时/未装），下不了结论。
+    Unknown,
+}
+
+fn docker_owned_container_state(card_id: &str) -> DockerOwnedContainerState {
+    // 四字段格式与 parse_docker_ps_a 的解析顺序对齐，见 DOCKER_PS_A_FORMAT。
+    let Some(stdout) = proc_timeout::query("docker", &["ps", "-a", "--format", DOCKER_PS_A_FORMAT])
+    else {
+        return DockerOwnedContainerState::Unknown;
+    };
+    let rows = parse_docker_ps_a(&stdout);
+    owned_container_state_from_rows(&rows, card_id)
+}
+
+fn owned_container_state_from_rows(
+    rows: &[DockerPsRow],
+    card_id: &str,
+) -> DockerOwnedContainerState {
+    let mut found = false;
+    let mut any_running = false;
+    for row in rows {
+        let owned = row.compose_project.as_deref() == Some(card_id) || row.name == card_id;
+        if !owned {
+            continue;
+        }
+        found = true;
+        any_running = any_running || row.running;
+    }
+    if !found {
+        DockerOwnedContainerState::Absent
+    } else if any_running {
+        DockerOwnedContainerState::Running
+    } else {
+        DockerOwnedContainerState::Stopped
+    }
+}
+
+/// 原生引擎进程是否属于本卡（r19 P1-1）。
+///
+/// 进程命令行里的 `--model-id` 是推理服务真正认的模型 id——对应记录里的
+/// `endpoint_model`，**不是**展示名 `model_name`（两者六张卡里没有一张相等，
+/// 见 `ForcedRemoval::endpoint_model` 的注释；内存准入喂给 matching_pid 的
+/// 也是 endpoint_model）。此前拿 model_name 比对，驭光卡 stop 半成功（DB 已
+/// running=0、进程还活）时活实例被判「非本卡」放行，purge 会在活进程脚下
+/// 删权重。两者任一命中都算本卡：老记录可能没有 endpoint_model，留展示名
+/// 兜底。
+fn native_process_owned_by_card(
+    process_model_id: Option<&str>,
+    endpoint_model: Option<&str>,
+    model_name: &str,
+) -> bool {
+    let Some(id) = process_model_id else {
+        // 归属无法确认（进程无 --model-id）：保守起见仍然拦。
+        return true;
+    };
+    Some(id) == endpoint_model || Some(id) == Some(model_name)
+}
+
+/// deployed 态、无 container_name 的卡该用哪条判停依据（r19 P1-2）。
+///
+/// ollama 卡既不是容器也没有 docker 镜像：走 docker 自有容器判据只会得到
+/// Absent，再因 ollama 引擎登记不出 docker_image 兜不回来，恒被「无法确认」
+/// 拒绝，停用后更新/卸载全部必拒。抽成纯函数是为了钉住「ollama 不落 docker
+/// 分支」这条路径——ollama_alive 要真发 HTTP，单测里 mock 不了。
+enum DeployedStoppedEvidence {
+    /// ollama 卡：判据是 ollama 服务本身在不在（与 reconcile_running_status
+    /// 的 ollama 分支同口径：服务不在 = 任何 ollama 模型都不可能在服务）。
+    OllamaService,
+    /// 其余（docker 形态）卡：判据是 compose 项目名/容器名 == card_id 的
+    /// 容器状态（[`docker_owned_container_state`]）。
+    OwnedContainer,
+}
+
+fn deployed_stopped_evidence(engine_name: &str) -> DeployedStoppedEvidence {
+    if engine_name == "ollama" {
+        DeployedStoppedEvidence::OllamaService
+    } else {
+        DeployedStoppedEvidence::OwnedContainer
+    }
+}
+
 /// 一次 HTTP 探测的失败，是否**确定**说明「那个地址后面没有服务」。
 ///
 /// 只认底层 IO 错误的 `ErrorKind`，不看错误文案：文案会随 reqwest/hyper 版本变，
@@ -3002,6 +5221,28 @@ fn docker_image_size(image: &str) -> u64 {
     .unwrap_or(0)
 }
 
+/// 只读取由本模型商店登记的容器 PID，供内存准入采样进程树使用。
+///
+/// 失败时返回 None：容器可能恰好在停止、docker 也可能短暂不可用；这种情况下前端
+/// 会显示“当前占用暂不可读取”，但仍按系统 `MemAvailable` 做保守判断。
+fn docker_container_pid(container_name: &str) -> Option<u32> {
+    proc_timeout::query(
+        "docker",
+        &["inspect", "--format", "{{.State.Pid}}", container_name],
+    )
+    .and_then(|pid| pid.trim().parse::<u32>().ok())
+    .filter(|pid| *pid > 0)
+}
+
+/// ollama 的引擎与全部模型数据（权重 blob 在 `models/` 子目录）都放在
+/// `$HOME/.ollama` 下。统计大小（`ollama_size`）和残留测量
+/// （`candidate_paths`）都要落到这一个目录上，解析逻辑只此一份。
+fn ollama_home_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".ollama"))
+}
+
 fn ollama_size() -> u64 {
     let mut total = 0u64;
     for p in ["/usr/local/bin/ollama", "/usr/bin/ollama"] {
@@ -3009,8 +5250,7 @@ fn ollama_size() -> u64 {
             total += meta.len();
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        let ollama_dir = PathBuf::from(home).join(".ollama");
+    if let Some(ollama_dir) = ollama_home_dir() {
         if ollama_dir.is_dir() {
             total += disk::dir_size_bytes(&ollama_dir);
         }
@@ -3039,8 +5279,243 @@ fn gpu_runtime_lines() -> Vec<String> {
     labels
         .iter()
         .zip(parts.iter())
+        // GB10 这类统一内存设备上显存两行是 [N/A]——留着就是两行空数据
+        // （2026-10-27 用户反馈），设备不支持的指标直接不出。
+        .filter(|(_, value)| !gpu_value_unsupported(value))
         .map(|(label, value)| format!("{label}：{value}"))
         .collect()
+}
+
+/// nvidia-smi 的这个字段值是否为「设备不支持此指标」的占位。
+fn gpu_value_unsupported(value: &str) -> bool {
+    let v = value.trim().to_ascii_lowercase();
+    matches!(
+        v.as_str(),
+        "" | "n/a" | "[n/a]" | "[not supported]" | "not supported"
+    )
+}
+
+/// 运行中模型的真实时画像（2026-10-27 用户反馈重做）：以前这里只有设备级
+/// GPU 六行，GB10 这类统一内存设备上「显存已用/总量」是 [N/A]，用户看到的
+/// 就是两行空数据。现在按优先级拼三段真实数据，全部即时实测：
+///
+/// 1. **本模型的进程**——docker 卡经 `docker inspect` 拿容器 PID/健康状态、
+///    `docker stats` 拿容器内存；原生引擎经 `.runtime/serve.identity.json`
+///    拿 PID、/proc 拿主进程 RSS。没有身份可查（如刚认领、无 identity 的
+///    老卡）就整段跳过，不编数据。
+/// 2. **端点实测**——OpenAI 风格端点发一次 /v1/models，报告响应耗时和
+///    端点里的模型清单。/generate 这类非 OpenAI 路径改写成 /v1/models 必
+///    404，探了只会误导，跳过。
+/// 3. **GPU 整体**——nvidia-smi，过滤设备不支持的行（[N/A]）。
+fn model_runtime_lines(rec: &db::StoreModelRecord) -> (Vec<String>, String) {
+    let mut lines = Vec::new();
+
+    if let Some(container) = owned_container_name(rec) {
+        lines.push(format!("运行方式：Docker 容器 {container}"));
+        if let Some((pid, state, health)) = docker_container_runtime(&container) {
+            let mut state_desc = state;
+            if let Some(h) = health {
+                state_desc = format!("{state_desc} · {h}");
+            }
+            lines.push(format!("容器状态：{state_desc}"));
+            if pid > 0 {
+                lines.push(format!("进程 PID：{pid}"));
+                push_uptime_and_rss(&mut lines, pid);
+            }
+        }
+        if let Some(mem) = docker_container_memory(&container) {
+            lines.push(format!("内存占用：{mem}（容器合计，实时）"));
+        }
+    } else if let Some(pid) = native_runtime_pid(rec).filter(|pid| pid_alive(*pid)) {
+        lines.push("运行方式：原生引擎进程".into());
+        if pid > 0 {
+            lines.push(format!("进程 PID：{pid}"));
+            push_uptime_and_rss(&mut lines, pid);
+        }
+    }
+
+    if let Some(endpoint) = rec.endpoint_url.as_deref() {
+        if endpoint_path_is_openai_style(endpoint) {
+            match probe_openai_endpoint(endpoint) {
+                OpenAiProbe::Ok { latency_ms, models } => {
+                    lines.push(format!("服务状态：正常（/v1/models 响应 {latency_ms}ms）"));
+                    if !models.is_empty() {
+                        lines.push(format!("端点模型：{}", models.join("、")));
+                    }
+                }
+                // 连接被拒是确定性的「没在服务」，照实说；超时/DNS 之类「问不出来」
+                // 的一行都不加——加了就是把不确定当结论。
+                OpenAiProbe::Refused => lines.push("服务状态：端点无响应（连接被拒）".into()),
+                OpenAiProbe::Unknown => {}
+            }
+        }
+    }
+
+    let gpu = gpu_runtime_lines();
+    let has_gpu = !gpu.is_empty();
+    lines.extend(gpu);
+    let note = if has_gpu {
+        "进程/内存/端点为本模型实时实测；GPU 行是设备整体状态，仅供参考。".into()
+    } else {
+        String::new()
+    };
+    (lines, note)
+}
+
+/// 本卡自有的 docker 容器名：优先用 DB 里启用脚本报上来的 container_name，
+/// 没有的话按 compose 项目名/容器名 == card_id 找（与 reconcile 同一套身份）。
+fn owned_container_name(rec: &db::StoreModelRecord) -> Option<String> {
+    if let Some(name) = rec
+        .container_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        return Some(name.to_string());
+    }
+    // r19 P1-3：这里的查询此前只有 Names/State/Label 三个 tab 字段，喂给
+    // splitn(4) 的 parse_docker_ps_a 后字段整体左移一位——state 吃到项目标签
+    // （永远不是 "running"）、compose_project 恒 None，find 判据只剩
+    // name == card_id 一条路，compose 卡（容器名 ≠ card_id）在详情页拿不到
+    // 容器名。补上 {{.Image}} 对齐 docker_owned_container_state 的四字段。
+    let stdout = proc_timeout::query("docker", &["ps", "-a", "--format", DOCKER_PS_A_FORMAT])?;
+    let rows = parse_docker_ps_a(&stdout);
+    owned_container_name_from_rows(&rows, &rec.card_id)
+}
+
+/// 与 [`owned_container_state_from_rows`] 同一套身份判据（compose 项目名/
+/// 容器名 == card_id），返回命中的容器名。
+fn owned_container_name_from_rows(rows: &[DockerPsRow], card_id: &str) -> Option<String> {
+    rows.iter()
+        .find(|row| row.compose_project.as_deref() == Some(card_id) || row.name == card_id)
+        .map(|row| row.name.clone())
+}
+
+/// `docker inspect` 出 (容器主进程 PID, 状态, 健康检查结论)。
+fn docker_container_runtime(container: &str) -> Option<(i64, String, Option<String>)> {
+    let stdout = proc_timeout::query(
+        "docker",
+        &[
+            "inspect",
+            "--format",
+            "{{.State.Pid}}\t{{.State.Status}}\t{{if .State.Health}}{{.State.Health.Status}}{{end}}",
+            container,
+        ],
+    )?;
+    let mut parts = stdout.trim().splitn(3, '\t');
+    let pid = parts.next()?.trim().parse::<i64>().ok()?;
+    let state = parts.next().unwrap_or_default().trim().to_string();
+    let health = parts
+        .next()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty());
+    Some((pid, state, health))
+}
+
+/// `docker stats --no-stream` 的容器内存用量（如 `7.9GiB`，docker 自己的口径）。
+/// 这个命令要等一个采样周期（约 2 秒），靠 proc_timeout 兜底防卡死。
+fn docker_container_memory(container: &str) -> Option<String> {
+    let stdout = proc_timeout::query(
+        "docker",
+        &[
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.MemUsage}}",
+            container,
+        ],
+    )?;
+    stdout
+        .trim()
+        .split_whitespace()
+        .next()
+        .map(|first| first.trim().to_string())
+        .filter(|mem| !mem.is_empty())
+}
+
+/// 原生引擎在 `.runtime/serve.identity.json` 里记的 PID（含 start_ticks/uid
+/// 核验——与 reconcile 的身份核验同一判据，PID 复用后老 PID 的假活不展示）。
+fn native_runtime_pid(rec: &db::StoreModelRecord) -> Option<i64> {
+    // r22 P3-3：join("") 得到的路径永非空，旧的空串守卫防不了「探测 cards/
+    // 整目录」；校验失败直接没有身份可读。
+    let safe_id = config::safe_path_component(&rec.card_id).ok()?;
+    let card_dir = config::data_dir().join("cards").join(safe_id);
+    let identity = native_identity_process(&card_dir)?;
+    identity_process_alive(&identity).then_some(identity.pid)
+}
+
+/// uptime（ps etime）+ 主进程 RSS（/proc VmRSS）。两项各自尽力：拿不到就少一行，
+/// 不编数。RSS 是主进程而非整个进程树，容器场景另有 docker stats 的容器合计，
+/// 这里标明「主进程」避免两个数对不上时像是测错了。
+fn push_uptime_and_rss(lines: &mut Vec<String>, pid: i64) {
+    if let Some(etime) = proc_timeout::query("ps", &["-o", "etime=", &pid.to_string()]) {
+        let etime = etime.trim();
+        if !etime.is_empty() {
+            lines.push(format!("已运行：{etime}"));
+        }
+    }
+    if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        let rss = status.lines().find_map(|line| {
+            let rest = line.strip_prefix("VmRSS:")?.trim();
+            rest.split_whitespace()
+                .next()
+                .and_then(|kb| kb.parse::<u64>().ok())
+                .map(|kb| disk::format_bytes((kb * 1024) as f64))
+        });
+        if let Some(rss) = rss {
+            lines.push(format!("内存占用：{rss}（主进程）"));
+        }
+    }
+}
+
+enum OpenAiProbe {
+    Ok {
+        latency_ms: u64,
+        models: Vec<String>,
+    },
+    Refused,
+    Unknown,
+}
+
+fn probe_openai_endpoint(endpoint_url: &str) -> OpenAiProbe {
+    let Ok(mut url) = reqwest::Url::parse(endpoint_url) else {
+        return OpenAiProbe::Unknown;
+    };
+    url.set_path("/v1/models");
+    url.set_query(None);
+    let started = std::time::Instant::now();
+    let result = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .no_proxy()
+        .build()
+        .and_then(|client| client.get(url).send());
+    match result {
+        Ok(response) if response.status().is_success() => {
+            let latency_ms = started.elapsed().as_millis() as u64;
+            let models = response
+                .json::<serde_json::Value>()
+                .ok()
+                .and_then(|body| {
+                    body["data"].as_array().map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item["id"].as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .unwrap_or_default();
+            OpenAiProbe::Ok { latency_ms, models }
+        }
+        // HTTP 有响应但非 2xx：服务在、路由不对，与「没服务」分开说。
+        Ok(_) => OpenAiProbe::Refused,
+        Err(error) => {
+            if probe_failure_means_nothing_listening(&error) {
+                OpenAiProbe::Refused
+            } else {
+                OpenAiProbe::Unknown
+            }
+        }
+    }
 }
 
 fn write_temp_script(content: &str) -> Result<PathBuf, ModelManagerError> {
@@ -3072,11 +5547,249 @@ mod tests {
     mod download_leases;
     mod recovery_admission;
 
+    #[test]
+    fn native_identity_supports_common_assets_without_overwriting_build_versions() {
+        let sha = "a".repeat(64);
+        let common =
+            format!("ENGINE_BIN_SHA256=\"{sha}\"\n# local-model-manager/engines/tachyon-serve");
+        let install = "source \"$CARD_DIR/common.sh\"";
+        assert_eq!(
+            native_tachyon_identity(install, Some(&common), None),
+            Some(("aaaaaaaa".into(), sha.clone()))
+        );
+        assert_eq!(
+            native_tachyon_identity(install, Some(&common), Some("build-42")),
+            Some(("build-42".into(), sha.clone()))
+        );
+        assert_eq!(
+            native_tachyon_identity(&common, None, Some("")),
+            Some(("aaaaaaaa".into(), sha))
+        );
+        assert!(native_tachyon_identity(install, None, None).is_none());
+        assert!(declared_native_sha("ENGINE_BIN_SHA256=short").is_none());
+        assert!(native_tachyon_identity("ENGINE_BIN_SHA256=bad", None, None).is_none());
+    }
+
+    /// 真机（2026-10-27 cube-9fde）`docker ps -a` 四字段的实际形态：compose 卡
+    /// 带项目标签，`docker run` 起的容器没有（None），状态字段区分 running/exited。
+    #[test]
+    fn parse_docker_ps_a_handles_missing_label_and_states() {
+        let stdout = "ornith15-api\tvllm/vllm-openai:v0.27.1\trunning\tornith15-bf16\n\
+                      z-image-turbo\tz-image-turbo:diffusers-0.40.0\texited\tz-image-turbo\n\
+                      megacube-qwen38fn-single\ta551e05307cd\texited\t\n";
+        let rows = parse_docker_ps_a(stdout);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].name, "ornith15-api");
+        assert!(rows[0].running);
+        assert_eq!(rows[0].compose_project.as_deref(), Some("ornith15-bf16"));
+        assert!(!rows[1].running);
+        assert_eq!(rows[1].compose_project.as_deref(), Some("z-image-turbo"));
+        assert_eq!(rows[2].compose_project, None);
+        // 空行不算容器
+        assert!(parse_docker_ps_a("\n  \n").is_empty());
+    }
+
+    /// 无 container_name 的 docker 卡判停/认领依据：compose 项目名或容器名等于
+    /// card_id 即视为本卡部署；两者都对不上时绝不把别人的容器当自己的。
+    #[test]
+    fn owned_container_state_matches_project_or_name() {
+        let rows = parse_docker_ps_a(
+            "ornith15-api\tvllm:v0.27.1\trunning\tornith15-bf16\n\
+             z-image-turbo\tz-image:diffusers\texited\tz-image-turbo\n\
+             cowork-vllm\tvllm:v0.27.1\trunning\t\n",
+        );
+        // 项目名 == card_id（ornith15-bf16 的容器叫 ornith15-api，名字对不上）
+        assert!(matches!(
+            owned_container_state_from_rows(&rows, "ornith15-bf16"),
+            DockerOwnedContainerState::Running
+        ));
+        // 容器名 == card_id，且已退出 → Stopped（z-image「更新脚本」被拦的场景）
+        assert!(matches!(
+            owned_container_state_from_rows(&rows, "z-image-turbo"),
+            DockerOwnedContainerState::Stopped
+        ));
+        // 同款镜像的外来容器：项目名、容器名都对不上 → Absent，不认领
+        assert!(matches!(
+            owned_container_state_from_rows(&rows, "ornith15-35b-a3b-nvfp4"),
+            DockerOwnedContainerState::Absent
+        ));
+    }
+
+    /// r19 P1-1：原生进程归属判定。进程 `--model-id` 是推理服务真正认的模型
+    /// id（= endpoint_model），不是展示名 model_name——此前拿 model_name 比对，
+    /// 六张卡没有一个能命中，驭光卡 stop 半成功（DB running=0、进程还活）时
+    /// 活实例被判「非本卡」放行，purge 在活进程脚下删权重。
+    #[test]
+    fn native_process_ownership_matches_endpoint_model_first() {
+        let endpoint_model = Some("ornith15-bf16");
+        let model_name = "Ornith-1.5-35B-A3B";
+        // 进程报的正是推理服务认的 id → 本卡（修复前这里恒 false）
+        assert!(native_process_owned_by_card(
+            Some("ornith15-bf16"),
+            endpoint_model,
+            model_name
+        ));
+        // 老记录没有 endpoint_model：展示名兜底命中，不算「非本卡」
+        assert!(native_process_owned_by_card(
+            Some(model_name),
+            None,
+            model_name
+        ));
+        // 别的卡的实例（两个 id 都对不上）→ 非本卡，放行跨卡更新
+        assert!(!native_process_owned_by_card(
+            Some("qwen38fn"),
+            endpoint_model,
+            model_name
+        ));
+        // 归属无法确认（进程无 --model-id）→ 保守起见视为本卡（拦）
+        assert!(native_process_owned_by_card(
+            None,
+            endpoint_model,
+            model_name
+        ));
+    }
+
+    /// r19 P1-2：deployed 态无 container_name 的卡，ollama 不许落 docker 判据
+    /// ——它既无容器也无镜像，docker 分支只会得到 Absent 再被恒拒。ollama_alive
+    /// 要真发 HTTP、mock 不了，这里钉住路径选择这一层。
+    #[test]
+    fn deployed_stopped_evidence_routes_ollama_away_from_docker() {
+        assert!(matches!(
+            deployed_stopped_evidence("ollama"),
+            DeployedStoppedEvidence::OllamaService
+        ));
+        // docker 形态的引擎照旧走自有容器判据
+        assert!(matches!(
+            deployed_stopped_evidence("vllm"),
+            DeployedStoppedEvidence::OwnedContainer
+        ));
+    }
+
+    /// r19 P1-3：详情页容器名按 compose 项目名命中（compose 卡容器名 ≠
+    /// card_id），并钉住查询格式与 splitn(4) 解析器的字段对齐。
+    #[test]
+    fn owned_container_name_matches_compose_project() {
+        let rows = parse_docker_ps_a(
+            "ornith15-api\tvllm:v0.27.1\trunning\tornith15-bf16\n\
+             z-image-turbo\tz-image:diffusers\texited\tz-image-turbo\n",
+        );
+        // compose 卡：容器名 ornith15-api ≠ card_id，靠项目名命中
+        assert_eq!(
+            owned_container_name_from_rows(&rows, "ornith15-bf16"),
+            Some("ornith15-api".into())
+        );
+        // docker run 形态：容器名 == card_id
+        assert_eq!(
+            owned_container_name_from_rows(&rows, "z-image-turbo"),
+            Some("z-image-turbo".into())
+        );
+        // 谁的容器都不是
+        assert_eq!(owned_container_name_from_rows(&rows, "other-card"), None);
+        // 查询格式必须与解析器对齐：四个 tab 分隔字段，顺序名字/镜像/状态/项目
+        let fields = DOCKER_PS_A_FORMAT.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 4, "字段数漂移会让 parse_docker_ps_a 错位");
+        assert!(fields[0].contains("Names"));
+        assert!(fields[1].contains("Image"));
+        assert!(fields[2].contains("State"));
+        assert!(fields[3].contains("com.docker.compose.project"));
+        // 错位实况（钉住为什么必须四字段）：三字段行的项目标签落进 state、
+        // compose_project 恒 None，compose 卡从此只能靠容器名碰运气。
+        let misaligned = parse_docker_ps_a("ornith15-api\trunning\tornith15-bf16");
+        assert_eq!(misaligned[0].compose_project, None);
+        assert!(!misaligned[0].running);
+    }
+
+    /// GB10 统一内存设备上 nvidia-smi 的显存两行是 [N/A]，过滤后不再出现空数据。
+    #[test]
+    fn gpu_value_unsupported_covers_na_placeholders() {
+        assert!(gpu_value_unsupported("[N/A]"));
+        assert!(gpu_value_unsupported(" N/A "));
+        assert!(gpu_value_unsupported("[Not Supported]"));
+        assert!(gpu_value_unsupported(""));
+        assert!(!gpu_value_unsupported("11.44 W"));
+        assert!(!gpu_value_unsupported("45"));
+    }
+
+    /// r18 P2-2：identity 判活必须比对 start_ticks/uid——PID 会被内核复用，
+    /// 仅凭「/proc/{pid}/stat 存在」会把同号新进程当成自己的实例认领。
+    /// 用本测试进程自己的 /proc 做真实比对（非伪造）。
+    #[test]
+    fn identity_pid_reuse_is_caught_by_start_ticks_and_uid() {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let ticks = super::super::native_process::start_ticks(&stat)
+            .expect("本进程 stat 应可解析出 starttime");
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata("/proc/self").unwrap().uid();
+        let self_pid = std::process::id() as i64;
+
+        let ok = NativeIdentity {
+            pid: self_pid,
+            start_ticks: Some(ticks),
+            uid: Some(uid),
+        };
+        assert!(identity_process_alive(&ok), "字段全对必须判活");
+
+        let reused = NativeIdentity {
+            pid: self_pid,
+            start_ticks: Some(ticks + 1),
+            uid: Some(uid),
+        };
+        assert!(
+            !identity_process_alive(&reused),
+            "start_ticks 换了 = 同号新进程（PID 复用），不得判活"
+        );
+
+        let foreign_uid = NativeIdentity {
+            pid: self_pid,
+            start_ticks: Some(ticks),
+            uid: Some(uid + 1),
+        };
+        assert!(
+            !identity_process_alive(&foreign_uid),
+            "uid 对不上 = 别的用户起的进程，不得判活"
+        );
+
+        let legacy = NativeIdentity {
+            pid: self_pid,
+            start_ticks: None,
+            uid: None,
+        };
+        assert!(
+            identity_process_alive(&legacy),
+            "老 identity 缺 start_ticks/uid 时退回仅 PID 存在"
+        );
+    }
+
+    #[test]
+    fn native_probe_distinguishes_absence_from_failure_and_checks_integrity() {
+        let blob = |content: &str| db::ScriptBlob {
+            content: content.into(),
+            sha256: script_runner::sha256_hex(content),
+        };
+        assert_eq!(
+            native_engine_cleanup_probe(&blob("#!/bin/bash\necho LMM_ENGINE_PRESENT=0\n")).unwrap(),
+            (false, None)
+        );
+        assert_eq!(
+            native_engine_cleanup_probe(&blob(
+                "#!/bin/bash\necho LMM_ENGINE_PRESENT=1\necho LMM_ENGINE_SIZE_BYTES=42\n"
+            ))
+            .unwrap(),
+            (true, Some(42))
+        );
+        assert!(native_engine_cleanup_probe(&blob("#!/bin/bash\nexit 1\n")).is_err());
+        assert!(native_engine_cleanup_probe(&blob("echo unknown\n")).is_err());
+        let mut altered = blob("#!/bin/bash\necho LMM_ENGINE_PRESENT=0\n");
+        altered.content.push_str("echo changed\n");
+        assert!(native_engine_cleanup_probe(&altered).is_err());
+    }
+
     fn make_card(name: &str, quant: Option<&str>) -> StoreCardDetail {
         StoreCardDetail {
             assets: Default::default(),
             asset_sha256: None,
             summary: StoreCardSummary {
+                resource_requirements: Default::default(),
                 deploy_topology: Default::default(),
                 id: "card-x".into(),
                 name: name.into(),
@@ -3202,6 +5915,125 @@ mod tests {
         }
     }
 
+    /// 网络类失败不得触发兜底提权（.48 真机案例，2026-10-27）：无外网设备上
+    /// docker pull 超时 → 自动弹 pkexec 重试 → 没人输密码 → 1800 秒 idle 判死。
+    /// 样本取自该真机的实际失败文案（英文原文 + humanize 中文形态各一）。
+    #[test]
+    fn network_failures_never_escalate_to_root() {
+        for msg in [
+            // .48 run log 原文：docker pull 的 registry 请求超时
+            "脚本执行失败（退出码 1）：failed to do request: Head \"https://registry-1.docker.io/v2/\": dial tcp: lookup registry-1.docker.io: i/o timeout",
+            "脚本执行失败（退出码 1）：Error response from daemon: failed to resolve reference vllm/vllm-openai: no route to host",
+            "脚本执行失败（退出码 1）：Temporary failure resolving 'hf-mirror.com'",
+            // 客户端 humanize 形态。这条**刻意保留 .48 真机原文的字面量**、不
+            // 引用 store_client 的 HINT_* 常量：守卫（MARKERS）那侧已经引用
+            // 常量了，这里从真机文案那一侧把两边一起钉住——常量若被改得与
+            // 真实文案分家，本用例会先红（r19 评审 P2-2 的双侧钉）。
+            "脚本执行失败（退出码 1）：连接超时，请检查网络或联系管理员（请检查设备能不能访问外网）",
+        ] {
+            assert!(
+                ModelManager::network_unreachable_failure(msg),
+                "网络类失败必须拦下兜底提权：{msg}"
+            );
+            assert!(
+                !ModelManager::is_fatal_failure(msg),
+                "网络类失败应保留断点续传重试（不进致命清单）：{msg}"
+            );
+        }
+        // 反例：与网络无关的普通失败不受影响（仍走既有兜底提权路径）
+        assert!(!ModelManager::network_unreachable_failure(
+            "脚本执行失败（退出码 1）：Error response from daemon: No such image: vllm/x"
+        ));
+        assert!(!ModelManager::network_unreachable_failure(
+            "脚本执行失败（退出码 2）：some card-specific error"
+        ));
+    }
+
+    /// 2026-11-17 客户事故（0.10.17）：image 卡引擎包 by-hash 地址在源站侧缺失，
+    /// curl 22（HTTP 404）落进了兜底提权——对着一个不存在的地址弹管理员密码框。
+    /// HTTP 层失败必须三断言同真：是 http_url_failure、不进致命清单（重装卡片
+    /// 配置后可恢复）、也不是网络不可达（治法不同——这边该指引检查卡片更新）。
+    /// 样本取自客户真机截图原文。
+    #[test]
+    fn http_url_failures_skip_privilege_escalation() {
+        for msg in [
+            // 客户 0.10.17 实录原文
+            "脚本执行失败（退出码 22）：curl: (22) The requested URL returned error: 404",
+            // 脚本 humanize 透传 curl 原文的另一形态
+            "脚本返回错误（curl: (22) The requested URL returned error: 404）",
+            // 403 同族（HF gated/源站拒绝）；5xx 是源站侧错误，同样不提权
+            "脚本执行失败（退出码 22）：curl: (22) The requested URL returned error: 403",
+            "脚本执行失败（退出码 22）：curl: (22) The requested URL returned error: 502",
+        ] {
+            assert!(
+                ModelManager::http_url_failure(msg),
+                "HTTP 层失败必须拦下兜底提权：{msg}"
+            );
+            assert!(
+                !ModelManager::is_fatal_failure(msg),
+                "HTTP 失败非致命（更新卡片配置后可恢复）：{msg}"
+            );
+            assert!(
+                !ModelManager::network_unreachable_failure(msg),
+                "HTTP 失败不是网络不可达（指引应是检查卡片更新而非换网络）：{msg}"
+            );
+        }
+        // 反例：传输中断（18/92）与普通脚本错误不受影响，仍走各自既有路径
+        assert!(!ModelManager::http_url_failure(
+            "脚本执行失败（退出码 18）：curl: (18) Transferred a partial file"
+        ));
+        assert!(!ModelManager::http_url_failure(
+            "脚本执行失败（退出码 2）：some card-specific error"
+        ));
+    }
+
+    /// 传输中断（cube-5059 真机案例，2026-10-29）：换 IP 后出网走代理劣化，
+    /// 驭光引擎包 curl 92 → 兜底提权重跑 → curl 18 → 终态失败。三类判定必须
+    /// 同时成立：是传输中断、不致命、也不是"网络不可达"（治法不同——这边
+    /// 该静默续传，那边该提示换网络）。样本取自该真机 run log 原文。
+    #[test]
+    fn transfer_interrupts_resume_instead_of_escalate_or_die() {
+        for msg in [
+            // .59 run log 原文：卡片脚本 humanize 后的 curl 18
+            "脚本执行失败（退出码 1）：引擎包还没下完整（curl 退出码 18）。已下好的部分保留在 /root/.local/share/local-model-manager/engines/tachyon-serve/engine.tar.gz.ea7605.part，再点一次「安装引擎」会从断点接着传。",
+            // curl 原文（卡片没 humanize 时直接透出）
+            "脚本执行失败（退出码 18）：curl: (18) Transferred a partial file",
+            "脚本执行失败（退出码 92）：curl: (92) HTTP/2 stream 1 was not closed cleanly: CANCEL (err 8)",
+            // 同族：连接被对端重置（curl 56）
+            "脚本执行失败（退出码 56）：脚本返回错误（curl: (56) Recv failure: Connection reset by peer）",
+            // r21 P2-7：通用包装器形态——卡片没透出 curl 原文、摘要里也没有
+            // 「curl」字样时，只剩退出码本身可认。
+            "脚本执行失败（退出码 18）：下载未完成",
+            "脚本执行失败（退出码 92）：流被中途取消",
+            // r21 P2-7：curl/docker 断流的三个原文形态
+            "脚本执行失败（退出码 18）：curl: (18) transfer closed with 297 bytes remaining",
+            "脚本执行失败（退出码 56）：Recv failure: Connection was reset",
+            "脚本执行失败（退出码 1）：unexpected EOF during chunked transfer",
+        ] {
+            assert!(
+                ModelManager::transfer_interrupted_failure(msg),
+                "应判为传输中断（自动续传）：{msg}"
+            );
+            assert!(!ModelManager::is_fatal_failure(msg), "不该判致命：{msg}");
+            assert!(
+                !ModelManager::network_unreachable_failure(msg),
+                "不该判网络不可达（治法是续传不是提示换网）：{msg}"
+            );
+        }
+        // 反例：远端真没有（HTTP 404）、权限不足、超时判死——都不是传输中断，
+        // 不许进续传循环
+        for msg in [
+            "脚本执行失败（退出码 22）：脚本返回错误（curl: (22) The requested URL returned error: 404 Not Found）",
+            "脚本执行失败（退出码 1）：权限不足",
+            "脚本执行超时：install_engine.sh（连续 300 秒没有任何新输出，判定为卡死）",
+        ] {
+            assert!(
+                !ModelManager::transfer_interrupted_failure(msg),
+                "不该判传输中断：{msg}"
+            );
+        }
+    }
+
     /// install_engine 是六个入口脚本里唯一会走 pkexec 的，所以只有它按
     /// 「会以 root 执行」那一档强制要求哈希。这份判定写错的代价是不对称的：
     /// 漏了它 = 未验签内容能拿到 root；多算一个 = 一张正常卡片突然装不动。
@@ -3213,24 +6045,27 @@ mod tests {
         }
     }
 
-    /// 只有打包在应用里的测试商店才允许把"URL"写成本地文件路径。真实商店的
-    /// 卡片来自网络，放开这个开关就等于让卡片指定"读本机哪个文件再当脚本跑"。
+    /// **生产上没有任何一条路能把"脚本地址是本地文件路径"放行。**
+    ///
+    /// 这一位原来是内置测试商店的生产开关（`builtin_store`）。测试商店 2026-09-30
+    /// 拿掉之后它只剩测试一个用处，所以这条测试从"谁可以用"改成盯"生产拿不到它"
+    /// ——`ModelManager::new` 出来的管理器必须是关着的，而唯一的开法是那个
+    /// `#[cfg(test)]` 的 `with_local_script_paths`。它一旦松掉，一张被改过的卡片
+    /// 就能指定"读本机哪个文件再当脚本跑"，install_engine 那条还经 pkexec。
     #[test]
-    fn only_the_bundled_store_may_use_local_paths() {
+    fn nothing_in_production_may_turn_on_local_script_paths() {
         let card = make_card("x", None);
         let remote = ScriptsSource::from_card(&card, false);
-        let bundled = ScriptsSource::from_card(&card, true);
 
         assert!(
             !remote.fetch_policy("install_engine").allow_local_path,
-            "真实商店不能读本地路径"
+            "商店卡片不能读本地路径"
         );
         assert!(
             remote.fetch_policy("install_engine").may_run_as_root,
             "install_engine 必须按提权那一档取（强制要求哈希）"
         );
         assert!(!remote.fetch_policy("deploy").may_run_as_root);
-        assert!(bundled.fetch_policy("install_engine").allow_local_path);
 
         // Local 来源（已固化的本地副本）压根不 fetch，策略也必须是最严的一档，
         // 免得哪天有人把它接进 fetch 路径时意外放行。
@@ -3240,6 +6075,13 @@ mod tests {
             profiles: Vec::new(),
         };
         assert!(!local.fetch_policy("install_engine").allow_local_path);
+
+        // 生产构造出来的管理器：这一位必须是关着的。
+        let _ctx = setup_temp_db();
+        assert!(
+            !ModelManager::new(None, None).local_script_paths,
+            "生产构造函数把本地路径放行了"
+        );
     }
 
     /// 引擎没装时探针以非 0 退出码结束，run_script 返回的是 Err。这个测试盯的
@@ -3247,7 +6089,8 @@ mod tests {
     /// 而不是用 on_progress 收集输出，这里就会挂。
     #[test]
     fn probe_reads_need_root_even_when_engine_is_missing() {
-        let mgr = ModelManager::new_test_store();
+        let _ctx = setup_temp_db();
+        let mgr = ModelManager::new(None, None);
         let source = ScriptsSource::Local {
             assets: Default::default(),
             blobs: [(
@@ -3275,7 +6118,8 @@ exit 1
     /// 安装会先以普通用户身份尝试（失败再自动提权），而不是无条件弹密码框。
     #[test]
     fn probe_defaults_to_no_root_for_scripts_without_the_marker() {
-        let mgr = ModelManager::new_test_store();
+        let _ctx = setup_temp_db();
+        let mgr = ModelManager::new(None, None);
         let source = ScriptsSource::Local {
             assets: Default::default(),
             blobs: [(
@@ -3298,27 +6142,16 @@ exit 0
         assert!(!probe.need_root, "没有约定标记就不该擅自提权");
     }
 
-    /// 内置测试商店的每张卡都要实现 LMM_NEED_ROOT 约定，否则新加的卡片会悄悄
-    /// 退回「先普通用户跑一次、失败再提权」的兜底路径，用户平白多等一轮。
-    #[test]
-    fn bundled_cards_implement_the_probe_convention() {
-        // 每张卡的 install_engine 都必须实现只读探针：LMM 在每次下载前先跑一次，
-        // 命中就整段跳过安装。没有它，用户每下一个模型都要重装一遍引擎。
-        //
-        // 但**不是每张卡都要声明 LMM_NEED_ROOT**：整包交付的那两张卡，包的
-        // preflight 明确 `require(os.geteuid() != 0)`，整个脚本以 root 跑会被
-        // 当场拒绝。它们需要提权的动作（注册 nvidia runtime、配直连网卡）由
-        // 脚本自己在内部处理——所以这里只钉住探针约定，不强求 root 声明。
-        for card in super::super::test_store_data::test_cards() {
-            let script = super::super::test_store_data::script_content(&card, "install_engine")
-                .expect("每张卡都该有 install_engine");
-            assert!(
-                script.contains("LMM_PROBE_ONLY"),
-                "卡片 {} 的 install_engine 没有实现只读探针约定",
-                card.summary.id
-            );
-        }
-    }
+    // 这里原来有一条 `bundled_cards_implement_the_probe_convention`：遍历内置测试
+    // 商店那 6 张卡，断言每张卡的 install_engine 都实现了只读探针约定
+    // （`LMM_PROBE_ONLY`）。内置卡片 2026-09-30 整体从仓库里拿掉之后，它没有可遍历
+    // 的对象了。
+    //
+    // **这条约定并没有跟着消失，只是守它的位置变了**：卡片脚本现在只存在于生产
+    // 商店，仓库里没有任何副本，所以"每张在架卡片都实现了探针约定"只能在上架流程
+    // 里查（见 pinvou3-ops 的上架检查单），代码这边查不了也不该假装能查。宿主侧的
+    // 那一半仍然有测试守着：探针怎么跑、读不到标记时按 need_root=false 处理，见上面
+    // 两条 `probe_*`。
 
     #[test]
     fn extracts_markers() {
@@ -3336,6 +6169,85 @@ exit 0
             Some("/models/target")
         );
         assert_eq!(extract_marker(&lines, "LMM_ENGINE_IMAGE="), None);
+    }
+
+    /// r19 评审 P2-1：install_engine 的 stdout 是卡片作者可控的输入，伪造的
+    /// `LMM_ENGINE_IMAGE=` 经 mark_engine_installed 的 COALESCE 能覆盖共享引擎
+    /// 行、再借 delete_engine 驱动 `docker rmi`。形式白名单先挡掉注入形状。
+    #[test]
+    fn engine_image_marker_whitelist_rejects_injection_shapes() {
+        // 合法形态：裸 repo、repo:tag、带 registry 端口、摘要引用
+        for ok in [
+            "example/img",
+            "vllm/vllm-openai:v0.8.5",
+            "registry.internal:5000/team/app:latest",
+            "registry.internal:5000/team/app@sha256:0f2a9c11d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9",
+            "ghcr.io/org/repo",
+        ] {
+            assert!(engine_image_marker_is_wellformed(ok), "应放行：{ok}");
+        }
+        // `-` 开头（docker 选项）、空白/引号/元字符（不是一个 token）、没有
+        // repo 名的纯 tag/纯摘要、空串——全部出局
+        for bad in [
+            "",
+            "-f",
+            "--",
+            "a b",
+            "'quoted'",
+            "$evIL",
+            "example/img;rm -rf /",
+            "a||b",
+            "a\nb",
+            ":just-a-tag",
+            "/repo",
+            "@sha256:0f2a9c",
+        ] {
+            assert!(!engine_image_marker_is_wellformed(bad), "应拒绝：{bad:?}");
+        }
+    }
+
+    /// r19 评审 P2-1：同名同版本的引擎行是共享的。脚本自报一个**不同**的镜像
+    /// 名时必须保留旧值（返回 None 让 COALESCE 生效），形式不合法的 marker
+    /// 直接丢弃；新引擎行没有旧值时照常登记。
+    #[test]
+    fn differing_engine_image_marker_never_overwrites_existing_row() {
+        let _home = setup_temp_db();
+        db::mark_engine_installed("vllm", Some("v1"), Some("old/img:1"), None, None).unwrap();
+
+        // 不同镜像名：不覆盖
+        assert_eq!(
+            engine_image_to_record("vllm", Some("v1"), Some("new/img:2".into())),
+            None,
+            "共享行已有镜像名时，自报的不同值不该覆盖旧值"
+        );
+        // 相同镜像名：等值登记，无害
+        assert_eq!(
+            engine_image_to_record("vllm", Some("v1"), Some("old/img:1".into())),
+            Some("old/img:1".into())
+        );
+        // 形式不合法：丢弃
+        assert_eq!(
+            engine_image_to_record("vllm", Some("v1"), Some("-f".into())),
+            None
+        );
+        // 新引擎行（库里没有旧值）：正常登记
+        assert_eq!(
+            engine_image_to_record("sglang", None, Some("s/img:9".into())),
+            Some("s/img:9".into())
+        );
+
+        // 走完 mark_engine_installed 全链路，库里仍是旧镜像名（COALESCE 那条腿）
+        let recorded = engine_image_to_record("vllm", Some("v1"), Some("new/img:2".into()));
+        db::mark_engine_installed("vllm", Some("v1"), recorded.as_deref(), None, None).unwrap();
+        assert_eq!(
+            db::get_installed_engine("vllm", Some("v1"))
+                .unwrap()
+                .unwrap()
+                .docker_image
+                .as_deref(),
+            Some("old/img:1"),
+            "覆盖被拒后落库的必须是旧镜像名"
+        );
     }
 
     #[test]
@@ -3357,6 +6269,34 @@ exit 0
         assert!(!deployment_receipt_is_missing(
             "deployment configuration is valid, but port 30000 is already in use"
         ));
+    }
+
+    #[test]
+    fn identifies_explicit_incomplete_weight_errors_without_misclassifying_runtime_errors() {
+        assert!(model_weights_are_incomplete(
+            "ERROR: download finished but the model directory is incomplete"
+        ));
+        assert!(model_weights_are_incomplete("模型权重不完整，请先下载模型"));
+        assert!(model_weights_are_incomplete("missing model weights"));
+        assert!(!model_weights_are_incomplete("网络连接失败，请稍后重试"));
+        assert!(!model_weights_are_incomplete("启动服务失败：显存不足"));
+        assert!(!model_weights_are_incomplete(
+            "port 30000 is already in use"
+        ));
+    }
+
+    #[test]
+    fn recognizes_engine_startup_failures_without_calling_them_download_failures() {
+        assert!(engine_startup_failed(
+            "2026-10-13 FATAL server failed during startup"
+        ));
+        assert!(engine_startup_failed(
+            "ERROR startup failed [finalizing target]"
+        ));
+        assert!(engine_startup_failed(
+            "推理服务启动失败：模型权重已加载完成，但服务初始化未完成"
+        ));
+        assert!(!engine_startup_failed("模型权重不完整，请先下载模型"));
     }
 
     /// 防的是「几百 GB 的 rm -rf 被 300 秒静默超时误杀」。
@@ -3412,7 +6352,7 @@ exit 0
             status: "deployed",
             profiles: &[],
             deploy_topology: DeployTopology::Single,
-            card_source: "builtin",
+            card_source: "store",
         })
         .unwrap();
     }
@@ -3640,6 +6580,36 @@ exit 0
         );
     }
 
+    /// r33 P2-4：停验门钉。此前三个 force_remove 测试的记录全部 running=false，
+    /// 删掉门那几行套件依旧全绿（评审变异实证）——门必须有自己的红/绿判据：
+    /// running=true 拒（记录必须原样保留），running=false 放行。
+    #[test]
+    fn force_remove_refuses_while_running_and_allows_when_stopped() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        add_stuck_record("card-live", "Org/Ornith-1.5-35B-A3B", 168_000_000_000);
+        db::set_running("card-live", true).unwrap();
+        let mgr = manager_with_models_dir(&models_dir);
+
+        let err = mgr
+            .force_remove_record("card-live")
+            .expect_err("运行中必须拒绝强删，否则孤儿实例再造");
+        assert!(
+            err.to_string().contains("先停止"),
+            "拒绝文案要说清下一步（先停止）：{err}"
+        );
+        assert!(
+            db::get_store_model("card-live").unwrap().is_some(),
+            "拒绝不是「删了但报错」——记录必须原样保留"
+        );
+
+        // 同一张卡停掉后放行——门不是一刀切禁用逃生口。
+        db::set_running("card-live", false).unwrap();
+        mgr.force_remove_record("card-live")
+            .expect("停止后应当放行强删");
+        assert!(db::get_store_model("card-live").unwrap().is_none());
+    }
+
     /// 防的是「常见位置没找到残留，就对用户说已经清干净了」。
     ///
     /// 权重目录是按卡片脚本的约定反推的（MODEL_PATH 写在脚本自己的 .env 里，
@@ -3666,7 +6636,108 @@ exit 0
         );
     }
 
+    /// r19 评审 P2-4：ollama 卡的权重 blob 在 `~/.ollama/models`，不在 models_dir。
+    /// candidate_paths 漏掉它的话，强制移除一张 ollama 卡会报"没有残留"——
+    /// 几十 GB 权重从此变成谁也不知道的孤儿。
+    #[test]
+    fn ollama_card_residue_measurement_includes_dot_ollama() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        // TempHome 已把 HOME 指到临时目录：在这里造出 ollama 的真实布局
+        let ollama_models = tmp.path().join(".ollama").join("models").join("blobs");
+        std::fs::create_dir_all(&ollama_models).unwrap();
+        std::fs::write(ollama_models.join("sha256-weights"), [0u8; 64]).unwrap();
+
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "card-ollama",
+            model_name: "qwen3:32b",
+            card_name: "Qwen3 32B",
+            org: None,
+            description: None,
+            engine_name: "ollama",
+            engine_version: None,
+            size_bytes: 20_000_000_000,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &Default::default(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: DeployTopology::Single,
+            card_source: "store",
+        })
+        .unwrap();
+
+        let removal = manager_with_models_dir(&models_dir)
+            .force_remove_record("card-ollama")
+            .expect("应当能强制移除");
+        assert!(
+            removal
+                .residual_paths
+                .iter()
+                .any(|p| p.ends_with(".ollama")),
+            "ollama 的权重目录必须被点名，否则几十 GB 就成了谁也看不见的孤儿：{:?}",
+            removal.residual_paths
+        );
+    }
+
     // ---------------------------------------------- 卸载：保留权重 / 彻底删除
+
+    #[test]
+    fn known_destructive_qwen_uninstall_is_rejected_before_materialization() {
+        let original =
+            include_str!("../../../../../../tests/fixtures/model-store-unsafe-qwen-uninstall.sh");
+        assert_eq!(
+            script_runner::sha256_hex(original),
+            "184de35d3e0844a4a43c8ffc6ab481aeeb65a06843d68410c18fe0f869ec349c"
+        );
+        for purge in [false, true] {
+            let tmp = setup_temp_db();
+            let models = tmp.path().join("models");
+            let weights = models.join("Qwen3.8-27B-NVFP4-Tachyon");
+            make_fake_weights(&weights, 4096);
+            add_stuck_record("unsafe-qwen", "Org/Qwen3.8-27B-NVFP4-Tachyon", 4098);
+            let scripts = BTreeMap::from([
+                (
+                    "uninstall".into(),
+                    db::ScriptBlob {
+                        content: original.into(),
+                        sha256: "forged-metadata".into(),
+                    },
+                ),
+                (
+                    "stop".into(),
+                    db::ScriptBlob {
+                        content:
+                            "#!/bin/bash\necho stop-ran > \"$LMM_MODELS_DIR/stop-ran\"\nexit 70\n"
+                                .into(),
+                        sha256: String::new(),
+                    },
+                ),
+            ]);
+            let assets = BTreeMap::from([("common.sh".into(), db::ScriptBlob {
+                content: "MODEL_DIR=\"$LMM_MODELS_DIR/Qwen3.8-27B-NVFP4-Tachyon\"\nRUNTIME_DIR=\"$LMM_MODELS_DIR/runtime-fixture\"\nDEPLOY_ENV=\"$LMM_MODELS_DIR/env-fixture\"\nENGINE_DIR=\"$LMM_MODELS_DIR/engine-fixture\"\nENGINE_ROOT=\"$LMM_MODELS_DIR/engines-fixture\"\n".into(),
+                sha256: String::new(),
+            })]);
+            db::set_scripts_content("unsafe-qwen", &scripts, &assets).unwrap();
+            db::set_running("unsafe-qwen", true).unwrap();
+            let error = manager_with_models_dir(&models)
+                .uninstall("unsafe-qwen", purge, &mut |_| {}, Default::default())
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("已拦截存在已知删除风险的旧版卸载脚本"),
+                "{error}"
+            );
+            assert!(weights.join("model.safetensors").exists());
+            assert!(!models.join("stop-ran").exists());
+            assert!(!config::data_dir().join("cards/unsafe-qwen").exists());
+            let record = db::get_store_model("unsafe-qwen").unwrap().unwrap();
+            assert!(record.running);
+            assert_eq!(record.status, "deployed");
+        }
+    }
 
     /// 装一条带真脚本的记录，脚本按 `LMM_PURGE_WEIGHTS` 决定删不删权重
     /// ——和六张内置卡的入口脚本用的是同一套约定（规范 4.6）。
@@ -3837,6 +6908,307 @@ exit 0
         assert!(!outcome.record_kept);
     }
 
+    /// 同 [`add_record_with_uninstall_script`]，但脚本删的目录名可以指定——
+    /// 复现厂商部署脚本「实际权重落在带消歧后缀的目录」的形态（真机：
+    /// `Qwen3.8-27B-NVFP4-unsloth`，与 repo 末段猜出的目录名不同）。
+    fn add_record_with_uninstall_script_for_dir(card_id: &str, repo: &str, dir_leaf: &str) {
+        add_stuck_record(card_id, repo, 0);
+        let script = format!(
+            "#!/bin/bash\n\
+             set -euo pipefail\n\
+             if [ \"${{LMM_PURGE_WEIGHTS:-0}}\" = \"1\" ]; then\n\
+             \x20   rm -rf -- \"$LMM_MODELS_DIR/{dir_leaf}\"\n\
+             \x20   echo '权重已删除'\n\
+             else\n\
+             \x20   echo '按选择保留权重'\n\
+             fi\n"
+        );
+        let blobs: BTreeMap<String, db::ScriptBlob> = [(
+            "uninstall".to_string(),
+            db::ScriptBlob {
+                content: script,
+                sha256: String::new(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        db::set_scripts_content(card_id, &blobs, &Default::default()).unwrap();
+    }
+
+    /// r23 P1-1 回归钉：purge 首轮失败进「需要继续清理」后，卡目录里的
+    /// `vendor/.deploy-env` 消歧提示必须仍在（重试轮靠它把同名后缀目录认成本卡
+    /// 产物）。旧序在残留判定前就删卡目录——首轮失败后提示被毁，重试轮只剩
+    /// 猜测路径，`…-unsloth` 目录不可见 → 残留误判为空 → 记录删除、权重孤儿化。
+    #[test]
+    fn failed_purge_keeps_disambiguation_hint_for_the_retry_round() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let sibling_weights = models_dir.join("Qwen3.8-27B-NVFP4");
+        make_fake_weights(&sibling_weights, 4096);
+        // 本卡权重在消歧后缀目录；脚本 rm 一个不存在的路径（成功但什么都没删），
+        // 模拟 mark_cleanup_required 针对的「脚本没删掉真实权重」失效类。
+        let own_weights = models_dir.join("Qwen3.8-27B-NVFP4-unsloth");
+        make_fake_weights(&own_weights, 4096);
+
+        add_record_with_uninstall_script_for_dir(
+            "card-stuck",
+            "unsloth/Qwen3.8-27B-NVFP4",
+            "definitely-not-created",
+        );
+        let vendor = config::data_dir()
+            .join("cards")
+            .join("card-stuck")
+            .join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(
+            vendor.join(".deploy-env"),
+            format!("MODEL_DIR=\"{}\"\n", own_weights.display()),
+        )
+        .unwrap();
+        add_stuck_record("card-kept", "RadixArk/Qwen3.8-27B-NVFP4", 21_000_000_000);
+
+        let mgr = manager_with_models_dir(&models_dir);
+        let first = mgr.uninstall("card-stuck", true, &mut |_| {}, Default::default());
+        assert!(
+            first.is_err(),
+            "脚本没删权重，首轮必须失败进「需要继续清理」"
+        );
+        assert!(
+            vendor.join(".deploy-env").exists(),
+            "失败路径必须保住消歧提示（重试轮靠它）"
+        );
+        assert!(
+            db::get_store_model("card-stuck").unwrap().is_some(),
+            "首轮失败后记录必须在（继续清理入口）"
+        );
+
+        // 重试轮：提示仍在 → 后缀目录仍被判为本卡残留 → 依旧如实失败，
+        // 绝不允许被洗成「删干净了」进而删记录孤儿化权重。
+        let second = mgr.uninstall("card-stuck", true, &mut |_| {}, Default::default());
+        let err_text = format!("{}", second.expect_err("重试轮同样没删权重，必须再次失败"));
+        assert!(
+            err_text.contains("尚未全部删除"),
+            "重试轮必须如实报残留：{err_text}"
+        );
+        assert!(own_weights.exists(), "本卡权重在两轮里都不许被误判清理");
+        assert!(
+            db::get_store_model("card-stuck").unwrap().is_some(),
+            "重试轮失败后记录必须仍在"
+        );
+    }
+
+    /// 2026-11-03 真机事故（cube-9fde）：下线卡 `unsloth/Qwen3.8-27B-NVFP4` 与
+    /// 保留卡 `RadixArk/Qwen3.8-27B-NVFP4` 的 repo 末段相同，猜出的权重目录是
+    /// 同一条。用户删下线卡：脚本把自己真正的权重（`-unsloth` 后缀目录）删得
+    /// 干干净净，收尾判定却看见保留卡的 21G 活权重"仍在磁盘上"→ 卡进
+    /// 「需要继续清理」，重试永远失败，唯一出路是强制移除——还被提示去手动
+    /// 清理那个目录。他卡拥有的路径不得算本卡的删除残留。
+    #[test]
+    fn purge_completes_when_a_sibling_card_shares_the_guessed_weights_dir() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        // 保留卡的活权重：整个卸载动作从头到尾不许碰它
+        let sibling_weights = models_dir.join("Qwen3.8-27B-NVFP4");
+        make_fake_weights(&sibling_weights, 4096);
+        // 下线卡自己的权重在带消歧后缀的目录里，脚本按约定删掉它
+        let own_weights = models_dir.join("Qwen3.8-27B-NVFP4-unsloth");
+        let own_bytes = make_fake_weights(&own_weights, 4096);
+
+        add_record_with_uninstall_script_for_dir(
+            "card-retired",
+            "unsloth/Qwen3.8-27B-NVFP4",
+            "Qwen3.8-27B-NVFP4-unsloth",
+        );
+        // 部署过的卡都会留下 .deploy-env，记着真实权重位置（带消歧后缀）
+        let vendor = config::data_dir()
+            .join("cards")
+            .join("card-retired")
+            .join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(
+            vendor.join(".deploy-env"),
+            format!("MODEL_DIR=\"{}\"\n", own_weights.display()),
+        )
+        .unwrap();
+        add_stuck_record("card-kept", "RadixArk/Qwen3.8-27B-NVFP4", 21_000_000_000);
+
+        let outcome = manager_with_models_dir(&models_dir)
+            .uninstall("card-retired", true, &mut |_| {}, Default::default())
+            .expect("自己的产物删干净了就该判完成，而不是卡进死循环");
+
+        assert!(!own_weights.exists(), "本卡自己的权重必须真的删掉");
+        assert!(
+            sibling_weights.join("model.safetensors").exists(),
+            "保留卡的活权重一个字节都不能少"
+        );
+        assert!(
+            outcome.remaining_paths.is_empty(),
+            "他卡的目录不得算本卡残留：{:?}",
+            outcome.remaining_paths
+        );
+        // 等号钉不死（purge 收尾还会删 cards/<id> 里的部署文件），钉下界：
+        // 量不到自己目录的字节就说明 hint/清单又退回纯猜了。
+        assert!(
+            outcome.freed_bytes >= own_bytes,
+            "量到的必须含自己目录的真实字节：{} < {own_bytes}",
+            outcome.freed_bytes
+        );
+        assert!(
+            db::get_store_model("card-retired").unwrap().is_none(),
+            "彻底删除必须移除记录"
+        );
+        let kept = db::get_store_model("card-kept")
+            .unwrap()
+            .expect("保留卡的记录不许被顺手删掉");
+        assert_eq!(kept.status, "deployed");
+    }
+
+    /// 卡片的真实权重落在带消歧后缀的目录（`.deploy-env` 记着），猜路径猜不到
+    /// 它。修复前 23G 权重删了、"实测释放"却报 0——数字是从猜的清单上量出来
+    /// 的。hint 入列后要量到真字节。
+    #[test]
+    fn deploy_env_hint_counts_the_real_weights_dir_in_freed_bytes() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        // 猜的目录（repo 末段）在磁盘上不存在——本卡的实际权重在别处
+        let actual = models_dir.join("Qwen3.8-27B-NVFP4-unsloth");
+        let real_bytes = make_fake_weights(&actual, 4096);
+
+        add_record_with_uninstall_script_for_dir(
+            "card-hint",
+            "unsloth/Qwen3.8-27B-NVFP4",
+            "Qwen3.8-27B-NVFP4-unsloth",
+        );
+        let vendor = config::data_dir()
+            .join("cards")
+            .join("card-hint")
+            .join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(
+            vendor.join(".deploy-env"),
+            format!("MODEL_DIR=\"{}\"\n", actual.display()),
+        )
+        .unwrap();
+
+        let outcome = manager_with_models_dir(&models_dir)
+            .uninstall("card-hint", true, &mut |_| {}, Default::default())
+            .expect("卸载应当成功");
+        assert!(!actual.exists());
+        // 等号钉不死：purge 收尾还会删掉 cards/<id> 里的部署文件（含这份
+        // .deploy-env 本身）。钉下界就够了——修复前 hint 不入列，量到的只有
+        // 几十字节的部署文件，远够不到真权重的字节数。
+        assert!(
+            outcome.freed_bytes >= real_bytes,
+            "实测释放必须量到 .deploy-env 指向的真权重目录：{} < {real_bytes}",
+            outcome.freed_bytes
+        );
+        assert!(
+            outcome.remaining_paths.is_empty(),
+            "删干净了就不该报残留：{:?}",
+            outcome.remaining_paths
+        );
+    }
+
+    /// `.deploy-env` 是卡片脚本写的文件，内容不可信：指到 models_dir 外、
+    /// 指到多层子目录的一律当没有。这里只做测量与报告，但校验必须先行——
+    /// 防的是未来有人拿 hint 去做删除。
+    #[test]
+    fn deploy_env_hint_rejects_paths_outside_the_models_dir() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        add_stuck_record("card-hint-guard", "unsloth/Qwen3.8-27B-NVFP4", 1);
+        let vendor = config::data_dir()
+            .join("cards")
+            .join("card-hint-guard")
+            .join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        let mgr = manager_with_models_dir(&models_dir);
+        let rec = mgr.get_record("card-hint-guard").unwrap();
+
+        for bad in [
+            format!("MODEL_DIR=\"/etc\"\n"),
+            format!("MODEL_DIR=\"{}\"\n", models_dir.join("sub/inner").display()),
+            format!("MODEL_DIR=\"{}\"\n", models_dir.parent().unwrap().display()),
+            "PORT=30000\n".to_string(),
+        ] {
+            std::fs::write(vendor.join(".deploy-env"), bad).unwrap();
+            assert!(
+                mgr.deployed_weights_hint(&rec).is_none(),
+                "逃出 models_dir 或非 MODEL_DIR 行必须当没有"
+            );
+        }
+        let good = models_dir.join("Qwen3.8-27B-NVFP4-unsloth");
+        std::fs::write(
+            vendor.join(".deploy-env"),
+            format!("MODEL_DIR=\"{}\"\n", good.display()),
+        )
+        .unwrap();
+        assert_eq!(mgr.deployed_weights_hint(&rec), Some(good));
+        std::fs::remove_file(vendor.join(".deploy-env")).unwrap();
+        assert_eq!(mgr.deployed_weights_hint(&rec), None);
+    }
+
+    /// r21 登记 P3「多 ollama 卡互为 purge 残留死循环」：所有 ollama 卡的 blob
+    /// 同住 `~/.ollama`。删 A 卡时该目录因 B 卡仍在而"存在"→ A 永远
+    /// 「需要继续清理」。它是 B 卡的候选路径，不算 A 的残留。
+    #[test]
+    fn purging_one_ollama_card_does_not_stall_on_the_shared_blob_dir() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        // TempHome 已把 HOME 指到临时目录：在这里造出 ollama 的 blob 布局
+        let ollama_blobs = tmp.path().join(".ollama").join("models").join("blobs");
+        std::fs::create_dir_all(&ollama_blobs).unwrap();
+        std::fs::write(ollama_blobs.join("sha256-weights"), [0u8; 64]).unwrap();
+
+        for card_id in ["card-ollama-a", "card-ollama-b"] {
+            db::add_store_model(db::AddStoreModelParams {
+                card_id,
+                model_name: "qwen3:32b",
+                card_name: "Qwen3 32B",
+                org: None,
+                description: None,
+                engine_name: "ollama",
+                engine_version: None,
+                size_bytes: 20_000_000_000,
+                quantization: None,
+                source_repo_id: None,
+                source_filename: None,
+                scripts: &Default::default(),
+                status: "deployed",
+                profiles: &[],
+                deploy_topology: DeployTopology::Single,
+                card_source: "store",
+            })
+            .unwrap();
+        }
+        // A 卡的卸载脚本：blob 由 ollama 服务自己管（ollama rm），这里只复现
+        // "脚本成功结束、共享 blob 根仍在"的收尾现场。
+        let blobs: BTreeMap<String, db::ScriptBlob> = [(
+            "uninstall".to_string(),
+            db::ScriptBlob {
+                content: "#!/bin/bash\nexit 0\n".into(),
+                sha256: String::new(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        db::set_scripts_content("card-ollama-a", &blobs, &Default::default()).unwrap();
+
+        manager_with_models_dir(&models_dir)
+            .uninstall("card-ollama-a", true, &mut |_| {}, Default::default())
+            .expect("共享 blob 根是 B 卡的，不该把 A 卡卡进「需要继续清理」");
+        assert!(
+            ollama_blobs.join("sha256-weights").exists(),
+            "B 卡还在用，blob 根必须原样保留"
+        );
+        assert!(db::get_store_model("card-ollama-a").unwrap().is_none());
+        assert!(
+            db::get_store_model("card-ollama-b").unwrap().is_some(),
+            "B 卡记录不许被顺手删掉"
+        );
+    }
+
     /// 防的是「脚本没认 LMM_PURGE_WEIGHTS，界面却照样宣布权重已删除」。
     ///
     /// 老卡片（按规范 1.0 写的）根本不知道有这个变量，收到 `=1` 也只会保留权重。
@@ -3862,24 +7234,21 @@ exit 0
         .collect();
         db::set_scripts_content("card-legacy", &blobs, &Default::default()).unwrap();
 
-        let outcome = manager_with_models_dir(&models_dir)
+        let error = manager_with_models_dir(&models_dir)
             .uninstall("card-legacy", true, &mut |_| {}, Default::default())
-            .expect("卸载应当成功");
+            .expect_err("删不干净不能伪装成成功");
 
-        assert_eq!(outcome.freed_bytes, 0, "脚本什么都没删，就不能报释放量");
         assert!(
-            outcome
-                .remaining_paths
-                .iter()
-                .any(|p| p.ends_with("Ornith-1.5-35B-A3B")),
-            "还在盘上的权重必须被点名，否则这几十 GB 就成了没人知道的孤儿：{:?}",
-            outcome.remaining_paths
+            error.to_string().contains("尚未全部删除")
+                && error.to_string().contains("Ornith-1.5-35B-A3B"),
+            "失败要明确告诉用户还有什么没清：{error}"
         );
-        assert!(
-            outcome.summary.contains("仍在磁盘上"),
-            "用户点的是彻底删除却没删掉，这句话必须说出来：{}",
-            outcome.summary
-        );
+        let rec = db::get_store_model("card-legacy")
+            .unwrap()
+            .expect("残留权重时记录必须留下，不能把文件变成看不见的孤儿");
+        assert_eq!(rec.status, "cleanup_required");
+        assert!(!rec.running);
+        assert!(weights.exists(), "脚本没删的权重仍在，应由后续继续清理接管");
     }
 
     // ------------------------------------------------ 下载：整段编排的端到端
@@ -3940,10 +7309,14 @@ echo '权重就绪'
             .unwrap_or(0)
     }
 
-    /// 造一张「脚本正文是本地文件」的卡片。内置测试商店在生产里就是这么下发的
-    /// （scripts 的值是本地路径而不是 https URL），所以这条路不用起服务器也能把
-    /// 整段编排真跑一遍，而且用的是 `builtin_store` 这一位生产开关，没有为测试
-    /// 另开后门。
+    /// 造一张「脚本正文是本地文件」的卡片：scripts 的值是本地路径而不是 https URL，
+    /// 于是整段下载编排能在不起服务器的前提下真跑一遍——包括"登记哈希对不上就中止"
+    /// 这条只在 fetch 路径上才成立的判据。
+    ///
+    /// 放行这种地址的那一位（`ModelManager::local_script_paths`）**只有测试能置真**，
+    /// 生产构造函数出来的管理器一律是关着的（那里有为什么，
+    /// `nothing_in_production_may_turn_on_local_script_paths` 钉着）。它以前是内置
+    /// 测试商店的生产开关，测试商店拿掉之后就只剩这一个用处了。
     ///
     /// `tampered` 指定哪个脚本的**登记哈希**故意写错：内容没动，动的是商店说
     /// 它应该是什么——正是"传输被篡改/后台数据被改"到达客户端时的样子。
@@ -3991,10 +7364,408 @@ echo '权重就绪'
     }
 
     fn manager_with_card(settings: Settings, card: StoreCardDetail) -> ModelManager {
-        let mut mgr = ModelManager::new(Some(settings), Some(Box::new(OneCardStore { card })));
-        // 卡片里的"URL"是本地文件路径，只有内置测试商店这一位放行它。
-        mgr.builtin_store = true;
-        mgr
+        ModelManager::new(Some(settings), Some(Box::new(OneCardStore { card })))
+            .with_local_script_paths()
+    }
+
+    fn updated_engine_deployment(
+        replacement_install: Option<&str>,
+        common: Option<&str>,
+    ) -> (config::TempHome, ModelManager, PathBuf) {
+        let home = setup_temp_db();
+        let models = home.path().join("models");
+        let manager = manager_with_card(
+            download_settings(&models),
+            local_script_card(&home.path().join("scripts"), None),
+        );
+        manager
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        let mut scripts = rec.scripts_content.clone();
+        let blob = |text: &str| db::ScriptBlob {
+            content: text.into(),
+            sha256: script_runner::sha256_hex(text),
+        };
+        scripts.insert(
+            "install_engine".into(),
+            blob(&replacement_install.map(str::to_string).unwrap_or_else(|| {
+                FAKE_INSTALL_ENGINE.replace("engine-installed", "engine-updated")
+            })),
+        );
+        scripts.insert("deploy".into(), blob(
+            "#!/bin/sh\n[ -f \"$LMM_MODELS_DIR/engine-updated\" ] || { echo 'ERROR: 引擎未就绪' >&2; exit 1; }\necho ran >> \"$LMM_MODELS_DIR/deploy-ran\"\n",
+        ));
+        let mut assets = rec.assets_content.clone();
+        if let Some(common) = common {
+            assets.insert("common.sh".into(), blob(common));
+        }
+        db::replace_card_package(&rec, &scripts, &assets).unwrap();
+        (home, manager, models)
+    }
+
+    #[test]
+    fn deploy_after_script_update_installs_missing_engine_without_downloading_weights() {
+        let (_home, manager, models) = updated_engine_deployment(None, None);
+        assert!(
+            db::get_installed_engine("vllm", Some("v0.27.1"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(!models.join("engine-updated").exists());
+        manager
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap();
+        assert_eq!(ran_times(&models.join("engine-updated")), 1);
+        assert_eq!(ran_times(&models.join("deploy-ran")), 1);
+        assert_eq!(ran_times(&models.join("download-ran")), 1);
+        assert!(
+            models.join("engine-installed").exists(),
+            "旧引擎不能被更新流程删除"
+        );
+        assert_eq!(
+            db::get_store_model("card-dl").unwrap().unwrap().status,
+            "deployed"
+        );
+        manager
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap();
+        assert_eq!(
+            ran_times(&models.join("engine-updated")),
+            1,
+            "已就绪的依赖应复用"
+        );
+        assert_eq!(ran_times(&models.join("deploy-ran")), 2);
+    }
+
+    #[test]
+    fn deploy_engine_install_failure_keeps_weights_and_never_executes_deploy() {
+        let failed = "#!/bin/sh\nif [ \"${LMM_PROBE_ONLY:-0}\" = 1 ]; then exit 1; fi\necho 'ERROR: 磁盘空间不足' >&2\nexit 1\n";
+        let (_home, manager, models) = updated_engine_deployment(Some(failed), None);
+        let before = db::get_installed_engine("vllm", Some("v0.27.1"))
+            .unwrap()
+            .unwrap();
+        let error = manager
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("磁盘空间不足"), "{error}");
+        assert_eq!(ran_times(&models.join("deploy-ran")), 0);
+        assert_eq!(ran_times(&models.join("download-ran")), 1);
+        let after = db::get_installed_engine("vllm", Some("v0.27.1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.install_script_sha256, after.install_script_sha256);
+        assert_eq!(
+            db::get_store_model("card-dl").unwrap().unwrap().status,
+            "downloaded"
+        );
+    }
+
+    /// r21 P1-1：deploy 的状态门。cleanup_required 的卡被误点部署时，必须在跑
+    /// 任何脚本之前拒绝，且不得把状态改写成 incomplete（「用继续下载掩盖清理态」
+    /// 正是 db.rs 注释禁止的）；incomplete / 缺 weights_ready_at（升级前老库）
+    /// 同样先拒、指「继续下载」。
+    #[test]
+    fn deploy_status_gate_rejects_cleanup_required_and_incomplete_records() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let mgr = manager_with_card(
+            download_settings(&models_dir),
+            local_script_card(&tmp.path().join("scripts"), None),
+        );
+        mgr.download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+
+        db::mark_cleanup_required("card-dl").unwrap();
+        let error = mgr
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("继续清理"),
+            "cleanup_required 要指引继续清理：{error}"
+        );
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        assert_eq!(rec.status, "cleanup_required", "拒绝路径不得改写状态");
+        assert!(
+            rec.weights_ready_at.is_some(),
+            "拒绝路径不得顺手抹掉下载凭据"
+        );
+
+        db::mark_weights_incomplete("card-dl").unwrap();
+        let error = mgr
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("继续下载"),
+            "incomplete 要指引继续下载：{error}"
+        );
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        assert_eq!(rec.status, "incomplete");
+    }
+
+    /// r20 P2-5 的守卫接线（r21 补测试）：deploy 撞「权重不完整」要走
+    /// 抹身份前的等价停验——实例仍在（running=1）时保留记录原样报错；
+    /// 真停了才归位成 incomplete。此前这条守卫零接线测试。
+    #[test]
+    fn weights_incomplete_reset_keeps_records_whose_instance_is_still_alive() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let mgr = manager_with_card(
+            download_settings(&models_dir),
+            local_script_card(&tmp.path().join("scripts"), None),
+        );
+        mgr.download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        // 换一个「报权重不完整」的 deploy 脚本（模型权重不完整是
+        // model_weights_are_incomplete 的强信号标记）。
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        let mut scripts = rec.scripts_content.clone();
+        let deploy_body = "#!/bin/sh\necho '模型权重不完整，请先下载模型' >&2\nexit 1\n";
+        scripts.insert(
+            "deploy".into(),
+            db::ScriptBlob {
+                content: deploy_body.into(),
+                sha256: script_runner::sha256_hex(deploy_body),
+            },
+        );
+        db::replace_card_package(&rec, &scripts, &rec.assets_content).unwrap();
+
+        // 实例仍在：停验必须拒绝归位，记录一字不动。
+        db::set_running("card-dl", true).unwrap();
+        let error = mgr
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("仍有实例在运行"),
+            "活实例脚下不得归位：{error}"
+        );
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        assert_eq!(rec.status, "downloaded", "拒绝路径不得改写状态");
+        assert!(rec.weights_ready_at.is_some());
+        assert!(rec.running, "拒绝路径不得清 running 标志");
+
+        // 真停了：归位照常发生（这正是守卫要保护的正确路径）。
+        db::set_running("card-dl", false).unwrap();
+        let error = mgr
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("继续下载"),
+            "停验通过后应归位为继续下载：{error}"
+        );
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        assert_eq!(rec.status, "incomplete");
+        assert!(rec.weights_ready_at.is_none());
+    }
+
+    /// r20 P2-8 的启用预检接线（r21 补测试）：running=1 直接拒；端点仍有响应
+    /// （遗留实例）也拒；端点确定没人听时放行（后续失败是脚本层的事，预检
+    /// 不背锅）。此前这条守卫零接线测试。
+    #[test]
+    fn enable_precheck_rejects_running_records_and_live_endpoints() {
+        use std::io::{Read as _, Write as _};
+
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let mgr = manager_with_card(
+            download_settings(&models_dir),
+            local_script_card(&tmp.path().join("scripts"), None),
+        );
+        mgr.download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        db::update_store_model_status("card-dl", "deployed", None).unwrap();
+
+        // ① r36 P1-2 终裁后语义：running=true 不再被预检拒绝——服务层的准入
+        // reconcile 已纠正陈旧标志，此刻的 running=1 是「本应用自己的活实例」，
+        // 再点启用 = 显式接管/重启意图（main 的二次启用流依赖它）。预检放行后
+        // 失败原因应是夹具缺 enable 脚本，而不是「请勿重复启用」。
+        db::set_running("card-dl", true).unwrap();
+        let error = mgr
+            .enable("card-dl", &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            !error.to_string().contains("请勿重复启用"),
+            "running=1 是接管意图，预检必须放行：{error}"
+        );
+
+        // ② 端点仍有响应（遗留实例）→ 拒绝并指引自助恢复。
+        db::set_running("card-dl", false).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            while let Ok((mut socket, _)) = listener.accept() {
+                let mut buf = [0_u8; 1024];
+                let _ = socket.read(&mut buf);
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                let _ = socket.flush();
+            }
+        });
+        db::set_endpoint_info(
+            "card-dl",
+            Some(&format!("http://127.0.0.1:{port}/v1")),
+            Some("model-id"),
+        )
+        .unwrap();
+        let error = mgr
+            .enable("card-dl", &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("双实例"),
+            "端点活着的遗留实例必须拒绝：{error}"
+        );
+
+        // ③ 端点确定没人听 → 预检放行（失败原因是夹具没有 enable 脚本，
+        // 而不是预检拦的）。
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
+        db::set_endpoint_info(
+            "card-dl",
+            Some(&format!("http://127.0.0.1:{closed_port}/v1")),
+            Some("model-id"),
+        )
+        .unwrap();
+        let error = mgr
+            .enable("card-dl", &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            !error.to_string().contains("双实例"),
+            "端口确定没人听时预检必须放行：{error}"
+        );
+        assert!(
+            error.to_string().contains("enable 脚本"),
+            "放行后失败应来自脚本层：{error}"
+        );
+    }
+
+    /// r41 P1-3：script-only 更新后（停止→更新脚本）deployed_script_sha256 与
+    /// 当前 deploy 脚本不一致——启用必须先重新部署，不能让新 enable 脚本跑在
+    /// 旧部署回执上；哈希对齐后放行（失败原因回到脚本层）。
+    #[test]
+    fn enable_rejects_when_deploy_script_changed_since_last_deploy() {
+        let tmp = setup_temp_db();
+        add_stuck_record("enable-stale", "org/model", 1024);
+        let deploy = "#!/bin/bash
+true
+";
+        let blob = |s: &str| db::ScriptBlob {
+            content: s.into(),
+            sha256: script_runner::sha256_hex(s),
+        };
+        db::set_scripts_content(
+            "enable-stale",
+            &BTreeMap::from([("deploy".into(), blob(deploy))]),
+            &Default::default(),
+        )
+        .unwrap();
+        let mgr = manager_with_models_dir(&tmp.path().join("models"));
+        let set_deployed_hash = |hash: &str| {
+            rusqlite::Connection::open(db::db_path())
+                .unwrap()
+                .execute(
+                    "UPDATE store_models SET status='deployed', running=0, deployed_script_sha256=?1,                      scripts_fetched_at='2026-11-17T10:00:00+00:00', deployed_at='2026-11-16T10:00:00+00:00'                      WHERE card_id='enable-stale'",
+                    [hash],
+                )
+                .unwrap();
+        };
+        // ① 旧部署哈希 ≠ 当前 deploy 脚本 → 拒，指引先重新部署。
+        set_deployed_hash("previous-hash");
+        let error = mgr
+            .enable("enable-stale", &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("请先重新部署"),
+            "脚本已换的卡必须先重部署再启用：{error}"
+        );
+        // ② 哈希对齐（=刚部署过的常态）→ 本门放行，失败原因回到脚本层。
+        set_deployed_hash(&script_runner::sha256_hex(deploy));
+        let error = mgr
+            .enable("enable-stale", &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            !error.to_string().contains("请先重新部署"),
+            "哈希一致时本门必须放行：{error}"
+        );
+    }
+
+    /// r21 P2-5 的判停新判据：/api/ps 能区分「服务在但模型未加载」（放行）与
+    /// 「模型仍在显存」（拒绝）；查不动是三态里的保守侧。
+    #[test]
+    fn ollama_model_loaded_distinguishes_loaded_from_idle() {
+        use std::io::{Read as _, Write as _};
+
+        let body = r#"{"models":[{"name":"qwen3:8b","size_vram":8589934592}]}"#;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0_u8; 1024];
+                let _ = socket.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes());
+                let _ = socket.flush();
+            }
+        });
+        let host = format!("http://127.0.0.1:{port}");
+        assert_eq!(
+            ollama_model_loaded(&host, "qwen3:8b"),
+            Some(true),
+            "api/ps 里列着的就是在跑"
+        );
+        assert_eq!(
+            ollama_model_loaded(&host, "llama3:70b"),
+            Some(false),
+            "服务在、模型未加载 = 卸载/更新可放行的稳态"
+        );
+
+        // 查不动（端口上没有服务）→ None（保守侧，调用方拒绝）。
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
+        assert_eq!(
+            ollama_model_loaded(&format!("http://127.0.0.1:{closed_port}"), "qwen3:8b"),
+            None
+        );
+    }
+
+    #[test]
+    fn deploy_cancelled_before_engine_install_has_no_install_or_deploy_side_effects() {
+        let (_home, manager, models) = updated_engine_deployment(None, None);
+        let control = script_runner::RunControl {
+            cancel: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                true,
+            ))),
+            ..Default::default()
+        };
+        let error = manager
+            .deploy("card-dl", None, &mut |_| {}, control)
+            .unwrap_err();
+        assert!(error.to_string().contains("已取消"));
+        assert!(!models.join("engine-updated").exists());
+        assert!(!models.join("deploy-ran").exists());
+    }
+
+    #[test]
+    fn deploy_rejects_native_installer_success_without_a_ready_engine() {
+        let install = "#!/bin/sh\nCARD_DIR=\"$(dirname \"$0\")\"\n. \"$CARD_DIR/common.sh\"\nif [ \"${LMM_PROBE_ONLY:-0}\" = 1 ]; then exit 1; fi\necho 'claimed installed'\n";
+        let common = format!(
+            "ENGINE_BIN_SHA256=\"{}\"\n# local-model-manager/engines/tachyon-serve\n",
+            "a".repeat(64)
+        );
+        let (_home, manager, models) = updated_engine_deployment(Some(install), Some(&common));
+        let error = manager
+            .deploy("card-dl", None, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("完整性检查"), "{error}");
+        assert!(!models.join("deploy-ran").exists());
+        assert_eq!(ran_times(&models.join("download-ran")), 1);
     }
 
     #[test]
@@ -4931,6 +8702,47 @@ echo '权重就绪'
         assert!(alive, "对面好端端地回了 200，不能判成服务不在");
     }
 
+    /// r19 评审 P2-7：成功的端点探测必须进 60s TTL 缓存——同一张卡在同一
+    /// 刷新窗口内被 reconcile 反复过问时（library() 每次都触发），第二次
+    /// 起直接复用，不再各蹲一次串行超时。服务端只应看到**一次**请求。
+    #[test]
+    fn successful_endpoint_probe_is_cached_within_ttl() {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("本机总能绑上");
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            while let Ok((mut socket, _)) = listener.accept() {
+                let mut buf = [0_u8; 1024];
+                let _ = socket.read(&mut buf);
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                let _ = socket.flush();
+            }
+        });
+
+        // card_id 用端口号唯一化，避免撞上其他测试（缓存是进程级 static）留在
+        // 缓存里的同名卡。
+        let card_id = format!("probe-cache-test-{port}");
+        let endpoint = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        assert!(
+            openai_endpoint_alive_cached(&card_id, &endpoint),
+            "对面回了 200，探测应判活"
+        );
+        assert!(
+            openai_endpoint_alive_cached(&card_id, &endpoint),
+            "60 秒内的重复探测应命中缓存并同样判活"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "第二次探测必须命中缓存，服务端只能看到一个请求"
+        );
+    }
+
     /// 卡片打印的 `LMM_ENDPOINT_URL=` 内容完全不可信，而它会被原样写成品悟里
     /// 那一行模型的 base_url。放进一个远程地址，用户此后每一句对话都发去那台
     /// 机器，且卸载清理（findLinkedRows 只认回环）永远匹配不到那一行。
@@ -4985,6 +8797,29 @@ echo '权重就绪'
             );
         }
     }
+    #[test]
+    fn openai_style_detection_separates_v1_endpoints_from_generate() {
+        // 原生引擎报上来的都是这两种形态：/v1 或 /v1/chat/completions。
+        assert!(endpoint_path_is_openai_style("http://127.0.0.1:8000/v1"));
+        assert!(endpoint_path_is_openai_style(
+            "http://127.0.0.1:8000/v1/chat/completions"
+        ));
+        // 没写路径（reqwest 归一成 "/"）也算：改写成 /v1/models 是安全的。
+        assert!(endpoint_path_is_openai_style("http://127.0.0.1:8000/"));
+        assert!(endpoint_path_is_openai_style("http://127.0.0.1:8000"));
+
+        // z-image 的文生图端点：改写路径探测必 404，绝不能按 OpenAI 探测，
+        // 否则容器明明 healthy 也会被误标成已停止（真机踩过）。
+        assert!(!endpoint_path_is_openai_style(
+            "http://127.0.0.1:8000/generate"
+        ));
+        assert!(!endpoint_path_is_openai_style(
+            "http://127.0.0.1:8000/generate?size=1024"
+        ));
+        // 解析失败按「不可探测」处理，保留原状态而不是清 running。
+        assert!(!endpoint_path_is_openai_style("not a url"));
+    }
+
     #[test]
     fn updated_card_installs_engine_before_deploy_and_stays_pending_on_failure() {
         let tmp = setup_temp_db();
@@ -5196,5 +9031,58 @@ echo '权重就绪'
         );
         assert_eq!(after.scripts_fetched_at, before.scripts_fetched_at);
         assert!(!after.card_update_pending);
+    }
+}
+
+/// r7 P1-5：启动时自动收紧存量 775 目录链的行为锁。
+/// 构造模拟目录（0775），验证收紧后变 0755；非属主目录不动。
+#[test]
+fn tighten_directory_permissions_fixes_wide_modes_and_skips_foreign() {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = config::TempHome::new();
+    let data = config::data_dir();
+    let cards = data.join("cards");
+    let logs = data.join("logs");
+    let card_a = cards.join("test-card-a");
+    for dir in [&data, &cards, &logs, &card_a] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+    }
+    // 已正确的目录不动
+    let already_tight = cards.join("already-755");
+    std::fs::create_dir(&already_tight).unwrap();
+    std::fs::set_permissions(&already_tight, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // r20 P2-11（r21 补齐）：名字里的 skips_foreign 此前没有对应用例。构造
+    // 非属主目录需要 chown 权限——只有 root 有（CI 常规腿以非 root 跑，这里
+    // 拿不到就跳过该子断言并说明，不做假断言）；root 环境下真正钉住「属主
+    // 不是自己的目录一个字节都不动」。
+    let foreign = cards.join("foreign-owned");
+    std::fs::create_dir(&foreign).unwrap();
+    std::fs::set_permissions(&foreign, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let foreign_chowned = {
+        use std::os::unix::ffi::OsStrExt as _;
+        let c_path = std::ffi::CString::new(foreign.as_os_str().as_bytes()).unwrap();
+        // 65534 = nobody/4294967294 沙箱惯用的非特权 uid。
+        (unsafe { libc::chown(c_path.as_ptr(), 65534, 65534) } == 0)
+    };
+
+    let settings = config::Settings::default();
+    tighten_store_directory_permissions(&settings);
+
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&data), 0o755, "data 目录应收紧到 755");
+    assert_eq!(mode(&cards), 0o755, "cards 目录应收紧到 755");
+    assert_eq!(mode(&logs), 0o755, "logs 目录应收紧到 755");
+    assert_eq!(mode(&card_a), 0o755, "一级子目录应收紧到 755");
+    assert_eq!(mode(&already_tight), 0o755, "已正确的目录不变");
+    if foreign_chowned {
+        assert_eq!(
+            mode(&foreign),
+            0o777,
+            "属主不是当前用户的目录不许动（哪怕它 777）"
+        );
+    } else {
+        eprintln!("[test] 非 root 环境无法构造非属主目录，跳过 skips_foreign 子断言");
     }
 }

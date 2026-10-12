@@ -781,7 +781,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
               hasUpdate={startupUpdates.some((update) => update.card_id === model.id && update.local_revision === model.record?.card_revision)}
               copy={copy}
               busyKind={
-                model.state === 'available'
+                model.state === 'available' || model.state === 'incomplete'
                   ? (runningTask(downloadTaskKey(model.id))?.kind || null)
                   : (runningTask(lifecycleTaskKey(model.id))?.kind || null)
               }

@@ -34,6 +34,7 @@ const STATE_BADGE = {
   running: { key: 'statusRunning', className: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300' },
   deployed: { key: 'statusDeployed', className: 'bg-sky-50 text-sky-700 dark:bg-sky-500/10 dark:text-sky-300' },
   downloaded: { key: 'statusPending', className: 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300' },
+  incomplete: { key: 'statusIncomplete', className: 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300' },
   available: { key: 'statusAvailable', className: 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400' },
 };
 
@@ -67,17 +68,18 @@ function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, 
   // 部署」时界面会写着「启用中…」而任务卡写着「部署…」，自相矛盾。
   const label = (kind, running, idle) => (busyKind === kind ? running : idle);
 
-  if (model.state === 'available') {
+  if (model.state === 'available' || model.state === 'incomplete') {
+    const resuming = model.state === 'incomplete';
     return (
       <button
         type="button"
         className={`${BTN_PRIMARY} ${ACTION_MIN_W}`}
         disabled={busy}
-        data-testid="model-store-download"
+        data-testid={resuming ? 'model-store-resume-download' : 'model-store-download'}
         onClick={(event) => { event.stopPropagation(); onDownload(model); }}
       >
         {busyKind === 'download' ? null : <Download size={14} />}
-        {label('download', copy.downloading, copy.download)}
+        {label('download', resuming ? copy.resumingDownload : copy.downloading, resuming ? copy.resumeDownload : copy.download)}
       </button>
     );
   }
