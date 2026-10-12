@@ -33,11 +33,14 @@ submodule checkout 会显式禁用 LFS smudge，随后检查受 LFS 管理的实
 校验内容包括 submodule commit、gitlink、origin URL、工作树状态、manifest SHA-256、文件大小与 SHA-256，以及受管理 ZIP 解压后的逐文件清单。`stagedFiles` 对应 payload 已复制、各组件已展开且按需分发的 ASR 主模型已移除，派生文件尚未生成且 payload 尚未清理的生命周期快照；缺失或多余文件都会导致校验失败。完整 staging 还会自动枚举所有声明 Windows Python 依赖的内置 MCP，核对暂存基础 Python ABI、target 绑定的锁 hash 及每个 wheel 的 PEP 425 标签（不预装第三方包），避免升级 Python 后沿用不兼容 wheel 锁。
 
 首次完整校验后，脚本会在 `target/windows-runtime/.verified-lock` 记录 runtime commit、manifest SHA-256、lock 文件
-SHA-256、目标平台和 resolver schema。staging 同时生成包含全部暂存文件路径、大小和 SHA-256 的 `.stage-manifest.json`，
-其摘要绑定到 staging marker，但这两份缓存元数据只用于快速拒绝和诊断。后续构建必须按主仓库 lock 锁定的 runtime manifest
+SHA-256、目标平台和 resolver schema，作为 submodule 源校验的元数据缓存：Stage 模式命中时只按 lock 复核源文件大小，
+跳过逐文件 SHA-256；Validate 模式仍对全部锁定源文件重新哈希；lock 文件或 submodule 身份变化都会使该缓存失效。
+staging 同时生成包含全部暂存文件路径、大小和 SHA-256 的 `.stage-manifest.json`，其摘要绑定到 staging marker。
+后续构建必须按主仓库 lock 锁定的 runtime manifest
 `stagedFiles` 重新校验完整文件集合与内容哈希，并校验 runtime descriptor 和 overlay；全部一致时才跳过重复展开与复制。
-任一输入或暂存产物变化、使用 `-Force`，都会重新执行源文件 SHA-256 校验并原子重建 staging。同一工作区的 resolver
-调用通过 `target/windows-runtime/.resolver.lock` 串行化，避免并发覆盖缓存。
+任一输入或暂存产物变化、使用 `-Force`，都会重新执行源文件 SHA-256 校验并原子重建 staging。runtime descriptor、
+Tauri overlay 和 ONNX 开发 descriptor 以临时文件加原子替换写入，避免并发或中断留下半写文件；同一工作区的 resolver
+调用通过 `target/windows-runtime/.resolver.lock` 串行化（等待方最多阻塞 120 秒，超时失败重试即可），避免并发覆盖缓存。
 
 ASR 安装资源只内置 `fsmn-vad.gguf`、wrapper 和 SenseVoice backend；`sensevoice-small-*` 识别模型由应用按需下载，不进入安装包。
 

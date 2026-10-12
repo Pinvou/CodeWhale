@@ -2116,6 +2116,7 @@ jobs:
             'features::memory::tests::topic_migration_' \
             'connector_introspection_guard_matches_complete_names_only' \
             'multiagent_depth_guard_enforces_two_level_inputs' \
+            'features::marketplace::tests::reinstall_upload_with_unlocked_pip_dependencies_contract' \
             'features::projects::tests::' \
             'features::sessions::' \
             'run_with_timeout_reaps_and_stays_bounded' \
@@ -2602,20 +2603,29 @@ jobs:
       # Ubuntu npm tests skip these suites outside win32. They use only Node
       # built-ins and fake MCP/host fixtures to exercise the real wrapper
       # subprocess, protocol, heartbeat, tombstone, and commit-unknown paths.
+      # One command per step: a multi-command pwsh run block only reports the
+      # last command's exit code, so an earlier failure would be masked.
       - name: Windows browser wrapper lifecycle regression
         env:
           PINVOU3_TEST_BROWSER_NO_HOST: "1"
-        run: |
-          node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
-          node pinvou3-app/tests/browser_wrapper_lazy.test.mjs
+        run: node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
+
+      - name: Windows browser wrapper lazy regression
+        env:
+          PINVOU3_TEST_BROWSER_NO_HOST: "1"
+        run: node pinvou3-app/tests/browser_wrapper_lazy.test.mjs
 
       - name: 安装构建依赖
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
 
-      - name: Windows Codex Runtime 原生打包冒烟
-        run: |
-          npm --prefix pinvou3-app run test:windows-runtime
-          npm --prefix pinvou3-app run test:codex-acp-windows-runtime
+      # One npm invocation per step: a multi-command pwsh run block only
+      # reports the last command's exit code, so a harness that dies before
+      # its assertions would be masked by the next command's success.
+      - name: Windows runtime packaging contract
+        run: npm --prefix pinvou3-app run test:windows-runtime
+
+      - name: Windows ACP bridge runtime smoke
+        run: npm --prefix pinvou3-app run test:codex-acp-windows-runtime
 
   windows-runtime-test:
     name: windows-runtime-test
