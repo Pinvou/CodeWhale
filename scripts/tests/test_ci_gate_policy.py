@@ -1596,6 +1596,53 @@ class CiGatePolicyTests(unittest.TestCase):
             )[0]
             self.assertIn("github.event.pull_request.draft == false", block)
 
+    def _assert_macos_deployment_regression(self, workflow):
+        # This coverage belongs to the existing native job; it must not become
+        # an echo, syntax-only check, filtered zero-match run or npm install.
+        block = workflow.split("\n  macos-rust-check:", maxsplit=1)[1].split(
+            "\n  windows-codex-runtime-test:", maxsplit=1
+        )[0]
+        body = _without_yaml_comments(block)
+        self.assertIn("runs-on: macos-15", body)
+        self.assertIn("uses: actions/setup-node@v7", body)
+        self.assertIn("node-version: '24'", body)
+        command = 'node --test --test-reporter=tap remote-control-relay/test/deployment-incidents.test.js | tee "$hardening_log"'
+        step = body.split("      - name: macOS temporary-root hardening and deployment regression\n", maxsplit=1)[1].split(
+            "\n      - name:", maxsplit=1
+        )[0]
+        self.assertRegex(step, r"(?m)^\s*" + re.escape(command) + r"$")
+        self.assertIn("set -euo pipefail", step)
+        for assertion in (
+            "grep -qE '^# tests [1-9][0-9]*$'",
+            "grep -qx '# fail 0'",
+            "grep -qx '# skipped 0'",
+            "grep -qx '# todo 0'",
+            "grep -qE '^ok [1-9][0-9]* - actual Darwin system temporary roots accept hardening input and reject operator links$'",
+        ):
+            self.assertIn(assertion + ' "$hardening_log"', step)
+        for bypass in ("|| true", "continue-on-error:", "if:", "--test-name-pattern"):
+            self.assertNotIn(bypass, step)
+        self.assertLess(body.index("uses: actions/setup-node@v7"), body.index(command))
+        self.assertLess(body.index(command), body.index("name: macOS Rust all-targets check"))
+
+    def test_macos_deployment_regression_uses_explicit_node_and_actual_test_file(self):
+        self._assert_macos_deployment_regression(self.workflow)
+
+    def test_macos_deployment_regression_rejects_execution_and_summary_bypasses(self):
+        for old, new in (
+            ("node --test --test-reporter=tap remote-control-relay/test/deployment-incidents.test.js", "node --check remote-control-relay/test/deployment-incidents.test.js"),
+            ("node --test --test-reporter=tap remote-control-relay/test/deployment-incidents.test.js", "node --test --test-name-pattern=absent --test-reporter=tap remote-control-relay/test/deployment-incidents.test.js"),
+            ('| tee "$hardening_log"', '| tee "$hardening_log" || true'),
+            ("grep -qE '^# tests [1-9][0-9]*$'", "grep -qE '^# tests [0-9]*$'"),
+            ("grep -qx '# skipped 0'", "echo '# skipped 0'"),
+            ("grep -qx '# fail 0'", "echo '# fail 0'"),
+            ("grep -qx '# todo 0'", "echo '# todo 0'"),
+            ("uses: actions/setup-node@v7", "# removed setup"),
+        ):
+            with self.subTest(mutation=new):
+                with self.assertRaises((AssertionError, IndexError)):
+                    self._assert_macos_deployment_regression(self.workflow.replace(old, new))
+
     def test_pure_frontend_changes_do_not_trigger_macos_rust_build(self):
         # Pure-frontend paths must not enter the mac-build trigger set (avoids
         # needless native builds); but package.json/package-lock.json changes

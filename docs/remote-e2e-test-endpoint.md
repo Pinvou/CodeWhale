@@ -69,7 +69,7 @@ bash scripts/deploy-remote-relay-test.sh --teardown
 - 完整 WebUI 浏览器 smoke：`remote-control-relay/test/web-ui.smoke.cjs`，由
   `npm --prefix pinvou3-app run test:webui` 构建并在桌面/手机视口执行。
 - v2 Relay 与部署契约：`relay.test.js`、`deploy.test.js`、`remote-test-deploy.test.js`；退役的
-  v1 jsdom 页面测试只由 `npm run test:legacy-v1-ui` 显式运行，不进入 v2 默认门禁。
+  v1 jsdom 页面及对应测试已删除，不再提供旧测试入口，也不属于当前 v2 门禁。
 - 旧 desktop 回路 e2e 条目引用的 `new_headless()` / `e2e_tests` 已不在当前源码中，
   不能作为当前真实 Node Relay + mobile 回路的测试或 CI 执行证据。
 - 当前 Windows B 端恢复接线回归的宿主入口是 `pinvou3-app/src-tauri/src/app/commands/remote_control/reader_resume_tests.rs` 的 `real_reader_manager_worker_resume_round_trip()`；它调用 `features/remote_control/controller/relay_runtime/reader_resume_tests.rs` 的共享 `resume_round_trip()` 夹具：
