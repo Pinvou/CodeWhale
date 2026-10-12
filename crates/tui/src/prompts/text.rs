@@ -14,8 +14,9 @@
 //! in `../prompts.rs`):
 //!
 //!   1. Constitution (binding core: `BASE_PROMPT` + language/output law)
-//!   2. Approval-policy overlays
-//!   3. Runtime templates (compaction relay, goal continuation, memory,
+//!   2. Personality overlay (`CALM_PERSONALITY` — one overlay, not a set)
+//!   3. Approval-policy overlays
+//!   4. Runtime templates (compaction relay, goal continuation, memory,
 //!      core execution, sub-agent output contract)
 //!
 //! Edit prompt text here directly. Content and ordering invariants are
