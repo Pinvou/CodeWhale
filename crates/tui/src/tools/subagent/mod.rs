@@ -36,7 +36,7 @@ use crate::core::engine::tool_catalog::{
     TOOL_SEARCH_NAME, active_tools_for_request, apply_native_tool_deferral,
     bounded_toolbox_eviction_note, ensure_advanced_tooling, execute_tool_search_with_cache,
     initial_active_tools, is_tool_search_tool, remove_toolbox_drops, tool_matches_any_rule,
-    touch_cached_tool_after_execution,
+    toolbox_oversize_reason, touch_cached_tool_after_execution,
 };
 use crate::core::events::{AgentProgressEventMeta, Event};
 use crate::core::session::ToolActivationCache;
@@ -14103,10 +14103,14 @@ fn routine_agent_progress_can_preserve_event_headroom(status: AgentWorkerStatus)
 /// names from this filtered catalog; they cannot make a denied tool executable.
 /// The active-name snapshot is rebuilt once per model request so a same-batch
 /// guessed call cannot use a schema that was not present in that request.
+/// Bounds evictions observed outside a result payload (a catalog refresh's
+/// revalidation, a warm start) park a note here that rides the child's next
+/// recorded result, mirroring the parent engine's parked-note channel.
 struct SubAgentToolSurface {
     catalog: Vec<Tool>,
     active_names: std::collections::HashSet<String>,
     cache: ToolActivationCache,
+    pending_eviction_note: Option<String>,
 }
 
 impl SubAgentToolSurface {
@@ -14115,16 +14119,65 @@ impl SubAgentToolSurface {
         let activation = cache.activate(&catalog, warm_names);
         let mut active_names = initial_active_tools(&catalog);
         active_names.extend(activation.admitted);
-        Self {
+        let mut surface = Self {
             catalog,
             active_names,
             cache,
+            pending_eviction_note: None,
+        };
+        // A warm start that overflows the bounds must not evict silently;
+        // park the note for the child's first result.
+        surface.park_eviction_note("step", &activation.evicted);
+        surface
+    }
+
+    /// Park (or combine with an already parked) bounded-toolbox eviction
+    /// note; it rides the child's next recorded result.
+    fn park_eviction_note(&mut self, trigger: &str, evicted: &[String]) {
+        if evicted.is_empty() {
+            return;
+        }
+        let note = bounded_toolbox_eviction_note(trigger, evicted);
+        self.pending_eviction_note = Some(match self.pending_eviction_note.take() {
+            Some(existing) => format!("{existing}\n\n{note}"),
+            None => note,
+        });
+    }
+
+    /// Take any parked eviction note so it can ride a recorded result.
+    fn take_pending_eviction_note(&mut self) -> Option<String> {
+        self.pending_eviction_note.take()
+    }
+
+    /// Refresh an executed cached tool and append its eviction note to the
+    /// recorded result — the child mirror of the parent engine's
+    /// post-execution channel.
+    fn touch_after_execution(&mut self, name: &str, result: &mut Result<RichToolResult>) {
+        if result.is_err() {
+            return;
+        }
+        let update = touch_cached_tool_after_execution(
+            &self.catalog,
+            &mut self.active_names,
+            &mut self.cache,
+            name,
+        );
+        if !update.evicted.is_empty()
+            && let Ok(rich) = result.as_mut()
+        {
+            rich.result.content.push_str(&format!(
+                "\n\n{}",
+                bounded_toolbox_eviction_note("step", &update.evicted)
+            ));
         }
     }
 
     fn request_tools(&mut self, catalog: Vec<Tool>, strict: bool) -> Vec<Tool> {
         self.catalog = catalog;
-        self.cache.revalidate(&self.catalog);
+        // A refresh that grew a cached schema past the collective bounds
+        // evicts here, outside any result payload — park the note.
+        let removals = self.cache.revalidate(&self.catalog);
+        self.park_eviction_note("step", &removals.bounds_evicted);
         let mut active_names = initial_active_tools(&self.catalog);
         active_names.extend(self.cache.names().map(str::to_string));
         self.active_names = active_names;
@@ -14171,8 +14224,12 @@ impl SubAgentToolSurface {
             }
             return Ok(message);
         }
+        // The only rejection here is the per-tool budget: a narrower search
+        // cannot help, so the recovery hint must say why the tool cannot
+        // enter instead of promising a narrower query would.
         Err(anyhow!(
-            "Tool {name} could not enter the bounded child toolbox; use tool_search with a narrower query"
+            "Tool {name} could not enter the bounded child toolbox: {}",
+            toolbox_oversize_reason()
         ))
     }
 }
@@ -15597,6 +15654,37 @@ impl SubAgentToolRegistry {
         name: &str,
         input: Value,
     ) -> Result<RichToolResult> {
+        let mut result = self
+            .execute_from_surface_inner(
+                agent_id,
+                tool_id,
+                surface,
+                request_active_names,
+                name,
+                input,
+            )
+            .await;
+        // A note parked by an earlier catalog refresh (request-time
+        // revalidation, a warm start) has no payload of its own; it rides
+        // the child's next recorded result, mirroring the parent engine's
+        // parked-note channel.
+        if let Ok(rich) = result.as_mut()
+            && let Some(note) = surface.take_pending_eviction_note()
+        {
+            rich.result.content.push_str(&format!("\n\n{note}"));
+        }
+        result
+    }
+
+    async fn execute_from_surface_inner(
+        &self,
+        agent_id: &str,
+        tool_id: &str,
+        surface: &mut SubAgentToolSurface,
+        request_active_names: &std::collections::HashSet<String>,
+        name: &str,
+        input: Value,
+    ) -> Result<RichToolResult> {
         if is_tool_search_tool(name) {
             if !request_active_names.contains(name) {
                 return Err(anyhow!("Tool {name} is not in this child's catalog"));
@@ -15624,14 +15712,9 @@ impl SubAgentToolRegistry {
         if !request_active_names.contains(name) {
             return Err(anyhow!("Tool {name} is not active for this sub-agent"));
         }
-        let result = self.execute_full(agent_id, tool_id, name, input).await;
-        if deferred && result.is_ok() {
-            touch_cached_tool_after_execution(
-                &surface.catalog,
-                &mut surface.active_names,
-                &mut surface.cache,
-                name,
-            );
+        let mut result = self.execute_full(agent_id, tool_id, name, input).await;
+        if deferred {
+            surface.touch_after_execution(name, &mut result);
         }
         result
     }
