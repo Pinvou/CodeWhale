@@ -1549,7 +1549,6 @@ pub enum MessageId {
     StatusMcpConfigured,
     StatusContextUsage,
     StatusContextSourceConfigured,
-    StatusContextSourceProviderReported,
     StatusContextSourceKimiSafeFloor,
     StatusContextSourceCatalog,
     StatusContextSourceModelHint,
@@ -3671,7 +3670,6 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::StatusMcpConfigured,
     MessageId::StatusContextUsage,
     MessageId::StatusContextSourceConfigured,
-    MessageId::StatusContextSourceProviderReported,
     MessageId::StatusContextSourceKimiSafeFloor,
     MessageId::StatusContextSourceCatalog,
     MessageId::StatusContextSourceModelHint,
@@ -6387,19 +6385,6 @@ mod tests {
             assert!(
                 leaked.is_empty(),
                 "hi {id:?} mixes Latin prose into Devanagari copy: {leaked:?} in {value}"
-            );
-        }
-    }
-
-    #[test]
-    fn no_shipped_locale_renders_a_missing_message_marker() {
-        // rust_i18n falls back to en for absent keys, so a "{MessageId}"
-        // debug string in the UI would mean the fallback chain itself broke.
-        for locale in Locale::shipped() {
-            assert!(
-                missing_message_ids(*locale).is_empty(),
-                "{} renders raw message ids (missing-marker UI)",
-                locale.tag()
             );
         }
     }

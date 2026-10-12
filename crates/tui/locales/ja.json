@@ -1776,7 +1776,6 @@
   "StatusMcpConfigured": "{count} 件設定済み",
   "StatusContextUsage": "{percent}% 使用中（{used} / {max} トークン）",
   "StatusContextSourceConfigured": "設定値",
-  "StatusContextSourceProviderReported": "プロバイダー報告",
   "StatusContextSourceKimiSafeFloor": "Kimi Code の静的安全下限",
   "StatusContextSourceCatalog": "カタログ",
   "StatusContextSourceModelHint": "モデル名のヒント（未検証）",

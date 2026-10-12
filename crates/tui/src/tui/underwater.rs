@@ -11,21 +11,17 @@ use std::borrow::Cow;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Widget},
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::HeaderItem;
 use crate::localization::{Locale, MessageId, tr};
-use crate::palette::{ChromeInk, chrome_style};
+use crate::palette::ChromeInk;
 use crate::tui::{
-    app::{App, AppMode, HeaderActionTarget, HeaderHitbox, OnboardingState},
+    app::{App, AppMode, OnboardingState},
     approval::ApprovalMode,
-    footer_ui::format_token_count_compact,
     ocean::COMPLETION_BREATH_MS,
     views::ModalKind,
 };
@@ -614,12 +610,6 @@ fn header_permission_ink(mode: ApprovalMode) -> ChromeInk {
     }
 }
 
-#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
-// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
-fn header_fg(app: &App, ink: ChromeInk) -> Style {
-    chrome_style(&app.ui_theme, ink)
-}
-
 /// One posture word with its ink — the unit the classic header's lockup was
 /// made of, now carried as merged-footer chips.
 pub(crate) type PostureChip = (Cow<'static, str>, ChromeInk);
@@ -928,10 +918,6 @@ fn filesystem_scope_notice(app: &App) -> Option<Cow<'static, str>> {
     }
 }
 
-fn span_width(spans: &[Span<'_>]) -> usize {
-    spans.iter().map(|span| span.content.width()).sum()
-}
-
 fn truncate_to_width(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_string();
@@ -954,432 +940,6 @@ fn truncate_to_width(text: &str, width: usize) -> String {
     }
     result.push('…');
     result
-}
-
-#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
-// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
-fn compact_tokens(tokens: i64) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.1}M", tokens as f64 / 1_000_000.0)
-    } else if tokens >= 1_000 {
-        format!("{:.0}K", tokens as f64 / 1_000.0)
-    } else {
-        tokens.to_string()
-    }
-}
-
-#[allow(dead_code)]
-// classic header/band renderer: superseded by the Tideline shell
-// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
-/// The context meter is one measured fact: an exact percentage for scanning,
-/// a token fraction for auditability when room permits, and a short bar for
-/// peripheral vision. It is deliberately the final header fact so its rect
-/// stays stable and can point at the inspector without parsing rendered text.
-fn header_context_meter(app: &App, tier: ShellTier) -> Option<Span<'static>> {
-    crate::tui::ui::context_usage_snapshot(app).map(|(used, max, percent)| {
-        let filled = ((percent / 100.0) * 5.0).ceil().clamp(0.0, 5.0) as usize;
-        let percentage = format!("{percent:.0}%");
-        let text = match tier {
-            ShellTier::Compact => format!("ctx {percentage}"),
-            ShellTier::Normal | ShellTier::Wide => format!(
-                "context {percentage} {}/{} {}{}",
-                compact_tokens(used),
-                compact_tokens(i64::from(max)),
-                "▰".repeat(filled),
-                "▱".repeat(5usize.saturating_sub(filled)),
-            ),
-        };
-        Span::styled(text, header_fg(app, ChromeInk::Info))
-    })
-}
-
-/// Return concrete, typed header targets for the latest frame.
-///
-/// The context meter is right-aligned and always the final header span, so
-/// its visible geometry does not depend on optional git/token facts. The
-/// keyboard route remains `Alt+C`; this gives that same inspectable fact a
-/// mouse route without inventing another context screen or state owner.
-#[allow(dead_code)]
-// classic header/band renderer: superseded by the Tideline shell
-// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
-// Its posture-floor guard (a hitbox never claims overlapped cells) is the
-// discipline `topbar::context_meter_hitbox` carries forward.
-#[must_use]
-pub(crate) fn header_hitboxes(area: Rect, app: &App) -> Vec<HeaderHitbox> {
-    if area.width == 0 || area.height == 0 {
-        return Vec::new();
-    }
-    let tier = ShellTier::for_chrome_width(area.width);
-    let Some(meter) = header_context_meter(app, tier) else {
-        return Vec::new();
-    };
-    let width = u16::try_from(span_width(&[meter]))
-        .unwrap_or(area.width)
-        .min(area.width);
-    if width == 0 {
-        return Vec::new();
-    }
-    // The posture lockup is the header's guaranteed floor and is never
-    // truncated to make room for the right cluster (see
-    // render_header_with_git_status). At compact widths that floor can run
-    // into the meter's columns, so a hitbox anchored blindly at the right
-    // edge would claim cells the posture actually paints (review finding 5).
-    // Recompute the floor's width with the same spans the renderer composes
-    // and refuse the hitbox when the two would overlap.
-    let mut posture_width = 0usize;
-    if let Some(indicator) = crate::tui::widgets::header_status_indicator_frame(
-        (!app.low_motion && app.fancy_animations)
-            .then_some(app.turn_started_at)
-            .flatten(),
-        &app.status_indicator,
-    ) {
-        posture_width += indicator.width() + GROUP_GAP.len();
-    }
-    posture_width += mode_label(app.ui_locale, app.mode).width();
-    posture_width += FIELD_JOIN.len() + permission_label(app).width();
-    if let Some(scope) = filesystem_scope_notice(app) {
-        posture_width += FIELD_JOIN.len() + scope.width();
-    }
-    let meter_start = usize::from(area.width.saturating_sub(width));
-    if meter_start <= posture_width.saturating_add(usize::from(width > 0)) {
-        return Vec::new();
-    }
-    vec![HeaderHitbox {
-        area: Rect {
-            x: area.x.saturating_add(area.width.saturating_sub(width)),
-            y: area.y,
-            width,
-            height: 1,
-        },
-        target: HeaderActionTarget::InspectContext,
-    }]
-}
-
-fn session_token_breakdown(app: &App) -> Option<Span<'static>> {
-    app.header_items.contains(&HeaderItem::Tokens).then(|| {
-        Span::styled(
-            format!(
-                "{} in · {} cch · {} out",
-                format_token_count_compact(u64::from(app.session.displayed_total_input_tokens())),
-                format_token_count_compact(u64::from(
-                    app.session.displayed_total_cache_hit_tokens(),
-                )),
-                format_token_count_compact(u64::from(app.session.displayed_total_output_tokens())),
-            ),
-            header_fg(app, ChromeInk::Info),
-        )
-    })
-}
-
-/// The header speaks with exactly two separators, and each one means one
-/// thing.
-///
-/// [`FIELD_JOIN`] binds words that qualify one another into a single phrase:
-/// `work · ask` is one statement of posture, not two facts. [`GROUP_GAP`]
-/// stands between whole facts — posture, then the goal chip, then the update
-/// notice; workspace, then the context meter.
-///
-/// Before this, every one of those boundaries was the same dotted separator at
-/// the same dim ink, so the header read as an undifferentiated list and there
-/// was nothing for the eye to group on. The gap is deliberately wider than the
-/// visual whitespace inside `" · "` — four blank columns against one — because
-/// that ratio is the only thing carrying the grouping.
-#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
-// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
-const FIELD_JOIN: &str = " · ";
-#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
-// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
-const GROUP_GAP: &str = "    ";
-
-/// Append one chrome element, inserting the group separator only between
-/// elements so an absent element never leaves trailing padding.
-#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
-// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
-fn push_chrome(spans: &mut Vec<Span<'static>>, span: Span<'static>) {
-    if !spans.is_empty() {
-        spans.push(Span::raw(GROUP_GAP));
-    }
-    spans.push(span);
-}
-
-/// Render the one-line shell header. Immediate operating posture and workspace
-/// truth live here; quieter route identity lives beside the phase footer.
-#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
-// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
-pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
-    let git_status = crate::tui::git_status::cached_status();
-    render_header_with_git_status(area, buf, app, &git_status);
-}
-
-#[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
-// (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
-fn render_header_with_git_status(
-    area: Rect,
-    buf: &mut Buffer,
-    app: &App,
-    git_status: &crate::tui::git_status::GitStatusSnapshot,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let tier = ShellTier::for_chrome_width(area.width);
-    Block::default()
-        .style(Style::default().bg(app.ui_theme.header_bg))
-        .render(area, buf);
-
-    let mode_color = header_mode_ink(app.mode).color(&app.ui_theme);
-    // Match the composer's warm top edge exactly: Ask amber, Auto-Review
-    // Signal Gold, and Full Access coral.
-    let permission_color = header_permission_ink(app.approval_mode).color(&app.ui_theme);
-    let dim = header_fg(app, ChromeInk::MetadataDim);
-    // `status_indicator` owns the single header mark. It used to be filtered
-    // against the literal "cw" because the header also hardcoded a leading
-    // "cw" span, and `header_status_indicator_frame` collapses `cw`, the
-    // legacy `whale` opt-in, and unknown values onto that same mark — so the
-    // filter silently discarded three of the setting's four documented values
-    // and left `off` with nothing to turn off (#5512). There is one mark now,
-    // and this setting decides what occupies it.
-    let status_indicator = crate::tui::widgets::header_status_indicator_frame(
-        (!app.low_motion && app.fancy_animations)
-            .then_some(app.turn_started_at)
-            .flatten(),
-        &app.status_indicator,
-    );
-    // The posture lockup: mark, then mode and permission (and the filesystem
-    // scope when it deviates) joined into one phrase. This is the guaranteed
-    // floor of the header — everything after it is sheddable — so it is built
-    // once and reused by the cramped rebuild below rather than spelled twice.
-    let mut left = Vec::new();
-    if let Some(indicator) = status_indicator {
-        left.push(Span::styled(
-            indicator,
-            header_fg(app, ChromeInk::Identity).add_modifier(Modifier::BOLD),
-        ));
-        left.push(Span::raw(GROUP_GAP));
-    }
-    left.push(Span::styled(
-        mode_label(app.ui_locale, app.mode),
-        Style::default().fg(mode_color),
-    ));
-    // Permission is safety state, not optional chrome. Compact terminals shed
-    // auxiliary detail, but keep mode and the effective posture.
-    left.push(Span::styled(FIELD_JOIN, dim));
-    left.push(Span::styled(
-        permission_label(app),
-        Style::default().fg(permission_color),
-    ));
-    let scope_notice = filesystem_scope_notice(app);
-    if let Some(scope) = scope_notice.clone() {
-        left.push(Span::styled(FIELD_JOIN, dim));
-        left.push(Span::styled(scope, Style::default().fg(permission_color)));
-    }
-    let posture = left.clone();
-    // Active-goal chip (#39): the ocean shell has no sidebar, so the topbar
-    // is the only always-on surface where a goal set via `create_goal` can
-    // live. Objective truncated to a fixed budget; terminal goals render
-    // nothing. The cramped-layout rebuild below keeps the chip in `suffix`.
-    let goal_chip =
-        crate::tui::footer_ui::active_goal_chip_state(app).map(|(objective, paused)| {
-            let budget = if paused { 22 } else { 26 };
-            let flat = objective.trim().replace(['\n', '\r'], " ");
-            let text = if paused {
-                format!("goal paused {}", truncate_to_width(&flat, budget))
-            } else {
-                format!("goal {}", truncate_to_width(&flat, budget))
-            };
-            let color = if paused {
-                ChromeInk::Attention.color(&app.ui_theme)
-            } else {
-                ChromeInk::Active.color(&app.ui_theme)
-            };
-            (text, color)
-        });
-    if let Some((text, color)) = &goal_chip {
-        left.push(Span::raw(GROUP_GAP));
-        left.push(Span::styled(
-            text.clone(),
-            Style::default().fg(*color).add_modifier(Modifier::BOLD),
-        ));
-    }
-    // Workflow-run chip (#5040): the same `WorkflowPanel::top_bar_chip` the
-    // classic header shows, so a collapsed run stays visible on the ocean
-    // shell too. No workflow panel means no chip. The cramped-layout rebuild
-    // below keeps the chip in `suffix` alongside the goal chip.
-    let workflow_chip = app.workflow_panel.as_ref().map(|panel| {
-        let ink = if matches!(
-            panel.lifecycle,
-            crate::tui::widgets::workflow_panel::WorkflowPanelLifecycle::Degraded
-        ) {
-            ChromeInk::Attention
-        } else {
-            ChromeInk::Info
-        };
-        (panel.top_bar_chip(), ink.color(&app.ui_theme))
-    });
-    if let Some((text, color)) = &workflow_chip {
-        left.push(Span::raw(GROUP_GAP));
-        left.push(Span::styled(
-            text.clone(),
-            Style::default().fg(*color).add_modifier(Modifier::BOLD),
-        ));
-    }
-    // Update-available chip (#14): a quiet, persistent affordance set once by
-    // the startup version check. Gets the workflow chip's treatment: last in
-    // the left cluster, the route label yields its budget first, and the chip
-    // drops cleanly when even a minimal chip cannot fit — never a modal,
-    // never mid-chip clipping.
-    let update_chip = app
-        .update_available
-        .as_ref()
-        .map(|label| (label.clone(), ChromeInk::Attention.color(&app.ui_theme)));
-    if let Some((text, color)) = &update_chip {
-        left.push(Span::raw(GROUP_GAP));
-        left.push(Span::styled(
-            text.clone(),
-            Style::default().fg(*color).add_modifier(Modifier::BOLD),
-        ));
-    }
-
-    let context_meter = header_context_meter(app, tier);
-    let token_breakdown = (tier != ShellTier::Compact)
-        .then(|| session_token_breakdown(app))
-        .flatten();
-    // Cached repository/worktree status only — never probe from the render path.
-    // Background refresh is scheduled from the event loop / idle ticks.
-    let git_label = crate::tui::git_status::chrome_label(git_status).map(|label| {
-        let max_width = match tier {
-            ShellTier::Compact => 24,
-            ShellTier::Normal => 36,
-            ShellTier::Wide => 52,
-        };
-        Span::styled(
-            truncate_to_width(&label, max_width),
-            header_fg(app, crate::tui::git_status::chrome_ink()),
-        )
-    });
-
-    // Baseline right-hand chrome: git, then the context meter.
-    //
-    // The build version used to close this cluster. It was already the first
-    // thing the header sacrificed — present only on `Wide`, gone below 110
-    // columns — which is the layout admitting it was never load-bearing. It is
-    // a fact you check deliberately (`codewhale --version`, `codewhale
-    // doctor`, the launch screen) exactly once, and the half of it that *is*
-    // worth reading mid-session — "your build is stale" — already has its own
-    // chip on the left. Fifteen columns of the primary chrome on every screen
-    // forever bought a numeral nobody was reading.
-    let mut right = Vec::new();
-    if let Some(git_label) = git_label.clone() {
-        push_chrome(&mut right, git_label);
-    }
-    if let Some(context_meter) = context_meter.clone() {
-        push_chrome(&mut right, context_meter);
-    }
-
-    // The posture lockup is the header's floor: mark, mode, permission, and a
-    // deviating filesystem scope never yield their columns to anything on the
-    // right. It is measured, not re-derived, so the floor cannot drift away
-    // from what actually gets drawn.
-    let minimum_left_width = span_width(&posture);
-    let available = usize::from(area.width);
-    // The optional token breakdown is the only elidable element: it is added
-    // between the git label and the context meter when the terminal is wide
-    // enough to keep the whole baseline plus the guaranteed-left minimum.
-    if let Some(token_breakdown) = token_breakdown {
-        let mut enhanced_right = Vec::new();
-        if let Some(git_label) = git_label.clone() {
-            push_chrome(&mut enhanced_right, git_label);
-        }
-        push_chrome(&mut enhanced_right, token_breakdown);
-        if let Some(context_meter) = context_meter.clone() {
-            push_chrome(&mut enhanced_right, context_meter);
-        }
-        let enhanced_width = span_width(&enhanced_right);
-        let gap = usize::from(enhanced_width > 0);
-        if minimum_left_width
-            .saturating_add(gap)
-            .saturating_add(enhanced_width)
-            <= available
-        {
-            right = enhanced_right;
-        }
-    }
-
-    let right_width = span_width(&right);
-    let left_budget = available.saturating_sub(right_width + usize::from(right_width > 0));
-    if span_width(&left) > left_budget {
-        // Cramped: keep the posture lockup exactly as composed and re-hang the
-        // chips behind it. Rebuilding the lockup by hand here is how the two
-        // passes used to disagree about what the header guarantees.
-        let mut compact_left = posture.clone();
-        // The goal chip survives cramped layouts too — it is operator state,
-        // not decoration. The route label yields its budget first (down to
-        // nothing, as it always has); below that the goal itself truncates,
-        // and when even a minimal chip cannot fit it drops rather than
-        // clipping mid-word (#39).
-        let base_fixed = span_width(&compact_left);
-        if let Some((text, color)) = &goal_chip {
-            let goal_room = left_budget
-                .saturating_sub(base_fixed)
-                .saturating_sub(GROUP_GAP.len());
-            if goal_room >= 8 {
-                compact_left.push(Span::raw(GROUP_GAP));
-                compact_left.push(Span::styled(
-                    truncate_to_width(text, goal_room),
-                    Style::default().fg(*color).add_modifier(Modifier::BOLD),
-                ));
-            }
-        }
-        // The workflow chip (#5040) is operator state too, so it gets the
-        // goal chip's treatment: whatever room remains after the chips ahead
-        // of it, clean truncation, and a clean drop when even a minimal chip
-        // cannot fit. The route label still yields its budget first.
-        if let Some((text, color)) = &workflow_chip {
-            let workflow_room = left_budget
-                .saturating_sub(span_width(&compact_left))
-                .saturating_sub(GROUP_GAP.len());
-            if workflow_room >= 8 {
-                compact_left.push(Span::raw(GROUP_GAP));
-                compact_left.push(Span::styled(
-                    truncate_to_width(text, workflow_room),
-                    Style::default().fg(*color).add_modifier(Modifier::BOLD),
-                ));
-            }
-        }
-        // The update chip (#14) gets the same treatment, last in line: it is
-        // useful, but it yields to every piece of operator state ahead of it.
-        if let Some((text, color)) = &update_chip {
-            let update_room = left_budget
-                .saturating_sub(span_width(&compact_left))
-                .saturating_sub(GROUP_GAP.len());
-            if update_room >= 8 {
-                compact_left.push(Span::raw(GROUP_GAP));
-                compact_left.push(Span::styled(
-                    truncate_to_width(text, update_room),
-                    Style::default().fg(*color).add_modifier(Modifier::BOLD),
-                ));
-            }
-        }
-        left = compact_left;
-    }
-    let left_width = span_width(&left);
-    let gap = available.saturating_sub(left_width + right_width);
-    left.push(Span::raw(" ".repeat(gap)));
-    left.extend(right);
-    let title_area = Rect { height: 1, ..area };
-    Paragraph::new(Line::from(left)).render(title_area, buf);
-    if area.height > 1 {
-        let rule_area = Rect {
-            y: area.y.saturating_add(1),
-            height: 1,
-            ..area
-        };
-        Paragraph::new(Line::from(Span::styled(
-            "─".repeat(usize::from(area.width)),
-            Style::default().fg(app.ui_theme.border),
-        )))
-        .render(rule_area, buf);
-    }
 }
 
 /// The transcript rows the idle brand mark needs before it will draw at all.
@@ -1831,15 +1391,9 @@ mod empty_state_caption_tests {
 
 #[cfg(test)]
 mod header_tests {
-    use super::{
-        FIELD_JOIN, GROUP_GAP, filesystem_scope_notice, header_hitboxes,
-        render_header_with_git_status,
-    };
-    use crate::palette::ChromeInk;
+    use super::filesystem_scope_notice;
     use crate::tui::app::{App, AppMode};
     use crate::tui::approval::ApprovalMode;
-    use crate::tui::widgets::workflow_panel::{WorkflowPanel, WorkflowPanelLifecycle};
-    use ratatui::{buffer::Buffer, layout::Rect};
 
     fn app() -> App {
         let mut app = crate::test_support::test_app_with_options(
@@ -1853,22 +1407,6 @@ mod header_tests {
         app
     }
 
-    fn header_line(app: &App, width: u16) -> String {
-        let area = Rect::new(0, 0, width, 1);
-        let mut buf = Buffer::empty(area);
-        render_header_with_git_status(
-            area,
-            &mut buf,
-            app,
-            &crate::tui::git_status::GitStatusSnapshot::default(),
-        );
-        (0..width)
-            .map(|x| buf[(x, 0)].symbol())
-            .collect::<String>()
-            .trim_end()
-            .to_string()
-    }
-
     #[test]
     fn default_posture_spends_no_columns_on_the_expected_scope() {
         // `files: workspace` used to be printed on every frame of every
@@ -1876,11 +1414,6 @@ mod header_tests {
         // default. A notice that never turns off cannot warn.
         let app = app();
         assert!(filesystem_scope_notice(&app).is_none());
-        let line = header_line(&app, 120);
-        assert!(!line.contains("files:"), "{line:?}");
-        assert!(line.starts_with("codewhale"), "{line:?}");
-        assert!(line.contains("work"), "{line:?}");
-        assert!(line.contains("ask"), "{line:?}");
     }
 
     #[test]
@@ -1892,15 +1425,6 @@ mod header_tests {
         app.approval_mode = ApprovalMode::Bypass;
         app.configured_sandbox_mode = Some("danger-full-access".to_string());
         assert!(filesystem_scope_notice(&app).is_none());
-        let line = header_line(&app, 120);
-        assert!(!line.contains("files:"), "{line:?}");
-        assert!(
-            line.contains(&*super::tr(
-                app.ui_locale,
-                super::MessageId::ChipPermissionFullAccess
-            )),
-            "{line:?}"
-        );
     }
 
     #[test]
@@ -1915,8 +1439,6 @@ mod header_tests {
         let notice = filesystem_scope_notice(&full)
             .expect("Full Access must never appear without a scope beside it");
         assert_eq!(notice, "files: workspace");
-        let line = header_line(&full, 120);
-        assert!(line.contains("files: workspace"), "{line:?}");
 
         // And the default posture still stays quiet.
         let mut quiet = app();
@@ -1930,97 +1452,6 @@ mod header_tests {
         let mut app = app();
         app.mode = AppMode::Plan;
         assert!(filesystem_scope_notice(&app).is_none());
-        let line = header_line(&app, 120);
-        assert!(line.contains("read only"), "{line:?}");
-        assert!(!line.contains("files: read-only"), "{line:?}");
-    }
-
-    #[test]
-    fn the_build_version_is_not_permanent_chrome() {
-        // It was already `Wide`-only, which is the layout admitting it was
-        // never load-bearing; `codewhale --version`, `codewhale doctor` and
-        // the launch screen are where a version is actually looked up, and
-        // the half worth reading mid-session is the update chip.
-        let app = app();
-        for width in [60u16, 80, 120, 200] {
-            let line = header_line(&app, width);
-            assert!(
-                !line.contains(concat!("v", env!("CODEWHALE_BUILD_VERSION"))),
-                "width {width}: {line:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn chips_are_separated_from_posture_by_a_wider_gap_than_the_posture_join() {
-        // One weight per meaning: `" · "` binds words into one phrase, the
-        // group gap stands between whole facts. If a goal chip hangs off the
-        // same dotted separator that joins mode to permission, the header is
-        // an undifferentiated list again.
-        let mut app = app();
-        app.update_available = Some("update 0.9.11".to_string());
-        let line = header_line(&app, 120);
-        assert!(
-            line.contains(&format!("ask{GROUP_GAP}update 0.9.11")),
-            "{line:?}",
-        );
-        assert!(line.contains(&format!("work{FIELD_JOIN}ask")), "{line:?}");
-        assert!(
-            unicode_width::UnicodeWidthStr::width(GROUP_GAP)
-                > unicode_width::UnicodeWidthStr::width(FIELD_JOIN),
-            "the group gap must out-space the phrase join or nothing groups",
-        );
-    }
-
-    #[test]
-    fn collapsed_degraded_workflow_chip_uses_attention_ink() {
-        let mut app = app();
-        let mut panel = WorkflowPanel::new("workflow-partial", "review release", 1_000);
-        panel.lifecycle = WorkflowPanelLifecycle::Degraded;
-        panel.expanded = false;
-        panel.completed_at_ms = Some(2_000);
-        app.workflow_panel = Some(panel);
-
-        let width = 200;
-        let area = Rect::new(0, 0, width, 1);
-        let mut buf = Buffer::empty(area);
-        render_header_with_git_status(
-            area,
-            &mut buf,
-            &app,
-            &crate::tui::git_status::GitStatusSnapshot::default(),
-        );
-        let text = (0..width).map(|x| buf[(x, 0)].symbol()).collect::<String>();
-        let start = text.find("wf degraded").expect("degraded workflow chip");
-        let expected = ChromeInk::Attention.color(&app.ui_theme);
-        for x in start..start + "wf degraded".len() {
-            assert_eq!(
-                buf[(x as u16, 0)].fg,
-                expected,
-                "collapsed degraded chip must stay amber at column {x}: {text:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_context_meter_states_its_percentage_and_registers_an_inspector_target() {
-        // The percentage is the direct operator question ("how full am I?").
-        // Fraction remains the auditable fact and the bar is the glance.
-        let mut app = app();
-        app.session.total_input_tokens = 3_000;
-        let line = header_line(&app, 120);
-        if line.contains('▱') || line.contains('▰') {
-            assert!(!line.contains('['), "{line:?}");
-            assert!(line.contains("context"), "{line:?}");
-            assert!(line.contains('%'), "{line:?}");
-            let hitboxes = header_hitboxes(Rect::new(0, 0, 120, 1), &app);
-            assert_eq!(hitboxes.len(), 1);
-            assert_eq!(hitboxes[0].area.right(), 120);
-            assert_eq!(
-                hitboxes[0].target,
-                crate::tui::app::HeaderActionTarget::InspectContext
-            );
-        }
     }
 }
 

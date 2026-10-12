@@ -1428,27 +1428,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_media_respects_cancel_token() {
-        let dir = tempdir().unwrap();
-        let img_path = dir.path().join("cancel.png");
-        let png_data = create_test_png(10, 10, [1, 2, 3, 255]);
-        std::fs::write(&img_path, &png_data).unwrap();
-
-        let cancel_token = tokio_util::sync::CancellationToken::new();
-        cancel_token.cancel();
-        let mut ctx = ToolContext::new(dir.path()).with_cancel_token(cancel_token);
-        ctx.route_capabilities.image_input = CapabilityState::Supported;
-
-        let tool = ReadMediaTool;
-        let err = tool
-            .execute_rich(json!({ "path": "cancel.png" }), &ctx)
-            .await
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("aborted") || msg.contains("cancel"), "{msg}");
-    }
-
-    #[tokio::test]
     async fn read_media_cancellation_before_dispatch_fails_without_read() {
         let dir = tempdir().unwrap();
         let cancel_token = tokio_util::sync::CancellationToken::new();

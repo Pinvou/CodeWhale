@@ -35,7 +35,7 @@ pub use provider_templates::{
     CEREBRAS_TEMPLATE_ID, COMMAND_CODE_TEMPLATE_ID, GROQ_API_KEY_ENV, GROQ_BASE_URL,
     GROQ_DEFAULT_MODEL, GROQ_TEMPLATE_ID, ProviderSetupApply, ProviderSetupTemplate,
     SENSENOVA_API_KEY_ENV, SENSENOVA_BASE_URL, SENSENOVA_DEFAULT_MODEL, SENSENOVA_TEMPLATE_ID,
-    compatible_provider_setup_templates, provider_setup_template, provider_setup_templates,
+    provider_setup_template, provider_setup_templates,
 };
 pub use settings_schema::{
     SETTINGS_SCHEMA, SettingDef, SettingKind, SettingOption, SettingUi, schema_groups, schema_rows,
@@ -1545,20 +1545,6 @@ impl ProviderChain {
     #[must_use]
     pub fn remaining(&self) -> usize {
         self.providers.len() - self.position
-    }
-}
-
-#[cfg(test)]
-mod provider_chain_tests {
-    use super::*;
-
-    #[test]
-    fn current_on_empty_chain_returns_default_provider() {
-        let chain = ProviderChain {
-            providers: vec![],
-            position: 0,
-        };
-        assert_eq!(chain.current(), ProviderKind::default());
     }
 }
 

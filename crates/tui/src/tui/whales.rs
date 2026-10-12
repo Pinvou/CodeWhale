@@ -16,8 +16,8 @@
 //!   roles map onto the six species; roles without a species (`worker`,
 //!   `general`, `custom`, unknown) render the plain Codewhale whale.
 //! - **State is evidence, never decoration.** [`WhaleState`] is derived only
-//!   from real runtime facts ([`WhaleState::for_subagent`],
-//!   [`WhaleState::for_shell_phase`]). *Working* is asserted only for a child
+//!   from real runtime facts ([`WhaleState::for_subagent`]). *Working* is
+//!   asserted only for a child
 //!   or turn that is actually running.
 //! - **Every state pairs a glyph cue with a word** ([`WhaleState::word`]), so
 //!   state never depends on color alone (same rule as `menu_style`).
@@ -38,7 +38,6 @@ use crate::palette::{self, UiTheme};
 use crate::tools::subagent::{AgentWorkerStatus, FleetRole, SubAgentResult, SubAgentStatus};
 use crate::tui::glyphs;
 use crate::tui::motion::mode::MotionMode;
-use crate::tui::underwater::ShellPhase;
 
 /// Cells occupied by a badge (species mark + body).
 pub const BADGE_WIDTH: usize = 2;
@@ -196,21 +195,6 @@ impl WhaleState {
         Self::Offline,
     ];
 
-    /// CWC state priority; higher wins when several facts apply. Public
-    /// contract for surfaces that fold several children into one whale.
-    #[cfg(test)]
-    #[must_use]
-    pub const fn priority(self) -> u8 {
-        match self {
-            Self::Waiting => 60,
-            Self::Blocked => 50,
-            Self::Working => 40,
-            Self::Thinking => 30,
-            Self::Offline => 20,
-            Self::Resting => 10,
-        }
-    }
-
     /// Localized state word — always rendered next to the glyph cue.
     #[must_use]
     pub fn word(self, locale: Locale) -> Cow<'static, str> {
@@ -262,20 +246,6 @@ impl WhaleState {
             SubAgentStatus::Interrupted(_) => Self::Waiting,
             SubAgentStatus::Failed(_) | SubAgentStatus::BudgetExhausted => Self::Blocked,
             SubAgentStatus::Cancelled => Self::Offline,
-        }
-    }
-
-    /// State from the operator session phase. Public contract for the shell
-    /// header / Fleet setup role pane (no consumer in this lane yet).
-    #[allow(dead_code)]
-    #[must_use]
-    pub const fn for_shell_phase(phase: ShellPhase) -> Self {
-        match phase {
-            ShellPhase::Idle | ShellPhase::Done => Self::Resting,
-            ShellPhase::Typing => Self::Thinking,
-            ShellPhase::Working | ShellPhase::Verifying => Self::Working,
-            ShellPhase::Waiting | ShellPhase::Approval => Self::Waiting,
-            ShellPhase::Failed => Self::Blocked,
         }
     }
 }
@@ -517,14 +487,6 @@ mod tests {
     }
 
     #[test]
-    fn state_priority_orders_attention_before_work() {
-        assert!(
-            WhaleState::Waiting.priority() > WhaleState::Working.priority()
-                && WhaleState::Working.priority() > WhaleState::Resting.priority()
-        );
-    }
-
-    #[test]
     fn badge_glyphs_have_ascii_fallbacks_and_stay_distinct() {
         for species in WhaleSpecies::ALL {
             let badge = badge_ascii(species);
@@ -629,48 +591,6 @@ mod tests {
             question: "which branch?".into(),
         });
         assert_eq!(WhaleState::for_subagent(&agent), WhaleState::Waiting);
-        // Priorities match CWC.
-        assert!(WhaleState::Waiting.priority() > WhaleState::Blocked.priority());
-        assert!(WhaleState::Blocked.priority() > WhaleState::Working.priority());
-        assert!(WhaleState::Working.priority() > WhaleState::Thinking.priority());
-        assert!(WhaleState::Thinking.priority() > WhaleState::Offline.priority());
-        assert!(WhaleState::Offline.priority() > WhaleState::Resting.priority());
-    }
-
-    #[test]
-    fn shell_phase_maps_without_inventing_work() {
-        assert_eq!(
-            WhaleState::for_shell_phase(ShellPhase::Idle),
-            WhaleState::Resting
-        );
-        assert_eq!(
-            WhaleState::for_shell_phase(ShellPhase::Done),
-            WhaleState::Resting
-        );
-        assert_eq!(
-            WhaleState::for_shell_phase(ShellPhase::Typing),
-            WhaleState::Thinking
-        );
-        assert_eq!(
-            WhaleState::for_shell_phase(ShellPhase::Working),
-            WhaleState::Working
-        );
-        assert_eq!(
-            WhaleState::for_shell_phase(ShellPhase::Verifying),
-            WhaleState::Working
-        );
-        assert_eq!(
-            WhaleState::for_shell_phase(ShellPhase::Waiting),
-            WhaleState::Waiting
-        );
-        assert_eq!(
-            WhaleState::for_shell_phase(ShellPhase::Approval),
-            WhaleState::Waiting
-        );
-        assert_eq!(
-            WhaleState::for_shell_phase(ShellPhase::Failed),
-            WhaleState::Blocked
-        );
     }
 
     #[test]

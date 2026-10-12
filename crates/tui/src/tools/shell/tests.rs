@@ -2146,20 +2146,6 @@ fn test_job_list_poll_cancel_and_stale_snapshot() {
     let detail = manager.inspect_job(&task_id).expect("inspect");
     assert!(detail.stdout.contains("done"));
     assert_eq!(detail.snapshot.status, ShellStatus::Completed);
-
-    manager.remember_stale_job(
-        "shell_stale",
-        "cargo test",
-        tmp.path().to_path_buf(),
-        Some("task_old".to_string()),
-    );
-    let stale = manager
-        .list_jobs()
-        .into_iter()
-        .find(|job| job.id == "shell_stale")
-        .expect("stale job");
-    assert!(stale.stale);
-    assert_eq!(stale.linked_task_id.as_deref(), Some("task_old"));
 }
 
 #[test]

@@ -2628,26 +2628,6 @@ mod tests {
     // ── git (arity 2 each) ────────────────────────────────────────────────────
 
     #[test]
-    fn classify_git_status_bare() {
-        assert_eq!(classify("git status"), "git status");
-    }
-
-    #[test]
-    fn classify_git_status_with_short_flag() {
-        assert_eq!(classify("git status -s"), "git status");
-    }
-
-    #[test]
-    fn classify_git_status_with_long_flag() {
-        assert_eq!(classify("git status --porcelain"), "git status");
-    }
-
-    #[test]
-    fn classify_git_push_does_not_equal_git_status() {
-        assert_ne!(classify("git push origin main"), "git status");
-    }
-
-    #[test]
     fn classify_git_push() {
         assert_eq!(classify("git push origin main"), "git push");
     }

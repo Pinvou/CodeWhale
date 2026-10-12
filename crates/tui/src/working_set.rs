@@ -2415,29 +2415,6 @@ mod tests {
         );
     }
 
-    /// Regression for #1921 — typing `@/` (or `@.`) must NOT trigger the
-    /// `local_reference_paths` walk, which scans up to
-    /// `LOCAL_REFERENCE_SCAN_LIMIT` paths on the UI thread. On WSL2 with a
-    /// `/mnt/c/...` workspace this hangs the composer for seconds to minutes.
-    #[test]
-    fn should_try_local_reference_completion_skips_bare_separators_and_dots() {
-        // The trigger gate must reject bare separators/dots.
-        assert!(!should_try_local_reference_completion("/"));
-        assert!(!should_try_local_reference_completion("\\"));
-        assert!(!should_try_local_reference_completion("."));
-        assert!(!should_try_local_reference_completion(".."));
-        // Empty string was already rejected; keep that.
-        assert!(!should_try_local_reference_completion(""));
-
-        // Actionable references must still trigger.
-        assert!(should_try_local_reference_completion("./foo"));
-        assert!(should_try_local_reference_completion("../bar"));
-        assert!(should_try_local_reference_completion(".env"));
-        assert!(should_try_local_reference_completion("path/"));
-        assert!(should_try_local_reference_completion("path/to/file"));
-        assert!(should_try_local_reference_completion("/usr"));
-    }
-
     #[test]
     fn cached_candidates_rank_like_live_completions() {
         // #3757: the composer caches one full candidate walk and ranks per

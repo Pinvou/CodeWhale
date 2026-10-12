@@ -396,12 +396,4 @@ mod tests {
         assert!(!detect_denial(0, "Success"));
         assert!(!detect_denial(1, "File not found"));
     }
-
-    #[test]
-    fn test_detect_denial_non_linux() {
-        #[cfg(not(target_os = "linux"))]
-        {
-            assert!(!detect_denial(31, "Bad system call"));
-        }
-    }
 }

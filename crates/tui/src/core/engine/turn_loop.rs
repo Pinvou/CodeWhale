@@ -6254,19 +6254,6 @@ fn turn_owned_child_parking_runtime_text(running: usize) -> String {
     )
 }
 
-#[cfg(test)]
-fn should_hold_turn_for_subagents(queued_completions: usize, running_children: usize) -> bool {
-    // #3216: launching sub-agents must NOT barrier the parent turn. Only queued
-    // completions (work already finished that must be surfaced into the
-    // transcript) hold the turn open. Running children are background work — the
-    // parent ends its turn and their results arrive via the completion sentinel
-    // on a later turn. The
-    // `running_children` argument is kept for call-site clarity and the
-    // background-status message, but deliberately no longer gates the hold.
-    let _ = running_children;
-    queued_completions > 0
-}
-
 fn stream_chunk_timeout_budget(config: &EngineConfig) -> (u64, Duration) {
     let secs = config.stream_chunk_timeout.as_secs();
     (secs, Duration::from_secs(secs))
@@ -7609,19 +7596,6 @@ mod tests {
     }
 
     #[test]
-    fn turn_holds_only_for_queued_completions_not_running_children() {
-        // #3216: queued completions hold the turn open so they get surfaced...
-        assert!(should_hold_turn_for_subagents(1, 0));
-        // ...but running children no longer barrier the parent — launching a
-        // sub-agent is not the same as joining it (results arrive via the
-        // completion sentinel).
-        assert!(!should_hold_turn_for_subagents(0, 1));
-        assert!(!should_hold_turn_for_subagents(0, 0));
-        // Queued completions hold regardless of how many children are running.
-        assert!(should_hold_turn_for_subagents(2, 5));
-    }
-
-    #[test]
     fn turn_owned_children_get_one_settlement_prompt_then_a_resumable_park() {
         assert!(should_guard_turn_end_for_owned_children(false, 1, false));
         assert!(!should_guard_turn_end_for_owned_children(false, 1, true));
@@ -7800,65 +7774,6 @@ mod tests {
                 },
             }
         ));
-    }
-
-    /// Regression test for the OpenAI streaming batch tool_calls bug.
-    ///
-    /// Background: when an OpenAI-compatible backend (vLLM, Ollama, LM Studio,
-    /// etc.) streams a response containing multiple `tool_calls` in the same
-    /// assistant message, the streaming parser emits the events in this order:
-    ///
-    /// ```text
-    /// ContentBlockStart::ToolUse { index: 0, ..}   // tool #1
-    /// ContentBlockDelta { index: 0, .. }            // its arguments
-    /// ContentBlockStart::ToolUse { index: 1, ..}   // tool #2
-    /// ContentBlockDelta { index: 1, .. }
-    /// …
-    /// ContentBlockStart::ToolUse { index: N-1, ..}
-    /// ContentBlockDelta { index: N-1, .. }
-    /// ContentBlockStop { index: 0 }                 // ── only flushed at
-    /// ContentBlockStop { index: 1 }                 //    finish_reason
-    /// …                                             //    (see chat.rs
-    /// ContentBlockStop { index: N-1 }               //    L2050-L2064)
-    /// ```
-    ///
-    /// All Starts arrive before any Stop. The fix replaces the single
-    /// `current_tool_index: Option<usize>` slot (overwritten by each Start)
-    /// with a `HashMap<u32 block_index, usize tool_uses_idx>` that survives
-    /// every Start and routes each Stop to the right `tool_uses` entry.
-    ///
-    /// This test confirms the invariant: feed 7 Starts then 7 Stops, expect
-    /// all 7 indices to come back out in order.
-    #[test]
-    fn batch_tool_calls_preserve_all_tool_use_indices() {
-        let mut current_tool_indices: std::collections::HashMap<u32, usize> =
-            std::collections::HashMap::new();
-
-        // Simulate `ContentBlockStart::ToolUse { index: i, ..}` for 7 tools.
-        for block_index in 0..7u32 {
-            current_tool_indices.insert(block_index, block_index as usize);
-        }
-        assert_eq!(current_tool_indices.len(), 7);
-
-        // Now drain via `ContentBlockStop { index: i }` in the same order.
-        let mut recovered: Vec<(u32, usize)> = (0..7u32)
-            .map(|block_index| {
-                let tool_idx = current_tool_indices
-                    .remove(&block_index)
-                    .expect("each block_index must route to a tool_uses entry");
-                (block_index, tool_idx)
-            })
-            .collect();
-        recovered.sort_by_key(|(block_index, _)| *block_index);
-        let expected: Vec<(u32, usize)> = (0..7u32).map(|i| (i, i as usize)).collect();
-        assert_eq!(
-            recovered, expected,
-            "every Stop must recover the tool_uses index pushed by its matching Start"
-        );
-        assert!(
-            current_tool_indices.is_empty(),
-            "all entries must drain after their Stops"
-        );
     }
 
     #[test]

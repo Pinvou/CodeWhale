@@ -16,7 +16,6 @@ pub const RAW_TOOL_OUTPUT_RECEIPT_THRESHOLD_CHARS: usize = 12_000;
 pub struct ToolOutputReceiptStats {
     pub compacted_count: usize,
     pub artifact_receipts: usize,
-    pub sha_receipts: usize,
     pub unavailable_receipts: usize,
     pub original_chars: usize,
 }
@@ -401,7 +400,6 @@ mod tests {
         };
 
         assert_eq!(stats.compacted_count, 1);
-        assert_eq!(stats.sha_receipts, 0);
         assert_eq!(stats.unavailable_receipts, 1);
         assert!(!content.contains("NO_ARTIFACT_RAW"));
         assert!(!content.contains("detail_handle"));

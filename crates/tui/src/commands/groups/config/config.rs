@@ -3718,15 +3718,6 @@ mod tests {
     }
 
     #[test]
-    fn test_show_settings_loads_from_file() {
-        let _lock = lock_test_env();
-        let mut app = create_test_app();
-        let result = show_settings(&mut app);
-        // Settings should load (may use defaults if file doesn't exist)
-        assert!(result.message.is_some());
-    }
-
-    #[test]
     fn settings_command_opens_typed_editor_and_preserves_text_mode() {
         let _lock = lock_test_env();
         let mut app = create_test_app();

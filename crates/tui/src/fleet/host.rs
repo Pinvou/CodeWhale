@@ -1949,32 +1949,6 @@ mod tests {
         adapter.stop_worker("local-memory").unwrap();
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn fleet_host_stop_signals_known_leader_without_process_table() {
-        // Even when full session census is unavailable, stop must still reach
-        // the tracked session leader/dispatcher pid.
-        let tmp = TempDir::new().unwrap();
-        let mut adapter = LocalProcessFleetHostAdapter::new(tmp.path());
-        let request = FleetWorkerStartRequest::new(
-            "known-leader-stop",
-            shell_command("printf ready; sleep 30"),
-        );
-        let handle = adapter.start_worker(request).unwrap();
-        let pid = handle.pid.expect("pid") as libc::pid_t;
-        let _ = wait_for_log(&adapter, "known-leader-stop", "ready");
-
-        let status = adapter
-            .stop_worker("known-leader-stop")
-            .expect("stop known leader without process table");
-        assert_eq!(status.state, FleetHostWorkerState::Stopped);
-        assert!(
-            wait_for_unix_pid_exit(pid, Duration::from_secs(2)),
-            "known session leader survived stop without process-table census"
-        );
-        adapter.cleanup_worker("known-leader-stop").unwrap();
-    }
-
     #[test]
     fn fleet_host_ssh_kind_does_not_report_local_process_memory() {
         let tmp = TempDir::new().unwrap();

@@ -5,14 +5,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use super::ledger::FleetLedger;
 use anyhow::{Context, Result, bail};
 use chrono::{SecondsFormat, Utc};
 use codewhale_protocol::fleet::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-
-use super::ledger::FleetLedger;
 
 const MAX_SCORER_READ_BYTES: u64 = 1_000_000;
 const MAX_FLEET_ID_BYTES: usize = 128;
@@ -394,17 +394,6 @@ pub fn prepare_verification_receipt(
         resolved_route: input.resolved_route.clone(),
         effective_permissions: input.effective_permissions.clone(),
     };
-    Ok(receipt)
-}
-
-pub fn record_verification_receipt(
-    ledger: &FleetLedger,
-    workspace: &Path,
-    input: &FleetTaskVerificationInput,
-    verification: FleetTaskVerification,
-) -> Result<FleetReceipt> {
-    let receipt = prepare_verification_receipt(workspace, input, verification)?;
-    ledger.record_receipt(receipt.clone())?;
     Ok(receipt)
 }
 
@@ -1107,8 +1096,8 @@ mod tests {
             &input,
         );
 
-        let receipt =
-            record_verification_receipt(&ledger, tmp.path(), &input, verification).unwrap();
+        let receipt = prepare_verification_receipt(tmp.path(), &input, verification).unwrap();
+        ledger.record_receipt(receipt.clone()).unwrap();
 
         assert_eq!(receipt.result, FleetTaskResult::Fail);
         assert_eq!(receipt.failure_kind, Some(FleetTaskFailureKind::Task));

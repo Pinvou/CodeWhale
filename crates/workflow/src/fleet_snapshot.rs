@@ -431,18 +431,6 @@ fn exact_members(exact: &ExactFleet) -> Vec<FleetSnapshotMember> {
         .collect()
 }
 
-/// Verify a snapshot that arrived from anywhere other than [`FleetSnapshot::capture`].
-///
-/// The free function exists for load/deserialize seams that hold a snapshot by
-/// reference and only need the yes/no answer — a durable-write guard, a replay
-/// loader, a cache read. It is the same check as
-/// [`FleetSnapshot::verify_content_hash`]; having a named entry point is what
-/// lets those call sites read as "verify before use" rather than as an
-/// incidental method call.
-pub fn verify_snapshot_content_hash(snapshot: &FleetSnapshot) -> Result<(), ExactFleetError> {
-    snapshot.verify_content_hash()
-}
-
 /// Normalize an exact Fleet's **legacy inline** Router into the captured
 /// service, if it used the prototype form.
 ///
@@ -500,7 +488,6 @@ permissions = "analyst"
     fn a_freshly_captured_snapshot_verifies() {
         let snapshot = captured();
         assert!(snapshot.verify_content_hash().is_ok());
-        assert!(verify_snapshot_content_hash(&snapshot).is_ok());
         assert!(snapshot.into_verified().is_ok());
     }
 

@@ -303,12 +303,6 @@ pub fn provider_setup_templates() -> &'static [ProviderSetupTemplate] {
     TEMPLATES
 }
 
-/// Templates that persist as named OpenAI-compatible tables.
-pub fn compatible_provider_setup_templates() -> impl Iterator<Item = &'static ProviderSetupTemplate>
-{
-    TEMPLATES.iter().filter(|template| template.is_compatible())
-}
-
 /// Look up a template by id, documented alias, or first-class provider id.
 #[must_use]
 pub fn provider_setup_template(id: &str) -> Option<&'static ProviderSetupTemplate> {
@@ -380,17 +374,6 @@ mod tests {
             assert!(
                 template.api_key_env().is_some_and(|env| !env.is_empty()),
                 "{} must name an API key env",
-                template.id
-            );
-        }
-    }
-
-    #[test]
-    fn compatible_template_ids_do_not_shadow_built_ins() {
-        for template in compatible_provider_setup_templates() {
-            assert!(
-                ProviderKind::parse(template.id).is_none(),
-                "compatible template '{}' shadows ProviderKind",
                 template.id
             );
         }

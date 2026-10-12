@@ -1593,29 +1593,6 @@ impl HookExecutor {
         }
     }
 
-    /// Create a disabled `HookExecutor` (no hooks will run)
-    #[allow(dead_code)] // Used in tests and as convenience constructor
-    pub fn disabled() -> Self {
-        Self {
-            config: HooksConfig {
-                enabled: false,
-                ..Default::default()
-            },
-            default_working_dir: PathBuf::from("."),
-            session_id: String::new(),
-            observer_dispatcher: ObserverDispatcher::new(),
-            background_supervisor: BackgroundSupervisor::new(),
-            #[cfg(test)]
-            lose_message_submit_executor: false,
-        }
-    }
-
-    /// Check if hooks are enabled
-    #[allow(dead_code)] // Public API for hook system consumers
-    pub fn is_enabled(&self) -> bool {
-        self.config.enabled
-    }
-
     /// Get the session ID
     /// Read-only access to the underlying configuration. Used by
     /// `/hooks` (#460 read-only MVP) so the user can list configured
@@ -3140,13 +3117,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn executor_type_is_available_from_executor_module() {
-        let executor = crate::hooks::executor::HookExecutor::disabled();
-
-        assert!(!executor.is_enabled());
-    }
-
     /// #456 — `parse_env_lines` covers the formats users actually emit from
     /// shell hooks: bare `KEY=VAL`, `export KEY=VAL`, quoted values, comments,
     /// blank lines. Lines without `=` are dropped; values are taken verbatim
@@ -3411,7 +3381,7 @@ NOEQUAL line dropped
     #[test]
     fn test_hook_condition_always() {
         let hook = Hook::new(HookEvent::SessionStart, "echo test");
-        let executor = HookExecutor::disabled();
+        let executor = HookExecutor::new(HooksConfig::default(), PathBuf::from("."));
         let context = HookContext::new();
 
         assert!(executor.matches_condition(&hook, &context));
@@ -3425,7 +3395,7 @@ NOEQUAL line dropped
             },
         );
 
-        let executor = HookExecutor::disabled();
+        let executor = HookExecutor::new(HooksConfig::default(), PathBuf::from("."));
 
         let context_match = HookContext::new().with_tool_name("exec_shell");
         let context_no_match = HookContext::new().with_tool_name("write_file");
@@ -3441,7 +3411,7 @@ NOEQUAL line dropped
                 mode: "agent".to_string(),
             });
 
-        let executor = HookExecutor::disabled();
+        let executor = HookExecutor::new(HooksConfig::default(), PathBuf::from("."));
 
         let context_match = HookContext::new().with_mode("AGENT"); // Case insensitive
         let context_no_match = HookContext::new().with_mode("normal");
@@ -3479,25 +3449,6 @@ NOEQUAL line dropped
 
         let hooks = config.hooks_for_event(HookEvent::SessionStart);
         assert!(hooks.is_empty());
-    }
-
-    #[test]
-    fn test_hook_builder() {
-        let hook = Hook::new(HookEvent::ToolCallAfter, "notify.sh")
-            .with_name("notify_tool")
-            .with_timeout(60)
-            .background()
-            .with_condition(HookCondition::ToolCategory {
-                category: "shell".to_string(),
-            });
-
-        assert_eq!(hook.name, Some("notify_tool".to_string()));
-        assert_eq!(hook.timeout_secs, 60);
-        assert!(hook.background);
-        assert!(matches!(
-            hook.condition,
-            Some(HookCondition::ToolCategory { .. })
-        ));
     }
 
     #[test]
@@ -4161,7 +4112,7 @@ exit 7
 
     #[test]
     fn has_hooks_for_event_fast_path_returns_false_for_empty_config() {
-        let executor = HookExecutor::disabled();
+        let executor = HookExecutor::new(HooksConfig::default(), PathBuf::from("."));
         // No hooks configured AT ALL — every event is a fast skip.
         for event in [
             HookEvent::SessionStart,
@@ -5676,7 +5627,7 @@ command = "echo project"
         assert_eq!(labels, vec!["shell-gate".to_string()], "{labels:?}");
 
         // Globally disabled hooks are not gates either.
-        let disabled = HookExecutor::disabled();
+        let disabled = HookExecutor::new(HooksConfig::default(), PathBuf::from("."));
         assert!(
             disabled
                 .matched_strict_gate_labels(

@@ -17,7 +17,6 @@ use crate::palette::UI_THEME;
 use crate::tui::golden_harness::{BLOCKER_SIZES, assert_matches_golden, render_golden_text};
 use crate::tui::history::tideline_exports::{
     TidelineReceiptState, TidelineStream, TidelineStreamEvent, render_tideline_stream,
-    tideline_stream_hitboxes,
 };
 
 fn events() -> Vec<TidelineStreamEvent> {
@@ -185,7 +184,6 @@ fn work_stage_hitboxes_match_painted_rows() {
     let groups = groups();
     let events = events();
     let rail = TidelineRail::new(&UI_THEME, &groups).focused(true);
-    let stream = TidelineStream::new(&UI_THEME, &events).selected(Some(3));
     let stage = TidelineWorkStage {
         rail: TidelineRail::new(&UI_THEME, &groups).focused(true),
         stream: TidelineStream::new(&UI_THEME, &events).selected(Some(3)),
@@ -201,18 +199,6 @@ fn work_stage_hitboxes_match_painted_rows() {
             .map(|x| buf[(x, rect.y)].symbol().to_string())
             .collect();
         assert!(!cells.trim().is_empty(), "rail rect covers empty cells");
-    }
-
-    let stream_area = Rect::new(22, 0, w - 22, h);
-    let stream_boxes = tideline_stream_hitboxes(stream_area, &stream);
-    assert_eq!(stream_boxes.len(), events.len(), "one rect per event");
-    // The fleet tree's rect spans its three edge rows.
-    assert_eq!(stream_boxes[1].height, 3);
-    for rect in &stream_boxes {
-        let cells: String = (rect.x..rect.x + rect.width)
-            .map(|x| buf[(x, rect.y)].symbol().to_string())
-            .collect();
-        assert!(!cells.trim().is_empty(), "stream rect covers empty cells");
     }
 }
 

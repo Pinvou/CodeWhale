@@ -2460,7 +2460,6 @@ mod tests {
         BackendId, BackendSearch, CapabilityState, DegradedReason, QueryCapabilities, QueryKnob,
         Recency, SearchQuery, SearchResult,
     };
-    use crate::tools::web::scrape::{decode_html_entities, normalize_bing_url};
     use serde_json::json;
     use std::time::{Duration, Instant};
 
@@ -2548,50 +2547,6 @@ mod tests {
             search_probe_target(SearchProvider::DuckDuckGo, Some("file:///tmp/search")),
             Err(SearchProbeTargetError::Invalid)
         );
-    }
-
-    #[test]
-    fn bing_ckurl_with_html_entities_decodes_real_url() {
-        let href = "https://www.bing.com/ck/a?!&amp;&amp;p=abc&amp;u=a1aHR0cHM6Ly9ydXN0LWxhbmcub3JnLw&amp;ntb=1";
-        assert_eq!(normalize_bing_url(href), "https://rust-lang.org/");
-    }
-
-    #[test]
-    fn decode_html_entities_handles_named_entities() {
-        assert_eq!(decode_html_entities("&amp;"), "&");
-        assert_eq!(decode_html_entities("&lt;"), "<");
-        assert_eq!(decode_html_entities("&gt;"), ">");
-        assert_eq!(decode_html_entities("&quot;"), "\"");
-        assert_eq!(decode_html_entities("&apos;"), "'");
-        assert_eq!(decode_html_entities("&nbsp;"), " ");
-        assert_eq!(decode_html_entities("&copy;"), "\u{00A9}");
-        assert_eq!(decode_html_entities("&mdash;"), "\u{2014}");
-    }
-
-    #[test]
-    fn decode_html_entities_handles_decimal_numeric_references() {
-        assert_eq!(decode_html_entities("&#65;"), "A");
-        assert_eq!(decode_html_entities("&#60;"), "<");
-        assert_eq!(decode_html_entities("&#8211;"), "\u{2013}");
-    }
-
-    #[test]
-    fn decode_html_entities_handles_hex_numeric_references() {
-        assert_eq!(decode_html_entities("&#x41;"), "A");
-        assert_eq!(decode_html_entities("&#x3C;"), "<");
-        assert_eq!(decode_html_entities("&#x2014;"), "\u{2014}");
-    }
-
-    #[test]
-    fn decode_html_entities_passthrough_unknown() {
-        assert_eq!(decode_html_entities("&unknown;"), "&unknown;");
-    }
-
-    #[test]
-    fn decode_html_entities_mixed_content() {
-        let input = "Hello &amp; welcome to &quot;Rust&apos;s world&quot; &mdash; enjoy!";
-        let expected = "Hello & welcome to \"Rust's world\" \u{2014} enjoy!";
-        assert_eq!(decode_html_entities(input), expected);
     }
 
     #[test]

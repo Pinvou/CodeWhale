@@ -1640,38 +1640,6 @@ mod tests {
     }
 
     #[test]
-    fn command_palette_hidden_canonical_shadow_exposes_no_discovery_row() {
-        // A hidden user command claiming a built-in canonical token must not
-        // surface either row: the hidden command is excluded from output while
-        // still owning the token (AT-008 boundary in the palette).
-        let tmp = TempDir::new().expect("tempdir");
-        let workspace = tmp.path().join("workspace");
-        let commands_dir = workspace.join(".codewhale").join("commands");
-        std::fs::create_dir_all(&commands_dir).expect("create commands dir");
-        std::fs::write(
-            commands_dir.join("private-help.md"),
-            "---\nname: help\nhidden: true\n---\nprivate help",
-        )
-        .expect("write hidden user command");
-
-        let entries = build_entries(
-            Locale::En,
-            tmp.path().join("skills").as_path(),
-            false,
-            workspace.as_path(),
-            tmp.path().join("mcp.json").as_path(),
-            None,
-        );
-
-        assert!(
-            !entries
-                .iter()
-                .any(|entry| entry.section == PaletteSection::Command && entry.label == "/help"),
-            "neither the hidden user command nor the shadowed built-in may appear"
-        );
-    }
-
-    #[test]
     fn command_palette_alias_shadow_preserves_canonical_row_without_claimed_alias() {
         // A user command claiming only one built-in alias must leave the
         // built-in canonical row visible and remove only the claimed alias

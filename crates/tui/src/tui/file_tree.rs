@@ -345,17 +345,6 @@ impl FileTreeState {
             self.scroll_offset = self.cursor.saturating_add(1).saturating_sub(visible_height);
         }
     }
-
-    /// Adjust scroll for a given visible height.
-    #[cfg(test)]
-    pub fn adjust_scroll(&mut self, visible: usize) {
-        if self.cursor < self.scroll_offset {
-            self.scroll_offset = self.cursor;
-        }
-        if visible > 0 && self.cursor >= self.scroll_offset + visible {
-            self.scroll_offset = self.cursor.saturating_add(1).saturating_sub(visible);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -672,19 +661,6 @@ mod tests {
             "re-expanding the parent restores the expanded child subtree: {:?}",
             entry_names(&state)
         );
-    }
-
-    #[test]
-    fn adjust_scroll_keeps_the_cursor_inside_the_visible_window() {
-        let ws = fixture_workspace();
-        let mut state = FileTreeState::new(ws.path());
-        state.cursor = state.entries.len().saturating_sub(1);
-        state.adjust_scroll(3);
-        assert!(state.cursor < state.scroll_offset + 3);
-
-        state.cursor = 0;
-        state.adjust_scroll(3);
-        assert_eq!(state.scroll_offset, 0);
     }
 
     #[test]

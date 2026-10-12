@@ -19,16 +19,12 @@ pub mod fleet_reasoning;
 pub mod fleet_snapshot;
 mod gates;
 mod js_authoring;
-mod model_policy;
 mod named_fleet;
 pub mod reasoning_router;
 pub mod redaction;
-mod replay;
-mod review_repair;
 mod role_resolve;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -48,27 +44,26 @@ pub use fleet_preflight::{
 };
 pub use fleet_reasoning::{
     EffectiveReasoning, EffectiveReasoningSource, FAITHFUL_WIRE_TIERS, FleetTaskReceipt,
-    ProviderEffectiveReasoning, ProviderReasoningControl, ROUTER_CALL_REASONING,
-    ROUTER_MAX_OUTPUT_TOKENS, ROUTER_REASONING_FIELD, ROUTER_SUMMARY_MAX_CHARS, ROUTING_SCOPE,
-    ReasoningCapability, ReasoningResolveError, ResolvedReasoning, RouterAvailability,
-    RouterCallDisclosure, RouterCallInput, RouterCallPlan, RouterDecision, RouterDecisionError,
-    RouterIdentity, RoutingDisclosure, RoutingPayload, TaskShape, bounded_routing_payload,
-    parse_router_decision, resolve_exact_member_reasoning, resolve_legacy_reasoning,
-    router_call_plan, router_system_prompt, router_user_message, transport_disclosure,
+    ProviderEffectiveReasoning, ProviderReasoningControl, ROUTER_MAX_OUTPUT_TOKENS,
+    ROUTER_REASONING_FIELD, ROUTER_SUMMARY_MAX_CHARS, ROUTING_SCOPE, ReasoningCapability,
+    ReasoningResolveError, ResolvedReasoning, RouterAvailability, RouterCallDisclosure,
+    RouterCallInput, RouterCallPlan, RouterDecision, RouterDecisionError, RouterIdentity,
+    RoutingDisclosure, RoutingPayload, TaskShape, bounded_routing_payload, parse_router_decision,
+    resolve_exact_member_reasoning, resolve_legacy_reasoning, router_call_plan,
+    router_system_prompt, router_user_message, transport_disclosure,
 };
 pub use fleet_snapshot::{
     FleetSnapshot, FleetSnapshotLegacyRole, FleetSnapshotMember, FleetSnapshotRouter,
-    QualifiedFleetId, captured_legacy_inline_router, verify_snapshot_content_hash,
+    QualifiedFleetId, captured_legacy_inline_router,
 };
 pub use gates::{
     GateError, GateKind, GateOn, GateOnFail, GateOutcome, GateSpec, GateState, GateStatusLine,
-    HandoffArtifact, LaneGateBoard, stopship_gate_pipeline,
+    HandoffArtifact, LaneGateBoard,
 };
 pub use js_authoring::{
     JavascriptWorkflowError, JavascriptWorkflowResult, compile_javascript_workflow,
     compile_typescript_workflow,
 };
-pub use model_policy::*;
 pub use named_fleet::{
     FleetDocument, FleetSchema, FleetSearchRoot, NamedFleet, NamedFleetError,
     STOPSHIP_REQUIRED_ROLES, exact_schema_revision, load_named_fleet, load_named_fleet_file,
@@ -83,41 +78,10 @@ pub use redaction::{
     REDACTION_ABSOLUTE_PATH, REDACTION_RELATIVE_PATH, REDACTION_SECRET, Redaction,
     redact_for_disclosure,
 };
-pub use replay::*;
-pub use review_repair::{
-    IterationReceipt, IterationVerdict, ReviewRepairBounds, ReviewRepairError, ReviewRepairLoop,
-    ReviewRepairPolicy, RouteReceipt, RoutedBy, StopReason,
-};
 pub use role_resolve::{
     FleetRoleMap, FleetRoleResolveError, ResolvedWorkflowAgent, normalize_token,
     resolve_workflow_agent, validate_role_token,
 };
-
-/// Default hard ceiling on total agents a Fleet-shaped Workflow plan may launch.
-/// Matches the imperative VM lifetime cap (1_000 agents per run).
-pub const DEFAULT_FLEET_WORKFLOW_MAX_AGENTS: usize = 1000;
-pub const DEFAULT_FLEET_WORKFLOW_MAX_DEPTH: usize = 5;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowConfig {
-    pub goal: String,
-    #[serde(default = "default_max_concurrent")]
-    pub max_concurrent: u8,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub phases: Vec<Phase>,
-}
-
-impl WorkflowConfig {
-    pub fn validate(&self) -> Result<(), WorkflowValidationError> {
-        WorkflowPlan::from_config(self).map(|_| ())
-    }
-
-    pub fn compile(&self) -> Result<WorkflowPlan, WorkflowValidationError> {
-        WorkflowPlan::from_config(self)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowSpec {
@@ -140,34 +104,6 @@ pub struct WorkflowSpec {
     pub gates: Vec<GateSpec>,
     #[serde(default)]
     pub nodes: Vec<WorkflowNode>,
-}
-
-impl WorkflowSpec {
-    pub fn validate_for_fleet(&self) -> Result<WorkflowFleetShape, WorkflowFleetLimitError> {
-        self.validate_for_fleet_with_limits(WorkflowFleetLimits::default())
-    }
-
-    pub fn validate_for_fleet_with_limits(
-        &self,
-        limits: WorkflowFleetLimits,
-    ) -> Result<WorkflowFleetShape, WorkflowFleetLimitError> {
-        validate_workflow_nodes(&self.nodes)
-            .map_err(|source| WorkflowFleetLimitError::InvalidWorkflow { source })?;
-        let shape = estimate_fleet_shape(&self.nodes)?;
-        if shape.total_agents > limits.max_total_agents {
-            return Err(WorkflowFleetLimitError::TooManyAgents {
-                total_agents: shape.total_agents,
-                max_total_agents: limits.max_total_agents,
-            });
-        }
-        if shape.max_depth > limits.max_depth {
-            return Err(WorkflowFleetLimitError::RecursionTooDeep {
-                depth: shape.max_depth,
-                max_depth: limits.max_depth,
-            });
-        }
-        Ok(shape)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,192 +288,6 @@ pub enum PromotionStrategy {
     TeacherSelected,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkflowPlan {
-    goal: String,
-    max_concurrent: u8,
-    phases: Vec<PhasePlan>,
-}
-
-impl WorkflowPlan {
-    pub fn from_config(config: &WorkflowConfig) -> Result<Self, WorkflowValidationError> {
-        validate_non_empty("workflow goal", &config.goal)?;
-        if !(1..=20).contains(&config.max_concurrent) {
-            return Err(WorkflowValidationError::InvalidMaxConcurrent {
-                value: config.max_concurrent,
-            });
-        }
-        if config.phases.is_empty() {
-            return Err(WorkflowValidationError::EmptyWorkflow);
-        }
-
-        let mut phase_indices = BTreeMap::new();
-        let mut all_tasks = BTreeMap::new();
-        let mut task_phase = BTreeMap::new();
-
-        for (phase_index, phase) in config.phases.iter().enumerate() {
-            validate_non_empty("phase name", &phase.name)?;
-            if phase.tasks.is_empty() {
-                return Err(WorkflowValidationError::EmptyPhase {
-                    phase: phase.name.clone(),
-                });
-            }
-            if phase_indices
-                .insert(phase.name.clone(), phase_index)
-                .is_some()
-            {
-                return Err(WorkflowValidationError::DuplicatePhase {
-                    phase: phase.name.clone(),
-                });
-            }
-
-            for task in &phase.tasks {
-                validate_non_empty("task id", &task.id)?;
-                validate_non_empty("task prompt", &task.prompt)?;
-                if all_tasks.insert(task.id.clone(), task).is_some() {
-                    return Err(WorkflowValidationError::DuplicateTask {
-                        task: task.id.clone(),
-                    });
-                }
-                task_phase.insert(task.id.clone(), phase.name.clone());
-            }
-        }
-
-        for phase in &config.phases {
-            for dependency in &phase.depends_on {
-                if dependency == &phase.name || !phase_indices.contains_key(dependency) {
-                    return Err(WorkflowValidationError::InvalidPhaseDependency {
-                        phase: phase.name.clone(),
-                        dependency: dependency.clone(),
-                    });
-                }
-            }
-            validate_parallel_write_scope(phase)?;
-        }
-
-        let ordered_phase_names = ordered_phases(config, &phase_indices)?;
-        let phase_order: BTreeMap<_, _> = ordered_phase_names
-            .iter()
-            .enumerate()
-            .map(|(index, phase)| (phase.clone(), index))
-            .collect();
-
-        for phase in &config.phases {
-            for task in &phase.tasks {
-                for dependency in &task.depends_on_results {
-                    let Some(dependency_phase) = task_phase.get(dependency) else {
-                        return Err(WorkflowValidationError::InvalidTaskResultDependency {
-                            task: task.id.clone(),
-                            dependency: dependency.clone(),
-                        });
-                    };
-                    if phase_order[dependency_phase] >= phase_order[&phase.name] {
-                        return Err(WorkflowValidationError::UnavailableTaskResultDependency {
-                            task: task.id.clone(),
-                            dependency: dependency.clone(),
-                            dependency_phase: dependency_phase.clone(),
-                            task_phase: phase.name.clone(),
-                        });
-                    }
-                }
-            }
-        }
-
-        let phases = ordered_phase_names
-            .iter()
-            .map(|phase_name| {
-                let phase = &config.phases[phase_indices[phase_name]];
-                PhasePlan {
-                    name: phase.name.clone(),
-                    parallel: phase.parallel,
-                    on_failure: phase.on_failure,
-                    tasks: phase.tasks.clone(),
-                }
-            })
-            .collect();
-
-        Ok(Self {
-            goal: config.goal.clone(),
-            max_concurrent: config.max_concurrent,
-            phases,
-        })
-    }
-
-    pub fn goal(&self) -> &str {
-        &self.goal
-    }
-
-    pub fn max_concurrent(&self) -> u8 {
-        self.max_concurrent
-    }
-
-    pub fn phases(&self) -> &[PhasePlan] {
-        &self.phases
-    }
-
-    pub fn phase_names(&self) -> impl Iterator<Item = &str> {
-        self.phases.iter().map(|phase| phase.name.as_str())
-    }
-}
-
-pub type WorkflowIr = WorkflowPlan;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PhasePlan {
-    pub name: String,
-    pub parallel: bool,
-    pub on_failure: FailurePolicy,
-    pub tasks: Vec<Task>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Phase {
-    pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub depends_on: Vec<String>,
-    #[serde(default)]
-    pub parallel: bool,
-    #[serde(default)]
-    pub on_failure: FailurePolicy,
-    #[serde(default)]
-    pub tasks: Vec<Task>,
-}
-
-pub type WorkflowPhase = Phase;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum FailurePolicy {
-    #[default]
-    SkipContinue,
-    Abort,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Task {
-    pub id: String,
-    pub prompt: String,
-    #[serde(default)]
-    pub agent_type: AgentType,
-    #[serde(default)]
-    pub mode: TaskMode,
-    #[serde(default)]
-    pub isolation: IsolationMode,
-    #[serde(default)]
-    pub file_scope: Vec<String>,
-    #[serde(default)]
-    pub depends_on_results: Vec<String>,
-    #[serde(default)]
-    pub max_steps: Option<u32>,
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
-}
-
-pub type WorkflowTask = Task;
-pub type WorkflowRole = AgentType;
-
 /// The workflow wire's agent type. The serialized spellings are the canonical
 /// Codewhale role vocabulary (founder, 2026-09-02); the pre-rename JS
 /// spellings stay accepted as aliases so checked-in and saved workflows keep
@@ -684,19 +434,6 @@ impl WorkflowUsage {
             .zip(self.output_tokens)
             .map(|(input, output)| input.saturating_add(output))
     }
-
-    /// Add two independently observed usage receipts. A field remains known
-    /// only when both contributors reported it; `Some(0)` is still observed.
-    pub(crate) fn add_assign(&mut self, other: Self) {
-        self.input_tokens = sum_reported(self.input_tokens, other.input_tokens);
-        self.output_tokens = sum_reported(self.output_tokens, other.output_tokens);
-        self.cost_microusd = sum_reported(self.cost_microusd, other.cost_microusd);
-    }
-}
-
-fn sum_reported(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    left.zip(right)
-        .map(|(left, right)| left.saturating_add(right))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -711,22 +448,6 @@ pub struct WorkflowMemoUsage {
     pub provider_prompt_cache_hits: u64,
     #[serde(default)]
     pub provider_prompt_cache_misses: u64,
-}
-
-impl WorkflowMemoUsage {
-    pub(crate) fn add_assign(&mut self, other: Self) {
-        self.armh_hits = self.armh_hits.saturating_add(other.armh_hits);
-        self.armh_misses = self.armh_misses.saturating_add(other.armh_misses);
-        self.armh_saved_estimated_tokens = self
-            .armh_saved_estimated_tokens
-            .saturating_add(other.armh_saved_estimated_tokens);
-        self.provider_prompt_cache_hits = self
-            .provider_prompt_cache_hits
-            .saturating_add(other.provider_prompt_cache_hits);
-        self.provider_prompt_cache_misses = self
-            .provider_prompt_cache_misses
-            .saturating_add(other.provider_prompt_cache_misses);
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -805,465 +526,6 @@ impl WorkflowExecution {
 
     pub fn mark_budget_exceeded(&mut self) {
         self.status = WorkflowRunStatus::BudgetExceeded;
-    }
-
-    pub(crate) fn mark_replay_diverged(&mut self) {
-        self.status = WorkflowRunStatus::ReplayDiverged;
-    }
-
-    fn should_stop_mock_execution(&self) -> bool {
-        matches!(
-            self.status,
-            WorkflowRunStatus::Cancelled | WorkflowRunStatus::BudgetExceeded
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MockLeafOutcome {
-    pub status: WorkflowRunStatus,
-    #[serde(default)]
-    pub usage: WorkflowUsage,
-    #[serde(default)]
-    pub memo_usage: WorkflowMemoUsage,
-    #[serde(default)]
-    pub output: Option<String>,
-    #[serde(default)]
-    pub artifacts: Vec<String>,
-}
-
-impl MockLeafOutcome {
-    pub fn succeeded(output: impl Into<String>) -> Self {
-        Self {
-            status: WorkflowRunStatus::Succeeded,
-            usage: WorkflowUsage::default(),
-            memo_usage: WorkflowMemoUsage::default(),
-            output: Some(output.into()),
-            artifacts: Vec::new(),
-        }
-    }
-
-    pub fn failed(output: impl Into<String>) -> Self {
-        Self {
-            status: WorkflowRunStatus::Failed,
-            usage: WorkflowUsage::default(),
-            memo_usage: WorkflowMemoUsage::default(),
-            output: Some(output.into()),
-            artifacts: Vec::new(),
-        }
-    }
-
-    pub fn with_usage(mut self, usage: WorkflowUsage) -> Self {
-        self.usage = usage;
-        self
-    }
-
-    pub fn with_memo_usage(mut self, memo_usage: WorkflowMemoUsage) -> Self {
-        self.memo_usage = memo_usage;
-        self
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct MockWorkflowExecutor {
-    leaf_outcomes: BTreeMap<String, MockLeafOutcome>,
-    predicate_results: BTreeMap<String, Vec<bool>>,
-    generated_nodes: BTreeMap<String, Vec<WorkflowNode>>,
-    cancelled: bool,
-    max_leaf_steps: Option<u32>,
-    leaf_steps_executed: u32,
-    max_leaf_tokens: Option<u64>,
-    leaf_tokens_used: u64,
-}
-
-impl MockWorkflowExecutor {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_leaf_outcome(
-        mut self,
-        leaf_id: impl Into<String>,
-        outcome: MockLeafOutcome,
-    ) -> Self {
-        self.leaf_outcomes.insert(leaf_id.into(), outcome);
-        self
-    }
-
-    pub fn with_predicate_results(
-        mut self,
-        node_id: impl Into<String>,
-        results: Vec<bool>,
-    ) -> Self {
-        self.predicate_results.insert(node_id.into(), results);
-        self
-    }
-
-    pub fn with_generated_nodes(
-        mut self,
-        node_id: impl Into<String>,
-        nodes: Vec<WorkflowNode>,
-    ) -> Self {
-        self.generated_nodes.insert(node_id.into(), nodes);
-        self
-    }
-
-    pub fn with_cancelled(mut self) -> Self {
-        self.cancelled = true;
-        self
-    }
-
-    pub fn with_max_leaf_steps(mut self, max_leaf_steps: u32) -> Self {
-        self.max_leaf_steps = Some(max_leaf_steps);
-        self
-    }
-
-    pub fn with_max_leaf_tokens(mut self, max_leaf_tokens: u64) -> Self {
-        self.max_leaf_tokens = Some(max_leaf_tokens);
-        self
-    }
-
-    pub fn run(
-        &mut self,
-        spec: &WorkflowSpec,
-    ) -> Result<WorkflowExecution, WorkflowExecutionError> {
-        validate_workflow_nodes(&spec.nodes)?;
-        let mut execution = WorkflowExecution::default();
-        self.execute_nodes(&spec.nodes, &mut execution)?;
-        Ok(execution)
-    }
-
-    fn execute_nodes(
-        &mut self,
-        nodes: &[WorkflowNode],
-        execution: &mut WorkflowExecution,
-    ) -> Result<(), WorkflowExecutionError> {
-        for node in nodes {
-            if execution.should_stop_mock_execution() {
-                break;
-            }
-            self.execute_node(node, execution)?;
-        }
-        Ok(())
-    }
-
-    fn execute_node(
-        &mut self,
-        node: &WorkflowNode,
-        execution: &mut WorkflowExecution,
-    ) -> Result<(), WorkflowExecutionError> {
-        match node {
-            WorkflowNode::BranchSet(spec) => self.execute_branch_set(spec, execution),
-            WorkflowNode::Leaf(spec) => {
-                self.execute_leaf(spec, execution);
-                Ok(())
-            }
-            WorkflowNode::Sequence(spec) => {
-                self.execute_nodes(&spec.children, execution)?;
-                execution.control_node_results.push(ControlNodeResult {
-                    node_id: spec.id.clone(),
-                    kind: ControlNodeKind::Sequence,
-                    status: execution.status,
-                    selected_children: spec.children.iter().map(node_id).collect(),
-                    summary: Some("sequence executed in declaration order".to_string()),
-                });
-                Ok(())
-            }
-            WorkflowNode::Reduce(spec) => {
-                execution.control_node_results.push(ControlNodeResult {
-                    node_id: spec.id.clone(),
-                    kind: ControlNodeKind::Reduce,
-                    status: WorkflowRunStatus::Succeeded,
-                    selected_children: spec.inputs.clone(),
-                    summary: Some(spec.prompt.clone()),
-                });
-                Ok(())
-            }
-            WorkflowNode::TeacherReview(spec) => {
-                execution.control_node_results.push(ControlNodeResult {
-                    node_id: spec.id.clone(),
-                    kind: ControlNodeKind::TeacherReview,
-                    status: WorkflowRunStatus::Succeeded,
-                    selected_children: spec.candidates.clone(),
-                    summary: Some(
-                        "teacher review scaffold selected declared candidates".to_string(),
-                    ),
-                });
-                Ok(())
-            }
-            WorkflowNode::LoopUntil(spec) => self.execute_loop_until(spec, execution),
-            WorkflowNode::Cond(spec) => self.execute_cond(spec, execution),
-            WorkflowNode::Expand(spec) => self.execute_expand(spec, execution),
-        }
-    }
-
-    fn execute_branch_set(
-        &mut self,
-        spec: &BranchSpec,
-        execution: &mut WorkflowExecution,
-    ) -> Result<(), WorkflowExecutionError> {
-        let before = execution.leaf_results.len();
-        self.execute_nodes(&spec.children, execution)?;
-        let status = aggregate_mock_status(&execution.leaf_results[before..]);
-        let mut usage = WorkflowUsage::default();
-        let mut memo_usage = WorkflowMemoUsage::default();
-        for (index, result) in execution.leaf_results[before..].iter().enumerate() {
-            if index == 0 {
-                usage = result.usage;
-            } else {
-                usage.add_assign(result.usage);
-            }
-            memo_usage.add_assign(result.memo_usage);
-        }
-        mark_execution_for_status(execution, status);
-        execution.branch_results.push(BranchResult {
-            branch_id: spec.id.clone(),
-            task_id: spec.id.clone(),
-            status,
-            usage,
-            memo_usage,
-            artifacts: Vec::new(),
-            notes: Some("mock branch set executed without runtime fanout".to_string()),
-        });
-        execution.control_node_results.push(ControlNodeResult {
-            node_id: spec.id.clone(),
-            kind: ControlNodeKind::BranchSet,
-            status,
-            selected_children: spec.children.iter().map(node_id).collect(),
-            summary: Some("branch set scaffold executed children deterministically".to_string()),
-        });
-        Ok(())
-    }
-
-    fn execute_leaf(&mut self, spec: &LeafSpec, execution: &mut WorkflowExecution) {
-        let outcome = self.mock_leaf_outcome(spec);
-        mark_execution_for_status(execution, outcome.status);
-        if execution.leaf_results.is_empty() {
-            execution.usage = outcome.usage;
-        } else {
-            execution.usage.add_assign(outcome.usage);
-        }
-        execution.memo_usage.add_assign(outcome.memo_usage);
-        execution.leaf_results.push(LeafResult {
-            leaf_id: spec.id.clone(),
-            task_id: spec.id.clone(),
-            role: spec.role.clone(),
-            profile: spec.profile.clone(),
-            status: outcome.status,
-            usage: outcome.usage,
-            memo_usage: outcome.memo_usage,
-            output: outcome.output,
-            artifacts: outcome.artifacts,
-            schema_error: None,
-        });
-    }
-
-    fn execute_loop_until(
-        &mut self,
-        spec: &LoopUntilSpec,
-        execution: &mut WorkflowExecution,
-    ) -> Result<(), WorkflowExecutionError> {
-        let max_iterations = spec.max_iterations.unwrap_or(1).max(1);
-        let mut iterations = 0;
-        let mut passed = false;
-        while iterations < max_iterations {
-            if execution.should_stop_mock_execution() {
-                break;
-            }
-            iterations += 1;
-            self.execute_nodes(&spec.children, execution)?;
-            if execution.should_stop_mock_execution() {
-                break;
-            }
-            if self.next_predicate_result(&spec.id) {
-                passed = true;
-                break;
-            }
-        }
-        let status = if execution.should_stop_mock_execution() {
-            execution.status
-        } else if passed {
-            WorkflowRunStatus::Succeeded
-        } else {
-            WorkflowRunStatus::Failed
-        };
-        mark_execution_for_status(execution, status);
-        execution.control_node_results.push(ControlNodeResult {
-            node_id: spec.id.clone(),
-            kind: ControlNodeKind::LoopUntil,
-            status,
-            selected_children: spec.children.iter().map(node_id).collect(),
-            summary: Some(format!("loop_until iterations={iterations}")),
-        });
-        Ok(())
-    }
-
-    fn execute_cond(
-        &mut self,
-        spec: &CondSpec,
-        execution: &mut WorkflowExecution,
-    ) -> Result<(), WorkflowExecutionError> {
-        let passed = self.next_predicate_result(&spec.id);
-        let selected_nodes = if passed {
-            &spec.then_nodes
-        } else {
-            &spec.else_nodes
-        };
-        self.execute_nodes(selected_nodes, execution)?;
-        let status = if execution.should_stop_mock_execution() {
-            execution.status
-        } else {
-            WorkflowRunStatus::Succeeded
-        };
-        execution.control_node_results.push(ControlNodeResult {
-            node_id: spec.id.clone(),
-            kind: ControlNodeKind::Cond,
-            status,
-            selected_children: selected_nodes.iter().map(node_id).collect(),
-            summary: Some(format!("predicate_result={passed}")),
-        });
-        Ok(())
-    }
-
-    fn execute_expand(
-        &mut self,
-        spec: &ExpandSpec,
-        execution: &mut WorkflowExecution,
-    ) -> Result<(), WorkflowExecutionError> {
-        let mut nodes = self.generated_nodes.remove(&spec.id).unwrap_or_default();
-        if let Some(max_children) = spec.max_children {
-            nodes.truncate(max_children);
-        }
-        validate_workflow_node_shapes(&nodes)?;
-        self.execute_nodes(&nodes, execution)?;
-        let status = if execution.should_stop_mock_execution() {
-            execution.status
-        } else {
-            WorkflowRunStatus::Succeeded
-        };
-        execution.control_node_results.push(ControlNodeResult {
-            node_id: spec.id.clone(),
-            kind: ControlNodeKind::Expand,
-            status,
-            selected_children: nodes.iter().map(node_id).collect(),
-            summary: Some(format!("expanded_from={}", spec.source)),
-        });
-        Ok(())
-    }
-
-    fn mock_leaf_outcome(&mut self, spec: &LeafSpec) -> MockLeafOutcome {
-        if self.cancelled {
-            return MockLeafOutcome {
-                status: WorkflowRunStatus::Cancelled,
-                usage: WorkflowUsage {
-                    input_tokens: Some(0),
-                    output_tokens: Some(0),
-                    cost_microusd: Some(0),
-                },
-                memo_usage: WorkflowMemoUsage::default(),
-                output: Some("mock workflow cancelled before leaf execution".to_string()),
-                artifacts: Vec::new(),
-            };
-        }
-        if self
-            .max_leaf_steps
-            .is_some_and(|max| max > 0 && self.leaf_steps_executed >= max)
-        {
-            return MockLeafOutcome {
-                status: WorkflowRunStatus::BudgetExceeded,
-                // The leaf was rejected before execution, so zero usage is a
-                // known observation rather than missing provider telemetry.
-                usage: WorkflowUsage {
-                    input_tokens: Some(0),
-                    output_tokens: Some(0),
-                    cost_microusd: Some(0),
-                },
-                memo_usage: WorkflowMemoUsage::default(),
-                output: Some("mock workflow leaf step budget exhausted".to_string()),
-                artifacts: Vec::new(),
-            };
-        }
-        if self
-            .max_leaf_tokens
-            .is_some_and(|max| self.leaf_tokens_used >= max)
-            || spec.budget.max_tokens == Some(0)
-        {
-            return MockLeafOutcome {
-                status: WorkflowRunStatus::BudgetExceeded,
-                usage: WorkflowUsage {
-                    input_tokens: Some(0),
-                    output_tokens: Some(0),
-                    cost_microusd: Some(0),
-                },
-                memo_usage: WorkflowMemoUsage::default(),
-                output: Some("mock workflow leaf token budget exhausted".to_string()),
-                artifacts: Vec::new(),
-            };
-        }
-        self.leaf_steps_executed = self.leaf_steps_executed.saturating_add(1);
-        let outcome = self
-            .leaf_outcomes
-            .remove(&spec.id)
-            .unwrap_or_else(|| MockLeafOutcome::succeeded(format!("mock leaf {}", spec.id)));
-        let tokens = outcome.usage.total_tokens();
-        if let (Some(per_leaf_token_cap), Some(tokens)) = (spec.budget.max_tokens, tokens)
-            && tokens > per_leaf_token_cap
-        {
-            return MockLeafOutcome {
-                status: WorkflowRunStatus::BudgetExceeded,
-                usage: outcome.usage,
-                memo_usage: outcome.memo_usage,
-                output: Some(format!(
-                    "mock workflow leaf token budget exhausted ({tokens} > {per_leaf_token_cap})"
-                )),
-                artifacts: outcome.artifacts,
-            };
-        }
-        if let Some(tokens) = tokens {
-            self.leaf_tokens_used = self.leaf_tokens_used.saturating_add(tokens);
-        }
-        outcome
-    }
-
-    fn next_predicate_result(&mut self, node_id: &str) -> bool {
-        let Some(results) = self.predicate_results.get_mut(node_id) else {
-            return false;
-        };
-        if results.is_empty() {
-            return false;
-        }
-        results.remove(0)
-    }
-}
-
-fn aggregate_mock_status(results: &[LeafResult]) -> WorkflowRunStatus {
-    if results
-        .iter()
-        .any(|result| result.status == WorkflowRunStatus::Cancelled)
-    {
-        WorkflowRunStatus::Cancelled
-    } else if results
-        .iter()
-        .any(|result| result.status == WorkflowRunStatus::BudgetExceeded)
-    {
-        WorkflowRunStatus::BudgetExceeded
-    } else if results
-        .iter()
-        .any(|result| result.status != WorkflowRunStatus::Succeeded)
-    {
-        WorkflowRunStatus::Failed
-    } else {
-        WorkflowRunStatus::Succeeded
-    }
-}
-
-fn mark_execution_for_status(execution: &mut WorkflowExecution, status: WorkflowRunStatus) {
-    match status {
-        WorkflowRunStatus::Succeeded | WorkflowRunStatus::Pending | WorkflowRunStatus::Running => {}
-        WorkflowRunStatus::Failed => execution.mark_failed(),
-        WorkflowRunStatus::Cancelled => execution.mark_cancelled(),
-        WorkflowRunStatus::BudgetExceeded => execution.mark_budget_exceeded(),
-        WorkflowRunStatus::ReplayDiverged => execution.mark_replay_diverged(),
     }
 }
 
@@ -1744,127 +1006,6 @@ pub enum WorkflowExecutionError {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WorkflowFleetLimits {
-    pub max_total_agents: usize,
-    pub max_depth: usize,
-}
-
-impl Default for WorkflowFleetLimits {
-    fn default() -> Self {
-        Self {
-            max_total_agents: DEFAULT_FLEET_WORKFLOW_MAX_AGENTS,
-            max_depth: DEFAULT_FLEET_WORKFLOW_MAX_DEPTH,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct WorkflowFleetShape {
-    pub total_agents: usize,
-    pub max_depth: usize,
-}
-
-impl WorkflowFleetShape {
-    fn add(self, other: Self) -> Self {
-        Self {
-            total_agents: self.total_agents.saturating_add(other.total_agents),
-            max_depth: self.max_depth.max(other.max_depth),
-        }
-    }
-
-    fn repeat(self, times: usize) -> Self {
-        Self {
-            total_agents: self.total_agents.saturating_mul(times),
-            max_depth: self.max_depth,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum WorkflowFleetLimitError {
-    #[error("workflow IR is invalid for Fleet: {source}")]
-    InvalidWorkflow {
-        #[from]
-        source: WorkflowExecutionError,
-    },
-    #[error(
-        "workflow would launch {total_agents} agents; Fleet Workflow limit is {max_total_agents}"
-    )]
-    TooManyAgents {
-        total_agents: usize,
-        max_total_agents: usize,
-    },
-    #[error("workflow reaches recursion depth {depth}; Fleet Workflow limit is {max_depth}")]
-    RecursionTooDeep { depth: usize, max_depth: usize },
-    #[error("expand node `{node}` must declare max_children before Fleet launch")]
-    UnboundedExpand { node: String },
-    #[error("expand node `{node}` must include a template before Fleet launch")]
-    MissingExpandTemplate { node: String },
-    #[error("loop_until node `{node}` must declare max_iterations before Fleet launch")]
-    UnboundedLoop { node: String },
-}
-
-fn estimate_fleet_shape(
-    nodes: &[WorkflowNode],
-) -> Result<WorkflowFleetShape, WorkflowFleetLimitError> {
-    estimate_fleet_shape_at_depth(nodes, 1)
-}
-
-fn estimate_fleet_shape_at_depth(
-    nodes: &[WorkflowNode],
-    depth: usize,
-) -> Result<WorkflowFleetShape, WorkflowFleetLimitError> {
-    nodes
-        .iter()
-        .try_fold(WorkflowFleetShape::default(), |shape, node| {
-            Ok(shape.add(estimate_node_fleet_shape(node, depth)?))
-        })
-}
-
-fn estimate_node_fleet_shape(
-    node: &WorkflowNode,
-    depth: usize,
-) -> Result<WorkflowFleetShape, WorkflowFleetLimitError> {
-    match node {
-        WorkflowNode::Leaf(_) => Ok(WorkflowFleetShape {
-            total_agents: 1,
-            max_depth: depth,
-        }),
-        WorkflowNode::BranchSet(spec) => estimate_fleet_shape_at_depth(&spec.children, depth + 1),
-        WorkflowNode::Sequence(spec) => estimate_fleet_shape_at_depth(&spec.children, depth),
-        WorkflowNode::Reduce(_) | WorkflowNode::TeacherReview(_) => Ok(WorkflowFleetShape {
-            total_agents: 0,
-            max_depth: 0,
-        }),
-        WorkflowNode::LoopUntil(spec) => {
-            let iterations =
-                spec.max_iterations
-                    .ok_or_else(|| WorkflowFleetLimitError::UnboundedLoop {
-                        node: spec.id.clone(),
-                    })? as usize;
-            Ok(estimate_fleet_shape_at_depth(&spec.children, depth)?.repeat(iterations.max(1)))
-        }
-        WorkflowNode::Cond(spec) => Ok(estimate_fleet_shape_at_depth(&spec.then_nodes, depth)?
-            .add(estimate_fleet_shape_at_depth(&spec.else_nodes, depth)?)),
-        WorkflowNode::Expand(spec) => {
-            let max_children =
-                spec.max_children
-                    .ok_or_else(|| WorkflowFleetLimitError::UnboundedExpand {
-                        node: spec.id.clone(),
-                    })?;
-            let template = spec.template.as_deref().ok_or_else(|| {
-                WorkflowFleetLimitError::MissingExpandTemplate {
-                    node: spec.id.clone(),
-                }
-            })?;
-            validate_workflow_node_shapes(std::slice::from_ref(template))
-                .map_err(|source| WorkflowFleetLimitError::InvalidWorkflow { source })?;
-            Ok(estimate_node_fleet_shape(template, depth)?.repeat(max_children))
-        }
-    }
-}
-
 fn default_frontier_limit() -> usize {
     8
 }
@@ -1888,13 +1029,6 @@ pub(crate) fn validate_workflow_nodes(
     let mut seen = BTreeSet::new();
     validate_workflow_nodes_inner(nodes, &mut seen)?;
     validate_workflow_references(nodes, &seen)
-}
-
-pub(crate) fn validate_workflow_node_shapes(
-    nodes: &[WorkflowNode],
-) -> Result<(), WorkflowExecutionError> {
-    let mut seen = BTreeSet::new();
-    validate_workflow_nodes_inner(nodes, &mut seen)
 }
 
 fn validate_workflow_nodes_inner(
@@ -2038,167 +1172,6 @@ fn control_kind_name(node: &WorkflowNode) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum WorkflowValidationError {
-    #[error("{field} must not be empty")]
-    EmptyField { field: &'static str },
-    #[error("workflow must contain at least one phase")]
-    EmptyWorkflow,
-    #[error("phase `{phase}` must contain at least one task")]
-    EmptyPhase { phase: String },
-    #[error("max_concurrent must be between 1 and 20, got {value}")]
-    InvalidMaxConcurrent { value: u8 },
-    #[error("duplicate workflow phase `{phase}`")]
-    DuplicatePhase { phase: String },
-    #[error("duplicate workflow task `{task}`")]
-    DuplicateTask { task: String },
-    #[error("phase `{phase}` has invalid dependency `{dependency}`")]
-    InvalidPhaseDependency { phase: String, dependency: String },
-    #[error("phase dependency cycle includes `{phase}`")]
-    PhaseDependencyCycle { phase: String },
-    #[error("task `{task}` has invalid result dependency `{dependency}`")]
-    InvalidTaskResultDependency { task: String, dependency: String },
-    #[error(
-        "task `{task}` depends on result `{dependency}` from unavailable phase `{dependency_phase}` while running in `{task_phase}`"
-    )]
-    UnavailableTaskResultDependency {
-        task: String,
-        dependency: String,
-        dependency_phase: String,
-        task_phase: String,
-    },
-    #[error("parallel read-write task `{task}` must declare a file_scope")]
-    MissingParallelWriteScope { task: String },
-    #[error("parallel read-write tasks `{left}` and `{right}` have overlapping file scopes")]
-    OverlappingParallelWriteScope { left: String, right: String },
-}
-
-fn default_max_concurrent() -> u8 {
-    4
-}
-
-fn validate_non_empty(field: &'static str, value: &str) -> Result<(), WorkflowValidationError> {
-    if value.trim().is_empty() {
-        return Err(WorkflowValidationError::EmptyField { field });
-    }
-    Ok(())
-}
-
-fn ordered_phases(
-    config: &WorkflowConfig,
-    phase_indices: &BTreeMap<String, usize>,
-) -> Result<Vec<String>, WorkflowValidationError> {
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    let mut ordered = Vec::with_capacity(config.phases.len());
-
-    for phase in &config.phases {
-        visit_phase(
-            &phase.name,
-            config,
-            phase_indices,
-            &mut visiting,
-            &mut visited,
-            &mut ordered,
-        )?;
-    }
-
-    Ok(ordered)
-}
-
-fn visit_phase(
-    phase_name: &str,
-    config: &WorkflowConfig,
-    phase_indices: &BTreeMap<String, usize>,
-    visiting: &mut BTreeSet<String>,
-    visited: &mut BTreeSet<String>,
-    ordered: &mut Vec<String>,
-) -> Result<(), WorkflowValidationError> {
-    if visited.contains(phase_name) {
-        return Ok(());
-    }
-    if !visiting.insert(phase_name.to_string()) {
-        return Err(WorkflowValidationError::PhaseDependencyCycle {
-            phase: phase_name.to_string(),
-        });
-    }
-
-    let phase = &config.phases[phase_indices[phase_name]];
-    for dependency in &phase.depends_on {
-        visit_phase(
-            dependency,
-            config,
-            phase_indices,
-            visiting,
-            visited,
-            ordered,
-        )?;
-    }
-
-    visiting.remove(phase_name);
-    visited.insert(phase_name.to_string());
-    ordered.push(phase_name.to_string());
-    Ok(())
-}
-
-fn validate_parallel_write_scope(phase: &Phase) -> Result<(), WorkflowValidationError> {
-    if !phase.parallel {
-        return Ok(());
-    }
-
-    let write_tasks: Vec<_> = phase
-        .tasks
-        .iter()
-        .filter(|task| task.mode == TaskMode::ReadWrite)
-        .collect();
-
-    for task in &write_tasks {
-        if task.file_scope.is_empty() {
-            return Err(WorkflowValidationError::MissingParallelWriteScope {
-                task: task.id.clone(),
-            });
-        }
-    }
-
-    for (left_index, left) in write_tasks.iter().enumerate() {
-        for right in write_tasks.iter().skip(left_index + 1) {
-            if scopes_overlap(&left.file_scope, &right.file_scope) {
-                return Err(WorkflowValidationError::OverlappingParallelWriteScope {
-                    left: left.id.clone(),
-                    right: right.id.clone(),
-                });
-            }
-        }
-    }
-
-    Ok(())
-}
-
-pub fn scopes_overlap(left: &[String], right: &[String]) -> bool {
-    left.iter().any(|left_scope| {
-        right
-            .iter()
-            .any(|right_scope| scope_overlaps(left_scope, right_scope))
-    })
-}
-
-fn scope_overlaps(left: &str, right: &str) -> bool {
-    let left = normalize_file_scope_root(left);
-    let right = normalize_file_scope_root(right);
-
-    if left == right || left == "." || right == "." {
-        return true;
-    }
-
-    if left.contains('*') || right.contains('*') {
-        return glob_prefix(&left) == glob_prefix(&right);
-    }
-
-    let left_path = Path::new(&left);
-    let right_path = Path::new(&right);
-    left_path.starts_with(right_path) || right_path.starts_with(left_path)
-}
-
 /// Normalize the suffix-glob spelling accepted by declarative workflow
 /// `file_scope` into the concrete directory root enforced at runtime.
 #[must_use]
@@ -2211,52 +1184,9 @@ pub fn normalize_file_scope_root(scope: &str) -> String {
         .to_string()
 }
 
-fn glob_prefix(scope: &str) -> String {
-    scope
-        .split('*')
-        .next()
-        .unwrap_or(scope)
-        .trim_end_matches('/')
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn task(id: &str) -> Task {
-        Task {
-            id: id.to_string(),
-            prompt: format!("run {id}"),
-            agent_type: AgentType::General,
-            mode: TaskMode::ReadOnly,
-            isolation: IsolationMode::Shared,
-            file_scope: Vec::new(),
-            depends_on_results: Vec::new(),
-            max_steps: None,
-            timeout_secs: None,
-        }
-    }
-
-    fn config(phases: Vec<Phase>) -> WorkflowConfig {
-        WorkflowConfig {
-            goal: "cache-change".to_string(),
-            max_concurrent: 4,
-            description: None,
-            phases,
-        }
-    }
-
-    fn phase(name: &str, depends_on: &[&str], tasks: Vec<Task>) -> Phase {
-        Phase {
-            name: name.to_string(),
-            description: None,
-            depends_on: depends_on.iter().map(|value| value.to_string()).collect(),
-            parallel: false,
-            on_failure: FailurePolicy::SkipContinue,
-            tasks,
-        }
-    }
 
     fn leaf_node(id: &str) -> WorkflowNode {
         WorkflowNode::Leaf(LeafSpec {
@@ -2270,23 +1200,6 @@ mod tests {
             file_scope: Vec::new(),
             depends_on_results: Vec::new(),
             budget: BudgetSpec::default(),
-            permissions: PermissionSpec::default(),
-            model_policy: ModelPolicy::default(),
-        })
-    }
-
-    fn leaf_node_with_budget(id: &str, budget: BudgetSpec) -> WorkflowNode {
-        WorkflowNode::Leaf(LeafSpec {
-            id: id.to_string(),
-            prompt: format!("run {id}"),
-            agent_type: AgentType::General,
-            role: None,
-            profile: None,
-            mode: TaskMode::ReadOnly,
-            isolation: IsolationMode::Shared,
-            file_scope: Vec::new(),
-            depends_on_results: Vec::new(),
-            budget,
             permissions: PermissionSpec::default(),
             model_policy: ModelPolicy::default(),
         })
@@ -2323,17 +1236,6 @@ mod tests {
         }
     }
 
-    fn control_result<'a>(
-        execution: &'a WorkflowExecution,
-        node_id: &str,
-    ) -> &'a ControlNodeResult {
-        execution
-            .control_node_results
-            .iter()
-            .find(|result| result.node_id == node_id)
-            .expect("control node result should exist")
-    }
-
     fn candidate(
         branch_id: &str,
         status: WorkflowRunStatus,
@@ -2351,252 +1253,30 @@ mod tests {
     }
 
     #[test]
-    fn independent_phases_preserve_declaration_order() {
-        let workflow = config(vec![
-            phase("discover", &[], vec![task("scan")]),
-            phase("report", &[], vec![task("summarize")]),
-        ]);
-
-        let plan = workflow.compile().expect("workflow should compile");
-
-        assert_eq!(
-            plan.phase_names().collect::<Vec<_>>(),
-            vec!["discover", "report"]
-        );
-    }
-
-    #[test]
-    fn dependencies_override_declaration_order_deterministically() {
-        let workflow = config(vec![
-            phase("review", &["implement"], vec![task("review-results")]),
-            phase("discover", &[], vec![task("scan")]),
-            phase("implement", &["discover"], vec![task("patch")]),
-            phase("report", &["review"], vec![task("summarize")]),
-        ]);
-
-        let plan = workflow.compile().expect("workflow should compile");
-
-        assert_eq!(
-            plan.phase_names().collect::<Vec<_>>(),
-            vec!["discover", "implement", "review", "report"]
-        );
-    }
-
-    #[test]
-    fn rejects_empty_workflow() {
-        let err = config(Vec::new())
-            .validate()
-            .expect_err("empty workflow should fail");
-
-        assert_eq!(err, WorkflowValidationError::EmptyWorkflow);
-    }
-
-    #[test]
-    fn rejects_empty_phase() {
-        let err = config(vec![phase("empty", &[], Vec::new())])
-            .validate()
-            .expect_err("empty phase should fail");
-
-        assert_eq!(
-            err,
-            WorkflowValidationError::EmptyPhase {
-                phase: "empty".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_max_concurrent() {
-        let mut workflow = config(vec![phase("discover", &[], vec![task("scan")])]);
-        workflow.max_concurrent = 0;
-
-        let err = workflow
-            .validate()
-            .expect_err("zero concurrency should fail");
-
-        assert_eq!(
-            err,
-            WorkflowValidationError::InvalidMaxConcurrent { value: 0 }
-        );
-    }
-
-    #[test]
-    fn rejects_duplicate_phase_names() {
-        let err = config(vec![
-            phase("discover", &[], vec![task("scan")]),
-            phase("discover", &[], vec![task("scan-again")]),
-        ])
-        .validate()
-        .expect_err("duplicate phase should fail");
-
-        assert!(matches!(
-            err,
-            WorkflowValidationError::DuplicatePhase { .. }
-        ));
-    }
-
-    #[test]
-    fn rejects_duplicate_task_ids() {
-        let err = config(vec![
-            phase("discover", &[], vec![task("scan")]),
-            phase("report", &[], vec![task("scan")]),
-        ])
-        .validate()
-        .expect_err("duplicate task should fail");
-
-        assert!(matches!(err, WorkflowValidationError::DuplicateTask { .. }));
-    }
-
-    #[test]
-    fn rejects_unknown_phase_dependency() {
-        let err = config(vec![phase("report", &["missing"], vec![task("summarize")])])
-            .validate()
-            .expect_err("unknown dependency should fail");
-
-        assert!(matches!(
-            err,
-            WorkflowValidationError::InvalidPhaseDependency { .. }
-        ));
-    }
-
-    #[test]
-    fn rejects_phase_dependency_cycles() {
-        let workflow = config(vec![
-            phase("a", &["b"], vec![task("a-task")]),
-            phase("b", &["a"], vec![task("b-task")]),
-        ]);
-
-        let err = workflow.validate().expect_err("cycle should fail");
-
-        assert!(matches!(
-            err,
-            WorkflowValidationError::PhaseDependencyCycle { .. }
-        ));
-    }
-
-    #[test]
-    fn rejects_task_result_dependency_from_same_parallel_phase() {
-        let mut first = task("first");
-        first.depends_on_results.push("second".to_string());
-        let mut parallel = phase("parallel", &[], vec![first, task("second")]);
-        parallel.parallel = true;
-
-        let err = config(vec![parallel])
-            .validate()
-            .expect_err("same-phase result dependency should fail");
-
-        assert!(matches!(
-            err,
-            WorkflowValidationError::UnavailableTaskResultDependency { .. }
-        ));
-    }
-
-    #[test]
-    fn rejects_task_result_dependency_from_later_phase() {
-        let mut summarize = task("summarize");
-        summarize.depends_on_results.push("scan".to_string());
-        let workflow = config(vec![
-            phase("report", &[], vec![summarize]),
-            phase("discover", &[], vec![task("scan")]),
-        ]);
-
-        let err = workflow
-            .validate()
-            .expect_err("later-phase result dependency should fail");
-
-        assert!(matches!(
-            err,
-            WorkflowValidationError::UnavailableTaskResultDependency { .. }
-        ));
-    }
-
-    #[test]
-    fn allows_task_result_dependency_from_earlier_phase() {
-        let upstream = phase("discover", &[], vec![task("scan")]);
-        let mut summarize = task("summarize");
-        summarize.depends_on_results.push("scan".to_string());
-        let downstream = phase("report", &["discover"], vec![summarize]);
-
-        config(vec![upstream, downstream])
-            .validate()
-            .expect("earlier-phase result should be available");
-    }
-
-    #[test]
-    fn rejects_parallel_read_write_without_file_scope() {
-        let mut write = task("write");
-        write.mode = TaskMode::ReadWrite;
-        let mut parallel = phase("parallel", &[], vec![write]);
-        parallel.parallel = true;
-
-        let err = config(vec![parallel])
-            .validate()
-            .expect_err("write task needs a scope");
-
-        assert!(matches!(
-            err,
-            WorkflowValidationError::MissingParallelWriteScope { .. }
-        ));
-    }
-
-    #[test]
-    fn detects_overlapping_parallel_write_scopes_with_path_boundaries() {
-        let mut left = task("auth");
-        left.mode = TaskMode::ReadWrite;
-        left.file_scope = vec!["src/auth/**".to_string()];
-        let mut right = task("auth-login");
-        right.mode = TaskMode::ReadWrite;
-        right.file_scope = vec!["src/auth/login.rs".to_string()];
-        let mut parallel = phase("parallel", &[], vec![left, right]);
-        parallel.parallel = true;
-
-        let err = config(vec![parallel])
-            .validate()
-            .expect_err("nested scopes should overlap");
-
-        assert!(matches!(
-            err,
-            WorkflowValidationError::OverlappingParallelWriteScope { .. }
-        ));
-    }
-
-    #[test]
-    fn does_not_confuse_path_prefixes_for_overlapping_scopes() {
-        let mut left = task("auth");
-        left.mode = TaskMode::ReadWrite;
-        left.file_scope = vec!["src/auth/**".to_string()];
-        let mut right = task("auth-admin");
-        right.mode = TaskMode::ReadWrite;
-        right.file_scope = vec!["src/auth_admin/**".to_string()];
-        let mut parallel = phase("parallel", &[], vec![left, right]);
-        parallel.parallel = true;
-
-        config(vec![parallel])
-            .validate()
-            .expect("component boundary scopes should not overlap");
-    }
-
-    #[test]
     fn json_roundtrip_keeps_snake_case_enum_names() {
-        let mut task = task("patch");
-        task.agent_type = AgentType::Implementer;
-        task.mode = TaskMode::ReadWrite;
-        task.isolation = IsolationMode::Worktree;
-        task.file_scope = vec!["src/auth/**".to_string()];
-        let mut parallel = phase("implement", &[], vec![task]);
-        parallel.parallel = true;
-        parallel.on_failure = FailurePolicy::Abort;
-        let workflow = config(vec![parallel]);
+        let leaf = LeafSpec {
+            id: "patch".to_string(),
+            prompt: "patch one safe gap".to_string(),
+            agent_type: AgentType::Implementer,
+            role: None,
+            profile: None,
+            mode: TaskMode::ReadWrite,
+            isolation: IsolationMode::Worktree,
+            file_scope: vec!["src/auth/**".to_string()],
+            depends_on_results: Vec::new(),
+            budget: BudgetSpec::default(),
+            permissions: PermissionSpec::default(),
+            model_policy: ModelPolicy::default(),
+        };
 
-        let json = serde_json::to_string(&workflow).expect("serialize workflow");
+        let json = serde_json::to_string(&leaf).expect("serialize leaf");
 
         assert!(json.contains("\"agent_type\":\"implement\""));
         assert!(json.contains("\"mode\":\"read_write\""));
         assert!(json.contains("\"isolation\":\"worktree\""));
-        assert!(json.contains("\"on_failure\":\"abort\""));
 
-        let parsed: WorkflowConfig = serde_json::from_str(&json).expect("parse workflow");
-        assert_eq!(parsed, workflow);
+        let parsed: LeafSpec = serde_json::from_str(&json).expect("parse leaf");
+        assert_eq!(parsed, leaf);
     }
 
     #[test]
@@ -2854,149 +1534,6 @@ mod tests {
     }
 
     #[test]
-    fn fleet_validation_accepts_one_thousand_agents_and_variable_models() {
-        let nodes = (0..DEFAULT_FLEET_WORKFLOW_MAX_AGENTS)
-            .map(|index| {
-                let mut leaf = match leaf_node(&format!("agent-{index}")) {
-                    WorkflowNode::Leaf(leaf) => leaf,
-                    _ => unreachable!("leaf helper returns a leaf"),
-                };
-                leaf.model_policy = if index == 0 {
-                    ModelPolicy {
-                        provider: Some("deepseek".to_string()),
-                        model: Some("deepseek-v4-pro".to_string()),
-                        fallback_models: Vec::new(),
-                    }
-                } else {
-                    ModelPolicy {
-                        provider: Some("deepseek".to_string()),
-                        model: Some("deepseek-v4-flash".to_string()),
-                        fallback_models: Vec::new(),
-                    }
-                };
-                WorkflowNode::Leaf(leaf)
-            })
-            .collect();
-        let workflow = workflow_spec(nodes);
-
-        let shape = workflow
-            .validate_for_fleet()
-            .expect("one thousand agents should fit the Fleet Workflow limit");
-
-        assert_eq!(shape.total_agents, DEFAULT_FLEET_WORKFLOW_MAX_AGENTS);
-        assert_eq!(shape.max_depth, 1);
-    }
-
-    #[test]
-    fn fleet_validation_rejects_more_than_one_thousand_agents() {
-        let nodes = (0..=DEFAULT_FLEET_WORKFLOW_MAX_AGENTS)
-            .map(|index| leaf_node(&format!("agent-{index}")))
-            .collect();
-        let workflow = workflow_spec(nodes);
-
-        let err = workflow
-            .validate_for_fleet()
-            .expect_err("agent population should be bounded before Fleet launch");
-
-        assert_eq!(
-            err,
-            WorkflowFleetLimitError::TooManyAgents {
-                total_agents: DEFAULT_FLEET_WORKFLOW_MAX_AGENTS + 1,
-                max_total_agents: DEFAULT_FLEET_WORKFLOW_MAX_AGENTS,
-            }
-        );
-    }
-
-    #[test]
-    fn fleet_validation_rejects_depth_beyond_five() {
-        let mut node = leaf_node("deep-leaf");
-        for depth in (0..DEFAULT_FLEET_WORKFLOW_MAX_DEPTH).rev() {
-            node = WorkflowNode::BranchSet(BranchSpec {
-                id: format!("ring-{depth}"),
-                description: None,
-                parallel: true,
-                budget: BudgetSpec::default(),
-                permissions: PermissionSpec::default(),
-                model_policy: ModelPolicy::default(),
-                children: vec![node],
-            });
-        }
-        let workflow = workflow_spec(vec![node]);
-
-        let err = workflow
-            .validate_for_fleet()
-            .expect_err("sixth agent ring should be rejected");
-
-        assert_eq!(
-            err,
-            WorkflowFleetLimitError::RecursionTooDeep {
-                depth: DEFAULT_FLEET_WORKFLOW_MAX_DEPTH + 1,
-                max_depth: DEFAULT_FLEET_WORKFLOW_MAX_DEPTH,
-            }
-        );
-    }
-
-    #[test]
-    fn fleet_validation_counts_loop_and_expand_fanout_conservatively() {
-        let workflow = workflow_spec(vec![
-            WorkflowNode::LoopUntil(LoopUntilSpec {
-                id: "retry-ring".to_string(),
-                condition: "verifier passes".to_string(),
-                max_iterations: Some(3),
-                children: vec![leaf_node("retry-worker")],
-            }),
-            WorkflowNode::Expand(ExpandSpec {
-                id: "split".to_string(),
-                source: "retry-ring".to_string(),
-                max_children: Some(4),
-                template: Some(Box::new(leaf_node("split-template"))),
-            }),
-        ]);
-
-        let shape = workflow
-            .validate_for_fleet()
-            .expect("bounded loop and expand should validate");
-
-        assert_eq!(shape.total_agents, 7);
-        assert_eq!(shape.max_depth, 1);
-    }
-
-    #[test]
-    fn fleet_validation_rejects_unbounded_loop_or_expand_before_launch() {
-        let workflow = workflow_spec(vec![
-            WorkflowNode::LoopUntil(LoopUntilSpec {
-                id: "retry-ring".to_string(),
-                condition: "verifier passes".to_string(),
-                max_iterations: None,
-                children: vec![leaf_node("retry-worker")],
-            }),
-            WorkflowNode::Expand(ExpandSpec {
-                id: "split".to_string(),
-                source: "retry-ring".to_string(),
-                max_children: Some(4),
-                template: Some(Box::new(leaf_node("split-template"))),
-            }),
-        ]);
-
-        assert!(matches!(
-            workflow.validate_for_fleet(),
-            Err(WorkflowFleetLimitError::UnboundedLoop { node }) if node == "retry-ring"
-        ));
-
-        let workflow = workflow_spec(vec![WorkflowNode::Expand(ExpandSpec {
-            id: "split".to_string(),
-            source: "retry-ring".to_string(),
-            max_children: None,
-            template: Some(Box::new(leaf_node("split-template"))),
-        })]);
-
-        assert!(matches!(
-            workflow.validate_for_fleet(),
-            Err(WorkflowFleetLimitError::UnboundedExpand { node }) if node == "split"
-        ));
-    }
-
-    #[test]
     fn branch_result_serialization() {
         let result = BranchResult {
             branch_id: "discover".to_string(),
@@ -3121,82 +1658,6 @@ mod tests {
     }
 
     #[test]
-    fn run_mock_three_branch_workflow() {
-        let workflow = workflow_spec(vec![WorkflowNode::BranchSet(BranchSpec {
-            id: "discover".to_string(),
-            description: None,
-            parallel: true,
-            budget: BudgetSpec::default(),
-            permissions: PermissionSpec::default(),
-            model_policy: ModelPolicy::default(),
-            children: vec![
-                leaf_node("scan-readme"),
-                leaf_node("scan-config"),
-                leaf_node("scan-tests"),
-            ],
-        })]);
-
-        let mut executor = MockWorkflowExecutor::new();
-        let execution = executor.run(&workflow).expect("mock workflow should run");
-
-        assert_eq!(execution.status, WorkflowRunStatus::Succeeded);
-        assert_eq!(
-            execution
-                .leaf_results
-                .iter()
-                .map(|result| result.leaf_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["scan-readme", "scan-config", "scan-tests"]
-        );
-        assert_eq!(execution.branch_results.len(), 1);
-        assert_eq!(execution.branch_results[0].branch_id, "discover");
-        assert_eq!(
-            control_result(&execution, "discover").selected_children,
-            vec!["scan-readme", "scan-config", "scan-tests"]
-        );
-    }
-
-    #[test]
-    fn mock_executor_surfaces_leaf_profile() {
-        let mut profiled_leaf = match leaf_node("review-change") {
-            WorkflowNode::Leaf(leaf) => leaf,
-            _ => unreachable!("leaf helper returns a leaf"),
-        };
-        profiled_leaf.profile = Some("reviewer".to_string());
-        let workflow = workflow_spec(vec![
-            WorkflowNode::Leaf(profiled_leaf),
-            leaf_node("scan-readme"),
-        ]);
-
-        let execution = MockWorkflowExecutor::new()
-            .run(&workflow)
-            .expect("mock workflow should run");
-
-        assert_eq!(execution.status, WorkflowRunStatus::Succeeded);
-        assert_eq!(
-            execution.leaf_results[0].profile.as_deref(),
-            Some("reviewer")
-        );
-        assert_eq!(execution.leaf_results[1].profile, None);
-    }
-
-    #[test]
-    fn mock_executor_surfaces_leaf_role() {
-        let mut role_leaf = match leaf_node("scout-issue") {
-            WorkflowNode::Leaf(leaf) => leaf,
-            _ => unreachable!("leaf helper returns a leaf"),
-        };
-        role_leaf.role = Some("scout".to_string());
-        let workflow = workflow_spec(vec![WorkflowNode::Leaf(role_leaf)]);
-
-        let execution = MockWorkflowExecutor::new()
-            .run(&workflow)
-            .expect("mock workflow should run");
-
-        assert_eq!(execution.leaf_results[0].role.as_deref(), Some("scout"));
-    }
-
-    #[test]
     fn leaf_role_token_rule_rejects_invalid_names() {
         for bad in ["", "has space", "role=scout"] {
             let mut leaf = match leaf_node("scan") {
@@ -3206,8 +1667,7 @@ mod tests {
             leaf.role = Some(bad.to_string());
             let workflow = workflow_spec(vec![WorkflowNode::Leaf(leaf)]);
 
-            let err = MockWorkflowExecutor::new()
-                .run(&workflow)
+            let err = validate_workflow_nodes(&workflow.nodes)
                 .expect_err("invalid role token should fail validation");
 
             assert!(
@@ -3253,8 +1713,7 @@ mod tests {
             leaf.profile = Some(bad.to_string());
             let workflow = workflow_spec(vec![WorkflowNode::Leaf(leaf)]);
 
-            let err = MockWorkflowExecutor::new()
-                .run(&workflow)
+            let err = validate_workflow_nodes(&workflow.nodes)
                 .expect_err("invalid profile token should fail validation");
 
             assert!(
@@ -3269,374 +1728,8 @@ mod tests {
         };
         leaf.profile = Some("reviewer".to_string());
         let workflow = workflow_spec(vec![WorkflowNode::Leaf(leaf)]);
-        MockWorkflowExecutor::new()
-            .run(&workflow)
+        validate_workflow_nodes(&workflow.nodes)
             .expect("valid profile token should pass validation");
-    }
-
-    #[test]
-    fn mock_executor_aggregates_leaf_usage() {
-        let workflow = workflow_spec(vec![WorkflowNode::BranchSet(BranchSpec {
-            id: "discover".to_string(),
-            description: None,
-            parallel: true,
-            budget: BudgetSpec::default(),
-            permissions: PermissionSpec::default(),
-            model_policy: ModelPolicy::default(),
-            children: vec![leaf_node("scan-readme"), leaf_node("scan-tests")],
-        })]);
-
-        let mut executor = MockWorkflowExecutor::new()
-            .with_leaf_outcome(
-                "scan-readme",
-                MockLeafOutcome::succeeded("readme ok").with_usage(WorkflowUsage {
-                    input_tokens: Some(100),
-                    output_tokens: Some(25),
-                    cost_microusd: Some(500),
-                }),
-            )
-            .with_leaf_outcome(
-                "scan-tests",
-                MockLeafOutcome::succeeded("tests ok").with_usage(WorkflowUsage {
-                    input_tokens: Some(50),
-                    output_tokens: Some(10),
-                    cost_microusd: Some(250),
-                }),
-            );
-
-        let execution = executor.run(&workflow).expect("mock workflow should run");
-
-        assert_eq!(
-            execution.usage,
-            WorkflowUsage {
-                input_tokens: Some(150),
-                output_tokens: Some(35),
-                cost_microusd: Some(750),
-            }
-        );
-        assert_eq!(execution.usage.total_tokens(), Some(185));
-        assert_eq!(execution.branch_results[0].usage, execution.usage);
-        assert_eq!(
-            execution
-                .leaf_results
-                .iter()
-                .map(|result| result.usage.cost_microusd)
-                .collect::<Vec<_>>(),
-            vec![Some(500), Some(250)]
-        );
-    }
-
-    #[test]
-    fn mock_executor_aggregates_memo_usage() {
-        let workflow = workflow_spec(vec![WorkflowNode::BranchSet(BranchSpec {
-            id: "cache-branches".to_string(),
-            description: None,
-            parallel: true,
-            budget: BudgetSpec::default(),
-            permissions: PermissionSpec::default(),
-            model_policy: ModelPolicy::default(),
-            children: vec![leaf_node("rlm-hit"), leaf_node("rlm-miss")],
-        })]);
-
-        let mut executor = MockWorkflowExecutor::new()
-            .with_leaf_outcome(
-                "rlm-hit",
-                MockLeafOutcome::succeeded("memo hit").with_memo_usage(WorkflowMemoUsage {
-                    armh_hits: 1,
-                    armh_misses: 0,
-                    armh_saved_estimated_tokens: 4096,
-                    provider_prompt_cache_hits: 1,
-                    provider_prompt_cache_misses: 0,
-                }),
-            )
-            .with_leaf_outcome(
-                "rlm-miss",
-                MockLeafOutcome::succeeded("memo miss").with_memo_usage(WorkflowMemoUsage {
-                    armh_hits: 0,
-                    armh_misses: 1,
-                    armh_saved_estimated_tokens: 0,
-                    provider_prompt_cache_hits: 0,
-                    provider_prompt_cache_misses: 1,
-                }),
-            );
-
-        let execution = executor.run(&workflow).expect("mock workflow should run");
-
-        assert_eq!(
-            execution.memo_usage,
-            WorkflowMemoUsage {
-                armh_hits: 1,
-                armh_misses: 1,
-                armh_saved_estimated_tokens: 4096,
-                provider_prompt_cache_hits: 1,
-                provider_prompt_cache_misses: 1,
-            }
-        );
-        assert_eq!(execution.branch_results[0].memo_usage, execution.memo_usage);
-        assert_eq!(
-            execution
-                .leaf_results
-                .iter()
-                .map(|result| (result.memo_usage.armh_hits, result.memo_usage.armh_misses))
-                .collect::<Vec<_>>(),
-            vec![(1, 0), (0, 1)]
-        );
-    }
-
-    #[test]
-    fn mock_executor_marks_cancelled_before_leaf() {
-        let workflow = workflow_spec(vec![WorkflowNode::BranchSet(BranchSpec {
-            id: "discover".to_string(),
-            description: None,
-            parallel: true,
-            budget: BudgetSpec::default(),
-            permissions: PermissionSpec::default(),
-            model_policy: ModelPolicy::default(),
-            children: vec![leaf_node("scan-readme"), leaf_node("scan-tests")],
-        })]);
-
-        let mut executor = MockWorkflowExecutor::new().with_cancelled();
-        let execution = executor.run(&workflow).expect("mock workflow should run");
-
-        assert_eq!(execution.status, WorkflowRunStatus::Cancelled);
-        assert_eq!(execution.leaf_results.len(), 1);
-        assert_eq!(
-            execution.leaf_results[0].status,
-            WorkflowRunStatus::Cancelled
-        );
-        assert_eq!(
-            execution.branch_results[0].status,
-            WorkflowRunStatus::Cancelled
-        );
-        assert_eq!(
-            control_result(&execution, "discover").status,
-            WorkflowRunStatus::Cancelled
-        );
-    }
-
-    #[test]
-    fn mock_executor_stops_when_global_leaf_budget_is_exhausted() {
-        let workflow = workflow_spec(vec![WorkflowNode::BranchSet(BranchSpec {
-            id: "discover".to_string(),
-            description: None,
-            parallel: true,
-            budget: BudgetSpec::default(),
-            permissions: PermissionSpec::default(),
-            model_policy: ModelPolicy::default(),
-            children: vec![
-                leaf_node("scan-readme"),
-                leaf_node("scan-config"),
-                leaf_node("scan-tests"),
-            ],
-        })]);
-
-        let mut executor = MockWorkflowExecutor::new().with_max_leaf_steps(1);
-        let execution = executor.run(&workflow).expect("mock workflow should run");
-
-        assert_eq!(execution.status, WorkflowRunStatus::BudgetExceeded);
-        assert_eq!(
-            execution
-                .leaf_results
-                .iter()
-                .map(|result| (result.leaf_id.as_str(), result.status))
-                .collect::<Vec<_>>(),
-            vec![
-                ("scan-readme", WorkflowRunStatus::Succeeded),
-                ("scan-config", WorkflowRunStatus::BudgetExceeded)
-            ]
-        );
-        assert_eq!(
-            execution.branch_results[0].status,
-            WorkflowRunStatus::BudgetExceeded
-        );
-    }
-
-    #[test]
-    fn mock_executor_treats_zero_step_budgets_as_unbounded() {
-        let workflow = workflow_spec(vec![WorkflowNode::BranchSet(BranchSpec {
-            id: "verify".to_string(),
-            description: None,
-            parallel: false,
-            budget: BudgetSpec::default(),
-            permissions: PermissionSpec::default(),
-            model_policy: ModelPolicy::default(),
-            children: vec![
-                leaf_node_with_budget(
-                    "run-tests",
-                    BudgetSpec {
-                        max_steps: Some(0),
-                        timeout_secs: None,
-                        max_parallel: None,
-                        max_tokens: None,
-                    },
-                ),
-                leaf_node("summarize"),
-            ],
-        })]);
-
-        let mut executor = MockWorkflowExecutor::new().with_max_leaf_steps(0);
-        let execution = executor.run(&workflow).expect("mock workflow should run");
-
-        assert_eq!(execution.status, WorkflowRunStatus::Succeeded);
-        assert_eq!(execution.leaf_results.len(), 2);
-        assert!(
-            execution
-                .leaf_results
-                .iter()
-                .all(|result| result.status == WorkflowRunStatus::Succeeded)
-        );
-    }
-
-    #[test]
-    fn mock_executor_stops_when_global_token_budget_is_exhausted() {
-        let workflow = workflow_spec(vec![WorkflowNode::BranchSet(BranchSpec {
-            id: "discover".to_string(),
-            description: None,
-            parallel: true,
-            budget: BudgetSpec::default(),
-            permissions: PermissionSpec::default(),
-            model_policy: ModelPolicy::default(),
-            children: vec![
-                leaf_node("scan-readme"),
-                leaf_node("scan-config"),
-                leaf_node("scan-tests"),
-            ],
-        })]);
-
-        // First leaf uses 600 tokens (300 in + 300 out); after the second leaf
-        // (500 tokens) the running total is 1100, exceeding the 1000-token
-        // global cap, so the third leaf hits the exhausted budget and halts the
-        // run.
-        let mut executor = MockWorkflowExecutor::new()
-            .with_max_leaf_tokens(1000)
-            .with_leaf_outcome(
-                "scan-readme",
-                MockLeafOutcome::succeeded("readme done").with_usage(WorkflowUsage {
-                    input_tokens: Some(300),
-                    output_tokens: Some(300),
-                    cost_microusd: Some(0),
-                }),
-            )
-            .with_leaf_outcome(
-                "scan-config",
-                MockLeafOutcome::succeeded("config done").with_usage(WorkflowUsage {
-                    input_tokens: Some(250),
-                    output_tokens: Some(250),
-                    cost_microusd: Some(0),
-                }),
-            );
-        let execution = executor.run(&workflow).expect("mock workflow should run");
-
-        assert_eq!(execution.status, WorkflowRunStatus::BudgetExceeded);
-        // Leaves 1+2 consume 1100 tokens, exhausting the 1000-token global cap.
-        // The third leaf is attempted, sees the budget already exceeded, and is
-        // recorded as BudgetExceeded — the same boundary-leaf behaviour used by
-        // step budgets (max_leaf_steps). The budget outcome carries no tokens,
-        // so total usage stays at 1100.
-        assert_eq!(execution.leaf_results.len(), 3);
-        assert_eq!(
-            execution.leaf_results[0].status,
-            WorkflowRunStatus::Succeeded
-        );
-        assert_eq!(
-            execution.leaf_results[1].status,
-            WorkflowRunStatus::Succeeded
-        );
-        assert_eq!(
-            execution.leaf_results[2].status,
-            WorkflowRunStatus::BudgetExceeded
-        );
-        assert_eq!(execution.usage.total_tokens(), Some(1100));
-    }
-
-    #[test]
-    fn mock_executor_honors_zero_token_leaf_budget() {
-        let workflow = workflow_spec(vec![WorkflowNode::BranchSet(BranchSpec {
-            id: "verify".to_string(),
-            description: None,
-            parallel: false,
-            budget: BudgetSpec::default(),
-            permissions: PermissionSpec::default(),
-            model_policy: ModelPolicy::default(),
-            children: vec![
-                leaf_node_with_budget(
-                    "run-tests",
-                    BudgetSpec {
-                        max_steps: None,
-                        timeout_secs: None,
-                        max_parallel: None,
-                        max_tokens: Some(0),
-                    },
-                ),
-                leaf_node("summarize"),
-            ],
-        })]);
-
-        let mut executor = MockWorkflowExecutor::new();
-        let execution = executor.run(&workflow).expect("mock workflow should run");
-
-        assert_eq!(execution.status, WorkflowRunStatus::BudgetExceeded);
-        assert_eq!(execution.leaf_results.len(), 1);
-        assert_eq!(
-            execution.leaf_results[0].status,
-            WorkflowRunStatus::BudgetExceeded
-        );
-        assert!(
-            execution.leaf_results[0]
-                .output
-                .as_deref()
-                .unwrap_or_default()
-                .contains("token budget exhausted")
-        );
-    }
-
-    #[test]
-    fn mock_executor_honors_per_leaf_token_cap() {
-        let workflow = workflow_spec(vec![WorkflowNode::BranchSet(BranchSpec {
-            id: "review".to_string(),
-            description: None,
-            parallel: false,
-            budget: BudgetSpec::default(),
-            permissions: PermissionSpec::default(),
-            model_policy: ModelPolicy::default(),
-            children: vec![
-                leaf_node_with_budget(
-                    "expensive-scan",
-                    BudgetSpec {
-                        max_steps: None,
-                        timeout_secs: None,
-                        max_parallel: None,
-                        max_tokens: Some(500),
-                    },
-                ),
-                leaf_node("summarize"),
-            ],
-        })]);
-
-        // The leaf outcome uses 800 tokens which exceeds the per-leaf cap of 500.
-        let mut executor = MockWorkflowExecutor::new().with_leaf_outcome(
-            "expensive-scan",
-            MockLeafOutcome::succeeded("scan done").with_usage(WorkflowUsage {
-                input_tokens: Some(500),
-                output_tokens: Some(300),
-                cost_microusd: Some(0),
-            }),
-        );
-        let execution = executor.run(&workflow).expect("mock workflow should run");
-
-        assert_eq!(execution.status, WorkflowRunStatus::BudgetExceeded);
-        assert_eq!(execution.leaf_results.len(), 1);
-        assert_eq!(
-            execution.leaf_results[0].status,
-            WorkflowRunStatus::BudgetExceeded
-        );
-        assert!(
-            execution.leaf_results[0]
-                .output
-                .as_deref()
-                .unwrap_or_default()
-                .contains("token budget exhausted")
-        );
     }
 
     #[test]
@@ -3662,114 +1755,8 @@ mod tests {
     }
 
     #[test]
-    fn loop_until_stops_on_pass() {
-        let workflow = workflow_spec(vec![WorkflowNode::LoopUntil(LoopUntilSpec {
-            id: "verify".to_string(),
-            condition: "verification passed".to_string(),
-            max_iterations: Some(5),
-            children: vec![leaf_node("run-check")],
-        })]);
-
-        let mut executor =
-            MockWorkflowExecutor::new().with_predicate_results("verify", vec![false, false, true]);
-        let execution = executor.run(&workflow).expect("loop should run");
-
-        assert_eq!(execution.status, WorkflowRunStatus::Succeeded);
-        assert_eq!(execution.leaf_results.len(), 3);
-        assert_eq!(
-            control_result(&execution, "verify").summary.as_deref(),
-            Some("loop_until iterations=3")
-        );
-    }
-
-    #[test]
-    fn loop_until_honors_max_iters() {
-        let workflow = workflow_spec(vec![WorkflowNode::LoopUntil(LoopUntilSpec {
-            id: "verify".to_string(),
-            condition: "verification passed".to_string(),
-            max_iterations: Some(2),
-            children: vec![leaf_node("run-check")],
-        })]);
-
-        let mut executor =
-            MockWorkflowExecutor::new().with_predicate_results("verify", vec![false, false, true]);
-        let execution = executor.run(&workflow).expect("loop should run");
-
-        assert_eq!(execution.status, WorkflowRunStatus::Failed);
-        assert_eq!(execution.leaf_results.len(), 2);
-        assert_eq!(
-            control_result(&execution, "verify").summary.as_deref(),
-            Some("loop_until iterations=2")
-        );
-    }
-
-    #[test]
-    fn cond_uses_logged_predicate_result() {
-        let workflow = workflow_spec(vec![WorkflowNode::Cond(CondSpec {
-            id: "should-fix".to_string(),
-            condition: "finding requires a patch".to_string(),
-            then_nodes: vec![leaf_node("patch")],
-            else_nodes: vec![leaf_node("report-only")],
-        })]);
-
-        let mut executor =
-            MockWorkflowExecutor::new().with_predicate_results("should-fix", vec![true]);
-        let execution = executor.run(&workflow).expect("cond should run");
-
-        assert_eq!(
-            execution
-                .leaf_results
-                .iter()
-                .map(|result| result.leaf_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["patch"]
-        );
-        assert_eq!(
-            control_result(&execution, "should-fix").summary.as_deref(),
-            Some("predicate_result=true")
-        );
-    }
-
-    #[test]
-    fn expand_respects_max_children() {
-        let workflow = workflow_spec(vec![WorkflowNode::Expand(ExpandSpec {
-            id: "split".to_string(),
-            source: "plan".to_string(),
-            max_children: Some(2),
-            template: None,
-        })]);
-
-        let generated = vec![leaf_node("first"), leaf_node("second"), leaf_node("third")];
-        let mut executor = MockWorkflowExecutor::new().with_generated_nodes("split", generated);
-        let execution = executor.run(&workflow).expect("expand should run");
-
-        assert_eq!(
-            execution
-                .leaf_results
-                .iter()
-                .map(|result| result.leaf_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["first", "second"]
-        );
-        assert_eq!(
-            control_result(&execution, "split").selected_children,
-            vec!["first", "second"]
-        );
-    }
-
-    #[test]
     fn expand_generated_nodes_validate_before_run() {
-        let workflow = workflow_spec(vec![WorkflowNode::Expand(ExpandSpec {
-            id: "split".to_string(),
-            source: "plan".to_string(),
-            max_children: None,
-            template: None,
-        })]);
-
-        let mut executor = MockWorkflowExecutor::new()
-            .with_generated_nodes("split", vec![invalid_leaf_node("bad")]);
-        let err = executor
-            .run(&workflow)
+        let err = validate_workflow_nodes(&[invalid_leaf_node("bad")])
             .expect_err("invalid generated leaf should fail before execution");
 
         assert_eq!(
@@ -3789,9 +1776,7 @@ mod tests {
         spec.depends_on_results = vec!["missing-scan".to_string()];
         let workflow = workflow_spec(vec![summarize]);
 
-        let mut executor = MockWorkflowExecutor::new();
-        let err = executor
-            .run(&workflow)
+        let err = validate_workflow_nodes(&workflow.nodes)
             .expect_err("unknown leaf dependency should fail before execution");
 
         assert_eq!(
@@ -3816,9 +1801,7 @@ mod tests {
             }),
         ]);
 
-        let mut executor = MockWorkflowExecutor::new();
-        let err = executor
-            .run(&workflow)
+        let err = validate_workflow_nodes(&workflow.nodes)
             .expect_err("unknown reduce input should fail before execution");
 
         assert_eq!(
@@ -3842,9 +1825,7 @@ mod tests {
             }),
         ]);
 
-        let mut executor = MockWorkflowExecutor::new();
-        let err = executor
-            .run(&workflow)
+        let err = validate_workflow_nodes(&workflow.nodes)
             .expect_err("unknown teacher candidate should fail before execution");
 
         assert_eq!(

@@ -121,14 +121,6 @@ impl TranscriptCache {
         self.insertion_order.push_back(key);
     }
 
-    /// Drop every cached entry. Used when the underlying transcript shape
-    /// changes drastically (e.g. session reset).
-    #[allow(dead_code)] // Reserved for /clear and session-reset call sites.
-    pub fn clear(&mut self) {
-        self.entries.clear();
-        self.insertion_order.clear();
-    }
-
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -221,14 +213,5 @@ mod tests {
         assert!(cache.get(CellId::History(1), 80, 1).is_some());
         assert!(cache.get(CellId::History(2), 80, 1).is_some());
         assert_eq!(cache.len(), 2);
-    }
-
-    #[test]
-    fn clear_drops_everything() {
-        let mut cache = TranscriptCache::new();
-        cache.insert(CellId::History(0), 80, 1, vec![line("v1")]);
-        cache.clear();
-        assert!(cache.get(CellId::History(0), 80, 1).is_none());
-        assert_eq!(cache.len(), 0);
     }
 }

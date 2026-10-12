@@ -4,9 +4,9 @@
 //! The TUI engine already had an internal channel (`Op` in
 //! `crates/tui/src/core/ops.rs` with `tx_op` / `rx_op` and `tx_steer`).
 //! This protocol file formalizes that channel so TUI, CLI, app-server, and
-//! tests share one serializable API. The wire is `OpEnvelope` + `Op`;
-//! transports that already speak JSON (app-server, tests) can send the
-//! envelope directly, while in-process callers continue to use the typed
+//! tests share one serializable API. The wire is the `Op` enum;
+//! transports that already speak JSON (app-server, tests) can send it
+//! directly, while in-process callers continue to use the typed
 //! enum.
 //!
 //! Parity is compile-enforced from the engine side:
@@ -51,19 +51,7 @@ where
     Ok(None)
 }
 
-use crate::ids::{SessionId, ThreadId};
 use crate::runtime::DynamicToolSpec;
-
-/// Every `Op` is paired with the ids that route it. This is the
-/// `Op`-in half of the `Op`-in / `EventMsg`-out contract.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpEnvelope {
-    /// Monotonic `op:<n>` for dedup / tracing within a session.
-    pub op_id: String,
-    pub thread_id: ThreadId,
-    pub session_id: SessionId,
-    pub op: Op,
-}
 
 /// Token-limit facts for a route. `None` is unknown, never zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,40 +483,6 @@ impl Op {
     }
 }
 
-/// Build a headless `SendMessage` envelope with fresh ids. This is the
-/// one-line helper every headless caller (CLI `exec`, app-server, tests)
-/// uses so TUI and headless start a session identically.
-#[must_use]
-pub fn headless_send_message_op(thread_id: ThreadId, content: impl Into<String>) -> OpEnvelope {
-    OpEnvelope {
-        op_id: format!("op-{}", uuid::Uuid::new_v4()),
-        thread_id: thread_id.clone(),
-        session_id: SessionId::new(),
-        op: Op::SendMessage {
-            content: content.into(),
-            mode: default_mode(),
-            model: None,
-            model_provider: None,
-            allowed_tools: None,
-            dynamic_tools: Vec::new(),
-            provenance: default_provenance(),
-            compaction: None,
-            goal_objective: None,
-            goal_token_budget: None,
-            goal_status: default_goal_status(),
-            reasoning_effort: None,
-            reasoning_effort_auto: false,
-            auto_model: false,
-            allow_shell: false,
-            trust_mode: false,
-            auto_approve: false,
-            approval_mode: default_approval_mode(),
-            translation_enabled: false,
-            verbosity: None,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,7 +505,28 @@ mod tests {
     /// One instance of every variant, in declaration order.
     fn every_variant() -> Vec<Op> {
         vec![
-            headless_send_message_op(ThreadId::new(), "hello").op,
+            Op::SendMessage {
+                content: "hello".into(),
+                mode: default_mode(),
+                model: None,
+                model_provider: None,
+                allowed_tools: None,
+                dynamic_tools: Vec::new(),
+                provenance: default_provenance(),
+                compaction: None,
+                goal_objective: None,
+                goal_token_budget: None,
+                goal_status: default_goal_status(),
+                reasoning_effort: None,
+                reasoning_effort_auto: false,
+                auto_model: false,
+                allow_shell: false,
+                trust_mode: false,
+                auto_approve: false,
+                approval_mode: default_approval_mode(),
+                translation_enabled: false,
+                verbosity: None,
+            },
             Op::Steer {
                 content: "more".into(),
             },
@@ -715,15 +690,6 @@ mod tests {
             let back: Op = serde_json::from_value(value).unwrap();
             assert_eq!(back, op);
         }
-    }
-
-    #[test]
-    fn op_envelope_roundtrip() {
-        let env = headless_send_message_op(ThreadId::new(), "hello");
-        let json = serde_json::to_string(&env).unwrap();
-        let back: OpEnvelope = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.thread_id, env.thread_id);
-        assert!(back.op.is_send_message());
     }
 
     #[test]

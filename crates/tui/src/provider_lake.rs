@@ -1390,27 +1390,6 @@ mod tests {
     }
 
     #[test]
-    fn configured_providers_matches_provider_predicate() {
-        let _env_lock = crate::test_support::lock_test_env();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let _auth_file = crate::test_support::EnvVarGuard::set(
-            "OPENAI_CODEX_AUTH_FILE",
-            tmp.path().join("missing-auth.json"),
-        );
-        let _openai_token = crate::test_support::EnvVarGuard::remove("OPENAI_CODEX_ACCESS_TOKEN");
-        let _codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        let config = Config::default();
-        let active = ApiProvider::Deepseek;
-        let expected: Vec<_> = ApiProvider::sorted_for_display()
-            .into_iter()
-            .filter(|provider| {
-                crate::config::provider_is_configured_for_active(&config, *provider, active)
-            })
-            .collect();
-        assert_eq!(configured_providers(&config, active), expected);
-    }
-
-    #[test]
     fn models_for_provider_filters_unconfigured_gateways() {
         let _env_lock = crate::test_support::lock_test_env();
         let _together = crate::test_support::EnvVarGuard::remove("TOGETHER_API_KEY");

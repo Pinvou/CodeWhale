@@ -1776,7 +1776,6 @@
   "StatusMcpConfigured": "已設定 {count} 個",
   "StatusContextUsage": "已使用 {percent}%（{used} / {max} 權杖）",
   "StatusContextSourceConfigured": "設定值",
-  "StatusContextSourceProviderReported": "提供者回報",
   "StatusContextSourceKimiSafeFloor": "靜態 Kimi Code 安全下限",
   "StatusContextSourceCatalog": "目錄",
   "StatusContextSourceModelHint": "模型名稱提示（未驗證）",

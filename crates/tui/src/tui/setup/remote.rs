@@ -199,23 +199,6 @@ impl SetupRemoteFacts {
         }
     }
 
-    /// The mode the step defaults to. Local-only is always the default and is
-    /// always skippable in one key — a user who never wants remote access is
-    /// done here immediately. Asserted by test rather than branched on: the
-    /// wizard's Enter path is unconditional precisely because of this.
-    #[cfg(test)]
-    pub(super) fn default_mode(&self) -> RemoteMode {
-        RemoteMode::LocalOnly
-    }
-
-    #[cfg(test)]
-    pub(super) fn status_for(&self, mode: RemoteMode) -> RemoteModeStatus {
-        self.modes
-            .iter()
-            .find(|fact| fact.mode == mode)
-            .map_or(RemoteModeStatus::NeedsAction, |fact| fact.status)
-    }
-
     /// True when something is missing but nothing is broken. Callers record
     /// `NeedsAction` — which by contract never blocks the ready screen.
     pub(super) fn needs_action(&self) -> bool {
@@ -455,6 +438,19 @@ mod tests {
             by_mode(RemoteMode::ChatBridge),
             RemoteModeStatus::NeedsAction
         );
+
+        // Direct call-site pin: the production ready gate reads NeedsAction
+        // from the same bare-install facts (`needs_action` has no other test).
+        let facts = SetupRemoteFacts {
+            modes: observe_modes(&env(&[])),
+            clouds_result: String::new(),
+            bridges_result: String::new(),
+            providers_result: String::new(),
+            mode_result: String::new(),
+            command_provider: "deepseek".to_string(),
+            result: String::new(),
+        };
+        assert!(facts.needs_action());
     }
 
     #[test]
@@ -556,36 +552,6 @@ mod tests {
         assert!(
             !preview.contains("DEEPSEEK_API_KEY"),
             "must not silently substitute another provider's credential contract"
-        );
-    }
-
-    /// A user who wants none of this must be able to leave in one key: the
-    /// default mode is local-only and local-only is always usable.
-    #[test]
-    fn the_default_mode_is_local_only_and_is_never_blocking() {
-        let facts = SetupRemoteFacts {
-            modes: observe_modes(&env(&[])),
-            clouds_result: String::new(),
-            bridges_result: String::new(),
-            providers_result: String::new(),
-            mode_result: String::new(),
-            command_provider: "deepseek".to_string(),
-            result: String::new(),
-        };
-
-        assert_eq!(facts.default_mode(), RemoteMode::LocalOnly);
-        assert_eq!(
-            facts.status_for(RemoteMode::LocalOnly),
-            RemoteModeStatus::Ready
-        );
-        // Missing tokens/config are surfaced, but only ever as NeedsAction.
-        assert!(facts.needs_action());
-        assert!(
-            facts
-                .modes
-                .iter()
-                .all(|fact| fact.status != RemoteModeStatus::Disabled
-                    || fact.mode == RemoteMode::MobileLan)
         );
     }
 

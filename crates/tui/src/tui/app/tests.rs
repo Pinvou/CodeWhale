@@ -3477,7 +3477,7 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
 
 #[test]
 fn test_cycle_scenario() {
-    // Scenario consolidation of: test_cycle_mode_transitions, test_cycle_mode_reverse_transitions
+    // Scenario consolidation of: test_cycle_mode_transitions
     // from test_cycle_mode_transitions
     {
         let mut app = App::new(test_options(false), &Config::default());
@@ -3485,22 +3485,6 @@ fn test_cycle_scenario() {
         app.cycle_mode();
         // Mode should have changed
         assert_ne!(app.mode, initial_mode);
-    }
-    // from test_cycle_mode_reverse_transitions
-    {
-        let mut app = App::new(test_options(false), &Config::default());
-
-        app.mode = AppMode::Plan;
-        app.cycle_mode_reverse();
-        assert_eq!(app.mode, AppMode::Operate);
-
-        app.mode = AppMode::Operate;
-        app.cycle_mode_reverse();
-        assert_eq!(app.mode, AppMode::Agent);
-
-        app.mode = AppMode::Agent;
-        app.cycle_mode_reverse();
-        assert_eq!(app.mode, AppMode::Plan);
     }
 }
 
@@ -4319,7 +4303,6 @@ fn live_motion_invalidation_only_bumps_live_transcript_rows() {
         is_diff: false,
     })));
     let app_active_before = app.active_cell_revision;
-    let cell_active_before = app.active_cell.as_ref().expect("active cell").revision();
 
     app.mark_live_motion_updated();
 
@@ -4329,14 +4312,9 @@ fn live_motion_invalidation_only_bumps_live_transcript_rows() {
     assert_eq!(app.history_revisions[3], history_before[3]);
     assert_eq!(app.history_revisions[4], history_before[4]);
     assert_ne!(app.active_cell_revision, app_active_before);
-    assert_ne!(
-        app.active_cell.as_ref().expect("active cell").revision(),
-        cell_active_before
-    );
 
     let history_after_all_live = app.history_revisions.clone();
     let app_active_after_all_live = app.active_cell_revision;
-    let cell_active_after_all_live = app.active_cell.as_ref().expect("active cell").revision();
     app.mark_live_history_motion_updated();
 
     assert_eq!(app.history_revisions[0], history_after_all_live[0]);
@@ -4345,10 +4323,6 @@ fn live_motion_invalidation_only_bumps_live_transcript_rows() {
     assert_eq!(app.history_revisions[3], history_after_all_live[3]);
     assert_eq!(app.history_revisions[4], history_after_all_live[4]);
     assert_eq!(app.active_cell_revision, app_active_after_all_live);
-    assert_eq!(
-        app.active_cell.as_ref().expect("active cell").revision(),
-        cell_active_after_all_live
-    );
 }
 
 #[test]
@@ -4996,7 +4970,9 @@ fn pasted_text_and_image_placeholders_survive_history_and_queue_paths() {
         Some("Use this skill")
     );
 
-    app.push_pending_steer(QueuedMessage::new(submitted.clone(), None));
+    app.pending_steers
+        .push_back(QueuedMessage::new(submitted.clone(), None));
+    app.submit_pending_steers_after_interrupt = true;
     let steers = app.drain_pending_steers();
     assert_eq!(steers[0].display, submitted);
 }
@@ -5357,10 +5333,12 @@ fn sticky_error_ttl_is_capped_and_clears_on_composer_activity() {
 }
 
 #[test]
-fn push_pending_steer_arms_resend_flag() {
+fn pending_steer_seed_arms_resend_flag() {
     let mut app = App::new(test_options(false), &Config::default());
     assert!(!app.submit_pending_steers_after_interrupt);
-    app.push_pending_steer(QueuedMessage::new("steer me".to_string(), None));
+    app.pending_steers
+        .push_back(QueuedMessage::new("steer me".to_string(), None));
+    app.submit_pending_steers_after_interrupt = true;
     assert_eq!(app.pending_steers.len(), 1);
     assert!(app.submit_pending_steers_after_interrupt);
 }
@@ -5371,9 +5349,13 @@ fn drain_pending_scenario() {
     // from drain_pending_steers_clears_flag_and_returns_in_order
     {
         let mut app = App::new(test_options(false), &Config::default());
-        app.push_pending_steer(QueuedMessage::new("first".to_string(), None));
-        app.push_pending_steer(QueuedMessage::new("second".to_string(), None));
-        app.push_pending_steer(QueuedMessage::new("third".to_string(), None));
+        app.pending_steers
+            .push_back(QueuedMessage::new("first".to_string(), None));
+        app.pending_steers
+            .push_back(QueuedMessage::new("second".to_string(), None));
+        app.pending_steers
+            .push_back(QueuedMessage::new("third".to_string(), None));
+        app.submit_pending_steers_after_interrupt = true;
 
         let drained = app.drain_pending_steers();
         assert_eq!(drained.len(), 3);
@@ -5394,10 +5376,13 @@ fn drain_pending_scenario() {
 }
 
 #[test]
-fn double_push_pending_steer_is_idempotent_on_flag() {
+fn double_steer_seed_is_idempotent_on_flag() {
     let mut app = App::new(test_options(false), &Config::default());
-    app.push_pending_steer(QueuedMessage::new("a".to_string(), None));
-    app.push_pending_steer(QueuedMessage::new("b".to_string(), None));
+    app.pending_steers
+        .push_back(QueuedMessage::new("a".to_string(), None));
+    app.pending_steers
+        .push_back(QueuedMessage::new("b".to_string(), None));
+    app.submit_pending_steers_after_interrupt = true;
     assert!(app.submit_pending_steers_after_interrupt);
     assert_eq!(app.pending_steers.len(), 2);
 }
@@ -7171,7 +7156,6 @@ fn mode_selection_reports_refusal_change_and_persisted_same_distinctly() {
 
     assert_eq!(app.select_mode(AppMode::Operate), SettingSelection::Changed);
     assert!(SettingSelection::Changed.changed_live_state());
-    assert!(SettingSelection::Changed.accepted());
 
     assert_eq!(
         app.select_mode(AppMode::Operate),
@@ -7181,14 +7165,8 @@ fn mode_selection_reports_refusal_change_and_persisted_same_distinctly() {
         !SettingSelection::PersistedSame.changed_live_state(),
         "a persisted-same selection must not resync the engine"
     );
-    assert!(
-        SettingSelection::PersistedSame.accepted(),
-        "a persisted-same selection did write the startup default"
-    );
-
     app.is_loading = true;
     assert_eq!(app.select_mode(AppMode::Plan), SettingSelection::Refused);
-    assert!(!SettingSelection::Refused.accepted());
     assert_eq!(app.mode, AppMode::Operate, "a refusal changes nothing");
 }
 

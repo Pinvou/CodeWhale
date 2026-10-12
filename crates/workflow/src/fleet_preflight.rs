@@ -223,17 +223,6 @@ impl RoutePreflight {
         self.workers.iter().find(|route| route.member_id == key)
     }
 
-    /// Fail unless every worker route is runnable.
-    ///
-    /// Called before a Workflow is allowed to start, so a member with no
-    /// credential is a startup error rather than a first-task surprise.
-    pub fn require_all_ready(&self) -> Result<(), PreflightError> {
-        for route in &self.workers {
-            route.require_ready()?;
-        }
-        Ok(())
-    }
-
     /// Whether any worker route talks to a different provider than the Router.
     /// This is what a receipt discloses as cross-provider inference.
     #[must_use]
@@ -364,9 +353,8 @@ mod tests {
             detail: "no ZAI_API_KEY".to_string(),
         };
 
-        let preflight = RoutePreflight::new(vec![route], None);
-        let err = preflight
-            .require_all_ready()
+        let err = route
+            .require_ready()
             .expect_err("a member with no credential must not start");
         assert!(matches!(err, PreflightError::CredentialMissing { .. }));
         let message = err.to_string();

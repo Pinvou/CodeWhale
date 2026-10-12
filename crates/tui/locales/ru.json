@@ -1776,7 +1776,6 @@
   "StatusMcpConfigured": "настроено: {count}",
   "StatusContextUsage": "использовано {percent}% ({used} / {max} токенов)",
   "StatusContextSourceConfigured": "настроено",
-  "StatusContextSourceProviderReported": "сообщено провайдером",
   "StatusContextSourceKimiSafeFloor": "статический безопасный минимум Kimi Code",
   "StatusContextSourceCatalog": "каталог",
   "StatusContextSourceModelHint": "подсказка из имени модели (не проверено)",

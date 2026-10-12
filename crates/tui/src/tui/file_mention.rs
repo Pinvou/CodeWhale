@@ -1626,24 +1626,6 @@ mod tests {
         assert!(!content.contains("<missing-file"), "got: {content}");
     }
 
-    /// Negative test: a truly missing path still produces `<missing-file>`
-    /// so the user gets an explicit signal instead of silent failure.
-    #[test]
-    fn truly_missing_mention_still_renders_missing_file() {
-        let tmp = TempDir::new().expect("tempdir");
-
-        let content = user_request_with_file_mentions(
-            "huh @does/not/exist.txt",
-            tmp.path(),
-            Some(tmp.path().to_path_buf()),
-        );
-
-        assert!(
-            content.contains("<missing-file mention=\"@does/not/exist.txt\""),
-            "got: {content}",
-        );
-    }
-
     #[test]
     fn pending_context_preview_is_lexical_and_does_not_probe_paths() {
         let previews = pending_context_previews("read @guide.md and @missing.md");

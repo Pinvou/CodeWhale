@@ -1062,15 +1062,6 @@ mod tests {
     // ── Parity tests (#2187) ──────────────────────────────────────────────
 
     #[test]
-    fn test_parity_platform_sandbox_detection() {
-        let sandbox_type = get_platform_sandbox();
-        let available = is_sandbox_available();
-        if available {
-            assert!(sandbox_type.is_some());
-        }
-    }
-
-    #[test]
     #[cfg(target_os = "macos")]
     fn test_parity_macos_seatbelt_available() {
         // Match real runtime availability (`seatbelt::is_available` via

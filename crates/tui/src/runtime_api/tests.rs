@@ -10628,7 +10628,8 @@ fn create_managed_skill(root_dir: &std::path::Path, name: &str) -> Result<(PathB
     )?;
     // Write an `.installed-from` marker so the mutation module considers it
     // managed (and therefore eligible for update/remove/trust).
-    let digest = crate::skills::audit::compute_package_digest(&skill_dir).expect("package digest");
+    let digest =
+        crate::skills::package_digest::compute_package_digest(&skill_dir).expect("package digest");
     crate::skills::install::write_installed_from_v2(
         &skill_dir,
         &format!("github:test/{name}"),

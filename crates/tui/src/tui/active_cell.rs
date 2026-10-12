@@ -105,15 +105,6 @@ impl ActiveCell {
         }
     }
 
-    /// Current revision counter. Wraps on overflow which is fine for cache
-    /// invalidation; the chance of a wrap-around collision is astronomical
-    /// over a single session and any miss only causes one extra re-render.
-    #[must_use]
-    #[allow(dead_code)] // Used by App::bump_active_cell_revision and future cache wiring.
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
-
     /// Increment the revision counter. Call any time an entry is mutated.
     pub fn bump_revision(&mut self) {
         self.revision = self.revision.wrapping_add(1);
@@ -358,13 +349,11 @@ mod tests {
     }
 
     #[test]
-    fn push_tool_records_entry_and_revision_advances() {
+    fn push_tool_records_entry_at_index() {
         let mut cell = ActiveCell::new();
-        let r0 = cell.revision();
         let idx = cell.push_tool("t1", exec_cell("ls"));
         assert_eq!(idx, 0);
         assert_eq!(cell.entry_count(), 1);
-        assert!(cell.revision() != r0);
         assert_eq!(cell.entry_index_for_tool("t1"), Some(0));
     }
 
@@ -417,11 +406,9 @@ mod tests {
     #[test]
     fn push_thinking_records_entry_at_tail() {
         let mut cell = ActiveCell::new();
-        let r0 = cell.revision();
         let idx = cell.push_thinking(thinking_cell("planning…", true));
         assert_eq!(idx, 0);
         assert_eq!(cell.entry_count(), 1);
-        assert!(cell.revision() != r0);
     }
 
     #[test]

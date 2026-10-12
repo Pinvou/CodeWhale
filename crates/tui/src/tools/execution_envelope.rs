@@ -96,22 +96,6 @@ impl ExecutionEnvelope {
     pub(crate) const fn is_unrestricted(self) -> bool {
         self.write && self.network && self.shell
     }
-
-    /// Intersect with another envelope. Used wherever a child envelope is
-    /// derived from a parent one: every field takes the more restrictive side,
-    /// so a descendant can never widen an ancestor.
-    ///
-    /// Exercised by this module's tests today; the grandchild-derivation path
-    /// that consumes it in production lands with the ratification UI.
-    #[must_use]
-    #[allow(dead_code)]
-    pub(crate) const fn narrow(self, other: Self) -> Self {
-        Self {
-            write: self.write && other.write,
-            network: self.network && other.network,
-            shell: self.shell && other.shell,
-        }
-    }
 }
 
 /// Tool names whose execution is governed by a different, stricter mechanism
@@ -785,23 +769,5 @@ mod tests {
             false,
         )
         .expect("a write-capable, shell-capable child keeps its gates");
-    }
-
-    #[test]
-    fn narrowing_never_widens() {
-        let parent = ExecutionEnvelope {
-            write: false,
-            network: true,
-            shell: true,
-        };
-        let child = ExecutionEnvelope {
-            write: true,
-            network: false,
-            shell: true,
-        };
-        let narrowed = parent.narrow(child);
-        assert!(!narrowed.write, "a child cannot regain the parent's writes");
-        assert!(!narrowed.network, "a child cannot regain its own denial");
-        assert!(narrowed.shell);
     }
 }

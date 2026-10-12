@@ -283,21 +283,6 @@ impl WorkshopVariables {
         self.last_tool_result = raw.to_string();
         self.last_tool_name = tool_name.to_string();
     }
-
-    /// Retrieve and clear the stored raw output (consume semantics so the
-    /// variable is not accidentally promoted twice).
-    ///
-    /// Called by the `promote_to_context` tool (not yet wired in this PR).
-    #[must_use]
-    #[allow(dead_code)] // consumed by promote_to_context tool in follow-up
-    pub fn take_raw(&mut self) -> Option<(String, String)> {
-        if self.last_tool_result.is_empty() {
-            return None;
-        }
-        let content = std::mem::take(&mut self.last_tool_result);
-        let name = std::mem::take(&mut self.last_tool_name);
-        Some((name, content))
-    }
 }
 
 // ── Adaptive evidence routing (#4619) ─────────────────────────────────────────
@@ -429,11 +414,6 @@ mod tests {
     }
 
     #[test]
-    fn default_threshold_is_32k_tokens() {
-        assert_eq!(DEFAULT_LARGE_OUTPUT_THRESHOLD_TOKENS, 32_768);
-    }
-
-    #[test]
     fn synthesise_above_threshold() {
         let router = LargeOutputRouter::default();
         // DEFAULT threshold = 32768 tokens; 3 chars/token → 32768*3 = 98304 chars
@@ -535,17 +515,14 @@ mod tests {
     }
 
     #[test]
-    fn workshop_variables_store_and_take() {
+    fn workshop_variables_store_raw_records_last_output() {
         let mut vars = WorkshopVariables::default();
-        assert!(vars.take_raw().is_none());
+        assert!(vars.last_tool_result.is_empty());
+        assert!(vars.last_tool_name.is_empty());
 
         vars.store_raw("read_file", "raw content here");
-        let taken = vars.take_raw().expect("should have content");
-        assert_eq!(taken.0, "read_file");
-        assert_eq!(taken.1, "raw content here");
-
-        // Second take is empty — consume semantics
-        assert!(vars.take_raw().is_none());
+        assert_eq!(vars.last_tool_name, "read_file");
+        assert_eq!(vars.last_tool_result, "raw content here");
     }
 
     #[test]

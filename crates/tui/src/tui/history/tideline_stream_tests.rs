@@ -2,7 +2,7 @@
 //! stage suite lives in `work_surface::tideline::tests` — both components
 //! share the reserved `work_*` golden names).
 
-use super::tideline_stream::{TidelineReceiptState, TidelineStreamEvent, tideline_stream_hitboxes};
+use super::tideline_stream::TidelineReceiptState;
 use crate::palette::ChromeInk;
 
 #[test]
@@ -29,14 +29,4 @@ fn receipt_states_pair_marks_with_words_and_ink_families() {
             );
         }
     }
-}
-
-#[test]
-fn stream_hitboxes_empty_on_degenerate_area() {
-    let events = vec![TidelineStreamEvent::UserTurn {
-        text: "x".to_string(),
-    }];
-    let theme = crate::palette::UI_THEME;
-    let stream = super::tideline_stream::TidelineStream::new(&theme, &events);
-    assert!(tideline_stream_hitboxes(ratatui::layout::Rect::new(0, 0, 2, 1), &stream).is_empty());
 }

@@ -398,8 +398,6 @@ fn user_constitution_disabled_by_setup_state() -> bool {
 // prompt text in `text.rs` directly; the test suite below guards content
 // and ordering invariants (constitution structure and binding gates #4032,
 // byte-stable prefix ordering, prefix privacy #4632).
-#[cfg(test)]
-use text::CALM_PERSONALITY;
 pub use text::{
     BASE_PROMPT, COMPACT_TEMPLATE, CORE_EXECUTION_PROFILE_PROMPT, GOAL_CONTINUATION_PROMPT,
     HEADLESS_BASE_PROMPT, LANGUAGE_PROMPT, MEMORY_GUIDANCE, OUTPUT_PROMPT,
@@ -1061,14 +1059,6 @@ fn apply_static_prompt_composer(
 // layer, never by mode-specific prompt text.
 
 // ── Public API ────────────────────────────────────────────────────────
-
-/// Get the system prompt for a specific mode with project context.
-pub fn system_prompt_for_mode_with_context(
-    workspace: &Path,
-    working_set_summary: Option<&str>,
-) -> SystemPrompt {
-    system_prompt_for_mode_with_context_and_skills(workspace, working_set_summary, None, None, None)
-}
 
 /// Get the system prompt for a specific mode with project and skills context.
 ///
@@ -2918,7 +2908,6 @@ mod tests {
     fn only_the_constitution_states_precedence() {
         // Composed overlays must describe behavior, never their own rank.
         let overlays = [
-            ("CALM_PERSONALITY", CALM_PERSONALITY),
             ("COMPACT_TEMPLATE", COMPACT_TEMPLATE),
             ("MEMORY_GUIDANCE", MEMORY_GUIDANCE),
             ("LANGUAGE_PROMPT", LANGUAGE_PROMPT),
@@ -3036,7 +3025,9 @@ mod tests {
         )
         .unwrap();
 
-        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
+        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
+            workspace, None, None, None, None,
+        ));
 
         assert!(prompt.contains(HANDOFF_BLOCK_MARKER));
         assert!(prompt.contains("Finish #32."));
@@ -3099,8 +3090,13 @@ mod tests {
     #[test]
     fn missing_handoff_does_not_inject_block() {
         let tmp = tempdir().expect("tempdir");
-        let prompt =
-            system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
+        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
+            tmp.path(),
+            None,
+            None,
+            None,
+            None,
+        ));
         assert!(!prompt.contains(HANDOFF_BLOCK_MARKER));
     }
 
@@ -3110,8 +3106,13 @@ mod tests {
         let dir = tmp.path().join(".deepseek");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("handoff.md"), "   \n\n  ").unwrap();
-        let prompt =
-            system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
+        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
+            tmp.path(),
+            None,
+            None,
+            None,
+            None,
+        ));
         assert!(!prompt.contains(HANDOFF_BLOCK_MARKER));
     }
 
@@ -3286,8 +3287,13 @@ mod tests {
     #[test]
     fn compact_template_is_lazy_in_fresh_prompt() {
         let tmp = tempdir().expect("tempdir");
-        let prompt =
-            system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
+        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
+            tmp.path(),
+            None,
+            None,
+            None,
+            None,
+        ));
         assert!(!prompt.contains("# Session relay"));
         assert!(!prompt.contains("## Verification"));
     }
@@ -3653,8 +3659,12 @@ mod tests {
         let _skills_dir = EnvVarGuard::remove("DEEPSEEK_SKILLS_DIR");
         let workspace = workspace_tmp.path();
 
-        let a = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
-        let b = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
+        let a = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
+            workspace, None, None, None, None,
+        ));
+        let b = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
+            workspace, None, None, None, None,
+        ));
         assert_byte_identical(
             "system_prompt_for_mode_with_context() on empty workspace",
             &a,
@@ -3676,13 +3686,19 @@ mod tests {
         let workspace = tmp.path();
         let summary = "## Repo Working Set\nWorkspace: /tmp/x\n";
 
-        let a = system_prompt_flat_text(&system_prompt_for_mode_with_context(
+        let a = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
             workspace,
             Some(summary),
+            None,
+            None,
+            None,
         ));
-        let b = system_prompt_flat_text(&system_prompt_for_mode_with_context(
+        let b = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
             workspace,
             Some(summary),
+            None,
+            None,
+            None,
         ));
         assert_byte_identical(
             "system_prompt_for_mode_with_context with constant working_set summary",
@@ -3716,8 +3732,12 @@ mod tests {
         )
         .unwrap();
 
-        let a = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
-        let b = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
+        let a = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
+            workspace, None, None, None, None,
+        ));
+        let b = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
+            workspace, None, None, None, None,
+        ));
         assert_byte_identical(
             "system_prompt_for_mode_with_context with constant handoff file",
             &a,
@@ -3740,9 +3760,12 @@ mod tests {
         std::fs::write(handoff_dir.join("handoff.md"), "# handoff body\n").unwrap();
 
         let summary = "## Repo Working Set\nWorkspace: /tmp/x\n";
-        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context(
+        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
             workspace,
             Some(summary),
+            None,
+            None,
+            None,
         ));
 
         let execution_pos = prompt
@@ -3790,14 +3813,16 @@ mod tests {
         let _userprofile = EnvVarGuard::set("USERPROFILE", home_tmp.path().as_os_str());
         let _skills_dir = EnvVarGuard::remove("DEEPSEEK_SKILLS_DIR");
         let workspace = tmp.path();
-        let prompt = match system_prompt_for_mode_with_context(workspace, None) {
-            SystemPrompt::Text(text) => text,
-            SystemPrompt::Blocks(blocks) => blocks
-                .iter()
-                .map(|block| block.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        };
+        let prompt =
+            match system_prompt_for_mode_with_context_and_skills(workspace, None, None, None, None)
+            {
+                SystemPrompt::Text(text) => text,
+                SystemPrompt::Blocks(blocks) => blocks
+                    .iter()
+                    .map(|block| block.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            };
 
         // No absolute paths (Unix or Windows).
         let offending: Vec<&str> = prompt
@@ -3987,20 +4012,6 @@ mod tests {
         assert!(
             prompt.contains("## Concise Output Discipline"),
             "Concise Output Discipline should be appended"
-        );
-    }
-
-    /// #2953 — the Calm overlay (`CALM_PERSONALITY`) stays out of the default
-    /// model-prompt path to keep the static prefix slim. Voice and tone
-    /// guidance travels via the constitution preamble instead.
-    #[test]
-    fn default_prompt_does_not_include_calm_personality_overlay() {
-        let prompt = compose_prompt_with_approval_model_and_shell(Personality::Calm, "codewhale");
-        let calm_text = CALM_PERSONALITY;
-        let first_calm_line = calm_text.lines().find(|l| !l.is_empty()).unwrap_or("");
-        assert!(
-            !prompt.contains(first_calm_line),
-            "default agent prompt must not include the calm personality overlay"
         );
     }
 

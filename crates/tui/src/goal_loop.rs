@@ -246,14 +246,6 @@ pub const fn token_budget_exhausted(_progress: GoalProgress, _budget: GoalBudget
     false
 }
 
-/// Whether a stop reason represents success (Completed) vs. an early/forced exit.
-/// Useful for the UI/status projection (#2666 token/time visibility).
-#[must_use]
-#[allow(dead_code)]
-pub fn is_success(reason: StopReason) -> bool {
-    matches!(reason, StopReason::Completed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,7 +258,6 @@ mod tests {
             GoalBudget::unbounded(),
         );
         assert_eq!(d, ContinuationDecision::Stop(StopReason::Completed));
-        assert!(is_success(StopReason::Completed));
     }
 
     #[test]
@@ -277,7 +268,6 @@ mod tests {
             GoalBudget::unbounded(),
         );
         assert_eq!(d, ContinuationDecision::Stop(StopReason::Blocked));
-        assert!(!is_success(StopReason::Blocked));
     }
 
     #[test]

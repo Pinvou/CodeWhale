@@ -93,8 +93,6 @@ mod shell_dispatcher;
 use codewhale_core::tool_parser;
 
 mod adaptive_evidence_acceptance;
-mod cache_guard;
-mod coordination_acceptance;
 mod diagnostic_read_only;
 mod dotenv_authority;
 mod eval_harness;
@@ -105,7 +103,6 @@ mod integration_mock_llm;
 mod lifecycle_outbox_exec;
 mod palette_audit;
 mod protocol_recovery;
-mod reasoning_content_replayed_after_tool_call;
 mod skill_cli;
 mod telemetry_contract;
 mod verifiers_harness_contract;

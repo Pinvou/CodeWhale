@@ -526,28 +526,3 @@ async fn capacity_gate_can_observe_request_before_response_streams() {
     // Drain to keep the mock state consistent.
     while stream.next().await.is_some() {}
 }
-
-// === 8. Compaction defaults (#402 P0) ======================================
-
-#[test]
-fn compaction_config_defaults_are_enabled_for_session_survivability() {
-    // The production CompactionConfig is gated behind a `#[path = ...]` module
-    // that isn't wired here, but we can test the principle: the
-    // `should_compact` function and `CompactionConfig` live in the same crate.
-    // Re-import from the production module to verify the default.
-    //
-    // We test via the mock pathway: the non-streaming compaction call (test 5
-    // above) already exercises `create_message` with `stream: Some(false)`,
-    // which is the code path `compact_messages` uses. Combined with the
-    // capacity controller's `TargetedContextRefresh`, the enabled-by-default
-    // compaction config means long sessions auto-compact before hitting the
-    // context window limit.
-    //
-    // This test is a smoke check that the defaults compile and are correct.
-    // The production `CompactionConfig::default()` is exercised by
-    // `compaction::tests::should_compact_respects_enabled_flag` etc.
-    let config = crate::models::compaction_threshold_for_model_at_percent("deepseek-v4-pro", 80.0);
-    // Verify the threshold is reasonable (> 0 and < context window).
-    assert!(config > 0, "compaction threshold must be positive");
-    assert!(config < 1_000_000, "compaction threshold must be below 1M");
-}

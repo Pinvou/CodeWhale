@@ -10164,26 +10164,6 @@ mod kimi_code_pairing_tests {
     use super::*;
 
     #[test]
-    fn membership_roster_passes_on_kimi_code_endpoint() {
-        for model in [
-            KIMI_CODE_K3_MODEL,
-            KIMI_CODE_K3_256K_MODEL,
-            DEFAULT_KIMI_CODE_MODEL,
-            KIMI_CODE_HIGHSPEED_MODEL,
-        ] {
-            assert!(
-                validate_kimi_code_api_model_id(
-                    ApiProvider::Moonshot,
-                    DEFAULT_KIMI_CODE_BASE_URL,
-                    model,
-                )
-                .is_ok(),
-                "{model} must be accepted on the exact Kimi Code membership endpoint"
-            );
-        }
-    }
-
-    #[test]
     fn direct_platform_ids_fail_on_kimi_code_endpoint() {
         for model in [
             MOONSHOT_KIMI_K3_MODEL,

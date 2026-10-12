@@ -956,13 +956,6 @@ mod tests {
         assert_eq!(registry.get("/other").unwrap().body, "Body");
     }
 
-    #[test]
-    fn reload_and_current_registry_compile_sentinel() {
-        reload(None);
-        let registry = current_registry();
-        assert!(registry.is_valid());
-    }
-
     fn write_workspace_command(workspace: &Path, name: &str, content: &str) {
         let dir = workspace.join(".codewhale").join("commands");
         std::fs::create_dir_all(&dir).expect("create commands dir");

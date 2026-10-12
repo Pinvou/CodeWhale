@@ -531,38 +531,6 @@ mod tests {
     }
 
     #[test]
-    fn list_renders_hooks_grouped_by_event_and_notes_disabled_state() {
-        // We test the formatter directly via a synthetic HooksConfig
-        // because `App` is heavyweight to spin up here. The actual
-        // `list(&App)` path is exercised once we hand the real
-        // config in via `app.hooks.config()`; the formatter logic is
-        // unit-tested standalone below.
-        let cfg = crate::hooks::HooksConfig {
-            enabled: false,
-            hooks: vec![
-                Hook::new(HookEvent::SessionStart, "echo started").with_name("greet"),
-                Hook::new(HookEvent::ToolCallAfter, "notify-send done")
-                    .with_condition(HookCondition::ToolName {
-                        name: "exec_shell".into(),
-                    })
-                    .with_name("notify"),
-            ],
-            ..crate::hooks::HooksConfig::default()
-        };
-
-        // Synthesize the expected sections by re-running the same
-        // formatter logic against the BTreeMap grouping.
-        let mut by_event: std::collections::BTreeMap<&str, Vec<&Hook>> =
-            std::collections::BTreeMap::new();
-        for h in &cfg.hooks {
-            by_event.entry(event_label(h.event)).or_default().push(h);
-        }
-        let events: Vec<&&str> = by_event.keys().collect();
-        // BTreeMap sorts alphabetically — `session_start` before `tool_call_after`.
-        assert_eq!(events, vec![&"session_start", &"tool_call_after"]);
-    }
-
-    #[test]
     fn events_listing_states_scope_and_the_steering_allowlist() {
         let body = events().message.expect("non-empty body");
         // Scope truth: this is a TUI runtime feature.

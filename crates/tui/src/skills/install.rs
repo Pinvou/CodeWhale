@@ -517,27 +517,6 @@ pub fn uninstall(name: &str, skills_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Mark a community-installed skill as trusted, binding the marker to the
-/// current package content digest (schema v2).
-///
-/// Refuses to mark system skills (no `.installed-from`) so the bundled
-/// `skill-creator` doesn't accidentally inherit elevated tool privileges.
-#[cfg(test)]
-pub fn trust(name: &str, skills_dir: &Path) -> Result<()> {
-    let target = skill_target_path(name, skills_dir)?;
-    if !target.exists() {
-        bail!("skill '{name}' is not installed at {}", target.display());
-    }
-    ensure_target_within_skills_dir(&target, skills_dir)?;
-    if !target.join(INSTALLED_FROM_MARKER).exists() {
-        return Err(InstallError::NotInstalledHere(name.to_string()).into());
-    }
-    let content_digest = super::package_digest::compute_package_digest(&target)
-        .with_context(|| format!("cannot compute content digest for {}", target.display()))?;
-    write_trust_v2(&target, &content_digest)?;
-    Ok(())
-}
-
 /// Fetch the curated registry and return the parsed entries.
 ///
 /// Honours `network` (skipping the call entirely on Deny / Prompt).
@@ -1859,7 +1838,6 @@ mod tests {
             "two words",
         ] {
             assert!(uninstall(bad, &skills_dir).is_err());
-            assert!(trust(bad, &skills_dir).is_err());
         }
     }
 

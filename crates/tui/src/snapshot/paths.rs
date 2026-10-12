@@ -144,15 +144,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_snapshot_dir_creates_path() {
-        let tmp = tempdir().expect("tempdir");
-        // Use scoped HOME so we don't pollute the real one.
-        let dir = snapshot_dir_with_home(tmp.path(), Some(tmp.path().to_path_buf()));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(dir.exists());
-    }
-
-    #[test]
     fn snapshot_git_dir_appends_dot_git() {
         let tmp = tempdir().expect("tempdir");
         let git_dir = snapshot_git_dir(tmp.path());

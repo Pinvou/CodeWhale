@@ -1776,7 +1776,6 @@
   "StatusMcpConfigured": "已配置 {count} 个",
   "StatusContextUsage": "已使用 {percent}%（{used} / {max} 令牌）",
   "StatusContextSourceConfigured": "配置值",
-  "StatusContextSourceProviderReported": "提供商报告",
   "StatusContextSourceKimiSafeFloor": "静态 Kimi Code 安全下限",
   "StatusContextSourceCatalog": "目录",
   "StatusContextSourceModelHint": "模型名称提示（未验证）",

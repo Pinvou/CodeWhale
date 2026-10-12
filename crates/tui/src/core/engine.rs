@@ -4950,7 +4950,6 @@ impl Engine {
                 ),
                 mcp_tool_names: Vec::new(),
                 mcp: McpToolState::Disabled,
-                subagent_runtime_model: None,
                 mailbox: None,
                 plugin_tool_names: HashSet::new(),
             };
@@ -5086,14 +5085,12 @@ impl Engine {
             None
         };
 
-        let mut subagent_runtime_model = None;
         let mut tool_registry = if subagents_available {
             let runtime = if let Some(client) = route.client.clone() {
                 let runtime_allow_shell =
                     input_policy.allow_shell && !matches!(input_policy.mode, AppMode::Plan);
                 let runtime_shell_policy =
                     shell_policy_for_mode(input_policy.mode, runtime_allow_shell);
-                subagent_runtime_model = Some(route.model.clone());
                 let mut rt = SubAgentRuntime::new(
                     client,
                     route.model.clone(),
@@ -5223,7 +5220,6 @@ impl Engine {
             surface,
             mcp_tool_names,
             mcp: mcp_state,
-            subagent_runtime_model,
             mailbox: mailbox_for_runtime,
             plugin_tool_names,
         }
@@ -8615,10 +8611,6 @@ struct TurnToolBuild {
     mcp_tool_names: Vec<String>,
     /// What is known about the MCP contribution to this catalog.
     mcp: McpToolState,
-    /// Route model installed into the child runtime, when sub-agent tools were
-    /// available. This is an internal receipt, not a manifest field.
-    #[cfg_attr(not(test), allow(dead_code))]
-    subagent_runtime_model: Option<String>,
     /// Turn-scoped sub-agent mailbox and its flush barrier, when sub-agent
     /// wiring was live. The engine must seal, flush, and await this before it
     /// emits `TurnComplete`. Detached children never reopen this ordering

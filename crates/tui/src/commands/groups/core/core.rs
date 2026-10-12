@@ -334,7 +334,6 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
                 None,
                 route_base_url,
                 app.active_context_window_override,
-                None,
                 // This receipt feeds only base_url/limits below; the static
                 // policy is fine because protocol is never consumed here.
                 None,

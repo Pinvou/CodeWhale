@@ -442,15 +442,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn probe_is_infallible_and_cached() {
-        let a = probe_display_refresh();
-        let b = probe_display_refresh();
-        assert_eq!(a, b);
-        // Either measured or skipped — never panics.
-        assert!(a.outcome() == "ok" || a.outcome() == "skipped" || a.outcome() == "error");
-    }
-
     /// The real host probe, which `probe_display_refresh` no longer reaches
     /// under test. Its result is whatever this machine reports, so assert only
     /// the invariants that hold everywhere — but keep calling it, so the FFI

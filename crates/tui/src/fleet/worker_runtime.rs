@@ -2954,8 +2954,11 @@ mod tests {
 
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join(draft.file_name()), draft.render_toml()).unwrap();
-        let profiles = crate::fleet::profile::load_agent_profiles_from_dir(dir.path())
-            .expect("rendered profile TOML loads");
+        let (profiles, _issues) = crate::fleet::profile::load_agent_profiles_from_dir_tolerant(
+            dir.path(),
+            crate::fleet::profile::ProfileOrigin::Workspace,
+        )
+        .expect("rendered profile TOML loads");
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].profile.provider.as_deref(), Some("openrouter"));
         assert_eq!(profiles[0].profile.reasoning_effort.as_deref(), Some("max"));

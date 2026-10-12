@@ -27,11 +27,9 @@ const ALL_ACTIONS: &[&str] = &[
 /// Unified automation tool.
 ///
 /// One struct, one input schema per surface: the canonical `automation`
-/// tool (all actions, or the read-only subset via [`AutomationTool::read_only`])
-/// plus hidden legacy aliases carrying a `forced_action`.
+/// tool (all actions, or the read-only subset via [`AutomationTool::read_only`]).
 pub struct AutomationTool {
     name: &'static str,
-    forced_action: Option<&'static str>,
     read_only: bool,
 }
 
@@ -39,7 +37,6 @@ impl AutomationTool {
     pub const fn new(name: &'static str) -> Self {
         Self {
             name,
-            forced_action: None,
             read_only: false,
         }
     }
@@ -48,17 +45,7 @@ impl AutomationTool {
     pub const fn read_only(name: &'static str) -> Self {
         Self {
             name,
-            forced_action: None,
             read_only: true,
-        }
-    }
-
-    #[cfg(test)]
-    pub const fn alias(name: &'static str, action: &'static str) -> Self {
-        Self {
-            name,
-            forced_action: Some(action),
-            read_only: false,
         }
     }
 
@@ -71,15 +58,12 @@ impl AutomationTool {
     }
 
     fn resolve_action<'a>(&'a self, input: &'a Value) -> Result<&'a str, ToolError> {
-        let action = match self.forced_action {
-            Some(action) => action,
-            None => input.get("action").and_then(Value::as_str).ok_or_else(|| {
-                ToolError::invalid_input(format!(
-                    "automation: missing `action` (one of: {})",
-                    self.allowed_actions().join(", ")
-                ))
-            })?,
-        };
+        let action = input.get("action").and_then(Value::as_str).ok_or_else(|| {
+            ToolError::invalid_input(format!(
+                "automation: missing `action` (one of: {})",
+                self.allowed_actions().join(", ")
+            ))
+        })?;
         if self.allowed_actions().contains(&action) {
             Ok(action)
         } else {
@@ -102,40 +86,18 @@ impl ToolSpec for AutomationTool {
     }
 
     fn model_visible(&self) -> bool {
-        self.forced_action.is_none()
+        true
     }
 
     fn description(&self) -> &'static str {
-        match self.forced_action {
-            Some("create") => {
-                "Create a durable scheduled automation. Creation requires approval. Supported schedules: FREQ=ONCE;AT=YYYY-MM-DDTHH:MM[:SS] (local time) or RFC3339, FREQ=HOURLY..., FREQ=WEEKLY..., and FREQ=CRON;EXPR=<standard 5-field local cron>. delivery_mode=watcher is for condition checks: return EXACTLY NOTHING_TO_REPORT when there is no change."
-            }
-            Some("list") => {
-                "List durable automations with status, next run, and last run timestamps."
-            }
-            Some("read") => "Read one durable automation plus recent run records.",
-            Some("update") => {
-                "Update a durable automation. Requires approval; schedules support ONCE, HOURLY, WEEKLY, and 5-field CRON forms."
-            }
-            Some("pause") => "Pause a durable automation. Requires approval.",
-            Some("resume") => "Resume a paused durable automation. Requires approval.",
-            Some("delete") => "Delete a durable automation and its run history. Requires approval.",
-            Some("run") => {
-                "Run an automation now. The run enqueues a normal durable task and returns linked task/thread/turn ids as they become available."
-            }
-            _ if self.read_only => {
-                "Inspect durable scheduled automations. Actions: \"list\" (status, next run, last run) and \"read\" (one automation plus recent run records)."
-            }
-            _ => {
-                "Manage durable scheduled automations. Actions: \"create\" (approval; schedules support ONCE, HOURLY, WEEKLY, and 5-field CRON forms; watcher mode uses EXACT NOTHING_TO_REPORT for no-change checks), \"list\", \"read\", \"update\" (approval), \"pause\" (approval), \"resume\" (approval), \"delete\" (approval), \"run\" (approval)."
-            }
+        if self.read_only {
+            "Inspect durable scheduled automations. Actions: \"list\" (status, next run, last run) and \"read\" (one automation plus recent run records)."
+        } else {
+            "Manage durable scheduled automations. Actions: \"create\" (approval; schedules support ONCE, HOURLY, WEEKLY, and 5-field CRON forms; watcher mode uses EXACT NOTHING_TO_REPORT for no-change checks), \"list\", \"read\", \"update\" (approval), \"pause\" (approval), \"resume\" (approval), \"delete\" (approval), \"run\" (approval)."
         }
     }
 
     fn input_schema(&self) -> Value {
-        if let Some(action) = self.forced_action {
-            return legacy_action_schema(action);
-        }
         let actions: Vec<&str> = self.allowed_actions().to_vec();
         let mut properties = serde_json::Map::new();
         properties.insert(
@@ -228,32 +190,27 @@ impl ToolSpec for AutomationTool {
     }
 
     fn capabilities(&self) -> Vec<ToolCapability> {
-        match self.forced_action {
-            Some(action) if Self::action_is_read(action) => vec![ToolCapability::ReadOnly],
+        if self.read_only {
+            vec![ToolCapability::ReadOnly]
+        } else {
             // `run` executes a stored automation now; the other mutating
             // actions schedule one to execute later, with its own prompt, cwd,
             // and task mode. Declaring only `RequiresApproval` described the
             // *approval* consequence and hid the *execution* one, which left
             // every capability-derived policy — including the child execution
             // envelope — unable to see that this family spawns agent runs.
-            Some(_) => vec![
+            vec![
                 ToolCapability::ExecutesCode,
                 ToolCapability::RequiresApproval,
-            ],
-            None if self.read_only => vec![ToolCapability::ReadOnly],
-            None => vec![
-                ToolCapability::ExecutesCode,
-                ToolCapability::RequiresApproval,
-            ],
+            ]
         }
     }
 
     fn approval_requirement(&self) -> ApprovalRequirement {
-        match self.forced_action {
-            Some(action) if Self::action_is_read(action) => ApprovalRequirement::Auto,
-            Some(_) => ApprovalRequirement::Required,
-            None if self.read_only => ApprovalRequirement::Auto,
-            None => ApprovalRequirement::Required,
+        if self.read_only {
+            ApprovalRequirement::Auto
+        } else {
+            ApprovalRequirement::Required
         }
     }
 
@@ -465,85 +422,6 @@ impl AutomationTool {
     }
 }
 
-/// The exact schema the legacy per-action tool exposed, kept so hidden alias
-/// registrations report an identical contract to the pre-unification tools.
-fn legacy_action_schema(action: &str) -> Value {
-    match action {
-        "create" => json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string" },
-                "prompt": { "type": "string" },
-                "rrule": {
-                    "type": "string",
-                    "description": "Supported: FREQ=ONCE;AT=2026-08-03T14:30 (local time or RFC3339), FREQ=HOURLY;INTERVAL=N[;BYDAY=MO,TU][;BYHOUR=9][;BYMINUTE=30], FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=30, or FREQ=CRON;EXPR=*/17 * * * *. Cron uses standard 5-field local time. For HOURLY, BYHOUR/BYMINUTE choose the initial local wall-clock anchor and INTERVAL advances from that anchor; BYHOUR is not a daily-only filter. Anchored wall times skip nonexistent clock times and use the first occurrence of ambiguous clock times."
-                },
-                "cwds": { "type": "array", "items": { "type": "string" } },
-                "model": { "type": "string", "description": "Model id for scheduled runs." },
-                "model_provider": { "type": "string", "description": "Provider kind for the pinned model." },
-                "model_provider_id": { "type": "string", "description": "Exact configured provider id." },
-                "mode": { "type": "string", "description": "Task mode for scheduled runs. Defaults to agent when omitted." },
-                "allow_shell": { "type": "boolean", "default": false },
-                "trust_mode": { "type": "boolean", "default": false },
-                "auto_approve": { "type": "boolean", "default": false },
-                "delivery_mode": {
-                    "type": "string",
-                    "enum": ["task", "watcher"],
-                    "default": "task",
-                    "description": "Delivery mode. watcher prompts must return EXACTLY NOTHING_TO_REPORT when there is no change."
-                },
-                "paused": { "type": "boolean", "default": false }
-            },
-            "required": ["name", "prompt", "rrule"],
-            "additionalProperties": false
-        }),
-        "list" => json!({
-            "type": "object",
-            "properties": {
-                "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
-            },
-            "additionalProperties": false
-        }),
-        "update" => json!({
-            "type": "object",
-            "properties": {
-                "automation_id": { "type": "string" },
-                "name": { "type": "string" },
-                "prompt": { "type": "string" },
-                "rrule": { "type": "string" },
-                "cwds": { "type": "array", "items": { "type": "string" } },
-                "model": { "type": "string", "description": "Model id for scheduled runs." },
-                "model_provider": { "type": "string", "description": "Provider kind for the pinned model." },
-                "model_provider_id": { "type": "string", "description": "Exact configured provider id." },
-                "mode": { "type": "string", "description": "Task mode for scheduled runs. Defaults to agent when omitted." },
-                "allow_shell": { "type": "boolean" },
-                "trust_mode": { "type": "boolean" },
-                "auto_approve": { "type": "boolean" },
-                "delivery_mode": { "type": "string", "enum": ["task", "watcher"] },
-                "status": { "type": "string", "enum": ["active", "paused"] }
-            },
-            "required": ["automation_id"],
-            "additionalProperties": false
-        }),
-        // read / pause / resume / delete / run share the id-only schema.
-        _ => automation_id_schema(true),
-    }
-}
-
-fn automation_id_schema(require_id: bool) -> Value {
-    let mut schema = json!({
-        "type": "object",
-        "properties": {
-            "automation_id": { "type": "string" }
-        },
-        "additionalProperties": false
-    });
-    if require_id {
-        schema["required"] = json!(["automation_id"]);
-    }
-    schema
-}
-
 fn string_array(input: &Value, field: &str) -> Result<Vec<String>, ToolError> {
     Ok(input
         .get(field)
@@ -591,13 +469,6 @@ mod tests {
     use crate::tools::spec::ToolSpec;
 
     #[test]
-    fn create_schema_exposes_rrule() {
-        let schema = AutomationTool::alias("automation_create", "create").input_schema();
-        assert!(schema["properties"]["rrule"].is_object());
-        assert_eq!(schema["required"][0], "name");
-    }
-
-    #[test]
     fn update_status_rejects_unknown_values_instead_of_coercing_to_active() {
         assert!(matches!(
             parse_automation_status("active"),
@@ -614,29 +485,6 @@ mod tests {
                 "{err}"
             );
         }
-    }
-
-    #[test]
-    fn create_schema_auto_approve_defaults_to_false() {
-        let schema = AutomationTool::alias("automation_create", "create").input_schema();
-        let auto_approve = &schema["properties"]["auto_approve"];
-        assert_eq!(auto_approve["type"], "boolean");
-        assert_eq!(auto_approve["default"], false);
-    }
-
-    #[test]
-    fn create_schema_exposes_delivery_mode_and_new_schedule_forms() {
-        let schema = AutomationTool::alias("automation_create", "create").input_schema();
-        assert!(schema["properties"]["model"].is_object());
-        assert_eq!(
-            schema["properties"]["delivery_mode"]["enum"],
-            json!(["task", "watcher"])
-        );
-        let description = schema["properties"]["rrule"]["description"]
-            .as_str()
-            .expect("rrule description");
-        assert!(description.contains("FREQ=ONCE"));
-        assert!(description.contains("FREQ=CRON"));
     }
 
     #[test]
@@ -685,16 +533,6 @@ mod tests {
 
     #[test]
     fn aliases_hide_from_model_and_force_action() {
-        let create = AutomationTool::alias("automation_create", "create");
-        assert!(!create.model_visible());
-        assert_eq!(create.name(), "automation_create");
-        assert_eq!(create.approval_requirement(), ApprovalRequirement::Required);
-
-        let list = AutomationTool::alias("automation_list", "list");
-        assert!(!list.model_visible());
-        assert_eq!(list.approval_requirement(), ApprovalRequirement::Auto);
-        assert!(list.is_read_only_for(&json!({})));
-
         let canonical = AutomationTool::new("automation");
         assert!(canonical.model_visible());
         // Approval routing stays per action: read actions auto, writes required.

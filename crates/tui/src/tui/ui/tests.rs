@@ -24,9 +24,7 @@ use crate::tui::file_mention::{
     apply_mention_menu_selection, find_file_mention_completions, partial_file_mention_at_cursor,
     try_autocomplete_file_mention, user_request_with_file_mentions, visible_mention_menu_entries,
 };
-use crate::tui::footer_ui::{
-    format_context_budget, format_token_count_compact, friendly_subagent_progress,
-};
+use crate::tui::footer_ui::{format_token_count_compact, friendly_subagent_progress};
 use crate::tui::history::{
     ExecCell, ExecSource, GenericToolCell, HistoryCell, SubAgentCell, ToolCell, ToolStatus,
 };
@@ -2940,8 +2938,10 @@ fn loading_mouse_filter_keeps_hover_and_active_drags() {
     assert!(!should_drop_loading_mouse_motion(&app, drag));
 
     app.viewport.transcript_scrollbar_dragging = false;
-    app.work_surface = crate::tui::work_surface::WorkSurfaceState::with_placement(
+    app.work_surface = crate::tui::work_surface::WorkSurfaceState::with_layout(
         crate::tui::work_surface::WorkSurfacePlacement::Top,
+        3,
+        30,
     );
     app.work_surface.last_area = Some(Rect::new(0, 0, 80, 3));
     let started = crate::tui::work_surface::handle_mouse(
@@ -10275,7 +10275,10 @@ async fn lost_strict_message_submit_executor_keeps_dispatch_atomic_and_recoverab
 
     // The failed gate leaves no poisoned dispatch state: a later ordinary
     // message can start and reaches the engine exactly once.
-    app.hooks = crate::hooks::HookExecutor::disabled();
+    app.hooks = crate::hooks::HookExecutor::new(
+        crate::hooks::HooksConfig::default(),
+        std::path::PathBuf::from("."),
+    );
     dispatch_user_message(
         &mut app,
         &Config::default(),
@@ -11534,10 +11537,12 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
     });
     let thinking_idx = crate::tui::streaming_thinking::ensure_active_entry(&mut app);
     crate::tui::streaming_thinking::append(&mut app, thinking_idx, "partial reasoning");
-    app.push_pending_steer(crate::tui::app::QueuedMessage::new(
-        "please continue after recovery".to_string(),
-        None,
-    ));
+    app.pending_steers
+        .push_back(crate::tui::app::QueuedMessage::new(
+            "please continue after recovery".to_string(),
+            None,
+        ));
+    app.submit_pending_steers_after_interrupt = true;
 
     let recovered = recover_engine_event_disconnect(&mut app);
 
@@ -12737,12 +12742,6 @@ fn format_token_count_compact_formats_units() {
     assert_eq!(format_token_count_compact(999), "999");
     assert_eq!(format_token_count_compact(1_200), "1.2k");
     assert_eq!(format_token_count_compact(1_000_000), "1.0M");
-}
-
-#[test]
-fn format_context_budget_caps_overflow_display() {
-    assert_eq!(format_context_budget(5_000, 128_000), "5.0k/128.0k");
-    assert_eq!(format_context_budget(250_000, 128_000), ">128.0k/128.0k");
 }
 
 #[test]
@@ -21767,10 +21766,11 @@ fn merge_pending_steers_returns_none_when_empty() {
 #[test]
 fn merge_pending_steers_passes_through_single_message() {
     let mut app = create_test_app();
-    app.push_pending_steer(QueuedMessage::new(
+    app.pending_steers.push_back(QueuedMessage::new(
         "lone steer".to_string(),
         Some("skill body".to_string()),
     ));
+    app.submit_pending_steers_after_interrupt = true;
     let merged = merge_pending_steers(&mut app).expect("merge yields a message");
     assert_eq!(merged.display, "lone steer");
     assert_eq!(merged.skill_instruction.as_deref(), Some("skill body"));
@@ -21781,9 +21781,13 @@ fn merge_pending_steers_passes_through_single_message() {
 #[test]
 fn merge_pending_steers_concatenates_multiple_with_blank_line() {
     let mut app = create_test_app();
-    app.push_pending_steer(QueuedMessage::new("first".to_string(), None));
-    app.push_pending_steer(QueuedMessage::new("second".to_string(), None));
-    app.push_pending_steer(QueuedMessage::new("third".to_string(), None));
+    app.pending_steers
+        .push_back(QueuedMessage::new("first".to_string(), None));
+    app.pending_steers
+        .push_back(QueuedMessage::new("second".to_string(), None));
+    app.pending_steers
+        .push_back(QueuedMessage::new("third".to_string(), None));
+    app.submit_pending_steers_after_interrupt = true;
 
     let merged = merge_pending_steers(&mut app).expect("merge yields a message");
     assert_eq!(merged.display, "first\n\nsecond\n\nthird");
@@ -21793,14 +21797,15 @@ fn merge_pending_steers_concatenates_multiple_with_blank_line() {
 #[test]
 fn merge_pending_steers_keeps_first_skill_instruction_only() {
     let mut app = create_test_app();
-    app.push_pending_steer(QueuedMessage::new(
+    app.pending_steers.push_back(QueuedMessage::new(
         "a".to_string(),
         Some("first skill".to_string()),
     ));
-    app.push_pending_steer(QueuedMessage::new(
+    app.pending_steers.push_back(QueuedMessage::new(
         "b".to_string(),
         Some("second skill".to_string()),
     ));
+    app.submit_pending_steers_after_interrupt = true;
     let merged = merge_pending_steers(&mut app).expect("merge yields a message");
     assert_eq!(merged.skill_instruction.as_deref(), Some("first skill"));
     assert_eq!(merged.display, "a\n\nb");
@@ -21828,8 +21833,11 @@ fn restored_queued_message_crosses_bounded_message_submit_serialization() {
 #[test]
 fn merged_pending_steers_cross_bounded_message_submit_serialization() {
     let mut app = create_test_app();
-    app.push_pending_steer(QueuedMessage::new("first \"quoted\"\n".repeat(5_000), None));
-    app.push_pending_steer(QueuedMessage::new("second 用户\n".repeat(5_000), None));
+    app.pending_steers
+        .push_back(QueuedMessage::new("first \"quoted\"\n".repeat(5_000), None));
+    app.pending_steers
+        .push_back(QueuedMessage::new("second 用户\n".repeat(5_000), None));
+    app.submit_pending_steers_after_interrupt = true;
     let merged = merge_pending_steers(&mut app).expect("merged message");
     let payload = crate::hooks::message_submit_payload(&app.base_hook_context(), &merged.display);
     let encoded = serde_json::to_vec(&payload).expect("serialize merged payload");
@@ -21851,7 +21859,9 @@ fn merged_pending_steers_cross_bounded_message_submit_serialization() {
 #[test]
 fn build_pending_input_preview_populates_all_three_buckets() {
     let mut app = create_test_app();
-    app.push_pending_steer(QueuedMessage::new("steer-msg".to_string(), None));
+    app.pending_steers
+        .push_back(QueuedMessage::new("steer-msg".to_string(), None));
+    app.submit_pending_steers_after_interrupt = true;
     app.rejected_steers.push_back("rejected-msg".to_string());
     app.queue_message(QueuedMessage::new("queued-msg".to_string(), None));
 
@@ -22001,23 +22011,23 @@ fn openrouter_credits_map_remaining_usd() {
 #[test]
 fn displayed_session_cost_is_monotonic_under_negative_reconciliation() {
     let mut app = create_test_app();
-    app.accrue_subagent_cost(0.50);
-    let after_first = app.displayed_session_cost();
+    app.accrue_subagent_cost_estimate(crate::pricing::CostEstimate::usd_only(0.50));
+    let after_first = app.displayed_session_cost_for_currency(crate::pricing::CostCurrency::Usd);
     assert!((after_first - 0.50).abs() < 1e-6);
 
     // Simulate reconciliation that lowers the underlying counter (e.g. a
     // cache discount applied after the fact). The underlying value drops,
     // but the displayed cost must not.
     app.session.subagent_cost = 0.20;
-    let after_second = app.displayed_session_cost();
+    let after_second = app.displayed_session_cost_for_currency(crate::pricing::CostCurrency::Usd);
     assert!(
         after_second >= after_first,
         "displayed cost regressed: {after_second} < {after_first}"
     );
 
     // Adding more cost should still bump above the high-water.
-    app.accrue_session_cost(0.10);
-    let after_add = app.displayed_session_cost();
+    app.accrue_session_cost_estimate(crate::pricing::CostEstimate::usd_only(0.10));
+    let after_add = app.displayed_session_cost_for_currency(crate::pricing::CostCurrency::Usd);
     assert!(after_add >= after_first);
 }
 
@@ -22038,14 +22048,16 @@ fn duplicate_mailbox_token_usage_does_not_regress_displayed_cost() {
         },
     };
     handle_subagent_mailbox(&mut app, 11, &usage);
-    let baseline = app.displayed_session_cost();
+    let baseline = app.displayed_session_cost_for_currency(crate::pricing::CostCurrency::Usd);
     assert!(baseline > 0.0);
 
     // Re-emit the same response under a fresh mailbox sequence — it must still
     // dedupe and leave displayed cost unchanged.
     handle_subagent_mailbox(&mut app, 12, &usage);
     assert!(
-        (app.displayed_session_cost() - baseline).abs() < 1e-9,
+        (app.displayed_session_cost_for_currency(crate::pricing::CostCurrency::Usd) - baseline)
+            .abs()
+            < 1e-9,
         "duplicate provider response must not move displayed cost"
     );
 
@@ -22056,7 +22068,7 @@ fn duplicate_mailbox_token_usage_does_not_regress_displayed_cost() {
     };
     *source_id = "response-y".to_string();
     handle_subagent_mailbox(&mut app, 13, &distinct);
-    assert!(app.displayed_session_cost() > baseline);
+    assert!(app.displayed_session_cost_for_currency(crate::pricing::CostCurrency::Usd) > baseline);
 }
 #[test]
 fn checklist_write_renders_dedicated_card() {

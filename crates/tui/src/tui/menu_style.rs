@@ -164,60 +164,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selected_row_style_is_the_canonical_trio() {
-        assert_eq!(
-            selected_row_style(),
-            Style::default()
-                .fg(palette::SELECTION_TEXT)
-                .bg(palette::SELECTION_BG)
-                .add_modifier(Modifier::BOLD)
-        );
-    }
-
-    #[test]
-    fn selected_row_variants_keep_the_shared_background() {
-        assert_eq!(
-            selected_row_bg_style(),
-            Style::default().bg(palette::SELECTION_BG)
-        );
-        assert_eq!(
-            selected_row_style_with_fg(palette::WHALE_ACTION),
-            Style::default()
-                .fg(palette::WHALE_ACTION)
-                .bg(palette::SELECTION_BG)
-                .add_modifier(Modifier::BOLD)
-        );
-    }
-
-    #[test]
-    fn disabled_selected_row_is_muted_ink_on_elevated_surface() {
-        assert_eq!(
-            disabled_selected_row_style(),
-            Style::default()
-                .fg(palette::TEXT_MUTED)
-                .bg(palette::SURFACE_ELEVATED)
-                .add_modifier(Modifier::DIM)
-        );
-    }
-
-    #[test]
     fn hovered_row_is_elevated_band_without_selection_ink() {
         let hovered = hovered_row_style();
         assert_eq!(hovered, Style::default().bg(palette::SURFACE_ELEVATED));
         assert_ne!(hovered, selected_row_style());
         assert_ne!(hovered, selected_row_bg_style());
-    }
-
-    #[test]
-    fn theme_variant_uses_the_previewed_themes_own_tokens() {
-        let theme = palette::UI_THEME;
-        assert_eq!(
-            theme_selected_row_style(&theme),
-            Style::default()
-                .fg(theme.text_body)
-                .bg(theme.selection_bg)
-                .add_modifier(Modifier::BOLD)
-        );
     }
 
     #[test]

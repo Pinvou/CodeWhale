@@ -696,7 +696,6 @@ impl ProviderDashboardRow {
                 .then(|| configured_base_url.clone())
                 .flatten(),
             config.context_window_for_provider_config(provider),
-            None,
             // The dialect of the same table that supplied the base URL above
             // (this row's scoped config), so the row's supported-protocol
             // display matches what a turn on this row would bind.

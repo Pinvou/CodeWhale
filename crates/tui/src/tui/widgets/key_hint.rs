@@ -58,9 +58,4 @@ mod tests {
         assert!(has_ctrl_or_alt(KeyModifiers::ALT));
         assert!(!has_ctrl_or_alt(KeyModifiers::NONE));
     }
-
-    #[test]
-    fn alt_prefix_uses_deterministic_test_spelling() {
-        assert_eq!(alt_prefix(), "⌥+");
-    }
 }

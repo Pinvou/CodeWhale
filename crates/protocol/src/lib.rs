@@ -17,7 +17,6 @@ pub mod ids;
 pub mod journal;
 pub mod op;
 pub mod runtime;
-pub mod workroom;
 
 /// Common trait for lifecycle status enums across the protocol layer.
 ///

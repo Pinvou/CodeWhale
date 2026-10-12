@@ -9,19 +9,14 @@
 //! ├─────────────────────────────────────────┤
 //! │ AppendLog (append-only)                  │ ← conversation history
 //! │   push() only, no insert / remove / edit │   preserves prefix of prior turns
-//! ├─────────────────────────────────────────┤
-//! │ TurnScratch (ephemeral)                  │ ← per-turn metadata
-//! │   cleared at every turn boundary         │   the only new content per request
 //! └─────────────────────────────────────────┘
 //! ```
 //!
-//! ## Status (Phase 1 foundation)
+//! ## Status
 //!
-//! `PinnedPrefix` / `FrozenPrefix` / `PrefixDrift` are ready for use.
-//! `AppendLog` / `TurnScratch` / `ThreeZoneRequest` are type scaffolding
-//! for future phases — not yet wired into the request path.
+//! `PinnedPrefix` / `FrozenPrefix` / `PrefixDrift` / `AppendLog` are ready
+//! for use; `AppendLog` itself is wired through `Session`'s message log.
 
-use crate::models::Role;
 use crate::models::{Message, SystemPrompt, Tool};
 // ── helpers ────────────────────────────────────────────────────────────
 
@@ -201,10 +196,6 @@ impl AppendLog {
         }
     }
 
-    pub fn from_messages(messages: Vec<Message>) -> Self {
-        Self { messages }
-    }
-
     /// Append a message to the log. A single-message push is the cheapest
     /// mutation for prefix-cache stability — it extends the byte sequence
     /// without disturbing earlier turns.
@@ -281,124 +272,13 @@ impl std::ops::Deref for AppendLog {
     }
 }
 
-// ── TurnScratch ────────────────────────────────────────────────────────
-
-/// Per-turn ephemeral data. Cleared at every turn boundary.
-///
-/// **Phase 1 scaffolding** — not yet wired into the engine request path.
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, Default)]
-pub struct TurnScratch {
-    pub working_set: Vec<String>,
-    pub user_message: Option<Message>,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-impl TurnScratch {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn clear(&mut self) {
-        self.working_set.clear();
-        self.user_message = None;
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.working_set.is_empty() && self.user_message.is_none()
-    }
-}
-
-// ── ThreeZoneRequest ───────────────────────────────────────────────────
-
-/// A composed three-zone request ready for DeepSeek API serialization.
-///
-/// **Phase 1 scaffolding** — not yet wired into the engine request path.
-/// Currently the engine continues to use `MessageRequest` directly.
-#[expect(dead_code)]
-#[derive(Debug, Clone)]
-pub struct ThreeZoneRequest<'a> {
-    pub prefix: &'a FrozenPrefix,
-    pub log: &'a AppendLog,
-    pub scratch: TurnScratch,
-    pub model: String,
-    pub max_tokens: u32,
-    pub system: Option<SystemPrompt>,
-    pub tools: Option<Vec<Tool>>,
-    pub tool_choice: Option<serde_json::Value>,
-    pub reasoning_effort: Option<String>,
-    pub thinking: Option<serde_json::Value>,
-    pub stream: Option<bool>,
-    pub temperature: Option<f32>,
-    pub top_p: Option<f32>,
-    pub metadata: Option<serde_json::Value>,
-}
-
-#[cfg_attr(not(test), expect(dead_code))]
-impl<'a> ThreeZoneRequest<'a> {
-    /// Build the full message list from system prompt, append-log messages,
-    /// and scratch user message. The returned vector is serialized as the
-    /// `messages` field in the DeepSeek chat-completion request.
-    #[must_use]
-    pub fn build_messages(&self) -> Vec<Message> {
-        let mut messages = Vec::with_capacity(self.message_count());
-
-        match self.system.as_ref() {
-            Some(SystemPrompt::Text(text)) => {
-                messages.push(Message {
-                    role: Role::System,
-                    content: vec![crate::models::ContentBlock::Text {
-                        text: text.clone(),
-                        cache_control: None,
-                    }],
-                });
-            }
-            Some(SystemPrompt::Blocks(blocks)) => {
-                let content: Vec<crate::models::ContentBlock> = blocks
-                    .iter()
-                    .map(|block| crate::models::ContentBlock::Text {
-                        text: block.text.clone(),
-                        cache_control: block.cache_control.clone(),
-                    })
-                    .collect();
-                messages.push(Message {
-                    role: Role::System,
-                    content,
-                });
-            }
-            None => {}
-        }
-
-        for msg in self.log.iter() {
-            messages.push(msg.clone());
-        }
-
-        if let Some(ref user_msg) = self.scratch.user_message {
-            messages.push(user_msg.clone());
-        }
-
-        messages
-    }
-
-    #[must_use]
-    pub fn message_count(&self) -> usize {
-        let system_count = if self.system.is_some() { 1 } else { 0 };
-        let scratch_count = if self.scratch.user_message.is_some() {
-            1
-        } else {
-            0
-        };
-        system_count + self.log.len() + scratch_count
-    }
-}
-
 // ── tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::ContentBlock;
+    use crate::models::Role;
 
     fn make_tool(name: &str) -> Tool {
         Tool {
@@ -553,150 +433,5 @@ mod tests {
 
         let messages: Vec<_> = log.iter().collect();
         assert_eq!(messages.len(), 2);
-    }
-
-    #[test]
-    fn append_log_from_messages() {
-        let msgs = vec![make_message("user", "a"), make_message("assistant", "b")];
-        let log = AppendLog::from_messages(msgs);
-        assert_eq!(log.len(), 2);
-        assert_eq!(log.as_slice().len(), 2);
-    }
-
-    // ── TurnScratch ───────────────────────────────────────────────
-
-    #[test]
-    fn scratch_clear_empties_all_fields() {
-        let mut scratch = TurnScratch::new();
-        scratch.working_set.push("file.rs".to_string());
-        scratch.user_message = Some(make_message("user", "task"));
-
-        assert!(!scratch.is_empty());
-        scratch.clear();
-        assert!(scratch.is_empty());
-        assert!(scratch.working_set.is_empty());
-        assert!(scratch.user_message.is_none());
-    }
-
-    // ── ThreeZoneRequest ──────────────────────────────────────────
-
-    #[test]
-    fn build_messages_concatenates_zones() {
-        let sys = SystemPrompt::Text("you are helpful".to_string());
-        let tools = vec![make_tool("read")];
-        let prefix = PinnedPrefix::new(Some(&sys), tools).freeze();
-
-        let mut log = AppendLog::new();
-        log.push(make_message("user", "prev question"));
-        log.push(make_message("assistant", "prev answer"));
-
-        let scratch = TurnScratch {
-            working_set: vec!["main.rs".to_string()],
-            user_message: Some(make_message("user", "current task")),
-        };
-
-        let request = ThreeZoneRequest {
-            prefix: &prefix,
-            log: &log,
-            scratch,
-            model: "deepseek-v4-pro".to_string(),
-            max_tokens: 4096,
-            system: Some(sys),
-            tools: None,
-            tool_choice: None,
-            reasoning_effort: None,
-            thinking: None,
-            stream: None,
-            temperature: None,
-            top_p: None,
-            metadata: None,
-        };
-
-        let messages = request.build_messages();
-        assert_eq!(messages.len(), 4);
-        assert_eq!(messages[0].role, "system");
-        assert_eq!(messages[1].role, "user");
-        assert_eq!(messages[2].role, "assistant");
-        assert_eq!(messages[3].role, "user");
-        assert_eq!(request.message_count(), 4);
-    }
-
-    #[test]
-    fn build_messages_no_system_no_scratch() {
-        let prefix = PinnedPrefix::new(None, vec![]).freeze();
-
-        let mut log = AppendLog::new();
-        log.push(make_message("user", "hi"));
-
-        let request = ThreeZoneRequest {
-            prefix: &prefix,
-            log: &log,
-            scratch: TurnScratch::new(),
-            model: "x".to_string(),
-            max_tokens: 1,
-            system: None,
-            tools: None,
-            tool_choice: None,
-            reasoning_effort: None,
-            thinking: None,
-            stream: None,
-            temperature: None,
-            top_p: None,
-            metadata: None,
-        };
-
-        let messages = request.build_messages();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(request.message_count(), 1);
-    }
-
-    #[test]
-    fn blocks_system_prompt_preserves_cache_control() {
-        use crate::models::{CacheControl, SystemBlock};
-        let cc = Some(CacheControl {
-            cache_type: "ephemeral".to_string(),
-        });
-        let blocks = SystemPrompt::Blocks(vec![SystemBlock {
-            block_type: "text".to_string(),
-            text: "hello".to_string(),
-            cache_control: cc.clone(),
-        }]);
-
-        let prefix = PinnedPrefix::new(Some(&blocks), vec![]).freeze();
-        let log = AppendLog::new();
-        let scratch = TurnScratch::new();
-        let request = ThreeZoneRequest {
-            prefix: &prefix,
-            log: &log,
-            scratch,
-            model: "x".to_string(),
-            max_tokens: 1,
-            system: Some(blocks),
-            tools: None,
-            tool_choice: None,
-            reasoning_effort: None,
-            thinking: None,
-            stream: None,
-            temperature: None,
-            top_p: None,
-            metadata: None,
-        };
-
-        let messages = request.build_messages();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "system");
-        // cache_control should be preserved on the block.
-        if let ContentBlock::Text {
-            cache_control: actual_cc,
-            ..
-        } = &messages[0].content[0]
-        {
-            assert_eq!(
-                actual_cc.as_ref().map(|c| c.cache_type.as_str()),
-                Some("ephemeral")
-            );
-        } else {
-            panic!("expected Text content block");
-        }
     }
 }

@@ -856,7 +856,7 @@ mod tests {
             "---\nname: demo\ndescription: d\n---\nbody\n",
         )
         .unwrap();
-        let digest = crate::skills::audit::compute_package_digest(&skill_dir).unwrap();
+        let digest = crate::skills::package_digest::compute_package_digest(&skill_dir).unwrap();
         crate::skills::install::write_installed_from_v2(
             &skill_dir,
             "github:o/r",

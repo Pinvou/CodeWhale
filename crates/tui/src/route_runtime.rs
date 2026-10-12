@@ -1,4 +1,3 @@
-use chrono::{DateTime, Duration, Utc};
 use codewhale_config::provider::{WireFormat, wire_dialect_override};
 use codewhale_config::route::{
     LimitField, LogicalModelRef, OverrideSource, ReadyRouteCandidate, RouteLimits, RouteRequest,
@@ -24,7 +23,6 @@ use crate::models::DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS;
 pub(crate) enum ContextWindowSource {
     EmbeddingHost,
     Configured,
-    ProviderReported,
     StaticKimiCodeSafeFloor,
     Catalog,
     /// Parsed from a vendor-agnostic `_Nk` suffix in the model name
@@ -39,10 +37,9 @@ impl ContextWindowSource {
     /// Every rung, in precedence order. The name-suffix hint sits between
     /// catalog data and the conservative fallback: any concrete fact about
     /// the route beats a naming convention.
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::EmbeddingHost,
         Self::Configured,
-        Self::ProviderReported,
         Self::StaticKimiCodeSafeFloor,
         Self::Catalog,
         Self::NameSuffixHint,
@@ -54,7 +51,6 @@ impl ContextWindowSource {
         match self {
             Self::EmbeddingHost => "embedding host",
             Self::Configured => "configured",
-            Self::ProviderReported => "provider-reported",
             Self::StaticKimiCodeSafeFloor => "static Kimi Code safe floor",
             Self::Catalog => "catalog",
             Self::NameSuffixHint => "model-name hint",
@@ -166,19 +162,6 @@ fn classify_capability_fallback_window(model: &str, tokens: u32) -> ContextWindo
         ContextWindowSource::Fallback
     }
 }
-
-/// Authenticated Kimi Code `/models` metadata that a caller has already
-/// validated.  This is intentionally route-scoped: generic Moonshot metadata
-/// can never promote a bare `k3` route.  The current runtime has no implicit
-/// network probe; an authenticated model-listing consumer may pass this value
-/// to [`resolve_route_candidate_with_context_metadata`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProviderReportedKimiCodeContext {
-    pub(crate) context_tokens: u32,
-    pub(crate) observed_at: DateTime<Utc>,
-}
-
-const KIMI_CODE_REPORTED_CONTEXT_MAX_AGE_HOURS: i64 = 24;
 
 #[derive(Debug)]
 pub(crate) struct RouteCandidateResolution {
@@ -378,7 +361,6 @@ pub(crate) fn resolve_route_candidate(
         saved_provider_model,
         base_url_override,
         context_window_override,
-        None,
         // Config-free by contract: this wrapper's callers (unpinned child
         // admission, the fleet hermetic fallback) build no client from the
         // candidate. The fallback renders `candidate.protocol()` as a display
@@ -431,10 +413,7 @@ pub(crate) fn resolve_unpinned_model_candidate(
 }
 
 /// Resolve a candidate together with a non-secret context-window provenance
-/// receipt.  `provider_reported_context` is accepted only for the exact Kimi
-/// Code bare-K3 endpoint, only at the documented 1M entitlement, and only
-/// while fresh; this prevents generic Moonshot or stale metadata from being
-/// inherited by a membership-plan route.
+/// receipt.
 ///
 /// `custom_wire_override` must carry the dialect of the same table that
 /// supplied `base_url_override` when `provider` is
@@ -448,7 +427,6 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
     saved_provider_model: Option<&str>,
     base_url_override: Option<String>,
     context_window_override: Option<u32>,
-    provider_reported_context: Option<ProviderReportedKimiCodeContext>,
     custom_wire_override: Option<WireFormat>,
 ) -> Result<RouteCandidateResolution, String> {
     resolve_route_candidate_with_context_metadata_and_host_limits(
@@ -457,7 +435,6 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
         saved_provider_model,
         base_url_override,
         context_window_override,
-        provider_reported_context,
         None,
         custom_wire_override,
     )
@@ -492,7 +469,6 @@ fn resolve_route_candidate_with_context_metadata_and_host_limits(
     saved_provider_model: Option<&str>,
     base_url_override: Option<String>,
     context_window_override: Option<u32>,
-    provider_reported_context: Option<ProviderReportedKimiCodeContext>,
     host_limits: Option<RouteLimits>,
     custom_wire_override: Option<WireFormat>,
 ) -> Result<RouteCandidateResolution, String> {
@@ -523,12 +499,7 @@ fn resolve_route_candidate_with_context_metadata_and_host_limits(
     let resolved = resolver
         .resolve(&base_request)
         .map_err(|err| err.to_string())?;
-    let mut plan = plan_limit_overrides(
-        provider,
-        &resolved,
-        context_window_override,
-        provider_reported_context,
-    );
+    let mut plan = plan_limit_overrides(provider, &resolved, context_window_override);
     if let Some(host_limits) = host_limits {
         append_embedding_host_limit_overrides(&mut plan, host_limits)?;
     }
@@ -595,14 +566,12 @@ struct LimitOverridePlan {
 ///
 /// Precedence (unchanged from the previous post-hoc mutation order):
 /// provider-scoped roster/API corrections and exact-route documented output
-/// facts first, then operator-configured context, then fresh route-scoped
-/// provider-reported context, then the membership-plan safe floor, then
-/// catalog data, then the conservative fallback.
+/// facts first, then operator-configured context, then the membership-plan
+/// safe floor, then catalog data, then the conservative fallback.
 fn plan_limit_overrides(
     provider: ApiProvider,
     resolved: &ReadyRouteCandidate,
     context_window_override: Option<u32>,
-    provider_reported_context: Option<ProviderReportedKimiCodeContext>,
 ) -> LimitOverridePlan {
     let mut overrides = Vec::new();
     let configured = context_window_override.filter(|window| *window > 0);
@@ -671,34 +640,10 @@ fn plan_limit_overrides(
         &resolved.endpoint().base_url,
         resolved.wire_model_id().as_str(),
     );
-    let now = Utc::now();
-    if is_exact_kimi_code_k3
-        && provider_reported_context.is_some_and(|reported| {
-            reported.context_tokens == 1_048_576
-                && reported.observed_at <= now
-                && now.signed_duration_since(reported.observed_at)
-                    <= Duration::hours(KIMI_CODE_REPORTED_CONTEXT_MAX_AGE_HOURS)
-        })
-    {
-        let reported = provider_reported_context.expect("checked above");
-        overrides.push(SourcedLimitOverride {
-            field: LimitField::ContextTokens,
-            value: Some(u64::from(reported.context_tokens)),
-            source: OverrideSource::ProviderReportedContextWindow,
-        });
-        return LimitOverridePlan {
-            overrides,
-            context_window: ContextWindowResolution {
-                tokens: reported.context_tokens,
-                source: ContextWindowSource::ProviderReported,
-            },
-        };
-    }
 
     // Kimi Code's bare `k3` is a membership-plan route, not an alias for
     // Moonshot's public `kimi-k3` catalog entry.  The safe all-plan floor is
-    // the route's next precedence after an explicit config or fresh, scoped
-    // provider report.
+    // the route's next precedence after an explicit config.
     if is_exact_kimi_code_k3 {
         overrides.push(SourcedLimitOverride {
             field: LimitField::ContextTokens,
@@ -832,7 +777,6 @@ fn resolve_runtime_route_for_identity_with_limits(
         saved_provider_model,
         Some(route_config.deepseek_base_url()),
         route_config.context_window_for_provider_config(provider),
-        None,
         host_limits,
         custom_wire_override,
     )?;
@@ -1322,7 +1266,6 @@ mod tests {
             base.clone(),
             None,
             None,
-            None,
         )
         .expect("Kimi Code route");
         assert_eq!(static_floor.context_window.tokens, 262_144);
@@ -1335,12 +1278,8 @@ mod tests {
             ApiProvider::Moonshot,
             Some("k3"),
             None,
-            base.clone(),
+            base,
             Some(1_048_576),
-            Some(ProviderReportedKimiCodeContext {
-                context_tokens: 1_048_576,
-                observed_at: Utc::now(),
-            }),
             None,
         )
         .expect("configured route");
@@ -1350,53 +1289,12 @@ mod tests {
             ContextWindowSource::Configured
         );
 
-        let reported = resolve_route_candidate_with_context_metadata(
-            ApiProvider::Moonshot,
-            Some("k3"),
-            None,
-            base.clone(),
-            None,
-            Some(ProviderReportedKimiCodeContext {
-                context_tokens: 1_048_576,
-                observed_at: Utc::now(),
-            }),
-            None,
-        )
-        .expect("fresh documented provider metadata");
-        assert_eq!(reported.context_window.tokens, 1_048_576);
-        assert_eq!(
-            reported.context_window.source,
-            ContextWindowSource::ProviderReported
-        );
-
-        let stale = resolve_route_candidate_with_context_metadata(
-            ApiProvider::Moonshot,
-            Some("k3"),
-            None,
-            base,
-            None,
-            Some(ProviderReportedKimiCodeContext {
-                context_tokens: 1_048_576,
-                observed_at: Utc::now() - Duration::hours(25),
-            }),
-            None,
-        )
-        .expect("stale metadata falls back safely");
-        assert_eq!(
-            stale.context_window.source,
-            ContextWindowSource::StaticKimiCodeSafeFloor
-        );
-
         let generic_err = resolve_route_candidate_with_context_metadata(
             ApiProvider::Moonshot,
             Some("k3"),
             None,
             Some(crate::config::DEFAULT_MOONSHOT_BASE_URL.to_string()),
             None,
-            Some(ProviderReportedKimiCodeContext {
-                context_tokens: 1_048_576,
-                observed_at: Utc::now(),
-            }),
             None,
         )
         .expect_err("bare k3 is rejected on the direct Moonshot endpoint (#4687)");

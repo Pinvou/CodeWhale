@@ -69,7 +69,6 @@ fn task_shell_wait_input(mut input: Value) -> Value {
 /// which differs from every other action in this family.
 pub struct TasksTool {
     name: &'static str,
-    forced_action: Option<&'static str>,
     read_only: bool,
 }
 
@@ -94,7 +93,6 @@ impl TasksTool {
     pub const fn new(name: &'static str) -> Self {
         Self {
             name,
-            forced_action: None,
             read_only: false,
         }
     }
@@ -103,17 +101,7 @@ impl TasksTool {
     pub const fn read_only(name: &'static str) -> Self {
         Self {
             name,
-            forced_action: None,
             read_only: true,
-        }
-    }
-
-    #[cfg(test)]
-    pub const fn alias(name: &'static str, action: &'static str) -> Self {
-        Self {
-            name,
-            forced_action: Some(action),
-            read_only: false,
         }
     }
 
@@ -126,15 +114,12 @@ impl TasksTool {
     }
 
     fn resolve_action<'a>(&'a self, input: &'a Value) -> Result<&'a str, ToolError> {
-        let action = match self.forced_action {
-            Some(action) => action,
-            None => input.get("action").and_then(Value::as_str).ok_or_else(|| {
-                ToolError::invalid_input(format!(
-                    "tasks: missing `action` (one of: {})",
-                    self.allowed_actions().join(", ")
-                ))
-            })?,
-        };
+        let action = input.get("action").and_then(Value::as_str).ok_or_else(|| {
+            ToolError::invalid_input(format!(
+                "tasks: missing `action` (one of: {})",
+                self.allowed_actions().join(", ")
+            ))
+        })?;
         if self.allowed_actions().contains(&action) {
             Ok(action)
         } else {
@@ -149,12 +134,6 @@ impl TasksTool {
         READ_ACTIONS.contains(&action)
     }
 
-    /// Whether this action executes code (drives static capabilities and the
-    /// Plan-mode "no ExecutesCode tools" invariant).
-    fn action_executes_code(action: &str) -> bool {
-        action == "gate_run"
-    }
-
     fn action_requires_approval(action: &str) -> bool {
         !Self::action_is_read(action)
     }
@@ -167,49 +146,18 @@ impl ToolSpec for TasksTool {
     }
 
     fn model_visible(&self) -> bool {
-        self.forced_action.is_none()
+        true
     }
 
     fn description(&self) -> &'static str {
-        match self.forced_action {
-            Some("create") => {
-                "Create/enqueue a durable background task through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents."
-            }
-            Some("list") => {
-                "List recent durable tasks with status, linked thread/turn ids, and concise summaries."
-            }
-            Some("read") => {
-                "Read durable task detail including timeline, checklist, gate evidence, artifacts, and PR attempts."
-            }
-            Some("cancel") => {
-                "Cancel a queued or running durable task through TaskManager. Requires approval because it changes work state."
-            }
-            Some("gate_run") => {
-                "Run an approved verification gate command and return structured evidence. When inside a durable task, the gate result and log artifact are attached to that task. Dangerous commands are BLOCKED unless auto-approve is enabled; default timeout 120s."
-            }
-            Some("pr_attempt_record") => {
-                "Capture current git diff as a durable PR work attempt with patch artifact, changed files, and verification notes. Requires approval because it records work state."
-            }
-            Some("pr_attempt_list") => "List PR attempts recorded on a durable task.",
-            Some("pr_attempt_read") => {
-                "Read one recorded PR attempt and its patch artifact reference."
-            }
-            Some("pr_attempt_preflight") => {
-                "Run `git apply --check` for a recorded attempt patch. This is a no-mutation preflight and itself requires approval; the actual apply stays a separate explicit step."
-            }
-            _ if self.read_only => {
-                "Inspect durable tasks and their PR attempts. Actions: \"list\", \"read\", \"pr_attempt_list\", \"pr_attempt_read\"."
-            }
-            _ => {
-                "Manage durable background tasks through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents. Actions: \"create\" (enqueue; approval), \"list\", \"read\", \"cancel\" (approval), \"gate_run\" (run an approved verification gate command and return structured evidence; approval), \"pr_attempt_record\" (approval), \"pr_attempt_list\", \"pr_attempt_read\", \"pr_attempt_preflight\" (approval). Use task_shell_start for long-running shell work."
-            }
+        if self.read_only {
+            "Inspect durable tasks and their PR attempts. Actions: \"list\", \"read\", \"pr_attempt_list\", \"pr_attempt_read\"."
+        } else {
+            "Manage durable background tasks through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents. Actions: \"create\" (enqueue; approval), \"list\", \"read\", \"cancel\" (approval), \"gate_run\" (run an approved verification gate command and return structured evidence; approval), \"pr_attempt_record\" (approval), \"pr_attempt_list\", \"pr_attempt_read\", \"pr_attempt_preflight\" (approval). Use task_shell_start for long-running shell work."
         }
     }
 
     fn input_schema(&self) -> Value {
-        if let Some(action) = self.forced_action {
-            return legacy_action_schema(action);
-        }
         let actions: Vec<&str> = self.allowed_actions().to_vec();
         let mut properties = serde_json::Map::new();
         properties.insert(
@@ -318,29 +266,21 @@ impl ToolSpec for TasksTool {
     }
 
     fn capabilities(&self) -> Vec<ToolCapability> {
-        match self.forced_action {
-            Some(action) if Self::action_executes_code(action) => {
-                vec![
-                    ToolCapability::ExecutesCode,
-                    ToolCapability::RequiresApproval,
-                ]
-            }
-            Some(action) if Self::action_is_read(action) => vec![ToolCapability::ReadOnly],
-            Some(_) => vec![ToolCapability::RequiresApproval],
-            None if self.read_only => vec![ToolCapability::ReadOnly],
-            None => vec![
+        if self.read_only {
+            vec![ToolCapability::ReadOnly]
+        } else {
+            vec![
                 ToolCapability::ExecutesCode,
                 ToolCapability::RequiresApproval,
-            ],
+            ]
         }
     }
 
     fn approval_requirement(&self) -> ApprovalRequirement {
-        match self.forced_action {
-            Some(action) if Self::action_requires_approval(action) => ApprovalRequirement::Required,
-            Some(_) => ApprovalRequirement::Auto,
-            None if self.read_only => ApprovalRequirement::Auto,
-            None => ApprovalRequirement::Required,
+        if self.read_only {
+            ApprovalRequirement::Auto
+        } else {
+            ApprovalRequirement::Required
         }
     }
 
@@ -374,83 +314,6 @@ impl ToolSpec for TasksTool {
                 "tasks: invalid action `{action}`"
             ))),
         }
-    }
-}
-
-/// The exact schema the legacy per-action tool exposed, kept so hidden alias
-/// registrations report an identical contract to the pre-unification tools.
-fn legacy_action_schema(action: &str) -> Value {
-    match action {
-        "create" => json!({
-            "type": "object",
-            "properties": {
-                "prompt": { "type": "string", "description": "Work prompt for the durable task." },
-                "model": { "type": "string" },
-                "model_provider": { "type": "string", "description": "Provider kind for the pinned model." },
-                "model_provider_id": { "type": "string", "description": "Exact configured provider id." },
-                "workspace": { "type": "string", "description": "Workspace path; defaults to current workspace." },
-                "mode": { "type": "string", "enum": ["agent", "plan", "operate"] },
-                "allow_shell": { "type": "boolean" },
-                "trust_mode": { "type": "boolean" },
-                "auto_approve": { "type": "boolean" }
-            },
-            "required": ["prompt"],
-            "additionalProperties": false
-        }),
-        "list" => json!({
-            "type": "object",
-            "properties": {
-                "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
-            },
-            "additionalProperties": false
-        }),
-        "read" | "cancel" => json!({
-            "type": "object",
-            "properties": {
-                "task_id": { "type": "string", "description": "Full task id or unambiguous prefix." }
-            },
-            "required": ["task_id"],
-            "additionalProperties": false
-        }),
-        "gate_run" => json!({
-            "type": "object",
-            "properties": {
-                "gate": {
-                    "type": "string",
-                    "enum": ["fmt", "check", "clippy", "test", "custom"],
-                    "description": "Gate category."
-                },
-                "command": { "type": "string", "description": "Command to run." },
-                "cwd": { "type": "string", "description": "Optional working directory within the workspace." },
-                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 }
-            },
-            "required": ["gate", "command"],
-            "additionalProperties": false
-        }),
-        "pr_attempt_record" => json!({
-            "type": "object",
-            "properties": {
-                "task_id": { "type": "string", "description": "Task to attach to; defaults to active task." },
-                "attempt_group_id": { "type": "string" },
-                "attempt_index": { "type": "integer", "minimum": 1 },
-                "attempt_count": { "type": "integer", "minimum": 1 },
-                "summary": { "type": "string" },
-                "verification": { "type": "array", "items": { "type": "string" } }
-            },
-            "required": ["summary"],
-            "additionalProperties": false
-        }),
-        "pr_attempt_list" => task_id_schema(),
-        // pr_attempt_read / pr_attempt_preflight share the attempt-id schema.
-        _ => json!({
-            "type": "object",
-            "properties": {
-                "task_id": { "type": "string", "description": "Task id; defaults to active task." },
-                "attempt_id": { "type": "string" }
-            },
-            "required": ["attempt_id"],
-            "additionalProperties": false
-        }),
     }
 }
 
@@ -1229,16 +1092,6 @@ fn task_id_from_input_or_context(
         })
 }
 
-fn task_id_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "task_id": { "type": "string", "description": "Task id; defaults to active task." }
-        },
-        "additionalProperties": false
-    })
-}
-
 async fn git_output(workspace: &Path, args: &[&str]) -> Result<String, ToolError> {
     let args_owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
     let cwd = workspace.to_path_buf();
@@ -1409,11 +1262,12 @@ mod tests {
         // fabricated `spawn_error` (the classifier reads that field as an
         // environment failure): record the 127 instead.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let gate = TasksTool::alias("task_gate_run", "gate_run");
+        let gate = TasksTool::new("tasks");
         let context = ToolContext::new(tmp.path().to_path_buf());
         let result = gate
             .execute(
                 json!({
+                    "action": "gate_run",
                     "gate": "test",
                     "command": "exec definitely-not-a-real-shell-binary",
                     "timeout_ms": 5000,
@@ -1437,11 +1291,12 @@ mod tests {
         // record carries `timed_out: true` as the timeout signal instead,
         // and the hook surface must read the absence as "no exit code".
         let tmp = tempfile::tempdir().expect("tempdir");
-        let gate = TasksTool::alias("task_gate_run", "gate_run");
+        let gate = TasksTool::new("tasks");
         let context = ToolContext::new(tmp.path().to_path_buf());
         let result = gate
             .execute(
                 json!({
+                    "action": "gate_run",
                     "gate": "test",
                     "command": "sleep 30",
                     "timeout_ms": 500,
@@ -1456,19 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_task_schema_requires_prompt() {
-        let schema = TasksTool::alias("task_create", "create").input_schema();
-        assert_eq!(schema["required"][0], "prompt");
-        assert!(schema["properties"]["prompt"].is_object());
-    }
-
-    #[test]
     fn create_mode_enum_advertises_operate_not_yolo() {
-        let create = TasksTool::alias("task_create", "create").input_schema();
-        assert_eq!(
-            create["properties"]["mode"]["enum"],
-            json!(["agent", "plan", "operate"])
-        );
         let canonical = TasksTool::new("tasks").input_schema();
         assert_eq!(
             canonical["properties"]["mode"]["enum"],
@@ -1543,19 +1386,6 @@ mod tests {
 
     #[test]
     fn aliases_hide_from_model_and_force_action() {
-        let create = TasksTool::alias("task_create", "create");
-        assert!(!create.model_visible());
-        assert_eq!(create.name(), "task_create");
-        assert_eq!(create.approval_requirement(), ApprovalRequirement::Required);
-
-        let gate = TasksTool::alias("task_gate_run", "gate_run");
-        assert_eq!(gate.approval_requirement(), ApprovalRequirement::Required);
-        assert!(gate.capabilities().contains(&ToolCapability::ExecutesCode));
-
-        let list = TasksTool::alias("task_list", "list");
-        assert_eq!(list.approval_requirement(), ApprovalRequirement::Auto);
-        assert!(list.is_read_only_for(&json!({})));
-
         let canonical = TasksTool::new("tasks");
         assert!(canonical.model_visible());
         assert_eq!(

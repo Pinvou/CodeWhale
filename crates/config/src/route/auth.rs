@@ -124,27 +124,6 @@ impl AuthMethod {
         label: "External consent",
         prompts: &[],
     };
-
-    /// Whether `answers` satisfy this prompt's `when` clause.
-    #[must_use]
-    pub fn prompt_visible(
-        prompt: &Prompt,
-        answers: &std::collections::BTreeMap<String, String>,
-    ) -> bool {
-        let when = match prompt {
-            Prompt::Text { when, .. } | Prompt::Select { when, .. } => *when,
-        };
-        match when {
-            None => true,
-            Some(When { key, op, value }) => {
-                let actual = answers.get(key).map(String::as_str).unwrap_or("");
-                match op {
-                    Op::Eq => actual == value,
-                    Op::Neq => actual != value,
-                }
-            }
-        }
-    }
 }
 
 /// Owned, serializable projection of [`AuthMethod`] for `providers export`.
@@ -281,30 +260,5 @@ impl From<Choice> for ChoiceExport {
             value: value.value.to_string(),
             hint: value.hint.map(str::to_string),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn when_eq_hides_unmatched_prompt() {
-        let prompt = Prompt::Text {
-            key: "key",
-            message: "Key",
-            placeholder: None,
-            secret: true,
-            when: Some(When {
-                key: "plan",
-                op: Op::Eq,
-                value: "coding",
-            }),
-        };
-        let mut answers = std::collections::BTreeMap::new();
-        answers.insert("plan".into(), "token".into());
-        assert!(!AuthMethod::prompt_visible(&prompt, &answers));
-        answers.insert("plan".into(), "coding".into());
-        assert!(AuthMethod::prompt_visible(&prompt, &answers));
     }
 }

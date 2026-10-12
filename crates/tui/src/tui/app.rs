@@ -854,18 +854,6 @@ impl Default for ComposerState {
 
 /// Compatibility name retained for the first Tideline header slice. New
 /// surfaces register [`crate::tui::tideline::InteractionAction`] directly.
-pub type HeaderActionTarget = crate::tui::tideline::InteractionAction;
-
-/// A header target painted in the latest frame.
-///
-/// The visible chrome owns placement; input owns dispatch. Keeping the
-/// rectangular target alongside its typed action gives mouse and keyboard
-/// routes one shared destination without a second navigation system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HeaderHitbox {
-    pub area: Rect,
-    pub target: HeaderActionTarget,
-}
 
 /// Viewport/scroll state — fields related to transcript scrolling and caching.
 pub struct ViewportState {
@@ -3203,14 +3191,6 @@ impl App {
         self.report_mode_selection(next, outcome);
     }
 
-    /// Cycle through modes in reverse.
-    #[allow(dead_code)]
-    pub fn cycle_mode_reverse(&mut self) {
-        let next = self.mode.previous();
-        let outcome = self.select_mode(next);
-        self.report_mode_selection(next, outcome);
-    }
-
     /// Show the startup-default receipt for a selection that did not move live
     /// mode. `Changed` and `Refused` already have their own messaging (the mode
     /// chip, and `reject_setting_change_while_busy` respectively).
@@ -3695,13 +3675,6 @@ impl App {
         }
     }
 
-    /// Add `delta` to the parent-turn session cost and bump the displayed
-    /// high-water mark so the footer total never reverses (#244).
-    #[allow(dead_code)]
-    pub fn accrue_session_cost(&mut self, delta: f64) {
-        self.accrue_session_cost_estimate(CostEstimate::usd_only(delta));
-    }
-
     /// Record what a turn's pricing attempt actually produced.
     ///
     /// Called with the same audit that feeds [`Self::accrue_session_cost_estimate`],
@@ -3919,13 +3892,6 @@ impl App {
         self.session.pending_turn_cost_cny = 0.0;
     }
 
-    /// Add `delta` to the running sub-agent cost and bump the displayed
-    /// high-water mark so the footer total never reverses (#244).
-    #[allow(dead_code)]
-    pub fn accrue_subagent_cost(&mut self, delta: f64) {
-        self.accrue_subagent_cost_estimate(CostEstimate::usd_only(delta));
-    }
-
     /// Add a dual-currency sub-agent/background cost estimate.
     pub fn accrue_subagent_cost_estimate(&mut self, estimate: CostEstimate) {
         let total = CostEstimate {
@@ -3999,14 +3965,6 @@ impl App {
         if current.cny > self.session.displayed_cost_high_water_cny {
             self.session.displayed_cost_high_water_cny = current.cny;
         }
-    }
-
-    /// Read the visible session+sub-agent cost. Guaranteed monotonic across
-    /// reconciliation events (cache adjustments, provisional → final swaps)
-    /// for the lifetime of one session (#244).
-    #[allow(dead_code)]
-    pub fn displayed_session_cost(&self) -> f64 {
-        self.displayed_session_cost_for_currency(CostCurrency::Usd)
     }
 
     /// Read the visible session+sub-agent cost in the chosen currency.
@@ -5437,16 +5395,6 @@ impl App {
         self.clear_input_recoverable();
         self.needs_redraw = true;
         true
-    }
-
-    /// Park a legacy pending steer. New keyboard handling routes running-turn
-    /// drafts through Ctrl+Enter (same-turn steer) or Enter (next-turn
-    /// follow-up).
-    #[allow(dead_code)]
-    pub fn push_pending_steer(&mut self, message: QueuedMessage) {
-        self.pending_steers.push_back(message);
-        self.submit_pending_steers_after_interrupt = true;
-        self.needs_redraw = true;
     }
 
     /// Drain the pending-steer queue and clear the resend flag. Returns the

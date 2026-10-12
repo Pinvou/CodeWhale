@@ -1776,7 +1776,6 @@
   "StatusMcpConfigured": "{count} configurés",
   "StatusContextUsage": "{percent}% utilisé ({used} / {max} jetons)",
   "StatusContextSourceConfigured": "configurée",
-  "StatusContextSourceProviderReported": "signalée par le fournisseur",
   "StatusContextSourceKimiSafeFloor": "plancher de sécurité statique Kimi Code",
   "StatusContextSourceCatalog": "catalogue",
   "StatusContextSourceModelHint": "indice du nom du modèle (non vérifié)",
