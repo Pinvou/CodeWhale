@@ -3950,16 +3950,14 @@ impl Engine {
         // ceil((S+own)*3/2) − ceil(S*3/2) = floor(own*3/2) + 1 exactly when
         // S is even and own is odd; pinned exhaustively (80k pairs) and per
         // case by `context_pressure_delta_matches_clone_and_push_reference`.
+        // `true` must mirror the estimator's own rule (every message's
+        // thinking payloads count since preserved-thinking replay); the old
+        // tool-call-only gate would make S's parity drift from base's rule.
         let sum: usize = self
             .session
             .messages
             .iter()
-            .map(|m| {
-                crate::compaction::estimate_tokens_for_message(
-                    m,
-                    crate::compaction::message_has_tool_use(m),
-                )
-            })
+            .map(|m| crate::compaction::estimate_tokens_for_message(m, true))
             .sum();
         let own = current_text.len() / 4;
         let mut inflated_delta = own * 3 / 2;

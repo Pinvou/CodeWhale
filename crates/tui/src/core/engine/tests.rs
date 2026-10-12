@@ -14971,6 +14971,395 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
     ));
 }
 
+/// Serves one multi-block thinking + tool-use turn, then a plain closing
+/// turn, capturing every outgoing request. The shape swaps the first stream:
+/// `TrailingSignatureOnly` never sends the signature-only block's stop event
+/// and only the tool use follows it — the success-path persist guard is then
+/// the only thing that can keep the block; `StoplessFirstBlock` drops the
+/// FIRST block's stop event, so the second thinking block's start is the
+/// only thing that can flush it (the start-arm flush guard).
+struct MultiThinkingStreamClient {
+    requests: std::sync::Mutex<Vec<crate::models::MessageRequest>>,
+    calls: std::sync::atomic::AtomicUsize,
+    shape: MultiThinkingStreamShape,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MultiThinkingStreamShape {
+    Full,
+    TrailingSignatureOnly,
+    StoplessFirstBlock,
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for MultiThinkingStreamClient {
+    fn provider_name(&self) -> &str {
+        "anthropic-dialect-test"
+    }
+
+    fn model(&self) -> &str {
+        "claude-sonnet-4-6"
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        anyhow::bail!("multi-thinking regression uses the streaming model boundary")
+    }
+
+    async fn create_message_stream(
+        &self,
+        request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        self.requests
+            .lock()
+            .expect("multi-thinking request lock")
+            .push(request);
+        use crate::models::{ContentBlockStart, Delta, MessageDelta, StreamEvent};
+        use MultiThinkingStreamShape as Shape;
+        let events: Vec<StreamEvent> = if call == 1 && self.shape == Shape::TrailingSignatureOnly {
+            // One signature-only thinking block whose stop event never
+            // arrives, directly followed by the tool use: no flush runs
+            // before the stream ends, so only the success-path persist
+            // guard can park the block.
+            vec![
+                crate::llm_client::mock::canned::message_start("msg_trailing"),
+                StreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: ContentBlockStart::Thinking {
+                        thinking: String::new(),
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: Delta::SignatureDelta {
+                        signature: "sig-trailing".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStart {
+                    index: 1,
+                    content_block: ContentBlockStart::ToolUse {
+                        id: "toolu_multi".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({}),
+                        caller: None,
+                        thought_signature: None,
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index: 1,
+                    delta: Delta::InputJsonDelta {
+                        partial_json: r#"{"path":"a.txt"}"#.to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStop { index: 1 },
+                StreamEvent::MessageDelta {
+                    delta: MessageDelta {
+                        stop_reason: Some("tool_use".to_string()),
+                        stop_sequence: None,
+                    },
+                    usage: None,
+                },
+                StreamEvent::MessageStop,
+            ]
+        } else if call == 1 {
+            vec![
+                crate::llm_client::mock::canned::message_start("msg_multi"),
+                // Block 0: readable thinking with a signature.
+                StreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: ContentBlockStart::Thinking {
+                        thinking: "first block".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: Delta::ThinkingDelta {
+                        thinking: " continued".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: Delta::SignatureDelta {
+                        signature: "sig-1".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStop { index: 0 },
+                // Block 1: `display: "omitted"` shape — empty text, real
+                // signature.
+                StreamEvent::ContentBlockStart {
+                    index: 1,
+                    content_block: ContentBlockStart::Thinking {
+                        thinking: String::new(),
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index: 1,
+                    delta: Delta::SignatureDelta {
+                        signature: "sig-2".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStop { index: 1 },
+                // Block 2: redacted thinking, complete at start.
+                StreamEvent::ContentBlockStart {
+                    index: 2,
+                    content_block: ContentBlockStart::RedactedThinking {
+                        data: "ENC_REDACTED_1".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStop { index: 2 },
+                // Tool use closes the turn.
+                StreamEvent::ContentBlockStart {
+                    index: 3,
+                    content_block: ContentBlockStart::ToolUse {
+                        id: "toolu_multi".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({}),
+                        caller: None,
+                        thought_signature: None,
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index: 3,
+                    delta: Delta::InputJsonDelta {
+                        partial_json: r#"{"path":"a.txt"}"#.to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStop { index: 3 },
+                StreamEvent::MessageDelta {
+                    delta: MessageDelta {
+                        stop_reason: Some("tool_use".to_string()),
+                        stop_sequence: None,
+                    },
+                    usage: None,
+                },
+                StreamEvent::MessageStop,
+            ]
+        } else {
+            if call > 2 {
+                anyhow::bail!("unexpected multi-thinking request #{call}");
+            }
+            crate::llm_client::mock::canned::simple_text_turn("done")
+        };
+        // The stop-less-first-block shape deletes ONLY the first thinking
+        // block's stop event: the second thinking block's start event is
+        // then the only thing that can flush the first block, pinning the
+        // start-arm flush guard.
+        let events: Vec<StreamEvent> = if self.shape == Shape::StoplessFirstBlock {
+            events
+                .into_iter()
+                .filter(|event| !matches!(event, StreamEvent::ContentBlockStop { index: 0 }))
+                .collect()
+        } else {
+            events
+        };
+        let events = events.into_iter().map(Ok);
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// Adaptive/interleaved thinking emits several thinking blocks per assistant
+/// turn, and Anthropic requires the entire sequence — readable, signature-only
+/// (`display: "omitted"`), and redacted — replayed unmodified and in order on
+/// the follow-up request.
+#[tokio::test]
+async fn multi_block_and_redacted_thinking_persist_into_followup_requests() {
+    let requests = run_multi_thinking_turn(MultiThinkingStreamShape::Full).await;
+    assert_followup_carries_full_thinking_sequence(&requests);
+}
+
+/// The success-path persist guard duplicates the signature-only clause for a
+/// trailing block whose stop event never arrives (the stopped path is pinned
+/// by the multi-block test above). Without that duplicated arm, an
+/// omitted-display block in a stop-less stream would vanish from the
+/// follow-up request and Anthropic would 400 on the bare `tool_use` replay.
+#[tokio::test]
+async fn signature_only_block_survives_a_stream_that_skips_its_stop_event() {
+    let requests = run_multi_thinking_turn(MultiThinkingStreamShape::TrailingSignatureOnly).await;
+    assert!(requests.len() >= 2, "expected a follow-up request");
+    let followup = &requests[1];
+    let assistant = followup
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::Assistant)
+        .expect("follow-up request must contain the prior assistant turn");
+    let mut blocks = assistant.content.iter();
+    match (blocks.next(), blocks.next(), blocks.next()) {
+        (
+            Some(ContentBlock::Thinking {
+                thinking,
+                signature,
+                state: None,
+                redacted_data: None,
+                ..
+            }),
+            Some(ContentBlock::ToolUse { .. }),
+            None,
+        ) => {
+            assert!(thinking.is_empty(), "omitted-display text stays empty");
+            assert_eq!(
+                signature.as_deref(),
+                Some("sig-trailing"),
+                "the trailing stop-less signature-only block must persist"
+            );
+        }
+        other => panic!("unexpected follow-up assistant blocks: {other:?}"),
+    }
+}
+
+/// The start-arm flush guard: a thinking block whose stop event never
+/// arrives must still be parked when the NEXT thinking block starts, ahead
+/// of the new block. Without that flush, the first block's deltas would be
+/// silently overwritten by the second block and the replayed sequence would
+/// be truncated.
+#[tokio::test]
+async fn stopless_first_block_survives_the_next_thinking_start() {
+    let requests = run_multi_thinking_turn(MultiThinkingStreamShape::StoplessFirstBlock).await;
+    assert_followup_carries_full_thinking_sequence(&requests);
+}
+
+/// Drive a two-request turn whose first stream carries the full thinking
+/// sequence (readable+signed, signature-only, redacted, tool use), capturing
+/// every outgoing request. `shape` swaps the first stream per the client's
+/// contract.
+async fn run_multi_thinking_turn(
+    shape: MultiThinkingStreamShape,
+) -> Vec<crate::models::MessageRequest> {
+    let config = Config {
+        provider: Some("custom-a".to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom: HashMap::from([(
+                "custom-a".to_string(),
+                crate::config::ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    base_url: Some("http://127.0.0.1:18191/v1".to_string()),
+                    model: Some("claude-sonnet-4-6".to_string()),
+                    api_key: Some("local-test-key".to_string()),
+                    ..crate::config::ProviderConfig::default()
+                },
+            )]),
+            ..crate::config::ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        max_steps: 2,
+        snapshots_enabled: false,
+        terminal_chrome_enabled: false,
+        ..EngineConfig::default()
+    };
+    let client = std::sync::Arc::new(MultiThinkingStreamClient {
+        requests: std::sync::Mutex::new(Vec::new()),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        shape,
+    });
+    let shared: crate::core::model_client::SharedModelClient = client.clone();
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &config, shared);
+    let _run = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: "inspect the file".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&config, "claude-sonnet-4-6"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send op");
+
+    // Wait for the turn to complete.
+    let mut completed = false;
+    for _ in 0..200 {
+        {
+            let mut rx = handle.rx_event.write().await;
+            if let Ok(Some(Event::TurnComplete { .. })) =
+                tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+            {
+                completed = true;
+                break;
+            }
+        }
+    }
+    assert!(completed, "turn did not complete");
+
+    client.requests.lock().expect("request lock").clone()
+}
+
+fn assert_followup_carries_full_thinking_sequence(requests: &[crate::models::MessageRequest]) {
+    assert!(requests.len() >= 2, "expected a follow-up request");
+    let followup = &requests[1];
+    let assistant = followup
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::Assistant)
+        .expect("follow-up request must contain the prior assistant turn");
+    let mut blocks = assistant.content.iter();
+    match (
+        blocks.next(),
+        blocks.next(),
+        blocks.next(),
+        blocks.next(),
+        blocks.next(),
+    ) {
+        (
+            Some(ContentBlock::Thinking {
+                thinking,
+                signature,
+                redacted_data: None,
+                ..
+            }),
+            Some(ContentBlock::Thinking {
+                thinking: empty,
+                signature: sig2,
+                redacted_data: None,
+                ..
+            }),
+            Some(ContentBlock::Thinking {
+                redacted_data: Some(data),
+                ..
+            }),
+            Some(ContentBlock::ToolUse { .. }),
+            None,
+        ) => {
+            assert_eq!(thinking, "first block continued");
+            assert_eq!(signature.as_deref(), Some("sig-1"));
+            assert!(empty.is_empty(), "omitted-display text stays empty");
+            assert_eq!(sig2.as_deref(), Some("sig-2"));
+            assert_eq!(data, "ENC_REDACTED_1");
+        }
+        other => panic!("unexpected follow-up assistant blocks: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn session_update_preserves_reasoning_tool_only_turn() {
     let (mut engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
@@ -14981,6 +15370,8 @@ async fn session_update_preserves_reasoning_tool_only_turn() {
                 signature: None,
                 state: None,
                 thinking: "Need a tool before answering.".to_string(),
+                redacted_data: None,
+                reasoning_details: None,
             },
             ContentBlock::ToolUse {
                 id: "tool-1".to_string(),
@@ -22008,6 +22399,19 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
     );
 }
 
+/// Which reasoning-only shape the canned response carries. All three are
+/// real provider reasoning with no sendable content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReasoningOnlyShape {
+    /// Readable thinking text.
+    Text,
+    /// A signature-only (`display: "omitted"`) block: empty text plus the
+    /// encrypted signature.
+    SignatureOnly,
+    /// An Anthropic redacted block: payload arrives complete on the start.
+    RedactedOnly,
+}
+
 /// A model client that answers with ONLY hidden reasoning and a clean stop for
 /// its first `reasoning_only` calls, then a real text answer. No transport
 /// error: the stream completes normally but carries no sendable content — the
@@ -22016,6 +22420,7 @@ struct ReasoningOnlyCleanFinishModelClient {
     calls: std::sync::atomic::AtomicUsize,
     reasoning_only: usize,
     stop_reason: &'static str,
+    shape: ReasoningOnlyShape,
     /// Every outbound request's messages, in order, so a test can tell a
     /// request-scoped nudge from one written into the session.
     requests: std::sync::Mutex<Vec<Vec<crate::models::Message>>>,
@@ -22053,19 +22458,50 @@ impl crate::core::model_client::ModelClient for ReasoningOnlyCleanFinishModelCli
         if call <= self.reasoning_only {
             // A protocol-complete response that opened and closed only a
             // thinking block: no text, no tool call, and a clean stop reason.
-            let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
-                Ok(canned::message_start("reasoning_only_msg")),
-                Ok(StreamEvent::ContentBlockStart {
-                    index: 0,
-                    content_block: crate::models::ContentBlockStart::Thinking {
-                        thinking: String::new(),
-                    },
-                }),
-                Ok(canned::thinking_delta(0, "reasoning with no final channel")),
-                Ok(canned::block_stop(0)),
-                Ok(canned::message_delta(self.stop_reason, None)),
-                Ok(canned::message_stop()),
-            ];
+            let events: Vec<anyhow::Result<crate::models::StreamEvent>> = match self.shape {
+                ReasoningOnlyShape::Text => vec![
+                    Ok(canned::message_start("reasoning_only_msg")),
+                    Ok(StreamEvent::ContentBlockStart {
+                        index: 0,
+                        content_block: crate::models::ContentBlockStart::Thinking {
+                            thinking: String::new(),
+                        },
+                    }),
+                    Ok(canned::thinking_delta(0, "reasoning with no final channel")),
+                    Ok(canned::block_stop(0)),
+                    Ok(canned::message_delta(self.stop_reason, None)),
+                    Ok(canned::message_stop()),
+                ],
+                ReasoningOnlyShape::SignatureOnly => vec![
+                    Ok(canned::message_start("reasoning_only_msg")),
+                    Ok(StreamEvent::ContentBlockStart {
+                        index: 0,
+                        content_block: crate::models::ContentBlockStart::Thinking {
+                            thinking: String::new(),
+                        },
+                    }),
+                    Ok(StreamEvent::ContentBlockDelta {
+                        index: 0,
+                        delta: crate::models::Delta::SignatureDelta {
+                            signature: "sig-omitted-display".to_string(),
+                        },
+                    }),
+                    Ok(canned::block_stop(0)),
+                    Ok(canned::message_delta(self.stop_reason, None)),
+                    Ok(canned::message_stop()),
+                ],
+                ReasoningOnlyShape::RedactedOnly => vec![
+                    Ok(canned::message_start("reasoning_only_msg")),
+                    Ok(StreamEvent::ContentBlockStart {
+                        index: 0,
+                        content_block: crate::models::ContentBlockStart::RedactedThinking {
+                            data: "ENC_REDACTED_PAYLOAD".to_string(),
+                        },
+                    }),
+                    Ok(canned::message_delta(self.stop_reason, None)),
+                    Ok(canned::message_stop()),
+                ],
+            };
             return Ok(Box::pin(futures_util::stream::iter(events)));
         }
         let events = canned::simple_text_turn("the recovered answer")
@@ -22102,10 +22538,29 @@ async fn run_reasoning_only_turn_with_reprompts(
     std::sync::Arc<ReasoningOnlyCleanFinishModelClient>,
     Vec<Event>,
 ) {
+    run_reasoning_only_turn_with_shape(
+        ReasoningOnlyShape::Text,
+        reasoning_only,
+        stop_reason,
+        max_reprompts,
+    )
+    .await
+}
+
+async fn run_reasoning_only_turn_with_shape(
+    shape: ReasoningOnlyShape,
+    reasoning_only: usize,
+    stop_reason: &'static str,
+    max_reprompts: u32,
+) -> (
+    std::sync::Arc<ReasoningOnlyCleanFinishModelClient>,
+    Vec<Event>,
+) {
     let model = std::sync::Arc::new(ReasoningOnlyCleanFinishModelClient {
         calls: std::sync::atomic::AtomicUsize::new(0),
         reasoning_only,
         stop_reason,
+        shape,
         requests: std::sync::Mutex::new(Vec::new()),
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
@@ -22237,6 +22692,192 @@ async fn reasoning_only_length_stop_fails_without_retry() {
         })
         .expect("terminal TurnComplete");
     assert_eq!(status, TurnOutcomeStatus::Failed);
+}
+
+/// Signature-only (`display: "omitted"`) and redacted-only responses are the
+/// same reasoning-only failure mode as text thinking: real provider reasoning
+/// with no sendable content, so a clean stop must ride the same cached-prefix
+/// recovery instead of dead-ending the turn. These are exactly the block
+/// shapes the preserved-thinking work made first-class.
+#[tokio::test]
+async fn signature_only_and_redacted_only_reasoning_stops_recover() {
+    for shape in [
+        ReasoningOnlyShape::SignatureOnly,
+        ReasoningOnlyShape::RedactedOnly,
+    ] {
+        let (model, events) = run_reasoning_only_turn_with_shape(
+            shape,
+            1,
+            "stop",
+            crate::config::DEFAULT_REASONING_ONLY_REPROMPTS,
+        )
+        .await;
+
+        assert_eq!(
+            model.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the {shape:?} reasoning-only response must be re-requested exactly once"
+        );
+        let status = events
+            .iter()
+            .find_map(|event| match event {
+                Event::TurnComplete { status, .. } => Some(*status),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("terminal TurnComplete for {shape:?}"));
+        assert_eq!(
+            status,
+            TurnOutcomeStatus::Completed,
+            "{shape:?} must recover"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                Event::Error { envelope, .. }
+                    if envelope.message.contains("no answer or tool call")
+            )),
+            "a recovered {shape:?} turn must not surface the incomplete-response error: {events:?}"
+        );
+    }
+}
+
+/// A stream that completed a thinking block (flushed at its stop event) and
+/// then died with a transport error has received content: the death must
+/// surface its real error instead of silently re-running the request, which
+/// would double-bill for the thinking already produced.
+struct StreamDeathAfterThinkingClient {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for StreamDeathAfterThinkingClient {
+    fn provider_name(&self) -> &str {
+        "stream-death"
+    }
+
+    fn model(&self) -> &str {
+        "local-model"
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        anyhow::bail!("stream-death recovery uses the streaming model boundary")
+    }
+
+    async fn create_message_stream(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        use crate::llm_client::mock::canned;
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
+            Ok(canned::message_start("death_msg")),
+            Ok(StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: crate::models::ContentBlockStart::Thinking {
+                    thinking: String::new(),
+                },
+            }),
+            Ok(canned::thinking_delta(0, "received reasoning")),
+            Ok(StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::SignatureDelta {
+                    signature: "sig-1".to_string(),
+                },
+            }),
+            Ok(canned::block_stop(0)),
+            Err(anyhow::anyhow!("transport boom")),
+        ];
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn stream_death_after_completed_thinking_surfaces_the_error() {
+    let model = std::sync::Arc::new(StreamDeathAfterThinkingClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let config = Config::default();
+    let engine_config = EngineConfig {
+        max_steps: 1,
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        terminal_chrome_enabled: true,
+        ..EngineConfig::default()
+    };
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
+    let run_task = tokio::spawn(engine.run());
+    handle
+        .send(Op::SendMessage {
+            content: "solve the task".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send stream-death turn");
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), async {
+            handle.rx_event.write().await.recv().await
+        })
+        .await
+        .expect("stream-death event timeout")
+        .expect("stream-death event");
+        let terminal = matches!(event, Event::TurnComplete { .. });
+        events.push(event);
+        if terminal {
+            break;
+        }
+    }
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a stream that already delivered a thinking block must not be re-issued"
+    );
+    let status = events
+        .iter()
+        .find_map(|event| match event {
+            Event::TurnComplete { status, .. } => Some(*status),
+            _ => None,
+        })
+        .expect("terminal TurnComplete");
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Error { envelope, .. } if envelope.message.contains("transport boom")
+        )),
+        "the real transport error must surface: {events:?}"
+    );
 }
 
 /// The reasoning-only nudge rides one request and is never written to the

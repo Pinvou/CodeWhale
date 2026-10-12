@@ -4208,7 +4208,7 @@ pub(crate) use chat::is_reasoning_replay_placeholder;
 mod tests {
     use super::*;
     use crate::client::chat::{
-        build_chat_messages, build_chat_messages_for_request,
+        ReasoningDetailsBuffer, build_chat_messages, build_chat_messages_for_request,
         build_chat_messages_for_request_and_provider, count_reasoning_replay_chars,
         parse_chat_message, parse_sse_chunk, sanitize_thinking_mode_messages, tool_to_chat,
         tool_to_chat_for_base_url,
@@ -5936,6 +5936,8 @@ mod tests {
                         thinking: "Inspect the saved tool state".to_string(),
                         signature: None,
                         state: None,
+                        redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::ToolUse {
                         id: "call-k3-replay".to_string(),
@@ -7162,13 +7164,35 @@ mod tests {
             messages: vec![
                 Message {
                     role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: "call-secret-test".to_string(),
-                        name: "read_file".to_string(),
-                        input: json!({"path": "config.toml"}),
-                        caller: None,
-                        thought_signature: None,
-                    }],
+                    content: vec![
+                        // A reasoning-capable model's bare function_call is
+                        // chain-dropped on the Responses route; pair the call
+                        // with replayable state (the test helper builds the
+                        // Responses body as OpenaiCodex) so the tool result —
+                        // and its redaction marker — reaches all three
+                        // protocol bodies.
+                        ContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: None,
+                            state: Some(crate::models::OpaqueReasoningState {
+                                provider: "openai-codex".to_string(),
+                                api: "openai-responses".to_string(),
+                                model: "glm-5.2".to_string(),
+                                id: None,
+                                encrypted_content: "enc-secret-fixture".to_string(),
+                                endpoint: Some("fp-codex-endpoint".to_string()),
+                            }),
+                            redacted_data: None,
+                            reasoning_details: None,
+                        },
+                        ContentBlock::ToolUse {
+                            id: "call-secret-test".to_string(),
+                            name: "read_file".to_string(),
+                            input: json!({"path": "config.toml"}),
+                            caller: None,
+                            thought_signature: None,
+                        },
+                    ],
                 },
                 Message {
                     role: Role::User,
@@ -8934,6 +8958,8 @@ mod tests {
                     signature: None,
                     state: None,
                     thinking: "plan".to_string(),
+                    redacted_data: None,
+                    reasoning_details: None,
                 },
                 ContentBlock::Text {
                     text: "done".to_string(),
@@ -8974,6 +9000,8 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "plan".to_string(),
+                        redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::Text {
                         text: "done".to_string(),
@@ -9025,6 +9053,8 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "Need to call a tool".to_string(),
+                        redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::ToolUse {
                         id: "tool-1".to_string(),
@@ -9079,6 +9109,8 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "Need to call a tool".to_string(),
+                        redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::ToolUse {
                         id: "tool-1".to_string(),
@@ -9152,6 +9184,8 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "Internal explanation plan".to_string(),
+                        redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::Text {
                         text: "Final answer".to_string(),
@@ -9197,6 +9231,8 @@ mod tests {
                     signature: None,
                     state: None,
                     thinking: "I should explain step by step.".to_string(),
+                    redacted_data: None,
+                    reasoning_details: None,
                 },
                 ContentBlock::Text {
                     text: "Here is the explanation.".to_string(),
@@ -10230,6 +10266,8 @@ mod tests {
             &mut thinking_started,
             &mut tool_indices,
             &mut reasoning_detail_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
             true,
         );
 
@@ -10354,6 +10392,8 @@ mod tests {
                     signature: None,
                     state: None,
                     thinking: "plan".to_string(),
+                    redacted_data: None,
+                    reasoning_details: None,
                 }],
             };
             let out = build_chat_messages(None, &[message], "some-non-deepseek-model");
@@ -10418,6 +10458,8 @@ mod tests {
             &mut thinking_started,
             &mut tool_indices,
             &mut reasoning_detail_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
             false,
         );
 
@@ -10479,6 +10521,8 @@ mod tests {
             &mut thinking_started,
             &mut tool_indices,
             &mut reasoning_detail_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
             false,
         );
 
@@ -10503,6 +10547,8 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "Need to inspect the directory".to_string(),
+                        redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::ToolUse {
                         id: "tool-1".to_string(),
@@ -10546,6 +10592,8 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "Need to search".to_string(),
+                        redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::ToolUse {
                         id: "tool-1".to_string(),
@@ -10639,6 +10687,8 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "Need to list files".to_string(),
+                        redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::ToolUse {
                         id: "tool-ok".to_string(),
@@ -11385,6 +11435,45 @@ mod tests {
             })
             .count();
         assert_eq!(assistant_with_reasoning, 2);
+    }
+
+    #[test]
+    fn sanitize_thinking_mode_leaves_details_messages_alone_and_counts_them() {
+        // OpenRouter details replay: the structured array carries the
+        // reasoning, so no text placeholder may be injected alongside it, and
+        // the replay-token estimate must include its bytes.
+        let details = serde_json::json!([
+            { "type": "reasoning.encrypted", "format": "openai-responses-v1", "data": "x" }
+        ]);
+        let mut body = json!({
+            "model": "deepseek/deepseek-v4-pro",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_details": details,
+                    "tool_calls": [{ "id": "1", "type": "function" }]
+                },
+                { "role": "tool", "tool_call_id": "1", "content": "ok" },
+                { "role": "user", "content": "next" }
+            ]
+        });
+        let approx_tokens = sanitize_thinking_mode_messages(
+            &mut body,
+            "deepseek/deepseek-v4-pro",
+            None,
+            ApiProvider::Openrouter,
+        )
+        .expect("details are replayed and must be reported");
+        let message = &body["messages"][0];
+        assert!(
+            message.get("reasoning_content").is_none(),
+            "a placeholder beside reasoning_details would present the reasoning twice"
+        );
+        // Serialized entry is ~90 bytes -> ~22 tokens; the exact value pins
+        // that details bytes are counted at all (text alone would be 0).
+        let serialized_chars = details.to_string().len() as u32;
+        assert_eq!(approx_tokens, serialized_chars / 4);
     }
 
     /// Issue #30: when no thinking-mode replay applies (non-thinking model or
