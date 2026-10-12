@@ -94,8 +94,8 @@ import {
   ConversationMarkdown,
   ConversationStatusBadge,
   ConversationTimeline,
-  useConversationSecondClock,
 } from '../conversation/ConversationTimeline.jsx';
+import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
 import {
   measureConversationScrollGeometry,
   startConversationBottomFollower,
@@ -131,7 +131,8 @@ import {
 } from '../conversation/conversation-model.js';
 import { QuestionChoiceCard } from '../conversation/QuestionChoiceCard.jsx';
 import { buildUserInputAnswers, normalizeUserInputQuestions } from '../../shared/user-input-shared.js';
-import { PlanLayer, ToolCard, cardBoxCls, cardBtnCls } from '../tools/tool-renderers.jsx';
+import { PlanLayer, ToolCard, cardBoxCls } from '../tools/tool-renderers.jsx';
+import { cardBtnCls } from '../../shared/card-buttons.mjs';
 import { YoloConfirmCard } from '../../shared/yolo-confirm-card.jsx';
 import { notifyChatRoundCommitted } from '../tools/tool-events.js';
 import { AttachmentChips } from '../attachments/AttachmentChips.jsx';
