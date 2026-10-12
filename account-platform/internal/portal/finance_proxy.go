@@ -1,9 +1,20 @@
 package portal
 
 import (
+	"context"
+	"encoding/json"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"io"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/google/uuid"
 )
+
+// Only the authenticated import endpoint accepts the large bounded bill body.
+const reconciliationImportBodyLimit int64 = 64 << 20
 
 func currentBillingApprovalCommand(command string) bool {
 	return command == "WALLET_ADJUSTMENT" || command == "PAYMENT_PROVIDER_RESUME" || command == "PAYMENT_PRODUCT_RESUME"
@@ -14,19 +25,19 @@ func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
 }
 
 // This stage exposes payment/entitlement operations and the three actual
-// governed commands. Reconciliation, usage repair and later governance paths
-// are not accepted, even when an upstream has storage for them.
+// governed commands, plus F03 reconciliation reads/imports/case commands.
+// Usage repair and later governance paths remain outside this stage.
 func billingAdminPathAllowed(method, resource string) bool {
 	if method == http.MethodHead {
 		method = http.MethodGet
 	}
 	if method == http.MethodGet {
 		switch resource {
-		case "/admin/v1/overview", "/admin/v1/finance-overviews/accounts", "/admin/v1/finance-overviews/payments", "/admin/v1/finance-overviews/products", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/recharge-products", "/admin/v1/recharge-product-create-options", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/payment-provider-controls", "/admin/v1/late-payment-reviews", "/admin/v1/payment-anomalies", "/admin/v1/adjustments":
+		case "/admin/v1/reconciliation-runs", "/admin/v1/reconciliation-cases", "/admin/v1/overview", "/admin/v1/finance-overviews/accounts", "/admin/v1/finance-overviews/payments", "/admin/v1/finance-overviews/products", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/recharge-products", "/admin/v1/recharge-product-create-options", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/payment-provider-controls", "/admin/v1/late-payment-reviews", "/admin/v1/payment-anomalies", "/admin/v1/adjustments":
 			return true
 		}
 	}
-	if method == http.MethodPost && (resource == "/admin/v1/recharge-products" || resource == "/admin/v1/adjustments") {
+	if method == http.MethodPost && (resource == "/admin/v1/reconciliation-runs" || resource == "/admin/v1/reconciliation-imports" || resource == "/admin/v1/recharge-products" || resource == "/admin/v1/adjustments") {
 		return true
 	}
 	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")
@@ -38,7 +49,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 	}
 	if len(parts) == 5 {
 		if method == http.MethodGet {
-			return parts[2] == "wallets" && parts[4] == "ledger" || parts[2] == "receivables" && parts[4] == "allocations" || parts[2] == "recharge-products" && parts[4] == "admission-verifications"
+			return parts[2] == "reconciliation-runs" && parts[4] == "cases" || parts[2] == "wallets" && parts[4] == "ledger" || parts[2] == "receivables" && parts[4] == "allocations" || parts[2] == "recharge-products" && parts[4] == "admission-verifications"
 		}
 		if method == http.MethodPut {
 			return parts[2] == "recharge-products" && parts[4] == "draft"
@@ -47,6 +58,8 @@ func billingAdminPathAllowed(method, resource string) bool {
 			return false
 		}
 		switch parts[2] {
+		case "reconciliation-cases":
+			return parts[4] == "commands"
 		case "payment-orders":
 			return parts[4] == "sync" || parts[4] == "repair" || parts[4] == "refunds"
 		case "late-payment-reviews":
@@ -60,4 +73,63 @@ func billingAdminPathAllowed(method, resource string) bool {
 		}
 	}
 	return len(parts) == 7 && parts[2] == "recharge-products" && parts[4] == "admission-verifications" && pathUUID(parts[5]) && method == http.MethodPost && (parts[6] == "retry" || parts[6] == "revoke")
+}
+
+// Preflight the sole large upload against current Account facts before reading
+// its body. Billing repeats authorization at its own boundary after forwarding.
+func (s *Service) allowReconciliationImport(w http.ResponseWriter, r *http.Request, session Session) bool {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	target := *s.config.AccountURL
+	target.Path = strings.TrimRight(target.Path, "/") + "/v1/me"
+	target.RawQuery = ""
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return reconciliationPreflightUnavailable(w, r)
+	}
+	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
+	request.Header.Set("Accept", "application/json")
+	response, err := s.client.Do(request)
+	if err != nil {
+		return reconciliationPreflightUnavailable(w, r)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized {
+		api.WriteError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "login is required", httpserver.RequestID(r.Context()))
+		return false
+	}
+	if response.StatusCode == http.StatusForbidden {
+		api.WriteError(w, http.StatusForbidden, "PERMISSION_DENIED", "financial reconciliation permission is required", httpserver.RequestID(r.Context()))
+		return false
+	}
+	if response.StatusCode != http.StatusOK {
+		return reconciliationPreflightUnavailable(w, r)
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil || len(raw) > 1<<20 {
+		return reconciliationPreflightUnavailable(w, r)
+	}
+	var current struct {
+		UserID              uuid.UUID `json:"user_id"`
+		Status              string    `json:"status"`
+		PlatformPermissions []string  `json:"platform_permissions"`
+	}
+	if json.Unmarshal(raw, &current) != nil || current.UserID == uuid.Nil || current.Status == "" || current.PlatformPermissions == nil {
+		return reconciliationPreflightUnavailable(w, r)
+	}
+	if current.Status != "ACTIVE" {
+		api.WriteError(w, http.StatusForbidden, "PERMISSION_DENIED", "active account is required", httpserver.RequestID(r.Context()))
+		return false
+	}
+	for _, permission := range current.PlatformPermissions {
+		if permission == "platform.billing.reconciliation.run" {
+			return true
+		}
+	}
+	api.WriteError(w, http.StatusForbidden, "PERMISSION_DENIED", "financial reconciliation permission is required", httpserver.RequestID(r.Context()))
+	return false
+}
+func reconciliationPreflightUnavailable(w http.ResponseWriter, r *http.Request) bool {
+	api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "financial reconciliation authorization is temporarily unavailable", httpserver.RequestID(r.Context()))
+	return false
 }

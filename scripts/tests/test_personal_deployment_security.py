@@ -71,7 +71,7 @@ kcadm() {
         text = (DEPLOY / "nginx/personal.conf.template").read_text(encoding="utf-8")
         self.assertIn("resolver 127.0.0.11 valid=10s ipv6=off;", text)
         targets = re.findall(r"proxy_pass\s+([^;]+);", text)
-        self.assertEqual(len(targets), 9)
+        self.assertEqual(len(targets), 10)
         self.assertEqual(targets.count("http://$billing_origin"), 2)
         self.assertIn("set $billing_origin billing-service:8080;", text)
         self.assertTrue(all(re.fullmatch(r"https?://\$[a-z_]+", target) for target in targets))
@@ -83,6 +83,15 @@ kcadm() {
         self.assertIn("proxy_ssl_name $keycloak_tls_name;", text)
         self.assertIn("map $keycloak_origin $keycloak_tls_name", text)
         self.assertIn("location = /realms/pinvou/protocol/openid-connect/token", text)
+
+    def test_large_import_has_one_exact_authenticated_portal_path(self):
+        text = (DEPLOY / "nginx/personal.conf.template").read_text(encoding="utf-8")
+        block = re.search(r"location = /api/admin/billing/admin/v1/reconciliation-imports\s*\{([^}]+\}[^}]+)\}", text).group(1)
+        self.assertIn("limit_except POST { deny all; }", block)
+        self.assertIn("client_max_body_size 64m;", block)
+        self.assertIn("proxy_pass http://$portal_origin;", block)
+        self.assertEqual(text.count("client_max_body_size 64m;"), 1)
+        self.assertIn("client_max_body_size 2m;", text)
 
     def test_account_source_peers_are_explicit_and_pinned_in_production(self):
         compose = (DEPLOY / "production/compose.personal.yaml").read_text(encoding="utf-8")

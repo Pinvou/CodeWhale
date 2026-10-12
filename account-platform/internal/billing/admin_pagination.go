@@ -243,6 +243,28 @@ var adminPaginationFilters = map[string]map[string]adminFilterDefinition{
 		"created_from": {rfc3339: true, maxLength: 64},
 		"created_to":   {rfc3339: true, maxLength: 64},
 	},
+	adminPageReconciliationRuns: {
+		"provider_id":        {maxLength: 120},
+		"channel":            {upper: true, identifier: true, maxLength: 32},
+		"status":             enumFilter("RUNNING", "COMPLETED", "FAILED"),
+		"business_date_from": {date: true, maxLength: 16},
+		"business_date_to":   {date: true, maxLength: 16},
+	},
+	adminPageReconciliationCases: {
+		"status":   enumFilter("OPEN", "IN_REVIEW", "RESOLVED", "IGNORED"),
+		"severity": enumFilter("P0", "P1", "P2"),
+		"owner_id": {uuid: true, maxLength: 64},
+		"case_type": enumFilter(
+			"PROVIDER_PAID_INTERNAL_MISSING", "INTERNAL_PAID_PROVIDER_MISSING", "AMOUNT_MISMATCH", "DUPLICATE_TRANSACTION",
+			"PROVIDER_REFUND_INTERNAL_MISSING", "INTERNAL_REFUND_PROVIDER_MISSING", "REFUND_AMOUNT_MISMATCH",
+			"PROVIDER_CHARGEBACK_INTERNAL_MISSING", "INTERNAL_CHARGEBACK_PROVIDER_MISSING",
+			"PAYMENT_LEDGER_MISSING", "REFUND_LEDGER_MISSING", "CHARGEBACK_LEDGER_MISSING", "UNSUPPORTED_PROVIDER_ENTRY",
+			"PAYMENT_LEDGER_INVALID", "REFUND_LEDGER_INVALID", "CHARGEBACK_LEDGER_INVALID",
+			"PAYMENT_PACKAGE_INVALID", "REFUND_DATE_UNVERIFIED", "CHARGEBACK_DATE_UNVERIFIED",
+		),
+		"created_from": {rfc3339: true, maxLength: 64},
+		"created_to":   {rfc3339: true, maxLength: 64},
+	},
 }
 
 func validAdminTimeRange(filters map[string]string, fromKey, toKey string) bool {
@@ -693,6 +715,10 @@ func adminSnapshotResourceQuery(request AdminPaginationRequest) (string, []any, 
 		return `SELECT late.id::text resource_id,late.created_at sort_at,late.id sort_id FROM late_payment_review_cases late JOIN manual_review_cases review ON review.id=late.id WHERE ($2='' OR late.id::text ILIKE '%'||$2||'%' OR late.payment_order_id::text ILIKE '%'||$2||'%' OR late.merchant_order_no ILIKE '%'||$2||'%') AND ($3='' OR late.review_status=$3) AND ($4='' OR review.severity=$4) AND ($5='' OR review.owner_id=NULLIF($5,'')::uuid) AND ($6='' OR late.provider_id=$6) AND ($7='' OR late.created_at>=NULLIF($7,'')::timestamptz) AND ($8='' OR late.created_at<NULLIF($8,'')::timestamptz) AND ($9='' OR late.next_review_at<=NULLIF($9,'')::timestamptz) AND ($10<>'true' OR review.status='OPEN' AND (late.next_review_at<=now() OR review.claim_due_at<=now() AND review.claimed_at IS NULL OR review.first_response_due_at<=now() AND review.first_response_at IS NULL OR review.mitigation_due_at<=now() AND review.mitigation_at IS NULL OR review.resolution_due_at<=now())) ORDER BY late.created_at DESC,late.id DESC`, []any{filterArg(f, "q"), filterArg(f, "status"), filterArg(f, "severity"), filterArg(f, "owner_id"), filterArg(f, "provider_id"), filterArg(f, "created_from"), filterArg(f, "created_to"), filterArg(f, "next_review_before"), filterArg(f, "overdue")}, nil
 	case adminPagePaymentAnomalies:
 		return `SELECT anomaly.id::text resource_id,anomaly.created_at sort_at,anomaly.id sort_id FROM payment_anomaly_cases anomaly JOIN manual_review_cases review ON review.id=anomaly.id LEFT JOIN payment_orders payment ON payment.id=anomaly.payment_order_id WHERE ($2='' OR anomaly.id::text ILIKE '%'||$2||'%' OR anomaly.payment_order_id::text ILIKE '%'||$2||'%' OR COALESCE(payment.merchant_order_no,'') ILIKE '%'||$2||'%') AND ($3='' OR anomaly.anomaly_type=$3) AND ($4='' OR anomaly.status=$4) AND ($5='' OR review.severity=$5) AND ($6='' OR review.owner_id=NULLIF($6,'')::uuid) AND ($7='' OR payment.provider_id=$7) AND ($8='' OR anomaly.created_at>=NULLIF($8,'')::timestamptz) AND ($9='' OR anomaly.created_at<NULLIF($9,'')::timestamptz) ORDER BY anomaly.created_at DESC,anomaly.id DESC`, []any{filterArg(f, "q"), filterArg(f, "anomaly_type"), filterArg(f, "status"), filterArg(f, "severity"), filterArg(f, "owner_id"), filterArg(f, "provider_id"), filterArg(f, "created_from"), filterArg(f, "created_to")}, nil
+	case adminPageReconciliationRuns:
+		return `SELECT id::text resource_id,started_at sort_at,id sort_id FROM reconciliation_runs WHERE ($2='' OR provider_id=$2) AND ($3='' OR channel=$3) AND ($4='' OR status=$4) AND ($5='' OR business_date>=NULLIF($5,'')::date) AND ($6='' OR business_date<NULLIF($6,'')::date) ORDER BY started_at DESC,id DESC`, []any{filterArg(f, "provider_id"), filterArg(f, "channel"), filterArg(f, "status"), filterArg(f, "business_date_from"), filterArg(f, "business_date_to")}, nil
+	case adminPageReconciliationCases:
+		return `SELECT id::text resource_id,created_at sort_at,id sort_id FROM reconciliation_cases WHERE ($2='' OR EXISTS(SELECT 1 FROM reconciliation_runs run WHERE run.id=NULLIF($2,'')::uuid AND ((run.active_observation_id IS NOT NULL AND EXISTS(SELECT 1 FROM reconciliation_observation_progress observation WHERE observation.observation_id=run.active_observation_id AND observation.case_id=reconciliation_cases.id)) OR (run.active_observation_id IS NULL AND EXISTS(SELECT 1 FROM reconciliation_case_runs link WHERE link.case_id=reconciliation_cases.id AND link.run_id=run.id))))) AND ($3='' OR status=$3) AND ($4='' OR severity=$4) AND ($5='' OR owner_id=NULLIF($5,'')::uuid) AND ($6='' OR case_type=$6) AND ($7='' OR created_at>=NULLIF($7,'')::timestamptz) AND ($8='' OR created_at<NULLIF($8,'')::timestamptz) ORDER BY created_at DESC,id DESC`, []any{request.Scope, filterArg(f, "status"), filterArg(f, "severity"), filterArg(f, "owner_id"), filterArg(f, "case_type"), filterArg(f, "created_from"), filterArg(f, "created_to")}, nil
 	default:
 		return "", nil, ErrPaginationCursorInvalid
 	}

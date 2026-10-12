@@ -2,6 +2,7 @@ import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOr
 import { requireSession } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
+import { requireReconciliationDate, requireReconciliationRun } from './reconciliation-contract.js';
 import { responseRetryAfter } from './auth-error.js';
 import { beforeFinanceDispatch, financeNotDispatched } from './finance-operation-state.js';
 function errorFromResponse(response, payload) {
@@ -585,6 +586,27 @@ export class AdminPlatformClient {
     if (!['publish', 'unpublish', 'delete', 'display-names'].includes(action)) throw new Error('INVALID_FINANCE_ACK');
     const result = await this.mutate('billing', `/admin/v1/recharge-products/${encodeURIComponent(id)}/${action}`, 'POST', body, key, signal, 200);
     if (result?.catalog_item_id !== id) throw new Error('INVALID_FINANCE_ACK'); return result;
+  }
+
+  reconciliationRuns(filters = {}, signal) {
+    return this.request('billing', `/admin/v1/reconciliation-runs?${billingCollectionQuery(filters, { keys: ['channel', 'status', 'provider_id', 'business_date_from', 'business_date_to'] })}`, signal);
+  }
+  reconciliationCases(filters = {}, signal) {
+    return this.request('billing', `/admin/v1/reconciliation-cases?${billingCollectionQuery(filters, { keys: ['run_id', 'case_type', 'status', 'severity', 'owner_id'], dateTimeKeys: ['created_from', 'created_to'] })}`, signal);
+  }
+  async runReconciliation(facts, signal) {
+    requireReconciliationDate(facts.business_date);
+    return requireReconciliationRun(await this.mutate('billing', '/admin/v1/reconciliation-runs', 'POST', facts, '', signal, 200), facts);
+  }
+  async importReconciliation(facts, signal) {
+    requireReconciliationDate(facts.business_date);
+    return requireReconciliationRun(await this.mutate('billing', '/admin/v1/reconciliation-imports', 'POST', facts, '', signal, 201), facts);
+  }
+  async reconciliationCaseCommand(id, facts, key, signal) {
+    requireFinanceID(id);
+    const result = await this.mutate('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(id)}/commands`, 'POST', facts, key, signal, 200);
+    if (result?.case_id !== id) throw new Error('INVALID_FINANCE_ACK');
+    return result;
   }
 
   async logout() {

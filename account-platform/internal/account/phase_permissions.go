@@ -7,6 +7,8 @@ func f01PermissionAllowed(permission string) bool {
 	case PermissionPersonalSessionLogin, PermissionPersonalProfileRead, PermissionPersonalProfileUpdate, PermissionPersonalSecurityManage, PermissionPersonalBillingRead,
 		PermissionPlatformUsersRead, PermissionPlatformUsersStatusManage, PermissionPlatformRegistrationsRepair, PermissionPlatformProfileChangesRepair, PermissionPlatformSMSConfigRead, PermissionPlatformSMSConfigManage:
 		return true
+	case "platform.usage.read", "platform.usage.reconcile.retry", "platform.billing.reconciliation.read", "platform.billing.reconciliation.run", "platform.billing.reconciliation.manage":
+		return true
 	case "personal.recharge.create", "personal.recharge.manage":
 		return true
 	case "platform.billing.adjustments.approve", "platform.billing.ledger.read", "platform.billing.orders.sync", "platform.billing.payment-controls.resume.approve", "platform.billing.payment-controls.resume.request", "platform.billing.repairs.approve", "platform.billing.repairs.request", "platform.billing.wallets.read", "platform.products.create", "platform.products.delete", "platform.products.publish", "platform.products.read", "platform.products.unpublish":

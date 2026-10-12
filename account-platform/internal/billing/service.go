@@ -80,6 +80,9 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	router := httpserver.NewRouter()
 	protected := router.Group("")
 	protected.Use(serviceauth.GinMiddleware(serviceToken))
+	if s.payments != nil {
+		protected.POST("/internal/v1/reconciliation/runs", serviceauth.Require("internal.billing.reconciliation.run"), httpserver.AdaptFunc(s.runReconciliation))
+	}
 	protected.GET("/internal/v1/approval-command-activations", serviceauth.Require("internal.billing.approval-activation.read"), httpserver.AdaptFunc(s.approvalCommandActivations))
 	protected.POST("/internal/v1/approval-command-proofs", serviceauth.Require("internal.billing.approval-proof.read"), httpserver.AdaptFunc(s.internalBillingApprovalProof))
 	protected.GET("/internal/v1/approval-effects/:approval_request_id", serviceauth.Require("internal.billing.approval-effect.read"), httpserver.AdaptFunc(s.approvalEffectObservation))
@@ -139,6 +142,12 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	if len(adminVerify) > 0 && adminVerify[0] != nil && s.authorizer != nil {
 		admin := router.Group("/admin/v1")
 		admin.Use(identity.GinMiddleware(adminVerify[0]))
+		admin.GET("/reconciliation-runs", s.authorizer.Require("platform.billing.reconciliation.read"), httpserver.AdaptFunc(s.adminReconciliationRuns))
+		admin.POST("/reconciliation-runs", s.authorizer.Require("platform.billing.reconciliation.run"), approvalpolicy.Require("BILLING_RECONCILIATION_RUN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRunReconciliation))
+		admin.POST("/reconciliation-imports", s.authorizer.Require("platform.billing.reconciliation.run"), approvalpolicy.Require("BILLING_PROVIDER_BILL_IMPORT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminImportReconciliation))
+		admin.GET("/reconciliation-cases", s.authorizer.Require("platform.billing.reconciliation.read"), httpserver.AdaptFunc(s.adminReconciliationCases))
+		admin.GET("/reconciliation-runs/:run_id/cases", s.authorizer.Require("platform.billing.reconciliation.read"), httpserver.AdaptFunc(s.adminReconciliationCases))
+		admin.POST("/reconciliation-cases/:case_id/commands", s.authorizer.Require("platform.billing.reconciliation.manage"), approvalpolicy.Require("BILLING_RECONCILIATION_CASE_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateReconciliationCase))
 		admin.GET("/overview", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminOverview))
 		admin.GET("/finance-overviews/accounts", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminFinanceAccountsOverview))
 		admin.GET("/finance-overviews/payments", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminFinancePaymentsOverview))
@@ -725,4 +734,25 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusPreconditionFailed, "PRICE_ETAG_CONFLICT", "the pricing space changed; reload it before retrying"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
+}
+
+func (s *Service) runReconciliation(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Channel      string `json:"channel"`
+		BusinessDate string `json:"business_date"`
+	}
+	if err := decodeReconciliationJSON(w, r, &body, 1<<20); err != nil {
+		return
+	}
+	businessDate, err := time.Parse("2006-01-02", body.BusinessDate)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid reconciliation date", httpserver.RequestID(r.Context()))
+		return
+	}
+	run, err := s.payments.RunReconciliation(r.Context(), body.Channel, businessDate)
+	if err != nil {
+		s.writeReconciliationError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, run)
 }

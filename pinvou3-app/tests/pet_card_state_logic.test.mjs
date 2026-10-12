@@ -22,6 +22,7 @@ try {
   copyFileSync(connectorI18nSrc, path.join(dir, 'shared', 'connector-i18n.js'));
   copyFileSync(accountPlatformI18nSrc, path.join(dir, 'shared', 'account-platform-i18n.js')); copyFileSync(path.join(here, '..', 'src', 'shared', 'admin-platform-i18n.js'), path.join(dir, 'shared', 'admin-platform-i18n.js'));
   copyFileSync(path.join(here, '..', 'src', 'shared', 'finance-i18n.js'), path.join(dir, 'shared', 'finance-i18n.js'));
+  copyFileSync(path.join(here, '..', 'src', 'shared', 'reconciliation-i18n.js'), path.join(dir, 'shared', 'reconciliation-i18n.js'));
   // i18n.js is split by locale with zh imported directly, so the temporary copy must include
   // zh and its shared browser dictionary.
   mkdirSync(path.join(dir, 'shared', 'i18n'), { recursive: true });

@@ -20,11 +20,11 @@ export function useFinanceOperation(owner, copy, client, scope) {
     setBusy(false); setUnknown(Boolean(intent.current)); setMessage(''); setError(intent.current ? 'unknown' : '');
     return () => { generation.current++; };
   }, [identity, client]); // eslint-disable-line react-hooks/exhaustive-deps
-  const read = async action => {
+  const read = async (action, classifyError) => {
     if (running.current) return;
     const stamp = generation.current; running.current = true; setBusy(true); setError('');
     try { const value = await action(); if (stamp === generation.current) return value; }
-    catch (reason) { if (stamp === generation.current) setError(reason.status === 403 ? 'permissions' : 'unavailable'); }
+    catch (reason) { if (stamp === generation.current) setError(classifyError ? classifyError(reason) : reason.status === 403 ? 'permissions' : 'unavailable'); }
     finally { if (stamp === generation.current) { running.current = false; setBusy(false); } }
   };
   const mutate = async (facts, action) => {
