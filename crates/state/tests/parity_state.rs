@@ -405,7 +405,7 @@ fn test_fork() {
         .list_messages("thread-test-1", None)
         .expect("list messages");
     assert_eq!(messages.len(), 5);
-    let _ids = messages
+    let ids = messages
         .iter()
         .enumerate()
         .map(|(i, message)| {
@@ -415,4 +415,65 @@ fn test_fork() {
             message.id.to_string()
         })
         .collect::<Vec<_>>();
+
+    store.upsert_thread(&thread).expect("upsert thread");
+
+    store
+        .fork_at_message(&ids[2], "foo5", "bar5", None)
+        .expect("fork at message");
+    let messages = store
+        .list_messages("thread-test-1", None)
+        .expect("list messages");
+    assert_eq!(messages.len(), 4);
+    const LIST_1: [i64; 4] = [0, 1, 2, 5];
+    messages
+        .iter()
+        .zip(LIST_1.iter())
+        .for_each(|(message, &i)| {
+            assert_eq!(message.thread_id, "thread-test-1");
+            assert_eq!(message.role, format!("foo{i}"));
+            assert_eq!(message.content, format!("bar{i}"));
+        });
+    let leaves = store
+        .list_leaf_messages("thread-test-1")
+        .expect("list leaf messages");
+    assert_eq!(leaves.len(), 2);
+
+    store
+        .set_current_leaf_id("thread-test-1", &ids[4])
+        .expect("set current leaf id");
+    store
+        .append_message("thread-test-1", "foo6", "bar6", None)
+        .expect("append message");
+    let messages = store
+        .list_messages("thread-test-1", None)
+        .expect("list messages");
+    assert_eq!(messages.len(), 6);
+    const LIST_2: [i64; 6] = [0, 1, 2, 3, 4, 6];
+    messages
+        .iter()
+        .zip(LIST_2.iter())
+        .for_each(|(message, &i)| {
+            assert_eq!(message.thread_id, "thread-test-1");
+            assert_eq!(message.role, format!("foo{i}"));
+            assert_eq!(message.content, format!("bar{i}"));
+        });
+
+    let leaves = store
+        .list_leaf_messages("thread-test-1")
+        .expect("list leaf messages");
+    assert_eq!(leaves.len(), 2);
+
+    store
+        .clear_messages("thread-test-1")
+        .expect("clear messages");
+    let leaves = store
+        .list_leaf_messages("thread-test-1")
+        .expect("list leaf messages");
+    assert_eq!(leaves.len(), 0);
+    let thread = store
+        .get_thread("thread-test-1")
+        .expect("get thread")
+        .unwrap();
+    assert!(thread.current_leaf_id.is_none());
 }

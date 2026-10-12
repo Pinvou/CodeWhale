@@ -642,7 +642,7 @@ impl StateStore {
     /// Insert or update thread metadata.
     ///
     /// This does **not** update `current_leaf_id`; use [`append_message`](Self::append_message)
-    /// for that.
+    /// or [`set_current_leaf_id`](Self::set_current_leaf_id) for that.
     pub fn upsert_thread(&self, thread: &ThreadMetadata) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -785,6 +785,15 @@ impl StateStore {
             ],
         )
         .context("failed to unarchive thread")?;
+        Ok(())
+    }
+
+    /// Permanently delete a thread and all of its associated data
+    /// (messages, checkpoints, dynamic tools) via cascading foreign keys.
+    pub fn delete_thread(&self, id: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM threads WHERE id = ?1", params![id])
+            .context("failed to delete thread")?;
         Ok(())
     }
 
@@ -968,6 +977,62 @@ impl StateStore {
             )
             .context("failed to delete thread goal")?;
         Ok(changed > 0)
+    }
+
+    /// List all leaf messages in a thread.
+    ///
+    /// A leaf message is one that has no other message referencing it as a parent.
+    /// In a branching conversation tree, there may be multiple leaf messages.
+    pub fn list_leaf_messages(&self, thread_id: &str) -> Result<Vec<MessageRecord>> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT m1.id, m1.thread_id, m1.role, m1.content, m1.item_json, m1.created_at, m1.parent_entry_id
+                FROM messages m1
+                LEFT JOIN messages m2 ON m1.id = m2.parent_entry_id
+                WHERE m1.thread_id = ?1 AND m2.id IS NULL
+                "#,
+            )
+            .context("failed to prepare message listing query")?;
+        let mut rows = stmt
+            .query(params![thread_id])
+            .with_context(|| format!("failed to list leaf messages for thread {thread_id}"))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().context("failed to iterate message rows")? {
+            let item_json: Option<String> = row.get(4).context("failed to read item json")?;
+            let item = item_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .with_context(|| {
+                    format!("failed to parse message item json in thread {thread_id}")
+                })?;
+            out.push(MessageRecord {
+                id: row.get(0).context("failed to read message id")?,
+                thread_id: row.get(1).context("failed to read message thread id")?,
+                role: row.get(2).context("failed to read message role")?,
+                content: row.get(3).context("failed to read message content")?,
+                item,
+                created_at: row.get(5).context("failed to read message timestamp")?,
+                parent_entry_id: row.get(6).context("failed to read parent entry id")?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Update the current leaf message pointer for a thread.
+    ///
+    /// This controls which branch of the conversation tree is considered active
+    /// when listing messages via [`list_messages`](Self::list_messages).
+    pub fn set_current_leaf_id(&self, thread_id: &str, current_leaf_id: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE threads SET current_leaf_id = ?1 WHERE id = ?2",
+            params![current_leaf_id, thread_id],
+        )
+        .context("failed to update thread current leaf id")?;
+        Ok(())
     }
 
     /// Replace the dynamic tools for a thread.
@@ -1154,6 +1219,96 @@ impl StateStore {
             });
         }
         Ok(out)
+    }
+
+    /// Fork the conversation at a specific message.
+    ///
+    /// Creates a new message whose parent is `message_id` and updates the thread's
+    /// `current_leaf_id` to the new message. Returns the ID of the new message.
+    /// This enables branching conversations from any point in the history.
+    pub fn fork_at_message(
+        &self,
+        message_id: &str,
+        role: &str,
+        content: &str,
+        item: Option<Value>,
+    ) -> Result<i64> {
+        let mut conn = self.conn()?;
+        let created_at = Utc::now().timestamp();
+        let item_json = item
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .context("failed to serialize message item payload")?;
+
+        let tx = conn
+            .transaction()
+            .context("failed to begin fork message transaction")?;
+
+        let thread_id: String = tx
+            .query_row(
+                "SELECT thread_id FROM messages WHERE id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("failed to query thread id for message {message_id}"))?;
+
+        let next_leaf_id: i64 = tx.query_row(
+            r#"
+                INSERT INTO messages(thread_id, role, content, item_json, created_at, parent_entry_id)
+                SELECT ?1, ?2, ?3, ?4, ?5, ?6
+                RETURNING id
+            "#, params![thread_id, role, content, item_json, created_at, message_id], |row| row.get(0)
+        ).with_context(|| format!("failed to fork at message for thread {thread_id:?}"))?;
+
+        tx.execute(
+            r#"
+            UPDATE threads
+            SET current_leaf_id = ?1
+            WHERE id = ?2;
+            "#,
+            params![next_leaf_id, thread_id],
+        )
+        .with_context(|| {
+            format!("failed to update thread current leaf id for thread {thread_id:?}")
+        })?;
+
+        tx.commit()
+            .context("failed to commit fork message transaction")?;
+
+        Ok(next_leaf_id)
+    }
+
+    /// Delete all messages belonging to a thread and reset its `current_leaf_id`.
+    ///
+    /// Returns the number of messages deleted.
+    pub fn clear_messages(&self, thread_id: &str) -> Result<usize> {
+        let mut conn = self.conn()?;
+        let tx = conn
+            .transaction()
+            .context("failed to begin clear messages transaction")?;
+
+        tx.execute(
+            r#"
+            UPDATE threads
+            SET current_leaf_id = NULL
+            WHERE id = ?1;
+            "#,
+            params![thread_id],
+        )
+        .with_context(|| format!("failed to clear messages for thread {thread_id}"))?;
+        let result = tx
+            .execute(
+                r#"
+                DELETE FROM messages WHERE thread_id = ?1
+                "#,
+                params![thread_id],
+            )
+            .with_context(|| format!("failed to clear messages for thread {thread_id}"))?;
+        tx.commit()
+            .context("failed to commit clear messages transaction")?;
+
+        Ok(result)
     }
 
     /// Save (or update) a named checkpoint for a thread.
@@ -1506,6 +1661,16 @@ impl StateStore {
             .write()
             .with_context(|| format!("failed to lock session index {}", lock_path.display()))?;
         operation()
+    }
+
+    /// Find the display name for a thread by its ID, using the session index.
+    ///
+    /// Returns `None` if the thread is not in the index or has no name.
+    pub fn find_thread_name_by_id(&self, thread_id: &str) -> Result<Option<String>> {
+        let map = self.session_index_map()?;
+        Ok(map
+            .get(thread_id)
+            .and_then(|entry| entry.thread_name.clone()))
     }
 
     /// Look up display names for multiple thread IDs at once.
@@ -1999,6 +2164,50 @@ mod tests {
     }
 
     #[test]
+    fn delete_thread_cascades_child_rows() {
+        let store = temp_state_store("thread-delete-cascade");
+        store
+            .upsert_thread(&test_thread("thread-1"))
+            .expect("upsert thread");
+        store
+            .append_message("thread-1", "user", "hello", None)
+            .expect("append message");
+        store
+            .save_checkpoint("thread-1", "checkpoint-1", &serde_json::json!({"ok": true}))
+            .expect("save checkpoint");
+        store
+            .persist_dynamic_tools(
+                "thread-1",
+                &[DynamicToolRecord {
+                    position: 0,
+                    name: "test_tool".to_string(),
+                    description: Some("test".to_string()),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            )
+            .expect("persist dynamic tools");
+        store
+            .upsert_thread_goal(&test_goal("thread-1", "Ship v0.8.67"))
+            .expect("upsert goal");
+
+        store.delete_thread("thread-1").expect("delete thread");
+
+        let conn = store.conn().expect("conn");
+        for table in [
+            "messages",
+            "checkpoints",
+            "thread_dynamic_tools",
+            "thread_goals",
+        ] {
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE thread_id = ?1");
+            let count: i64 = conn
+                .query_row(&sql, params!["thread-1"], |row| row.get(0))
+                .expect("count child rows");
+            assert_eq!(count, 0, "{table} row survived thread deletion");
+        }
+    }
+
+    #[test]
     fn state_store_reuses_one_connection_across_operations_and_clones() {
         let store = temp_state_store("conn-reuse");
         {
@@ -2418,11 +2627,9 @@ mod tests {
         assert_eq!(line_count, 1);
 
         let name = store
-            .session_index_map()
-            .ok()
-            .and_then(|m| m.get("thread-1").and_then(|e| e.thread_name.clone()))
+            .find_thread_name_by_id("thread-1")
             .expect("lookup thread name");
-        assert_eq!(name, "name-5");
+        assert_eq!(name.as_deref(), Some("name-5"));
     }
 
     #[test]
@@ -2450,19 +2657,17 @@ mod tests {
 
         assert_eq!(
             store
-                .session_index_map()
-                .ok()
-                .and_then(|m| m.get("thread-1").and_then(|e| e.thread_name.clone()))
-                .expect("lookup thread-1"),
-            "first",
+                .find_thread_name_by_id("thread-1")
+                .expect("lookup thread-1")
+                .as_deref(),
+            Some("first"),
         );
         assert_eq!(
             store
-                .session_index_map()
-                .ok()
-                .and_then(|m| m.get("thread-3").and_then(|e| e.thread_name.clone()))
-                .expect("lookup thread-3"),
-            "third",
+                .find_thread_name_by_id("thread-3")
+                .expect("lookup thread-3")
+                .as_deref(),
+            Some("third"),
         );
     }
 
@@ -2549,20 +2754,18 @@ mod tests {
 
         assert_eq!(
             store
-                .session_index_map()
-                .ok()
-                .and_then(|m| m.get("racer").and_then(|e| e.thread_name.clone()))
-                .expect("lookup racer"),
-            "racer-name",
+                .find_thread_name_by_id("racer")
+                .expect("lookup racer")
+                .as_deref(),
+            Some("racer-name"),
             "append was dropped by a concurrent compaction",
         );
         assert_eq!(
             store
-                .session_index_map()
-                .ok()
-                .and_then(|m| m.get("trigger").and_then(|e| e.thread_name.clone()))
-                .expect("lookup trigger"),
-            "trigger-name",
+                .find_thread_name_by_id("trigger")
+                .expect("lookup trigger")
+                .as_deref(),
+            Some("trigger-name"),
         );
     }
 }

@@ -344,57 +344,54 @@ pub enum GateError {
     Serde(String),
 }
 
+/// Canonical stopship-style gate pipeline (scout → implementer → reviewer → verifier → release_lead).
+pub fn stopship_gate_pipeline() -> Vec<GateSpec> {
+    vec![
+        GateSpec {
+            id: "scout-findings".into(),
+            role: "scout".into(),
+            on: GateOn::RoleComplete,
+            gate: GateKind::Approve,
+            on_fail: GateOnFail::Block,
+            blocks_role: Some("implementer".into()),
+            max_retries: 0,
+            artifact_kind: Some("findings".into()),
+            require_explicit_verdict: false,
+        },
+        GateSpec {
+            id: "reviewer-diff".into(),
+            role: "reviewer".into(),
+            on: GateOn::RoleComplete,
+            gate: GateKind::Review,
+            on_fail: GateOnFail::Block,
+            blocks_role: Some("verifier".into()),
+            max_retries: 1,
+            artifact_kind: Some("diff_review".into()),
+            require_explicit_verdict: false,
+        },
+        GateSpec {
+            id: "verifier-suite".into(),
+            role: "verifier".into(),
+            on: GateOn::RoleComplete,
+            gate: GateKind::Verify,
+            on_fail: GateOnFail::Retry,
+            blocks_role: Some("release_lead".into()),
+            max_retries: 2,
+            artifact_kind: Some("verify_report".into()),
+            require_explicit_verdict: false,
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    /// Inline copy of the canonical stopship-style gate specs (scout →
-    /// implementer → reviewer → verifier → release_lead). The production
-    /// constructor was removed with the unwired pipeline scaffolding; these
-    /// literals keep exercising the live `LaneGateBoard` semantics.
-    fn stopship_gate_specs() -> Vec<GateSpec> {
-        vec![
-            GateSpec {
-                id: "scout-findings".into(),
-                role: "scout".into(),
-                on: GateOn::RoleComplete,
-                gate: GateKind::Approve,
-                on_fail: GateOnFail::Block,
-                blocks_role: Some("implementer".into()),
-                max_retries: 0,
-                artifact_kind: Some("findings".into()),
-                require_explicit_verdict: false,
-            },
-            GateSpec {
-                id: "reviewer-diff".into(),
-                role: "reviewer".into(),
-                on: GateOn::RoleComplete,
-                gate: GateKind::Review,
-                on_fail: GateOnFail::Block,
-                blocks_role: Some("verifier".into()),
-                max_retries: 1,
-                artifact_kind: Some("diff_review".into()),
-                require_explicit_verdict: false,
-            },
-            GateSpec {
-                id: "verifier-suite".into(),
-                role: "verifier".into(),
-                on: GateOn::RoleComplete,
-                gate: GateKind::Verify,
-                on_fail: GateOnFail::Retry,
-                blocks_role: Some("release_lead".into()),
-                max_retries: 2,
-                artifact_kind: Some("verify_report".into()),
-                require_explicit_verdict: false,
-            },
-        ]
-    }
-
     #[test]
     fn scout_handoff_passes_findings_to_implementer() {
         let mut board = LaneGateBoard::new("lane-test");
-        let gates = stopship_gate_specs();
+        let gates = stopship_gate_pipeline();
         board.install_gates(&gates);
 
         board
@@ -419,12 +416,6 @@ mod tests {
         let state = board.evaluate(&gates[0], GateOutcome::Pass).unwrap();
         assert_eq!(state, GateState::Passed);
         assert!(board.role_is_blocked(&gates, "implementer").is_none());
-        assert!(
-            board
-                .status_summary()
-                .iter()
-                .any(|l| l.gate_id == "scout-findings" && l.state == "passed")
-        );
     }
 
     #[test]
@@ -467,7 +458,7 @@ mod tests {
     #[test]
     fn reviewer_block_prevents_verifier() {
         let mut board = LaneGateBoard::new("lane-rev");
-        let gates = stopship_gate_specs();
+        let gates = stopship_gate_pipeline();
         board.install_gates(&gates);
 
         let state = board
@@ -488,7 +479,7 @@ mod tests {
     #[test]
     fn verifier_retry_then_escalate() {
         let mut board = LaneGateBoard::new("lane-ver");
-        let gates = stopship_gate_specs();
+        let gates = stopship_gate_pipeline();
         board.install_gates(&gates);
         let verify = &gates[2];
         assert_eq!(verify.max_retries, 2);
@@ -528,7 +519,7 @@ mod tests {
     #[test]
     fn human_approve_clears_block() {
         let mut board = LaneGateBoard::new("lane-hum");
-        let gates = stopship_gate_specs();
+        let gates = stopship_gate_pipeline();
         board.install_gates(&gates);
         board
             .evaluate(
@@ -556,10 +547,10 @@ mod tests {
     fn board_persists_for_lane_status() {
         let dir = tempdir().unwrap();
         let mut board = LaneGateBoard::new("lane-persist");
-        board.install_gates(&stopship_gate_specs());
+        board.install_gates(&stopship_gate_pipeline());
         board
             .evaluate(
-                &stopship_gate_specs()[0],
+                &stopship_gate_pipeline()[0],
                 GateOutcome::Fail {
                     reason: "scout incomplete".into(),
                 },

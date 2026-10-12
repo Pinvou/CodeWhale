@@ -286,6 +286,17 @@ mod tests {
     }
 
     #[test]
+    fn grouping_key_collapses_shell_flag_variants() {
+        let key_a = build_approval_grouping_key("exec_shell", &json!({"command": "cargo build"}));
+        let key_b =
+            build_approval_grouping_key("exec_shell", &json!({"command": "cargo build --release"}));
+        assert_eq!(
+            key_a, key_b,
+            "approving a command family must cover later flag variants"
+        );
+    }
+
+    #[test]
     fn grouping_key_grants_mcp_tools_as_reviewed_kinds() {
         // A session grant for a reviewed plugin MCP tool is the kind
         // (`mcp:<tool>`), not the exact arguments: the plugin e2e acceptance

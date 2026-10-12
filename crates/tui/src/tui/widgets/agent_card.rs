@@ -139,6 +139,39 @@ impl DelegateCard {
         self.todo.as_ref().and_then(card_todo_projection)
     }
 
+    /// Project this direct sub-agent card onto the shared workflow history
+    /// renderer (#4122) so collapsed/expanded concepts stay aligned.
+    #[must_use]
+    #[allow(dead_code)] // public #4122 convergence API; covered by unit tests
+    pub fn as_workflow_history_panel(
+        &self,
+        started_at_ms: u64,
+        completed_at_ms: Option<u64>,
+    ) -> crate::tui::widgets::workflow_panel::WorkflowPanel {
+        use crate::tui::widgets::workflow_panel::{WorkflowPanel, WorkflowPanelLifecycle};
+        let lifecycle = match self.status {
+            AgentLifecycle::Pending => WorkflowPanelLifecycle::Pending,
+            AgentLifecycle::Running => WorkflowPanelLifecycle::Running,
+            AgentLifecycle::Completed => WorkflowPanelLifecycle::Succeeded,
+            AgentLifecycle::Failed => WorkflowPanelLifecycle::Failed,
+            AgentLifecycle::Cancelled => WorkflowPanelLifecycle::Cancelled,
+            AgentLifecycle::Interrupted => WorkflowPanelLifecycle::Failed,
+        };
+        WorkflowPanel::from_direct_subagent(
+            self.agent_id.clone(),
+            public_role_label(&self.agent_type),
+            lifecycle,
+            started_at_ms,
+            completed_at_ms,
+            self.summary.clone(),
+            if matches!(self.status, AgentLifecycle::Failed) {
+                self.summary.clone()
+            } else {
+                None
+            },
+        )
+    }
+
     pub fn push_action(&mut self, action: impl Into<String>) {
         self.actions.push(action.into());
         if self.actions.len() > DELEGATE_MAX_ACTIONS {
@@ -1320,5 +1353,36 @@ mod tests {
             render_to_strings(&card.render_lines(100, &crate::palette::UI_THEME)).join("\n");
         assert!(!rendered.contains("worker one work"), "{rendered}");
         assert!(!rendered.contains("To-do"), "{rendered}");
+    }
+
+    #[test]
+    fn direct_subagent_projects_onto_shared_workflow_history_card() {
+        use crate::tui::widgets::workflow_panel::WorkflowHistoryExtras;
+
+        let mut card = DelegateCard::new("agent_xyz", "explore");
+        card.status = AgentLifecycle::Completed;
+        card.summary = Some("mapped 4 call sites".to_string());
+        let panel = card.as_workflow_history_panel(1_000, Some(5_000));
+        let compact = panel.render_history_card(100, false, &WorkflowHistoryExtras::default());
+        let joined = render_to_strings(&compact).join("\n");
+        assert!(
+            joined.contains("success") || joined.contains("explore"),
+            "shared compact lifecycle: {joined}"
+        );
+        assert!(
+            joined.contains("1 child") || joined.contains("children"),
+            "shared child count: {joined}"
+        );
+        let expanded = panel.render_history_card(
+            100,
+            true,
+            &WorkflowHistoryExtras {
+                result_summary: Some("mapped 4 call sites".to_string()),
+                ..WorkflowHistoryExtras::default()
+            },
+        );
+        let joined = render_to_strings(&expanded).join("\n");
+        assert!(joined.contains("result:"), "{joined}");
+        assert!(joined.contains("mapped 4 call sites"), "{joined}");
     }
 }

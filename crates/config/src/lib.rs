@@ -1548,6 +1548,20 @@ impl ProviderChain {
     }
 }
 
+#[cfg(test)]
+mod provider_chain_tests {
+    use super::*;
+
+    #[test]
+    fn current_on_empty_chain_returns_default_provider() {
+        let chain = ProviderChain {
+            providers: vec![],
+            position: 0,
+        };
+        assert_eq!(chain.current(), ProviderKind::default());
+    }
+}
+
 /// On-disk schema for the `[hook_sinks]` table.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HookSinksToml {

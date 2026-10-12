@@ -60,7 +60,7 @@ pub use fleet_snapshot::{
 };
 pub use gates::{
     GateError, GateKind, GateOn, GateOnFail, GateOutcome, GateSpec, GateState, GateStatusLine,
-    HandoffArtifact, LaneGateBoard,
+    HandoffArtifact, LaneGateBoard, stopship_gate_pipeline,
 };
 pub use js_authoring::{
     JavascriptWorkflowError, JavascriptWorkflowResult, compile_javascript_workflow,
@@ -478,6 +478,9 @@ pub enum WorkflowRunStatus {
     Failed,
     Cancelled,
     BudgetExceeded,
+    /// Wire-compatible only: no in-repo producer since the replay executor
+    /// was removed; kept so older serializations and existing matches stay
+    /// valid.
     ReplayDiverged,
 }
 

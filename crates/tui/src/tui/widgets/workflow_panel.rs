@@ -1216,6 +1216,88 @@ impl WorkflowPanel {
         lines
     }
 
+    /// Full history-card lines including a simple self-contained header so
+    /// unit tests (and direct sub-agent cards) can render without history.rs.
+    ///
+    /// Public convergence API for #4122 — also exercised by unit tests and
+    /// `DelegateCard::as_workflow_history_panel`.
+    #[must_use]
+    #[allow(dead_code)] // public API used by direct sub-agent projection + tests
+    pub fn render_history_card(
+        &self,
+        width: u16,
+        expanded: bool,
+        extras: &WorkflowHistoryExtras,
+    ) -> Vec<Line<'static>> {
+        let content_width = usize::from(width).max(1);
+        let mut lines = Vec::new();
+        let glyph = if expanded { '▼' } else { '▶' };
+        let summary = self.compact_summary_text(content_width.saturating_sub(2));
+        lines.push(Line::from(Span::styled(
+            truncate_line_to_width(&format!("{glyph} {summary}"), content_width),
+            Style::default()
+                .fg(self.lifecycle.color())
+                .add_modifier(Modifier::BOLD),
+        )));
+        if expanded {
+            lines.extend(self.history_expanded_lines(width, extras));
+        }
+        lines
+    }
+
+    /// Single-agent "mini workflow" view for direct sub-agent cards so they
+    /// share the same lifecycle/elapsed/result concepts as workflow runs.
+    #[must_use]
+    #[allow(dead_code)] // public API used by DelegateCard + tests
+    pub fn from_direct_subagent(
+        agent_id: impl Into<String>,
+        role: impl Into<String>,
+        lifecycle: WorkflowPanelLifecycle,
+        started_at_ms: u64,
+        completed_at_ms: Option<u64>,
+        summary: Option<String>,
+        error: Option<String>,
+    ) -> Self {
+        let agent_id = agent_id.into();
+        let role = role.into();
+        let mut panel = Self::new(agent_id.clone(), role.clone(), started_at_ms);
+        panel.lifecycle = lifecycle;
+        panel.completed_at_ms = completed_at_ms;
+        panel.expanded = false;
+        panel.show_workflow_receipts = false;
+        panel.result_summary = summary.clone();
+        panel.error = error.clone();
+        let status = match lifecycle {
+            WorkflowPanelLifecycle::Pending => WorkflowRowStatus::Pending,
+            WorkflowPanelLifecycle::Running => WorkflowRowStatus::Running,
+            WorkflowPanelLifecycle::Succeeded => WorkflowRowStatus::Succeeded,
+            WorkflowPanelLifecycle::Degraded => WorkflowRowStatus::Failed,
+            WorkflowPanelLifecycle::Failed => WorkflowRowStatus::Failed,
+            WorkflowPanelLifecycle::Cancelled => WorkflowRowStatus::Cancelled,
+        };
+        let mut phase = WorkflowPanelPhase::new("Agent");
+        phase.rows.push(WorkflowPanelRow {
+            task_id: agent_id,
+            label: role,
+            profile: None,
+            model: None,
+            strength: None,
+            worktree: false,
+            workspace: None,
+            status,
+            started_at_ms,
+            completed_at_ms,
+            error,
+            schema_error: None,
+            // A direct sub-agent card projects a single agent, not a Workflow
+            // task, so it carries no Workflow launch/usage receipt (#4039).
+            route: WorkflowRowRoute::default(),
+            usage: completed_at_ms.map(|_| WorkflowRowUsage::default()),
+        });
+        panel.phases.push(phase);
+        panel
+    }
+
     /// Apply a stream of events. `RunStarted` replaces any prior completed run.
     pub fn apply_event(&mut self, event: WorkflowPanelEvent) {
         match event {
@@ -3497,6 +3579,111 @@ mod tests {
         );
     }
 
+    #[test]
+    fn direct_subagent_card_reuses_history_renderer() {
+        let panel = WorkflowPanel::from_direct_subagent(
+            "agent_abc",
+            "explore",
+            WorkflowPanelLifecycle::Succeeded,
+            1_000,
+            Some(4_500),
+            Some("found 3 call sites".to_string()),
+            None,
+        );
+        let compact = panel.render_history_card(100, false, &WorkflowHistoryExtras::default());
+        let joined: String = compact
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            joined.contains("success") || joined.contains("explore"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("1 child") || joined.contains("1 children"),
+            "{joined}"
+        );
+        assert!(joined.contains("3s") || joined.contains("s"), "{joined}");
+
+        let expanded = panel.render_history_card(
+            100,
+            true,
+            &WorkflowHistoryExtras {
+                result_summary: Some("found 3 call sites".to_string()),
+                ..WorkflowHistoryExtras::default()
+            },
+        );
+        let joined: String = expanded
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("children:"), "{joined}");
+        assert!(joined.contains("result:"), "{joined}");
+        assert!(joined.contains("found 3 call sites"), "{joined}");
+        assert!(!joined.contains("reasoning unknown"), "{joined}");
+        assert!(!joined.contains("via unknown"), "{joined}");
+        assert!(!joined.contains("tokens unknown"), "{joined}");
+        assert!(
+            joined.contains(crate::tui::shell_key_routing::tool_details_chord().as_ref()),
+            "history details hint must use the platform chord: {joined}"
+        );
+        assert!(!joined.contains("details (v)"), "{joined}");
+    }
+
+    #[test]
+    fn from_run_json_round_trips_events_into_history_card() {
+        let value = json!({
+            "run_id": "workflow_demo",
+            "status": "completed",
+            "workflow_goal": "ship it",
+            "started_at_ms": 1000,
+            "completed_at_ms": 5000,
+            "events": [
+                {
+                    "type": "run_started",
+                    "at_ms": 1000,
+                    "run_id": "workflow_demo",
+                    "workflow_goal": "ship it"
+                },
+                {"type": "phase_started", "at_ms": 1100, "title": "Build"},
+                {
+                    "type": "task_started",
+                    "at_ms": 1200,
+                    "task_id": "t1",
+                    "label": "compile",
+                    "profile": "implementer"
+                },
+                {
+                    "type": "task_completed",
+                    "at_ms": 4000,
+                    "task_id": "t1",
+                    "status": "succeeded"
+                },
+                {"type": "run_completed", "at_ms": 5000, "status": "completed"}
+            ]
+        });
+        let panel = WorkflowPanel::from_run_json(&value).expect("hydrate");
+        assert_eq!(panel.lifecycle, WorkflowPanelLifecycle::Succeeded);
+        let compact = panel.compact_summary_text(120);
+        assert!(compact.contains("1 child"), "{compact}");
+        assert!(compact.contains("success"), "{compact}");
+        let expanded = panel.history_expanded_lines(120, &WorkflowHistoryExtras::default());
+        let joined: String = expanded
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("goal:"), "{joined}");
+        assert!(joined.contains("ship it"), "{joined}");
+        assert!(joined.contains("Build"), "{joined}");
+        assert!(joined.contains("compile"), "{joined}");
+    }
+
+    // ── #4131 dogfood scenario projections ──────────────────────────────────
+
+    /// WF-A1: read-only repo audit — scout phase on main workspace, labeled
+    /// children, no worktree marker, synthesizer phase present.
     #[test]
     fn dogfood_read_only_repo_audit_panel() {
         let mut panel = WorkflowPanel::new("wf_a1", "read-only repo audit", 1_000);
