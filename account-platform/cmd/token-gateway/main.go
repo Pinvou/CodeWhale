@@ -27,10 +27,20 @@ func main() {
 	if err := httpserver.ConfigureProcessLogging("token-gateway"); err != nil {
 		log.Fatal("TOKEN_STARTUP_CONFIGURATION_FAILED")
 	}
+	profile, err := config.ParseAccountPlatformProfile(os.Getenv("ACCOUNT_PLATFORM_PROFILE"))
+	if err != nil {
+		log.Fatal("TOKEN_DEPLOYMENT_PROFILE_INVALID")
+	}
 	ctx := context.Background()
 	cfg, err := config.Load("token-gateway")
 	if err != nil {
 		log.Fatal("TOKEN_STARTUP_CONFIGURATION_FAILED")
+	}
+	if profile == config.AccountPlatformProfilePersonal {
+		if err := runPersonalGateway(ctx, cfg.Environment); err != nil {
+			log.Fatal("TOKEN_STARTUP_CONFIGURATION_FAILED")
+		}
+		return
 	}
 	key, err := base64.StdEncoding.DecodeString(os.Getenv("TOKEN_LOCAL_KEK_BASE64"))
 	if err != nil {

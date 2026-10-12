@@ -60,6 +60,7 @@ services:
     healthcheck: {disable: true}
   account-service:
     environment:
+      ACCOUNT_PLATFORM_PROFILE: models
       TOKEN_HTTP_URL: http://token-gateway:8080
       TOKEN_GOVERNANCE_POLICY_SET_DIGEST: ${TOKEN_GOVERNANCE_POLICY_SET_DIGEST:?set independently approved current policy digest}
       TOKEN_GOVERNANCE_HANDLER_SET_DIGEST: ${TOKEN_GOVERNANCE_HANDLER_SET_DIGEST:?set independently approved eighteen-handler digest}
@@ -80,6 +81,7 @@ services:
     networks: [backend, kms]
     environment:
       <<: *http
+      ACCOUNT_PLATFORM_PROFILE: models
       ACCOUNT_HTTP_URL: http://account-service:8080
       BILLING_HTTP_URL: http://billing-service:8080
       PGPASSFILE: /run/pinvou/database/pgpass
@@ -100,6 +102,7 @@ services:
       token-migrate: {condition: service_completed_successfully}
   approval-resources:
     environment:
+      ACCOUNT_PLATFORM_PROFILE: models
       TOKEN_CONSUMER_RESOURCE_RECEIPT_FILE: /run/pinvou/token-consumer-receipt/receipt.json
     volumes:
       - {type: bind, source: "${TOKEN_CONSUMER_PUBLIC_RECEIPT_DIRECTORY:?set independent empty Token resource receipt directory}", target: /run/pinvou/token-consumer-receipt, bind: {create_host_path: false}}
