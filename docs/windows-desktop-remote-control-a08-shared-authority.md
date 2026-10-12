@@ -256,3 +256,27 @@ Linux 动态执行仍须以新提交 CI 为准，不以 Windows 通过冒充。�
 x86_64-unknown-linux-gnu cargo check --tests。临时校验包只位于忽略的 target，
 不修改项目依赖、默认工具链或门禁；只证明该源码的 Linux 目标编译，不等价于
 完整 app/core harness 的 Linux 构建或 Unix 动态执行，初次失败记录仍保留。
+
+### R21 取消锁序、端点撤销和重复归档
+
+A 的取消与认证能力快照统一按会话意图 → 连接 owner → 加密 lane → Store
+取得所有权。取消在 intents 锁内捕获该会话的 wire ID，再进入完整租约和实际
+attempted-task 台账检查；闭包不重入会话管理器。close/reopen 不能在读取与检查
+之间替换会话，旧租约、未尝试任务仍失败关闭。关联磁盘操作尚在这些锁内，
+本次解决锁序死锁，不宣称已完成同步 IO 性能优化。
+
+端点撤销在最终临界区同时匹配 endpoint ID 和实际 reader socket，复用完整退休
+逻辑清除 controller generation/binding/inbound 与旧 authority。测试用真实
+loopback WebSocket 向存活 lane 发撤销，确认旧 sender/recv 失效、新 lane 可启动，
+并故意复用 generation 验证旧 Drop 不清新绑定；迟到旧 reader 撤销不得清新端点。
+
+归档 seal 在同一进程 owner/fd-lock 内、写不可逆 pending 前检查 local ID、remote
+ref 与 client/task 两域冲突。仅完全相同不可变记录及完整墓碑可幂等返回，不增长
+水位；不同内容或复用标识先失败，不毒化 anchor。原 pending 恢复的严格水位、
+字节和墓碑验证保持。另一实例已完成 seal 后，活动残留只在全字段一致时清理，
+hidden 仍是独立档案 UI 标记；不同残留不得重新取得执行权。没有新增可复用 ID、
+只读缓存或兼容旧开发接口。
+
+归档 contains 的 fresh SQLite 验证仍会在全局 RemoteProxy 锁内执行，性能项另行
+登记；未经慢盘测量不声称固定开库倍数或已复现整机阻塞。后续优化不得用负缓存
+绕过跨进程封存、缺库、替库、旧备份及永久反重放检查。真实双机与发布验收仍独立。
