@@ -1614,10 +1614,10 @@ fn openrouter_details_placeholder_entries_never_enter_the_snapshot() {
 
 #[test]
 fn openrouter_details_without_index_key_by_array_position() {
-    // Entries without an `index` are keyed by their position in the
-    // incoming array. A `type` key would merge two same-type entries into
-    // one (losing the other), and a running counter would re-key every
-    // reappearance of an entry and grow the snapshot.
+    // Entries with neither an `index` nor an `id` are keyed by their
+    // position in the incoming array. A `type` key would merge two
+    // same-type entries into one (losing the other), and a running counter
+    // would re-key every reappearance of an entry and grow the snapshot.
     let chunks = vec![
         serde_json::json!({
             "choices": [{
@@ -1649,6 +1649,132 @@ fn openrouter_details_without_index_key_by_array_position() {
     assert_eq!(last.len(), 2, "both index-less entries survive");
     assert_eq!(last[0]["text"], "oneth", "each position concatenates");
     assert_eq!(last[1]["text"], "two!", "each position concatenates");
+}
+
+#[test]
+fn openrouter_details_distinct_ids_without_index_stay_separate() {
+    // OpenRouter documents `index` as optional and `id` as the unique
+    // identifier of a reasoning detail. Two single-entry chunks carrying
+    // distinct ids must stay distinct entries in first-seen order: keying
+    // id-less-index entries by array position alone collides both chunks
+    // at position 0, and the merge keeps the first entry's nonempty
+    // fields — the second entry's payload is silently lost from the
+    // replayed sequence.
+    let chunks = vec![
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.encrypted", "id": "r1", "data": "payload-one" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.encrypted", "id": "r2", "data": "payload-two" }
+                    ]
+                }
+            }]
+        }),
+    ];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    let snapshots = details_delta_payloads(&events);
+    let last = snapshots.last().expect("final snapshot");
+    assert_eq!(last.len(), 2, "distinct ids must not collide on position");
+    assert_eq!(last[0]["id"], "r1", "first-seen order kept");
+    assert_eq!(last[0]["data"], "payload-one");
+    assert_eq!(last[1]["id"], "r2");
+    assert_eq!(last[1]["data"], "payload-two", "second payload preserved");
+}
+
+#[test]
+fn openrouter_details_fragments_with_same_id_concatenate() {
+    // Continuation fragments of the same index-less entry repeat the
+    // entry's `id`: they must keep merging into that one entry — text in
+    // arrival order, trailing metadata filled in — instead of growing the
+    // snapshot.
+    let chunks = vec![
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "id": "s1", "text": "al" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "id": "s1", "text": "pha" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "id": "s1", "text": "", "signature": "SIG-tail" }
+                    ]
+                }
+            }]
+        }),
+    ];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    let snapshots = details_delta_payloads(&events);
+    let last = snapshots.last().expect("final snapshot");
+    assert_eq!(last.len(), 1, "same-id fragments are one entry");
+    assert_eq!(last[0]["text"], "alpha", "fragments concatenate in order");
+    assert_eq!(
+        last[0]["signature"], "SIG-tail",
+        "a trailing signature must fill the entry"
+    );
+}
+
+#[test]
+fn openrouter_details_distinct_signed_entries_keep_their_own_text() {
+    // Distinct signed entries with ids must not concatenate each other's
+    // text: each entry keeps its own text and signature.
+    let chunks = vec![
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "id": "a", "text": "first", "signature": "SA" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "id": "b", "text": "second", "signature": "SB" }
+                    ]
+                }
+            }]
+        }),
+    ];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    let snapshots = details_delta_payloads(&events);
+    let last = snapshots.last().expect("final snapshot");
+    assert_eq!(last.len(), 2, "distinct signed entries stay separate");
+    assert_eq!(last[0]["text"], "first");
+    assert_eq!(last[0]["signature"], "SA");
+    assert_eq!(last[1]["text"], "second", "text must not cross entries");
+    assert_eq!(last[1]["signature"], "SB");
 }
 
 #[test]

@@ -3845,12 +3845,18 @@ fn merge_reasoning_detail_entry(stored: &mut Value, fragment: &Value) -> bool {
 /// OpenRouter's documented streaming contract is incremental — "each
 /// reasoning detail chunk is sent as it becomes available", "the complete
 /// reasoning sequence is built by concatenating all chunks in order" — so a
-/// fragment for a known key (the entry's `index`, or its position in the
-/// incoming array when the entry carries none; a `type` key would collide
-/// two same-type entries into one) is concatenated onto the stored entry
-/// rather than replacing it. The concatenation is unconditional: a fragment
-/// that happens to repeat or extend the stored text is still a fragment,
-/// and guessing "cumulative re-send" from content would silently drop
+/// fragment for a known key is concatenated onto the stored entry rather
+/// than replacing it. The key is the strongest identity the entry carries:
+/// its `index`, else its documented unique `id` ("Unique identifier for the
+/// reasoning detail"; `index` is optional, so two distinct single-entry
+/// chunks would otherwise both land on array position 0 and the merge keeps
+/// the first entry's nonempty fields — the second entry would be silently
+/// lost), else its position in the incoming array for entries carrying
+/// neither. Key spaces are prefixed apart so an id can never collide with
+/// an index or position key. A `type` key would collide two same-type
+/// entries into one. The concatenation is unconditional: a fragment that
+/// happens to repeat or extend the stored text is still a fragment, and
+/// guessing "cumulative re-send" from content would silently drop
 /// legitimate increments. Capture runs on the OpenRouter route only, so
 /// cumulative producers like MiniMax's reasoning_split stream never reach
 /// this buffer (their display path keeps its own prefix handling), and
@@ -3874,6 +3880,13 @@ impl ReasoningDetailsBuffer {
                 .get("index")
                 .and_then(Value::as_u64)
                 .map(|index| index.to_string())
+                .or_else(|| {
+                    entry
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .map(|id| format!("id:{id}"))
+                })
                 .unwrap_or_else(|| format!("_arr{position}"));
             if !self.order.contains(&key) {
                 self.order.push(key.clone());
