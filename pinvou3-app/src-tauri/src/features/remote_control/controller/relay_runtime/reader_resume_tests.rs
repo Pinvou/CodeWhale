@@ -704,6 +704,41 @@ async fn endpoint_rotation_round_trip(
     let mut successor_socket = lifecycle_registered(listener).await;
     drop(current);
     assert_lifecycle_route(&mut successor_socket, &mut successor).await;
+    // Exercise a real unsolicited endpoint revocation while its lane is alive.
+    // A plain endpoint.take() leaves the sender/generation installed forever.
+    let revoked_id = relay.controller_endpoint_id().unwrap();
     outbound.clear_owned(&successor.sender());
-    drop(successor);
+    let mut revoked = successor;
+    let old_sender = revoked.sender();
+    send(
+        &mut successor_socket,
+        &json!({"v":2,"type":"desktop_endpoint_revoked","endpoint_id":revoked_id}),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while relay.status().status
+            != crate::features::remote_control::protocol::WebAccessStatusKind::Revoked
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("live endpoint revocation did not retire the endpoint");
+    assert!(old_sender.try_send(json!({})).is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), revoked.recv())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Deliberately reuse the generation: old Drop and late reader callbacks
+    // must not retire the successor's different socket/binding.
+    let mut restarted = relay
+        .start_controller_relay(revoked.generation())
+        .await
+        .unwrap();
+    let mut restarted_socket = lifecycle_registered(listener).await;
+    drop(revoked);
+    assert_lifecycle_route(&mut restarted_socket, &mut restarted).await;
+    drop(restarted);
 }
