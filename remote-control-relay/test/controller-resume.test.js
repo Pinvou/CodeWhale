@@ -34,13 +34,13 @@ function fixture({ startClock = 1_000, onLeaseTerminated = async () => {} } = {}
     consumeForControllerLease: async (value) => value,
     terminate: async () => {},
   };
+  const slots = new EndpointInteractionSlots();
+  const reservations = new ControllerReservationManager({
+    pairingStore: pairings, interactionSlots: slots, clock: () => clock,
+  });
   const manager = new ControllerLeaseManager({
     pairingStore: pairings,
-    reservationManager: new ControllerReservationManager({
-      pairingStore: pairings,
-      interactionSlots: new EndpointInteractionSlots(),
-      clock: () => clock,
-    }),
+    reservationManager: reservations,
     relayEpoch: "relay-epoch-0001",
     signingKeyId: "relay-signing-key-0001",
     signTranscript: (preimage) => crypto.sign(null, preimage, crypto.generateKeyPairSync("ed25519").privateKey),
@@ -59,6 +59,8 @@ function fixture({ startClock = 1_000, onLeaseTerminated = async () => {} } = {}
     hooks,
     liveness,
     pairing,
+    slots,
+    reservations,
     get clock() { return clock; },
     set clock(value) { clock = value; },
   };
@@ -860,6 +862,44 @@ test("completed transaction abort and stale expected owner cannot terminate the 
   assert.equal(value.manager.lease(updated.controller_lease_id), updated);
   assert.equal(value.hooks.phase(updated.controller_lease_id), "connected");
   assert.notEqual(value.liveness.resumeDeadline(updated), null);
+});
+
+test("release failures still notify exact observers and aggregate every failure", async (t) => {
+  for (const code of ["release_adapter_failed", "interaction_slot_revision_exhausted", "observer_also_failed"]) {
+    await t.test(code, async () => {
+      let notifications = 0;
+      let observed;
+      const hookError = new Error("fixed-hook-failure");
+      const observerError = new Error("fixed-observer-failure");
+      const releaseError = Object.assign(new Error(code), { code });
+      const value = fixture({ onLeaseTerminated: async () => { notifications += 1; throw hookError; } });
+      value.manager.setTerminationObserver(async (event, lease, previous) => {
+        observed = { event, lease, previous };
+        if (code === "observer_also_failed") throw observerError;
+      });
+      const committed = await createLease(value);
+      const owner = value.slots.read(committed.lease.endpoint_id);
+      value.reservations.releaseControllerLease = () => { throw releaseError; };
+      await assert.rejects(value.manager.terminateLease({ controllerLeaseId: committed.lease.controller_lease_id,
+        expectedLease: committed.lease }), (error) => {
+        assert.ok(error instanceof AggregateError);
+        assert.deepEqual(error.errors, code === "observer_also_failed"
+          ? [releaseError, observerError, hookError] : [releaseError, hookError]);
+        return true;
+      });
+      assert.equal(observed.lease, committed.lease);
+      assert.equal(observed.event.controller_lease_id, committed.lease.controller_lease_id);
+      assert.equal(notifications, 1);
+      assert.deepEqual(value.slots.read(committed.lease.endpoint_id), owner);
+      assert.equal(value.manager.lease(committed.lease.controller_lease_id), null);
+      const replacement = value.slots.compareAndSwap(committed.lease.endpoint_id, owner.revision,
+        { kind: "web_lease", owner_id: "replacement-web" });
+      assert.equal(await value.manager.terminateLease({ controllerLeaseId: committed.lease.controller_lease_id,
+        expectedLease: committed.lease }), false);
+      assert.deepEqual(value.slots.read(committed.lease.endpoint_id), replacement);
+      assert.equal(notifications, 1);
+    });
+  }
 });
 
 test("a failing replacement callback cannot prevent hook cleanup or duplicate notifications", async () => {

@@ -633,9 +633,14 @@ export class ControllerLeaseManager {
     this.#leases.delete(controllerLeaseId);
     const previousLease = this.#previousLeases.get(controllerLeaseId);
     this.#previousLeases.delete(controllerLeaseId);
-    this.#reservations.releaseControllerLease({
-      endpointId: lease.endpoint_id, controllerLeaseId,
-    });
+    const failures = [];
+    try {
+      this.#reservations.releaseControllerLease({
+        endpointId: lease.endpoint_id, controllerLeaseId,
+      });
+    } catch (error) {
+      failures.push(error);
+    }
     const event = Object.freeze({
       endpoint_id: lease.endpoint_id,
       remote_control_generation: lease.remote_control_generation,
@@ -644,9 +649,11 @@ export class ControllerLeaseManager {
     });
     const callbacks = [() => this.#onLeaseTerminated(event)];
     if (this.#terminationObserver) callbacks.unshift(() => this.#terminationObserver(event, lease, previousLease));
+    // A failed slot release must not strand exact-revision hooks or peers.
+    // Preserve the failed release as observable evidence; stale retries stay no-ops.
     const outcomes = await Promise.allSettled(callbacks.map((callback) => Promise.resolve().then(callback)));
     this.#emit("controller_lease_terminated");
-    const failures = outcomes.filter((outcome) => outcome.status === "rejected").map((outcome) => outcome.reason);
+    failures.push(...outcomes.filter((outcome) => outcome.status === "rejected").map((outcome) => outcome.reason));
     if (failures.length) throw new AggregateError(failures, "controller_lease_termination_callback_failed");
     return true;
   }
