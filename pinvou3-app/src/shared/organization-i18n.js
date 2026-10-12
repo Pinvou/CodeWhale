@@ -42,3 +42,7 @@ export const organizationCopy = {
   create: '組織を作成', rename: '名称を変更', disable: '無効化', enable: '有効化', delete: '組織を削除', readiness: '削除条件を確認', blockers: '阻止条件', addMember: 'メンバーを追加', renameUnit: '単位名を変更', deleteUnit: '単位を削除', previous: '前のページ', next: '次のページ', search: '名称を検索',
  },
 };
+
+Object.assign(organizationCopy.zh, { cancelConfirmation: '取消', confirmAction: '确认执行', confirmationTarget: '操作对象' });
+Object.assign(organizationCopy.en, { cancelConfirmation: 'Cancel', confirmAction: 'Confirm operation', confirmationTarget: 'Action target' });
+Object.assign(organizationCopy.ja, { cancelConfirmation: 'キャンセル', confirmAction: '実行を確認', confirmationTarget: '操作対象' });
