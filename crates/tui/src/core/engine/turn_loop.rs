@@ -676,12 +676,12 @@ fn simple_extension_filters(value: &serde_json::Value) -> Option<serde_json::Val
     Some(serde_json::Value::Array(extensions))
 }
 
-struct PlannedToolCalls {
-    plans: Vec<ToolExecutionPlan>,
-    hook_contexts: std::collections::HashMap<String, String>,
-    batch_sandbox_policy: crate::sandbox::SandboxPolicy,
-    benchmark_budget_exhausted: bool,
-    benchmark_skipped_over_budget_tool_ids: std::collections::HashSet<String>,
+pub(super) struct PlannedToolCalls {
+    pub(super) plans: Vec<ToolExecutionPlan>,
+    pub(super) hook_contexts: std::collections::HashMap<String, String>,
+    pub(super) batch_sandbox_policy: crate::sandbox::SandboxPolicy,
+    pub(super) benchmark_budget_exhausted: bool,
+    pub(super) benchmark_skipped_over_budget_tool_ids: std::collections::HashSet<String>,
 }
 
 struct StreamOutcome {
@@ -3486,7 +3486,7 @@ impl Engine {
     /// deferred-tool activation state. It returns the executable plans together
     /// with the hook context and batch sandbox policy consumed by later phases.
     #[allow(clippy::too_many_arguments)] // phase fns mirror the turn pipeline shape
-    async fn plan_tool_calls(
+    pub(super) async fn plan_tool_calls(
         &mut self,
         client: &dyn crate::core::model_client::ModelClient,
         turn: &mut TurnContext,
@@ -4009,7 +4009,7 @@ impl Engine {
             let should_emit_hydration_status =
                 !deferred_tools_hydrated_this_batch.contains(&tool_name);
             if blocked_error.is_none()
-                && let Some(result) = maybe_hydrate_requested_deferred_tool(
+                && let Some(hydration) = maybe_hydrate_requested_deferred_tool(
                     &tool_name,
                     &tool_input,
                     tool_catalog,
@@ -4017,37 +4017,49 @@ impl Engine {
                     &mut deferred_tools_hydrated_this_batch,
                 )
             {
-                if should_emit_hydration_status {
-                    // Retain first-proposal order separately from the set
-                    // used to deduplicate calls in this batch. LRU bounds
-                    // must not depend on randomized HashSet iteration.
-                    deferred_tools_hydrated_in_order.push(tool_name.clone());
-                }
-                emit_tool_audit_for_policy(
-                    self.active_turn_tool_security.is_some(),
-                    json!({
-                        "event": "tool.schema_hydrated",
-                        "tool_id": tool_id.clone(),
-                        "tool_name": tool_name.clone(),
-                        "auto_retry_same_turn": false,
-                        "metadata": result.metadata,
-                    }),
-                );
-                if should_emit_hydration_status {
-                    let status = if requested_tool_name == tool_name {
-                        format!(
-                            "Loaded deferred tool '{tool_name}'. Retry the call with its visible schema."
-                        )
-                    } else {
-                        format!(
-                            "Loaded deferred tool '{tool_name}' after resolving '{requested_tool_name}'. Retry the call with its visible schema."
-                        )
-                    };
-                    let _ = self.tx_event.send(Event::status(status)).await;
-                }
+                let result = match hydration {
+                    DeferredHydration::Loaded(result) => {
+                        if should_emit_hydration_status {
+                            // Retain first-proposal order separately from the set
+                            // used to deduplicate calls in this batch. LRU bounds
+                            // must not depend on randomized HashSet iteration.
+                            deferred_tools_hydrated_in_order.push(tool_name.clone());
+                        }
+                        emit_tool_audit_for_policy(
+                            self.active_turn_tool_security.is_some(),
+                            json!({
+                                "event": "tool.schema_hydrated",
+                                "tool_id": tool_id.clone(),
+                                "tool_name": tool_name.clone(),
+                                "auto_retry_same_turn": false,
+                                "metadata": result.metadata,
+                            }),
+                        );
+                        if should_emit_hydration_status {
+                            let status = if requested_tool_name == tool_name {
+                                format!(
+                                    "Loaded deferred tool '{tool_name}'. Retry the call with its visible schema."
+                                )
+                            } else {
+                                format!(
+                                    "Loaded deferred tool '{tool_name}' after resolving '{requested_tool_name}'. Retry the call with its visible schema."
+                                )
+                            };
+                            let _ = self.tx_event.send(Event::status(status)).await;
+                        }
+                        result
+                    }
+                    // A refusal loads nothing: announcing "Loaded deferred
+                    // tool" or auditing `tool.schema_hydrated` would state
+                    // the opposite of the receipt, and the refused name must
+                    // stay out of the hydration order so the batch
+                    // activation is never asked to admit it.
+                    DeferredHydration::Refused(result) => result,
+                };
                 // The provider did not advertise this schema in the current
                 // request. Hydration is discovery, never execution authority:
-                // return the schema now and require a subsequent model call.
+                // return the schema — or the refusal — now and require a
+                // subsequent model call.
                 guard_result = Some(result);
             }
 

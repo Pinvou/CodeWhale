@@ -1,5 +1,5 @@
 use super::{
-    CODE_EXECUTION_DESCRIPTION, DEFAULT_ACTIVE_NATIVE_TOOLS,
+    CODE_EXECUTION_DESCRIPTION, DEFAULT_ACTIVE_NATIVE_TOOLS, DeferredHydration,
     allowlist_is_native_file_and_shell_only, apply_mcp_tool_deferral, apply_native_tool_deferral,
     apply_registry_first_shell_guidance, build_model_tool_catalog_with_surface,
     default_synthetic_catalog_tool_names, ensure_advanced_tooling, execute_tool_search_with_cache,
@@ -811,18 +811,19 @@ fn hydration_of_an_oversize_tool_reports_the_rejection_not_a_load() {
     let active = HashSet::new();
     let mut hydrated = HashSet::new();
 
-    let receipt = maybe_hydrate_requested_deferred_tool(
+    let Some(DeferredHydration::Refused(receipt)) = maybe_hydrate_requested_deferred_tool(
         "huge-deferred",
         &json!({}),
         &catalog,
         &active,
         &mut hydrated,
-    )
-    .expect("the oversize refusal must still answer the call");
+    ) else {
+        panic!("the oversize call must be refused, not loaded");
+    };
     assert!(
         receipt
             .content
-            .contains("could not enter the bounded conversation toolbox"),
+            .contains("was not loaded and was not executed"),
         "the receipt must refuse the load: {}",
         receipt.content
     );

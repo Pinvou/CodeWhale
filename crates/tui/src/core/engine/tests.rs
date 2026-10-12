@@ -12279,14 +12279,15 @@ fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
     let catalog = vec![apply_patch];
     let active_at_batch_start = HashSet::new();
     let mut hydrated_this_batch = HashSet::new();
-    let result = maybe_hydrate_requested_deferred_tool(
+    let Some(DeferredHydration::Loaded(result)) = maybe_hydrate_requested_deferred_tool(
         "apply_patch",
         &json!({"patch": "*** Begin Patch\n*** End Patch"}),
         &catalog,
         &active_at_batch_start,
         &mut hydrated_this_batch,
-    )
-    .expect("first deferred use should hydrate");
+    ) else {
+        panic!("first deferred use should hydrate, not refuse");
+    };
 
     assert!(!active_at_batch_start.contains("apply_patch"));
     assert!(hydrated_this_batch.contains("apply_patch"));
@@ -12300,14 +12301,15 @@ fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
     assert_eq!(metadata["executed"], false);
     assert_eq!(metadata["retry_required"], true);
 
-    let second_result = maybe_hydrate_requested_deferred_tool(
+    let Some(DeferredHydration::Loaded(second_result)) = maybe_hydrate_requested_deferred_tool(
         "apply_patch",
         &json!({"patch": "*** Begin Patch\n*** End Patch"}),
         &catalog,
         &active_at_batch_start,
         &mut hydrated_this_batch,
-    )
-    .expect("later calls in the same batch should hydrate instead of executing");
+    ) else {
+        panic!("later calls in the same batch should hydrate instead of executing");
+    };
     assert_eq!(second_result.metadata.unwrap()["executed"], false);
     assert_eq!(
         hydrated_this_batch,
@@ -27712,6 +27714,103 @@ async fn turn_start_note_does_not_name_a_tool_the_result_re_admits() {
         !receipt.contains("no longer callable"),
         "the receipt must not declare a tool uncallable that the same result re-admits: {receipt}"
     );
+}
+
+/// A refused hydration loads nothing: the receipt must answer the call with
+/// the shared oversize reason, but no "Loaded deferred tool" status may
+/// announce a load that did not happen, and the refused name must stay out
+/// of the batch hydration order — the batch activation is never asked to
+/// admit it.
+#[tokio::test]
+async fn refused_hydration_emits_no_load_status_and_never_enters_the_batch() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("unused")]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    // `notify` has a registered execution path (so the direct call passes
+    // the dispatch gate) and its catalog entry is deferred with an oversize
+    // schema, so the hydration must refuse instead of load. The sibling
+    // keeps the single-tool fallback from force-activating it.
+    let mut registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    registry.register(std::sync::Arc::new(crate::tools::notify::NotifyTool));
+    let catalog = vec![
+        heavy_deferred_tool("notify", 20_000),
+        heavy_deferred_tool("cached-b", 100),
+    ];
+    let surface = test_tool_surface(&engine, registry, Some(catalog.clone()), AppMode::Agent);
+    let tool_registry = Some(&surface.registry);
+    let mut tool_uses = vec![super::streaming::ToolUseState {
+        id: "refuse-1".to_string(),
+        name: "notify".to_string(),
+        input: json!({}),
+        caller: None,
+        thought_signature: None,
+        input_buffer: String::new(),
+        input_parse_error: None,
+    }];
+    let mut active = HashSet::new();
+    let mut budget = crate::tools::tool_call_budget::ToolCallBudget::new(surface.max_tool_calls);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let planned = engine
+        .plan_tool_calls(
+            mock.as_ref(),
+            &mut turn,
+            &surface,
+            &mut tool_uses,
+            &catalog,
+            tool_registry,
+            &mut active,
+            &mut budget,
+            AppMode::Agent,
+        )
+        .await;
+
+    let plan = planned
+        .plans
+        .iter()
+        .find(|plan| plan.id == "refuse-1")
+        .expect("the refused call must be planned");
+    let receipt = plan
+        .guard_result
+        .as_ref()
+        .expect("the refusal must answer the call as a guard result");
+    assert!(
+        receipt.content.contains("was not loaded")
+            && receipt
+                .content
+                .contains(&super::tool_catalog::toolbox_oversize_reason()),
+        "the receipt must refuse with the shared oversize reason: {}",
+        receipt.content
+    );
+    assert!(
+        !receipt.content.contains("has now been loaded"),
+        "the receipt must not promise a load: {}",
+        receipt.content
+    );
+    assert!(
+        !active.contains("notify"),
+        "the refused name must stay out of the batch hydration: {active:?}"
+    );
+
+    // Nothing may announce the load: drain the engine's events and require
+    // that no status claims the tool was loaded.
+    let mut rx = handle.rx_event.write().await;
+    while let Ok(event) = rx.try_recv() {
+        if let crate::core::events::Event::Status { message } = event {
+            assert!(
+                !message.contains("Loaded deferred tool"),
+                "a refused hydration must not announce a load: {message}"
+            );
+        }
+    }
 }
 
 /// Turn-start revalidation and a hydration batch can both evict in the same

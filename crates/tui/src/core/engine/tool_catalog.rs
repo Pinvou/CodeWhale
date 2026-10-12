@@ -1165,7 +1165,7 @@ pub(super) fn maybe_hydrate_requested_deferred_tool(
     catalog: &[Tool],
     active_tools_at_batch_start: &HashSet<String>,
     hydrated_tools_this_batch: &mut HashSet<String>,
-) -> Option<ToolResult> {
+) -> Option<DeferredHydration> {
     let def = catalog.iter().find(|def| def.name == tool_name)?;
 
     if !def.defer_loading.unwrap_or(false) || active_tools_at_batch_start.contains(tool_name) {
@@ -1179,17 +1179,30 @@ pub(super) fn maybe_hydrate_requested_deferred_tool(
     // statement the child surface makes. The name stays out of the
     // hydration set, so the batch activation is never asked to admit it.
     if ToolActivationCache::exceeds_per_tool_budget(def) {
-        return Some(deferred_tool_oversize_hydration_result(def));
+        return Some(DeferredHydration::Refused(
+            deferred_tool_oversize_hydration_result(def),
+        ));
     }
 
     hydrated_tools_this_batch.insert(tool_name.to_string());
-    Some(deferred_tool_schema_hydration_result(def, tool_input))
+    Some(DeferredHydration::Loaded(
+        deferred_tool_schema_hydration_result(def, tool_input),
+    ))
+}
+
+/// Outcome of a direct call to a deferred tool: either the schema was
+/// loaded into the batch hydration (the receipt publishes it and the load
+/// is announced), or the tool cannot enter the toolbox and the receipt
+/// refuses. The caller must keep the two apart: a refusal is not a load,
+/// and announcing one as the other lies to the user and the audit log.
+pub(super) enum DeferredHydration {
+    Loaded(ToolResult),
+    Refused(ToolResult),
 }
 
 fn deferred_tool_oversize_hydration_result(tool: &Tool) -> ToolResult {
     ToolResult::success(format!(
-        "Tool `{}` could not enter the bounded conversation toolbox: {}. \
-         The tool was not executed.",
+        "Tool `{}` was not loaded and was not executed: {}",
         tool.name,
         toolbox_oversize_reason()
     ))
@@ -1204,7 +1217,7 @@ pub(super) fn preflight_requested_deferred_tool(
 ) -> Option<ToolResult> {
     let active_tools_at_batch_start = active_tools.clone();
     let mut hydrated_tools_this_batch = HashSet::new();
-    let result = maybe_hydrate_requested_deferred_tool(
+    let hydration = maybe_hydrate_requested_deferred_tool(
         tool_name,
         tool_input,
         catalog,
@@ -1212,7 +1225,9 @@ pub(super) fn preflight_requested_deferred_tool(
         &mut hydrated_tools_this_batch,
     );
     active_tools.extend(hydrated_tools_this_batch);
-    result
+    hydration.map(|hydration| match hydration {
+        DeferredHydration::Loaded(result) | DeferredHydration::Refused(result) => result,
+    })
 }
 
 fn deferred_tool_schema_hydration_result(tool: &Tool, tool_input: &Value) -> ToolResult {
