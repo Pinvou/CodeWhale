@@ -1381,6 +1381,12 @@ impl Engine {
         let strict_tool_mode = tool_policy.strict_tool_mode;
         let mut tool_catalog = std::mem::take(&mut tool_policy.catalog);
         let mut active_tool_names = std::mem::take(&mut tool_policy.active_names);
+        // A note parked by an earlier turn that never reached a tool result
+        // (an interrupted turn, a panic) would misattribute its evictions to
+        // this turn's first result; drop it before revalidating. SyncSession
+        // already clears it at the conversation edge — this covers the
+        // same-conversation case.
+        self.session.pending_toolbox_eviction_note = None;
         // Search activations belong to the conversation, not just the user
         // turn. Revalidate names against this turn's already-filtered catalog
         // before exposing them; stale mode/MCP/allow-list entries disappear.
@@ -1389,6 +1395,11 @@ impl Engine {
             &mut active_tool_names,
             removals.dropped_names().map(str::to_string),
         );
+        // This revalidation can also evict on the collective bounds when a
+        // cached schema grew between turns (an MCP refresh, for example).
+        // Like a hydration it has no result payload of its own: park the
+        // note so the turn's first recorded result carries it.
+        self.park_toolbox_eviction_note("turn's start", &removals.bounds_evicted);
         active_tool_names.extend(
             self.session
                 .tool_activation_cache
@@ -4139,13 +4150,12 @@ impl Engine {
         // session so the first recorded tool result of this batch carries it
         // to the model. The evictions may come from the admission itself or
         // from revalidation after a cached schema grew. Unavailable drops are
-        // not reported here — the next `tool_search` result is where the
-        // model learns it cannot re-activate such a tool.
-        if !activation.evicted.is_empty() {
-            self.session.pending_toolbox_eviction_note = Some(
-                super::tool_catalog::bounded_toolbox_eviction_note("step", &activation.evicted),
-            );
-        }
+        // not reported here: an oversize drop is re-reported with its reason
+        // the next time a search matches the tool, while a catalog-shrink
+        // drop left the catalog entirely and no later search can name it —
+        // the model learns of those only when a search for the capability
+        // misses.
+        self.park_toolbox_eviction_note("step", &activation.evicted);
         PlannedToolCalls {
             plans,
             hook_contexts,
@@ -4992,6 +5002,21 @@ impl Engine {
         outcomes
     }
 
+    /// Park a bounded-toolbox eviction note for the next recorded tool
+    /// result, combining with any note already parked — turn-start
+    /// revalidation and a hydration batch can both evict in the same turn.
+    pub(super) fn park_toolbox_eviction_note(&mut self, trigger: &str, evicted: &[String]) {
+        if evicted.is_empty() {
+            return;
+        }
+        let note = super::tool_catalog::bounded_toolbox_eviction_note(trigger, evicted);
+        self.session.pending_toolbox_eviction_note =
+            Some(match self.session.pending_toolbox_eviction_note.take() {
+                Some(existing) => format!("{existing}\n\n{note}"),
+                None => note,
+            });
+    }
+
     /// Commit collected tool outcomes to the session and related runtime state.
     ///
     /// This phase activates result dependencies, refreshes a changed MCP catalog,
@@ -5186,18 +5211,21 @@ impl Engine {
                         .find(|tool| tool.name == outcome.name)
                         .map(|tool| &tool.input_schema);
                     let error = format_tool_error_with_schema(&e, &outcome.name, input_schema);
-                    // A pending hydration-eviction note must still reach the
-                    // model when the batch's first result is an error.
-                    let error = match pending_eviction_note.take() {
-                        Some(note) => format!("{error}\n\n{note}"),
-                        None => error,
-                    };
+                    // The working set observes the tool's own error, not the
+                    // surface bookkeeping appended below — the same pre-note
+                    // text the success path observes.
                     self.session.working_set.observe_tool_call(
                         &tool_name_for_ws,
                         &tool_input,
                         Some(&error),
                         &self.session.workspace,
                     );
+                    // A pending hydration-eviction note must still reach the
+                    // model when the batch's first result is an error.
+                    let error = match pending_eviction_note.take() {
+                        Some(note) => format!("{error}\n\n{note}"),
+                        None => error,
+                    };
                     self.add_session_message(Message {
                         role: Role::User,
                         content: tool_result_message_content(
@@ -5211,6 +5239,15 @@ impl Engine {
                     .await;
                 }
             }
+        }
+
+        // A batch whose outcomes all flattened away (a benchmark final-only
+        // skip, for example) has no result to carry the note. Re-park it so
+        // a later batch of this turn still delivers it; a turn that ends
+        // without another batch strands it, and the next turn's entry sweep
+        // drops it rather than letting it ride an unrelated result.
+        if let Some(note) = pending_eviction_note {
+            self.session.pending_toolbox_eviction_note = Some(note);
         }
 
         // Reflect a mid-turn goal change on the sidebar immediately (idempotent:

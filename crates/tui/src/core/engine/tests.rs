@@ -1,6 +1,7 @@
 use super::*;
 
 use super::context::COMPACTION_SUMMARY_MARKER;
+use super::dispatch::ToolExecOutcome;
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
     auto_review_block_tool_error, initial_stream_error_user_message,
@@ -15,6 +16,7 @@ use crate::prompts::{
     system_prompt_for_mode_with_context_skills_and_session,
 };
 use crate::test_support::{EnvVarGuard, lock_test_env};
+use crate::tools::spec::{ToolError, ToolExecutionOutcome};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -27271,9 +27273,6 @@ async fn a_booting_turn_keeps_an_already_declared_surface_reason() {
 // must ride the triggering result. A regression that drops the take, skips
 // the error branch, or misroutes the triggering result turns these red.
 
-use super::dispatch::ToolExecOutcome;
-use crate::tools::spec::{ToolError, ToolExecutionOutcome};
-
 fn synthetic_toolbox_outcome(
     id: &str,
     name: &str,
@@ -27565,10 +27564,12 @@ async fn session_sync_drops_a_parked_toolbox_eviction_note() {
     }
     drop(rx);
 
+    let mut saw_tool_result = false;
     for request in model.captured_requests() {
         for message in &request.messages {
             for block in &message.content {
                 if let crate::models::ContentBlock::ToolResult { content, .. } = block {
+                    saw_tool_result = true;
                     assert!(
                         !content.contains("ghost-tool"),
                         "the previous conversation's parked note must not survive SyncSession: {content}"
@@ -27577,7 +27578,101 @@ async fn session_sync_drops_a_parked_toolbox_eviction_note() {
             }
         }
     }
+    assert!(
+        saw_tool_result,
+        "the post-sync turn must record at least one tool result, or the ghost-tool scan proves nothing"
+    );
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
+}
+
+/// A turn-start revalidation that evicts on the collective bounds (a cached
+/// schema grew between turns) must park its note so the turn's first recorded
+/// result carries it — the eviction may not ride a search that has not
+/// happened yet.
+#[tokio::test]
+async fn turn_start_revalidation_parks_an_eviction_note_for_the_turn() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("done")]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let priming_catalog = vec![
+        heavy_deferred_tool("cached-a", 7_000),
+        heavy_deferred_tool("cached-b", 7_000),
+    ];
+    let cached = vec!["cached-a".to_string(), "cached-b".to_string()];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&priming_catalog, &cached);
+
+    // The catalog's schema for `cached-a` grew between turns (an MCP
+    // refresh): this turn's start revalidation evicts the LRU victim, and
+    // the note must be parked for the turn's first result.
+    let grown_catalog = vec![
+        heavy_deferred_tool("cached-a", 12_000),
+        heavy_deferred_tool("cached-b", 7_000),
+    ];
+    let policy = policy_for_catalog(
+        grown_catalog,
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let _ = engine.run_turn(&mut turn, policy, None, None).await;
+
+    assert!(
+        !engine
+            .session
+            .tool_activation_cache
+            .names()
+            .any(|name| name == "cached-a"),
+        "the turn-start eviction must drop the LRU victim from the cache"
+    );
+    let note = engine
+        .session
+        .pending_toolbox_eviction_note
+        .expect("the turn-start eviction must park its note for the turn's first result");
+    assert!(
+        note.contains("turn's start") && note.contains("cached-a"),
+        "the parked note must name the trigger and the victim: {note}"
+    );
+}
+
+/// Turn-start revalidation and a hydration batch can both evict in the same
+/// turn; the parked notes must combine, not overwrite.
+#[tokio::test]
+async fn toolbox_eviction_notes_park_and_combine() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.park_toolbox_eviction_note("turn's start", &["turn-victim".to_string()]);
+    engine.park_toolbox_eviction_note("step", &["step-victim".to_string()]);
+
+    let note = engine
+        .session
+        .pending_toolbox_eviction_note
+        .clone()
+        .expect("the combined note must stay parked");
+    assert!(
+        note.contains("This turn's start evicted") && note.contains("turn-victim"),
+        "the turn-start note must survive a later park: {note}"
+    );
+    assert!(
+        note.contains("This step evicted") && note.contains("step-victim"),
+        "the hydration note must combine with the parked one: {note}"
+    );
+
+    // An empty eviction list parks nothing and must not clobber the slot.
+    engine.park_toolbox_eviction_note("step", &[]);
+    assert!(
+        engine.session.pending_toolbox_eviction_note.is_some(),
+        "an empty eviction list must not clear the parked note"
+    );
 }
