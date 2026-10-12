@@ -213,8 +213,6 @@ pub enum FragmentCapError {
         bytes: usize,
         max: usize,
     },
-    #[error("context has too many fragments: {count} > {max}")]
-    TooManyFragments { count: usize, max: usize },
 }
 
 pub fn validate_fragment(fragment: &BoundedFragment) -> Result<(), FragmentCapError> {

@@ -414,6 +414,14 @@ mod tests {
         assert_eq!(sense.picker_models(), vec![SENSENOVA_DEFAULT_MODEL]);
         assert!(sense.docs_url().is_none());
         assert!(sense.credential_url().is_none());
+        // Re-pointed from compatible_template_ids_do_not_shadow_built_ins:
+        // this template id is the one the surviving hosted-host enumeration
+        // does not cover, and it must never shadow a ProviderKind built-in.
+        assert!(
+            ProviderKind::parse(SENSENOVA_TEMPLATE_ID).is_none(),
+            "compatible template '{}' shadows ProviderKind",
+            SENSENOVA_TEMPLATE_ID
+        );
     }
 
     #[test]

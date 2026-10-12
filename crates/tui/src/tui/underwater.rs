@@ -12,7 +12,7 @@ use std::borrow::Cow;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::UnicodeWidthStr;
@@ -567,28 +567,6 @@ impl ShellPhase {
             Self::Done => tr(locale, MessageId::PhaseDone),
             Self::Failed => tr(locale, MessageId::PhaseFailed),
         }
-    }
-
-    #[must_use]
-    #[allow(dead_code)] // classic header/band renderer: superseded by the Tideline shell
-    // (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
-    pub fn color(self, app: &App) -> Color {
-        phase_ink(self).color(&app.ui_theme)
-    }
-}
-
-/// Status-bar phase ink. Failure red is only `Failed`.
-#[must_use]
-pub(crate) fn phase_ink(phase: ShellPhase) -> ChromeInk {
-    match phase {
-        ShellPhase::Idle => ChromeInk::Metadata,
-        ShellPhase::Done => ChromeInk::Outcome,
-        ShellPhase::Typing => ChromeInk::Identity,
-        // Verifying shares the live seafoam hue; the tick-vs-bubble
-        // marker carries the checking/searching distinction.
-        ShellPhase::Working | ShellPhase::Verifying => ChromeInk::Active,
-        ShellPhase::Waiting | ShellPhase::Approval => ChromeInk::Waiting,
-        ShellPhase::Failed => ChromeInk::Failure,
     }
 }
 
