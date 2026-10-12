@@ -275,9 +275,18 @@ func (s *Service) allocateOrganizationQuotaBatch(w http.ResponseWriter, r *http.
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a valid quota allocation batch is required", httpserver.RequestID(r.Context()))
 		return
 	}
+	var items []json.RawMessage
+	if json.Unmarshal(body.Items, &items) != nil || items == nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a valid quota allocation batch is required", httpserver.RequestID(r.Context()))
+		return
+	}
 	payload, err := client.AllocateOrganizationQuotaBatch(r.Context(), organizationID, resolved.UserID, body.Items, r.Header.Get("Idempotency-Key"))
 	if err != nil {
-		api.WriteError(w, http.StatusConflict, "QUOTA_ALLOCATION_FAILED", "the quota allocation batch could not be completed", httpserver.RequestID(r.Context()))
+		writeOrganizationQuotaFailure(w, r, err, "QUOTA_ALLOCATION_FAILED", "the quota allocation batch could not be completed")
+		return
+	}
+	if !json.Valid(payload) {
+		writeOrganizationQuotaFailure(w, r, errors.New("invalid quota receipt"), "QUOTA_ALLOCATION_FAILED", "the quota allocation batch could not be completed")
 		return
 	}
 	writeRawNoStore(w, http.StatusMultiStatus, payload)
@@ -298,8 +307,39 @@ func (s *Service) revokeOrganizationQuotaGrant(w http.ResponseWriter, r *http.Re
 	}
 	payload, err := client.RevokeOrganizationQuota(r.Context(), organizationID, grantID, resolved.UserID, body.Reason, r.Header.Get("Idempotency-Key"))
 	if err != nil {
-		api.WriteError(w, http.StatusConflict, "QUOTA_REVOKE_FAILED", "the quota grant cannot be revoked in its current state", httpserver.RequestID(r.Context()))
+		writeOrganizationQuotaFailure(w, r, err, "QUOTA_REVOKE_FAILED", "the quota grant cannot be revoked in its current state")
+		return
+	}
+	if !json.Valid(payload) {
+		writeOrganizationQuotaFailure(w, r, errors.New("invalid quota receipt"), "QUOTA_REVOKE_FAILED", "the quota grant cannot be revoked in its current state")
 		return
 	}
 	writeRawNoStore(w, http.StatusOK, payload)
+}
+
+// A transport/credential/service failure or malformed success receipt does not
+// prove that a quota write was rejected. Only a typed domain HTTP rejection can
+// be relayed as such; keep the caller's key and the upstream details private.
+func writeOrganizationQuotaFailure(w http.ResponseWriter, r *http.Request, err error, code, message string) {
+	var failure *BillingHTTPError
+	if errors.As(err, &failure) {
+		switch failure.Status {
+		case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusTooManyRequests:
+			if failure.Status == http.StatusTooManyRequests {
+				validSeconds := failure.RetryAfter != ""
+				for _, digit := range failure.RetryAfter {
+					if digit < '0' || digit > '9' {
+						validSeconds = false
+						break
+					}
+				}
+				if validSeconds {
+					w.Header().Set("Retry-After", failure.RetryAfter)
+				}
+			}
+			api.WriteError(w, failure.Status, code, message, httpserver.RequestID(r.Context()))
+			return
+		}
+	}
+	api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the quota result is temporarily unavailable; retry with the same idempotency key", httpserver.RequestID(r.Context()))
 }

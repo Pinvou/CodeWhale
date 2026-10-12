@@ -6,6 +6,11 @@ import (
 )
 
 func (s *Service) registerOrganizationFinanceRoutes(routes *httpserver.RouteGroup) {
+	// Personal finance has no organization/model repository. Keep organization
+	// facilities in the existing explicit management assembly.
+	if !s.managementEnabled {
+		return
+	}
 	routes.GET("/organizations/:organization_id/model-policy", httpserver.AdaptFunc(s.organizationModelPolicy))
 	routes.PUT("/organizations/:organization_id/model-policy", approvalpolicy.Require("TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationModelPolicy))
 	routes.GET("/organizations/:organization_id/balance", httpserver.AdaptFunc(s.getOrganizationBalance))

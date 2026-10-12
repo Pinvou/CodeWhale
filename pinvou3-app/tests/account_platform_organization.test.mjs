@@ -77,3 +77,13 @@ test('organization model policy initial version zero is valid but malformed or u
  for(const malformed of [{...value,version:-1},{...value,version:9007199254740992},{...value,mode:'UNKNOWN'},{...value,model_ids:[other]},{...value,mode:'ALLOW_LIST',model_ids:[other,other]},{...value,authorization_version:0}])assert.throws(()=>requireOrganizationModelPolicy(malformed,org));
  for(const locale of ['zh','en','ja'])for(const key of ['modelPolicy','modelPolicyMode','models','ALLOW_ALL','ALLOW_LIST','DENY_LIST'])assert.ok(organizationCopy[locale][key]?.trim());
 });
+
+test('organization operation copy fulfills every finance hook error state in all languages', () => {
+ for (const language of ['zh', 'en', 'ja']) {
+  const copy = organizationCopy[language];
+  for (const key of ['inputInvalid', 'permissions', 'sourceChanged', 'unavailable', 'unknown', 'saved']) assert.ok(copy[key]?.trim());
+  assert.equal(copy.inputInvalid, copy.invalid);
+  assert.notEqual(copy.invitationUnknown, copy.contextUnknown);
+  assert.notEqual(copy.invitationUnavailable, copy.invitationAcceptedRefreshUnknown);
+ }
+});

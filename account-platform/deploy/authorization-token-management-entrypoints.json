@@ -1213,5 +1213,165 @@
       "path": "/launch",
       "handler": "launch"
     }
+  ],
+  "organizationFinanceRoutes": [
+    {
+      "method": "get",
+      "path": "/v1/organizations/{organization_id}/model-policy",
+      "handler": "organizationModelPolicy",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.models.read"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    },
+    {
+      "method": "put",
+      "path": "/v1/organizations/{organization_id}/model-policy",
+      "handler": "organizationModelPolicy",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.models.manage"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ],
+      "policy": {
+        "command": "TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE",
+        "mode": "AuditOnly"
+      }
+    },
+    {
+      "method": "get",
+      "path": "/v1/organizations/{organization_id}/balance",
+      "handler": "getOrganizationBalance",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.wallet.read"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/v1/organizations/{organization_id}/entitlement-packages",
+      "handler": "getOrganizationEntitlementPackages",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.wallet.read"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/v1/organizations/{organization_id}/recharge/products",
+      "handler": "getOrganizationRechargeProducts",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.entitlements.purchase"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/v1/organizations/{organization_id}/payment-capabilities",
+      "handler": "getOrganizationPaymentCapabilities",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.entitlements.purchase"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/v1/organizations/{organization_id}/recharge/orders",
+      "handler": "createOrganizationRechargeOrder",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.entitlements.purchase"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/v1/organizations/{organization_id}/recharge/orders/{order_id}",
+      "handler": "getOrganizationRechargeOrder",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.entitlements.purchase"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    },
+    {
+      "method": "get",
+      "path": "/v1/organizations/{organization_id}/quota-grants",
+      "handler": "listOrganizationQuotaGrants",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.quota.read.self"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/v1/organizations/{organization_id}/quota-grants:batch",
+      "handler": "allocateOrganizationQuotaBatch",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.quota.allocate"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    },
+    {
+      "method": "post",
+      "path": "/v1/organizations/{organization_id}/quota-grants/{grant_id}/revoke",
+      "handler": "revokeOrganizationQuotaGrant",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.quota.revoke"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    }
   ]
 }

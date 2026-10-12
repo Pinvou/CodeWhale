@@ -86,6 +86,26 @@ func (r *PostgresRepository) ReplaceMemberUnits(ctx context.Context, principal i
 		if err = requireMemberUnitPlatformPermission(ctx, tx, actorID); err != nil {
 			return MembershipMutationResult{}, err
 		}
+	} else {
+		// Check current read authority before exposing organization/member
+		// existence or versions. Keep this precheck non-locking: the original
+		// organization→target→authority lock order and final fenced check below
+		// still own mutations. Organization-wide managers retain missing-target
+		// errors; scoped managers must already cover the target's existing units.
+		err = requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationMembersManage)
+		if errors.Is(err, ErrForbidden) {
+			err = requireOrganizationMemberPermission(ctx, tx, actorID, organizationID, targetID, PermissionOrganizationMembersManage)
+		}
+		if errors.Is(err, ErrForbidden) {
+			// A receipt uses its immutable affected scope, even when the target
+			// has since moved or become inactive. Only this actor's original key
+			// can establish that read authority; the original locked hash and
+			// permission checks below still decide the replay.
+			err = requireMemberUnitsReceiptReadPermission(ctx, tx, actorID, organizationID, targetID, key)
+		}
+		if err != nil {
+			return MembershipMutationResult{}, err
+		}
 	}
 	var orgStatus string
 	if err = tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&orgStatus); errors.Is(err, pgx.ErrNoRows) {
@@ -177,6 +197,25 @@ func (r *PostgresRepository) ReplaceMemberUnits(ctx context.Context, principal i
 		return MembershipMutationResult{}, err
 	}
 	return result, tx.Commit(ctx)
+}
+
+func requireMemberUnitsReceiptReadPermission(ctx context.Context, tx pgx.Tx, actorID, organizationID, targetID uuid.UUID, key string) error {
+	var raw []byte
+	err := tx.QueryRow(ctx, `SELECT result FROM membership_commands WHERE actor_user_id=$1 AND organization_id=$2 AND command_type='UNITS_REPLACE' AND idempotency_key=$3`, actorID, organizationID, key).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrForbidden
+	}
+	if err != nil {
+		return err
+	}
+	var receipt memberUnitsReceipt
+	if err := json.Unmarshal(raw, &receipt); err != nil {
+		return err
+	}
+	if receipt.OrganizationID != organizationID || receipt.Member.UserID != targetID {
+		return ErrForbidden
+	}
+	return requireMembershipAffectedScopePermission(ctx, tx, actorID, organizationID, receipt.AffectedUnitIDs)
 }
 
 // Platform input has a separate permission fence; a caller-supplied flag never

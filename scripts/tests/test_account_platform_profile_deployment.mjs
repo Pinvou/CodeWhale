@@ -95,3 +95,16 @@ test('required operator interpolation refuses both missing and empty mode before
     }
   }
 });
+
+const organizations = readCompose('compose.organizations.yaml');
+
+test('organization overlay explicitly retains complete models assembly for all three services', () => {
+  for (const service of services) assert.equal(organizations.services[service].environment[mode], 'models');
+  assert.equal(organizations.services['account-service'].environment.TOKEN_HTTP_URL, 'http://token-gateway:8080');
+  assert.equal(organizations.services['account-service'].environment.BILLING_HTTP_URL, 'http://billing-service:8080');
+  expectModes([personal, finance, models, organizations], 'models');
+  expectModes([personal, models, organizations, finance], 'models');
+  const token = Object.assign({}, models.services['token-gateway'].environment, organizations.services['token-gateway'].environment);
+  assert.equal(token.TOKEN_SECRET_PROVIDER, 'vault-transit');
+  assert.equal(token.PGPASSFILE, '/run/pinvou/database/pgpass');
+});

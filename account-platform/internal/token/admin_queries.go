@@ -633,8 +633,38 @@ WHERE audit.model_id=$3 AND audit.created_at<=$4 AND ($5='' OR audit.action=$5) 
 AND ($7::timestamptz IS NULL OR audit.created_at >= $7) AND ($8::timestamptz IS NULL OR audit.created_at < $8)
 `, resourceID, highWater, action, actorID, from, to)
 		}
+		// Legacy account and completion audits retain the actual account UUID.
+		// Governed account/route audits use the original immutable receipt, not
+		// a hash of a normalized target or the mutable live route. CREATE's
+		// PENDING request remains historical PENDING after its saga completes.
 		return adminSnapshotInsert(ctx, tx, snapshotID, maximum, `SELECT audit.id::text AS resource_id,row_number() OVER (ORDER BY audit.occurred_at DESC,audit.id DESC)-1 AS position FROM token_audit_logs audit
-WHERE audit.resource_type='TOKEN_ACCOUNT' AND audit.resource_id=$3 AND audit.occurred_at<=$4
+WHERE (
+ (audit.resource_type='TOKEN_ACCOUNT' AND audit.resource_id=$3 AND audit.action<>'TOKEN_ACCOUNT_PROVISIONING_REQUESTED')
+ OR (audit.resource_type IN ('TOKEN_ACCOUNT','TOKEN_ROUTE') AND EXISTS (
+  SELECT 1 FROM token_command_results command
+  WHERE command.command_reference = CASE
+   WHEN audit.summary->>'command_reference' ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+   THEN (audit.summary->>'command_reference')::uuid END
+   AND command.target_resource_type=audit.resource_type
+   AND command.actor_user_id=audit.actor_user_id
+   AND (
+    (command.command_type=audit.action
+     AND command.status IN ('SUCCEEDED','REJECTED','FAILED','UNKNOWN') AND command.status=audit.summary->>'status'
+     AND command.expected_versions->>'token_account_id'=($3::uuid)::text
+     AND command.before_state=audit.summary->'before_state'
+     AND COALESCE(command.after_state,'null'::jsonb)=audit.summary->'after_state')
+    OR (audit.action='TOKEN_ACCOUNT_PROVISIONING_REQUESTED' AND audit.resource_type='TOKEN_ACCOUNT'
+     AND command.command_type='TOKEN_ACCOUNT_CREATE' AND command.status='SUCCEEDED'
+     AND audit.summary->>'status'='PENDING'
+     AND audit.resource_id::text=command.expected_versions->>'owner_id'
+     AND audit.summary->>'owner_id'=command.expected_versions->>'owner_id'
+     AND audit.summary->>'owner_type'=command.expected_versions->>'owner_type'
+     AND command.after_state->>'owner_id'=command.expected_versions->>'owner_id'
+     AND command.after_state->>'owner_type'=command.expected_versions->>'owner_type'
+     AND command.after_state->>'token_account_id'=($3::uuid)::text)
+   )
+ ))
+) AND audit.occurred_at<=$4
 AND ($5='' OR audit.action=$5) AND ($6::uuid IS NULL OR audit.actor_user_id=$6)
 AND ($7::timestamptz IS NULL OR audit.occurred_at >= $7) AND ($8::timestamptz IS NULL OR audit.occurred_at < $8)
 `, resourceID, highWater, action, actorID, from, to)

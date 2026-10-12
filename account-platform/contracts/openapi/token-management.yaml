@@ -3,7 +3,7 @@
   "info": {
     "title": "Token management current contract",
     "version": "F06",
-    "description": "Current management API. Personal invocation/usage and signed readiness are specified separately in token-invocation.yaml. This finite document covers every installed management method/path and authority; selected write and receipt DTOs are specified, other read projections are explicitly partial. Platform GET routes also register authenticated HEAD with the same authority."
+    "description": "Current management API. Personal invocation/usage and signed readiness are specified separately in token-invocation.yaml. This finite document covers the management_routes.go method/path and authority set; separately installed organization finance/model-policy routes are covered by organization-finance.yaml and the same coverage checker; selected write and receipt DTOs are specified, other read projections are explicitly partial. Platform GET routes also register authenticated HEAD with the same authority."
   },
   "paths": {
     "/admin/v1/commands/{command_reference}": {

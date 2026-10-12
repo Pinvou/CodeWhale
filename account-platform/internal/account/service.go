@@ -23,6 +23,7 @@ import (
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
 
 type Service struct {
+	organizationsDisabled       bool
 	organizationLifecycle       []OrganizationLifecycleClient
 	organizationUnitLifecycle   []OrganizationUnitLifecycleClient
 	organizationMemberLifecycle []OrganizationMemberLifecycleClient

@@ -110,12 +110,18 @@ func (r *PostgresRepository) SaveOrganizationModelPolicy(ctx context.Context, or
 	if errors.Is(err, pgx.ErrNoRows) {
 		current, err = 0, nil
 	}
-	if err != nil || current != expectedVersion {
+	if err != nil {
+		return OrganizationModelPolicy{}, err
+	}
+	if current != expectedVersion {
 		return OrganizationModelPolicy{}, ErrModelPolicyVersionConflict
 	}
 	if len(modelIDs) > 0 {
 		var count int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM model_catalog_entries WHERE catalog_version=(SELECT max(version) FROM model_catalog_versions) AND lifecycle_status<>'REMOVED' AND model_id=ANY($1)`, modelIDs).Scan(&count); err != nil || count != len(modelIDs) {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM model_catalog_entries WHERE catalog_version=(SELECT max(version) FROM model_catalog_versions) AND lifecycle_status<>'REMOVED' AND model_id=ANY($1)`, modelIDs).Scan(&count); err != nil {
+			return OrganizationModelPolicy{}, err
+		}
+		if count != len(modelIDs) {
 			return OrganizationModelPolicy{}, ErrModelUnavailable
 		}
 	}

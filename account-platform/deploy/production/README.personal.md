@@ -5,6 +5,7 @@
 `compose.personal.yaml` 运行五个业务进程、两个迁移作业、普通 Account relay 和 TLS 入口；`event-resources` 是显式运维 profile。它使用已独立配置的 Postgres、Redis、NATS 和 Keycloak，并不接管它们或创建网络、密钥与账号。站点依赖必须位于验证过的私有网络上。业务进程不发布宿主端口，只有入口的 TLS 端口对外开放。私有 origin、URL 中的凭证、数据库 DSN、短信凭证、Token、Cookie、HMAC 和密码不得写入仓库、例子、日志或渲染后的公开配置。
 
 `ACCOUNT_PLATFORM_PROFILE` 是业务进程运行模式，与 Compose 的 `event-resources`、`approval-operations` profiles 不同。基础模板明确将 Account 与余额 Token facade 设为 `personal`：Account 保留 Billing 审批投影、证明及结果读取，Token 保留个人余额和已有个人金融接口，不构造模型数据库、KMS、provider、模型 worker 或模型管理入口。直接运行未配置该变量的二进制仍默认 `models`；未知值拒绝启动，缺少模型配置不会隐式降级。
+个人 Account 不构造组织 Billing/Token lifecycle clients，组织、成员、单位与邀请入口在业务仓库或跨域写入前明确返回既有 `ORGANIZATION_UNAVAILABLE`（503）；通用个人角色查询和合法 `PERSONAL` 上下文切换仍可用，`ORGANIZATION` 切换不可用。个人余额 Token facade 不挂载组织金融或模型管理入口（404），models 则通过显式完整 management 装配提供。需要组织功能时必须改用完整模型与组织叠加，不得仅补一个 Token URL 将个人模式当作组织部署。
 
 叠加 `compose.finance.yaml` 前须显式配置 `ACCOUNT_PLATFORM_PROFILE=personal`，其 `approval-resources` 要求该变量非空，保持三个服务一致。个人财务的 live activate/resume 仅核验原三条 Billing consumer，不执行 Token consumer 初始化；当前离线公共 manifest 仍是既有六 descriptor 的固定期望，不能将其误作模型消费者已安装或就绪的证明。模型部署必须改用 [完整模型叠加](README.models.md)，不得把个人余额服务宣称为模型运维部署。
 
