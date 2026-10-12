@@ -294,6 +294,31 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 		return err
 	}
 	terminal := status == "COMMITTED" || status == "RELEASED"
+	// Re-entry after a historical case moved the public row must use the first
+	// actual persistence fact, never updated_at or this retry's clock.
+	persistedAt := now
+	var firstObserved *time.Time
+	if err := tx.QueryRow(ctx, `SELECT min(observed_at) FROM usage_convergence_evidence WHERE usage_request_id=$1 AND evidence_type='RESULT_OBSERVED' AND source_type='GATEWAY' AND decision='RECORDED' AND sanitized_snapshot->>'content_persisted' IS DISTINCT FROM 'false'`, usageID).Scan(&firstObserved); err != nil {
+		return err
+	}
+	if firstObserved != nil {
+		persistedAt = *firstObserved
+	}
+	var caseContent bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM usage_replay_retention_cases WHERE usage_request_id=$1)`, usageID).Scan(&caseContent); err != nil {
+		return err
+	}
+	var storedCreated *time.Time
+	var storedHasBody bool
+	if err := tx.QueryRow(ctx, `SELECT created_at,octet_length(encrypted_payload)>0 FROM usage_replay_results WHERE usage_request_id=$1`, usageID).Scan(&storedCreated, &storedHasBody); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if storedCreated != nil && storedCreated.Before(persistedAt) {
+		persistedAt = *storedCreated
+	}
+	// Legacy REVIEW without any surviving first-persistence fact cannot
+	// authorize a new content lifetime. Financial observations still persist.
+	unprovenFirstPersistence := status == "REVIEW" && storedCreated == nil && firstObserved == nil
 	var expiresAt any
 	if terminal {
 		expiresAt = terminalAt.Add(30 * 24 * time.Hour)
@@ -328,11 +353,20 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 			}
 		}
 	}
-	command, err := tx.Exec(ctx, `INSERT INTO usage_replay_results(usage_request_id,response_kind,http_status,content_type,encrypted_payload,key_id,payload_integrity,evidence_payload_digest,final_usage,last_sequence,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(usage_request_id) DO NOTHING`, usageID, result.Kind, result.HTTPStatus, result.ContentType, ciphertext, r.secrets.KeyID(), replayDigest(ciphertext), responseDigest, finalUsage, result.LastSequence, now, expiresAt)
+	allowMetadata := !unprovenFirstPersistence
+	if caseContent || (!terminal && !persistedAt.Add(resultRetention).After(now)) {
+		// Keep only the stable identity/financial metadata for a controlled case
+		// or expired response. No ciphertext is republished by a duplicate save.
+		ciphertext = nil
+		expiresAt = now
+	}
+	// Empty legacy stubs keep their original clock. An unproven history does
+	// not manufacture a new first-persistence fact for the next retry.
+	command, err := tx.Exec(ctx, `INSERT INTO usage_replay_results(usage_request_id,response_kind,http_status,content_type,encrypted_payload,key_id,payload_integrity,evidence_payload_digest,final_usage,last_sequence,created_at,expires_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12 WHERE $13 ON CONFLICT(usage_request_id) DO NOTHING`, usageID, result.Kind, result.HTTPStatus, result.ContentType, append([]byte{}, ciphertext...), r.secrets.KeyID(), replayDigest(ciphertext), responseDigest, finalUsage, result.LastSequence, persistedAt, expiresAt, allowMetadata)
 	if err != nil {
 		return err
 	}
-	if command.RowsAffected() == 0 {
+	if command.RowsAffected() == 0 && !unprovenFirstPersistence {
 		var storedKind string
 		var storedStatus int
 		var storedSequence int64
@@ -367,8 +401,15 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 			return err
 		}
 	}
-	if err == nil {
-		err = appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "RECORDED", fmt.Sprintf("%s:%d:%d", result.Kind, result.HTTPStatus, result.LastSequence), map[string]any{"response_kind": result.Kind, "http_status": result.HTTPStatus, "content_type": result.ContentType, "response_payload_digest": responseDigest, "final_usage_present": result.FinalUsage != nil, "settlement_snapshot_present": settlementPresent, "last_sequence": result.LastSequence}, now)
+	// A matching live duplicate keeps the original immutable observation.
+	// Empty metadata or observation-only retries cannot assert new body storage.
+	bodyPersisted := command.RowsAffected() > 0 && len(ciphertext) > 0
+	if err == nil && (bodyPersisted || !storedHasBody || len(ciphertext) == 0) {
+		observation := map[string]any{"response_kind": result.Kind, "http_status": result.HTTPStatus, "content_type": result.ContentType, "response_payload_digest": responseDigest, "final_usage_present": result.FinalUsage != nil, "settlement_snapshot_present": settlementPresent, "last_sequence": result.LastSequence}
+		if !bodyPersisted {
+			observation["content_persisted"] = false
+		}
+		err = appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "RECORDED", fmt.Sprintf("%s:%d:%d", result.Kind, result.HTTPStatus, result.LastSequence), observation, now)
 	}
 	if err == nil {
 		err = tx.Commit(ctx)
@@ -383,7 +424,8 @@ func (r *PostgresRepository) LoadReplay(ctx context.Context, usageID uuid.UUID, 
 	}
 	snapshot := ReplaySnapshot{Usage: usage}
 	now := r.now()
-	rows, err := r.pool.Query(ctx, `SELECT sequence,event_type,encrypted_payload,key_id,payload_integrity FROM usage_stream_events WHERE usage_request_id=$1 AND sequence>$2 AND (expires_at IS NULL OR expires_at>$3) ORDER BY sequence`, usageID, after, now)
+	terminal := usage.Status == "COMMITTED" || usage.Status == "RELEASED"
+	rows, err := r.pool.Query(ctx, `SELECT sequence,event_type,encrypted_payload,key_id,payload_integrity FROM usage_stream_events WHERE usage_request_id=$1 AND sequence>$2 AND (expires_at IS NULL OR expires_at>$3) AND ($4 OR created_at+interval '720 hours'>$3) ORDER BY sequence`, usageID, after, now, terminal)
 	if err != nil {
 		return ReplaySnapshot{}, err
 	}
@@ -412,7 +454,7 @@ func (r *PostgresRepository) LoadReplay(ctx context.Context, usageID uuid.UUID, 
 	var keyID, integrity string
 	var finalUsage []byte
 	var resultExpiresAt *time.Time
-	err = r.pool.QueryRow(ctx, `SELECT response_kind,http_status,content_type,encrypted_payload,key_id,payload_integrity,final_usage,last_sequence,expires_at FROM usage_replay_results WHERE usage_request_id=$1 AND (expires_at IS NULL OR expires_at>$2)`, usageID, now).Scan(&result.Kind, &result.HTTPStatus, &result.ContentType, &ciphertext, &keyID, &integrity, &finalUsage, &result.LastSequence, &resultExpiresAt)
+	err = r.pool.QueryRow(ctx, `SELECT response_kind,http_status,content_type,encrypted_payload,key_id,payload_integrity,final_usage,last_sequence,expires_at FROM usage_replay_results WHERE usage_request_id=$1 AND (expires_at IS NULL OR expires_at>$2) AND ($3 OR created_at+interval '720 hours'>$2)`, usageID, now, terminal).Scan(&result.Kind, &result.HTTPStatus, &result.ContentType, &ciphertext, &keyID, &integrity, &finalUsage, &result.LastSequence, &resultExpiresAt)
 	if err == nil {
 		if resultExpiresAt != nil {
 			result.ExpiresAt = *resultExpiresAt
@@ -496,10 +538,17 @@ func (r *PostgresRepository) CleanupReplayRetention(ctx context.Context) error {
 	}
 	defer tx.Rollback(ctx)
 	caseGuard := `NOT EXISTS(SELECT 1 FROM usage_replay_retention_cases retention WHERE retention.usage_request_id=%s AND retention.released_at IS NULL AND retention.expires_at>$1)`
-	if _, err := tx.Exec(ctx, `DELETE FROM usage_stream_events event WHERE expires_at<=$1 AND `+fmt.Sprintf(caseGuard, "event.usage_request_id"), now); err != nil {
+	// Unsettled rows retain their original content identity/clock but not their
+	// ciphertext. That prevents sequence reuse and result lifetime renewal.
+	for _, table := range []string{"usage_stream_events", "usage_replay_results"} {
+		if _, err := tx.Exec(ctx, `UPDATE `+table+` content SET encrypted_payload='\x'::bytea,expires_at=LEAST(COALESCE(expires_at,created_at+interval '720 hours'),created_at+interval '720 hours') WHERE (expires_at<=$1 OR created_at+interval '720 hours'<=$1) AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=content.usage_request_id AND request.status NOT IN ('COMMITTED','RELEASED')) AND `+fmt.Sprintf(caseGuard, "content.usage_request_id"), now); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM usage_stream_events event WHERE expires_at<=$1 AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=event.usage_request_id AND request.status IN ('COMMITTED','RELEASED')) AND `+fmt.Sprintf(caseGuard, "event.usage_request_id"), now); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM usage_replay_results result WHERE expires_at<=$1 AND `+fmt.Sprintf(caseGuard, "result.usage_request_id"), now); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM usage_replay_results result WHERE expires_at<=$1 AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=result.usage_request_id AND request.status IN ('COMMITTED','RELEASED')) AND `+fmt.Sprintf(caseGuard, "result.usage_request_id"), now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE usage_requests request SET idempotency_key_digest=NULL,updated_at=$1 FROM usage_idempotency_tombstones tombstone WHERE tombstone.usage_request_id=request.id AND tombstone.expires_at<=$1 AND `+fmt.Sprintf(caseGuard, "request.id"), now); err != nil {
@@ -531,15 +580,15 @@ func (r *PostgresRepository) CreateReplayRetentionCase(ctx context.Context, usag
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO usage_replay_case_payloads(retention_case_id,encrypted_events,encrypted_result,moved_at)
 SELECT $1,
-       COALESCE((SELECT jsonb_agg(jsonb_build_object('sequence',sequence,'event_type',event_type,'ciphertext',encode(encrypted_payload,'base64'),'key_id',key_id,'integrity',payload_integrity,'created_at',created_at) ORDER BY sequence) FROM usage_stream_events WHERE usage_request_id=$2),'[]'::jsonb),
-       (SELECT jsonb_build_object('response_kind',response_kind,'http_status',http_status,'content_type',content_type,'ciphertext',encode(encrypted_payload,'base64'),'key_id',key_id,'integrity',payload_integrity,'final_usage',final_usage,'last_sequence',last_sequence,'created_at',created_at) FROM usage_replay_results WHERE usage_request_id=$2),
+       COALESCE((SELECT jsonb_agg(jsonb_build_object('sequence',sequence,'event_type',event_type,'ciphertext',encode(encrypted_payload,'base64'),'key_id',key_id,'integrity',payload_integrity,'created_at',created_at) ORDER BY sequence) FROM usage_stream_events WHERE usage_request_id=$2 AND octet_length(encrypted_payload)>0),'[]'::jsonb),
+       (SELECT jsonb_build_object('response_kind',response_kind,'http_status',http_status,'content_type',content_type,'ciphertext',encode(encrypted_payload,'base64'),'key_id',key_id,'integrity',payload_integrity,'final_usage',final_usage,'last_sequence',last_sequence,'created_at',created_at) FROM usage_replay_results WHERE usage_request_id=$2 AND octet_length(encrypted_payload)>0),
        $3`, caseID, usageID, now); err != nil {
 		return uuid.Nil, err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM usage_stream_events WHERE usage_request_id=$1`, usageID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE usage_stream_events SET encrypted_payload='\x'::bytea,expires_at=LEAST(COALESCE(expires_at,created_at+interval '720 hours'),$2) WHERE usage_request_id=$1`, usageID, now); err != nil {
 		return uuid.Nil, err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM usage_replay_results WHERE usage_request_id=$1`, usageID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE usage_replay_results SET encrypted_payload='\x'::bytea,expires_at=LEAST(COALESCE(expires_at,created_at+interval '720 hours'),$2) WHERE usage_request_id=$1`, usageID, now); err != nil {
 		return uuid.Nil, err
 	}
 	return caseID, tx.Commit(ctx)
