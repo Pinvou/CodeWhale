@@ -59,7 +59,7 @@ func (r *PostgresRepository) ListPackages(ctx context.Context, userID, walletID 
 			index[items[i].ID] = i
 			items[i].Components = []EntitlementComponent{}
 		}
-		componentRows, err := r.pool.Query(ctx, `SELECT package_id,id,component_type,original_microcredits,available_microcredits,reserved_microcredits,used_microcredits,active_grant_microcredits,suspended_grant_microcredits,expired_microcredits,revoked_microcredits,credited_at,expires_at,status FROM entitlement_components WHERE package_id=ANY($1) ORDER BY expires_at,CASE component_type WHEN 'BONUS' THEN 0 ELSE 1 END,credited_at,id`, packageIDs)
+		componentRows, err := r.pool.Query(ctx, `SELECT package_id,id,component_type,original_microcredits,original_microcredits-reclassified_out_microcredits,available_microcredits,reserved_microcredits,used_microcredits,active_grant_microcredits,suspended_grant_microcredits,expired_microcredits,revoked_microcredits,credited_at,expires_at,status FROM entitlement_components WHERE package_id=ANY($1) ORDER BY expires_at,CASE component_type WHEN 'BONUS' THEN 0 ELSE 1 END,credited_at,id`, packageIDs)
 		if err != nil {
 			return nil, PackageSummary{}, err
 		}
@@ -67,10 +67,9 @@ func (r *PostgresRepository) ListPackages(ctx context.Context, userID, walletID 
 		for componentRows.Next() {
 			var packageID uuid.UUID
 			var component EntitlementComponent
-			if err := componentRows.Scan(&packageID, &component.ID, &component.ComponentType, &component.OriginalMicrocredits, &component.AvailableMicrocredits, &component.ReservedMicrocredits, &component.UsedMicrocredits, &component.ActiveGrantMicrocredits, &component.SuspendedGrantMicrocredits, &component.ExpiredMicrocredits, &component.RevokedMicrocredits, &component.CreditedAt, &component.ExpiresAt, &component.Status); err != nil {
+			if err := componentRows.Scan(&packageID, &component.ID, &component.ComponentType, &component.OriginalMicrocredits, &component.EffectiveOriginalMicrocredits, &component.AvailableMicrocredits, &component.ReservedMicrocredits, &component.UsedMicrocredits, &component.ActiveGrantMicrocredits, &component.SuspendedGrantMicrocredits, &component.ExpiredMicrocredits, &component.RevokedMicrocredits, &component.CreditedAt, &component.ExpiresAt, &component.Status); err != nil {
 				return nil, PackageSummary{}, err
 			}
-			component.EffectiveOriginalMicrocredits = component.OriginalMicrocredits
 			items[index[packageID]].Components = append(items[index[packageID]].Components, component)
 		}
 		if err := componentRows.Err(); err != nil {

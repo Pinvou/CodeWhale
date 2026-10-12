@@ -180,6 +180,15 @@
     {
       "source": "account-platform/internal/account/service.go",
       "receiver": "adminV2",
+      "method": "POST",
+      "path": "/approval-command-prechecks",
+      "scope": "platform",
+      "strategy": "domain.entitlement-precheck-recent-auth-read-only-owner",
+      "permissions": ["platform.billing.repairs.request"]
+    },
+    {
+      "source": "account-platform/internal/account/service.go",
+      "receiver": "adminV2",
       "method": "GET",
       "path": "/approval-capability",
       "scope": "platform",

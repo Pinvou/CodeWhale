@@ -23,6 +23,7 @@ import (
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
 
 type Service struct {
+	approvalPrechecks           ApprovalPrecheckSource
 	organizationLifecycle       []OrganizationLifecycleClient
 	organizationUnitLifecycle   []OrganizationUnitLifecycleClient
 	organizationMemberLifecycle []OrganizationMemberLifecycleClient
@@ -144,6 +145,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.POST("/approval-requests/:approval_request_id/actions/withdraw", approvalpolicy.Require("APPROVAL_REQUEST_WITHDRAW", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminWithdrawApprovalRequest))
 	admin.POST("/approval-requests/:approval_request_id/actions/decide", approvalpolicy.Require("APPROVAL_REQUEST_DECIDE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDecideApprovalRequest))
 	adminV2 := protected.Group("/admin/v2")
+	adminV2.POST("/approval-command-prechecks", s.requirePermission("platform.billing.repairs.request"), httpserver.AdaptFunc(s.adminApprovalCommandPrecheck))
 	adminV2.GET("/approval-capability", httpserver.AdaptFunc(s.adminApprovalCapability))
 	adminV2.GET("/approval-directory", httpserver.AdaptFunc(s.adminApprovalDirectory))
 	adminV2.GET("/approval-requests", httpserver.AdaptFunc(s.adminApprovalRequestsV2))

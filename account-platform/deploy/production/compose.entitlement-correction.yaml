@@ -1,0 +1,26 @@
+# Apply last, after the reviewed current PERSONAL/ORG/closure overlays.
+# All binaries, public migrations and Portal assets must come from the same F09 source.
+name: pinvou-personal
+services:
+  account-migrate:
+    image: ${MIGRATE_IMAGE:?set reviewed same-source F09 migrator with Account069/070 and Billing056-059/900013}
+  billing-migrate:
+    image: ${MIGRATE_IMAGE:?set reviewed same-source F09 migrator with Account069/070 and Billing056-059/900013}
+  account-service:
+    image: ${ACCOUNT_SERVICE_IMAGE:?set reviewed same-source F09 Account with closed Billing precheck and typed approval projection}
+    environment:
+      BILLING_HTTP_URL: http://billing-service:8080
+  billing-service:
+    image: ${BILLING_SERVICE_IMAGE:?set reviewed same-source F09 Billing owner/proof/claim/effect/result}
+  token-gateway:
+    image: ${TOKEN_GATEWAY_IMAGE:?set reviewed same-source F09 policy registry binary}
+  token-command-executor:
+    image: ${TOKEN_COMMAND_EXECUTOR_IMAGE:?set reviewed same-source F09 policy registry executor}
+  token-portal:
+    image: ${TOKEN_PORTAL_IMAGE:?set reviewed same-source F09 Portal BFF and generated three-language financial form assets}
+  account-event-relay:
+    image: ${EVENT_RELAY_IMAGE:?set reviewed same-source F09 seven-consumer registry relay}
+  billing-event-relay:
+    image: ${EVENT_RELAY_IMAGE:?set reviewed same-source F09 registry relay}
+  approval-resources:
+    image: ${APPROVAL_RESOURCES_IMAGE:?set reviewed same-source F09 four-Billing-consumer operator}
