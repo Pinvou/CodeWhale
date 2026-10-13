@@ -341,6 +341,35 @@ mod tests {
         assert_eq!(4_200.0 * sensor_unit_factor("fan"), 4_200.0);
     }
 
+    // 符号链接逃逸对抗面：家目录之下、中间组件指向家目录之外的符号链接，
+    // canonicalize 后 strip_prefix(home) 必须失败。守卫本体在
+    // external_models.rs（features 层不能写 cfg），这个 unix 专属测试按架构
+    // 约定落在平台适配层（第四轮评审测试盲区；曾因 #[cfg(unix)] 留在
+    // features 层被架构守卫拦下）。
+    #[test]
+    fn weights_deletion_guard_rejects_symlink_escape_under_home() {
+        use crate::features::device::external_models::weights_deletion_guard;
+        let home = std::env::temp_dir().join(format!("guard-symlink-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("guard-symlink-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&home).expect("create temp home");
+        let outside_weights = outside.join("b").join("c");
+        std::fs::create_dir_all(&outside_weights).expect("create outside weights");
+        let link = home.join("a");
+        std::os::unix::fs::symlink(&outside, &link).expect("create symlink");
+        let smuggled = link.join("b").join("c");
+        let result = weights_deletion_guard(&home, None, &smuggled);
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&outside);
+        assert!(
+            result.is_err(),
+            "symlink escape must be rejected, got {:?}",
+            result
+        );
+    }
+
     #[test]
     fn extra_sensors_reads_the_host_hwmon_tree_without_panicking() {
         // 集成冒烟：真机上跑通即可；无 hwmon（或全为温度通道）时为空也合法。

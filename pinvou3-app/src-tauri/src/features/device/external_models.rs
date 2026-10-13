@@ -604,7 +604,7 @@ fn removal_boundary_error(
 /// `protected_root`（应用自身数据根 `~/.pinvou3`）整体拒绝：注册表目录恰好 3 层、
 /// bundle/skills、runtimes 等更深目录都在放行深度内，不显式排除就存在"删除权重"
 /// 按钮抹掉应用配置/知识库的通道（第三轮评审 P2）。
-fn weights_deletion_guard(
+pub(crate) fn weights_deletion_guard(
     home: &Path,
     protected_root: Option<&Path>,
     weights_path: &Path,
@@ -1456,33 +1456,6 @@ mod tests {
             .expect("lookup ok")
             .expect("empty content id tolerates the filename contract");
         assert_eq!(record.name, "legacy-empty-id");
-    }
-
-    // unix-only：符号链接构造依赖 std::os::unix::fs::symlink（Windows 测试编译
-    // 也会编这个模块，此前漏 gate 直接打爆 windows-rust-test）。
-    #[cfg(unix)]
-    #[test]
-    fn weights_deletion_guard_rejects_symlink_escape_under_home() {
-        // 家目录之下、但中间组件是指向家目录之外的符号链接：canonicalize 后
-        // strip_prefix(home) 必须失败——这是守卫最要紧的对抗面，此前恰好零覆盖
-        // （第四轮评审测试盲区）。
-        let home = TempDir::new("guard-symlink");
-        let outside = TempDir::new("guard-symlink-outside");
-        let outside_weights = outside.path().join("b").join("c");
-        std::fs::create_dir_all(&outside_weights).expect("create outside weights");
-        let link = home.path().join("a");
-        std::os::unix::fs::symlink(outside.path(), &link).expect("create symlink");
-        let smuggled = link.join("b").join("c");
-        assert_eq!(
-            smuggled.components().count() - home.path().components().count(),
-            3
-        );
-        let result = weights_deletion_guard(home.path(), None, &smuggled);
-        assert!(
-            result.is_err(),
-            "symlink escape must be rejected, got {:?}",
-            result
-        );
     }
 
     #[tokio::test]
