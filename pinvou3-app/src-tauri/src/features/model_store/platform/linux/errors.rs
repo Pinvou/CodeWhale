@@ -62,6 +62,14 @@ const SCRIPT_ERROR_PATTERNS: &[(&str, &str)] = &[
         "connection refused",
         "无法连接到推理服务，请确认服务正在运行",
     ),
+    // 有些引擎会先完整加载权重，再在 HTTP/RPC 服务初始化阶段退出。这里绝不能
+    // 误报成“下载失败”或“权重不完整”：截图中的 `Weights ready` 已经说明下载、
+    // 读取权重和引擎进程都走通了。真正的根因仍应以诊断日志里的最后一条引擎错误
+    // 为准，因此只陈述已知事实并引导导出日志。
+    (
+        "server failed during startup",
+        "推理服务启动失败：模型权重已加载完成，但服务初始化未完成。请导出诊断日志反馈给我们",
+    ),
     ("manifest unknown", "在远端找不到该模型/量化版本"),
     ("unauthorized", "没有访问权限，请检查凭据配置"),
     ("timeout", "操作超时，请稍后重试"),
@@ -406,6 +414,10 @@ mod tests {
         assert_eq!(
             humanize_script_message(r#"{"error": "model not found: xyz"}"#),
             "找不到对应的模型"
+        );
+        assert_eq!(
+            humanize_script_message("2026-10-13 08:56:52 FATAL server failed during startup"),
+            "推理服务启动失败：模型权重已加载完成，但服务初始化未完成。请导出诊断日志反馈给我们"
         );
     }
 
