@@ -46,6 +46,82 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 try {
+  # The repair engine's refusal guards are the core safety contract: they must
+  # reject the shared account rustup, a filesystem root, a non-empty unmarked
+  # directory, a missing RUSTUP_HOME and a run without the managed flag before
+  # touching anything. Exercise them for real here; every case below throws
+  # before rustup runs, so at most an empty lock file is created inside the
+  # throwaway test home.
+  $previousRustupHome = $env:RUSTUP_HOME
+  $previousCargoHome = $env:CARGO_HOME
+  $previousManagedFlag = $env:PINVOU3_MANAGED_RUSTUP
+  $previousDistServer = $env:RUSTUP_DIST_SERVER
+  $previousUpdateRoot = $env:RUSTUP_UPDATE_ROOT
+  $previousDownloadTimeout = $env:RUSTUP_DOWNLOAD_TIMEOUT
+  $env:PINVOU3_MANAGED_RUSTUP = "1"
+  $unmarkedHome = Join-Path $temporaryRoot "unmarked"
+  New-Item -ItemType Directory -Path $unmarkedHome -Force | Out-Null
+  Set-Content -LiteralPath (Join-Path $unmarkedHome "placeholder") `
+    -Value "not a rustup home" -Encoding Ascii
+  $guardRejections = @(
+    [pscustomobject]@{
+      Name = "the build account's shared rustup home"
+      Home = Join-Path $env:USERPROFILE ".rustup"
+      Managed = "1"
+      Message = "Refusing to modify the build account's shared RUSTUP_HOME"
+    },
+    [pscustomobject]@{
+      Name = "a filesystem root"
+      Home = [IO.Path]::GetPathRoot(([IO.Path]::GetFullPath($temporaryRoot)))
+      Managed = "1"
+      Message = "Refusing to use a filesystem root as RUSTUP_HOME"
+    },
+    [pscustomobject]@{
+      Name = "a non-empty unmarked directory"
+      Home = $unmarkedHome
+      Managed = "1"
+      Message = "Refusing to adopt a non-empty unmarked RUSTUP_HOME"
+    },
+    [pscustomobject]@{
+      Name = "a missing RUSTUP_HOME"
+      Home = $null
+      Managed = "1"
+      Message = "Refusing automatic repair without an isolated RUSTUP_HOME"
+    },
+    [pscustomobject]@{
+      Name = "a run without the managed flag"
+      Home = $temporaryRustup
+      Managed = $null
+      Message = "Refusing automatic repair without PINVOU3_MANAGED_RUSTUP=1"
+    }
+  )
+  foreach ($guard in $guardRejections) {
+    if ($null -eq $guard.Home) {
+      Remove-Item Env:RUSTUP_HOME -ErrorAction SilentlyContinue
+    } else {
+      $env:RUSTUP_HOME = $guard.Home
+    }
+    if ($null -eq $guard.Managed) {
+      Remove-Item Env:PINVOU3_MANAGED_RUSTUP -ErrorAction SilentlyContinue
+    } else {
+      $env:PINVOU3_MANAGED_RUSTUP = $guard.Managed
+    }
+    $rejectionMessage = $null
+    try {
+      & $repairScript
+    } catch {
+      $rejectionMessage = "$($_.Exception.Message)"
+    }
+    if ($null -eq $rejectionMessage -or -not $rejectionMessage.Contains($guard.Message)) {
+      throw (
+        "The repair guard did not reject {0} (got: {1}); RUSTUP_HOME={2}" -f
+        $guard.Name, $rejectionMessage, $guard.Home
+      )
+    }
+    Write-Host "[test] Guard rejected $($guard.Name): OK"
+  }
+  $env:PINVOU3_MANAGED_RUSTUP = "1"
+
   New-Item -ItemType Directory -Path $temporaryToolchains, $temporaryCargo -Force |
     Out-Null
   Set-Content -LiteralPath (Join-Path $temporaryRustup ".pinvou3-managed-rustup") `
@@ -90,9 +166,20 @@ try {
   # fallback source promptly when a distribution endpoint stalls.
   $env:RUSTUP_DOWNLOAD_TIMEOUT = "120"
 
+  # With RUSTUP_HOME pointed at the corrupted copy, the real -CheckOnly probe
+  # must classify it as incomplete (exit 2) before any repair runs; this is
+  # the only place the incomplete branch executes against real rustup state.
+  & $repairScript -CheckOnly
+  if ($LASTEXITCODE -ne 2) {
+    throw (
+      "Inconsistent toolchain was not detected by -CheckOnly (exit $LASTEXITCODE, expected 2)."
+    )
+  }
+  Write-Host "[test] -CheckOnly detected the corrupted toolchain: OK"
+
   $repairOutput = @(
     & $repairScript `
-      -InstallAttemptTimeoutSeconds 120 `
+      -InstallAttemptTimeoutSeconds 300 `
       -RepairAttemptsPerSource 1 *>&1
   )
   $repairOutput | ForEach-Object { Write-Host $_ }
@@ -102,7 +189,7 @@ try {
     "Using configured source: http://127.0.0.1:1",
     "Repair attempt 1/1 failed using configured source",
     "Resetting the incomplete isolated toolchain before retry",
-    "Using Rust official source: https://static.rust-lang.org",
+    "Using rsproxy mirror: https://rsproxy.cn",
     "Toolchain repair succeeded using"
   )
   foreach ($evidence in $expectedRepairEvidence) {
@@ -112,14 +199,50 @@ try {
   }
 
   foreach ($command in @("cargo", "rustc", "clippy-driver", "rustfmt")) {
-    & rustup run $Toolchain $command -V
+    & rustup run $Toolchain $command --version
     if ($LASTEXITCODE -ne 0) {
       throw "Post-repair verification failed: $command"
     }
   }
 
+  # rust-std corruption with intact binaries must be detected too: the four
+  # binary probes never link against std, so the target libdir is probed
+  # directly. Remove it and require -CheckOnly to classify the toolchain as
+  # incomplete through the real probe path.
+  $stdTargetLibDir = (& rustup run $Toolchain rustc --print target-libdir |
+    Select-Object -Last 1)
+  $stdTargetLibDir = "$stdTargetLibDir".Trim()
+  if ([string]::IsNullOrWhiteSpace($stdTargetLibDir) -or -not $stdTargetLibDir.StartsWith(
+    $resolvedTemporaryRoot,
+    [StringComparison]::OrdinalIgnoreCase
+  )) {
+    throw "Unexpected std target libdir outside the isolated test root: $stdTargetLibDir"
+  }
+  Remove-Item -LiteralPath $stdTargetLibDir -Recurse -Force
+  & $repairScript -CheckOnly
+  if ($LASTEXITCODE -ne 2) {
+    throw (
+      "A missing rust-std was not detected by -CheckOnly (exit $LASTEXITCODE, expected 2)."
+    )
+  }
+  Write-Host "[test] -CheckOnly detected the missing rust-std: OK"
+
   Write-Host "[test] Isolated inconsistent-toolchain repair: PASS"
 } finally {
+  foreach ($entry in @(
+    @("RUSTUP_HOME", $previousRustupHome),
+    @("CARGO_HOME", $previousCargoHome),
+    @("PINVOU3_MANAGED_RUSTUP", $previousManagedFlag),
+    @("RUSTUP_DIST_SERVER", $previousDistServer),
+    @("RUSTUP_UPDATE_ROOT", $previousUpdateRoot),
+    @("RUSTUP_DOWNLOAD_TIMEOUT", $previousDownloadTimeout)
+  )) {
+    if ($null -eq $entry[1]) {
+      Remove-Item -LiteralPath "Env:\$($entry[0])" -ErrorAction SilentlyContinue
+    } else {
+      Set-Item -LiteralPath "Env:\$($entry[0])" -Value $entry[1]
+    }
+  }
   if (Test-Path -LiteralPath $temporaryRoot) {
     $resolved = (Resolve-Path -LiteralPath $temporaryRoot).Path
     $temporaryBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())

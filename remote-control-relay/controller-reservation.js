@@ -9,6 +9,9 @@ const RESERVED_TIMEOUT_MS = 10_000;
 const HANDSHAKE_TIMEOUT_MS = 20_000;
 const RESERVATION_ID_ATTEMPTS = 32;
 const CAS_ATTEMPTS = 8;
+const EXPIRY_RETRY_BASE_MS = 1000;
+const EXPIRY_RETRY_MAX_MS = 60_000;
+const EXPIRY_RETRY_MAX_FAILURES = 7;
 const RELEASE_REASONS = new Set([
   "failed", "owner_disconnected", "endpoint_disconnected", "handshake_failed", "refreshed", "timeout",
 ]);
@@ -162,17 +165,22 @@ export class ControllerReservationManager {
   #reservations = new Map(); #sourceBuckets = new Map(); #connectionBuckets = new Map();
   #globalBuckets = new Map(); #requests = new Map(); #releases = new Map(); #limits;
   #codeProofKey = crypto.randomBytes(32);
+  // Weak ownership prevents retry metadata becoming a second retained-history
+  // table. A new reservation object, even with a reused ID, has no old timing.
+  #expiryRetries = new WeakMap(); #retryClock; #retryRandom; #lastRetryNow = 0;
 
   constructor({
     pairingStore, interactionSlots, clock = Date.now, randomBytes = crypto.randomBytes,
     onPairingInvalidated = async () => {}, audit = () => {},
     sourceLimit = 30, connectionLimit = 10, globalLimit = 10_000, windowMs = 60_000,
     maxSourceBuckets = 4096, maxConnectionBuckets = 4096,
+    retryClock = () => performance.now(), retryRandom = Math.random,
   } = {}) {
     if (!pairingStore || typeof pairingStore.findActiveByCode !== "function"
       || typeof pairingStore.terminate !== "function" || !(interactionSlots instanceof EndpointInteractionSlots)
       || typeof clock !== "function" || typeof randomBytes !== "function"
-      || typeof onPairingInvalidated !== "function" || typeof audit !== "function") {
+      || typeof onPairingInvalidated !== "function" || typeof audit !== "function"
+      || typeof retryClock !== "function" || typeof retryRandom !== "function") {
       fail("controller_reservation_config_invalid");
     }
     for (const value of [sourceLimit, connectionLimit, globalLimit, windowMs,
@@ -185,6 +193,8 @@ export class ControllerReservationManager {
     this.#randomBytes = randomBytes;
     this.#onInvalidated = onPairingInvalidated;
     this.#audit = audit;
+    this.#retryClock = retryClock;
+    this.#retryRandom = retryRandom;
     this.#limits = Object.freeze({
       sourceLimit, connectionLimit, globalLimit, windowMs, maxSourceBuckets, maxConnectionBuckets,
     });
@@ -330,6 +340,30 @@ export class ControllerReservationManager {
   }
 
   async release({ reservationId, socketIdentity, reason = "failed" } = {}) {
+    return this.#release({ reservationId, socketIdentity, reason }, false);
+  }
+
+  #retryNow() {
+    const value = this.#retryClock();
+    if (!Number.isFinite(value) || value < this.#lastRetryNow
+      || value > Number.MAX_SAFE_INTEGER - EXPIRY_RETRY_MAX_MS) {
+      fail("reservation_retry_clock_invalid");
+    }
+    this.#lastRetryNow = value;
+    return value;
+  }
+
+  #retryAttempt(reservation) {
+    const sample = this.#retryRandom();
+    if (!Number.isFinite(sample) || sample < 0 || sample > 1) fail("reservation_retry_random_invalid");
+    const failures = Math.min((this.#expiryRetries.get(reservation)?.failures ?? 0) + 1,
+      EXPIRY_RETRY_MAX_FAILURES);
+    const nominal = Math.min(EXPIRY_RETRY_MAX_MS, EXPIRY_RETRY_BASE_MS * (2 ** (failures - 1)));
+    this.#retryNow();
+    return { failures, delay: Math.floor(nominal * (0.8 + 0.2 * sample)) };
+  }
+
+  async #release({ reservationId, socketIdentity, reason }, automatic) {
     let reservation = this.#owned(reservationId, socketIdentity);
     if (!RELEASE_REASONS.has(reason)) fail("reservation_release_reason_invalid");
     const pending = this.#releases.get(reservation.reservation_id);
@@ -340,7 +374,20 @@ export class ControllerReservationManager {
       });
       this.#reservations.set(reservation.reservation_id, reservation);
     }
-    const operation = this.#invalidate(reservation);
+    const retry = automatic ? this.#retryAttempt(reservation) : null;
+    const operation = this.#invalidate(reservation).catch((error) => {
+      if (retry && this.#reservations.get(reservation.reservation_id) === reservation) {
+        let retryAt = null;
+        // An unknown completion time cannot borrow the attempt's start time:
+        // long I/O may already have consumed that whole delay. Preserve the
+        // primary error and establish a full cooldown on clock recovery.
+        try { retryAt = this.#retryNow() + retry.delay; } catch { /* retain the original failure */ }
+        this.#expiryRetries.set(reservation, {
+          failures: retry.failures, delay: retry.delay, retryAt,
+        });
+      }
+      throw error;
+    });
     this.#releases.set(reservation.reservation_id, operation);
     try { return await operation; } finally { this.#releases.delete(reservation.reservation_id); }
   }
@@ -358,6 +405,7 @@ export class ControllerReservationManager {
     this.#slots.compareAndSwap(reservation.endpoint_id, slot.revision, {
       kind: "controller_lease", owner_id: controllerLeaseId,
     });
+    this.#expiryRetries.delete(reservation);
     this.#reservations.delete(reservation.reservation_id);
     this.#requests.delete(reservation.request_id);
     this.#pairings.releaseReservation?.(reservation.pairing_id);
@@ -385,6 +433,7 @@ export class ControllerReservationManager {
       && slot.owner.owner_id === reservation.reservation_id) {
       this.#slots.compareAndSwap(reservation.endpoint_id, slot.revision, null);
     }
+    this.#expiryRetries.delete(reservation);
     this.#reservations.delete(reservation.reservation_id);
     this.#requests.delete(reservation.request_id);
     this.#pairings.releaseReservation?.(reservation.pairing_id);
@@ -406,13 +455,16 @@ export class ControllerReservationManager {
     return this.#releaseAll(owned, reason);
   }
 
-  async #releaseAll(reservations, reason) {
+  async #releaseAll(reservations, reason, automatic = false) {
     if (!RELEASE_REASONS.has(reason)) fail("reservation_release_reason_invalid");
-    const results = await Promise.allSettled(reservations.map((reservation) => this.release({
-      reservationId: reservation.reservation_id,
-      socketIdentity: reservation.owner_socket_identity,
-      reason,
-    })));
+    const results = await Promise.allSettled(reservations.map((reservation) => {
+      const input = {
+        reservationId: reservation.reservation_id,
+        socketIdentity: reservation.owner_socket_identity,
+        reason,
+      };
+      return automatic ? this.#release(input, true) : this.release(input);
+    }));
     const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason);
     if (failures.length > 0) throw new AggregateError(failures, "reservation_cleanup_failed");
     return reservations.length;
@@ -426,8 +478,17 @@ export class ControllerReservationManager {
         : reservation.state === "handshake_pending"
           ? Number(reservation.handshake_deadline_ms) <= now
           : reservation.state === "invalidating"
-    ));
-    return this.#releaseAll(expired, "timeout");
+    )).filter((reservation) => {
+      const retry = this.#expiryRetries.get(reservation);
+      if (!retry) return true;
+      const retryNow = this.#retryNow();
+      if (retry.retryAt === null) {
+        this.#expiryRetries.set(reservation, { ...retry, retryAt: retryNow + retry.delay });
+        return false;
+      }
+      return retryNow >= retry.retryAt;
+    });
+    return this.#releaseAll(expired, "timeout", true);
   }
 
   acquireWeb(input) { return this.#slots.acquireWeb(input); }

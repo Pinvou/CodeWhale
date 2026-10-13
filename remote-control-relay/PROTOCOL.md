@@ -619,9 +619,22 @@ base_url, model, image_capability_override` and only optionally accepts
 `provider_kind, vendor, endpoint_mode, context_window_tokens,
 max_output_tokens, reasoning_effort`. Presets are `local_vllm`, `deepseek`,
 `kimi`, `openai_compatible`, `qwen`, `doubao`, `minimax`, `glm`, `mimo`,
-`openai`, `anthropic`, `gemini`, `xai`; Anthropic alone uses
-`anthropic_messages`, all others use `openai_chat_completions`. Credentials
-are exactly `{kind:"api_key",secret:string}`. OAuth, cookies, subscription
+`openai`, `openai_responses`, `anthropic`, `gemini`, `xai`. Wire values are
+`openai_chat_completions`, `anthropic_messages`, `openai_responses`; A, B and
+Relay independently derive the effective wire from host, vendor, preset and
+model, not just the preset label. Official OpenAI GPT catalog routes and the
+explicit Responses preset use Responses, subject to the unchanged DeepSeek
+host guard. A mismatching declared wire is rejected. Responses is supported
+only for primary models, including native image input; `vision_fallback`
+must use Chat. The separate Chat-only image tool must not automatically reuse
+a Responses primary. Locked task routes ignore host process model overrides;
+ordinary local model precedence is unchanged. Credentials are exactly
+`{kind:"api_key",secret:string}` and contain a nonempty API key of at most
+4096 UTF-8 bytes. Display names are
+nonblank and at most 128 Unicode characters; model IDs are nonblank and at
+most 256 Unicode characters. Whitespace normalization follows Rust Unicode
+White_Space (including NEL, excluding FEFF), not ECMAScript trim.
+OAuth, cookies, subscription
 login, opaque SavedModel fields, credential references and recursive fallback
 are forbidden.
 
@@ -634,11 +647,16 @@ or bare IPv6, fragment, whitespace, or backslash. The suffix is an optional
 each percent escape is exactly `%` plus two uppercase hex digits. Lowercase
 escapes and malformed escapes fail rather than normalize.
 
-`artifact_index` returns bounded metadata objects rather than bare paths or
-IDs. Each item is exactly `artifact_id, task_id, display_name, mime_type,
-size_bytes, sha256, preview_mode`; preview mode is `inline_text`,
-`inline_image`, or `download_only`. A subsequent read still uses only the
-opaque artifact ID under the same lease/session context.
+The `artifact_index` operation returns bounded metadata (at most 256 artifacts,
+the `MAX_ARTIFACTS` limit) in `body.artifacts`
+of a successful `remote_action_result`, never as a standalone payload.
+Each item is exactly `artifact_id, task_id, display_name, mime_type,
+total_bytes, sha256, preview_kind`; preview kinds are `text`,
+`download_only`, or `unsupported`. Subsequent preview and download requests
+use `remote_action_request` under the same lease/session context. Preview
+selects the opaque `artifact_id`; downloads also bind `task_id`, and their
+chunk/abort operations additionally bind `transfer_id`. No host path is
+accepted as read authority.
 
 The shared fixture freezes the contract SHA-256, complete registries, exhaustive
 outer-message role matrix, canonical transcript/receipt/liveness/attestation
@@ -650,7 +668,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`11c728929280ade5f529efc38a0fca6d618a77839bba1c7e48938b34e781f889`.
+`98ab9cc1835d7b617b142b7e26b8583a96245107db574465b46a836f43217a6b`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role

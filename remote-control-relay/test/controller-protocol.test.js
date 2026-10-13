@@ -172,6 +172,54 @@ test("protocol documentation anchors match the executable registries and digests
   assert.match(document, new RegExp("The contract digest is\\s+`" + CONTROLLER_CONTRACT_SHA256 + "`"));
   assert.match(document, /standalone declaration, so clients must not send it to the live router/u);
   assert.match(document, /A's `controller_pairing_claim`\s+carry their capability lists/u);
+  const artifactSection = document.match(/The `artifact_index` operation([\s\S]*?)The shared fixture/u)?.[1];
+  assert.ok(artifactSection, 'artifact_index must be documented as a remote action');
+  assert.match(artifactSection, /`body\.artifacts`[\s\S]*?`remote_action_result`/u);
+  const artifactFields = artifactSection.match(/Each item is exactly `([^`]+)`/u)?.[1];
+  assert.ok(artifactFields);
+  const documentedArtifactFields = artifactFields.split(',').map((field) => field.trim());
+  assert.deepEqual(documentedArtifactFields,
+    ['artifact_id', 'task_id', 'display_name', 'mime_type', 'total_bytes', 'sha256', 'preview_kind']);
+  const item = { artifact_id: 'artifact-1', task_id: 'task-1', display_name: 'report.txt',
+    mime_type: 'text/plain', total_bytes: '3', sha256: ZERO_HASH, preview_kind: 'text' };
+  const result = { ...validPayload('remote_action_result'), operation: 'artifact_index',
+    body: { artifacts: [item] } };
+  assert.deepEqual(Object.keys(item), documentedArtifactFields);
+  validateControllerPayload(result, 'B', LEASE);
+  for (const field of documentedArtifactFields) {
+    const missing = structuredClone(result);
+    delete missing.body.artifacts[0][field];
+    assertProtocolError('missing_field', () => validateControllerPayload(missing, 'B', LEASE), field);
+  }
+  const previewKinds = artifactSection.match(/preview kinds are ([\s\S]*?)\. Subsequent/u)?.[1];
+  assert.ok(previewKinds);
+  assert.deepEqual(quoted(previewKinds), ['text', 'download_only', 'unsupported']);
+  for (const previewKind of quoted(previewKinds)) {
+    const variant = structuredClone(result);
+    variant.body.artifacts[0].preview_kind = previewKind;
+    validateControllerPayload(variant, 'B', LEASE);
+  }
+  assert.match(artifactSection, /`remote_action_request`[\s\S]*?`artifact_id`[\s\S]*?`task_id`[\s\S]*?`transfer_id`/u);
+  assert.doesNotMatch(artifactSection, /size_bytes|preview_mode|inline_text|inline_image/u);
+});
+
+test('artifact remote-action validator rejects legacy fields mixed into the current shape', () => {
+  const result = { ...validPayload('remote_action_result'), operation: 'artifact_index', body: {
+    artifacts: [{ artifact_id: 'artifact-1', task_id: 'task-1', display_name: 'report.txt',
+      mime_type: 'text/plain', total_bytes: '3', sha256: ZERO_HASH, preview_kind: 'text' }],
+  } };
+  validateControllerPayload(result, 'B', LEASE);
+  for (const [field, value] of [['size_bytes', '3'], ['preview_mode', 'inline_text'],
+    ['inline_text', 'old content'], ['inline_image', 'AQID']]) {
+    const mixed = structuredClone(result);
+    mixed.body.artifacts[0][field] = value;
+    assertProtocolError('unknown_field', () => validateControllerPayload(mixed, 'B', LEASE), field);
+  }
+  for (const previewKind of ['inline_text', 'inline_image']) {
+    const legacyEnum = structuredClone(result);
+    legacyEnum.body.artifacts[0].preview_kind = previewKind;
+    assertProtocolError('invalid_enum', () => validateControllerPayload(legacyEnum, 'B', LEASE), previewKind);
+  }
 });
 
 test("raw controller JSON rejects duplicate keys before object construction", () => {
@@ -282,6 +330,23 @@ test("task submission carries bounded input, exact statuses and the full tempora
   const oversizedPackage = structuredClone(fixture.task_submit_vectors.temporary);
   oversizedPackage.temporary_model_package.primary_credential.secret = "x".repeat(65_536);
   assertProtocolError("message_too_large", () => validateControllerPayload(oversizedPackage, "A", LEASE));
+});
+
+test("primary Responses and Chat-only vision share wire-true cross-language vectors", () => {
+  for (const vector of fixture.temporary_model_wire_vectors) {
+    for (const vision of [false, true]) {
+      const payload = structuredClone(fixture.task_submit_vectors.temporary);
+      const route = { ...payload.temporary_model_package.primary };
+      delete route.vendor;
+      Object.assign(route, vector.route);
+      if (vision) payload.temporary_model_package.vision_fallback = { route, credential: { kind: "api_key", secret: vector.credential_secret ?? "fixture-vision-key" } };
+      else payload.temporary_model_package.primary = route;
+      if (!vision && vector.credential_secret !== undefined) payload.temporary_model_package.primary_credential.secret = vector.credential_secret;
+      const valid = vision ? vector.vision : vector.primary;
+      if (valid) assert.deepEqual(validateControllerPayload(payload, "A", LEASE), payload, vector.name);
+      else assert.throws(() => validateControllerPayload(payload, "A", LEASE), ControllerProtocolError, vector.name);
+    }
+  }
 });
 
 test("temporary model URLs follow the shared strict ASCII grammar", () => {

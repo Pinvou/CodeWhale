@@ -12,6 +12,89 @@ use crate::platform::path_policy::validate_user_path;
 use std::path::{Path, PathBuf};
 
 #[test]
+fn remote_pending_identifier_contract_matches_controlled_task_protocol() {
+    use crate::features::remote_control::controller::task::{
+        RemoteTaskRequest, task_input_digest_for_value,
+    };
+    use crate::features::sessions::remote_proxy::schema::valid_remote_identifier;
+
+    // The pending slot on A must accept exactly the identifiers B's frozen
+    // task request accepts, including all four permitted leading punctuations.
+    for (id, expected) in [
+        ("-leading".to_owned(), true),
+        ("_leading".to_owned(), true),
+        (".leading".to_owned(), true),
+        (":leading".to_owned(), true),
+        ("mid-dle_under.dot:colon".to_owned(), true),
+        ("a".repeat(128), true),
+        (String::new(), false),
+        ("bad space".to_owned(), false),
+        ("éclair".to_owned(), false),
+        ("a".repeat(129), false),
+        ("bad/slash".to_owned(), false),
+    ] {
+        assert_eq!(valid_remote_identifier(&id), expected, "A: {id:?}");
+        // session_id is a B wire identifier, not A's local_session_id;
+        // include it without conflating it with the local-session validator.
+        for field in ["client_request_id", "task_id", "session_id"] {
+            let mut payload = serde_json::json!({
+                "connection_id": "connection-1",
+                "controller_lease_id": "lease-1",
+                "lease_epoch": "epoch-1",
+                "relay_epoch": "relay-1",
+                "remote_control_generation": "generation-1",
+                "task_id": "task-1",
+                "client_request_id": "request-1",
+                "session_id": "session-1",
+                "capability_revision": "1",
+                "mode": "chat",
+                "model_source": "controlled_device",
+                "input": {"text": "hello", "attachment_ids": [], "skill_ids": []},
+            });
+            // Keep the request valid independently of the identifier under test;
+            // the admission boundary verifies the canonical input digest.
+            payload["input_digest"] = task_input_digest_for_value(&payload["input"])
+                .expect("valid task input")
+                .into();
+            payload[field] = id.clone().into();
+            assert_eq!(
+                RemoteTaskRequest::from_payload(&payload).is_ok(),
+                expected,
+                "B {field}: {id:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn local_chat_command_guard_rejects_remote_proxy_without_backend_dispatch() {
+    use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+    let local = store
+        .create_new("model".into(), None, temp.path().join("local"))
+        .unwrap();
+    assert!(ensure_chat_session(&store, &local.metadata.id, "save_session_messages").is_ok());
+    let context = LiveRemoteContext {
+        peer_id: "peer".into(),
+        resume_boundary_id: "boundary".into(),
+        connection_id: "connection".into(),
+        controller_lease_id: "lease".into(),
+        lease_epoch: "epoch".into(),
+        relay_epoch: "relay".into(),
+        generation: "generation".into(),
+        control_connected: true,
+        encrypted_channel_connected: true,
+    };
+    let remote = store.test_commit_remote_proxy_open(None, &context).unwrap();
+    let error = ensure_chat_session(&store, &remote.local_session_id, "save_session_messages")
+        .expect_err("remote session must not use local transcript command");
+    assert!(error.contains("authenticated remote route"));
+    assert!(store.delete(&remote.local_session_id).is_err());
+}
+
+#[test]
 fn generic_file_staging_preserves_the_gui_image_wrapper_contract() {
     let source_dir = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -24,7 +107,7 @@ fn generic_file_staging_preserves_the_gui_image_wrapper_contract() {
         "attachments",
     )
     .unwrap();
-    let image = stage_image_in_workspace(
+    let image = stage_file_in_workspace(
         source.to_str().unwrap(),
         "wrapper.png",
         workspace.path(),
@@ -2253,7 +2336,7 @@ fn staged_targets_never_follow_preexisting_dangling_symlinks() {
         return;
     }
 
-    let staged_image = stage_image_in_workspace(
+    let staged_image = stage_file_in_workspace(
         source.to_string_lossy().as_ref(),
         "source.png",
         &workspace,
@@ -2385,7 +2468,7 @@ fn atomic_staging_keeps_legal_image_and_text_behavior() {
     let source = workspace.join("source.png");
     std::fs::write(&source, b"image bytes").expect("source");
 
-    let image = stage_image_in_workspace(
+    let image = stage_file_in_workspace(
         source.to_string_lossy().as_ref(),
         "safe.png",
         &workspace,
@@ -3027,5 +3110,437 @@ fn save_model_inner_commits_prefs_before_the_deferred_delete() {
         store.ops(),
         vec!["delete:pinvou3-model-api-key:model:m-edit".to_string()],
         "exactly one deferred keyring delete, attempted after the commit"
+    );
+}
+
+// ---- search credential deletion ordering (search settings save commits before the keyring) ----
+
+use crate::platform::prefs::{SearchCredential, SearchProvider};
+
+fn search_deletion_credential(action: Option<CredentialEditAction>) -> SearchCredential {
+    SearchCredential {
+        credential_ref: Some(SearchProvider::Tavily.credential_reference()),
+        credential_state: CredentialState::Configured,
+        has_secret: true,
+        credential_action: action,
+        ..Default::default()
+    }
+}
+
+fn search_deletion_payload(action: Option<CredentialEditAction>) -> SearchPrefs {
+    SearchPrefs {
+        provider: SearchProvider::Tavily,
+        enabled_providers: vec![SearchProvider::Bing, SearchProvider::Tavily],
+        api_key: None,
+        credentials: [(SearchProvider::Tavily, search_deletion_credential(action))]
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn seed_search_deletion_prefs() {
+    UserPrefs::update_transaction(|prefs| {
+        prefs.migrate_models();
+        prefs.search = search_deletion_payload(None);
+        Ok(())
+    })
+    .expect("seed search deletion prefs");
+}
+
+#[test]
+fn persist_search_settings_commits_before_the_deferred_keyring_delete() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("search-delete-order");
+    seed_search_deletion_prefs();
+    let search = search_deletion_payload(Some(CredentialEditAction::Delete));
+    let store = crate::platform::credential_store::RecordingCredentialStore::new();
+    store.fail_delete();
+
+    // With the keyring delete failing, Ok + a committed removal is only
+    // reachable when the prefs save landed BEFORE the delete attempt: the
+    // reverted ordering runs the delete inside the transaction, where its
+    // failure aborts the save (and records the keyring op).
+    super::settings::persist_search_settings_inner(search, &store).expect("the save must succeed");
+
+    let prefs = UserPrefs::load();
+    let credential = prefs.search.credentials.get(&SearchProvider::Tavily);
+    // SearchPrefs::normalize retains out the secretless/refless entry, so
+    // absence on disk is what a committed delete must produce.
+    assert!(
+        credential.is_none(),
+        "the deleted credential must not survive in prefs: {:?}",
+        credential
+    );
+    assert_eq!(
+        store.ops(),
+        vec!["delete:pinvou3-search-api-key:search:tavily".to_string()],
+        "exactly one deferred keyring delete, attempted after the commit"
+    );
+}
+
+#[test]
+fn persist_search_settings_failure_leaves_the_deferred_delete_unrun() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("search-delete-abort");
+    seed_search_deletion_prefs();
+    let mut search = search_deletion_payload(Some(CredentialEditAction::Delete));
+    search.credentials.insert(
+        SearchProvider::Bocha,
+        SearchCredential {
+            api_key: "sk-test-secret-1234567890".to_string(),
+            credential_action: Some(CredentialEditAction::Replace),
+            ..Default::default()
+        },
+    );
+    let store = crate::platform::credential_store::RecordingCredentialStore::new();
+    store.fail_set();
+
+    // A sibling provider's keyring set failure aborts the whole transaction;
+    // the already-captured Tavily delete must stay unrun, or Tavily would be
+    // left configured-but-secretless on disk.
+    let error = super::settings::persist_search_settings_inner(search, &store)
+        .expect_err("the failing sibling set must fail the save");
+
+    assert!(error.contains("credential store unavailable"), "{error}");
+    assert_eq!(
+        store.ops(),
+        vec!["set:pinvou3-search-api-key:search:bocha=sk-test-secret-1234567890".to_string()],
+        "the aborted save must record only the failed sibling set, no keyring delete: {:?}",
+        store.ops()
+    );
+    let prefs = UserPrefs::load();
+    let credential = prefs
+        .search
+        .credentials
+        .get(&SearchProvider::Tavily)
+        .expect("the aborted save must leave the provider configured in prefs");
+    assert_eq!(credential.credential_state, CredentialState::Configured);
+    assert!(credential.has_secret);
+}
+
+// The injection mechanism (read-only PINVOU3_HOME directory) only exists on
+// Unix: 0o555 blocks the save's tmp+rename there, while Windows ignores the
+// directory read-only attribute — and the unix permission APIs this needs do
+// not compile on Windows at all. The platform-independent abort direction
+// (a failing in-transaction step keeps the deferred delete unrun) stays
+// pinned for every OS by persist_search_settings_failure_leaves_the_
+// deferred_delete_unrun above.
+#[cfg(unix)]
+#[test]
+fn persist_search_settings_disk_failure_leaves_the_deferred_delete_unrun() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let home = TempPinvou3Home::new("search-delete-disk-fail");
+    seed_search_deletion_prefs();
+    let search = search_deletion_payload(Some(CredentialEditAction::Delete));
+    let store = crate::platform::credential_store::RecordingCredentialStore::new();
+
+    // A read-only PINVOU3_HOME fails the save's disk write AFTER the closure
+    // captured the deferred delete — the one abort direction where the
+    // post-commit hook placement (the hook runs only after save_unlocked
+    // succeeded, no matter that the closure already captured the delete) is
+    // the only thing keeping the keyring delete unrun.
+    std::fs::set_permissions(&home.root, std::fs::Permissions::from_mode(0o555))
+        .expect("make PINVOU3_HOME read-only");
+    let error = super::settings::persist_search_settings_inner(search, &store)
+        .expect_err("the failing disk write must fail the save");
+    std::fs::set_permissions(&home.root, std::fs::Permissions::from_mode(0o755))
+        .expect("restore PINVOU3_HOME permissions");
+
+    assert!(error.contains("save settings failed"), "{error}");
+    assert!(
+        store.ops().is_empty(),
+        "the aborted save must run no keyring op, deferred delete included: {:?}",
+        store.ops()
+    );
+    let prefs = UserPrefs::load();
+    let credential = prefs
+        .search
+        .credentials
+        .get(&SearchProvider::Tavily)
+        .expect("the aborted save must leave the provider configured in prefs");
+    assert_eq!(credential.credential_state, CredentialState::Configured);
+    assert!(credential.has_secret);
+}
+
+fn web_deletion_patch(action: Option<CredentialEditAction>) -> super::settings::WebSettingsPatch {
+    super::settings::WebSettingsPatch {
+        memory_enabled: None,
+        search: Some(search_deletion_payload(action)),
+    }
+}
+
+#[test]
+fn persist_web_settings_commits_before_the_deferred_keyring_delete() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("web-delete-order");
+    seed_search_deletion_prefs();
+    let patch = web_deletion_patch(Some(CredentialEditAction::Delete));
+    let store = crate::platform::credential_store::RecordingCredentialStore::new();
+    store.fail_delete();
+
+    // Web clients carry the same Delete action through WebSettingsPatch.search
+    // (web_access_update_settings), so the web persist path must obey the
+    // identical ordering: commit first, then attempt the deferred delete —
+    // with the delete failing, Ok + a committed removal is only reachable
+    // when the save landed first.
+    super::settings::persist_web_settings_inner(patch, &store).expect("the save must succeed");
+
+    let prefs = UserPrefs::load();
+    // SearchPrefs::normalize retains out the secretless/refless entry, so
+    // absence on disk is what a committed delete must produce.
+    assert!(
+        !prefs
+            .search
+            .credentials
+            .contains_key(&SearchProvider::Tavily),
+        "the deleted credential must not survive in prefs"
+    );
+    assert_eq!(
+        store.ops(),
+        vec!["delete:pinvou3-search-api-key:search:tavily".to_string()],
+        "exactly one deferred keyring delete, attempted after the commit"
+    );
+}
+
+// ---- deferred delete vs a concurrent replacement of the same credential ----
+//
+// The post-commit delete must share the USER_PREFS_LOCK serialization with
+// credential replacement writes (which run their keyring set inside the
+// transaction, under the same lock). Otherwise two overlapping saves can run
+// as: A commits Delete and pauses before cleanup, B sets a fresh secret for
+// the same deterministic provider reference and commits Configured, A resumes
+// and destroys B's secret — both saves succeed while prefs describe a
+// configured provider whose secret is gone.
+
+use crate::platform::credential_store::{
+    CredentialError, CredentialReference, MemoryCredentialStore,
+};
+
+const BARRIER_REPLACEMENT_KEY: &str = "tvly-replacement-1234567890";
+const BARRIER_ORIGINAL_KEY: &str = "tvly-original-1234567890";
+
+/// Pause point between a committed save and its deferred keyring removal:
+/// `delete` first reports "starting" on a channel, then blocks until the test
+/// opens the gate, and only then forwards to the real in-memory store. Every
+/// other op forwards untouched, so the replacement save runs at full speed.
+struct GatedDeleteStore {
+    inner: MemoryCredentialStore,
+    delete_started: std::sync::mpsc::Sender<()>,
+    gate: DeleteGate,
+}
+
+#[derive(Clone, Default)]
+struct DeleteGate(std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+impl DeleteGate {
+    fn open(&self) {
+        let (lock, signal) = &*self.0;
+        *lock.lock().expect("delete gate lock") = true;
+        signal.notify_all();
+    }
+
+    fn wait(&self) {
+        let (lock, signal) = &*self.0;
+        let mut open = lock.lock().expect("delete gate lock");
+        while !*open {
+            open = signal.wait(open).expect("delete gate signal");
+        }
+    }
+}
+
+impl CredentialStore for GatedDeleteStore {
+    fn get(&self, reference: &CredentialReference) -> Result<Option<String>, CredentialError> {
+        self.inner.get(reference)
+    }
+
+    fn set(&self, reference: &CredentialReference, value: &str) -> Result<(), CredentialError> {
+        self.inner.set(reference, value)
+    }
+
+    fn delete(&self, reference: &CredentialReference) -> Result<(), CredentialError> {
+        // Deterministic barrier: by the time the test observes this signal the
+        // save has committed (the delete is post-commit by construction on
+        // both the fixed and the racy ordering), and the removal stays paused
+        // until the gate opens.
+        let _ = self.delete_started.send(());
+        self.gate.wait();
+        self.inner.delete(reference)
+    }
+}
+
+fn search_replacement_payload(key: &str) -> SearchPrefs {
+    SearchPrefs {
+        provider: SearchProvider::Tavily,
+        enabled_providers: vec![SearchProvider::Bing, SearchProvider::Tavily],
+        api_key: None,
+        credentials: [(
+            SearchProvider::Tavily,
+            SearchCredential {
+                api_key: key.to_string(),
+                credential_action: Some(CredentialEditAction::Replace),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+    }
+}
+
+fn barrier_store() -> (
+    std::sync::Arc<GatedDeleteStore>,
+    DeleteGate,
+    std::sync::mpsc::Receiver<()>,
+) {
+    let inner = MemoryCredentialStore::default();
+    inner
+        .set(
+            &SearchProvider::Tavily.credential_reference(),
+            BARRIER_ORIGINAL_KEY,
+        )
+        .expect("seed the original keyring secret");
+    let (delete_started, delete_started_rx) = std::sync::mpsc::channel();
+    let gate = DeleteGate::default();
+    let store = std::sync::Arc::new(GatedDeleteStore {
+        inner,
+        delete_started,
+        gate: gate.clone(),
+    });
+    (store, gate, delete_started_rx)
+}
+
+/// Drives the reviewer's interleaving deterministically: A's deferred delete
+/// is observed paused after its save committed, B's replacement of the same
+/// provider reference then runs, and the gate is released in the order each
+/// ordering allows — replacement first on the racy ordering (which must fail
+/// the final assertions red), delete first under the fixed serialization.
+/// Channel signal + gate, no timing: whichever branch runs, the interleaving
+/// is forced, not raced.
+fn run_delete_replacement_barrier(
+    label: &str,
+    save_a_delete: impl FnOnce() -> Result<UserPrefs, String> + Send + 'static,
+    save_b_replace: impl FnOnce() -> Result<UserPrefs, String> + Send + 'static,
+    store: std::sync::Arc<GatedDeleteStore>,
+    gate: DeleteGate,
+    delete_started: std::sync::mpsc::Receiver<()>,
+) {
+    let reference = SearchProvider::Tavily.credential_reference();
+    let a = std::thread::spawn(save_a_delete);
+    // Deterministic pause: this returns only once A's save committed and its
+    // deferred delete is blocked before the keyring removal.
+    delete_started
+        .recv()
+        .expect("the deferred delete must start once A's save committed");
+
+    let b = std::thread::spawn(save_b_replace);
+    if crate::platform::prefs::UserPrefs::user_prefs_lock_free_for_test() {
+        // Racy ordering: the deferred delete runs OUTSIDE the prefs lock, so
+        // B's replacement commits first; resuming A's delete afterwards then
+        // destroys B's fresh secret and the final assertions fail red.
+        b.join()
+            .unwrap()
+            .expect("B's replacement save must succeed");
+        gate.open();
+    } else {
+        // Fixed ordering: the deferred delete runs INSIDE the prefs-lock
+        // critical section, so B's replacement is blocked on the lock until
+        // the delete finished; opening the gate now lands the delete strictly
+        // before B's keyring write.
+        gate.open();
+        b.join()
+            .unwrap()
+            .expect("B's replacement save must succeed");
+    }
+    a.join().unwrap().expect("A's delete save must succeed");
+
+    let secret = store.inner.get(&reference).unwrap();
+    let configured = UserPrefs::load()
+        .search
+        .credentials
+        .get(&SearchProvider::Tavily)
+        .map(|credential| credential.credential_state == CredentialState::Configured)
+        .unwrap_or(false);
+    assert_eq!(
+        secret.as_deref(),
+        Some(BARRIER_REPLACEMENT_KEY),
+        "{label}: B's committed secret must survive A's deferred delete"
+    );
+    assert!(
+        configured,
+        "{label}: the replacement must leave the provider configured in prefs"
+    );
+}
+
+#[test]
+fn search_settings_deferred_delete_serializes_with_a_concurrent_replacement() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("search-delete-replace-race");
+    seed_search_deletion_prefs();
+    let (store, gate, delete_started) = barrier_store();
+    let a_store = store.clone();
+    let b_store = store.clone();
+
+    run_delete_replacement_barrier(
+        "save_search_settings",
+        move || {
+            super::settings::persist_search_settings_inner(
+                search_deletion_payload(Some(CredentialEditAction::Delete)),
+                a_store.as_ref(),
+            )
+        },
+        move || {
+            super::settings::persist_search_settings_inner(
+                search_replacement_payload(BARRIER_REPLACEMENT_KEY),
+                b_store.as_ref(),
+            )
+        },
+        store,
+        gate,
+        delete_started,
+    );
+}
+
+#[test]
+fn web_settings_deferred_delete_serializes_with_a_concurrent_replacement() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("web-delete-replace-race");
+    seed_search_deletion_prefs();
+    let (store, gate, delete_started) = barrier_store();
+    let a_store = store.clone();
+    let b_store = store.clone();
+
+    let web_patch = |search: SearchPrefs| super::settings::WebSettingsPatch {
+        memory_enabled: None,
+        search: Some(search),
+    };
+    run_delete_replacement_barrier(
+        "save_web_settings",
+        move || {
+            super::settings::persist_web_settings_inner(
+                web_patch(search_deletion_payload(Some(CredentialEditAction::Delete))),
+                a_store.as_ref(),
+            )
+        },
+        move || {
+            super::settings::persist_web_settings_inner(
+                web_patch(search_replacement_payload(BARRIER_REPLACEMENT_KEY)),
+                b_store.as_ref(),
+            )
+        },
+        store,
+        gate,
+        delete_started,
     );
 }

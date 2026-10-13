@@ -36,7 +36,6 @@ use introspect::*;
 use login::*;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -7625,10 +7624,10 @@ mod tests {
                         elicitation_id: id.to_owned(),
                         request: json!({ "form": { "secretPath": "C:/private/secret.txt" } }),
                     },
-                    activity: stall::new_activity_clock(),
-                    bridge: None,
                     remote_owner,
+                    activity: stall::new_activity_clock(),
                     response_tx,
+                    bridge: None,
                 },
                 response_rx,
             )

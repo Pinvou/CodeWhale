@@ -1,12 +1,16 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import { EnrollmentMigrationHandler } from "./enrollment-migration-handler.js";
-import { ENROLLMENT_NAMESPACE, loadEnrollmentRegistryConfig } from "./enrollment-registry.js";
+import { ENROLLMENT_NAMESPACE, loadEnrollmentRegistryConfig,
+  enrollmentKeyringFingerprint, enrollmentKeyringUsesKey } from "./enrollment-registry.js";
 import { isEnrollmentEndpointIdentifier } from "./identifier-contract.js";
 
 const REQUEST_SCHEMA = "pinvou-enrollment-coverage-request";
 const RESPONSE_SCHEMA = "pinvou-enrollment-coverage-response";
 const PATH = "/coverage";
+const CAPACITY_PATH = "/capacity";
+const CAPACITY_REQUEST_SCHEMA = "pinvou-enrollment-capacity-request";
+const CAPACITY_RESPONSE_SCHEMA = "pinvou-enrollment-capacity-response";
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 16 * 1024;
 const CLOCK_WINDOW_MS = 15_000;
@@ -46,6 +50,8 @@ export function loadEnrollmentCoverageControlConfig(env = process.env, { require
   if (key.length < 32 || key.length > 4096
     || keyText === env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY
     || keyText === env.PINVOU_REMOTE_PAIRING_HMAC_KEY) fail("coverage_control_key_invalid");
+  if (env.PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON
+    && enrollmentKeyringUsesKey(loadEnrollmentRegistryConfig(env), key)) fail("coverage_control_key_invalid");
   return { host, port, key };
 }
 
@@ -56,6 +62,7 @@ function storeBinding(env, key) {
   return mac(key, "store", Buffer.from(JSON.stringify({ config,
     key_id: env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID,
     key_fingerprint: mac(key, "credential-key", Buffer.from(env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY, "utf8")),
+    keyring_fingerprint: enrollmentKeyringFingerprint(config, key),
   }), "utf8"));
 }
 
@@ -85,35 +92,54 @@ export function createEnrollmentCoverageControl({ registry, stateStore, gatewayI
     const reply = (status, value) => {
       const bytes = Buffer.from(JSON.stringify(value), "utf8");
       response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store",
-        [SIGNATURE_HEADER]: mac(control.key, "response", bytes) });
+        [SIGNATURE_HEADER]: mac(control.key, request.url === CAPACITY_PATH ? "capacity-response" : "response", bytes) });
       response.end(bytes);
     };
     try {
-      if (request.method !== "POST" || request.url !== PATH
+      const capacityRequest = request.url === CAPACITY_PATH;
+      if (request.method !== "POST" || (!capacityRequest && request.url !== PATH)
         || !["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(request.socket.remoteAddress)) {
         request.resume();
         reply(404, { ok: false, code: "coverage_request_invalid" });
         return;
       }
       const bytes = await readBounded(request, MAX_REQUEST_BYTES);
-      if (!verified(control.key, "request", bytes, request.headers[SIGNATURE_HEADER])) {
+      if (!verified(control.key, capacityRequest ? "capacity-request" : "request", bytes, request.headers[SIGNATURE_HEADER])) {
         reply(403, { ok: false, code: "coverage_authorization_failed" });
         return;
       }
       let input;
       try { input = JSON.parse(bytes.toString("utf8")); } catch { fail("coverage_request_invalid"); }
       const now = clock();
-      if (!exact(input, ["schema", "version", "nonce", "issued_at_ms", "store_binding", "endpoint_ids"])
-        || input.schema !== REQUEST_SCHEMA || input.version !== 1 || typeof input.nonce !== "string" || !HEX_64.test(input.nonce)
+      if (!exact(input, capacityRequest
+        ? ["schema", "version", "nonce", "issued_at_ms", "store_binding"]
+        : ["schema", "version", "nonce", "issued_at_ms", "store_binding", "endpoint_ids"])
+        || input.schema !== (capacityRequest ? CAPACITY_REQUEST_SCHEMA : REQUEST_SCHEMA)
+        || input.version !== 1 || typeof input.nonce !== "string" || !HEX_64.test(input.nonce)
         || !Number.isSafeInteger(now) || !Number.isSafeInteger(input.issued_at_ms)
         || Math.abs(now - input.issued_at_ms) > CLOCK_WINDOW_MS) fail("coverage_request_invalid");
       if (input.store_binding !== binding) fail("coverage_store_mismatch");
-      if (!Array.isArray(input.endpoint_ids) || input.endpoint_ids.length > 100_000
-        || input.endpoint_ids.some((id) => !isEnrollmentEndpointIdentifier(id))) fail("coverage_inventory_invalid");
+      if (!capacityRequest && (!Array.isArray(input.endpoint_ids) || input.endpoint_ids.length > 100_000
+        || input.endpoint_ids.some((id) => !isEnrollmentEndpointIdentifier(id)))) fail("coverage_inventory_invalid");
       for (const [nonce, expires] of nonces) if (expires < now) nonces.delete(nonce);
       if (nonces.has(input.nonce)) fail("coverage_request_replayed");
       if (nonces.size >= MAX_NONCES) fail("coverage_capacity_reached");
       nonces.set(input.nonce, now + CLOCK_WINDOW_MS * 2);
+      if (capacityRequest) {
+        // Both reads are synchronous on this live writer. Never open an
+        // unlocked disk copy or initialize a missing store for observation.
+        const ledger = registry.getMigrationCapacity();
+        const storage = stateStore.readCapacity();
+        if (ledger.store_revision !== storage.store_revision) fail("coverage_store_mismatch");
+        const value = { ok: true, schema: CAPACITY_RESPONSE_SCHEMA, version: 1,
+          request_nonce: input.nonce, store_binding: binding, gateway_instance_id: gatewayInstanceId,
+          checked_at_ms: now, ledger, storage };
+        const contents = Buffer.from(JSON.stringify(value), "utf8");
+        response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store",
+          [SIGNATURE_HEADER]: mac(control.key, "capacity-response", contents) });
+        response.end(contents);
+        return;
+      }
       // No await between the metadata and the real registry read: both belong
       // to this live writer's same synchronous namespace snapshot.
       const revision = stateStore.readNamespaceRevision(ENROLLMENT_NAMESPACE);
@@ -144,6 +170,48 @@ export function createEnrollmentCoverageControl({ registry, stateStore, gatewayI
       return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     },
   });
+}
+
+export async function requestEnrollmentCapacity({ env = process.env, fetchImpl = fetch } = {}) {
+  const control = loadEnrollmentCoverageControlConfig(env, { required: true });
+  const binding = storeBinding(env, control.key);
+  const nonce = crypto.randomBytes(32).toString("hex");
+  const bytes = Buffer.from(JSON.stringify({ schema: CAPACITY_REQUEST_SCHEMA, version: 1,
+    nonce, issued_at_ms: Date.now(), store_binding: binding }), "utf8");
+  let response;
+  try {
+    const host = control.host === "::1" ? "[::1]" : control.host;
+    response = await fetchImpl(`http://${host}:${control.port}${CAPACITY_PATH}`, { method: "POST", redirect: "error",
+      headers: { "content-type": "application/json", [SIGNATURE_HEADER]: mac(control.key, "capacity-request", bytes) },
+      body: bytes, signal: AbortSignal.timeout(5000) });
+  } catch { fail("coverage_control_unavailable"); }
+  let contents;
+  try { contents = await readBounded(response.body, MAX_RESPONSE_BYTES); } catch { fail("coverage_response_invalid"); }
+  if (!verified(control.key, "capacity-response", contents, response.headers.get(SIGNATURE_HEADER))) {
+    fail("coverage_response_unverified");
+  }
+  let output;
+  try { output = JSON.parse(contents.toString("utf8")); } catch { fail("coverage_response_invalid"); }
+  if (!response.ok || output?.ok !== true) fail("coverage_control_rejected");
+  if (!exact(output, ["ok", "schema", "version", "request_nonce", "store_binding", "gateway_instance_id",
+    "checked_at_ms", "ledger", "storage"]) || output.schema !== CAPACITY_RESPONSE_SCHEMA || output.version !== 1
+    || output.request_nonce !== nonce || output.store_binding !== binding
+    || typeof output.gateway_instance_id !== "string" || !HEX_64.test(output.gateway_instance_id)
+    || !Number.isSafeInteger(output.checked_at_ms) || Math.abs(Date.now() - output.checked_at_ms) > CLOCK_WINDOW_MS
+    || !exact(output.ledger, ["store_revision", "namespace_revision", "total", "max_requests", "pending", "succeeded", "failed"])
+    || !exact(output.storage, ["store_revision", "serialized_bytes", "max_bytes"])) fail("coverage_response_invalid");
+  const { ledger, storage } = output;
+  for (const revision of [ledger.store_revision, ledger.namespace_revision, storage.store_revision]) {
+    if (typeof revision !== "string" || !/^(?:0|[1-9][0-9]{0,19})$/u.test(revision)
+      || BigInt(revision) > 18_446_744_073_709_551_615n) fail("coverage_response_invalid");
+  }
+  if (ledger.store_revision !== storage.store_revision || ledger.max_requests !== 100_000
+    || [ledger.total, ledger.pending, ledger.succeeded, ledger.failed].some((value) => !Number.isSafeInteger(value) || value < 0)
+    || ledger.total > ledger.max_requests || ledger.total !== ledger.pending + ledger.succeeded + ledger.failed
+    || !Number.isSafeInteger(storage.serialized_bytes) || storage.serialized_bytes < 1
+    || !Number.isSafeInteger(storage.max_bytes) || storage.max_bytes < 1024 || storage.max_bytes > 256 * 1024 * 1024
+    || storage.serialized_bytes > storage.max_bytes) fail("coverage_response_invalid");
+  return output;
 }
 
 export async function requestEnrollmentCoverage({ endpointIds, env = process.env, fetchImpl = fetch } = {}) {

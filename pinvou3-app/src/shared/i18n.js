@@ -6,6 +6,7 @@
 // 比 zh 多出的 settings 相关键是历史遗留);ja 以 en 兜底(i18n/ja.js 内 spread);
 // settings 详情文案已并入各语言文件(原 settings-i18n.js)。
 import { dictZh } from './i18n/zh.js';
+export { CHAT_RECOVERY_COPY } from './i18n/chat-recovery.js';
 
 const dict = { zh: dictZh };
 
