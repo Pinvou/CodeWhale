@@ -513,14 +513,19 @@ pub(crate) fn park_toolbox_eviction(
 /// set; a name an earlier note in the same ride already named is not
 /// repeated. Either way the result must not declare the tool "no longer
 /// callable": such names are dropped, and a note emptied by the netting is
-/// dropped with them. Consumes the notes — the slot is cleared whether or
-/// not anything rendered — so a caller cannot re-ride them on a later
-/// result. Returns `None` when nothing remains to report.
+/// dropped with them. A name that left the catalog between its eviction and
+/// this ride can no longer be re-activated by a search, so it is reported
+/// under that truth instead of the recovery promise. Consumes the notes —
+/// the slot is cleared whether or not anything rendered — so a caller
+/// cannot re-ride them on a later result. Returns `None` when nothing
+/// remains to report.
 pub(crate) fn render_toolbox_eviction_notes(
     notes: &mut Vec<PendingToolboxEviction>,
     cache: &ToolActivationCache,
     active_names: &std::collections::HashSet<String>,
+    catalog: &[Tool],
 ) -> Option<String> {
+    let catalog_names: HashSet<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
     let mut rendered_names: HashSet<String> = HashSet::new();
     for note in notes.iter_mut() {
         note.evicted.retain(|name| {
@@ -531,7 +536,29 @@ pub(crate) fn render_toolbox_eviction_notes(
     let rendered: Vec<String> = notes
         .iter()
         .filter(|note| !note.evicted.is_empty())
-        .map(|note| bounded_toolbox_eviction_note(note.trigger, &note.evicted))
+        .map(|note| {
+            let (recoverable, gone): (Vec<String>, Vec<String>) = note
+                .evicted
+                .iter()
+                .cloned()
+                .partition(|name| catalog_names.contains(name.as_str()));
+            let mut text = Vec::new();
+            if !recoverable.is_empty() {
+                text.push(bounded_toolbox_eviction_note(note.trigger, &recoverable));
+            }
+            if !gone.is_empty() {
+                text.push(format!(
+                    "This {} evicted {} that {} since left the toolbox \
+                     catalog; a search can no longer re-activate {}: {}",
+                    note.trigger.label(),
+                    if gone.len() == 1 { "a tool" } else { "tools" },
+                    if gone.len() == 1 { "has" } else { "have" },
+                    if gone.len() == 1 { "it" } else { "them" },
+                    gone.join(", ")
+                ));
+            }
+            text.join("\n\n")
+        })
         .collect();
     let ride_count = rendered.len();
     notes.clear();

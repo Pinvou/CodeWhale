@@ -860,6 +860,10 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
     let catalog = vec![deferred];
     let mut cache = ToolActivationCache::default();
     cache.activate(&catalog, &["deferred-x".to_string()]);
+    // The ride-time catalog: every name below is still served by it, so the
+    // notes keep the recovery vocabulary. The gone-name segment drops the
+    // name from this catalog on purpose.
+    let ride_catalog = vec![tool("deferred-x"), tool("deferred-y"), tool("deferred-z")];
 
     let note = |trigger, names| crate::core::session::PendingToolboxEviction {
         trigger,
@@ -873,8 +877,9 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
         ),
         note(ToolboxEvictionTrigger::Step, vec!["deferred-x".to_string()]),
     ];
-    let rendered = render_toolbox_eviction_notes(&mut notes, &cache, &HashSet::new())
-        .expect("deferred-y is still evicted");
+    let rendered =
+        render_toolbox_eviction_notes(&mut notes, &cache, &HashSet::new(), &ride_catalog)
+            .expect("deferred-y is still evicted");
     assert!(
         rendered.contains("deferred-y") && !rendered.contains("deferred-x"),
         "re-admitted names must be netted out of the note: {rendered}"
@@ -882,6 +887,13 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
     assert!(
         rendered.contains("This turn's start evicted"),
         "the surviving note keeps its own trigger attribution: {rendered}"
+    );
+    assert_eq!(
+        rendered
+            .matches("evicted tools from the bounded conversation toolbox")
+            .count(),
+        1,
+        "a companion note the netting empties must contribute no prose: {rendered}"
     );
 
     // A note whose every name is re-admitted is fully absorbed: reporting
@@ -891,7 +903,7 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
         vec!["deferred-x".to_string()],
     )];
     assert!(
-        render_toolbox_eviction_notes(&mut notes, &cache, &HashSet::new()).is_none(),
+        render_toolbox_eviction_notes(&mut notes, &cache, &HashSet::new(), &ride_catalog).is_none(),
         "a fully netted note must not ride at all"
     );
 
@@ -906,8 +918,13 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
         vec!["deferred-y".to_string()],
     )];
     assert!(
-        render_toolbox_eviction_notes(&mut notes, &ToolActivationCache::default(), &active)
-            .is_none(),
+        render_toolbox_eviction_notes(
+            &mut notes,
+            &ToolActivationCache::default(),
+            &active,
+            &ride_catalog,
+        )
+        .is_none(),
         "an active-set name is callable and must not be declared evicted"
     );
     assert!(
@@ -925,12 +942,59 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
         ),
         note(ToolboxEvictionTrigger::Step, vec!["deferred-z".to_string()]),
     ];
-    let rendered = render_toolbox_eviction_notes(&mut notes, &cache, &HashSet::new())
-        .expect("deferred-z is still evicted");
+    let rendered =
+        render_toolbox_eviction_notes(&mut notes, &cache, &HashSet::new(), &ride_catalog)
+            .expect("deferred-z is still evicted");
     assert_eq!(
         rendered.matches("deferred-z").count(),
         1,
         "a name already rendered by an earlier note must not be repeated: {rendered}"
     );
     assert!(notes.is_empty());
+
+    // A name that left the catalog between its eviction and this ride can
+    // no longer be recovered by a search, so the note must report that
+    // truth instead of promising a re-activating search — beside a name
+    // the catalog still serves, which keeps the recovery contract.
+    let mut gone_catalog = vec![tool("deferred-y")];
+    gone_catalog[0].defer_loading = Some(true);
+    let mut notes = vec![note(
+        ToolboxEvictionTrigger::Step,
+        vec!["deferred-y".to_string(), "gone-tool".to_string()],
+    )];
+    let rendered = render_toolbox_eviction_notes(
+        &mut notes,
+        &ToolActivationCache::default(),
+        &HashSet::new(),
+        &gone_catalog,
+    )
+    .expect("both names are still evicted");
+    assert!(
+        rendered.contains("no longer callable until a later search re-activates them: deferred-y"),
+        "the served name keeps the recovery contract: {rendered}"
+    );
+    assert!(
+        rendered.contains("evicted a tool that has since left the toolbox catalog")
+            && rendered.contains("a search can no longer re-activate it: gone-tool"),
+        "a catalog-departed name must not be promised a re-activating search: {rendered}"
+    );
+
+    // A note whose every name left the catalog renders the unrecoverable
+    // sentence alone — never an empty recovery list.
+    let mut notes = vec![note(
+        ToolboxEvictionTrigger::Step,
+        vec!["gone-tool".to_string()],
+    )];
+    let rendered = render_toolbox_eviction_notes(
+        &mut notes,
+        &ToolActivationCache::default(),
+        &HashSet::new(),
+        &gone_catalog,
+    )
+    .expect("gone-tool is still evicted");
+    assert!(
+        rendered.contains("evicted a tool that has since left the toolbox catalog")
+            && !rendered.contains("no longer callable until a later search"),
+        "a fully unrecoverable note must drop the recovery promise: {rendered}"
+    );
 }

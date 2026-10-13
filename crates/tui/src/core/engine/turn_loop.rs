@@ -5219,6 +5219,7 @@ impl Engine {
                             &mut pending_eviction_notes,
                             &self.session.tool_activation_cache,
                             active_tool_names,
+                            tool_catalog,
                         ) {
                             eviction_notes.push(rendered);
                         }
@@ -5285,6 +5286,7 @@ impl Engine {
                             &mut pending_eviction_notes,
                             &self.session.tool_activation_cache,
                             active_tool_names,
+                            tool_catalog,
                         );
                     }
                     let error = match note_text {

@@ -14154,6 +14154,7 @@ impl SubAgentToolSurface {
             &mut self.pending_eviction_notes,
             &self.cache,
             &self.active_names,
+            &self.catalog,
         ) else {
             return;
         };
