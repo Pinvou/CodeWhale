@@ -15728,7 +15728,18 @@ impl SubAgentToolRegistry {
                 "Tool {name} is not in this child's policy-filtered catalog"
             ));
         };
-        if deferred && !request_active_names.contains(name) {
+        if deferred
+            && (!request_active_names.contains(name) || !surface.active_names.contains(name))
+        {
+            // A mid-request bounds eviction (a touch or hydrate revalidation)
+            // removes the tool from the surface's live active set while the
+            // request snapshot still carries it. Falling through to
+            // `execute_full` would run a call the surface no longer admits
+            // and make the eviction note an earlier result recorded a false
+            // statement for the rest of this request; routing the retry
+            // through hydration re-admits it under the bounds — or refuses
+            // it with the shared oversize reason — exactly like the parent
+            // engine's retry flow.
             return surface
                 .hydrate(name)
                 .map(|content| RichToolResult::plain(ToolResult::success(content)));

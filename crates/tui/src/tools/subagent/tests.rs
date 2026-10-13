@@ -7701,7 +7701,20 @@ fn child_hydrate_rejection_carries_the_revalidations_evictions() {
 /// re-admits are netted out against the child's live cache.
 #[test]
 fn child_parked_note_rides_success_and_error_results_and_nets_re_admissions() {
-    let mut surface = SubAgentToolSurface::new(vec![], &[]);
+    // A parked eviction note names cache members, and cache members are
+    // catalog members — the premise the ride-time catalog check relies on.
+    // The eager lead defeats `initial_active_tools`' single-tool fallback,
+    // which would otherwise force-activate `big-a` and the ride would net
+    // it out of the note.
+    let mut lead = synthetic_deferred_tool("lead", 8);
+    lead.defer_loading = Some(false);
+    let catalog = vec![
+        lead,
+        synthetic_deferred_tool("big-a", 8),
+        synthetic_deferred_tool("big-b", 8),
+        synthetic_deferred_tool("big-c", 8),
+    ];
+    let mut surface = SubAgentToolSurface::new(catalog, &[]);
     surface.park_eviction_note(
         ToolboxEvictionTrigger::Step,
         vec!["big-a".to_string(), "big-b".to_string()].as_slice(),
@@ -7838,6 +7851,11 @@ async fn parked_note_rides_through_the_execute_from_surface_glue() {
     let registry = small_surface_registry(FleetRole::Builder);
     let catalog = registry.deferred_catalog_for_model(&FleetRole::Builder);
     let mut surface = SubAgentToolSurface::new(catalog, &["get_goal".to_string()]);
+    // A parked eviction note names a cache member, and a cache member is a
+    // catalog member — the premise the ride-time catalog check relies on.
+    surface
+        .catalog
+        .push(synthetic_deferred_tool("ghost-tool", 8));
     surface.park_eviction_note(
         ToolboxEvictionTrigger::TurnStart,
         &["ghost-tool".to_string()],
@@ -7930,6 +7948,72 @@ async fn touch_glue_rides_the_refresh_eviction_through_execute_from_surface() {
         !surface.active_names.contains("big-a"),
         "the evicted victim must leave the child's active set"
     );
+}
+
+/// A mid-request bounds eviction must not leave the evicted tool
+/// dispatchable for the rest of the request: the request's active-name
+/// snapshot still carries it, but the surface's live active set no longer
+/// does. Routing the retry through hydration re-admits it under the bounds
+/// with a truthful receipt (or refuses it with the shared oversize reason)
+/// instead of executing a call the surface no longer admits — the eviction
+/// note an earlier result recorded would otherwise be a false statement for
+/// the rest of this request. Deleting the live-set disjunct in the dispatch
+/// turns this pin red.
+#[tokio::test]
+async fn mid_request_eviction_routes_the_retry_through_hydration() {
+    let registry = small_surface_registry(FleetRole::Builder);
+    let catalog = vec![
+        synthetic_deferred_tool("big-a", 8_050),
+        synthetic_deferred_tool("big-b", 8_050),
+        synthetic_deferred_tool("big-c", 8),
+    ];
+    let mut surface =
+        SubAgentToolSurface::new(catalog, &["big-a".to_string(), "big-b".to_string()]);
+    // The request's active-name snapshot is taken once per request; call i
+    // (hydrating big-c) evicts big-a behind it.
+    let request_active: HashSet<String> = ["big-a".to_string(), "big-b".to_string()]
+        .into_iter()
+        .collect();
+
+    let load = execute_surface_tool(&registry, &mut surface, "big-c", json!({}))
+        .await
+        .expect("big-c hydrates");
+    assert!(
+        load.contains("`big-c` was deferred and has now been loaded") && load.contains("big-a"),
+        "premise: the mid-request hydration evicts big-a and says so: {load}"
+    );
+    assert!(
+        !surface.active_names.contains("big-a"),
+        "premise: big-a left the surface's live active set"
+    );
+
+    // Call j retries big-a under the stale request snapshot.
+    let retry = registry
+        .execute_from_surface(
+            "agent_test",
+            "",
+            &mut surface,
+            &request_active,
+            "big-a",
+            json!({}),
+        )
+        .await
+        .expect("the retry must rehydrate, not execute behind the eviction");
+    assert!(
+        retry
+            .result
+            .content
+            .contains("`big-a` was deferred and has now been loaded"),
+        "the evicted retry must route through hydration: {}",
+        retry.result.content
+    );
+    assert!(
+        retry.result.content.contains("big-b"),
+        "the rehydration's own eviction must be reported truthfully: {}",
+        retry.result.content
+    );
+    assert!(surface.active_names.contains("big-a"));
+    assert!(!surface.active_names.contains("big-b"));
 }
 
 /// The warm-start overflow park is defensive today (the only production
