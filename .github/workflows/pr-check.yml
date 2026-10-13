@@ -385,6 +385,10 @@ jobs:
               - 'scripts/deploy-remote-relay-test.sh'
               - 'scripts/run-windows-relay-dacl.mjs'
               - 'scripts/tests/windows-relay-dacl-*.test.mjs'
+              - 'scripts/remote-control-local-selftest.ps1'
+              - 'scripts/run-remote-control-endpoint.ps1'
+              - 'scripts/run-windows-relay-tools-tests.mjs'
+              - 'scripts/windows-relay-tools-test-summary.mjs'
               - '.github/workflows/pr-check.yml'
             team_relay_hub:
               - 'team-relay-hub/**'
@@ -762,6 +766,24 @@ jobs:
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
       - name: Verify real Windows Relay state DACLs
         run: node scripts/run-windows-relay-dacl.mjs
+
+  windows-relay-tools-test:
+    name: windows-relay-tools-test
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: remote-control-relay/package-lock.json
+      - name: 安装 relay 依赖
+        run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
+      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）
+        run: node scripts/run-windows-relay-tools-tests.mjs
 
   team-relay-hub-test:
     name: team-relay-hub-test
@@ -2085,7 +2107,8 @@ jobs:
     # rust-test verifies the combined tree; check does not link, so no
     # signing/packaging/frontend artifacts are needed (same as windows-rust-test: verified
     # empirically on macOS in 2026-08 that cargo check --all-targets does not depend on
-    # node_modules, hence no node/npm install).
+    # node_modules or npm install). The independent deployment regression below
+    # needs only Node itself and does not extend this job's applicability.
     if: >-
       ${{
         !cancelled() &&
@@ -2122,6 +2145,22 @@ jobs:
         uses: actions/checkout@v7
         with:
           submodules: false
+
+      - name: Node.js (isolated macOS deployment regression)
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: macOS temporary-root hardening and deployment regression
+        run: |
+          set -euo pipefail
+          hardening_log="$RUNNER_TEMP/remote-deployment-regression.tap"
+          node --test --test-reporter=tap remote-control-relay/test/deployment-incidents.test.js | tee "$hardening_log"
+          grep -qE '^# tests [1-9][0-9]*$' "$hardening_log"
+          grep -qx '# fail 0' "$hardening_log"
+          grep -qx '# skipped 0' "$hardening_log"
+          grep -qx '# todo 0' "$hardening_log"
+          grep -qE '^ok [1-9][0-9]* - actual Darwin system temporary roots accept hardening input and reject operator links$' "$hardening_log"
 
       - name: Init CodeWhale submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -2257,6 +2296,7 @@ jobs:
       - frontend-test
       - relay-test
       - windows-relay-dacl
+      - windows-relay-tools-test
       - team-relay-hub-test
       - update-release-console-test
       - release-contract-test
@@ -2292,6 +2332,8 @@ jobs:
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
           WINDOWS_RELAY_DACL_RESULT: ${{ needs.windows-relay-dacl.result }}
+          WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}
+          RELAY_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.relay == 'true' }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
           UPDATE_RELEASE_CONSOLE_RESULT: ${{ needs.update-release-console-test.result }}
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
@@ -2326,12 +2368,23 @@ jobs:
             exit 1
           fi
 
+          if [[ "$RELAY_REQUIRED_BY_POLICY" == "true" && ( "$RELAY_RESULT" != success || "$WINDOWS_RELAY_RESULT" != success ) ]]; then
+            echo "Relay 变更要求 Linux 与 Windows 实际回归成功: relay=$RELAY_RESULT windows-relay=$WINDOWS_RELAY_RESULT" >&2
+            exit 1
+          fi
+
+          if [[ "$RELAY_REQUIRED_BY_POLICY" == "true" && "$WINDOWS_RELAY_DACL_RESULT" != success ]]; then
+            echo "Relay 变更要求真实 Windows DACL 验证成功: windows-relay-dacl=$WINDOWS_RELAY_DACL_RESULT" >&2
+            exit 1
+          fi
+
           failed=0
           for item in \
             "backflow-portability:$BACKFLOW_PORTABILITY_RESULT" \
             "frontend-test:$FRONTEND_RESULT" \
             "relay-test:$RELAY_RESULT" \
             "windows-relay-dacl:$WINDOWS_RELAY_DACL_RESULT" \
+            "windows-relay-tools-test:$WINDOWS_RELAY_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
             "update-release-console-test:$UPDATE_RELEASE_CONSOLE_RESULT" \
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \

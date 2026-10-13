@@ -3809,7 +3809,11 @@ mod tests {
     fn builtin_endpoint_profiles_ship_urls_and_trust_root() {
         use base64::Engine as _;
 
-        assert_eq!(active_endpoint_profile().id, "production");
+        // 验证随包常量，不读取用户配置或测试进程的环境覆盖。
+        assert_eq!(
+            endpoint_profile_by_id("production").unwrap().id,
+            "production"
+        );
         assert_eq!(PRODUCTION_PROFILE.public_base_url, DEFAULT_PUBLIC_BASE_URL);
         assert_eq!(PRODUCTION_PROFILE.relay_ws_url, DEFAULT_RELAY_WS_URL);
         // 生产信任根也必须随包内置且格式合法（否则线上配对会 relay_trust_unconfigured）。

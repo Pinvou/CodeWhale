@@ -1,4 +1,6 @@
 import re
+import os
+import subprocess
 import tomllib
 import unittest
 from fnmatch import fnmatchcase
@@ -129,6 +131,79 @@ class CiGatePolicyTests(unittest.TestCase):
         cls.workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         cls.pr_workflow = cls.workflow
         cls.release_workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    def test_windows_relay_tools_run_on_native_windows_for_draft_ready_and_queue(self):
+        job = self.workflow.split("\n  windows-relay-tools-test:", 1)[1].split("\n  team-relay-hub-test:", 1)[0]
+        self.assertIn("runs-on: windows-latest", job)
+        self.assertIn("needs: changes", job)
+        self.assertIn("node scripts/run-windows-relay-tools-tests.mjs", job)
+        self.assertIn('node-version: "24"', job)
+        self.assertIn("timeout-minutes: 10", job)
+        expression = re.search(r"if: \$\{\{ (.*?) \}\}", job).group(1)
+        for event in ("pull_request", "merge_group", "push"):
+            for draft in (True, False):
+                for changed in (True, False):
+                    for action in ("synchronize", "closed"):
+                        condition = expression.replace("!cancelled()", "True")
+                        condition = condition.replace("github.event.action", repr(action))
+                        condition = condition.replace("github.event_name", repr(event))
+                        condition = condition.replace("github.event.pull_request.draft", repr(draft))
+                        condition = condition.replace("needs.changes.outputs.relay", repr(str(changed).lower()))
+                        condition = condition.replace("&&", " and ").replace("||", " or ")
+                        self.assertEqual(bool(eval(condition, {"__builtins__": {}}, {})),
+                                         changed and action != "closed" and event in ("pull_request", "merge_group"))
+        filters = re.search(r"\n            relay:\n((?:              .*\n)+)", self.workflow).group(1)
+        paths = _extract_quoted_paths(filters)
+        for path in ("remote-control-relay/test/local-selftest-ownership.test.js",
+                     "remote-control-relay/test/local-selftest-identity.test.js",
+                     "remote-control-relay/test/endpoint-launcher.test.js",
+                     "remote-control-relay/scripts/check-local-signing-key.cjs",
+                     "scripts/remote-control-local-selftest.ps1", "scripts/run-remote-control-endpoint.ps1",
+                     "scripts/run-windows-relay-tools-tests.mjs", "scripts/windows-relay-tools-test-summary.mjs",
+                     ".github/workflows/pr-check.yml"):
+            self.assertTrue(_matches_paths_filter(path, paths), path)
+
+    def test_required_gate_rejects_skipped_or_failed_applicable_relay_legs(self):
+        gate = self.workflow.split("\n  required-gate:", 1)[1]
+        self.assertIn("- windows-relay-tools-test", gate)
+        self.assertIn("WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}", gate)
+        self.assertIn("RELAY_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.relay == 'true' }}", gate)
+        self.assertIn('"windows-relay-tools-test:$WINDOWS_RELAY_RESULT"', gate)
+        body = gate.split("        run: |\n", 1)[1]
+        shell = "\n".join(line[10:] for line in body.splitlines())
+        environment = {**os.environ, "GITHUB_EVENT_NAME": "pull_request", "BACKFLOW_MODE": "full",
+                       "WINDOWS_RUST_REQUIRED_BY_POLICY": "false"}
+        for name in re.findall(r"^          ([A-Z_]+_RESULT):", gate, re.MULTILINE):
+            environment[name] = "success"
+        for required in ("true", "false"):
+            for linux in ("success", "skipped", "failure", "cancelled", ""):
+                for windows in ("success", "skipped", "failure", "cancelled", ""):
+                    result = subprocess.run(["bash", "-c", shell], capture_output=True, timeout=10,
+                        env={**environment, "RELAY_REQUIRED_BY_POLICY": required,
+                             "RELAY_RESULT": linux, "WINDOWS_RELAY_RESULT": windows})
+                    accepted = (linux == windows == "success" if required == "true"
+                                else linux in ("success", "skipped") and windows in ("success", "skipped"))
+                    self.assertEqual(result.returncode == 0, accepted, (required, linux, windows, result.stderr))
+
+    def test_required_gate_requires_actual_success_for_applicable_windows_dacl(self):
+        gate = self.workflow.split("\n  required-gate:", 1)[1]
+        body = gate.split("        run: |\n", 1)[1]
+        shell = "\n".join(line[10:] for line in body.splitlines())
+        environment = {**os.environ, "BACKFLOW_MODE": "full",
+                       "WINDOWS_RUST_REQUIRED_BY_POLICY": "false"}
+        for name in re.findall(r"^          ([A-Z_]+_RESULT):", gate, re.MULTILINE):
+            environment[name] = "success"
+        for event in ("pull_request", "merge_group"):
+            for required in ("true", "false"):
+                for status in ("success", "skipped", "failure", "cancelled", ""):
+                    result = subprocess.run(["bash", "-c", shell], capture_output=True, timeout=10,
+                        env={**environment, "GITHUB_EVENT_NAME": event,
+                             "RELAY_REQUIRED_BY_POLICY": required,
+                             "WINDOWS_RELAY_DACL_RESULT": status})
+                    accepted = (status == "success" if required == "true"
+                                else status in ("success", "skipped"))
+                    self.assertEqual(result.returncode == 0, accepted,
+                                     (event, required, status, result.stderr))
 
     def test_release_workflow_does_not_reference_retired_web_template(self):
         for retired_reference in (
@@ -1539,6 +1614,53 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"\n  {end}:", maxsplit=1
             )[0]
             self.assertIn("github.event.pull_request.draft == false", block)
+
+    def _assert_macos_deployment_regression(self, workflow):
+        # This coverage belongs to the existing native job; it must not become
+        # an echo, syntax-only check, filtered zero-match run or npm install.
+        block = workflow.split("\n  macos-rust-check:", maxsplit=1)[1].split(
+            "\n  windows-codex-runtime-test:", maxsplit=1
+        )[0]
+        body = _without_yaml_comments(block)
+        self.assertIn("runs-on: macos-15", body)
+        self.assertIn("uses: actions/setup-node@v7", body)
+        self.assertIn("node-version: '24'", body)
+        command = 'node --test --test-reporter=tap remote-control-relay/test/deployment-incidents.test.js | tee "$hardening_log"'
+        step = body.split("      - name: macOS temporary-root hardening and deployment regression\n", maxsplit=1)[1].split(
+            "\n      - name:", maxsplit=1
+        )[0]
+        self.assertRegex(step, r"(?m)^\s*" + re.escape(command) + r"$")
+        self.assertIn("set -euo pipefail", step)
+        for assertion in (
+            "grep -qE '^# tests [1-9][0-9]*$'",
+            "grep -qx '# fail 0'",
+            "grep -qx '# skipped 0'",
+            "grep -qx '# todo 0'",
+            "grep -qE '^ok [1-9][0-9]* - actual Darwin system temporary roots accept hardening input and reject operator links$'",
+        ):
+            self.assertIn(assertion + ' "$hardening_log"', step)
+        for bypass in ("|| true", "continue-on-error:", "if:", "--test-name-pattern"):
+            self.assertNotIn(bypass, step)
+        self.assertLess(body.index("uses: actions/setup-node@v7"), body.index(command))
+        self.assertLess(body.index(command), body.index("name: macOS Rust all-targets check"))
+
+    def test_macos_deployment_regression_uses_explicit_node_and_actual_test_file(self):
+        self._assert_macos_deployment_regression(self.workflow)
+
+    def test_macos_deployment_regression_rejects_execution_and_summary_bypasses(self):
+        for old, new in (
+            ("node --test --test-reporter=tap remote-control-relay/test/deployment-incidents.test.js", "node --check remote-control-relay/test/deployment-incidents.test.js"),
+            ("node --test --test-reporter=tap remote-control-relay/test/deployment-incidents.test.js", "node --test --test-name-pattern=absent --test-reporter=tap remote-control-relay/test/deployment-incidents.test.js"),
+            ('| tee "$hardening_log"', '| tee "$hardening_log" || true'),
+            ("grep -qE '^# tests [1-9][0-9]*$'", "grep -qE '^# tests [0-9]*$'"),
+            ("grep -qx '# skipped 0'", "echo '# skipped 0'"),
+            ("grep -qx '# fail 0'", "echo '# fail 0'"),
+            ("grep -qx '# todo 0'", "echo '# todo 0'"),
+            ("uses: actions/setup-node@v7", "# removed setup"),
+        ):
+            with self.subTest(mutation=new):
+                with self.assertRaises((AssertionError, IndexError)):
+                    self._assert_macos_deployment_regression(self.workflow.replace(old, new))
 
     def test_pure_frontend_changes_do_not_trigger_macos_rust_build(self):
         # Pure-frontend paths must not enter the mac-build trigger set (avoids

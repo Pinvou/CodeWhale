@@ -2,6 +2,8 @@
 
 > 本文保留各历史提交当时的审核结论，不替代当前固定 SHA 审核或发布验收。当前范围和 owner 边界以《Windows双端远程控制开发任务拆分》为准。
 
+> A18 补录的 DEV-15 模型链路修复与历史测试数归属当时功能开发，不是本波部署脚本的新增产品实现或当前 head 实跑证据；历史提交与记录保留，不改写或重新认领。
+
 > 用途：记录 DEV-01 起逐任务「独立审核 → 修复 → 复审」的过程与证据。
 > 规则：审核结论必须以当前代码与真实测试输出为据；每条审核发现独立提交修复；审核者认为通过后该任务才算完成。
 
@@ -172,9 +174,10 @@
 - 逐条核对：v1 严格解析（未知字段/枚举/组合拒绝）、SavedModel→route 投影与不可导出原因、loopback/私网/metadata SSRF 拒绝、任务绑定、内存态存储与幂等释放、清理 hook 接入 DEV-13，均有用例（12 条）。
 - 发现（major，已修复）：任务提交路径未校验 `controller_temporary` 是否真装有与该任务绑定的临时包，存在「拿不到凭证仍提交」的口子，与 RC-M-006/RC-M-009 冲突。
   - 修复提交：`7e296f7f` — 提交前要求存在 active_task == task_id 的临时包，否则 `model_package_missing`；新增用例覆盖无包、正确绑定与跨任务复用三种情形。
-- 登记缺口（未修，需后续任务）：临时模型包尚未注入引擎请求路径（B 还不能真正用 A 的凭证执行），属引擎层集成，需单独排期。
-- 验证：`cargo test temporary_model` 12 通过；`cargo test desktop_remote_task` 5 通过。
-- 结论：**REVIEW: PASS**（含 1 项已登记缺口）。
+- 发现（major，已修复）：临时模型包此前只参与准入校验，未注入 chat executor/`EnginePool`，导致“我的模型”仍由 B 模型执行。现已接通 A 端任务级模型来源与加密模型包、B 端绑定安装、显式运行时模型/凭据覆盖及终态引擎回收；缺包、无凭据或绑定错误均失败关闭，不回退 B 模型。日志只记录 `model_source` 与安装阶段，不记录路由密钥。
+- 回归补充（已修复）：临时包生成器一度把 `lease_epoch` 与 token 上限编码为 JSON number，而冻结协议规定为规范十进制 string，导致 A 在发送前以 `task_request_invalid` 拒绝，B 解析器也无法读取共享 fixture。现已统一双端编解码，并增加“生成包通过冻结协议校验”和“B 解析共享 fixture”两条跨边界测试。
+- 验证：`cargo test remote_control::controller::temporary_model` 13 通过；`cargo test remote_control::controller::task` 24 通过；`cargo test remote_control::controller::controlling_session` 9 通过；`cargo test features::assistant::remote_turn` 3 通过；`cargo check --no-default-features --features local-embed` 通过。
+- 结论：**REVIEW: PASS**。
 
 ## 16. DEV-16 / DEV-17 / DEV-18
 

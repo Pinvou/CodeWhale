@@ -7,6 +7,17 @@ import { remoteProjectionLabelKey } from '../src/features/remote-control/remote-
 const chat = readFileSync(new URL('../src/features/chat/ChatView.jsx', import.meta.url), 'utf8');
 const app = readFileSync(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
 
+test('remote status capsule reuses the translated model-source label in every language', () => {
+  assert.doesNotMatch(chat, /t\.controllerConnection\.modelSourceDevice/);
+  const capsule = chat.slice(chat.indexOf('data-testid="chat-remote-status"'),
+    chat.indexOf('data-testid="chat-remote-model-source"'));
+  assert.match(capsule, /t\.remoteConversation\.modelSourceDevice/);
+  for (const language of ['zh', 'en', 'ja']) {
+    assert.equal(typeof dict[language].remoteConversation.modelSourceDevice, 'string');
+    assert.ok(dict[language].remoteConversation.modelSourceDevice.trim());
+  }
+});
+
 function sourceSection(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
   assert.notEqual(start, -1, `missing source marker: ${startMarker}`);
@@ -296,8 +307,8 @@ test('remote event roles and hidden-detail safety copy exist in all three langua
 
 test('device model source label is explicitly available in every supported language', () => {
   for (const language of ['zh', 'en', 'ja']) {
-    assert.equal(typeof dict[language].controllerConnection.modelSourceDevice, 'string');
-    assert.ok(dict[language].controllerConnection.modelSourceDevice.trim());
+    assert.equal(typeof dict[language].remoteConversation.modelSourceDevice, 'string');
+    assert.ok(dict[language].remoteConversation.modelSourceDevice.trim());
   }
-  assert.match(chat, /t\.controllerConnection\.modelSourceDevice/);
+  assert.match(chat, /t\.remoteConversation\.modelSourceDevice/);
 });
