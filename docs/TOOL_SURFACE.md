@@ -76,10 +76,52 @@ user explicitly names them in `[tools].always_load`.
 
 A successful search activation is remembered by name for the current
 conversation. The cache holds at most eight deferred names and 16 KiB of
-serialized schemas, evicts least-recently-used entries, and revalidates every
+serialized tool definitions, evicts least-recently-used entries, and
+revalidates every
 entry against the current catalog and policy before advertising it again. A
 session sync clears it. The cache cannot resurrect a removed, denied, or
 newly-eager tool.
+
+Bounds-driven evictions are reported to the model best-effort — in the
+`tool_search` result when a search causes it, otherwise appended to a tool
+result: a hydration's note rides the batch's first recorded result (or its
+error), a retrieval activation or a refresh of an executed tool rides the
+triggering result, and a turn's start revalidation parks its note on the
+session so the turn's first recorded result carries it (a refresh only
+evicts when a cached tool's serialized definition grew since its last
+activation enough that the collective budget overflows). A note that never reaches a recorded result is dropped rather
+than riding an unrelated later result: a session sync clears it at the
+conversation edge, and a turn that ends without a recorded result has it
+swept at the next turn's entry. Child agents report the same way on their
+own surface (they have no conversation-level sync or turn-entry sweep): a
+hydration receipt (or its refusal error) and an executed tool's result
+carry their own eviction notes, and a note parked outside any result — a
+catalog refresh's revalidation or a warm-start overflow — rides the child's
+next recorded result (or its error); a call the child cancels on its tool
+timeout is recorded without the note, deferring it to a later result; a
+retry of a tool a mid-request eviction removed rehydrates it under the
+bounds instead of executing behind the eviction; a note a child never
+delivers dies with the child's surface. A note never
+names a tool the model can call
+again: names the ride re-admits — into the activation cache or the
+request's active tool set — are netted out of it, a name that left the
+catalog between the eviction and the ride is reported under that
+unrecoverable truth instead of the search promise, and a mid-turn MCP
+catalog refresh respects the same rule from the other side, re-advertising
+only the eager entries its servers serve and the deferred tools this
+conversation still has activated. An evicted deferred tool therefore stays
+off the wire and the note naming it stays truthful. Tools
+the model cannot get back by searching are reported differently:
+`tool_search` results surface them as unavailable references, naming
+whether the tool left the catalog (a disconnect, a changed allow/deny rule,
+a mode switch — any catalog-shrink cause) or outgrew the per-tool
+serialized-size budget. A cached tool that became
+eager is not reported at all — it stays directly callable. Unavailable drops
+observed by non-search paths are absorbed silently: an oversize drop is
+re-reported with its reason the next time a search returns the tool (a
+match ranked past the result cap re-reports nothing), while a
+catalog-shrink drop left the catalog entirely and no later search can name
+it — the model learns of those only when a search for the capability misses.
 
 Each subagent gets its own policy-filtered deferred catalog, always-present
 `tool_search`, and bounded activation cache. Forked messages and instructions
