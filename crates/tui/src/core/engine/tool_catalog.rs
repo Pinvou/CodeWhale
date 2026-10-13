@@ -1505,8 +1505,8 @@ pub(super) fn execute_tool_search(
     execute_tool_search_inner(tool_name, input, catalog, active_tools, None, None)
 }
 
-/// Execute tool search while retaining activated schemas in the bounded
-/// conversation cache. Kept separate from the test-only pure search helper so existing
+/// Execute tool search while retaining activated schemas in the conversation
+/// cache. Kept separate from the test-only pure search helper so existing
 /// pure catalog tests and compatibility callers do not need an engine session.
 ///
 /// `connecting_mcp_servers` carries the boot-window status (#588): while the
@@ -1597,6 +1597,12 @@ fn execute_tool_search_inner(
             })
         })
         .collect::<Vec<_>>();
+    // In the Pinvou fork the toolbox size bounds never fire (see the session
+    // constants): discovery pre-filters deferred membership, so the only way
+    // a name lands here is the per-entry sentinel — a schema whose serialized
+    // size cannot be measured (serde failure reports usize::MAX) — which no
+    // real schema reaches. The reason therefore claims no bound and
+    // interpolates no numbers.
     unavailable_references.extend(cache_rejected.iter().map(|name| {
         json!({
             "type": "unavailable_tool_reference",

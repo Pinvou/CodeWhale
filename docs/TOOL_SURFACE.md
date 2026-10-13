@@ -75,9 +75,18 @@ user explicitly names them in `[tools].always_load`.
 ### Conversation toolbox cache
 
 A successful search activation is remembered by name for the current
-conversation. The cache holds at most eight deferred names and 16 KiB of
-serialized tool definitions, evicts least-recently-used entries, and
-revalidates every
+conversation. Upstream bounds the cache to eight deferred names and 16 KiB of
+serialized schemas with least-recently-used eviction; this fork disables that
+bound (effectively unbounded), so every activation stays
+advertised for the conversation's lifetime — under provider prompt-cache
+pricing, an eviction re-prefills the entire prefix while saving only the ~0.1x
+cached-read cost of the schemas it frees (see codewhale-hq/Codewhale#6969).
+No size ceiling remains: the activated set is the only clamp on the request
+tools array, so a session that activates very many large schemas can approach
+provider request-size or tool-count limits. Bookkeeping grows with the
+activated set too: revalidation and admission re-serialize cached schemas
+against the catalog on each pass, negligible at tens of tools but not free
+for activation-heavy sessions. The cache still revalidates every
 entry against the current catalog and policy before advertising it again. A
 session sync clears it. The cache cannot resurrect a removed, denied, or
 newly-eager tool.
@@ -124,7 +133,8 @@ catalog-shrink drop left the catalog entirely and no later search can name
 it — the model learns of those only when a search for the capability misses.
 
 Each subagent gets its own policy-filtered deferred catalog, always-present
-`tool_search`, and bounded activation cache. Forked messages and instructions
+`tool_search`, and activation cache (unbounded in this fork, like the parent
+conversation's). Forked messages and instructions
 remain in context, but the child cache starts empty and discovers tools locally;
 neither forked context nor a cache can become a discovery allowlist. A child can
 still search every tool its own authority permits, including Web search/fetch
