@@ -416,8 +416,9 @@ func (r *PostgresRepository) PaymentFinancialRepairProofInput(ctx context.Contex
 
 // ApplyPaymentFinancialRepair commits exactly one confirmed-payment repair by
 // reusing the existing audited merge writer with the frozen provider fact. It
-// never calls the provider and never rewrites an existing transaction, package,
-// lot, journal or repair row.
+// never calls the provider. It advances the matching REVIEW_REQUIRED transaction
+// through the existing fulfillment path while preserving its provider/payment
+// facts; historical package, lot, journal and repair rows are not rewritten.
 func (p *PaymentCoordinator) ApplyPaymentFinancialRepair(ctx context.Context, input PaymentFinancialRepairExecutionInput) (PaymentFinancialRepairResult, error) {
 	executionKey := strings.TrimSpace(input.ExecutionKey)
 	if p == nil || p.repository == nil || p.repository.pool == nil || input.ApprovalRequestID == uuid.Nil ||
@@ -647,14 +648,14 @@ func paymentFinancialRepairExecutionActivation(ctx context.Context, source payme
 	var enabled bool
 	err := source.QueryRow(ctx, `SELECT active,activation_version,updated_at FROM billing_approval_execution.lock_payment_activation()`).
 		Scan(&enabled, &active.Version, &active.UpdatedAt)
-	if enabled {
-		active.State = "ACTIVE"
-	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrApprovalSnapshotMismatch
 	}
 	if err != nil {
 		return err
+	}
+	if enabled {
+		active.State = "ACTIVE"
 	}
 	if !validActivationItem(active, paymentFinancialRepairCommand, billingApprovalActivationSpecs[paymentFinancialRepairCommand], now) ||
 		active.State != "ACTIVE" || active.PolicyVersion != input.PolicyVersion || int64(active.SnapshotSchemaVersion) != input.SchemaVersion || active.Version != input.ActivationVersion {
