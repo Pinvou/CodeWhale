@@ -55,13 +55,20 @@ pub fn check_update_platform_support() -> Result<(), String> {
 ///
 /// 安装时旧 .app 被改名备份(防回滚),清理依赖"下次安装开头"。但如果用户只升级
 /// 一次后长期不更新,这份备份(整个旧 app bundle,可达数百 MB)会永久驻留磁盘。
-/// 本函数在应用**正常启动时**调用(此时旧进程必然已退出,inode 安全释放),清掉残留。
-pub fn cleanup_stale_backup() {
+/// 本函数只在新版本主窗口首次 React 提交后调用(此时旧进程已退出且新版可渲染),
+/// 清掉残留；清理失败会由更新健康事务保留状态并在下次启动重试。
+pub fn cleanup_stale_backup() -> Result<(), String> {
     // 只清理我们自己的备份(固定路径),不会误删用户其它文件。
     let backup = "/Applications/.pinvou3.app.old";
-    if Path::new(backup).exists() {
-        let _ = std::fs::remove_dir_all(backup);
+    let metadata = match std::fs::symlink_metadata(backup) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("读取 macOS 更新备份失败: {error}")),
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err("拒绝清理 macOS 更新备份:路径不是普通目录".to_string());
     }
+    std::fs::remove_dir_all(backup).map_err(|error| format!("清理 macOS 更新备份失败: {error}"))
 }
 
 /// 从 manifest 解析本平台下载资产。优先 platforms[build_platform_key()](需 url 与

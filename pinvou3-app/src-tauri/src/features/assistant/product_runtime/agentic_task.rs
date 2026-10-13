@@ -901,7 +901,11 @@ fn ensure_existing_chat_session(store: &SessionStore, session_id: &str) -> Resul
              headless runs cannot resolve its scope"
         );
     }
-    match store.session_kind(session_id)? {
+    ensure_chat_session_kind(session_id, store.session_kind(session_id)?)
+}
+
+fn ensure_chat_session_kind(session_id: &str, kind: SessionKind) -> Result<()> {
+    match kind {
         SessionKind::Chat => Ok(()),
         SessionKind::ScheduledRun => anyhow::bail!(
             "agent_session_not_chat: session '{session_id}' is a scheduled-run session"
@@ -2250,6 +2254,16 @@ mod tests {
         let error = ensure_existing_chat_session(&store, &chat.metadata.id).unwrap_err();
         assert!(error.to_string().contains("agent_session_unreadable"));
         // `_env` restores the captured PINVOU3_HOME on return or panic.
+    }
+
+    #[test]
+    fn agentic_session_kind_gate_rejects_remote_proxy_authority() {
+        use crate::features::sessions::SessionKind;
+        assert!(super::ensure_chat_session_kind("chat", SessionKind::Chat).is_ok());
+        for kind in [SessionKind::ScheduledRun, SessionKind::RemoteProxy] {
+            let error = super::ensure_chat_session_kind("non-chat", kind).unwrap_err();
+            assert!(error.to_string().contains("agent_session_not_chat"));
+        }
     }
 
     /// The store-side half of the eviction-warning contract: retention sweep

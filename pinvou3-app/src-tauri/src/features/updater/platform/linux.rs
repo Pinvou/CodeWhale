@@ -84,7 +84,9 @@ cat "$stderr_file" >&2
 exit "$retry_status"
 "#;
 
-pub fn cleanup_stale_backup() {}
+pub fn cleanup_stale_backup() -> Result<(), String> {
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LatestManifest {

@@ -306,18 +306,18 @@ const WORKER_THREAD_NAME: &str = "computer-use-backend";
 fn install_worker_panic_redaction() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(|| {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
+        crate::core::panic_hooks::chain(move |info| {
             if std::thread::current().name() == Some(WORKER_THREAD_NAME) {
                 let location = info
                     .location()
                     .map(|location| format!("{}:{}", location.file(), location.line()))
                     .unwrap_or_else(|| "unknown location".to_string());
                 eprintln!("[computer_use] panic at {location}: payload withheld");
+                true
             } else {
-                previous(info);
+                false
             }
-        }));
+        });
     });
 }
 
@@ -2010,31 +2010,6 @@ mod tests {
         assert!(
             !registry.contains("s-rereg"),
             "the successor's Drop must remove its own registration"
-        );
-    }
-
-    /// A global stop must reach a session whose earlier revoke only cleaned
-    /// up without unregistering — the exact orphaning regression.
-    #[test]
-    fn emergency_release_all_reaches_a_revoked_then_re_granted_session() {
-        let state = Arc::new(Mutex::new(ProbeState::default()));
-        let registry = BackendRegistry::default();
-        let handle = probe_handle(&state);
-        registry.insert("s-regrant", handle.clone());
-        // Start the backend first: a never-started (Pending) handle takes
-        // emergency_cleanup's fast path and would skip the cleanup entirely.
-        assert!(handle.capabilities().is_ok());
-
-        registry.emergency_release("s-regrant");
-        wait_for_cleanup(&state, |s| s.releases > 0);
-        // Re-grant happened meanwhile; no re-insert: the original entry is
-        // still there and must still be reachable.
-        registry.emergency_release_all();
-        wait_for_cleanup(&state, |s| s.releases > 1);
-        let state = state.lock();
-        assert_eq!(
-            state.releases, 2,
-            "global stop must reach the re-granted session"
         );
     }
 

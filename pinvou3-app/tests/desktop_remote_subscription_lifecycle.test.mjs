@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-function install() {
+function install(invoke = () => Promise.resolve({ status: 'idle' })) {
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
   const sandbox = { window: root, TextEncoder, setTimeout, clearTimeout };
   vm.createContext(sandbox);
@@ -17,7 +17,7 @@ function install() {
     state: { desktopRemoteControl: root.__PINVOU_REMOTE_CONTROL_STATE__.createState() },
     notify() { notifications++; },
     can: () => true,
-    invoke: () => Promise.resolve({ status: 'idle' }),
+    invoke,
     listen(name, callback) {
       const pending = Promise.withResolvers();
       const registration = { name, callback, pending, releases: 0 };
@@ -26,7 +26,8 @@ function install() {
       return pending.promise;
     },
   });
-  return { feature, registrations, notifications: () => notifications };
+  return { feature, registrations, notifications: () => notifications,
+    logic: root.__PINVOU_REMOTE_CONTROL_STATE__ };
 }
 
 async function complete(registrations) {
@@ -83,4 +84,62 @@ test('partial registration rejection does not retain successful late listeners a
   assert.deepEqual(registrations.slice(1).map(entry => entry.releases), Array(8).fill(1));
   feature.stop();
   assert.deepEqual(registrations.slice(1).map(entry => entry.releases), Array(8).fill(1));
+});
+
+test('a cleanup callback can create a replacement without inheriting the retired channel attempts', async () => {
+  const { feature, registrations, notifications } = install();
+  registrations[0].off = () => {
+    registrations[0].releases++;
+    feature.subscribe();
+  };
+  try {
+    const old = registrations.slice();
+    await complete(old);
+    feature.stop();
+    assert.equal(registrations.length, 18, 'replacement registers all nine retired channels');
+    const replacement = registrations.slice(9);
+    await complete(replacement);
+    const before = notifications();
+    old[0].callback({ payload: { status: 'idle' } });
+    assert.equal(notifications(), before);
+    replacement[0].callback({ payload: { status: 'idle' } });
+    assert.equal(notifications(), before + 1);
+    assert.deepEqual(old.map(entry => entry.releases), Array(9).fill(1));
+    feature.stop();
+    assert.deepEqual(replacement.map(entry => entry.releases), Array(9).fill(1));
+    assert.deepEqual(old.map(entry => entry.releases), Array(9).fill(1));
+  } finally {
+    feature.stop();
+  }
+});
+
+test('old stop does not invalidate a new-owner proxy request started by a cleanup callback', async () => {
+  const pending = Promise.withResolvers();
+  const { feature, registrations, logic } = install(command => {
+    if (command === 'desktop_remote_proxy_history_list') return pending.promise;
+    assert.equal(command, 'desktop_remote_controller_status');
+    return Promise.resolve({ status: 'idle' });
+  });
+  let projections = 0;
+  const project = logic.projectRemoteProxyList;
+  logic.projectRemoteProxyList = (...args) => { projections++; return project(...args); };
+  let request;
+  registrations[0].off = () => {
+    registrations[0].releases++;
+    feature.subscribe();
+    request = feature.listRemoteProxyHistory();
+  };
+  try {
+    await complete(registrations.slice());
+    await new Promise(setImmediate);
+    feature.stop();
+    assert.equal(registrations[0].releases, 1, 'actual retained cleanup ran');
+    assert.ok(request, 'replacement issued its real bridge request');
+    pending.resolve([]);
+    await request;
+    assert.equal(projections, 1, 'retired stop cannot invalidate the new owner list intent');
+    await complete(registrations.slice(9));
+  } finally {
+    feature.stop();
+  }
 });

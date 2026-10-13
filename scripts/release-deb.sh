@@ -55,6 +55,10 @@ DEB="${BUILT[0]}"
 ARCH="$(basename "$DEB" .deb)"
 ARCH="${ARCH#pinvou3_"${VERSION}"_}"
 
+# 与 release-packages.yml 同款最大压缩重打包(data.tar gzip-6 → xz -9);
+# 先重打包再算 sha256/latest.json,校验和与清单覆盖最终产物。
+"$REPO_ROOT/scripts/repack-deb-xz.sh" "$DEB"
+
 # ── 3. 合并 latest.json(保留其它平台条目,只更新顶层 Linux 字段) ──────
 # 修复「Linux 发版抹掉 platforms.macos-arm64」:此前用 `jq -n` 从零生成 latest.json,
 # 会清掉 platforms 下所有非 Linux 条目 → Mac 客户端回退到顶层(此时是 Linux deb)→

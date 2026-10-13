@@ -789,7 +789,8 @@ pub(crate) struct ControlledRelayWorker {
     processed_frames: Option<tokio::sync::mpsc::Sender<Value>>,
 }
 
-/// Completion observation only; all routing and decisions stay production.
+/// Test-only completion observation: follows the exact production branch,
+/// including its continue/return paths, without injecting a routing shortcut.
 #[cfg(test)]
 struct ProcessedControllerFrame {
     sink: Option<tokio::sync::mpsc::Sender<Value>>,
@@ -998,6 +999,28 @@ pub(crate) async fn wait_for_registration<P: ControlledRelayPort>(
     }
 }
 
+/// A rejected registration owns no serving lifecycle. Release the worker and
+/// its generation-bound channel before completing the command, including when
+/// an already-stopped generation reaches registration after its stop signal.
+async fn finish_controlled_registration<W, S, F>(
+    worker: W,
+    result: Result<S, String>,
+    done: oneshot::Sender<Result<S, String>>,
+    fail: impl FnOnce(&W, &str),
+    serve: impl FnOnce(W) -> F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    if let Err(error) = &result {
+        fail(&worker, error);
+        drop(worker);
+        let _ = done.send(result);
+        return;
+    }
+    let _ = done.send(result);
+    serve(worker).await;
+}
+
 impl ControlledRelayWorker {
     pub(crate) async fn start(
         app: AppHandle,
@@ -1025,13 +1048,14 @@ impl ControlledRelayWorker {
         };
         tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
-            if let Err(error) = &result {
-                worker.fail_registration(error);
-            }
-            let _ = done_tx.send(result);
-            // Keep the generation-bound receiver alive after registration. Later
-            // E2E tasks install handshake and encrypted business dispatch here.
-            worker.serve().await;
+            finish_controlled_registration(
+                worker,
+                result,
+                done_tx,
+                |worker, error| worker.fail_registration(error),
+                |worker| worker.serve(),
+            )
+            .await;
         });
         Ok(done_rx)
     }
@@ -1188,7 +1212,8 @@ impl ControlledRelayWorker {
                     };
                     #[cfg(test)]
                     let _processed = ProcessedControllerFrame {
-                        sink: self.processed_frames.clone(), frame: message.clone(),
+                        sink: self.processed_frames.clone(),
+                        frame: message.clone(),
                     };
                     if message.get("type").and_then(Value::as_str) == Some("desktop_controller_stop") {
                         break 'serve;
@@ -1398,6 +1423,7 @@ impl ControlledRelayWorker {
                 if self.channel.try_send(frame).is_ok() {
                     evidence.outstanding = Some((challenge_id, challenge_b64, now_b));
                     evidence.escalated = false;
+                    evidence.attestation_sent_at_b = None;
                     log_controlled_event("liveness_challenge", "sent");
                 } else {
                     manager.cancel_liveness_challenge(&challenge_id);
@@ -1421,7 +1447,7 @@ impl ControlledRelayWorker {
                     return;
                 };
                 if self.channel.try_send(frame).is_ok() {
-                    evidence.escalated = true;
+                    evidence.record_attestation_sent(now_b);
                     log_controlled_event("liveness_attestation", "requested");
                 }
             }
@@ -1430,6 +1456,7 @@ impl ControlledRelayWorker {
                     manager.cancel_liveness_challenge(&challenge_id);
                 }
                 evidence.escalated = false;
+                evidence.attestation_sent_at_b = None;
                 log_controlled_event("liveness_challenge", "expired");
             }
         }
@@ -1495,6 +1522,7 @@ impl ControlledRelayWorker {
             Ok(()) => {
                 evidence.outstanding = None;
                 evidence.escalated = false;
+                evidence.attestation_sent_at_b = None;
                 log_controlled_event("liveness_direct", "accepted");
             }
             Err(error) => log_controlled_event("liveness_direct", error.code),
@@ -1504,12 +1532,9 @@ impl ControlledRelayWorker {
     /// E2E-06：接受 Relay 签名 attestation 续期本端 watchdog（挑战与请求时间
     /// 由本端记录，跨机时间一律不用）。
     fn accept_liveness_attestation(&self, message: &Value, evidence: &mut LivenessEvidenceState) {
-        let Some((challenge_id, _, sent_at_b)) = evidence.outstanding.clone() else {
+        let Some(sent_at_b) = evidence.attestation_request_start(message) else {
             return;
         };
-        if message.get("challenge_id").and_then(Value::as_str) != Some(challenge_id.as_str()) {
-            return;
-        }
         let Ok(trust) = load_relay_trust_config(|name| std::env::var(name).ok()) else {
             // Missing/invalid administrator pins cannot authorize liveness or
             // consume the outstanding challenge. The watchdog remains closed.
@@ -1521,6 +1546,7 @@ impl ControlledRelayWorker {
             Ok(()) => {
                 evidence.outstanding = None;
                 evidence.escalated = false;
+                evidence.attestation_sent_at_b = None;
                 log_controlled_event("liveness_attestation", "accepted");
             }
             Err(error) => log_controlled_event("liveness_attestation", error.code),
@@ -1619,6 +1645,8 @@ impl ControlledRelayWorker {
 
     fn fail_runtime(&self, error: &str) {
         let manager = self.app.state::<ControlledDeviceManager>();
+        // Exact operation validation precedes all cleanup. A retired worker
+        // must not clear the replacement generation's keys or projection.
         if let Ok(status) = manager.fail_operation(self.operation.clone(), sanitize_error(error)) {
             emit_controlled_status(&self.app, &status);
         }
@@ -1761,10 +1789,7 @@ async fn dispatch_controlled_business_job(
     });
 }
 
-/// E2E-06：证据轮询间隔（远小于 30 秒预算）。
-pub(crate) const LIVENESS_EVIDENCE_POLL_MS: u64 = 2_000;
-/// 挑战发出后多久升级到 Relay 签名 attestation 兜底（直接应答尚未接线）。
-pub(crate) const LIVENESS_ATTESTATION_ESCALATION_MS: u64 = 2_500;
+pub(crate) use super::liveness::{LIVENESS_ATTESTATION_ESCALATION_MS, LIVENESS_EVIDENCE_POLL_MS};
 /// 挑战的最长等待：超过后作废并重新发起。
 pub(crate) const LIVENESS_CHALLENGE_TIMEOUT_MS: u64 = 8_000;
 
@@ -1786,6 +1811,26 @@ pub(crate) enum LivenessEvidenceAction {
 pub(crate) struct LivenessEvidenceState {
     pub(crate) outstanding: Option<(String, String, u64)>,
     pub(crate) escalated: bool,
+    // Separate request RTT from the original direct challenge age. Neither
+    // timestamp changes the frozen disconnect/recovery deadline.
+    pub(crate) attestation_sent_at_b: Option<u64>,
+}
+
+impl LivenessEvidenceState {
+    fn record_attestation_sent(&mut self, now_b: u64) {
+        self.escalated = true;
+        self.attestation_sent_at_b = Some(now_b);
+    }
+
+    fn attestation_request_start(&self, message: &Value) -> Option<u64> {
+        let (challenge_id, _, _) = self.outstanding.as_ref()?;
+        if !self.escalated
+            || message.get("challenge_id").and_then(Value::as_str) != Some(challenge_id.as_str())
+        {
+            return None;
+        }
+        self.attestation_sent_at_b
+    }
 }
 
 /// 依据 watchdog 的需求与当前未完成挑战推导本轮动作。
@@ -1801,6 +1846,18 @@ pub(crate) fn liveness_evidence_action(
         None => LivenessEvidenceAction::Challenge,
         Some((_, _, sent_at)) => {
             let age = now_b.saturating_sub(*sent_at);
+            if state.escalated {
+                // Preserve a full fallback request RTT without changing the
+                // original challenge validity or frozen recovery cutoff.
+                return if age >= super::liveness::LIVENESS_TOTAL_BUDGET_MS
+                    || state.attestation_sent_at_b.is_none_or(|request_start| {
+                        now_b.saturating_sub(request_start) > super::liveness::MAX_LIVENESS_RTT_MS
+                    }) {
+                    LivenessEvidenceAction::Reset
+                } else {
+                    LivenessEvidenceAction::Idle
+                };
+            }
             if age >= LIVENESS_CHALLENGE_TIMEOUT_MS {
                 return LivenessEvidenceAction::Reset;
             }
@@ -2274,7 +2331,11 @@ pub(crate) enum ControlledResumeOutcome {
 
 /// E2E-06：`desktop socket` 掉线后启动 B 端恢复：投影 reconnecting、取恢复材料，
 /// 并按冻结协议发出 `controller_resume_prepare`。任一步失败返回 false，调用方
-/// 必须结束本代通道（此时管理器的恢复失败路径已经清理租约与本代凭证）。
+/// 必须结束本代通道。管理器内部的恢复失败会立即清理租约与本代凭证；构造或
+/// 入队等管理器外失败由已冻结的 watchdog 截止及命令层
+/// `desktop_remote_controlled::spawn_watchdog_reaper`（应用 setup 注册、独立每秒轮询）
+/// 有界收口；它独立于本 worker 的两秒 poll，不随本 worker 退出而停止。
+/// 不表示所有返回 false 的路径都已经完成清理，也不会因恢复而延长截止。
 pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
     port: &P,
     manager: &ControlledDeviceManager,
@@ -2703,14 +2764,102 @@ fn sanitize_error(value: &str) -> String {
     }
 }
 
-// The real Windows Wry host is used without creating windows. Unsupported
-// platforms do not run a simulated desktop-control adapter.
+// This integration uses the real Windows Wry host without creating windows;
+// unsupported desktop-control platforms do not run a simulated Wry adapter.
 #[cfg(test)]
 pub(crate) mod reader_resume_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RegistrationDropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for RegistrationDropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    struct RegistrationCompletionProbe {
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        observed: std::sync::atomic::AtomicUsize,
+    }
+
+    impl std::task::Wake for RegistrationCompletionProbe {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            let dropped = self.dropped.load(std::sync::atomic::Ordering::SeqCst);
+            self.observed.store(
+                if dropped { 1 } else { 2 },
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_registration_drops_worker_before_reply_and_never_serves() {
+        for error in ["pairing_registration_failed", "desktop_remote_stale_result"] {
+            let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let completion = std::sync::Arc::new(RegistrationCompletionProbe {
+                dropped: dropped.clone(),
+                observed: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let waker = std::task::Waker::from(completion.clone());
+            let (done_tx, done_rx) = oneshot::channel::<Result<(), String>>();
+            let mut done_rx = Box::pin(done_rx);
+            assert!(
+                std::future::Future::poll(
+                    done_rx.as_mut(),
+                    &mut std::task::Context::from_waker(&waker),
+                )
+                .is_pending()
+            );
+            finish_controlled_registration(
+                RegistrationDropProbe(dropped.clone()),
+                Err(error.to_owned()),
+                done_tx,
+                |worker, failure| {
+                    assert_eq!(failure, error);
+                    assert!(!worker.0.load(std::sync::atomic::Ordering::SeqCst));
+                },
+                |_| async { panic!("failed registration has no serving lifecycle") },
+            )
+            .await;
+            assert_eq!(done_rx.await.unwrap().unwrap_err(), error);
+            assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+            // The actual oneshot wakes synchronously at completion: a mutation
+            // that sends before dropping would observe 2 instead of 1.
+            assert_eq!(
+                completion
+                    .observed
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_registration_replies_before_serving_and_retains_worker() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (done_tx, mut done_rx) = oneshot::channel::<Result<u8, String>>();
+        finish_controlled_registration(
+            RegistrationDropProbe(dropped.clone()),
+            Ok(7),
+            done_tx,
+            |_, _| panic!("successful registration must not fail"),
+            |worker| async move {
+                assert_eq!(done_rx.try_recv().unwrap().unwrap(), 7);
+                assert!(!worker.0.load(std::sync::atomic::Ordering::SeqCst));
+                drop(worker);
+            },
+        )
+        .await;
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[test]
     fn compact_value_fingerprint_preserves_the_original_serialized_bytes() {
@@ -4399,6 +4548,7 @@ mod tests {
         let outstanding = LivenessEvidenceState {
             outstanding: Some(("challenge-1".to_owned(), "AAAA".to_owned(), 1_000)),
             escalated: false,
+            attestation_sent_at_b: None,
         };
         assert_eq!(
             liveness_evidence_action(true, &outstanding, 2_000),
@@ -4411,6 +4561,7 @@ mod tests {
         );
         let escalated = LivenessEvidenceState {
             escalated: true,
+            attestation_sent_at_b: Some(3_500),
             ..outstanding.clone()
         };
         assert_eq!(
@@ -4426,6 +4577,186 @@ mod tests {
         assert_eq!(
             liveness_evidence_action(false, &outstanding, 12_000),
             LivenessEvidenceAction::Idle
+        );
+    }
+
+    #[test]
+    fn controlled_role_heartbeat_matches_relay_fixture_and_fences_replaced_lease() {
+        use super::super::controlled_heartbeat::{
+            ControlledHeartbeat,
+            test_support::{CapturePort, connect},
+        };
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/controller_role_b_heartbeat.json"
+        ))
+        .unwrap();
+        let lease = LeaseContext {
+            connection_id: "connection-0001".into(),
+            controller_lease_id: "lease-0001".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "epoch-test-1".into(),
+            remote_control_generation: "generation-0001".into(),
+        };
+        assert_eq!(
+            super::super::liveness::build_controller_liveness(
+                &lease,
+                SenderRole::ControlledB,
+                "live-b-1",
+                1,
+            )
+            .unwrap(),
+            expected,
+            "the shared production builder must match the Relay fixture exactly"
+        );
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        let mut owned_lease = lease;
+        owned_lease.remote_control_generation = operation.generation().into();
+        connect(
+            &manager,
+            &operation,
+            owned_lease.clone(),
+            "live-a-1",
+            vec!["role_liveness_v1".into()],
+        );
+        let port = CapturePort::default();
+        let mut state = ControlledHeartbeat::default();
+        state.pump(&manager, &operation, false, &port).unwrap();
+        assert!(port.frames.lock().is_empty());
+        state.install(owned_lease.clone(), "live-b-1").unwrap();
+        state.pump(&manager, &operation, false, &port).unwrap();
+        let mut owned_expected = expected;
+        owned_expected["remote_control_generation"] = json!(operation.generation());
+        assert_eq!(port.frames.lock()[0], owned_expected);
+        state.pump(&manager, &operation, false, &port).unwrap();
+        assert_eq!(port.frames.lock()[1]["heartbeat_sequence"], "2");
+        state.install(owned_lease.clone(), "live-b-1").unwrap();
+        state.pump(&manager, &operation, false, &port).unwrap();
+        assert_eq!(port.frames.lock()[2]["heartbeat_sequence"], "3");
+        let mut replacement = owned_lease.clone();
+        replacement.remote_control_generation = "generation-0002".into();
+        state.install(replacement, "live-b-1").unwrap();
+        assert!(state.pump(&manager, &operation, false, &port).is_err());
+        assert_eq!(port.frames.lock().len(), 3);
+        state.install(owned_lease, "live-b-2").unwrap();
+        state.pump(&manager, &operation, false, &port).unwrap();
+        let resumed = port.frames.lock()[3].clone();
+        assert_eq!(resumed["liveness_epoch"], "live-b-2");
+        assert_eq!(resumed["heartbeat_sequence"], "1");
+        manager.stop();
+        manager.start(None, Vec::new()).unwrap();
+        assert!(state.pump(&manager, &operation, false, &port).is_err());
+        assert_eq!(port.frames.lock().len(), 4);
+        // Sequence overflow and failed-enqueue retry are covered by the same
+        // producer's tests; do not reintroduce a weaker test-only builder.
+    }
+
+    #[test]
+    fn fallback_request_rtt_does_not_include_direct_wait_or_reset_challenge_age() {
+        let mut state = LivenessEvidenceState {
+            outstanding: Some((
+                "challenge-1".into(),
+                "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+                1_000,
+            )),
+            ..Default::default()
+        };
+        let response = json!({"challenge_id": "challenge-1"});
+        assert!(state.attestation_request_start(&response).is_none());
+        // A 2.5s threshold on a 2s pump escalates after a 4s direct wait.
+        state.record_attestation_sent(5_000);
+        assert_eq!(state.attestation_request_start(&response), Some(5_000));
+        assert_eq!(state.outstanding.as_ref().unwrap().2, 1_000);
+        assert!(
+            state
+                .attestation_request_start(&json!({"challenge_id": "other"}))
+                .is_none()
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &state, 9_000),
+            LivenessEvidenceAction::Idle
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &state, 10_000),
+            LivenessEvidenceAction::Idle
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &state, 10_001),
+            LivenessEvidenceAction::Reset
+        );
+    }
+
+    #[test]
+    fn quantized_poll_preserves_full_fallback_rtt_and_frozen_authentication_cutoff() {
+        use super::super::liveness::{ControllerLivenessWatchdog, LivenessWatchdogState};
+        let mut watchdog = ControllerLivenessWatchdog::authenticated_cycle("live-a-1", 0).unwrap();
+        assert!(!watchdog.needs_evidence(2_000));
+        assert!(watchdog.needs_evidence(4_000));
+        let nonce = "AAAAAAAAAAAAAAAAAAAAAA==";
+        watchdog
+            .register_challenge("challenge-1", nonce, 4_000)
+            .unwrap();
+        let frozen = watchdog.freeze_deadline(4_000);
+        let mut state = LivenessEvidenceState {
+            outstanding: Some(("challenge-1".into(), nonce.into(), 4_000)),
+            ..Default::default()
+        };
+        assert_eq!(
+            liveness_evidence_action(true, &state, 6_000),
+            LivenessEvidenceAction::Idle
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &state, 8_000),
+            LivenessEvidenceAction::Escalate
+        );
+        state.record_attestation_sent(8_000);
+        // At the original 8s challenge timeout the fallback still has 1s left.
+        assert_eq!(
+            liveness_evidence_action(true, &state, 12_000),
+            LivenessEvidenceAction::Idle
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &state, 13_000),
+            LivenessEvidenceAction::Idle
+        );
+        let response = json!({
+            "v": 1, "type": "controller_liveness_attestation_a", "request_id": "request-1",
+            "connection_id": "connection-0001", "controller_lease_id": "lease-0001", "lease_epoch": "1",
+            "relay_epoch": "epoch-test-1", "remote_control_generation": "generation-0001",
+            "liveness_epoch_a": "live-a-1", "heartbeat_sequence_a": "1", "attestation_sequence": "1",
+            "challenge_id": "challenge-1", "challenge_b64": nonce,
+            "observed_age_ms": "5000", "remaining_ttl_ms": "25000", "issued_at_relay": "9000",
+            "relay_signing_key_id": "relay-key-test-1", "signature_algorithm": "ed25519",
+            "relay_signature_b64": format!("{}==", "A".repeat(86)),
+        });
+        let lease = LeaseContext {
+            connection_id: "connection-0001".into(),
+            controller_lease_id: "lease-0001".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "epoch-test-1".into(),
+            remote_control_generation: "generation-0001".into(),
+        };
+        watchdog
+            .accept_attestation_json(
+                &response.to_string(),
+                &lease,
+                state.attestation_request_start(&response).unwrap(),
+                13_000,
+            )
+            .unwrap();
+        assert_eq!(
+            watchdog.deadline_b(),
+            frozen,
+            "proof cannot extend a frozen cutoff"
+        );
+        assert_eq!(watchdog.state(13_000), LivenessWatchdogState::Healthy);
+        assert_eq!(
+            liveness_evidence_action(true, &state, 13_001),
+            LivenessEvidenceAction::Reset
+        );
+        assert_eq!(
+            watchdog.state(frozen.unwrap()),
+            LivenessWatchdogState::Expired
         );
     }
 }

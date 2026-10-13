@@ -18,6 +18,16 @@ desktop pairing cannot use a legacy-only endpoint ID. Administrator migration
 request IDs use the desktop character set with their own 8–128 length bound.
 Credential/HMAC digest and official proof-key grammars are separate and unchanged.
 
+Relay signing-key configuration has a separate 1–64 ASCII-character bound:
+an alphanumeric first character, followed by alphanumerics or `._-`. This is
+the intersection of the wire identifier and the native pinned trust-key domain.
+Colon, tilde, whitespace, non-ASCII and longer values fail configuration before
+signing. Earlier colon-signing tests validated only the wire schema, not native
+trust installation. No ID is automatically renamed; configured or historical
+identities and existing trust records are not rewritten. Operators must provide
+the same supported ID on both ends. Generic wire IDs and released Legacy Web
+IDs retain their existing grammars.
+
 Set these variables before opening the registry:
 
 | Variable | Meaning |
@@ -30,6 +40,7 @@ Set these variables before opening the registry:
 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64` | Pinned key ID and canonical base64 Ed25519 PKCS#8 DER private key used to sign pairing transcripts. The private value is deployment-only and must never enter logs or repository files. |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID` | Stable identifier for the active credential-digest key. |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY` | Secret HMAC key, 32–4096 UTF-8 bytes. Supply it through the deployment secret manager, never source control or logs. |
+| `PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON` | Optional secret JSON array of `{ "key_id": "...", "key": "..." }` for verification-only old keys. At most seven, unique IDs distinct from the active ID; each secret has the same 32–4096 UTF-8 byte bounds. Maximum JSON input is 65536 bytes. |
 | `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | Optional `1`/`true`; accepted only with `deployment=development` and `NODE_ENV=development` or `test`. |
 
 `official` and `self_hosted` always reject an unknown endpoint. A production
@@ -44,6 +55,23 @@ primary, backup, lock, marker, temporary, stale-lock, or other reserved
 management path. Controller state filenames using those reserved suffixes are
 also rejected.
 
+## Desktop Relay signature pins
+
+The desktop application normally uses the signing key ID and public key from
+its bundled endpoint profile. For an administrator-managed Relay, set both
+`PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` and
+`PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64` in the desktop process environment
+before starting the application. The public value is standard base64 of the
+raw 32-byte Ed25519 public key, not PEM, SPKI DER, or the Relay's PKCS#8 private
+key. Provision the matching key ID and public key through a trusted
+administrator channel; never obtain the trust pin from an unverified handshake.
+
+Neither override being set selects the bundled profile. A partial override or
+malformed key fails closed; it does not fall back to bundled trust. Provision
+matching pins on both desktop peers when changing the Relay signing key, then
+restart the desktop processes. The signing private key remains Relay-only and
+must never be copied into a desktop environment, repository, PR, or log.
+
 ## Persistence and concurrency contract
 
 `relay-state-store.js` owns an independent, versioned controller state file and
@@ -51,7 +79,11 @@ does not rewrite the strict Web v2 revoke file. The state file must be the child
 of a dedicated directory whose parent already exists. The store creates and
 protects only that final directory. If it already exists, the store verifies its
 owner and protection and never chmods or rewrites a caller-owned parent. A
-marker identifies the directory, and unexpected entries fail closed. Each
+marker identifies the directory, and unexpected entries fail closed. A dedicated
+regression creates a real foreign file, directory, and directory link (Windows
+junction), repeats the refusal, and checks that primary/backup/marker bytes and
+foreign evidence remain unchanged. Its Windows security injection is not a DACL
+qualification. Each
 namespace has a canonical unsigned-decimal revision. A caller reads a namespace
 snapshot and commits with
 `compareAndSwap(name, expectedRevision, value)`; stale revisions fail without a
@@ -102,6 +134,17 @@ parsing; a mismatch, a missing peer copy, or a damaged backup fails closed. A
 valid backup may restore a malformed primary; a missing primary fails closed so
 a staged but uncommitted backup cannot become authoritative. Malformed,
 oversized, unsupported, or ambiguous candidates otherwise fail closed.
+Recognizable controller-state versions newer than this implementation are
+reported as `relay_state_unsupported` before validating the current field set,
+including when they contain additional fields. Unsupported primary or backup
+files are never treated as recoverable corruption: opening preserves both
+copies without promoting the older authorization snapshot. Keep those files
+for an implementation that understands their version; do not edit the version
+or remove fields to make an older Relay accept them. Recovery of genuinely
+malformed current-state files and the documented v0 migration remain unchanged.
+Files exceeding the configured read budget fail closed as
+`relay_state_unavailable` without being parsed or restored. Their format cannot
+be identified safely, so neither copy is overwritten from the other one.
 Operators must back up the primary and `.bak`
 together while the Relay is stopped or through a later coordinated snapshot
 facility.
@@ -219,6 +262,25 @@ comparison. A ledger row contains only the stable request ID, operation class,
 sorted endpoint IDs, keyed parameter digest, timestamps, state, and a bounded
 secret-free outcome.
 
+New access and desktop role credentials must round-trip UTF-8 exactly, contain
+32–4096 UTF-8 bytes, and fit within 1024 UTF-16 code units, matching the existing
+Legacy transport limit. The limits apply together (at most 3072 UTF-8 bytes for
+well-formed text within 1024 UTF-16 units); no trimming, normalization or automatic
+renaming occurs. Fresh enrollment, development TOFU, backfill, re-enrollment,
+rotation and batch writes enforce this rule before committing role material.
+Overflow returns the secret-free `enrollment_credential_transport_invalid` error.
+
+Existing longer credentials and their digests remain valid for registry
+authorization and explicit rotation to a new credential in the common domain;
+they are not automatically rewritten or guaranteed to pass Legacy transport.
+An exact no-write role claim and a historical terminal migration replay retain
+their original behavior. An existing pending request that would newly write an
+overlong credential remains pending, with its original parameters and evidence
+unchanged. Operators must retain that request, explicitly rotate/re-enroll using
+a new request ID and compatible material, and investigate the old request;
+changing parameters under its existing ID remains a conflict. Snapshot restoration
+preserves historical digests and does not infer plaintext length from a digest.
+
 Callers use:
 
 - `EnrollmentRegistry.enroll` for an already authenticated official/admin flow;
@@ -271,18 +333,57 @@ cannot register a desktop or pair. Development TOFU may create an access-only
 record for a Web request, or both roles atomically for a desktop request; a
 pairing request can never invent a desktop digest from a single credential.
 
-Digest-key rotation is not endpoint credential rotation. Replacing the deployment
-HMAC key (including replacing bytes under the same key ID) invalidates existing
-digests; the registry cannot recover them without the previous key. Existing
-endpoint IDs cannot be re-enrolled: active conflicting entries are rejected and
-revoked entries remain terminal. Do not change the HMAC key as routine maintenance.
-An intentional HMAC-key replacement requires re-enrollment of all affected
-clients with fresh endpoint IDs and new credentials through the authenticated
-admin flow, followed by new pairing and configuration on both peers. Revoke the
-old entries through the admin flow; never delete or hand-edit shared state or
-reset other namespaces/Legacy Web data. A new key ID must identify new key
-material. Before revocation or new enrollments, restoring the previous key and
-key ID restores authorization; it does not undo later registry transitions.
+Digest-key rotation is not endpoint credential rotation. A phased keyring retains
+old keys for verification while all new credential and migration digests use the
+active key. Every existing digest is verified with its exact persisted `key_id`;
+unknown keys still fail closed. A new key ID must identify new independently
+generated key material; never replace bytes under an existing ID. Endpoint IDs,
+role domains, CAS revisions, revoked entries and migration history are preserved.
+
+1. Before the change, back up the protected primary/backup pair and secret-manager
+   key versions using the documented stopped-service procedure. Record only key
+   IDs, revisions and backup checksums in the operational record, never keys or
+   raw credentials. Confirm no unknown pending migration outcome; do not restart
+   an uncertain operation with a new request ID.
+2. Generate a new independent key in the secret manager. First retain the current
+   active key and configure the new key as a previous key on every registry
+   consumer (Relay and administration CLI). Validate configuration and existing
+   Web/desktop authentication without modifying registry files. Deploy compatible
+   keyring-aware Relay, gateway and CLI versions together. Coverage control binds
+   the complete canonical keyring (IDs and keyed material fingerprints), not just
+   the active key; consumers with a missing or different old key fail the existing
+   store-binding check. Keep the coverage-control secret independent of every
+   active and retained enrollment key as well as the pairing key.
+   With no retained key (unset or empty previous array), the released v1 control
+   binding stays byte-for-byte compatible; the keyring extension is present only
+   when an old key is retained.
+3. Switch the active ID/key to the new pair and keep the old pair in the previous
+   array. Restart consumers with the same protected state. Verify old role
+   credentials still authenticate, revoked endpoints remain rejected, and a
+   controlled new enrollment records the new key ID. No automatic rewrite occurs
+   during authorization.
+4. Through existing authenticated `rotateAccessCredential` and
+   `rotateDesktopCredential` operations, verify each old role credential and CAS
+   revision and write its replacement digest with the active key. Coordinate
+   client updates; changing the access credential invalidates existing Web links.
+   Do not re-enroll existing IDs, delete tombstones, or bypass digest verification.
+   Old pending/terminal migration IDs continue to verify with their original key;
+   successful terminal replay never executes its operations again.
+5. Before retirement, inventory all active role digest key IDs and pending
+   migration key IDs from the protected snapshot. Retain each referenced old key.
+   Keep terminal migration keys for as long as exact request replay is required;
+   removing one makes that old ID fail with `migration_request_key_unavailable`,
+   preserving its evidence and prohibiting replacement-ID reexecution. Only after
+   these conditions are explicitly accepted may an unneeded previous key be
+   removed from every consumer. Recheck authentication, restart and revoked
+   endpoints; do not hand-edit stored digests or reset Legacy Web state.
+
+On configuration or authentication failure, restore the last known-good keyring
+configuration, retaining every key used by any already committed transition.
+Changing the active key back does not roll back endpoint revisions, credentials,
+revocation or migration outcomes. Do not restore an older state snapshot simply
+to make a key match. If a required old key is unavailable, preserve state and
+escalate for manual recovery; neither raw digests nor backup files authorize it.
 
 `enrollment_registry_capacity_reached` identifies entry-count or shared byte-budget
 rejection, not an infrastructure outage. Capacity validation runs before durable
@@ -303,6 +404,13 @@ may admit a first registration; callers must apply the protocol layer's rate
 limits before exposure.
 
 Recognized lock schemas with an unsupported positive version fail closed with
+`relay_state_lock_unsupported`. A v1 lock with a complete valid owner tuple and
+additional fields also fails with that code: extensions are not evidence of a
+dead owner, even when the recorded PID appears dead. Its lock bytes and file
+identity, primary and backup are preserved; it is not renamed or reclaimed.
+Recovery requires the owning protocol or explicit operator investigation, not
+automatic deletion. Supported v1 dead-owner and fully read crash-lock recovery
+remain unchanged. Recognized future versions still fail closed with
 `relay_state_lock_unsupported`, even with added fields or an apparently dead PID.
 They are never quarantined or stolen; use a compatible Relay version or an
 operator-controlled offline upgrade. Locks exceeding the 4096-byte read bound,
@@ -315,6 +423,15 @@ For `revoke`, the expected endpoint revision is syntax-checked for every call
 and compared before an active-to-revoked transition. An already revoked entry
 is a read-only idempotent result even if a retry supplies an old or future
 well-formed revision: no endpoint/namespace revision or persisted bytes change.
+
+The registry's 100,000-entry ceiling and the store's default 16 MiB serialized
+state budget are separate from the store's 32-namespace ceiling. Creating the
+32nd namespace is allowed; a 33rd returns `relay_state_capacity_reached` without
+changing durable primary/backup bytes or any revision. CAS updates of existing
+namespaces remain available at that ceiling and survive reopening the store.
+The namespace-boundary regression covers this contract independently of the
+implementation constant. Dedicated-directory alien-entry rejection is a
+separate test-coverage follow-up; this regression does not qualify that path.
 
 The registry's 100,000-entry ceiling and the store's default 16 MiB serialized
 size ceiling are independent safety limits, not a promise to store 100,000

@@ -30,7 +30,7 @@
     if (!logic) throw new Error("desktop remote control state logic not loaded");
 
     var unlisten = [];
-    var subscribed = false;
+    var channelRegistrations = Object.create(null);
     var subscriptionOwner = null;
     var capabilityWaiters = Object.create(null);
     var capabilityOutcomes = Object.create(null);
@@ -86,7 +86,7 @@
     function publish(next) {
       state.desktopRemoteControl = next;
       mirrorSlices(next);
-      if (typeof notify === "function") notify("desktopRemoteControl");
+      if (typeof notify === "function") notify(["desktopRemoteControl"]);
       return next;
     }
 
@@ -107,92 +107,128 @@
       }
     }
 
-    function subscribe() {
-      if (subscribed || typeof listen !== "function") return;
-      subscribed = true;
-      var owner = {};
-      subscriptionOwner = owner;
-      function listenOwned(name, callback) {
-        return listen(name, function (event) {
-          if (subscriptionOwner === owner) callback(event);
+    function subscribeChannel(name, start) {
+      if (channelRegistrations[name]) return;
+      var owner = subscriptionOwner;
+      var attempt = {};
+      channelRegistrations[name] = attempt;
+      function isLive() {
+        return subscriptionOwner === owner && channelRegistrations[name] === attempt;
+      }
+      function registrationFailed() {
+        // Retire only this attempt. Other channels and replacement owners keep
+        // their registrations and can retry independently.
+        if (channelRegistrations[name] === attempt) delete channelRegistrations[name];
+      }
+      function listenOwned(eventName, callback) {
+        return listen(eventName, function (event) {
+          if (isLive()) callback(event);
         });
       }
       function retainUnlisten(off) {
-        if (typeof off !== "function") return;
-        if (subscriptionOwner === owner) {
+        if (typeof off !== "function") {
+          registrationFailed();
+          return;
+        }
+        if (isLive()) {
           unlisten.push(off);
         } else {
-          // Registration may complete after stop or after a new subscription.
-          // Its cleanup belongs to this retired owner, never the replacement.
+          // A late registration owns only its old off, never a replacement.
           try { off(); } catch (_) {}
         }
       }
-      listenOwned("desktop-remote-controlled-status", function (event) {
-        var payload = event && event.payload ? event.payload : event || {};
-        noteControlledTerminal(payload);
-        clientEvent("controlled_status", controlledDiagnosticDetail(payload.status));
-        publish(logic.applyControlledStatus(current(), controlledStatusPayload(payload)));
-      }).then(retainUnlisten).catch(function () {});
-      listenOwned("desktop-remote-controller-status", function (event) {
-        var payload = event && event.payload ? event.payload : event || {};
-        noteControllerTerminal(payload);
-        publish(logic.applyControllerStatus(current(), payload));
-      }).then(retainUnlisten).catch(function () {});
-      listenOwned("desktop-remote-task-status", function (event) {
-        var payload = event && event.payload ? event.payload : event || {};
-        var state = current();
-        var controlledSession = state.controlledSession || {};
-        // This event is the current frozen task_status protocol projection.
-        // The separate local task-event channel uses camelCase.
-        var sessionId = payload.sessionId || payload.session_id || "";
-        if (controlledSession.sessionId && String(controlledSession.sessionId) === String(sessionId)) {
-          publish(logic.applyControlledTaskEvent(state, payload));
-        }
-      }).then(retainUnlisten).catch(function () {});
-      listenOwned("desktop-remote-task-event", function (event) {
-        var payload = event && event.payload ? event.payload : event || {};
-        publish(logic.applyControlledTaskEvent(current(), payload));
-      }).then(retainUnlisten).catch(function () {});
-      listenOwned("desktop-remote-controlled-session", function (event) {
-        var payload = event && event.payload ? event.payload : event || {};
-        publish(logic.applyControlledSession(current(), payload));
-      }).then(retainUnlisten).catch(function () {});
-      listenOwned("desktop-remote-controlled-journal", function (event) {
-        var payload = event && event.payload ? event.payload : event || {};
-        publish(logic.applyControlledJournalEvent(current(), payload));
-      }).then(retainUnlisten).catch(function () {});
-      listenOwned("desktop-remote-task-content", function (event) {
-        var payload = event && event.payload ? event.payload : event || {};
-        publish(logic.applyTaskContent(current(), payload));
-      }).then(retainUnlisten).catch(function () {});
+      try {
+        Promise.resolve(start(listenOwned)).then(retainUnlisten, registrationFailed);
+      } catch (_) {
+        registrationFailed();
+      }
+    }
+
+    function subscribe() {
+      if (typeof listen !== "function") return;
+      if (!subscriptionOwner) subscriptionOwner = {};
+      subscribeChannel("desktop-remote-controlled-status", function (listenOwned) {
+        return listenOwned("desktop-remote-controlled-status", function (event) {
+          var payload = event && event.payload ? event.payload : event || {};
+          noteControlledTerminal(payload);
+          clientEvent("controlled_status", controlledDiagnosticDetail(payload.status));
+          publish(logic.applyControlledStatus(current(), controlledStatusPayload(payload)));
+        });
+      });
+      subscribeChannel("desktop-remote-controller-status", function (listenOwned) {
+        return listenOwned("desktop-remote-controller-status", function (event) {
+          var payload = event && event.payload ? event.payload : event || {};
+          noteControllerTerminal(payload);
+          publish(logic.applyControllerStatus(current(), payload));
+        });
+      });
+      subscribeChannel("desktop-remote-task-status", function (listenOwned) {
+        return listenOwned("desktop-remote-task-status", function (event) {
+          var payload = event && event.payload ? event.payload : event || {};
+          var state = current();
+          var controlledSession = state.controlledSession || {};
+          // This event is the current frozen task_status protocol projection.
+          // The separate local task-event channel uses camelCase.
+          var sessionId = payload.sessionId || payload.session_id || "";
+          if (controlledSession.sessionId && String(controlledSession.sessionId) === String(sessionId)) {
+            publish(logic.applyControlledTaskEvent(state, payload));
+          }
+        });
+      });
+      subscribeChannel("desktop-remote-task-event", function (listenOwned) {
+        return listenOwned("desktop-remote-task-event", function (event) {
+          var payload = event && event.payload ? event.payload : event || {};
+          publish(logic.applyControlledTaskEvent(current(), payload));
+        });
+      });
+      subscribeChannel("desktop-remote-controlled-session", function (listenOwned) {
+        return listenOwned("desktop-remote-controlled-session", function (event) {
+          var payload = event && event.payload ? event.payload : event || {};
+          publish(logic.applyControlledSession(current(), payload));
+        });
+      });
+      subscribeChannel("desktop-remote-controlled-journal", function (listenOwned) {
+        return listenOwned("desktop-remote-controlled-journal", function (event) {
+          var payload = event && event.payload ? event.payload : event || {};
+          publish(logic.applyControlledJournalEvent(current(), payload));
+        });
+      });
+      subscribeChannel("desktop-remote-task-content", function (listenOwned) {
+        return listenOwned("desktop-remote-task-content", function (event) {
+          var payload = event && event.payload ? event.payload : event || {};
+          publish(logic.applyTaskContent(current(), payload));
+        });
+      });
       // A 端状态事件：后台 keeper 会在 connecting / safety_handshake /
       // connected / reconnecting / error 之间推进。没有这条监听时，前端只能
       // 看到一次性命令返回值，窗口重载后会误以为 A 端仍然空闲。
       // Rust authenticates this narrow result against the live RemoteProxy.
       // The WebView still checks its exact local/ref/session/lease binding.
-      listenOwned("desktop-remote-proxy-capability", function (event) {
-        var payload = event && event.payload ? event.payload : event || {};
-        settleCapabilityResponse(payload);
-      }).then(retainUnlisten).catch(function () {});
-      listenOwned("desktop_remote_proxy", function (event) {
-        var payload = event && event.payload ? event.payload : event || {};
-        var before = current();
-        var after = logic.applyRemoteProxyNotice(before, payload);
-        if (after !== before) {
-          publish(after);
-          scheduleRemoteProxyRefresh(after.remoteProxyNotice);
-        }
-      }).then(retainUnlisten).catch(function () {});
+      subscribeChannel("desktop-remote-proxy-capability", function (listenOwned) {
+        return listenOwned("desktop-remote-proxy-capability", function (event) {
+          var payload = event && event.payload ? event.payload : event || {};
+          settleCapabilityResponse(payload);
+        });
+      });
+      subscribeChannel("desktop_remote_proxy", function (listenOwned) {
+        return listenOwned("desktop_remote_proxy", function (event) {
+          var payload = event && event.payload ? event.payload : event || {};
+          var before = current();
+          var after = logic.applyRemoteProxyNotice(before, payload);
+          if (after !== before) {
+            publish(after);
+            scheduleRemoteProxyRefresh(after.remoteProxyNotice);
+          }
+        });
+      });
     }
 
     function stop() {
       subscriptionOwner = null;
-      unlisten.splice(0).forEach(function (off) {
-        try {
-          off();
-        } catch (_) {}
-      });
-      subscribed = false;
+      channelRegistrations = Object.create(null);
+      var retiredUnlisten = unlisten.splice(0);
+      var retiredWaiters = capabilityWaiters;
+      capabilityWaiters = Object.create(null);
       if (proxyRefreshTimer) clearTimeout(proxyRefreshTimer);
       proxyRefreshTimer = null;
       ++proxyListIntent;
@@ -200,14 +236,26 @@
       proxyReadIntents = Object.create(null);
       if (capabilityRenewalTimer) clearTimeout(capabilityRenewalTimer);
       capabilityRenewalTimer = null;
-      Object.keys(capabilityWaiters).forEach(function (requestId) {
-        var waiter = capabilityWaiters[requestId];
-        clearTimeout(waiter.timer);
-        waiter.reject(asBoundedError("capability_snapshot_unavailable"));
-        delete capabilityWaiters[requestId];
-      });
       uncertainActionRequests = Object.create(null);
       uncertainActionOrder = [];
+      Object.keys(retiredWaiters).forEach(function (requestId) {
+        clearTimeout(retiredWaiters[requestId].timer);
+      });
+      try {
+        Object.keys(retiredWaiters).forEach(function (requestId) {
+          var waiter = retiredWaiters[requestId];
+          delete retiredWaiters[requestId];
+          waiter.reject(asBoundedError("capability_snapshot_unavailable"));
+        });
+      } finally {
+        // Retire every old resource before an external cleanup can synchronously
+        // start a new owner and its requests. Only the old off snapshot is used.
+        retiredUnlisten.forEach(function (off) {
+          try {
+            off();
+          } catch (_) {}
+        });
+      }
     }
 
     function controlledIntent(openNewGeneration) {
@@ -344,8 +392,9 @@
     }
 
     /**
-     * 随包内置的「服务端点」profile 列表（生产/测试）。用户不需要再配置
-     * PINVOU_REMOTE_* 环境变量即可在应用内切换。
+     * 随包内置的「服务端点」profile 列表（生产/测试），与后端切换能力对应。
+     * 该桥接能力无需 PINVOU_REMOTE_* 环境变量；当前 React 界面有意不消费
+     * 端点列表和切换入口，不代表用户切换界面已交付。
      */
     function endpointProfiles() {
       ensureAvailable();
@@ -647,7 +696,7 @@
         state.attachments = (state.attachments || []).filter(function (attachment) {
           return consumedIds.indexOf(attachment.id) < 0;
         });
-        if (typeof notify === "function") notify("chat");
+        if (typeof notify === "function") notify(["chat"]);
       }
       return result;
     }

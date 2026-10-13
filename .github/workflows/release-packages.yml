@@ -16,7 +16,10 @@ name: release-packages
 # 构建 job 只消费已校验的版本文件,保证打进包里的任何版本号都来自 VERSION。
 #
 # 与其他 workflow 的分工:
-# - pr-check / mac-build:每次改动跑编译验证 gate(不产出可用产物)。
+# - pr-check: fast PR gating and release-contract verification (produces no
+#   installers); macOS native regression is also folded into its
+#   macos-rust-check push leg (2026-10; the former standalone mac-build was
+#   deleted).
 # - release-packages(本 workflow):PR 只做轻量契约验证;VERSION 进入 main 或手动触发后产出全平台 artifact。
 # - 本 workflow 只上传 CI artifact,绝不创建/推送 GitHub Release，也不替代
 #   release-deb.sh / release-macos.sh 的正式 OTA 上传、签名与清单更新流程。
@@ -191,8 +194,40 @@ jobs:
       # (SIGBUS,Linux 与 macOS 同源风险)。.cargo/config.toml 不设置 rustc-wrapper
       # (全局键无法按平台条件化),由本 Linux 发布 job 显式注入 RUSTC_WRAPPER
       # 指向 sh 版(wrapper 只作用于编译期 rustc 进程,产物运行时语义不变)。
-      # lld:BFD ld 处理大型 Rust binary 内存效率差,是 link OOM 独立主因(同 arm64)。
-      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+      # lld: BFD ld is memory-inefficient on large Rust binaries and is the
+      # standalone link-OOM cause (same as arm64). The linker receives only
+      # post-LTO plain objects: thin LTO's cross-crate merging completes
+      # in-process in the final crate's rustc (cargo compiles dependency crates
+      # with -C linker-plugin-lto), so lld is picked for object-linking time
+      # and memory, not bitcode support.
+      # Mechanism note (2026-10 calibration): since rustc >= 1.90,
+      # x86_64-linux-gnu self-links with its bundled rust-lld by default (rustc
+      # injects -B<sysroot>/.../gcc-ld into cc itself), so this flag is in
+      # practice a redundant fallback under jammy gcc 11 (when gcc resolves
+      # ld.lld by name, the -B directory precedes PATH). It is kept as a
+      # fallback for older toolchains and local environments; do not conclude
+      # from this comment that the linker is apt's ld.lld.
+      # The ThinLTO backends run inside rustc's process, so no cap is needed:
+      # release O3 + codegen-units=1 stays stable on 4 cores (recent releases
+      # 11/11 green).
+      # lld:BFD ld 处理大型 Rust binary 内存效率差,是 link OOM 独立主因(同 arm64);
+      # BFD also has no --icf, so it cannot perform the identical-code folding
+      # on the next line. Thin LTO itself is executed by rustc (the final unit
+      # gets -C lto=thin) and is independent of the linker identity; see the
+      # Cargo.toml [profile.release] comments for the mechanism.
+      # --icf=safe: lld identical-code folding (merges identical code sections,
+      # a size optimization). The safe tier only folds functions whose address
+      # is provably never taken. The boundary between ICF and Rust function
+      # address identity is a known issue (rust#160267 is one example: a
+      # miscompilation occurred even under the safe tier, LLVM-side root
+      # cause, still unfixed), so the conservative tier is chosen over all.
+      # RUSTFLAGS is an env-level injection covering both the tauri main build
+      # and the standalone knowledge-host build in this job (the latter's
+      # profile lives in pinvou-knowledge/Cargo.toml).
+      # --remap-path-prefix: normalizes build-machine absolute paths embedded
+      # in the artifact (panic locations etc.) to /. Top-level rustc flag —
+      # NOT a -C codegen option; rustc rejects `-C remap-path-prefix`.
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld -C link-arg=-Wl,--icf=safe --remap-path-prefix=${{ github.workspace }}=/"
       RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper
     steps:
       - name: Checkout (含 submodule)
@@ -226,9 +261,12 @@ jobs:
           # jammy 后缀隔离此前由 Ubuntu 24.04 构建的缓存产物，避免高版本
           # glibc 符号通过 target 缓存混入 Ubuntu 22.04 发布包。
           shared-key: release-linux-x64-jammy
-          # 非 main 手动构建只恢复 main 缓存；禁止写入分支缓存，避免多平台
-          # release 缓存重复占满仓库配额并淘汰 pr-check 的 rust-test 暖缓存。
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # save-if: false (2026-10 quota policy): four release caches × 1-2GB
+          # landing at once on a VERSION push burst-evicted the PR-gate caches
+          # (windows/macos/rust-test/lint) via the 10GB LRU — the same
+          # dynamics that left mac-build permanently cold. Releases are rare
+          # and pass cold; the restore side stays in case an entry exists.
+          save-if: false
 
       # pinvou3 编译链接的系统库(gtk/webkit/soup/rsvg/openssl/X11×3/appindicator),
       # ubuntu runner 默认没装;cmake:reqwest 的 rustls 用 aws-lc-rs,其 build script
@@ -293,6 +331,14 @@ jobs:
         working-directory: pinvou3-app
         run: node scripts/tauri/build.js build --bundles deb
 
+      # The tauri bundler hardcodes data.tar to gzip-6 (tauri.conf exposes no
+      # compression knob); repack as xz -9 to shrink the package. The content
+      # is untouched and the sha256 is computed afterwards, so it covers the
+      # final artifact.
+      - name: Repack deb (data.tar gzip-6 → xz -9)
+        working-directory: pinvou3-app/src-tauri/target/release/bundle/deb
+        run: bash "$GITHUB_WORKSPACE/scripts/repack-deb-xz.sh" "pinvou3_${VERSION}_amd64.deb"
+
       # tauri deb 产物默认名 pinvou3_<version>_amd64.deb,重命名为 x64 后缀统一全平台命名。
       - name: 校验产物 + 统一命名 + sha256
         working-directory: pinvou3-app/src-tauri/target/release/bundle/deb
@@ -340,8 +386,25 @@ jobs:
       # 其他平台及正式本地 release profile 仍使用 Cargo.toml 的 thin LTO。
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-      # 即使关闭 LTO 也保留 lld，降低大型 Rust binary 的链接内存开销。
-      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+      # lld kept: BFD ld is slow and memory-hungry object-linking large Rust
+      # binaries (same as x64); the linker receives only post-LTO plain
+      # objects, and cross-crate merging completes inside the final crate's
+      # rustc process.
+      # Mechanism note (2026-10 calibration): rustc 1.90's default rust-lld
+      # self-linking covers x86_64-unknown-linux-gnu only; on aarch64 rustc
+      # still goes through cc to BFD, so this flag is the lld selection that
+      # actually takes effect (apt's ld.lld), not a fallback. The ThinLTO
+      # backends run inside rustc's process, so no cap is needed (same reason
+      # as x64).
+      # lld is required: BFD links large binaries with poor memory efficiency
+      # (proven OOM) and has no --icf, so it cannot do --icf=safe. Thin LTO
+      # itself is executed by rustc and is independent of the linker identity
+      # (see the Cargo.toml [profile.release] comments for the mechanism).
+      # --icf=safe / remap-path-prefix: same as build-linux-x64 (see that
+      # job's comments for the conservative-tier trade-off and the known
+      # fn-address identity boundary rust#160267; the RUSTFLAGS env covers
+      # both the tauri main build and knowledge-host).
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld -C link-arg=-Wl,--icf=safe --remap-path-prefix=${{ github.workspace }}=/"
       # release 编译 codewhale-tui 的 SIGBUS 同源风险防护(同 build-linux-x64,
       # 正式入口按平台注入 RUSTC_WRAPPER,见 config.toml 注释)。
       RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper
@@ -379,7 +442,8 @@ jobs:
             pinvou-knowledge
           # jammy 后缀隔离此前由 Ubuntu 24.04 构建的缓存产物。
           shared-key: release-linux-arm64-jammy
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # save-if: false — same quota policy as release-linux-x64-jammy.
+          save-if: false
 
       - name: 装 Tauri + pinvou3 Linux 系统依赖
         run: |
@@ -439,6 +503,11 @@ jobs:
       - name: 构建 deb（托管 ARM64 发布配置）
         working-directory: pinvou3-app
         run: node scripts/tauri/build.js build --bundles deb
+
+      # Repack deb (data.tar gzip-6 → xz -9), same as build-linux-x64.
+      - name: Repack deb (data.tar gzip-6 → xz -9)
+        working-directory: pinvou3-app/src-tauri/target/release/bundle/deb
+        run: bash "$GITHUB_WORKSPACE/scripts/repack-deb-xz.sh" "pinvou3_${VERSION}_arm64.deb"
 
       # tauri deb 产物默认名 pinvou3_<version>_arm64.deb,与目标命名一致,无需重命名。
       - name: 校验产物 + sha256
@@ -537,6 +606,47 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # [linker consistency, 2026-10-02] Select the bundled lld (lld-link) for
+      # the shipped binary too, matching the windows-rust-test leg (#642).
+      # rustc hands the linker only plain objects (see the Cargo.toml lto
+      # note), so this swaps the object-linking step only. #642 moved the test
+      # leg because link.exe thrashed the hosted runner's pagefile there
+      # (silent 3-4 h runs killed at their 180/240-minute caps; runs
+      # 36919362322/36940184038) while the lld-link recipe runs green; this
+      # release job has itself built every completed release with link.exe
+      # (0.10.6: 94m42s of a 150 cap; a cancelled 0.10.5 attempt left no OOM
+      # evidence) — the swap is for cross-leg consistency on the same
+      # workspace, not an OOM fix here.
+      # Same probed two-step as #642: stable has no target-spanning flag to
+      # pick lld. On 1.99 `-C linker-features=+lld` is unstable on every
+      # target (it parses and then hard-errors; only the `-lld` opt-out is
+      # stable, x86_64-linux-gnu only), so arm 2 always wins today; arm 1
+      # stays so a future +lld stabilization is picked up automatically, and
+      # both arms do a real link — a pass cannot be a silent no-op.
+      # No /threads:1 cap here, unlike the test leg: the job is time-bound and
+      # has never recorded a link-memory thrash with link.exe — capping would
+      # only slow the release.
+      # NOTE for the reviewer: this changes the shipped nsis binary (different
+      # linker, same source). Revert = delete this step.
+      - name: Probe and export the Windows lld link flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          probe="$(mktemp -d)"
+          echo 'fn main() {}' > "$probe/probe.rs"
+          if rustc -C linker-features=+lld -o "$probe/probe.exe" "$probe/probe.rs" 2>"$probe/a.err"; then
+            flags="-C linker-features=+lld"
+          elif rustc -C linker=rust-lld -C linker-flavor=lld-link \
+              -o "$probe/probe.exe" "$probe/probe.rs" 2>"$probe/b.err"; then
+            flags="-C linker=rust-lld -C linker-flavor=lld-link"
+          else
+            echo "FAIL: this toolchain has no stable flag to select lld" >&2
+            cat "$probe/a.err" "$probe/b.err" >&2 || true
+            exit 1
+          fi
+          echo "probed RUSTFLAGS=$flags"
+          echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"
+
       # 编译 Windows 专用 .exe 栈 wrapper(源码 scripts/rustc-stack-wrapper.rs)。
       # 直接调 rustc 编译、不经 cargo,故不受本 job 的 RUSTC_WRAPPER 影响,无自举依赖。
       - name: 编译 Windows 栈 wrapper(.exe)
@@ -548,7 +658,8 @@ jobs:
         with:
           workspaces: pinvou3-app/src-tauri
           shared-key: release-windows-x64
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # save-if: false — same quota policy as release-linux-x64-jammy.
+          save-if: false
 
       - name: Node.js
         uses: actions/setup-node@v7
@@ -624,10 +735,23 @@ jobs:
     # 实测仍持续增长：0.10.0-0.10.2 分别 138/219/226 分钟(run 34747563852/
     # 34877996483/35308587808)，0.10.3(run 35377723253)在 241 分钟处撞线被取消，
     # macOS dmg 因此缺席发布而其余三平台完成。放宽至 360 分钟。
+    # Link-mechanism note (2026-10 calibration): thin LTO's cross-crate merging
+    # completes in-process in the final crate's rustc (Apple ld links only
+    # plain objects and never touches bitcode), and there is no cap knob —
+    # this job's duration and memory peak are dominated by the rustc side; the
+    # mitigation is splitting the universal build (needs a Tauri
+    # universal-bundler change, tracked separately) rather than swapping the
+    # linker.
     timeout-minutes: 360
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       VERSION: ${{ needs.check-version-bump.outputs.version }}
+      # Normalizes build-machine absolute paths embedded in the artifact
+      # (panic locations etc.) to /. Top-level rustc flag — NOT a -C codegen
+      # option. Apple ld/ld-prime has no ICF capability,
+      # so macOS needs no (and cannot take an) icf flag; -dead_strip is
+      # already passed by rustc by default.
+      RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/"
       # v0.9.5 升级后 release(thin-LTO O3)编译 codewhale-tui 时 rustc/LLVM 栈溢出
       # (SIGBUS,run 31558490865 实证)。.cargo/config.toml 不设置 rustc-wrapper
       # (全局键无法按平台条件化),由本 macOS 发布 job 显式注入 RUSTC_WRAPPER
@@ -658,21 +782,17 @@ jobs:
             pinvou3-app/src-tauri
             pinvou-knowledge
           shared-key: release-macos-universal
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # save-if: false — same quota policy as release-linux-x64-jammy: a
+          # 2GB+ macos save on each VERSION push was prime LRU-eviction fuel
+          # for the PR-gate caches.
+          save-if: false
 
-      # macOS 27+ 兼容:dyld 新增 LINKEDIT 字符串池 8 字节对齐校验,而 release 默认
-      # strip=debuginfo 会让 proc-macro dylib dlopen 被拒 → E0463(macOS ≤26 无此校验)。
-      # runner 目前是 macos-15(不受影响),但 GitHub 升级 runner 到 macOS 27+ 时若缺此
-      # 注入,tauri build 会硬失败。同 mac-build.yml 的 workaround。
-      - name: macOS 27+ strip workaround
-        run: |
-          if [ "$(sw_vers -productVersion | cut -d. -f1)" -ge 27 ] 2>/dev/null; then
-            echo "CARGO_PROFILE_RELEASE_STRIP=none" >> "$GITHUB_ENV"
-            echo "RUSTFLAGS=-C strip=none" >> "$GITHUB_ENV"
-            echo "⚠️ macOS $(sw_vers -productVersion) → 注入 strip=none(绕过 dyld 对齐校验)"
-          else
-            echo "✓ macOS $(sw_vers -productVersion),保留默认 strip"
-          fi
+      # The macOS 27+ strip=none workaround is removed: the repo's stable
+      # toolchain tracks ≥ 1.98.0, which contains the Mach-O __LINKEDIT
+      # 8-byte alignment fix (rust#157750, LLVM backport #158410), so
+      # strip="symbols" is safe again on every macOS version and artifacts
+      # no longer keep symbol tables / debug maps.
+      # See docs/binary-size-optimization.md.
 
       - name: Node.js
         uses: actions/setup-node@v7
@@ -734,6 +854,14 @@ jobs:
           fi
 
           test -f "$DMG" || { echo "❌ dmg 产物不存在: $DMG"; exit 1; }
+
+          # Compression upgrade: the tauri dmg (bundler's bundle_dmg) is
+          # UDZO/zlib and passes no -imagekey zlib-level, so hdiutil uses its
+          # default compression level 1 (speed-oriented). The shared helper
+          # converts it to ULMO (LZMA, mountable since macOS 10.15+; our
+          # floor is 11.0) and degrades to keeping the original dmg on
+          # failure; see scripts/convert-dmg-ulmo.sh for the rationale.
+          bash "$GITHUB_WORKSPACE/scripts/convert-dmg-ulmo.sh" "$DMG"
 
           # 校验 universal dmg 双架构完整性 + 写 checksum 文件(随 artifact 附带)
           BIN="src-tauri/target/universal-apple-darwin/release/bundle/macos/pinvou3.app/Contents/MacOS/pinvou3-tauri"

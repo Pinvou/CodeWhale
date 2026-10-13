@@ -332,6 +332,26 @@ export class ControllerRouter {
       if (hooks) {
         const lease = typeof message?.controller_lease_id === "string"
           ? this.#leases.lease(message.controller_lease_id) : null;
+        // A heartbeat for the frozen lease's current liveness epoch can be in flight when its
+        // counterpart closes. During recovery it is neither new evidence nor
+        // a fatal error: returning an error can abort A's recovery worker.
+        // Validate the surviving socket and frozen context before ignoring it;
+        // do not revive liveness state or move the first-close deadline.
+        const resume = this.#hooks.find((candidate) => typeof candidate.phase === "function");
+        const phase = lease && resume?.phase(lease.controller_lease_id);
+        if (hooks === this.#livenessHooks && message?.type === "controller_liveness"
+          && phase && phase !== "connected" && phase !== "terminated") {
+          if (!lease || !new Set(["A", "B"]).has(peer.role)
+            || peer.controllerLeaseId !== lease.controller_lease_id
+            || lease.sockets?.[peer.role] !== socketIdentity) fail("controller_lease_not_found");
+          const heartbeat = validateControllerMessage(message, peer.role, lease);
+          const epoch = peer.role === "A" ? lease.liveness_epoch_a : lease.liveness_epoch_b;
+          if (heartbeat.sender_role !== peer.role || heartbeat.liveness_epoch !== epoch
+            || BigInt(heartbeat.heartbeat_sequence) === 0n) {
+            fail("controller_liveness_epoch_invalid");
+          }
+          return null;
+        }
         const result = await hooks.handle(Object.freeze({
           message, socket_identity: socketIdentity, role: peer.role, lease,
         }));

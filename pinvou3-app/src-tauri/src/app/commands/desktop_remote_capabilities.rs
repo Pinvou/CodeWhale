@@ -18,7 +18,7 @@ use crate::features::marketplace::skill_marketplace::SkillMarketplaceManager;
 use crate::features::marketplace::{ConnectorScope, MarketplaceManager, unavailable_bundles_for};
 use crate::features::remote_control::controller::capabilities::{
     CapabilityDescriptor, CapabilityError, CapabilitySnapshot, CapabilitySnapshotManager,
-    CapabilitySource,
+    CapabilitySource, MAX_DISPLAY_CHARS,
 };
 #[cfg(test)]
 pub(crate) use crate::features::remote_control::controller::clock::monotonic_millis;
@@ -46,7 +46,14 @@ fn unix_millis() -> Result<u64, String> {
 fn descriptor(id: impl Into<String>, display_name: impl Into<String>) -> CapabilityDescriptor {
     CapabilityDescriptor {
         id: id.into(),
-        display_name: display_name.into().trim().to_owned(),
+        // Display text is cosmetic; opaque IDs and authorization stay intact.
+        // Local marketplace names may exceed the frozen remote wire limit.
+        display_name: display_name
+            .into()
+            .trim()
+            .chars()
+            .take(MAX_DISPLAY_CHARS)
+            .collect(),
     }
 }
 
@@ -97,18 +104,21 @@ pub async fn desktop_remote_capabilities_snapshot(
 /// using for the same controlled session.
 #[tauri::command]
 pub async fn desktop_remote_controlled_capabilities_snapshot(
-    app: AppHandle,
+    controlled: super::desktop_remote_state::DesktopRemoteState<'_, ControlledDeviceManager>,
+    manager: super::desktop_remote_state::DesktopRemoteState<'_, CapabilitySnapshotManager>,
+    runtime: super::desktop_remote_state::DesktopRemoteState<
+        '_,
+        std::sync::Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>,
+    >,
     session_id: String,
 ) -> Result<serde_json::Value, String> {
-    super::desktop_remote_state::ensure_ready(&app)?;
-    let controlled = app.state::<ControlledDeviceManager>();
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
     }
     let context = controlled
         .live_lease()
         .map_err(|error| error.code.to_owned())?;
-    let manager = app.state::<CapabilitySnapshotManager>();
     let now_b = controlled_monotonic_millis();
     // B observes but never mints a replacement revision here. A's authenticated
     // renewal request is the single writer, preventing two near-expiry readers
@@ -122,8 +132,6 @@ pub async fn desktop_remote_controlled_capabilities_snapshot(
     if still_live != context {
         return Err("session_context_stale".to_owned());
     }
-    let runtime =
-        app.state::<std::sync::Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
     let lane = runtime
         .service()
         .lane_for_session(&session_id, &context.remote_control_generation)
@@ -216,6 +224,16 @@ mod tests {
         assert_eq!(value.id, "tool.one");
         assert_eq!(value.display_name, "Browser");
         assert!(!format!("{value:?}").contains(r"D:\\"));
+    }
+
+    #[test]
+    fn descriptor_projection_bounds_unicode_display_without_changing_authority() {
+        for length in [128, 129, 160, 161] {
+            let value = descriptor("tool.one", format!("  {}  ", "界".repeat(length)));
+            assert_eq!(value.id, "tool.one");
+            assert_eq!(value.display_name.chars().count(), length.min(128));
+            assert_eq!(value.display_name, "界".repeat(length.min(128)));
+        }
     }
 
     #[test]

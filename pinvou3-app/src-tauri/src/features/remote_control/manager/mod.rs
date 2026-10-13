@@ -175,15 +175,28 @@ fn validate_multi_agent_session_web_scope(
     command: &str,
     session_id: &str,
 ) -> Result<(), String> {
-    // Documented exception (round-34 minor 7): the three aux commands are
-    // NOT in the denylist even when the MAIN session runs multi-agent — an
-    // aux conversation on a multi-agent main stays fully usable over the
-    // relay. Intended: the aux engine is the isolated pure-Q&A config
-    // (zero tools, no subagents — the denylist's threat model never
-    // applies to it), the desktop offers the same entry, and blocking it
-    // would break the side chat for exactly the heaviest users. The
-    // denylist's "web is read-only" promise is scoped to the multi-agent
-    // EXECUTION surface, not to its side chat.
+    // Documented exception (round-34 minor 7; comment reworded per the
+    // round-37 review — that reword (commit ef48f0701) was dropped by a
+    // branch rewrite before it could merge, never reaching main in any
+    // form, and is restored here re-keyed on the mechanism, ADR-0024): the
+    // early return keys on the SESSION ARGUMENT being aux-shaped — an
+    // `aux-` id bypasses this denylist scope check for ANY command. That
+    // is exactly what keeps an aux conversation fully usable over the
+    // relay while its MAIN session runs multi-agent. The aux-id carriers
+    // through this validator today are the WebUI aux send (`web_access_chat`,
+    // denylist entry #11) and the aux panel's hydration reads
+    // (`web_access_load_session_chunk`, `get_session_timeline`, the
+    // persona/reviews/scene sidecar reads, `web_access_cancel_session_download`);
+    // the three aux management commands carry the PARENT id (the aux id is
+    // minted server-side and never sent back). The invariant to preserve is
+    // "aux ids are never subject to the multi-agent web execution denylist",
+    // because the aux engine is the isolated pure-Q&A config (at most one
+    // scoped read-only context tool, never an execution surface, no
+    // subagents — the denylist's threat model never applies to it), the
+    // desktop offers the same entry, and blocking it would break the side
+    // chat for exactly the heaviest users. The denylist's "web is read-only"
+    // promise is scoped to the multi-agent EXECUTION surface, not to its
+    // side chat.
     if crate::features::sessions::is_aux_session_id(session_id) {
         return Ok(());
     }
@@ -311,6 +324,16 @@ fn controller_relay_message(value: &Value) -> bool {
                 | "encrypted_controller_liveness_a"
                 | "encrypted_frame"
         )
+}
+
+fn controller_peer_message(value: &Value) -> bool {
+    controller_relay_message(value)
+        && (value
+            .get("endpoint_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .is_empty()
+            || value.get("type").and_then(Value::as_str) != Some("desktop_endpoint_registered"))
 }
 
 // Error payloads carry no connection authority. A v2 rejection can omit the
@@ -1255,7 +1278,9 @@ impl RemoteControlManager {
         self.clear_controller_channel(generation);
     }
 
-    /// Stop only a test-owned loopback connection, without durable revocation.
+    /// Stop only a test-owned loopback connection, without durable revocation
+    /// or a detached retry against a production profile. The regular start,
+    /// reader, routing and controller channel remain the production path.
     #[cfg(test)]
     pub(crate) fn shutdown_loopback_test_endpoint(&self) {
         let endpoint = {
@@ -1528,7 +1553,8 @@ impl RemoteControlManager {
         Ok(self.relay_settings())
     }
 
-    /// 可选的随包内置端点 profile（供设置页「服务端点」下拉使用）。
+    /// 可选的随包内置端点 profile，供后端与桥接接口查询。
+    /// 当前 React 界面有意不展示端点列表或切换入口。
     pub fn endpoint_profile_options(&self) -> Vec<serde_json::Value> {
         ENDPOINT_PROFILES
             .iter()
@@ -2632,10 +2658,7 @@ impl RemoteControlManager {
         // desktop socket is already authenticated and the router binds it to an
         // endpoint. Route those frames only to the controller lane instead of
         // misclassifying them as legacy broadcast messages.
-        if controller_relay_message(&value)
-            && (endpoint_id.is_empty()
-                || value.get("type").and_then(Value::as_str) != Some("desktop_endpoint_registered"))
-        {
+        if controller_peer_message(&value) {
             if value.get("type").and_then(Value::as_str) == Some("encrypted_frame")
                 && value.get("payload_kind").and_then(Value::as_str) == Some("task_submit")
             {
@@ -3766,12 +3789,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bare_resume_confirm_routes_to_controller_before_legacy_endpoint_check() {
+        use crate::features::remote_control::controller::protocol::{
+            SenderRole, validate_controller_message_json,
+        };
+        use base64::Engine as _;
+        let confirm = json!({
+            "v":1, "type":"encrypted_resume_confirm", "request_id":"request-0001",
+            "connection_id":"connection-0001", "controller_lease_id":"lease-0001",
+            "lease_epoch":"1", "relay_epoch":"relay-0001",
+            "remote_control_generation":"generation-0001", "activation_id":"activation-0001",
+            "sender_role":"A", "ciphertext_b64":base64::engine::general_purpose::STANDARD.encode([7;32]),
+            "ciphertext_bytes":"32"
+        });
+        assert!(
+            validate_controller_message_json(&confirm.to_string(), SenderRole::ControllerA).is_ok()
+        );
+        assert!(confirm.get("endpoint_id").is_none());
+        assert_ne!(confirm["type"], "encrypted_frame");
+        // This is the production branch executed before is_current_endpoint("").
+        assert!(controller_peer_message(&confirm));
+        assert!(!controller_peer_message(
+            &json!({"v":2,"type":"rpc_request"})
+        ));
+        assert!(!controller_peer_message(&json!({
+            "type":"desktop_endpoint_registered", "endpoint_id":"endpoint-0001"
+        })));
+    }
+
     /// 内置端点 profile：地址与信任根随包分发，用户不需要再配置环境变量。
     #[test]
     fn builtin_endpoint_profiles_ship_urls_and_trust_root() {
         use base64::Engine as _;
 
-        assert_eq!(active_endpoint_profile().id, "production");
+        // 验证随包常量，不读取用户配置或测试进程的环境覆盖。
+        assert_eq!(
+            endpoint_profile_by_id("production").unwrap().id,
+            "production"
+        );
         assert_eq!(PRODUCTION_PROFILE.public_base_url, DEFAULT_PUBLIC_BASE_URL);
         assert_eq!(PRODUCTION_PROFILE.relay_ws_url, DEFAULT_RELAY_WS_URL);
         // 生产信任根也必须随包内置且格式合法（否则线上配对会 relay_trust_unconfigured）。
@@ -4693,6 +4749,8 @@ mod tests {
             ("set_session_archived", "id"),
             ("set_session_pinned", "id"),
             ("save_session_artifacts", "id"),
+            ("get_session_pinvou_scene_events", "sessionId"),
+            ("save_session_pinvou_scene_events", "sessionId"),
             ("web_access_write_artifact_text", "sessionId"),
             ("web_access_render_artifact_visual", "sessionId"),
         ];

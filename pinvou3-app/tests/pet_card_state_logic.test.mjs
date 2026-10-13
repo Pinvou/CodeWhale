@@ -22,7 +22,7 @@ try {
   // i18n.js is split by locale with zh imported directly, so the temporary copy must include
   // zh and its shared browser dictionary.
   mkdirSync(path.join(dir, 'shared', 'i18n'), { recursive: true });
-  for (const f of ['zh.js', 'browser.js']) {
+  for (const f of ['zh.js', 'browser.js', 'chat-recovery.js']) {
     copyFileSync(
       path.join(here, '..', 'src', 'shared', 'i18n', f),
       path.join(dir, 'shared', 'i18n', f),

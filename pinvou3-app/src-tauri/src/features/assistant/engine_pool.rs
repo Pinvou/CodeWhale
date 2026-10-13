@@ -264,7 +264,7 @@ fn elapsed_ms(started: Instant) -> u64 {
 /// spuriously trip the conservative `cleanup_failed` preset; that is
 /// accepted (the flag is diagnostics-only and the detached run still
 /// records the true outcome).
-const TURN_GATE_AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const TURN_GATE_AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Total wait per op for the detached retry that re-delivers the reclaim
 /// shutdown ops after the gate-held send gave up (issue #255). The retry
@@ -610,9 +610,7 @@ pub(crate) fn forward_edit_resend_with_reminder<F>(
     send: impl FnOnce(String) -> F,
 ) -> F {
     send(match merge_aux_zero_tool_reminder(session_id, None) {
-        Some(reminder) => {
-            format!("<system-reminder>\n{reminder}\n</system-reminder>\n\n{new_message}")
-        }
+        Some(reminder) => super::engine_support::wrap_system_reminder(&reminder, &new_message),
         None => new_message,
     })
 }
@@ -1112,6 +1110,27 @@ where
     }
 }
 
+/// Bounded Shutdown delivery and retry for unpublished-engine cleanup.
+/// ColdEngineCustody first tries synchronous FIFO delivery. If only Shutdown
+/// remains, this helper runs outside the turn gate in its detached fallback:
+/// at most 5s for the first send, then 60s for the detached retry. The closure
+/// retains the old AppEngine (including its bridge/private skills), not pool
+/// state or a replacement entry.
+async fn bounded_teardown_shutdown<S, Fut>(send: S)
+where
+    S: FnMut(Op) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    let delivered = bounded_shutdown_sends(send.clone(), [Op::Shutdown]).await;
+    if delivered < 1 {
+        let _ = tokio::spawn(retry_shutdown_sends(
+            send,
+            vec![Op::Shutdown],
+            RECLAIM_SHUTDOWN_RETRY_PATIENCE,
+        ));
+    }
+}
+
 /// The testable body of the cancel logic, extracted from
 /// [`EnginePool::cancel`] so deterministic tests can use bare Default
 /// components
@@ -1585,6 +1604,14 @@ impl Drop for ColdEngineCustody {
                 return;
             };
             runtime.spawn(async move {
+                if matches!(pending.as_slice(), [Op::Shutdown]) {
+                    bounded_teardown_shutdown(move |op| {
+                        let engine = engine.clone();
+                        async move { engine.handle.send(op).await }
+                    })
+                    .await;
+                    return;
+                }
                 retry_shutdown_sends(
                     |op| engine.handle.send(op),
                     pending,
@@ -3424,7 +3451,18 @@ impl EnginePool {
                     }
                 }
                 forwarder.abort();
-                let _ = forwarder.await;
+                // The abort-join is bounded (issue #525): reclaim holds the
+                // turn gate, and a forwarder wedged outside an await point
+                // can only be reaped once it next reaches an await — which
+                // may never happen. Dropping the join handle on timeout
+                // detaches it (tauri's JoinHandle has no abort-on-drop); a
+                // detached straggler lingers like an undelivered Shutdown
+                // does (accepted #483 residue), and holds no gate, pool, or
+                // session-map state, so it cannot re-block evict/delete.
+                bounded_while_holding_turn_gate("forwarder drain", async move {
+                    let _ = forwarder.await;
+                })
+                .await;
             },
             || {
                 engine.finish_reclaimed_turn(
@@ -5304,14 +5342,15 @@ mod scheduled_model_tests {
         SESSION_MODEL_BINDING_STALE_ERROR, ScheduledUnattendedGuard, SessionShellManagers,
         SessionTurnLifecycles, SessionTurnLocks, SessionTurnShellTasks, TURN_GATE_AWAIT_TIMEOUT,
         TranscriptOperation, TurnIdentity, bounded_join_while_holding_turn_gate,
-        bounded_shutdown_sends, cancel_turn_with_gates, default_model_for_new_session_from,
-        delete_chat_session_with_aux_cascade, delete_chat_session_with_gate,
-        delete_scheduled_run_with_gate, delete_then_forget, dispatch_remote_turn_cancel,
-        dispatch_turn_bound_cancel, entry_is_fresh, evict_if_idle_with_gates,
-        forward_edit_resend_with_reminder, forward_forced_turn_restrict, generation_matches,
-        identity_for_active_model, identity_for_saved_model, merge_aux_zero_tool_reminder,
-        prepare_selected_runtime_model, quiesce_engine_before_reclaim, rebind_evict_with_gates,
-        rebind_evictable, reset_aux_session_delete_with_gate, resolve_eval_model_selection_from,
+        bounded_shutdown_sends, bounded_teardown_shutdown, cancel_turn_with_gates,
+        default_model_for_new_session_from, delete_chat_session_with_aux_cascade,
+        delete_chat_session_with_gate, delete_scheduled_run_with_gate, delete_then_forget,
+        dispatch_remote_turn_cancel, dispatch_turn_bound_cancel, entry_is_fresh,
+        evict_if_idle_with_gates, forward_edit_resend_with_reminder, forward_forced_turn_restrict,
+        generation_matches, identity_for_active_model, identity_for_saved_model,
+        merge_aux_zero_tool_reminder, prepare_selected_runtime_model,
+        quiesce_engine_before_reclaim, rebind_evict_with_gates, rebind_evictable,
+        reset_aux_session_delete_with_gate, resolve_eval_model_selection_from,
         resolve_runtime_model_override, resolve_scheduled_model, resolve_spawn_model,
         retry_shutdown_sends, scheduled_profile_after_turn_gate, should_still_reap_after_snapshot,
         turn_restrict_tools, user_display_message, validate_prepared_runtime_route,
@@ -8358,6 +8397,68 @@ mod scheduled_model_tests {
         assert!(started.elapsed() < TURN_GATE_AWAIT_TIMEOUT);
     }
 
+    // issue #525: the spawn-failure teardown (`get_or_spawn` hydration arms
+    // on the submit path) must bound its `Shutdown` send by the turn-gate
+    // bound and move a shortfall to the detached retry, which re-delivers
+    // once capacity frees up. The forkguard_ prefix registers it as a
+    // fork-guard layer-3 behavior test (fork-policy §3).
+    #[tokio::test]
+    async fn forkguard_spawn_failure_teardown_shutdown_bounded_and_retried() {
+        // Capacity 1, filled and never drained: the gate-held teardown send
+        // parks exactly like on a wedged engine.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Op>(1);
+        tx.send(Op::CancelSubAgents)
+            .await
+            .expect("wedged slot filled");
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            2 * TURN_GATE_AWAIT_TIMEOUT,
+            bounded_teardown_shutdown(move |op| {
+                let tx = tx.clone();
+                async move { tx.send(op).await.map_err(anyhow::Error::from) }
+            }),
+        )
+        .await
+        .expect(
+            "the teardown must settle within twice the gate bound; an unbounded regression would hang here",
+        );
+        assert!(
+            started.elapsed() >= TURN_GATE_AWAIT_TIMEOUT,
+            "the teardown must wait the full budget"
+        );
+        // The teardown returned while wedged (gate responsive) and spawned
+        // the detached retry: once the filler is drained, the retry must
+        // deliver the Shutdown so the engine can exit its normal path.
+        assert!(matches!(rx.try_recv(), Ok(Op::CancelSubAgents)));
+        assert!(
+            matches!(
+                tokio::time::timeout(2 * TURN_GATE_AWAIT_TIMEOUT, rx.recv())
+                    .await
+                    .expect("retry Shutdown must arrive within twice the gate bound"),
+                Some(Op::Shutdown)
+            ),
+            "the detached retry must re-deliver the undelivered Shutdown"
+        );
+    }
+
+    // Control for the teardown wedge test: a healthy engine accepts the
+    // Shutdown inline — the helper bounds the wait, it does not skip the
+    // send, and no retry task is left pending on a delivered op.
+    #[tokio::test]
+    async fn spawn_failure_teardown_shutdown_delivers_when_engine_accepts() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Op>(1);
+        tokio::time::timeout(
+            2 * TURN_GATE_AWAIT_TIMEOUT,
+            bounded_teardown_shutdown(move |op| {
+                let tx = tx.clone();
+                async move { tx.send(op).await.map_err(anyhow::Error::from) }
+            }),
+        )
+        .await
+        .expect("the teardown must settle on an accepting engine");
+        assert!(matches!(rx.recv().await, Some(Op::Shutdown)));
+    }
+
     // The Detached arm must be distinguishable too: a task that outlives
     // the (parameterized) budget is detached — it keeps running while the
     // caller stops waiting — and must not be counted as settled or
@@ -9933,6 +10034,8 @@ mod scheduled_model_tests {
             "\n    pub ",
             "\n    pub(crate) ",
             "\n    pub(super) ",
+            "\n    fn ",
+            "\n    async fn ",
             "\n    ///",
         ]
         .iter()
@@ -9944,7 +10047,8 @@ mod scheduled_model_tests {
 
     #[test]
     fn rebind_engine_take_production_closure_reads_turn_and_scheduled_state() {
-        // Normalize checkout line endings, not the production tokens/assertions.
+        // Git may materialize CRLF on Windows; preserve the exact test-module
+        // cutoff and production assertions without making checkout EOL semantic.
         let src = include_str!("engine_pool.rs").replace("\r\n", "\n");
         // Round-26 MAJOR-3: cut at the test module exactly like projects.rs's
         // `production_source` (round-18) — an unanchored find over the WHOLE
@@ -9976,6 +10080,76 @@ mod scheduled_model_tests {
         assert!(
             gate_at < remove_at,
             "the evictability recheck must precede the entry removal"
+        );
+    }
+
+    // The stack moves loading ahead of spawn and gives unpublished engines
+    // cancellation-safe custody. Preserve #525's bounded shutdown contract at
+    // that actual ownership boundary, rather than pinning obsolete load-after-
+    // spawn error arms. Channel and real AppEngine tests cover delivery/retry.
+    #[test]
+    fn spawn_failure_teardown_is_bounded_in_production() {
+        let src = include_str!("engine_pool.rs").replace("\r\n", "\n");
+        let src = &src[..src
+            .find("#[allow(clippy::await_holding_lock)]\nmod scheduled_model_tests {")
+            .expect("the test module marker must exist")];
+        let body = production_body(src, "async fn get_or_spawn_with_policy(");
+        let load = body
+            .find(".load(session_id)")
+            .expect("load must precede spawn");
+        let spawn = body
+            .find("AppEngine::spawn_for_session(")
+            .expect("spawn exists");
+        let custody = body
+            .find("ColdEngineCustody::new(engine, forwarder)")
+            .expect("custody exists");
+        let sync = body
+            .find(".try_sync_new_session(")
+            .expect("nonblocking sync exists");
+        let publish = body
+            .find("publish_cold_entry(")
+            .expect("publication exists");
+        assert!(load < spawn && spawn < custody && custody < sync && sync < publish);
+        let drop_body = src
+            .split_once("impl Drop for ColdEngineCustody {")
+            .expect("the production custody Drop must exist")
+            .1
+            .split_once("\nasync fn publish_cold_entry<F>(")
+            .expect("the custody Drop must end before publication")
+            .0;
+        assert!(drop_body.contains("bounded_teardown_shutdown(move |op|"));
+        assert!(drop_body.contains("let engine = engine.clone();"));
+        assert!(drop_body.contains("matches!(pending.as_slice(), [Op::Shutdown])"));
+        assert!(drop_body.contains("retry_shutdown_sends("));
+        assert!(
+            !body.contains("engine.handle.send(Op::Shutdown)"),
+            "no direct unbounded Shutdown send may remain in the spawn-failure teardown"
+        );
+    }
+
+    #[test]
+    fn reclaim_forwarder_join_is_bounded_in_production() {
+        let src = include_str!("engine_pool.rs");
+        let src = &src[..src
+            .find("#[allow(clippy::await_holding_lock)]\nmod scheduled_model_tests {")
+            .expect("the test module marker must exist")];
+        let body = production_body(
+            src,
+            "async fn reclaim_engine_entry(&self, session_id: &str, entry: EngineEntry) {",
+        );
+        let abort_at = body
+            .find("forwarder.abort()")
+            .expect("reclaim must abort the forwarder");
+        let join_at = body
+            .find("bounded_while_holding_turn_gate(\"forwarder drain\", async move {")
+            .expect("the forwarder abort-join must be bounded (issue #525)");
+        assert!(
+            abort_at < join_at,
+            "the forwarder must be aborted before the bounded join"
+        );
+        assert!(
+            !body.contains("tokio::time::timeout(TURN_GATE_AWAIT_TIMEOUT, forwarder)"),
+            "no direct unbounded forwarder join may remain in reclaim"
         );
     }
 }

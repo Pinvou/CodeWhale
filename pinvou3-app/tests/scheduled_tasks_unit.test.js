@@ -18,7 +18,8 @@ const indexHtml = [
   'components/layout/NavigationComponents.jsx',
   'features/chat/ChatView.jsx',
   'features/scheduled/ScheduledTasksView.jsx',
-  'features/conversation/ConversationTimeline.jsx' // second-level countdown tick has been consolidated into useConversationSecondClock
+  'features/conversation/ConversationTimeline.jsx',
+  'hooks/useConversationSecondClock.js' // second-level countdown tick has been consolidated into useConversationSecondClock
 ].map(file => fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8')).join('\n');
 // Derived from the bridge feature directory so a new feature file cannot be
 // forgotten here again (a missing entry makes bridge.js throw
@@ -149,7 +150,7 @@ assert.ok(
   'ordinary session navigation must hide the native browser before publishing the chat route and loading the remote session'
 );
 assert.ok(
-  /const navigateFromScheduledRun = useCallback\(async \(nextView[\s\S]{0,520}runBrowserUiTransition[\s\S]{0,260}await bridge\.scheduled\.exitScheduledRunChat\(\)[\s\S]{0,160}!exited \|\| !isCurrent\(\)[\s\S]{0,260}setCurrentView\(nextView\)[\s\S]{0,360}hideMode: bs && bs\.scheduledRunContext[\s\S]{0,80}'workspace'/.test(indexHtml),
+  /const navigateFromScheduledRun = useCallback\(async \(nextView[\s\S]{0,520}runBrowserUiTransition[\s\S]{0,260}await bridge\.scheduled\.exitScheduledRunChat\(\)[\s\S]{0,160}!exited \|\| !isCurrent\(\)[\s\S]{0,260}setCurrentView\(nextView\)[\s\S]{0,560}hideMode: bs && bs\.scheduledRunContext[\s\S]{0,80}'workspace'/.test(indexHtml),
   'leaving a scheduled run must hide the native browser before restoring its return session and publishing the next route'
 );
 assert.ok(
@@ -239,7 +240,7 @@ assert.ok(
 assert.ok(
   /scheduled_task:run_updated[\s\S]{0,180}scheduleScheduledRunRefresh\(\)/.test(tauriBridge) &&
     /function scheduleScheduledRunRefresh\([\s\S]{0,900}refreshScheduledTaskData\(20\)[\s\S]{0,320}loadScheduledTaskRecentRuns\(\)/.test(tauriBridge) &&
-    /async function init\(\)[\s\S]{0,1200}loadScheduledTasks\(\)\.catch/.test(tauriBridge),
+    /async function init\([^)]*\)[\s\S]{0,1200}loadScheduledTasks\(\)\.catch/.test(tauriBridge),
   'run updates should debounce a global task and run refresh regardless of the current page'
 );
 assert.ok(
@@ -287,8 +288,8 @@ assert.ok(
     /data-testid="scheduled-filter-tabs"/.test(indexHtml) &&
     /data-testid="scheduled-left-toolbar"/.test(indexHtml) &&
     /data-testid="scheduled-list-intro"/.test(indexHtml) &&
-    /\{renderTemplateSuggestions\(\)\}[\s\S]{0,120}<MyTasksSection className="mb-0" \/>/.test(indexHtml) &&
-    /const DetailTaskDialog = \(\) => !\(selected && detailForm\) \? null/.test(indexHtml) &&
+    /\{renderTemplateSuggestions\(\)\}[\s\S]{0,120}(?:<MyTasksSection className="mb-0" \/>|\{MyTasksSection\(\)\})/.test(indexHtml) &&
+    /const DetailTaskDialog = \(\) => (?:!\(selected && detailForm\) \? null|\(selected && detailForm\) \? renderModal\()/.test(indexHtml) &&
     /const renderModal = node => modalPortalTarget \? createPortal\(node, modalPortalTarget\) : node/.test(indexHtml) &&
     /DetailTaskDialog = \(\) => !\(selected && detailForm\) \? null : renderModal\(/.test(indexHtml) &&
     /role="dialog"/.test(indexHtml) &&

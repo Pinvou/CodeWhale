@@ -18,7 +18,8 @@ use super::protocol::LeaseContext;
 const SNAPSHOT_TTL_MS: u64 = 30_000;
 const MAX_DESCRIPTORS: usize = 256;
 const MAX_ID_CHARS: usize = 128;
-const MAX_DISPLAY_CHARS: usize = 160;
+// Frozen capability_snapshot wire grammar counts Unicode scalars, not bytes.
+pub(crate) const MAX_DISPLAY_CHARS: usize = 128;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct CapabilityError {
@@ -996,6 +997,52 @@ mod tests {
                 .code,
             "capability_snapshot_stale"
         );
+    }
+
+    #[test]
+    fn display_boundary_matches_the_frozen_wire_validator() {
+        use super::super::protocol::{
+            RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
+        };
+        for target in ["tool", "plain_skill", "code_skill", "workspace"] {
+            for length in [128, 129] {
+                let manager = CapabilitySnapshotManager::default();
+                let mut source = fixture_source();
+                let display = "界".repeat(length);
+                match target {
+                    "tool" => source.tools[0].display_name = display,
+                    "plain_skill" => source.plain_skills[0].display_name = display,
+                    "code_skill" => source.code_skills[0].display_name = display,
+                    _ => source.workspaces[0].display_name = display,
+                }
+                let result = manager.build(context("generation-0001"), source, 1_000);
+                if length == 129 {
+                    assert_eq!(result.unwrap_err().code, "capability_display_invalid");
+                    assert!(
+                        manager
+                            .current_for_context(&context("generation-0001"), 1_001)
+                            .is_err()
+                    );
+                } else {
+                    let snapshot = result.unwrap();
+                    let mut wire = manager.wire_capability_snapshot(&snapshot, "request-0001");
+                    wire["session_id"] = serde_json::json!("remote-ref-1");
+                    wire["controlled_session_id"] = serde_json::json!("b-session-1");
+                    validate_controller_runtime_payload_json(
+                        &wire.to_string(),
+                        SenderRole::ControlledB,
+                        Some(&RuntimeValidationContext {
+                            lease: Some(context("generation-0001")),
+                            negotiated_capabilities: vec![
+                                "encrypted_frames_v1".into(),
+                                "task_v1".into(),
+                            ],
+                        }),
+                    )
+                    .unwrap();
+                }
+            }
+        }
     }
 
     #[test]

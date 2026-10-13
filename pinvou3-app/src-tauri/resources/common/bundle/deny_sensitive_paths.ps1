@@ -10,6 +10,10 @@
 # pinvou3-app/src-tauri/src/features/assistant/safety_deny_rules.rs.
 # This script keeps only the connector introspection-correction segment
 # equivalent to deny_sensitive_paths.sh segment 5.
+# Registration matches only the two MCP introspection tools. This advisory
+# correction uses continue_on_error: true, so interpreter failures warn while
+# an explicit exit 2 still denies the mistaken introspection. Security decisions
+# remain in the execpolicy rule engine.
 $toolName = if ($env:DEEPSEEK_TOOL_NAME) { $env:DEEPSEEK_TOOL_NAME } else { "unknown" }
 $argsText = if ($env:DEEPSEEK_TOOL_ARGS) { $env:DEEPSEEK_TOOL_ARGS } else { "" }
 
@@ -27,13 +31,20 @@ $argsText = if ($env:DEEPSEEK_TOOL_ARGS) { $env:DEEPSEEK_TOOL_ARGS } else { "" }
 # so marketplace packages such as `wecom-bot` are not caught merely because an
 # ID or display name contains a skill-connector alias.
 if ($toolName -eq "list_mcp_resources" -or $toolName -eq "list_mcp_resource_templates") {
-    $skillConnectorNamePattern = '"(?:wecom|weixin|wework|feishu|lark|dingtalk|dingding|dws|tmeet|tencent[\s_\-]?meeting|企微|企业微信|微信|飞书|钉钉|腾讯会议)"'
+    # PowerShell -match is already case-insensitive, so capitalized echoes
+    # ("Feishu", "Wecom") hit too. Do NOT add scoped inline options like
+    # (?i:...): this script runs under Windows PowerShell 5.1 (.NET
+    # Framework), which rejects them ("Unrecognized grouping construct") and
+    # — under $ErrorActionPreference = "Stop" — dies before printing, so the
+    # correction never reaches the model on list_mcp_resources* calls.
+    # (The .sh twin lowercases the args instead.)
+    $skillConnectorNamePattern = '"(wecom|weixin|wework|feishu|lark|dingtalk|dingding|dws|tmeet|tencent[\s_\-]?meeting|企微|企业微信|微信|飞书|钉钉|腾讯会议)"'
     if ($argsText -match $skillConnectorNamePattern) {
-        $denyJson = '{"decision":"deny","reason":"该名称不是 MCP server（无 MCP schema），无法用 list_mcp_resources 自省。若它是技能型连接器，请用 load_skill 加载其对应技能后按技能说明使用。连接状态以工具面板为准，自省失败不代表未连接。"}'
+        $denyJson = '{"decision":"deny","reason":"该名称不是 MCP server（无 MCP schema），无法用 list_mcp_resources 或 list_mcp_resource_templates 自省。若它是技能型连接器，请用 load_skill 加载其对应技能后按技能说明使用。连接状态以工具面板为准，自省失败不代表未连接。"}'
         # 经标准输出流写 UTF-8 无 BOM：上游按 UTF-8 解码 stdout 且 serde_json 拒绝
         # BOM 前缀；PS 5.1 控制台默认 ANSI(GBK)，WriteLine 会把中文转成乱码。
         # 不设 [Console]::OutputEncoding：无控制台句柄的宿主里 setter 会抛，
-        # $ErrorActionPreference=Stop 下脚本退出 1 → 所有工具调用被 fail-closed。
+        # $ErrorActionPreference=Stop exits 1, dropping the correction feedback.
         $stdout = New-Object System.IO.StreamWriter([Console]::OpenStandardOutput(), (New-Object System.Text.UTF8Encoding($false)))
         $stdout.WriteLine($denyJson)
         $stdout.Flush()

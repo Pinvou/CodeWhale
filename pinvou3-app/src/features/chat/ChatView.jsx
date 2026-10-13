@@ -20,16 +20,24 @@ import { PinvouLogo } from '../../components/PinvouLogo.jsx';
 import { ViewErrorBoundary } from '../../shared/ViewErrorBoundary.jsx';
 import { ArtifactCard } from '../tools/tool-common.jsx';
 import { RightDockPanel, useRightDockOcclusion } from '../../components/layout/RightDock.jsx';
-import { CarefulBlockedCard, PlanCard, PlanStuckCard, ToolCard, UserInputCard, cardBtnCls } from '../tools/tool-renderers.jsx';
+import { CarefulBlockedCard, PlanCard, PlanStuckCard, ToolCard, UserInputCard } from '../tools/tool-renderers.jsx';
+import { cardBtnCls } from '../../shared/card-buttons.mjs';
 import { annotateAgentSpawnGroups } from '../multiagent/spawn-aggregation.mjs';
 import { RunningAgentsOverlay } from '../multiagent/RunningAgentsOverlay.jsx';
 import { ComputerUseBanner, ComputerUseDialogs } from '../computer-use/ComputerUseConsent.jsx';
 import {
   ConversationActivityIndicator,
   ConversationTimeline,
-  useConversationSecondClock,
 } from '../conversation/ConversationTimeline.jsx';
+import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
 import { AuxQuoteSelection } from '../aux-chat/AuxQuoteSelection.jsx';
+import {
+  codeBlockCopyLabels,
+  copyCodeBlockFromButton,
+  ensureCodeCopyButtons,
+  findCodeCopyButton,
+  observeCodeCopyButtons,
+} from '../conversation/code-block-copy.js';
 import { HomeModeSwitcher } from '../conversation/HomeModeSwitcher.jsx';
 import {
   conversationItemsForMode,
@@ -58,7 +66,7 @@ import { formatAttachmentLimitError } from '../attachments/attachment-limit-erro
 import { ComposerAttachmentDropOverlay } from '../attachments/ComposerAttachmentDropOverlay.jsx';
 import { ConversationAttachmentBubble } from '../attachments/ConversationAttachmentBubble.jsx';
 import { splitAttachmentLine } from '../attachments/attachment-message.js';
-import { CHAT_INPUT_MAX_LENGTH, constrainChatInput } from './chat-input-limit.js';
+import { CHAT_INPUT_MAX_LENGTH, constrainChatInput } from '../../shared/chat-input-limit.js';
 import {
   controlledTaskChatItems as projectControlledTaskChatItems,
   mergeControlledTaskChatItems,
@@ -94,7 +102,7 @@ import {
   remoteDispatchCases,
 } from '../remote-control/remote-dispatch-ui.mjs';
 import {
-  isControlledDeviceChatActive,
+  isControlledSessionChatActive,
   isTaskTerminal,
   taskStatusKey,
 } from '../remote-control/remote-control-logic.mjs';
@@ -215,20 +223,20 @@ import { createVisualPosterMessageMeta, shouldUseVisualPosterScene } from './vis
 import {
   createDataVisualizationMessageMeta,
   createDocumentWritingMessageMeta,
-  createPersonalWorkbenchMessageMeta,
   createPptDesignMessageMeta,
-  PERSONAL_WORKBENCH_SCENE_KEY,
   shouldUseDataVisualizationScene,
   shouldUseDocumentWritingScene,
-  shouldUsePersonalWorkbenchScene,
   shouldUsePptDesignScene,
 } from './work-scene-routes.js';
 import {
+  createPersonalWorkbenchMessageMeta,
+  PERSONAL_WORKBENCH_SCENE_KEY,
   PERSONAL_WORKBENCH_TEMPLATES,
   findPersonalWorkbenchTemplateDraft,
   getPersonalWorkbenchTemplate,
   getPersonalWorkbenchTemplateById,
   isPersonalWorkbenchTemplateDraftForTemplate,
+  shouldUsePersonalWorkbenchScene,
 } from './personal-workbench-scene.js';
 import { canPrepareSceneCapabilities, prepareSceneCapabilities, requiredCapabilitiesForMeta } from './scene-capabilities.js';
 import { consumeWelcomeOptIn, resolveSendCapabilityStatus, runSharedWelcomeOptIn } from './welcome-optin.js';
@@ -860,8 +868,10 @@ const openChatExternalUrl = (url) => {
       const remoteProxyHistory = remoteProxyForSession(activeSessionId, bs?.remoteProxyHistory);
       const remoteChatActive = !!remoteProxyHistory;
       const controlledDevice = (bs && bs.controlledDevice) || {};
-      const controlledChatActive = isControlledDeviceChatActive(controlledDevice);
       const controlledSession = (bs && bs.controlledSession) || {};
+      const controlledChatActive = isControlledSessionChatActive(
+        controlledDevice, controlledSession, activeSessionId,
+      );
       const [remoteCapabilityBusy, setRemoteCapabilityBusy] = useState(false);
       const [remoteCapabilityError, setRemoteCapabilityError] = useState(null);
       const remoteCapabilityRequesterRef = useRef(null);
@@ -3691,7 +3701,7 @@ const openChatExternalUrl = (url) => {
                     {scopedRemoteConnection?.sessionRef
                       ? (effectiveRemoteModelSource === 'controller_temporary'
                         ? t.remoteConversation.modelSourceMine
-                        : t.controllerConnection.modelSourceDevice)
+                        : t.remoteConversation.modelSourceDevice)
                       : t.controllerConnection.remoteSessionPreparing}
                   </span>
                 </div>
@@ -5288,6 +5298,21 @@ const openChatExternalUrl = (url) => {
       // markdown(见下),订阅版本号让注册后本组件重渲染,历史消息恢复高亮。
       const syntaxVersion = useSyncExternalStore(subscribeSyntaxHighlight, getSyntaxHighlightVersion);
       void syntaxVersion;
+      // 代码块一键复制:assistant 气泡经 dangerouslySetInnerHTML 注入,按钮只能在
+      // 提交后补挂。目标 div 在流式首帧(item.streaming && !item.html)时不渲染,
+      // ref 可能为 null,因此不设 deps:每次渲染后重跑,目标挂载后的下一次渲染即
+      // 接上;ensureCodeCopyButtons 幂等(流式/重渲染会整体替换内部 DOM,新块自动
+      // 补装)。观察器与 ensure 同 effect:innerHTML 可能在 effect 不再触发时被整体
+      // 替换(冷启动懒注册重提交等),MutationObserver 自愈补装;重渲染时清理函数先
+      // 断开旧观察器再重挂,卸载时断开。
+      useEffect(() => {
+        if (item.type !== 'assistant') return;
+        const target = assistantSelectionTargetRef.current;
+        if (!target) return;
+        const labels = codeBlockCopyLabels(t.uiConversation);
+        ensureCodeCopyButtons(target, labels);
+        return observeCodeCopyButtons(target, labels);
+      });
 
       if (item.remoteProxy && item.type === 'system') {
         const copy = t.remoteConversation;
@@ -5363,6 +5388,12 @@ const openChatExternalUrl = (url) => {
                 ref={assistantSelectionTargetRef}
                 className={`msg-md text-[15px] leading-relaxed ${item.streaming ? 'streaming-cursor' : ''} ${'text-[#1F1F1F] dark:text-[#E3E3E3]'}`}
                 onClick={(e) => {
+                  const copyButton = findCodeCopyButton(e.target);
+                  if (copyButton) {
+                    e.preventDefault();
+                    copyCodeBlockFromButton(copyButton, { labels: codeBlockCopyLabels(t.uiConversation) });
+                    return;
+                  }
                   // 聊天里的链接(如飞书授权 URL)点击 → 走系统浏览器,别导航主窗口/不可点。
                   const a = e.target && e.target.closest && e.target.closest('a[href]');
                   if (!a) return;

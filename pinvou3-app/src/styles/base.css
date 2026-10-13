@@ -238,6 +238,83 @@
       letter-spacing:.02em;
       user-select:none;
     }
+    /* 语言条右侧为复制按钮预留空间,长语言标签不滑入按钮下方。该预留同样作用于复用
+       .msg-md 的 FilePreviewModal/EditableMarkdownPreview 预览(不装按钮,仅接受右侧
+       留白,视觉影响可忽略);persona-body 无按钮,不动。 */
+    .msg-md pre.pinvou-code-block::before,
+    .codex-markdown pre.pinvou-code-block::before {
+      padding-right:2.8rem;
+    }
+    /* 代码块右上角的一键复制按钮:悬停代码块或按钮聚焦时显现,复制反馈期间保持可见。
+       按钮挂在 pre 内随横向滚动平移——与上方语言条 ::before 同一 containing block
+       的既有行为,保持一致。 */
+    .msg-md pre.pinvou-code-block .pinvou-code-copy-btn,
+    .codex-markdown pre.pinvou-code-block .pinvou-code-copy-btn {
+      position:absolute;
+      top:0;
+      right:.3rem;
+      height:1.85rem;
+      box-sizing:border-box;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      padding:0 .3rem;
+      border:none;
+      border-radius:4px;
+      background:transparent;
+      color:var(--pinvou-code-label, #6E7781);
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      cursor:pointer;
+      opacity:0;
+      transition:opacity .15s ease, background-color .15s ease;
+    }
+    .msg-md pre.pinvou-code-block:hover .pinvou-code-copy-btn,
+    .msg-md pre.pinvou-code-block:focus-within .pinvou-code-copy-btn,
+    .codex-markdown pre.pinvou-code-block:hover .pinvou-code-copy-btn,
+    .codex-markdown pre.pinvou-code-block:focus-within .pinvou-code-copy-btn,
+    .msg-md pre.pinvou-code-block .pinvou-code-copy-btn.is-copied,
+    .msg-md pre.pinvou-code-block .pinvou-code-copy-btn.is-failed,
+    .codex-markdown pre.pinvou-code-block .pinvou-code-copy-btn.is-copied,
+    .codex-markdown pre.pinvou-code-block .pinvou-code-copy-btn.is-failed {
+      opacity:1;
+    }
+    .msg-md pre.pinvou-code-block .pinvou-code-copy-btn:hover,
+    .codex-markdown pre.pinvou-code-block .pinvou-code-copy-btn:hover {
+      background:var(--pinvou-code-divider, rgba(128,128,128,.16));
+    }
+    /* 键盘焦点环:负 offset 防止被 pre 的圆角滚动容器裁剪(与图标按钮焦点环惯例一致)。 */
+    .msg-md pre.pinvou-code-block .pinvou-code-copy-btn:focus-visible,
+    .codex-markdown pre.pinvou-code-block .pinvou-code-copy-btn:focus-visible {
+      outline:2px solid rgba(10,132,255,.6);
+      outline-offset:-2px;
+    }
+    /* 状态类与基础规则同样限定在实际装按钮的容器:接入面由 ensureCodeCopyButtons
+       全量摘除伪造元素的类名(不限标签);复用 .msg-md 的文件预览等未接入面,伪造
+       元素至多获得外观(动作通道由 expando 校验把守,不可点)。 */
+    .msg-md pre.pinvou-code-block .pinvou-code-copy-btn.is-copied,
+    .codex-markdown pre.pinvou-code-block .pinvou-code-copy-btn.is-copied {
+      color:var(--pinvou-hl-addition, #1A7F37);
+    }
+    .msg-md pre.pinvou-code-block .pinvou-code-copy-btn.is-failed,
+    .codex-markdown pre.pinvou-code-block .pinvou-code-copy-btn.is-failed {
+      color:var(--pinvou-hl-deletion, #CF222E);
+    }
+    /* 复制反馈的屏幕阅读器通道:视觉隐藏,仅供 aria-live 播报(sr-only 惯例写法);
+       user-select:none 防反馈文本混入用户的代码选择(同语言条 ::before 的防护)。
+       与按钮规则同范围收敛:未接入 ensureCodeCopyButtons 的渲染面不适用。 */
+    .msg-md pre.pinvou-code-block .pinvou-code-copy-live,
+    .codex-markdown pre.pinvou-code-block .pinvou-code-copy-live {
+      position:absolute;
+      width:1px;
+      height:1px;
+      padding:0;
+      margin:-1px;
+      overflow:hidden;
+      clip-path:inset(50%);
+      white-space:nowrap;
+      border:0;
+      user-select:none;
+    }
     .pinvou-code-block .hljs-comment,.pinvou-code-block .hljs-quote { color:var(--pinvou-hl-comment, #6E7781); font-style:italic; }
     .pinvou-code-block .hljs-keyword,.pinvou-code-block .hljs-selector-tag,.pinvou-code-block .hljs-literal,.pinvou-code-block .hljs-section,.pinvou-code-block .hljs-link { color:var(--pinvou-hl-keyword, #CF222E); }
     .pinvou-code-block .hljs-title,.pinvou-code-block .hljs-title.class_,.pinvou-code-block .hljs-title.function_,.pinvou-code-block .hljs-name,.pinvou-code-block .hljs-type { color:var(--pinvou-hl-title, #8250DF); }
@@ -428,8 +505,6 @@
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
     .streaming-cursor::after { content:"▊"; animation:blink 1s step-end infinite; margin-left:2px; }
 
-    /* Thinking animation */
-    @keyframes spin-braille { 0%{content:"⠋"} 10%{content:"⠙"} 20%{content:"⠹"} 30%{content:"⠸"} 40%{content:"⠼"} 50%{content:"⠴"} 60%{content:"⠦"} 70%{content:"⠧"} 80%{content:"⠇"} 90%{content:"⠏"} }
     /* Tool Store */
     .no-scrollbar::-webkit-scrollbar { display: none; }
     .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -456,31 +531,11 @@
       .voice-pill-live::after { animation:none; content:none; }
     }
 
-    /* ===== 卡片池: tilt / spotlight / borderglow / 挂件 ===== */
-    .ap-card { transform-style: preserve-3d; transition: transform .18s cubic-bezier(.2,.8,.2,1), box-shadow .25s, border-color .25s; will-change: transform; position: relative; }
-    /* 鼠标跟随高光(--mx/--my 由 JS 注入) */
-    .ap-card::before {
-      content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none; opacity:0;
-      transition:opacity .25s; z-index:1;
-      background: radial-gradient(380px circle at var(--mx,50%) var(--my,50%), rgba(255,255,255,.10), transparent 42%);
-    }
-    .ap-card:hover::before { opacity:1; }
-    .ap-card > * { position:relative; z-index:2; }
-    /* A 档金色 spotlight 额外柔光 */
-    .ap-card.tier-A:hover { box-shadow: 0 0 0 1px rgba(255,191,0,.35), 0 14px 40px -12px rgba(255,191,0,.30); }
-    /* 已加持: 金色流转边框 */
-    @keyframes ap-borderglow { 0%{box-shadow:0 0 0 1px rgba(255,170,0,.9),0 0 18px -2px rgba(255,170,0,.55)} 50%{box-shadow:0 0 0 1px rgba(255,210,80,1),0 0 26px 0 rgba(255,190,40,.75)} 100%{box-shadow:0 0 0 1px rgba(255,170,0,.9),0 0 18px -2px rgba(255,170,0,.55)} }
-    .ap-card.equipped { border-color: rgba(255,180,30,.95) !important; animation: ap-borderglow 2.4s ease-in-out infinite; }
-    /* 挂件(lanyard) 入场 + 悬挂摆动 */
-    @keyframes lanyard-drop { 0%{ transform: translateY(-120%) rotate(-3deg); opacity:0 } 60%{ transform: translateY(6%) rotate(1.5deg) } 100%{ transform: translateY(0) rotate(0); opacity:1 } }
-    @keyframes lanyard-sway { 0%,100%{ transform: rotate(-1.3deg) } 50%{ transform: rotate(1.3deg) } }
     /* AI 造卡 banner 头像浮动 */
     @keyframes bnrFloat1 { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
     @keyframes bnrFloat2 { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
     @keyframes bnrFloat3 { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-5px)} }
     @media (max-width: 760px){ .bnr-avatars { display: none; } }
-    .lanyard-wrap { animation: lanyard-drop .55s cubic-bezier(.2,.9,.3,1.2) both; transform-origin: top center; }
-    .lanyard-card { animation: lanyard-sway 4.5s ease-in-out infinite; transform-origin: top center; }
     /* 详情 modal 里的完整人设正文(markdown) prose 排版 */
     .persona-body h1, .persona-body h2, .persona-body h3 { font-weight:600; margin:.9em 0 .35em; line-height:1.3; }
     .persona-body h1 { font-size:1.15em; } .persona-body h2 { font-size:1.06em; } .persona-body h3 { font-size:1em; }
