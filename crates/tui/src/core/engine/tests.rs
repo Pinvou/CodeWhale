@@ -4952,6 +4952,17 @@ fn policy_for_catalog(
     )
 }
 
+/// Permissive turn policy for `process_tool_results` tests: no allow/deny
+/// gates, so the mid-turn MCP refresh narrows nothing away.
+fn permissive_turn_policy() -> ToolSurfacePolicy {
+    policy_for_catalog(
+        vec![],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    )
+}
+
 #[test]
 fn tool_catalog_scenario() {
     // Scenario consolidation of: tool_catalog_filter_applies_allow_and_deny_gates, tool_catalog_filter_is_inert_without_gates
@@ -9168,8 +9179,10 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
     let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["exec_shell", "mcp_static_read", "mcp_dynamic_render"],
-        "the synthetic authenticate tool leaves after its own login; engine tools stay"
+        vec!["mcp_static_read", "exec_shell", "mcp_dynamic_render"],
+        "the synthetic authenticate tool leaves after its own login; the replaced \
+         entry keeps its own slot, the engine tool never moves, and the new \
+         arrival appends at the end"
     );
     let static_read = catalog
         .iter()
@@ -9240,6 +9253,65 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
     assert!(
         active.contains("mcp_static_read"),
         "a still-activated deferred tool stays on the wire: {active:?}"
+    );
+
+    // A replacement splices back into its own slot: entries after the pool
+    // slice never move, so a same-name refresh reorders nothing (the cached
+    // request prefix survives even when a count-keyed declaration would
+    // have called the refresh a no-op).
+    let mut catalog = vec![api_tool("mcp_static_read"), api_tool("exec_shell")];
+    let mut active = HashSet::new();
+    let universe: HashSet<String> = ["mcp_static_read"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let wire_changed = replace_runtime_mcp_tools(
+        &mut catalog,
+        &mut active,
+        &universe,
+        vec![api_tool("mcp_static_read")],
+        &cache,
+    );
+    let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["mcp_static_read", "exec_shell"],
+        "a replaced entry keeps its slot; later entries never relocate"
+    );
+    assert!(
+        !wire_changed,
+        "a same-name refresh that changes no wire-visible name is no drift"
+    );
+
+    // A 1:1 identity change (a server-side rename) keeps the catalog count
+    // but changes the wire: the old active name leaves, the eager new name
+    // joins. The declaration must key on that wire change, not on the
+    // count, or the C5 guard would see undeclared drift.
+    let mut deferred = api_tool("mcp_old_name");
+    deferred.defer_loading = Some(true);
+    let mut cache = crate::core::session::ToolActivationCache::default();
+    cache.activate(&[deferred.clone()], &["mcp_old_name".to_string()]);
+    let mut catalog = vec![api_tool("exec_shell"), deferred];
+    let mut active: HashSet<String> = ["exec_shell".to_string(), "mcp_old_name".to_string()]
+        .into_iter()
+        .collect();
+    let universe: HashSet<String> = ["mcp_old_name".to_string(), "mcp_new_name".to_string()]
+        .into_iter()
+        .collect();
+    let wire_changed = replace_runtime_mcp_tools(
+        &mut catalog,
+        &mut active,
+        &universe,
+        vec![api_tool("mcp_new_name")],
+        &cache,
+    );
+    assert!(
+        wire_changed,
+        "a rename that swaps a wire-visible name must be declared: {active:?}"
+    );
+    assert!(
+        !active.contains("mcp_old_name") && active.contains("mcp_new_name"),
+        "the renamed surface must be reflected in the active set: {active:?}"
     );
 }
 
@@ -27395,6 +27467,7 @@ async fn hydration_eviction_note_rides_the_batch_first_result() {
             &mut catalog,
             &mut active,
             &HashMap::new(),
+            &permissive_turn_policy(),
         )
         .await;
 
@@ -27438,6 +27511,7 @@ async fn hydration_eviction_note_survives_a_leading_error_result() {
             &mut catalog,
             &mut active,
             &HashMap::new(),
+            &permissive_turn_policy(),
         )
         .await;
 
@@ -27487,6 +27561,7 @@ async fn retrieval_admission_eviction_note_rides_the_triggering_result() {
             &mut live_catalog,
             &mut active,
             &HashMap::new(),
+            &permissive_turn_policy(),
         )
         .await;
 
@@ -27538,6 +27613,7 @@ async fn execution_refresh_eviction_note_rides_the_refreshed_result() {
             &mut grown_catalog,
             &mut active,
             &HashMap::new(),
+            &permissive_turn_policy(),
         )
         .await;
 
@@ -27637,9 +27713,18 @@ async fn step_note_names_a_victim_the_refresh_cannot_resurrect() {
             &mut grown_catalog,
             &mut active,
             &HashMap::new(),
+            &permissive_turn_policy(),
         )
         .await;
 
+    // Premise: the refresh must have actually replaced the pool slice —
+    // otherwise "nothing resurrects the victim" would hold vacuously.
+    assert!(
+        grown_catalog
+            .iter()
+            .any(|tool| tool.name == "mcp_probe_authenticate"),
+        "premise: the refresh must have swapped the pool's slice in"
+    );
     assert!(
         !engine
             .session
@@ -27761,8 +27846,18 @@ async fn refresh_between_outcomes_cannot_resurrect_an_evicted_tool() {
             &mut grown_catalog,
             &mut active,
             &HashMap::new(),
+            &permissive_turn_policy(),
         )
         .await;
+
+    // Premise: the refresh must have actually replaced the pool slice —
+    // otherwise "nothing resurrects the victim" would hold vacuously.
+    assert!(
+        grown_catalog
+            .iter()
+            .any(|tool| tool.name == "mcp_probe_authenticate"),
+        "premise: the refresh must have swapped the pool's slice in"
+    );
 
     let filler = recorded_tool_result_content(&engine, "call-filler");
     assert!(
@@ -27780,6 +27875,99 @@ async fn refresh_between_outcomes_cannot_resurrect_an_evicted_tool() {
             .names()
             .any(|name| name == victim),
         "the victim stays unactivated: a search re-activates it"
+    );
+}
+
+/// The mid-turn refresh must apply the same allow/deny narrowing the turn
+/// build ran over its catalog: a tool the build stripped must not re-enter
+/// the catalog and the active set on a `mcp_catalog_changed` outcome, or a
+/// live 401 (or a completed login) would defeat the denied-name
+/// concealment. Both refresh paths delegate to the same
+/// `ToolSurfacePolicy::allows_tool` spelling; deleting the filter here
+/// turns this pin red.
+#[tokio::test]
+async fn mid_turn_refresh_honors_the_turn_policy() {
+    use crate::mcp::{McpConfig, McpPool};
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    let mut config = McpConfig::default();
+    config.servers.insert(
+        "probe".to_string(),
+        crate::mcp::McpServerConfig {
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            url: Some("https://probe.example.test/mcp".to_string()),
+            transport: None,
+            connect_timeout: None,
+            execute_timeout: None,
+            read_timeout: None,
+            disabled: false,
+            enabled: true,
+            required: false,
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            headers: HashMap::new(),
+            env_headers: HashMap::new(),
+            bearer_token_env_var: None,
+            scopes: Vec::new(),
+            oauth: None,
+            oauth_resource: None,
+            reviewed_plugin: None,
+        },
+    );
+    let mut pool = McpPool::new(config);
+    pool.note_connect_failure("probe", &anyhow::Error::msg("HTTP 401 unauthorized"));
+    engine.mcp_pool = Some(Arc::new(AsyncMutex::new(pool)));
+
+    // Premise: the needs-auth pool's refreshed list serves the synthetic
+    // authenticate tool, so the denial below has something to deny.
+    {
+        let pool = engine.mcp_pool.as_ref().expect("pool").lock().await;
+        assert!(
+            pool.to_api_tools()
+                .iter()
+                .any(|tool| tool.name == "mcp_probe_authenticate"),
+            "premise: the needs-auth pool must serve the synthetic login tool"
+        );
+    }
+
+    let policy = policy_for_catalog(
+        vec![],
+        None,
+        Some(vec!["mcp_probe_authenticate".to_string()]),
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut catalog = Vec::new();
+    let mut active = HashSet::new();
+    engine
+        .process_tool_results(
+            vec![Some(synthetic_toolbox_outcome(
+                "call-auth",
+                "unrelated",
+                Ok(ToolResult::success("payload").with_metadata(json!({
+                    "mcp_catalog_changed": true,
+                }))),
+            ))],
+            &mut catalog,
+            &mut active,
+            &HashMap::new(),
+            &policy,
+        )
+        .await;
+
+    assert!(
+        !catalog
+            .iter()
+            .any(|tool| tool.name == "mcp_probe_authenticate"),
+        "a build-stripped name must not re-enter the catalog on a refresh: {catalog:?}"
+    );
+    assert!(
+        !active.contains("mcp_probe_authenticate"),
+        "a build-stripped name must not re-enter the active set on a refresh: {active:?}"
     );
 }
 
@@ -27974,6 +28162,7 @@ async fn turn_start_note_does_not_name_a_tool_the_result_re_admits() {
             &mut surface_catalog,
             &mut active,
             &HashMap::new(),
+            &permissive_turn_policy(),
         )
         .await;
 
@@ -28178,6 +28367,7 @@ async fn refusal_audit_payload_carries_the_executed_marker() {
             &mut catalog.clone(),
             &mut active,
             &HashMap::new(),
+            &permissive_turn_policy(),
         )
         .await;
 
@@ -28443,7 +28633,13 @@ async fn toolbox_note_survives_a_batch_without_results() {
     let mut catalog = Vec::new();
     let mut active = HashSet::new();
     engine
-        .process_tool_results(vec![None, None], &mut catalog, &mut active, &HashMap::new())
+        .process_tool_results(
+            vec![None, None],
+            &mut catalog,
+            &mut active,
+            &HashMap::new(),
+            &permissive_turn_policy(),
+        )
         .await;
 
     let notes = &engine.session.pending_toolbox_eviction_notes;

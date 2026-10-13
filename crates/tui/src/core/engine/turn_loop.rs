@@ -1054,37 +1054,77 @@ fn registered_tool_requires_non_bypassable_approval(tool_name: &str) -> bool {
 /// entry eager, so each replaced tool also carries its prior deferral
 /// marking across the refresh: adopting the pool's flag would flip deferred
 /// tools back onto the head of the wire list and bust the cached prefix.
+/// A name the conversation has never seen (the synthetic login tool a
+/// mid-turn 401 just started offering, or a server-side rename) arrives
+/// with the pool's eager flag and joins the active set: the 401 result's
+/// auth hint points straight at that tool, so deferring it would strand
+/// the recovery path behind a search. Replaced entries are spliced back
+/// into their own catalog slot, so a refresh that serves the same names
+/// reorders nothing and the caller's declaration (this return value: did
+/// the model-visible wire list change?) stays false — a same-count
+/// refresh moves no wire bytes and must not trip the C5 undeclared-drift
+/// guard as a false positive.
 pub(super) fn replace_runtime_mcp_tools(
     tool_catalog: &mut Vec<Tool>,
     active_tool_names: &mut std::collections::HashSet<String>,
     universe: &std::collections::HashSet<String>,
     refreshed: Vec<Tool>,
     activation_cache: &crate::core::session::ToolActivationCache,
-) -> usize {
+) -> bool {
     let previous_deferral: std::collections::HashMap<String, bool> = tool_catalog
         .iter()
         .filter(|tool| universe.contains(&tool.name))
         .map(|tool| (tool.name.clone(), tool.defer_loading.unwrap_or(false)))
         .collect();
-    let before = tool_catalog.len();
-    tool_catalog.retain(|tool| {
-        let owned = universe.contains(&tool.name);
-        if owned {
-            active_tool_names.remove(&tool.name);
+    // The wire list is the eager head plus the activated deferred tail;
+    // that identity — not the catalog's length — is what a declared re-pin
+    // answers for.
+    let wire_before = wire_visible_tool_names(tool_catalog, active_tool_names);
+    let mut slot_by_name: std::collections::HashMap<String, usize> = tool_catalog
+        .iter()
+        .enumerate()
+        .filter(|(_, tool)| universe.contains(&tool.name))
+        .map(|(i, tool)| (tool.name.clone(), i))
+        .collect();
+    let mut arrivals: Vec<Tool> = Vec::new();
+    for mut tool in refreshed {
+        if let Some(was_deferred) = previous_deferral.get(&tool.name) {
+            tool.defer_loading = Some(*was_deferred);
         }
-        !owned
-    });
-    for tool in refreshed {
-        let mut tool = tool;
-        if let Some(was_eager) = previous_deferral.get(&tool.name) {
-            tool.defer_loading = Some(*was_eager);
+        let name = tool.name.clone();
+        let re_advertise = !tool.defer_loading.unwrap_or(false) || activation_cache.contains(&name);
+        active_tool_names.remove(&name);
+        match slot_by_name.remove(&name) {
+            Some(slot) => tool_catalog[slot] = tool,
+            None => arrivals.push(tool),
         }
-        if !tool.defer_loading.unwrap_or(false) || activation_cache.contains(&tool.name) {
-            active_tool_names.insert(tool.name.clone());
+        if re_advertise {
+            active_tool_names.insert(name);
         }
-        tool_catalog.push(tool);
     }
-    tool_catalog.len().abs_diff(before)
+    // Names the refreshed list stopped serving leave the catalog and the
+    // active set; the refreshed list is the pool's truth about its slice.
+    let departed: Vec<String> = slot_by_name.into_keys().collect();
+    for name in &departed {
+        active_tool_names.remove(name);
+    }
+    tool_catalog.retain(|tool| !departed.contains(&tool.name));
+    tool_catalog.extend(arrivals);
+    wire_visible_tool_names(tool_catalog, active_tool_names) != wire_before
+}
+
+/// Every name the next request would serialize: the eager head plus the
+/// activated deferred tail.
+fn wire_visible_tool_names(
+    tool_catalog: &[Tool],
+    active_tool_names: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    tool_catalog
+        .iter()
+        .filter(|tool| !tool.defer_loading.unwrap_or(false))
+        .map(|tool| tool.name.clone())
+        .chain(active_tool_names.iter().cloned())
+        .collect()
 }
 
 impl Engine {
@@ -3387,6 +3427,7 @@ impl Engine {
                 &mut tool_catalog,
                 &mut active_tool_names,
                 &hook_contexts,
+                &tool_policy,
             )
             .await;
 
@@ -5069,6 +5110,7 @@ impl Engine {
         tool_catalog: &mut Vec<crate::models::Tool>,
         active_tool_names: &mut std::collections::HashSet<String>,
         hook_contexts: &std::collections::HashMap<String, String>,
+        tool_policy: &ToolSurfacePolicy,
     ) {
         let active_tool_names_before = active_tool_names.clone();
         let tool_catalog_len_before = tool_catalog.len();
@@ -5128,7 +5170,27 @@ impl Engine {
                     if mcp_catalog_changed && let Some(pool) = self.mcp_pool.as_ref().cloned() {
                         let (universe, refreshed) = {
                             let pool = pool.lock().await;
-                            (pool.model_tool_names(), pool.to_api_tools())
+                            let (universe, refreshed) =
+                                (pool.model_tool_names(), pool.to_api_tools());
+                            // Same allow/deny narrowing the turn build ran
+                            // over its catalog: a tool the build stripped
+                            // must not re-enter mid-turn, where a
+                            // `tool_search` hit would defeat the denied-name
+                            // concealment and a declared activation would
+                            // serialize an operator-excluded schema into the
+                            // request. Mirror of the boot-window refresh's
+                            // gate; both delegate to the same
+                            // `ToolSurfacePolicy::allows_tool` spelling.
+                            (
+                                universe
+                                    .into_iter()
+                                    .filter(|name| tool_policy.allows_tool(name))
+                                    .collect(),
+                                refreshed
+                                    .into_iter()
+                                    .filter(|tool| tool_policy.allows_tool(&tool.name))
+                                    .collect(),
+                            )
                         };
                         tool_surface_changed |= replace_runtime_mcp_tools(
                             tool_catalog,
@@ -5136,7 +5198,7 @@ impl Engine {
                             &universe,
                             refreshed,
                             &self.session.tool_activation_cache,
-                        ) > 0;
+                        );
                     }
                     // Any of the legitimate mid-turn tool-surface changes above
                     // re-pin the header under a declared `change:tool_surface`
