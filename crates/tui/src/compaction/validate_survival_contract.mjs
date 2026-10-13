@@ -2,6 +2,12 @@
 // Language-invariant coverage floor for the compaction survival contract.
 // Later TypeScript strategies should keep this check; Rust remains the B1
 // enforcement path. Run: node validate_survival_contract.mjs
+//
+// Checkpoint recognition mirrors the Rust `CheckpointEra` (see
+// `history_recognition.rs`): a history that carries a provenance-stamped
+// carrier is read post-provenance, where only the stamped two-block form is
+// a checkpoint and a user turn pasting the bare summary header is content;
+// a history without one keeps the loose single-block reading.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -11,6 +17,7 @@ const MARKERS = [
   "Another language model started to solve this problem",
   "Conversation Summary (Auto-Generated)",
 ];
+const PROVENANCE_STAMP = "<!-- codewhale.compaction-checkpoint.v1 -->";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const matrix = JSON.parse(
@@ -27,18 +34,51 @@ function userTextOf(message) {
   return text || null;
 }
 
-function isCheckpoint(message) {
-  const text = userTextOf(message);
-  return Boolean(text && MARKERS.some((marker) => text.includes(marker)));
+// Structural match of the Rust `is_compaction_checkpoint_message`: a user
+// message whose first block is a text block beginning with a summary header
+// and whose remaining blocks are either empty or exactly the engine-written
+// provenance marker.
+function isLooseCheckpoint(message) {
+  if (message.role !== "user") return false;
+  const content = message.content ?? [];
+  const [first, ...rest] = content;
+  if (!first || first.type !== "text" || first.cache_control != null) {
+    return false;
+  }
+  if (!MARKERS.some((marker) => first.text.startsWith(marker))) return false;
+  if (rest.length === 0) return true;
+  return (
+    rest.length === 1 &&
+    rest[0].type === "text" &&
+    rest[0].cache_control == null &&
+    rest[0].text === PROVENANCE_STAMP
+  );
 }
 
-function isPlainUserText(message) {
-  return !isCheckpoint(message) && Boolean(userTextOf(message));
+// The provenance-stamped form — exactly [text header, text stamp]. Typed
+// input cannot produce it; the engine's `compaction_checkpoint_message` is
+// the only writer.
+function isStampedCheckpoint(message) {
+  if (!isLooseCheckpoint(message)) return false;
+  const content = message.content ?? [];
+  return content.length === 2 && content[1].text === PROVENANCE_STAMP;
 }
 
-function lastPlainUserIndex(messages, end) {
+function eraOf(messages) {
+  return { postProvenance: messages.some(isStampedCheckpoint) };
+}
+
+function isCheckpoint(message, era) {
+  return era.postProvenance ? isStampedCheckpoint(message) : isLooseCheckpoint(message);
+}
+
+function isPlainUserText(message, era) {
+  return !isCheckpoint(message, era) && Boolean(userTextOf(message));
+}
+
+function lastPlainUserIndex(messages, end, era) {
   for (let idx = end - 1; idx >= 0; idx -= 1) {
-    if (isPlainUserText(messages[idx])) return idx;
+    if (isPlainUserText(messages[idx], era)) return idx;
   }
   return null;
 }
@@ -50,12 +90,13 @@ function sliceHasToolResult(messages, start) {
 }
 
 export function lastRoundStart(messages) {
-  const lastUser = lastPlainUserIndex(messages, messages.length);
+  const era = eraOf(messages);
+  const lastUser = lastPlainUserIndex(messages, messages.length, era);
   if (lastUser === null) return 0;
   if (sliceHasToolResult(messages, lastUser)) return lastUser;
   let candidate = lastUser;
   for (;;) {
-    const prev = lastPlainUserIndex(messages, candidate);
+    const prev = lastPlainUserIndex(messages, candidate, era);
     if (prev === null) return lastUser;
     if (sliceHasToolResult(messages, prev)) return prev;
     candidate = prev;
@@ -101,12 +142,18 @@ function survives(text, replacement, of) {
 }
 
 export function validateSurvivalContract(original, replacement, anchors) {
+  const era = eraOf(original);
   const start = lastRoundStart(original);
   const lastRound = original.slice(start);
-  // Every user turn in the round, not the first one `find` reaches: the round
-  // spans a tool-bearing turn plus the toolless tail after it, so checking one
-  // let a rewrite drop the latest turn.
-  for (const text of lastRound.map(userTextOf).filter(Boolean)) {
+  // Every plain user turn in the round, not the first one `find` reaches: the
+  // round spans a tool-bearing turn plus the toolless tail after it, so
+  // checking one let a rewrite drop the latest turn. Era-aware: in a
+  // post-provenance history the pasted-header turn is plain user text and
+  // must survive; the stamped carrier is not.
+  for (const text of lastRound
+    .filter((message) => isPlainUserText(message, era))
+    .map(userTextOf)
+    .filter(Boolean)) {
     if (!survives(text, replacement, userTextOf)) {
       return "a last-round user message was dropped";
     }
@@ -146,7 +193,16 @@ export function validateSurvivalContract(original, replacement, anchors) {
   ) {
     return "last-round assistant output was dropped";
   }
-  const checkpoints = replacement.filter(isCheckpoint).length;
+  // The receipt count reads the replacement in its own era — except that a
+  // post-provenance original demands the stamped receipt: the engine stamps
+  // every replacement it builds, so a retained pasted turn must not satisfy
+  // the floor loosely.
+  const receiptsEra = era.postProvenance
+    ? { postProvenance: true }
+    : eraOf(replacement);
+  const checkpoints = replacement.filter((message) =>
+    isCheckpoint(message, receiptsEra),
+  ).length;
   if (checkpoints === 0) return "checkpoint receipt was dropped";
   if (checkpoints > 1) return "prior summaries were duplicated";
   if (anchors && !replacement.some((message) =>
