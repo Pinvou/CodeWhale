@@ -910,4 +910,27 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
             .is_none(),
         "an active-set name is callable and must not be declared evicted"
     );
+    assert!(
+        notes.is_empty(),
+        "the render consumes the notes whether or not anything rendered"
+    );
+
+    // A name an earlier note in the same ride already named must not be
+    // repeated by a later note on the same result: the second mention is
+    // redundant prose about the same eviction.
+    let mut notes = vec![
+        note(
+            ToolboxEvictionTrigger::TurnStart,
+            vec!["deferred-z".to_string()],
+        ),
+        note(ToolboxEvictionTrigger::Step, vec!["deferred-z".to_string()]),
+    ];
+    let rendered = render_toolbox_eviction_notes(&mut notes, &cache, &HashSet::new())
+        .expect("deferred-z is still evicted");
+    assert_eq!(
+        rendered.matches("deferred-z").count(),
+        1,
+        "a name already rendered by an earlier note must not be repeated: {rendered}"
+    );
+    assert!(notes.is_empty());
 }

@@ -5221,7 +5221,6 @@ impl Engine {
                         ) {
                             eviction_notes.push(rendered);
                         }
-                        pending_eviction_notes.clear();
                     }
                     let output_for_context = if eviction_notes.is_empty() {
                         output_for_context
@@ -5277,7 +5276,8 @@ impl Engine {
                     );
                     // A pending eviction note must still reach the model when
                     // the batch's first result is an error, netted the same
-                    // way as on the success path.
+                    // way as on the success path. The render consumes the
+                    // notes either way.
                     let mut note_text = None;
                     if !pending_eviction_notes.is_empty() {
                         note_text = super::tool_catalog::render_toolbox_eviction_notes(
@@ -5285,7 +5285,6 @@ impl Engine {
                             &self.session.tool_activation_cache,
                             active_tool_names,
                         );
-                        pending_eviction_notes.clear();
                     }
                     let error = match note_text {
                         Some(note) => format!("{error}\n\n{note}"),
