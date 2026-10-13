@@ -23,6 +23,9 @@ mod crypto;
 #[path = "../../../src/features/remote_control/controller/encrypted_lane.rs"]
 mod encrypted_lane;
 
+#[path = "../../../src/features/remote_control/controller/lane_event.rs"]
+mod lane_event;
+
 #[path = "../../../src/features/remote_control/controller/liveness.rs"]
 pub(crate) mod liveness;
 
@@ -96,16 +99,20 @@ mod features {
         pub(crate) mod validators {
             // Explicit host seam: native tests cover SessionStore validation.
             pub(crate) fn validate_session_id(id: &str) -> anyhow::Result<()> {
-                anyhow::ensure!(!id.is_empty() && id.bytes().all(|byte|
-                    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
+                anyhow::ensure!(
+                    !id.is_empty()
+                        && id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                            || byte == b'-'
+                            || byte == b'_')
+                );
                 Ok(())
             }
         }
     }
     pub(crate) mod files {
         pub(crate) mod file_ingest {
-            pub(crate) use crate::published_attachment::*;
             pub(crate) use crate::file_limits::MAX_FILE_BYTES;
+            pub(crate) use crate::published_attachment::*;
         }
     }
     pub(crate) mod remote_control {
