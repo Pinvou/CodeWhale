@@ -1,4 +1,25 @@
 use super::*;
+
+#[test]
+fn forkguard_model_operation_builtin_and_unspecified_identity_scope() {
+    for (source, target, retained) in [
+        (Some("deepseek"), "deepseek", true),
+        (Some("deepseek"), "openai", false),
+        (None, "deepseek", true),
+        (None, "openai", false),
+    ] {
+        let mut config = Config {
+            provider: source.map(str::to_string),
+            request_idempotency_header: Some("idempotency-key".into()),
+            ..Default::default()
+        };
+        let identity = config.resolve_provider_identity(target).unwrap();
+        config.scope_to_provider_identity(&identity);
+        assert_eq!(config.request_idempotency_header.is_some(), retained);
+        assert_eq!(config.provider.as_deref(), Some(target));
+        assert!(!config.migrated_legacy_ollama_cloud_route);
+    }
+}
 use crate::test_support::{EnvVarGuard, env_scope_ticket, join_env_scope, lock_test_env};
 use std::collections::HashMap;
 use std::env;
@@ -8994,6 +9015,8 @@ fn migrated_ollama_cloud_scope_preserves_legacy_table_and_slot_read_only() -> Re
     let mut scoped = config.clone();
     scoped.scope_to_provider_identity(&identity);
     assert_eq!(scoped.api_provider(), ApiProvider::OllamaCloud);
+    assert!(scoped.migrated_legacy_ollama_cloud_route);
+    assert_eq!(identity.persisted_id(), Some("ollama"));
     assert_eq!(
         scoped.deepseek_base_url(),
         codewhale_config::provider::OLLAMA_CLOUD_BASE_URL
