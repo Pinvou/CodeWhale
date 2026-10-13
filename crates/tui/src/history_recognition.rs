@@ -80,8 +80,13 @@ pub(crate) fn is_compaction_checkpoint_message(message: &Message) -> bool {
 /// marker is its own content block and the only writer is
 /// [`crate::compaction::compaction_checkpoint_message`] — so an ordinary turn
 /// that pastes the whole summary header after a tool result keeps its
-/// position. Only a hand-edited session file can forge the two-block form,
-/// and doing so flips recognition for that one message, not the protocol.
+/// position. Only a hand-edited session file can forge the two-block form.
+/// Forging one flips the *history's* era, not just that message: because
+/// [`CheckpointEra::of_history`] keys off any stamped carrier, every other
+/// bare-header turn in that history also reclassifies as user content, while
+/// the forged message itself reads as the checkpoint — restore deletes it,
+/// retention and round bounding skip it, and the coverage floor no longer
+/// protects it.
 #[must_use]
 pub(crate) fn is_generated_compaction_checkpoint(message: &Message) -> bool {
     let [
@@ -115,7 +120,11 @@ pub(crate) fn is_generated_compaction_checkpoint(message: &Message) -> bool {
 /// user turns, so they can truncate away the only stamped carrier and drop
 /// the history back to the legacy reading, where the restore-time loose
 /// retain would drop a pasted-header turn on the next reload-with-checkpoint.
-/// Foreign imports carry no codewhale stamp at all and stay legacy. Derive
+/// Foreign imports carry no codewhale stamp at all and stay legacy. A history
+/// holding *both* a genuine pre-stamp bare carrier and a stamped carrier (only
+/// constructible by splicing session files) reads post-provenance, so the old
+/// bare carrier reclassifies as user content — retained, editable,
+/// round-anchoring. Derive
 /// the era once per history with [`Self::of_history`] and route every
 /// per-message checkpoint classification through [`Self::is_checkpoint`] —
 /// classifying messages one at a time without the history is exactly the

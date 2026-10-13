@@ -1518,6 +1518,14 @@ pub fn edit_last_turn_target(messages: &[Message]) -> EditLastTurnTarget {
 /// one list so "turn N" stays consistent with what `/edit` targets —
 /// classifying messages one at a time with [`is_user_turn_prompt`] reads the
 /// legacy form and misses exactly those pasted turns.
+///
+/// Only *editable* turns are listed. When the latest user turn is unsupported
+/// (for example image-only), [`edit_last_turn_target`] surfaces
+/// [`EditLastTurnTarget::Unsupported`] and `/edit` refuses rather than
+/// targeting an older prompt, while this list simply ends at the newest
+/// editable turn — a rewind cut point must therefore still ask
+/// [`edit_last_turn_target`] and must not assume its last index is one
+/// `/edit` would take.
 #[must_use]
 pub fn user_turn_prompt_indices(history: &[Message]) -> Vec<usize> {
     let checkpoints = crate::history_recognition::CheckpointEra::of_history(history);
