@@ -55,6 +55,12 @@ primary, backup, lock, marker, temporary, stale-lock, or other reserved
 management path. Controller state filenames using those reserved suffixes are
 also rejected.
 
+### Gateway transport keepalive
+
+The [gateway idle transport contract](../docs/windows-desktop-remote-control-a05-gateway-idle.md)
+describes explicit proxy timeouts and the independent authenticated public-hop
+heartbeat. Transport pong does not renew enrollment or task authorization.
+
 ## Desktop Relay signature pins
 
 The desktop application normally uses the signing key ID and public key from
