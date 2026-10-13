@@ -4,6 +4,7 @@ import { test } from 'node:test';
 
 const requirements = readFileSync(new URL('../../docs/Windows双端远程控制需求文档.md', import.meta.url), 'utf8');
 const architecture = readFileSync(new URL('../../docs/Windows双端远程控制代码架构.md', import.meta.url), 'utf8');
+const deliveryPlan = readFileSync(new URL('../../docs/Windows双端远程控制开发任务拆分.md', import.meta.url), 'utf8');
 const currentArchitecture = architecture.split('## 历史设计附录')[0];
 const section = (title, nextTitle) => requirements.split(title)[1]?.split(nextTitle)[0] || '';
 
@@ -46,11 +47,18 @@ test('released Legacy Web enrollment and safe rollback obligations stay mandator
   assert.match(compatibility, /不得删除其数据或绕过 enrollment/u);
 });
 
-test('reviewed A18 version entries survive and A19 corrections append instead of renumbering', () => {
+test('reviewed version entries survive and A22 corrections append instead of renumbering', () => {
   assert.ok(requirements.includes('| 1.8 | 2026-10-01 | 记录 Finished receipt 固定向量勘误，澄清 reservation 原子提升、模块落位与模型路由判别符，并登记生产容量定标门禁 |'));
   assert.match(requirements, /\| 1\.9 \| 2026-10-07 \|/u);
   assert.match(requirements, /A19 原草稿把前序 1.8 勘误重编号为 1.10/u);
-  assert.doesNotMatch(requirements, /^\| 1\.10 \|/mu);
+  assert.match(requirements, /^\| 1\.10 \| 2026-10-07 \| 补录 A20/mu);
+  assert.match(requirements, /^\| 1\.11 \| 2026-10-07 \| 追加 A22/mu);
+  assert.doesNotMatch(requirements, /^\| 1\.(?:12|13) \|/mu);
+  assert.match(requirements, /A22 原草稿把前序 Finished receipt 勘误从 1.12 再编号为 1.13/u);
+  assert.match(deliveryPlan, /^> 需求基线：.* v1\.11$/mu);
+  const compatibility = section('## 15.', '## 16.');
+  assert.match(compatibility, /20\. 首次发布的全新安装与包含废弃实验文件的升级目录/u);
+  assert.match(compatibility, /不为它添加 sidecar、供数指针或 migration revision/u);
 });
 
 test('every historical architecture section is locally marked obsolete', () => {

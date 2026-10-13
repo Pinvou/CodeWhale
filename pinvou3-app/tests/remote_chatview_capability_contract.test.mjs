@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { dict } from './helpers/i18n-all.js';
 import { remoteProjectionLabelKey } from '../src/features/remote-control/remote-session-adapter.mjs';
+import { createCapabilityRequestLoop } from '../src/features/remote-control/capability-request-loop.mjs';
 
 const chat = readFileSync(new URL('../src/features/chat/ChatView.jsx', import.meta.url), 'utf8');
 const app = readFileSync(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
@@ -25,6 +26,58 @@ function sourceSection(source, startMarker, endMarker) {
   assert.notEqual(end, -1, `missing source marker: ${endMarker}`);
   return source.slice(start, end);
 }
+
+test('a generation-only connection change starts a new capability request and isolates old completion', async () => {
+  const binding = sourceSection(chat, 'const requestKey =', 'const requestRemoteCapabilities');
+  assert.match(binding, /remoteConnection\?\.generation/);
+  assert.doesNotMatch(binding, /remoteConnection\?\.remoteControlGeneration/);
+  const dependencies = sourceSection(binding, '}, [', ']);');
+  assert.match(dependencies, /remoteConnection\?\.generation/);
+  const expression = binding.slice('const requestKey ='.length, binding.indexOf(';')).trim();
+  // Execute the actual ChatView initializer instead of duplicating its identity formula.
+  const keyFor = new Function('remoteConnection', 'sessionRef', `return ${expression};`);
+  const connection = { connectionId: 'connection', leaseEpoch: 1, generation: 'old-generation' };
+  const oldKey = keyFor(connection, 'session');
+  const newKey = keyFor({ ...connection, generation: 'new-generation' }, 'session');
+  assert.notEqual(oldKey, newKey);
+
+  const pending = [];
+  const errors = [];
+  const busy = [];
+  const timers = new Set();
+  const calls = [];
+  const loop = createCapabilityRequestLoop({
+    send(sessionRef) {
+      calls.push(sessionRef);
+      return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+    },
+    onError: (error) => errors.push(error),
+    onBusy: (value) => busy.push(value),
+    schedule(callback) { timers.add(callback); return callback; },
+    cancel: (callback) => timers.delete(callback),
+  });
+  try {
+    loop.update({ enabled: true, key: oldKey, sessionRef: 'session' });
+    await new Promise(setImmediate);
+    loop.update({ enabled: true, key: newKey, sessionRef: 'session' });
+    await new Promise(setImmediate);
+    assert.deepEqual(calls, ['session', 'session']);
+
+    pending[0].reject({ code: 'stale-generation-error' });
+    await new Promise(setImmediate);
+    assert.ok(errors.every((error) => error === null), 'old completion cannot publish an error');
+    assert.equal(busy.at(-1), true, 'old completion cannot clear the new request busy state');
+    assert.equal(timers.size, 0, 'old completion cannot schedule a retry');
+
+    pending[1].resolve();
+    await new Promise(setImmediate);
+    assert.equal(busy.at(-1), false);
+    assert.equal(timers.size, 1, 'only the current generation owns a retry');
+  } finally {
+    loop.dispose();
+  }
+  assert.equal(timers.size, 0);
+});
 
 test('RemoteProxy hides local controls and exposes only verified remote capability actions', () => {
   assert.match(chat, /enabled=\{!remoteChatActive && bridge\.available/);
