@@ -23,6 +23,9 @@ mod crypto;
 #[path = "../../../src/features/remote_control/controller/encrypted_lane.rs"]
 mod encrypted_lane;
 
+#[path = "../../../src/features/remote_control/controller/lane_event.rs"]
+mod lane_event;
+
 #[path = "../../../src/features/remote_control/controller/liveness.rs"]
 pub(crate) mod liveness;
 
@@ -39,7 +42,11 @@ pub(crate) mod panic_scope;
 #[path = "../../../src/core/panic_hooks.rs"]
 pub(crate) mod panic_hooks;
 
+#[path = "../../../src/core/model_wire.rs"]
+pub(crate) mod model_wire;
+
 mod core {
+    pub(crate) use crate::model_wire;
     pub(crate) use crate::panic_hooks;
 }
 #[path = "../../../src/features/remote_control/controller/shared_transport.rs"]
@@ -96,16 +103,20 @@ mod features {
         pub(crate) mod validators {
             // Explicit host seam: native tests cover SessionStore validation.
             pub(crate) fn validate_session_id(id: &str) -> anyhow::Result<()> {
-                anyhow::ensure!(!id.is_empty() && id.bytes().all(|byte|
-                    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
+                anyhow::ensure!(
+                    !id.is_empty()
+                        && id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                            || byte == b'-'
+                            || byte == b'_')
+                );
                 Ok(())
             }
         }
     }
     pub(crate) mod files {
         pub(crate) mod file_ingest {
-            pub(crate) use crate::published_attachment::*;
             pub(crate) use crate::file_limits::MAX_FILE_BYTES;
+            pub(crate) use crate::published_attachment::*;
         }
     }
     pub(crate) mod remote_control {

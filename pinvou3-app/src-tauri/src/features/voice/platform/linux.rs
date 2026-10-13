@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use tauri::Emitter;
 
-use super::super::voice_asr::{self, AsrModelSpec};
+use super::super::voice_asr;
 
 pub fn engine_binary_name() -> &'static str {
     "sense-voice-main"
@@ -15,36 +15,9 @@ pub fn bundled_engine_intact(
     true
 }
 
-const ASR_MODEL_URL: &str = "https://www.modelscope.cn/models/lovemefan/SenseVoiceGGUF/resolve/master/sense-voice-small-q4_k.gguf";
-const ASR_MODEL_MIRROR_URL: &str =
-    "https://huggingface.co/lovemefan/sense-voice-gguf/resolve/main/sense-voice-small-q4_k.gguf";
-const ASR_MODEL_SIZE: u64 = 182_278_688;
-const ASR_MODEL_SHA256: &str = "c8e7bf77acd860c5b83d2106da44aa7b985026ef4e7dbf5236c7f0f4001d9e9b";
-
 pub fn asr_tool_path() -> PathBuf {
-    for name in [
-        "PINVOU3_ASR_CMD",
-        "PINVOU3_DEEPSPEECH2_CMD",
-        "PADDLESPEECH_BIN",
-    ] {
-        if let Ok(path) = std::env::var(name) {
-            if !path.trim().is_empty() {
-                return PathBuf::from(path);
-            }
-        }
-    }
-    PathBuf::from("pinvou-asr")
-}
-
-pub fn asr_model_spec() -> AsrModelSpec {
-    AsrModelSpec {
-        id: "sensevoice-q4-k",
-        filename: "sense-voice-small-q4_k.gguf",
-        expected_size: ASR_MODEL_SIZE,
-        sha256: ASR_MODEL_SHA256,
-        primary_url: ASR_MODEL_URL,
-        mirror_url: ASR_MODEL_MIRROR_URL,
-    }
+    // 环境变量探测循环与 macos/windows 共用（platform::asr_tool_path_from_env）。
+    super::asr_tool_path_from_env().unwrap_or_else(|| PathBuf::from("pinvou-asr"))
 }
 
 pub fn asr_model_path() -> PathBuf {
@@ -56,11 +29,17 @@ pub fn asr_model_exists() -> bool {
 }
 
 pub fn asr_tool_exists() -> bool {
-    let configured = asr_tool_path();
-    if configured.is_file() || crate::platform::os::command_exists(&configured.to_string_lossy()) {
-        return true;
+    // Linux 执行序（app/commands/voice.rs → recognize_native）：引擎+模型齐
+    // 先走内置转写，env 覆盖命令根本不参与；否则才回退 CLI（asr_tool_path，
+    // env 优先）。就绪判定必须逐分支复刻该执行序，否则两个方向都会背离：
+    // env 失效但引擎完好时报未就绪（执行其实能成功），或引擎缺模型时报就绪
+    // （执行回退 CLI 才发现没有可用命令）。该双分支判定无法折叠进
+    // platform::asr_ready_decision 的单布尔（那条骨架只适配"执行必经 env
+    // CLI"的 Windows），故不走共用骨架。
+    (voice_asr::engine_path().is_file() && voice_asr::model_path().is_file()) || {
+        let tool = asr_tool_path();
+        tool.is_file() || crate::platform::os::command_exists(&tool.to_string_lossy())
     }
-    voice_asr::engine_path().is_file()
 }
 
 pub fn asr_bundled_runtime_status() -> Option<bool> {
