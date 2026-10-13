@@ -43,7 +43,7 @@ var billingApprovalActivationSpecs = map[string]activationSpec{
 	"PAYMENT_PROVIDER_RESUME":          {2, 1, true},
 	"RECEIVABLE_WRITE_OFF":             {1, 1, true},
 	"RECONCILIATION_FINANCIAL_REPAIR":  {1, 1, false},
-	"REFUND_EXCEPTION_REPAIR":          {1, 1, false},
+	"REFUND_EXCEPTION_REPAIR":          {1, 1, true},
 	"USAGE_SETTLEMENT_REPAIR":          {1, 1, false},
 	"WALLET_ADJUSTMENT":                {1, 1, true},
 }

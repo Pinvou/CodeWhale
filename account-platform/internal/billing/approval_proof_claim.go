@@ -173,3 +173,20 @@ func (f billingTxProofFacts) paymentFinancialRepairPlan(ctx context.Context, inp
 	}
 	return paymentFinancialRepairPlanFrom(ctx, f.tx, input, policyVersion, schemaVersion, version)
 }
+
+func (f billingTxProofFacts) refundExceptionRepairPlan(ctx context.Context, input RefundExceptionRepairCommandInput) (RefundExceptionRepairPlan, error) {
+	var policyVersion, schemaVersion, version int64
+	var state string
+	err := f.tx.QueryRow(ctx, `SELECT policy_version,snapshot_schema_version,state,version FROM billing_approval_command_activations WHERE command_type=$1`, refundExceptionRepairCommand).
+		Scan(&policyVersion, &schemaVersion, &state, &version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RefundExceptionRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	if err != nil {
+		return RefundExceptionRepairPlan{}, err
+	}
+	if state != "ACTIVE" || policyVersion != 1 || schemaVersion != 1 || version < 1 {
+		return RefundExceptionRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	return refundExceptionRepairPlanFrom(ctx, f.tx, input, policyVersion, schemaVersion, version)
+}
