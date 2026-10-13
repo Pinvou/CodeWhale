@@ -19,6 +19,7 @@ const source = relative => readFileSync(new URL(`../src/${relative}`, import.met
 // text inside comments (a commented-out guard would otherwise still satisfy
 // every anchor). Negative pins run against the RAW text.
 const stripComments = text => text
+  .replace(/\r\n?/g, '\n')
   .replace(/\/\*[\s\S]*?\*\//g, comment => comment.replace(/[^\n]/g, ''))
   .split('\n')
   .map(line => line.replace(/\/\/.*$/, ''))
@@ -31,6 +32,19 @@ const chat = stripComments(source('features/chat/ChatView.jsx'));
 const conversation = stripComments(source('features/conversation/ConversationTimeline.jsx'));
 const codex = stripComments(source('features/codex/CodexAcpView.jsx'));
 const auxQuoteSelection = stripComments(source('features/aux-chat/AuxQuoteSelection.jsx'));
+
+test('JSX shape comment stripping treats LF and CRLF alike without accepting commented guards', () => {
+  const fixture = "el.addEventListener('scroll', onScroll, { passive: true });\n"
+    + "return () => el.removeEventListener('scroll', onScroll);\n"
+    + "// effect is attached after the portal exists\n}, [view.auxId]);\n";
+  const pattern = /el\.addEventListener\('scroll', onScroll, \{ passive: true \}\);\s*return \(\) => el\.removeEventListener\('scroll', onScroll\);\s*\}, \[view\.auxId\]\);/;
+  for (const text of [fixture, fixture.replace(/\n/g, '\r\n')]) {
+    assert.match(stripComments(text), pattern);
+    assert.doesNotMatch(stripComments(text.replace('[view.auxId]', '[]')), pattern);
+    assert.doesNotMatch(stripComments(text.replace('el.addEventListener', '// el.addEventListener')), pattern);
+  }
+  assert.equal(stripComments(fixture), stripComments(fixture.replace(/\n/g, '\r\n')));
+});
 
 // ── Adapter wiring: the JSX is a thin shell over the controller singleton ──
 
