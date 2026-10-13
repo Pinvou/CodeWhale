@@ -69,25 +69,6 @@ fn user_message(text: &str) -> Message {
     }
 }
 
-fn assistant_thinking(thinking: &str, text: &str) -> Message {
-    Message {
-        role: Role::Assistant,
-        content: vec![
-            ContentBlock::Thinking {
-                thinking: thinking.to_string(),
-                signature: None,
-                state: None,
-                redacted_data: None,
-                reasoning_details: None,
-            },
-            ContentBlock::Text {
-                text: text.to_string(),
-                cache_control: None,
-            },
-        ],
-    }
-}
-
 fn assistant_tool_call(id: &str, name: &str, input: serde_json::Value) -> Message {
     Message {
         role: Role::Assistant,
@@ -182,82 +163,7 @@ async fn full_turn_loop_streams_text_chunks() {
     assert_eq!(mock.captured_requests().len(), 1);
 }
 
-// === 2. Reasoning replay (V4 thinking-mode HTTP-400 regression) =============
-
-#[tokio::test]
-async fn reasoning_replay_required_on_subsequent_turn() {
-    // Turn 1: assistant emits thinking + tool_call. Turn 2: text reply.
-    let turn1 = vec![
-        canned::message_start("r1"),
-        canned::thinking_delta(0, "I should call list_dir."),
-        canned::tool_use_block_start(1, "call_a", "list_dir"),
-        canned::tool_input_delta(1, r#"{"path":"/tmp"}"#),
-        canned::block_stop(1),
-        canned::message_delta("tool_use", None),
-        canned::message_stop(),
-    ];
-    let turn2 = vec![
-        canned::message_start("r2"),
-        canned::text_block_start(0),
-        canned::text_delta(0, "I see /tmp."),
-        canned::block_stop(0),
-        canned::message_delta("end_turn", None),
-        canned::message_stop(),
-    ];
-    let mock = MockLlmClient::new(vec![turn1, turn2]);
-
-    // === Round 1: user prompt -> assistant tool_call ===
-    let req1 = make_request(vec![user_message("list /tmp")]);
-    let _ = mock.create_message_stream(req1).await.unwrap().next().await;
-    // (we don't drain — capture is what matters here)
-
-    // === Round 2: runtime composes the next request including the prior
-    // assistant turn's reasoning_content. The mock can verify that any
-    // ContentBlock::Thinking the runtime preserves is present in the next
-    // outgoing request — the very payload shape that broke v0.4.9-v0.5.1.
-    let next_messages = vec![
-        user_message("list /tmp"),
-        assistant_thinking("I should call list_dir.", ""),
-        assistant_tool_call("call_a", "list_dir", serde_json::json!({ "path": "/tmp" })),
-        tool_result_message("call_a", "/tmp/file1\n/tmp/file2"),
-    ];
-    let req2 = make_request(next_messages);
-    let _ = mock.create_message_stream(req2).await.unwrap();
-
-    // The mock captured both requests. Assert the SECOND request preserves
-    // the prior assistant message's Thinking block — i.e. the runtime did
-    // not strip reasoning_content before re-sending. (V4 thinking-mode tool
-    // turns reject HTTP 400 if reasoning_content is missing.)
-    let captured = mock.captured_requests();
-    assert_eq!(captured.len(), 2);
-
-    let req2 = &captured[1];
-    let assistant_with_thinking = req2
-        .messages
-        .iter()
-        .find(|m| {
-            m.role == "assistant"
-                && m.content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::Thinking { .. }))
-        })
-        .expect("turn 2 request must replay assistant Thinking content");
-
-    let thinking_text = assistant_with_thinking
-        .content
-        .iter()
-        .find_map(|b| match b {
-            ContentBlock::Thinking { thinking, .. } => Some(thinking.clone()),
-            _ => None,
-        })
-        .expect("Thinking block present");
-    assert_eq!(
-        thinking_text, "I should call list_dir.",
-        "reasoning_content must be replayed verbatim across tool-call rounds"
-    );
-}
-
-// === 3. Tool-call round-trip ================================================
+// === 2. Tool-call round-trip ================================================
 
 #[tokio::test]
 async fn tool_call_round_trip_streams_args_then_continues() {

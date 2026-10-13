@@ -48,13 +48,16 @@ runtime is meant to depend on.
 Coverage today exercises the trait surface end-to-end:
 
 - streaming turn loop
-- reasoning-content replay across tool-call rounds (V4 §5.1.1, the bug that
-  broke v0.4.9-v0.5.1)
 - tool-call round-trip with chunked input JSON
 - multi-tool-call ordering inside a single turn
 - compaction-style non-streaming `create_message`
 - sub-agent style independent parent/child mocks
 - capacity-gate observation of a captured request before stream drain
+
+Reasoning-content replay across tool-call rounds (V4 §5.1.1, the bug that
+broke v0.4.9-v0.5.1) is pinned by the engine tests
+(`multi_block_and_redacted_thinking_persist_into_followup_requests`), which
+drive a real engine and assert on the production-composed follow-up request.
 
 Full-engine journeys use `Engine::new_with_model_client` and the same mock.
 A non-trivial model/protocol/user-visible behavior change needs one keyless
