@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -134,4 +136,130 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 		t.Fatal("old receipt no longer replays after operator transitions")
 	}
 	t.Log("operator waited until real financial commit; inactive/version mismatch wrote zero receipts; old receipt remains read-only")
+
+	t.Run("operator-first-lock-rejects-stale-serializable-apply", func(t *testing.T) {
+		activationVersion = setActivation("ACTIVE")
+		orderID, _, evidenceID := seed(100, 100, 80, 20, "RECORDED", "PAY_SUCCESS")
+		command := PaymentFinancialRepairCommandInput{PaymentOrderID: orderID, PaymentEvidenceID: evidenceID}
+		plan, err := paymentFinancialRepairPlanFrom(ctx, pool, command, 1, 1, activationVersion)
+		if err != nil {
+			t.Fatal("reverse race requires a valid current frozen plan", err)
+		}
+		reverse := input
+		reverse.ApprovalRequestID = uuid.New()
+		reverse.AuthorizationEventID = uuid.New()
+		reverse.ExecutionKey = "payment-operator-first:" + uuid.NewString()
+		reverse.ActivationVersion = activationVersion
+		reverse.Command = command
+		reverse.Frozen = frozen(plan)
+		snapshot := func() map[string]string {
+			facts := entitlementFinancialFactsSnapshot(t, ctx, repository)
+			for _, table := range []string{"payment_evidence", "payment_order_repairs", "ledger_accounts"} {
+				var rows string
+				if err := pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(row ORDER BY row::text),'[]'::jsonb)::text FROM (SELECT to_jsonb(f) AS row FROM `+table+` f) facts`).Scan(&rows); err != nil {
+					t.Fatal("reverse race complete financial snapshot failed", err)
+				}
+				facts[table] = rows
+			}
+			return facts
+		}
+		before := snapshot()
+		raceCtx, stop := context.WithTimeout(ctx, 20*time.Second)
+		defer stop()
+		operator := ledgerActivationFixtureOperator(t, raceCtx, pool)
+		observer := ledgerActivationFixtureOperator(t, raceCtx, pool)
+		// The migrator has SET membership but deliberately does not inherit the
+		// service role. Observe that role's query text under its existing authority.
+		if _, err := observer.Exec(raceCtx, `SET ROLE billing_service`); err != nil {
+			t.Fatal("observer cannot assume its existing Billing service role", err)
+		}
+		var sessionActor, currentActor string
+		var superuser bool
+		if err := observer.QueryRow(raceCtx, `SELECT session_user,current_user,(SELECT rolsuper FROM pg_roles WHERE rolname=session_user)`).Scan(&sessionActor, &currentActor, &superuser); err != nil || sessionActor != "billing_migrator" || currentActor != "billing_service" || superuser {
+			t.Fatal("reverse observer identity must remain the non-super fixture migrator acting as service", err)
+		}
+		operatorTx, err := operator.Begin(raceCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer operatorTx.Rollback(context.Background())
+		if _, err := operatorTx.Exec(raceCtx, `SET LOCAL ROLE billing_schema_owner`); err != nil {
+			t.Fatal(err)
+		}
+		var nextVersion int64
+		if err := operatorTx.QueryRow(raceCtx, `UPDATE public.billing_approval_command_activations SET state='INACTIVE',version=version+1 WHERE command_type='PAYMENT_FINANCIAL_REPAIR' AND policy_version=1 AND snapshot_schema_version=1 RETURNING version`).Scan(&nextVersion); err != nil || nextVersion != activationVersion+1 {
+			t.Fatal("operator must hold the exact installed activation transition", err)
+		}
+		var operatorPID int
+		if err := operatorTx.QueryRow(raceCtx, `SELECT pg_backend_pid()`).Scan(&operatorPID); err != nil {
+			t.Fatal(err)
+		}
+		type outcome struct {
+			result PaymentFinancialRepairResult
+			err    error
+		}
+		applied := make(chan outcome, 1)
+		finished := make(chan struct{})
+		go func() {
+			defer close(finished)
+			result, err := coordinator.ApplyPaymentFinancialRepair(raceCtx, reverse)
+			applied <- outcome{result, err}
+		}()
+		defer func() {
+			_ = operatorTx.Rollback(context.Background())
+			stop()
+			select {
+			case <-finished:
+			case <-time.After(5 * time.Second):
+				t.Error("reverse Apply did not retire before fixture cleanup")
+			}
+		}()
+		blocked := false
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case <-applied:
+				t.Fatal("Apply returned before the operator activation lock was released")
+			default:
+			}
+			if _, err := observer.Exec(raceCtx, `SELECT pg_stat_clear_snapshot()`); err != nil {
+				t.Fatal(err)
+			}
+			if err := observer.QueryRow(raceCtx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND usename='billing_service' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%billing_approval_execution.lock_payment_activation%')`, operatorPID).Scan(&blocked); err != nil {
+				t.Fatal("reverse runtime activation wait observation failed", err)
+			}
+			if blocked {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !blocked {
+			t.Fatal("real Apply did not wait on the operator's installed activation row")
+		}
+		if err := operatorTx.Commit(raceCtx); err != nil {
+			t.Fatal("operator transition failed to commit", err)
+		}
+		var got outcome
+		select {
+		case got = <-applied:
+		case <-raceCtx.Done():
+			t.Fatal("reverse Apply did not complete within the bounded fixture budget")
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(got.err, &pgErr) || pgErr.Code != "40001" || got.result != (PaymentFinancialRepairResult{}) {
+			t.Fatalf("stale serializable Apply must preserve its typed rejection and no receipt: %v", got.err)
+		}
+		if !reflect.DeepEqual(snapshot(), before) {
+			t.Fatal("operator-first rejection changed a financial/effect/repair row")
+		}
+		var repairs int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM payment_order_repairs WHERE approval_request_id=$1`, reverse.ApprovalRequestID).Scan(&repairs); err != nil || repairs != 0 {
+			t.Fatal("operator-first rejection wrote an execution receipt", err)
+		}
+		var state string
+		var version int64
+		if err := pool.QueryRow(ctx, `SELECT state,version FROM billing_approval_command_activations WHERE command_type='PAYMENT_FINANCIAL_REPAIR' AND policy_version=1 AND snapshot_schema_version=1`).Scan(&state, &version); err != nil || state != "INACTIVE" || version != nextVersion || provider.calls != 0 {
+			t.Fatal("operator transition or provider-free rejection contract changed", err)
+		}
+	})
 }

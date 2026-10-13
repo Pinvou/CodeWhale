@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +14,30 @@ import (
 func TestF09ExpiryAfterComponentLockPostgres(t *testing.T) {
 	repository, ctx := retainedFinanceRepository(t)
 	t.Logf("owned expiry fixture database=%s owner=billing_schema_owner", repository.pool.Config().ConnConfig.Database)
+	// Use the original deployment-qualified operator before starting the short
+	// expiry clock; runtime credentials cannot manufacture command activation.
+	operatorConfig := repository.pool.Config().ConnConfig.Copy()
+	operatorConfig.User = "billing_migrator"
+	operator, err := pgx.ConnectConfig(ctx, operatorConfig)
+	if err != nil {
+		t.Fatal("activation operator connection failed")
+	}
+	defer operator.Close(ctx)
+	activationTx, err := operator.Begin(ctx)
+	if err != nil {
+		t.Fatal("activation operator transaction failed")
+	}
+	defer activationTx.Rollback(ctx)
+	if _, err := activationTx.Exec(ctx, `SET LOCAL ROLE billing_schema_owner`); err != nil {
+		t.Fatal("activation operator qualification failed")
+	}
+	activated, err := activationTx.Exec(ctx, `UPDATE public.billing_approval_command_activations SET state='ACTIVE',version=version+1 WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=2 AND snapshot_schema_version=2`)
+	if err != nil || activated.RowsAffected() != 1 {
+		t.Fatal("activation operator update failed")
+	}
+	if err := activationTx.Commit(ctx); err != nil {
+		t.Fatal("activation operator commit failed")
+	}
 	walletID, ownerID, orderID, transactionID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	lotID, packageID, walletAccountID, clearingAccountID, sourceJournalID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	var now, expires time.Time

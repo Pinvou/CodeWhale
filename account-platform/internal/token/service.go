@@ -238,6 +238,12 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusNotFound, "TOKEN_NOT_FOUND", "the token resource was not found"
 	case errors.Is(err, ErrNoEligibleRoute):
 		status, code, message = http.StatusUnprocessableEntity, "TOKEN_ROUTE_UNAVAILABLE", "no eligible token route is available"
+	case errors.Is(err, ErrModelPolicyDenied):
+		status, code, message = http.StatusForbidden, "MODEL_POLICY_DENIED", "the organization model policy does not permit this model"
+	case errors.Is(err, ErrModelPolicyVersionConflict):
+		status, code, message = http.StatusConflict, "MODEL_POLICY_VERSION_CONFLICT", "the organization model policy version changed"
+	case errors.Is(err, ErrModelUnavailable):
+		status, code, message = http.StatusUnprocessableEntity, "MODEL_UNAVAILABLE", "the model is unavailable"
 	case errors.Is(err, ErrOrganizationLifecycleConflict):
 		status, code, message = http.StatusConflict, "ORGANIZATION_LIFECYCLE_CONFLICT", "the organization lifecycle facts conflict"
 	case errors.Is(err, ErrIdempotencyConflict):

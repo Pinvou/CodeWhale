@@ -130,3 +130,12 @@ test("closure production and recovery browser command is selected in full and fe
   assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AccountClosureWorkspace.jsx"])).includes(target));
   assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])).includes(target));
 });
+
+
+test("native same-actor reauthentication browser runs once for full and account feature changes", () => {
+  const target = "npm:test:account-platform-desktop-reauthentication";
+  for (const selected of [fullLabels, labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/desktop-reauthentication.js"])), labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/PersonalFinanceWorkspace.jsx"])), labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"]))]) {
+    assert.equal(selected.filter(label => label === target).length, 1);
+  }
+  assert.equal(labels(selectFrontendSmokes(["pinvou3-app/src/features/settings/SettingsView.jsx"])).includes(target), false);
+});

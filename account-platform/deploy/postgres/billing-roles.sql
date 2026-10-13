@@ -33,10 +33,20 @@ DO $$ BEGIN
   RAISE EXCEPTION 'unsafe existing billing identities require operator investigation';
  END IF;
 END $$;
+-- CREATE here means schemas inside this one dedicated database, not CREATEDB.
+-- Existing PUBLIC or inherited runtime/migrator privileges are evidence to
+-- investigate, never authority for the bootstrap to revoke or broaden.
+DO $$ BEGIN
+ IF has_database_privilege('billing_service',current_database(),'CREATE')
+    OR has_database_privilege('billing_migrator',current_database(),'CREATE') THEN
+  RAISE EXCEPTION 'existing runtime or migrator database CREATE requires operator investigation';
+ END IF;
+END $$;
 -- One-way inheritance lets the trusted owner reclaim legacy runtime-owned
 -- objects. Runtime gains no membership or SET authority in the owner.
 GRANT billing_service TO billing_schema_owner WITH INHERIT TRUE,SET TRUE;
 GRANT billing_service,billing_schema_owner TO billing_migrator WITH INHERIT FALSE,SET TRUE;
+GRANT CREATE ON DATABASE :"billing_database" TO billing_schema_owner;
 DO $$ BEGIN
  IF to_regclass('public.billing_runtime_hardening') IS NULL THEN
   ALTER SCHEMA public OWNER TO billing_schema_owner;

@@ -316,20 +316,12 @@ func (r *PostgresRepository) ApplyReceivableWriteOff(ctx context.Context, input 
 	if err := insertPosting(ctx, tx, journalID, adjustmentAccount, -plan.WriteOffMicrocredits, nil, now); err != nil {
 		return ReceivableWriteOffResult{}, err
 	}
-	tag, err := tx.Exec(ctx, `UPDATE receivables SET settled_microcredits=settled_microcredits+$3,outstanding_microcredits=outstanding_microcredits-$3,
-status=CASE WHEN outstanding_microcredits=$3 THEN 'WRITTEN_OFF' ELSE 'PARTIALLY_SETTLED' END,
-settled_at=CASE WHEN outstanding_microcredits=$3 THEN $4 ELSE settled_at END,version=version+1,updated_at=$4
-WHERE id=$1 AND version=$2 AND outstanding_microcredits>=$3 AND source_type='USAGE_OVERAGE'`,
-		plan.ReceivableID, plan.ReceivableVersion, plan.WriteOffMicrocredits, now)
-	if err != nil || tag.RowsAffected() != 1 {
-		return ReceivableWriteOffResult{}, ErrConflict
+	if err := receivableWriteOffGuardedUpdate(ctx, tx, receivableWriteOffReceivableUpdateSQL,
+		plan.ReceivableID, plan.ReceivableVersion, plan.WriteOffMicrocredits, now); err != nil {
+		return ReceivableWriteOffResult{}, err
 	}
-	tag, err = tx.Exec(ctx, `UPDATE wallets SET receivable_microcredits=receivable_microcredits-$2,
-financial_status=CASE WHEN receivable_microcredits=$2 THEN 'CLEAR' ELSE 'RECEIVABLE_OPEN' END,
-financial_freeze_reason=CASE WHEN receivable_microcredits=$2 THEN NULL ELSE financial_freeze_reason END,
-version=version+1,updated_at=$3 WHERE id=$1 AND receivable_microcredits>=$2`, plan.WalletID, plan.WriteOffMicrocredits, now)
-	if err != nil || tag.RowsAffected() != 1 {
-		return ReceivableWriteOffResult{}, ErrConflict
+	if err := receivableWriteOffGuardedUpdate(ctx, tx, receivableWriteOffWalletUpdateSQL, plan.WalletID, plan.WriteOffMicrocredits, now); err != nil {
+		return ReceivableWriteOffResult{}, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO receivable_allocations(id,receivable_id,wallet_id,source_type,source_reference,amount_microcredits,journal_entry_id,created_at)
 VALUES($1,$2,$3,'APPROVED_WRITE_OFF',$4,$5,$6,$7)`, allocationID, plan.ReceivableID, plan.WalletID, reference, plan.WriteOffMicrocredits, journalID, now); err != nil {
@@ -352,10 +344,7 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'EXECUTED',$15)`,
 		plan.ReceivableID, plan.WalletID, plan.WriteOffMicrocredits, plan.ReceivableVersion, plan.ReceivableVersion+1,
 		statusAfter, plan.FactsDigest, journalID, allocationID, now); err != nil {
 		if receivableWriteOffUniqueViolation(err) {
-			if stored, readErr := readReceivableWriteOffCaseByReceivable(ctx, tx, plan.ReceivableID); readErr == nil && stored.matchesFrozen(input, executionKey) {
-				return stored.ReceivableWriteOffResult, tx.Commit(ctx)
-			}
-			return ReceivableWriteOffResult{}, ErrConflict
+			return recoverReceivableWriteOffUnique(ctx, tx, r.readCommittedReceivableWriteOffCase, input, executionKey)
 		}
 		return ReceivableWriteOffResult{}, err
 	}
@@ -380,22 +369,27 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'EXECUTED',$15)`,
 // ReceivableWriteOffForRequest reads the committed write-off of one approval
 // request without creating any new fact (result-first).
 func (r *PostgresRepository) ReceivableWriteOffForRequest(ctx context.Context, approvalRequestID uuid.UUID) (ReceivableWriteOffResult, error) {
+	stored, err := r.readCommittedReceivableWriteOffCase(ctx, approvalRequestID)
+	return stored.ReceivableWriteOffResult, err
+}
+
+func (r *PostgresRepository) readCommittedReceivableWriteOffCase(ctx context.Context, approvalRequestID uuid.UUID) (receivableWriteOffCaseRecord, error) {
 	if r == nil || r.pool == nil || approvalRequestID == uuid.Nil {
-		return ReceivableWriteOffResult{}, ErrConflict
+		return receivableWriteOffCaseRecord{}, ErrConflict
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return ReceivableWriteOffResult{}, err
+		return receivableWriteOffCaseRecord{}, err
 	}
 	defer tx.Rollback(ctx)
 	stored, err := readReceivableWriteOffCase(ctx, tx, approvalRequestID)
 	if err != nil {
-		return ReceivableWriteOffResult{}, err
+		return receivableWriteOffCaseRecord{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return ReceivableWriteOffResult{}, err
+		return receivableWriteOffCaseRecord{}, err
 	}
-	return stored.ReceivableWriteOffResult, nil
+	return stored, nil
 }
 
 type receivableWriteOffCaseRecord struct {
@@ -437,8 +431,58 @@ func readReceivableWriteOffCase(ctx context.Context, source receivableWriteOffRe
 	return scanReceivableWriteOffCase(source.QueryRow(ctx, `SELECT `+receivableWriteOffCaseColumns+` FROM receivable_write_off_cases WHERE approval_request_id=$1`, approvalRequestID))
 }
 
-func readReceivableWriteOffCaseByReceivable(ctx context.Context, source receivableWriteOffReader, receivableID uuid.UUID) (receivableWriteOffCaseRecord, error) {
-	return scanReceivableWriteOffCase(source.QueryRow(ctx, `SELECT `+receivableWriteOffCaseColumns+` FROM receivable_write_off_cases WHERE receivable_id=$1 ORDER BY created_at,id LIMIT 1`, receivableID))
+const receivableWriteOffReceivableUpdateSQL = `UPDATE receivables SET settled_microcredits=settled_microcredits+$3,outstanding_microcredits=outstanding_microcredits-$3,
+status=CASE WHEN outstanding_microcredits=$3 THEN 'WRITTEN_OFF' ELSE 'PARTIALLY_SETTLED' END,
+settled_at=CASE WHEN outstanding_microcredits=$3 THEN $4 ELSE settled_at END,version=version+1,updated_at=$4
+WHERE id=$1 AND version=$2 AND outstanding_microcredits>=$3 AND source_type='USAGE_OVERAGE'`
+
+const receivableWriteOffWalletUpdateSQL = `UPDATE wallets SET receivable_microcredits=receivable_microcredits-$2,
+financial_status=CASE WHEN receivable_microcredits=$2 THEN 'CLEAR' ELSE 'RECEIVABLE_OPEN' END,
+financial_freeze_reason=CASE WHEN receivable_microcredits=$2 THEN NULL ELSE financial_freeze_reason END,
+version=version+1,updated_at=$3 WHERE id=$1 AND receivable_microcredits>=$2`
+
+type receivableWriteOffUpdateExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+// Storage failures remain typed and uncertain; only a completed guarded update
+// without the one expected row is a definite domain conflict.
+func receivableWriteOffGuardedUpdate(ctx context.Context, tx receivableWriteOffUpdateExecutor, statement string, arguments ...any) error {
+	tag, err := tx.Exec(ctx, statement, arguments...)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+type receivableWriteOffRollback interface {
+	Rollback(context.Context) error
+}
+
+// A PostgreSQL unique violation leaves the write transaction aborted. Finish
+// rolling it back before opening a new readonly snapshot, and locate only the
+// original approval's immutable receipt (never a different case of the same
+// receivable). This recovery cannot re-dispatch or commit financial writes.
+func recoverReceivableWriteOffUnique(ctx context.Context, failed receivableWriteOffRollback,
+	readCommitted func(context.Context, uuid.UUID) (receivableWriteOffCaseRecord, error),
+	input ReceivableWriteOffExecutionInput, executionKey string) (ReceivableWriteOffResult, error) {
+	if err := failed.Rollback(ctx); err != nil {
+		return ReceivableWriteOffResult{}, err
+	}
+	stored, err := readCommitted(ctx, input.ApprovalRequestID)
+	if errors.Is(err, ErrNotFound) {
+		return ReceivableWriteOffResult{}, ErrConflict
+	}
+	if err != nil {
+		return ReceivableWriteOffResult{}, err
+	}
+	if !stored.matchesFrozen(input, executionKey) {
+		return ReceivableWriteOffResult{}, ErrConflict
+	}
+	return stored.ReceivableWriteOffResult, nil
 }
 
 func receivableWriteOffUniqueViolation(err error) bool {

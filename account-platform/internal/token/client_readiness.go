@@ -28,7 +28,6 @@ const defaultClientReadinessContract = "client-readiness-v1"
 
 var (
 	artifactDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	clientVersionPattern  = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$`)
 )
 
 type ClientReadinessCheck struct {
@@ -312,8 +311,8 @@ func (s *ClientReadinessService) oidcMetadata(ctx context.Context) (string, erro
 }
 
 func (s *ClientReadinessService) Issue(ctx context.Context, artifactSHA256, clientVersion, environment, protocol string) (ClientReadinessAttestation, error) {
-	artifactSHA256, clientVersion, environment = strings.ToLower(strings.TrimSpace(artifactSHA256)), strings.TrimSpace(clientVersion), strings.TrimSpace(environment)
-	if !artifactDigestPattern.MatchString(artifactSHA256) || !clientVersionPattern.MatchString(clientVersion) || environment != s.config.Environment || len(s.config.SigningKey) != ed25519.PrivateKeySize || s.record == nil {
+	artifactSHA256, environment = strings.ToLower(strings.TrimSpace(artifactSHA256)), strings.TrimSpace(environment)
+	if !artifactDigestPattern.MatchString(artifactSHA256) || !clientcompat.ValidVersion(clientVersion) || environment != s.config.Environment || len(s.config.SigningKey) != ed25519.PrivateKeySize || s.record == nil {
 		return ClientReadinessAttestation{}, ErrForbidden
 	}
 	result := s.Check(ctx, protocol)

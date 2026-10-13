@@ -268,10 +268,11 @@ FROM payment_order_repairs WHERE approval_request_id=$1`, requestID).
 		t.Fatalf("repair row points=%d before=%d after=%d links=%v/%v epoch=%d actor=%v requester=%v err=%v",
 			pointsAwarded, balanceBefore, balanceAfter, linkRequestID, linkEventID, approvalEpoch, actorID, requesterID, err)
 	}
-	// The operational path keeps writing rows with NULL approval linkage.
+	// This fixture executes the governed path only; it must not also create
+	// an operational row with NULL approval linkage.
 	var operationalRows, unattributedRows int64
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM payment_order_repairs WHERE approval_request_id IS NULL`).Scan(&operationalRows); err != nil {
-		t.Fatal(err)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM payment_order_repairs WHERE approval_request_id IS NULL`).Scan(&operationalRows); err != nil || operationalRows != 0 {
+		t.Fatalf("governed fixture created operational rows=%d err=%v", operationalRows, err)
 	}
 	// 000077 keeps the requester all-or-none with the approval linkage, so no
 	// operational row may carry one.
@@ -339,4 +340,103 @@ VALUES($1,$2,'USAGE_OVERAGE',$3,40,40,'OPEN',$4,$4)`, uuid.New(), walletTwo, "us
 	if _, err := repository.PaymentFinancialRepairForRequest(ctx, uuid.New()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("absent repair err=%v", err)
 	}
+
+	// Existing min(BASE, outstanding) behavior is correct. These are real
+	// saturation coverage additions, not a claim of a new production cap bug.
+	fullFinancialSnapshot := func() string {
+		t.Helper()
+		var value string
+		if err := pool.QueryRow(ctx, `SELECT jsonb_build_array(
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM wallets x),
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM receivables x),
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM payment_orders x),
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM payment_transactions x),
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM payment_evidence x),
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM payment_order_repairs x),
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM entitlement_packages x),
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM entitlement_components x),
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM credit_lots x),
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM journal_entries x),
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM ledger_postings x),
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM receivable_allocations x),
+ (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM outbox_events x))::text`).Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	for _, scenario := range []struct {
+		name                   string
+		credits, bonus, posted int64
+	}{
+		{"BASE40_credit40_noBonus", 40, 0, 0},
+		{"BASE40_credit100_BONUS60", 100, 60, 60},
+	} {
+		t.Run("SaturatedReceivableBudget/"+scenario.name, func(t *testing.T) {
+			orderID, walletID, evidenceID := seed(100, scenario.credits, 40, scenario.bonus, "RECORDED", "PAY_SUCCESS")
+			receivableID := uuid.New()
+			if _, err := pool.Exec(ctx, `INSERT INTO receivables(id,wallet_id,source_type,source_reference,original_microcredits,outstanding_microcredits,status,created_at,updated_at)
+ VALUES($1,$2,'USAGE_OVERAGE',$3,100,100,'OPEN',$4,$4)`, receivableID, walletID, "saturation:"+receivableID.String(), now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE wallets SET receivable_microcredits=100,financial_status='RECEIVABLE_OPEN',financial_freeze_reason='USAGE_OVERAGE' WHERE id=$1`, walletID); err != nil {
+				t.Fatal(err)
+			}
+			plan, err := paymentFinancialRepairPlanFrom(ctx, pool, PaymentFinancialRepairCommandInput{PaymentOrderID: orderID, PaymentEvidenceID: evidenceID}, 1, 1, activationVersion)
+			if err != nil || plan.BaseAmount != 40 || plan.BonusAmount != scenario.bonus || plan.CreditMicrocredits != scenario.credits || plan.AppliedToReceivables != 40 {
+				t.Fatalf("BASE saturation plan %+v err=%v", plan, err)
+			}
+			if scenario.bonus != 0 {
+				// 50 is inside totalcredit100 but outside the owner's BASE40.
+				// Keep the real digest/other facts, change only that claimed scalar.
+				bad := frozenFacts(plan)
+				bad.AppliedToReceivables = 50
+				before := fullFinancialSnapshot()
+				if _, err := execute(uuid.New(), uuid.New(), orderID, evidenceID, bad); !errors.Is(err, ErrApprovalSnapshotMismatch) {
+					t.Fatal("above BASE within total credit accepted", err)
+				}
+				if fullFinancialSnapshot() != before {
+					t.Fatal("above BASE rejection changed any financial or immutable fact")
+				}
+			}
+			requestID, eventID := uuid.New(), uuid.New()
+			frozen := frozenFacts(plan)
+			result, err := execute(requestID, eventID, orderID, evidenceID, frozen)
+			if err != nil || result.Status != "SUCCEEDED" || result.AppliedToReceivables != 40 || result.CreditMicrocredits != scenario.credits {
+				t.Fatalf("BASE saturation result %+v err=%v", result, err)
+			}
+			var posted, reserved, aggregate, settled, outstanding int64
+			var status, financialStatus string
+			if err := pool.QueryRow(ctx, `SELECT w.posted_microcredits,w.reserved_microcredits,w.receivable_microcredits,w.financial_status,r.settled_microcredits,r.outstanding_microcredits,r.status FROM wallets w JOIN receivables r ON r.wallet_id=w.id WHERE w.id=$1 AND r.id=$2`, walletID, receivableID).Scan(&posted, &reserved, &aggregate, &financialStatus, &settled, &outstanding, &status); err != nil || posted != scenario.posted || reserved != 0 || aggregate != 60 || settled != 40 || outstanding != 60 || status != "PARTIALLY_SETTLED" || financialStatus != "RECEIVABLE_OPEN" {
+				t.Fatal("wallet/receivable saturation projection differs", err)
+			}
+			var baseOriginal, bonusOriginal, baseAvailable, bonusAvailable, lotRemaining int64
+			if err := pool.QueryRow(ctx, `SELECT COALESCE(sum(c.original_microcredits) FILTER (WHERE c.component_type='BASE'),0),COALESCE(sum(c.original_microcredits) FILTER (WHERE c.component_type='BONUS'),0),COALESCE(sum(c.available_microcredits) FILTER (WHERE c.component_type='BASE'),0),COALESCE(sum(c.available_microcredits) FILTER (WHERE c.component_type='BONUS'),0),COALESCE(sum(l.remaining_microcredits),0) FROM entitlement_components c JOIN credit_lots l ON l.id=c.credit_lot_id WHERE c.package_id=$1`, result.EntitlementPackageID).Scan(&baseOriginal, &bonusOriginal, &baseAvailable, &bonusAvailable, &lotRemaining); err != nil || baseOriginal != 40 || bonusOriginal != scenario.bonus || baseAvailable != 0 || bonusAvailable != scenario.bonus || lotRemaining != scenario.posted {
+				t.Fatal("BASE/BONUS/lot budget differs", err)
+			}
+			var allocation int64
+			var allocationRows, postingRows int
+			var delta int64
+			if err := pool.QueryRow(ctx, `SELECT count(*),COALESCE(sum(amount_microcredits),0) FROM receivable_allocations WHERE receivable_id=$1 AND source_type='CASH_RECHARGE_BASE'`, receivableID).Scan(&allocationRows, &allocation); err != nil || allocationRows != 1 || allocation != 40 {
+				t.Fatal("saturated receivable allocation differs", err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT count(*),COALESCE(sum(delta_microcredits),0) FROM ledger_postings WHERE journal_entry_id=$1`, result.JournalEntryID).Scan(&postingRows, &delta); err != nil || postingRows < 2 || delta != 0 {
+				t.Fatal("saturated payment journal is not balanced", err)
+			}
+			var awarded, beforeBalance, afterBalance, epoch int64
+			var request, event, actor, requester uuid.UUID
+			var digest string
+			if err := pool.QueryRow(ctx, `SELECT points_awarded,wallet_balance_before,wallet_balance_after,approval_request_id,authorization_event_id,approval_epoch,actor_id,requester_user_id,facts_digest FROM payment_order_repairs WHERE approval_request_id=$1`, requestID).Scan(&awarded, &beforeBalance, &afterBalance, &request, &event, &epoch, &actor, &requester, &digest); err != nil || awarded != scenario.credits || beforeBalance != 0 || afterBalance != scenario.posted || awarded-(afterBalance-beforeBalance) != 40 || request != requestID || event != eventID || epoch != 2 || actor != approvingUserID || requester != requestingUserID || digest != plan.FactsDigest {
+				t.Fatal("saturated immutable receipt or actors differ", err)
+			}
+			beforeReplay := fullFinancialSnapshot()
+			same, err := execute(requestID, eventID, orderID, evidenceID, frozen)
+			if err != nil || same != result || fullFinancialSnapshot() != beforeReplay {
+				t.Fatal("saturated matching replay changed any financial or immutable fact", err)
+			}
+			if provider.calls != 0 {
+				t.Fatal("persisted-evidence repair called controlled provider")
+			}
+		})
+	}
+
 }

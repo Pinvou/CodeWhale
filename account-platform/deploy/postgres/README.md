@@ -4,6 +4,10 @@ Billing 必须使用独立数据库，不能与其他应用共享 public schema�
 
 `billing_schema_owner` 为 NOLOGIN；`billing_migrator` 为 LOGIN/NOINHERIT，迁移连接选择 `MIGRATION_ROLE=billing_service`；runtime 使用受限 `billing_service`。只有 owner 单向继承 runtime 的旧对象权限，runtime 不得属于 owner，包括间接成员关系。管理员须通过部署认证机制配置两种 LOGIN 身份，不能将测试的 loopback trust 用于生产。先完成备份并保留可核验回执，再执行原 `cmd/migrate -domain billing` 流程；必须使用 `billingschema.Up`，不能绕过兼容与权限收回。
 
+900013 首次由独立 owner 创建 `billing_approval_execution` schema，因此 bootstrap 显式只为已经核对的 `billing_database` 授予 `billing_schema_owner` 数据库级 CREATE；数据库可以继续归原 DBA 所有。此权限仅能在该数据库内创建 schema，与 CREATEDB 角色属性不同：owner 仍为 NOLOGIN/NOCREATEDB，runtime 与 migrator 不获得直接数据库 CREATE，migrator 只沿原 SET ROLE owner 的受控迁移合同使用 owner 能力。若 runtime 或 migrator 通过 PUBLIC、直接授权或继承已有数据库 CREATE，脚本回滚并要求操作员调查；不会自动撤销已有授权、转移数据库属主或改写凭据。
+
+实际 bootstrap 回归以 `PINVOU_TEST_SCHEMA_DATABASE_URL` 显式启用原隔离 UUID 数据库夹具，并调用真正 psql。可用 `PINVOU_TEST_PSQL` 指定可执行文件，未指定则查找 PATH 中的 `psql`；已启用 PG 但缺少工具会失败，不跳过。该回归不代表生产部署或真实支付验收。
+
 900003 安装独立 schema、table、sequence 和 function owner，收回 runtime CREATE、TRIGGER、TRUNCATE 和迁移账本写权。runtime 保留业务 DML、账本只读、proof 的 SELECT/INSERT，以及已审核生命周期函数的 EXECUTE。所有 Billing 表都有 statement TRUNCATE guard。SECURITY DEFINER 生命周期函数固定 owner 和可信 search_path；runtime 不能在 public 创建对象覆盖其依赖。旧 SQL 要求 runtime 拥有部分对象；独立 migrator 仅在同一未提交事务中临时借回，执行后收回，再由独立 owner 记账。后继较小编号增量仍按每个 version/checksum 执行，新增对象在同一事务收归 owner。未知 SECURITY DEFINER 函数会阻断收回，须先审核并加入显式许可。
 
 旧 RESOLVED chargeback 保持状态和原始证据，不自动执行资金动作。029 兼容执行只在存在旧行且冻结 SQL/hash 完全匹配时，将新 CHECK 安装为 NOT VALID；新写和更新为 RESOLVED 仍由数据库拒绝。人工核实前不得运行 VALIDATE 或批量改状态。检查待核实记录：`SELECT id,status FROM chargeback_cases WHERE status='RESOLVED'`。检查约束：`SELECT conname,convalidated FROM pg_constraint WHERE conrelid='public.chargeback_cases'::regclass AND conname='chargeback_cases_status_check'`。未 validated 的约束和只读历史属于明确的人工运维待办。

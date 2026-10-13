@@ -26,12 +26,15 @@ func TestPrivateF11PublicOwnerIntegration(t *testing.T) {
 	if e != nil {
 		t.Fatal("isolated connect")
 	}
-	var dd, user string
-	var port, actors int
-	e = admin.QueryRow(ctx, `SELECT current_setting('data_directory'),session_user,current_setting('port')::int,(SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>'pinvou_wave_test')`).Scan(&dd, &user, &port, &actors)
-	admin.Close(ctx)
-	if e != nil || port != 55504 || user != "pinvou_wave_test" || actors != 0 || strings.ReplaceAll(dd, "\\", "/") != "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data" {
-		t.Fatal("owner/port/datadir/absence guard")
+	// Only an explicitly selected isolated superuser session with no other
+	// deployment actors may create the fixture's UUID databases and roles.
+	var actors int
+	var isolatedOwner bool
+	e = admin.QueryRow(ctx, `SELECT current_user=session_user AND (SELECT rolsuper FROM pg_roles WHERE rolname=session_user),
+ (SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>session_user)`).Scan(&isolatedOwner, &actors)
+	_ = admin.Close(ctx)
+	if e != nil || !isolatedOwner || actors != 0 {
+		t.Fatal("explicit isolated owner and exclusive actor guard")
 	}
 	f := newStageFixture(t, ctx, raw)
 	t.Run("public-account-original072-policy", func(t *testing.T) {
@@ -59,18 +62,25 @@ func TestPrivateF11PublicOwnerIntegration(t *testing.T) {
 	t.Run("original-owner-contract-child", func(t *testing.T) {
 		dir := "../billing"
 		args := []string{"test", "-mod=readonly", "-race", "-count=1", "-json", ".", "-run", "^(TestReceivableWriteOffPostgresIntegration|TestPrivateF11OwnerFrozenFailureAndRollback)$"}
-		cmd := exec.CommandContext(ctx, os.Getenv("F11_GO_BINARY"), args...)
+		binary := os.Getenv("F11_GO_BINARY")
+		if binary == "" {
+			var err error
+			binary, err = exec.LookPath("go")
+			if err != nil {
+				t.Fatal("enabled PostgreSQL fixture requires Go")
+			}
+		}
+		cmd := exec.CommandContext(ctx, binary, args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "PINVOU_TEST_BILLING_DATABASE_URL="+raw)
 		out, e := cmd.CombinedOutput()
 		dest := os.Getenv("F11_CHILD_LOG")
 		if dest == "" {
-			t.Fatal("child log destination required")
+			dest = filepath.Join(t.TempDir(), "f11-owner-child.jsonl")
 		}
 		if er := os.WriteFile(dest, out, 0600); er != nil {
 			t.Fatal(er)
 		}
-		_ = filepath.Base(dest)
 		if e != nil {
 			t.Fatal("original owner child failed; retained log", e)
 		}

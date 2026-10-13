@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -115,7 +116,15 @@ func (f *rotationFixture) rotate(output string, expected int) error {
 	return RotateTransit(context.Background(), f.cfg, f.rolesDirectory, f.id, output, expected)
 }
 
+func requireSupportedTransitRotation(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+		t.Skip("transit rotation requires the Linux/Windows process lock; unsupported platforms fail closed")
+	}
+}
+
 func TestRotationOneMutationAndReadOnlyResume(t *testing.T) {
+	requireSupportedTransitRotation(t)
 	for _, mode := range []string{"normal", "lost-response", "unchanged", "concurrent", "revoke-failed"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newRotationFixture(t)
@@ -167,6 +176,7 @@ func TestRotationOneMutationAndReadOnlyResume(t *testing.T) {
 }
 
 func TestRotationRejectsPreflightAndDamagedAttempts(t *testing.T) {
+	requireSupportedTransitRotation(t)
 	for _, mode := range []string{"extra-policy", "unsafe-key", "missing-key-field", "version", "unfinalized", "partial", "expired", "wrong-binding"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newRotationFixture(t)
@@ -214,6 +224,7 @@ func TestRotationRejectsPreflightAndDamagedAttempts(t *testing.T) {
 }
 
 func TestRotationReplayRetirementCannotBorrowPreviousSuccess(t *testing.T) {
+	requireSupportedTransitRotation(t)
 	f := newRotationFixture(t)
 	parent := t.TempDir()
 	os.Chmod(parent, 0700)
@@ -239,6 +250,7 @@ func TestRotationReplayRetirementCannotBorrowPreviousSuccess(t *testing.T) {
 }
 
 func TestRotationInvalidAndUnknownLoginRemainOwned(t *testing.T) {
+	requireSupportedTransitRotation(t)
 	for _, mode := range []string{"invalid-retired", "invalid-unretired", "lost"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newRotationFixture(t)
@@ -265,6 +277,7 @@ func TestRotationInvalidAndUnknownLoginRemainOwned(t *testing.T) {
 }
 
 func TestRotationLockAndPendingRecordIntegrity(t *testing.T) {
+	requireSupportedTransitRotation(t)
 	for _, mode := range []string{"locked", "missing-lease", "bad-binding", "bad-closed", "archive-collision", "rollback"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newRotationFixture(t)

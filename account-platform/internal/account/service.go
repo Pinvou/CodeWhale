@@ -24,6 +24,7 @@ var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomple
 
 type Service struct {
 	approvalPrechecks           ApprovalPrecheckSource
+	organizationsDisabled       bool
 	organizationLifecycle       []OrganizationLifecycleClient
 	organizationUnitLifecycle   []OrganizationUnitLifecycleClient
 	organizationMemberLifecycle []OrganizationMemberLifecycleClient
@@ -44,11 +45,6 @@ type Service struct {
 
 func (s *Service) WithSMSConfiguration(configuration *VersionedSMSProviderResolver) *Service {
 	s.smsConfiguration = configuration
-	return s
-}
-
-func (s *Service) WithApprovalPrecheckSource(source ApprovalPrecheckSource) *Service {
-	s.approvalPrechecks = source
 	return s
 }
 

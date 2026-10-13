@@ -191,6 +191,20 @@ func entitlementCorrectionPlanFrom(ctx context.Context, source entitlementCorrec
 	if hasRelated {
 		return entitlementCorrectionReadPlan{}, ErrConflict
 	}
+	hasRefundRepair, err := entitlementCorrectionHasRefundRepairHistory(ctx, source, packageID)
+	if err != nil {
+		return entitlementCorrectionReadPlan{}, err
+	}
+	if hasRefundRepair {
+		return entitlementCorrectionReadPlan{}, ErrConflict
+	}
+	hasChargebackRepair, err := entitlementCorrectionHasChargebackRepairHistory(ctx, source, packageID)
+	if err != nil {
+		return entitlementCorrectionReadPlan{}, err
+	}
+	if hasChargebackRepair {
+		return entitlementCorrectionReadPlan{}, ErrConflict
+	}
 	var journalID uuid.UUID
 	err = source.QueryRow(ctx, `SELECT id FROM journal_entries WHERE business_reference=$1 AND entry_type='RECHARGE'`, sourceReference).Scan(&journalID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -389,4 +403,20 @@ func entitlementCorrectionDigests(input entitlementCorrectionDigestInput) (strin
 func digestHex(value []byte) string {
 	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])
+}
+
+// entitlementCorrectionHasRefundRepairHistory registers this wave's immutable
+// financial history by its own package identity. Older correction installations
+// without the refund repair facility retain their existing eligibility contract.
+func entitlementCorrectionHasRefundRepairHistory(ctx context.Context, source entitlementCorrectionQuerier, packageID uuid.UUID) (bool, error) {
+	var installed bool
+	if err := source.QueryRow(ctx, `SELECT to_regclass('public.refund_exception_repair_cases') IS NOT NULL`).Scan(&installed); err != nil {
+		return false, err
+	}
+	if !installed {
+		return false, nil
+	}
+	var hasRelated bool
+	err := source.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.refund_exception_repair_cases WHERE package_id=$1)`, packageID).Scan(&hasRelated)
+	return hasRelated, err
 }

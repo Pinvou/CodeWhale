@@ -4,7 +4,7 @@ import { ProfileCaptcha } from './ProfileSettings.jsx';
 import { localizedAccountPlatformError } from './error-localization.js';
 import { profileCaptchaSubmissionOffset } from './profile-captcha-state.js';
 
-export function AccountLogin({ client, copy, onAuthenticated }) {
+export function AccountLogin({ client, copy, onAuthenticated, reauthentication = false, onAuthenticationFailure }) {
   const [mode, setMode] = useState('password');
   const [account, setAccount] = useState('');
   const [mobile, setMobile] = useState('');
@@ -29,6 +29,7 @@ export function AccountLogin({ client, copy, onAuthenticated }) {
     return () => clearTimeout(timer);
   }, [cooldown]);
   useEffect(() => {
+    if (reauthentication) return undefined;
     let stopped = false;
     let timer;
     const poll = async () => {
@@ -47,7 +48,7 @@ export function AccountLogin({ client, copy, onAuthenticated }) {
     };
     void poll();
     return () => { stopped = true; clearTimeout(timer); };
-  }, [client, recovery?.registration_operation_id]);
+  }, [client, recovery?.registration_operation_id, reauthentication]);
   const pending = Boolean(progress && !progress.user_id && ['REGISTRATION_IN_PROGRESS', 'IDENTITY_CREATING', 'IDENTITY_CREATED', 'ACCOUNT_COMMITTING', 'REPAIR_REQUIRED', 'RECOVERY_UNAVAILABLE'].includes(progress.status));
   const run = async action => {
     const generation = owner.current;
@@ -56,6 +57,7 @@ export function AccountLogin({ client, copy, onAuthenticated }) {
     try { await action(current); }
     catch (reason) {
       if (current()) {
+        if (reauthentication) { setPassword(''); setConfirmation(''); onAuthenticationFailure?.(reason); }
         setError(localizedAccountPlatformError(copy, reason, {
           USERNAME_INVALID: copy.usernameInvalid,
           USERNAME_ALREADY_REGISTERED: copy.usernameAlreadyRegistered,
@@ -146,8 +148,8 @@ export function AccountLogin({ client, copy, onAuthenticated }) {
     owner.current++; setter(event.target.value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null);
   };
   return <section className="ap-stack">
-    <h1>{copy.title}</h1><p>{copy.desktopLoginIntro}</p>
-    <nav>{[['password', copy.login], ['sms', copy.authModes.sms], ['register', copy.register], ['forgot', copy.authModes.forgot]].map(([value, label]) => <button key={value} type="button" disabled={busy || pending} aria-pressed={mode === value} onClick={() => changeMode(value)}>{label}</button>)}</nav>
+    <h1>{reauthentication ? copy.desktopReauthenticationTitle : copy.title}</h1><p>{reauthentication ? copy.desktopReauthenticationLead : copy.desktopLoginIntro}</p>
+    {!reauthentication && <nav>{[['password', copy.login], ['sms', copy.authModes.sms], ['register', copy.register], ['forgot', copy.authModes.forgot]].map(([value, label]) => <button key={value} type="button" disabled={busy || pending} aria-pressed={mode === value} onClick={() => changeMode(value)}>{label}</button>)}</nav>}
     {error && <div className="ap-alert error" role="alert">{error}</div>}{notice && <div className="ap-alert" role="status">{notice}</div>}
     {pending ? <div role="status"><p>{copy.registrationDoNotRepeat}</p><p>{progress.status}</p><button disabled={busy} onClick={recover}>{copy.retry}</button></div> : <form className="ap-stack" onSubmit={submit}>
       {(mode === 'password' || mode === 'register') && <label>{mode === 'register' ? copy.registrationUsername : copy.account}<input required value={account} autoComplete="username" disabled={busy} onChange={changeFacts(setAccount)} /></label>}

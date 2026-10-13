@@ -17,3 +17,12 @@
 900016 与 900017 数据 Down 明确返回 55000。运维回退是停止消费者、将 activation 置 INACTIVE 并保留历史，不能删除审批、审计或已入账事实。900017 为 payment_order_repairs(payment_order_id) 增加非唯一索引，保留一订单多笔维修记录。
 
 本轮作者隔离 PostgreSQL 计划样本为 10001 条维修记录、2001 个订单：干净 900016 阶段默认 planner 顺序扫描，官方升级 900017 后使用该索引。首轮与暖访问均记录实际 EXPLAIN/BUFFERS；操作系统缓存未受控，不代表生产负载或延迟保证。索引问题跟踪 #1671，审计写 ACL 跟踪 #1709；独立验收和正常发布前不以作者结果关闭。#1678 的 execution digest 兼容议题仍保留，未改旧 receipt/claim 的算法。
+
+
+## 有限可移植验证
+
+`TestPrivateF12PublicOwnerIntegration` 使用显式 `PINVOU_TEST_SCHEMA_DATABASE_URL` 的隔离 current/session 同一 superuser，要求其它部署角色全 absent；复用现有 UUID 数据库、原 actor、权限和正常清理守卫，不安装到输入数据库。仅未提供 URL 才 SKIP，已提供但不安全则失败。命令：`go test -mod=readonly -race -count=1 ./internal/billingschema -run '^TestPrivateF12PublicOwnerIntegration$'`。子进程原三个 named owner 测试必须实际通过，零例、任何 SKIP/FAIL 都不能通过。`F12_GO_BINARY` 可选覆盖 PATH Go，`F12_CHILD_LOG` 可选，默认日志位于测试临时目录；不再依赖私人端口、用户名或实例目录。
+
+补充 BASE 饱和用例使用真实 owner plan/execute 和原付款证据夹具：未结应收100、BASE40时最多清偿40；BONUS60保留为余额，不替 BASE 扩大抵扣。closed wire 的 0..total credit 是粗校验，执行仍由冻结 owner BASE 预算与精确事实约束；不增加公共字段或新钱包状态策略。批准的完整原审计、账本、allocation、组件和回执断言保留。此有限验证不代表真实 Provider、审批发行/NATS、Native 或部署 E2E。
+
+浏览器正式入口读取 `CHROME`（也保留 `EDGE_PATH`/常见跨平台候选），缺浏览器明确失败而非 SKIP。`F12_REACT_RESULT` 仅为显式诊断输出，不覆盖已有私人结果。管理门户近期认证与未知审批操作保持现有 Approval EDIT 兜底，不新增跨刷新持久化或 Native 管理恢复政策。
