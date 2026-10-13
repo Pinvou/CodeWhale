@@ -341,6 +341,36 @@ test("GC retains an invalidating reservation until failed notification is retrie
   assert.equal(notifications, 2);
 });
 
+test("exact reservation release preserves another retained pairing through GC", async () => {
+  let now = 1000;
+  let entropyByte = 0;
+  const stateStore = new MemoryStateStore();
+  const store = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => now,
+    randomBytes: size => Buffer.alloc(size, entropyByte) });
+  const make = async cycle => (await store.register({ request: registration({
+    request_id: `release-transport-${cycle}`, registration_request_id: `release-registration-${cycle}`,
+    remote_control_generation: `release-generation-${cycle}`,
+  }), relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode })).result.pairing_id;
+  const first = await make(0);
+  store.retainForReservation(first);
+  now = 700_000;
+  entropyByte = 1;
+  const second = await make(1);
+  assert.equal(stateStore.value.tombstones.some(row => row.pairing_id === first), true);
+  store.retainForReservation(second);
+  const before = JSON.stringify(stateStore.value);
+  assert.throws(() => store.releaseReservation({ toString: () => second }), { code: "pairing_id_invalid" });
+  store.releaseReservation("pairing:unknown");
+  store.releaseReservation(first);
+  store.releaseReservation(first);
+  assert.equal(JSON.stringify(stateStore.value), before, "release itself does not erase durable evidence");
+  now = 1_400_000;
+  entropyByte = 2;
+  await make(2);
+  assert.equal(stateStore.value.tombstones.some(row => row.pairing_id === first), false);
+  assert.equal(stateStore.value.tombstones.some(row => row.pairing_id === second), true);
+});
+
 test("concurrent registration handlers converge through the global namespace CAS", async () => {
   const stateStore = new MemoryStateStore();
   const left = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => 1000 });
