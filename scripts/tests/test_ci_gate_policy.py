@@ -72,6 +72,51 @@ def _extract_contract_read_targets(contract_test):
     return targets
 
 
+def _extract_consent_marker_read_targets(consent_test):
+    """从 consent_marker_frontend.test.mjs 源码派生全部 src-tauri 读取目标。
+
+    该测试的读取形态与 multiagent_plan_normalize 不同:`join(rustDir,
+    '<rel>.rs')`(rustDir = src-tauri/src/features)与
+    `join(root, 'src-tauri/<rel>.rs')`
+    (root = pinvou3-app)均为单文件读取。统一按「以 .rs 结尾的
+    字符串字面量即一个 src-tauri 源读取」归一化——未来新增读取自动
+    纳入路由锁,不会 fail-open。
+    """
+    targets = set()
+    for literal in re.findall(r"['\"]([^'\"]*\.rs)['\"]", consent_test):
+        if literal.startswith("src-tauri/"):
+            # join(root, 'src-tauri/<rel>.rs'):root 即 pinvou3-app/。
+            targets.add("pinvou3-app/" + literal)
+        else:
+            targets.add("pinvou3-app/src-tauri/src/features/" + literal)
+    return sorted(targets)
+
+
+def _changes_block(workflow_text):
+    """pr-check.yml 的 changes 块(去注释),各 filter 组提取的公共上游。"""
+    return _without_yaml_comments(
+        workflow_text.split("\n  changes:", maxsplit=1)[1].split(
+            "\n  fast-gate:", maxsplit=1
+        )[0]
+    )
+
+
+def _frontend_filter_entries(workflow_text):
+    """从 pr-check.yml 的 changes 块提取 frontend filter 的路径条目列表。"""
+    changes = _changes_block(workflow_text)
+    return _extract_quoted_paths(
+        changes.split("            frontend:", maxsplit=1)[1].split(
+            "            relay:", maxsplit=1
+        )[0]
+    )
+
+
+def _macos_job(workflow_text):
+    return workflow_text.split("\n  macos-rust-check:", maxsplit=1)[1].split(
+        "\n  windows-codex-runtime-test:", maxsplit=1
+    )[0]
+
+
 def _matches_paths_filter(path, patterns):
     """Model paths-filter v4 some-with-excludes routing for policy examples."""
     included = any(
@@ -186,16 +231,11 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertEqual(frontend.count("npm run test:markdown"), 0)
 
     def test_static_analysis_gate_configs_route_to_frontend_test(self):
-        # 静态分析门禁只在 frontend-test 内运行，其配置文件必须进入
-        # frontend 路径过滤，否则 config-only PR 会静默跳过消费它的门禁。
-        changes = _without_yaml_comments(
-            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
-                "\n  fast-gate:", maxsplit=1
-            )[0]
-        )
-        frontend_paths = changes.split(
-            "            frontend:", maxsplit=1
-        )[1].split("            relay:", maxsplit=1)[0]
+        # The static-analysis gates (oxlint/Biome/knip/jsconfig/audit-compat)
+        # only run inside frontend-test, so their config files must be in the
+        # frontend path filter; otherwise a config-only PR skips every gate
+        # that consumes the file it changed.
+        frontend_entries = _frontend_filter_entries(self.pr_workflow)
         for path in (
             "pinvou3-app/.oxlintrc.json",
             "pinvou3-app/biome.jsonc",
@@ -205,9 +245,9 @@ class CiGatePolicyTests(unittest.TestCase):
             "pinvou3-app/scripts/audit-compat.mjs",
         ):
             self.assertIn(
-                f"- '{path}'",
-                frontend_paths,
-                f"静态门禁配置 {path} 不在 frontend filter 中",
+                path,
+                frontend_entries,
+                f"静态门禁配置 {path} 不在 frontend filter 中,config-only PR 会静默跳过 frontend-test",
             )
 
     def test_cross_language_contract_rust_sources_route_to_frontend_test(self):
@@ -217,14 +257,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # the frontend path filter, a Rust-only PR silently skips that node
         # gate — the same structural blind spot the static-analysis configs
         # above guard against.
-        changes = _without_yaml_comments(
-            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
-                "\n  fast-gate:", maxsplit=1
-            )[0]
-        )
-        frontend_paths = changes.split(
-            "            frontend:", maxsplit=1
-        )[1].split("            relay:", maxsplit=1)[0]
+        frontend_entries = _frontend_filter_entries(self.pr_workflow)
         for path in (
             "pinvou3-app/src-tauri/src/features/assistant/**",
             "pinvou3-app/src-tauri/src/features/multiagent/transcripts.rs",
@@ -241,8 +274,8 @@ class CiGatePolicyTests(unittest.TestCase):
             "pinvou3-app/src-tauri/src/lib.rs",
         ):
             self.assertIn(
-                f"- '{path}'",
-                frontend_paths,
+                path,
+                frontend_entries,
                 f"跨语言契约测试读取的 Rust 源 {path} 不在 frontend filter 中,Rust-only PR 会静默跳过该 node 门禁",
             )
 
@@ -253,16 +286,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # 均归一化匹配),逐一断言 frontend filter 覆盖。给契约测试新增
         # Rust read 而不路由、或把已路由文件挪走,都会在这里失败(本套件
         # 在 fast-gate 每个 PR 必跑)。
-        changes = _without_yaml_comments(
-            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
-                "\n  fast-gate:", maxsplit=1
-            )[0]
-        )
-        frontend_entries = _extract_quoted_paths(
-            changes.split("            frontend:", maxsplit=1)[1].split(
-                "            relay:", maxsplit=1
-            )[0]
-        )
+        frontend_entries = _frontend_filter_entries(self.pr_workflow)
         contract_test = (
             ROOT / "pinvou3-app/tests/multiagent_plan_normalize.test.mjs"
         ).read_text(encoding="utf-8")
@@ -277,6 +301,38 @@ class CiGatePolicyTests(unittest.TestCase):
             self.assertTrue(
                 _is_covered_by_trigger(target, frontend_entries),
                 f"跨语言契约测试读取的 {target} 未被 frontend filter 覆盖,"
+                "Rust-only 改动会静默跳过该 node 门禁",
+            )
+
+    def test_consent_marker_contract_reads_fully_routed(self):
+        # consent_marker_frontend.test.mjs 读取三个 Rust 源做 marker 跨语言
+        # 契约断言——Rust-only 改动把 marker 连同其 Rust 值 pin 一起 reword
+        # 时,rust-test 与该 node 门禁自身都全绿,而 ToolStoreView 的
+        # includes() 静默失配,告警降级为通用文案。从测试源码派生全部
+        # .rs 读取目标逐一断言 frontend filter 覆盖;新增读取而未路由、
+        # 或已路由文件被挪走,都会在这里失败(本套件在 fast-gate 每个 PR
+        # 必跑)。
+        frontend_entries = _frontend_filter_entries(self.pr_workflow)
+        consent_test = (
+            ROOT / "pinvou3-app/tests/consent_marker_frontend.test.mjs"
+        ).read_text(encoding="utf-8")
+
+        targets = _extract_consent_marker_read_targets(consent_test)
+
+        # The quoted-literal regex is the parser's contract —
+        # a refactor to template literals would silently shrink the target set
+        # and unroute a source. A bare count fails just as loudly on that
+        # shrinkage or regex rot, while legitimate growth stays fail-closed in
+        # the coverage loop below until the new target is routed.
+        self.assertEqual(
+            len(targets),
+            3,
+            f"consent marker 契约测试读取目标漂移，实际解析出： {sorted(targets)}",
+        )
+        for target in targets:
+            self.assertTrue(
+                _is_covered_by_trigger(target, frontend_entries),
+                f"consent marker 契约测试读取的 {target} 未被 frontend filter 覆盖,"
                 "Rust-only 改动会静默跳过该 node 门禁",
             )
 
@@ -496,11 +552,7 @@ class CiGatePolicyTests(unittest.TestCase):
         )
 
     def test_standalone_knowledge_crate_has_its_own_required_gate(self):
-        changes = _without_yaml_comments(
-            self.workflow.split("\n  changes:", maxsplit=1)[1].split(
-                "\n  fast-gate:", maxsplit=1
-            )[0]
-        )
+        changes = _changes_block(self.pr_workflow)
         self.assertIn("knowledge_rust:", changes)
         self.assertIn("knowledge_dependencies:", changes)
         knowledge_paths = changes.split(
@@ -564,11 +616,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("| sha256sum --check -", step)
         self.assertNotIn("download-actionlint.bash", step)
     def test_cli_crate_has_its_own_required_gate(self):
-        changes = _without_yaml_comments(
-            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
-                "\n  fast-gate:", maxsplit=1
-            )[0]
-        )
+        changes = _changes_block(self.pr_workflow)
         self.assertIn("cli_rust:", changes)
         cli_paths = changes.split("            cli_rust:", maxsplit=1)[1].split(
             "            knowledge_rust:", maxsplit=1
@@ -636,11 +684,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("benchmark_codewhale:", changes)
 
     def test_full_rust_filter_fails_closed_with_stable_module_boundaries(self):
-        changes = _without_yaml_comments(
-            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
-                "\n  fast-gate:", maxsplit=1
-            )[0]
-        )
+        changes = _changes_block(self.pr_workflow)
         rust_full = changes.split("            rust_full:", maxsplit=1)[1].split(
             "            knowledge_rust:", maxsplit=1
         )[0]
@@ -688,14 +732,11 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"documented low-risk leaf should use the fast route: {path}",
             )
 
-        for workflow_path in (
+        self.assertNotIn(
             ".github/workflows/pr-check.yml",
-        ):
-            self.assertNotIn(
-                workflow_path,
-                rust_full_paths,
-                "workflow policy changes must not link the full application tests",
-            )
+            rust_full_paths,
+            "workflow policy changes must not link the full application tests",
+        )
 
         literal_feature_files = [
             path
@@ -1592,12 +1633,8 @@ class CiGatePolicyTests(unittest.TestCase):
             required_gate,
         )
 
-    def test_release_and_platform_contracts_skip_drafts_but_run_in_queue(self):
-        changes = _without_yaml_comments(
-            self.workflow.split("\n  changes:", maxsplit=1)[1].split(
-                "\n  fast-gate:", maxsplit=1
-            )[0]
-        )
+    def test_release_contract_runs_for_ready_pr_queue_and_main(self):
+        changes = _changes_block(self.pr_workflow)
         release_contract_paths = changes.split(
             "            release_contract:", maxsplit=1
         )[1].split("            l1:", maxsplit=1)[0]
@@ -1661,11 +1698,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # release-packages). VERSION is deliberately absent from the filter:
         # a real version-sync commit always touches
         # tauri.conf.json/package.json, entering bundle_chain through them.
-        changes = _without_yaml_comments(
-            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
-                "\n  fast-gate:", maxsplit=1
-            )[0]
-        )
+        changes = _changes_block(self.pr_workflow)
         self.assertIn("bundle_chain:", changes)
         bundle_chain_paths = _extract_quoted_paths(
             changes.split("            bundle_chain:", maxsplit=1)[1]
@@ -1688,9 +1721,7 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"changing would silently skip the bundle smoke: {entry}",
             )
 
-        macos_job = self.pr_workflow.split(
-            "\n  macos-rust-check:", maxsplit=1
-        )[1].split("\n  windows-codex-runtime-test:", maxsplit=1)[0]
+        macos_job = _macos_job(self.pr_workflow)
         smoke_step = _without_yaml_comments(
             macos_job.split(
                 "- name: Tauri bundle smoke", maxsplit=1
@@ -1724,9 +1755,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # lockfile affects the build). Formerly pinned the standalone
         # mac-build.yml trigger; the workflow was folded into pr-check's
         # macos-rust-check in 2026-10.
-        macos_job = self.pr_workflow.split(
-            "\n  macos-rust-check:", maxsplit=1
-        )[1].split("\n  windows-codex-runtime-test:", maxsplit=1)[0]
+        macos_job = _macos_job(self.pr_workflow)
         job_if = macos_job.split("\n    if: >-", maxsplit=1)[1].split(
             "\n    runs-on:", maxsplit=1
         )[0]
@@ -1753,11 +1782,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "the PR side must keep the rust-filter routing (high-risk draft/ready paths)",
         )
 
-        changes = _without_yaml_comments(
-            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
-                "\n  fast-gate:", maxsplit=1
-            )[0]
-        )
+        changes = _changes_block(self.pr_workflow)
         bundle_tail = changes.split("            bundle_chain:", maxsplit=1)[1]
         # bundle_chain is the last filter group and the extraction below has
         # no lower bound: a group appended after it would leak into the
@@ -1786,9 +1811,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # folded into macos-rust-check. Its old failure mode was silent: the
         # workflow kept "running" (cancel-failing) for weeks with zero
         # coverage. Pin each folded leg so removing one cannot go unnoticed.
-        macos_job = self.pr_workflow.split(
-            "\n  macos-rust-check:", maxsplit=1
-        )[1].split("\n  windows-codex-runtime-test:", maxsplit=1)[0]
+        macos_job = _macos_job(self.pr_workflow)
         # mac-build died inside its own 50-minute cap; the fold replaces it
         # with 180. Reverting to the default (360) or deleting the cap burns
         # a hung runner for hours — the exact waste this PR removes.
@@ -1935,9 +1958,7 @@ class CiGatePolicyTests(unittest.TestCase):
         #   a usable lld fails in seconds ahead of any cache restore or
         #   build work (cargo fingerprints inside target/, not the cache
         #   key, keep the lld-built artifacts consistent).
-        macos_job = self.pr_workflow.split(
-            "\n  macos-rust-check:", maxsplit=1
-        )[1].split("\n  windows-codex-runtime-test:", maxsplit=1)[0]
+        macos_job = _macos_job(self.pr_workflow)
 
         # No linker env at job level (comments excluded: they document
         # the scoping and legitimately name the variables).

@@ -500,6 +500,13 @@ pub fn feishu_skills_should_show() -> bool {
 pub async fn feishu_apply_skills() -> Result<Value, String> {
     let show = tokio::task::spawn_blocking(|| -> Result<bool, String> {
         let show = feishu_skills_should_show();
+        // Deny-first transaction boundary (#517): register the connector
+        // in the initialized DenyAll scopes BEFORE materializing skill
+        // files, so a refused registration aborts before anything lands
+        // (the sync write can block on the cross-process flock, hence
+        // inside this spawn_blocking closure; the post-apply consent sync
+        // below stays as the fail-visible belt-and-braces leg).
+        crate::features::marketplace::deny_first_register_connector("feishu", show)?;
         if let Err(e) = GATE.apply_skills(show) {
             // The connected-catch on the card replaces this string with the
             // skills_enable_failed code, so log the raw cause here (stdout in
@@ -536,6 +543,10 @@ pub async fn feishu_apply_skills() -> Result<Value, String> {
 /// 用户显式开启不会被开机刷新回退）。
 pub(crate) fn feishu_gate_step() -> Result<bool, String> {
     let show = feishu_skills_should_show();
+    // Same deny-first boundary as the apply command (#517): the auth-gate
+    // refresh also materializes skill files, so a connector flipping
+    // visible here registers first; a refusal fails before exposure.
+    crate::features::marketplace::deny_first_register_connector("feishu", show)?;
     GATE.apply_skills(show)
         .map_err(|e| format!("更新飞书技能失败: {e}"))?;
     if show {
