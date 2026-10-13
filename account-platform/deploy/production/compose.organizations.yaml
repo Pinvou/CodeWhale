@@ -4,10 +4,13 @@ services:
   account-service:
     image: ${ACCOUNT_ORGANIZATION_IMAGE:?set reviewed same-source F06 Account image}
     environment:
+      ACCOUNT_PLATFORM_PROFILE: models
       TOKEN_HTTP_URL: http://token-gateway:8080
       BILLING_HTTP_URL: http://billing-service:8080
   token-gateway:
     image: ${TOKEN_ORGANIZATION_IMAGE:?set reviewed same-source F06 Token organization image}
+    environment:
+      ACCOUNT_PLATFORM_PROFILE: models
   billing-service:
     image: ${BILLING_ORGANIZATION_IMAGE:?set reviewed same-source F06 Billing organization image}
   token-portal:
@@ -22,3 +25,5 @@ services:
     image: ${MIGRATE_ORGANIZATION_IMAGE:?set reviewed same-source F06 sparse migration image}
   approval-resources:
     image: ${APPROVAL_RESOURCES_ORGANIZATION_IMAGE:?set reviewed same-source F06 membership consumer resource image}
+    environment:
+      ACCOUNT_PLATFORM_PROFILE: models

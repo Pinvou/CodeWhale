@@ -4,6 +4,8 @@
 
 使用现有公共 migrator 安装原字节 Account069/070、Billing056–059，以及新增 Billing900013。原 v1 policy/snapshot 行和历史审批保留，v1 activation 保持 INACTIVE；新增 v2 行安装后也为 INACTIVE。Billing 的 v2 激活仍须满足现有 Account authority、policy digest、handler digest、proof claim、身份和发行前置。此叠加文件不激活命令，不生成身份、签名或 receipt。
 
+升级顺序沿用原受控部署窗口：先按既有流程 quiesce 并 fence relay/consumer，保留历史与未知投递；不得让仍只识别旧 activation 集合的读者继续读取已经追加 v2 行的数据。部署能同时接受原 v1 历史和并存 v2 行的当前 Account/Billing activation、proof、effect/result 读者，并核验实际 owner 回读；新 v2 保持 INACTIVE，原 v1 历史不替换、不激活。Billing 进程还依赖当前七 consumer 的已审配置和回执，不能把旧三项资源或不存在的 reader-only 启动模式当成新读者就绪。迁移、同源二进制、七 consumer 初始化和外部回执完成后，再核验当前读者及 proof/claim/executor 全链实际就绪，最后由原受控 operator 单独执行 activate/resume。兼容读取不等于激活授权，也不承诺无停机滚动升级。
+
 Billing900013 仅安装固定、无参数的 owner 锁能力：运行角色只有该私有 schema 的 USAGE 和函数 EXECUTE，没有 activation 表 UPDATE、schema CREATE 或 owner 身份继承。新执行在资金事务内锁定 ENTITLEMENT_COMPONENT_ADJUSTMENT policy2/snapshot2 的 activation 行；运维停用必须等待已持锁事务结束，之后的新执行失败关闭。已经提交的 immutable result 优先只读回放，停用不能使既有回执失效。
 
 数据迁移不提供回滚删除：Account069 和 Billing900013 的 Down 明确返回 SQLSTATE55000，不删除 policy、触发器、账务或 migration ledger。运维回退应停止专属 consumer，并由既有受控 operator 将 v2 activation 置为 INACTIVE，保留旧事实及未确认投递用于恢复。Issue1664 的旧 Account027 项由前序单独处理，不能以本波069验证宣称整项完成。

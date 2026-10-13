@@ -11,6 +11,7 @@
     "src/app/personas-overlay.js",
     "tests/*.test.{js,mjs}",
     "tests/fixtures/f04-governed-envelope.mjs",
+    "tests/account_platform_organization_boundaries_ui_smoke.mjs",
     "tests/*.js",
     "src/platform/tauri/bridge.js",
     "src/platform/tauri/bridge/*.js",

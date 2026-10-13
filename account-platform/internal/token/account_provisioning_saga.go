@@ -382,9 +382,6 @@ func (r *PostgresRepository) claimTokenAccountProvisioning(ctx context.Context, 
 			err = recordTokenAudit(ctx, tx, v.ActorUserID, "TOKEN_ACCOUNT_PROVISIONING_MANUAL_REVIEW", "TOKEN_ACCOUNT", v.CommandReference, `jsonb_build_object('command_reference',$6,'attempt_count',$7,'recovery_epoch',$8)`, v.CommandReference, v.AttemptCount, v.RecoveryEpoch)
 		}
 		if err == nil {
-			_, err = tx.Exec(ctx, `INSERT INTO outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at) VALUES($1,'token.account-provisioning.manual-review.v1',$2::uuid,$3,jsonb_build_object('attempt_count',$4::integer,'recovery_epoch',$5::bigint),($2::uuid)::text,$6)`, uuid.Must(uuid.NewV7()), v.CommandReference, v.ReservationVersion+1, v.AttemptCount, v.RecoveryEpoch, now)
-		}
-		if err == nil {
 			err = tx.Commit(ctx)
 		}
 		if err != nil {
@@ -451,11 +448,7 @@ func (r *PostgresRepository) failTokenAccountProvisioning(ctx context.Context, i
 	if err = recordTokenAudit(ctx, tx, item.ActorUserID, "TOKEN_ACCOUNT_PROVISIONING_FAILED", "TOKEN_ACCOUNT", item.CommandReference, `jsonb_build_object('command_reference',$6,'stable_error_code',$7)`, item.CommandReference, code); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at) VALUES($1,'token.account-provisioning.failed.v1',$2::uuid,$3,jsonb_build_object('stable_error_code',$4::text),($2::uuid)::text,$5)`, uuid.Must(uuid.NewV7()), item.CommandReference, item.ReservationVersion, code, now)
-	if err == nil {
-		err = tx.Commit(ctx)
-	}
-	return err
+	return tx.Commit(ctx)
 }
 
 // A result from another service is only evidence until the same live claim is
@@ -554,11 +547,7 @@ func (r *PostgresRepository) finalizeTokenAccountProvisioning(ctx context.Contex
 	if err = recordTokenAudit(ctx, tx, item.ActorUserID, "TOKEN_ACCOUNT_PROVISIONING_COMPLETED", "TOKEN_ACCOUNT", account.ID, `jsonb_build_object('command_reference',$6,'token_account_id',$7,'owner_type',$8,'owner_id',$9)`, item.CommandReference, account.ID, item.OwnerType, item.OwnerID); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at) VALUES($1,'token.account-provisioning.completed.v1',$2,1,jsonb_build_object('command_reference',$3::uuid,'token_account_id',$2::uuid),($3::uuid)::text,$4)`, uuid.Must(uuid.NewV7()), account.ID, item.CommandReference, now)
-	if err == nil {
-		err = tx.Commit(ctx)
-	}
-	return err
+	return tx.Commit(ctx)
 }
 
 type TokenAccountRecoveryActionResult struct {
@@ -962,10 +951,6 @@ func (r *PostgresRepository) applyTokenAccountRecoveryAction(ctx context.Context
 		return TokenAccountRecoveryActionResult{}, false, err
 	}
 	if err = recordTokenAudit(ctx, tx, operator.ActorID, "TOKEN_ACCOUNT_PROVISIONING_RECOVERY", "TOKEN_ACCOUNT", reference, `jsonb_build_object('command_reference',$6,'creator_actor_id',$7,'operator_actor_id',$8,'action',$9,'audit_reference',$10,'reason',$11)`, reference, creator, operator.ActorID, action, auditID, reason); err != nil {
-		return TokenAccountRecoveryActionResult{}, false, err
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at) VALUES($1,'token.account-provisioning.recovery.v1',$2,$3,jsonb_build_object('action_id',$4::uuid,'action',$5::text,'audit_reference',$6::uuid),($6::uuid)::text,$7)`, uuid.Must(uuid.NewV7()), reference, newEpoch, actionID, action, auditID, now)
-	if err != nil {
 		return TokenAccountRecoveryActionResult{}, false, err
 	}
 	item, err := scanRecoveryAction(tx.QueryRow(ctx, recoveryActionSelect+` WHERE action_id=$1`, actionID))

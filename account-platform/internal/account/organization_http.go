@@ -245,6 +245,10 @@ func (s *Service) setActiveContext(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid active context", httpserver.RequestID(r.Context()))
 		return
 	}
+	if s.organizationsDisabled && body.ContextType == "ORGANIZATION" {
+		s.writeOrganizationsUnavailable(w, r)
+		return
+	}
 	context, err := repository.SetActiveContext(r.Context(), mustPrincipal(r.Context()), body.OrganizationID, body.ExpectedContextVersion)
 	if err != nil {
 		s.writeError(w, r, err)

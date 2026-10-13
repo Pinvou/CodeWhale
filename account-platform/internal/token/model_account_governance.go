@@ -392,10 +392,6 @@ func (s *Service) executeGovernedModelAccountCommand(ctx context.Context, reposi
 		if err = recordTokenAudit(ctx, tx, input.ActorUserID, "TOKEN_ACCOUNT_PROVISIONING_REQUESTED", "TOKEN_ACCOUNT", command.OwnerID, `jsonb_build_object('command_reference',$6,'owner_type',$7,'owner_id',$8,'status','PENDING')`, reference, command.OwnerType, command.OwnerID); err != nil {
 			return TokenCommandResult{}, false, err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at) VALUES($1,'token.account-provisioning.requested.v1',$2,1,jsonb_build_object('command_reference',$2::uuid,'owner_type',$3::text,'owner_id',$4::uuid),$5,$6)`, uuid.Must(uuid.NewV7()), reference, command.OwnerType, command.OwnerID, input.AuditRequestID, now)
-		if err != nil {
-			return TokenCommandResult{}, false, err
-		}
 		pending, scanErr := scanTokenCommandResult(tx.QueryRow(ctx, tokenCommandResultSelect+` WHERE command_reference=$1`, reference))
 		if scanErr != nil {
 			return TokenCommandResult{}, false, scanErr

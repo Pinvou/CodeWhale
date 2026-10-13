@@ -86,8 +86,23 @@ func TestF04OfflineRendererPreservesArtifactSuperset(t *testing.T) {
 					Durable string `json:"durable"`
 				} `json:"consumers"`
 			}
-			if json.Unmarshal(manifest, &parsed) != nil || len(parsed.Consumers) != 6 {
+			if json.Unmarshal(manifest, &parsed) != nil || len(parsed.Consumers) != 8 {
 				t.Fatal("fixed offline expectation changed with deployment profile")
+			}
+			expectedDurables := []string{
+				"billing-entitlement-component-adjustment-executor-p2-v1",
+				"billing-ledger-repair-executor-p1-v1",
+				"billing-wallet-adjustment-executor-p1-v1",
+				"billing-payment-provider-resume-executor-p2-v1",
+				"billing-payment-product-resume-executor-p1-v1",
+				"token-model-lifecycle-executor-v1",
+				"token-catalog-rollback-executor-v1",
+				"token-credential-revoke-executor-v1",
+			}
+			for i, durable := range expectedDurables {
+				if parsed.Consumers[i].Durable != durable {
+					t.Fatal("fixed phase consumer identity changed")
+				}
 			}
 			for i, descriptor := range approvalconsumer.All() {
 				if parsed.Consumers[i].Durable != descriptor.Durable {

@@ -103,6 +103,9 @@ WITH candidates AS (
     FROM usage_requests request
     LEFT JOIN usage_attempts attempt ON attempt.usage_request_id = request.id
     WHERE request.status IN ('SETTLEMENT_PENDING','REVIEW')
+      -- Cancellation owns recovery of a possibly committed pre-dispatch hold.
+      -- It must retain the exact facts used by the existing release proof.
+      AND request.error_class IS DISTINCT FROM 'cancel_hold_recovery_unconfirmed'
       AND request.reconciliation_stopped_at IS NULL
       AND (request.reconciliation_next_at IS NULL OR request.reconciliation_next_at <= $1)
       AND (request.reconciliation_lease_until IS NULL OR request.reconciliation_lease_until <= $1)
@@ -144,7 +147,8 @@ RETURNING request.id,request.idempotency_key_digest,request.user_id,request.sess
 func (r *PostgresRepository) RescheduleReconciliation(ctx context.Context, usageID uuid.UUID, lastError string, nextAt time.Time) error {
 	command, err := r.pool.Exec(ctx, `UPDATE usage_requests
 SET reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error=$3,updated_at=$4
-WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NULL`, usageID, nextAt.UTC(), truncateReconciliationError(lastError), r.now())
+WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NULL
+  AND error_class IS DISTINCT FROM 'cancel_hold_recovery_unconfirmed'`, usageID, nextAt.UTC(), truncateReconciliationError(lastError), r.now())
 	if err != nil {
 		return err
 	}
@@ -161,9 +165,13 @@ func (r *PostgresRepository) StopReconciliation(ctx context.Context, usageID uui
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// UPDATE evaluates this ownership predicate under its usage-row lock. A
+	// previously claimed item cannot overwrite a later cancellation recovery or
+	// append RECONCILIATION_STOPPED evidence that invalidates its release proof.
 	command, err := tx.Exec(ctx, `UPDATE usage_requests
 SET status='REVIEW',settlement_status='REVIEW',cancel_status=CASE WHEN cancel_status IN ('CANCEL_REQUESTED','PROVIDER_SENT','PROVIDER_CONFIRMED') THEN 'RESULT_UNKNOWN' ELSE cancel_status END,error_class='automatic_reconciliation_exhausted',reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=$2,reconciliation_stopped_at=$3,updated_at=$3
-WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW')`, usageID, truncateReconciliationError(reason), now)
+WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW')
+  AND error_class IS DISTINCT FROM 'cancel_hold_recovery_unconfirmed'`, usageID, truncateReconciliationError(reason), now)
 	if err != nil {
 		return err
 	}

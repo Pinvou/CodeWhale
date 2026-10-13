@@ -1,4 +1,4 @@
-import { integerMoney, parseFinanceJSON, encodeFinanceJSON } from './finance-contract.js';
+import { integerMoney, parseFinanceJSON, encodeFinanceJSON, requireFinanceID } from './finance-contract.js';
 // Entitlement component correction (`ENTITLEMENT_COMPONENT_ADJUSTMENT`) is a
 // closed policy v2 / snapshot schema v2 command. The business page never
 // derives domain facts: it renders the projection returned by the read-only
@@ -29,6 +29,13 @@ function amount(value) {
 function reasonCodeValid(value) {
   return typeof value === 'string' && value.length > 0 && value.trim() === value &&
     new TextEncoder().encode(value).length <= 80;
+}
+
+// The editable inputs use the same identifier and normalized byte bounds as
+// the existing client, separately from validation of an owner's response.
+export function entitlementCorrectionInputValid(packageID, orderID, reasonCode) {
+  try { requireFinanceID(packageID); requireFinanceID(orderID); } catch { return false; }
+  return reasonCodeValid(reasonCode);
 }
 
 function closedObject(value) {

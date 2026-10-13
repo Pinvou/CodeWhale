@@ -134,6 +134,9 @@ test("container CI uses immutable official cache images without losing either bu
 
 test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
   const paths = filterPaths(workflow, "account_platform");
+  for (const path of ["scripts/check-account-platform-authorization-coverage.mjs", "scripts/tests/account-platform-authorization-coverage.test.mjs"]) {
+    assert.ok(paths.includes(path), `authorization changes must trigger the Go gate: ${path}`);
+  }
   for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-token-management-authorization-coverage.mjs", "scripts/tests/token-management-authorization-coverage.test.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
     assert.ok(paths.includes(path), `Go routing must cover ${path}`);
   }
@@ -156,6 +159,21 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
     assert.equal(result.stdout, expectedOutput);
   }
   assert.doesNotMatch(job, /secrets\.|services:|continue-on-error:/);
+});
+
+test("whole Account Platform authorization failures block the CI gate", () => {
+  const job = jobBlock("account-platform-test");
+  const run = stepRun(job, "Verify Account Platform authorization contracts");
+  assert.deepEqual(run.trim().split(/\r?\n/), [
+    "node scripts/check-account-platform-authorization-coverage.mjs",
+    "node --test scripts/tests/account-platform-authorization-coverage.test.mjs",
+  ]);
+  for (const [checkerStatus, formalStatus, expectedOutput, expectedStatus] of [[7, 0, "checker", 7], [0, 8, "checkerformal", 8], [0, 0, "checkerformal", 0]]) {
+    const fixture = `node() { if [[ "$1" == scripts/check-account-platform-authorization-coverage.mjs ]]; then printf checker; return ${checkerStatus}; else printf formal; return ${formalStatus}; fi; };\n`;
+    const result = spawnSync(bash, ["-e", "-c", fixture + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, expectedStatus, result.stderr);
+    assert.equal(result.stdout, expectedOutput);
+  }
 });
 
 test("Go gate executes test and vet for root and future nested modules, and fails on errors", () => {

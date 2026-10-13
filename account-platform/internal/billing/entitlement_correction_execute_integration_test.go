@@ -171,6 +171,29 @@ func TestEntitlementCorrectionExecuteAndConsumerReadPostgresIntegration(t *testi
 		t.Fatal("deactivation race mutated financial facts")
 	}
 	setActivation("ACTIVE")
+	t.Run("approved-monetary-facts-drift-has-no-effects", func(t *testing.T) {
+		changedProduct, err := json.Marshal(Product{ProductID: "CORRECTION_EXECUTE_TEST", AmountFen: 100, CreditMicrocredits: 100, BasePoints: 70, BonusPoints: 30, Currency: "CNY"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repository.pool.Exec(ctx, `UPDATE payment_orders SET product_snapshot=$2 WHERE id=$1`, orderID, changedProduct); err != nil {
+			t.Fatal(err)
+		}
+		before := entitlementFinancialFactsSnapshot(t, ctx, repository)
+		if _, err := repository.ExecuteEntitlementComponentCorrection(ctx, approvalRequestID, authorizationEventID, 2,
+			packageID, orderID, requesterID, approverID, executionKey, "independent approval completed", reasonCode, frozen); !errors.Is(err, ErrApprovalSnapshotMismatch) {
+			t.Fatalf("changed monetary facts accepted: %v", err)
+		}
+		after := entitlementFinancialFactsSnapshot(t, ctx, repository)
+		for table, rows := range before {
+			if after[table] != rows {
+				t.Fatalf("rejected execution mutated %s", table)
+			}
+		}
+		if _, err := repository.pool.Exec(ctx, `UPDATE payment_orders SET product_snapshot=$2 WHERE id=$1`, orderID, product); err != nil {
+			t.Fatal(err)
+		}
+	})
 	result, err := repository.ExecuteEntitlementComponentCorrection(ctx, approvalRequestID, authorizationEventID, 2,
 		packageID, orderID, requesterID, approverID, executionKey, "independent approval completed", reasonCode, frozen)
 	if err != nil || result.Status != "SUCCEEDED" || result.AmountMicrocredits != 20 || result.SourceComponentID != lotID ||
@@ -330,6 +353,21 @@ has_table_privilege('billing_service',$1,'UPDATE'),has_table_privilege('billing_
 	}
 }
 
+// Read every row in the owned database's financial/effect tables. Checking only
+// the source balance would miss journals, receipts, grants or recovery effects.
+func entitlementFinancialFactsSnapshot(t *testing.T, ctx context.Context, r *PostgresRepository) map[string]string {
+	t.Helper()
+	result := map[string]string{}
+	for _, table := range []string{"payment_orders", "payment_transactions", "wallets", "credit_lots", "entitlement_packages", "entitlement_components", "entitlement_component_corrections", "journal_entries", "ledger_postings", "member_quota_grants", "usage_holds", "usage_hold_allocations", "refunds", "refund_component_reservations", "forced_refund_cases", "chargeback_cases", "receivables", "receivable_allocations", "outbox_events"} {
+		var rows string
+		if err := r.pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(row ORDER BY row::text),'[]'::jsonb)::text FROM (SELECT to_jsonb(f) AS row FROM `+pgx.Identifier{table}.Sanitize()+` f) facts`).Scan(&rows); err != nil {
+			t.Fatalf("snapshot %s: %v", table, err)
+		}
+		result[table] = rows
+	}
+	return result
+}
+
 // Uses only this branch's installed SQL, the real versioned wrapper, and the
 // inherited strict owned UUID database cleanup. Fixed roles belong to the
 // isolated F09 test instance and are created/removed by the outer role harness.
@@ -400,6 +438,11 @@ func entitlementRepositoryToVersion(t *testing.T, ctx context.Context, raw strin
 	}
 	selected := make([]migrations.Migration, 0, len(loaded))
 	for _, migration := range loaded {
+		// Partial fixtures retain the original F09 entitlement phase input.
+		// Full installation (maximum == 0) must keep every F10 Ledger migration.
+		if maximum != 0 && (migration.Version == 61 || migration.Version == 62 || migration.Version == 900014) {
+			continue
+		}
 		if migration.Version == 900013 && maximum != 0 && maximum < 59 {
 			continue
 		}

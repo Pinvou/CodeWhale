@@ -402,8 +402,9 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 		id, lotID                    uuid.UUID
 		kind, status                 string
 		available, active, suspended int64
+		original, reclassified       int64
 	}
-	rows, err := tx.Query(ctx, `SELECT id,credit_lot_id,component_type,status,available_microcredits,active_grant_microcredits,suspended_grant_microcredits FROM entitlement_components WHERE package_id=$1 AND used_microcredits=0 AND reserved_microcredits=0 AND expired_microcredits=0 AND revoked_microcredits=0 ORDER BY id FOR UPDATE`, packageID)
+	rows, err := tx.Query(ctx, `SELECT id,credit_lot_id,component_type,status,available_microcredits,active_grant_microcredits,suspended_grant_microcredits,original_microcredits,reclassified_out_microcredits FROM entitlement_components WHERE package_id=$1 AND used_microcredits=0 AND reserved_microcredits=0 AND expired_microcredits=0 AND revoked_microcredits=0 ORDER BY id FOR UPDATE`, packageID)
 	if err != nil {
 		return Refund{}, false, err
 	}
@@ -411,12 +412,15 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 	var base, bonus int64
 	for rows.Next() {
 		var item componentReservation
-		if err := rows.Scan(&item.id, &item.lotID, &item.kind, &item.status, &item.available, &item.active, &item.suspended); err != nil {
+		if err := rows.Scan(&item.id, &item.lotID, &item.kind, &item.status, &item.available, &item.active, &item.suspended, &item.original, &item.reclassified); err != nil {
 			rows.Close()
 			return Refund{}, false, err
 		}
 		total := item.available + item.active + item.suspended
-		if total <= 0 || (item.kind != "BASE" && item.kind != "BONUS") {
+		// Keep the historical source in the reservation/count guards even when
+		// an immutable correction transferred all of its unused entitlement.
+		fullyReclassified := total == 0 && item.original > 0 && item.reclassified == item.original
+		if (total <= 0 && !fullyReclassified) || (item.kind != "BASE" && item.kind != "BONUS") {
 			rows.Close()
 			return Refund{}, false, ErrConflict
 		}
@@ -601,10 +605,10 @@ func (p *PaymentCoordinator) finishRefundTransaction(ctx context.Context, tx pgx
 	walletAccount, err := walletLedgerAccount(ctx, tx, order.WalletID)
 	for _, component := range components {
 		amount := component.available + component.active + component.suspended
-		if err == nil {
+		if err == nil && amount > 0 {
 			err = insertPosting(ctx, tx, entryID, walletAccount, -amount, &component.lotID, now)
 		}
-		if err == nil {
+		if err == nil && amount > 0 {
 			command, updateErr := tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits=remaining_microcredits-$2 WHERE id=$1 AND remaining_microcredits>=$2`, component.lotID, amount)
 			err = updateErr
 			if err == nil && command.RowsAffected() != 1 {
@@ -612,7 +616,7 @@ func (p *PaymentCoordinator) finishRefundTransaction(ctx context.Context, tx pgx
 			}
 		}
 		if err == nil {
-			command, updateErr := tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=0,active_grant_microcredits=0,suspended_grant_microcredits=0,revoked_microcredits=revoked_microcredits+$2,status='REVOKED',updated_at=$3 WHERE id=$1 AND status='FROZEN' AND available_microcredits=$4 AND active_grant_microcredits=$5 AND suspended_grant_microcredits=$6 AND used_microcredits=0 AND reserved_microcredits=0 AND expired_microcredits=0`, component.id, amount, now, component.available, component.active, component.suspended)
+			command, updateErr := tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=0,active_grant_microcredits=0,suspended_grant_microcredits=0,revoked_microcredits=revoked_microcredits+$2,status='REVOKED',updated_at=$3 WHERE id=$1 AND status='FROZEN' AND available_microcredits=$4 AND active_grant_microcredits=$5 AND suspended_grant_microcredits=$6 AND used_microcredits=0 AND reserved_microcredits=0 AND expired_microcredits=0 AND ($2>0 OR (original_microcredits>0 AND reclassified_out_microcredits=original_microcredits))`, component.id, amount, now, component.available, component.active, component.suspended)
 			err = updateErr
 			if err == nil && command.RowsAffected() != 1 {
 				err = ErrConflict

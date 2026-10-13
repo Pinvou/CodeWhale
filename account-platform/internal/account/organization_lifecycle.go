@@ -163,6 +163,80 @@ type organizationDeletionRepository interface {
 	AdminOrganizationDeletionBlockers(context.Context, uuid.UUID) ([]OrganizationLifecycleBlocker, error)
 }
 
+// Recover the existing deletion operation without regressing an authority that
+// already stored DELETED(v+1). A preflight is only a readiness observation; every
+// authority must subsequently confirm Apply's exact immutable target tuple.
+func (s *Service) confirmOrganizationDeletionProjection(ctx context.Context, organizationID uuid.UUID, currentVersion int64) (OrganizationLifecycleAssessment, error) {
+	targetVersion := currentVersion + 1
+	combined := OrganizationLifecycleAssessment{OrganizationID: organizationID, Status: "DELETED", AccountVersion: targetVersion, Ready: true, Blockers: []OrganizationLifecycleBlocker{}}
+	validate := func(value OrganizationLifecycleAssessment, status string, version int64) error {
+		if value.OrganizationID != organizationID || value.Status != status || value.AccountVersion != version || value.Ready != (len(value.Blockers) == 0) {
+			return errors.New("organization deletion authority returned conflicting completion facts")
+		}
+		return nil
+	}
+	for _, client := range s.organizationLifecycle {
+		assessment, err := client.Preflight(ctx, organizationID, "DELETED", targetVersion)
+		if err != nil {
+			return combined, err
+		}
+		if err := validate(assessment, "DELETED", targetVersion); err != nil {
+			return combined, err
+		}
+		if assessment.Ready {
+			continue
+		}
+		needsDisabled := false
+		for _, blocker := range assessment.Blockers {
+			if blocker.Code == "ORGANIZATION_NOT_DISABLED" {
+				needsDisabled = true
+			}
+		}
+		if needsDisabled {
+			assessment, err = client.Apply(ctx, organizationID, "DISABLED", currentVersion)
+			if err != nil {
+				return combined, err
+			}
+			if err := validate(assessment, "DISABLED", currentVersion); err != nil {
+				return combined, err
+			}
+			if !assessment.Ready {
+				return assessment, nil
+			}
+		}
+	}
+	// Preserve all-domain preflight-before-delete ordering and every blocker.
+	for _, client := range s.organizationLifecycle {
+		assessment, err := client.Preflight(ctx, organizationID, "DELETED", targetVersion)
+		if err != nil {
+			return combined, err
+		}
+		if err := validate(assessment, "DELETED", targetVersion); err != nil {
+			return combined, err
+		}
+		if !assessment.Ready {
+			combined.Ready = false
+			combined.Blockers = append(combined.Blockers, assessment.Blockers...)
+		}
+	}
+	if !combined.Ready {
+		return combined, nil
+	}
+	for _, client := range s.organizationLifecycle {
+		assessment, err := client.Apply(ctx, organizationID, "DELETED", targetVersion)
+		if err != nil {
+			return combined, err
+		}
+		if err := validate(assessment, "DELETED", targetVersion); err != nil {
+			return combined, err
+		}
+		if !assessment.Ready {
+			return assessment, nil
+		}
+	}
+	return combined, nil
+}
+
 func (s *Service) assessOrganizationDeletion(ctx context.Context, repository organizationDeletionRepository, organizationID uuid.UUID) (OrganizationDeletionReadiness, error) {
 	state, err := repository.AdminOrganizationState(ctx, organizationID)
 	if err != nil {

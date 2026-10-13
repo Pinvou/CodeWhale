@@ -21,6 +21,9 @@ func TestProtectedMigrationIdentityUsesFrozenFacts(t *testing.T) {
 		{900001, "outbox_publication_generation", "changed", "billing"},
 		{900002, "payment_anomaly_resolution_intents", "changed", "billing"},
 		{87, "registration_bonus_fingerprint", "changed", "account"},
+		{28, "account_closure_cleanup", "changed", "account"},
+		{28, "renamed", "05eec7870758d9eb29248236a389f7facfbc4025d1fa711d40775d3fe96855b9", "account"},
+		{28, "custom_business", "custom_checksum", ""},
 		{900004, "renamed", "ddfdb70370c3900c113efc918fb5586ab1a2cb977337b8df35e565e1a250772f", "account"},
 		{79, "registration_bonus", "changed", "billing"},
 		{6, "merchant_customer_key", "changed", "payment-simulator"},
@@ -73,6 +76,20 @@ func TestMigrationDomainRetainsUnrelatedCustomHistory(t *testing.T) {
 	var remains bool
 	if err = connection.QueryRow(ctx, `SELECT to_regclass('owned_custom_facts') IS NOT NULL OR EXISTS(SELECT 1 FROM schema_migrations)`).Scan(&remains); err != nil || remains {
 		t.Fatal("generic rollback did not preserve its original semantics")
+	}
+	// Sharing a version number alone must not turn a custom schema into Account.
+	loaded[0].Version = 28
+	if domain, err = migrationDomain(ctx, connection, loaded, "owned-custom-history"); err != nil || domain != "owned-custom-history" {
+		t.Fatal("unrelated custom version 28 no longer generic")
+	}
+	if err = migrations.Up(ctx, connection, loaded); err != nil {
+		t.Fatal(err)
+	}
+	if err = migrations.DownOne(ctx, connection, loaded); err != nil {
+		t.Fatal("unrelated custom version 28 rollback rejected")
+	}
+	if err = connection.QueryRow(ctx, `SELECT to_regclass('owned_custom_facts') IS NOT NULL OR EXISTS(SELECT 1 FROM schema_migrations)`).Scan(&remains); err != nil || remains {
+		t.Fatal("unrelated custom version 28 rollback changed semantics")
 	}
 	mixed := []migrations.Migration{{Version: 900001, Name: "outbox_publication_generation"}, {Version: 6, Name: "merchant_customer_key"}}
 	if _, err = migrationDomain(ctx, connection, mixed, "owned-custom-history"); err == nil {

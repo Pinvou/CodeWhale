@@ -52,6 +52,15 @@ policy starts disabled. GET/PUT `/admin/v1/registration-bonus-policy` require th
 current read/manage permission; PUT also requires existing recent authentication,
 AuditOnly policy, expected revision, reason and an immutable actor-bound key.
 
+Registration freezes eligibility and its fingerprint, not a Billing policy
+snapshot. The first successful Billing provisioning transaction uses the active
+policy at that time and freezes its revision and outcome in the claim/receipt.
+A wallet-worker delay can therefore make a later policy apply to a registration
+that has not yet received its first receipt. Replays retain the original receipt
+even after a policy change. Disabled and zero-amount outcomes also permanently
+consume that registration's eligibility; enabling or increasing the policy later
+does not grant the same fingerprint a second opportunity.
+
 Existing public SMS/captcha/register flows freeze the operation, username/mobile,
 challenge, password-policy version and eligibility fingerprint before provisioning.
 `X-Registration-Query-Token` is scoped to one operation and is read-only: querying
