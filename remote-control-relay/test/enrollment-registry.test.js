@@ -42,6 +42,66 @@ function windowsDaclInspectorConfiguration(paths, environment = process.env) {
   return { executable: path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), env };
 }
 
+async function executeDaclInspector(t, executable, argv, options, execute = execFileAsync) {
+  try {
+    return await execute(executable, argv, options);
+  } catch (error) {
+    const read = (field) => {
+      try { return error?.[field]; } catch { return undefined; }
+    };
+    const code = read("code");
+    const errno = read("errno");
+    const killed = read("killed");
+    const signal = read("signal");
+    const diagnostic = { stage: "inspector", code: "unknown" };
+    if (["ETIMEDOUT", "EACCES", "EPERM", "ENOENT", "ENOTDIR", "EINVAL",
+      "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"].includes(code)) diagnostic.code = code;
+    if (Number.isSafeInteger(errno) && errno >= -2147483648 && errno <= 2147483647) diagnostic.errno = errno;
+    if (typeof killed === "boolean") diagnostic.killed = killed;
+    if (["SIGTERM", "SIGKILL", "SIGABRT", "SIGINT"].includes(signal)) diagnostic.signal = signal;
+    try { t.diagnostic(`windows_relay_dacl_inspector_failure ${JSON.stringify(diagnostic)}`); }
+    catch { /* Diagnostics cannot replace the original inspector failure. */ }
+    throw error;
+  }
+}
+
+test("Windows DACL inspector failure diagnostic preserves execution and cached closed fields", async () => {
+  for (const mode of ["changing", "throwing", "boxed", "observer_throw"]) {
+    const reads = { code: 0, errno: 0, killed: 0, signal: 0 };
+    const forbidden = { message: 0, stack: 0, stdout: 0, stderr: 0, cmd: 0, path: 0, SID: 0, owner: 0, sddl: 0 };
+    const safe = { code: "ETIMEDOUT", errno: -1, killed: true, signal: "SIGTERM" };
+    const original = {};
+    for (const [field, value] of Object.entries(safe)) {
+      Object.defineProperty(original, field, { get() {
+        reads[field] += 1;
+        if (mode === "throwing") throw new Error("SECRET_SENTINEL");
+        if (mode === "boxed") return Object(value);
+        return reads[field] === 1 ? value : "SECRET_SENTINEL";
+      } });
+    }
+    for (const field of Object.keys(forbidden)) {
+      Object.defineProperty(original, field, { get() {
+        forbidden[field] += 1;
+        throw new Error("FORBIDDEN_SECRET_READ");
+      } });
+    }
+    const argv = [], options = {}, messages = [];
+    await assert.rejects(executeDaclInspector({ diagnostic(value) {
+      messages.push(value);
+      if (mode === "observer_throw") throw new Error("OBSERVER_SECRET_SENTINEL");
+    } }, "original-executable", argv, options, async (executable, actualArgv, actualOptions) => {
+      assert.equal(executable, "original-executable"); assert.equal(actualArgv, argv); assert.equal(actualOptions, options);
+      throw original;
+    }), (actual) => actual === original);
+    for (const count of Object.values(reads)) assert.equal(count, 1);
+    for (const count of Object.values(forbidden)) assert.equal(count, 0);
+    assert.equal(messages.length, 1); assert.equal(messages[0].includes("SECRET"), false);
+    assert.deepEqual(JSON.parse(messages[0].slice("windows_relay_dacl_inspector_failure ".length)), ["changing", "observer_throw"].includes(mode)
+      ? { stage: "inspector", code: "ETIMEDOUT", errno: -1, killed: true, signal: "SIGTERM" }
+      : { stage: "inspector", code: "unknown" });
+  }
+});
+
 test("Windows DACL inspector uses only explicit production environment and executable", () => {
   for (const fallback of [false, true]) {
     const values = { SystemRoot: fallback ? undefined : "C:\\Windows", WINDIR: "C:\\Windows", PATH: "original-path", PATHEXT: ".EXE", TEMP: "C:\\owned-temp", TMP: undefined };
@@ -1154,7 +1214,7 @@ test("Windows state directory and every durable/lock file have protected DACLs",
     lockPath(statePath),
   ];
   const inspector = windowsDaclInspectorConfiguration(paths.join("|"));
-  const { stdout } = await execFileAsync(inspector.executable, [
+  const { stdout } = await executeDaclInspector(t, inspector.executable, [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
     "-EncodedCommand", Buffer.from(inspectScript, "utf16le").toString("base64"),
   ], {
