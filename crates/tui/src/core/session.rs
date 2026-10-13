@@ -27,9 +27,11 @@ use std::path::PathBuf;
 /// but the size bounds never fire, so an activated schema stays callable for
 /// the conversation's lifetime. `usize::MAX` itself cannot serve as the bound:
 /// comparisons against the type extreme trip clippy's deny-by-default
-/// `absurd_extreme_comparisons` (and rustc's `unused_comparisons`), so the
-/// bound is an effectively-unbounded sentinel at `usize::MAX / 2` — any
-/// slightly smaller value compiles; only the exact extreme is lint-rejected.
+/// `absurd_extreme_comparisons` (rustc's `unused_comparisons` joins in only
+/// when the extreme is written as a numeric literal, not through a const
+/// item), so the bound is an effectively-unbounded sentinel at
+/// `usize::MAX / 2` — any slightly smaller value compiles; only the exact
+/// extreme is lint-rejected.
 pub(crate) const TOOL_ACTIVATION_CACHE_MAX_NAMES: usize = usize::MAX / 2;
 /// Maximum serialized bytes added to requests by cached deferred schemas.
 ///
@@ -89,7 +91,9 @@ impl ToolActivationCache {
     }
 
     /// Drop entries that are no longer deferred members of this turn's
-    /// filtered catalog and enforce both cache bounds.
+    /// filtered catalog. Upstream also evicts until both size bounds hold;
+    /// in the Pinvou fork the bounds are disabled (see the constants above)
+    /// and only the membership half can drop entries.
     pub(crate) fn revalidate(&mut self, catalog: &[crate::models::Tool]) -> Vec<String> {
         let mut evicted = Vec::new();
         self.names.retain(|name| {
@@ -113,9 +117,11 @@ impl ToolActivationCache {
         evicted
     }
 
-    /// Touch requested deferred tools in search-result order. An oversized
-    /// schema is rejected; otherwise least-recently-used entries are evicted
-    /// until both bounds hold.
+    /// Touch requested deferred tools in search-result order. Upstream
+    /// rejects oversized schemas and evicts least-recently-used entries until
+    /// both size bounds hold; the Pinvou fork disables those bounds (see the
+    /// constants above), so those paths never fire and every request naming a
+    /// deferred catalog member is admitted.
     pub(crate) fn activate(
         &mut self,
         catalog: &[crate::models::Tool],
@@ -504,8 +510,8 @@ mod tests {
     fn forkguard_oversized_schema_is_admitted_while_the_bounds_are_disabled() {
         // 17 KiB exceeds upstream's historical 16 KiB per-tool bound; with the
         // bounds disabled it is admitted like any other schema. The literal is
-        // sized against the historical bound because the fork bound
-        // (usize::MAX / 2) has no constructible neighbor.
+        // sized against the historical bound because no constructible schema
+        // can approach the fork bound (usize::MAX / 2).
         let catalog = vec![deferred_tool("huge", 17 * 1024)];
         let mut cache = ToolActivationCache::default();
         let delta = cache.activate(&catalog, &["huge".to_string()]);
@@ -517,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn touching_a_cached_tool_moves_it_to_the_back_and_evicts_nothing() {
+    fn forkguard_touching_a_cached_tool_moves_it_to_the_back_and_evicts_nothing() {
         let catalog = (0..9)
             .map(|index| deferred_tool(&format!("tool_{index}"), 8))
             .collect::<Vec<_>>();

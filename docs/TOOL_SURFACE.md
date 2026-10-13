@@ -77,13 +77,16 @@ user explicitly names them in `[tools].always_load`.
 A successful search activation is remembered by name for the current
 conversation. Upstream bounds the cache to eight deferred names and 16 KiB of
 serialized schemas with least-recently-used eviction; this fork disables that
-bound (`usize::MAX / 2`, effectively unbounded), so every activation stays
+bound (effectively unbounded), so every activation stays
 advertised for the conversation's lifetime — under provider prompt-cache
 pricing, an eviction re-prefills the entire prefix while saving only the ~0.1x
 cached-read cost of the schemas it frees (see codewhale-hq/Codewhale#6969).
 No size ceiling remains: the activated set is the only clamp on the request
 tools array, so a session that activates very many large schemas can approach
-provider request-size or tool-count limits. The cache still revalidates every
+provider request-size or tool-count limits. Bookkeeping grows with the
+activated set too: revalidation and admission re-serialize cached schemas
+against the catalog on each pass, negligible at tens of tools but not free
+for activation-heavy sessions. The cache still revalidates every
 entry against the current catalog and policy before advertising it again. A
 session sync clears it. The cache cannot resurrect a removed, denied, or
 newly-eager tool.

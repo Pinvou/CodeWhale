@@ -18,9 +18,7 @@ use crate::models::Tool;
 use crate::tools::spec::{ToolError, ToolResult, optional_str, optional_u64, required_str};
 use crate::tui::app::AppMode;
 
-use crate::core::session::{
-    TOOL_ACTIVATION_CACHE_MAX_NAMES, TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES, ToolActivationCache,
-};
+use crate::core::session::ToolActivationCache;
 use crate::dependencies::ExternalTool;
 use crate::regex_cache::compile_user_regex;
 
@@ -1296,8 +1294,8 @@ pub(super) fn execute_tool_search(
     execute_tool_search_inner(tool_name, input, catalog, active_tools, None, None)
 }
 
-/// Execute tool search while retaining activated schemas in the bounded
-/// conversation cache. Kept separate from the test-only pure search helper so existing
+/// Execute tool search while retaining activated schemas in the conversation
+/// cache. Kept separate from the test-only pure search helper so existing
 /// pure catalog tests and compatibility callers do not need an engine session.
 ///
 /// `connecting_mcp_servers` carries the boot-window status (#588): while the
@@ -1384,23 +1382,18 @@ fn execute_tool_search_inner(
             })
         })
         .collect::<Vec<_>>();
-    // The bounds statement is derived from the session constants so the prose
-    // can never disagree with them. In the Pinvou fork the bounds never fire:
-    // discovery pre-filters deferred membership, so the only way a name lands
-    // here is the per-entry size sentinel (including the serde-failure case),
-    // which no real schema can reach. Built lazily so a normal search pays no
-    // formatting cost.
+    // In the Pinvou fork the toolbox size bounds never fire (see the session
+    // constants): discovery pre-filters deferred membership, so the only way
+    // a name lands here is the per-entry sentinel — a schema whose serialized
+    // size cannot be measured (serde failure reports usize::MAX) — which no
+    // real schema reaches. The reason therefore claims no bound and
+    // interpolates no numbers.
     unavailable_references.extend(cache_rejected.iter().map(|name| {
         json!({
             "type": "unavailable_tool_reference",
             "tool_name": name,
-            "reason": format!(
-                "The tool schema exceeds the bounded conversation toolbox ({} cached tools, \
-                 {}KiB of added serialized schemas). Narrow the search or use a smaller \
-                 matching tool.",
-                TOOL_ACTIVATION_CACHE_MAX_NAMES,
-                TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES / 1024
-            ),
+            "reason":
+                "The tool schema could not be measured for admission to the conversation toolbox.",
         })
     }));
 
