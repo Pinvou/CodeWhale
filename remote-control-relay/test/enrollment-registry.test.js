@@ -1190,9 +1190,9 @@ test("Windows state directory and every durable/lock file have protected DACLs",
     $result = @()
     $index = 0
     foreach ($target in ($env:PINVOU_ACL_PATHS -split '\\|')) {
-      $acl = Get-Acl -LiteralPath $target
-      $sids = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
-      $ownerAccount = New-Object System.Security.Principal.NTAccount -ArgumentList $acl.Owner
+      $acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $target
+      $sids = @($acl.Access | Microsoft.PowerShell.Core\\ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Microsoft.PowerShell.Utility\\Sort-Object -Unique)
+      $ownerAccount = Microsoft.PowerShell.Utility\\New-Object System.Security.Principal.NTAccount -ArgumentList $acl.Owner
       $ownerSid = $ownerAccount.Translate([System.Security.Principal.SecurityIdentifier]).Value
       $validRules = $true
       foreach ($rule in @($acl.Access)) {
@@ -1204,7 +1204,7 @@ test("Windows state directory and every durable/lock file have protected DACLs",
       $result += [pscustomobject]@{ protected = $acl.AreAccessRulesProtected; owner = $ownerSid; sids = $sids; count = @($acl.Access).Count; valid_rules = $validRules }
       $index += 1
     }
-    [Console]::Out.Write(($result | ConvertTo-Json -Compress))
+    [Console]::Out.Write(($result | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress))
   `;
   const paths = [
     path.dirname(statePath),
