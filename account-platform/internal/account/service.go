@@ -24,6 +24,7 @@ var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomple
 
 type Service struct {
 	approvalPrechecks           ApprovalPrecheckSource
+	organizationsDisabled       bool
 	organizationLifecycle       []OrganizationLifecycleClient
 	organizationUnitLifecycle   []OrganizationUnitLifecycleClient
 	organizationMemberLifecycle []OrganizationMemberLifecycleClient

@@ -53,7 +53,7 @@ func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixtur
 			t.Fatal("exclusive actor creation rejected")
 		}
 	}
-	if _, err := tx.Exec(ctx, `GRANT account_service,account_approval_control_owner TO account_migrator; GRANT account_approval_authorization_owner TO account_migrator WITH INHERIT FALSE,SET TRUE,ADMIN TRUE; GRANT billing_service,billing_schema_owner TO billing_migrator; GRANT token_gateway,token_schema_owner,token_cap_policy_deployer TO token_migrator`); err != nil {
+	if _, err := tx.Exec(ctx, `GRANT account_service,account_approval_control_owner TO account_migrator; GRANT account_approval_authorization_owner TO account_migrator WITH INHERIT FALSE,SET TRUE,ADMIN TRUE; GRANT billing_service,billing_schema_owner TO billing_migrator; GRANT billing_service TO billing_schema_owner WITH INHERIT TRUE,SET TRUE; GRANT token_gateway,token_schema_owner,token_cap_policy_deployer TO token_migrator`); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -131,7 +131,7 @@ func TestF09ExpiryPublicCoordinator(t *testing.T) {
 			args = append(args, filepath.Join(dir, e.Name()))
 		}
 	}
-	args = append(args, filepath.Join(dir, "retained_financial_integration_test.go"), filepath.Join(dir, "entitlement_correction_expiry_integration_test.go"))
+	args = append(args, filepath.Join(dir, "retained_financial_integration_test.go"), filepath.Join(dir, "finance_refund_reconcile_integration_test.go"), filepath.Join(dir, "entitlement_correction_expiry_integration_test.go"))
 	child := exec.CommandContext(ctx, os.Getenv("PINVOU_PRIVATE_GO"), args...)
 	child.Dir = "."
 	child.Env = append(os.Environ(), "PINVOU_TEST_BILLING_DATABASE_URL="+raw)

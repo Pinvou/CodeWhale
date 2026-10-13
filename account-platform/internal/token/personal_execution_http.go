@@ -42,6 +42,10 @@ func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	usage, err := s.repository.GetUsage(r.Context(), usageID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		s.writeError(w, r, err)
+		return
+	}
 	if err != nil || !usageContextMatches(resolved, usage) {
 		s.writeError(w, r, ErrNotFound)
 		return

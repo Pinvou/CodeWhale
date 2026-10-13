@@ -158,6 +158,9 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, err)
 			return
 		}
+	} else if resolved.ContextType == "ORGANIZATION" {
+		api.WriteError(w, http.StatusServiceUnavailable, "MODEL_POLICY_UNAVAILABLE", "organization model policy is unavailable", httpserver.RequestID(r.Context()))
+		return
 	}
 	maximumOutput := request.MaxCompletionTokens
 	if maximumOutput == 0 {
@@ -295,7 +298,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	hold, err := s.ensureUsageHold(r.Context(), usageRequest, envelope)
 	if err != nil {
-		if definitiveBillingFailure(err) {
+		if definitiveInitialBillingFailure(err) {
 			s.writeInitialReservationFailure(w, r, usageRequest.ID, envelope, err)
 		} else {
 			w.Header().Set("Location", "/v1/usage-requests/"+usageRequest.ID.String())
@@ -600,7 +603,7 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 		}
 		hold, err := s.ensureUsageHold(context.WithoutCancel(r.Context()), usage, envelope)
 		if err != nil {
-			if definitiveBillingFailure(err) {
+			if definitiveInitialBillingFailure(err) {
 				s.writeInitialReservationFailure(w, r, usage.ID, envelope, err)
 			} else {
 				w.Header().Set("Location", "/v1/usage-requests/"+usage.ID.String())

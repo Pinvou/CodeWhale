@@ -38,6 +38,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if err := validateRegistrationBonusGuard(input); err != nil {
 		return nil, err
 	}
+	if err := validateMemberUnitAssignments(input); err != nil {
+		return nil, err
+	}
 	if err := validateExecutionGuard(input); err != nil {
 		return nil, err
 	}
@@ -104,6 +107,9 @@ func Up(ctx context.Context, connection *pgx.Conn, input []migrations.Migration)
 	bridged := make(map[int64]bool)
 	hooks := migrations.UpHooks{
 		BeforeApply: func(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
+			if err := guardEntitlementPolicyMigrationIdentity(ctx, tx, migration); err != nil {
+				return err
+			}
 			if migration.Version != 27 && migration.Version != 28 && migration.Version != 33 {
 				return nil
 			}
@@ -268,6 +274,24 @@ func removeObsoleteReclaimMetadata(ctx context.Context, tx pgx.Tx) error {
 	}
 	if command.RowsAffected() != 1 {
 		return errors.New("obsolete reclaim metadata was not uniquely removed")
+	}
+	return nil
+}
+
+// Original 069 appends immutable policy under the same deployment identities as
+// its adjacent 068/070. A runtime login must not install it merely because all
+// earlier migrations are already recorded. Unrelated custom 69 is unchanged.
+func guardEntitlementPolicyMigrationIdentity(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
+	const originalChecksum = "5dfcd5e1f9e3f41206e594653cc6b55c0e1c3c015033e8d59a294f966710dd6e"
+	if migration.Version != 69 || (migration.Name != "entitlement_component_adjustment_policy_v2" && migration.Checksum != originalChecksum) {
+		return nil
+	}
+	var qualified bool
+	if err := tx.QueryRow(ctx, `SELECT session_user='account_migrator' AND current_user='account_service'`).Scan(&qualified); err != nil {
+		return err
+	}
+	if !qualified {
+		return errors.New("entitlement policy v2 requires the isolated account migration identities")
 	}
 	return nil
 }

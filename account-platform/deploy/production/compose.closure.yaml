@@ -1,6 +1,12 @@
 # Add after reviewed F07 signup/bonus and F06 organization overlays.
 name: pinvou-personal
 services:
+  account-migrate:
+    image: ${MIGRATE_IMAGE:?set reviewed same-source F08 Account Billing and Token public migrations image}
+  billing-migrate:
+    image: ${MIGRATE_IMAGE:?set reviewed same-source F08 Account Billing and Token public migrations image}
+  token-migrate:
+    image: ${MIGRATE_IMAGE:?set reviewed same-source F08 Account Billing and Token public migrations image}
   account-service:
     image: ${ACCOUNT_CLOSURE_IMAGE:?set reviewed same-source F08 Account with bounded closure worker and gift/lease guards}
     environment:

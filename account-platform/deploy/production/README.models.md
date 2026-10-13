@@ -1,10 +1,12 @@
 # 模型管理首次部署
 
-本叠加层交付模型目录、协议和公式、Token Account/凭据/路由管理、十九项治理策略以及三条审批执行链。目录同步、密钥轮换、默认路由配置和管理取消 worker 为实际生产进程。个人模型调用和用量入口须另外按 `README.invocation.md` 装配并验收；组织和注销尚未交付，共享迁移中的必要对象不表示这些功能已启用。
+本叠加层交付模型目录、协议和公式、Token Account/凭据/路由管理、十九项治理策略以及三条审批执行链。目录同步、密钥轮换、默认路由配置和管理取消 worker 为实际生产进程。个人模型调用和用量入口须另外按 `README.invocation.md` 装配并验收；组织功能须单独叠加下述组织配置；注销尚未交付，共享迁移中的必要对象不表示它已启用。
 
 按顺序组合 `compose.personal.yaml`、`compose.personal-workload.yaml`、`compose.finance.yaml`、`compose.reconciliation.yaml` 和 `compose.models.yaml`。使用同一已审核源码构造 migrate、Account、Billing、Token Gateway、Portal、独立 credential Portal、Token executor 和 approval-resources 镜像。所有 image 值须固定到审核过的制品，不在生产自动拉取或生成审批资源。数据库、OpenBao、NATS、身份服务、可验证的 HTTPS OTLP 和至少三个独立时间源均须先准备。此前个人/财务运行规则仍适用。
 
 启动上述组合前显式配置 `ACCOUNT_PLATFORM_PROFILE=models`。`compose.models.yaml` 对 Account、Token Gateway 与 `approval-resources` 三者均明确选择 `models`；推荐保持模型叠加最后。即使再叠加 finance 文件，其 operator 也从这个必填变量读取 `models`，不能回落到 `personal`。这是业务运行模式，不是 Docker Compose profile；未配置的直接二进制仍默认 `models`，未知值拒绝，不能用缺失的 Token URL、digest、完整数据库、KMS 或 provider 输入触发个人模式。
+
+组织功能使用 `compose.organizations.yaml`，必须叠加在上述完整模型组合后；该叠加对 Account、Token Gateway、`approval-resources` 均明确选择 `models`，finance operator 的显式 `ACCOUNT_PLATFORM_PROFILE` 也须为 `models`。Account 组织、单位投影同时要求 Billing 与 Token authority，成员投影仍要求 Billing；缺失任何必需域必须停止启动，不能以空客户端或个人余额模式替代。Token 组织入口由显式 models management 工厂提供；个人余额 facade 与原管理/模型入口一样不挂载这些路由（404），Account 个人模式组织入口返回既有 `ORGANIZATION_UNAVAILABLE`（503）。静态组合检查不证明 Docker、NATS、跨域投影或部署验收已经完成。
 
 ## 数据库和治理
 

@@ -13,6 +13,11 @@ import (
 const legacyAnomalyChecksum = "849e4ae4ff57132486992216005fc56a3f9a06c31a3cc84bc14c60c5fbe9bedb"
 const chargebackStatusCheck = "ADD CONSTRAINT chargeback_cases_status_check CHECK (status IN ('REVIEW_REQUIRED','CONFIRMED','DISMISSED'))"
 
+// Match the original effect migration, including the retained runner's legacy
+// CRLF ledger representation. An unrelated version 58 cannot open the phase.
+const entitlementEffectChecksum = "a6ff23901e5c01f83dfcb09ad6e0a4f4ec47b93658d094c4c3767ce92b2a45a7"
+const entitlementEffectLegacyChecksum = "31d2dabe3d1f0c865c7db413279eaee60343c8e71ac1f17a6640cebb7afdf4df"
+
 func applyBillingMigration(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
 	sql := migration.UpSQL
 	if migration.Version == 29 {
@@ -55,7 +60,7 @@ GRANT CREATE ON SCHEMA public TO billing_service;
 DO $$ DECLARE object RECORD; BEGIN
  FOR object IN SELECT c.relname,c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='public' AND pg_get_userbyid(c.relowner)='billing_schema_owner' AND c.relkind IN ('r','p','S','v','m')
- AND c.relname NOT IN ('schema_migrations','billing_runtime_hardening','billing_approval_command_activations','billing_approval_command_activation_history','billing_approval_proof_claims') LOOP
+ AND c.relname NOT IN ('schema_migrations','billing_runtime_hardening','billing_approval_command_activations','billing_approval_command_activation_history','billing_approval_proof_claims','entitlement_component_corrections') LOOP
  EXECUTE format('ALTER %s public.%I OWNER TO billing_service',CASE object.relkind WHEN 'S' THEN 'SEQUENCE' WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE 'TABLE' END,object.relname);
  END LOOP;
  FOR object IN SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
@@ -79,14 +84,23 @@ func finishBillingMigration(ctx context.Context, tx pgx.Tx, migration migrations
 	if !hardened {
 		return nil
 	}
-	// The frozen generic hardener predates the correction receipt. Preserve its
-	// registered append-only INSERT/SELECT contract after every later migration,
-	// rather than changing installed SQL or relying only on row triggers.
+	// The original prepare phase is read-only; only installed 058 enables
+	// append-only receipts. AfterApply runs before this migration's ledger write,
+	// so the current 058 counts explicitly. Never infer a phase from MAX(version).
+	effectInstalled := `EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=58 AND checksum IN ('` + entitlementEffectChecksum + `','` + entitlementEffectLegacyChecksum + `'))`
+	if migration.Version == 58 && sqlChecksum(migration.UpSQL) == entitlementEffectChecksum {
+		effectInstalled = `TRUE`
+	}
 	_, err := tx.Exec(ctx, `SET ROLE billing_schema_owner;
 SELECT public.harden_billing_runtime_objects();
 DO $$ BEGIN
  IF to_regclass('public.entitlement_component_corrections') IS NOT NULL THEN
   REVOKE UPDATE,DELETE ON TABLE public.entitlement_component_corrections FROM billing_service;
+  IF `+effectInstalled+` THEN
+   GRANT INSERT ON TABLE public.entitlement_component_corrections TO billing_service;
+  ELSE
+   REVOKE INSERT ON TABLE public.entitlement_component_corrections FROM billing_service;
+  END IF;
  END IF;
 END $$;
 SET ROLE billing_service;`)

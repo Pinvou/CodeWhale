@@ -86,7 +86,7 @@ func TestF04OfflineRendererPreservesArtifactSuperset(t *testing.T) {
 					Durable string `json:"durable"`
 				} `json:"consumers"`
 			}
-			if json.Unmarshal(manifest, &parsed) != nil || len(parsed.Consumers) != 6 {
+			if json.Unmarshal(manifest, &parsed) != nil || len(parsed.Consumers) != 7 {
 				t.Fatal("fixed offline expectation changed with deployment profile")
 			}
 			for i, descriptor := range approvalconsumer.All() {

@@ -97,7 +97,10 @@ func newFixture(t *testing.T) *fixture {
 		io.WriteString(w, `{"sealed":false}`)
 	}))
 	t.Cleanup(f.server.Close)
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	os.Chmod(dir, 0700)
 	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: f.server.Certificate().Raw})
 	f.cfg = Config{Endpoint: f.server.URL, CAFile: filepath.Join(dir, "ca.crt"), RecipientSHA256: hash([]byte(f.id.Recipient().String())), InstanceID: "isolated-operator-fixture"}

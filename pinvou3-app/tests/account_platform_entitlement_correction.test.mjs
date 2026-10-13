@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { entitlementCorrectionPrecheck, entitlementCorrectionApprovalDraft, parseEntitlementCorrectionJSON, encodeEntitlementCorrectionJSON } from '../src/features/account-platform/admin-entitlement-correction.js';
+import { entitlementCorrectionPrecheck, entitlementCorrectionApprovalDraft, parseEntitlementCorrectionJSON, encodeEntitlementCorrectionJSON, entitlementCorrectionInputValid } from '../src/features/account-platform/admin-entitlement-correction.js';
 import { entitlementIntentStorage, entitlementEditReferences } from '../src/features/account-platform/entitlement-correction-intent.js';
 import { createAndSubmitFreshGovernedApproval } from '../src/features/account-platform/admin-governed-approval-workflow.js';
 
@@ -19,6 +19,23 @@ const fixture = () => ({
   },
   financial_snapshot: { package_total_microcredits: '9223372036854775807', source_original_microcredits: '9223372036854775807',
     target_original_microcredits: '0', effective_total_microcredits: '9223372036854775807' },
+});
+
+for (const [name, code, valid] of [
+  ['ASCII exactly 80 bytes', 'x'.repeat(80), true], ['ASCII 81 bytes', 'x'.repeat(81), false],
+  ['Chinese exactly 80 bytes', '中'.repeat(26) + 'ab', true], ['Chinese 81 bytes', '中'.repeat(27), false],
+  ['nonBMP exactly 80 bytes', '😀'.repeat(20), true], ['nonBMP 84 bytes', '😀'.repeat(21), false],
+  ['empty', '', false], ['whitespace-only', ' ', false], ['non-normalized whitespace', ' CORRECTION ', false],
+]) test('editable correction input retains original byte bound: ' + name, () => {
+  assert.equal(entitlementCorrectionInputValid(packageID, orderID, code), valid);
+  assert.equal(entitlementCorrectionInputValid(packageID, orderID, code.trim()), code.trim() ? valid || code.trim() === 'CORRECTION' : false);
+  const value = fixture(); value.normalized_command.reason_code = code;
+  assert.equal(Boolean(entitlementCorrectionPrecheck(value)), valid);
+});
+
+test('invalid editable identifier cannot replace the existing identifier contract', () => {
+  assert.equal(entitlementCorrectionInputValid('not-a-uuid', orderID, 'CORRECTION'), false);
+  assert.equal(entitlementCorrectionInputValid(packageID, 'not-a-uuid', 'CORRECTION'), false);
 });
 
 test('owner frozen int64 facts and null target IDs survive the draft unchanged', () => {

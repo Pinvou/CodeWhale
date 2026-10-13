@@ -29,7 +29,7 @@ func TestF09UnexpiredReplayPublicCoordinator(t *testing.T) {
 			args = append(args, filepath.Join(dir, e.Name()))
 		}
 	}
-	args = append(args, filepath.Join(dir, "retained_financial_integration_test.go"), filepath.Join(dir, "entitlement_correction_execute_integration_test.go"))
+	args = append(args, filepath.Join(dir, "retained_financial_integration_test.go"), filepath.Join(dir, "finance_refund_reconcile_integration_test.go"), filepath.Join(dir, "entitlement_correction_execute_integration_test.go"))
 	child := exec.CommandContext(ctx, os.Getenv("PINVOU_PRIVATE_GO"), args...)
 	child.Env = append(os.Environ(), "PINVOU_TEST_BILLING_DATABASE_URL="+raw)
 	stream, err := os.Create(os.Getenv("PINVOU_F09_CHILD_STREAM"))

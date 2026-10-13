@@ -44,7 +44,8 @@ export function OrganizationClosedGrantsWorkspace({ client, me, language }) {
   return () => { generation.current++; controller.abort(); };
  }, [api, owner, permitted]); // eslint-disable-line react-hooks/exhaustive-deps
  if (!permitted) return null;
- const eligible = grants.filter(grant => grant.status === 'SUSPENDED' && grant.suspension_reason === 'ACCOUNT_CLOSED' && integerMoney(grant.reserved_microcredits) === 0n && integerMoney(grant.available_microcredits) > 0n);
+ const now = Date.now();
+ const eligible = grants.filter(grant => grant.status === 'SUSPENDED' && grant.suspension_reason === 'ACCOUNT_CLOSED' && Date.parse(grant.expires_at) > now && integerMoney(grant.reserved_microcredits) === 0n && integerMoney(grant.available_microcredits) > 0n);
  // A list read cannot confirm this invocation. Retain its original card until
  // the same-key write returns a known receipt, even after the list changes.
  const candidates = [...new Map([...recoveryGrants.map(grant => [grant.grant_id, grant]), ...eligible.map(grant => [grant.grant_id, grant]), ...unresolved.current]).values()];

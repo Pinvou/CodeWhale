@@ -20,8 +20,9 @@ const grantID = '0199a100-0001-7000-8000-000000000401';
 let actor = actorA, csrf = 'csrf-initial', mode = 'personal', writes = [], effects = 0, auths = 0;
 let readOnly = false;
 let immediateReceipt = false;
+let grantExpiry = '2030-01-01T00:00:00Z';
 const closure = status => ({ closure_request_id: closureID, status, stage: status === 'COMPLETED' ? 'COMPLETED' : 'CLOSURE_REQUESTED', blockers: status === 'BLOCKED' ? [{ code: 'FORCED_REFUND_UNRESOLVED', domain: 'BILLING', resource_type: 'FORCED_REFUND', user_action: 'FINISH_REFUND' }] : [], sla_expires_at: '2026-10-12T00:00:00Z' });
-const grant = reclaimed => ({ grant_id: grantID, organization_id: organizationID, member_user_id: actorA, package_id: closureID, component_id: closureID, status: reclaimed ? 'RECLAIMED_ACCOUNT_CLOSED' : 'SUSPENDED', suspension_reason: reclaimed ? null : 'ACCOUNT_CLOSED', membership_version: 2, allocation_version: 2, original_microcredits: 10, available_microcredits: reclaimed ? 0 : 10, reserved_microcredits: 0, used_microcredits: 0, expired_microcredits: 0, revoked_microcredits: reclaimed ? 10 : 0 });
+const grant = reclaimed => ({ grant_id: grantID, organization_id: organizationID, member_user_id: actorA, package_id: closureID, component_id: closureID, status: reclaimed ? 'RECLAIMED_ACCOUNT_CLOSED' : 'SUSPENDED', suspension_reason: reclaimed ? null : 'ACCOUNT_CLOSED', membership_version: 2, allocation_version: 2, original_microcredits: 10, available_microcredits: reclaimed ? 0 : 10, reserved_microcredits: 0, used_microcredits: 0, expired_microcredits: 0, revoked_microcredits: reclaimed ? 10 : 0, expires_at: grantExpiry });
 const grantReceipt = () => ({ grant: grant(true), amount_microcredits: 10, subject_lifecycle_version: 2, replayed: true });
 const json = (response, payload, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(payload)); };
 const server = createServer(async (request, response) => {
@@ -77,6 +78,14 @@ const click = async (page, label) => {
   try { await page.waitForFunction(text => [...document.querySelectorAll('button')].some(button => button.textContent === text && !button.disabled), { timeout: 5000 }, label); }
   catch (error) { console.log('CONTROLLED_FIXTURE_PAGE', await page.evaluate(() => document.body.innerText)); throw error; }
   await page.evaluate(text => [...document.querySelectorAll('button')].find(button => button.textContent === text).click(), label);
+  if (Object.values(accountClosureCopy).some(copy => copy.start === label)) {
+    await page.waitForSelector('.ap-closure-confirm-dialog input');
+    await page.type('.ap-closure-confirm-dialog input', 'CLOSE_MY_ACCOUNT');
+    await page.click('.ap-closure-confirm-dialog button[type="submit"]');
+  } else if (Object.values(accountClosedGrantCopy).some(copy => copy.single === label || copy.batch === label)) {
+    await page.waitForSelector('.ap-org-confirm-dialog');
+    await page.click('.ap-org-confirm-dialog footer button:last-child');
+  }
 };
 try {
   for (const locale of ['zh', 'en', 'ja']) {
@@ -211,5 +220,49 @@ try {
   assert.equal(await changedActorPage.evaluate(text => [...document.querySelectorAll('button')].some(button => button.textContent === text), financeCopy.en.retry), false);
   passed++; console.log('PASS compiled new actor cannot replay old actor proof and retains old evidence');
   await changedActorPage.close();
+  for (const orgMode of ['org-single', 'org-batch']) {
+    mode = orgMode; actor = actorA; readOnly = false; effects = 0; writes = []; csrf = 'csrf-initial';
+    const blockedPage = await browser.newPage();
+    await blockedPage.evaluateOnNewDocument(() => {
+      localStorage.setItem('pinvou.account.language', 'en');
+      const original = document.defaultView.Storage.prototype.setItem;
+      document.defaultView.Storage.prototype.setItem = function (key, value) {
+        if (key.startsWith('pinvou.closure.intent.v1:')) throw new DOMException('Controlled proof persistence unavailable', 'QuotaExceededError');
+        return original.call(this, key, value);
+      };
+    });
+    await blockedPage.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
+    if (orgMode === 'org-batch') { await blockedPage.waitForSelector('select[multiple]'); await blockedPage.select('select[multiple]', grantID); }
+    const label = orgMode === 'org-batch' ? accountClosedGrantCopy.en.batch : accountClosedGrantCopy.en.single;
+    await click(blockedPage, label);
+    await blockedPage.waitForFunction(text => document.body.textContent.includes(text), {}, accountClosedGrantCopy.en.recoveryUnavailable);
+    const disabled = await blockedPage.evaluate(text => [...document.querySelectorAll('button')].find(button => button.textContent === text)?.disabled, label);
+    assert.equal(disabled, true); assert.equal(writes.length, 0); assert.equal(effects, 0);
+    await blockedPage.evaluate(text => [...document.querySelectorAll('button')].find(button => button.textContent === text).click(), label);
+    assert.equal(await blockedPage.evaluate(() => Boolean(document.querySelector('.ap-org-confirm-dialog'))), false);
+    assert.equal(writes.length, 0);
+    passed++; console.log(`PASS compiled ${orgMode} actual closed-grant hook blocks unavailable proof before any command`);
+    await blockedPage.close();
+  }
+  mode = 'org-single'; actor = actorA; readOnly = false; effects = 0; writes = []; csrf = 'csrf-initial'; grantExpiry = '1970-01-01T00:00:00Z';
+  const expiryPage = await browser.newPage();
+  await expiryPage.evaluateOnNewDocument(() => localStorage.setItem('pinvou.account.language', 'en'));
+  await expiryPage.goto(`${origin}/account.html`, { waitUntil: 'networkidle0' });
+  assert.equal(await expiryPage.evaluate(text => [...document.querySelectorAll('button')].some(button => button.textContent === text), accountClosedGrantCopy.en.single), false);
+  assert.equal(await expiryPage.evaluate(text => [...document.querySelectorAll('button')].find(button => button.textContent === text)?.disabled, accountClosedGrantCopy.en.batch), true);
+  assert.equal(writes.length, 0);
+  grantExpiry = '2030-01-01T00:00:00Z'; await expiryPage.reload({ waitUntil: 'networkidle0' });
+  await click(expiryPage, accountClosedGrantCopy.en.single);
+  await expiryPage.waitForFunction(text => document.body.textContent.includes(text), {}, organizationCopy.en.unknown);
+  const retainedProof = await expiryPage.evaluate(() => Object.entries(document.defaultView.sessionStorage));
+  grantExpiry = '1970-01-01T00:00:00Z'; await expiryPage.reload({ waitUntil: 'networkidle0' });
+  assert.equal(writes.length, 1); assert.deepEqual(await expiryPage.evaluate(() => Object.entries(document.defaultView.sessionStorage)), retainedProof);
+  await click(expiryPage, organizationCopy.en.retry);
+  await expiryPage.waitForFunction(text => document.body.textContent.includes(text), {}, organizationCopy.en.unknown);
+  await click(expiryPage, organizationCopy.en.retry);
+  await expiryPage.waitForFunction(() => !Object.keys(document.defaultView.sessionStorage).some(key => key.startsWith('pinvou.closure.intent.v1:')));
+  assert.equal(writes.length, 3); assert.equal(effects, 1); assert.equal(writes[0].key, writes[2].key); assert.deepEqual(writes[0].facts, writes[2].facts);
+  passed++; console.log('PASS compiled expired fresh grant is unavailable while original UNKNOWN receipt/key survives expiry');
+  await expiryPage.close();
 } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);

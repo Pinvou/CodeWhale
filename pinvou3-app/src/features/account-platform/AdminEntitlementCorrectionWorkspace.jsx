@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { entitlementCorrectionCopy } from '../../shared/i18n.js';
-import { entitlementCorrectionPrecheck, entitlementCorrectionApprovalDraft } from './admin-entitlement-correction.js';
+import { entitlementCorrectionPrecheck, entitlementCorrectionApprovalDraft, entitlementCorrectionInputValid } from './admin-entitlement-correction.js';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
 import { useClosureOperation } from './useClosureOperation.js';
 import { entitlementIntentStorage, entitlementEditReferences } from './entitlement-correction-intent.js';
@@ -26,6 +26,7 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
   const change = (setter, value) => { generation.current++; controller.current?.abort(); setter(value); setPrecheck(null); setReceipt(null); setReadError(''); };
   const load = async () => {
     if (!canRequest || locked) return;
+    if (!entitlementCorrectionInputValid(packageID, orderID, reasonCode.trim())) { setReadError(copy.inputInvalid); return; }
     const stamp = ++generation.current; controller.current?.abort(); controller.current = new AbortController();
     setReading(true); setPrecheck(null); setReceipt(null); setReadError('');
     try {
@@ -35,7 +36,7 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
       if (stamp === generation.current) setPrecheck(data);
     } catch (error) {
       if (stamp === generation.current) {
-        setReadError(error.status === 403 ? copy.permissions : text.unavailable);
+        setReadError(error.status === 403 ? copy.permissions : error.status === 400 && error.code === 'INVALID_APPROVAL_PRECHECK_REQUEST' ? copy.inputInvalid : text.unavailable);
         if (error.code === 'RECENT_AUTHENTICATION_REQUIRED') setNeedsAuthentication(true);
       }
     } finally { if (stamp === generation.current) setReading(false); }
@@ -68,7 +69,7 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
     <form onSubmit={event => { event.preventDefault(); void load(); }}>
       <label>{text.packageID}<input disabled={locked} value={pending?.precheck.normalized_command.package_id || packageID} onChange={event => change(setPackageID, event.target.value)} /></label>
       <label>{text.orderID}<input disabled={locked} value={pending?.precheck.normalized_command.payment_order_id || orderID} onChange={event => change(setOrderID, event.target.value)} /></label>
-      <label>{text.reasonCode}<input disabled={locked} maxLength={80} value={pending?.reasonCode || reasonCode} onChange={event => change(setReasonCode, event.target.value)} /></label>
+      <label>{text.reasonCode}<input disabled={locked} value={pending?.reasonCode || reasonCode} onChange={event => change(setReasonCode, event.target.value)} /><small>{text.reasonCodeHelp}</small></label>
       <button disabled={locked || !packageID || !orderID || !reasonCode.trim()}>{text.precheck}</button>
     </form>
     {projection && <dl>

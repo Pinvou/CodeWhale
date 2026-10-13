@@ -87,6 +87,9 @@ func auditFourWayReconciliationFacts(ctx context.Context, q reconciliationQuerie
  'transaction',(SELECT to_jsonb(t) FROM payment_transactions t WHERE t.id=input.transaction_id::uuid),
  'packages',COALESCE((SELECT jsonb_agg(to_jsonb(p)) FROM entitlement_packages p WHERE p.source_payment_transaction_id=input.transaction_id::uuid),'[]'),
  'components',COALESCE((SELECT jsonb_agg(to_jsonb(c)||jsonb_build_object('lot',to_jsonb(l))) FROM entitlement_components c JOIN entitlement_packages p ON p.id=c.package_id LEFT JOIN credit_lots l ON l.id=c.credit_lot_id WHERE p.source_payment_transaction_id=input.transaction_id::uuid),'[]'),
+ 'corrections',COALESCE((SELECT jsonb_agg(to_jsonb(c)) FROM entitlement_component_corrections c WHERE c.payment_transaction_id=input.transaction_id::uuid),'[]'),
+ 'correction_journals',COALESCE((SELECT jsonb_agg(to_jsonb(j)) FROM journal_entries j JOIN entitlement_component_corrections c ON c.journal_entry_id=j.id WHERE c.payment_transaction_id=input.transaction_id::uuid),'[]'),
+ 'correction_postings',COALESCE((SELECT jsonb_agg(to_jsonb(p)||jsonb_build_object('account',to_jsonb(a))) FROM ledger_postings p JOIN entitlement_component_corrections c ON c.journal_entry_id=p.journal_entry_id LEFT JOIN ledger_accounts a ON a.id=p.ledger_account_id WHERE c.payment_transaction_id=input.transaction_id::uuid),'[]'),
  'journals',COALESCE((SELECT jsonb_agg(to_jsonb(j)) FROM journal_entries j WHERE j.business_reference=ANY(input.journal_refs)),'[]'),
  'postings',COALESCE((SELECT jsonb_agg(to_jsonb(post)||jsonb_build_object('account',to_jsonb(a))) FROM ledger_postings post JOIN journal_entries j ON j.id=post.journal_entry_id LEFT JOIN ledger_accounts a ON a.id=post.ledger_account_id WHERE j.business_reference=ANY(input.journal_refs)),'[]'),
  'allocations',COALESCE((SELECT jsonb_agg(to_jsonb(a)||jsonb_build_object('receivable_wallet_id',r.wallet_id)) FROM receivable_allocations a JOIN receivables r ON r.id=a.receivable_id JOIN journal_entries j ON j.id=a.journal_entry_id WHERE j.business_reference=ANY(input.journal_refs)),'[]'),
@@ -186,28 +189,47 @@ func auditReconciliationFactWithForcedGroup(f *ReconciliationInternalFact, reque
 		packageValid = auditString(packages[0], "user_id") == ""
 	}
 	original := new(big.Int)
+	pieces := map[string][]*big.Int{}
+	corrected := len(auditRecords(payload["corrections"])) > 0
 	for _, c := range components {
-		n := auditInteger(c, "original_microcredits")
-		var lot reconciliationAuditRecord
-		_ = json.Unmarshal(c["lot"], &lot)
-		lotID := auditString(c, "credit_lot_id")
-		if n == nil || n.Sign() < 0 || lotID == "" || lotAmounts[lotID] != nil || auditString(lot, "wallet_id") != wallet || auditString(c, "package_id") != auditString(packages[0], "id") || auditInteger(lot, "original_microcredits") == nil || n.Cmp(auditInteger(lot, "original_microcredits")) != 0 {
-			packageValid = false
-			continue
+		if out := auditInteger(c, "reclassified_out_microcredits"); out != nil && out.Sign() != 0 {
+			corrected = true
 		}
-		lotAmounts[lotID] = new(big.Int).Set(n)
-		lotKinds[lotID] = auditString(c, "component_type")
-		kind := lotKinds[lotID]
-		reference := auditString(lot, "source_reference")
-		validReference := reference == "payment-transaction:"+request.Transaction || reference == "repair-payment-transaction:"+request.Transaction
-		if kind == "BONUS" {
-			validReference = validReference || reference == "payment-transaction:"+request.Transaction+":bonus" || reference == "repair-payment-transaction:"+request.Transaction+":bonus"
+	}
+	if corrected {
+		amounts, valid := auditCorrectionAmounts(request, payload, wallet, auditString(packages[0], "id"))
+		packageValid = packageValid && valid
+		original.Set(amounts.total)
+		lotKinds, kindAmounts, pieces = amounts.kinds, amounts.byKind, amounts.pieces
+		lotAmounts = amounts.effective
+		if f.EntryType == "PAYMENT" {
+			lotAmounts = amounts.funding
 		}
-		if (kind != "BASE" && kind != "BONUS") || kindAmounts[kind] != nil || !validReference || auditString(lot, "source_type") != "RECHARGE" {
-			packageValid = false
+	} else {
+		for _, c := range components {
+			n := auditInteger(c, "original_microcredits")
+			var lot reconciliationAuditRecord
+			_ = json.Unmarshal(c["lot"], &lot)
+			lotID := auditString(c, "credit_lot_id")
+			if n == nil || n.Sign() < 0 || lotID == "" || lotAmounts[lotID] != nil || auditString(lot, "wallet_id") != wallet || auditString(c, "package_id") != auditString(packages[0], "id") || auditInteger(lot, "original_microcredits") == nil || n.Cmp(auditInteger(lot, "original_microcredits")) != 0 {
+				packageValid = false
+				continue
+			}
+			lotAmounts[lotID] = new(big.Int).Set(n)
+			lotKinds[lotID] = auditString(c, "component_type")
+			kind := lotKinds[lotID]
+			reference := auditString(lot, "source_reference")
+			validReference := reference == "payment-transaction:"+request.Transaction || reference == "repair-payment-transaction:"+request.Transaction
+			if kind == "BONUS" {
+				validReference = validReference || reference == "payment-transaction:"+request.Transaction+":bonus" || reference == "repair-payment-transaction:"+request.Transaction+":bonus"
+			}
+			if (kind != "BASE" && kind != "BONUS") || kindAmounts[kind] != nil || !validReference || auditString(lot, "source_type") != "RECHARGE" {
+				packageValid = false
+			}
+			kindAmounts[kind] = new(big.Int).Set(n)
+			pieces[kind] = append(pieces[kind], new(big.Int).Set(n))
+			original.Add(original, n)
 		}
-		kindAmounts[kind] = new(big.Int).Set(n)
-		original.Add(original, n)
 	}
 	credit := auditInteger(order, "credit_microcredits")
 	var product Product
@@ -347,23 +369,26 @@ func auditReconciliationFactWithForcedGroup(f *ReconciliationInternalFact, reque
 				if amount == nil || transactionAmount == nil || !amount.IsInt64() || !transactionAmount.IsInt64() || amount.Sign() <= 0 || amount.Cmp(transactionAmount) > 0 || !originalBase.IsInt64() || !originalBonus.IsInt64() {
 					return
 				}
-				baseAmount, err := proportionalCeiling(originalBase.Int64(), amount.Int64(), transactionAmount.Int64())
-				if err != nil {
+				baseAmount, ok := auditComponentProportion(pieces["BASE"], amount, transactionAmount, true)
+				if !ok {
 					return
 				}
-				bonusAmount, err := proportionalCeiling(originalBonus.Int64(), amount.Int64(), transactionAmount.Int64())
-				if err != nil {
+				bonusAmount, ok := auditComponentProportion(pieces["BONUS"], amount, transactionAmount, true)
+				if !ok {
 					return
 				}
-				targetBase.SetInt64(baseAmount)
-				targetBonus.SetInt64(bonusAmount)
-				if verifyGroup && !auditForcedRefundGroup(request, payload, originalBase, originalBonus, transactionAmount) {
+				targetBase.Set(baseAmount)
+				targetBonus.Set(bonusAmount)
+				if verifyGroup && !auditForcedRefundGroupComponents(request, payload, pieces, transactionAmount) {
 					return
 				}
 				// Receipts have no durable cross-process execution ordinal. Validate
 				// the group's exact cumulative target, then each receipt's possible
 				// floor/ceiling increment; never infer ordering from wall clocks.
-				lower := new(big.Int).Quo(new(big.Int).Mul(originalBase, amount), transactionAmount)
+				lower, ok := auditComponentProportion(pieces["BASE"], amount, transactionAmount, false)
+				if !ok {
+					return
+				}
 				actualBase := new(big.Int).Add(base, receivableExpected)
 				if actualBase.Cmp(lower) < 0 || actualBase.Cmp(targetBase) > 0 {
 					return
@@ -471,6 +496,10 @@ func auditReconciliationFactWithForcedGroup(f *ReconciliationInternalFact, reque
 // execution order. Application timestamps and UUIDs are not a cross-process
 // ordinal. Unknown legacy allocations remain incidents, never new fund actions.
 func auditForcedRefundGroup(request reconciliationAuditRequest, payload reconciliationAuditRecord, originalBase, originalBonus, transactionAmount *big.Int) bool {
+	return auditForcedRefundGroupComponents(request, payload, map[string][]*big.Int{"BASE": {originalBase}, "BONUS": {originalBonus}}, transactionAmount)
+}
+
+func auditForcedRefundGroupComponents(request reconciliationAuditRequest, payload reconciliationAuditRecord, pieces map[string][]*big.Int, transactionAmount *big.Int) bool {
 	var mixed bool
 	if json.Unmarshal(payload["forced_mixed"], &mixed) != nil || mixed {
 		return false
@@ -551,15 +580,15 @@ func auditForcedRefundGroup(request reconciliationAuditRequest, payload reconcil
 			found = true
 		}
 	}
-	if !found || cash.Sign() <= 0 || cash.Cmp(transactionAmount) > 0 || !cash.IsInt64() || !transactionAmount.IsInt64() || !originalBase.IsInt64() || !originalBonus.IsInt64() {
+	if !found || cash.Sign() <= 0 || cash.Cmp(transactionAmount) > 0 || !cash.IsInt64() || !transactionAmount.IsInt64() {
 		return false
 	}
-	baseTarget, err := proportionalCeiling(originalBase.Int64(), cash.Int64(), transactionAmount.Int64())
-	if err != nil {
+	baseTarget, ok := auditComponentProportion(pieces["BASE"], cash, transactionAmount, true)
+	if !ok {
 		return false
 	}
-	bonusTarget, err := proportionalCeiling(originalBonus.Int64(), cash.Int64(), transactionAmount.Int64())
-	return err == nil && base.Cmp(big.NewInt(baseTarget)) == 0 && bonus.Cmp(big.NewInt(bonusTarget)) <= 0
+	bonusTarget, ok := auditComponentProportion(pieces["BONUS"], cash, transactionAmount, true)
+	return ok && base.Cmp(baseTarget) == 0 && bonus.Cmp(bonusTarget) <= 0
 }
 
 func bytesEqualJSONInteger(a, b json.RawMessage) bool {
@@ -608,13 +637,16 @@ func reconciliationIntegrityDigest(payload reconciliationAuditRecord) string {
 		selected = append(selected, section+":"+string(raw))
 	}
 	fields := map[string][]string{
-		"journals":     {"id", "entry_type", "business_reference"},
-		"postings":     {"journal_entry_id", "ledger_account_id", "delta_microcredits", "credit_lot_id"},
-		"packages":     {"id", "user_id", "source_type", "wallet_id", "payment_order_id", "source_payment_transaction_id", "amount_fen", "points_total"},
-		"components":   {"id", "package_id", "component_type", "credit_lot_id", "original_microcredits"},
-		"allocations":  {"receivable_id", "wallet_id", "source_type", "source_reference", "amount_microcredits", "journal_entry_id", "receivable_wallet_id"},
-		"receivables":  {"id", "wallet_id", "source_type", "source_reference", "original_microcredits", "payment_order_id", "payment_transaction_id", "entitlement_package_id"},
-		"reservations": {"refund_id", "component_id", "package_id", "component_type", "credit_lot_id", "available_microcredits", "active_grant_microcredits", "suspended_grant_microcredits"},
+		"journals":            {"id", "entry_type", "business_reference"},
+		"postings":            {"journal_entry_id", "ledger_account_id", "delta_microcredits", "credit_lot_id"},
+		"packages":            {"id", "user_id", "source_type", "wallet_id", "payment_order_id", "source_payment_transaction_id", "amount_fen", "points_total"},
+		"components":          {"id", "package_id", "component_type", "credit_lot_id", "original_microcredits"},
+		"allocations":         {"receivable_id", "wallet_id", "source_type", "source_reference", "amount_microcredits", "journal_entry_id", "receivable_wallet_id"},
+		"receivables":         {"id", "wallet_id", "source_type", "source_reference", "original_microcredits", "payment_order_id", "payment_transaction_id", "entitlement_package_id"},
+		"reservations":        {"refund_id", "component_id", "package_id", "component_type", "credit_lot_id", "available_microcredits", "active_grant_microcredits", "suspended_grant_microcredits"},
+		"corrections":         {"id", "approval_request_id", "authorization_event_id", "approval_epoch", "execution_key_digest", "package_id", "wallet_id", "payment_order_id", "payment_transaction_id", "source_component_id", "source_lot_id", "target_component_id", "target_lot_id", "source_type", "target_type", "amount_microcredits", "reason_code", "source_evidence_digest", "facts_digest", "journal_entry_id"},
+		"correction_journals": {"id", "entry_type", "business_reference"},
+		"correction_postings": {"journal_entry_id", "ledger_account_id", "delta_microcredits", "credit_lot_id"},
 	}
 	for section, keys := range fields {
 		for _, record := range auditRecords(payload[section]) {
@@ -622,7 +654,7 @@ func reconciliationIntegrityDigest(payload reconciliationAuditRecord) string {
 			for _, key := range keys {
 				entry[key] = record[key]
 			}
-			if section == "postings" {
+			if section == "postings" || section == "correction_postings" {
 				var a reconciliationAuditRecord
 				_ = json.Unmarshal(record["account"], &a)
 				for _, key := range []string{"id", "wallet_id", "account_type", "code"} {
@@ -630,6 +662,10 @@ func reconciliationIntegrityDigest(payload reconciliationAuditRecord) string {
 				}
 			}
 			if section == "components" {
+				// Keep old, uncorrected incident identities stable.
+				if out := auditInteger(record, "reclassified_out_microcredits"); out != nil && out.Sign() != 0 {
+					entry["reclassified_out_microcredits"] = record["reclassified_out_microcredits"]
+				}
 				var l reconciliationAuditRecord
 				_ = json.Unmarshal(record["lot"], &l)
 				for _, key := range []string{"id", "wallet_id", "source_type", "source_reference", "original_microcredits"} {

@@ -102,6 +102,7 @@ type PostgresRepository struct {
 	routeActivationGuard    TokenRouteActivationTransactionGuard
 	credentialAuthGuard     CredentialIsolationAuthorityGuard
 	protocolFormulaT1Commit func(context.Context, pgx.Tx) error
+	secretRotation          *secretRotationRuntime
 }
 
 type Repository interface {

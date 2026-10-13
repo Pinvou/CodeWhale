@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AccountClosureWorkspace } from './src/features/account-platform/AccountClosureWorkspace.jsx';
 import { AdminAccountClosureWorkspace } from './src/features/account-platform/AdminAccountClosureWorkspace.jsx';
@@ -19,12 +19,23 @@ globalThis.fetch = async (url, input = {}) => {
     return c.receipt ? Response.json(c.receipt) : new Response('{}', { status: 404 });
   }
   if (c.delay) await new Promise(resolve => { c.resolve = resolve; });
+  if (c.repair401 && String(url).includes('/actions/retry')) return new Response(JSON.stringify({ code: 'RECENT_AUTHENTICATION_REQUIRED' }), { status: 401 });
   if (c.unknown) { c.unknown = false; throw new TypeError('Controlled ACK lost'); }
-  return Response.json(receipt, { status: String(url).includes('/actions/retry') ? 200 : 202 });
+  return Response.json(c.invalidSLA ? { ...receipt, sla_expires_at: c.invalidSLA === 'missing' ? undefined : '2026-02-31T12:00:00Z' } : receipt, { status: String(url).includes('/actions/retry') ? 200 : 202 });
 };
 window.prompt = () => 'CLOSE_MY_ACCOUNT';
+function AfterEffectProbe({ client, owner, epoch }) {
+  useEffect(() => {
+    if (c.afterEffectSubmit) {
+      c.afterEffectSubmit = false;
+      c.afterEffectCalls = (c.afterEffectCalls || 0) + 1;
+      [...document.querySelectorAll('.ap-danger-section button')].find(button => [c.copy().start, c.finance().retry].includes(button.textContent))?.click();
+    }
+  }, [client, owner, epoch]);
+  return null;
+}
 c.render = () => {
   const me = { user_id: c.owner, personal_permissions: c.deniedRead ? [] : c.readonly ? ['personal.account.close.read'] : ['personal.account.close.read', 'personal.account.close.request'], platform_permissions: c.readonly ? ['platform.account-closures.read'] : ['platform.account-closures.read', 'platform.account-closures.repair'] };
-  ui.render(c.admin ? <AdminAccountClosureWorkspace key={c.owner} client={c.adminClient} me={me} language={c.language} /> : <AccountClosureWorkspace key={c.owner} client={c.client} me={me} language={c.language} />);
+  ui.render(c.admin ? <AdminAccountClosureWorkspace key={c.owner} client={c.adminClient} me={me} language={c.language} /> : <><AccountClosureWorkspace key={c.keepMounted ? 'controlled-owned-view' : c.owner} client={c.client} me={me} language={c.language} /><AfterEffectProbe client={c.client} owner={c.owner} epoch={c.client.financeSessionEpoch} /></>);
 };
 c.render();
