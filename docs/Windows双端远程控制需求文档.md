@@ -486,13 +486,13 @@ React UI / ChatView
 }
 
 RouteV1 = {
-  display_name: string,                                // 必填，仅展示，不参与路由
+  display_name: string,                                // 必填，非空白，至多 128 Unicode 字符；仅展示
   preset: "local_vllm" | "deepseek" | "kimi" | "openai_compatible" |
           "qwen" | "doubao" | "minimax" | "glm" | "mimo" | "openai" |
-          "anthropic" | "gemini" | "xai",
-  wire_api: "openai_chat_completions" | "anthropic_messages", // 必填，且须与 preset 匹配
+          "openai_responses" | "anthropic" | "gemini" | "xai",
+  wire_api: "openai_chat_completions" | "anthropic_messages" | "openai_responses", // 必填，匹配实际路线
   base_url: string,
-  model: string,
+  model: string,                                       // 非空白，至多 256 Unicode 字符
   provider_kind?: "custom" | "official_api",         // `coding_plan` 禁止导出
   vendor?: "anthropic" | "deepseek" | "doubao" | "gemini" | "glm" | "kimi" |
            "mimo" | "minimax" | "openai" | "qwen" | "tencent" | "xai",
@@ -507,6 +507,8 @@ RouteV1 = {
 `SensitiveString` 是非空 UTF-8 API Key，只能在已认证加密帧的敏感序列化路径出现，默认 `Debug`、普通日志和错误序列化必须脱敏。`RouteV1` 的字符串长度、URL 长度、数值上限和模型包总字节数必须由协议常量限定；`vision_fallback` 只允许一层，不得再次引用视觉模型。即使 `preset` 枚举中存在 `local_vllm`，RC-M-010/011 的可传输判定仍会拒绝 loopback、本机 socket、私网或 B 无法安全访问的 endpoint。所有枚举都按这里列出的 v1 值闭集校验，新增 vendor、endpoint mode 或 reasoning 档位必须提升包版本或完成显式能力协商，不能按任意字符串透传。
 
 规范数字一律按上面的 canonical decimal string 编码；发送 JSON number 或接收时猜测两种编码均不属于 v1。A 只有在双方能力快照都包含 `temporary_model_package_v1` 时才可展示并发送“我的模型”；不具备该能力的旧客户端必须失败关闭或隐藏入口。该能力首次随桌面端 0.10.1 的同批 A/B 升级交付，不能把仅包含旧数字编码实现的中间构建与新版混用。
+
+模型包中每条 credential.secret 至多 4096 UTF-8 字节，A、B 和 Relay 同一口径；不得误用通用敏感缓冲的 8192 字节上限扩大本包许可。显示名和模型名按 Unicode 字符计数，URL 仍按既有 ASCII 字节语法校验。
 
 `SavedModel` 到 v1 包的映射固定如下：
 
@@ -524,7 +526,9 @@ RouteV1 = {
 | `credential_state`、`has_secret` | 只用于 A 本地判断是否可导出，不传输 |
 | `credential_action` | 编辑态字段，禁止传输；非空时不得构包 |
 
-`wire_api` 是 `temporary_model_package/v1` 导出与校验使用的规范化判别符，不是直接传给 CodeWhale 的内部端点模式。B 必须先根据 `preset` 独立推导期望的 `wire_api` 并校验；通过后再重建 `SavedModel`，并由既有路由解析接口独立选择底座协议；不得将包内枚举字面量直接透传给底座。底座的 `chat`、`chat_completions`、`chat-completions` 等内部别名不扩展本包的合法枚举。
+`wire_api` 是 `temporary_model_package/v1` 导出与校验使用的规范化判别符，不是直接传给 CodeWhale 的内部端点模式。A、B 和 Relay 根据 host、vendor、preset、model 独立推导期望 wire 并校验；官方 OpenAI 端点的 GPT 目录路线及显式 `openai_responses` 预设走 Responses，保留既有 DeepSeek 端点守卫。通过后重建 `SavedModel`，由既有路由解析接口选择底座协议；任务锁定路线不得被 B 的进程模型环境变量改写。不将包内枚举直接透传底座，底座内部别名不扩展包枚举。
+
+本次仅主模型支持 Responses，并保留其原生图片输入；`vision_fallback` 必须为 `openai_chat_completions`，Responses 或 Messages 视觉兜底在导出、协议接纳和构包时拒绝。独立 `image_analyze` 工具仍仅支持 Chat，不得自动复用远程 Responses 主模型；没有 Chat 兜底时不注册该工具。普通本地模型的行为不变。远控尚未发布，A/B/Relay 同批更新 v1 闭集、共享夹具和固定合同摘要，不保留旧中间开发协议的兼容分支。
 
 `builtin_llmapi`、`provider_kind=coding_plan` 以及任何依赖 OAuth、Cookie、订阅账号、设备绑定或企业登录态的模型必须从“我的模型”隐藏；不得把这些凭证包装成 `api_key` 绕过限制。使用 B 模型时不发送该包。主模型原生支持图片时不发送 `vision_fallback`；需要视觉兜底时，主模型与兜底模型各自携带独立的 API Key，均遵守同一任务绑定和清理周期。
 

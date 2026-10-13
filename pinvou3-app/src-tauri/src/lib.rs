@@ -695,6 +695,7 @@ pub fn run() {
     tauri::async_runtime::set(async_runtime.handle().clone());
     startup::init();
     startup::mark("environment:ready");
+    features::updater::observe_pending_update_health();
     // 必须早于 Tauri Builder/WebView 创建：避免升级后 WebKit 复用旧 index.html，
     // 却在新包内找不到旧 CSS，退化成裸 HTML 页面。
     crate::platform::ui_cache::migrate_before_webview();
@@ -824,8 +825,6 @@ pub fn run() {
                     features::files::attachment_upload::sweep_stale_draft_attachments();
                 });
             features::browser::install_automation_context(app);
-            #[cfg(target_os = "macos")]
-            features::updater::cleanup_stale_backup();
             // Attach the logging backend in ALL builds, not just debug: without
             // it every log:: line — connector and updater failure causes among
             // them — is a no-op in release and the raw cause of a failure is
@@ -1601,6 +1600,7 @@ pub fn run() {
             commands::computer_use::computer_use_confirm,
             commands::computer_use::computer_use_set_enabled,
             commands::computer_use::computer_use_request_permissions,
+            commands::computer_use::computer_use_permission_status,
             commands::connectors::refresh_connector_auth_gates,
             commands::connectors::feishu_ensure_cli,
             commands::connectors::feishu_connect_begin,
@@ -2014,6 +2014,7 @@ pub fn run() {
             commands::updater::restart_app,
             commands::updater::cancel_download,
             commands::updater::report_pending_update_result,
+            commands::updater::commit_pending_update_ready,
             commands::dependencies::check_dependencies,
             commands::dependencies::install_dependencies,
             commands::marketplace::list_marketplace_tools,
@@ -2375,6 +2376,10 @@ mod tool_allowlist_contract {
             "file_search",
             "registry_sync",
             "start_registry_mcp_server",
+            // The computer-use instruction section (computer_use::
+            // instruction_block, rendered while the master switch is on)
+            // names the tool directly, so it must ship non-deferred.
+            crate::features::computer_use::TOOL_NAME,
         ] {
             assert!(
                 PINVOU3_ALWAYS_LOADED_TOOLS.contains(&load_bearing),

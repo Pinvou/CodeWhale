@@ -10,7 +10,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PR_WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release-packages.yml"
-MAC_BUILD_WORKFLOW = ROOT / ".github/workflows/mac-build.yml"
 PUBLIC_SUBMODULE_VERIFIER = ROOT / "scripts/verify-public-submodule.sh"
 TAURI_MANIFEST = ROOT / "pinvou3-app/src-tauri/Cargo.toml"
 
@@ -437,6 +436,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "windows_runtime",
             "windows_rustup_repair",
             "backflow_infra",
+            "bundle_chain",
         ):
             self.assertIn(
                 f"{output}: ${{{{ steps.filter.outputs.{output} }}}}",
@@ -582,7 +582,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # The -D-warnings hard gate must stay in this job (single shared
         # cache); rust-lint must not compile the workspace a second time.
         self.assertIn(
-            "cargo clippy --manifest-path pinvou-knowledge/Cargo.toml --lib --bins --no-deps --features server -- -D warnings",
+            "cargo clippy --manifest-path pinvou-knowledge/Cargo.toml --lib --bins --no-deps --features server --locked -- -D warnings",
             knowledge,
         )
         self.assertNotIn("cargo clippy pinvou-knowledge", self.pr_workflow)
@@ -746,7 +746,6 @@ class CiGatePolicyTests(unittest.TestCase):
 
         for workflow_path in (
             ".github/workflows/pr-check.yml",
-            ".github/workflows/mac-build.yml",
         ):
             self.assertNotIn(
                 workflow_path,
@@ -1018,6 +1017,63 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertNotIn("keeping the existing swap configuration", source)
 
+    def test_windows_rust_test_parallel_phases_preserve_routing_and_coverage(self):
+        # The all-target check and the linked regressions run as two matrix
+        # legs of one required job. Splitting the compile graphs must not
+        # turn either leg into an optional check, add a cache writer, or drop
+        # a step from its leg.
+        windows_rust_test = _without_yaml_comments(
+            self.pr_workflow.split("\n  windows-rust-test:", maxsplit=1)[1].split(
+                "\n  macos-rust-check:", maxsplit=1
+            )[0]
+        )
+        self.assertIn("name: windows-rust-test (${{ matrix.phase }})", windows_rust_test)
+        self.assertIn("fail-fast: false", windows_rust_test)
+        self.assertIn("max-parallel: 2", windows_rust_test)
+        self.assertIn("phase: [all-targets-check, regression]", windows_rust_test)
+        # Routing is job level, so it applies to both legs unchanged.
+        job_if = windows_rust_test.split("\n    if: >-", 1)[1].split("\n    strategy:", 1)[0]
+        self.assertNotIn("matrix.phase", job_if)
+
+        steps = re.split(r"\n      - name: ", windows_rust_test)[1:]
+        phase_of = {}
+        for step in steps:
+            name = step.split("\n", 1)[0].strip()
+            match = re.search(r"\n        if: \$\{\{ matrix\.phase == '([a-z-]+)' \}\}", step)
+            phase_of[name] = match.group(1) if match else None
+        expected = {
+            "Windows Rust 全目标检查": "all-targets-check",
+            "pinvou-cli Windows compile check": "all-targets-check",
+            "Windows Rust 单元测试链接检查": "regression",
+            "Windows 测试 exe 嵌入 Common-Controls v6 清单": "regression",
+            "Windows 测试二进制导入诊断": "regression",
+            "CodeWhale Windows PowerShell regressions": "regression",
+            "Windows 原子替换状态机回归": "regression",
+            # Shared setup runs on both legs.
+            "初始化公共底座 submodule": None,
+            "Cargo cache": None,
+            "Windows Rust cache baseline diagnostics": None,
+        }
+        for name, phase in expected.items():
+            with self.subTest(step=name):
+                self.assertIn(name, phase_of)
+                self.assertEqual(phase_of[name], phase)
+        self.assertIn("--all-targets --features dev-tools", windows_rust_test)
+        self.assertIn("--lib --no-run --locked --message-format=json", windows_rust_test)
+
+        # Both legs restore one established namespace; only regression on
+        # main may save, so there is no second writer or new key.
+        self.assertEqual(windows_rust_test.count("shared-key:"), 1)
+        self.assertIn("shared-key: windows-rust-test", windows_rust_test)
+        self.assertIn(
+            "save-if: ${{ matrix.phase == 'regression' && "
+            "github.ref == 'refs/heads/main' }}",
+            windows_rust_test,
+        )
+        self.assertIn("WINDOWS_RUST_CACHE", windows_rust_test)
+        self.assertIn("WINDOWS_RUST_TIMING", windows_rust_test)
+        self.assertNotIn("actions/setup-node", windows_rust_test)
+
     def test_memory_setup_disk_swap_is_mandatory(self):
         # 2026-09-19 拍板:磁盘 swap 必建,不再是 PINVOU3_CI_ENABLE_DISK_SWAP
         # opt-in(zram 池 70% 封顶后,8G /mnt swapfile 是唯一无界溢出层)。
@@ -1025,6 +1081,19 @@ class CiGatePolicyTests(unittest.TestCase):
         source = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")
         self.assertNotIn("PINVOU3_CI_ENABLE_DISK_SWAP", source)
         self.assertIn("DISK_SWAP_SIZE_KIB=$((8 * 1024 * 1024))", source)
+        self.assertIn("DISK_SWAP_SIZE_KIB=$((16 * 1024 * 1024))", source)
+        self.assertIn(
+            "swapon --show=NAME --noheadings 2>/dev/null | grep -q '/dev/zram'",
+            source,
+        )
+        self.assertIn(
+            'warn "apt-get install ${modules_pkg} failed once; retrying"',
+            source,
+        )
+        self.assertIn(
+            'warn "apt-get install ${modules_pkg} failed again; giving up on zram layers"',
+            source,
+        )
         self.assertIn(
             'log "provisioning the mandatory /mnt disk swap"\nsetup_disk_swap',
             source,
@@ -1206,7 +1275,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "        if: ${{ matrix.phase == 'regression' }}",
             windows_rust_test,
         )
-        self.assertIn("--lib --no-run --message-format=json", windows_rust_test)
+        self.assertIn("--lib --no-run --locked --message-format=json", windows_rust_test)
 
         # Both isolated legs restore one established namespace, but only the
         # regression/main leg may save. This avoids a second cache writer/key.
@@ -1333,7 +1402,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "\n  windows-rust-test:", maxsplit=1
         )[1].split("\n  windows-rustup-repair-test:", maxsplit=1)[0]
         self.assertIn("--all-targets --features dev-tools", windows_rust_test)
-        self.assertIn("--lib --no-run --message-format=json", windows_rust_test)
+        self.assertIn("--lib --no-run --locked --message-format=json", windows_rust_test)
         self.assertNotIn("--lib --no-run --features dev-tools", windows_rust_test)
 
     def test_windows_release_powershell_scripts_route_to_native_static_contract(self):
@@ -1531,6 +1600,13 @@ class CiGatePolicyTests(unittest.TestCase):
             "windows_python_dependency_contract.ps1",
             windows_codex_filter,
         )
+        # The VC++ temp-preflight pins inside windows_runtime_packaging_contract.test.js
+        # target src-tauri/packaging/windows/nsis/vcredist-temp-preflight.ps1, so edits
+        # to that file must trigger the only job that runs the pins.
+        self.assertIn(
+            "pinvou3-app/src-tauri/packaging/windows/nsis/**",
+            windows_codex_filter,
+        )
 
         windows_job = self.pr_workflow.split(
             "\n  windows-codex-runtime-test:", maxsplit=1
@@ -1544,6 +1620,71 @@ class CiGatePolicyTests(unittest.TestCase):
             "\n  required-gate:", maxsplit=1
         )[1]
         self.assertIn("- windows-codex-runtime-test", required_gate)
+
+    def test_windows_rustup_repair_runs_in_required_native_job(self):
+        changes = self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+            "\n  fast-gate:", maxsplit=1
+        )[0]
+        self.assertIn(
+            "windows_rustup_repair: ${{ steps.filter.outputs.windows_rustup_repair }}",
+            changes,
+        )
+        repair_filter = re.search(
+            r"\n            windows_rustup_repair:\n((?:              .*(?:\n|$))+)",
+            changes,
+        ).group(1)
+        for trigger in (
+            ".github/workflows/pr-check.yml",
+            "pinvou3-app/scripts/ci/**",
+            "pinvou3-app/scripts/tauri/build.js",
+            "pinvou3-app/tests/windows_rustup_repair_smoke.ps1",
+            "pinvou3-app/tests/windows_rust_toolchain_contract.test.js",
+            "pinvou3-app/src-tauri/rust-toolchain.toml",
+            "pinvou3-app/package.json",
+        ):
+            self.assertIn(trigger, repair_filter)
+
+        job_body = self.pr_workflow.split(
+            "\n  windows-rustup-repair-test:", maxsplit=1
+        )[1]
+        job = re.split(r"\n  [a-zA-Z]", job_body, maxsplit=1)[0]
+        self.assertIn("needs: changes", job)
+        self.assertIn(
+            "needs.changes.outputs.windows_rustup_repair == 'true'", job
+        )
+        self.assertIn("runs-on: windows-latest", job)
+        self.assertIn("npm --prefix pinvou3-app run test:windows-rustup-repair", job)
+        # scripts/ci/** is in no node-test filter, so this job is the only
+        # gate that pins ensure-rust-toolchain.ps1 through the node contract
+        # test. Dropping the step would silently unpin the repair engine.
+        self.assertIn(
+            "node --test pinvou3-app/tests/windows_rust_toolchain_contract.test.js",
+            job,
+        )
+        # The contract test must run before the smoke: it fails in seconds on
+        # engine drift, while the smoke pays a real toolchain download first.
+        self.assertLess(
+            job.index(
+                "node --test pinvou3-app/tests/windows_rust_toolchain_contract.test.js"
+            ),
+            job.index("npm --prefix pinvou3-app run test:windows-rustup-repair"),
+        )
+
+        # Same three-wiring rule as the other native legs: needs entry, env
+        # backfill, and summary-loop entry.
+        required_gate = self.pr_workflow.split(
+            "\n  required-gate:", maxsplit=1
+        )[1]
+        self.assertIn("- windows-rustup-repair-test", required_gate)
+        self.assertIn(
+            "WINDOWS_RUSTUP_REPAIR_RESULT: "
+            "${{ needs.windows-rustup-repair-test.result }}",
+            required_gate,
+        )
+        self.assertIn(
+            '"windows-rustup-repair-test:$WINDOWS_RUSTUP_REPAIR_RESULT"',
+            required_gate,
+        )
 
     def test_release_and_platform_contracts_skip_drafts_but_run_in_queue(self):
         changes = _without_yaml_comments(
@@ -1594,7 +1735,11 @@ class CiGatePolicyTests(unittest.TestCase):
             block = self.workflow.split(f"\n  {start}:", maxsplit=1)[1].split(
                 f"\n  {end}:", maxsplit=1
             )[0]
-            self.assertIn("github.event.pull_request.draft == false", block)
+            self.assertIn(
+                "github.event.pull_request.draft == false",
+                block,
+                f"{start} 必须只在非 draft 的 Ready PR 上运行",
+            )
 
     def _assert_macos_deployment_regression(self, workflow):
         # This coverage belongs to the existing native job; it must not become
@@ -1643,21 +1788,474 @@ class CiGatePolicyTests(unittest.TestCase):
                 with self.assertRaises((AssertionError, IndexError)):
                     self._assert_macos_deployment_regression(self.workflow.replace(old, new))
 
-    def test_pure_frontend_changes_do_not_trigger_macos_rust_build(self):
-        # Pure-frontend paths must not enter the mac-build trigger set (avoids
-        # needless native builds); but package.json/package-lock.json changes
-        # must trigger (the lockfile affects the build).
-        # Folded in from scripts/tests/test_ci_trigger_routing_policy.py to
-        # remove the duplicated parsing of the same mac-build.yml trigger
-        # block across two files.
-        trigger = MAC_BUILD_WORKFLOW.read_text(encoding="utf-8").split(
-            "\non:", maxsplit=1
-        )[1].split("\npermissions:", maxsplit=1)[0]
+    def test_mac_bundle_smoke_is_gated_on_bundle_chain_paths(self):
+        # mac-build.yml's bundle_chain filter (before its 2026-10 fold into
+        # pr-check's macos-rust-check) decided when to append the universal
+        # bundle smoke. After the fold the filter moved into pr-check's
+        # changes job, and the smoke step runs only on push with a
+        # bundle_chain hit; this test pins: the filter entries are complete
+        # (one missing = packaging-chain changes silently skip the smoke),
+        # the smoke step consumes that output, and the PR/Queue side does not
+        # run it (the PR side gets the lightweight contract from
+        # release-contract-test, and a VERSION bump gets full dmg builds from
+        # release-packages). VERSION is deliberately absent from the filter:
+        # a real version-sync commit always touches
+        # tauri.conf.json/package.json, entering bundle_chain through them.
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+                "\n  fast-gate:", maxsplit=1
+            )[0]
+        )
+        self.assertIn("bundle_chain:", changes)
+        bundle_chain_paths = _extract_quoted_paths(
+            changes.split("            bundle_chain:", maxsplit=1)[1]
+        )
+        self.assertTrue(bundle_chain_paths, "bundle_chain parsed to an empty path list")
+        for entry in (
+            "pinvou3-app/scripts/tauri/**",
+            "pinvou3-app/src-tauri/tauri.conf.json",
+            "pinvou3-app/src-tauri/config/**",
+            "pinvou3-app/src-tauri/packaging/**",
+            "pinvou3-app/src-tauri/resources/**",
+            "pinvou3-app/package.json",
+            "pinvou3-app/package-lock.json",
+            "pinvou3-app/vite.config.mjs",
+        ):
+            self.assertIn(
+                entry,
+                bundle_chain_paths,
+                f"bundle_chain is missing the packaging-chain entry; this path "
+                f"changing would silently skip the bundle smoke: {entry}",
+            )
 
-        self.assertIn("'pinvou3-app/src-tauri/**'", trigger)
-        self.assertNotIn("'pinvou3-app/src/**'", trigger)
-        self.assertIn("'pinvou3-app/package.json'", trigger)
-        self.assertIn("'pinvou3-app/package-lock.json'", trigger)
+        macos_job = self.pr_workflow.split(
+            "\n  macos-rust-check:", maxsplit=1
+        )[1].split("\n  windows-codex-runtime-test:", maxsplit=1)[0]
+        smoke_step = _without_yaml_comments(
+            macos_job.split(
+                "- name: Tauri bundle smoke", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+        )
+        self.assertIn(
+            "github.event_name == 'push' && needs.changes.outputs.bundle_chain == 'true'",
+            smoke_step,
+            "the bundle smoke must run only on push and only for packaging-chain changes",
+        )
+        self.assertIn(
+            "node scripts/tauri/build.js build --target universal-apple-darwin",
+            smoke_step,
+        )
+        self.assertNotIn(
+            "continue-on-error",
+            smoke_step,
+            "the universal bundle smoke must be able to fail main "
+            "(a broken macos packaging chain must be red)",
+        )
+
+    def test_macos_rust_check_routes_by_rust_filters_not_frontend_paths(self):
+        # PR/MQ-side routing: the macos job's if must not consume the
+        # frontend/pet outputs (it is a rust gate; frontend changes are
+        # validated by frontend-test). On main push the folded mac legs run
+        # path-independently (the cumulative main-push contract,
+        # frontend-only pushes included), so this pin is about PR routing,
+        # not push. The bundle_chain filter must also not treat
+        # pure-frontend src/** as a packaging-chain change — but
+        # package.json/package-lock.json must stay bundle_chain triggers (the
+        # lockfile affects the build). Formerly pinned the standalone
+        # mac-build.yml trigger; the workflow was folded into pr-check's
+        # macos-rust-check in 2026-10.
+        macos_job = self.pr_workflow.split(
+            "\n  macos-rust-check:", maxsplit=1
+        )[1].split("\n  windows-codex-runtime-test:", maxsplit=1)[0]
+        job_if = macos_job.split("\n    if: >-", maxsplit=1)[1].split(
+            "\n    runs-on:", maxsplit=1
+        )[0]
+        for output in ("frontend", "pet"):
+            self.assertNotIn(
+                f"needs.changes.outputs.{output}",
+                job_if,
+                f"macos-rust-check is a rust gate; {output} changes must not trigger it",
+            )
+        # Positive shape: push must stay unconditional and the PR branch must
+        # keep the rust-filter routing. Without this, collapsing the whole if
+        # to a bare push check deletes PR-side macOS coverage (the only leg
+        # that runs macOS-only unit tests on PRs) while every negative pin
+        # and step-level pin stays green.
+        self.assertIn(
+            "github.event_name == 'push' ||",
+            job_if,
+            "a main push must enter this job unconditionally "
+            "(the path-independent cumulative coverage contract)",
+        )
+        self.assertIn(
+            "needs.changes.outputs.rust_full == 'true'",
+            job_if,
+            "the PR side must keep the rust-filter routing (high-risk draft/ready paths)",
+        )
+
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+                "\n  fast-gate:", maxsplit=1
+            )[0]
+        )
+        bundle_tail = changes.split("            bundle_chain:", maxsplit=1)[1]
+        # bundle_chain is the last filter group and the extraction below has
+        # no lower bound: a group appended after it would leak into the
+        # extracted paths (the exact-entry pins would keep passing until a
+        # negation false-fails). Pin the boundary instead.
+        leaked_groups = [
+            line
+            for line in bundle_tail.splitlines()[1:]
+            if re.fullmatch(r"            [A-Za-z0-9_-]+:", line)
+        ]
+        self.assertEqual(
+            [], leaked_groups,
+            "a new filter group after bundle_chain must re-bound this extraction",
+        )
+        bundle_chain_paths = _extract_quoted_paths(bundle_tail)
+        self.assertNotIn(
+            "pinvou3-app/src/**",
+            bundle_chain_paths,
+            "pure-frontend src/** must not enter bundle_chain (avoids needless native builds)",
+        )
+        self.assertIn("pinvou3-app/package.json", bundle_chain_paths)
+        self.assertIn("pinvou3-app/package-lock.json", bundle_chain_paths)
+
+    def test_macos_native_regression_legs_survived_the_mac_build_fold(self):
+        # mac-build.yml was deleted in 2026-10 and its push-only coverage was
+        # folded into macos-rust-check. Its old failure mode was silent: the
+        # workflow kept "running" (cancel-failing) for weeks with zero
+        # coverage. Pin each folded leg so removing one cannot go unnoticed.
+        macos_job = self.pr_workflow.split(
+            "\n  macos-rust-check:", maxsplit=1
+        )[1].split("\n  windows-codex-runtime-test:", maxsplit=1)[0]
+        # mac-build died inside its own 50-minute cap; the fold replaces it
+        # with 180. Reverting to the default (360) or deleting the cap burns
+        # a hung runner for hours — the exact waste this PR removes.
+        self.assertIn("timeout-minutes: 180", macos_job)
+
+        # Full native lib regression: push-only, serial threads, locked.
+        # Comment-stripped: an if-line deleted but kept "alive" in a YAML
+        # comment must not satisfy the gate.
+        test_step = _without_yaml_comments(
+            macos_job.split(
+                "- name: macOS full lib tests", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+        )
+        self.assertIn(
+            "if: ${{ github.event_name == 'push' }}", test_step
+        )
+        self.assertIn(
+            "cargo test --lib --features benchmark-hooks --locked -- --test-threads=1",
+            test_step,
+        )
+        # Same silent-no-op guard as the PR leg's computer_use run: a
+        # filterless suite that somehow runs zero tests must fail the push.
+        self.assertIn("running [1-9][0-9]* tests?", test_step)
+
+        # The universal build needs both darwin targets installed; dropping
+        # this step resurfaces as MODULE/target errors on the first
+        # bundle_chain push, weeks after the fold (same class as the npm
+        # provisioning miss the review caught).
+        targets_step = _without_yaml_comments(
+            macos_job.split(
+                "- name: Install both targets (universal bundle smoke, push only)",
+                maxsplit=1,
+            )[1].split("\n      - name:", maxsplit=1)[0]
+        )
+        self.assertIn("github.event_name == 'push'", targets_step)
+        self.assertIn(
+            "rustup target add aarch64-apple-darwin x86_64-apple-darwin",
+            targets_step,
+        )
+
+        # The release-fast compile smoke and the verify script stay push-only.
+        release_fast = _without_yaml_comments(
+            macos_job.split(
+                "- name: Cargo build (release-fast", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+        )
+        self.assertIn("github.event_name == 'push'", release_fast)
+        self.assertIn(
+            "cargo build --profile release-fast --target aarch64-apple-darwin --lib",
+            release_fast,
+        )
+        verify_step = _without_yaml_comments(
+            macos_job.split(
+                "- name: Verify script", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+        )
+        self.assertIn("always() && github.event_name == 'push'", verify_step)
+        self.assertIn("./scripts/run-mac-verify.sh --skip-test", verify_step)
+
+        # The computer_use filtered run yields to the full leg on push (the
+        # full suite executes the same tests) and keeps guarding PR legs.
+        computer_use = _without_yaml_comments(
+            macos_job.split(
+                "- name: macOS computer_use unit tests", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+        )
+        self.assertIn("github.event_name != 'push'", computer_use)
+
+        # The bundle smoke consumes node_modules (build.js resolves
+        # @tauri-apps/cli from it and the beforeBuildCommand runs vite), so the
+        # push-gated Node.js setup + npm ci steps must survive alongside it.
+        # The 2026-10 review round caught the fold initially dropping them:
+        # the first bundle_chain push would have died MODULE_NOT_FOUND while
+        # every lock test stayed green.
+        node_step = _without_yaml_comments(
+            macos_job.split(
+                "- name: Node.js (universal bundle smoke, push only)", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+        )
+        self.assertIn(
+            "github.event_name == 'push' && needs.changes.outputs.bundle_chain == 'true'",
+            node_step,
+            "node setup is only consumed by the bundle_chain-gated smoke; "
+            "gating it the same way stops paying npm ci on unrelated pushes",
+        )
+        self.assertIn("node-version: '24'", node_step)
+        self.assertIn(
+            "cache-dependency-path: pinvou3-app/package-lock.json", node_step
+        )
+        npm_step = _without_yaml_comments(
+            macos_job.split(
+                "- name: Install frontend deps (universal bundle smoke, push only)",
+                maxsplit=1,
+            )[1].split("\n      - name:", maxsplit=1)[0]
+        )
+        self.assertIn(
+            "github.event_name == 'push' && needs.changes.outputs.bundle_chain == 'true'",
+            npm_step,
+        )
+        self.assertIn("npm ci", npm_step)
+        # The dual rustup targets feed the same universal build (lipo needs
+        # both arches); they are smoke-only provisioning too, so they carry
+        # the identical gate — otherwise unrelated pushes pay rustup while
+        # node/npm skip.
+        dual_target_step = macos_job.split(
+            "- name: Install both targets (universal bundle smoke, push only)",
+            maxsplit=1,
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        self.assertIn(
+            "github.event_name == 'push' && needs.changes.outputs.bundle_chain == 'true'",
+            dual_target_step,
+        )
+        self.assertIn(
+            "rustup target add aarch64-apple-darwin x86_64-apple-darwin",
+            dual_target_step,
+        )
+        # Provisioning must precede the smoke step in the job body.
+        self.assertLess(
+            macos_job.index("- name: Node.js (universal bundle smoke, push only)"),
+            macos_job.index("- name: Tauri bundle smoke"),
+        )
+
+        # Deployment-target parity with the release job.
+        self.assertIn('MACOSX_DEPLOYMENT_TARGET: "11.0"', macos_job)
+
+    def test_macos_lld_linker_wiring_is_pinned(self):
+        # The mac leg's lld linker wiring is easy to lose silently: a dropped
+        # env line, a job-level leak into the release legs, or a replaced
+        # RUSTFLAGS write all fail no build. The probe cannot self-validate
+        # these static pieces, so pin them:
+        # - the linker env applied per step to exactly the three
+        #   dev-profile test legs (the linux leg pins its own
+        #   RUSTFLAGS/DEV_DEBUG exactly; mirror that here),
+        # - the job-level env staying free of the linker: the folded
+        #   push-only release-fast/bundle legs ship artifacts and are
+        #   outside the validated scope, so they must keep default Apple
+        #   ld linking,
+        # - the probe emitting a step output instead of GITHUB_ENV, so
+        #   nothing downstream inherits the probed linker by default,
+        # - no global RUSTFLAGS write: the obsolete strip workaround is
+        #   removed with the pinned toolchain fix, and a global write could
+        #   re-propagate the probe's flags onto the release legs,
+        # - the probe staying before the cache step, so a toolchain without
+        #   a usable lld fails in seconds ahead of any cache restore or
+        #   build work (cargo fingerprints inside target/, not the cache
+        #   key, keep the lld-built artifacts consistent).
+        macos_job = self.pr_workflow.split(
+            "\n  macos-rust-check:", maxsplit=1
+        )[1].split("\n  windows-codex-runtime-test:", maxsplit=1)[0]
+
+        # No linker env at job level (comments excluded: they document
+        # the scoping and legitimately name the variables).
+        job_env = _without_yaml_comments(
+            macos_job.split("\n    env:", maxsplit=1)[1].split(
+                "\n    steps:", maxsplit=1
+            )[0]
+        )
+        self.assertNotIn("CARGO_PROFILE_DEV_LTO", job_env)
+        self.assertNotIn("RUSTFLAGS", job_env)
+
+        # Per-step application to the three dev-profile test legs, identical
+        # across them so target/debug artifacts stay incrementally reusable.
+        test_leg_names = (
+            "- name: macOS Rust all-targets check",
+            "- name: macOS computer_use unit tests",
+            "- name: macOS full lib tests (native regression, push only)",
+        )
+        for step_name in test_leg_names:
+            body = macos_job.split(step_name, maxsplit=1)[1].split(
+                "\n      - name:", maxsplit=1
+            )[0]
+            self.assertIn('CARGO_PROFILE_DEV_LTO: "thin"', body, step_name)
+            self.assertIn(
+                "RUSTFLAGS: ${{ steps.mac_lld_probe.outputs.flags }}",
+                body,
+                step_name,
+            )
+
+        # The probe emits a step output, not GITHUB_ENV: nothing between the
+        # probe and the consuming test steps — nor the release legs below —
+        # may inherit the probed linker silently.
+        probe_step = macos_job.split(
+            "- name: Probe and export the macOS lld link flags", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        self.assertIn("id: mac_lld_probe", probe_step)
+        self.assertIn('echo "flags=$flags" >> "$GITHUB_OUTPUT"', probe_step)
+        self.assertIn('echo "probed RUSTFLAGS=$flags"', probe_step)
+        self.assertNotIn("$GITHUB_ENV", probe_step)
+        self.assertLess(
+            macos_job.index("- name: Probe and export the macOS lld link flags"),
+            macos_job.index("uses: Swatinem/rust-cache@v2"),
+        )
+
+        # Release builds use the profile's strip policy now that the pinned
+        # toolchain includes the Mach-O fix. No step may export RUSTFLAGS
+        # globally and accidentally carry the dev linker into those builds.
+        self.assertNotIn("- name: macOS 27+ strip workaround", macos_job)
+        for line in _without_yaml_comments(macos_job).splitlines():
+            if "GITHUB_ENV" in line:
+                self.assertNotIn("RUSTFLAGS", line)
+
+        # The push-only release legs carry no linker env of their own.
+        for step_name in (
+            "- name: Cargo build (release-fast",
+            "- name: Tauri bundle smoke",
+        ):
+            body = macos_job.split(step_name, maxsplit=1)[1].split(
+                "\n      - name:", maxsplit=1
+            )[0]
+            self.assertNotIn("RUSTFLAGS", body, step_name)
+            self.assertNotIn("CARGO_PROFILE_DEV_LTO", body, step_name)
+
+    def test_main_rust_caches_save_on_failure_and_rust_test_keeps_targets(self):
+        # cache-on-failure keeps one failed main run from stranding a
+        # namespace cold — mac-build's exact death loop (evicted once, then
+        # save-on-success-only kept it cold forever). Saves stay main-only
+        # (rust-cache's post step also requires save-if), so PR runs never
+        # write caches. rust-test's target cache stays re-enabled: the
+        # 2026-08-29/30 restored-target runner deaths were root-caused to
+        # runner RAM and absorbed by the zram+swap layers (maintainer
+        # ruling, recorded at the cache step) — dropping targets again is a
+        # policy change, not cleanup, and must revisit this pin.
+        for job_name, end_marker in (
+            ("rust-test", "\n  cli-test:"),
+            ("windows-rust-test", "\n  macos-rust-check:"),
+            ("macos-rust-check", "\n  windows-codex-runtime-test:"),
+        ):
+            job = self.pr_workflow.split(
+                f"\n  {job_name}:", maxsplit=1
+            )[1].split(end_marker, maxsplit=1)[0]
+            # Official's rust-test job restores the lint warm cache
+            # (rust-lint-v2, save-if: false) before its own Cargo test cache
+            # step; anchor on the step name so the lint restore is not
+            # mistaken for the save-on-failure cache.
+            job_scope = (
+                job.split("- name: Cargo test cache", maxsplit=1)[1]
+                if job_name == "rust-test"
+                else job
+            )
+            cache_step = _without_yaml_comments(
+                job_scope.split("uses: Swatinem/rust-cache@v2", maxsplit=1)[1].split(
+                    "\n      - name:", maxsplit=1
+                )[0]
+            )
+            self.assertIn("cache-on-failure: true", cache_step, job_name)
+            self.assertIn("refs/heads/main", cache_step, job_name)
+        rust_test_job = self.pr_workflow.split(
+            "\n  rust-test:", maxsplit=1
+        )[1].split("\n  cli-test:", maxsplit=1)[0]
+        rust_test_cache = _without_yaml_comments(
+            rust_test_job.split("- name: Cargo test cache", maxsplit=1)[1].split(
+                "uses: Swatinem/rust-cache@v2", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+        )
+        self.assertIn("shared-key: rust-test-v2", rust_test_cache)
+        # The re-enable is the absence of the old cache-targets: false
+        # (rust-cache's default keeps target artifacts). Comments stripped:
+        # the decision record above mentions the old value historically.
+        self.assertNotIn("cache-targets:", rust_test_cache)
+
+    def test_quota_and_toolchain_hardening_stays_pinned(self):
+        # 2026-10 audit hardening. Each item is a silent policy change (quota
+        # weight or toolchain drift) if removed, with no runtime error to
+        # expose it — so each is pinned:
+        # - CARGO_INCREMENTAL=0 repo-wide: incremental artifacts are pure
+        #   cache-bloat on ephemeral runners under the 10GB quota.
+        # - knowledge-rust drops its target cache (workspace compiles cold
+        #   inside its 30-minute cap); only ~/.cargo is cached.
+        # - The CodeWhale Windows regression resolves its toolchain via the
+        #   same rust-toolchain.toml-derived resolution as every other leg
+        #   (RUSTUP_TOOLCHAIN beats the directory override file).
+        # - Both Cargo.lock drift guards fail loud when a cargo invocation
+        #   regenerated a lockfile instead of honoring it (--locked parity).
+        self.assertIn('CARGO_INCREMENTAL: "0"', self.pr_workflow)
+
+        knowledge_job = self.pr_workflow.split(
+            "\n  knowledge-rust:", maxsplit=1
+        )[1].split("\n  rust-lint:", maxsplit=1)[0]
+        knowledge_cache = _without_yaml_comments(
+            knowledge_job.split(
+                "uses: Swatinem/rust-cache@v2", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+        )
+        self.assertIn("cache-targets: false", knowledge_cache)
+
+        windows_rust_job = self.pr_workflow.split(
+            "\n  windows-rust-test:", maxsplit=1
+        )[1].split("\n  macos-rust-check:", maxsplit=1)[0]
+        self.assertIn(
+            "RUSTUP_TOOLCHAIN: ${{ steps.pinned_toolchain.outputs.version }}",
+            _without_yaml_comments(windows_rust_job),
+        )
+
+        for job_name, end_marker in (
+            ("knowledge-rust", "\n  rust-lint:"),
+            ("rust-lint", "\n  rust-test:"),
+        ):
+            job = self.pr_workflow.split(
+                f"\n  {job_name}:", maxsplit=1
+            )[1].split(end_marker, maxsplit=1)[0]
+            self.assertIn(
+                "Cargo.lock drift guard", job, job_name,
+            )
+            self.assertIn(
+                "git diff --exit-code -- '**/Cargo.lock'", job, job_name,
+            )
+
+    def test_connector_darwin_x64_executes_on_intel(self):
+        # darwin-x64 verifies the pinned x86_64 connector CLIs by EXECUTING
+        # them. On the arm64 image that step was skipped (can_run: false),
+        # leaving sha256/file checks only — a hash-matching but broken binary
+        # shipped green. macos-15-intel is the Intel image (sunset ~2027 with
+        # the macos-15 generation; the re-homing note lives in the matrix).
+        workflow = (
+            ROOT / ".github/workflows/connector-verify.yml"
+        ).read_text(encoding="utf-8")
+        darwin_x64 = workflow.split(
+            "- platform: darwin-x64", maxsplit=1
+        )[1].split("- platform:", maxsplit=1)[0]
+        self.assertIn("runs-on: macos-15-intel", darwin_x64)
+        self.assertIn("can_run: true", darwin_x64)
+        # The arm64 leg keeps executing on the arm64 image (no coverage lost).
+        darwin_arm64 = workflow.split(
+            "- platform: darwin-arm64", maxsplit=1
+        )[1].split("- platform:", maxsplit=1)[0]
+        self.assertIn("runs-on: macos-15", darwin_arm64)
+        self.assertIn("can_run: true", darwin_arm64)
 
     def test_wrapper_smoke_routes_merge_groups_before_platform_matrix(self):
         # rustc-wrapper-smoke must first pass the paths-filter gate before
@@ -1691,6 +2289,16 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("needs: changes", smoke)
         self.assertIn("if: ${{ needs.changes.outputs.wrapper == 'true' }}", smoke)
         self.assertIn("os: [macos-15, ubuntu-22.04, windows-latest]", smoke)
+        # The 2026-10 concurrency fix: only PR runs cancel each other; queue
+        # entries and main pushes must never cancel (queue entries carry the
+        # required-check contexts the merge queue waits on). Both jobs get
+        # explicit caps instead of the 360-minute workflow default.
+        self.assertIn(
+            "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+            workflow,
+        )
+        self.assertIn("timeout-minutes: 10", changes)
+        self.assertIn("timeout-minutes: 20", smoke)
 
 
 if __name__ == "__main__":
