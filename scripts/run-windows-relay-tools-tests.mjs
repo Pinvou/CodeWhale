@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { assertTestSummary } from './windows-relay-tools-test-summary.mjs';
+import { requireWindowsPowerShell51 } from './windows-relay-tools-preflight.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const files = [
@@ -12,11 +13,7 @@ const files = [
 
 function run() {
   if (process.platform !== 'win32') throw new Error('Native Windows execution required');
-  const version = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8', timeout: 10_000 });
-  if (version.error || version.status !== 0 || !/^5\.1\./.test(version.stdout.trim())) {
-    throw new Error('Windows PowerShell 5.1 required');
-  }
+  requireWindowsPowerShell51();
   for (const file of files) {
     const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap',
       resolve(root, 'remote-control-relay/test', file)],
