@@ -14,8 +14,14 @@
 #   linker = "clang"
 #   rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 #
-# macOS 不换链接器:Tauri 依赖 Apple ld 处理 framework,换 lld/zld 风险高于收益。
-# Windows 不换链接器:MSVC link.exe 是 WebView2/Com 的唯一稳定选项。
+# macOS: release/artifact paths stay on Apple ld (Tauri depends on it for
+# framework handling; switching to lld/zld risks more than it wins); CI test
+# legs inject the probed ld64.lld per job since #646 (pr-check's
+# macos-rust-check; the push-only release/bundle legs keep Apple ld).
+# Windows: CI injects the probed lld-link per job (pr-check's windows-rust-test
+# since #642, release-packages' build-windows-x64 since 2026-10-02).
+# This file hardcodes neither; local overrides keep going through
+# config.local.toml.
 #
 # 未来若团队统一约定要强制(如 CI 已确认装好 clang+lld),再把这些 rustflags 从
 # config.local.toml 提升回这里,并同步更新 CI 镜像。
@@ -44,8 +50,10 @@
 #   - Windows 开发:run-dev.sh 调用 selector,selector 幂等编译并注入
 #     scripts/rustc-stack-wrapper.exe(经 CreateProcess 直启;无扩展名 sh
 #     会 os error 193)
-#   - CI:pr-check(ubuntu rust-test / windows-rust-test)、mac-build、
-#     release-packages 的 macOS universal 构建按平台注入对应 wrapper
+#   - CI: pr-check (rust-lint, macos-rust-check), release-packages
+#     (Linux x64/arm64、macOS universal)注入 sh 版;
+#     release-packages 的 Windows x64 与 pr-check 的 windows-rust-test
+#     先 rustc 编译 .exe 版再注入
 # 注入的 RUST_MIN_STACK=16MiB 只作用于编译期 rustc 进程;cargo run /
 # cargo test 目标进程不经过 wrapper,运行时线程栈语义(约 2 MiB)不变。
 # 与 rust-lang/rust #160535(默认栈提升到 16 MiB)同方向。

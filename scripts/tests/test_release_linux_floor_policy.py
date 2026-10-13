@@ -81,8 +81,12 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
             upload_name = (
                 "pinvou3_${{ needs.check-version-bump.outputs.version }}_" + arch + ".deb"
             )
+            # x64: 重命名/校验 + glibc 守卫;arm64 多一处 Repack 步骤
+            # (xz -9 重打包直接引用本地名,见 docs/binary-size-optimization.md)。
+            expected_local = 3 if arch == "arm64" else 2
             self.assertEqual(
-                job.count(local_name), 2, f"{arch}: local deb name must appear in packaging and guard"
+                job.count(local_name), expected_local,
+                f"{arch}: local deb name must appear in packaging/repack and guard",
             )
             self.assertEqual(
                 job.count(upload_name), 2, f"{arch}: upload deb name must appear in both upload paths"

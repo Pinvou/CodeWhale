@@ -46,7 +46,13 @@ class ReleaseArm64PolicyTests(unittest.TestCase):
         for setting in (
             'CARGO_PROFILE_RELEASE_LTO: "false"',
             'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"',
-            'RUSTFLAGS: "-C link-arg=-fuse-ld=lld"',
+            # Size-policy flags(与 x64 job 同款): --icf=safe 为 lld 同码折叠
+            # (safe 层只折叠地址确定不被取用的函数,保守处理 rust#160267 的
+            # 函数地址同一性边界); remap-path-prefix 将制品内嵌的构建机绝对
+            # 路径规一化为 /(顶层 rustc flag,不是 -C codegen 选项)。
+            'RUSTFLAGS: "-C link-arg=-fuse-ld=lld '
+            '-C link-arg=-Wl,--icf=safe '
+            '--remap-path-prefix=${{ github.workspace }}=/"',
         ):
             self.assertIn(setting, job_env)
 

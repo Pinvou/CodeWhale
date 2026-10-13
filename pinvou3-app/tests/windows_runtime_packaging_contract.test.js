@@ -81,6 +81,10 @@ const vcRedistTempPreflightPath = path.join(
   "vcredist-temp-preflight.ps1",
 );
 const vcRedistTempPreflight = fs.readFileSync(vcRedistTempPreflightPath, "utf8");
+const runtimeCacheBehaviorHarness = readApp(
+  "tests",
+  "windows_runtime_cache_behavior.ps1",
+);
 const runtimeWrapper = readApp("scripts", "tauri", "windows-runtime.js");
 const installerAdapter = readApp("scripts", "tauri", "windows-installer.js");
 const buildScript = readApp("scripts", "tauri", "build.js");
@@ -285,6 +289,39 @@ for (const recoveryHint of [
 }
 assert.match(vcRedistTempPreflight, /S-1-5-18/);
 assert.match(vcRedistTempPreflight, /S-1-5-32-544/);
+// SID constants alone are not a behavior pin: require the full grant chain
+// (both SIDs in the applied set, rule granted and written back, every ensured
+// directory running the grant) so deleting the ACL repair still fails here.
+assert.match(
+  vcRedistTempPreflight,
+  /\$requiredSids = @\(\$systemSid, \$administratorsSid\)/,
+  "SYSTEM and Administrators SIDs must form the required-access set",
+);
+assert.match(
+  vcRedistTempPreflight,
+  /\[void\]\$acl\.AddAccessRule\(\$rule\)/,
+  "the required-access set must be granted through ACL access rules",
+);
+assert.match(
+  vcRedistTempPreflight,
+  /Set-Acl -LiteralPath \$Path -AclObject \$acl/,
+  "granted ACL rules must be written back to the repaired directory",
+);
+assert.match(
+  vcRedistTempPreflight,
+  /Add-RequiredAccess -Path \$Path/,
+  "every ensured system directory must receive the required ACL entries",
+);
+assert.match(
+  vcRedistTempPreflight,
+  /Ensure-SystemDirectory -Path \$windowsTempPath/,
+  "the Windows temp directory must run the ACL-preserving ensure",
+);
+assert.match(
+  vcRedistTempPreflight,
+  /Ensure-SystemDirectory -Path \$windowsInstallerPath -HiddenSystem/,
+  "the Windows Installer directory must run the ACL-preserving ensure",
+);
 assert.match(
   vcRedistTempPreflight,
   /SetEnvironmentVariable\(\$Name, \$FallbackPath, "Machine"\)/,
@@ -615,10 +652,15 @@ assert.match(
   /isDev && process\.platform === "win32"[\s\S]*?stageWindowsOnnxRuntime\(\)/u,
   "Windows dev must stage only the pinned ONNX Runtime before starting Tauri",
 );
-assert.doesNotMatch(
+// Positive anchor: only a build/bundle command may widen into the full
+// packaging runtime. A negative "(hasTauriBuildCommand || isDev)" scan would
+// also hit the unrelated Windows toolchain-check gate above. Official's
+// runtime staging widens through the NSIS-staging validator, so the anchor
+// points at that gate expression.
+assert.match(
   buildScript,
-  /\(hasTauriBuildCommand \|\| isDev\)[\s\S]*?stageWindowsRuntime\(\)/u,
-  "Windows dev must not stage the complete packaging runtime",
+  /hasTauriBuildCommand && process\.platform === "win32"\s*\?\s*\(usesValidatedNsisStaging\(args\)/u,
+  "only a build/bundle command must stage the complete packaging runtime",
 );
 assert.match(
   buildScript,
@@ -750,6 +792,124 @@ assert.match(
 assert.match(
   releaseWorkflow,
   /build_required: \$\{\{ steps\.diff\.outputs\.build_required \}\}/,
+);
+
+// Windows PowerShell 5.1 spawned under a pwsh 7 parent (CI step shells, pwsh
+// terminals) inherits pwsh's PSModulePath: Get-FileHash then raises
+// CommandNotFound and Get-Acl resolves the unloadable PowerShell 7 module,
+// so the native harnesses die before their assertions while the aggregate
+// CI step still reports green. Each direct 5.1 entry point must restore the
+// host default module path before its first module-dependent cmdlet.
+const modulePathGuard =
+  /PSVersionTable\.PSVersion\.Major -lt 6[\s\S]*?System32\\WindowsPowerShell\\v1\.0\\Modules/u;
+assert.match(
+  runtimeScript,
+  modulePathGuard,
+  "the runtime resolver must restore the 5.1 module path (it runs as a child process and is dot-sourced by the wrappers)",
+);
+assert.match(
+  vcRedistTempPreflight,
+  modulePathGuard,
+  "the VC++ temp preflight must restore the 5.1 module path itself (nothing runs before it)",
+);
+assert.match(
+  runtimeInitScript,
+  modulePathGuard,
+  "the runtime init script must restore the 5.1 module path before its lock-file hashing",
+);
+assert.ok(
+  runtimeScript.indexOf("PSVersionTable.PSVersion.Major -lt 6") <
+    runtimeScript.indexOf("Add-Type -AssemblyName"),
+  "the resolver must restore the module path before Add-Type so module autoload works",
+);
+assert.match(
+  runtimeScript,
+  /Get-CachedVerifiedManifest -VerifyContent:\(\$Mode -eq "Validate"\)/u,
+  "Stage may trust cached source metadata; Validate must re-hash the locked content",
+);
+assert.ok(
+  runtimeScript.includes(
+    "if ($VerifyContent -and (Get-Sha256 -Path $sourcePath) -ne [string]$entry.sha256)",
+  ),
+  "the Validate-mode content re-hash guard must stay inside Get-CachedVerifiedManifest, not just at its call site",
+);
+// The size-only cache is safe only while the cached path re-runs the full
+// runtime identity check itself (marker match alone must never authorize
+// per-file sizes), and a vanished checkout must decline to the full path so
+// the actionable "not initialized" message survives the cache. Pin the call
+// ordering inside Get-CachedVerifiedManifest's own body; removing either the
+// checkout guard or the identity re-check there must fail here loudly.
+const cachedFnStart = runtimeScript.indexOf("function Get-CachedVerifiedManifest");
+const cachedMarkerIdx = runtimeScript.indexOf(
+  "Test-VerificationMarker -Path $sourceVerificationMarkerPath",
+  cachedFnStart,
+);
+const cachedCheckoutIdx = runtimeScript.indexOf(
+  "Test-Path -LiteralPath $RuntimeRoot -PathType Container",
+  cachedFnStart,
+);
+const cachedIdentityIdx = runtimeScript.indexOf("Assert-RuntimeIdentity", cachedFnStart);
+const cachedSizeIdx = runtimeScript.indexOf(
+  "$sourcePath).Length -ne [long]$entry.bytes",
+  cachedFnStart,
+);
+assert.ok(
+  cachedFnStart !== -1 &&
+    cachedMarkerIdx > cachedFnStart &&
+    cachedCheckoutIdx > cachedMarkerIdx &&
+    cachedIdentityIdx > cachedCheckoutIdx &&
+    cachedSizeIdx > cachedIdentityIdx,
+  "the cached path must decline to the full path when the checkout is gone and re-run the runtime identity check between the marker check and the per-file size loop, not trust sizes on the marker alone",
+);
+assert.equal(
+  (runtimeScript.match(/Write-Utf8Atomically -Path \$sourceVerificationMarkerPath/gu) || []).length,
+  2,
+  "the workspace source-metadata marker must be rewritten on both the full-verify and the cached-rebuild paths",
+);
+assert.match(runtimeScript, /Write-Utf8Atomically -Path \$runtimeDescriptorPath/u);
+assert.match(runtimeScript, /Write-Utf8Atomically -Path \$generatedConfigPath/u);
+assert.match(
+  runtimeScript,
+  /Write-Utf8Atomically -Path \$onnxDevDescriptorPath/u,
+  "the ONNX dev descriptor is shared-visibility state and must be written atomically",
+);
+const atomicFnStart = runtimeScript.indexOf("function Write-Utf8Atomically");
+const atomicFnEnd = runtimeScript.indexOf("\nfunction ", atomicFnStart);
+assert.ok(atomicFnStart !== -1 && atomicFnEnd > atomicFnStart);
+const atomicFnBody = runtimeScript.slice(atomicFnStart, atomicFnEnd);
+assert.match(
+  atomicFnBody,
+  /^\s*if \(Test-Path -LiteralPath \$Path -PathType Leaf\) \{$/mu,
+  "the atomic writer must branch on an existing destination",
+);
+assert.match(
+  atomicFnBody,
+  /^\s*\[System\.IO\.File\]::Replace\(\$temporaryPath, \$Path, \[NullString\]::Value\)$/mu,
+  "an existing destination must be swapped in via File.Replace (atomic ReplaceFile) with a real null backup (PowerShell coerces a plain $null argument to an empty string, which Replace would resolve as the backup path), because Move-Item -Force deletes the destination before the rename and the unlocked descriptor readers in scripts/tauri/windows-runtime.js would observe the file missing",
+);
+assert.match(
+  atomicFnBody,
+  /^\s*\[System\.IO\.File\]::Move\(\$temporaryPath, \$Path\)$/mu,
+  "a fresh destination must still take the plain move path (File.Replace requires an existing destination)",
+);
+const atomicFnCode = atomicFnBody
+  .split("\n")
+  .filter((line) => !line.trimStart().startsWith("#"))
+  .join("\n");
+assert.doesNotMatch(
+  atomicFnCode,
+  /Move-Item/,
+  "no delete-before-move primitive may re-enter the atomic writer",
+);
+assert.match(
+  runtimeCacheBehaviorHarness,
+  /foreach \(\$generation in @\("second", "third"\)\)/u,
+  "the cache-behavior harness must exercise repeated atomic replacement (the re-stage path), not only first creation",
+);
+assert.match(
+  runtimeCacheBehaviorHarness,
+  /atomic replace under a sharing reader must fail loudly/u,
+  "the cache-behavior harness must prove a failed atomic replacement preserves the previous descriptor",
 );
 
 console.log("Windows runtime packaging contract: ok");

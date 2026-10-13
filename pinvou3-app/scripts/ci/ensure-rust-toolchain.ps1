@@ -1,13 +1,64 @@
 param(
   [switch]$CheckOnly,
-  [int]$LockTimeoutSeconds = 600,
   [ValidateRange(1, 3600)]
   [int]$InstallAttemptTimeoutSeconds = 600,
   [ValidateRange(1, 5)]
-  [int]$RepairAttemptsPerSource = 2
+  [int]$RepairAttemptsPerSource = 2,
+  [ValidateRange(1, 7200)]
+  [int]$RepairTimeoutSeconds = 1500,
+  # A waiter must out-wait the holder's legitimate worst case: the overall
+  # repair budget, plus the final budget-cleared attempt's install AND its
+  # uninstall reset (each bounded by InstallAttemptTimeoutSeconds and
+  # carrying its own kill/drain slack), plus probe overhead. The lock is
+  # handle-based and released on crash, so a long wait can only mean a live,
+  # still-useful repair on the other side; a fixed 600s deadline made a
+  # second build on the same checkout fail spuriously while the holder was
+  # legitimately mid-repair.
+  [ValidateRange(1, 14700)]
+  [int]$LockTimeoutSeconds = (
+    $RepairTimeoutSeconds + 2 * $InstallAttemptTimeoutSeconds + 300
+  )
 )
 
 $ErrorActionPreference = "Stop"
+
+# Version probes use --version, the long form all six probe commands accept:
+# rustfmt 1.10.0 (stable 1.99.0) rewrote cargo-fmt on clap and rejects the
+# short -V, so a -V probe classified every healthy current stable as
+# incomplete and sent the repair into a non-convergent reinstall loop.
+# Probes never touch the standard library, so a toolchain whose rust-std was
+# wiped or half-extracted still passes every binary probe; the target libdir
+# reported by rustc must exist and be populated for real compiles.
+function Test-RustStdTargetLib {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$RustupPath,
+    [Parameter(Mandatory = $true)]
+    [string]$Toolchain
+  )
+
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $targetLibDir = & $RustupPath run $Toolchain rustc --print target-libdir 2>$null |
+      Select-Object -Last 1
+    if ($LASTEXITCODE -ne 0) {
+      return $false
+    }
+    $targetLibDir = "$targetLibDir".Trim()
+    if ([string]::IsNullOrWhiteSpace($targetLibDir)) {
+      return $false
+    }
+    if (-not (Test-Path -LiteralPath $targetLibDir -PathType Container)) {
+      return $false
+    }
+    return @(
+      Get-ChildItem -LiteralPath $targetLibDir -Force -ErrorAction SilentlyContinue
+    ).Count -gt 0
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+}
 
 if ($CheckOnly) {
   $accountToolchainFile = Join-Path $PSScriptRoot "..\..\src-tauri\rust-toolchain.toml"
@@ -20,7 +71,7 @@ if ($CheckOnly) {
     '(?m)^\s*channel\s*=\s*"([^"]+)"'
   )
   if (-not $accountChannelMatch.Success) {
-    throw "[rustup] Unable to read the pinned Rust channel from: $accountToolchainFile"
+    throw "[rustup] Unable to read the Rust channel from: $accountToolchainFile"
   }
   $accountToolchain = $accountChannelMatch.Groups[1].Value
   $accountRustupCommand = Get-Command rustup -ErrorAction SilentlyContinue
@@ -33,12 +84,17 @@ if ($CheckOnly) {
   $previousErrorActionPreference = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    foreach ($command in @("cargo", "rustc", "clippy-driver", "rustfmt")) {
-      & $accountRustupPath run $accountToolchain $command -V 2>&1 |
+    foreach ($command in @(
+      "cargo", "rustc", "clippy-driver", "rustfmt", "cargo-clippy", "cargo-fmt"
+    )) {
+      & $accountRustupPath run $accountToolchain $command --version 2>&1 |
         ForEach-Object { Write-Host "[rustup] $_" }
       if ($LASTEXITCODE -ne 0) {
         $invalidAccountCommands += $command
       }
+    }
+    if (-not (Test-RustStdTargetLib -RustupPath $accountRustupPath -Toolchain $accountToolchain)) {
+      $invalidAccountCommands += "rust-std"
     }
   } finally {
     $ErrorActionPreference = $previousErrorActionPreference
@@ -80,20 +136,6 @@ if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
 }
 
 New-Item -ItemType Directory -Path $managedRustupHome -Force | Out-Null
-$managedMarker = Join-Path $managedRustupHome ".pinvou3-managed-rustup"
-if (-not (Test-Path -LiteralPath $managedMarker)) {
-  $existingEntries = @(Get-ChildItem -LiteralPath $managedRustupHome -Force)
-  if ($existingEntries.Count -gt 0) {
-    throw "[rustup] Refusing to adopt a non-empty unmarked RUSTUP_HOME: $managedRustupHome"
-  }
-  Set-Content -LiteralPath $managedMarker `
-    -Value "pinvou3-managed-rustup-v1" -Encoding Ascii
-}
-$markerValue = (Get-Content -LiteralPath $managedMarker -Raw).Trim()
-if ($markerValue -ne "pinvou3-managed-rustup-v1") {
-  throw "[rustup] Invalid managed RUSTUP_HOME marker: $managedMarker"
-}
-$env:RUSTUP_HOME = $managedRustupHome
 
 $lockPath = Join-Path $managedRustupHome ".pinvou3-toolchain.lock"
 $lockDeadline = [DateTime]::UtcNow.AddSeconds($LockTimeoutSeconds)
@@ -115,6 +157,29 @@ while ($null -eq $lockStream) {
 }
 
 try {
+  # The adopt-or-refuse decision runs under the lock so two concurrent
+  # first-time builds cannot both adopt the same home. The lock file is the
+  # only entry a fresh home may already carry.
+  $managedMarker = Join-Path $managedRustupHome ".pinvou3-managed-rustup"
+  if (-not (Test-Path -LiteralPath $managedMarker)) {
+    $existingEntries = @(Get-ChildItem -LiteralPath $managedRustupHome -Force | Where-Object {
+      $_.Name -ne ".pinvou3-toolchain.lock"
+    })
+    if ($existingEntries.Count -gt 0) {
+      throw (
+        "[rustup] Refusing to adopt a non-empty unmarked RUSTUP_HOME: $managedRustupHome. " +
+        "It is safe to delete the isolated RUSTUP_HOME at $managedRustupHome and re-run the build."
+      )
+    }
+    Set-Content -LiteralPath $managedMarker `
+      -Value "pinvou3-managed-rustup-v1" -Encoding Ascii
+  }
+  $markerValue = (Get-Content -LiteralPath $managedMarker -Raw).Trim()
+  if ($markerValue -ne "pinvou3-managed-rustup-v1") {
+    throw "[rustup] Invalid managed RUSTUP_HOME marker: $managedMarker"
+  }
+  $env:RUSTUP_HOME = $managedRustupHome
+
   Write-Host "[rustup] Checking the isolated Rust toolchain: $managedRustupHome"
 
   $toolchainFile = Join-Path $PSScriptRoot "..\..\src-tauri\rust-toolchain.toml"
@@ -128,7 +193,7 @@ try {
     '(?m)^\s*channel\s*=\s*"([^"]+)"'
   )
   if (-not $channelMatch.Success) {
-    throw "[rustup] Unable to read the pinned Rust channel from: $toolchainFile"
+    throw "[rustup] Unable to read the Rust channel from: $toolchainFile"
   }
   $toolchain = $channelMatch.Groups[1].Value
 
@@ -154,21 +219,33 @@ try {
     }
   }
 
+  # Mirror-first, the ordering #619 uses for its runtime downloads: this
+  # engine exists for machines where the official source stalls, so the CN
+  # mirrors come first and the official source is the last resort. Note the
+  # integrity model differs from #619's SHA-256-pinned downloads: rustup
+  # verifies components only against the channel manifest served by the same
+  # mirror, so mirror trust rests on HTTPS; RUSTUP_DIST_SERVER restores
+  # official-first with mirror fallback. rsproxy and USTC
+  # each serve both the dist manifests and the rustup update root for rolling
+  # and version-pinned channels alike (verified live). TUNA is not in the
+  # chain: it 404s version-pinned manifests, so it only works while the
+  # configured channel happens to be rolling, and rsproxy + USTC already keep
+  # the chain channel-agnostic.
   $fallbackSources = @(
-    [pscustomobject]@{
-      Name = "Rust official source"
-      DistServer = "https://static.rust-lang.org"
-      UpdateRoot = "https://static.rust-lang.org/rustup"
-    },
     [pscustomobject]@{
       Name = "rsproxy mirror"
       DistServer = "https://rsproxy.cn"
       UpdateRoot = "https://rsproxy.cn/rustup"
     },
     [pscustomobject]@{
-      Name = "TUNA mirror"
-      DistServer = "https://mirrors.tuna.tsinghua.edu.cn/rustup"
-      UpdateRoot = "https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup"
+      Name = "USTC mirror"
+      DistServer = "https://mirrors.ustc.edu.cn/rust-static"
+      UpdateRoot = "https://mirrors.ustc.edu.cn/rust-static/rustup"
+    },
+    [pscustomobject]@{
+      Name = "Rust official source"
+      DistServer = "https://static.rust-lang.org"
+      UpdateRoot = "https://static.rust-lang.org/rustup"
     }
   )
 
@@ -230,26 +307,59 @@ try {
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
         if ($timedOut) {
-          $process.Kill()
-        }
-        $process.WaitForExit()
+          # rustup can exit inside the window between the timed-out wait and
+          # the kill; .NET Kill() then throws InvalidOperationException, and
+          # a Win32Exception (already gone, access denied) is equally
+          # possible. Either race must count as a failed attempt, not abort
+          # the whole repair.
+          try {
+            $process.Kill()
+          } catch [System.InvalidOperationException], [System.ComponentModel.Win32Exception] {
+          }
+          # A kill that could not complete must not hang the repair on the
+          # unbounded WaitForExit either; the attempt is failed regardless.
+          $null = $process.WaitForExit(5000)
 
-        $nativeOutput = @(
-          $stdoutTask.GetAwaiter().GetResult(),
-          $stderrTask.GetAwaiter().GetResult()
-        ) -join "`n"
+          # Bounded drain: a surviving handle holder could otherwise stall
+          # the stream reads past the per-attempt timeout. A faulted read
+          # task throws AggregateException out of Wait(); the attempt is
+          # already failed here, so only its output is lost.
+          try { $null = $stdoutTask.Wait(10000) } catch [System.AggregateException] { }
+          try { $null = $stderrTask.Wait(10000) } catch [System.AggregateException] { }
+          $stdoutText = ""
+          if ($stdoutTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { $stdoutText = $stdoutTask.Result }
+          $stderrText = ""
+          if ($stderrTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { $stderrText = $stderrTask.Result }
+          $nativeOutput = @($stdoutText, $stderrText) -join "`n"
+          $nativeOutput -split '[\r\n]+' | ForEach-Object {
+            if (-not [string]::IsNullOrWhiteSpace($_)) {
+              Write-Host "[rustup] $_"
+            }
+          }
+          Write-Warning (
+            "[rustup] Rustup attempt timed out after $TimeoutSeconds seconds."
+          )
+          return 124
+        }
+
+        # Bounded drain on the success path too: a faulted read task is
+        # completed but not RanToCompletion, so an IsCompleted guard would
+        # still let .Result rethrow past the exit-code classification; only
+        # a RanToCompletion read may contribute output, and an inherited
+        # pipe handle must not hang a completed process's output read.
+        try { $null = $stdoutTask.Wait(10000) } catch [System.AggregateException] { }
+        try { $null = $stderrTask.Wait(10000) } catch [System.AggregateException] { }
+        $stdoutText = ""
+        if ($stdoutTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { $stdoutText = $stdoutTask.Result }
+        $stderrText = ""
+        if ($stderrTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { $stderrText = $stderrTask.Result }
+        $nativeOutput = @($stdoutText, $stderrText) -join "`n"
         $nativeOutput -split '[\r\n]+' | ForEach-Object {
           if (-not [string]::IsNullOrWhiteSpace($_)) {
             Write-Host "[rustup] $_"
           }
         }
 
-        if ($timedOut) {
-          Write-Warning (
-            "[rustup] Rustup attempt timed out after $TimeoutSeconds seconds."
-          )
-          return 124
-        }
         return $process.ExitCode
       } finally {
         $process.Dispose()
@@ -262,6 +372,15 @@ try {
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
+      # A native command that cannot start (AV lock, blocked executable)
+      # never updates $LASTEXITCODE, so a stale 0 from an earlier call would
+      # false-pass the probe classification below. The seed must write the
+      # GLOBAL: a bare assignment creates a function-local $LASTEXITCODE that
+      # shadows the one the engine writes for the native command, so every
+      # probe would read the seeded failure forever (proven on a real
+      # windows-latest run: every post-install probe reported every command
+      # missing).
+      $global:LASTEXITCODE = 1
       & $rustupPath @Arguments 2>&1 | ForEach-Object {
         $message = if ($_ -is [System.Management.Automation.ErrorRecord]) {
           $_.Exception.Message
@@ -285,7 +404,7 @@ try {
       [string]$Command
     )
 
-    $exitCode = Invoke-Rustup -Arguments @("run", $toolchain, $Command, "-V")
+    $exitCode = Invoke-Rustup -Arguments @("run", $toolchain, $Command, "--version")
     return $exitCode -eq 0
   }
 
@@ -294,34 +413,64 @@ try {
     if (-not (Test-Path -LiteralPath $toolchainsRoot)) {
       return $false
     }
-    $matches = @(Get-ChildItem -LiteralPath $toolchainsRoot -Directory | Where-Object {
+    # $matches is a PowerShell automatic variable; use a distinct name.
+    $managedToolchainDirs = @(Get-ChildItem -LiteralPath $toolchainsRoot -Directory | Where-Object {
       $_.Name -eq $toolchain -or $_.Name.StartsWith(
         "$toolchain-",
         [StringComparison]::OrdinalIgnoreCase
       )
     })
-    return $matches.Count -gt 0
+    return $managedToolchainDirs.Count -gt 0
   }
 
-  $requiredCommands = @("cargo", "rustc", "clippy-driver", "rustfmt")
-  $invalidCommands = @($requiredCommands | Where-Object {
+  # cargo clippy / cargo fmt shell out to the cargo-clippy/cargo-fmt shims, so
+  # a toolchain missing them passes the driver probes and still breaks the
+  # lint gates later.
+  $requiredCommands = @(
+    "cargo", "rustc", "clippy-driver", "rustfmt", "cargo-clippy", "cargo-fmt"
+  )
+  $invalidEntries = @($requiredCommands | Where-Object {
     -not (Test-RustComponent -Command $_)
   })
+  if (-not (Test-RustStdTargetLib -RustupPath $rustupPath -Toolchain $toolchain)) {
+    $invalidEntries += "rust-std"
+  }
 
-  if ($invalidCommands.Count -gt 0) {
+  if ($invalidEntries.Count -gt 0) {
     Write-Warning (
       "[rustup] Rust $toolchain is incomplete ({0}); repairing the isolated toolchain." -f
-      ($invalidCommands -join ", ")
+      ($invalidEntries -join ", ")
     )
 
     $repairSucceeded = $false
     $repairFailures = @()
+    # Checked between attempts, so the worst case is this budget plus one
+    # bounded install attempt and its bounded uninstall reset; without it
+    # four sources could wander for over an hour before anything gives up.
+    $repairDeadline = [DateTime]::UtcNow.AddSeconds($RepairTimeoutSeconds)
     foreach ($source in $repairSources) {
       Set-RustupSource -Source $source
       foreach ($attempt in 1..$RepairAttemptsPerSource) {
+        if ([DateTime]::UtcNow -ge $repairDeadline) {
+          $repairFailures += "$($source.Name) (repair budget of $RepairTimeoutSeconds s exhausted before attempt $attempt)"
+          throw (
+            (
+              "[rustup] Rust toolchain repair exceeded its {0}s budget; attempts: {1}. " +
+              "It is safe to delete the isolated RUSTUP_HOME at {2} and re-run the build."
+            ) -f
+            $RepairTimeoutSeconds,
+            ($repairFailures -join "; "),
+            $managedRustupHome
+          )
+        }
         Write-Host (
           "[rustup] Repair attempt $attempt/$RepairAttemptsPerSource using $($source.Name)."
         )
+        # --force only overrides rustup's component-completeness check. Over a
+        # partially-installed directory it can exit 0 as "unchanged" without
+        # restoring missing binaries, so the post-install probe below is the
+        # real success gate and the uninstall reset after a failed attempt is
+        # what actually reinstalls a broken directory.
         $repairExitCode = Invoke-Rustup -Arguments @(
           "toolchain", "install", $toolchain,
           "--profile", "minimal",
@@ -335,6 +484,9 @@ try {
           $postInstallInvalid = @($requiredCommands | Where-Object {
             -not (Test-RustComponent -Command $_)
           })
+          if (-not (Test-RustStdTargetLib -RustupPath $rustupPath -Toolchain $toolchain)) {
+            $postInstallInvalid += "rust-std"
+          }
           if ($postInstallInvalid.Count -eq 0) {
             $repairSucceeded = $true
             Write-Host "[rustup] Toolchain repair succeeded using $($source.Name)."
@@ -356,11 +508,20 @@ try {
         # reset. The build account's shared toolchain is never selected.
         if (Test-ManagedToolchainPresent) {
           Write-Host "[rustup] Resetting the incomplete isolated toolchain before retry."
+          # Bounded like the install: a reset stalled by AV scanning or a
+          # transiently locked binary must abort the repair instead of
+          # outlasting the budget and the waiters' derived lock deadline. A
+          # directory that cannot be reset cannot be repaired by a later
+          # attempt over the same directory, so aborting is the honest
+          # outcome; the error names the way out.
           $resetExitCode = Invoke-Rustup -Arguments @(
             "toolchain", "uninstall", $toolchain
-          )
+          ) -TimeoutSeconds $InstallAttemptTimeoutSeconds
           if ($resetExitCode -ne 0) {
-            throw "[rustup] Failed to reset the isolated Rust toolchain: $toolchain"
+            throw (
+              "[rustup] Failed to reset the isolated Rust toolchain: $toolchain (exit $resetExitCode). " +
+              "It is safe to delete the isolated RUSTUP_HOME at $managedRustupHome and re-run the build."
+            )
           }
         }
         if ($attempt -lt $RepairAttemptsPerSource) {
@@ -374,20 +535,27 @@ try {
 
     if (-not $repairSucceeded) {
       throw (
-        "[rustup] Failed to repair Rust toolchain {0}; attempts: {1}" -f
+        (
+          "[rustup] Failed to repair Rust toolchain {0}; attempts: {1}. " +
+          "It is safe to delete the isolated RUSTUP_HOME at {2} and re-run the build."
+        ) -f
         $toolchain,
-        ($repairFailures -join "; ")
+        ($repairFailures -join "; "),
+        $managedRustupHome
       )
     }
 
-    $failedCommands = @($requiredCommands | Where-Object {
+    $failedEntries = @($requiredCommands | Where-Object {
       -not (Test-RustComponent -Command $_)
     })
-    if ($failedCommands.Count -gt 0) {
+    if (-not (Test-RustStdTargetLib -RustupPath $rustupPath -Toolchain $toolchain)) {
+      $failedEntries += "rust-std"
+    }
+    if ($failedEntries.Count -gt 0) {
       throw (
         "[rustup] Rust toolchain verification failed after repair ({0}): {1}" -f
         $toolchain,
-        ($failedCommands -join ", ")
+        ($failedEntries -join ", ")
       )
     }
   }

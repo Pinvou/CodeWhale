@@ -189,7 +189,7 @@ export function CodexWorkspacePanel({
   const previewRequestRef = useRef(0);
   const showError = (nextError) => {
     console.error('Codex workspace operation failed:', nextError);
-    setError(acpErrorMessage(nextError, copy, { allowRaw: !isWeb }));
+    setError(acpErrorMessage(nextError, copy, { allowRaw: isWeb ? false : undefined }));
   };
   const referencedPaths = useMemo(() => new Set(references), [references]);
   const systemOpenAvailable = can('externalSystemOpen');
@@ -344,7 +344,7 @@ export function CodexWorkspacePanel({
         relativePath: entry.relativePath,
         preview: null,
         loading: false,
-        error: acpErrorMessage(nextError, copy, { allowRaw: !isWeb }),
+        error: acpErrorMessage(nextError, copy, { allowRaw: isWeb ? false : undefined }),
       });
     }
   }

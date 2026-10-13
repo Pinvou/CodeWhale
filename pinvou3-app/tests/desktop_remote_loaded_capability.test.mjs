@@ -58,6 +58,11 @@ function loadDesktopBridge() {
 
 test('the full desktop bridge and shared UI gate agree before load, after failure and on every OS', async () => {
   const host = loadDesktopBridge();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const platformSnapshots = [];
+  const settingsSnapshots = [];
+  const unsubscribePlatform = host.api.state.subscribe('platform', snapshot => platformSnapshots.push(snapshot));
+  const unsubscribeSettings = host.api.state.subscribe('settings', snapshot => settingsSnapshots.push(snapshot));
   const available = (expected) => {
     assert.equal(host.canRemote(), expected);
     assert.equal(host.bridgeCan('desktopRemoteControl'), expected);
@@ -69,6 +74,8 @@ test('the full desktop bridge and shared UI gate agree before load, after failur
   for (const os of ['linux', 'macos', 'windows']) {
     host.setCapabilities({ os, desktopRemoteControlSupported: true });
     await host.api.platform.loadPlatformCapabilities();
+    assert.equal(platformSnapshots.at(-1).platformCapabilities.os, os);
+    assert.equal(platformSnapshots.at(-1).platformCapabilities.loaded, true);
     available(os === 'windows');
   }
   host.setCapabilities({ os: 'windows', desktopRemoteControlSupported: false });
@@ -80,5 +87,11 @@ test('the full desktop bridge and shared UI gate agree before load, after failur
   host.setCapabilities(new Error('unavailable'));
   await host.api.platform.loadPlatformCapabilities();
   available(false);
+  assert.equal(platformSnapshots.at(-1).platformCapabilities.loaded, false);
+  assert.ok(settingsSnapshots.length > 0, 'precise publication still delivers subscribers');
+  assert.ok(settingsSnapshots.every(snapshot => snapshot === settingsSnapshots[0]),
+    'platform and remote publication must not invalidate unchanged settings');
   assert.equal(host.bridgeCan('unknownCapability'), false, 'unrelated capabilities must not acquire a permissive fallback');
+  unsubscribePlatform();
+  unsubscribeSettings();
 });

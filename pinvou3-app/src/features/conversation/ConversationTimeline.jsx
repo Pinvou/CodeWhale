@@ -6,6 +6,7 @@ import { dict } from '../../shared/i18n.js';
 import { renderMarkdown } from '../../shared/markdown-renderer.js';
 import { getSyntaxHighlightVersion, subscribeSyntaxHighlight } from '../../shared/syntax-highlighter.js';
 import { useThrottledValue } from './useThrottledValue.js';
+import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -29,6 +30,13 @@ import {
   workspaceMarkdownResource,
 } from './conversation-model.js';
 import { AssistantMessageActions, AssistantMessageFooter } from './AssistantMessageActions.jsx';
+import {
+  codeBlockCopyLabels,
+  copyCodeBlockFromButton,
+  ensureCodeCopyButtons,
+  findCodeCopyButton,
+  observeCodeCopyButtons,
+} from './code-block-copy.js';
 import { assistantResponseAvailable, assistantResponseText } from './message-clipboard.js';
 import {
   CONVERSATION_VIRTUALIZATION_THRESHOLD,
@@ -77,22 +85,8 @@ const DEFAULT_CONVERSATION_ROW_GAP_PX = 16;
 // the component showing elapsed time owns the tick. On mount/activation it first syncs a baseline,
 // then starts the interval (same semantics as the old ChatView/CodexAcpView top-level ticker); no
 // timer is created while inactive, and it is cleaned up on unmount.
-// Exported for reuse by the ChatView composer activity indicator wrapper.
-/**
- * @param {boolean} active - whether the displayed duration is currently advancing
- * @returns {number} a timestamp that advances once per second while active
- */
-export function useConversationSecondClock(active) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- sync the clock baseline once on activation so elapsed time is correct immediately, before the first interval tick
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [active]);
-  return now;
-}
+// (Hook body lives in hooks/useConversationSecondClock.js, shared with the artifacts/monitor/
+// scheduled/chat tickers.)
 
 function localizedSemanticLabel(value, copy) {
   return {
@@ -107,7 +101,8 @@ function localizedSemanticLabel(value, copy) {
   }[value] || value;
 }
 
-export function ConversationMarkdown({ text, className = '', onOpenExternal, onOpenResource, streaming = false }) {
+export function ConversationMarkdown({ text, className = '', onOpenExternal, onOpenResource, streaming = false, copy }) {
+  const c = conversationCopy(copy);
   // lazy language registration bumps the version when it completes; the version must stay in the useMemo deps
   // (syntax-highlighter.js contract), otherwise already-rendered code stays plain text after registration completes.
   const syntaxVersion = useSyncExternalStore(subscribeSyntaxHighlight, getSyntaxHighlightVersion);
@@ -118,6 +113,17 @@ export function ConversationMarkdown({ text, className = '', onOpenExternal, onO
   const renderText = useThrottledValue(text, STREAMING_MARKDOWN_THROTTLE_MS, streaming);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- syntaxVersion is a version counter; any change requires recomputing to restore highlighting
   const html = useMemo(() => renderMarkdown(renderText), [renderText, syntaxVersion]);
+  const containerRef = useRef(null);
+  const copyLabels = useMemo(() => codeBlockCopyLabels(c), [c]);
+  // 渲染 HTML 经 dangerouslySetInnerHTML 注入,代码块复制按钮只能在提交后挂到 DOM;
+  // 流式期间 html 每次 throttle 都整体替换,ensureCodeCopyButtons 幂等补装新块。
+  // 但 innerHTML 可能在 effect 不重新触发的情况下被整体替换(冷启动语法高亮注册、
+  // Suspense/懒注册重提交等),仅靠 [html] 依赖会漏装,因此挂 MutationObserver 自愈:
+  // 容器内任何结构变化都幂等补装,卸载时断开。
+  useEffect(() => {
+    ensureCodeCopyButtons(containerRef.current, copyLabels);
+    return observeCodeCopyButtons(containerRef.current, copyLabels);
+  }, [html, copyLabels]);
   const openLink = (event) => {
     const anchor = event.target && event.target.closest && event.target.closest('a[href]');
     if (!anchor) return;
@@ -131,10 +137,20 @@ export function ConversationMarkdown({ text, className = '', onOpenExternal, onO
       if (resource && onOpenResource) onOpenResource(resource);
     }
   };
+  const onClick = (event) => {
+    const copyButton = findCodeCopyButton(event.target);
+    if (copyButton) {
+      event.preventDefault();
+      copyCodeBlockFromButton(copyButton, { labels: copyLabels });
+      return;
+    }
+    openLink(event);
+  };
   return (
     <div
+      ref={containerRef}
       className={`codex-markdown conversation-markdown text-[15px] leading-7 ${className}`}
-      onClick={openLink}
+      onClick={onClick}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );
@@ -179,6 +195,16 @@ export function ConversationStatusBadge({ status, copy }) {
   );
 }
 
+// running turn 的等待判定(时间轴行与活动指示器共用同一口径):
+// turn 上的显式标记,或 permissions/elicitations 任一未决,都视为等待用户注意。
+function turnWaitingAttention(turn) {
+  const waitingPermission = turn.waitingPermission
+    || (turn.permissions || []).some(permission => !permission.resolved);
+  const waitingInput = turn.waitingInput
+    || (turn.elicitations || []).some(elicitation => !elicitation.resolved);
+  return { waitingPermission, waitingInput, waitingAttention: waitingPermission || waitingInput };
+}
+
 // ChatView 与 CodexAcpView 的 LiveConversationActivityIndicator 仍跨文件消费此
 // 组件,保持模块表面导出(Community 端为文件内私有)。
 export function ConversationActivityIndicator({
@@ -191,11 +217,7 @@ export function ConversationActivityIndicator({
   const c = conversationCopy(copy);
   const activityNow = now ?? Date.now();
   if (!turn || turn.status !== 'running') return null;
-  const waitingPermission = turn.waitingPermission
-    || (turn.permissions || []).some(permission => !permission.resolved);
-  const waitingInput = turn.waitingInput
-    || (turn.elicitations || []).some(elicitation => !elicitation.resolved);
-  const waitingAttention = waitingPermission || waitingInput;
+  const { waitingPermission, waitingInput, waitingAttention } = turnWaitingAttention(turn);
   const label = waitingPermission
     ? c.waitingPermission
     : waitingInput
@@ -232,6 +254,25 @@ function TerminalBlock({ label, text }) {
     <div className="mt-3 min-w-0 max-w-full">
       <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-gray-400">{label}</div>
       <pre className="max-h-80 max-w-full overflow-auto whitespace-pre rounded-xl bg-[#F4F5F7] dark:bg-black/30 px-3 py-2.5 text-[12px] leading-5 font-mono text-gray-700 dark:text-gray-200">{text}</pre>
+    </div>
+  );
+}
+
+// search/fetch 工具卡片共用的原始输出折叠块:自带展开状态,文案走会话 copy。
+function RawOutputToggle({ rawOutput, copy }) {
+  const c = conversationCopy(copy);
+  const [rawOpen, setRawOpen] = useState(false);
+  if (!rawOutput) return null;
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setRawOpen(value => !value)}
+        className="text-[10px] text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+      >
+        {rawOpen ? c.collapseRaw : c.viewRaw}
+      </button>
+      {rawOpen && <TerminalBlock label={c.rawData} text={rawOutput} />}
     </div>
   );
 }
@@ -322,7 +363,6 @@ function SearchToolItem({ item, now, onOpenExternal, copy }) {
   const details = searchToolDetails(tool);
   const state = terminalStatus(item.status);
   const [open, setOpen] = useState(false);
-  const [rawOpen, setRawOpen] = useState(false);
   const detailsId = useId();
   const duration = c.elapsed(elapsedMs(item.startedAt, item.completedAt, now));
   const query = details.query || tool.title || c.webContent;
@@ -378,18 +418,7 @@ function SearchToolItem({ item, now, onOpenExternal, copy }) {
           {details.compacted && (
             <div className="mt-2 text-[10px] text-gray-400">{c.resultSummaryOnly}</div>
           )}
-          {details.rawOutput && (
-            <div className="mt-2">
-              <button
-                type="button"
-                onClick={() => setRawOpen(value => !value)}
-                className="text-[10px] text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
-              >
-                {rawOpen ? c.collapseRaw : c.viewRaw}
-              </button>
-              {rawOpen && <TerminalBlock label={c.rawData} text={details.rawOutput} />}
-            </div>
-          )}
+          <RawOutputToggle rawOutput={details.rawOutput} copy={c} />
         </div>
       )}
     </div>
@@ -404,7 +433,6 @@ function FetchToolItem({ item, now, onOpenExternal, copy }) {
   const responseWarning = details.status != null && details.status >= 400;
   const visualState = responseWarning && state !== 'failed' ? 'warning' : state;
   const [open, setOpen] = useState(false);
-  const [rawOpen, setRawOpen] = useState(false);
   const detailsId = useId();
   const duration = c.elapsed(elapsedMs(item.startedAt, item.completedAt, now));
   const toolName = String(tool.name || '').trim() || 'fetch_url';
@@ -453,18 +481,7 @@ function FetchToolItem({ item, now, onOpenExternal, copy }) {
           {details.truncated && (
             <div className="mt-2 text-[10px] text-gray-400">{c.responseTruncated}</div>
           )}
-          {details.rawOutput && (
-            <div className="mt-2">
-              <button
-                type="button"
-                onClick={() => setRawOpen(value => !value)}
-                className="text-[10px] text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
-              >
-                {rawOpen ? c.collapseRaw : c.viewRaw}
-              </button>
-              {rawOpen && <TerminalBlock label={c.rawData} text={details.rawOutput} />}
-            </div>
-          )}
+          <RawOutputToggle rawOutput={details.rawOutput} copy={c} />
         </div>
       )}
     </div>
@@ -747,10 +764,10 @@ function DefaultItem({
     // while text can still grow, render through the throttle; when it ends, the full text is replayed verbatim.
     return commentary
       ? <ConversationMarkdown text={item.text} onOpenExternal={onOpenExternal} onOpenResource={onOpenResource}
-          streaming={item.status === 'in_progress'}
+          streaming={item.status === 'in_progress'} copy={copy}
           className="text-[13px] leading-6 text-gray-500 dark:text-gray-400" />
       : <ConversationMarkdown text={item.text} onOpenExternal={onOpenExternal} onOpenResource={onOpenResource}
-          streaming={item.status === 'in_progress'} />;
+          streaming={item.status === 'in_progress'} copy={copy} />;
   }
   return null;
 }
@@ -864,11 +881,7 @@ function ConversationTurnView({
   // internal clock drives elapsed time, re-rendering only this one turn subtree per second.
   const tickNow = useConversationSecondClock(running);
   const effectiveNow = now || tickNow;
-  const waitingPermission = turn.waitingPermission
-    || (turn.permissions || []).some(permission => !permission.resolved);
-  const waitingInput = turn.waitingInput
-    || (turn.elicitations || []).some(elicitation => !elicitation.resolved);
-  const waitingAttention = waitingPermission || waitingInput;
+  const { waitingPermission, waitingInput, waitingAttention } = turnWaitingAttention(turn);
   const duration = c.elapsed(elapsedMs(turn.startedAt, turn.completedAt, effectiveNow));
   const showTerminalDuration = Boolean(turn.startedAt && turn.completedAt);
   const presentation = turn.presentation || turn.items || [];

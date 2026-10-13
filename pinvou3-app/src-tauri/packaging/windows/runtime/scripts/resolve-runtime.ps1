@@ -9,6 +9,29 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# A Windows PowerShell 5.1 process spawned under a pwsh 7 parent (a CI step
+# shell or a pwsh terminal) inherits pwsh's PSModulePath and then cannot load
+# its own built-in modules: Get-FileHash raises CommandNotFound and Get-Acl
+# resolves the unloadable PowerShell 7 module. Rebuild the host default
+# module path before the first module-dependent cmdlet (Add-Type included);
+# plain 5.1 consoles already match and are left untouched.
+if ($PSVersionTable.PSVersion.Major -lt 6) {
+  $systemModulePath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\Modules"
+  $modulePathEntries = @(
+    [System.Environment]::GetEnvironmentVariable("PSModulePath", "Process") -split ";"
+  ) | Where-Object { $_ }
+  $pwshModuleEntries = $modulePathEntries | Where-Object {
+    $_ -like "*\PowerShell\7\Modules" -or $_ -like "*\PowerShell\Modules"
+  }
+  if (($modulePathEntries -notcontains $systemModulePath) -or $pwshModuleEntries) {
+    $env:PSModulePath = @(
+      (Join-Path $HOME "Documents\WindowsPowerShell\Modules"),
+      (Join-Path $env:ProgramFiles "WindowsPowerShell\Modules"),
+      $systemModulePath
+    ) -join ";"
+  }
+}
+
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $tauriRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
@@ -76,7 +99,19 @@ function Write-Utf8Atomically {
   $temporaryPath = Join-Path $parent ("." + [System.IO.Path]::GetFileName($Path) + ".tmp-" + [System.Guid]::NewGuid().ToString("N"))
   try {
     Write-Utf8WithoutBom -Path $temporaryPath -Content $Content
-    Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+      # ReplaceFile() swaps the destination in one atomic operation, so the
+      # unlocked descriptor readers (describeWindowsRuntime and the ONNX dev
+      # reader in scripts/tauri/windows-runtime.js) never observe the file
+      # missing. Move-Item -Force deletes the destination before renaming the
+      # replacement into place, which re-opens exactly that window on every
+      # re-stage. PowerShell turns a plain $null argument into an empty
+      # string for a .NET string parameter, and Replace would then resolve
+      # "" as the backup path and fail; NullString passes a real null.
+      [System.IO.File]::Replace($temporaryPath, $Path, [NullString]::Value)
+    } else {
+      [System.IO.File]::Move($temporaryPath, $Path)
+    }
   } finally {
     Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
   }
@@ -315,7 +350,18 @@ function Get-VerifiedOnnxManifest {
 function Get-CachedVerifiedManifest {
   param([switch]$VerifyContent)
 
+  # The source marker is only written after a full Get-VerifiedManifest pass
+  # (including the VC++ version check) and binds the lock file SHA-256, so a
+  # changed lock invalidates it. Identity failures below stay fatal; per-file
+  # mismatches just fall back to full verification.
   if (-not (Test-VerificationMarker -Path $sourceVerificationMarkerPath)) {
+    return $null
+  }
+
+  # A vanished checkout would surface as a raw git error from the identity
+  # check below; decline the cache so the full path raises the actionable
+  # "not initialized" message instead.
+  if (-not (Test-Path -LiteralPath $RuntimeRoot -PathType Container)) {
     return $null
   }
 

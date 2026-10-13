@@ -67,11 +67,7 @@ const GENERIC_CONNECT_ERROR: &str = "invalid_message";
 /// 对端不可达（断线或超时）的公共错误码。
 const PEER_UNAVAILABLE_ERROR: &str = "endpoint_offline";
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) enum ControllerLaneEvent {
-    Frame(String),
-    Disconnected,
-}
+pub(crate) use super::lane_event::ControllerLaneEvent;
 
 /// 握手完成后的通道抽象。只暴露「下一条通道事件」，使断线投影可以在不依赖
 /// Tauri 的情况下被测试。
