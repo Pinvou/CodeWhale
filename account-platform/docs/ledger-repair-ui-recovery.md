@@ -52,6 +52,32 @@ not be run against an instance with existing deployment actors. From the
 `account-platform` module, select `go test -count=1 ./internal/billingschema -run '^TestPrivateLedgerSignedCorrection$'`. An absent
 connection skips the case; a skip does not establish financial validation.
 
+The checked-in `TestF09PolicyIdentityPublicCoordinator` runs the original policy
+identity fixture and requires every selected child case to pass without skips.
+From `account-platform`, run
+`go test -race -count=1 -mod=readonly ./internal/f09fixture -run '^TestF09PolicyIdentityPublicCoordinator$'`.
+Set `PINVOU_TEST_SCHEMA_DATABASE_URL` to the explicitly isolated control
+instance, `PINVOU_PRIVATE_GO` to the Go executable, and
+`PINVOU_F09_CHILD_STREAM` to a dedicated private diagnostic file. Its inherited
+fixture requires its actors to be absent before creating UUID-owned databases
+and restores those databases and roles. Do not use a shared or deployed
+instance. Missing database opt-in skips the coordinator and is not evidence of
+policy validation.
+
+`TestF02ApprovalStopLossExecutionFence` uses that isolated control instance with
+explicit `PINVOU_PRIVATE_OWNER_DATA_DIRECTORY` and `PINVOU_PRIVATE_OWNER_USER`
+controls. From `account-platform`, run
+`go test -race -count=1 -mod=readonly ./internal/billingschema -run '^TestF02ApprovalStopLossExecutionFence$'`.
+The data directory must be absolute. Before any fixture writes, the guard
+requires a loopback connection to `postgres` with no fallback, the matching
+superuser session, actual port and data directory, no other non-system roles,
+no application databases and no other client sessions. There is no fixed
+private port, directory or account default. Providing a database URL with absent
+or mismatching owner controls fails; only absent database opt-in skips the case.
+The companion `TestF02StopLossOwnerConfiguration` checks configuration acceptance
+and rejection without connecting; it does not establish PostgreSQL execution.
+
+
 `TestAccountClosedGrantBillingHandler` uses controlled repository responses and
 already verified delegation context to cover the existing Billing handler's
 validation, closure-authority fence, actor/lifecycle forwarding and receipt. It
