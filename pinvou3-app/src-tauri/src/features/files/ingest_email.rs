@@ -8,7 +8,6 @@
 // architecture-guard: allow-target-cfg -- msg_parser compiles on Windows only (cfg(windows) dependency section in Cargo.toml); the native .msg parsing branch shares that gating, while its pure decode helpers are gated `any(target_os = "windows", test)` so the cross-platform unit tests exercise them off-Windows
 
 use std::path::Path;
-use std::process::Command;
 
 use super::IngestResult;
 use super::estimate_tokens;
@@ -72,7 +71,7 @@ pub(super) fn ingest_email(
         // msgconvert 是 perl 脚本，网络/编码异常下会挂死，按超时 kill-tree。
         let conv = crate::platform::process::output_with_timeout_and_kill_tree(
             {
-                let mut command = Command::new("msgconvert");
+                let mut command = crate::platform::process::HiddenCommand::new("msgconvert");
                 command.current_dir(&tmpdir).arg(path);
                 command
             },
@@ -277,36 +276,33 @@ fn decode_msg_html_payload(value: &str) -> String {
 #[cfg(any(target_os = "windows", test))]
 fn decode_msg_bytes(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFF, 0xFE]) {
-        return decode_utf16le(&bytes[2..]);
+        return decode_utf16(&bytes[2..], false);
     }
     if bytes.starts_with(&[0xFE, 0xFF]) {
-        return decode_utf16be(&bytes[2..]);
+        return decode_utf16(&bytes[2..], true);
     }
     if let Ok(text) = String::from_utf8(bytes.to_vec()) {
         return clean_msg_text(&text);
     }
     let nul_count = bytes.iter().filter(|byte| **byte == 0).count();
     if nul_count > bytes.len() / 4 {
-        decode_utf16le(bytes)
+        decode_utf16(bytes, false)
     } else {
         clean_msg_text(&String::from_utf8_lossy(bytes))
     }
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn decode_utf16le(bytes: &[u8]) -> String {
+fn decode_utf16(bytes: &[u8], is_big_endian: bool) -> String {
     let units: Vec<u16> = bytes
         .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect();
-    clean_msg_text(&String::from_utf16_lossy(&units))
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn decode_utf16be(bytes: &[u8]) -> String {
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        .map(|chunk| {
+            if is_big_endian {
+                u16::from_be_bytes([chunk[0], chunk[1]])
+            } else {
+                u16::from_le_bytes([chunk[0], chunk[1]])
+            }
+        })
         .collect();
     clean_msg_text(&String::from_utf16_lossy(&units))
 }

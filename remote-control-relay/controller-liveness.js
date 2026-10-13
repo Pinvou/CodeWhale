@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { isControllerIdentifier } from "./identifier-contract.js";
+import { isControllerIdentifier, isRelaySigningKeyIdentifier } from "./identifier-contract.js";
 
 import {
   CONTROLLER_PROTOCOL_VERSION,
@@ -58,7 +58,7 @@ function signingConfiguration({ signingKeyId, signingPrivateKeyB64, signingPriva
   if (!signingPrivateKey && !encodedKey && typeof sign !== "function") {
     return { signingKeyId: "", signAttestation: null };
   }
-  if (!isControllerIdentifier(keyId)) fail("controller_liveness_signing_key_invalid");
+  if (!isRelaySigningKeyIdentifier(keyId)) fail("controller_liveness_signing_key_invalid");
   if (typeof sign !== "function" && typeof sign !== "undefined") {
     fail("controller_liveness_signing_key_invalid");
   }

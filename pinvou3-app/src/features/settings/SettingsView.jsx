@@ -1,13 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Code, Cpu, Database, Globe, MessageSquare, Plus, RefreshCw, Search, Sparkles, User, Users, Wrench, X } from '../../components/icons.jsx';
-import { ArchivedDeleteConfirmDialog } from '../sessions/ArchiveConfirmDialog.jsx';
+import { ArchivedDeleteConfirmDialog } from '../../components/ArchiveConfirmDialog.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
 import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
 import RemoteControlSettingsPage from '../remote-control/RemoteControlSettingsPage.jsx';
 import { bridge, isLocalModel, useBridgeState } from '../../hooks/useBridge.js';
+import { copyClipboardText } from '../../shared/clipboard.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
 import { isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
 import { can, isWeb } from '../../shared/platform.js';
@@ -268,7 +269,7 @@ const formatMemoryTime = (item, copy) => {
             )}
             {webAccess.last_error && <div className="mt-3 text-[12px] text-[#EA4335] break-all">{webAccess.last_error}</div>}
             <div className="mt-4 flex items-center justify-end gap-2">
-              <button onClick={() => navigator.clipboard && navigator.clipboard.writeText(webAccess.url || '')}
+              <button type="button" onClick={() => { if (webAccess.url) copyClipboardText(webAccess.url); }}
                 disabled={!webAccess.url}
                 className={`px-3.5 py-2 rounded-full text-[13px] bg-black/5 hover:bg-black/10 disabled:opacity-40 dark:bg-white/10 dark:hover:bg-white/15 dark:disabled:opacity-40`}>{remoteCopy.copy}</button>
               {webAccessActive && !hostWorkspaceAuthorized && <button disabled={actionBusy} onClick={handleRetryWebAccess}
@@ -463,7 +464,7 @@ const formatMemoryTime = (item, copy) => {
         const nextModel = item.custom ? '' : (item.model || defs.model);
         const nextBaseUrl = normalizedProviderBaseUrl(group) || defs.baseUrl;
         setProviderKey(group.key || '');
-        setProviderKind(group.providerKind || (p === 'openai_compatible' ? PROVIDER_KIND_CUSTOM : PROVIDER_KIND_OFFICIAL_API));
+        setProviderKind(group.providerKind || ((p === 'openai_compatible' || p === 'openai_responses') ? PROVIDER_KIND_CUSTOM : PROVIDER_KIND_OFFICIAL_API));
         setVendor(group.vendor || '');
         setEndpointMode(group.endpointMode || '');
         setBaseUrl(nextBaseUrl);
@@ -611,7 +612,8 @@ const formatMemoryTime = (item, copy) => {
       const showCodingPlanModelField = !isLocalPreset && isCodingPlan;
       const showProviderModelField = !isLocalPreset && !!activeProvider && Array.isArray(activeProvider.items) && activeProvider.items.length > 0;
       const showModelIdField = isLocalPreset || customModel || showProviderModelField;
-      const showBaseUrlField = isLocalPreset || (customModel && preset === 'openai_compatible' && !isCodingPlan);
+      const showBaseUrlField = isLocalPreset
+        || (customModel && (preset === 'openai_compatible' || preset === 'openai_responses') && !isCodingPlan);
       const showCustomCloudKeyField = !isLocalPreset && customModel;
       const showLocalKeyField = isLocalPreset && localKeyEnabled;
       const showDisplayNameField = isLocalPreset && !initial.__new;
@@ -827,6 +829,15 @@ const formatMemoryTime = (item, copy) => {
       const formSectionTitle = `px-1 mb-1.5 text-[12px] leading-4 font-semibold text-[#8A8A8E] dark:text-[#8E8E93]`;
       const formGroup = `overflow-hidden rounded-[16px] bg-[#F2F2F7] dark:bg-[#2C2C2E]`;
       const formDivider = 'border-black/[0.10] dark:border-white/[0.10]';
+      // Custom-entry description for the provider model picker and the catalog
+      // picker: both key off the same group fields (key/providerKind/preset).
+      const customModelDescFor = (group, copy) => (group && group.key === 'tencent_token_plan'
+        ? copy.customTokenPlanDesc
+        : (group && group.providerKind === PROVIDER_KIND_CODING_PLAN
+          ? copy.customCodingPlanDesc
+          : (group && group.preset === 'local_vllm'
+            ? copy.customLocalDesc
+            : (group && (group.preset === 'openai_compatible' || group.preset === 'openai_responses') ? copy.customCompatibleDesc : copy.customModelDesc))));
       const renderProviderModelField = () => {
         const items = activeProvider ? activeProvider.items : [];
         const known = items.some(item => !item.custom && catalogItemMatchesModel(item, model));
@@ -880,7 +891,7 @@ const formatMemoryTime = (item, copy) => {
                       <span className="min-w-0 flex-1">
                         <span className={`block text-[14px] leading-5 truncate ${active ? ('text-[#007AFF] dark:text-[#64B5F6]') : ('text-[#1C1C1E] dark:text-[#F2F2F7]')}`}>{item.custom ? ((activeProvider && settingsCopy.customModelTitles[activeProvider.key]) || settingsCopy.customModelTitle(selectedProvider)) : (item.title || item.model || `${settingsCopy.customModel} ID`)}</span>
                         {item.desc && <span className={`block mt-0.5 text-[12px] leading-[16px] truncate text-[#8A8A8E] dark:text-[#8E8E93]`}>{item.custom
-                          ? (activeProvider && activeProvider.key === 'tencent_token_plan' ? settingsCopy.customTokenPlanDesc : (activeProvider && activeProvider.providerKind === PROVIDER_KIND_CODING_PLAN ? settingsCopy.customCodingPlanDesc : (activeProvider.preset === 'local_vllm' ? settingsCopy.customLocalDesc : (activeProvider.preset === 'openai_compatible' ? settingsCopy.customCompatibleDesc : settingsCopy.customModelDesc))))
+                          ? customModelDescFor(activeProvider, settingsCopy)
                           : (settingsCopy.modelDescriptions[item.desc] || item.desc)}</span>}
                       </span>
                       {active && <Check size={17} strokeWidth={2.4} className={'text-[#007AFF] dark:text-[#64B5F6]'} />}
@@ -980,7 +991,7 @@ const formatMemoryTime = (item, copy) => {
                   const active = preset === group.preset && !item.custom && catalogItemMatchesModel(item, model);
                   const itemTitle = item.custom ? (settingsCopy.customModelTitles[group.key] || settingsCopy.customModelTitle(presetProviderLabel(group.preset, t))) : item.title;
                   const itemDescription = item.custom
-                    ? (group.key === 'tencent_token_plan' ? settingsCopy.customTokenPlanDesc : (group.providerKind === PROVIDER_KIND_CODING_PLAN ? settingsCopy.customCodingPlanDesc : (group.preset === 'local_vllm' ? settingsCopy.customLocalDesc : (group.preset === 'openai_compatible' ? settingsCopy.customCompatibleDesc : settingsCopy.customModelDesc))))
+                    ? customModelDescFor(group, settingsCopy)
                     : (settingsCopy.modelDescriptions[item.desc] || item.desc);
                   return (
                     <button
@@ -1685,8 +1696,61 @@ const formatMemoryTime = (item, copy) => {
       // resume path). Without this hint the stop state is invisible in
       // settings — the safety loop's exit must be discoverable.
       const stopped = !!computerUse.stopped;
+      // macOS permission onboarding: one snapshot fetch on mount (and a
+      // re-read after the user answers the OS dialogs). Null = unknown or no
+      // permission flow (web stub rejection, older backend, non-macOS): the
+      // row stays hidden instead of showing permanently-false toggles. A
+      // `false` grant is advisory — TCC applies a fresh grant to processes
+      // launched after it, so the hint always pairs a miss with the restart
+      // step instead of polling for a flip.
+      const [permStatus, setPermStatus] = useState(null);
+      const [permBusy, setPermBusy] = useState(false);
+      useEffect(() => {
+        if (unsupported) return;
+        if (!bridge.available || !bridge.computerUse) return;
+        let cancelled = false;
+        bridge.computerUse.permissionStatus()
+          .catch(() => null)
+          .then((status) => { if (!cancelled) setPermStatus(status || null); });
+        return () => { cancelled = true; };
+      }, [unsupported]);
+      const refreshPermStatus = () => {
+        if (!bridge.available || !bridge.computerUse) return Promise.resolve(null);
+        return bridge.computerUse.permissionStatus()
+          .catch(() => null)
+          .then((status) => { setPermStatus(status || null); return status; });
+      };
+      const permMissing = !!permStatus && permStatus.supported
+        && (permStatus.screen_recording === false || permStatus.accessibility === false);
+      const permValue = permStatus && permStatus.supported
+        ? `${t.uiComputerUse.permScreenRecording} ${permStatus.screen_recording ? t.uiComputerUse.permGranted : t.uiComputerUse.permNotGranted} · ${t.uiComputerUse.permAccessibility} ${permStatus.accessibility ? t.uiComputerUse.permGranted : t.uiComputerUse.permNotGranted}`
+        : null;
+      const openPermissionDialogs = () => {
+        if (!bridge.available || !bridge.computerUse || permBusy) return;
+        setPermBusy(true);
+        // A rejection here must not hide the row: keep the last snapshot and
+        // surface the failure through the section's actionError slot (same
+        // surface as the toggle), then re-read whatever the dialogs changed.
+        bridge.computerUse.requestPermissions()
+          .catch((error) => setActionError(t.uiComputerUse.actionFailed(String(error && error.message ? error.message : error))))
+          .finally(() => { setPermBusy(false); void refreshPermStatus(); });
+      };
       return (
         <IOSSection title={t.uiComputerUse.settingsSection}>
+          {permValue && (
+            <IOSRow
+              label={t.uiComputerUse.permTitle}
+              desc={permMissing ? t.uiComputerUse.permRestartHint : undefined}
+            >
+              <div className="flex flex-col items-end gap-1.5 max-sm:items-stretch">
+                <span className={`text-[12px] leading-4 ${permMissing ? 'text-[#FF9500] dark:text-[#FF9F0A]' : 'text-[#8A8A8E] dark:text-[#98989D]'}`}>{permValue}</span>
+                {permMissing && (
+                  <button type="button" disabled={permBusy} onClick={openPermissionDialogs}
+                    className={`px-3 py-1.5 rounded-lg text-[12px] border border-black/10 hover:bg-black/5 disabled:opacity-50 dark:border dark:border-white/10 dark:hover:bg-white/10`}>{t.uiComputerUse.permRequest}</button>
+                )}
+              </div>
+            </IOSRow>
+          )}
           <IOSRow
             label={t.uiComputerUse.settingsToggle}
             desc={
@@ -2725,7 +2789,7 @@ const formatMemoryTime = (item, copy) => {
               </IOSSection>
             )}
             {canUseComputerUse && <ComputerUseSettingSection t={t} />}
-            <div id="settings-dependencies">
+            {canInstallDependencies && <div id="settings-dependencies">
               <IOSSection
                 title={t.depCheckTitle}
                 footer={usesHomebrewDependencyInstaller ? t.depInstallNoteMac : (usesBundledDependencyInstaller ? t.depInstallNoteWindows : t.depInstallNote)}
@@ -2755,7 +2819,7 @@ const formatMemoryTime = (item, copy) => {
                   </IOSRow>
                 )}
               </IOSSection>
-            </div>
+            </div>}
           </>
         );
       };

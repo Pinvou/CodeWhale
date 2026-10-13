@@ -21,10 +21,13 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
+mod health;
 mod platform;
 
-pub(crate) fn cleanup_stale_backup() {
-    platform::cleanup_stale_backup();
+pub use health::UpdateReadyCommitResult;
+
+pub(crate) fn observe_pending_update_health() {
+    health::observe_pending_update(env!("CARGO_PKG_VERSION"), std::env::consts::OS);
 }
 
 /// 下载停滞看门狗阈值：连上后单次等待数据超过此时长即判定挂死。
@@ -323,8 +326,24 @@ pub async fn install_update(
     let _operation = UPDATE_OPERATION
         .try_lock()
         .map_err(|_| "已有更新下载或安装正在进行".to_string())?;
+    let pending_target = info.as_ref().map(|value| value.latest_version.clone());
     let exit_after_start = tokio::task::spawn_blocking(move || {
-        platform::install_downloaded_update(deb_path, installer_path, info)
+        let result = platform::install_downloaded_update(deb_path, installer_path, info);
+        if result.is_ok()
+            && let Some(target_version) = pending_target
+            && let Err(error) = health::record_pending_update(
+                env!("CARGO_PKG_VERSION"),
+                &target_version,
+                std::env::consts::OS,
+            )
+        {
+            // Installation has already crossed the platform boundary. Reporting
+            // failure here would leave the old process running against replaced
+            // files, so preserve the successful install result and surface only
+            // the diagnostic. First-commit cleanup remains safe without a marker.
+            log::warn!("[updater] installed update but could not persist health marker: {error}");
+        }
+        result
     })
     .await
     .map_err(|e| {
@@ -336,6 +355,23 @@ pub async fn install_update(
         app.exit(0);
     }
     Ok(())
+}
+
+pub async fn commit_pending_update_ready(
+    window: tauri::WebviewWindow,
+) -> Result<UpdateReadyCommitResult, String> {
+    if window.label() != "main" {
+        return Ok(UpdateReadyCommitResult::ignored_window());
+    }
+    tokio::task::spawn_blocking(|| {
+        health::commit_ready(
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            platform::cleanup_stale_backup,
+        )
+    })
+    .await
+    .map_err(|error| format!("更新 ready 提交任务失败: {error}"))?
 }
 
 /// 重启应用使新版本生效（exec 新 inode）。restart 跳过 RunEvent::Exit，

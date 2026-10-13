@@ -479,6 +479,74 @@ async fn failed_cold_sync_closes_forwarder_without_publishing_or_widening() {
     assert!(!path.exists());
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn cold_custody_shutdown_only_retry_retains_old_resources_and_never_blocks_drop() {
+    let _lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let home = TestHome::new();
+    let snapshot = home.snapshot();
+    let path = snapshot.path().to_owned();
+    let (mut engine, _unused) = home.engine(snapshot).await;
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    engine.handle.tx_op = sender;
+    let (forwarder, finished) = forwarder();
+    let before = tokio::time::Instant::now();
+    drop(ColdEngineCustody::new(engine, forwarder));
+    assert_eq!(tokio::time::Instant::now(), before, "Drop must not await");
+    finished.await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        path.is_dir(),
+        "the blocked old engine still owns its skills"
+    );
+    tokio::time::advance(TURN_GATE_AWAIT_TIMEOUT + Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        path.is_dir(),
+        "the detached retry must retain the old AppEngine"
+    );
+    assert_shutdown(&mut receiver).await;
+    tokio::task::yield_now().await;
+    assert!(
+        receiver.try_recv().is_err(),
+        "no duplicated cancellation or shutdown"
+    );
+    assert!(!path.exists());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn cold_custody_full_mailbox_keeps_cancel_shutdown_fifo_and_spares_resident() {
+    let _lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let home = TestHome::new();
+    let resident_skills = home.snapshot();
+    let resident_path = resident_skills.path().to_owned();
+    let (resident, mut resident_ops) = home.engine(resident_skills).await;
+    let snapshot = home.snapshot();
+    let path = snapshot.path().to_owned();
+    let (mut engine, _unused) = home.engine(snapshot).await;
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    sender.send(Op::Shutdown).await.unwrap(); // distinguishable pre-existing filler
+    engine.handle.tx_op = sender;
+    let (forwarder, finished) = forwarder();
+    let before = tokio::time::Instant::now();
+    drop(ColdEngineCustody::new(engine, forwarder));
+    assert_eq!(tokio::time::Instant::now(), before);
+    finished.await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(path.is_dir());
+    assert!(matches!(receiver.recv().await, Some(Op::Shutdown)));
+    assert_shutdown(&mut receiver).await;
+    tokio::task::yield_now().await;
+    assert!(receiver.try_recv().is_err());
+    assert!(!path.exists());
+    assert!(resident_path.is_dir());
+    assert!(resident_ops.try_recv().is_err());
+    drop(resident);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn missing_remote_snapshot_never_self_heals_from_shared_enabled_skills() {
     let _lock = crate::platform::paths::tests::ENV_LOCK

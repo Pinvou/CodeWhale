@@ -379,6 +379,13 @@ function parseState(contents) {
   } catch (error) {
     fail("relay_state_invalid_json", error);
   }
+  // A newer format can add or replace fields. Recognize its version before
+  // applying today's exact field set, and never downgrade it from a backup.
+  if (value?.schema === RELAY_CONTROLLER_STATE_SCHEMA
+    && Number.isInteger(value.version) && value.version > 0
+    && value.version !== RELAY_CONTROLLER_STATE_VERSION) {
+    fail("relay_state_unsupported");
+  }
   if (value?.schema === RELAY_CONTROLLER_STATE_SCHEMA && value?.version === 0) {
     return { state: migrateLegacyState(value), migrated: true };
   }
@@ -475,6 +482,16 @@ function exactLock(value) {
   // A future writer may add fields. Never classify its lock as recoverable corruption.
   if (value?.schema === LOCK_SCHEMA && Number.isSafeInteger(value.version)
     && value.version > 0 && value.version !== LOCK_VERSION) {
+    fail("relay_state_lock_unsupported");
+  }
+  // A complete v1 owner tuple with extra fields is an unknown lock protocol,
+  // not crash debris. Do not reclaim it even if that PID appears dead.
+  if (value?.schema === LOCK_SCHEMA && value.version === LOCK_VERSION
+    && Number.isSafeInteger(value.pid) && value.pid > 0
+    && typeof value.process_identity === "string" && value.process_identity.length >= 3
+    && value.process_identity.length <= 512
+    && typeof value.owner_id === "string" && /^[A-Za-z0-9_-]{24}$/u.test(value.owner_id)
+    && Object.keys(value).some(key => !["schema", "version", "pid", "process_identity", "owner_id"].includes(key))) {
     fail("relay_state_lock_unsupported");
   }
   const lock = exactObject(value, ["schema", "version", "pid", "process_identity", "owner_id"], "relay_state_lock");
@@ -1195,12 +1212,15 @@ export class RelayStateStore {
         fail("relay_state_file_unsafe");
       }
       if (metadata.size > this.#maxBytes) {
-        return { kind: "invalid" };
+        // Its format cannot be identified within the read budget. Do not treat
+        // an unreadable future snapshot as corruption that a backup can replace.
+        fail("relay_state_unavailable");
       }
       const contents = await this.#readBoundedFile(path, this.#maxBytes, "relay_state_file_unsafe");
       try {
         return { kind: "valid", ...parseState(contents) };
       } catch (error) {
+        if (error?.code === "relay_state_unsupported") throw error;
         if (error instanceof RelayStateStoreError) return { kind: "invalid" };
         throw error;
       }

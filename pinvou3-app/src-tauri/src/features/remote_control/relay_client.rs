@@ -93,7 +93,6 @@ pub enum RelayOutbound {
     Shutdown,
 }
 
-#[derive(Debug)]
 pub enum RelayInbound {
     /// Raw, size-checked JSON text. Keeping parsing out of the bounded queue
     /// makes its memory ceiling proportional to wire bytes rather than the
@@ -109,6 +108,29 @@ pub enum RelayInbound {
         connected: bool,
         error: Option<String>,
     },
+}
+
+impl fmt::Debug for RelayInbound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Message(_) => f.debug_tuple("Message").field(&"[REDACTED]").finish(),
+            Self::ControllerMessage { receipt, .. } => f
+                .debug_struct("ControllerMessage")
+                .field("text", &"[REDACTED]")
+                .field("receipt", receipt)
+                .finish(),
+            Self::Connection {
+                endpoint_id,
+                connected,
+                error,
+            } => f
+                .debug_struct("Connection")
+                .field("endpoint_id", endpoint_id)
+                .field("connected", connected)
+                .field("error", error)
+                .finish(),
+        }
+    }
 }
 
 struct OutboundFrame {
@@ -1094,6 +1116,62 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio_tungstenite::accept_async;
+
+    #[test]
+    fn inbound_debug_redacts_relay_payloads_and_preserves_reader_receipt() {
+        let original = json!({ "future_payload": "fake-relay-payload-secret" }).to_string();
+        let ordinary = RelayInbound::Message(original.clone());
+        for diagnostic in [format!("{ordinary:?}"), format!("{ordinary:#?}")] {
+            assert!(!diagnostic.contains("fake-relay-payload-secret"));
+            assert!(diagnostic.contains("Message"));
+            assert!(diagnostic.contains("[REDACTED]"));
+        }
+        let RelayInbound::Message(text) = ordinary else {
+            unreachable!()
+        };
+        assert_eq!(text, original);
+
+        let fixture = super::super::controller::test_support::pairing_fixture("relay-debug-key");
+        let authority = SharedControllerAuthority::default();
+        let generation = fixture.joined["remote_control_generation"]
+            .as_str()
+            .unwrap();
+        authority.bind(generation).unwrap();
+        let socket = authority.open_socket(true).unwrap();
+        let receipt = socket.receipt(&fixture.joined).unwrap();
+        let original = fixture.joined.to_string();
+        let token = fixture.joined["resume_token_b64"].as_str().unwrap();
+        let event = RelayInbound::ControllerMessage {
+            text: original.clone(),
+            receipt,
+        };
+        for diagnostic in [format!("{event:?}"), format!("{event:#?}")] {
+            assert!(!diagnostic.contains(token));
+            assert!(diagnostic.contains("ControllerMessage"));
+            assert!(diagnostic.contains("ControllerReadReceipt([REDACTED])"));
+        }
+        let RelayInbound::ControllerMessage { text, receipt } = event else {
+            unreachable!()
+        };
+        assert_eq!(text, original);
+        // The actual reader-minted proof remains available, not replaced by a
+        // diagnostic stand-in or reconstructed from printable wire metadata.
+        assert_eq!(format!("{receipt:?}"), "ControllerReadReceipt([REDACTED])");
+    }
+
+    #[test]
+    fn inbound_debug_keeps_relay_connection_diagnostics() {
+        let event = RelayInbound::Connection {
+            endpoint_id: "endpoint-diagnostic".to_owned(),
+            connected: false,
+            error: Some("read deadline".to_owned()),
+        };
+        let diagnostic = format!("{event:?}");
+        assert!(diagnostic.contains("Connection"));
+        assert!(diagnostic.contains("endpoint-diagnostic"));
+        assert!(diagnostic.contains("false"));
+        assert!(diagnostic.contains("read deadline"));
+    }
 
     fn config() -> WebAccessConfig {
         WebAccessConfig {

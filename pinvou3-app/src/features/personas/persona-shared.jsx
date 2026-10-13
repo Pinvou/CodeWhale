@@ -9,13 +9,11 @@ import { expertAvatarSrc } from '../../shared/expert-avatar.mjs';
 const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', finance:'金融', 'game-development':'游戏', gis:'地理信息', hr:'人力', legal:'法务', marketing:'营销', 'paid-media':'投放', product:'产品', 'project-management':'项管', sales:'销售', security:'安全', 'spatial-computing':'空间计算', specialized:'专项', 'supply-chain':'供应链', support:'客服', testing:'测试', tool:'工具' };
     // 部门标签按当前 UI 语言取词(t.depts),DEPT_LABELS(中文)兜底
 export function deptLabelFor(t, k) { return (t && t.depts && t.depts[k]) || DEPT_LABELS[k] || k; }
+import { personaOverlayFor } from '../../shared/persona-overlay.js';
     // 内置卡名称/简介按 UI 语言显示(personas-i18n.js overlay,按 id 查),中文兜底;自制卡不翻
 export function personaText(c, t) {
-      const L = t && t.langTag;
-      if (!c || !L || L === 'zh' || c.source === 'user') return c || {};
-      const overlays = window.PERSONA_I18N;
-      const tr = (overlays && overlays[c.id] && overlays[c.id][L]) || null;
-      if (!tr) return c;
+      const tr = personaOverlayFor(c, t && t.langTag);
+      if (!tr) return c || {};
       return { ...c, name: tr.name || c.name, description: tr.description || c.description };
     }
 export const DEPT_ORDER = ['engineering','marketing','specialized','design','product','finance','sales','testing','project-management','paid-media','support','academic','game-development','spatial-computing','gis','security','supply-chain','hr','legal','tool'];

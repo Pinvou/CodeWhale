@@ -63,6 +63,27 @@ fn shared_credential_store() -> &'static SystemCredentialStore {
 const LOCAL_VLLM_API_KEY: &str = "local-no-auth";
 const SEPARATE_REASONING_FIELD: &str = "separate_field";
 
+// Engine-side named-custom route name: the single landing point for the
+// OpenAI Responses wire.
+//
+// The foundation's builtin `openai` provider has a wire policy fixed to Chat
+// Completions (codewhale-config `Openai::wire_policy`), so routing GPT models
+// over the Responses protocol happens in this layer, per the fork policy
+// ("if the app bridge can solve it, don't touch the foundation"):
+// build_dt_config overwrites this table wholesale with the current route's
+// base_url / api_key / model, and once `cfg.provider` points at the table
+// name the foundation's runtime-route resolver honors the table's
+// `wire = "responses"` dialect (RouteRequest.wire_override). The minted
+// candidate is wire-true, so the per-turn `DeepSeekClient::from_candidate`
+// client binds ApiProvider::Custom + WireFormat::Responses and drives the
+// generic `/responses` client: tool calls, reasoning.effort, image input,
+// and encrypted reasoning-item capture/replay are provider-generic on that
+// wire (capture applies to every Responses route that sends
+// `include: ["reasoning.encrypted_content"]`; replay matches the captured
+// provider tag). Foundation side: CodeWhale PR #79, squash-merged into
+// pinvou3-clean as `3035a022e` and carried by the pinned head `0bc868ff0`.
+const RESPONSES_ROUTE_PROVIDER: &str = "pinvou_responses";
+
 // Multi-agent is an agent cluster where the main session stays the overall
 // coordinator and complex tasks nest at most one extra level — not an unbounded
 // recursive tree. Plain conversations keep the original CodeWhale caps; only
@@ -102,19 +123,27 @@ fn configure_provider(
 }
 
 fn is_official_deepseek_base_url(base_url: &str) -> bool {
-    let normalized = base_url
-        .trim()
-        .trim_end_matches('/')
-        .trim_end_matches("/beta")
-        .trim_end_matches("/v1")
-        .to_ascii_lowercase();
     // api.deepseeki.com used to be in this list; removed on 2026-09-11: the
     // official documentation never listed the domain, and the community
     // reported it as a non-resolvable unofficial domain
     // (deepseek-ai/awesome-deepseek-agent#311),
     // so it must not trigger the official DeepSeek provider/model-name
     // rewriting.
-    matches!(normalized.as_str(), "https://api.deepseek.com")
+    crate::core::model_wire::is_official_deepseek_base_url(base_url)
+}
+
+/// Official-OpenAI endpoint check for the Responses remap. The remap must not
+/// silently switch a hand-edited `preset = "openai"` (or vendor-stamped)
+/// record pointed at an aggregator or private host: those keep the Chat wire
+/// today, and a strictly-Responses-only feature set is exactly what the
+/// `openai_responses` preset group is the explicit opt-in for.
+#[cfg(test)]
+fn is_official_openai_base_url(base_url: &str) -> bool {
+    // Lowercase before stripping the `/v1` suffix: the strip is
+    // case-sensitive, so `https://api.openai.com/V1` (an odd-but-legitimate
+    // spelling of the official host) must normalize to the official form
+    // rather than silently keep the Chat wire for a GPT id.
+    crate::core::model_wire::is_official_openai_base_url(base_url)
 }
 
 /// Conversation key for engine configs that carry no session identity
@@ -133,6 +162,31 @@ fn is_siliconflow_cn_base_url(base_url: &str) -> bool {
     let normalized = base_url.trim().to_ascii_lowercase();
     normalized.starts_with("https://api.siliconflow.cn/")
         || normalized == "https://api.siliconflow.cn"
+}
+
+/// GPT-model predicate for "the Responses API supports function calling"
+/// under OpenAI's official wording (whether the OpenAI preset switches to
+/// the Responses wire for a model id).
+///
+/// Scope = Pinvou catalog ∩ official OpenAI Responses support (verified
+/// 2026-09-29 against the per-model pages,
+/// developers.openai.com/api/docs/models/*: every model's endpoint table
+/// lists `v1/responses` Supported with supported features including
+/// function_calling):
+/// - gpt-6 family (sol/luna/astra and later gpt-6* names): astra's tool
+///   calling is Responses-only, and sol/luna support function calling on the
+///   Chat protocol only at effort=none;
+/// - gpt-5.6 family (sol/terra/luna and date snapshots), gpt-5.5 family
+///   (incl. -pro and date snapshots, matching the base
+///   `is_openai_gpt_55_api_model` snapshot rule), and gpt-5.4-mini.
+/// Hand-typed ids outside the catalog (possibly Chat-only legacy models) do
+/// not match and keep the Chat wire; endpoints that must force Responses
+/// should use the dedicated `openai_responses` preset.
+/// Frontend mirror: model-catalog.js `isOpenaiResponsesWireModel` (the tier
+/// UI depends on it).
+#[cfg(test)]
+fn openai_responses_wire_model(model: &str) -> bool {
+    crate::core::model_wire::openai_responses_wire_model(model)
 }
 
 pub(crate) fn base_url_uses_loopback(base_url: &str) -> bool {
@@ -386,11 +440,15 @@ impl Pinvou3Bridge {
     /// On first launch a default `settings.json` is written so users/
     /// developers can conveniently hand-edit advanced.
     ///
-    /// **workspace is now `$HOME`** (phase C adjustment) — so the AI can use
-    /// read_file/glob to find the user's real files on Desktop/Documents/
-    /// Downloads. The companion sensitive-directory ban is guided in
-    /// `bundle/instructions.md`; hard interception later goes through a
-    /// deepseek-tui hook registration.
+    /// **Default `workspace` is `$HOME`**, but the per-session engine workspace
+    /// is resolved through `SessionRoots` (`roots.execution`, see
+    /// `build_engine_config_for_session_roots`): session-private for unbound
+    /// plain sessions, the bound directory for bound/code sessions. The engine
+    /// prints the resolved `Current workspace` every turn;
+    /// instructions-work.md teaches relative paths against that value and
+    /// locates the user's real files under `$HOME`. The companion
+    /// sensitive-directory ban is guided in `bundle/instructions-*.md`; hard
+    /// interception goes through the deny-sensitive-paths hook registration.
     ///
     /// The session artifacts dir `PINVOU3_SESSION_ARTIFACTS` is NOT injected here:
     /// boot runs in the multi-threaded phase, and process env writes are
@@ -623,8 +681,9 @@ impl Pinvou3Bridge {
                 "{{PINVOU3_SUDO_INSTRUCTION}}",
                 crate::platform::super_permission::instruction_block(),
             )
-            // The user memory section is filled or dropped with the memory toggle (off by
-            // default plus force-off for en/ja, see the memory_section comment). Replaced
+            // The user memory placeholder is filled with the section or the off-notice
+            // per the memory toggle (off by default plus force-off for en/ja, see the
+            // memory_section comment). Replaced
             // at the session render layer rather than inside the OnceLock instructions_md,
             // so a setting change takes effect on new sessions; old session prompts are
             // left unchanged.
@@ -654,6 +713,21 @@ impl Pinvou3Bridge {
         if let Some(block) = self.prefs.language.extra_language_directive() {
             rendered.push_str("\n\n");
             rendered.push_str(block);
+        }
+        // Computer use is opt-in and off by default: announce the tool only
+        // while the master switch is on (and the platform has a backend),
+        // keeping the prompt byte-exact — and the prefix cache intact — for
+        // every session where the feature is disabled. The announcement
+        // pairs with the tool's always-load entry (tool_policy.rs): static
+        // text that names a tool must not describe an absent first-turn
+        // catalog entry. External ACP runtimes have no Pinvou tool registry;
+        // skip them like the per-turn inventory block above.
+        if !self.is_external_acp_session(session_id)
+            && self.prefs.computer_use.enabled
+            && crate::features::computer_use::backend_supported()
+        {
+            rendered.push_str("\n\n");
+            rendered.push_str(crate::features::computer_use::instruction_block());
         }
         // When browser capabilities are statically unavailable, inject a model-readable
         // reason and recovery guidance. The Browser capabilities section already explains
@@ -1130,6 +1204,85 @@ impl Pinvou3Bridge {
             // Gemini uses the official OpenAI-compatible endpoint, reusing the
             // openai wire route.
             ModelPreset::Qwen | ModelPreset::Openai | ModelPreset::Gemini => "openai".to_string(),
+            // Custom OpenAI Responses endpoints: the whole group rides the
+            // Responses wire by definition (named-custom route, see
+            // `RESPONSES_ROUTE_PROVIDER`); the model id and endpoint are
+            // entirely user-entered, with no model-name matching. The same
+            // operator suppression as [`Self::uses_responses_wire`] applies,
+            // landing the group on its vendor "openai" Chat route so this
+            // arm and the wire gate stay consistent.
+            ModelPreset::OpenaiResponses if !self.responses_wire_suppressed() => {
+                RESPONSES_ROUTE_PROVIDER.to_string()
+            }
+            ModelPreset::OpenaiResponses => "openai".to_string(),
+        }
+    }
+
+    /// Local-only operator overrides that suppress the Responses remap: explicit
+    /// `DEEPSEEK_PROVIDER` / `DEEPSEEK_MODEL` env pins and the
+    /// official-DeepSeek endpoint guard. Locked task routes ignore the env
+    /// pins, but retain their own endpoint guard. Shared by
+    /// [`Self::uses_responses_wire`] and the `ModelPreset::OpenaiResponses`
+    /// arm of [`Self::provider`], so the wire gate and the engine landing
+    /// can never disagree (round-5 review: a bare `DEEPSEEK_MODEL` used to
+    /// suppress the gate while the preset arm still minted the Responses
+    /// table).
+    fn responses_wire_suppressed(&self) -> bool {
+        (!self.runtime_route_is_locked()
+            && (std::env::var("DEEPSEEK_PROVIDER").is_ok()
+                || std::env::var("DEEPSEEK_MODEL").is_ok()))
+            || is_official_deepseek_base_url(&self.base_url())
+    }
+
+    /// Whether the current route switches to the OpenAI Responses wire (the
+    /// foundation's named-custom route).
+    ///
+    /// Two entries:
+    /// - `ModelPreset::OpenaiResponses` (the custom Responses-compatible
+    ///   group) qualifies as a whole, by definition — the group is the
+    ///   explicit opt-in for arbitrary user endpoints;
+    /// - the official OpenAI endpoint (vendor=openai or preset=openai, at
+    ///   `api.openai.com`) × a GPT model matched by
+    ///   [`openai_responses_wire_model`]. Hand-typed ids outside the
+    ///   prefix set keep the Chat wire, and so does any non-official host:
+    ///   a hand-edited `preset = "openai"` record pointed at an aggregator
+    ///   must not silently change wire.
+    ///
+    /// Yields to explicit `DEEPSEEK_PROVIDER` / `DEEPSEEK_MODEL` env pins
+    /// (same env precedence as [`Self::provider`] / [`Self::model`], where
+    /// the model itself is operator-owned and out of scope for the GPT
+    /// prefix match); the official-DeepSeek endpoint guard likewise wins.
+    /// [`Self::provider`]'s preset arm applies the same predicate, so the
+    /// gate documented here is the sole decider of the engine landing.
+    fn uses_responses_wire(&self) -> bool {
+        if self.responses_wire_suppressed() {
+            return false;
+        }
+        let model = self.effective_model();
+        let preset = model
+            .map(|m| m.preset)
+            .unwrap_or_else(|| self.prefs.advanced.model_preset.unwrap_or_default());
+        crate::core::model_wire::model_route_uses_responses(
+            preset.as_str(),
+            model.and_then(|m| m.vendor.as_deref()),
+            &self.model(),
+            &self.base_url(),
+        )
+    }
+
+    /// Engine route identity: [`Self::provider`] carries vendor semantics
+    /// (tier decisions, thinking-field handling, tests, logs) — except for
+    /// the `OpenaiResponses` preset, where it already returns
+    /// [`RESPONSES_ROUTE_PROVIDER`]. This method only remaps the engine
+    /// landing to [`RESPONSES_ROUTE_PROVIDER`] (named-custom +
+    /// `wire = "responses"`) on a GPT×Responses hit. Consumed solely by
+    /// `build_dt_config`; the divergence from `provider()` is declared here
+    /// and in the [`Self::uses_responses_wire`] docs.
+    fn engine_route_provider(&self) -> String {
+        if self.uses_responses_wire() {
+            RESPONSES_ROUTE_PROVIDER.to_string()
+        } else {
+            self.provider()
         }
     }
 
@@ -1142,7 +1295,19 @@ impl Pinvou3Bridge {
     /// not cataloged yet. Truly custom OpenAI-compatible interfaces keep None,
     /// continuing with the foundation's safe default, never guessing thinking
     /// content from the reply text.
+    ///
+    /// The "vllm" route is NOT a truly custom interface: it only ever comes
+    /// from the LocalVllm preset, an explicit `DEEPSEEK_PROVIDER=vllm`
+    /// operator pin, or a probed local engine (vLLM / SGLang / llama.cpp /
+    /// KoboldCpp / LMDeploy / Docker Model Runner), and those servers place
+    /// thinking in the separate reasoning_content field whenever their
+    /// reasoning parser is enabled (model-store cards ship with one).
+    /// Keeping None here would hit the foundation's wildcard-proxy fallback,
+    /// which inlines reasoning-only deltas into the answer text.
     fn reasoning_stream_style(&self, provider: &str) -> Option<&'static str> {
+        if provider == "vllm" {
+            return Some(SEPARATE_REASONING_FIELD);
+        }
         if matches!(
             provider,
             "deepseek" | "moonshot" | "zai" | "minimax" | "xiaomi-mimo" | "volcengine"
@@ -1494,6 +1659,18 @@ impl Pinvou3Bridge {
                 );
                 return None;
             };
+            // The existing image_analyze tool is Chat-only. A transported
+            // route must not silently send Responses/Messages models to Chat.
+            if self.runtime_route_is_locked()
+                && crate::core::model_wire::model_route_wire_api(
+                    vision.preset.as_str(),
+                    vision.vendor.as_deref(),
+                    &vision.model,
+                    &vision.base_url,
+                ) != "openai_chat_completions"
+            {
+                return None;
+            }
             // The vision model's own capability is not rejected here: the
             // selector already verified it with the image-recognition probe
             // (only supported models can be selected). The override mark
@@ -1517,6 +1694,20 @@ impl Pinvou3Bridge {
                 api_key: Some(api_key),
                 base_url: Some(vision.base_url.clone()),
             });
+        }
+        // Native image input still follows the main protocol's client; only
+        // automatic reuse by the separate Chat-only image tool is disabled.
+        if self.runtime_route_is_locked()
+            && effective.is_none_or(|model| {
+                crate::core::model_wire::model_route_wire_api(
+                    model.preset.as_str(),
+                    model.vendor.as_deref(),
+                    &self.model(),
+                    &self.base_url(),
+                ) != "openai_chat_completions"
+            })
+        {
+            return None;
         }
         if effective.map(effective_image_capability) == Some(EffectiveImageCapability::Supported) {
             return Some(deepseek_tui::config::VisionModelConfig {
@@ -1730,6 +1921,11 @@ impl Pinvou3Bridge {
                         )
                     })
             })
+            // Documented-output anchors (core::model_context): cloud models the
+            // base catalog has no output row for would otherwise ride the
+            // engine's 8192 uncatalogued fail-close, which starves the
+            // Responses wire where reasoning meters as output.
+            .or_else(|| crate::core::model_context::resolved_output_limit(model))
             // The endpoint's self-reported output limit (the `/v1/models`
             // probe) only min-tightens: when the API rejects over-limit
             // requests, the declaration must yield.
@@ -2650,7 +2846,10 @@ impl Pinvou3Bridge {
     /// `DEEPSEEK_*` settings in run-dev.sh).
     pub fn build_dt_config(&self) -> DtConfig {
         let mut cfg = DtConfig::default();
-        let provider = self.provider();
+        // The engine landing (the RESPONSES_ROUTE_PROVIDER named-custom route
+        // on a GPT×Responses hit) may diverge from the vendor-semantics
+        // provider(); see `engine_route_provider`.
+        let provider = self.engine_route_provider();
         cfg.provider = Some(provider.clone());
         let api_key = self.api_key();
         cfg.api_key = Some(api_key.clone());
@@ -2658,39 +2857,55 @@ impl Pinvou3Bridge {
         let model = self.model();
         let reasoning_stream_style = self.reasoning_stream_style(&provider);
         let providers = cfg.providers.get_or_insert_with(ProvidersConfig::default);
-        // Write base_url + api_key into the provider config matching the provider
-        let provider_config = match provider.as_str() {
-            "vllm" => &mut providers.vllm,
-            "ollama" => &mut providers.ollama,
-            "openai" => &mut providers.openai,
-            "deepseek" => &mut providers.deepseek,
-            "moonshot" => &mut providers.moonshot,
-            "volcengine" => &mut providers.volcengine,
-            "zai" => &mut providers.zai,
-            "minimax" => &mut providers.minimax,
-            "xiaomi-mimo" => &mut providers.xiaomi_mimo,
-            "anthropic" => &mut providers.anthropic,
-            "xai" => &mut providers.xai,
-            // Aggregator kinds must keep their own foundation slots: the
-            // credential chain reads the provider table of the resolved kind
-            // (the root api_key belongs to DeepSeek), so falling into the
-            // vllm catch-all would strand the user's key in a slot these
-            // routes never read and redirect custom base URLs to the
-            // official defaults.
-            "openrouter" => &mut providers.openrouter,
-            "siliconflow" => &mut providers.siliconflow,
-            "siliconflow-cn" => &mut providers.siliconflow_cn,
-            // Unknown providers uniformly fall through to vllm (consistent with the
-            // existing catch-all behavior).
-            _ => &mut providers.vllm,
-        };
-        configure_provider(
-            provider_config,
-            &base_url,
-            &api_key,
-            &model,
-            reasoning_stream_style,
-        );
+        if provider == RESPONSES_ROUTE_PROVIDER {
+            // Named-custom table for the OpenAI Responses wire: kind + wire
+            // are rebuilt every time (the foundation reads this table by the
+            // exact cfg.provider key, and ApiProvider::Custom +
+            // WireFormat::Responses is driven by the wire field);
+            // base_url / api_key / model carry the same current-route values
+            // as every other route.
+            let entry = providers
+                .custom
+                .entry(RESPONSES_ROUTE_PROVIDER.to_string())
+                .or_default();
+            entry.kind = Some("openai-compatible".to_string());
+            entry.wire = Some("responses".to_string());
+            configure_provider(entry, &base_url, &api_key, &model, reasoning_stream_style);
+        } else {
+            // Write base_url + api_key into the provider config matching the provider
+            let provider_config = match provider.as_str() {
+                "vllm" => &mut providers.vllm,
+                "ollama" => &mut providers.ollama,
+                "openai" => &mut providers.openai,
+                "deepseek" => &mut providers.deepseek,
+                "moonshot" => &mut providers.moonshot,
+                "volcengine" => &mut providers.volcengine,
+                "zai" => &mut providers.zai,
+                "minimax" => &mut providers.minimax,
+                "xiaomi-mimo" => &mut providers.xiaomi_mimo,
+                "anthropic" => &mut providers.anthropic,
+                "xai" => &mut providers.xai,
+                // Aggregator kinds must keep their own foundation slots: the
+                // credential chain reads the provider table of the resolved kind
+                // (the root api_key belongs to DeepSeek), so falling into the
+                // vllm catch-all would strand the user's key in a slot these
+                // routes never read and redirect custom base URLs to the
+                // official defaults.
+                "openrouter" => &mut providers.openrouter,
+                "siliconflow" => &mut providers.siliconflow,
+                "siliconflow-cn" => &mut providers.siliconflow_cn,
+                // Unknown providers uniformly fall through to vllm (consistent with the
+                // existing catch-all behavior).
+                _ => &mut providers.vllm,
+            };
+            configure_provider(
+                provider_config,
+                &base_url,
+                &api_key,
+                &model,
+                reasoning_stream_style,
+            );
+        }
         if is_opencode_gateway_base_url(&base_url) {
             cfg.http_headers.get_or_insert_with(HashMap::new).insert(
                 "x-opencode-session".to_string(),
@@ -2753,8 +2968,10 @@ impl Pinvou3Bridge {
     /// (exit 2 + stdout JSON reason, the Hooks v2 contract). The
     /// sensitive-path/dangerous-command/sudo hard-deny segments the script
     /// used to carry have moved to the execpolicy rule engine
-    /// (`safety_deny_rules`); the script no longer hard-denies. The script
-    /// itself lives in the bundle and is unpacked on first start to
+    /// (`safety_deny_rules`). Only the two MCP introspection tools run this
+    /// advisory hook: interpreter failures warn without blocking execution,
+    /// while an explicit exit 2 still denies the mistaken introspection.
+    /// The script lives in the bundle and is unpacked on first start to
     /// `~/.pinvou3/bundle/deny_sensitive_paths.sh`.
     fn build_hooks_config(&self) -> HooksConfig {
         #[cfg(windows)]
@@ -2774,10 +2991,22 @@ impl Pinvou3Bridge {
         let hooks = vec![Hook {
             event: HookEvent::ToolCallBefore,
             command: sensitive_command,
-            condition: None,
-            timeout_secs: 5,
+            condition: Some(HookCondition::Any {
+                conditions: vec![
+                    HookCondition::ToolName {
+                        name: "list_mcp_resources".into(),
+                    },
+                    HookCondition::ToolName {
+                        name: "list_mcp_resource_templates".into(),
+                    },
+                ],
+            }),
+            // Windows PowerShell startup can exceed 5s even for `exit 0`.
+            // This budget applies only to connector introspection; ordinary
+            // tool calls must not spawn an interpreter for this correction.
+            timeout_secs: 30,
             background: false,
-            continue_on_error: false,
+            continue_on_error: true,
             name: Some("pinvou3-sensitive-firewall".into()),
             plugin_authority: None,
         }];
@@ -2819,10 +3048,9 @@ impl Pinvou3Bridge {
 
         // No global default: the foundation replaces every per-hook
         // timeout_secs with `default_timeout_secs` when it is set
-        // (`HooksConfig::effective_timeout_secs`), which would silently cap
-        // the shell-env hook back to 5s and defeat the budget above. Every
-        // hook here declares its own timeout explicitly; leaving this unset
-        // is behavior-identical to the old Some(5) for all of them (5s == 5s).
+        // (`HooksConfig::effective_timeout_secs`). A global 5s value would
+        // defeat both the connector correction's 30s budget and the Unix
+        // shell-env hook's 20s budget. Keep each hook's explicit budget.
         HooksConfig {
             enabled: true,
             hooks,
@@ -2878,7 +3106,13 @@ impl Pinvou3Bridge {
                     },
                 ],
             }),
-            timeout_secs: 5,
+            // Windows PowerShell startup can exceed 5s even for `exit 0` —
+            // the same reproduction that raised the connector firewall's
+            // budget. This guard stays strict on purpose (a missing verdict
+            // fails closed), so a too-tight budget here denied legitimate
+            // agent/workflow calls before they ran; only these two gated
+            // tool names ever pay this budget.
+            timeout_secs: 30,
             background: false,
             continue_on_error: false,
             name: Some("pinvou3-multiagent-depth-guard".into()),
@@ -3244,7 +3478,10 @@ impl Pinvou3Bridge {
         let full_content = if reminder_body.is_empty() {
             content
         } else {
-            format!("<system-reminder>\n{reminder_body}\n</system-reminder>\n\n{content}")
+            crate::features::assistant::engine_support::wrap_system_reminder(
+                &reminder_body,
+                &content,
+            )
         };
         let model = self.model();
         // Approval parameters come from the session policy (R-2), the same
@@ -3806,9 +4043,9 @@ mod tests {
         // work semantics.
         let prompt = bridge.build_session_system_prompt("sess-plain-bound");
         assert!(prompt.contains("用户选择的工作目录"), "应渲染绑定环境段");
-        assert!(!prompt.contains("自动落到本会话专属工作目录"));
+        assert!(!prompt.contains("自动落到工作区"));
         let plain_prompt = bridge.build_session_system_prompt("sess-plain");
-        assert!(plain_prompt.contains("自动落到本会话专属工作目录"));
+        assert!(plain_prompt.contains("自动落到工作区"));
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -5035,6 +5272,173 @@ mod tests {
             config.base_url.as_deref(),
             Some("https://vision.example.invalid/v1")
         );
+    }
+
+    #[test]
+    fn locked_messages_primary_never_reuses_the_chat_only_vision_tool() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        for (preset, vendor) in [
+            (ModelPreset::Anthropic, None),
+            (ModelPreset::OpenaiCompatible, Some("anthropic")),
+        ] {
+            for override_value in [
+                prefs::ImageCapabilityOverride::Enabled,
+                prefs::ImageCapabilityOverride::Pinvou,
+            ] {
+                let mut bridge = fixture_bridge();
+                set_active_model(
+                    &mut bridge,
+                    preset,
+                    "fixture-unknown-vision-model",
+                    "https://api.anthropic.com",
+                    "fixture-primary-key",
+                );
+                let mut primary = bridge.prefs.advanced.saved_models[0].clone();
+                primary.vendor = vendor.map(str::to_owned);
+                primary.image_capability_override = override_value;
+                bridge.session_model = Some(primary);
+                bridge.runtime_route_locked = true;
+                bridge.image_analyze_always = true;
+                if override_value == prefs::ImageCapabilityOverride::Enabled {
+                    assert_eq!(
+                        bridge.effective_image_capability(),
+                        EffectiveImageCapability::Supported
+                    );
+                } else {
+                    assert_eq!(
+                        bridge.effective_image_capability(),
+                        EffectiveImageCapability::Unknown
+                    );
+                }
+                assert!(bridge.resolve_vision_model_config().is_none());
+                assert!(bridge.build_engine_config().vision_config.is_none());
+                bridge.runtime_route_locked = false;
+                assert!(
+                    bridge.resolve_vision_model_config().is_some(),
+                    "ordinary local behavior is unchanged"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn locked_responses_primary_keeps_native_images_but_does_not_reuse_chat_vision_tool() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::OpenaiResponses,
+            "gpt-6-sol",
+            "https://responses.example.test/v1",
+            "fixture-primary-key",
+        );
+        let mut primary = bridge.prefs.advanced.saved_models[0].clone();
+        primary.image_capability_override = prefs::ImageCapabilityOverride::Enabled;
+        bridge.session_model = Some(primary);
+        bridge.runtime_route_locked = true;
+        bridge.image_analyze_always = true;
+        assert_eq!(
+            bridge.effective_image_capability(),
+            EffectiveImageCapability::Supported
+        );
+        assert!(bridge.resolve_vision_model_config().is_none());
+        assert!(bridge.build_engine_config().vision_config.is_none());
+
+        let mut vision = bridge.session_model.clone().unwrap();
+        vision.id = "runtime-vision".into();
+        vision.preset = ModelPreset::Openai;
+        vision.vendor = None;
+        vision.model = "gpt-4o".into();
+        vision.base_url = "https://api.openai.com/v1".into();
+        bridge.session_model.as_mut().unwrap().vision_model_id = Some(vision.id.clone());
+        bridge.runtime_vision_model = Some(vision);
+        bridge.runtime_vision_credential =
+            Some(RuntimeModelCredential::api_key("fixture-vision-key").unwrap());
+        let config = bridge.resolve_vision_model_config().unwrap();
+        assert_eq!(config.model, "gpt-4o");
+        assert_eq!(config.api_key.as_deref(), Some("fixture-vision-key"));
+        bridge.runtime_vision_model.as_mut().unwrap().preset = ModelPreset::OpenaiResponses;
+        assert!(bridge.resolve_vision_model_config().is_none());
+        bridge.runtime_vision_model.as_mut().unwrap().preset = ModelPreset::Anthropic;
+        assert!(bridge.resolve_vision_model_config().is_none());
+    }
+
+    #[test]
+    fn locked_runtime_responses_wire_ignores_environment_suppression() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        // SAFETY: platform::paths::tests::ENV_LOCK held by locked_env.
+        unsafe {
+            std::env::set_var("DEEPSEEK_PROVIDER", "anthropic");
+            std::env::set_var("DEEPSEEK_MODEL", "deepseek-chat");
+            std::env::set_var("DEEPSEEK_BASE_URL", "https://controlled.invalid/v1");
+        }
+        for (preset, vendor, base) in [
+            (ModelPreset::Openai, None, "https://api.openai.com/v1"),
+            (
+                ModelPreset::OpenaiCompatible,
+                Some("openai"),
+                "https://api.openai.com/v1",
+            ),
+            (
+                ModelPreset::OpenaiResponses,
+                None,
+                "https://relay.example.test/v1",
+            ),
+        ] {
+            let mut bridge = fixture_bridge();
+            set_active_model(&mut bridge, preset, "gpt-6-sol", base, "fixture-key");
+            let mut model = bridge.prefs.advanced.saved_models[0].clone();
+            model.vendor = vendor.map(str::to_owned);
+            bridge.session_model = Some(model);
+            bridge.runtime_route_locked = true;
+            assert!(!bridge.responses_wire_suppressed());
+            assert!(bridge.uses_responses_wire());
+            assert_eq!(bridge.model(), "gpt-6-sol");
+            assert_eq!(bridge.base_url(), base);
+            assert_eq!(bridge.engine_route_provider(), RESPONSES_ROUTE_PROVIDER);
+            let config = bridge.build_dt_config();
+            assert_eq!(config.provider.as_deref(), Some(RESPONSES_ROUTE_PROVIDER));
+            let table = config
+                .providers
+                .as_ref()
+                .unwrap()
+                .custom
+                .get(RESPONSES_ROUTE_PROVIDER)
+                .unwrap();
+            assert_eq!(table.wire.as_deref(), Some("responses"));
+
+            // Ordinary local startup still yields to operator-owned env pins.
+            bridge.runtime_route_locked = false;
+            assert!(bridge.responses_wire_suppressed());
+            assert!(!bridge.uses_responses_wire());
+            assert_eq!(bridge.engine_route_provider(), "anthropic");
+        }
+        let mut deepseek = fixture_bridge();
+        set_active_model(
+            &mut deepseek,
+            ModelPreset::OpenaiResponses,
+            "gpt-6-sol",
+            "https://api.deepseek.com/v1",
+            "fixture-key",
+        );
+        deepseek.runtime_route_locked = true;
+        assert!(!deepseek.uses_responses_wire());
+        assert_eq!(deepseek.engine_route_provider(), "deepseek");
     }
 
     #[test]
@@ -7428,6 +7832,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn connector_introspection_hook_skips_unrelated_tools() {
+        use deepseek_tui::hooks::HookContext;
+
+        let mut hooks = fixture_bridge().build_hooks_config();
+        let hook = hooks
+            .hooks
+            .iter_mut()
+            .find(|hook| hook.name.as_deref() == Some("pinvou3-sensitive-firewall"))
+            .unwrap();
+        // A dispatched hook returns a failure, making accidental dispatch
+        // observable without relying on interpreter startup timing.
+        hook.command = "exit 99".into();
+        assert_eq!(hook.timeout_secs, 30);
+        let executor = HookExecutor::new(hooks, std::env::temp_dir());
+
+        for tool in [
+            "write",
+            "read",
+            "bash",
+            "Bash",
+            "Web",
+            "tool_search",
+            "mcp__example__write",
+            "list_mcp_resources_extra",
+        ] {
+            let context = HookContext::new().with_tool_name(tool);
+            assert!(
+                executor
+                    .execute(HookEvent::ToolCallBefore, &context)
+                    .is_empty(),
+                "unrelated tool {tool} must not dispatch the connector hook"
+            );
+        }
+        for tool in ["list_mcp_resources", "list_mcp_resource_templates"] {
+            let context = HookContext::new().with_tool_name(tool);
+            let results = executor.execute(HookEvent::ToolCallBefore, &context);
+            assert_eq!(results.len(), 1, "{tool} must dispatch the correction");
+            assert_eq!(results[0].exit_code, Some(99));
+            assert!(!results[0].strict, "correction failure must be advisory");
+        }
+    }
+
+    #[test]
+    fn connector_introspection_hook_timeout_is_advisory() {
+        use deepseek_tui::hooks::HookContext;
+
+        let mut hooks = fixture_bridge().build_hooks_config();
+        let hook = hooks
+            .hooks
+            .iter_mut()
+            .find(|hook| hook.name.as_deref() == Some("pinvou3-sensitive-firewall"))
+            .unwrap();
+        hook.timeout_secs = 1;
+        #[cfg(windows)]
+        {
+            hook.command = "ping -n 6 127.0.0.1 >NUL".into();
+        }
+        #[cfg(not(windows))]
+        {
+            hook.command = "sleep 5".into();
+        }
+        let mut strict_gate = Hook::new(HookEvent::ToolCallBefore, "exit 0");
+        strict_gate.name = Some("test-security-gate".into());
+        strict_gate.continue_on_error = false;
+        hooks.hooks.push(strict_gate);
+        let executor = HookExecutor::new(hooks, std::env::temp_dir());
+        let context = HookContext::new().with_tool_name("list_mcp_resources");
+
+        assert_eq!(
+            executor.matched_strict_gate_labels(HookEvent::ToolCallBefore, &context),
+            vec!["test-security-gate"],
+            "only the security gate may fail closed"
+        );
+        let results = executor.execute(HookEvent::ToolCallBefore, &context);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].exit_code, None);
+        assert!(!results[0].success);
+        assert!(!results[0].strict, "connector timeout must not block tools");
+        assert!(
+            results[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("timed out")),
+            "expected a real hook timeout: {:?}",
+            results[0]
+        );
+        assert!(results[1].success);
+        assert!(results[1].strict, "security gates must remain strict");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn exec_shell_receives_filtered_shell_env_from_runtime_services() {
@@ -8111,6 +8606,460 @@ mod tests {
         );
     }
 
+    /// OpenAI Responses wire routing (2026-09-29 #620 follow-up): catalog GPT
+    /// ids on the OpenAI preset and the whole `openai_responses` preset ride
+    /// the foundation's named-custom Responses route (`RESPONSES_ROUTE_PROVIDER`
+    /// + `wire = "responses"`); vendor semantics (`provider()`) stay "openai"
+    /// for tiers/logs; uncatalogued ids keep the Chat wire; the
+    /// `DEEPSEEK_PROVIDER` env pin and the official-DeepSeek endpoint guard
+    /// both win over the remap.
+    #[test]
+    fn openai_responses_wire_routing() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+
+        // A. OpenAI preset × catalog GPT id → named-custom Responses route.
+        let mut b = fixture_bridge();
+        set_active_model(
+            &mut b,
+            ModelPreset::Openai,
+            "gpt-6-sol",
+            "https://api.openai.com/v1",
+            "sk-openai",
+        );
+        assert_eq!(b.provider(), "openai", "vendor semantics stay openai");
+        assert_eq!(b.engine_route_provider(), RESPONSES_ROUTE_PROVIDER);
+        let cfg = b.build_dt_config();
+        assert_eq!(cfg.provider.as_deref(), Some(RESPONSES_ROUTE_PROVIDER));
+        assert_eq!(
+            cfg.api_provider(),
+            ApiProvider::Custom,
+            "the foundation must resolve the named table to the dynamic custom identity"
+        );
+        let table = cfg
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.custom.get(RESPONSES_ROUTE_PROVIDER))
+            .expect("named responses table must be populated");
+        assert_eq!(table.wire.as_deref(), Some("responses"));
+        assert_eq!(table.kind.as_deref(), Some("openai-compatible"));
+        assert_eq!(table.base_url.as_deref(), Some("https://api.openai.com/v1"));
+        assert_eq!(table.model.as_deref(), Some("gpt-6-sol"));
+        assert_eq!(table.api_key.as_deref(), Some("sk-openai"));
+        assert_eq!(table.reasoning_stream_style, None);
+        assert_eq!(cfg.default_text_model.as_deref(), Some("gpt-6-sol"));
+        // Default tier stays high (Responses mapper has no none), and the
+        // route carries the documented output fact so the engine's 8192
+        // uncatalogued fail-close is replaced (128_000 documented; the
+        // engine's automatic-request default keeps the wire cap at 64K).
+        assert_eq!(cfg.reasoning_effort.as_deref(), Some("high"));
+        let limits = b
+            .route_limits_for_model("gpt-6-sol")
+            .expect("gpt-6-sol must resolve route limits");
+        assert_eq!(limits.output_tokens, Some(128_000));
+        // gpt-5.4-mini rides the same anchor (official model page: 128K max
+        // output); without it the engine fail-closes to 8192 on the Responses
+        // wire, where reasoning meters as output.
+        let mini_limits = b
+            .route_limits_for_model("gpt-5.4-mini")
+            .expect("gpt-5.4-mini must resolve route limits");
+        assert_eq!(mini_limits.output_tokens, Some(128_000));
+
+        // B. the responses predicate covers the supported catalog families
+        // (incl. date-snapshot spellings and the gpt-5.5-codex overlap id,
+        // which also matches the base's Chat reasoning family — responses
+        // wins) and nothing else.
+        for model in [
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-6-astra",
+            "gpt-5.6-terra",
+            "gpt-5.5",
+            "gpt-5.5-codex",
+            "gpt-5.4-mini",
+            "gpt-5.5-2026-01-01",
+        ] {
+            assert!(openai_responses_wire_model(model), "{model}");
+        }
+        for model in [
+            "totally-unregistered-cloud-model",
+            "gpt-5.3-codex",
+            "my-finetune",
+        ] {
+            assert!(!openai_responses_wire_model(model), "{model}");
+        }
+        // C. chat-only or unknown ids stay on the Chat wire (provider ==
+        // table "openai").
+        let mut c = fixture_bridge();
+        set_active_model(
+            &mut c,
+            ModelPreset::Openai,
+            "totally-unregistered-cloud-model",
+            "https://api.openai.com/v1",
+            "k",
+        );
+        assert_eq!(c.build_dt_config().provider.as_deref(), Some("openai"));
+
+        // D. vendor metadata routes like the preset arm (provider()'s
+        // vendor-first parity; comparison is case-insensitive).
+        let mut d = fixture_bridge();
+        set_active_model(
+            &mut d,
+            ModelPreset::OpenaiCompatible,
+            "gpt-6-luna",
+            "https://api.openai.com/v1",
+            "k",
+        );
+        d.prefs.advanced.saved_models[0].vendor = Some("OpenAI".to_string());
+        assert_eq!(d.engine_route_provider(), RESPONSES_ROUTE_PROVIDER);
+
+        // E. the openai_responses preset routes EVERY model id over the
+        // Responses wire with the user endpoint preserved.
+        let mut e = fixture_bridge();
+        set_active_model(
+            &mut e,
+            ModelPreset::OpenaiResponses,
+            "my-aggregator-model",
+            "https://gw.example.com/v1",
+            "k",
+        );
+        assert_eq!(e.provider(), RESPONSES_ROUTE_PROVIDER);
+        let cfg_e = e.build_dt_config();
+        assert_eq!(cfg_e.provider.as_deref(), Some(RESPONSES_ROUTE_PROVIDER));
+        let table_e = cfg_e
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.custom.get(RESPONSES_ROUTE_PROVIDER))
+            .expect("named responses table must be populated");
+        assert_eq!(table_e.wire.as_deref(), Some("responses"));
+        assert_eq!(
+            table_e.base_url.as_deref(),
+            Some("https://gw.example.com/v1")
+        );
+        assert_eq!(table_e.model.as_deref(), Some("my-aggregator-model"));
+        assert_eq!(table_e.api_key.as_deref(), Some("k"));
+        assert_eq!(table_e.reasoning_stream_style, None);
+        assert_eq!(cfg_e.reasoning_effort.as_deref(), Some("high"));
+
+        // F. an explicit DEEPSEEK_PROVIDER pin wins over the remap (same
+        // priority as provider()'s env arm).
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes are serialized.
+        unsafe { std::env::set_var("DEEPSEEK_PROVIDER", "openai") };
+        let mut f = fixture_bridge();
+        set_active_model(
+            &mut f,
+            ModelPreset::Openai,
+            "gpt-6-sol",
+            "https://api.openai.com/v1",
+            "k",
+        );
+        assert_eq!(f.engine_route_provider(), "openai");
+
+        // G. the official-DeepSeek endpoint guard also wins over the remap,
+        // and the rebuilt config carries no stale named table (DtConfig is
+        // rebuilt from default(), so switching away cannot leave the
+        // pinvou_responses entry behind).
+        unsafe { std::env::remove_var("DEEPSEEK_PROVIDER") };
+        let mut g = fixture_bridge();
+        set_active_model(
+            &mut g,
+            ModelPreset::Openai,
+            "gpt-6-sol",
+            "https://api.deepseek.com",
+            "k",
+        );
+        assert_eq!(g.provider(), "deepseek");
+        assert_eq!(g.engine_route_provider(), "deepseek");
+        let cfg_g = g.build_dt_config();
+        assert_eq!(cfg_g.provider.as_deref(), Some("deepseek"));
+        assert!(
+            cfg_g
+                .providers
+                .as_ref()
+                .is_none_or(|providers| providers.custom.is_empty()),
+            "no stale pinvou_responses table may survive a switch away"
+        );
+
+        // H. a set-but-empty DEEPSEEK_PROVIDER degrades exactly like
+        // provider()'s own env arm (the value is returned verbatim; both
+        // consumers treat "set" the same way).
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes are serialized.
+        unsafe { std::env::set_var("DEEPSEEK_PROVIDER", "") };
+        let mut h = fixture_bridge();
+        set_active_model(
+            &mut h,
+            ModelPreset::Openai,
+            "gpt-6-sol",
+            "https://api.openai.com/v1",
+            "k",
+        );
+        assert_eq!(h.provider(), "");
+        assert_eq!(h.engine_route_provider(), "");
+    }
+
+    /// A `DEEPSEEK_MODEL` env pin means the model id is operator-owned, not a
+    /// user selection: the GPT-prefix match must not run on it (the env is
+    /// read unconditionally by `model()`), or a leftover pin would silently
+    /// rewire the route onto the Responses wire.
+    #[test]
+    fn responses_wire_yields_to_a_deepseek_model_env_pin() {
+        // DEEPSEEK_MODEL must be in the locked list: locked_env serializes
+        // the env lock for it AND restores the original value on drop, so
+        // other model()-reading tests never observe this pin.
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes are serialized.
+        unsafe { std::env::set_var("DEEPSEEK_MODEL", "gpt-6-sol") };
+        let mut i = fixture_bridge();
+        set_active_model(
+            &mut i,
+            ModelPreset::Openai,
+            "gpt-6-sol",
+            "https://api.openai.com/v1",
+            "k",
+        );
+        assert_eq!(i.model(), "gpt-6-sol");
+        assert_eq!(
+            i.engine_route_provider(),
+            "openai",
+            "env-owned model ids never drive the wire predicate"
+        );
+    }
+
+    /// The `OpenaiResponses` group arm of `provider()` applies the same
+    /// operator suppression as the wire gate: a bare `DEEPSEEK_MODEL` pin
+    /// must not leave the gate saying Chat while the engine still lands on
+    /// the named Responses table (round-5 review R2: the preset arm used to
+    /// remap unconditionally, so the pin only half-won).
+    #[test]
+    fn responses_group_yields_to_a_deepseek_model_env_pin() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        let mut unsuppressed = fixture_bridge();
+        set_active_model(
+            &mut unsuppressed,
+            ModelPreset::OpenaiResponses,
+            "gpt-6-sol",
+            "https://relay.example.test/v1",
+            "k",
+        );
+        assert_eq!(unsuppressed.provider(), "pinvou_responses");
+        assert!(unsuppressed.uses_responses_wire());
+
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes are serialized.
+        unsafe { std::env::set_var("DEEPSEEK_MODEL", "deepseek-v4-flash") };
+        assert!(!unsuppressed.uses_responses_wire());
+        assert_eq!(
+            unsuppressed.provider(),
+            "openai",
+            "the pinned model is operator-owned: the group keeps its vendor identity on the Chat wire"
+        );
+        assert_eq!(
+            unsuppressed.engine_route_provider(),
+            "openai",
+            "gate and engine landing must agree under the pin"
+        );
+    }
+
+    /// Odd-but-legitimate spellings of the official host must still count as
+    /// official: the `/v1` suffix strip is case-sensitive, so normalization
+    /// lowercases before stripping (`/V1`, `//` trails).
+    #[test]
+    fn official_openai_host_normalization_accepts_case_and_slash_variants() {
+        assert!(is_official_openai_base_url("https://api.openai.com"));
+        assert!(is_official_openai_base_url("https://api.openai.com/v1"));
+        assert!(is_official_openai_base_url("https://api.openai.com/V1"));
+        assert!(is_official_openai_base_url("https://api.openai.com/v1/"));
+        assert!(is_official_openai_base_url("  https://API.OPENAI.COM/v1  "));
+        // Aggregators and private hosts keep failing the check.
+        assert!(!is_official_openai_base_url(
+            "https://aggregator.example.test/v1"
+        ));
+        assert!(!is_official_openai_base_url("http://api.openai.com/v1"));
+    }
+
+    /// A chat-era stored `off` reaches the wire verbatim on the Responses
+    /// route (the engine maps it to low); the display-side renormalization
+    /// to `low` must not silently rewrite what the app sends.
+    #[test]
+    fn stored_off_reasoning_effort_reaches_the_responses_wire_verbatim() {
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::OpenaiResponses,
+            "gpt-6-sol",
+            "https://relay.example.test/v1",
+            "k",
+        );
+        bridge.prefs.advanced.saved_models[0].reasoning_effort = Some("off".to_string());
+        assert!(bridge.uses_responses_wire());
+        assert_eq!(
+            bridge.request_reasoning_effort(),
+            Some("off".to_string()),
+            "the stored value passes through untouched; the engine maps off→low"
+        );
+    }
+
+    /// The Openai-arm remap is scoped to the official endpoint: a hand-edited
+    /// `preset = "openai"` (or vendor-stamped) record pointed at an aggregator
+    /// or private host keeps the Chat wire, exactly as on the base branch.
+    #[test]
+    fn responses_wire_never_switches_a_non_official_openai_host() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        // Hand-edited preset=openai at an aggregator host.
+        let mut j = fixture_bridge();
+        set_active_model(
+            &mut j,
+            ModelPreset::Openai,
+            "gpt-6-sol",
+            "https://aggregator.example.test/v1",
+            "k",
+        );
+        assert_eq!(
+            j.engine_route_provider(),
+            "openai",
+            "non-official hosts keep the Chat wire on the openai preset"
+        );
+        let cfg_j = j.build_dt_config();
+        assert!(
+            cfg_j
+                .providers
+                .as_ref()
+                .is_none_or(|providers| providers.custom.is_empty()),
+            "the non-official openai route must not mint a pinvou_responses table"
+        );
+
+        // The vendor-stamped parity corner on a custom record: Chat off the
+        // official endpoint, Responses on it (vendor-first routing mirrored).
+        let mut k = fixture_bridge();
+        set_active_model(
+            &mut k,
+            ModelPreset::OpenaiCompatible,
+            "gpt-6-luna",
+            "https://aggregator.example.test/v1",
+            "k",
+        );
+        k.prefs.advanced.saved_models[0].vendor = Some("OpenAI".to_string());
+        assert_eq!(
+            k.engine_route_provider(),
+            "openai",
+            "the vendor corner needs the official endpoint"
+        );
+        let mut l = fixture_bridge();
+        set_active_model(
+            &mut l,
+            ModelPreset::OpenaiCompatible,
+            "gpt-6-luna",
+            "https://api.openai.com/v1",
+            "k",
+        );
+        l.prefs.advanced.saved_models[0].vendor = Some("OpenAI".to_string());
+        assert_eq!(l.engine_route_provider(), RESPONSES_ROUTE_PROVIDER);
+
+        // Negative pin for the deliberately-unchanged boundary: a custom
+        // record carrying NO vendor metadata stays Chat even at the official
+        // endpoint.
+        let mut m = fixture_bridge();
+        set_active_model(
+            &mut m,
+            ModelPreset::OpenaiCompatible,
+            "gpt-6-luna",
+            "https://api.openai.com/v1",
+            "k",
+        );
+        assert_ne!(
+            m.engine_route_provider(),
+            RESPONSES_ROUTE_PROVIDER,
+            "OpenaiCompatible without vendor metadata must not switch wire"
+        );
+    }
+
+    /// The documented-output anchor is the LAST resort of the route output
+    /// chain: an explicit SavedModel.max_output_tokens and the operator
+    /// window-tier declaration must both outrank it for anchor-covered ids,
+    /// otherwise a tighter user/deployer declaration would be silently
+    /// widened to the documented 128K figure.
+    #[test]
+    fn responses_route_output_anchor_loses_to_higher_precedence_facts() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_MAX_OUTPUT_TOKENS",
+            "PINVOU3_MAX_OUTPUT_TOKENS",
+        ]);
+
+        // A user's explicit output declaration beats the anchor.
+        let mut b = fixture_bridge();
+        set_active_model(
+            &mut b,
+            ModelPreset::Openai,
+            "gpt-6-sol",
+            "https://api.openai.com/v1",
+            "sk-openai",
+        );
+        let saved = b
+            .prefs
+            .advanced
+            .saved_models
+            .first_mut()
+            .expect("active model");
+        saved.max_output_tokens = Some(24_576);
+        let limits = b
+            .route_limits_for_model("gpt-6-sol")
+            .expect("gpt-6-sol must resolve route limits");
+        assert_eq!(
+            limits.output_tokens,
+            Some(24_576),
+            "configured output must outrank the documented-output anchor"
+        );
+
+        // On an operator-owned endpoint the window-tier declaration also
+        // beats the anchor (>=500K window tier declares 131_072).
+        let mut op = fixture_bridge();
+        set_active_model(
+            &mut op,
+            ModelPreset::OpenaiCompatible,
+            "gpt-6-sol",
+            "https://gw.example.com/v1",
+            "k",
+        );
+        let saved = op
+            .prefs
+            .advanced
+            .saved_models
+            .first_mut()
+            .expect("active model");
+        saved.provider_kind = Some("custom".into());
+        saved.context_window_tokens = Some(600_000);
+        let limits = op
+            .route_limits_for_model("gpt-6-sol")
+            .expect("gpt-6-sol must resolve route limits");
+        assert_eq!(
+            limits.output_tokens,
+            Some(131_072),
+            "operator window tier must outrank the documented-output anchor"
+        );
+    }
+
     /// Verifies the bridge-side Browser MCP gate: Work-mode sessions use a session-specific
     /// mcp.work.json, Code-mode sessions fall back to global mcp.json without a browser
     /// entry, and the unavailable-capability message is injected only into Work mode.
@@ -8212,6 +9161,71 @@ mod tests {
                 .build_session_system_prompt("native-work")
                 .contains("## 市场 MCP 应用发现"),
             "native Engine sessions must continue to receive inventory rules"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The computer-use instruction section follows the master toggle:
+    /// rendered for native Engine sessions (Work AND Code — the tool is
+    /// registered for both), absent while the switch is off, and never
+    /// rendered for external ACP runtimes (no Pinvou tool registry there).
+    /// The section names the tool directly, which is why `computer_use`
+    /// ships non-deferred (the tool_policy always-load contract).
+    #[test]
+    fn computer_use_instruction_follows_master_toggle() {
+        let (_lock, _env) = locked_env(&["PINVOU3_HOME", "PINVOU3_SESSION_ARTIFACTS"]);
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-cu-instruction-{}-{}",
+            std::process::id(),
+            crate::bridge::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
+
+        let mut bridge = fixture_bridge();
+        bridge
+            .set_external_acp_session_predicate(std::sync::Arc::new(|s| s.starts_with("sess-acp")));
+
+        // Toggle off (fixture prefs default): no section anywhere — the
+        // prompt stays byte-exact with the pre-announcement static text.
+        assert!(
+            !bridge
+                .build_session_system_prompt("sess-work-1")
+                .contains("## Computer use"),
+            "disabled computer use must not announce the tool"
+        );
+        assert!(
+            !bridge
+                .build_session_system_prompt("sess-code-1")
+                .contains("## Computer use"),
+            "disabled computer use must not announce the tool in code sessions"
+        );
+
+        // Toggle on: native sessions get the section naming the tool;
+        // external ACP runtimes never do.
+        bridge.prefs.computer_use.enabled = true;
+        let prompt_work = bridge.build_session_system_prompt("sess-work-1");
+        assert!(
+            prompt_work.contains("## Computer use"),
+            "enabled computer use must announce the tool to Work sessions"
+        );
+        assert!(
+            prompt_work.contains("`computer_use`"),
+            "the section must name the tool (paired with the always-load entry)"
+        );
+        assert!(
+            bridge
+                .build_session_system_prompt("sess-code-1")
+                .contains("## Computer use"),
+            "the tool is registered for code sessions too, so they get the section"
+        );
+        assert!(
+            !bridge
+                .build_session_system_prompt("sess-acp-1")
+                .contains("## Computer use"),
+            "external ACP runtimes have no Pinvou tool registry to announce into"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -8903,10 +9917,14 @@ mod tests {
     /// SGLang / llama.cpp / KoboldCpp / LMDeploy / Docker Model Runner probe
     /// results all map to the engine's vllm provider (chat_template_kwargs +
     /// reasoning_effort wire are structurally identical), defaulting to the
-    /// lowest thinking tier low locally.
+    /// lowest thinking tier low locally. The route declares the
+    /// separate_field stream style so the server's reasoning_content deltas
+    /// surface as thinking instead of being inlined into the answer text by
+    /// the foundation's wildcard-proxy fallback.
     #[test]
     fn local_reasoning_frameworks_map_to_vllm_wire_and_default_low() {
         for kind in [
+            LocalServerKind::Vllm,
             LocalServerKind::Sglang,
             LocalServerKind::LlamaCpp,
             LocalServerKind::KoboldCpp,
@@ -8932,6 +9950,13 @@ mod tests {
             assert_eq!(
                 bridge.request_reasoning_effort().as_deref(),
                 Some("low"),
+                "{kind:?}"
+            );
+            let cfg = bridge.build_dt_config();
+            let providers = cfg.providers.as_ref().expect("providers config");
+            assert_eq!(
+                providers.vllm.reasoning_stream_style.as_deref(),
+                Some(SEPARATE_REASONING_FIELD),
                 "{kind:?}"
             );
         }
@@ -10103,6 +11128,73 @@ mod tests {
             !multi_content.contains(crate::features::assistant::swarm::SWARM_CONTRACT),
             "契约正文只在 spawn 级 instructions，不得逐轮重复:\n{multi_content}"
         );
+    }
+
+    /// 深度护栏预算契约（回归锚）：Windows 上 PowerShell 冷启动本身可能超过
+    /// 5s（与连接器防火墙同一复现），而本护栏是**有意 strict** 的真实门——
+    /// 无 verdict 即 fail closed——预算过紧会在工具执行前拒绝合法的
+    /// agent/workflow 调用。30s 只覆盖解释器启动；门槛仍然只匹配两个精确
+    /// 工具名，且 strict 语义不得被顺手改成 advisory。
+    #[test]
+    fn multi_agent_depth_guard_keeps_strict_gate_with_startup_budget() {
+        let bridge = fixture_bridge();
+        let executor = bridge.build_multi_agent_hook_executor(&std::env::temp_dir());
+        let guard = executor
+            .config()
+            .hooks
+            .iter()
+            .find(|hook| hook.name.as_deref() == Some("pinvou3-multiagent-depth-guard"))
+            .expect("multi-agent executor must mount the depth guard");
+        assert_eq!(guard.event, HookEvent::ToolCallBefore);
+        assert_eq!(
+            guard.timeout_secs, 30,
+            "depth-guard budget must cover interpreter startup, not deny at 5s"
+        );
+        assert!(
+            !guard.continue_on_error,
+            "depth-guard is a real gate: a missing verdict must fail closed"
+        );
+        assert!(
+            !guard.background,
+            "the guard must be awaited, not fire-and-forget"
+        );
+        let names = match &guard.condition {
+            Some(HookCondition::Any { conditions }) => conditions
+                .iter()
+                .map(|condition| match condition {
+                    HookCondition::ToolName { name } => name.as_str(),
+                    other => panic!("unexpected guard condition: {other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("depth-guard must stay gated on tool names, got {other:?}"),
+        };
+        assert_eq!(names, ["agent", "workflow"]);
+        // 条件匹配语义与执行器一致（精确、大小写敏感）：只有两个升级入口
+        // 命中 strict 门；近邻名称不得被波及。多智能体执行器里还挂着其他
+        // strict 门（如主分支上的防火墙），因此按护栏名过滤后再断言。
+        let hits_guard = |tool: &str| {
+            let context = deepseek_tui::hooks::HookContext::new().with_tool_name(tool);
+            executor
+                .matched_strict_gate_labels(HookEvent::ToolCallBefore, &context)
+                .iter()
+                .any(|label| label == "pinvou3-multiagent-depth-guard")
+        };
+        for tool in ["agent", "workflow"] {
+            assert!(hits_guard(tool), "{tool} must hit the strict depth guard");
+        }
+        for tool in [
+            "read",
+            "write",
+            "bash",
+            "Agent",
+            "mcp__x__agent",
+            "agent_pro",
+        ] {
+            assert!(
+                !hits_guard(tool),
+                "unrelated tool {tool} must not dispatch the depth guard"
+            );
+        }
     }
 
     /// 多智能体轮没有匹配候选时，信封兜底一句名册提示（零候选轮对模型可见，

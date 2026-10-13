@@ -65,12 +65,22 @@ function fixture({ clock = () => 1000, failConsume = false, pairingCapabilities 
   return { manager, pairings, reservations, slots, consumed, terminal, pairing };
 }
 
-test("identifier contract: lease publishes schema-valid colon epochs and signing key IDs", async () => {
-  const { manager } = fixture({ relayEpoch: "relay:epoch:0001", signingKeyId: "relay:signing:0001" });
+test("identifier contract: lease publishes colon epochs with pinned-trust signing IDs", async () => {
+  const { manager } = fixture({ relayEpoch: "relay:epoch:0001", signingKeyId: "relay.signing-0001" });
   const result = await start(manager);
   assert.equal(result.transcript.relay_epoch, "relay:epoch:0001");
-  assert.equal(result.relay_signing_key_id, "relay:signing:0001");
+  assert.equal(result.relay_signing_key_id, "relay.signing-0001");
+  assert.throws(() => fixture({ signingKeyId: "relay:signing:0001" }), { code: "controller_lease_config_invalid" });
   assert.throws(() => fixture({ signingKeyId: "relay~signing" }), { code: "controller_lease_config_invalid" });
+});
+
+test("signing IDs at both supported bounds remain exact in real signed reservation", async () => {
+  for (const signingKeyId of ["a", "A" + "._-9".repeat(15) + "xyz"]) {
+    const { manager } = fixture({ signingKeyId });
+    const result = await start(manager);
+    assert.equal(result.relay_signing_key_id, signingKeyId);
+    assert.equal(typeof result.relay_signature_b64, "string");
+  }
 });
 
 for (const phase of ["resolve", "sign"]) {
