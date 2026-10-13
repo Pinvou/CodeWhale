@@ -127,19 +127,6 @@ fn looks_like_version(token: &str) -> bool {
     count >= 2
 }
 
-/// 注册表目录只留 owner 权限（0700）：外部模型记录含 base_url/weights_path，
-/// 同机其他用户不该读到。
-pub(crate) fn harden_dir_owner_only(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
-}
-
-/// 注册表文件只留 owner 权限（0600），rename 落盘前调用。
-pub(crate) fn set_file_owner_only(file: &std::fs::File) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-}
-
 /// hwmon 风扇/电压/电流/功率采样（温度交给 sysinfo Components，这里跳过温度通道）。
 /// chip 取 hwmon 的 `name` 文件；label 取 `<前缀>N_label`，否则 `<chip> <通道号>`。
 pub(crate) fn extra_sensors() -> Vec<ExtraSensor> {

@@ -236,6 +236,18 @@ pub async fn register_external_model(
     }
     let model = normalize_optional(&model);
     let weights_path = normalize_optional(&weights_path);
+    // 字符串字段限长：read_record 对 >64KB 的文件整条拒绝，一个超长字段会登记
+    // 出"写进去就永远读不出来"的僵尸记录（第四轮评审 P3）。上限给足宽
+    // （4096 ≈ PATH_MAX，URL/标识远用不到这么多），正常输入无感。
+    for (label, value) in [
+        ("服务地址", base_url.as_deref()),
+        ("模型标识", model.as_deref()),
+        ("权重路径", weights_path.as_deref()),
+    ] {
+        if value.is_some_and(|value| value.chars().count() > 4096) {
+            return Err(format!("{label}过长（最多 4096 字符）"));
+        }
+    }
 
     // Ollama 记录实际删除的目标名：登记端点类别名时 model ≠ name（移除同一口径），
     // 商店边界必须对**有效删除名**检查——只查 name 会漏掉"别名指向商店管理的
@@ -251,10 +263,15 @@ pub async fn register_external_model(
         let effective_ollama_name = effective_ollama_name.clone();
         let weights_path = weights_path.clone();
         move || {
+            // 登记端维持宽松口径（查询出错按未命中），但 Ollama 有效删除名臂
+            // 同样大小写不敏感：早一步给出"由模型商店管理"的明确报错，好过登记
+            // 成一条之后永远移除不掉的记录。
             let name_hit = crate::features::model_store::store_model_name(&name);
-            let model_hit = effective_ollama_name
-                .as_deref()
-                .and_then(crate::features::model_store::store_model_name);
+            let model_hit = effective_ollama_name.as_deref().and_then(|name| {
+                crate::features::model_store::store_model_name_checked(name, true)
+                    .ok()
+                    .flatten()
+            });
             let weights_hit = weights_path
                 .as_deref()
                 .map(weights_in_store)
@@ -431,24 +448,36 @@ pub async fn remove_external_model(
     // 守卫 1 + 守卫 2：确认名一致、名字（及 Ollama 有效删除名）不在商店名单、
     // 权重不在任一商店根之下。商店名单查询（sqlite connect）与权重根收集（读
     // settings）是阻塞 IO，先在 blocking 池里把边界事实一次查全，再走纯函数。
-    let (name_hit, ollama_model_hit, weights_hit) = tokio::task::spawn_blocking({
+    // 移除路径 **fail-closed**（第四轮评审 P2）：查询出错按 Err 拒绝，不当未
+    // 命中放行——瞬时 SQLITE_BUSY（恰在商店部署/删除高峰最常见）若放行，别名
+    // 记录就能对着商店管理的 Ollama 模型执行真 DELETE。登记端维持宽松口径
+    // （登记错最多产生一条之后删不掉的记录，移除错会真删商店模型）。
+    let boundary = tokio::task::spawn_blocking({
         let record_name = record.name.clone();
         let weights_path = record.weights_path.clone();
         let ollama_model_name = ollama_model_name.clone();
         move || {
-            let name_hit = crate::features::model_store::store_model_name(&record_name);
-            let ollama_model_hit = ollama_model_name
-                .as_deref()
-                .and_then(crate::features::model_store::store_model_name);
+            let name_hit =
+                crate::features::model_store::store_model_name_checked(&record_name, false)?;
+            let ollama_model_hit = match &ollama_model_name {
+                // Ollama 有效删除名按大小写不敏感对齐：daemon 标签归一小写，
+                // BINARY 精确匹配会漏掉 "Qwen3:30B" → "qwen3:30b" 的别名（第四轮 P3）。
+                Some(name) => crate::features::model_store::store_model_name_checked(name, true)?,
+                None => None,
+            };
             let weights_hit = weights_path
                 .as_deref()
                 .map(weights_in_store)
                 .unwrap_or(false);
-            (name_hit, ollama_model_hit, weights_hit)
+            Ok((name_hit, ollama_model_hit, weights_hit))
         }
     })
     .await
-    .map_err(|error| format!("商店边界查询失败：{error}"))?;
+    .map_err(|error| format!("商店边界查询失败：{error}"))?
+    .map_err(|error: String| {
+        format!("{error}；为防误删商店管理的模型，本次移除已被拒绝，请稍后重试")
+    })?;
+    let (name_hit, ollama_model_hit, weights_hit) = boundary;
     removal_boundary_error(
         &record.name,
         &confirm_name,
@@ -471,16 +500,26 @@ pub async fn remove_external_model(
                 "登记的权重目录不存在（可能已删除过），已跳过：{weights}"
             )),
             Some(weights) => {
-                let target = weights_deletion_guard(
-                    &crate::platform::paths::user_home_dir(),
-                    Some(&crate::platform::paths::pinvou3_home()),
-                    Path::new(weights),
-                )?;
-                let display = target.display().to_string();
-                tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&target))
-                    .await
-                    .map_err(|error| format!("权重目录删除失败（{display}）：{error}"))?
-                    .map_err(|error| format!("权重目录删除失败（{display}）：{error}"))?;
+                let home = crate::platform::paths::user_home_dir();
+                let protected = crate::platform::paths::pinvou3_home();
+                let weights = weights.to_string();
+                let weights_for_task = weights.clone();
+                tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
+                    // 守卫（含 canonicalize）与整目录删除同一池执行：canonicalize
+                    // 在陈旧 NFS/FUSE 挂载上可能阻塞数秒，不能占住 async worker
+                    // （第四轮评审 P3；其余 IO 此前已全部入池）。
+                    let target = weights_deletion_guard(
+                        &home,
+                        Some(&protected),
+                        Path::new(&weights_for_task),
+                    )?;
+                    std::fs::remove_dir_all(&target).map_err(|error| {
+                        format!("权重目录删除失败（{}）：{error}", target.display())
+                    })?;
+                    Ok(target)
+                })
+                .await
+                .map_err(|error| format!("权重目录删除失败（{weights}）：{error}"))??;
                 removed_weights = true;
             }
         }
@@ -562,7 +601,7 @@ fn removal_boundary_error(
 /// 调用方只对该返回值执行 `remove_dir_all`——绝不删除入参原样路径。
 /// 深度按"家目录之下的相对层级"计（≥ 3 = 至少是家目录的孙目录）：直接删家目录的
 /// 一级子目录（往往是用户自己整理的目录）风险过高，必须再往深一层才放行。
-/// `protected_root`（应用自身数据根 `~/.pinjou3`）整体拒绝：注册表目录恰好 3 层、
+/// `protected_root`（应用自身数据根 `~/.pinvou3`）整体拒绝：注册表目录恰好 3 层、
 /// bundle/skills、runtimes 等更深目录都在放行深度内，不显式排除就存在"删除权重"
 /// 按钮抹掉应用配置/知识库的通道（第三轮评审 P2）。
 fn weights_deletion_guard(
@@ -619,16 +658,24 @@ fn weights_deletion_guard(
     Ok(target)
 }
 
-/// 移除时的记录加载：`<id>.json` 直取；缺失时有界扫描按**内容 id** 兜底（消化
-/// 文件名与 id 不一致的存量记录）。返回命中的记录与其实际文件路径（第 5 步删的
-/// 就是这个路径）。
+/// 移除时的记录加载：`<id>.json` 直取（内容 id 与文件名不一致的错位文件不认，
+/// 除非内容 id 为空的存量记录）；缺失时有界扫描按**内容 id** 兜底（消化文件名
+/// 与 id 不一致的存量记录）。返回命中的记录与其实际文件路径（第 5 步删的就是
+/// 这个路径）。扫描对坏邻居文件（坏 JSON/超限）跳过而不是让整个移除失败——
+/// 与 `read_registry` 的降级口径一致，否则一个损坏文件会吊死所有健康记录的
+/// 移除（第四轮评审 P2）。
 fn load_record_for_removal(
     dir: &Path,
     id: &str,
 ) -> Result<Option<(RegistryRecord, PathBuf)>, String> {
     let direct = dir.join(format!("{id}.json"));
     if let Some(record) = read_record(&direct)? {
-        return Ok(Some((record, direct)));
+        // 直取也要求内容 id 对得上（容忍存量空 id）：`a.json` 内容 id 是 `m-2`
+        // 而 `m-1` 命中直取时，破坏性动作会用错那份记录的权重路径/模型名。
+        let content_id = record.id.trim();
+        if content_id == id || content_id.is_empty() {
+            return Ok(Some((record, direct)));
+        }
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(None);
@@ -644,10 +691,11 @@ fn load_record_for_removal(
         if path == direct {
             continue;
         }
-        if let Some(record) = read_record(&path)? {
-            if record.id.trim() == id {
-                return Ok(Some((record, path)));
-            }
+        let Ok(Some(record)) = read_record(&path) else {
+            continue;
+        };
+        if record.id.trim() == id {
+            return Ok(Some((record, path)));
         }
     }
     Ok(None)
@@ -1016,10 +1064,10 @@ mod tests {
 
     #[test]
     fn weights_deletion_guard_rejects_the_app_data_tree() {
-        // ~/.pinjou3 整树拒绝：注册表目录恰好 3 层、bundle/skills 等更深目录都在
+        // ~/.pinvou3 整树拒绝：注册表目录恰好 3 层、bundle/skills 等更深目录都在
         // 放行深度内，不显式排除就有"删除权重"抹掉应用数据的通道。
         let home = TempDir::new("guard-appdata");
-        let app_root = home.path().join(".pinjou3");
+        let app_root = home.path().join(".pinvou3");
         let registry = app_root.join("device").join("external-models.d");
         std::fs::create_dir_all(&registry).expect("create registry dir");
         let deep_app = app_root.join("bundle").join("skills").join("device-doctor");
@@ -1348,5 +1396,118 @@ mod tests {
         let (models, warnings) = read_registry(dir.path());
         assert_eq!(models.len(), MAX_REGISTRY_FILES);
         assert!(warnings.iter().any(|warning| warning.contains("超过")));
+    }
+
+    #[test]
+    fn removal_scan_skips_corrupt_siblings_instead_of_failing() {
+        // 一个坏邻居（坏 JSON/超限）不得吊死健康记录的移除：扫描口径必须与
+        // read_registry 的"坏文件跳过进警告"一致（第四轮评审 P2）。
+        let dir = TempDir::new("removal-bad-sibling");
+        // 排序在目标之前与之后各放一个坏文件，证明不是"先坏就断"。
+        std::fs::write(dir.path().join("m-aaaa1111.json"), "{ broken").expect("bad early");
+        let target_path = dir.path().join("m-target000.json");
+        std::fs::write(
+            &target_path,
+            r#"{"id": "m-target000", "name": "healthy", "kind": "ollama"}"#,
+        )
+        .expect("write healthy record");
+        let blob = format!(
+            "{{\"name\": \"big\", \"note\": \"{}\"}}",
+            "x".repeat(70 * 1024)
+        );
+        std::fs::write(dir.path().join("m-zzzz9999.json"), blob).expect("bad late");
+        let (record, path) = load_record_for_removal(dir.path(), "m-target000")
+            .expect("lookup must succeed past corrupt siblings")
+            .expect("healthy record must be found");
+        assert_eq!(record.id, "m-target000");
+        assert_eq!(path, target_path);
+    }
+
+    #[test]
+    fn removal_direct_hit_requires_matching_content_id() {
+        // `m-1.json` 内容 id 是 `m-2` 的错位文件：直取不认（否则破坏性动作会用
+        // 错那份记录的权重路径/模型名），落到按内容 id 的兜底扫描（第四轮 P3）。
+        let dir = TempDir::new("removal-misfiled");
+        let misfiled = dir.path().join("m-11111111.json");
+        std::fs::write(
+            &misfiled,
+            r#"{"id": "m-22222222", "name": "misfiled", "kind": "other"}"#,
+        )
+        .expect("write misfiled record");
+        // 按 m-1 找：直取内容 id 不符 → 扫描也找不到内容 id 为 m-1 的文件 → None。
+        assert!(
+            load_record_for_removal(dir.path(), "m-11111111")
+                .expect("lookup ok")
+                .is_none()
+        );
+        // 按 m-2 找：兜底扫描按内容 id 命中错位文件本身。
+        let (record, path) = load_record_for_removal(dir.path(), "m-22222222")
+            .expect("lookup ok")
+            .expect("content id finds the misfiled file");
+        assert_eq!(record.name, "misfiled");
+        assert_eq!(path, misfiled);
+        // 容忍存量空 id：文件名对得上即放行。
+        std::fs::write(
+            dir.path().join("m-33333333.json"),
+            r#"{"id": "", "name": "legacy-empty-id", "kind": "other"}"#,
+        )
+        .expect("write empty-id record");
+        let (record, _) = load_record_for_removal(dir.path(), "m-33333333")
+            .expect("lookup ok")
+            .expect("empty content id tolerates the filename contract");
+        assert_eq!(record.name, "legacy-empty-id");
+    }
+
+    #[test]
+    fn weights_deletion_guard_rejects_symlink_escape_under_home() {
+        // 家目录之下、但中间组件是指向家目录之外的符号链接：canonicalize 后
+        // strip_prefix(home) 必须失败——这是守卫最要紧的对抗面，此前恰好零覆盖
+        // （第四轮评审测试盲区）。
+        let home = TempDir::new("guard-symlink");
+        let outside = TempDir::new("guard-symlink-outside");
+        let outside_weights = outside.path().join("b").join("c");
+        std::fs::create_dir_all(&outside_weights).expect("create outside weights");
+        let link = home.path().join("a");
+        std::os::unix::fs::symlink(outside.path(), &link).expect("create symlink");
+        let smuggled = link.join("b").join("c");
+        assert_eq!(
+            smuggled.components().count() - home.path().components().count(),
+            3
+        );
+        let result = weights_deletion_guard(home.path(), None, &smuggled);
+        assert!(
+            result.is_err(),
+            "symlink escape must be rejected, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn register_rejects_oversized_string_fields_before_touching_the_store() {
+        // 超长字段会登记出 read_record 永远拒绝的僵尸记录（>64KB 整条拒读，
+        // 第四轮 P3）；登记端必须在触到商店边界之前就拒绝。错误返回发生在
+        // 商店查询 spawn 之前，本测试不需要临时 HOME。
+        let huge = "x".repeat(5000);
+        let error = register_external_model(
+            "caps-test".to_string(),
+            "llamacpp".to_string(),
+            Some("http://127.0.0.1:8080/v1".to_string()),
+            None,
+            Some(huge),
+        )
+        .await
+        .expect_err("oversized weights_path must be rejected");
+        assert!(error.contains("过长"), "unexpected error: {error}");
+        let huge_url = "http://127.0.0.1:8080/".to_string() + &"x".repeat(5000);
+        let error = register_external_model(
+            "caps-test".to_string(),
+            "openai_endpoint".to_string(),
+            Some(huge_url),
+            None,
+            None,
+        )
+        .await
+        .expect_err("oversized base_url must be rejected");
+        assert!(error.contains("过长"), "unexpected error: {error}");
     }
 }

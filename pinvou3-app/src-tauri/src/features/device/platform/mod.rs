@@ -5,6 +5,11 @@
 //! sysfs/procfs 读取全部收在 `linux.rs`，其余平台走 `unsupported.rs` 的显式
 //! 桩（None / 空集合，不静默借用其他平台实现）。
 //!
+//! 权限收敛（`owner_only.rs`）是纯 `std::os::unix`：Linux 与 macOS 共用同一份
+//! 实现（`cfg(unix)`），只有非 unix 平台走 unsupported 的空桩——此前 macOS 被
+//! `cfg(not(target_os = "linux"))` 桩误伤，能加固的平台被静默放弃加固（第四轮
+//! 评审 P2）。
+//!
 //! 上层 `features/device/mod.rs` 只依赖本模块的跨平台入口，不写任何 cfg。
 
 /// `extra_sensors()` 的条目形状：`(chip, kind, name, value, critical, max)`。
@@ -13,18 +18,23 @@ pub(crate) type ExtraSensor = (String, String, String, f64, Option<f64>, Option<
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(unix)]
+mod owner_only;
 #[cfg(not(target_os = "linux"))]
 mod unsupported;
 
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{
-    cuda_toolkit_version, dmi_product_name, extra_sensors, harden_dir_owner_only,
-    iface_has_wireless, iface_operstate_up, nvidia_driver_version, os_pretty_name,
-    set_file_owner_only,
+    cuda_toolkit_version, dmi_product_name, extra_sensors, iface_has_wireless, iface_operstate_up,
+    nvidia_driver_version, os_pretty_name,
 };
 #[cfg(not(target_os = "linux"))]
 pub(crate) use unsupported::{
-    cuda_toolkit_version, dmi_product_name, extra_sensors, harden_dir_owner_only,
-    iface_has_wireless, iface_operstate_up, nvidia_driver_version, os_pretty_name,
-    set_file_owner_only,
+    cuda_toolkit_version, dmi_product_name, extra_sensors, iface_has_wireless, iface_operstate_up,
+    nvidia_driver_version, os_pretty_name,
 };
+// 权限收敛按 unix/not(unix) 二分，而不是按目标 OS——macOS 同样享受 0700/0600。
+#[cfg(unix)]
+pub(crate) use owner_only::{harden_dir_owner_only, set_file_owner_only};
+#[cfg(not(unix))]
+pub(crate) use unsupported::{harden_dir_owner_only, set_file_owner_only};

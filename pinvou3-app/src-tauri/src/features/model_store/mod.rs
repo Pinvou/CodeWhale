@@ -86,6 +86,9 @@ pub use platform::backend::{
 // 商店边界查询：供其他 feature（设备管理的外部模型登记/移除）判断某个名字
 // 是否已被商店接管。见 platform::store_model_name 的说明。
 pub(crate) use platform::store_model_name;
+// 可失败版（移除路径 fail-closed）：Err = 商店库查询本身失败，移除端必须拒绝
+// 操作而不是当未命中放行。见 platform::store_model_name_checked 的说明。
+pub(crate) use platform::store_model_name_checked;
 pub(crate) use platform::store_weights_roots;
 // 本机 Ollama 守护进程基地址：设备管理的外部模型探测/标签/删除与商店生命周期
 // 对齐到同一实例。见 platform::ollama_base_url 的说明。

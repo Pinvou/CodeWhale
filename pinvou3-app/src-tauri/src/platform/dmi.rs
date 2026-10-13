@@ -24,11 +24,21 @@ pub(crate) fn dmi_first_nonempty() -> Option<String> {
     DMI_ID_FIELDS.iter().find_map(|field| dmi_field(field))
 }
 
-/// 任一字段含 `needle`（小写匹配，能力位用）。
+/// 任一字段含 `needle`（小写匹配，能力位用）。读取 sysfs 后走
+/// [`any_value_contains`] 的同一份聚合口径——匹配语义只有一份实现，测试直打
+/// 纯函数而不是内联重写（第四轮评审 P2：此前的测试把表达式抄了一遍，生产路径
+/// 丢掉小写化/换包含语义照样全绿）。
 pub(crate) fn any_field_contains(needle: &str) -> bool {
-    DMI_ID_FIELDS.iter().any(|field| {
-        dmi_field(field).is_some_and(|value| value.to_ascii_lowercase().contains(needle))
-    })
+    let values: Vec<Option<String>> = DMI_ID_FIELDS.iter().map(|field| dmi_field(field)).collect();
+    any_value_contains(&values, needle)
+}
+
+/// 聚合口径（纯函数，测试直打）：任一非空字段值小写化后包含 needle 即命中。
+fn any_value_contains(values: &[Option<String>], needle: &str) -> bool {
+    values
+        .iter()
+        .flatten()
+        .any(|value| value.to_ascii_lowercase().contains(needle))
 }
 
 #[cfg(test)]
@@ -49,17 +59,26 @@ mod tests {
 
     #[test]
     fn contains_match_is_case_insensitive_over_any_field() {
-        let values = ["LinSeer MegaCube", "PowerEdge"];
-        assert!(
-            values
-                .iter()
-                .any(|value| value.to_ascii_lowercase().contains("megacube"))
-        );
-        assert!(
-            !["PowerEdge", "R750"]
-                .iter()
-                .any(|value| value.to_ascii_lowercase().contains("megacube"))
-        );
+        // 与生产同一条聚合路径：values 形状 = 逐字段读取结果（None = 读不到）。
+        let values = vec![
+            Some("LinSeer MegaCube".to_string()),
+            Some("PowerEdge".to_string()),
+            None,
+        ];
+        assert!(any_value_contains(&values, "megacube"));
+        // 大小写必须被归一：丢掉 to_ascii_lowercase 的回归在这里必须变红。
+        assert!(any_value_contains(
+            &[Some("MEGACUBE-GB10".to_string()), None],
+            "megacube"
+        ));
+        assert!(!any_value_contains(
+            &[Some("PowerEdge".to_string()), Some("R750".to_string())],
+            "megacube"
+        ));
+        // 全部字段读不到 → 不命中（fail-closed）。
+        assert!(!any_value_contains(&[None, None], "megacube"));
+        // 空集合同样不命中。
+        assert!(!any_value_contains(&[], "megacube"));
     }
 
     #[test]

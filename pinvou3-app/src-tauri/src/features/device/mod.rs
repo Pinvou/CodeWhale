@@ -261,7 +261,23 @@ fn collect_sensors() -> Vec<SensorGroup> {
     for (chip, kind, name, value, critical, max) in platform::extra_sensors() {
         push_sensor(&mut groups, chip, &kind, name, value, critical, max);
     }
+    sort_sensors(&mut groups);
     groups
+}
+
+/// 传感器输出排序（组按 chip、组内按 kind+name）。sysinfo 0.36.1 的 Components
+/// 在 Linux 上由 HashMap 聚合（component.rs `from_hwmon`），每次
+/// `new_with_refreshed_list()` 迭代序都不同——不排序的话组序/条目序逐拍漂移，
+/// 而 bridge 的显示等价抑制对数组是逐元素比较，会把纯顺序抖动当成真实变化，
+/// 设备页每 2s 重渲染一次、卡片可见跳动（第四轮评审 P2）。组数极小，排序开销
+/// 可忽略；磁盘/网络/进程列表本就各自确定性排序，这里补齐最后一个缺口。
+fn sort_sensors(groups: &mut [SensorGroup]) {
+    groups.sort_by(|a, b| a.chip.cmp(&b.chip));
+    for group in groups {
+        group
+            .entries
+            .sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
+    }
 }
 
 fn push_sensor(
@@ -333,10 +349,16 @@ fn disk_snapshot(disk: &sysinfo::Disk) -> DiskSnapshot {
     }
 }
 
-/// 过滤噪音挂载：squashfs（snap 的只读 squash 包）与 snap 挂载点；`/boot/efi`
-/// 保留（用户关心 EFI 分区占用），只是排序垫底。
+/// 过滤噪音挂载：squashfs（snap 的只读 squash 包）与 snap 挂载点；overlay
+/// （docker/containerd/podman 的容器叠层，每容器一份、容量复制自根文件系统，
+/// 模型服务工作流一跑容器就会刷出一排同名假磁盘——第四轮评审 P3；Live USB 的
+/// overlay 根挂载是仅有的误伤面，不在本功能的目标形态内）；`/boot/efi` 保留
+/// （用户关心 EFI 分区占用），只是排序垫底。
 fn keep_disk(disk: &DiskSnapshot) -> bool {
     if disk.fs_type.eq_ignore_ascii_case("squashfs") {
+        return false;
+    }
+    if disk.fs_type.eq_ignore_ascii_case("overlay") {
         return false;
     }
     if disk.mount_point.replace('\\', "/").starts_with("/snap/") {
@@ -377,11 +399,11 @@ fn collect_network(state: &DeviceStateInner) -> Vec<NetIfaceSnapshot> {
         .iter()
         .map(|(name, data)| {
             let (rx_bytes_per_sec, tx_bytes_per_sec) = match elapsed_secs {
-                Some(secs) if secs > 0.0 => (
-                    data.received() as f64 / secs,
-                    data.transmitted() as f64 / secs,
+                Some(secs) => (
+                    rate_from_delta(data.received(), secs),
+                    rate_from_delta(data.transmitted(), secs),
                 ),
-                _ => (0.0, 0.0),
+                None => (0.0, 0.0),
             };
             let mac = data.mac_address().to_string();
             NetIfaceSnapshot {
@@ -404,9 +426,20 @@ fn collect_network(state: &DeviceStateInner) -> Vec<NetIfaceSnapshot> {
     list
 }
 
+/// 速率 = 字节增量 / 秒；间隔非正（时钟回拨/同拍重入）按 0，绝不出负速率或
+/// 除零。抽成纯函数以便把方向（增量 ÷ 秒）钉进测试——算反了页面上显示的
+/// 就是恒错数字（第四轮评审：正时长分支此前零覆盖）。
+fn rate_from_delta(delta_bytes: u64, secs: f64) -> f64 {
+    if secs > 0.0 {
+        delta_bytes as f64 / secs
+    } else {
+        0.0
+    }
+}
+
 /// 接口类型分类（设计 §2.2 顺序）：lo → 回环；wireless 子目录 → wifi；
-/// br-/virbr → 网桥；docker/veth → 虚拟；enp/eth/enx → 以太网；wl → wifi；
-/// tun/tap/wg 等一律 other（VPN 归 other）。
+/// br-/virbr/裸 br+数字（OVS/手工网桥惯例，如 br0）→ 网桥；docker/veth → 虚拟；
+/// enp/eth/enx → 以太网；wl → wifi；tun/tap/wg 等一律 other（VPN 归 other）。
 fn classify_iface(name: &str, has_wireless_dir: bool) -> &'static str {
     if name == "lo" {
         return "loopback";
@@ -414,7 +447,7 @@ fn classify_iface(name: &str, has_wireless_dir: bool) -> &'static str {
     if has_wireless_dir {
         return "wifi";
     }
-    if name.starts_with("br-") || name.starts_with("virbr") {
+    if name.starts_with("br-") || name.starts_with("virbr") || is_bare_bridge_name(name) {
         return "bridge";
     }
     if name.starts_with("docker") || name.starts_with("veth") {
@@ -427,6 +460,13 @@ fn classify_iface(name: &str, has_wireless_dir: bool) -> &'static str {
         return "wifi";
     }
     "other"
+}
+
+/// `br0`/`br10` 这类"br+纯数字"命名（OVS/手工网桥的常见惯例）；`brctl` 等非
+/// 数字后缀不命中（那是工具名形状，不是网桥命名）。
+fn is_bare_bridge_name(name: &str) -> bool {
+    name.strip_prefix("br")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// 进程 top 列表：CPU% 依赖同一个 System 实例两次刷新的差值（DeviceState 持久
@@ -453,11 +493,16 @@ fn collect_processes(state: &DeviceStateInner) -> ProcessSummary {
         })
         .collect();
     let mut top_cpu = procs.clone();
+    // 等值 CPU/内存追加 name/pid 决胜键，与 top_memory 同口径：等值键回退到
+    // HashMap 迭代序会让前 8 名的成员跨拍反复跳动（top_memory 已修，第三轮
+    // 评审 P3；top_cpu 漏了同一刀，第四轮评审 P3 补齐）。
     top_cpu.sort_by(|a, b| {
         b.cpu_pct
             .partial_cmp(&a.cpu_pct)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| b.memory_bytes.cmp(&a.memory_bytes))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.pid.cmp(&b.pid))
     });
     top_cpu.truncate(TOP_N);
     let mut top_memory = procs;
@@ -484,25 +529,41 @@ fn truncate_name(raw: &str) -> String {
 
 /// GPU 扩展快照（3s 缓存，monitor::gpu_snapshot 同款结构）。nvidia-smi 探测
 /// 失败/超时按"本机无 NVIDIA"降级返回 None。
+///
+/// 预算注记（第四轮评审）：缓存互斥锁在子进程探测期间持有——一次刷新 =
+/// 表头 + 计算进程两次 nvidia-smi，每次至多 3 个候选路径 × 10s 超时，最坏
+/// ~60s；期间整份设备快照（温度/磁盘/网络/进程均已采好）在 blocking 池排队。
+/// 有界且自愈（超时会 kill 子进程），与 monitor「挂起期间结果缓存互斥量被
+/// 持有，后续轮询在 blocking 池里排队」是同一取舍，这里显式写明。
 fn gpu_ext_cached() -> Option<GpuExtSnapshot> {
     static CACHE: OnceLock<Mutex<GpuExtCache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(GpuExtCache::default()));
     let mut guard = cache.lock();
-    if guard
+    refresh_gpu_ext_cache(&mut guard, Instant::now(), gpu_ext_snapshot)
+}
+
+/// 缓存刷新的纯逻辑（测试直打）：TTL 内直接返回旧值不触发采样；过期后采样，
+/// 采样成功用新值、失败保留旧值只刷时间戳（monitor TtlSnapshotCache 的失败
+/// 保旧同款——一次抖动不该让 compute 列表/驱动徽章在页面上闪没，第三轮评审
+/// P3）；首拍就失败保持 None。抽成纯函数是因为原先这条最关键的保旧分支锁在
+/// OnceLock + 真子进程后面，零覆盖（第四轮评审 P3）。
+fn refresh_gpu_ext_cache(
+    cache: &mut GpuExtCache,
+    now: Instant,
+    sample: impl FnOnce() -> Option<GpuExtSnapshot>,
+) -> Option<GpuExtSnapshot> {
+    if cache
         .sampled_at
-        .is_some_and(|sampled_at| sampled_at.elapsed() < GPU_EXT_CACHE_TTL)
+        .is_some_and(|sampled_at| now.duration_since(sampled_at) < GPU_EXT_CACHE_TTL)
     {
-        return guard.value.clone();
+        return cache.value.clone();
     }
-    let value = gpu_ext_snapshot();
-    guard.sampled_at = Some(Instant::now());
-    // 采样失败（瞬时超时/驱动忙）保留上一份好值、只刷新时间戳，与 monitor
-    // TtlSnapshotCache 的失败保旧同款——否则一次抖动会让 compute 列表/驱动徽章
-    // 在页面上闪没（第三轮评审 P3）。
-    if value.is_some() || guard.value.is_none() {
-        guard.value = value;
+    let value = sample();
+    cache.sampled_at = Some(now);
+    if value.is_some() || cache.value.is_none() {
+        cache.value = value;
     }
-    guard.value.clone()
+    cache.value.clone()
 }
 
 #[derive(Default)]
@@ -647,29 +708,38 @@ async fn probe_ollama_service() -> ServiceStatus {
 
 /// vllm / lmstudio → 对候选端口逐个探测 `/v1/models`，任一 200 即 running。
 async fn probe_openai_ports(key: &str, ports: &[u16]) -> ServiceStatus {
+    // 端口被占用但对不上协议的服务会回 HTTP 4xx：这时"连接被拒绝或超时"是
+    // 误导，把最具体的 HTTP 状态透给用户（第四轮评审 P3）。
+    let mut http_error: Option<String> = None;
     for port in ports {
-        if http_get_success(&format!("http://127.0.0.1:{port}/v1/models"))
-            .await
-            .is_ok()
-        {
-            return ServiceStatus {
-                key: key.to_string(),
-                running: true,
-                detail: None,
-            };
+        match http_get_success(&format!("http://127.0.0.1:{port}/v1/models")).await {
+            Ok(()) => {
+                return ServiceStatus {
+                    key: key.to_string(),
+                    running: true,
+                    detail: None,
+                };
+            }
+            Err(reason) => {
+                if http_error.is_none() && reason.starts_with("服务响应异常") {
+                    http_error = Some(reason);
+                }
+            }
         }
     }
     ServiceStatus {
         key: key.to_string(),
         running: false,
-        detail: Some(format!(
-            "未在端口 {} 探测到服务（连接被拒绝或超时）",
-            ports
-                .iter()
-                .map(|port| port.to_string())
-                .collect::<Vec<_>>()
-                .join("/")
-        )),
+        detail: Some(http_error.unwrap_or_else(|| {
+            format!(
+                "未在端口 {} 探测到服务（连接被拒绝或超时）",
+                ports
+                    .iter()
+                    .map(|port| port.to_string())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            )
+        })),
     }
 }
 
@@ -714,7 +784,7 @@ fn probe_docker_service() -> ServiceStatus {
 
 // ---------------------------------------------------------------- 共用探针
 
-pub(crate) const OLLAMA_BASE: &str = "http://127.0.0.1:11434";
+const OLLAMA_BASE: &str = "http://127.0.0.1:11434";
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// 本机 Ollama 守护进程基地址：商店设置里的 `ollama_host`（config.json 可改）
@@ -758,14 +828,18 @@ pub(crate) async fn http_get_success(url: &str) -> Result<(), String> {
     }
 }
 
-/// reqwest 错误 → 人话原因（超时 / 拒绝连接 / 其他）。
+/// reqwest 错误 → 人话原因（超时 / 拒绝连接 / 其他）。第三臂**不得**串化原始
+/// 错误：reqwest 的 Display 会追加 " for url (<完整 URL>)"，而 URL 来自用户
+/// 可配置的 ollama_host（可能带 userinfo/内网主机名），detail 会进排查提示词
+/// 上下文送往（可能是云端的）模型——doctor 契约是"上下文刻意不含端点地址"
+/// （doctor.rs TASK_SERVICES），第四轮评审 P2 堵住这条旁路。
 pub(crate) fn human_probe_error(error: reqwest::Error) -> String {
     if error.is_timeout() {
         "请求超时".to_string()
     } else if error.is_connect() {
         "连接被拒绝（服务可能未启动）".to_string()
     } else {
-        error.to_string()
+        "网络异常，无法访问服务".to_string()
     }
 }
 
@@ -812,6 +886,10 @@ mod tests {
         // 桥 / 虚拟 / 以太网。
         assert_eq!(classify_iface("br-1a2b3c", false), "bridge");
         assert_eq!(classify_iface("virbr0", false), "bridge");
+        // 裸 br+数字（OVS/手工网桥惯例）；非数字后缀不命中。
+        assert_eq!(classify_iface("br0", false), "bridge");
+        assert_eq!(classify_iface("br10", false), "bridge");
+        assert_eq!(classify_iface("brctl", false), "other");
         assert_eq!(classify_iface("docker0", false), "virtual");
         assert_eq!(classify_iface("veth8a2f1b0", false), "virtual");
         assert_eq!(classify_iface("enp1s0", false), "ethernet");
@@ -825,28 +903,165 @@ mod tests {
     }
 
     #[test]
-    fn disk_filters_drop_squashfs_and_snap_mounts() {
-        let squash = DiskSnapshot {
+    fn disk_filters_drop_squashfs_snap_and_container_overlay_mounts() {
+        let make = |mount_point: &str, fs_type: &str| DiskSnapshot {
             name: None,
-            mount_point: "/snap/core22/1380".to_string(),
-            fs_type: "squashfs".to_string(),
+            mount_point: mount_point.to_string(),
+            fs_type: fs_type.to_string(),
             kind: "unknown".to_string(),
             total_bytes: 1,
             available_bytes: 0,
             is_removable: false,
         };
-        let overlay = DiskSnapshot {
-            fs_type: "overlay".to_string(),
-            mount_point: "/var/lib/docker/overlay2/x/merged".to_string(),
-            ..squash.clone()
-        };
+        let squash = make("/snap/core22/1380", "squashfs");
+        // 容器叠层（docker/containerd/podman）过滤：每容器一份、容量复制根 fs，
+        // 跑一次模型容器就会刷出一排同名假磁盘（第四轮评审 P3）。
+        let overlay = make("/var/lib/docker/overlay2/x/merged", "overlay");
         assert!(!keep_disk(&squash));
-        // squashfs 类型即过滤，无论挂载点；非 squashfs 的普通挂载保留。
-        let mut root = squash.clone();
-        root.fs_type = "ext4".to_string();
-        root.mount_point = "/".to_string();
-        assert!(keep_disk(&root));
-        assert!(keep_disk(&overlay));
+        assert!(!keep_disk(&overlay));
+        // squashfs 类型即过滤，无论挂载点；非 squashfs/overlay 的普通挂载保留。
+        assert!(!keep_disk(&make("/any/where", "squashfs")));
+        assert!(keep_disk(&make("/", "ext4")));
+        assert!(keep_disk(&make("/home", "btrfs")));
+    }
+
+    #[test]
+    fn rate_math_is_delta_over_positive_elapsed_only() {
+        // 方向钉死：增量 ÷ 秒。算反（秒 ÷ 增量、或增量当分母）页面上就是恒错数字。
+        assert_eq!(rate_from_delta(1500, 2.0), 750.0);
+        assert_eq!(rate_from_delta(0, 2.0), 0.0);
+        // 非正间隔（时钟回拨/同拍重入）按 0，绝不出除零或负速率。
+        assert_eq!(rate_from_delta(1500, 0.0), 0.0);
+        assert_eq!(rate_from_delta(1500, -1.0), 0.0);
+    }
+
+    #[test]
+    fn sensor_groups_sort_deterministically_by_chip_kind_name() {
+        // sysinfo Components 的 HashMap 迭代序逐拍漂移；不排序会击穿 bridge 的
+        // 显示等价抑制（第四轮评审 P2）。这里直打排序口径。
+        let mut groups = vec![
+            SensorGroup {
+                chip: "nvme".to_string(),
+                entries: vec![SensorEntry {
+                    kind: "temperature".to_string(),
+                    name: "Composite".to_string(),
+                    value: 45.0,
+                    critical: None,
+                    max: None,
+                }],
+            },
+            SensorGroup {
+                chip: "acpitz".to_string(),
+                entries: vec![
+                    SensorEntry {
+                        kind: "temperature".to_string(),
+                        name: "thermal_zone".to_string(),
+                        value: 79.4,
+                        critical: None,
+                        max: None,
+                    },
+                    SensorEntry {
+                        kind: "fan".to_string(),
+                        name: "fan1".to_string(),
+                        value: 1200.0,
+                        critical: None,
+                        max: None,
+                    },
+                ],
+            },
+        ];
+        sort_sensors(&mut groups);
+        let chips: Vec<&str> = groups.iter().map(|group| group.chip.as_str()).collect();
+        assert_eq!(chips, vec!["acpitz", "nvme"], "groups must sort by chip");
+        let kinds: Vec<&str> = groups[0]
+            .entries
+            .iter()
+            .map(|entry| entry.kind.as_str())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["fan", "temperature"],
+            "entries must sort by kind then name"
+        );
+    }
+
+    #[test]
+    fn gpu_ext_cache_keeps_old_value_on_failed_refresh_and_honors_ttl() {
+        use std::cell::Cell;
+        let make_value = |driver: &str| {
+            Some(GpuExtSnapshot {
+                driver_version: Some(driver.to_string()),
+                cuda_version: None,
+                compute_processes: Vec::new(),
+            })
+        };
+        let start = Instant::now();
+        let mut cache = GpuExtCache::default();
+        let calls = Cell::new(0usize);
+        // 首拍成功落值。
+        let first = refresh_gpu_ext_cache(&mut cache, start, || {
+            calls.set(calls.get() + 1);
+            make_value("580.02")
+        });
+        assert_eq!(
+            first
+                .as_ref()
+                .and_then(|value| value.driver_version.as_deref()),
+            Some("580.02")
+        );
+        assert_eq!(calls.get(), 1);
+        // TTL 内：不触发采样，返回旧值。
+        let cached = refresh_gpu_ext_cache(
+            &mut cache,
+            start + GPU_EXT_CACHE_TTL - Duration::from_millis(1),
+            || {
+                calls.set(calls.get() + 1);
+                make_value("999")
+            },
+        );
+        assert_eq!(
+            cached
+                .as_ref()
+                .and_then(|value| value.driver_version.as_deref()),
+            Some("580.02")
+        );
+        assert_eq!(calls.get(), 1, "TTL hit must not re-sample");
+        // 过期 + 采样失败（瞬时超时/驱动忙）：保留旧值，只刷时间戳（第三轮 P3）。
+        let kept = refresh_gpu_ext_cache(&mut cache, start + GPU_EXT_CACHE_TTL, || {
+            calls.set(calls.get() + 1);
+            None
+        });
+        assert_eq!(
+            kept.as_ref()
+                .and_then(|value| value.driver_version.as_deref()),
+            Some("580.02")
+        );
+        assert_eq!(calls.get(), 2);
+        // 失败后的 TTL 窗口内不再重复打子进程。
+        let _ = refresh_gpu_ext_cache(
+            &mut cache,
+            start + GPU_EXT_CACHE_TTL + Duration::from_millis(1),
+            || {
+                calls.set(calls.get() + 1);
+                None
+            },
+        );
+        assert_eq!(calls.get(), 2, "kept-old refresh must still be TTL-cached");
+        // 过期后采样恢复 → 换上新值。
+        let recovered = refresh_gpu_ext_cache(&mut cache, start + 2 * GPU_EXT_CACHE_TTL, || {
+            calls.set(calls.get() + 1);
+            make_value("590.01")
+        });
+        assert_eq!(
+            recovered
+                .as_ref()
+                .and_then(|value| value.driver_version.as_deref()),
+            Some("590.01")
+        );
+        // 首拍即失败：保持 None（“本机无 NVIDIA”降级）。
+        let mut fresh = GpuExtCache::default();
+        let none = refresh_gpu_ext_cache(&mut fresh, start, || None);
+        assert!(none.is_none());
     }
 
     #[test]
@@ -890,6 +1105,12 @@ mod tests {
         // GB10 unified-memory：used_memory 为 [N/A] → 按 0，行保留。
         let info = parse_compute_app_line("1234, python3, [N/A]").expect("N/A tolerated");
         assert_eq!(info.used_mib, 0);
+        // CSV 无引号转义：名字含逗号时中间整段归名字、末段仍是内存（第三轮 P3
+        // 修复所依赖的路径，此前恰好没测）。
+        let info = parse_compute_app_line("1234, /usr/bin/my,proc, 4096").expect("comma name");
+        assert_eq!(info.pid, 1234);
+        assert_eq!(info.name, "/usr/bin/my,proc");
+        assert_eq!(info.used_mib, 4096);
         assert!(parse_compute_app_line("not,a,line").is_none());
         assert!(parse_compute_app_line("").is_none());
     }
@@ -912,6 +1133,24 @@ mod tests {
             Some("12.3".to_string())
         );
         assert_eq!(parse_nvidia_smi_cuda_version("no header"), None);
+    }
+
+    #[test]
+    fn parse_nvidia_smi_header_driver_version() {
+        // driver_version 是 gpu_ext 块的存在门（None → 整块 None），必须与 cuda
+        // 版本同等级钉死（第四轮评审 P3：此前只有 CUDA 一侧有测试）。
+        let header = "| NVIDIA-SMI 540.4.0    Driver Version: 540.4.0    CUDA Version: 12.3 |\n";
+        assert_eq!(
+            parse_nvidia_smi_driver_version(header),
+            Some("540.4.0".to_string())
+        );
+        // 竖线紧贴版本号（表头列收边）：trim_end_matches('|') 分支。
+        let tight = "Driver Version: 550.54.14|   CUDA Version: N/A";
+        assert_eq!(
+            parse_nvidia_smi_driver_version(tight),
+            Some("550.54.14".to_string())
+        );
+        assert_eq!(parse_nvidia_smi_driver_version("no header"), None);
     }
 
     #[test]

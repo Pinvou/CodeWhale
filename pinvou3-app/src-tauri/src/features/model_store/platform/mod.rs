@@ -27,67 +27,9 @@ pub(crate) use linux as backend;
 #[cfg(not(target_os = "linux"))]
 pub(crate) use unsupported as backend;
 
-/// 跨平台的商店边界查询：按模型名查商店库，命中返回商店里的规范名。
-/// 设备管理（features/device）的外部模型登记/移除用它拒绝"把商店模型当成
-/// 外部模型"的越界操作。Linux 查 sqlite；其他平台没有商店，恒为 None。
-/// 查询出错按未命中处理——商店库打不开时商店自身也不可用，不存在"误接管"。
-#[cfg(target_os = "linux")]
-pub(crate) fn store_model_name(model_name: &str) -> Option<String> {
-    linux::db::get_store_model_by_name(model_name)
-        .ok()
-        .flatten()
-        .map(|record| record.model_name)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn store_model_name(_model_name: &str) -> Option<String> {
-    None
-}
-
-/// 商店权重的**全部**可能根目录。默认根是 store 数据根（`~/.pinvou3/model-store/`，
-/// 默认 `models_dir` 即其下的 `models/`）；用户可在设置里把 `models_dir` 改到别处
-///（几十上百 GB 的权重常被挪去别的盘），那个目录同样是商店管理的权重根。
-///
-/// 设备管理（features/device）的外部模型登记/移除对每个根都做路径边界检查——
-/// 设备侧不得自行推断默认值，否则商店调整权重布局时两边会漂移。
-///
-/// 注意：本函数并非无副作用——`data_dir()` 首次调用会建出商店数据目录，
-/// `load_settings()` 读 config.json（坏配置会触发隔离改名），底层 connect 还会
-/// 建出空库与 WAL 边车。调用方（features/device）已在 blocking 池中调用并接受
-/// 这些副作用；修改副作用语义前先核对这两个调用点。
-#[cfg(target_os = "linux")]
-pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
-    let mut roots = vec![linux::config::data_dir()];
-    let custom = linux::config::load_settings().models_dir;
-    let custom = std::path::PathBuf::from(custom);
-    if !roots.contains(&custom) {
-        roots.push(custom);
-    }
-    roots
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
-    // 非 Linux 平台没有商店；保留数据根作为兜底边界（外部模型守卫统一走多根检查）。
-    vec![crate::platform::paths::pinvou3_home().join("model-store")]
-}
-
-/// 本机 Ollama 守护进程基地址：默认 `http://127.0.0.1:11434`，可被商店设置里的
-/// `ollama_host`（config.json）覆盖。设备管理（features/device）的外部模型探测、
-/// 标签与删除必须与商店的 ollama 生命周期指向**同一**守护进程，否则改配过的机器
-/// 上设备页会读写另一个实例（第三轮评审 P3 对齐项）。空值回填默认。
-#[cfg(target_os = "linux")]
-pub(crate) fn ollama_base_url() -> String {
-    let host = linux::config::load_settings().ollama_host;
-    let host = host.trim();
-    if host.is_empty() {
-        "http://127.0.0.1:11434".to_string()
-    } else {
-        host.trim_end_matches('/').to_string()
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn ollama_base_url() -> String {
-    "http://127.0.0.1:11434".to_string()
-}
+// 商店边界（features/device 的外部模型登记/移除消费）。与文件内其余平台差异
+// 同一约定：具体实现住 linux/（boundary.rs）与 unsupported/，这里只做无 cfg 的
+// 转发——第四轮评审前这里曾内联两套 #[cfg] fn，与模块级约定并存成第二套写法。
+pub(crate) use backend::{
+    ollama_base_url, store_model_name, store_model_name_checked, store_weights_roots,
+};

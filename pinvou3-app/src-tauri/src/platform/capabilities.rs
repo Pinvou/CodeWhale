@@ -244,18 +244,14 @@ fn forced_megacube_device_override() -> Option<bool> {
     parse_megacube_env_override(std::env::var("PINVOU3_MEGACUBE_DEVICE").ok().as_deref())
 }
 
-/// 环境变量取值语义（纯函数，测试直打）：只认字面 "1"/"0"，其余一律不覆盖。
+/// 环境变量取值语义（纯函数，测试直打）：字面 "1"/"0"（容忍首尾空白，env 文件
+/// 里手滑带个换行不该静默丢掉覆盖）优先，其余一律不覆盖、走 DMI 探测。
 fn parse_megacube_env_override(value: Option<&str>) -> Option<bool> {
-    match value {
+    match value.map(str::trim) {
         Some("1") => Some(true),
         Some("0") => Some(false),
         _ => None,
     }
-}
-
-/// DMI 字段匹配口径（纯函数）：小写化后含 "megacube" 即命中。
-fn dmi_value_contains_megacube(value: &str) -> bool {
-    value.to_ascii_lowercase().contains("megacube")
 }
 
 pub(crate) const fn is_windows() -> bool {
@@ -320,18 +316,14 @@ mod tests {
     fn megacube_env_override_only_accepts_literal_0_and_1() {
         assert_eq!(parse_megacube_env_override(Some("1")), Some(true));
         assert_eq!(parse_megacube_env_override(Some("0")), Some(false));
+        // 首尾空白容忍：env 文件里手滑的换行/空格不该静默丢掉覆盖。
+        assert_eq!(parse_megacube_env_override(Some(" 1")), Some(true));
+        assert_eq!(parse_megacube_env_override(Some("0\n")), Some(false));
         // 其他值/未设一律不覆盖，走 DMI 探测（fail-closed，不会误开启）。
         assert_eq!(parse_megacube_env_override(Some("true")), None);
         assert_eq!(parse_megacube_env_override(Some("")), None);
+        assert_eq!(parse_megacube_env_override(Some("  ")), None);
         assert_eq!(parse_megacube_env_override(None), None);
-    }
-
-    #[test]
-    fn dmi_value_match_is_case_insensitive() {
-        assert!(dmi_value_contains_megacube("LinSeer MegaCube"));
-        assert!(dmi_value_contains_megacube("MEGACUBE-GB10"));
-        assert!(!dmi_value_contains_megacube("PowerEdge R750"));
-        assert!(!dmi_value_contains_megacube(""));
     }
 
     #[test]

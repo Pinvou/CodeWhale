@@ -194,9 +194,14 @@ fn mask_path_text(text: &str, home: &str, username: &str) -> String {
         return format!("~/{rest}");
     }
     if !username.is_empty() {
-        let media_prefix = format!("/media/{username}/");
-        if let Some(rest) = text.strip_prefix(&media_prefix) {
-            return format!("/media/~/{rest}");
+        // 两个惯例自动挂载位：/media/<user>（Ubuntu 桌面）与 /run/media/<user>
+        // （systemd/udisks2，Fedora 系与多数现代发行版），卷标都是插盘人可控的
+        // 自由文本，用户名一并脱敏（第四轮评审 P3 补 /run 臂）。
+        for media_root in ["/media", "/run/media"] {
+            let media_prefix = format!("{media_root}/{username}/");
+            if let Some(rest) = text.strip_prefix(&media_prefix) {
+                return format!("{media_root}/~/{rest}");
+            }
         }
     }
     text.to_string()
@@ -267,15 +272,24 @@ mod tests {
         );
         assert_eq!(mask_path_text("/home/u", "/home/u", "u"), "~");
         assert_eq!(mask_path_text("/home/u/data", "/home/u", "u"), "~/data");
-        // /media/<用户名>/ 自动挂载段：用户名改写为 ~，卷标原样保留。
+        // /media/<用户名>/ 与 /run/media/<用户名>/ 自动挂载段：用户名改写为 ~，
+        // 卷标原样保留（第四轮评审 P3 补 systemd 的 /run/media 惯例位）。
         assert_eq!(
             mask_path_text("/media/zhangsan/USB", "/home/zhangsan", "zhangsan"),
             "/media/~/USB"
+        );
+        assert_eq!(
+            mask_path_text("/run/media/zhangsan/USB", "/home/zhangsan", "zhangsan"),
+            "/run/media/~/USB"
         );
         // 别的用户的 /media 段不动。
         assert_eq!(
             mask_path_text("/media/other/x", "/home/zhangsan", "zhangsan"),
             "/media/other/x"
+        );
+        assert_eq!(
+            mask_path_text("/run/media/other/x", "/home/zhangsan", "zhangsan"),
+            "/run/media/other/x"
         );
     }
 

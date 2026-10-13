@@ -144,3 +144,28 @@ pub fn run_startup_refresh() {}
 pub fn take_startup_cleanup(_service: &Arc<ModelStoreService>) -> Result<Value, String> {
     nope()
 }
+
+// ── 商店边界（与 linux/boundary.rs 同名同签名，见 platform/mod.rs 的转发）──
+
+/// 非 Linux 没有商店，恒为未命中（宽松版，登记端用）。
+pub(crate) fn store_model_name(_model_name: &str) -> Option<String> {
+    None
+}
+
+/// 非 Linux 没有商店：查询"成功且未命中"。移除路径的 fail-closed 语义在
+/// Linux 侧由 Err 表达；这里没有查询可言，Ok(None) 即可。
+pub(crate) fn store_model_name_checked(
+    _model_name: &str,
+    _case_insensitive: bool,
+) -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+/// 非 Linux 没有商店；保留数据根作为兜底边界（外部模型守卫统一走多根检查）。
+pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
+    vec![crate::platform::paths::pinvou3_home().join("model-store")]
+}
+
+pub(crate) fn ollama_base_url() -> String {
+    "http://127.0.0.1:11434".to_string()
+}

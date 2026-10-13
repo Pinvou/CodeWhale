@@ -36,6 +36,11 @@ pub(crate) fn nvidia_driver_version() -> Option<String> {
     None
 }
 
+/// 非 unix 平台没有 unix 权限位可收：显式 no-op（unix 平台——含 macOS——走
+/// owner_only.rs 的真实现；这两条只为 non-unix 编译存在，macOS 上不编译，
+/// 否则成为 dead_code）。
+#[cfg(not(unix))]
 pub(crate) fn harden_dir_owner_only(_path: &std::path::Path) {}
 
+#[cfg(not(unix))]
 pub(crate) fn set_file_owner_only(_file: &std::fs::File) {}
