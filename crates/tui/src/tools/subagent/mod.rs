@@ -10828,7 +10828,7 @@ async fn publish_live_subagent_transcript(
 ///
 /// Returns the (possibly bounded) content and the spillover path when one was
 /// written. Spillover write failures degrade to passing the original content
-/// through, mirroring `apply_spillover`.
+/// through, mirroring `apply_spillover_with_artifact`'s passthrough posture.
 fn bound_subagent_tool_result(
     agent_id: &str,
     tool_id: &str,
@@ -16218,7 +16218,8 @@ chars shown. This is the child's self-report; {retrieval}]\n\n{tail}",
 /// Persist a final report that exceeds the summary budget so the truncated
 /// summary can name a retrievable artifact instead of dropping the elided
 /// middle. Returns the `retrieve_tool_result` ref on success; write failures
-/// degrade to no ref, mirroring `apply_spillover`'s passthrough posture. The
+/// degrade to no ref, mirroring `apply_spillover_with_artifact`'s passthrough
+/// posture. The
 /// artifact lands under the shared session root (`state_namespace`), which
 /// every agent in the spawn tree clones, so the parent and any sibling can
 /// resolve it. Same-id writes carry identical bytes, so a synthesized

@@ -1595,27 +1595,6 @@ mod tests {
         );
     }
 
-    /// A dual-mode child provider with no dispatch config is *unknown*, not a
-    /// subscription. It still never shows dollars, but the distinction is what
-    /// keeps its spend inside `/cost`'s coverage denominator instead of being
-    /// excused as quota-billed (#4318).
-    #[test]
-    fn routed_zai_child_never_claims_api_dollars_without_full_route_config() {
-        let billing = for_child_route(
-            ApiProvider::Deepseek,
-            BillingPresentation::Metered,
-            ApiProvider::Zai,
-            None,
-        );
-        assert_eq!(
-            billing,
-            BillingPresentation::Unknown,
-            "without the child's route truth, fail closed instead of guessing a quota"
-        );
-        assert!(!billing.shows_money());
-        assert_eq!(billing.label(), Some("unknown"));
-    }
-
     /// Child-route billing for each shape a child can take. Without the
     /// child's own provenance, only a local runtime is exactly non-metered;
     /// every other cross-provider child fails closed to Unknown, and Unknown
@@ -1660,6 +1639,7 @@ mod tests {
             );
             assert_eq!(billing, BillingPresentation::Unknown, "{provider:?}");
             assert!(!billing.shows_money(), "{provider:?}");
+            assert_eq!(billing.label(), Some("unknown"), "{provider:?}");
             let audit = crate::pricing::audit_turn_cost_for_route(
                 provider,
                 "some-model",
@@ -2029,50 +2009,6 @@ mod tests {
                 Some(crate::pricing::MINIMAX_TOKEN_PLAN_BILLING_SURFACE)
             );
         }
-    }
-
-    #[test]
-    fn unknown_cross_provider_oauth_capable_child_never_invents_dollars() {
-        assert!(
-            !for_child_route(
-                ApiProvider::Deepseek,
-                BillingPresentation::Metered,
-                ApiProvider::Xai,
-                None,
-            )
-            .shows_money()
-        );
-        // Identity alone no longer claims metered dollars either: without the
-        // child's own route truth a cross-provider child fails closed.
-        assert!(
-            !for_child_route(
-                ApiProvider::Deepseek,
-                BillingPresentation::Metered,
-                ApiProvider::Openrouter,
-                None,
-            )
-            .shows_money()
-        );
-        // Unknown, not an invented "provider quota" subscription.
-        assert_eq!(
-            for_child_route(
-                ApiProvider::Deepseek,
-                BillingPresentation::Metered,
-                ApiProvider::Xai,
-                None,
-            ),
-            BillingPresentation::Unknown
-        );
-        // The child's own metered provenance is what prices the route.
-        assert!(
-            for_child_route(
-                ApiProvider::Deepseek,
-                BillingPresentation::Metered,
-                ApiProvider::Openrouter,
-                Some(BillingPresentation::Metered),
-            )
-            .shows_money()
-        );
     }
 
     #[test]
@@ -2554,36 +2490,6 @@ mod tests {
             ),
             BillingPresentation::Metered
         );
-    }
-
-    #[test]
-    fn cross_provider_child_without_provenance_fails_closed_unknown() {
-        // Moonshot and MiniMax both run metered AND subscription routes, so
-        // identity alone must never guess either direction.
-        for child in [ApiProvider::Moonshot, ApiProvider::Minimax] {
-            assert_eq!(
-                for_child_route(
-                    ApiProvider::Deepseek,
-                    BillingPresentation::Metered,
-                    child,
-                    None,
-                ),
-                BillingPresentation::Unknown,
-                "{child:?} identity must not guess subscription or metered billing"
-            );
-        }
-        // Local routes are the one identity-derived fact that stays truthful.
-        for child in [ApiProvider::Ollama, ApiProvider::Sglang, ApiProvider::Vllm] {
-            assert_eq!(
-                for_child_route(
-                    ApiProvider::Deepseek,
-                    BillingPresentation::Metered,
-                    child,
-                    None,
-                ),
-                BillingPresentation::Local
-            );
-        }
     }
 
     #[test]

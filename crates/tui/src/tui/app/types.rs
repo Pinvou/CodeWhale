@@ -35,13 +35,6 @@ impl SettingSelection {
     pub fn changed_live_state(self) -> bool {
         matches!(self, Self::Changed)
     }
-
-    /// Whether the selection was accepted at all (either case that persisted).
-    #[must_use]
-    #[cfg(test)]
-    pub fn accepted(self) -> bool {
-        !matches!(self, Self::Refused)
-    }
 }
 
 /// The user-facing operating mode. Defined in codewhale-config; re-exported

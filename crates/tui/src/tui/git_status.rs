@@ -241,52 +241,6 @@ fn repository_name_from_common_dir(worktree_root: &Path, common_dir: &Path) -> O
         .map(|name| name.to_string_lossy().into_owned())
 }
 
-/// Compact chrome label: `CodeWhale · main* ↑2` or
-/// `CodeWhale/feature · feature*` for a linked worktree.
-///
-/// Omits the segment when Git has not named a location or ref. A known
-/// location without a branch still renders — the header must not invent a
-/// ref to fill the slot.
-#[must_use]
-pub fn chrome_label(snap: &GitStatusSnapshot) -> Option<String> {
-    let worktree_name = snap
-        .root
-        .as_deref()
-        .and_then(Path::file_name)
-        .map(|name| name.to_string_lossy());
-    let location = match (snap.repository_name.as_deref(), worktree_name.as_deref()) {
-        (Some(repository), Some(worktree)) if repository != worktree => {
-            Some(format!("{repository}/{worktree}"))
-        }
-        (Some(repository), _) => Some(repository.to_string()),
-        (None, Some(worktree)) => Some(worktree.to_string()),
-        (None, None) => None,
-    };
-    let mut label = match (location, snap.branch.as_deref()) {
-        (Some(location), Some(branch)) => format!("{location} · {branch}"),
-        (Some(location), None) => location,
-        (None, Some(branch)) => branch.to_string(),
-        (None, None) => return None,
-    };
-    if snap.dirty {
-        label.push('*');
-    }
-    if snap.ahead > 0 {
-        label.push_str(&format!(" ↑{}", snap.ahead));
-    }
-    if snap.behind > 0 {
-        label.push_str(&format!(" ↓{}", snap.behind));
-    }
-    Some(label)
-}
-
-/// Status-bar ink for repository chrome. Location is metadata, not a
-/// failure — dirtiness is the `*` on the same gray string.
-#[must_use]
-pub fn chrome_ink() -> crate::palette::ChromeInk {
-    crate::palette::ChromeInk::Metadata
-}
-
 /// Create a new worktree at `path` tracking `branch` (or a new branch name).
 pub fn create_worktree(
     repo: &Path,
@@ -383,80 +337,6 @@ locked
         assert_eq!(entries[0].branch.as_deref(), Some("main"));
         assert!(entries[1].locked);
         assert_eq!(entries[1].branch.as_deref(), Some("feat"));
-    }
-
-    #[test]
-    fn chrome_label_marks_dirty_and_divergence() {
-        let snap = GitStatusSnapshot {
-            root: Some("/repo".into()),
-            repository_name: Some("repo".into()),
-            branch: Some("main".into()),
-            dirty: true,
-            ahead: 2,
-            behind: 1,
-            ..GitStatusSnapshot::default()
-        };
-        assert_eq!(chrome_label(&snap).as_deref(), Some("repo · main* ↑2 ↓1"));
-    }
-
-    #[test]
-    fn chrome_label_identifies_a_linked_worktree() {
-        let snap = GitStatusSnapshot {
-            root: Some("/repo/.cw-worktrees/feature".into()),
-            repository_name: Some("repo".into()),
-            branch: Some("feature".into()),
-            dirty: true,
-            ..GitStatusSnapshot::default()
-        };
-
-        assert_eq!(
-            chrome_label(&snap).as_deref(),
-            Some("repo/feature · feature*")
-        );
-    }
-
-    #[test]
-    fn chrome_label_omits_dirty_marker_when_clean() {
-        let snap = GitStatusSnapshot {
-            root: Some("/repo".into()),
-            repository_name: Some("repo".into()),
-            branch: Some("main".into()),
-            dirty: false,
-            ..GitStatusSnapshot::default()
-        };
-        assert_eq!(chrome_label(&snap).as_deref(), Some("repo · main"));
-    }
-
-    #[test]
-    fn chrome_label_keeps_location_when_the_ref_is_unknown() {
-        let snap = GitStatusSnapshot {
-            root: Some("/repo/.cw-worktrees/feature".into()),
-            repository_name: Some("repo".into()),
-            branch: None,
-            dirty: true,
-            ..GitStatusSnapshot::default()
-        };
-        assert_eq!(chrome_label(&snap).as_deref(), Some("repo/feature*"));
-    }
-
-    #[test]
-    fn chrome_label_is_absent_without_a_repo_or_ref() {
-        assert_eq!(
-            chrome_label(&GitStatusSnapshot {
-                error: Some("not a git repository".into()),
-                ..GitStatusSnapshot::default()
-            }),
-            None
-        );
-    }
-
-    #[test]
-    fn chrome_ink_is_metadata_not_failure() {
-        assert_eq!(chrome_ink(), crate::palette::ChromeInk::Metadata);
-        assert_eq!(
-            chrome_ink().family(),
-            crate::palette::SemanticFamily::Metadata
-        );
     }
 
     #[test]

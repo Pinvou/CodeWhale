@@ -10,7 +10,12 @@ use sha2::{Digest, Sha256};
 use std::path::{Component, Path};
 use thiserror::Error;
 
-use crate::{DEFAULT_FLEET_WORKFLOW_MAX_AGENTS, experimental_search::SearchSpecError::*};
+use crate::experimental_search::SearchSpecError::*;
+
+/// Lifetime cap on total agents a Fleet-shaped Workflow may launch. Kept local
+/// after the imperative `WorkflowConfig` VM surface was removed; the value is
+/// the admission ceiling this module's validation enforces.
+const DEFAULT_FLEET_WORKFLOW_MAX_AGENTS: usize = 1000;
 
 pub const WORKFLOW_SEARCH_SCHEMA_VERSION: u32 = 1;
 /// Fallback live-worker ceiling for one search admission batch.

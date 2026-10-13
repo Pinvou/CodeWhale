@@ -16,8 +16,8 @@ the `codewhale-tui` bin unit tests):
 
 | harness | binary | what lives there | why it stays separate |
 |---|---|---|---|
-| `tests/integration/main.rs` | `integration` | 17 plain `#[test]`/`#[tokio::test]` suites: `adaptive_evidence_acceptance`, `cache_guard`, `coordination_acceptance`, `diagnostic_read_only`, `dotenv_authority`, `eval_harness`, `exec_persistent_service`, `exec_stream_drop_acceptance`, `exec_turn_usage`, `integration_mock_llm`, `palette_audit`, `protocol_recovery`, `reasoning_content_replayed_after_tool_call`, `skill_cli`, `telemetry_contract`, `verifiers_harness_contract`, `workflow_tool_stream_acceptance` | All are process-level but require no PTY or Gherkin runner; they share `wiremock`/`tempfile` and link the TUI once instead of 17 times. `crate::` for `eval`/`models`/`llm_client`/`palette`/`network_policy`/`config`/`install` is satisfied by `integration/main.rs` re-exporting those `#[path]` modules at the harness crate root so `crate::config` etc. resolve. |
-| `tests/cucumber/main.rs` | `cucumber` | 6 Gherkin runners: `core_session_command_extraction`, `directory_listing_acceptance`, `epic_acceptance_harness`, `eval_smoke_acceptance`, `plugin_e2e_acceptance`, `tool_lifecycle_acceptance` | Each defines a distinct `cucumber::World`; steps are registered per-World via inventory, so merging is safe and cuts 6 `cucumber` link jobs to 1. `plugin_e2e`’s PTY part is `#[cfg(all(unix, feature="long-running-tests"))]` and stays dormant in the default run. |
+| `tests/integration/main.rs` | `integration` | 15 plain `#[test]`/`#[tokio::test]` suites: `adaptive_evidence_acceptance`, `diagnostic_read_only`, `dotenv_authority`, `eval_harness`, `exec_persistent_service`, `exec_stream_drop_acceptance`, `exec_turn_usage`, `integration_mock_llm`, `lifecycle_outbox_exec`, `palette_audit`, `protocol_recovery`, `skill_cli`, `telemetry_contract`, `verifiers_harness_contract`, `workflow_tool_stream_acceptance` | All are process-level but require no PTY or Gherkin runner; they share `wiremock`/`tempfile` and link the TUI once instead of 15 times. `crate::` for `eval`/`models`/`llm_client`/`palette`/`network_policy`/`config`/`install` is satisfied by `integration/main.rs` re-exporting those `#[path]` modules at the harness crate root so `crate::config` etc. resolve. |
+| `tests/cucumber/main.rs` | `cucumber` | 5 Gherkin runners: `core_session_command_extraction`, `directory_listing_acceptance`, `epic_acceptance_harness`, `eval_smoke_acceptance`, `tool_lifecycle_acceptance` | Each defines a distinct `cucumber::World`; steps are registered per-World via inventory, so merging is safe and cuts the `cucumber` link jobs. `plugin_e2e_acceptance` is no longer a Gherkin runner: its production-mirror scanner World/steps were removed with the worthless-test sweep (the real `scan_plugin_dir` contract stays covered by unit tests in `src/tools/plugin.rs`), leaving the plain binary smoke + `#[cfg(all(unix, feature="long-running-tests"))]` PTY acceptance, dormant in the default run. |
 The former `tests/pty` harness was removed. It accumulated full-screen copy,
 color, timing, and geometry assertions that were expensive to link and made the
 implementation serve a simulated terminal. Visible UX is now accepted against
@@ -48,13 +48,16 @@ runtime is meant to depend on.
 Coverage today exercises the trait surface end-to-end:
 
 - streaming turn loop
-- reasoning-content replay across tool-call rounds (V4 §5.1.1, the bug that
-  broke v0.4.9-v0.5.1)
 - tool-call round-trip with chunked input JSON
 - multi-tool-call ordering inside a single turn
 - compaction-style non-streaming `create_message`
 - sub-agent style independent parent/child mocks
 - capacity-gate observation of a captured request before stream drain
+
+Reasoning-content replay across tool-call rounds (V4 §5.1.1, the bug that
+broke v0.4.9-v0.5.1) is pinned by the engine tests
+(`multi_block_and_redacted_thinking_persist_into_followup_requests`), which
+drive a real engine and assert on the production-composed follow-up request.
 
 Full-engine journeys use `Engine::new_with_model_client` and the same mock.
 A non-trivial model/protocol/user-visible behavior change needs one keyless

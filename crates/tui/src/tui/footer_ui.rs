@@ -128,27 +128,6 @@ pub(crate) fn format_token_count_compact(tokens: u64) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn format_context_budget(used: i64, max: u32) -> String {
-    let max_u64 = u64::from(max);
-    let max_i64 = i64::from(max);
-
-    if used > max_i64 {
-        return format!(
-            ">{}/{}",
-            format_token_count_compact(max_u64),
-            format_token_count_compact(max_u64)
-        );
-    }
-
-    let used_u64 = u64::try_from(used.max(0)).unwrap_or(0);
-    format!(
-        "{}/{}",
-        format_token_count_compact(used_u64),
-        format_token_count_compact(max_u64)
-    )
-}
-
-#[cfg(test)]
 mod tests {
     use super::one_line_summary;
 

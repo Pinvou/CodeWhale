@@ -46,7 +46,7 @@ tags = ["smoke", "check"]
 id = "protocol-review"
 name = "Protocol review"
 description = "Review fleet protocol types for security and correctness."
-objective = "Inspect crates/protocol/src/fleet.rs and crates/secrets/src/lib.rs. Report any missing serde defaults, unsafe wire changes, or security-sensitive fields lacking SecretRef."
+objective = "Inspect crates/protocol/src/fleet.rs and crates/secrets/src/lib.rs. Report any missing serde defaults, unsafe wire changes, or security-sensitive fields lacking FleetSecretRef."
 instructions = "Read crates/protocol/src/fleet.rs and crates/secrets/src/lib.rs. Check for: (1) new fields without serde(default) or skip_serializing_if, (2) raw secrets in struct fields instead of FleetSecretRef, (3) missing Clone/Debug/PartialEq derives on new types. Write a concise report with file:line references for each finding. If there are no findings, report 'all clear'."
 worker = { role = "reviewer", tool_profile = "read-only", tools = ["rg", "git", "cargo"], capabilities = ["rust"] }
 workspace = { required_files = ["crates/protocol/src/fleet.rs", "crates/secrets/src/lib.rs"], writable_paths = [".codewhale/fleet"], environment = { required = ["PATH"] } }

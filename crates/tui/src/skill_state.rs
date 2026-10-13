@@ -67,11 +67,6 @@ impl SkillStateStore {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn disabled(&self) -> Vec<String> {
-        self.disabled.iter().cloned().collect()
-    }
-
     fn set_enabled_with_persist(
         &mut self,
         skill_name: &str,
@@ -261,7 +256,6 @@ mod tests {
     fn missing_file_defaults_to_everything_enabled() {
         let (_dir, store) = fresh();
         assert!(store.is_enabled("anything"));
-        assert!(store.disabled().is_empty());
     }
 
     #[test]
@@ -281,14 +275,6 @@ mod tests {
         store.set_enabled("foo", false).unwrap();
         store.set_enabled("foo", true).unwrap();
         assert!(store.is_enabled("foo"));
-        assert!(store.disabled().is_empty());
-    }
-
-    #[test]
-    fn redundant_toggle_is_noop() {
-        let (_dir, mut store) = fresh();
-        store.set_enabled("foo", true).unwrap();
-        assert!(store.disabled().is_empty());
     }
 
     #[test]
@@ -302,18 +288,6 @@ mod tests {
             fs::read(&path).unwrap(),
             b"this is not toml = { broken",
             "a malformed authority file must remain untouched for recovery"
-        );
-    }
-
-    #[test]
-    fn disabled_list_is_deterministic_order() {
-        let (_dir, mut store) = fresh();
-        store.set_enabled("zeta", false).unwrap();
-        store.set_enabled("alpha", false).unwrap();
-        store.set_enabled("mu", false).unwrap();
-        assert_eq!(
-            store.disabled(),
-            vec!["alpha".to_string(), "mu".to_string(), "zeta".to_string()]
         );
     }
 

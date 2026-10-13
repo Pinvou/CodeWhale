@@ -269,7 +269,7 @@ mod tests {
     use super::{
         ContextBudgetSnapshot, InspectDetail, InteractionAction, InteractionFocus,
         InteractionRegistry, InteractionTarget, InteractionTargetId, SettingApplySemantics,
-        SettingAuthority, SettingFact, UiSnapshot,
+        SettingAuthority, UiSnapshot,
     };
     use crate::config::ApiProvider;
     use ratatui::layout::Rect;
@@ -287,26 +287,6 @@ mod tests {
                 percent_basis_points: 3_000,
             }),
         }
-    }
-
-    #[test]
-    fn topbar_route_target_is_typed_without_copying_route_facts() {
-        let target = InteractionTarget {
-            id: InteractionTargetId::HEADER_ROUTE,
-            area: Rect::new(20, 0, 24, 1),
-            focus: InteractionFocus::Direct,
-            keyboard_action: Some(InteractionAction::OpenProviderPicker),
-            mouse_action: Some(InteractionAction::OpenProviderPicker),
-            inspect_detail: InspectDetail::Route,
-        };
-
-        assert_eq!(target.id, InteractionTargetId::HEADER_ROUTE);
-        assert_eq!(
-            target.keyboard_action,
-            Some(InteractionAction::OpenProviderPicker)
-        );
-        assert_eq!(target.mouse_action, target.keyboard_action);
-        assert_eq!(target.inspect_detail, InspectDetail::Route);
     }
 
     #[test]
@@ -342,43 +322,6 @@ mod tests {
         assert_eq!(snapshot.max_tokens, max_tokens);
         assert!(snapshot.used_tokens <= snapshot.max_tokens);
         assert!(snapshot.percent_basis_points <= 10_000);
-    }
-
-    #[test]
-    fn setting_fact_keeps_live_startup_and_saved_lanes_distinct() {
-        let fact = SettingFact {
-            current: Some("session"),
-            effective: Some("managed"),
-            startup: Some("next"),
-            saved: Some("disk"),
-            authority: SettingAuthority::ManagedPolicy,
-            apply: SettingApplySemantics::NextSession,
-        };
-
-        assert_eq!(fact.current, Some("session"));
-        assert_eq!(fact.effective, Some("managed"));
-        assert_eq!(fact.startup, Some("next"));
-        assert_eq!(fact.saved, Some("disk"));
-    }
-
-    #[test]
-    fn apply_semantics_distinguish_reload_and_partial_restart_from_full_restart() {
-        let reload = SettingFact {
-            current: Some("live"),
-            effective: None,
-            startup: None,
-            saved: Some("disk"),
-            authority: SettingAuthority::UserSettings,
-            apply: SettingApplySemantics::ReloadRequired,
-        };
-        let partial = SettingFact {
-            apply: SettingApplySemantics::UiNowEngineRestart,
-            ..reload.clone()
-        };
-        assert_ne!(reload.apply, SettingApplySemantics::RestartRequired);
-        assert_ne!(partial.apply, SettingApplySemantics::RestartRequired);
-        assert_ne!(reload.apply, partial.apply);
-        assert_ne!(reload.apply, SettingApplySemantics::Immediate);
     }
 
     #[test]

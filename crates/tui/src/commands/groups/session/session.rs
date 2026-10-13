@@ -1006,17 +1006,6 @@ mod tests {
     }
 
     #[test]
-    fn test_save_serialization_error() {
-        let tmpdir = TempDir::new().unwrap();
-        let mut app = create_test_app_with_tmpdir(&tmpdir);
-        // This should work normally since SavedSession is serializable
-        // Testing error path would require mocking, which is complex
-        let save_path = tmpdir.path().join("test.json");
-        let result = save(&mut app, Some(save_path.to_str().unwrap()));
-        assert!(result.message.is_some());
-    }
-
-    #[test]
     fn test_load_without_path_returns_error() {
         let tmpdir = TempDir::new().unwrap();
         let mut app = create_test_app_with_tmpdir(&tmpdir);

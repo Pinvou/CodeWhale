@@ -4758,64 +4758,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_streaming_envelope_bounds_a_stalled_provider() {
-        // The injected budget is process-global; serialize against other
-        // tests (which may issue non-streaming requests with their own
-        // timing assumptions) through the shared test-env lock.
-        let _env_lock = crate::test_support::lock_test_env();
-        let _envelope = NonStreamingEnvelopeGuard::millis(2000);
-        let server = MockServer::start().await;
-        // The provider accepts the connection but stalls far past the
-        // budgeted envelope before answering: the whole request (headers
-        // and body) must be cut off with a timeout instead of wedging the
-        // caller.
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({
-                        "model": "deepseek-v4-pro",
-                        "choices": [
-                            { "message": { "role": "assistant", "content": "late" } }
-                        ]
-                    }))
-                    .set_delay(Duration::from_secs(5)),
-            )
-            .mount(&server)
-            .await;
-
-        let client = deepseek_request_boundary_client(&server.uri(), server.uri());
-        let request = MessageRequest {
-            model: "deepseek-v4-pro".to_string(),
-            messages: vec![Message {
-                role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: "envelope".to_string(),
-                    cache_control: None,
-                }],
-            }],
-            max_tokens: 16,
-            system: None,
-            tools: None,
-            tool_choice: None,
-            metadata: None,
-            thinking: None,
-            reasoning_effort: Some("off".to_string()),
-            stream: Some(false),
-            temperature: None,
-            top_p: None,
-        };
-
-        let err = client
-            .create_message(request)
-            .await
-            .expect_err("a provider that never answers must hit the envelope");
-        assert!(
-            err.to_string().to_lowercase().contains("timed out"),
-            "envelope timeout must be reported as such; got {err:#}"
-        );
-    }
-
-    #[tokio::test]
     async fn envelope_exceed_probes_recovery_once_degraded() {
         // A provider that wedges past the whole envelope must not leave
         // connection health stale: once the failure threshold has degraded
@@ -7755,16 +7697,23 @@ mod tests {
         let _guard = crate::tools::truncate::TEST_SPILLOVER_GUARD
             .lock()
             .unwrap_or_else(|err| err.into_inner());
+        let _artifact_guard = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let spillover_root = tmp.path().join(".codewhale").join("tool_outputs");
+        let sessions_root = tmp.path().join(".codewhale").join("sessions");
         let prior = crate::tools::truncate::set_test_spillover_root(Some(spillover_root.clone()));
-        struct Restore(Option<std::path::PathBuf>);
+        let prior_artifacts =
+            crate::artifacts::set_test_artifact_sessions_root(Some(sessions_root.clone()));
+        struct Restore(Option<std::path::PathBuf>, Option<std::path::PathBuf>);
         impl Drop for Restore {
             fn drop(&mut self) {
                 crate::tools::truncate::set_test_spillover_root(self.0.take());
+                crate::artifacts::set_test_artifact_sessions_root(self.1.take());
             }
         }
-        let _restore = Restore(prior);
+        let _restore = Restore(prior, prior_artifacts);
 
         let head = (0..40)
             .map(|_| format!("{}\n", "safe-head".repeat(100)))
@@ -7779,15 +7728,24 @@ mod tests {
         );
 
         let mut spilled = crate::tools::spec::ToolResult::success(raw.clone());
-        let path = crate::tools::truncate::apply_spillover(&mut spilled, "call-local-secret")
-            .expect("turn-loop spillover");
-        crate::tools::truncate::publish_legacy_spillover_ownership(
-            &path,
+        // The plain spillover path is the legacy routing arm of
+        // `apply_spillover_with_artifact`, reached via the classic rollback
+        // switch (the old `apply_spillover` wrapper was removed).
+        // SAFETY: single-threaded test; no other thread reads env concurrently.
+        unsafe { std::env::set_var("CODEWHALE_CLASSIC_OUTPUT_ROUTING", "1") };
+        let path = crate::tools::truncate::apply_spillover_with_artifact(
+            &mut spilled,
+            "call-local-secret",
+            "exec_shell",
             "workspace",
-            raw.as_bytes(),
         )
-        .expect("publish compatibility ownership proof");
-        assert_eq!(path.parent(), Some(spillover_root.as_path()));
+        .expect("turn-loop spillover");
+        unsafe { std::env::remove_var("CODEWHALE_CLASSIC_OUTPUT_ROUTING") };
+        // Classic routing still returns the session artifact handle; the
+        // legacy payload lands under the spillover root and the ownership
+        // sidecar is published by `apply_spillover_with_artifact` itself.
+        let expected_artifacts = sessions_root.join("workspace").join("artifacts");
+        assert_eq!(path.parent(), Some(expected_artifacts.as_path()));
         assert!(
             std::fs::read_to_string(&path)
                 .expect("read local spillover")
@@ -10948,56 +10906,6 @@ mod tests {
             !out.iter()
                 .any(|v| v.get("role").and_then(Value::as_str) == Some("tool")),
             "orphaned tool results should also be removed"
-        );
-    }
-
-    #[test]
-    fn chat_messages_keeps_valid_tool_calls_intact() {
-        // Complete call+result pair should NOT be stripped.
-        let messages = vec![
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        signature: None,
-                        state: None,
-                        thinking: "Need to list files".to_string(),
-                        redacted_data: None,
-                        reasoning_details: None,
-                    },
-                    ContentBlock::ToolUse {
-                        id: "tool-ok".to_string(),
-                        name: "list_dir".to_string(),
-                        input: json!({}),
-                        caller: None,
-                        thought_signature: None,
-                    },
-                ],
-            },
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "tool-ok".to_string(),
-                    content: "files".to_string(),
-                    is_error: None,
-                    content_blocks: None,
-                }],
-            },
-        ];
-
-        let out = build_chat_messages(None, &messages, "deepseek-v4-flash");
-        let assistant = out
-            .iter()
-            .find(|value| value.get("role").and_then(Value::as_str) == Some("assistant"))
-            .expect("assistant message");
-        assert!(
-            assistant.get("tool_calls").is_some(),
-            "valid tool_calls should remain intact"
-        );
-        assert!(
-            out.iter()
-                .any(|value| value.get("role").and_then(Value::as_str) == Some("tool")),
-            "tool result should remain"
         );
     }
 

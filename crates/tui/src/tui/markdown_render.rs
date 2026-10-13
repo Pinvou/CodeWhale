@@ -3771,17 +3771,6 @@ mod tests {
         assert_eq!(combined.matches('y').count(), 120);
     }
 
-    #[test]
-    fn paragraph_wrap_handles_zero_width_gracefully() {
-        // Width 0 should not panic or hang; it returns the input as-is or
-        // empty, but never produces a line wider than 0 (when 0 means "no
-        // budget at all"). This pins the early-return path against future
-        // regressions.
-        let rendered = render_paragraph_for_test("hello world", 0);
-        // Any output is acceptable (the path is degenerate); assert no panic.
-        let _ = rendered;
-    }
-
     fn rendered_text(rendered: &[Line<'static>]) -> String {
         rendered
             .iter()
