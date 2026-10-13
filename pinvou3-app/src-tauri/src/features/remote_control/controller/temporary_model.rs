@@ -28,6 +28,8 @@ pub(crate) const PACKAGE_SCHEMA: &str = "temporary_model_package/v1";
 pub(crate) const MAX_PACKAGE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_ID_CHARS: usize = 128;
 pub(crate) const MAX_DISPLAY_CHARS: usize = 128;
+// UTF-8 needs at most four bytes per Unicode scalar; this is not a package budget.
+const MAX_DISPLAY_BYTES: usize = MAX_DISPLAY_CHARS * 4;
 pub(crate) const MAX_MODEL_CHARS: usize = 256;
 pub(crate) const MAX_URL_CHARS: usize = 2048;
 pub(crate) const MAX_SECRET_BYTES: usize = super::protocol::MAX_TEMPORARY_MODEL_CREDENTIAL_BYTES;
@@ -231,9 +233,7 @@ impl ExportRoute {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.display_name.trim().is_empty()
-            || self.display_name.chars().count() > MAX_DISPLAY_CHARS
-        {
+        if self.display_name.trim().is_empty() || !display_name_within_budget(&self.display_name) {
             return Err(error("model_display_name_invalid"));
         }
         if !PRESETS.contains(&self.preset.as_str()) {
@@ -355,7 +355,7 @@ impl ExportRoute {
         let context_window_tokens = optional_u32(object, "context_window_tokens")?;
         let max_output_tokens = optional_u32(object, "max_output_tokens")?;
         Ok(Self {
-            display_name: required_text(object, "display_name", MAX_DISPLAY_CHARS)?,
+            display_name: required_display_name(object)?,
             preset: required_string(object, "preset", MAX_ID_CHARS)?,
             wire_api: required_string(object, "wire_api", MAX_ID_CHARS)?,
             base_url: required_string(object, "base_url", MAX_URL_CHARS)?,
@@ -611,6 +611,18 @@ fn required_text(
         return Err(error("model_package_field_invalid"));
     }
     Ok(value.to_owned())
+}
+
+fn display_name_within_budget(value: &str) -> bool {
+    value.len() <= MAX_DISPLAY_BYTES && value.chars().count() <= MAX_DISPLAY_CHARS
+}
+
+fn required_display_name(object: &Map<String, Value>) -> Result<String> {
+    let value = required_string(object, "display_name", MAX_DISPLAY_BYTES)?;
+    if !display_name_within_budget(&value) {
+        return Err(error("model_package_field_invalid"));
+    }
+    Ok(value)
 }
 
 fn required_string(
@@ -1126,6 +1138,102 @@ mod tests {
             has_secret: true,
             credential_action: None,
         }
+    }
+
+    #[test]
+    fn display_name_scalar_boundaries_round_trip_primary_and_fallback() {
+        assert_eq!(MAX_DISPLAY_CHARS, 128);
+        assert_eq!(MAX_DISPLAY_BYTES, 512);
+        for unit in ["a", "中", "日", "a中", "😀"] {
+            let name: String = unit.chars().cycle().take(128).collect();
+            assert_eq!(name.chars().count(), 128);
+            let mut exported = package("sk-test-only");
+            exported.primary.display_name = name.clone();
+            let mut fallback = route("https://api.openai.com/v1", "openai", "sk-test-fallback");
+            fallback.display_name = name.clone();
+            exported.vision_fallback = Some(fallback);
+            exported.validate().unwrap();
+            let wire = exported.to_wire_value();
+            let received = TemporaryModelPackageV1::from_wire_value(&wire).unwrap();
+            assert_eq!(received.primary.display_name, name);
+            assert_eq!(
+                received.vision_fallback.as_ref().unwrap().display_name,
+                name
+            );
+            assert_eq!(received.to_wire_value(), wire);
+            let mut oversized = wire.clone();
+            let rejected_name = format!("{name}a");
+            assert_eq!(rejected_name.chars().count(), 129);
+            oversized["primary"]["display_name"] = json!(rejected_name);
+            assert_eq!(
+                TemporaryModelPackageV1::from_wire_value(&oversized)
+                    .unwrap_err()
+                    .code,
+                "model_package_field_invalid"
+            );
+            oversized = wire.clone();
+            oversized["vision_fallback"]["route"]["display_name"] = json!(format!("{name}a"));
+            assert_eq!(
+                TemporaryModelPackageV1::from_wire_value(&oversized)
+                    .unwrap_err()
+                    .code,
+                "model_package_field_invalid"
+            );
+            exported.primary.display_name.push('a');
+            assert_eq!(
+                exported.validate().unwrap_err().code,
+                "model_display_name_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn display_name_whitespace_and_other_field_budgets_are_unchanged() {
+        for name in ["", " ", "\t\n", "　"] {
+            let mut exported = package("sk-test-only");
+            exported.primary.display_name = name.into();
+            assert_eq!(
+                exported.validate().unwrap_err().code,
+                "model_display_name_invalid"
+            );
+            assert_eq!(
+                TemporaryModelPackageV1::from_wire_value(&exported.to_wire_value())
+                    .unwrap_err()
+                    .code,
+                "model_display_name_invalid"
+            );
+        }
+        let mut exported = package("sk-test-only");
+        exported.primary.display_name = " 中😀 ".into();
+        let wire = exported.to_wire_value();
+        assert_eq!(
+            TemporaryModelPackageV1::from_wire_value(&wire)
+                .unwrap()
+                .to_wire_value(),
+            wire
+        );
+        let mut object = Map::new();
+        object.insert("model".into(), json!("中".repeat(MAX_MODEL_CHARS)));
+        assert_eq!(
+            required_string(&object, "model", MAX_MODEL_CHARS)
+                .unwrap_err()
+                .code,
+            "model_package_field_invalid"
+        );
+        assert_eq!(MAX_DISPLAY_BYTES, 512);
+        assert_eq!(MAX_PACKAGE_BYTES, 64 * 1024);
+        assert!(enforce_package_size(MAX_PACKAGE_BYTES).is_ok());
+        assert_eq!(
+            enforce_package_size(MAX_PACKAGE_BYTES + 1)
+                .unwrap_err()
+                .code,
+            "model_package_too_large"
+        );
+        exported.primary.display_name = "😀".repeat(MAX_PACKAGE_BYTES);
+        assert_eq!(
+            exported.enforce_size().unwrap_err().code,
+            "model_package_too_large"
+        );
     }
 
     #[test]
