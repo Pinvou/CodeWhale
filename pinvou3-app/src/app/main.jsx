@@ -3008,29 +3008,37 @@ const App = () => {
 
       // MegaCube 设备管理（DeviceManagerView）的 AI 动作入口：安装新模型、
       // 故障排查快捷卡和自定义提问都落到这里。与用户手点「新对话」完全一致地
-      // 物化一个普通新会话（默认模型、默认工具链），跳到聊天页后把后端
-      // device_doctor_prompt 拼好的提示词原样发出。materializeSession 立即
-      // 返回真实会话 id，sendMessage 走已物化路径直达发送，不经过
-      // scheduledTaskPendingGuide/restrictTools。失败不打断用户：设备管理页
-      // 上的按钮各自有 loading 态，这里只留一条诊断日志。
+      // 物化一个普通新会话（默认模型、默认工具链），把后端 device_doctor_prompt
+      // 拼好的提示词原样发出后跳到聊天页（发送在前：失败留在本页给 toast）。
+      // materializeSession 立即返回真实会话 id，sendMessage 走已物化路径直达
+      // 发送，不经过 scheduledTaskPendingGuide/restrictTools。transition 选项与
+      // handleNewChat/handleSwitchSession 同款（hideMode/sessionTarget 第四轮
+      // 评审补齐）。失败不打断用户：设备管理页上的按钮各自有 loading 态。
       const openDeviceDoctorChat = useCallback(async (prompt) => {
         // 返回值契约（设备管理页依赖）：true=已送达新会话；false=没发出去（桥
         // 不可用 / 中途离开设备页 / 发送失败）。视图据此保留用户输入并提示重试，
         // 不再静默吞掉失败（评审 P3：失败仅 console、输入被无声清空）。
         if (!bridge.available || !prompt) return false;
         try {
+          const sid = await bridge.sessions.materializeSession();
+          if (!sid) return false;
           const sent = await runBrowserUiTransition(async ({ isCurrent }) => {
-            const sid = await bridge.sessions.materializeSession();
-            if (!sid || !isCurrent()) return false;
+            if (!isCurrent()) return false;
+            // 先发送再跳转：发送失败时用户还留在设备管理页，「问题已保留，请
+            // 重试」的 toast 才有着落——先跳转的话视图已卸载，失败只剩一条
+            // console 日志（第四轮评审 P3）。发送成功后进入会话，消息与回复
+            // 随会话历史照常渲染。
+            await bridge.chat.sendMessage(prompt);
             setCodeModeOn(false);
             closeMobileSidebar();
             setCurrentView('chat');
             setActiveChat(sid);
-            await bridge.chat.sendMessage(prompt);
             return true;
           }, {
             channel: 'session',
+            hideMode: 'workspace',
             serialize: true,
+            sessionTarget: sid,
           });
           return sent === true;
         } catch (error) {

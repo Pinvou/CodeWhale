@@ -35,13 +35,16 @@ import {
   Wrench,
 } from '../../components/icons.jsx';
 import { bridge } from '../../hooks/useBridge.js';
-import { MonitorView } from '../monitor/MonitorView.jsx';
+import { MonitorView, MONITOR_CLOCK_LOCALE } from '../monitor/MonitorView.jsx';
 import { fetchLibrary, storeAvailability } from '../model-store/model-store-api.js';
 import { libraryStatusOf } from '../model-store/model-store-logic.js';
 import { buildSavedModel, findLinkedRows, isLocalGatewayUrl } from '../model-store/pinvou-model-link.js';
 import { MsButton, MsPill, MsToast } from '../model-store/model-store-ui.jsx';
 
 const TOAST_MS = 3200;
+// Two-step confirmation dead-zone (ms): long enough to absorb a double-click's
+// second click, short enough to feel instant (see armRemove).
+const CONFIRM_GATE_MS = 400;
 // Slow-cadence probe for model services (ollama/vllm/lmstudio/docker); the
 // bridge documents the same 10s rhythm next to pollDeviceServices.
 const SERVICES_POLL_MS = 10000;
@@ -59,9 +62,6 @@ const GPU_TEMP_CRIT_C = 90;
 const QUESTION_MAX = 2000;
 // The counter only appears near the limit so it never becomes noise.
 const COUNTER_THRESHOLD = 1800;
-
-// Locale map for the "updated at" clock, same convention as MonitorView.
-const CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
 
 // sensor chipKey (from bridge/device.js sensorChipKey) -> i18n key. Unknown
 // chipKey falls back to the raw chip text at render time.
@@ -150,21 +150,22 @@ const pctLevel = (pct, warnAt, critAt) => {
   return 'ok';
 };
 
-// Largest temperature across all sensor groups, parsed from the formatted
-// value text (the bridge only exposes display strings). Rendered as
-// Rendered as "Top sensor temp": the snapshot has no dedicated GPU temperature
-// source; this is the max across ALL temperature channels (NVMe, board, ...),
-// and a GPU-specific label would mislead the fix.
+// Hottest temperature entry across all sensor groups. The header chip reuses
+// the SAME bridge-computed warn/crit level as the sensor card — fixed header
+// thresholds used to contradict the per-channel limit the card showed for the
+// very same reading (round-4 review P3). "Top sensor temp" is the max across
+// ALL temperature channels (NVMe, board, ...): the snapshot has no dedicated
+// GPU temperature source, and a GPU-specific label would mislead.
 const maxSensorTemperature = (sensors) => {
-  let max = null;
+  let top = null;
   for (const group of Array.isArray(sensors) ? sensors : []) {
     for (const entry of Array.isArray(group?.entries) ? group.entries : []) {
       if (entry?.kind !== 'temperature') continue;
       const value = parseFloat(entry.valueText);
-      if (Number.isFinite(value) && (max == null || value > max)) max = value;
+      if (Number.isFinite(value) && (top == null || value > top.value)) top = entry;
     }
   }
-  return max;
+  return top == null ? null : { value: top.value, level: top.level };
 };
 
 const friendlyChipName = (group, copy) => {
@@ -203,13 +204,13 @@ const SectionShell = ({ id, icon: Icon, title, children }) => (
 const SensorGroupCard = ({ group, copy }) => (
   <div data-testid="device-manager-sensor-chip" className={`${CARD_CLASS} space-y-3 p-5`}>
     <div className="text-[13px] font-bold text-black/80 dark:text-white/80">{friendlyChipName(group, copy)}</div>
-    {(group.entries || []).map((entry, index) => {
+    {(group.entries || []).map((entry) => {
       const limitValue = entry.critical != null ? entry.critical : entry.max;
       const limitText = limitValue != null
         ? copy.critLimit(`${Math.round(limitValue)}${limitUnitOfKind(entry.kind)}`)
         : null;
       return (
-        <div key={`${entry.name}-${index}`} className="flex items-start justify-between gap-3">
+        <div key={`${entry.kind}-${entry.name}`} className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${LEVEL_DOT[entry.level] || LEVEL_DOT.ok}`} />
@@ -237,7 +238,11 @@ const SensorGroupCard = ({ group, copy }) => (
 
 const DiskRow = ({ disk, copy }) => {
   const level = pctLevel(disk.usedPct, DISK_WARN_PCT, DISK_CRIT_PCT);
-  const known = disk.totalText !== '\u2014';
+  // usageKnown comes from the bridge (total and available both present): the
+  // row no longer couples to the em-dash display string. A disk with a total
+  // but no available value used to render as a 0-width green bar that read as
+  // "empty disk" (round-4 review P3).
+  const known = disk.usageKnown === true;
   return (
     <div data-testid="device-manager-disk-row" className={`${CARD_CLASS} p-5`}>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -314,8 +319,8 @@ const ProcList = ({ title, rows, metricKey, testId, placeholder = null }) => (
       <div className={`text-[12px] ${MUTED_TEXT}`}>{placeholder || '\u2014'}</div>
     ) : (
       <div className="space-y-2">
-        {rows.map((proc, index) => (
-          <div key={`${proc.pid}-${index}`} className="flex items-center justify-between gap-3 text-[13px]">
+        {rows.map((proc) => (
+          <div key={`${proc.pid}`} className="flex items-center justify-between gap-3 text-[13px]">
             <span className="min-w-0 truncate text-black/75 dark:text-white/75">
               {proc.name} <span className={`font-mono text-[11px] ${MUTED_TEXT}`}>#{proc.pid}</span>
             </span>
@@ -393,9 +398,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     // "nothing installed" hint, which reads as a fact instead of the read
     // failure it is (same surface rule as the manual Refresh button).
     if (typeof dev.fetchExternalModels === 'function') {
-      dev.fetchExternalModels().catch((error) => {
-        showToast(copy.refreshFailed(String(error?.message || error)));
-      });
+      dev.fetchExternalModels()
+        .then(() => setExternalFetchError(null))
+        .catch((error) => {
+          setExternalFetchError(String(error?.message || error));
+          showToast(copy.refreshFailed(String(error?.message || error)));
+        });
     }
     return () => {
       clearInterval(servicesTimer);
@@ -417,9 +425,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     const dev = (window.TauriBridge || bridge)?.device;
     if (!dev?.fetchExternalModels) return;
     // Swallowing the rejection makes Refresh look dead: surface a human-readable failure.
-    dev.fetchExternalModels().catch((error) => {
-      showToast(copy.refreshFailed(String(error?.message || error)));
-    });
+    dev.fetchExternalModels()
+      .then(() => setExternalFetchError(null))
+      .catch((error) => {
+        setExternalFetchError(String(error?.message || error));
+        showToast(copy.refreshFailed(String(error?.message || error)));
+      });
   }, [copy, showToast]);
 
   // ── Model store (read-only here) ─────────────────────────────────
@@ -463,6 +474,26 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const [busyKey, setBusyKey] = useState(null);
   const [armedRemoveId, setArmedRemoveId] = useState(null);
   const [deleteWeights, setDeleteWeights] = useState(false);
+  // Two-step confirmation gate: the armed cluster replaces the Remove button in
+  // place, so the second click of a plain double-click would land on whatever
+  // now occupies those coordinates — the confirm button (immediate removal on
+  // rows without weights) or the delete-weights checkbox (silently pre-arming
+  // the destructive option). A short dead-zone after arming turns that gesture
+  // back into two deliberate steps (round-4 review P2).
+  const [confirmGateReady, setConfirmGateReady] = useState(true);
+  const confirmGateTimerRef = useRef(null);
+  useEffect(() => () => { if (confirmGateTimerRef.current) clearTimeout(confirmGateTimerRef.current); }, []);
+  // Initial fetch failure must not read as the "nothing installed" fact: keep
+  // an error slot so the empty area can show the real read failure + retry
+  // (round-4 review P3).
+  const [externalFetchError, setExternalFetchError] = useState(null);
+
+  // Identity for armed/busy keys: source-qualified row name. The NAME (not the
+  // id) stays the user-facing identity through the quiet re-register id swap
+  // (round-3 review P2); the source qualifier keeps a registry row and an
+  // Ollama-listing row that share a name from arming/busying together — the
+  // registry does not enforce name uniqueness across kinds (round-4 review P3).
+  const rowKey = (row) => `${row.source || 'registry'}:${row.name}`;
 
   const isRowLinked = (row) => findLinkedRows(bs?.savedModels, row.model, row.name).length > 0;
 
@@ -485,7 +516,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       showToast(copy.linkDisabledRemote);
       return;
     }
-    setBusyKey(`link:${row.name}`);
+    setBusyKey(`link:${rowKey(row)}`);
     try {
       // findLinkedRows takes (...names): pass both the registry model and the
       // listing name so a relink updates the already-saved row in place
@@ -501,7 +532,9 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       if (liveBridge.models.setActiveModel) await liveBridge.models.setActiveModel(saved.id);
       showToast(copy.linkDone);
     } catch (error) {
-      showToast(String(error?.message || error));
+      // Same localized-prefix discipline as removeFailed/refreshFailed: a raw
+      // backend string alone reads as a foreign system error (round-4 review P3).
+      showToast(copy.linkFailed(String(error?.message || error)));
     } finally {
       setBusyKey(null);
     }
@@ -515,9 +548,17 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // name the user-facing identity of a row.
   const armRemove = useCallback((row) => {
     setDeleteWeights(false);
-    setArmedRemoveId(row.name);
+    setConfirmGateReady(false);
+    if (confirmGateTimerRef.current) clearTimeout(confirmGateTimerRef.current);
+    confirmGateTimerRef.current = setTimeout(() => setConfirmGateReady(true), CONFIRM_GATE_MS);
+    setArmedRemoveId(rowKey(row));
   }, []);
-  const cancelRemove = useCallback(() => setArmedRemoveId(null), []);
+  const cancelRemove = useCallback(() => {
+    setArmedRemoveId(null);
+    setDeleteWeights(false);
+    setConfirmGateReady(true);
+    if (confirmGateTimerRef.current) clearTimeout(confirmGateTimerRef.current);
+  }, []);
 
   // Guarded removal through the backend command. Ollama rows that were listed
   // straight from the local service (not yet in the registry) have no usable
@@ -527,7 +568,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const confirmRemove = useCallback(async (row) => {
     const dev = (window.TauriBridge || bridge)?.device;
     if (!dev?.removeExternalModel) return;
-    setBusyKey(`remove:${row.name}`);
+    setBusyKey(`remove:${rowKey(row)}`);
     try {
       let id = row.id;
       if (row.source === 'ollama' && !row.registered) {
@@ -572,8 +613,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
         cleanupErrorText = 'bridge unavailable';
         cleanupOk = false;
       }
-      setArmedRemoveId(null);
-      setDeleteWeights(false);
+      const completedKey = rowKey(row);
+      if (armedRemoveId === completedKey) {
+        setArmedRemoveId(null);
+        setDeleteWeights(false);
+      }
       // One aggregated toast: the single-slot toast used to show only the LAST
       // warning, drowning both the backend warnings and the cleanup failure
       // (round-3 review P2). Outcome + warnings travel together now.
@@ -592,7 +636,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
     } finally {
       setBusyKey(null);
     }
-  }, [bs, copy, deleteWeights, showToast]);
+  }, [armedRemoveId, bs, copy, deleteWeights, showToast]);
 
   // ── AI doctor actions ────────────────────────────────────────────
   const [doctorBusy, setDoctorBusy] = useState(null);
@@ -630,8 +674,8 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   const subtitleParts = [deviceFmt?.osPrettyName, deviceFmt?.kernel, deviceFmt?.arch].filter(Boolean);
   const rootDisk = (deviceFmt?.disks || []).find((disk) => disk.isRoot) || null;
   const ramPct = typeof monitorFmt?.ramPct === 'number' ? monitorFmt.ramPct : null;
-  const gpuTemp = maxSensorTemperature(deviceFmt?.sensors);
-  const locale = CLOCK_LOCALE[t.langTag] || 'zh-CN';
+  const topTemp = maxSensorTemperature(deviceFmt?.sensors);
+  const locale = MONITOR_CLOCK_LOCALE[t.langTag] || 'zh-CN';
   // updatedAt is when the data last changed (frozen under display-equivalence
   // suppression) — exactly what the label should say. No more 10s tick that
   // re-renders the whole tree without changing a single displayed value.
@@ -661,7 +705,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
               {subtitleParts.length > 0 ? subtitleParts.join(' \u00B7 ') : copy.loading}
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              {rootDisk && rootDisk.totalText !== '\u2014' && (
+              {rootDisk?.usageKnown === true && (
                 <HealthChip
                   label={copy.chipDisk}
                   value={`${rootDisk.usedPct}%`}
@@ -675,11 +719,13 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                   level={pctLevel(ramPct, DISK_WARN_PCT, DISK_CRIT_PCT)}
                 />
               )}
-              {gpuTemp != null && (
+              {topTemp != null && (
                 <HealthChip
                   label={copy.chipMaxTemp}
-                  value={`${gpuTemp}\u00B0C`}
-                  level={pctLevel(gpuTemp, GPU_TEMP_WARN_C, GPU_TEMP_CRIT_C)}
+                  value={`${topTemp.value}\u00B0C`}
+                  // Same bridge-computed level as the sensor card; the fixed
+                  // thresholds only apply when the level is missing.
+                  level={topTemp.level || pctLevel(topTemp.value, GPU_TEMP_WARN_C, GPU_TEMP_CRIT_C)}
                 />
               )}
               {deviceFmt?.gpuExt?.driverVersion && (
@@ -741,8 +787,8 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
               <div className={`${CARD_CLASS} p-6 text-center text-[13px] ${MUTED_TEXT}`}>{copy.sensorEmpty}</div>
             ) : (
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                {deviceFmt.sensors.map((group, index) => (
-                  <SensorGroupCard key={`${group.chip}-${index}`} group={group} copy={copy} />
+                {deviceFmt.sensors.map((group) => (
+                  <SensorGroupCard key={group.chip} group={group} copy={copy} />
                 ))}
               </div>
             )}
@@ -947,9 +993,16 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     const target = linkTargetOf(row);
                     const linkable = !!(target.model && target.baseUrl && isLocalGatewayUrl(target.baseUrl));
                     const remoteOnly = !!(target.model && target.baseUrl && !isLocalGatewayUrl(target.baseUrl));
-                    const armed = armedRemoveId === row.name;
+                    const rowIdentity = rowKey(row);
+                    const armed = armedRemoveId === rowIdentity;
                     const kindLabel = copy[KIND_LABEL_KEYS[row.kind] || 'kindOther'];
-                    const rowBusy = busyKey === `link:${row.name}` || busyKey === `remove:${row.name}`;
+                    const rowBusy = busyKey === `link:${rowIdentity}` || busyKey === `remove:${rowIdentity}`;
+                    // Daemon rows whose model name is store-managed only fail at
+                    // confirm time today (backend boundary rejects the quiet
+                    // registration); pre-disable with the same managed hint so
+                    // the user learns before arming (round-4 review P3).
+                    const managedByStore = storeRows.some((record) =>
+                      String(record.model_name || '').toLowerCase() === row.name.toLowerCase());
                     return (
                       <div
                         key={row.id || row.name}
@@ -1001,7 +1054,7 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                           ) : (linkable && (
                             <MsButton
                               tone="ghost"
-                              busy={busyKey === `link:${row.name}`}
+                              busy={busyKey === `link:${rowIdentity}`}
                               // Never link an unreachable model: linking also
                               // makes it the default model, and an unreachable
                               // default breaks every new chat (same reasoning
@@ -1034,14 +1087,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                                 </label>
                               )}
                               {deleteWeights && (
-                                <span className={`text-[11px] ${'text-[#A15C07] dark:text-[#FDD663]'}`}>
+                                <span className="text-[11px] text-[#A15C07] dark:text-[#FDD663]">
                                   {copy.removeIrreversible}
                                 </span>
                               )}
                               <MsButton
                                 tone="danger"
-                                busy={busyKey === `remove:${row.name}`}
-                                disabled={rowBusy}
+                                busy={busyKey === `remove:${rowIdentity}`}
+                                disabled={rowBusy || !confirmGateReady}
                                 onClick={() => confirmRemove(row)}
                                 data-testid="device-manager-remove-confirm"
                               >
@@ -1059,7 +1112,8 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                           ) : (
                             <MsButton
                               tone="danger"
-                              disabled={rowBusy}
+                              disabled={rowBusy || managedByStore}
+                              title={managedByStore ? copy.storeManaged : undefined}
                               onClick={() => armRemove(row)}
                               data-testid="device-manager-remove"
                             >
@@ -1082,10 +1136,20 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                 </p>
               )}
 
-              {/* Empty guidance: nothing installed anywhere. */}
+              {/* Empty guidance: nothing installed anywhere. A failed read must
+                  not degrade into the "nothing installed" fact — show the real
+                  failure with a retry (round-4 review P3). */}
               {storeRows.length === 0 && externalModels.length === 0 && (
                 storeState === 'loading' && !external ? (
                   <div className={`py-4 text-center text-[13px] ${MUTED_TEXT}`}>{copy.loading}</div>
+                ) : externalFetchError ? (
+                  <div
+                    data-testid="device-manager-models-error"
+                    className="flex flex-wrap items-center justify-center gap-2 py-4 text-center text-[13px] text-[#A15C07] dark:text-[#FDD663]"
+                  >
+                    <span className="min-w-0 break-words">{copy.refreshFailed(externalFetchError)}</span>
+                    <MsButton tone="ghost" onClick={refreshExternal}>{copy.retry}</MsButton>
+                  </div>
                 ) : (
                   <div
                     data-testid="device-manager-models-empty"

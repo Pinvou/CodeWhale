@@ -365,6 +365,7 @@ const jaBase = {
           removeWeightsPath:path=>`削除する重みディレクトリ：${path}`,
           removeIrreversible:'削除は元に戻せません。モデルの重みディレクトリであることを先に確認してください。',
           linkDisabledUnreachable:'現在到達できないため接続できません。サービスの起動を確認してから再試行してください。',
+          linkFailed:(e)=>`接続に失敗しました：${e}`,
           doctorSendFailed:'トラブルシューティング用チャットを開始できませんでした。質問は保持されているので、再試行してください。',
           refreshFailed:e=>`外部モデルの更新に失敗しました：${e}`,
           linkRowStale:(name,e)=>`「${name}」は削除されましたが、PINVOU のモデル一覧の対応行を削除できませんでした（${e}）。その行は現在使えないため、設定から手動で削除してください。`,

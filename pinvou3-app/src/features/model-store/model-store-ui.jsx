@@ -212,8 +212,17 @@ function MsToast({ toast }) {
   return (
     <div
       data-testid="model-store-toast"
-      className="pointer-events-none fixed bottom-6 left-1/2 z-[240] -translate-x-1/2 rounded-full px-4 py-2.5 text-[13px] font-medium text-white bg-[rgba(32,33,36,.94)] dark:bg-[rgba(232,234,237,.94)] dark:text-[#202124]"
+      // 聚合提示（设备管理移除的 outcome+警告）以 \n 分行：没有 whitespace-pre-line
+      // 时 HTML 折叠成一行长文，多行块撑在 rounded-full 胶囊里也无法读（第四轮
+      // 评审 P2）。多行时放宽圆角与最大宽度；role/aria-live 让读屏器播报结果。
+      className={`pointer-events-none fixed bottom-6 left-1/2 z-[240] max-w-[min(90vw,560px)] -translate-x-1/2 bg-[rgba(32,33,36,.94)] px-4 py-2.5 text-[13px] font-medium text-white dark:bg-[rgba(232,234,237,.94)] dark:text-[#202124] ${
+        String(toast.text || '').includes('\n')
+          ? 'whitespace-pre-line rounded-2xl text-left leading-5'
+          : 'whitespace-nowrap rounded-full'
+      }`}
       style={{ boxShadow: '0 8px 24px rgba(0,0,0,.28)' }}
+      role="status"
+      aria-live="polite"
     >
       {toast.text}
     </div>

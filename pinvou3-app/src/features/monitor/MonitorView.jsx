@@ -5,7 +5,8 @@ import { bridge } from '../../hooks/useBridge.js';
 import { formatCompactCount } from '../../shared/format-number.js';
 import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
 
-// 界面语言 → BCP 47 locale，用于时钟等本地化格式化
+// 界面语言 → BCP 47 locale，用于时钟等本地化格式化（设备管理页的内嵌卡片
+// 复用同一映射，第四轮评审 P3 收敛重复声明）。
 const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
 
     const MONITOR_BRAND_ICONS = {
@@ -581,5 +582,5 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
 
     // 统一排版原语：卡片 / 行(label 左 + 控件右) / 纵向输入字段 / 分段选择 / 改动操作条
 
-export { MonitorView };
+export { MonitorView, MONITOR_CLOCK_LOCALE };
 /* eslint-enable sonarjs/cognitive-complexity -- legacy view; tracked separately */

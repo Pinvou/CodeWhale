@@ -368,6 +368,7 @@ export const dictZh = {
           removeWeightsPath:path=>`将删除的权重目录：${path}`,
           removeIrreversible:'删除不可恢复，请先确认这确实是模型权重目录。',
           linkDisabledUnreachable:'当前探测不可达，暂不能接入；请先确认服务已启动再试。',
+          linkFailed:e=>`接入失败：${e}`,
           doctorSendFailed:'排查会话没有发出去，你的问题已保留，请重试。',
           refreshFailed:e=>`外部模型刷新失败：${e}`,
           linkRowStale:(name,e)=>`「${name}」已移除，但品悟模型列表里的对应配置没能移除（${e}）。它已不可用，请到设置里手动删除。`,

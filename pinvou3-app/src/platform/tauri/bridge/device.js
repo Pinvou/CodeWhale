@@ -113,15 +113,19 @@
       var d = disk || {};
       var total = typeof d.total_bytes === "number" && isFinite(d.total_bytes) ? d.total_bytes : null;
       var available = typeof d.available_bytes === "number" && isFinite(d.available_bytes) ? d.available_bytes : null;
+      // 用量是否真实可知（总/可用都到位且总量为正）：视图凭这个布尔决定渲染
+      // 用量条还是"容量未知"占位——不再耦合 em-dash 展示字符串（有总量没可用
+      // 的盘曾因此渲染成 0 宽绿条，读作"空盘"）。usedPct 在不可知时保持 0，
+      // 只是永远不会被渲染（第四轮评审 P3）。
+      var usageKnown = total != null && total > 0 && available != null;
       return {
         mountPoint: d.mount_point ? String(d.mount_point) : "—",
         fsType: d.fs_type ? String(d.fs_type) : "—",
         kindLabel: d.kind === "ssd" ? "SSD" : (d.kind === "hdd" ? "HDD" : null),
         totalText: fmtBytes(total),
         availableText: fmtBytes(available),
-        // 缺任一实测值不给百分比（宁缺勿把未知渲染成「已满/已空」）。
-        usedPct: total != null && total > 0 && available != null
-          ? Math.min(100, fmtPct((total - available) / total * 100)) : 0,
+        usageKnown: usageKnown,
+        usedPct: usageKnown ? Math.min(100, fmtPct((total - available) / total * 100)) : 0,
         isRoot: d.mount_point === "/",
       };
     });
@@ -235,6 +239,31 @@
     return true;
   }
 
+  // Structural deep-equality for the services/external-models suppression
+  // baselines. JSON.stringify was order-sensitive: a map-shaped field flipping
+  // serialization order would defeat suppression (extra notifies, never wrong
+  // data). Primitive comparison is strict — these payloads carry no jittering
+  // numerics (the snapshot path keeps its 0.5 tolerance in deviceFmtEqual).
+  function structuralEqual(a, b) {
+    if (a === b) return true;
+    if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    if (Array.isArray(a)) {
+      if (a.length !== b.length) return false;
+      for (var i = 0; i < a.length; i++) {
+        if (!structuralEqual(a[i], b[i])) return false;
+      }
+      return true;
+    }
+    var keys = Object.keys(a);
+    if (keys.length !== Object.keys(b).length) return false;
+    for (var j = 0; j < keys.length; j++) {
+      if (!Object.prototype.hasOwnProperty.call(b, keys[j])) return false;
+      if (!structuralEqual(a[keys[j]], b[keys[j]])) return false;
+    }
+    return true;
+  }
+
   // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
   async function pollDevice() {
     if (devicePollInFlight) return;
@@ -306,7 +335,7 @@
       // 首拍必须落地（state.deviceServices 还是 null）：基线用 null 短路，否则
       // "null || []" 会把首个空结果吞掉，视图的 loading 永远不退（第三轮评审 P2）。
       state.deviceServicesError = null;
-      if (!state.deviceServices || JSON.stringify(next) !== JSON.stringify(state.deviceServices)) {
+      if (!state.deviceServices || !structuralEqual(next, state.deviceServices)) {
         state.deviceServices = next;
         notifyDomains(["device"]);
       }
@@ -330,8 +359,9 @@
   async function fetchExternalModels() {
     var view = await invoke("get_external_models");
     // 无变化不下发（登记/移除后的回读常常逐字节一致，不值得一次全域重渲染）。
+    // 结构比较而非 JSON.stringify：键序翻转不再击穿抑制（第四轮评审 P3）。
     var next = view || null;
-    if (JSON.stringify(next) !== JSON.stringify(state.externalModels || null)) {
+    if (!structuralEqual(next, state.externalModels || null)) {
       state.externalModels = next;
       notifyDomains(["device"]);
     }
