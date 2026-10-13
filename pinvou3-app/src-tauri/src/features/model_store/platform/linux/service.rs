@@ -57,6 +57,42 @@ fn is_prompt_line(line: &str) -> bool {
     t.starts_with(script_runner::PROMPT_MARKER) || t.starts_with(script_runner::PROMPT_FORM_MARKER)
 }
 
+/// Docker pull 会为每一层反复重绘同一行，例如
+/// `[安装引擎] a1b2c3d4: Downloading [====>] 1.2GB/4GB`。
+///
+/// 界面侧需要这些行来汇总成一条可读的「镜像层 / 估算进度」，所以不能在进入
+/// `RunLog` 前整体丢掉；但把每一次重绘都写进持久日志，会在长下载尚未结束时把
+/// 4 MiB 的诊断配额耗尽，真正的错误和结束结果反而落不进去。这里严格识别 Docker
+/// 的层格式，只让它跳过**磁盘副本**。普通 Docker 信息、错误，以及任意非 Docker
+/// 的 `hex: 内容` 行仍照常保留。
+fn is_docker_layer_progress_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let body = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once("] ").map(|(_, body)| body.trim()))
+        .unwrap_or(trimmed);
+    let Some((layer, status)) = body.split_once(": ") else {
+        return false;
+    };
+    if !(8..=64).contains(&layer.len()) || !layer.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    let status = status.trim().to_ascii_lowercase();
+    [
+        "pulling fs layer",
+        "waiting",
+        "downloading",
+        "download complete",
+        "extracting",
+        "pull complete",
+        "verifying checksum",
+        "already exists",
+        "layer already exists",
+    ]
+    .iter()
+    .any(|prefix| status.starts_with(prefix))
+}
+
 // ---------------------------------------------------------------- 运行记录
 
 /// 有上限的行缓冲，**同时保住长轮询的绝对游标语义**。
@@ -114,6 +150,8 @@ struct RunLog {
     /// 落盘句柄。**开不出来就是 `None`，操作照常跑**——日志是诊断手段，不是功能，
     /// 为了记日志而让用户下不了模型是本末倒置。
     disk: Option<RunLogFile>,
+    /// Docker 层的逐帧刷新不落盘时，留一条说明，避免诊断人员以为日志突然缺了一段。
+    docker_progress_notice_emitted: Mutex<bool>,
     /// `None` = 还在跑；`Some(Ok(v))` = 成功及其返回值；`Some(Err(msg))` = 失败
     outcome: Mutex<Option<Result<Value, String>>>,
     /// 用户主动取消。取消在底层也是一个 Err，但对用户是两回事——"你点了取消"
@@ -137,6 +175,7 @@ impl RunLog {
         Self {
             lines: Mutex::new(LineRing::new()),
             disk: RunLogFile::open(run_id, label),
+            docker_progress_notice_emitted: Mutex::new(false),
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
             awaiting_prompt: Mutex::new(false),
@@ -152,8 +191,18 @@ impl RunLog {
         // 落盘挂在这里、而不是在 pty 读取循环里另开一个出口：这一条是「已经
         // strip_ansi 过、已经切好行、已经加过阶段前缀」的唯一汇聚点，挂在它后面
         // 就自动继承了那些处理。落盘前还要过一道定向脱敏，见 run_log_store。
+        // Docker 的层刷新例外：界面会聚合它，磁盘只留一次说明，以保证错误/结局
+        // 不会被数万次重绘挤掉。
         if let Some(disk) = self.disk.as_ref() {
-            disk.append(line);
+            if is_docker_layer_progress_line(line) {
+                let mut emitted = self.docker_progress_notice_emitted.lock();
+                if !*emitted {
+                    disk.append("Docker 镜像层进度已在界面中汇总显示；日志省略重复的逐层刷新。");
+                    *emitted = true;
+                }
+            } else {
+                disk.append(line);
+            }
         }
         self.lines.lock().push(line);
         self.notify.notify_waiters();
@@ -168,6 +217,7 @@ impl RunLog {
         Self {
             lines: Mutex::new(LineRing::new()),
             disk: None,
+            docker_progress_notice_emitted: Mutex::new(false),
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
             awaiting_prompt: Mutex::new(false),
@@ -564,9 +614,25 @@ pub async fn memory_admission(card_id: String) -> Result<Value, String> {
 
 /// 删除未被任何模型绑定的、且当前客户端有安全删除方式的引擎。
 pub async fn delete_engine(
+    service: &Arc<ModelStoreService>,
     engine_name: String,
     engine_version: Option<String>,
 ) -> Result<Value, String> {
+    // 已下载的模型才会写入 store_models；正在下载或部署的卡片尚未必有一条
+    // 可供 affected_models 查到的记录。若此时按“没有模型绑定”删除引擎，会让
+    // 当前任务在末尾失去可复用的运行环境，下一步又得重下几十 GB。因此删除
+    // 引擎必须同时避开所有活跃的模型商店操作。
+    let active = service.active.active_runs();
+    if !active.is_empty() {
+        let operations = active
+            .iter()
+            .map(|run| format!("「{}」正在{}", run.card_id, run.label))
+            .collect::<Vec<_>>()
+            .join("、");
+        return Err(format!(
+            "当前{operations}。为避免中断下载、部署或启停操作，请等待这些任务结束后再删除推理引擎。"
+        ));
+    }
     tokio::task::spawn_blocking(move || {
         let manager = ModelManager::new(None, None);
         let current = manager.list_installed_engines();
@@ -1028,6 +1094,28 @@ pub fn force_remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_layer_refreshes_are_recognized_without_hiding_real_messages() {
+        assert!(is_docker_layer_progress_line(
+            "[安装引擎] ae5a106b6076: Pulling fs layer"
+        ));
+        assert!(is_docker_layer_progress_line(
+            "7014a14111a1: Downloading [====>    ] 1.967GB/4.07GB"
+        ));
+        assert!(is_docker_layer_progress_line("abcdef123456: Pull complete"));
+
+        // 这两类信息能解释下载结果，绝不能为了节省日志空间一并吞掉。
+        assert!(!is_docker_layer_progress_line(
+            "Status: Downloaded newer image for lmsysorg/sglang:v0.5.16-cu130"
+        ));
+        assert!(!is_docker_layer_progress_line(
+            "脚本执行失败：镜像源返回 429"
+        ));
+        assert!(!is_docker_layer_progress_line(
+            "not-a-layer: Downloading [====>] 1GB/4GB"
+        ));
+    }
 
     /// 「现在还有没有提示在等人答」只有后端知道，而这件事必须由后端说了算。
     ///

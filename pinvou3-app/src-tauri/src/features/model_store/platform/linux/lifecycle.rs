@@ -56,6 +56,11 @@ fi
 echo "ollama 已卸载"
 "#;
 
+/// 驭光原生引擎的稳定身份键。`engine_label` 才是给用户展示的文案；不能再把
+/// 展示名的改动当成一次新引擎安装。版本取二进制 SHA-256 的前 8 位，和引擎
+/// 实际落盘目录一一对应。
+const NATIVE_TACHYON_ENGINE_NAME: &str = "驭光（H3C自研推理引擎）";
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DownloadResult {
     pub model_name: String,
@@ -297,6 +302,27 @@ fn may_run_as_root(script_type: &str) -> bool {
     script_type == "install_engine"
 }
 
+/// 返回卡片固化脚本声明的驭光二进制版本（完整 SHA 的前 8 位）。
+///
+/// 这不是通用 Shell 解析器：只接受驭光交付包里那条明确的
+/// `ENGINE_BIN_SHA256="..."` 声明，并同时要求脚本写明 tachyon-serve 的受管
+/// 目录。任何不满足格式的旧卡都不迁移，宁可保留旧关联，不能把其他厂商的引擎
+/// 误归为驭光。
+fn native_tachyon_version(record: &db::StoreModelRecord) -> Option<String> {
+    let script = &record.scripts_content.get("install_engine")?.content;
+    if !script.contains("tachyon-serve") || !script.contains("local-model-manager/engines") {
+        return None;
+    }
+    let value = script.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("ENGINE_BIN_SHA256=")?;
+        Some(value.trim().trim_matches(['\"', '\'']))
+    })?;
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(value[..8].to_ascii_lowercase())
+}
+
 /// 一张卡片抓下来的完整脚本包：六个入口脚本 + 附属文件。
 struct CardPackage {
     scripts: BTreeMap<String, db::ScriptBlob>,
@@ -357,6 +383,27 @@ impl ScriptsSource {
                 .as_ref()
                 .and_then(|h| h.get(script_type))
                 .cloned(),
+        }
+    }
+
+    /// 取一份可随已安装引擎长期保存的可选脚本。`uninstall_engine` 不属于模型
+    /// 生命周期必须的六类脚本：老卡片没有它不能妨碍下载；新卡片提供它时，则
+    /// 在引擎安装完成的同一事务里固化，之后即使模型记录被删除也还有安全的清理
+    /// 契约可用。
+    fn optional_script_blob(
+        &self,
+        script_type: &str,
+    ) -> Result<Option<db::ScriptBlob>, ModelManagerError> {
+        match self {
+            Self::Local { blobs, .. } => Ok(blobs.get(script_type).cloned()),
+            Self::Remote { scripts, .. } if !scripts.contains_key(script_type) => Ok(None),
+            Self::Remote { .. } => {
+                let content = self.entry_content(script_type, self.fetch_policy(script_type))?;
+                Ok(Some(db::ScriptBlob {
+                    sha256: script_runner::sha256_hex(&content),
+                    content,
+                }))
+            }
         }
     }
 
@@ -1144,6 +1191,18 @@ impl ModelManager {
             // ollama 就没有），供"已安装引擎"的删除功能精确 docker rmi。
             docker_image = extract_marker(&install_lines, "LMM_ENGINE_IMAGE=");
         }
+        // 独立清理脚本不是下载前提：老卡片没有它、或弱网下一次补取失败，都不能
+        // 让已经验证好的模型权重下载功亏一篑。缺失时只是不开放“删除原生引擎”。
+        let cleanup_script = match source.optional_script_blob("uninstall_engine") {
+            Ok(script) => script,
+            Err(error) => {
+                eprintln!(
+                    "[download] 未能固化原生引擎清理脚本（{}）：{error}",
+                    card.summary.id
+                );
+                None
+            }
+        };
         db::mark_engine_installed(
             &card.summary.engine_name,
             card.summary.engine_version.as_deref(),
@@ -1151,6 +1210,7 @@ impl ModelManager {
             // 记下这次跑的 install_engine 是哪个版本；下次比对哈希决定要不要
             // 为了刷新部署包再跑一遍
             current_hash.as_deref(),
+            cleanup_script.as_ref(),
         )
         .map_err(|e| ModelManagerError::new(format!("记录引擎安装状态失败：{e}")))?;
 
@@ -2283,6 +2343,13 @@ impl ModelManager {
     // 全部模型绑定、且客户端有明确清理契约的引擎。
 
     pub fn list_installed_engines(&self) -> Vec<InstalledEngineInfo> {
+        // 先把历史上“展示名误作身份键”的驭光记录迁到二进制真实版本。迁移只
+        // 改数据库关联，不移动、更不删除任何引擎目录；随后仍以探针确认实体。
+        self.migrate_native_engine_identities();
+        // 存量用户不应为取得一份几 KB 的清理契约而重新下载几十 GB 模型权重。
+        // 这里仅在本机已有对应原生引擎、且记录尚未有契约时，从商店按哈希补取。
+        // 网络不可用就维持“不可自动删除”，绝不退化成猜路径删除。
+        self.refresh_native_engine_cleanup_contracts();
         let Ok(records) = db::list_installed_engines() else {
             return Vec::new();
         };
@@ -2305,6 +2372,14 @@ impl ModelManager {
                         return None;
                     }
                     (Some(size), true)
+                } else if let Some(cleanup_script) = rec.cleanup_script.as_ref() {
+                    // 新版原生引擎必须用随引擎固化的清理契约探测。它能在模型
+                    // 记录已经删掉后依然验明实体、给出真实大小，不能再依赖一张
+                    // 恰好仍留在数据库里的模型卡片。
+                    let Some(size) = native_engine_cleanup_probe(cleanup_script) else {
+                        return None;
+                    };
+                    (size, true)
                 } else {
                     let Some(model) = models.iter().find(|model| {
                         model.engine_name == rec.engine_name
@@ -2320,9 +2395,9 @@ impl ModelManager {
                     {
                         return None;
                     }
-                    // 非 docker 的厂商交付引擎暂未下发独立的清理契约；显示真实存在
-                    // 的实体，但绝不猜路径 `rm -rf`。等卡片提供 uninstall_engine 后
-                    // 再把这一项开放为可删除。
+                    // 老版原生引擎尚未下发独立清理契约；显示真实存在的实体，但
+                    // 绝不猜路径 `rm -rf`。用户重新下载/更新到含清理契约的卡片
+                    // 后，新的安装记录会接管这一项。
                     (None, false)
                 };
                 let affected = db::list_model_names_using_engine(
@@ -2340,6 +2415,94 @@ impl ModelManager {
                 })
             })
             .collect()
+    }
+
+    /// 从已固化的 install_engine 脚本读取驭光二进制的内容指纹，并将历史记录
+    /// 迁到稳定的 (engine_name, engine_version) 键。不能按卡片名称、目录名或
+    /// 仅 8 位前缀猜测：只有卡片自己锁定的完整 SHA-256 才足以说明两者是同一
+    /// 个原生二进制。
+    fn migrate_native_engine_identities(&self) {
+        let Ok(models) = db::list_store_models() else {
+            return;
+        };
+        for model in models {
+            let Some(version) = native_tachyon_version(&model) else {
+                continue;
+            };
+            if let Err(error) = db::migrate_engine_identity(
+                &model.card_id,
+                NATIVE_TACHYON_ENGINE_NAME,
+                Some(&version),
+            ) {
+                // 迁移只是兼容修复；列表不能因为某一条旧数据写不进去而整体不可用。
+                eprintln!(
+                    "[model-store] 迁移原生引擎身份失败（{}）：{error}",
+                    model.card_id
+                );
+            }
+        }
+    }
+
+    /// 为旧安装记录补取原生引擎的独立清理契约。
+    ///
+    /// 卡片的六类日常脚本下载成功时会固化进模型记录；`uninstall_engine` 是后加的
+    /// 可选契约，老记录自然没有。只同步它本身（并强制校验商店下发的哈希），不
+    /// 重跑安装、不会碰权重、不会改变部署状态。
+    fn refresh_native_engine_cleanup_contracts(&self) {
+        let Ok(models) = db::list_store_models() else {
+            return;
+        };
+        for model in models {
+            let Some(version) = native_tachyon_version(&model) else {
+                continue;
+            };
+            let already_present =
+                db::get_installed_engine(NATIVE_TACHYON_ENGINE_NAME, Some(&version))
+                    .ok()
+                    .flatten()
+                    .is_some_and(|engine| engine.cleanup_script.is_some());
+            if already_present {
+                continue;
+            }
+            let card = match self.store.get_card(&model.card_id) {
+                Ok(card) => card,
+                Err(error) => {
+                    eprintln!(
+                        "[model-store] 无法同步原生引擎清理契约（{}）：{error}",
+                        model.card_id
+                    );
+                    continue;
+                }
+            };
+            // 商店若不是同一套二进制，绝不能把它的清理脚本安到当前引擎记录上。
+            if card.summary.engine_name != NATIVE_TACHYON_ENGINE_NAME
+                || card.summary.engine_version.as_deref() != Some(version.as_str())
+            {
+                continue;
+            }
+            let source = ScriptsSource::from_card(&card, self.local_script_paths);
+            let cleanup_script = match source.optional_script_blob("uninstall_engine") {
+                Ok(Some(script)) => script,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "[model-store] 原生引擎清理契约校验失败（{}）：{error}",
+                        model.card_id
+                    );
+                    continue;
+                }
+            };
+            if let Err(error) = db::set_engine_cleanup_script(
+                NATIVE_TACHYON_ENGINE_NAME,
+                Some(&version),
+                &cleanup_script,
+            ) {
+                eprintln!(
+                    "[model-store] 保存原生引擎清理契约失败（{}）：{error}",
+                    model.card_id
+                );
+            }
+        }
     }
 
     /// 启用前读取一次真实系统内存与当前受本模型商店管理的运行模型。
@@ -2504,6 +2667,12 @@ impl ModelManager {
         // 语把它拦下来更糟；代价是那一次确认框会少列几个模型名。
         let affected =
             db::list_model_names_using_engine(engine_name, engine_version).unwrap_or_default();
+        if !affected.is_empty() {
+            return Err(ModelManagerError::new(format!(
+                "该引擎仍被以下模型绑定，不能删除：{}。请先处理这些模型。",
+                affected.join("、")
+            )));
+        }
 
         if let Some(image) = &rec.docker_image {
             let freed = docker_image_size(image);
@@ -2596,8 +2765,25 @@ impl ModelManager {
             });
         }
 
+        if let Some(cleanup_script) = rec.cleanup_script.as_ref() {
+            let freed = remove_native_engine(cleanup_script)?;
+            db::delete_installed_engine(engine_name, engine_version)
+                .map_err(|e| ModelManagerError::new(format!("删除引擎记录失败：{e}")))?;
+            return Ok(EngineRemoval {
+                engine_name: engine_name.to_string(),
+                engine_version: engine_version.map(str::to_string),
+                freed_bytes: freed,
+                purged_model_data: false,
+                affected_models: affected,
+                summary: format!(
+                    "已删除推理引擎，释放约 {}。模型权重和部署配置没有动；下次下载需要它的模型时会自动重新安装。",
+                    disk::format_bytes(freed as f64),
+                ),
+            });
+        }
+
         Err(ModelManagerError::new(format!(
-            "暂不支持自动清理该类型的引擎：{engine_name}"
+            "该引擎尚未提供安全的独立清理方式：{engine_name}。请更新模型卡片后再试，不能通过猜测目录自动删除。"
         )))
     }
 
@@ -2736,6 +2922,61 @@ fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
         }
     }
     found
+}
+
+/// 用厂商随引擎提供的独立清理脚本做只读探测。
+///
+/// 约定：`LMM_PROBE_ONLY=1` 时，实体存在即退出 0，并可选输出
+/// `LMM_ENGINE_SIZE_BYTES=<bytes>`；实体不存在退出非 0。这样“模型已经删了、
+/// 引擎仍在”的场景不必借一张模型卡片来猜目录，也不会扫描/删除用户任意路径。
+fn native_engine_cleanup_probe(script: &db::ScriptBlob) -> Option<Option<u64>> {
+    let script_path = write_temp_script(&script.content).ok()?;
+    let mut env = HashMap::new();
+    env.insert("LMM_PROBE_ONLY".to_string(), "1".to_string());
+    let result = script_runner::run_script(
+        &script_path,
+        &env,
+        RunScriptOptions {
+            label: Some("检查本机推理引擎".to_string()),
+            timeout: Some(Duration::from_secs(30)),
+            idle_timeout: Some(Duration::from_secs(10)),
+            ..Default::default()
+        },
+    );
+    let _ = std::fs::remove_file(&script_path);
+    let lines = result.ok()?;
+    Some(
+        extract_marker(&lines, "LMM_ENGINE_SIZE_BYTES=")
+            .and_then(|value| value.parse::<u64>().ok()),
+    )
+}
+
+/// 执行已经固化的原生引擎清理契约，并以同一份脚本后验确认实体确实消失。
+///
+/// 不能在此处根据 `$HOME` / 目录名自行拼 `rm -rf`：唯一获准删除的路径必须由
+/// 随该引擎版本签发并校验过的脚本决定。
+fn remove_native_engine(script: &db::ScriptBlob) -> Result<u64, ModelManagerError> {
+    let script_path = write_temp_script(&script.content)?;
+    let result = script_runner::run_script(
+        &script_path,
+        &HashMap::new(),
+        RunScriptOptions {
+            label: Some("删除本机推理引擎".to_string()),
+            timeout: Some(LONG_RUNNING_IDLE_TIMEOUT),
+            idle_timeout: Some(LONG_RUNNING_IDLE_TIMEOUT),
+            ..Default::default()
+        },
+    );
+    let _ = std::fs::remove_file(&script_path);
+    let lines = result?;
+    if native_engine_cleanup_probe(script).is_some() {
+        return Err(ModelManagerError::new(
+            "推理引擎清理脚本已经结束，但后验检查发现引擎文件仍在；为避免留下无法管理的残留，未移除引擎记录。",
+        ));
+    }
+    Ok(extract_marker(&lines, "LMM_ENGINE_FREED_BYTES=")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0))
 }
 
 /// 卡片的 enable 脚本明确说部署配置缺失时，数据库中的“已部署”就是陈旧状态。

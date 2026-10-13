@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS installed_engines (
     -- 判断跳过的话，商店修好的脚本永远送不到已装过引擎的设备上。存下哈希，
     -- 下次发现脚本变了就重跑一遍把部署包刷新掉。
     install_script_sha256 TEXT,
+    -- 原生厂商引擎的独立清理契约（正文 + SHA-256）。不能靠猜目录删除：用户
+    -- 删除模型后，唯一安全的清理依据必须跟随已安装引擎本身持久化下来。
+    cleanup_script_json TEXT,
     installed_at TEXT NOT NULL,
     PRIMARY KEY (engine_name, engine_version)
 );
@@ -132,7 +135,11 @@ const MIGRATION_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     ("api_keys", &[("card_id", "TEXT")]),
     (
         "installed_engines",
-        &[("docker_image", "TEXT"), ("install_script_sha256", "TEXT")],
+        &[
+            ("docker_image", "TEXT"),
+            ("install_script_sha256", "TEXT"),
+            ("cleanup_script_json", "TEXT"),
+        ],
     ),
 ];
 
@@ -348,6 +355,9 @@ pub struct InstalledEngineRecord {
     pub engine_version: Option<String>,
     pub docker_image: Option<String>,
     pub install_script_sha256: Option<String>,
+    /// 卡片随引擎下发的、已经校验并固化的独立清理脚本。没有它就不能对原生
+    /// 引擎猜路径删除，即使当前磁盘上看得到目录也不行。
+    pub cleanup_script: Option<ScriptBlob>,
     pub installed_at: String,
 }
 
@@ -358,6 +368,9 @@ impl InstalledEngineRecord {
             engine_version: row.get("engine_version")?,
             docker_image: row.get("docker_image")?,
             install_script_sha256: row.get("install_script_sha256")?,
+            cleanup_script: row
+                .get::<_, Option<String>>("cleanup_script_json")?
+                .and_then(|raw| serde_json::from_str(&raw).ok()),
             installed_at: row.get("installed_at")?,
         })
     }
@@ -389,26 +402,55 @@ pub fn mark_engine_installed(
     engine_version: Option<&str>,
     docker_image: Option<&str>,
     install_script_sha256: Option<&str>,
+    cleanup_script: Option<&ScriptBlob>,
 ) -> rusqlite::Result<()> {
     let conn = connect()?;
+    let cleanup_script_json = cleanup_script.and_then(|script| serde_json::to_string(script).ok());
     conn.execute(
         "INSERT INTO installed_engines
-             (engine_name, engine_version, docker_image, install_script_sha256, installed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+             (engine_name, engine_version, docker_image, install_script_sha256,
+              cleanup_script_json, installed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(engine_name, engine_version) DO UPDATE SET
              docker_image=COALESCE(excluded.docker_image, installed_engines.docker_image),
              install_script_sha256=COALESCE(excluded.install_script_sha256,
                                             installed_engines.install_script_sha256),
+             cleanup_script_json=COALESCE(excluded.cleanup_script_json,
+                                          installed_engines.cleanup_script_json),
              installed_at=excluded.installed_at",
         params![
             engine_name,
             engine_key(engine_version),
             docker_image,
             install_script_sha256,
+            cleanup_script_json,
             now_iso()
         ],
     )?;
     Ok(())
+}
+
+/// 给已存在的引擎补一份独立清理契约。
+///
+/// 这用于升级后的存量设备：它们已经装好了引擎和模型权重，不能为了多一份几十行
+/// 的清理脚本要求重新下载几十 GB 权重。调用方必须先从商店按哈希取回并校验脚本；
+/// 这里仅把经过验证的正文固化到该引擎记录。
+pub fn set_engine_cleanup_script(
+    engine_name: &str,
+    engine_version: Option<&str>,
+    cleanup_script: &ScriptBlob,
+) -> rusqlite::Result<bool> {
+    let conn = connect()?;
+    let raw = serde_json::to_string(cleanup_script)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let changed = conn.execute(
+        "UPDATE installed_engines
+            SET cleanup_script_json = ?1
+          WHERE engine_name = ?2 AND engine_version = ?3
+            AND (cleanup_script_json IS NULL OR cleanup_script_json <> ?1)",
+        params![raw, engine_name, engine_key(engine_version)],
+    )?;
+    Ok(changed > 0)
 }
 
 pub fn list_installed_engines() -> rusqlite::Result<Vec<InstalledEngineRecord>> {
@@ -444,6 +486,160 @@ pub fn delete_installed_engine(
         params![engine_name, engine_key(engine_version)],
     )?;
     Ok(())
+}
+
+/// 将一张已下载卡片曾经使用的引擎身份迁到新的规范身份。
+///
+/// 引擎的展示名称曾经被错误地写进身份键，随后又出现了同一套原生二进制在
+/// “驭光” / “驭光（H3C自研推理引擎）” 两个键下各有一条记录的历史数据。直接
+/// 改卡片字段会让老设备把已装的 300MB 引擎看成另一个引擎，既可能重复下载，也
+/// 会把真正仍被模型使用的目录误显示成孤儿。
+///
+/// 这条迁移只搬**同一张卡**当前引用的引擎记录；若仍有其他旧卡引用旧键，就暂
+/// 留那条记录，等它们各自完成迁移，绝不抢先删掉共享资源。
+pub fn migrate_engine_identity(
+    card_id: &str,
+    canonical_name: &str,
+    canonical_version: Option<&str>,
+) -> rusqlite::Result<bool> {
+    let mut conn = connect()?;
+    let tx = conn.transaction()?;
+    let current: Option<(String, Option<String>)> = tx
+        .query_row(
+            "SELECT engine_name, engine_version FROM store_models WHERE card_id = ?1",
+            params![card_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((old_name, old_version)) = current else {
+        return Ok(false);
+    };
+    let old_key = engine_key(old_version.as_deref());
+    let canonical_key = engine_key(canonical_version);
+    if old_name == canonical_name && old_key == canonical_key {
+        return Ok(false);
+    }
+
+    // 早期 Ornith 卡片曾写成「模型记录：驭光（H3C…）+ 空版本；已装引擎：驭光
+    // + 二进制版本」。先按模型自身的旧键找；找不到时才认这一个已知的历史展示名
+    // `驭光`，并且版本必须恰好等于当前已校验的厂商二进制版本。不能按目录或任意
+    // 同版本记录猜，不然可能把别家的资源错误并入原生引擎。
+    let exact_engine: Option<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    )> = tx
+        .query_row(
+            "SELECT engine_name, engine_version, docker_image, install_script_sha256,
+                    cleanup_script_json, installed_at
+               FROM installed_engines
+              WHERE engine_name = ?1 AND engine_version = ?2",
+            params![old_name, old_key],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let legacy_engine = if exact_engine.is_none() && canonical_key != old_key {
+        tx.query_row(
+            "SELECT engine_name, engine_version, docker_image, install_script_sha256,
+                    cleanup_script_json, installed_at
+               FROM installed_engines
+              WHERE engine_name = '驭光' AND engine_version = ?1",
+            params![canonical_key],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?
+    } else {
+        None
+    };
+    let source_engine = exact_engine.or(legacy_engine);
+    if let Some((
+        _source_name,
+        _source_version,
+        docker_image,
+        install_script_sha256,
+        cleanup_script_json,
+        installed_at,
+    )) = source_engine.as_ref()
+    {
+        // 已有规范记录时优先信任它；旧键只在规范记录缺字段时补值，避免一次
+        // 名称迁移把较新的安装脚本哈希或镜像指针回滚成旧值。
+        tx.execute(
+            "INSERT INTO installed_engines
+                 (engine_name, engine_version, docker_image, install_script_sha256,
+                  cleanup_script_json, installed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(engine_name, engine_version) DO UPDATE SET
+                 docker_image = COALESCE(installed_engines.docker_image, excluded.docker_image),
+                 install_script_sha256 = COALESCE(
+                     installed_engines.install_script_sha256,
+                     excluded.install_script_sha256
+                 ),
+                 cleanup_script_json = COALESCE(
+                     installed_engines.cleanup_script_json,
+                     excluded.cleanup_script_json
+                 )",
+            params![
+                canonical_name,
+                canonical_key,
+                docker_image,
+                install_script_sha256,
+                cleanup_script_json,
+                installed_at,
+            ],
+        )?;
+    }
+
+    tx.execute(
+        "UPDATE store_models
+            SET engine_name = ?1, engine_version = ?2
+          WHERE card_id = ?3",
+        params![canonical_name, canonical_key, card_id],
+    )?;
+
+    let (source_name, source_version) = source_engine
+        .as_ref()
+        .map(|(name, version, ..)| (name.as_str(), version.as_str()))
+        .unwrap_or((&old_name, old_key.as_str()));
+    let still_referenced: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM store_models
+              WHERE engine_name = ?1
+                AND COALESCE(engine_version, '') = ?2
+                AND card_id <> ?3
+              LIMIT 1",
+            params![source_name, source_version, card_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if still_referenced.is_none() {
+        tx.execute(
+            "DELETE FROM installed_engines WHERE engine_name = ?1 AND engine_version = ?2",
+            params![source_name, source_version],
+        )?;
+    }
+    tx.commit()?;
+    Ok(true)
 }
 
 /// 引擎可能被多张已下载/部署的卡片共用，删除前用这个查有哪些模型受影响，
@@ -1127,6 +1323,7 @@ mod tests {
             Some("0.5.0"),
             Some("ollama/ollama:latest"),
             Some("abc123"),
+            None,
         )
         .unwrap();
         assert!(is_engine_installed("ollama", Some("0.5.0")).unwrap());
@@ -1143,6 +1340,61 @@ mod tests {
         assert!(!is_engine_installed("ollama", Some("0.5.0")).unwrap());
     }
 
+    /// 真机遗留的 Ornith 状态正是这个组合：模型记录使用了后来改过的展示名，却
+    /// 丢了版本；实体引擎仍用早期的“驭光”展示名和真实二进制版本。迁移必须接
+    /// 回这份实体记录，不能把它显示成孤儿、更不能要求用户重复下载。
+    #[test]
+    fn native_engine_identity_migration_reclaims_known_legacy_display_name() {
+        let _ctx = setup_temp_db();
+        let scripts = std::collections::BTreeMap::new();
+        add_store_model(AddStoreModelParams {
+            card_id: "ornith15-35b-a3b-nvfp4",
+            model_name: "ornith-test",
+            card_name: "Ornith test",
+            org: None,
+            description: None,
+            engine_name: "驭光（H3C自研推理引擎）",
+            engine_version: None,
+            size_bytes: 1,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &scripts,
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: DeployTopology::Single,
+        })
+        .unwrap();
+        mark_engine_installed("驭光", Some("0f8a4a7c"), None, Some("legacy-script"), None).unwrap();
+
+        assert!(
+            migrate_engine_identity(
+                "ornith15-35b-a3b-nvfp4",
+                "驭光（H3C自研推理引擎）",
+                Some("0f8a4a7c"),
+            )
+            .unwrap()
+        );
+
+        let model = get_store_model("ornith15-35b-a3b-nvfp4").unwrap().unwrap();
+        assert_eq!(model.engine_name, "驭光（H3C自研推理引擎）");
+        assert_eq!(model.engine_version.as_deref(), Some("0f8a4a7c"));
+        assert_eq!(
+            get_installed_engine("驭光（H3C自研推理引擎）", Some("0f8a4a7c"))
+                .unwrap()
+                .unwrap()
+                .install_script_sha256
+                .as_deref(),
+            Some("legacy-script")
+        );
+        assert!(
+            get_installed_engine("驭光", Some("0f8a4a7c"))
+                .unwrap()
+                .is_none(),
+            "旧展示名没有移除，界面仍会把同一引擎显示两次"
+        );
+    }
+
     /// 同名不同版本必须是两条独立记录。
     ///
     /// 真机上撞过：ornith15 用 vllm v0.27.1-aarch64，双机卡用 vllm dspark-0.1.1，
@@ -1156,12 +1408,14 @@ mod tests {
             Some("v0.27.1-aarch64"),
             Some("vllm/vllm-openai:v0.27.1-aarch64"),
             None,
+            None,
         )
         .unwrap();
         mark_engine_installed(
             "vllm",
             Some("dspark-0.1.1"),
             Some("megacube/deepseek-direct:0.1.1"),
+            None,
             None,
         )
         .unwrap();

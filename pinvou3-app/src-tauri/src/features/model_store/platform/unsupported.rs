@@ -64,6 +64,7 @@ pub async fn memory_admission(_card_id: String) -> Result<Value, String> {
 }
 
 pub async fn delete_engine(
+    _service: &Arc<ModelStoreService>,
     _engine_name: String,
     _engine_version: Option<String>,
 ) -> Result<Value, String> {

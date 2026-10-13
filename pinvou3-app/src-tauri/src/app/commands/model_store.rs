@@ -66,10 +66,11 @@ pub async fn model_store_memory_admission(card_id: String) -> Result<Value, Stri
 
 #[tauri::command]
 pub async fn model_store_delete_engine(
+    service: State<'_, Arc<ModelStoreService>>,
     engine_name: String,
     engine_version: Option<String>,
 ) -> Result<Value, String> {
-    model_store::delete_engine(engine_name, engine_version).await
+    model_store::delete_engine(&service, engine_name, engine_version).await
 }
 
 // ---------------------------------------------------------------- 长操作
