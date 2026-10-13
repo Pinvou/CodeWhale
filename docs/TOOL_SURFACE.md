@@ -88,21 +88,27 @@ error), a retrieval activation or a refresh of an executed tool rides the
 triggering result, and a turn's start revalidation parks its note on the
 session so the turn's first recorded result carries it (a refresh only
 evicts when a cached schema grew past the budget since its last
-activation). A note that never reaches a recorded result — a turn that ends
-without one, or a session sync — is dropped at the next turn's entry rather
-than riding an unrelated later result. Child agents report the same way: a
-hydration receipt and an executed tool's result carry their own eviction
-notes, and a note parked by the child's catalog refresh rides the child's
+activation). A note that never reaches a recorded result is dropped rather
+than riding an unrelated later result: a session sync clears it at the
+conversation edge, and a turn that ends without a recorded result has it
+swept at the next turn's entry. Child agents report the same way: a
+hydration receipt (or its refusal error) and an executed tool's result
+carry their own eviction notes, and a note parked outside any result — a
+catalog refresh's revalidation or a warm-start overflow — rides the child's
 next recorded result (or its error); a note a child never delivers dies
 with the child's surface. A note never names a tool the model can call
-again: names a ride re-admits are netted out of it against the live
-activation cache. Tools the model cannot get back by searching are
-reported differently: `tool_search` results surface them as unavailable
-references, naming whether the tool left the catalog (disconnect, deny rule,
-mode switch) or outgrew the per-tool schema budget. A cached tool that became
+again: names the ride re-admits — into the activation cache or the
+request's active tool set, which a mid-turn MCP catalog refresh can
+repopulate without re-activating the cache — are netted out of it. Tools
+the model cannot get back by searching are reported differently:
+`tool_search` results surface them as unavailable references, naming
+whether the tool left the catalog (a disconnect, a changed allow/deny rule,
+a mode switch — any catalog-shrink cause) or outgrew the per-tool
+serialized-size budget. A cached tool that became
 eager is not reported at all — it stays directly callable. Unavailable drops
 observed by non-search paths are absorbed silently: an oversize drop is
-re-reported with its reason the next time a search matches the tool, while a
+re-reported with its reason the next time a search returns the tool (a
+match ranked past the result cap re-reports nothing), while a
 catalog-shrink drop left the catalog entirely and no later search can name
 it — the model learns of those only when a search for the capability misses.
 
