@@ -325,15 +325,24 @@ fn read_audit_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup
                     stats.elapsed_samples += 1;
                 }
 
-                // Success / failure
+                // Success / failure. A receipt the engine marked
+                // `executed: false` (a deferred-tool hydration receipt, an
+                // oversize-hydration refusal) answered the call without the
+                // tool ever running, so it counts as neither — counting it
+                // as a success would inflate the tool's real execution rate.
                 let success = v
                     .pointer("/details/success")
                     .or_else(|| v.pointer("/payload/success"))
                     .and_then(|b| b.as_bool())
                     .unwrap_or(true);
-                if success {
+                let executed = v
+                    .pointer("/details/executed")
+                    .or_else(|| v.pointer("/payload/executed"))
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(true);
+                if success && executed {
                     stats.successes += 1;
-                } else {
+                } else if !success {
                     stats.failures += 1;
                 }
             }
@@ -1013,6 +1022,39 @@ mod tests {
         assert_eq!(rollup.parsed_lines, 1);
         assert!(!rollup.tools.contains_key("exec_shell"));
         assert_eq!(rollup.tools["read_file"].calls, 1);
+    }
+
+    #[test]
+    fn tool_result_rollup_counts_unexecuted_receipts_as_neither() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        // A plain success, a plain failure, an `executed: false` receipt
+        // (a hydration receipt or an oversize-hydration refusal — the tool
+        // never ran), and an executed-marked success.
+        let lines = [
+            r#"{"event":"tool.result","ts":"2026-04-01T10:00:00+00:00","details":{"tool_name":"exec_shell","success":true}}"#,
+            r#"{"event":"tool.result","ts":"2026-04-01T10:01:00+00:00","details":{"tool_name":"exec_shell","success":false}}"#,
+            r#"{"event":"tool.result","ts":"2026-04-01T10:02:00+00:00","details":{"tool_name":"deferred_tool","success":true,"executed":false}}"#,
+            r#"{"event":"tool.result","ts":"2026-04-01T10:03:00+00:00","details":{"tool_name":"other_tool","success":true,"executed":true}}"#,
+        ];
+        for line in lines {
+            writeln!(tmp, "{line}").unwrap();
+        }
+
+        let mut rollup = Rollup::default();
+        read_audit_log(tmp.path(), None, &mut rollup);
+
+        assert_eq!(rollup.tools["exec_shell"].calls, 2);
+        assert_eq!(rollup.tools["exec_shell"].successes, 1);
+        assert_eq!(rollup.tools["exec_shell"].failures, 1);
+        // The unexecuted receipt counts as neither success nor failure:
+        // counting it as a success would inflate the tool's real execution
+        // rate. Deleting the `executed` consult turns this pin red.
+        assert_eq!(rollup.tools["deferred_tool"].calls, 1);
+        assert_eq!(rollup.tools["deferred_tool"].successes, 0);
+        assert_eq!(rollup.tools["deferred_tool"].failures, 0);
+        assert_eq!(rollup.tools["other_tool"].calls, 1);
+        assert_eq!(rollup.tools["other_tool"].successes, 1);
     }
 
     #[test]

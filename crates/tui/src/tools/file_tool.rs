@@ -60,7 +60,7 @@ impl ToolSpec for ReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a text file. Output is limited to 2000 complete lines or 50KB, whichever comes first. Use offset and limit to continue through large files."
+        "Read a text file. By default, output is limited to 2000 complete lines or 50KB, whichever comes first. Use offset and limit to continue through large files."
     }
 
     fn input_schema(&self) -> Value {

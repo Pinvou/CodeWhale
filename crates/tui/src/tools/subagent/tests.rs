@@ -2876,6 +2876,9 @@ fn agent_description_explains_background_child_and_transcript_handle() {
              {description}"
         );
     }
+    // Headroom note: the description sits 13 tokens (40 chars) under this
+    // cap (3032 chars = 1011 estimated tokens). Budget any reword against
+    // this limit instead of loosening the cap.
     assert!(
         estimate_tool_description_tokens_conservative(description) <= 1024,
         "agent description exceeds the conservative 1024-token budget"
@@ -7591,6 +7594,466 @@ fn synthetic_deferred_tool(name: &str, description_bytes: usize) -> Tool {
         strict: None,
         cache_control: None,
     }
+}
+
+fn synthetic_eager_tool(name: &str) -> Tool {
+    Tool {
+        tool_type: Some("function".to_string()),
+        name: name.to_string(),
+        description: "eager always-present tool".to_string(),
+        input_schema: json!({"type": "object", "properties": {}}),
+        allowed_callers: None,
+        defer_loading: Some(false),
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    }
+}
+
+/// The child hydration receipt is the hydration's only result payload, so a
+/// bounds eviction caused by the load must reach the child model through it.
+#[test]
+fn child_hydration_receipt_carries_the_eviction_note() {
+    // Two large warm activations sit near the collective budget; hydrating a
+    // third overflows the child cache. The 8,050-byte descriptions serialize
+    // to ~8,170-byte tools, so the warm pair totals ~16,340 bytes — roughly
+    // 40 bytes under the 16,384 collective budget: loading big-c overflows
+    // it, but the warm pair alone must not. If a Tool field or serde
+    // attribute changes serialized size, re-tune these numbers before
+    // trusting either half of this test.
+    let warm_catalog = vec![
+        synthetic_deferred_tool("big-a", 8_050),
+        synthetic_deferred_tool("big-b", 8_050),
+        synthetic_deferred_tool("big-c", 8),
+    ];
+    let mut premise = ToolActivationCache::default();
+    assert!(
+        premise
+            .activate(&warm_catalog, &["big-a".to_string(), "big-b".to_string()])
+            .evicted
+            .is_empty(),
+        "premise: the warm pair alone must fit the collective budget"
+    );
+    let mut surface =
+        SubAgentToolSurface::new(warm_catalog, &["big-a".to_string(), "big-b".to_string()]);
+
+    let receipt = surface.hydrate("big-c").expect("third activation");
+    assert!(
+        receipt.contains("`big-c` was deferred and has now been loaded"),
+        "the receipt must confirm the load: {receipt}"
+    );
+    assert!(
+        receipt.contains("evicted tools from the bounded conversation toolbox")
+            && receipt.contains("big-a"),
+        "the load receipt must carry the eviction note naming the LRU victim: {receipt}"
+    );
+    assert!(!surface.active_names.contains("big-a"));
+}
+
+/// The oversize hydration rejection runs after the activation, so its
+/// revalidation may have bounds-evicted other tools. This error is the
+/// call's only result payload: the rejection must carry both the shared
+/// oversize reason and those evictions instead of absorbing them.
+#[test]
+fn child_hydrate_rejection_carries_the_revalidations_evictions() {
+    let warm_catalog = vec![
+        synthetic_deferred_tool("big-a", 8_050),
+        synthetic_deferred_tool("big-b", 8_050),
+        synthetic_deferred_tool("big-c", 20_000),
+    ];
+    let mut surface =
+        SubAgentToolSurface::new(warm_catalog, &["big-a".to_string(), "big-b".to_string()]);
+    // The catalog's schema for `big-a` grew after the warm start (a
+    // refresh): the rejection's activation revalidates against it and the
+    // collective budget overflows, while `big-c` itself is per-tool
+    // oversize and is refused.
+    surface.catalog = vec![
+        synthetic_deferred_tool("big-a", 12_000),
+        synthetic_deferred_tool("big-b", 8_050),
+        synthetic_deferred_tool("big-c", 20_000),
+    ];
+
+    let error = surface
+        .hydrate("big-c")
+        .expect_err("big-c is per-tool oversize");
+    let message = error.to_string();
+    assert!(
+        message.contains("could not enter the bounded child toolbox")
+            && message.contains(&toolbox_oversize_reason()),
+        "the rejection must carry the shared oversize reason: {message}"
+    );
+    assert!(
+        message.contains("no longer callable") && message.contains("big-a"),
+        "the rejection must carry the revalidation's eviction note: {message}"
+    );
+    assert!(
+        !message.contains("has now been loaded"),
+        "the rejection must not promise a load: {message}"
+    );
+    assert!(
+        surface.pending_eviction_notes.is_empty(),
+        "the evictions rode the error directly; nothing may stay parked"
+    );
+}
+
+/// The child's ride channel mirrors the parent's: parked notes ride success
+/// and error results alike (a note held back on `Err` would strand until a
+/// later `Ok` — or forever if the child ends first), and names the ride
+/// re-admits are netted out against the child's live cache.
+#[test]
+fn child_parked_note_rides_success_and_error_results_and_nets_re_admissions() {
+    // A parked eviction note names cache members, and cache members are
+    // catalog members — the premise the ride-time catalog check relies on.
+    // The eager lead defeats `initial_active_tools`' single-tool fallback,
+    // which would otherwise force-activate `big-a` and the ride would net
+    // it out of the note.
+    let mut lead = synthetic_deferred_tool("lead", 8);
+    lead.defer_loading = Some(false);
+    let catalog = vec![
+        lead,
+        synthetic_deferred_tool("big-a", 8),
+        synthetic_deferred_tool("big-b", 8),
+        synthetic_deferred_tool("big-c", 8),
+    ];
+    let mut surface = SubAgentToolSurface::new(catalog, &[]);
+    surface.park_eviction_note(
+        ToolboxEvictionTrigger::Step,
+        vec!["big-a".to_string(), "big-b".to_string()].as_slice(),
+    );
+
+    let mut ok = Ok(RichToolResult::plain(ToolResult::success("payload")));
+    surface.ride_pending_eviction_notes(&mut ok);
+    let ok = ok.expect("stays ok");
+    assert!(
+        ok.result.content.contains("payload")
+            && ok.result.content.contains("no longer callable")
+            && ok.result.content.contains("big-a")
+            && ok.result.content.contains("big-b"),
+        "the note rides a success result: {}",
+        ok.result.content
+    );
+
+    surface.park_eviction_note(ToolboxEvictionTrigger::Step, &["big-c".to_string()]);
+    let mut failure: Result<RichToolResult> = Err(anyhow::anyhow!("boom"));
+    surface.ride_pending_eviction_notes(&mut failure);
+    let message = failure.expect_err("stays an error").to_string();
+    assert!(
+        message.contains("boom")
+            && message.contains("no longer callable")
+            && message.contains("big-c"),
+        "the note must ride an error result too: {message}"
+    );
+    assert!(surface.pending_eviction_notes.is_empty());
+
+    // A name the ride hands back is netted out; a fully netted note does
+    // not ride at all.
+    let mut deferred = synthetic_deferred_tool("big-a", 8);
+    deferred.name = "big-a".to_string();
+    surface.cache.activate(&[deferred], &["big-a".to_string()]);
+    surface.park_eviction_note(ToolboxEvictionTrigger::Step, &["big-a".to_string()]);
+    let mut netted = Ok(RichToolResult::plain(ToolResult::success("clean")));
+    surface.ride_pending_eviction_notes(&mut netted);
+    let netted = netted.expect("stays ok");
+    assert!(
+        netted.result.content == "clean",
+        "a note naming only re-admitted tools must be absorbed: {}",
+        netted.result.content
+    );
+}
+
+/// An executed tool's refresh can evict on the collective bounds when a
+/// cached schema grew; the child mirror of the parent's post-execution
+/// channel must append the eviction note to the recorded result.
+#[test]
+fn child_execution_refresh_eviction_note_rides_the_child_result() {
+    let warm_catalog = vec![
+        synthetic_deferred_tool("big-a", 8_050),
+        synthetic_deferred_tool("big-b", 8_050),
+    ];
+    let mut surface =
+        SubAgentToolSurface::new(warm_catalog, &["big-a".to_string(), "big-b".to_string()]);
+    // The catalog's schema for `big-a` grew after the warm start (a
+    // refresh): refreshing `big-b` revalidates against the grown catalog
+    // and the collective budget overflows.
+    surface.catalog = vec![
+        synthetic_deferred_tool("big-a", 12_000),
+        synthetic_deferred_tool("big-b", 8_050),
+    ];
+
+    let mut result: Result<RichToolResult> =
+        Ok(RichToolResult::plain(ToolResult::success("payload")));
+    surface.touch_after_execution("big-b", &mut result);
+
+    let rich = result.expect("the refresh result stays ok");
+    assert!(
+        rich.result.content.contains("big-a")
+            && rich
+                .result
+                .content
+                .contains("evicted tools from the bounded conversation toolbox"),
+        "the refresh result must carry the eviction note naming the LRU victim: {}",
+        rich.result.content
+    );
+    assert!(!surface.active_names.contains("big-a"));
+    assert!(
+        surface.pending_eviction_notes.is_empty(),
+        "the touch eviction rides the result directly, not the parked slot"
+    );
+}
+
+/// A note parked outside any result payload (a catalog refresh's
+/// revalidation) must ride the child's next recorded result instead of
+/// vanishing.
+#[test]
+fn child_parked_note_rides_the_next_result_and_refresh_parks_one() {
+    let warm_catalog = vec![
+        synthetic_deferred_tool("big-a", 8_050),
+        synthetic_deferred_tool("big-b", 8_050),
+    ];
+    let mut surface =
+        SubAgentToolSurface::new(warm_catalog, &["big-a".to_string(), "big-b".to_string()]);
+    assert!(
+        surface.pending_eviction_notes.is_empty(),
+        "a warm start inside the bounds must not park anything"
+    );
+
+    // The refresh grows `big-a` past the collective bounds: request_tools
+    // revalidates, the LRU victim pops, and the note must park for the
+    // child's next recorded result. The eager lead tool keeps the
+    // single-tool fallback from force-activating `big-a`.
+    let refreshed_catalog = vec![
+        synthetic_eager_tool("small-eager"),
+        synthetic_deferred_tool("big-a", 12_000),
+        synthetic_deferred_tool("big-b", 8_050),
+    ];
+    let tools = surface.request_tools(refreshed_catalog, false);
+    assert!(
+        !tools.iter().any(|tool| tool.name == "big-a"),
+        "the evicted tool must leave the child's request surface"
+    );
+    let parked = &surface.pending_eviction_notes;
+    assert_eq!(
+        parked.len(),
+        1,
+        "the refresh eviction must park a note: {parked:?}"
+    );
+    assert!(
+        parked[0].evicted.iter().any(|name| name == "big-a"),
+        "the parked note must name the LRU victim: {parked:?}"
+    );
+}
+
+/// The park side is covered above; this pin is the consumption side —
+/// `execute_from_surface` must hand parked notes to the child's recorded
+/// result, the production edge that once discarded every report. Driven
+/// through the same wrapper a real child tool call takes.
+#[tokio::test]
+async fn parked_note_rides_through_the_execute_from_surface_glue() {
+    let registry = small_surface_registry(FleetRole::Builder);
+    let catalog = registry.deferred_catalog_for_model(&FleetRole::Builder);
+    let mut surface = SubAgentToolSurface::new(catalog, &["get_goal".to_string()]);
+    // A parked eviction note names a cache member, and a cache member is a
+    // catalog member — the premise the ride-time catalog check relies on.
+    surface
+        .catalog
+        .push(synthetic_deferred_tool("ghost-tool", 8));
+    surface.park_eviction_note(
+        ToolboxEvictionTrigger::TurnStart,
+        &["ghost-tool".to_string()],
+    );
+
+    let content = execute_surface_tool(&registry, &mut surface, "get_goal", json!({}))
+        .await
+        .expect("cached read tool executes");
+    assert!(
+        content.contains("no longer callable") && content.contains("ghost-tool"),
+        "the production ride glue must attach the parked note to the recorded result: {content}"
+    );
+    assert!(
+        surface.pending_eviction_notes.is_empty(),
+        "the ride consumes the parked notes: {:?}",
+        surface.pending_eviction_notes
+    );
+}
+
+/// The hydrate dispatch is production wiring too: a deferred tool outside
+/// the request's active set must load through `execute_from_surface` — the
+/// glue edge whose regression would dead-end every first call. Driven
+/// through the same wrapper a real child tool call takes.
+#[tokio::test]
+async fn hydrate_dispatch_loads_a_deferred_tool_through_the_execute_from_surface_glue() {
+    let registry = small_surface_registry(FleetRole::Builder);
+    let catalog = vec![
+        synthetic_deferred_tool("big-a", 8_050),
+        synthetic_deferred_tool("big-b", 8_050),
+        synthetic_deferred_tool("big-c", 8),
+    ];
+    // Premise: the warm pair alone must fit the collective budget, so the
+    // overflow below is attributable to the third load (see the byte-tuning
+    // note on the receipt test above).
+    let mut premise = ToolActivationCache::default();
+    assert!(
+        premise
+            .activate(&catalog, &["big-a".to_string(), "big-b".to_string()])
+            .evicted
+            .is_empty(),
+        "premise: the warm pair must fit the collective budget"
+    );
+    let mut surface =
+        SubAgentToolSurface::new(catalog, &["big-a".to_string(), "big-b".to_string()]);
+
+    let content = execute_surface_tool(&registry, &mut surface, "big-c", json!({}))
+        .await
+        .expect("the deferred tool must hydrate through the glue, not dead-end");
+    assert!(
+        content.contains("`big-c` was deferred and has now been loaded"),
+        "the glue's hydrate dispatch must load the tool: {content}"
+    );
+    assert!(
+        surface.active_names.contains("big-c"),
+        "the hydration must activate the tool for the rest of this request: {:?}",
+        surface.active_names
+    );
+}
+
+/// The refresh channel's reporting is production wiring: an executed
+/// deferred tool's touch eviction must ride the recorded result through
+/// `execute_from_surface` itself — deleting the dispatch there must turn
+/// this pin red, the exact round-2 defect shape (the child discarding its
+/// helpers' reports).
+#[tokio::test]
+async fn touch_glue_rides_the_refresh_eviction_through_execute_from_surface() {
+    let registry = small_surface_registry(FleetRole::Builder);
+    let catalog = vec![
+        synthetic_deferred_tool("big-a", 8_050),
+        synthetic_deferred_tool("get_goal", 8_050),
+    ];
+    let mut surface =
+        SubAgentToolSurface::new(catalog, &["big-a".to_string(), "get_goal".to_string()]);
+    // The catalog's schema for `get_goal` grew after the warm start (a
+    // refresh): the executed tool's touch revalidates against it and the
+    // collective budget overflows.
+    surface.catalog = vec![
+        synthetic_deferred_tool("big-a", 8_050),
+        synthetic_deferred_tool("get_goal", 8_400),
+    ];
+
+    let content = execute_surface_tool(&registry, &mut surface, "get_goal", json!({}))
+        .await
+        .expect("the cached tool executes");
+    assert!(
+        content.contains("no longer callable") && content.contains("big-a"),
+        "the touch eviction must ride the recorded result through the glue: {content}"
+    );
+    assert!(
+        !surface.active_names.contains("big-a"),
+        "the evicted victim must leave the child's active set"
+    );
+}
+
+/// A mid-request bounds eviction must not leave the evicted tool
+/// dispatchable for the rest of the request: the request's active-name
+/// snapshot still carries it, but the surface's live active set no longer
+/// does. Routing the retry through hydration re-admits it under the bounds
+/// with a truthful receipt (or refuses it with the shared oversize reason)
+/// instead of executing a call the surface no longer admits — the eviction
+/// note an earlier result recorded would otherwise be a false statement for
+/// the rest of this request. Deleting the live-set disjunct in the dispatch
+/// turns this pin red.
+#[tokio::test]
+async fn mid_request_eviction_routes_the_retry_through_hydration() {
+    let registry = small_surface_registry(FleetRole::Builder);
+    let catalog = vec![
+        synthetic_deferred_tool("big-a", 8_050),
+        synthetic_deferred_tool("big-b", 8_050),
+        synthetic_deferred_tool("big-c", 8),
+    ];
+    let mut surface =
+        SubAgentToolSurface::new(catalog, &["big-a".to_string(), "big-b".to_string()]);
+    // The request's active-name snapshot is taken once per request; call i
+    // (hydrating big-c) evicts big-a behind it.
+    let request_active: HashSet<String> = ["big-a".to_string(), "big-b".to_string()]
+        .into_iter()
+        .collect();
+
+    let load = execute_surface_tool(&registry, &mut surface, "big-c", json!({}))
+        .await
+        .expect("big-c hydrates");
+    assert!(
+        load.contains("`big-c` was deferred and has now been loaded") && load.contains("big-a"),
+        "premise: the mid-request hydration evicts big-a and says so: {load}"
+    );
+    assert!(
+        !surface.active_names.contains("big-a"),
+        "premise: big-a left the surface's live active set"
+    );
+
+    // Call j retries big-a under the stale request snapshot.
+    let retry = registry
+        .execute_from_surface(
+            "agent_test",
+            "",
+            &mut surface,
+            &request_active,
+            "big-a",
+            json!({}),
+        )
+        .await
+        .expect("the retry must rehydrate, not execute behind the eviction");
+    assert!(
+        retry
+            .result
+            .content
+            .contains("`big-a` was deferred and has now been loaded"),
+        "the evicted retry must route through hydration: {}",
+        retry.result.content
+    );
+    assert!(
+        retry.result.content.contains("big-b"),
+        "the rehydration's own eviction must be reported truthfully: {}",
+        retry.result.content
+    );
+    assert!(surface.active_names.contains("big-a"));
+    assert!(!surface.active_names.contains("big-b"));
+}
+
+/// The warm-start overflow park is defensive today (the only production
+/// spawn passes no warm names) but it is the constructor's invariant guard:
+/// deleting the park must turn this pin red.
+#[tokio::test]
+async fn warm_start_overflow_park_rides_the_first_result() {
+    let registry = small_surface_registry(FleetRole::Builder);
+    let catalog = registry.deferred_catalog_for_model(&FleetRole::Builder);
+    let deferred: Vec<String> = catalog
+        .iter()
+        .filter(|tool| tool.defer_loading == Some(true) && tool.name != "get_goal")
+        .map(|tool| tool.name.clone())
+        .take(8)
+        .collect();
+    // Nine warm names exceed the eight-name cache: the LRU front victim
+    // pops at construction and its note must park for the first result.
+    // `get_goal` is warmed last (most recently used) so it survives and the
+    // pinned ride runs down the executed-tool path.
+    let mut warm = deferred.clone();
+    warm.push("get_goal".to_string());
+    let victim = warm[0].clone();
+    let mut surface = SubAgentToolSurface::new(catalog, &warm);
+    let parked = &surface.pending_eviction_notes;
+    assert!(
+        parked
+            .iter()
+            .any(|note| note.evicted.iter().any(|name| name == &victim)),
+        "premise: the warm start must overflow and park the LRU victim: {parked:?}"
+    );
+
+    let content = execute_surface_tool(&registry, &mut surface, "get_goal", json!({}))
+        .await
+        .expect("cached read tool executes");
+    assert!(
+        content.contains("no longer callable") && content.contains(&victim),
+        "the warm-start overflow note must ride the child's first result: {content}"
+    );
+    assert!(surface.pending_eviction_notes.is_empty());
 }
 
 #[test]
