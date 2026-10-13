@@ -1665,6 +1665,19 @@ mod tests {
         .expect("parse minimal control node result");
         assert!(minimal.selected_children.is_empty());
         assert_eq!(minimal.summary, None);
+
+        // ReplayDiverged has no in-repo producer since the replay executor
+        // was removed; the variant's snake_case spelling is the
+        // wire-compatibility promise its doc keeps for older payloads, so
+        // pin it in both directions.
+        let mut diverged = result.clone();
+        diverged.status = WorkflowRunStatus::ReplayDiverged;
+        let diverged_json =
+            serde_json::to_string(&diverged).expect("serialize replay-diverged result");
+        assert!(diverged_json.contains("\"status\":\"replay_diverged\""));
+        let reparsed: ControlNodeResult =
+            serde_json::from_str(&diverged_json).expect("parse replay-diverged result");
+        assert_eq!(reparsed.status, WorkflowRunStatus::ReplayDiverged);
     }
 
     #[test]

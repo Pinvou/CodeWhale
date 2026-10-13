@@ -2549,6 +2549,19 @@ mod tests {
                 "attempt {attempt}"
             );
         }
+        // High attempts must stay finite: the exponent clamps at 20 and the
+        // multiply saturates, so attempt 63 yields base * 2^20 rather than
+        // an overflow panic in the retry path.
+        let saturated = JobRetryMetadata {
+            attempt: 63,
+            backoff_base_ms: 1000,
+            ..Default::default()
+        };
+        assert_eq!(
+            JobManager::deterministic_backoff_ms(&saturated),
+            1000u64 << 20,
+            "attempt 63 must saturate, not overflow"
+        );
     }
 
     // ── JobManager: history truncation ─────────────────────────────────
