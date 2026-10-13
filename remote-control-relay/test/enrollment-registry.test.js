@@ -971,6 +971,96 @@ test("restart reloads committed registry and valid backup restores a corrupted p
   assert.doesNotMatch(await fs.readFile(statePath, "utf8"), /corrupt/u);
 });
 
+test("future state versions preserve both files instead of restoring an older backup", async (t) => {
+  for (const [label, primaryKind, backupKind, extraFields, version] of [
+    ["future primary with current backup", "future", "current", false, 2],
+    ["extended future primary with current backup", "future", "current", true, 2],
+    ["large future version with current backup", "future", "current", true, Number.MAX_SAFE_INTEGER],
+    ["current primary with future backup", "current", "future", false, 2],
+    ["current primary with extended future backup", "current", "future", true, 2],
+    ["damaged primary with future backup", "damaged", "future", true, 2],
+    ["both files contain future versions", "future", "future", true, 2],
+  ]) {
+    await t.test(label, async (subtest) => {
+      const statePath = await temporaryState(subtest);
+      const initialized = await openStateStore(statePath);
+      const registry = EnrollmentRegistry.open({
+        stateStore: initialized, config: configForState(statePath),
+      });
+      await registry.enroll({ endpointId: "future-version-probe", credential: FIRST_CREDENTIAL });
+      await initialized.close();
+      const current = JSON.parse(await fs.readFile(statePath, "utf8"));
+      const future = {
+        ...current,
+        version,
+        ...(extraFields ? { future_authorization: { committed_revision: "future-only" } } : {}),
+      };
+      const contents = (kind) => kind === "damaged" ? "{corrupt"
+        : `${JSON.stringify(kind === "future" ? future : current, null, 2)}\n`;
+      await fs.writeFile(statePath, contents(primaryKind), "utf8");
+      await fs.writeFile(`${statePath}.bak`, contents(backupKind), "utf8");
+      const primaryBefore = await fs.readFile(statePath);
+      const backupBefore = await fs.readFile(`${statePath}.bak`);
+
+      await rejectsCode(openStateStore(statePath).then((store) => {
+        resourcesFor(subtest).stores.push(store);
+        return store;
+      }), "relay_state_unsupported");
+      assert.deepEqual(await fs.readFile(statePath), primaryBefore);
+      assert.deepEqual(await fs.readFile(`${statePath}.bak`), backupBefore);
+      await assert.rejects(fs.stat(lockPath(statePath)), { code: "ENOENT" });
+      // A second open must also reject: neither the failed open nor lock cleanup
+      // may make the old authorization snapshot authoritative on a later boot.
+      await rejectsCode(openStateStore(statePath).then((store) => {
+        resourcesFor(subtest).stores.push(store);
+        return store;
+      }), "relay_state_unsupported");
+      assert.deepEqual(await fs.readFile(statePath), primaryBefore);
+      assert.deepEqual(await fs.readFile(`${statePath}.bak`), backupBefore);
+    });
+  }
+});
+
+test("over-budget future state files are preserved without reading or recovering them", async (t) => {
+  for (const [label, largePrimary, largeBackup] of [
+    ["large future primary with current backup", true, false],
+    ["current primary with large future backup", false, true],
+    ["both future copies exceed the read budget", true, true],
+  ]) {
+    await t.test(label, async (subtest) => {
+      const statePath = await temporaryState(subtest);
+      const initialized = await openStateStore(statePath);
+      await initialized.close();
+      const current = await fs.readFile(statePath);
+      const largeFuture = Buffer.from(JSON.stringify({
+        schema: RELAY_CONTROLLER_STATE_SCHEMA, version: 2,
+        future_authorization: "x".repeat(2048),
+      }));
+      await fs.writeFile(statePath, largePrimary ? largeFuture : current);
+      await fs.writeFile(`${statePath}.bak`, largeBackup ? largeFuture : current);
+      const primaryBefore = await fs.readFile(statePath);
+      const backupBefore = await fs.readFile(`${statePath}.bak`);
+      const reads = [];
+      const boundedFs = {
+        ...fs,
+        open: async (candidate, ...args) => {
+          if ((largePrimary && candidate === statePath)
+            || (largeBackup && candidate === `${statePath}.bak`)) reads.push(candidate);
+          return fs.open(candidate, ...args);
+        },
+      };
+      await rejectsCode(openStateStore(statePath, { maxBytes: 1024, fs: boundedFs }).then((store) => {
+        resourcesFor(subtest).stores.push(store);
+        return store;
+      }), "relay_state_unavailable");
+      assert.deepEqual(reads, [], "bounded-out candidates must not be opened for parsing or replacement");
+      assert.deepEqual(await fs.readFile(statePath), primaryBefore);
+      assert.deepEqual(await fs.readFile(`${statePath}.bak`), backupBefore);
+      await assert.rejects(fs.stat(lockPath(statePath)), { code: "ENOENT" });
+    });
+  }
+});
+
 test("legacy controller state migrates once without touching the existing v2 relay state", async (t) => {
   const statePath = await temporaryState(t);
   const initialized = await openStateStore(statePath);
@@ -1067,7 +1157,7 @@ test("legacy migration rejects inconsistent backup without rewriting either cand
       await rejectsCode(openStateStore(statePath).then((store) => {
         resourcesFor(subtest).stores.push(store);
         return store;
-      }), "relay_state_unavailable");
+      }), label === "unsupported backup" ? "relay_state_unsupported" : "relay_state_unavailable");
       assert.deepEqual(await fs.readFile(statePath), Buffer.from(primaryBefore, "utf8"));
       if (backup === null) await assert.rejects(fs.stat(`${statePath}.bak`), { code: "ENOENT" });
       else assert.deepEqual(await fs.readFile(`${statePath}.bak`), Buffer.from(backup, "utf8"));

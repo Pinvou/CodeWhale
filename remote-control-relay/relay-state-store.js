@@ -345,6 +345,13 @@ function parseState(contents) {
   } catch (error) {
     fail("relay_state_invalid_json", error);
   }
+  // A newer format can add or replace fields. Recognize its version before
+  // applying today's exact field set, and never downgrade it from a backup.
+  if (value?.schema === RELAY_CONTROLLER_STATE_SCHEMA
+    && Number.isInteger(value.version) && value.version > 0
+    && value.version !== RELAY_CONTROLLER_STATE_VERSION) {
+    fail("relay_state_unsupported");
+  }
   if (value?.schema === RELAY_CONTROLLER_STATE_SCHEMA && value?.version === 0) {
     return { state: migrateLegacyState(value), migrated: true };
   }
@@ -1171,12 +1178,15 @@ export class RelayStateStore {
         fail("relay_state_file_unsafe");
       }
       if (metadata.size > this.#maxBytes) {
-        return { kind: "invalid" };
+        // Its format cannot be identified within the read budget. Do not treat
+        // an unreadable future snapshot as corruption that a backup can replace.
+        fail("relay_state_unavailable");
       }
       const contents = await this.#readBoundedFile(path, this.#maxBytes, "relay_state_file_unsafe");
       try {
         return { kind: "valid", ...parseState(contents) };
       } catch (error) {
+        if (error?.code === "relay_state_unsupported") throw error;
         if (error instanceof RelayStateStoreError) return { kind: "invalid" };
         throw error;
       }

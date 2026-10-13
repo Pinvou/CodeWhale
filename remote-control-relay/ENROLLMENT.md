@@ -134,6 +134,17 @@ parsing; a mismatch, a missing peer copy, or a damaged backup fails closed. A
 valid backup may restore a malformed primary; a missing primary fails closed so
 a staged but uncommitted backup cannot become authoritative. Malformed,
 oversized, unsupported, or ambiguous candidates otherwise fail closed.
+Recognizable controller-state versions newer than this implementation are
+reported as `relay_state_unsupported` before validating the current field set,
+including when they contain additional fields. Unsupported primary or backup
+files are never treated as recoverable corruption: opening preserves both
+copies without promoting the older authorization snapshot. Keep those files
+for an implementation that understands their version; do not edit the version
+or remove fields to make an older Relay accept them. Recovery of genuinely
+malformed current-state files and the documented v0 migration remain unchanged.
+Files exceeding the configured read budget fail closed as
+`relay_state_unavailable` without being parsed or restored. Their format cannot
+be identified safely, so neither copy is overwritten from the other one.
 Operators must back up the primary and `.bak`
 together while the Relay is stopped or through a later coordinated snapshot
 facility.
