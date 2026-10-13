@@ -28,6 +28,75 @@ const THIRD_CREDENTIAL = "endpoint-credential-three-at-least-32-bytes";
 const execFileAsync = promisify(execFile);
 const TEST_RESOURCES = new WeakMap();
 
+async function openDaclQualificationStore(t, options, open = RelayStateStore.open.bind(RelayStateStore)) {
+  try {
+    return await open(options);
+  } catch (error) {
+    const read = (object, field) => {
+      try { return object?.[field]; } catch { return undefined; }
+    };
+    const cause = read(error, "cause");
+    const code = read(cause, "code");
+    const errno = read(cause, "errno");
+    const killed = read(cause, "killed");
+    const signal = read(cause, "signal");
+    const diagnostic = { stage: "store_open", code: "unknown" };
+    if (["ETIMEDOUT", "EACCES", "EPERM", "ENOENT", "ENOTDIR", "EINVAL",
+      "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"].includes(code)) diagnostic.code = code;
+    if (Number.isSafeInteger(errno) && errno >= -2147483648 && errno <= 2147483647) diagnostic.errno = errno;
+    if (typeof killed === "boolean") diagnostic.killed = killed;
+    if (["SIGTERM", "SIGKILL", "SIGABRT", "SIGINT"].includes(signal)) diagnostic.signal = signal;
+    try { t.diagnostic(`windows_relay_dacl_store_failure ${JSON.stringify(diagnostic)}`); }
+    catch { /* Diagnostics cannot replace the original failure. */ }
+    throw error;
+  }
+}
+
+test("Windows DACL store-open diagnostic reads only cached closed fields and rethrows", async () => {
+  for (const mode of ["changing", "throwing", "boxed", "absent", "cause_throw", "observer_throw"]) {
+    const reads = { cause: 0, code: 0, errno: 0, killed: 0, signal: 0 };
+    const forbiddenReads = { message: 0, stack: 0, stdout: 0, stderr: 0, cmd: 0, path: 0 };
+    const safe = { code: "ETIMEDOUT", errno: -1, killed: true, signal: "SIGTERM" };
+    const cause = {};
+    for (const field of ["code", "errno", "killed", "signal"]) {
+      Object.defineProperty(cause, field, { get() {
+        reads[field] += 1;
+        if (mode === "throwing") throw new Error("SECRET_SENTINEL");
+        if (mode === "boxed") return Object(safe[field]);
+        return reads[field] === 1 ? safe[field] : "SECRET_SENTINEL";
+      } });
+    }
+    for (const field of ["message", "stack", "stdout", "stderr", "cmd", "path"]) {
+      Object.defineProperty(cause, field, { get() {
+        forbiddenReads[field] += 1;
+        throw new Error("FORBIDDEN_SECRET_READ");
+      } });
+    }
+    const original = {};
+    Object.defineProperty(original, "cause", { get() {
+      reads.cause += 1;
+      if (mode === "cause_throw") throw new Error("SECRET_SENTINEL");
+      return mode === "absent" ? undefined : cause;
+    } });
+    const messages = [];
+    const options = {};
+    await assert.rejects(openDaclQualificationStore({ diagnostic: (value) => {
+      messages.push(value);
+      if (mode === "observer_throw") throw new Error("OBSERVER_SECRET_SENTINEL");
+    } }, options,
+      async (actual) => { assert.equal(actual, options); throw original; }), (actual) => actual === original);
+    assert.equal(reads.cause, 1);
+    for (const field of ["code", "errno", "killed", "signal"]) assert.equal(reads[field], ["absent", "cause_throw"].includes(mode) ? 0 : 1);
+    for (const count of Object.values(forbiddenReads)) assert.equal(count, 0);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].includes("SECRET"), false);
+    const diagnostic = JSON.parse(messages[0].slice("windows_relay_dacl_store_failure ".length));
+    assert.deepEqual(diagnostic, ["changing", "observer_throw"].includes(mode)
+      ? { stage: "store_open", code: "ETIMEDOUT", errno: -1, killed: true, signal: "SIGTERM" }
+      : { stage: "store_open", code: "unknown" });
+  }
+});
+
 function resourcesFor(t) {
   let resources = TEST_RESOURCES.get(t);
   if (!resources) {
@@ -1011,7 +1080,7 @@ test("Windows state directory and every durable/lock file have protected DACLs",
   skip: process.platform !== "win32",
 }, async (t) => {
   const statePath = await temporaryState(t);
-  const store = await RelayStateStore.open({
+  const store = await openDaclQualificationStore(t, {
     statePath,
     legacyStatePath: legacyStatePath(statePath),
     processIdentity: async (pid) => `acl-test-process:${pid}`,
