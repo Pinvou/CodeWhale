@@ -7,7 +7,7 @@
   var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry["monitor"] = function (context) {
     var state = context.state;
-    var notify = context.notify;
+    var notifyDomains = context.notifyDomains;
     var invoke = context.invoke;
     var bt = context.bt;
     var safeConsoleInfo = context.safeConsoleInfo;
@@ -286,21 +286,32 @@
         dtVersion: snap.app ? snap.app.deepseek_tui_version : "—",
         uptime: snap.app ? fmtDuration(snap.app.session_uptime_secs) : "—",
       };
+      var monitorDomains = ["monitor"];
+      var tokenLimitChanged = false;
       if (snap.vllm && snap.vllm.max_model_len) {
         maxModelLen = snap.vllm.max_model_len;
+        tokenLimitChanged = state.tokens.max !== maxModelLen;
+        if (tokenLimitChanged) monitorDomains.push("chat");
         state.tokens.max = maxModelLen;
       }
-      // Display-equivalent snapshots neither overwrite state.monitor nor
-      // notify (must send on the first frame or after an errored round).
+      // Display-equivalent snapshots do not overwrite state.monitor. A token
+      // denominator change still publishes chat below, even when the monitor
+      // card itself is unchanged.
       const prevFmt = state.monitor && state.monitor._fmt;
-      if (hadMonitorError || !prevFmt || !monitorFmtEqual(prevFmt, snap._fmt)) {
+      const monitorChanged = hadMonitorError || !prevFmt || !monitorFmtEqual(prevFmt, snap._fmt);
+      if (monitorChanged) {
         state.monitor = snap;
-        notify();
+        notifyDomains(monitorDomains);
+      } else if (tokenLimitChanged) {
+        // Another model/status path may have changed tokens.max while the
+        // monitor card stayed display-equivalent. Publish the restored token
+        // denominator even though the monitor slice itself can stay cached.
+        notifyDomains(["chat"]);
       }
     } catch (e) {
       state.monitorError = e && e.message ? e.message : String(e || "monitor poll failed");
       console.warn("monitor poll failed", e);
-      notify();
+      notifyDomains(["monitor"]);
     } finally {
       monitorPollInFlight = false;
     }
@@ -321,18 +332,20 @@
 
   // ── Backend status (live dot) ────────────────────────────────────
   async function pollBackendStatus() {
+    var changedDomains = ["platform"];
     try {
       var s = await invoke("get_backend_status");
       state.backendOnline = !!s.vllm_online;
       // 修 token 分母时机 bug：不再依赖用户打开监控页才拿到真实 max_model_len
       if (s.max_model_len) {
         maxModelLen = s.max_model_len;
+        if (state.tokens.max !== maxModelLen) changedDomains.push("chat");
         state.tokens.max = maxModelLen;
       }
     } catch (e) {
       state.backendOnline = false;
     }
-    notify();
+    notifyDomains(changedDomains);
   }
 
     return {

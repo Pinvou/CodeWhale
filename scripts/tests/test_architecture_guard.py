@@ -29,7 +29,7 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         # Immutable integration target used for this migration calibration.
         # It includes frozen main's builtin references; never use a moving ref.
         # generated_from tracks older resources, not the migration target.
-        reference = "006c9ce7130e7e35c9871b03ff5d4b26a3ecd822"
+        reference = "797cf38c3a600c5dbd54b56c675dd785ab78908c"
         self.assertEqual(
             reference,
             subprocess.check_output(
@@ -444,8 +444,11 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
             merge_state, anchor_state, target_state
         )
         expected = dict(migration_limits["rust_cyclic_feature_dependencies"])
-        # The A20 adapter removes one marketplace dependency from reviewed A19.
+        # T already contains A, so M=A; only the frozen target's source counts
+        # apply. The A20 test adapter removes one marketplace dependency.
+        self.assertEqual(merge_state, anchor_state)
         self.assertEqual(65, expected["assistant->marketplace"])
+        self.assertEqual(61, expected["runtime_bundle->marketplace"])
         expected["assistant->marketplace"] = 64
         self.assertEqual(expected, baseline["rules"]["rust_cyclic_feature_dependencies"])
         self.assertEqual(
@@ -469,6 +472,14 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         for edge in ("assistant->marketplace", "runtime_bundle->marketplace"):
             self.assertTrue(any(edge in failure for failure in stale_failures))
 
+        expanded = json.loads(json.dumps(baseline))
+        expanded["rules"]["rust_cyclic_feature_dependencies"]["runtime_bundle->marketplace"] += 1
+        self.assertTrue(any(
+            "runtime_bundle->marketplace" in item
+            for item in self.guard.compare_baseline_ratchet(
+                expanded, previous, merge_state, anchor_state, target_state
+            )
+        ))
         expanded = json.loads(json.dumps(baseline))
         expanded["rules"]["rust_cyclic_feature_dependencies"]["assistant->knowledge"] += 1
         self.assertTrue(self.guard.compare_baseline_ratchet(
@@ -732,6 +743,21 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
             future_added = commit("future main added references")
             subprocess.run(["git", "checkout", "--detach", "-q", anchor], cwd=root, check=True)
             check(future_added, 11, 2)
+
+            # An integration target that already contains A has M=A: only
+            # T's actual references are eligible, not the obsolete target's
+            # allowance plus the reviewed branch's delta a second time.
+            subprocess.run(["git", "checkout", "-qb", "integrated", anchor], cwd=root, check=True)
+            assistant.write_text(forward * 11, encoding="utf-8")
+            knowledge.write_text(backward * 2, encoding="utf-8")
+            integrated_target = commit("integrated target added two tested references")
+            subprocess.run(["git", "checkout", "--detach", "-q", anchor], cwd=root, check=True)
+            check(integrated_target, 11, 2)
+            subprocess.run(["git", "checkout", "-q", "integrated"], cwd=root, check=True)
+            assistant.write_text(forward * 10, encoding="utf-8")
+            tightened_target = commit("integrated target retired one reference")
+            subprocess.run(["git", "checkout", "--detach", "-q", anchor], cwd=root, check=True)
+            check(tightened_target, 10, 2)
 
             # A branch-side reduction is a negative net delta, not fresh allowance.
             subprocess.run(["git", "checkout", "-qb", "reduced", old_main], cwd=root, check=True)

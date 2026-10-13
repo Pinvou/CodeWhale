@@ -1,12 +1,9 @@
 import {
-  PERSONAL_WORKBENCH_SCENE_KEY,
-  createPersonalWorkbenchMessageMeta,
-  shouldUsePersonalWorkbenchScene,
-} from './personal-workbench-scene.js';
-
-const WORK_DOCUMENT_SCENE_KEY = 'document-writing';
-const DATA_VISUALIZATION_SCENE_KEY = 'data-visualization';
-const DESIGN_PPT_SCENE_KEY = 'ppt';
+  DATA_VISUALIZATION_SCENE_KEY,
+  DOCUMENT_WRITING_SCENE_KEY,
+  PPT_DESIGN_SCENE_KEY,
+  pinvouSceneTag,
+} from './scene-registry.js';
 
 const DOCUMENT_WRITING_CONTEXT = `Pinvou 公文写作场景路由：
 - 这是强制能力场景，不要按普通聊天或普通 Markdown 文案处理。
@@ -57,7 +54,7 @@ const PPT_DESIGN_AUDIT = `生成完成前执行 PPT 自检：
 如有问题，先自行修正再交付，并在回复中用简短「PPT 自检」说明结果。`;
 
 function shouldUseDocumentWritingScene(subtab) {
-  return subtab === WORK_DOCUMENT_SCENE_KEY;
+  return subtab === DOCUMENT_WRITING_SCENE_KEY;
 }
 
 function shouldUseDataVisualizationScene(subtab) {
@@ -65,10 +62,10 @@ function shouldUseDataVisualizationScene(subtab) {
 }
 
 function shouldUsePptDesignScene(subtab) {
-  return subtab === DESIGN_PPT_SCENE_KEY;
+  return subtab === PPT_DESIGN_SCENE_KEY;
 }
 
-function buildWorkScenePayloadText(text, context, audit) {
+export function buildScenePayloadText(text, context, audit) {
   const raw = String(text || '').trim();
   if (!raw) return raw;
   return `${raw}\n\n---\n${context}\n\n${audit}`;
@@ -76,38 +73,30 @@ function buildWorkScenePayloadText(text, context, audit) {
 
 function createDocumentWritingMessageMeta(text) {
   return {
-    pinvouScene: `work:${WORK_DOCUMENT_SCENE_KEY}`,
-    pinvouRequiredSkill: 'government-writing',
-    pinvouRequiredTool: 'gongwen',
-    pinvouPayloadText: buildWorkScenePayloadText(text, DOCUMENT_WRITING_CONTEXT, DOCUMENT_WRITING_AUDIT),
+    pinvouScene: pinvouSceneTag(DOCUMENT_WRITING_SCENE_KEY),
+    pinvouPayloadText: buildScenePayloadText(text, DOCUMENT_WRITING_CONTEXT, DOCUMENT_WRITING_AUDIT),
   };
 }
 
 function createDataVisualizationMessageMeta(text) {
   return {
-    pinvouScene: `design:${DATA_VISUALIZATION_SCENE_KEY}`,
-    pinvouRequiredSkill: 'visualizer',
-    pinvouPayloadText: buildWorkScenePayloadText(text, DATA_VISUALIZATION_CONTEXT, DATA_VISUALIZATION_AUDIT),
+    pinvouScene: pinvouSceneTag(DATA_VISUALIZATION_SCENE_KEY),
+    pinvouPayloadText: buildScenePayloadText(text, DATA_VISUALIZATION_CONTEXT, DATA_VISUALIZATION_AUDIT),
   };
 }
 
 function createPptDesignMessageMeta(text) {
   return {
-    pinvouScene: `design:${DESIGN_PPT_SCENE_KEY}`,
-    pinvouRequiredSkill: 'pptx',
-    pinvouRequiredTool: 'pptx',
-    pinvouPayloadText: buildWorkScenePayloadText(text, PPT_DESIGN_CONTEXT, PPT_DESIGN_AUDIT),
+    pinvouScene: pinvouSceneTag(PPT_DESIGN_SCENE_KEY),
+    pinvouPayloadText: buildScenePayloadText(text, PPT_DESIGN_CONTEXT, PPT_DESIGN_AUDIT),
   };
 }
 
 export {
-  PERSONAL_WORKBENCH_SCENE_KEY,
   createDataVisualizationMessageMeta,
   createDocumentWritingMessageMeta,
-  createPersonalWorkbenchMessageMeta,
   createPptDesignMessageMeta,
   shouldUseDataVisualizationScene,
   shouldUseDocumentWritingScene,
   shouldUsePptDesignScene,
-  shouldUsePersonalWorkbenchScene,
 };

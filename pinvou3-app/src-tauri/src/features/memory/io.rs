@@ -48,13 +48,8 @@ pub(super) fn write_lock() -> &'static Mutex<()> {
 /// Stored-text caps per store, shared by the write path (which re-cleans every
 /// incoming text) and by organize validation (which must validate against the
 /// same cap so a passing action is not silently truncated when stored).
-///
-/// `WORK_CONTEXT_TEXT_MAX_CHARS` is re-exported from `features::memory` for
-/// the CLI's `memory add` verification: comparing against a locally
-/// duplicated cap would re-create the false `memory_add_not_materialized`
-/// failure the shared normalization fixed if the cap ever changes.
 pub(super) const PREFERENCE_TEXT_MAX_CHARS: usize = 120;
-pub const WORK_CONTEXT_TEXT_MAX_CHARS: usize = 160;
+pub(super) const WORK_CONTEXT_TEXT_MAX_CHARS: usize = 160;
 pub(super) const TIMED_TEXT_MAX_CHARS: usize = 180;
 
 pub(super) fn turn_capture_store() -> &'static Mutex<BTreeMap<String, TurnCapture>> {
@@ -2061,7 +2056,7 @@ fn normalize_timed_memory(item: &mut TimedMemoryItem) {
     item.id = clean_id(&item.id);
     item.kind = normalize_timed_memory_kind(&item.kind);
     item.topic = normalize_timed_memory_topic(&item.kind, &item.topic);
-    item.text = clean_text(&item.text, 180);
+    item.text = clean_text(&item.text, TIMED_TEXT_MAX_CHARS);
     item.source = clean_text(&item.source, 40);
     item.status = match clean_text(&item.status, 20).as_str() {
         "active" => "active".to_string(),
