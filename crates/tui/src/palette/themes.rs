@@ -1117,14 +1117,6 @@ pub fn theme_label_for_mode(mode: PaletteMode) -> &'static str {
 }
 
 #[must_use]
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn ui_theme_from_settings(theme: &str, background_color: Option<&str>) -> UiTheme {
-    super::resolve_theme_setting(theme, background_color)
-        .map(|(_, _, theme)| theme)
-        .unwrap_or_else(|_| UiTheme::detect())
-}
-
-#[must_use]
 pub fn parse_hex_rgb_color(value: &str) -> Option<Color> {
     let hex = value.trim().strip_prefix('#').unwrap_or(value.trim());
     if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {

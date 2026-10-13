@@ -805,10 +805,4 @@ mod tests {
             ("resend it to the queue", false)
         );
     }
-
-    #[test]
-    fn recorder_detection_does_not_crash() {
-        // Just verify the function runs without panicking
-        let _ = is_available();
-    }
 }

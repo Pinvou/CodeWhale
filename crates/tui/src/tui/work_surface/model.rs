@@ -381,12 +381,6 @@ pub struct WorkSurfaceState {
     pub(crate) session_owner_probe_dir: Option<std::path::PathBuf>,
 }
 
-impl Default for WorkSurfaceState {
-    fn default() -> Self {
-        Self::with_placement(WorkSurfacePlacement::Bottom)
-    }
-}
-
 impl WorkSurfaceState {
     #[must_use]
     pub(crate) fn is_resizing(&self) -> bool {
@@ -398,11 +392,6 @@ impl WorkSurfaceState {
     #[must_use]
     pub fn effective_placement(&self) -> WorkSurfacePlacement {
         self.effective_placement
-    }
-
-    #[must_use]
-    pub fn with_placement(placement: WorkSurfacePlacement) -> Self {
-        Self::with_layout(placement, 3, 30)
     }
 
     #[must_use]
@@ -2790,7 +2779,7 @@ mod tests {
     }
 
     fn surface() -> WorkSurfaceState {
-        WorkSurfaceState::default()
+        WorkSurfaceState::with_layout(WorkSurfacePlacement::Bottom, 3, 30)
     }
 
     fn operation(state: NodeState, suffix: &str) -> WorkNode {

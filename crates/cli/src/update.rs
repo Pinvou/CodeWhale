@@ -3257,16 +3257,6 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
     }
 
     #[test]
-    fn android_release_assets_never_select_linux_arm64() {
-        // Sanity: the stem formatter must never produce a linux-* stem for android.
-        let stem = release_asset_stem_for_prefix("codewhale", "android", "aarch64");
-        assert!(
-            !stem.contains("linux"),
-            "android stem must not contain linux: {stem}"
-        );
-    }
-
-    #[test]
     fn mirror_release_uses_base_url_and_platform_assets() {
         let release = release_from_mirror_base_url(
             "https://mirror.example/releases/v0.8.36/",

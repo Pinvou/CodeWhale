@@ -216,90 +216,9 @@ pub trait LlmClient: Send + Sync {
 
 // === Authentication diagnostics ===
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AuthenticationErrorContext {
-    pub provider: Option<String>,
-    pub base_url_authority: Option<String>,
-    pub model: Option<String>,
-    pub key_source: Option<String>,
-    pub key_fingerprint: Option<String>,
-    pub key_kind: Option<String>,
-}
-
-impl AuthenticationErrorContext {
-    #[must_use]
-    pub fn new(
-        provider: &str,
-        base_url: &str,
-        model: &str,
-        key_source: &str,
-        api_key: &str,
-    ) -> Self {
-        Self::from_parts(
-            Some(provider),
-            Some(base_url),
-            Some(model),
-            Some(key_source),
-            Some(api_key),
-        )
-    }
-
-    #[must_use]
-    pub fn from_parts(
-        provider: Option<&str>,
-        base_url: Option<&str>,
-        model: Option<&str>,
-        key_source: Option<&str>,
-        api_key: Option<&str>,
-    ) -> Self {
-        let api_key = api_key.and_then(non_empty_trimmed);
-        Self {
-            provider: provider.and_then(non_empty_trimmed).map(str::to_string),
-            base_url_authority: base_url.and_then(base_url_authority),
-            model: model.and_then(non_empty_trimmed).map(str::to_string),
-            key_source: key_source.and_then(non_empty_trimmed).map(str::to_string),
-            key_fingerprint: api_key.map(redacted_key_fingerprint),
-            key_kind: api_key.map(classify_api_key_prefix).map(str::to_string),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.provider.is_none()
-            && self.base_url_authority.is_none()
-            && self.model.is_none()
-            && self.key_source.is_none()
-            && self.key_fingerprint.is_none()
-            && self.key_kind.is_none()
-    }
-
-    fn detail_segments(&self) -> Vec<String> {
-        let mut segments = Vec::new();
-        if let Some(provider) = self.provider.as_deref() {
-            segments.push(format!("provider: {provider}"));
-        }
-        if let Some(authority) = self.base_url_authority.as_deref() {
-            segments.push(format!("base URL authority: {authority}"));
-        }
-        if let Some(model) = self.model.as_deref() {
-            segments.push(format!("model: {model}"));
-        }
-        if let Some(source) = self.key_source.as_deref() {
-            segments.push(format!("key source: {source}"));
-        }
-        if let Some(fingerprint) = self.key_fingerprint.as_deref() {
-            segments.push(format!("key fingerprint: {fingerprint}"));
-        }
-        if let Some(kind) = self.key_kind.as_deref() {
-            segments.push(format!("key type: {kind}"));
-        }
-        segments
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticationErrorDetail {
     message: String,
-    context: Option<AuthenticationErrorContext>,
 }
 
 impl AuthenticationErrorDetail {
@@ -307,19 +226,6 @@ impl AuthenticationErrorDetail {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            context: None,
-        }
-    }
-
-    #[must_use]
-    pub fn with_context(
-        message: impl Into<String>,
-        context: Option<AuthenticationErrorContext>,
-    ) -> Self {
-        let context = context.filter(|context| !context.is_empty());
-        Self {
-            message: message.into(),
-            context,
         }
     }
 
@@ -330,15 +236,7 @@ impl AuthenticationErrorDetail {
 
     #[must_use]
     pub fn to_user_message(&self) -> String {
-        let Some(context) = self.context.as_ref() else {
-            return self.message.clone();
-        };
-        let segments = context.detail_segments();
-        if segments.is_empty() {
-            self.message.clone()
-        } else {
-            format!("{} ({})", self.message, segments.join(", "))
-        }
+        self.message.clone()
     }
 }
 
@@ -352,54 +250,6 @@ impl From<&str> for AuthenticationErrorDetail {
     fn from(message: &str) -> Self {
         Self::new(message)
     }
-}
-
-#[must_use]
-pub fn classify_api_key_prefix(api_key: &str) -> &'static str {
-    if api_key.starts_with("tp-") {
-        "Xiaomi MiMo Token Plan key"
-    } else {
-        "API key"
-    }
-}
-
-fn non_empty_trimmed(value: &str) -> Option<&str> {
-    let value = value.trim();
-    if value.is_empty() { None } else { Some(value) }
-}
-
-fn base_url_authority(base_url: &str) -> Option<String> {
-    let base_url = non_empty_trimmed(base_url)?;
-    let without_scheme = base_url
-        .split_once("://")
-        .map_or(base_url, |(_, rest)| rest);
-    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, authority)| authority);
-    non_empty_trimmed(authority).map(str::to_string)
-}
-
-fn redacted_key_fingerprint(api_key: &str) -> String {
-    let api_key = api_key.trim();
-    let len = api_key.chars().count();
-    match public_key_prefix(api_key) {
-        Some(prefix) => format!("{prefix}... (len={len})"),
-        None => format!("unprefixed (len={len})"),
-    }
-}
-
-fn public_key_prefix(api_key: &str) -> Option<&str> {
-    ["tp-", "sk-", "hf_", "hf-", "ak-", "rk-"]
-        .into_iter()
-        .find(|prefix| api_key.starts_with(prefix))
-}
-
-fn redact_api_key_from_message(message: &str, api_key: Option<&str>) -> String {
-    let Some(api_key) = api_key.and_then(non_empty_trimmed) else {
-        return message.to_string();
-    };
-    message.replace(api_key, "[redacted API key]")
 }
 
 // === LlmError - Classified Error Types ===
@@ -632,57 +482,6 @@ impl LlmError {
     #[must_use]
     pub fn authentication_error(message: impl Into<String>) -> Self {
         LlmError::AuthenticationError(AuthenticationErrorDetail::new(message))
-    }
-
-    #[must_use]
-    pub fn authentication_error_with_context(
-        message: impl Into<String>,
-        context: Option<AuthenticationErrorContext>,
-    ) -> Self {
-        LlmError::AuthenticationError(AuthenticationErrorDetail::with_context(message, context))
-    }
-
-    /// Constructs an `LlmError` from HTTP response data plus request context
-    /// that is safe to display when authentication fails.
-    #[must_use]
-    pub fn from_http_response_with_request_context(
-        status: u16,
-        body: &str,
-        provider: Option<&str>,
-        base_url: Option<&str>,
-        model: Option<&str>,
-        key_source: Option<&str>,
-        api_key: Option<&str>,
-    ) -> Self {
-        let body = redact_api_key_from_message(body, api_key);
-        let context =
-            AuthenticationErrorContext::from_parts(provider, base_url, model, key_source, api_key);
-        Self::from_http_response_with_auth_context(status, &body, Some(context))
-    }
-
-    /// Constructs an `LlmError` from HTTP status code and response body, with
-    /// optional structured details for authentication failures.
-    ///
-    /// The `body` passed here must already be safe for user display. Prefer
-    /// [`Self::from_http_response_with_request_context`] when the raw API key is
-    /// available so the response body can be redacted before rendering.
-    #[must_use]
-    pub fn from_http_response_with_auth_context(
-        status: u16,
-        body: &str,
-        auth_context: Option<AuthenticationErrorContext>,
-    ) -> Self {
-        match status {
-            401 => Self::authentication_error_with_context(body, auth_context),
-            403 => {
-                if looks_like_authentication_failure(body) {
-                    Self::authentication_error_with_context(body, auth_context)
-                } else {
-                    LlmError::AuthorizationError(body.to_string())
-                }
-            }
-            _ => Self::from_http_response(status, body),
-        }
     }
 
     /// Constructs an `LlmError` from HTTP status code, body, and optional Retry-After header.
@@ -1034,7 +833,6 @@ impl From<serde_json::Error> for LlmError {
 /// - `exponential_base`: 2.0
 /// - `jitter`: true (adds randomness to prevent thundering herd)
 /// - `jitter_factor`: 0.1 (10% variation)
-/// - `retryable_status_codes`: [429, 499, 500, 502, 503, 504]
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     /// Whether retry logic is enabled
@@ -1061,10 +859,6 @@ pub struct RetryConfig {
     /// Whether to respect server's Retry-After header
     pub respect_retry_after: bool,
 
-    /// HTTP status codes that should trigger a retry
-    #[allow(dead_code)] // Used in tests via is_retryable_status()
-    pub retryable_status_codes: Vec<u16>,
-
     /// Timeout for individual requests (seconds, 0 = no timeout)
     #[allow(dead_code)] // Configuration field for retry consumers
     pub request_timeout: f64,
@@ -1084,7 +878,6 @@ impl Default for RetryConfig {
             jitter: true,
             jitter_factor: 0.1,
             respect_retry_after: true,
-            retryable_status_codes: vec![429, 499, 500, 502, 503, 504],
             request_timeout: 120.0,
             total_timeout: 0.0, // No total timeout by default
         }
@@ -1163,11 +956,6 @@ impl RetryConfig {
 
         Duration::from_secs_f64(final_delay)
     }
-
-    /// Checks if a given HTTP status code should trigger a retry
-    pub fn is_retryable_status(&self, status: u16) -> bool {
-        self.retryable_status_codes.contains(&status)
-    }
 }
 
 /// Converts from the existing `RetryPolicy` in config
@@ -1180,19 +968,6 @@ impl From<RetryPolicy> for RetryConfig {
             max_delay: policy.max_delay,
             exponential_base: policy.exponential_base,
             ..Default::default()
-        }
-    }
-}
-
-/// Converts back to `RetryPolicy` for compatibility
-impl From<RetryConfig> for RetryPolicy {
-    fn from(config: RetryConfig) -> Self {
-        Self {
-            enabled: config.enabled,
-            max_retries: config.max_retries,
-            initial_delay: config.initial_delay,
-            max_delay: config.max_delay,
-            exponential_base: config.exponential_base,
         }
     }
 }
@@ -1430,13 +1205,6 @@ mod tests {
         );
     }
 
-    fn auth_user_message(error: LlmError) -> String {
-        match error {
-            LlmError::AuthenticationError(auth) => auth.to_user_message(),
-            other => panic!("expected authentication error, got {other}"),
-        }
-    }
-
     #[test]
     fn test_retry_config_defaults() {
         let config = RetryConfig::default();
@@ -1514,126 +1282,6 @@ mod tests {
         assert!(d1.as_secs_f64() <= base + range);
         assert!(d2.as_secs_f64() >= base - range);
         assert!(d2.as_secs_f64() <= base + range);
-    }
-
-    #[test]
-    fn test_is_retryable_status() {
-        let config = RetryConfig::default();
-
-        assert!(config.is_retryable_status(429)); // Rate limit
-        assert!(config.is_retryable_status(499)); // Upstream request cancelled
-        assert!(config.is_retryable_status(500)); // Internal server error
-        assert!(config.is_retryable_status(502)); // Bad gateway
-        assert!(config.is_retryable_status(503)); // Service unavailable
-        assert!(config.is_retryable_status(504)); // Gateway timeout
-
-        assert!(!config.is_retryable_status(400)); // Bad request
-        assert!(!config.is_retryable_status(401)); // Unauthorized
-        assert!(!config.is_retryable_status(403)); // Forbidden
-        assert!(!config.is_retryable_status(404)); // Not found
-    }
-
-    #[test]
-    fn auth_error_with_context_includes_provider_authority_model_and_key_source() {
-        let err = LlmError::from_http_response_with_request_context(
-            401,
-            "Invalid API Key",
-            Some("Xiaomi MiMo"),
-            Some("https://token-plan-sgp.xiaomimimo.com/v1"),
-            Some("mimo-v2.5"),
-            Some("env"),
-            Some("tp-secret-token-plan-value"),
-        );
-        let message = auth_user_message(err);
-
-        assert!(message.contains("Invalid API Key"));
-        assert!(message.contains("provider: Xiaomi MiMo"));
-        assert!(message.contains("base URL authority: token-plan-sgp.xiaomimimo.com"));
-        assert!(message.contains("model: mimo-v2.5"));
-        assert!(message.contains("key source: env"));
-        assert!(message.contains("key fingerprint: tp-... (len=26)"));
-    }
-
-    #[test]
-    fn auth_error_redacts_full_api_key_from_body_and_context() {
-        let api_key = "tp-secret-token-plan-value";
-        let err = LlmError::from_http_response_with_request_context(
-            401,
-            &format!("Invalid API Key: {api_key}"),
-            Some("Xiaomi MiMo"),
-            Some("https://token-plan-sgp.xiaomimimo.com/v1"),
-            Some("mimo-v2.5"),
-            Some("config-file"),
-            Some(api_key),
-        );
-        let message = auth_user_message(err);
-
-        assert!(!message.contains(api_key));
-        assert!(!message.contains("secret-token-plan-value"));
-        assert!(message.contains("[redacted API key]"));
-        assert!(message.contains("key fingerprint: tp-... (len=26)"));
-    }
-
-    #[test]
-    fn auth_error_classifies_xiaomi_token_plan_key_prefix() {
-        let token_plan = AuthenticationErrorContext::from_parts(
-            None,
-            None,
-            None,
-            Some("session"),
-            Some("tp-secret-token-plan-value"),
-        );
-        let generic = AuthenticationErrorContext::from_parts(
-            None,
-            None,
-            None,
-            Some("session"),
-            Some("sk-other"),
-        );
-        let unprefixed = AuthenticationErrorContext::from_parts(
-            None,
-            None,
-            None,
-            Some("session"),
-            Some("plainsecretvalue"),
-        );
-
-        assert_eq!(
-            token_plan.key_kind.as_deref(),
-            Some("Xiaomi MiMo Token Plan key")
-        );
-        assert_eq!(generic.key_kind.as_deref(), Some("API key"));
-        assert_eq!(unprefixed.key_kind.as_deref(), Some("API key"));
-        assert_eq!(
-            unprefixed.key_fingerprint.as_deref(),
-            Some("unprefixed (len=16)")
-        );
-    }
-
-    #[test]
-    fn authorization_403_is_not_reclassified_by_auth_context() {
-        let err = LlmError::from_http_response_with_request_context(
-            403,
-            "forbidden",
-            Some("Arcee AI"),
-            Some("https://api.arcee.ai/v1"),
-            Some("auto"),
-            Some("env"),
-            Some("sk-arcee-secret"),
-        );
-
-        assert!(matches!(err, LlmError::AuthorizationError(_)));
-    }
-
-    #[test]
-    fn auth_error_without_context_preserves_bare_message() {
-        let err = LlmError::from_http_response_with_auth_context(
-            401,
-            "Invalid API Key",
-            Some(AuthenticationErrorContext::default()),
-        );
-
-        assert_eq!(auth_user_message(err), "Invalid API Key");
     }
 
     /// A flat `{"error","message"}` body keeps its detail: the class alone
@@ -1804,11 +1452,6 @@ mod tests {
         assert_f64_eq(config.initial_delay, policy.initial_delay);
         assert_f64_eq(config.max_delay, policy.max_delay);
         assert_f64_eq(config.exponential_base, policy.exponential_base);
-
-        // Convert back
-        let policy2: RetryPolicy = config.into();
-        assert_eq!(policy2.enabled, policy.enabled);
-        assert_eq!(policy2.max_retries, policy.max_retries);
     }
 
     #[tokio::test]

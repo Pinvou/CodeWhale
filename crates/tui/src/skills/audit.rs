@@ -641,12 +641,6 @@ struct PackageAnalysis {
     warnings: Vec<String>,
 }
 
-/// Compute the bounded package content digest used by audit and mutation.
-#[allow(dead_code)] // public wrapper; mutation uses package_digest directly
-pub fn compute_package_digest(package_dir: &Path) -> Result<String, DigestUnknownReason> {
-    package_digest::compute_package_digest(package_dir).map_err(digest_error_to_unknown)
-}
-
 fn digest_error_to_unknown(err: PackageDigestError) -> DigestUnknownReason {
     match err {
         PackageDigestError::Unreadable => DigestUnknownReason::Unreadable,

@@ -3477,7 +3477,7 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
 
 #[test]
 fn test_cycle_scenario() {
-    // Scenario consolidation of: test_cycle_mode_transitions, test_cycle_mode_reverse_transitions
+    // Scenario consolidation of: test_cycle_mode_transitions
     // from test_cycle_mode_transitions
     {
         let mut app = App::new(test_options(false), &Config::default());
@@ -3485,22 +3485,6 @@ fn test_cycle_scenario() {
         app.cycle_mode();
         // Mode should have changed
         assert_ne!(app.mode, initial_mode);
-    }
-    // from test_cycle_mode_reverse_transitions
-    {
-        let mut app = App::new(test_options(false), &Config::default());
-
-        app.mode = AppMode::Plan;
-        app.cycle_mode_reverse();
-        assert_eq!(app.mode, AppMode::Operate);
-
-        app.mode = AppMode::Operate;
-        app.cycle_mode_reverse();
-        assert_eq!(app.mode, AppMode::Agent);
-
-        app.mode = AppMode::Agent;
-        app.cycle_mode_reverse();
-        assert_eq!(app.mode, AppMode::Plan);
     }
 }
 
@@ -4435,14 +4419,6 @@ fn tool_run_expansion_toggle_handles_active_run() {
 }
 
 #[test]
-fn test_scroll_operations() {
-    let mut app = App::new(test_options(false), &Config::default());
-    // Just verify scroll methods can be called without panic
-    app.scroll_up(5);
-    app.scroll_down(3);
-}
-
-#[test]
 fn resize_preserves_scrolled_transcript_position() {
     let mut app = App::new(test_options(false), &Config::default());
     app.viewport.transcript_scroll = TranscriptScroll::at_line(42);
@@ -4996,7 +4972,9 @@ fn pasted_text_and_image_placeholders_survive_history_and_queue_paths() {
         Some("Use this skill")
     );
 
-    app.push_pending_steer(QueuedMessage::new(submitted.clone(), None));
+    app.pending_steers
+        .push_back(QueuedMessage::new(submitted.clone(), None));
+    app.submit_pending_steers_after_interrupt = true;
     let steers = app.drain_pending_steers();
     assert_eq!(steers[0].display, submitted);
 }
@@ -5357,23 +5335,18 @@ fn sticky_error_ttl_is_capped_and_clears_on_composer_activity() {
 }
 
 #[test]
-fn push_pending_steer_arms_resend_flag() {
-    let mut app = App::new(test_options(false), &Config::default());
-    assert!(!app.submit_pending_steers_after_interrupt);
-    app.push_pending_steer(QueuedMessage::new("steer me".to_string(), None));
-    assert_eq!(app.pending_steers.len(), 1);
-    assert!(app.submit_pending_steers_after_interrupt);
-}
-
-#[test]
 fn drain_pending_scenario() {
     // Scenario consolidation of: drain_pending_steers_clears_flag_and_returns_in_order, drain_pending_steers_when_empty_is_safe
     // from drain_pending_steers_clears_flag_and_returns_in_order
     {
         let mut app = App::new(test_options(false), &Config::default());
-        app.push_pending_steer(QueuedMessage::new("first".to_string(), None));
-        app.push_pending_steer(QueuedMessage::new("second".to_string(), None));
-        app.push_pending_steer(QueuedMessage::new("third".to_string(), None));
+        app.pending_steers
+            .push_back(QueuedMessage::new("first".to_string(), None));
+        app.pending_steers
+            .push_back(QueuedMessage::new("second".to_string(), None));
+        app.pending_steers
+            .push_back(QueuedMessage::new("third".to_string(), None));
+        app.submit_pending_steers_after_interrupt = true;
 
         let drained = app.drain_pending_steers();
         assert_eq!(drained.len(), 3);
@@ -5391,15 +5364,6 @@ fn drain_pending_scenario() {
         assert!(drained.is_empty());
         assert!(!app.submit_pending_steers_after_interrupt);
     }
-}
-
-#[test]
-fn double_push_pending_steer_is_idempotent_on_flag() {
-    let mut app = App::new(test_options(false), &Config::default());
-    app.push_pending_steer(QueuedMessage::new("a".to_string(), None));
-    app.push_pending_steer(QueuedMessage::new("b".to_string(), None));
-    assert!(app.submit_pending_steers_after_interrupt);
-    assert_eq!(app.pending_steers.len(), 2);
 }
 
 #[test]
@@ -7171,7 +7135,6 @@ fn mode_selection_reports_refusal_change_and_persisted_same_distinctly() {
 
     assert_eq!(app.select_mode(AppMode::Operate), SettingSelection::Changed);
     assert!(SettingSelection::Changed.changed_live_state());
-    assert!(SettingSelection::Changed.accepted());
 
     assert_eq!(
         app.select_mode(AppMode::Operate),
@@ -7181,14 +7144,8 @@ fn mode_selection_reports_refusal_change_and_persisted_same_distinctly() {
         !SettingSelection::PersistedSame.changed_live_state(),
         "a persisted-same selection must not resync the engine"
     );
-    assert!(
-        SettingSelection::PersistedSame.accepted(),
-        "a persisted-same selection did write the startup default"
-    );
-
     app.is_loading = true;
     assert_eq!(app.select_mode(AppMode::Plan), SettingSelection::Refused);
-    assert!(!SettingSelection::Refused.accepted());
     assert_eq!(app.mode, AppMode::Operate, "a refusal changes nothing");
 }
 

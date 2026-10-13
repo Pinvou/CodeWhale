@@ -169,10 +169,6 @@ struct AgentProfilePermissionsToml {
     approval_required: Option<bool>,
 }
 
-pub fn load_workspace_agent_profiles(workspace: impl AsRef<Path>) -> Result<Vec<AgentProfile>> {
-    load_agent_profiles_from_dir(workspace.as_ref().join(WORKSPACE_AGENT_PROFILE_DIR))
-}
-
 /// Load every valid workspace profile while reporting invalid neighbors
 /// individually.  The runtime roster uses this path so one stale profile does
 /// not hide a newly-authored valid profile (or the rest of the party).
@@ -257,16 +253,6 @@ pub(crate) fn load_plugin_agent_profiles_from_component(
     Ok((profiles, issues))
 }
 
-/// Read only the identity-bearing fields from workspace profiles for the
-/// authoring collision gate.  Unknown legacy fields are harmless here because
-/// no profile behavior is loaded or executed from this representation.
-pub fn load_workspace_agent_profile_identities(
-    workspace: impl AsRef<Path>,
-) -> Result<Vec<AgentProfileIdentity>> {
-    let dir = workspace.as_ref().join(WORKSPACE_AGENT_PROFILE_DIR);
-    load_agent_profile_identities_from_dir(dir)
-}
-
 pub fn load_agent_profile_identities_from_dir(
     dir: impl AsRef<Path>,
 ) -> Result<Vec<AgentProfileIdentity>> {
@@ -275,20 +261,6 @@ pub fn load_agent_profile_identities_from_dir(
         .into_iter()
         .map(|path| load_agent_profile_identity_file(&path))
         .collect()
-}
-
-pub fn load_agent_profiles_from_dir(dir: impl AsRef<Path>) -> Result<Vec<AgentProfile>> {
-    let dir = dir.as_ref();
-    let mut profiles = Vec::new();
-    let mut seen = BTreeSet::new();
-    for path in agent_profile_paths(dir)? {
-        let profile = load_agent_profile_file(&path)?;
-        if !seen.insert(profile.id.to_ascii_lowercase()) {
-            bail!("duplicate agent profile id {}", profile.id);
-        }
-        profiles.push(profile);
-    }
-    Ok(profiles)
 }
 
 fn agent_profile_paths(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -905,7 +877,9 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let path = write_profile(dir.path(), &draft.file_name(), &draft.render_toml());
-        let profiles = load_agent_profiles_from_dir(dir.path()).expect("rendered TOML loads");
+        let (profiles, _issues) =
+            load_agent_profiles_from_dir_tolerant(dir.path(), ProfileOrigin::Workspace)
+                .expect("rendered TOML loads");
         assert_eq!(profiles.len(), 1);
         let loaded = &profiles[0];
         assert_eq!(loaded.id, "reviewer");
@@ -951,7 +925,9 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         write_profile(dir.path(), &draft.file_name(), &rendered);
-        let profiles = load_agent_profiles_from_dir(dir.path()).expect("rendered TOML loads");
+        let (profiles, _issues) =
+            load_agent_profiles_from_dir_tolerant(dir.path(), ProfileOrigin::Workspace)
+                .expect("rendered TOML loads");
         assert_eq!(profiles.len(), 1);
         let loaded = &profiles[0];
         assert_eq!(loaded.profile.model.as_deref(), Some("deepseek-v4-flash"));
@@ -980,7 +956,9 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         write_profile(dir.path(), &draft.file_name(), &rendered);
-        let profiles = load_agent_profiles_from_dir(dir.path()).expect("rendered TOML loads");
+        let (profiles, _issues) =
+            load_agent_profiles_from_dir_tolerant(dir.path(), ProfileOrigin::Workspace)
+                .expect("rendered TOML loads");
         assert_eq!(profiles.len(), 1);
         let loaded = &profiles[0];
         assert_eq!(loaded.profile.provider.as_deref(), Some("deepseek"));
@@ -1004,7 +982,9 @@ text = "Scout deeply."
 "#,
         );
 
-        let profiles = load_agent_profiles_from_dir(dir.path()).expect("profile TOML loads");
+        let (profiles, _issues) =
+            load_agent_profiles_from_dir_tolerant(dir.path(), ProfileOrigin::Workspace)
+                .expect("profile TOML loads");
         assert_eq!(profiles.len(), 1);
         // `xhigh` used to land here too; the thinking ladder made it a rung of
         // its own, so `ultracode` is the alias left to exercise.
@@ -1055,7 +1035,10 @@ reasoning = "expensive"
 "#,
         );
 
-        let err = load_agent_profiles_from_dir(dir.path()).expect_err("invalid effort must fail");
+        let (_profiles, issues) =
+            load_agent_profiles_from_dir_tolerant(dir.path(), ProfileOrigin::Workspace)
+                .expect("dir scan must succeed");
+        let err = issues.join("\n");
         assert!(
             err.to_string().contains("reasoning_effort"),
             "unexpected error: {err}"
@@ -1167,7 +1150,7 @@ model = "deepseek-v4-flash"
     fn agent_profile_loader_returns_empty_for_missing_workspace_dir() {
         let tmp = TempDir::new().unwrap();
 
-        let profiles = load_workspace_agent_profiles(tmp.path()).unwrap();
+        let (profiles, _issues) = load_workspace_agent_profiles_tolerant(tmp.path()).unwrap();
 
         assert!(profiles.is_empty());
     }
@@ -1188,8 +1171,9 @@ models = ["glm-5.2", "deepseek-v4-pro"]
 "#,
         );
 
-        let identities = load_workspace_agent_profile_identities(tmp.path())
-            .expect("legacy fields do not obscure identity");
+        let identities =
+            load_agent_profile_identities_from_dir(tmp.path().join(WORKSPACE_AGENT_PROFILE_DIR))
+                .expect("legacy fields do not obscure identity");
 
         assert_eq!(
             identities,
@@ -1207,9 +1191,10 @@ models = ["glm-5.2", "deepseek-v4-pro"]
         std::fs::create_dir_all(&agents_dir).unwrap();
         write_profile(&agents_dir, "broken.toml", "id = [\n");
 
-        let err = load_workspace_agent_profile_identities(tmp.path())
-            .expect_err("malformed TOML cannot prove collision safety")
-            .to_string();
+        let err =
+            load_agent_profile_identities_from_dir(tmp.path().join(WORKSPACE_AGENT_PROFILE_DIR))
+                .expect_err("malformed TOML cannot prove collision safety")
+                .to_string();
 
         assert!(err.contains("broken.toml"), "unexpected error: {err}");
         assert!(err.contains("profile identity"), "unexpected error: {err}");
@@ -1280,9 +1265,10 @@ models = ["glm-5.2", "deepseek-v4-pro"]
         std::fs::create_dir_all(&agents_dir).unwrap();
         write_profile(&agents_dir, "broken.toml", "id = \"bad id\"\n");
 
-        let err = load_workspace_agent_profile_identities(tmp.path())
-            .expect_err("invalid identity tokens cannot prove collision safety")
-            .to_string();
+        let err =
+            load_agent_profile_identities_from_dir(tmp.path().join(WORKSPACE_AGENT_PROFILE_DIR))
+                .expect_err("invalid identity tokens cannot prove collision safety")
+                .to_string();
 
         assert!(err.contains("broken.toml"), "unexpected error: {err}");
         assert!(err.contains("simple token"), "unexpected error: {err}");
@@ -1302,8 +1288,9 @@ models = ["glm-5.2", "deepseek-v4-pro"]
         let reviewer_path = write_profile(&agents_dir, "reviewer.toml", legacy);
         let before = std::fs::read_to_string(&reviewer_path).unwrap();
 
-        let identities = load_workspace_agent_profile_identities(tmp.path())
-            .expect("legacy neighbor must not block identity discovery");
+        let identities =
+            load_agent_profile_identities_from_dir(tmp.path().join(WORKSPACE_AGENT_PROFILE_DIR))
+                .expect("legacy neighbor must not block identity discovery");
         assert_eq!(identities.len(), 1);
         assert_eq!(identities[0].id, "reviewer");
         assert!(
@@ -1366,7 +1353,7 @@ posture = "read-only"
 "#,
         );
 
-        let profiles = load_workspace_agent_profiles(tmp.path()).unwrap();
+        let (profiles, _issues) = load_workspace_agent_profiles_tolerant(tmp.path()).unwrap();
 
         assert_eq!(profiles.len(), 1);
         let profile = &profiles[0];
@@ -1413,9 +1400,10 @@ role_hint = "reviewer"
                 ),
             );
 
-            let err = load_agent_profiles_from_dir(tmp.path())
-                .unwrap_err()
-                .to_string();
+            let (_profiles, issues) =
+                load_agent_profiles_from_dir_tolerant(tmp.path(), ProfileOrigin::Workspace)
+                    .expect("dir scan must succeed");
+            let err = issues.join("\n");
 
             assert!(
                 err.contains(field) || err.contains("unknown field"),
@@ -1440,7 +1428,9 @@ model = "deepseek/deepseek-v4-pro"
 "#,
         );
 
-        let profiles = load_agent_profiles_from_dir(tmp.path()).expect("profile loads");
+        let (profiles, _issues) =
+            load_agent_profiles_from_dir_tolerant(tmp.path(), ProfileOrigin::Workspace)
+                .expect("profile loads");
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].profile.provider.as_deref(), Some("openrouter"));
         assert_eq!(
@@ -1465,7 +1455,9 @@ model = "qwen-2.5-7b"
 "#,
         );
 
-        let profiles = load_agent_profiles_from_dir(tmp.path()).expect("profile loads");
+        let (profiles, _issues) =
+            load_agent_profiles_from_dir_tolerant(tmp.path(), ProfileOrigin::Workspace)
+                .expect("profile loads");
 
         assert_eq!(profiles[0].profile.provider.as_deref(), Some("lm-studio"));
         assert_eq!(profiles[0].profile.model.as_deref(), Some("qwen-2.5-7b"));
@@ -1484,9 +1476,10 @@ model = "some-model"
 "#,
         );
 
-        let err = load_agent_profiles_from_dir(tmp.path())
-            .unwrap_err()
-            .to_string();
+        let (_profiles, issues) =
+            load_agent_profiles_from_dir_tolerant(tmp.path(), ProfileOrigin::Workspace)
+                .expect("dir scan must succeed");
+        let err = issues.join("\n");
 
         assert!(
             err.contains("provider must be a simple provider id"),
@@ -1508,9 +1501,10 @@ posture = "read-write"
 "#,
         );
 
-        let err = load_agent_profiles_from_dir(tmp.path())
-            .unwrap_err()
-            .to_string();
+        let (_profiles, issues) =
+            load_agent_profiles_from_dir_tolerant(tmp.path(), ProfileOrigin::Workspace)
+                .expect("dir scan must succeed");
+        let err = issues.join("\n");
 
         assert!(
             err.contains("would widen permissions"),
@@ -1530,28 +1524,13 @@ model = "deepseek-v4-pro api_key=secret"
 "#,
         );
 
-        let err = load_agent_profiles_from_dir(tmp.path())
-            .unwrap_err()
-            .to_string();
+        let (_profiles, issues) =
+            load_agent_profiles_from_dir_tolerant(tmp.path(), ProfileOrigin::Workspace)
+                .expect("dir scan must succeed");
+        let err = issues.join("\n");
 
         assert!(
             err.contains("model must be a visible model id"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn agent_profile_loader_rejects_duplicate_ids() {
-        let tmp = TempDir::new().unwrap();
-        write_profile(tmp.path(), "a.toml", "name = \"reviewer\"\n");
-        write_profile(tmp.path(), "b.toml", "id = \"reviewer\"\n");
-
-        let err = load_agent_profiles_from_dir(tmp.path())
-            .unwrap_err()
-            .to_string();
-
-        assert!(
-            err.contains("duplicate agent profile id reviewer"),
             "unexpected error: {err}"
         );
     }

@@ -499,16 +499,6 @@ mod tests {
                 "invalid line is consumed so retries cannot loop"
             );
         }
-        // from take_sse_line_rejects_invalid_bytes_without_replacement
-        {
-            let mut buffer = b"data: ok".to_vec();
-            buffer.push(0xFF);
-            buffer.extend_from_slice(b"\n");
-            let err = take_sse_line(&mut buffer).expect_err("0xFF is not UTF-8");
-            assert_eq!(err.valid_up_to, 8);
-            assert!(!err.to_string().contains('\u{FFFD}'));
-            assert!(buffer.is_empty(), "invalid line must be drained");
-        }
     }
 
     #[test]

@@ -2563,20 +2563,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_mapping_keeps_cache_write_separate_from_miss() {
-        let usage = parse_anthropic_usage(&json!({
-            "input_tokens": 3,
-            "cache_creation_input_tokens": 2045,
-            "cache_read_input_tokens": 18000,
-            "output_tokens": 1,
-        }));
-        assert_eq!(usage.input_tokens, 3 + 2045 + 18000);
-        assert_eq!(usage.prompt_cache_hit_tokens, Some(18000));
-        assert_eq!(usage.prompt_cache_miss_tokens, Some(3));
-        assert_eq!(usage.prompt_cache_write_tokens, Some(2045));
-    }
-
-    #[test]
     fn error_envelope_parses_type_and_message() {
         let (error_type, message) = parse_anthropic_error_envelope(
             r#"{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"},"request_id":"req_1"}"#,

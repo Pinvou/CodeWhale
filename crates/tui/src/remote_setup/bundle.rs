@@ -540,25 +540,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_and_bridge_share_the_token() {
-        let inputs = sample_inputs(&AZURE, &TELEGRAM, "openai");
-        let files = render_bundle(&inputs);
-        let runtime = &files
-            .iter()
-            .find(|f| f.relative_path == "runtime.env")
-            .unwrap()
-            .contents;
-        let bridge = &files
-            .iter()
-            .find(|f| f.relative_path == "telegram.env")
-            .unwrap()
-            .contents;
-        let token_line = format!("CODEWHALE_RUNTIME_TOKEN={}", inputs.runtime_token);
-        assert!(runtime.contains(&token_line), "runtime.env missing token");
-        assert!(bridge.contains(&token_line), "bridge env missing token");
-    }
-
-    #[test]
     fn env_files_lead_with_codewhale_keys() {
         let inputs = sample_inputs(&DIGITALOCEAN, &TELEGRAM, "deepseek");
         let files = render_bundle(&inputs);

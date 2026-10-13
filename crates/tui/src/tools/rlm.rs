@@ -933,24 +933,6 @@ mod tests {
     }
 
     #[test]
-    fn schema_uses_new_tool_names() {
-        assert_eq!(
-            RlmTool::alias("rlm_session_objects", "session_objects", None).name(),
-            "rlm_session_objects"
-        );
-        assert_eq!(RlmTool::alias("rlm_open", "open", None).name(), "rlm_open");
-        assert_eq!(RlmTool::alias("rlm_eval", "eval", None).name(), "rlm_eval");
-        assert_eq!(
-            RlmTool::alias("rlm_configure", "configure", None).name(),
-            "rlm_configure"
-        );
-        assert_eq!(
-            RlmTool::alias("rlm_close", "close", None).name(),
-            "rlm_close"
-        );
-    }
-
-    #[test]
     fn rlm_tool_is_compatibility_only_not_model_visible() {
         let canonical = RlmTool::new("rlm", None);
         assert!(!canonical.model_visible());

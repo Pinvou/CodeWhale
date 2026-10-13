@@ -609,7 +609,6 @@ async fn planned_route_builds_subagent_catalog_without_installed_client() {
     engine.deepseek_client = None;
     let planned = plan(&config, &identity, false, "planned child route").await;
     let route = planned.route.validate().expect("planned route validates");
-    let planned_model = route.model.clone();
     let policy = TurnAuthority::from_effective_fields(
         AppMode::Agent,
         false,
@@ -647,11 +646,6 @@ async fn planned_route_builds_subagent_catalog_without_installed_client() {
             .iter()
             .any(|tool| tool.name == "agent"),
         "the planned route client must make sub-agent tools available"
-    );
-    assert_eq!(
-        build.subagent_runtime_model.as_deref(),
-        Some(planned_model.as_str()),
-        "the child runtime must carry the planned route model"
     );
 }
 

@@ -280,10 +280,6 @@ impl ProviderEffectiveReasoning {
 
 // ── Router call reasoning: configured, visible, and cheap ───────────────────
 
-/// The cheapest reasoning a Router call falls back to when nothing else is
-/// configured. A Router profile may raise this to `low` — and no further.
-pub const ROUTER_CALL_REASONING: RouterCallReasoning = RouterCallReasoning::Off;
-
 /// Everything a receipt needs to say about *the Router's own call*.
 ///
 /// Four separate facts, because collapsing them is how a receipt starts lying:
@@ -1877,7 +1873,6 @@ mod tests {
         assert_eq!(plan.tier, ReasoningTier::Off);
         assert_eq!(plan.disclosure.requested, "off");
         assert_eq!(plan.disclosure.effective, "off");
-        assert_eq!(ROUTER_CALL_REASONING, RouterCallReasoning::Off);
     }
 
     /// Capability may move a router call — an always-thinking route cannot

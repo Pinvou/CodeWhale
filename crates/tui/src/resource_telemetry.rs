@@ -194,21 +194,8 @@ impl TokenThroughput {
         })
     }
 
-    pub fn from_estimated_text(text: &str, elapsed: Duration) -> Option<Self> {
-        Self::new(estimate_output_tokens_from_text(text), elapsed)
-    }
-
     pub fn tokens_per_second(self) -> f64 {
         self.output_tokens as f64 / self.elapsed_seconds
-    }
-
-    pub fn compact_rate(self) -> String {
-        let rate = self.tokens_per_second();
-        if rate < 10.0 {
-            format!("{rate:.1}")
-        } else {
-            format!("{rate:.0}")
-        }
     }
 }
 
@@ -313,13 +300,9 @@ mod tests {
     // ---- throughput -------------------------------------------------------
 
     #[test]
-    fn token_throughput_formats_compact_rates() {
+    fn token_throughput_formats_tokens_per_second() {
         let throughput = TokenThroughput::new(120, Duration::from_secs(6)).expect("throughput");
         assert_eq!(throughput.tokens_per_second(), 20.0);
-        assert_eq!(throughput.compact_rate(), "20");
-
-        let slow = TokenThroughput::new(15, Duration::from_secs(4)).expect("throughput");
-        assert_eq!(slow.compact_rate(), "3.8");
     }
 
     #[test]
@@ -334,12 +317,6 @@ mod tests {
         assert_eq!(estimate_output_tokens_from_text("abc"), 1);
         assert_eq!(estimate_output_tokens_from_text("abcd"), 1);
         assert_eq!(estimate_output_tokens_from_text("abcde"), 2);
-
-        let throughput =
-            TokenThroughput::from_estimated_text(&"x".repeat(400), Duration::from_secs(10))
-                .expect("estimated throughput");
-        assert_eq!(throughput.output_tokens, 100);
-        assert_eq!(throughput.compact_rate(), "10");
     }
 
     // ---- fraction / percent ----------------------------------------------

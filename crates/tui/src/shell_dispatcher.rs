@@ -97,13 +97,6 @@ impl ShellKind {
         }
     }
 
-    /// Whether this shell needs an extra `-Command` flag after the profile
-    /// flag (PowerShell-specific). Only exercised by shell-flag unit tests.
-    #[cfg(test)]
-    pub fn needs_command_flag(&self) -> bool {
-        matches!(self, ShellKind::Pwsh | ShellKind::WindowsPowerShell)
-    }
-
     /// Returns true when this is a PowerShell-family shell.
     pub fn is_powershell(&self) -> bool {
         match self {
@@ -411,16 +404,6 @@ impl ShellDispatcher {
         Some((program, args))
     }
 
-    /// Build a `Command` from separate program + args (bypasses the shell).
-    /// Used when the caller already has a resolved executable and argument
-    /// vector — e.g. `ExecEnv` from the sandbox.
-    #[cfg(test)]
-    pub fn build_direct(&self, program: &str, args: &[String]) -> Command {
-        let mut cmd = Command::new(program);
-        cmd.args(args);
-        cmd
-    }
-
     /// Execute a foreground command with raw-mode save/restore.
     ///
     /// A scope guard ensures raw mode is restored even if the command fails
@@ -671,12 +654,6 @@ mod tests {
     }
 
     #[test]
-    fn detect_returns_some_shell() {
-        let dispatcher = global_dispatcher();
-        let _kind = dispatcher.kind();
-    }
-
-    #[test]
     fn powershell_build_command_includes_no_profile_and_command_flags() {
         let dispatcher = ShellDispatcher {
             kind: ShellKind::Pwsh,
@@ -866,28 +843,6 @@ mod tests {
 
     #[cfg(test)]
     #[test]
-    fn build_direct_preserves_args() {
-        let dispatcher = ShellDispatcher {
-            kind: ShellKind::Cmd,
-        };
-        let args = vec!["-m".to_string(), "commit message".to_string()];
-        let cmd = dispatcher.build_direct("git", &args);
-        let cmd_args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
-        assert_eq!(cmd_args, vec!["-m", "commit message"]);
-    }
-
-    #[cfg(test)]
-    #[test]
-    fn powershell_flags_are_correct() {
-        assert!(ShellKind::Pwsh.needs_command_flag());
-        assert!(ShellKind::WindowsPowerShell.needs_command_flag());
-        assert!(!ShellKind::Cmd.needs_command_flag());
-        assert!(!ShellKind::Sh.needs_command_flag());
-        assert!(!ShellKind::Bash.needs_command_flag());
-    }
-
-    #[cfg(test)]
-    #[test]
     fn is_powershell_detects_both_variants() {
         assert!(ShellKind::Pwsh.is_powershell());
         assert!(ShellKind::WindowsPowerShell.is_powershell());
@@ -926,17 +881,6 @@ mod tests {
             args.iter().any(|a| a.contains("msg with spaces")),
             "quoted payload missing: {args:?}"
         );
-    }
-
-    #[cfg(test)]
-    #[test]
-    fn build_direct_handles_empty_args() {
-        let dispatcher = ShellDispatcher {
-            kind: ShellKind::Sh,
-        };
-        let cmd = dispatcher.build_direct("echo", &[]);
-        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
-        assert!(args.is_empty());
     }
 
     #[cfg(windows)]

@@ -2559,13 +2559,6 @@ mod tests {
     }
 
     #[test]
-    fn ask_action_default_backward_compatible() {
-        // Without explicit action, rules default to Ask via serde default.
-        let rule = ToolAskRule::exec_shell("cargo test");
-        assert_eq!(rule.action, PermissionAction::Ask);
-    }
-
-    #[test]
     fn deny_action_constructors_produce_ask_by_default() {
         assert_eq!(ToolAskRule::new("exec_shell").action, PermissionAction::Ask);
         assert_eq!(
@@ -3108,12 +3101,6 @@ mod tests {
         let d = engine.check(ctx("cargo test --workspace", Never)).unwrap();
         assert!(!d.allow);
         assert_eq!(d.requirement.phase(), "forbidden");
-    }
-
-    #[test]
-    fn ask_is_default_when_action_omitted() {
-        let rule = ToolAskRule::exec_shell("cargo test");
-        assert_eq!(rule.action, PermissionAction::Ask);
     }
 
     // ── cross-cutting ─────────────────────────────────────────────────────
