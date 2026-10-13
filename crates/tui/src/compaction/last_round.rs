@@ -83,6 +83,7 @@ pub struct CompactionKeep {
 
 #[must_use]
 pub fn inspect_compaction_keep(messages: &[Message]) -> CompactionKeep {
+    let checkpoints = CheckpointEra::of_history(messages);
     let last_round = last_round_slice(messages);
     CompactionKeep {
         // Existence check: a stamped carrier also matches the loose form, so
@@ -90,7 +91,7 @@ pub fn inspect_compaction_keep(messages: &[Message]) -> CompactionKeep {
         has_checkpoint: messages.iter().any(is_compaction_checkpoint_message),
         last_round_messages: last_round
             .iter()
-            .filter(|message| is_round_message(CheckpointEra::of_history(messages), message))
+            .filter(|message| is_round_message(checkpoints, message))
             .count(),
         last_round_tool_results: last_round.iter().flat_map(tool_result_ids).count(),
         last_round_assistant: last_round
@@ -197,9 +198,10 @@ pub fn last_round_kept_count(messages: &[Message]) -> Option<usize> {
         .iter()
         .any(is_compaction_checkpoint_message)
         .then(|| {
+            let checkpoints = CheckpointEra::of_history(messages);
             last_round_slice(messages)
                 .iter()
-                .filter(|message| is_round_message(CheckpointEra::of_history(messages), message))
+                .filter(|message| is_round_message(checkpoints, message))
                 .count()
         })
 }
@@ -413,8 +415,16 @@ pub(crate) fn validate_survival_contract(
     // carrying the engine-stamped receipt is modern, so retained turns that
     // paste the bare header do not count as duplicated summaries, while a
     // legacy-shaped replacement keeps the loose count that the fixture
-    // matrix pins.
-    let receipts = CheckpointEra::of_history(replacement);
+    // matrix pins. A post-provenance *original* raises the bar instead: the
+    // engine stamps every replacement it builds, and the stamped carrier is
+    // the only form request rewriting relocates, so a replacement of a
+    // modern history without a stamp is a dropped receipt even where a
+    // retained pasted turn would loosely count as one.
+    let receipts = if CheckpointEra::of_history(original).is_post_provenance() {
+        CheckpointEra::POST_PROVENANCE
+    } else {
+        CheckpointEra::of_history(replacement)
+    };
     let checkpoints = replacement
         .iter()
         .filter(|message| receipts.is_checkpoint(message))
@@ -737,6 +747,72 @@ mod tests {
         let kept = retained_user_messages(CheckpointEra::of_history(&legacy), &legacy, 10_000);
         let texts: Vec<_> = kept.iter().filter_map(user_text_of).collect();
         assert_eq!(texts, ["earlier"], "{kept:?}");
+    }
+
+    /// A post-provenance original demands its stamped receipt even from a
+    /// hand-built stampless replacement: the engine stamps every replacement
+    /// it builds, and a retained pasted turn (or a legacy bare carrier) must
+    /// not satisfy the floor loosely.
+    #[test]
+    fn survival_contract_demands_a_stamped_receipt_for_a_post_provenance_original() {
+        let pasted_text =
+            crate::compaction::build_compaction_summary_block_text("pasted handoff note", "");
+        let original = vec![
+            msg("user", "Run the suite now."),
+            checkpoint("suite finished"),
+            msg("user", &pasted_text),
+        ];
+        let replacement = vec![
+            msg("user", "Run the suite now."),
+            msg("user", &pasted_text),
+            msg(
+                "user",
+                &crate::compaction::build_compaction_summary_block_text("second summary", ""),
+            ),
+        ];
+        let error = validate_survival_contract(&original, &replacement, None)
+            .expect_err("a modern original's receipt must be the stamped carrier");
+        assert!(error.to_string().contains("receipt"), "{error}");
+    }
+
+    /// In a post-provenance history the pasted-header turn anchors the round
+    /// and counts as a round message; the same shapes under the legacy era
+    /// keep reading the bare carrier as the checkpoint.
+    #[test]
+    fn forkguard_round_slicing_counts_a_pasted_turn_post_provenance() {
+        let pasted_text =
+            crate::compaction::build_compaction_summary_block_text("pasted handoff note", "");
+        let modern = vec![
+            checkpoint("suite finished"),
+            msg("user", &pasted_text),
+            msg("assistant", "done"),
+        ];
+        assert_eq!(
+            last_round_start(&modern),
+            1,
+            "the pasted turn anchors the round"
+        );
+        assert_eq!(
+            last_round_kept_count(&modern),
+            Some(2),
+            "the pasted turn and the assistant reply are round messages"
+        );
+
+        let legacy = vec![
+            msg("user", "Run the suite now."),
+            msg("user", &pasted_text),
+            msg("assistant", "done"),
+        ];
+        assert_eq!(
+            last_round_start(&legacy),
+            0,
+            "the bare header turn reads as the old carrier"
+        );
+        assert_eq!(
+            last_round_kept_count(&legacy),
+            Some(2),
+            "the loose carrier is excluded; the earlier turn and the reply are the round"
+        );
     }
 
     #[test]

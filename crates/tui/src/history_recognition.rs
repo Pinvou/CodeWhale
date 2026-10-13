@@ -47,7 +47,10 @@ fn has_compaction_summary_header(text: &str) -> bool {
 /// [`is_generated_compaction_checkpoint`] — so such a turn is never moved or
 /// merged on the wire, and history-aware consumers reclassify through
 /// [`CheckpointEra`], which reads the loose form only when the history has no
-/// stamped carrier.
+/// stamped carrier. The remaining unconditional loose readers count
+/// existence (`inspect_compaction_keep.has_checkpoint`,
+/// `last_round_kept_count`'s gate), where both eras answer identically
+/// because every stamped carrier also matches this form.
 #[must_use]
 pub(crate) fn is_compaction_checkpoint_message(message: &Message) -> bool {
     let [
@@ -73,8 +76,12 @@ pub(crate) fn is_compaction_checkpoint_message(message: &Message) -> bool {
 }
 
 /// The provenance-stamped form, and the only form request rewriting may
-/// relocate or merge. A user cannot type this shape, so an ordinary turn that
-/// pastes the whole summary header after a tool result keeps its position.
+/// relocate or merge. Typed input cannot produce this shape — the provenance
+/// marker is its own content block and the only writer is
+/// [`crate::compaction::compaction_checkpoint_message`] — so an ordinary turn
+/// that pastes the whole summary header after a tool result keeps its
+/// position. Only a hand-edited session file can forge the two-block form,
+/// and doing so flips recognition for that one message, not the protocol.
 #[must_use]
 pub(crate) fn is_generated_compaction_checkpoint(message: &Message) -> bool {
     let [
@@ -95,17 +102,25 @@ pub(crate) fn is_generated_compaction_checkpoint(message: &Message) -> bool {
 
 /// Which checkpoint shape a saved history's recognition family may match.
 ///
-/// The provenance stamp is the era signal: once any message in a history
-/// carries the engine-written provenance block, the history postdates
-/// stamping, every carrier in it is stamped, and a user turn that merely
-/// pastes the summary header is genuine content. A history without a stamped
-/// carrier predates the stamp (or never compacted); there the pasted header
-/// is indistinguishable from the saved bare carrier, so the loose predicate
-/// keeps applying. Derive the era once per history with [`Self::of_history`]
-/// and route every per-message checkpoint classification through
-/// [`Self::is_checkpoint`] — classifying messages one at a time without the
-/// history is exactly the trap that let a pasted turn be dropped,
-/// mis-edited, and unretained (issue pinvou-agent#594).
+/// The era signal is the history's content, not the session's age: a history
+/// that *contains* a stamped carrier is read post-provenance — the engine
+/// writes every carrier it produces stamped, so a user turn that merely
+/// pastes the summary header is genuine content there. A history without a
+/// stamped carrier carries none the engine wrote (never compacted, saved
+/// before the stamp existed, or the stamp was truncated away — see below);
+/// there the pasted header is indistinguishable from the saved bare carrier,
+/// so the loose predicate keeps applying.
+///
+/// The signal is one-way and destructible: `/edit` and host rewinds cut at
+/// user turns, so they can truncate away the only stamped carrier and drop
+/// the history back to the legacy reading, where the restore-time loose
+/// retain would drop a pasted-header turn on the next reload-with-checkpoint.
+/// Foreign imports carry no codewhale stamp at all and stay legacy. Derive
+/// the era once per history with [`Self::of_history`] and route every
+/// per-message checkpoint classification through [`Self::is_checkpoint`] —
+/// classifying messages one at a time without the history is exactly the
+/// trap that let a pasted turn be dropped, mis-edited, and unretained
+/// (issue pinvou-agent#594).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CheckpointEra {
     post_provenance: bool,
@@ -119,11 +134,26 @@ impl CheckpointEra {
         post_provenance: false,
     };
 
+    /// The post-provenance era: stamped-only recognition. For validators that
+    /// hold one history to a standard derived from another (the survival
+    /// receipt floor reads a post-provenance original's replacement stamped,
+    /// whatever the replacement's own shape); normal consumers derive the era
+    /// with [`Self::of_history`].
+    pub(crate) const POST_PROVENANCE: Self = Self {
+        post_provenance: true,
+    };
+
     #[must_use]
     pub(crate) fn of_history(history: &[Message]) -> Self {
         Self {
             post_provenance: history.iter().any(is_generated_compaction_checkpoint),
         }
+    }
+
+    /// Whether this era reads only the stamped form.
+    #[must_use]
+    pub(crate) fn is_post_provenance(&self) -> bool {
+        self.post_provenance
     }
 
     /// Whether `message` is a compaction checkpoint of this history. In a
