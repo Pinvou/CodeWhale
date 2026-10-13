@@ -1,6 +1,10 @@
 use super::*;
 
+#[path = "operation_tests.rs"]
+mod operation_tests;
+
 use super::context::COMPACTION_SUMMARY_MARKER;
+use super::dispatch::ToolExecOutcome;
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
     auto_review_block_tool_error, initial_stream_error_user_message,
@@ -15,6 +19,7 @@ use crate::prompts::{
     system_prompt_for_mode_with_context_skills_and_session,
 };
 use crate::test_support::{EnvVarGuard, lock_test_env};
+use crate::tools::spec::{ToolError, ToolExecutionOutcome};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -4950,6 +4955,17 @@ fn policy_for_catalog(
     )
 }
 
+/// Permissive turn policy for `process_tool_results` tests: no allow/deny
+/// gates, so the mid-turn MCP refresh narrows nothing away.
+fn permissive_turn_policy() -> ToolSurfacePolicy {
+    policy_for_catalog(
+        vec![],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    )
+}
+
 #[test]
 fn tool_catalog_scenario() {
     // Scenario consolidation of: tool_catalog_filter_applies_allow_and_deny_gates, tool_catalog_filter_is_inert_without_gates
@@ -9143,11 +9159,14 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
         api_tool("exec_shell"), // engine-owned: never the pool's to remove
     ];
     let mut active = HashSet::new();
+    let cache = crate::core::session::ToolActivationCache::default();
 
     // The pool's universe owns the static read (still live) and the
     // synthetic authenticate entry (its login just succeeded — it must
     // LEAVE). The refreshed surface adds a new tool and keeps the static
-    // one; the engine tool is untouched.
+    // one; the engine tool is untouched. The static read was deferred in
+    // this conversation, so the refresh carries that marking across instead
+    // of adopting the pool's eager flag.
     let universe: HashSet<String> = ["mcp_static_read", "mcp_alpha_authenticate"]
         .into_iter()
         .map(str::to_string)
@@ -9157,15 +9176,29 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
         &mut active,
         &universe,
         vec![api_tool("mcp_static_read"), api_tool("mcp_dynamic_render")],
+        &cache,
     );
 
     let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["exec_shell", "mcp_static_read", "mcp_dynamic_render"],
-        "the synthetic authenticate tool leaves after its own login; engine tools stay"
+        vec!["mcp_static_read", "exec_shell", "mcp_dynamic_render"],
+        "the synthetic authenticate tool leaves after its own login; the replaced \
+         entry keeps its own slot, the engine tool never moves, and the new \
+         arrival appends at the end"
     );
-    assert!(active.contains("mcp_static_read"));
+    let static_read = catalog
+        .iter()
+        .find(|tool| tool.name == "mcp_static_read")
+        .expect("the static read survives the refresh");
+    assert_eq!(
+        static_read.defer_loading,
+        Some(true),
+        "the conversation's deferral marking must survive the pool's eager flag"
+    );
+    // Deferred and not activated in this conversation: the refresh must not
+    // put it on the wire — a search activates it.
+    assert!(!active.contains("mcp_static_read"));
     assert!(active.contains("mcp_dynamic_render"));
     assert!(!active.contains("mcp_alpha_authenticate"));
 
@@ -9184,6 +9217,7 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
         &mut active,
         &universe,
         vec![api_tool("mcp_alpha_authenticate")],
+        &cache,
     );
     let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(
@@ -9193,6 +9227,95 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
     );
     assert!(active.contains("mcp_alpha_authenticate"));
     assert!(!active.contains("mcp_dynamic_render"));
+
+    // Wire visibility stays the conversation's decision: a deferred tool
+    // this conversation has not activated must not ride the wire after a
+    // refresh — it returns when a search activates it, and re-advertising
+    // it would contradict any eviction note already recorded.
+    let mut catalog = vec![api_tool("exec_shell")];
+    let mut active = HashSet::new();
+    let mut deferred = api_tool("mcp_static_read");
+    deferred.defer_loading = Some(true);
+    let universe: HashSet<String> = ["mcp_static_read"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    replace_runtime_mcp_tools(&mut catalog, &mut active, &universe, vec![deferred], &cache);
+    assert!(
+        !active.contains("mcp_static_read"),
+        "an unactivated deferred tool must stay off the wire: {active:?}"
+    );
+    assert_eq!(catalog.len(), 2, "the tool still exists for tool_search");
+
+    // Once a search activates it, the same refresh keeps it on the wire.
+    let mut deferred = api_tool("mcp_static_read");
+    deferred.defer_loading = Some(true);
+    let mut cache = crate::core::session::ToolActivationCache::default();
+    cache.activate(&[deferred.clone()], &["mcp_static_read".to_string()]);
+    replace_runtime_mcp_tools(&mut catalog, &mut active, &universe, vec![deferred], &cache);
+    assert!(
+        active.contains("mcp_static_read"),
+        "a still-activated deferred tool stays on the wire: {active:?}"
+    );
+
+    // A replacement splices back into its own slot: entries after the pool
+    // slice never move, so a same-name refresh reorders nothing (the cached
+    // request prefix survives even when a count-keyed declaration would
+    // have called the refresh a no-op).
+    let mut catalog = vec![api_tool("mcp_static_read"), api_tool("exec_shell")];
+    let mut active = HashSet::new();
+    let universe: HashSet<String> = ["mcp_static_read"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let wire_changed = replace_runtime_mcp_tools(
+        &mut catalog,
+        &mut active,
+        &universe,
+        vec![api_tool("mcp_static_read")],
+        &cache,
+    );
+    let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["mcp_static_read", "exec_shell"],
+        "a replaced entry keeps its slot; later entries never relocate"
+    );
+    assert!(
+        !wire_changed,
+        "a same-name refresh that changes no wire-visible name is no drift"
+    );
+
+    // A 1:1 identity change (a server-side rename) keeps the catalog count
+    // but changes the wire: the old active name leaves, the eager new name
+    // joins. The declaration must key on that wire change, not on the
+    // count, or the C5 guard would see undeclared drift.
+    let mut deferred = api_tool("mcp_old_name");
+    deferred.defer_loading = Some(true);
+    let mut cache = crate::core::session::ToolActivationCache::default();
+    cache.activate(&[deferred.clone()], &["mcp_old_name".to_string()]);
+    let mut catalog = vec![api_tool("exec_shell"), deferred];
+    let mut active: HashSet<String> = ["exec_shell".to_string(), "mcp_old_name".to_string()]
+        .into_iter()
+        .collect();
+    let universe: HashSet<String> = ["mcp_old_name".to_string(), "mcp_new_name".to_string()]
+        .into_iter()
+        .collect();
+    let wire_changed = replace_runtime_mcp_tools(
+        &mut catalog,
+        &mut active,
+        &universe,
+        vec![api_tool("mcp_new_name")],
+        &cache,
+    );
+    assert!(
+        wire_changed,
+        "a rename that swaps a wire-visible name must be declared: {active:?}"
+    );
+    assert!(
+        !active.contains("mcp_old_name") && active.contains("mcp_new_name"),
+        "the renamed surface must be reflected in the active set: {active:?}"
+    );
 }
 
 #[test]
@@ -12277,14 +12400,15 @@ fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
     let catalog = vec![apply_patch];
     let active_at_batch_start = HashSet::new();
     let mut hydrated_this_batch = HashSet::new();
-    let result = maybe_hydrate_requested_deferred_tool(
+    let Some(DeferredHydration::Loaded(result)) = maybe_hydrate_requested_deferred_tool(
         "apply_patch",
         &json!({"patch": "*** Begin Patch\n*** End Patch"}),
         &catalog,
         &active_at_batch_start,
         &mut hydrated_this_batch,
-    )
-    .expect("first deferred use should hydrate");
+    ) else {
+        panic!("first deferred use should hydrate, not refuse");
+    };
 
     assert!(!active_at_batch_start.contains("apply_patch"));
     assert!(hydrated_this_batch.contains("apply_patch"));
@@ -12298,14 +12422,15 @@ fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
     assert_eq!(metadata["executed"], false);
     assert_eq!(metadata["retry_required"], true);
 
-    let second_result = maybe_hydrate_requested_deferred_tool(
+    let Some(DeferredHydration::Loaded(second_result)) = maybe_hydrate_requested_deferred_tool(
         "apply_patch",
         &json!({"patch": "*** Begin Patch\n*** End Patch"}),
         &catalog,
         &active_at_batch_start,
         &mut hydrated_this_batch,
-    )
-    .expect("later calls in the same batch should hydrate instead of executing");
+    ) else {
+        panic!("later calls in the same batch should hydrate instead of executing");
+    };
     assert_eq!(second_result.metadata.unwrap()["executed"], false);
     assert_eq!(
         hydrated_this_batch,
@@ -27260,5 +27385,1275 @@ async fn a_booting_turn_keeps_an_already_declared_surface_reason() {
         last.reason, "change:resume",
         "the already-declared reason must survive the booting turn start: {:?}",
         last
+    );
+}
+
+// === Toolbox eviction note channels ===
+//
+// The bounded conversation toolbox reports bounds-driven evictions to the
+// model through the recorded tool result. These tests pin each channel's
+// wiring: the hydration note parked on the session must ride the batch's
+// first recorded result (or its error), and the retrieval/refresh evictions
+// must ride the triggering result. A regression that drops the take, skips
+// the error branch, or misroutes the triggering result turns these red.
+
+fn synthetic_toolbox_outcome(
+    id: &str,
+    name: &str,
+    result: Result<ToolResult, ToolError>,
+) -> ToolExecOutcome {
+    ToolExecOutcome {
+        index: 0,
+        id: id.to_string(),
+        name: name.to_string(),
+        input: json!({}),
+        started_at: Instant::now(),
+        terminal: ToolExecutionOutcome::from_legacy(result),
+        content_blocks: Vec::new(),
+    }
+}
+
+fn heavy_deferred_tool(name: &str, description_bytes: usize) -> crate::models::Tool {
+    crate::models::Tool {
+        tool_type: None,
+        name: name.to_string(),
+        description: "x".repeat(description_bytes),
+        input_schema: json!({"type": "object", "properties": {}}),
+        allowed_callers: None,
+        defer_loading: Some(true),
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    }
+}
+
+fn recorded_tool_result_content(engine: &Engine, tool_use_id: &str) -> String {
+    engine
+        .session
+        .messages
+        .iter()
+        .find_map(|message| {
+            message.content.iter().find_map(|block| match block {
+                crate::models::ContentBlock::ToolResult {
+                    tool_use_id: id,
+                    content,
+                    ..
+                } if id == tool_use_id => Some(content.clone()),
+                _ => None,
+            })
+        })
+        .expect("every batch outcome must be recorded as a tool result message")
+}
+
+#[tokio::test]
+async fn hydration_eviction_note_rides_the_batch_first_result() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["ghost-tool".to_string()],
+    );
+    let mut catalog = Vec::new();
+    let mut active = HashSet::new();
+    engine
+        .process_tool_results(
+            vec![
+                Some(synthetic_toolbox_outcome(
+                    "call-first",
+                    "tool_a",
+                    Ok(ToolResult::success("first payload")),
+                )),
+                Some(synthetic_toolbox_outcome(
+                    "call-second",
+                    "tool_b",
+                    Ok(ToolResult::success("second payload")),
+                )),
+            ],
+            &mut catalog,
+            &mut active,
+            &HashMap::new(),
+            &permissive_turn_policy(),
+        )
+        .await;
+
+    let first = recorded_tool_result_content(&engine, "call-first");
+    assert!(
+        first.contains("ghost-tool"),
+        "the parked hydration note must ride the batch's first recorded result: {first}"
+    );
+    let second = recorded_tool_result_content(&engine, "call-second");
+    assert!(
+        !second.contains("ghost-tool"),
+        "the note rides only the first result of the batch: {second}"
+    );
+}
+
+#[tokio::test]
+async fn hydration_eviction_note_survives_a_leading_error_result() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["ghost-tool".to_string()],
+    );
+    let mut catalog = Vec::new();
+    let mut active = HashSet::new();
+    engine
+        .process_tool_results(
+            vec![
+                Some(synthetic_toolbox_outcome(
+                    "call-fails",
+                    "tool_a",
+                    Err(ToolError::ExecutionFailed {
+                        message: "boom".to_string(),
+                    }),
+                )),
+                Some(synthetic_toolbox_outcome(
+                    "call-succeeds",
+                    "tool_b",
+                    Ok(ToolResult::success("payload")),
+                )),
+            ],
+            &mut catalog,
+            &mut active,
+            &HashMap::new(),
+            &permissive_turn_policy(),
+        )
+        .await;
+
+    let failed = recorded_tool_result_content(&engine, "call-fails");
+    assert!(
+        failed.contains("boom") && failed.contains("ghost-tool"),
+        "the note must reach the model even when the batch's first result is an error: {failed}"
+    );
+    let succeeded = recorded_tool_result_content(&engine, "call-succeeds");
+    assert!(
+        !succeeded.contains("ghost-tool"),
+        "the note rides only the first recorded result: {succeeded}"
+    );
+}
+
+#[tokio::test]
+async fn retrieval_admission_eviction_note_rides_the_triggering_result() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    // Two cached deferred schemas sit near the collective budget; the
+    // evidence receipt admits the retrieval schema on top and overflows the
+    // cache, so the eviction must ride the receipt's own recorded result.
+    let catalog = vec![
+        heavy_deferred_tool("retrieve_tool_result", 3_000),
+        heavy_deferred_tool("cached-a", 7_000),
+        heavy_deferred_tool("cached-b", 7_000),
+    ];
+    let mut active = super::tool_catalog::initial_active_tools(&catalog);
+    let cached = vec!["cached-a".to_string(), "cached-b".to_string()];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&catalog, &cached);
+    active.extend(cached);
+
+    let mut live_catalog = catalog;
+    engine
+        .process_tool_results(
+            vec![Some(synthetic_toolbox_outcome(
+                "call-evidence",
+                "evidence-tool",
+                Ok(ToolResult {
+                    content: "evidence payload".to_string(),
+                    success: true,
+                    metadata: Some(json!({"evidence_available": true})),
+                }),
+            ))],
+            &mut live_catalog,
+            &mut active,
+            &HashMap::new(),
+            &permissive_turn_policy(),
+        )
+        .await;
+
+    let evidence = recorded_tool_result_content(&engine, "call-evidence");
+    assert!(
+        evidence.contains("cached-a"),
+        "the retrieval admission's eviction must ride the triggering result: {evidence}"
+    );
+    assert!(
+        !engine
+            .session
+            .tool_activation_cache
+            .names()
+            .any(|name| name == "cached-a"),
+        "the evicted name must leave the cache"
+    );
+}
+
+#[tokio::test]
+async fn execution_refresh_eviction_note_rides_the_refreshed_result() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    let priming_catalog = vec![
+        heavy_deferred_tool("cached-a", 7_000),
+        heavy_deferred_tool("executed", 7_000),
+    ];
+    let mut active = super::tool_catalog::initial_active_tools(&priming_catalog);
+    let cached = vec!["cached-a".to_string(), "executed".to_string()];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&priming_catalog, &cached);
+    active.extend(cached);
+
+    // The catalog's schema for `cached-a` grew after the activation (an MCP
+    // refresh). Refreshing `executed` revalidates against the grown catalog,
+    // the collective budget overflows, and the eviction must ride the
+    // refreshed tool's own recorded result.
+    let mut grown_catalog = vec![
+        heavy_deferred_tool("cached-a", 12_000),
+        heavy_deferred_tool("executed", 7_000),
+    ];
+    engine
+        .process_tool_results(
+            vec![Some(synthetic_toolbox_outcome(
+                "call-executed",
+                "executed",
+                Ok(ToolResult::success("executed payload")),
+            ))],
+            &mut grown_catalog,
+            &mut active,
+            &HashMap::new(),
+            &permissive_turn_policy(),
+        )
+        .await;
+
+    let executed = recorded_tool_result_content(&engine, "call-executed");
+    assert!(
+        executed.contains("cached-a"),
+        "the refresh's revalidation eviction must ride the refreshed result: {executed}"
+    );
+    assert!(
+        !engine
+            .session
+            .tool_activation_cache
+            .names()
+            .any(|name| name == "cached-a"),
+        "the evicted name must leave the cache"
+    );
+}
+
+#[tokio::test]
+async fn step_note_names_a_victim_the_refresh_cannot_resurrect() {
+    use crate::mcp::{McpConfig, McpPool};
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    // A server whose last connect failed auth-required: the pool's refreshed
+    // list serves the synthetic `mcp_probe_authenticate` tool, so the
+    // outcome's `mcp_catalog_changed` refresh runs in the same arm whose
+    // touch evicted it. The refresh must not resurrect the evicted entry
+    // onto the wire: the step note may name it truthfully.
+    let mut config = McpConfig::default();
+    config.servers.insert(
+        "probe".to_string(),
+        crate::mcp::McpServerConfig {
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            url: Some("https://probe.example.test/mcp".to_string()),
+            transport: None,
+            connect_timeout: None,
+            execute_timeout: None,
+            read_timeout: None,
+            disabled: false,
+            enabled: true,
+            required: false,
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            headers: HashMap::new(),
+            env_headers: HashMap::new(),
+            bearer_token_env_var: None,
+            scopes: Vec::new(),
+            oauth: None,
+            oauth_resource: None,
+            reviewed_plugin: None,
+        },
+    );
+    let mut pool = McpPool::new(config);
+    pool.note_connect_failure("probe", &anyhow::Error::msg("HTTP 401 unauthorized"));
+    engine.mcp_pool = Some(Arc::new(AsyncMutex::new(pool)));
+
+    let victim = "mcp_probe_authenticate";
+    let priming_catalog = vec![
+        heavy_deferred_tool(victim, 7_000),
+        heavy_deferred_tool("executed", 7_000),
+    ];
+    let mut active = super::tool_catalog::initial_active_tools(&priming_catalog);
+    let cached = vec![victim.to_string(), "executed".to_string()];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&priming_catalog, &cached);
+    active.extend(cached);
+
+    // The catalog's schema for the victim grew after the activation (an MCP
+    // refresh), so refreshing `executed` overflow-pops it — and the same
+    // outcome's `mcp_catalog_changed` refresh replaces the pool slice. The
+    // victim is still deferred in this conversation and no longer activated,
+    // so the refresh must leave it off the wire and the step note may name
+    // it: the next request must not carry a tool the note declares
+    // uncallable.
+    let mut grown_catalog = vec![
+        heavy_deferred_tool(victim, 12_000),
+        heavy_deferred_tool("executed", 7_000),
+    ];
+    engine
+        .process_tool_results(
+            vec![Some(synthetic_toolbox_outcome(
+                "call-executed",
+                "executed",
+                Ok(
+                    ToolResult::success("executed payload").with_metadata(json!({
+                        "mcp_catalog_changed": true,
+                    })),
+                ),
+            ))],
+            &mut grown_catalog,
+            &mut active,
+            &HashMap::new(),
+            &permissive_turn_policy(),
+        )
+        .await;
+
+    // Premise: the refresh must have actually replaced the pool slice —
+    // otherwise "nothing resurrects the victim" would hold vacuously.
+    assert!(
+        grown_catalog
+            .iter()
+            .any(|tool| tool.name == "mcp_probe_authenticate"),
+        "premise: the refresh must have swapped the pool's slice in"
+    );
+    assert!(
+        !engine
+            .session
+            .tool_activation_cache
+            .names()
+            .any(|name| name == victim),
+        "the victim must leave the cache before the note renders"
+    );
+    assert!(
+        !active.contains(victim),
+        "the refresh must not resurrect the evicted victim onto the wire: {active:?}"
+    );
+    let executed = recorded_tool_result_content(&engine, "call-executed");
+    assert!(
+        executed.contains("no longer callable") && executed.contains(victim),
+        "the step note must name the victim truthfully — it is not callable again: {executed}"
+    );
+}
+
+/// The cross-outcome window: a note that rides an early outcome of a batch
+/// must stay truthful when a later outcome of the same batch refreshes the
+/// MCP catalog. The refresh re-advertises eager entries and still-activated
+/// deferred tools — never a bounds-evicted one — so the next request cannot
+/// carry a tool an earlier result in the same pass declared uncallable.
+#[tokio::test]
+async fn refresh_between_outcomes_cannot_resurrect_an_evicted_tool() {
+    use crate::mcp::{McpConfig, McpPool};
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    let mut config = McpConfig::default();
+    config.servers.insert(
+        "probe".to_string(),
+        crate::mcp::McpServerConfig {
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            url: Some("https://probe.example.test/mcp".to_string()),
+            transport: None,
+            connect_timeout: None,
+            execute_timeout: None,
+            read_timeout: None,
+            disabled: false,
+            enabled: true,
+            required: false,
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            headers: HashMap::new(),
+            env_headers: HashMap::new(),
+            bearer_token_env_var: None,
+            scopes: Vec::new(),
+            oauth: None,
+            oauth_resource: None,
+            reviewed_plugin: None,
+        },
+    );
+    let mut pool = McpPool::new(config);
+    pool.note_connect_failure("probe", &anyhow::Error::msg("HTTP 401 unauthorized"));
+    engine.mcp_pool = Some(Arc::new(AsyncMutex::new(pool)));
+
+    let victim = "mcp_probe_authenticate";
+    // Turn start: the victim's schema grew between turns, so the entry
+    // revalidation overflow-pops it and parks the turn-start note — the
+    // exact sequence `run_turn`'s entry runs.
+    let priming_catalog = vec![
+        heavy_deferred_tool(victim, 7_000),
+        heavy_deferred_tool("filler", 9_000),
+    ];
+    let mut active = super::tool_catalog::initial_active_tools(&priming_catalog);
+    let cached = vec![victim.to_string(), "filler".to_string()];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&priming_catalog, &cached);
+    active.extend(cached);
+    let mut grown_catalog = vec![
+        heavy_deferred_tool(victim, 12_000),
+        heavy_deferred_tool("filler", 9_000),
+    ];
+    let removals = engine
+        .session
+        .tool_activation_cache
+        .revalidate(&grown_catalog);
+    super::tool_catalog::remove_toolbox_drops(
+        &mut active,
+        removals.dropped_names().map(str::to_string),
+    );
+    assert_eq!(
+        removals.bounds_evicted,
+        vec![victim.to_string()],
+        "premise: the turn-start revalidation must evict the victim"
+    );
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::TurnStart,
+        &removals.bounds_evicted,
+    );
+
+    // The batch: a first outcome records the parked note, then a later
+    // outcome in the same pass carries `mcp_catalog_changed`. The refresh
+    // must not put the victim back onto the wire behind the note's back.
+    engine
+        .process_tool_results(
+            vec![
+                Some(synthetic_toolbox_outcome(
+                    "call-filler",
+                    "filler",
+                    Ok(ToolResult::success("filler payload")),
+                )),
+                Some(synthetic_toolbox_outcome(
+                    "call-auth",
+                    victim,
+                    Ok(ToolResult::success("auth payload").with_metadata(json!({
+                        "mcp_catalog_changed": true,
+                    }))),
+                )),
+            ],
+            &mut grown_catalog,
+            &mut active,
+            &HashMap::new(),
+            &permissive_turn_policy(),
+        )
+        .await;
+
+    // Premise: the refresh must have actually replaced the pool slice —
+    // otherwise "nothing resurrects the victim" would hold vacuously.
+    assert!(
+        grown_catalog
+            .iter()
+            .any(|tool| tool.name == "mcp_probe_authenticate"),
+        "premise: the refresh must have swapped the pool's slice in"
+    );
+
+    let filler = recorded_tool_result_content(&engine, "call-filler");
+    assert!(
+        filler.contains("no longer callable") && filler.contains(victim),
+        "the parked note must ride the batch's first result: {filler}"
+    );
+    assert!(
+        !active.contains(victim),
+        "a later outcome's refresh must not resurrect the evicted victim onto the wire: {active:?}"
+    );
+    assert!(
+        !engine
+            .session
+            .tool_activation_cache
+            .names()
+            .any(|name| name == victim),
+        "the victim stays unactivated: a search re-activates it"
+    );
+}
+
+/// The mid-turn refresh must apply the same allow/deny narrowing the turn
+/// build ran over its catalog: a tool the build stripped must not re-enter
+/// the catalog and the active set on a `mcp_catalog_changed` outcome, or a
+/// live 401 (or a completed login) would defeat the denied-name
+/// concealment. Both refresh paths delegate to the same
+/// `ToolSurfacePolicy::allows_tool` spelling; deleting the filter here
+/// turns this pin red.
+#[tokio::test]
+async fn mid_turn_refresh_honors_the_turn_policy() {
+    use crate::mcp::{McpConfig, McpPool};
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    let mut config = McpConfig::default();
+    config.servers.insert(
+        "probe".to_string(),
+        crate::mcp::McpServerConfig {
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            url: Some("https://probe.example.test/mcp".to_string()),
+            transport: None,
+            connect_timeout: None,
+            execute_timeout: None,
+            read_timeout: None,
+            disabled: false,
+            enabled: true,
+            required: false,
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            headers: HashMap::new(),
+            env_headers: HashMap::new(),
+            bearer_token_env_var: None,
+            scopes: Vec::new(),
+            oauth: None,
+            oauth_resource: None,
+            reviewed_plugin: None,
+        },
+    );
+    let mut pool = McpPool::new(config);
+    pool.note_connect_failure("probe", &anyhow::Error::msg("HTTP 401 unauthorized"));
+    engine.mcp_pool = Some(Arc::new(AsyncMutex::new(pool)));
+
+    // Premise: the needs-auth pool's refreshed list serves the synthetic
+    // authenticate tool, so the denial below has something to deny.
+    {
+        let pool = engine.mcp_pool.as_ref().expect("pool").lock().await;
+        assert!(
+            pool.to_api_tools()
+                .iter()
+                .any(|tool| tool.name == "mcp_probe_authenticate"),
+            "premise: the needs-auth pool must serve the synthetic login tool"
+        );
+    }
+
+    let policy = policy_for_catalog(
+        vec![],
+        None,
+        Some(vec!["mcp_probe_authenticate".to_string()]),
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut catalog = Vec::new();
+    let mut active = HashSet::new();
+    engine
+        .process_tool_results(
+            vec![Some(synthetic_toolbox_outcome(
+                "call-auth",
+                "unrelated",
+                Ok(ToolResult::success("payload").with_metadata(json!({
+                    "mcp_catalog_changed": true,
+                }))),
+            ))],
+            &mut catalog,
+            &mut active,
+            &HashMap::new(),
+            &policy,
+        )
+        .await;
+
+    assert!(
+        !catalog
+            .iter()
+            .any(|tool| tool.name == "mcp_probe_authenticate"),
+        "a build-stripped name must not re-enter the catalog on a refresh: {catalog:?}"
+    );
+    assert!(
+        !active.contains("mcp_probe_authenticate"),
+        "a build-stripped name must not re-enter the active set on a refresh: {active:?}"
+    );
+}
+
+#[tokio::test]
+async fn session_sync_drops_a_parked_toolbox_eviction_note() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let config = Config::default();
+    let model = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn("call-after-sync", "get_goal", "{}"),
+        canned::simple_text_turn("done"),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    // A turn dropped between planning and result processing leaves the note
+    // parked. SyncSession installs another conversation: the parked note
+    // belongs to the previous one and must never ride the new conversation's
+    // tool results. This test pins the composed mutant only: the turn-entry
+    // sweep also masks a missing SyncSession clear (the engine owns the
+    // field behind the op loop, so the clear's effect is not observable
+    // between the sync and the next turn) — the clear is defense in depth
+    // beside that sweep, and removing both is what fails here.
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["ghost-tool".to_string()],
+    );
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("fresh-session".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace.path().to_path_buf(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync fresh session");
+    handle
+        .send(external_user_message_op(
+            "Run a tool in the new conversation.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send the turn after sync");
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for the post-sync turn")
+            .expect("engine event channel closed before turn completion");
+        if let Event::TurnComplete { status, error, .. } = event {
+            assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+            break;
+        }
+    }
+    drop(rx);
+
+    let mut saw_tool_result = false;
+    for request in model.captured_requests() {
+        for message in &request.messages {
+            for block in &message.content {
+                if let crate::models::ContentBlock::ToolResult { content, .. } = block {
+                    saw_tool_result = true;
+                    assert!(
+                        !content.contains("ghost-tool"),
+                        "the previous conversation's parked note must not survive SyncSession: {content}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        saw_tool_result,
+        "the post-sync turn must record at least one tool result, or the ghost-tool scan proves nothing"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
+/// A turn-start revalidation that evicts on the collective bounds (a cached
+/// schema grew between turns) must park its note so the turn's first recorded
+/// result carries it — the eviction may not ride a search that has not
+/// happened yet.
+#[tokio::test]
+async fn turn_start_revalidation_parks_an_eviction_note_for_the_turn() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("done")]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let priming_catalog = vec![
+        heavy_deferred_tool("cached-a", 7_000),
+        heavy_deferred_tool("cached-b", 7_000),
+    ];
+    let cached = vec!["cached-a".to_string(), "cached-b".to_string()];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&priming_catalog, &cached);
+
+    // The catalog's schema for `cached-a` grew between turns (an MCP
+    // refresh): this turn's start revalidation evicts the LRU victim, and
+    // the note must be parked for the turn's first result.
+    let grown_catalog = vec![
+        heavy_deferred_tool("cached-a", 12_000),
+        heavy_deferred_tool("cached-b", 7_000),
+    ];
+    let policy = policy_for_catalog(
+        grown_catalog,
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let _ = engine.run_turn(&mut turn, policy, None, None).await;
+
+    assert!(
+        !engine
+            .session
+            .tool_activation_cache
+            .names()
+            .any(|name| name == "cached-a"),
+        "the turn-start eviction must drop the LRU victim from the cache"
+    );
+    let notes = &engine.session.pending_toolbox_eviction_notes;
+    assert_eq!(
+        notes.len(),
+        1,
+        "the turn-start eviction must park its note for the turn's first result: {notes:?}"
+    );
+    assert_eq!(
+        notes[0].trigger,
+        crate::core::session::ToolboxEvictionTrigger::TurnStart
+    );
+    assert!(
+        notes[0].evicted.iter().any(|name| name == "cached-a"),
+        "the parked note must name the victim: {notes:?}"
+    );
+}
+
+/// The ride-time netting pin: a note parked at the turn's start must not
+/// name a tool that the very result carrying it re-admits. The natural
+/// retry — the model calling the tool the turn-start eviction just dropped
+/// — hydrates it back into the cache before any result records (the batch
+/// admission in `plan_tool_calls`), so the receipt the note rides must not
+/// declare it uncallable.
+#[tokio::test]
+async fn turn_start_note_does_not_name_a_tool_the_result_re_admits() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::TurnStart,
+        &["cached-a".to_string()],
+    );
+    // The batch hydration re-admitted the victim before any result recorded:
+    // plan_tool_calls admits the directly-called deferred tool into the cache
+    // when the model retries it, under the per-tool budget.
+    let catalog = vec![heavy_deferred_tool("cached-a", 100)];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&catalog, &["cached-a".to_string()]);
+
+    // The batch's catalog (the refresh channel revalidates against it, so it
+    // must be the same catalog the hydration admitted from).
+    let mut surface_catalog = vec![heavy_deferred_tool("cached-a", 100)];
+    let mut active = HashSet::new();
+    engine
+        .process_tool_results(
+            vec![Some(synthetic_toolbox_outcome(
+                "retry-victim",
+                "cached-a",
+                Ok(ToolResult::success(
+                    "Tool `cached-a` was deferred and has now been loaded. \
+                     Retry the call with its visible schema.",
+                )),
+            ))],
+            &mut surface_catalog,
+            &mut active,
+            &HashMap::new(),
+            &permissive_turn_policy(),
+        )
+        .await;
+
+    assert!(
+        engine.session.pending_toolbox_eviction_notes.is_empty(),
+        "the note rode the first result (fully netted); it must not stay parked: {:?}",
+        engine.session.pending_toolbox_eviction_notes
+    );
+    let receipt = recorded_tool_result_content(&engine, "retry-victim");
+    assert!(
+        receipt.contains("has now been loaded"),
+        "the hydration receipt must reach the model: {receipt}"
+    );
+    assert!(
+        !receipt.contains("no longer callable"),
+        "the receipt must not declare a tool uncallable that the same result re-admits: {receipt}"
+    );
+}
+
+/// A refused hydration loads nothing: the receipt must answer the call with
+/// the shared oversize reason, but no "Loaded deferred tool" status may
+/// announce a load that did not happen, and the refused name must stay out
+/// of the batch hydration order — the batch activation is never asked to
+/// admit it.
+#[tokio::test]
+async fn refused_hydration_emits_no_load_status_and_never_enters_the_batch() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("unused")]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    // `notify` has a registered execution path (so the direct call passes
+    // the dispatch gate) and its catalog entry is deferred with an oversize
+    // schema, so the hydration must refuse instead of load. The sibling
+    // keeps the single-tool fallback from force-activating it.
+    let mut registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    registry.register(std::sync::Arc::new(crate::tools::notify::NotifyTool));
+    let catalog = vec![
+        heavy_deferred_tool("notify", 20_000),
+        heavy_deferred_tool("cached-b", 100),
+    ];
+    let surface = test_tool_surface(&engine, registry, Some(catalog.clone()), AppMode::Agent);
+    let tool_registry = Some(&surface.registry);
+    let mut tool_uses = vec![super::streaming::ToolUseState {
+        id: "refuse-1".to_string(),
+        name: "notify".to_string(),
+        input: json!({}),
+        caller: None,
+        thought_signature: None,
+        input_buffer: String::new(),
+        input_parse_error: None,
+    }];
+    let mut active = HashSet::new();
+    let mut budget = crate::tools::tool_call_budget::ToolCallBudget::new(surface.max_tool_calls);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let planned = engine
+        .plan_tool_calls(
+            mock.as_ref(),
+            &mut turn,
+            &surface,
+            &mut tool_uses,
+            &catalog,
+            tool_registry,
+            &mut active,
+            &mut budget,
+            AppMode::Agent,
+        )
+        .await;
+
+    let plan = planned
+        .plans
+        .iter()
+        .find(|plan| plan.id == "refuse-1")
+        .expect("the refused call must be planned");
+    let receipt = plan
+        .guard_result
+        .as_ref()
+        .expect("the refusal must answer the call as a guard result");
+    assert!(
+        receipt.content.contains("was not loaded")
+            && receipt
+                .content
+                .contains(&super::tool_catalog::toolbox_oversize_reason()),
+        "the receipt must refuse with the shared oversize reason: {}",
+        receipt.content
+    );
+    assert!(
+        !receipt.content.contains("has now been loaded"),
+        "the receipt must not promise a load: {}",
+        receipt.content
+    );
+    assert!(
+        !active.contains("notify"),
+        "the refused name must stay out of the batch hydration: {active:?}"
+    );
+    assert_eq!(
+        receipt
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("executed"))
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "the refusal must be marked unexecuted, or the working set and the audit would record a call that never happened: {:?}",
+        receipt.metadata
+    );
+
+    // Nothing may announce the load: drain the engine's events and require
+    // that no status claims the tool was loaded.
+    let mut rx = handle.rx_event.write().await;
+    while let Ok(event) = rx.try_recv() {
+        if let crate::core::events::Event::Status { message } = event {
+            assert!(
+                !message.contains("Loaded deferred tool"),
+                "a refused hydration must not announce a load: {message}"
+            );
+        }
+    }
+}
+
+/// The refusal's `executed: false` marker must reach the `tool.result` audit
+/// payload, not just the receipt metadata: the audit is the record that a
+/// refused, never-executed call is not a successful execution. Driven through
+/// the real refusal receipt this commit's marker reads, the audit line must
+/// carry the marker verbatim.
+#[tokio::test]
+async fn refusal_audit_payload_carries_the_executed_marker() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let _guard = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let audit_path = workspace.path().join("tool-audit.jsonl");
+    let _audit = EnvVarGuard::set("CODEWHALE_TOOL_AUDIT_LOG", &audit_path);
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("unused")]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let mut registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    registry.register(std::sync::Arc::new(crate::tools::notify::NotifyTool));
+    let catalog = vec![
+        heavy_deferred_tool("notify", 20_000),
+        heavy_deferred_tool("cached-b", 100),
+    ];
+    let surface = test_tool_surface(&engine, registry, Some(catalog.clone()), AppMode::Agent);
+    let tool_registry = Some(&surface.registry);
+    let mut tool_uses = vec![super::streaming::ToolUseState {
+        id: "refuse-audit".to_string(),
+        name: "notify".to_string(),
+        input: json!({}),
+        caller: None,
+        thought_signature: None,
+        input_buffer: String::new(),
+        input_parse_error: None,
+    }];
+    let mut active = HashSet::new();
+    let mut budget = crate::tools::tool_call_budget::ToolCallBudget::new(surface.max_tool_calls);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let planned = engine
+        .plan_tool_calls(
+            mock.as_ref(),
+            &mut turn,
+            &surface,
+            &mut tool_uses,
+            &catalog,
+            tool_registry,
+            &mut active,
+            &mut budget,
+            AppMode::Agent,
+        )
+        .await;
+
+    let plan = planned
+        .plans
+        .iter()
+        .find(|plan| plan.id == "refuse-audit")
+        .expect("the refused call must be planned");
+    let receipt = plan
+        .guard_result
+        .as_ref()
+        .expect("the refusal must answer the call as a guard result")
+        .clone();
+
+    // The results phase consumes the receipt exactly as production does.
+    engine
+        .process_tool_results(
+            vec![Some(synthetic_toolbox_outcome(
+                "refuse-audit",
+                "notify",
+                Ok(receipt),
+            ))],
+            &mut catalog.clone(),
+            &mut active,
+            &HashMap::new(),
+            &permissive_turn_policy(),
+        )
+        .await;
+
+    let audit = std::fs::read_to_string(&audit_path).expect("the audit log must exist");
+    let line = audit
+        .lines()
+        .find_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            (value.get("event")? == "tool.result" && value.get("tool_id")? == "refuse-audit")
+                .then_some(value)
+        })
+        .expect("the refusal's tool.result audit line must exist");
+    assert_eq!(
+        line.get("executed").and_then(serde_json::Value::as_bool),
+        Some(false),
+        "the audit must record the refused call as never executed: {line}"
+    );
+    assert_eq!(
+        line.get("success").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "the receipt travels the success path — only the executed marker distinguishes it: {line}"
+    );
+}
+
+/// The hydration batch's eviction park is production wiring, not just the
+/// shared helper: a direct call that hydrates a deferred tool can itself
+/// overflow the collective bounds and evict a cached victim. Driven through
+/// the real `plan_tool_calls`, the batch must park the note for the turn's
+/// first recorded result.
+#[tokio::test]
+async fn hydration_batch_eviction_parks_its_note_through_plan_tool_calls() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("unused")]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    // `notify` has a registered execution path (so the direct call passes
+    // the dispatch gate) and its catalog entry is deferred and admittable —
+    // but admitting it on top of the pre-filled cache overflows the
+    // collective byte budget and evicts the LRU-front victim.
+    let mut registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    registry.register(std::sync::Arc::new(crate::tools::notify::NotifyTool));
+    let catalog = vec![
+        heavy_deferred_tool("notify", 4_000),
+        heavy_deferred_tool("cached-a", 7_000),
+        heavy_deferred_tool("cached-b", 7_000),
+    ];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&catalog, &["cached-a".to_string(), "cached-b".to_string()]);
+    let surface = test_tool_surface(&engine, registry, Some(catalog.clone()), AppMode::Agent);
+    let tool_registry = Some(&surface.registry);
+    let mut tool_uses = vec![super::streaming::ToolUseState {
+        id: "hydrate-1".to_string(),
+        name: "notify".to_string(),
+        input: json!({}),
+        caller: None,
+        thought_signature: None,
+        input_buffer: String::new(),
+        input_parse_error: None,
+    }];
+    let mut active = HashSet::new();
+    let mut budget = crate::tools::tool_call_budget::ToolCallBudget::new(surface.max_tool_calls);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    engine
+        .plan_tool_calls(
+            mock.as_ref(),
+            &mut turn,
+            &surface,
+            &mut tool_uses,
+            &catalog,
+            tool_registry,
+            &mut active,
+            &mut budget,
+            AppMode::Agent,
+        )
+        .await;
+
+    let notes = &engine.session.pending_toolbox_eviction_notes;
+    assert_eq!(
+        notes.len(),
+        1,
+        "the hydration batch must park its eviction note for the turn's first recorded result: {notes:?}"
+    );
+    assert_eq!(
+        notes[0].trigger,
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        "a hydration is a non-search activation step: {notes:?}"
+    );
+    assert_eq!(
+        notes[0].evicted,
+        vec!["cached-a".to_string()],
+        "the note must name the LRU-front victim the admission evicted: {notes:?}"
+    );
+    assert!(
+        !engine.session.tool_activation_cache.contains("cached-a")
+            && engine.session.tool_activation_cache.contains("cached-b")
+            && engine.session.tool_activation_cache.contains("notify"),
+        "the victim must leave the cache while the sibling and the hydrated tool stay"
+    );
+    assert!(
+        active.contains("notify"),
+        "the hydrated tool must join the active set: {active:?}"
+    );
+}
+
+/// Turn-start revalidation and a hydration batch can both evict in the same
+/// turn; the parked notes must combine, not overwrite.
+#[tokio::test]
+async fn toolbox_eviction_notes_park_and_combine() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::TurnStart,
+        &["turn-victim".to_string()],
+    );
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["step-victim".to_string()],
+    );
+
+    let notes = &engine.session.pending_toolbox_eviction_notes;
+    assert_eq!(notes.len(), 2, "both notes must stay parked: {notes:?}");
+    assert_eq!(
+        notes[0].trigger,
+        crate::core::session::ToolboxEvictionTrigger::TurnStart
+    );
+    assert!(notes[0].evicted.iter().any(|name| name == "turn-victim"));
+    assert_eq!(
+        notes[1].trigger,
+        crate::core::session::ToolboxEvictionTrigger::Step
+    );
+    assert!(notes[1].evicted.iter().any(|name| name == "step-victim"));
+
+    // An empty eviction list parks nothing and must not clobber the slot.
+    engine.park_toolbox_eviction_note(crate::core::session::ToolboxEvictionTrigger::Step, &[]);
+    assert_eq!(
+        engine.session.pending_toolbox_eviction_notes.len(),
+        2,
+        "an empty eviction list must not clear the parked notes"
+    );
+}
+
+/// A note stranded by an interrupted turn must be swept at the next turn's
+/// entry, not ride that turn's first result under a false "this step"
+/// attribution.
+#[tokio::test]
+async fn turn_start_sweeps_a_stranded_eviction_note() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("done")]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["ghost-tool".to_string()],
+    );
+
+    // No eviction happens this turn: the sweep must still clear the
+    // stranded note, and nothing may re-park it.
+    let policy = policy_for_catalog(
+        vec![heavy_deferred_tool("cached-a", 7_000)],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let _ = engine.run_turn(&mut turn, policy, None, None).await;
+
+    assert!(
+        engine.session.pending_toolbox_eviction_notes.is_empty(),
+        "a stranded note must not survive into the turn to misattribute its evictions"
+    );
+}
+
+/// The turn-entry sweep must run before the turn-start park: a note
+/// stranded by the previous turn is dropped while this turn's fresh
+/// eviction note survives. Sweeping after the park would eat the fresh
+/// note and lose the eviction report entirely.
+#[tokio::test]
+async fn turn_entry_sweep_precedes_the_turn_start_park() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("done")]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    // Stranded by an interrupted previous turn.
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["ghost-tool".to_string()],
+    );
+
+    // This turn's start evicts on the collective bounds (a cached schema
+    // grew between turns) and parks its own note.
+    let priming_catalog = vec![
+        heavy_deferred_tool("cached-a", 7_000),
+        heavy_deferred_tool("cached-b", 7_000),
+    ];
+    let cached = vec!["cached-a".to_string(), "cached-b".to_string()];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&priming_catalog, &cached);
+    let grown_catalog = vec![
+        heavy_deferred_tool("cached-a", 12_000),
+        heavy_deferred_tool("cached-b", 7_000),
+    ];
+    let policy = policy_for_catalog(
+        grown_catalog,
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let _ = engine.run_turn(&mut turn, policy, None, None).await;
+
+    let notes = &engine.session.pending_toolbox_eviction_notes;
+    assert_eq!(
+        notes.len(),
+        1,
+        "the stranded note must be swept and the fresh turn-start note must survive: {notes:?}"
+    );
+    assert_eq!(
+        notes[0].trigger,
+        crate::core::session::ToolboxEvictionTrigger::TurnStart
+    );
+    assert!(
+        notes[0].evicted.iter().any(|name| name == "cached-a"),
+        "the fresh note names this turn's victim: {notes:?}"
+    );
+    assert!(
+        !notes[0].evicted.iter().any(|name| name == "ghost-tool"),
+        "the stranded note must not combine into this turn's report: {notes:?}"
+    );
+}
+
+/// A batch whose outcomes all flattened away has no result to carry the
+/// parked note; it must be re-parked for a later batch instead of dropped.
+#[tokio::test]
+async fn toolbox_note_survives_a_batch_without_results() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        &["ghost-tool".to_string()],
+    );
+    let mut catalog = Vec::new();
+    let mut active = HashSet::new();
+    engine
+        .process_tool_results(
+            vec![None, None],
+            &mut catalog,
+            &mut active,
+            &HashMap::new(),
+            &permissive_turn_policy(),
+        )
+        .await;
+
+    let notes = &engine.session.pending_toolbox_eviction_notes;
+    assert_eq!(
+        notes.len(),
+        1,
+        "a resultless batch must re-park the note instead of dropping it: {notes:?}"
+    );
+    assert!(
+        notes[0].evicted.iter().any(|name| name == "ghost-tool"),
+        "the re-parked note must keep its content: {notes:?}"
     );
 }

@@ -1272,6 +1272,14 @@ fn sanitize_kimi_parameters_candidate(
     // only adjusts valid nested unions.
     sanitize_for_kimi(parameters);
 
+    // JSON Schema reads an empty `items` schema as "items are unconstrained",
+    // which is exactly the MFJS-legal shape with the keyword absent. MFJS
+    // itself has no empty schema node and fails the whole tool with
+    // MissingType, so repair the equivalent shape instead of dropping the
+    // tool from the request (the Pinvou browser `evaluate_script` catalog
+    // historically shipped `args: {"type": "array", "items": {}}`).
+    remove_empty_mfjs_items_schemas(parameters);
+
     let Some(root) = parameters.as_object() else {
         return Err(KimiParameterSchemaError::RootMustBeObject);
     };
@@ -1285,6 +1293,57 @@ fn sanitize_kimi_parameters_candidate(
     }
 
     Ok(constraint_note)
+}
+
+/// Drop every empty `items` schema node (`"items": {}`) from a Kimi
+/// parameters document.
+///
+/// Empty-schema nodes sit exactly where schema values live: property values,
+/// `items`, object-form `additionalProperties`, `anyOf` branches, and `$defs`
+/// entries. `properties` itself is a name map, so its own emptiness is legal
+/// and only its values are visited. `oneOf` needs no visit: this runs after
+/// `normalize_kimi_compatibility` has converted every non-root `oneOf` to
+/// `anyOf`, and root composition was already flattened before that.
+///
+/// Children are visited before the node's own `items` check so a nested
+/// repair can empty the parent (`"items": {"items": {}}` is vacuously true
+/// once the inner keyword is gone, so dropping the outer keyword is still
+/// semantics-preserving). Every removal keeps the document equivalent: an
+/// absent `items` keyword already means unconstrained items, so a legal
+/// document passes through unchanged.
+fn remove_empty_mfjs_items_schemas(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(properties) = obj.get_mut("properties").and_then(Value::as_object_mut) {
+        for child in properties.values_mut() {
+            remove_empty_mfjs_items_schemas(child);
+        }
+    }
+    if let Some(definitions) = obj.get_mut("$defs").and_then(Value::as_object_mut) {
+        for child in definitions.values_mut() {
+            remove_empty_mfjs_items_schemas(child);
+        }
+    }
+    if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
+        for branch in branches.iter_mut() {
+            remove_empty_mfjs_items_schemas(branch);
+        }
+    }
+    if let Some(additional) = obj.get_mut("additionalProperties")
+        && additional.is_object()
+    {
+        remove_empty_mfjs_items_schemas(additional);
+    }
+    if let Some(items) = obj.get_mut("items") {
+        remove_empty_mfjs_items_schemas(items);
+    }
+    if obj
+        .get("items")
+        .is_some_and(|items| items.as_object().is_some_and(Map::is_empty))
+    {
+        obj.shift_remove("items");
+    }
 }
 
 fn inline_internal_kimi_root_ref(parameters: &mut Value) -> Result<(), KimiParameterSchemaError> {
@@ -2449,6 +2508,274 @@ mod kimi_tests {
         assert_eq!(
             sanitize_for_kimi_parameters(&mut invalid).unwrap_err(),
             KimiParameterSchemaError::MissingType
+        );
+    }
+
+    #[test]
+    fn kimi_parameters_repairs_empty_items_as_unconstrained() {
+        // The Pinvou browser `evaluate_script` catalog shipped
+        // `args: {"type": "array", "items": {}}`. JSON Schema reads the empty
+        // items schema as unconstrained, but MFJS fails it with MissingType
+        // and the request builder silently dropped the whole tool — the model
+        // kept seeing a tool_search reference it could never call. The
+        // MFJS-legal equivalent shape drops the keyword instead.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "function": {"type": "string"},
+                "args": {"type": "array", "items": {}}
+            },
+            "required": ["function"],
+            "additionalProperties": true
+        });
+        sanitize_for_kimi_parameters(&mut schema)
+            .expect("empty items must repair to the keyword being absent");
+        assert_eq!(schema["properties"]["args"], json!({"type": "array"}));
+
+        // Nested occurrences repair too; other untyped schema nodes still
+        // fail closed because no semantics-preserving MFJS shape exists.
+        let mut nested = json!({
+            "type": "object",
+            "properties": {
+                "outer": {
+                    "type": "object",
+                    "properties": {
+                        "inner": {"type": "array", "items": {}}
+                    },
+                    "required": ["inner"]
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut nested).expect("nested empty items repair");
+        assert_eq!(
+            nested["properties"]["outer"]["properties"]["inner"],
+            json!({"type": "array"})
+        );
+
+        let mut described_only = json!({
+            "type": "object",
+            "properties": {
+                "args": {"type": "array", "items": {"description": "anything"}}
+            }
+        });
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut described_only).unwrap_err(),
+            KimiParameterSchemaError::MissingType
+        );
+    }
+
+    #[test]
+    fn kimi_parameters_repairs_nested_and_sibling_empty_items() {
+        // items-in-items: the inner keyword repairs to nothing, which empties
+        // the outer node; `{"items": X}` is vacuously true for non-arrays and
+        // `{"items": {}}` accepts everything, so dropping the outer keyword
+        // preserves the accepted set. The emptiness check must run after the
+        // recursion or the parent is stranded as `{}` and fails MissingType.
+        let mut grid = json!({
+            "type": "object",
+            "properties": {
+                "grid": {"type": "array", "items": {"items": {}}}
+            }
+        });
+        sanitize_for_kimi_parameters(&mut grid).expect("items-in-items repair");
+        assert_eq!(grid["properties"]["grid"], json!({"type": "array"}));
+
+        // A root `items` keyword beside `$defs`: the repair must visit every
+        // schema-value sibling of the root node, not just the removed key's
+        // own subtree, or `$defs` stays unrepaired and fails the whole tool.
+        let mut with_defs = json!({
+            "type": "object",
+            "items": {},
+            "$defs": {"rows": {"type": "array", "items": {}}},
+            "properties": {"rows": {"$ref": "#/$defs/rows"}}
+        });
+        sanitize_for_kimi_parameters(&mut with_defs).expect("root items beside $defs repair");
+        assert!(with_defs.get("items").is_none());
+        assert_eq!(with_defs["$defs"]["rows"], json!({"type": "array"}));
+
+        // Every schema-value position the validator recurses into must be
+        // visited: an empty `items` inside an object-form
+        // `additionalProperties` or an `anyOf` branch repairs too, and a
+        // walker that skips either position would strand the node and fail
+        // the whole tool with MissingType.
+        let mut nested_positions = json!({
+            "type": "object",
+            "properties": {
+                "map": {
+                    "type": "object",
+                    "additionalProperties": {"type": "array", "items": {}}
+                },
+                "choice": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {}}
+                    ]
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut nested_positions)
+            .expect("additionalProperties and anyOf empty items repair");
+        assert_eq!(
+            nested_positions["properties"]["map"]["additionalProperties"],
+            json!({"type": "array"})
+        );
+        assert_eq!(
+            nested_positions["properties"]["choice"]["anyOf"][1],
+            json!({"type": "array"})
+        );
+    }
+
+    #[test]
+    fn kimi_parameters_min_items_beside_empty_items_is_position_dependent() {
+        // Terminator-checked position (a required property): the repaired
+        // node must still terminate, and with `minItems >= 1` the terminator
+        // requires an `items` keyword — the tool keeps failing closed, with
+        // the terminator's variant.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "array", "items": {}, "minItems": 1}},
+            "required": ["a"]
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("minItems >= 1 cannot terminate without items at a checked position");
+        assert!(
+            matches!(error, KimiParameterSchemaError::InvalidSchemaNode),
+            "the terminator's variant is InvalidSchemaNode, not MissingType: {error:?}"
+        );
+
+        // `minItems: 0` terminates trivially at the same checked position,
+        // and its only MFJS-legal shape repairs to the equivalent
+        // unconstrained form.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "array", "items": {}, "minItems": 0}},
+            "required": ["a"]
+        });
+        sanitize_for_kimi_parameters(&mut schema).expect("minItems: 0 beside empty items repairs");
+        assert_eq!(
+            schema["properties"]["a"],
+            json!({"type": "array", "minItems": 0})
+        );
+
+        // A non-required property position is never revisited by the
+        // terminator, so the repaired tool SHIPS — pre-repair it was dropped
+        // with MissingType. The shipped shape is instance-set-equivalent:
+        // the empty `items` was a no-op constraint and `minItems` survives.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "s": {"type": "array", "items": {}, "minItems": 1}
+            }
+        });
+        sanitize_for_kimi_parameters(&mut schema)
+            .expect("a non-required position ships the equivalent repaired schema");
+        assert_eq!(
+            schema["properties"]["s"],
+            json!({"type": "array", "minItems": 1})
+        );
+
+        // The terminator's other two checked positions — an `anyOf` branch
+        // and a `$ref` target, each reached from a required property — fail
+        // closed the same way, with the terminator's variant.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "anyOf": [
+                        {"type": "array", "items": {}, "minItems": 1},
+                        {"type": "string"}
+                    ]
+                }
+            },
+            "required": ["a"]
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("minItems >= 1 cannot terminate in a checked anyOf branch");
+        assert!(
+            matches!(error, KimiParameterSchemaError::InvalidSchemaNode),
+            "the anyOf branch's variant is InvalidSchemaNode: {error:?}"
+        );
+
+        let mut schema = json!({
+            "type": "object",
+            "$defs": {"a": {"type": "array", "items": {}, "minItems": 1}},
+            "properties": {"x": {"$ref": "#/$defs/a"}},
+            "required": ["x"]
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("minItems >= 1 cannot terminate at a checked $ref target");
+        assert!(
+            matches!(error, KimiParameterSchemaError::InvalidSchemaNode),
+            "the $ref target's variant is InvalidSchemaNode: {error:?}"
+        );
+    }
+
+    #[test]
+    fn kimi_parameters_fail_closed_shapes_stay_dropped() {
+        // The body's fail-closed enumeration, each pinned so a validator
+        // change cannot silence the drop silently: empty `anyOf` branches
+        // (including one the nested repair itself empties), empty `$defs`
+        // entries, boolean and tuple `items`.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "choice": {"anyOf": [{"type": "string"}, {}]}
+            }
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("an empty anyOf branch fails closed");
+        assert!(
+            matches!(error, KimiParameterSchemaError::MissingType),
+            "empty branch drops with MissingType: {error:?}"
+        );
+
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "choice": {"anyOf": [{"type": "string"}, {"items": {"items": {}}}]}
+            }
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("a branch the nested repair empties to {} fails closed");
+        assert!(
+            matches!(error, KimiParameterSchemaError::MissingType),
+            "nested-emptied branch drops with MissingType: {error:?}"
+        );
+
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "$defs": {"x": {}}
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("an empty $defs entry fails closed");
+        assert!(
+            matches!(error, KimiParameterSchemaError::MissingType),
+            "empty $defs entry drops with MissingType: {error:?}"
+        );
+
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "array", "items": true}},
+            "required": ["a"]
+        });
+        let error =
+            sanitize_for_kimi_parameters(&mut schema).expect_err("boolean items fail closed");
+        assert!(
+            matches!(error, KimiParameterSchemaError::InvalidSchemaNode),
+            "boolean items drops with InvalidSchemaNode: {error:?}"
+        );
+
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "array", "items": [{"type": "string"}]}},
+            "required": ["a"]
+        });
+        let error =
+            sanitize_for_kimi_parameters(&mut schema).expect_err("tuple-form items fail closed");
+        assert!(
+            matches!(error, KimiParameterSchemaError::InvalidSchemaNode),
+            "tuple items drops with InvalidSchemaNode: {error:?}"
         );
     }
 

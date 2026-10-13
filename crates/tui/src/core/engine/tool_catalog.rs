@@ -18,7 +18,7 @@ use crate::models::Tool;
 use crate::tools::spec::{ToolError, ToolResult, optional_str, optional_u64, required_str};
 use crate::tui::app::AppMode;
 
-use crate::core::session::ToolActivationCache;
+use crate::core::session::{PendingToolboxEviction, ToolActivationCache, ToolboxEvictionTrigger};
 use crate::dependencies::ExternalTool;
 use crate::regex_cache::compile_user_regex;
 
@@ -403,25 +403,188 @@ pub(crate) fn initial_active_tools(catalog: &[Tool]) -> HashSet<String> {
     active
 }
 
-/// Remove schemas evicted from the conversation cache without hiding tools
-/// that the current catalog now exposes eagerly.
+/// Remove names the bounded toolbox dropped — unavailable entries and
+/// bounds evictions — from the active set.
 ///
-/// A cached tool can become eager after an explicit `tools_always_load`
-/// change or another policy update. Cache revalidation correctly forgets the
-/// old deferred entry, but the eager catalog entry must remain active.
-pub(crate) fn remove_evicted_cache_activations(
-    catalog: &[Tool],
+/// Eager promotions never appear in these lists: `revalidate` classifies
+/// them out because the tool is directly callable at the engine layer, so
+/// removing these names cannot hide a tool that the current catalog still
+/// exposes eagerly. (A schema the provider wire still rejects is the
+/// sanitize layer's concern and outside this vocabulary.)
+pub(crate) fn remove_toolbox_drops(
     active: &mut HashSet<String>,
-    evicted: impl IntoIterator<Item = String>,
+    names: impl IntoIterator<Item = String>,
 ) {
-    for name in evicted {
-        let is_eager_now = catalog
-            .iter()
-            .any(|tool| tool.name == name && !tool.defer_loading.unwrap_or(false));
-        if !is_eager_now {
-            active.remove(&name);
-        }
+    for name in names {
+        active.remove(&name);
     }
+}
+
+/// Why a catalog-shrink stale entry is reported under the unavailable
+/// vocabulary instead of the eviction note: the tool left the deferred
+/// catalog itself (disconnect, deny rule, mode switch), so the search-result
+/// recovery contract ("re-search to re-activate") would be a false promise
+/// for it. Oversize drops carry [`toolbox_oversize_reason`] instead.
+const TOOLBOX_CATALOG_SHRINK_REASON: &str = "Previously active in this conversation but no longer available in the tool catalog; searching cannot re-activate it while it stays unavailable.";
+
+/// Why a deferred tool stays out of the bounded conversation toolbox: its
+/// serialized form — name, description, and schema measured together —
+/// exceeds the per-tool budget, so no activation can admit it while it
+/// stays that large. Shared by discovery-time rejections and revalidation
+/// drops so the prose cannot drift from the real bounds. Search-context
+/// callers append the recovery hint via [`toolbox_oversize_search_hint`];
+/// a direct-call refusal has no query to narrow and states the bounds only.
+pub(crate) fn toolbox_oversize_reason() -> String {
+    format!(
+        "The serialized tool exceeds the bounded conversation toolbox ({} \
+         cached tools, {}KiB of serialized tool definitions).",
+        crate::core::session::TOOL_ACTIVATION_CACHE_MAX_NAMES,
+        crate::core::session::TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES / 1024
+    )
+}
+
+/// The search-context tail for [`toolbox_oversize_reason`]: after a
+/// discovery rejection the search is the recovery path, so the reason says
+/// what a narrower query can do. Only a search result may attach it.
+pub(crate) fn toolbox_oversize_search_hint() -> &'static str {
+    " Narrow the search or use a smaller matching tool."
+}
+
+/// [`toolbox_oversize_reason`] with the search-context recovery hint, for
+/// the `tool_search` payload's unavailable references.
+fn search_oversize_reason() -> String {
+    format!(
+        "{}{}",
+        toolbox_oversize_reason(),
+        toolbox_oversize_search_hint()
+    )
+}
+
+/// The model-facing sentence naming a bounds-driven toolbox eviction and the
+/// recovery contract. `trigger` names the step that surfaced it; the capacity
+/// label is derived from the session constants so the prose cannot drift from
+/// the real bounds. The eviction may come from the admission itself or from
+/// revalidation after a cached schema grew, so the wording stays neutral
+/// about the cause.
+pub(crate) fn bounded_toolbox_eviction_note(
+    trigger: ToolboxEvictionTrigger,
+    evicted: &[String],
+) -> String {
+    format!(
+        "This {} evicted tools from the bounded conversation toolbox \
+         ({} cached tools, {}KiB of serialized tool definitions); the evicted tools \
+         are no longer callable until a later search re-activates them: {}",
+        trigger.label(),
+        crate::core::session::TOOL_ACTIVATION_CACHE_MAX_NAMES,
+        crate::core::session::TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES / 1024,
+        evicted.join(", ")
+    )
+}
+
+/// Park a bounds-driven toolbox eviction for a later result to carry,
+/// combining with any note already parked — turn-start revalidation and a
+/// hydration batch can both evict before a result records. Shared by the
+/// parent engine and the child surface so the combine contract is stated
+/// and pinned once.
+pub(crate) fn park_toolbox_eviction(
+    notes: &mut Vec<PendingToolboxEviction>,
+    trigger: ToolboxEvictionTrigger,
+    evicted: &[String],
+) {
+    if evicted.is_empty() {
+        return;
+    }
+    tracing::debug!(
+        target: "engine.tool_surface",
+        trigger = trigger.label(),
+        ?evicted,
+        "parked toolbox eviction note for a later result"
+    );
+    notes.push(PendingToolboxEviction {
+        trigger,
+        evicted: evicted.to_vec(),
+    });
+}
+
+/// Net and render toolbox eviction notes for the result they ride: the
+/// turn's parked notes and the step's own touch/retrieval evictions share
+/// this attach-time netting. A name that is back in the activation cache is
+/// callable again, and so is a name sitting in the request's active tool
+/// set; a name an earlier note in the same ride already named is not
+/// repeated. Either way the result must not declare the tool "no longer
+/// callable": such names are dropped, and a note emptied by the netting is
+/// dropped with them. A name that left the catalog between its eviction and
+/// this ride can no longer be re-activated by a search, so it is reported
+/// under that truth instead of the recovery promise. Consumes the notes —
+/// the slot is cleared whether or not anything rendered — so a caller
+/// cannot re-ride them on a later result. Returns `None` when nothing
+/// remains to report.
+pub(crate) fn render_toolbox_eviction_notes(
+    notes: &mut Vec<PendingToolboxEviction>,
+    cache: &ToolActivationCache,
+    active_names: &std::collections::HashSet<String>,
+    catalog: &[Tool],
+) -> Option<String> {
+    let catalog_names: HashSet<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
+    let mut rendered_names: HashSet<String> = HashSet::new();
+    for note in notes.iter_mut() {
+        note.evicted.retain(|name| {
+            !cache.contains(name) && !active_names.contains(name) && !rendered_names.contains(name)
+        });
+        rendered_names.extend(note.evicted.iter().cloned());
+    }
+    let rendered: Vec<String> = notes
+        .iter()
+        .filter(|note| !note.evicted.is_empty())
+        .map(|note| {
+            let (recoverable, gone): (Vec<String>, Vec<String>) = note
+                .evicted
+                .iter()
+                .cloned()
+                .partition(|name| catalog_names.contains(name.as_str()));
+            let mut text = Vec::new();
+            if !recoverable.is_empty() {
+                text.push(bounded_toolbox_eviction_note(note.trigger, &recoverable));
+            }
+            if !gone.is_empty() {
+                text.push(format!(
+                    "This {} evicted {} that {} since left the toolbox \
+                     catalog; a search can no longer re-activate {}: {}",
+                    note.trigger.label(),
+                    if gone.len() == 1 { "a tool" } else { "tools" },
+                    if gone.len() == 1 { "has" } else { "have" },
+                    if gone.len() == 1 { "it" } else { "them" },
+                    gone.join(", ")
+                ));
+            }
+            text.join("\n\n")
+        })
+        .collect();
+    let ride_count = rendered.len();
+    notes.clear();
+    if rendered.is_empty() {
+        None
+    } else {
+        tracing::debug!(
+            target: "engine.tool_surface",
+            notes = ride_count,
+            "toolbox eviction notes ride a recorded result"
+        );
+        Some(rendered.join("\n\n"))
+    }
+}
+
+/// Outcome of a non-search activation against the bounded conversation
+/// toolbox: whether the request-visible tool surface changed, and which
+/// previously active tools this activation bounds-evicted — from the
+/// admission itself or from revalidation after a cached schema grew.
+/// Unavailable drops are handled inside the callee and deliberately absent
+/// here — they are reported (where at all) under the unavailable vocabulary,
+/// never under the re-activatable eviction contract.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ToolSurfaceUpdate {
+    pub(crate) changed: bool,
+    pub(crate) evicted: Vec<String>,
 }
 
 /// Promote a successfully executed deferred tool only when this conversation
@@ -431,14 +594,17 @@ pub(crate) fn touch_cached_tool_after_execution(
     active: &mut HashSet<String>,
     cache: &mut ToolActivationCache,
     name: &str,
-) -> bool {
+) -> ToolSurfaceUpdate {
     if !cache.names().any(|cached| cached == name) {
-        return false;
+        return ToolSurfaceUpdate::default();
     }
     let delta = cache.activate(catalog, &[name.to_string()]);
-    remove_evicted_cache_activations(catalog, active, delta.evicted);
+    remove_toolbox_drops(active, delta.dropped_names().map(str::to_string));
     active.extend(delta.admitted);
-    true
+    ToolSurfaceUpdate {
+        changed: true,
+        evicted: delta.evicted,
+    }
 }
 
 /// Make the recovery schema visible on the next provider step when a tool
@@ -450,7 +616,7 @@ pub(crate) fn activate_result_dependencies(
     active: &mut HashSet<String>,
     cache: &mut ToolActivationCache,
     result: &ToolResult,
-) -> bool {
+) -> ToolSurfaceUpdate {
     let needs_retrieval = result
         .metadata
         .as_ref()
@@ -458,12 +624,15 @@ pub(crate) fn activate_result_dependencies(
         .and_then(Value::as_bool)
         == Some(true);
     if !needs_retrieval {
-        return false;
+        return ToolSurfaceUpdate::default();
     }
     let delta = cache.activate(catalog, &[TOOL_RESULT_RETRIEVAL_NAME.to_string()]);
-    remove_evicted_cache_activations(catalog, active, delta.evicted.iter().cloned());
+    remove_toolbox_drops(active, delta.dropped_names().map(str::to_string));
     active.extend(delta.admitted.iter().cloned());
-    !delta.admitted.is_empty() || !delta.evicted.is_empty()
+    ToolSurfaceUpdate {
+        changed: !delta.admitted.is_empty() || !delta.evicted.is_empty() || !delta.stale.is_empty(),
+        evicted: delta.evicted,
+    }
 }
 
 fn active_tool_list_from_catalog(catalog: &[Tool], active: &HashSet<String>) -> Vec<Tool> {
@@ -1065,15 +1234,55 @@ pub(super) fn maybe_hydrate_requested_deferred_tool(
     catalog: &[Tool],
     active_tools_at_batch_start: &HashSet<String>,
     hydrated_tools_this_batch: &mut HashSet<String>,
-) -> Option<ToolResult> {
+) -> Option<DeferredHydration> {
     let def = catalog.iter().find(|def| def.name == tool_name)?;
 
     if !def.defer_loading.unwrap_or(false) || active_tools_at_batch_start.contains(tool_name) {
         return None;
     }
 
+    // An oversize tool can never enter the bounded toolbox, so the
+    // receipt must not promise a load that the admission would refuse —
+    // that promise turns every retry into another false "has now been
+    // loaded". Refuse up front with the shared oversize reason, the same
+    // statement the child surface makes. The name stays out of the
+    // hydration set, so the batch activation is never asked to admit it.
+    if ToolActivationCache::exceeds_per_tool_budget(def) {
+        return Some(DeferredHydration::Refused(
+            deferred_tool_oversize_hydration_result(def),
+        ));
+    }
+
     hydrated_tools_this_batch.insert(tool_name.to_string());
-    Some(deferred_tool_schema_hydration_result(def, tool_input))
+    Some(DeferredHydration::Loaded(
+        deferred_tool_schema_hydration_result(def, tool_input),
+    ))
+}
+
+/// Outcome of a direct call to a deferred tool: either the schema was
+/// loaded into the batch hydration (the receipt publishes it and the load
+/// is announced), or the tool cannot enter the toolbox and the receipt
+/// refuses. The caller must keep the two apart: a refusal is not a load,
+/// and announcing one as the other lies to the user and the audit log.
+pub(super) enum DeferredHydration {
+    Loaded(ToolResult),
+    Refused(ToolResult),
+}
+
+fn deferred_tool_oversize_hydration_result(tool: &Tool) -> ToolResult {
+    // `executed: false` mirrors the Loaded receipt: the refusal answers a
+    // tool call without running it, and the results phase defaults the
+    // executed flag to true — without the marker the working set would
+    // observe a call that never happened and the audit would log the
+    // refusal as a successful execution.
+    ToolResult::success(format!(
+        "Tool `{}` was not loaded and was not executed: {}",
+        tool.name,
+        toolbox_oversize_reason()
+    ))
+    .with_metadata(json!({
+        "executed": false,
+    }))
 }
 
 #[cfg(test)]
@@ -1085,7 +1294,7 @@ pub(super) fn preflight_requested_deferred_tool(
 ) -> Option<ToolResult> {
     let active_tools_at_batch_start = active_tools.clone();
     let mut hydrated_tools_this_batch = HashSet::new();
-    let result = maybe_hydrate_requested_deferred_tool(
+    let hydration = maybe_hydrate_requested_deferred_tool(
         tool_name,
         tool_input,
         catalog,
@@ -1093,7 +1302,9 @@ pub(super) fn preflight_requested_deferred_tool(
         &mut hydrated_tools_this_batch,
     );
     active_tools.extend(hydrated_tools_this_batch);
-    result
+    hydration.map(|hydration| match hydration {
+        DeferredHydration::Loaded(result) | DeferredHydration::Refused(result) => result,
+    })
 }
 
 fn deferred_tool_schema_hydration_result(tool: &Tool, tool_input: &Value) -> ToolResult {
@@ -1357,10 +1568,14 @@ fn execute_tool_search_inner(
         unavailable_core_action_tools_with_bm25_like(catalog, query, remaining_results)
     };
 
-    let mut cache_rejected = Vec::new();
+    let mut cache_rejected: Vec<String> = Vec::new();
+    let mut cache_evicted = Vec::new();
+    let mut cache_stale = Vec::<crate::core::session::ToolActivationStale>::new();
     if let Some(cache) = cache {
         let delta = cache.activate(catalog, &discovered);
-        remove_evicted_cache_activations(catalog, active_tools, delta.evicted);
+        remove_toolbox_drops(active_tools, delta.dropped_names().map(str::to_string));
+        cache_stale = delta.stale;
+        cache_evicted = delta.evicted;
         cache_rejected = delta.rejected;
         discovered = delta.admitted;
     }
@@ -1386,8 +1601,40 @@ fn execute_tool_search_inner(
         json!({
             "type": "unavailable_tool_reference",
             "tool_name": name,
-            "reason": "The tool schema exceeds the bounded conversation toolbox (8 cached tools, 16KiB of added serialized schemas). Narrow the search or use a smaller matching tool."
+            "reason": search_oversize_reason(),
         })
+    }));
+    // Stale evictions travel under the unavailable vocabulary — the eviction
+    // note's "re-search to re-activate" contract would be a false promise
+    // for them. The cause picks the truthful reason: a catalog shrink cannot
+    // be searched back, while an oversize drop can return once its schema
+    // shrinks. A discovery rejection can only ever mean oversize (discovery
+    // surfaces catalog members alone), so an Oversize stale entry and its
+    // rejection would carry the same reason — emit that pair once, chosen
+    // by cause rather than by name so a CatalogShrink entry for the same
+    // name would still state its own truth.
+    let rejected_names: std::collections::HashSet<&str> =
+        cache_rejected.iter().map(String::as_str).collect();
+    unavailable_references.extend(cache_stale.iter().filter_map(|entry| {
+        if rejected_names.contains(entry.name.as_str())
+            && matches!(
+                entry.cause,
+                crate::core::session::ToolActivationStaleCause::Oversize
+            )
+        {
+            return None;
+        }
+        let reason = match entry.cause {
+            crate::core::session::ToolActivationStaleCause::CatalogShrink => {
+                TOOLBOX_CATALOG_SHRINK_REASON.to_string()
+            }
+            crate::core::session::ToolActivationStaleCause::Oversize => search_oversize_reason(),
+        };
+        Some(json!({
+            "type": "unavailable_tool_reference",
+            "tool_name": entry.name,
+            "reason": reason,
+        }))
     }));
 
     // Boot-window status (#588): a bare empty result is byte-identical to
@@ -1401,6 +1648,23 @@ fn execute_tool_search_inner(
         "tool_references": references,
         "unavailable_tool_references": unavailable_references.clone(),
     });
+    // The activation cache is bounded (8 cached tools, 16KiB of serialized
+    // tool definitions), so admitting new tools can silently revoke ones this
+    // conversation already used. Naming the evictions in the result keeps
+    // the model's picture of its callable toolbox honest — otherwise it sees
+    // a previously working tool disappear between turns with no explanation.
+    if !cache_evicted.is_empty() {
+        payload["evicted_tool_references"] = json!(
+            cache_evicted
+                .iter()
+                .map(|name| json!({"type": "tool_reference", "tool_name": name}))
+                .collect::<Vec<_>>()
+        );
+        payload["toolbox_note"] = json!(bounded_toolbox_eviction_note(
+            ToolboxEvictionTrigger::ToolSearch,
+            &cache_evicted
+        ));
+    }
     if let Some(servers) = boot_status {
         payload["mcp_boot"] = json!({
             "status": "connecting",
@@ -1413,6 +1677,10 @@ fn execute_tool_search_inner(
         "tool_references": discovered,
         "unavailable_tool_references": unavailable_references,
     });
+    if !cache_evicted.is_empty() {
+        metadata["evicted_tool_references"] = json!(cache_evicted);
+        metadata["toolbox_note"] = payload["toolbox_note"].clone();
+    }
     if boot_status.is_some() {
         metadata["mcp_boot"] = payload["mcp_boot"].clone();
     }
