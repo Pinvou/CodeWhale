@@ -113,8 +113,10 @@ impl ToolboxEvictionTrigger {
 /// still structured. Names stay unresolved until ride time so the attaching
 /// channel can net out names the model can call again by then: between the
 /// park and the ride, a search, a hydration, or a retrieval may have
-/// re-admitted a victim, and a note naming it "no longer callable" would
-/// contradict the very result that hands it back.
+/// re-admitted a victim, and a mid-turn MCP catalog refresh can
+/// re-advertise one into the active set without re-activating the cache.
+/// A note naming a callable tool "no longer callable" would contradict the
+/// very result that hands it back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingToolboxEviction {
     pub(crate) trigger: ToolboxEvictionTrigger,

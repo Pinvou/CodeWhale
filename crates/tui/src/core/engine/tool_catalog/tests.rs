@@ -844,9 +844,11 @@ fn hydration_of_an_oversize_tool_reports_the_rejection_not_a_load() {
 }
 
 /// Ride-time netting: a parked note must not name a tool the riding result
-/// hands back. Names back in the activation cache are dropped from the note,
-/// a note emptied by the netting is dropped entirely, and the surviving note
-/// keeps its own trigger attribution.
+/// hands back. Names back in the activation cache — or in the request's
+/// active tool set, which a mid-turn MCP catalog refresh can repopulate
+/// without re-activating the cache — are dropped from the note, a note
+/// emptied by the netting is dropped entirely, and the surviving note keeps
+/// its own trigger attribution.
 #[test]
 fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
     let mut deferred = tool("deferred-x");
@@ -867,8 +869,8 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
         ),
         note(ToolboxEvictionTrigger::Step, vec!["deferred-x".to_string()]),
     ];
-    let rendered =
-        render_toolbox_eviction_notes(&mut notes, &cache).expect("deferred-y is still evicted");
+    let rendered = render_toolbox_eviction_notes(&mut notes, &cache, &HashSet::new())
+        .expect("deferred-y is still evicted");
     assert!(
         rendered.contains("deferred-y") && !rendered.contains("deferred-x"),
         "re-admitted names must be netted out of the note: {rendered}"
@@ -885,7 +887,23 @@ fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
         vec!["deferred-x".to_string()],
     )];
     assert!(
-        render_toolbox_eviction_notes(&mut notes, &cache).is_none(),
+        render_toolbox_eviction_notes(&mut notes, &cache, &HashSet::new()).is_none(),
         "a fully netted note must not ride at all"
+    );
+
+    // A name the mid-turn MCP refresh re-advertised into the active set is
+    // callable even though the cache no longer holds it: the note must net
+    // against the active set too, or it would contradict the next request,
+    // which carries the tool.
+    let mut active = HashSet::new();
+    active.insert("deferred-y".to_string());
+    let mut notes = vec![note(
+        ToolboxEvictionTrigger::Step,
+        vec!["deferred-y".to_string()],
+    )];
+    assert!(
+        render_toolbox_eviction_notes(&mut notes, &ToolActivationCache::default(), &active)
+            .is_none(),
+        "an active-set name is callable and must not be declared evicted"
     );
 }

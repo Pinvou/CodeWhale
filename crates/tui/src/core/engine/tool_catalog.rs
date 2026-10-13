@@ -481,17 +481,20 @@ pub(crate) fn park_toolbox_eviction(
 }
 
 /// Net and render the parked toolbox eviction notes for the result they
-/// ride. A name that is back in the activation cache is callable again, so
-/// it must not be declared "no longer callable" by the very result that
-/// carries it back: such names are dropped, and a note emptied by the
-/// netting is dropped with them. Returns `None` when nothing remains to
-/// report.
+/// ride. A name that is back in the activation cache is callable again, and
+/// so is a name sitting in the request's active tool set — a mid-turn MCP
+/// catalog refresh re-advertises its tools there without re-activating the
+/// cache. Either way the result must not declare the tool "no longer
+/// callable": such names are dropped, and a note emptied by the netting is
+/// dropped with them. Returns `None` when nothing remains to report.
 pub(crate) fn render_toolbox_eviction_notes(
     notes: &mut [PendingToolboxEviction],
     cache: &ToolActivationCache,
+    active_names: &std::collections::HashSet<String>,
 ) -> Option<String> {
     for note in notes.iter_mut() {
-        note.evicted.retain(|name| !cache.contains(name));
+        note.evicted
+            .retain(|name| !cache.contains(name) && !active_names.contains(name));
     }
     let rendered: Vec<String> = notes
         .iter()

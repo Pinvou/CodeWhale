@@ -14140,17 +14140,21 @@ impl SubAgentToolSurface {
 
     /// Attach the parked eviction notes to this result — the child's ride
     /// channel. Names re-admitted since the park are netted out against the
-    /// child's live cache, so a note never declares a tool uncallable that
-    /// the riding result hands back, and a note emptied by the netting is
-    /// dropped. Error results carry the notes too, mirroring the parent
-    /// engine's error path: a note held back on `Err` would strand until a
-    /// later `Ok` — or forever if the child ends first.
+    /// child's live cache and its request's active-name set (a catalog
+    /// refresh can re-advertise a victim there without re-activating the
+    /// cache), so a note never declares a tool uncallable that the riding
+    /// result hands back, and a note emptied by the netting is dropped.
+    /// Error results carry the notes too, mirroring the parent engine's
+    /// error path: a note held back on `Err` would strand until a later
+    /// `Ok` — or forever if the child ends first.
     fn ride_pending_eviction_notes(&mut self, result: &mut Result<RichToolResult>) {
         if self.pending_eviction_notes.is_empty() {
             return;
         }
         let mut parked = std::mem::take(&mut self.pending_eviction_notes);
-        let Some(rendered) = render_toolbox_eviction_notes(&mut parked, &self.cache) else {
+        let Some(rendered) =
+            render_toolbox_eviction_notes(&mut parked, &self.cache, &self.active_names)
+        else {
             return;
         };
         match result.as_mut() {

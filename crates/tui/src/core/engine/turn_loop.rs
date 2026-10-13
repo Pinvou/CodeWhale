@@ -5179,13 +5179,16 @@ impl Engine {
                     // The batch's parked notes and this result's own
                     // retrieval/touch evictions share one channel to the
                     // model: the recorded result content. The parked notes
-                    // net against the live cache at attach so a name this
-                    // result hands back is never declared uncallable.
+                    // net against the live cache and the active tool set at
+                    // attach so a name this result hands back — or that a
+                    // mid-turn MCP refresh re-advertised — is never declared
+                    // uncallable.
                     let mut eviction_notes = Vec::new();
                     if !pending_eviction_notes.is_empty() {
                         if let Some(rendered) = super::tool_catalog::render_toolbox_eviction_notes(
                             &mut pending_eviction_notes,
                             &self.session.tool_activation_cache,
+                            active_tool_names,
                         ) {
                             eviction_notes.push(rendered);
                         }
@@ -5257,6 +5260,7 @@ impl Engine {
                         note_text = super::tool_catalog::render_toolbox_eviction_notes(
                             &mut pending_eviction_notes,
                             &self.session.tool_activation_cache,
+                            active_tool_names,
                         );
                         pending_eviction_notes.clear();
                     }
