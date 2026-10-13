@@ -690,6 +690,10 @@ fn review_reasoning_dialect(
         | ModelPreset::LocalVllm
         | ModelPreset::Deepseek
         | ModelPreset::Openai
+        // Custom Responses endpoints only switch the main-session engine
+        // route; review aux calls stay single-shot Chat Completions (no
+        // tool calls), so resolution falls back to URL/model-name sniffing.
+        | ModelPreset::OpenaiResponses
         | ModelPreset::Anthropic
         | ModelPreset::Gemini
         | ModelPreset::Xai => reasoning_dialect_from_base_url(base_url, model).into(),
@@ -1146,6 +1150,28 @@ mod tests {
                 "openai",
                 "https://api.openai.com/v1",
                 "gpt-4o",
+            ),
+            ReviewReasoningDialect::None
+        );
+        // The custom Responses preset rides the same URL-sniff fallback:
+        // review's single-shot calls stay plain Chat (no tools), so the
+        // dialect follows the endpoint/model, not the preset (the compiler
+        // only pins arm exhaustiveness — this pins the semantics).
+        assert_eq!(
+            review_reasoning_dialect(
+                ModelPreset::OpenaiResponses,
+                "openai",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "qwen3.6-flash",
+            ),
+            ReviewReasoningDialect::QwenEnableThinking
+        );
+        assert_eq!(
+            review_reasoning_dialect(
+                ModelPreset::OpenaiResponses,
+                "openai",
+                "https://api.openai.com/v1",
+                "gpt-6-sol",
             ),
             ReviewReasoningDialect::None
         );

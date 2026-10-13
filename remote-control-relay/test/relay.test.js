@@ -252,9 +252,9 @@ function controllerEnvironment(name, overrides = {}) {
   };
 }
 
-test("identifier contract: real Relay accepts colon signing IDs and preserves legacy leading-ID Web v2", { timeout: 90_000 }, async (t) => {
+test("identifier contract: real Relay accepts pinned-trust signing IDs and preserves legacy leading-ID Web v2", { timeout: 90_000 }, async (t) => {
   const isolated = await spawnRelay(controllerEnvironment("identifier-contract", {
-    PINVOU_REMOTE_RELAY_SIGNING_KEY_ID: "relay:signing:0001",
+    PINVOU_REMOTE_RELAY_SIGNING_KEY_ID: "relay.signing-0001",
   }));
   t.after(() => stopRelay(isolated.child));
   for (const endpointId of ["_old", "-old"]) {

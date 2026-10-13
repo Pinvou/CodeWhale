@@ -10,6 +10,7 @@ export const MAX_DECRYPTED_PAYLOAD_BYTES = 512 * 1024;
 export const MAX_TRANSFER_CHUNK_BYTES = 256 * 1024;
 export const MAX_TASK_INPUT_TEXT_BYTES = 64 * 1024;
 export const MAX_TEMPORARY_MODEL_PACKAGE_BYTES = 64 * 1024;
+export const MAX_TEMPORARY_MODEL_CREDENTIAL_BYTES = 4096;
 export const MAX_ID_CHARS = 128;
 export const SEALED_CODE_V1_BYTES = 68;
 const MAX_TASK_REFERENCES = 32;
@@ -17,7 +18,7 @@ const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 const MAX_SENSITIVE_STRING_BYTES = 8 * 1024;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "11c728929280ade5f529efc38a0fca6d618a77839bba1c7e48938b34e781f889";
+export const CONTROLLER_CONTRACT_SHA256 = "98ab9cc1835d7b617b142b7e26b8583a96245107db574465b46a836f43217a6b";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -197,8 +198,8 @@ const CONTRACT_ENUMS = Object.freeze({
   decision: ["allow", "deny"],
   risk_level: ["low", "medium", "high", "critical"],
   event_kind: ["user_message", "assistant_delta", "reasoning", "tool", "permission", "error", "cancel", "artifact", "terminal"],
-  preset: ["local_vllm", "deepseek", "kimi", "openai_compatible", "qwen", "doubao", "minimax", "glm", "mimo", "openai", "anthropic", "gemini", "xai"],
-  wire_api: ["openai_chat_completions", "anthropic_messages"],
+  preset: ["local_vllm", "deepseek", "kimi", "openai_compatible", "qwen", "doubao", "minimax", "glm", "mimo", "openai", "openai_responses", "anthropic", "gemini", "xai"],
+  wire_api: ["openai_chat_completions", "anthropic_messages", "openai_responses"],
   provider_kind: ["custom", "official_api"],
   vendor: ["anthropic", "deepseek", "doubao", "gemini", "glm", "kimi", "mimo", "minimax", "openai", "qwen", "tencent", "xai"],
   endpoint_mode: ["full_chat_completions"],
@@ -899,20 +900,46 @@ function validateTemporaryModelPackage(value, task) {
   validateCredential(object.primary_credential, "temporary_model_package.primary_credential");
   if (object.vision_fallback !== undefined) {
     const fallback = exactObject(object.vision_fallback, NESTED_SCHEMAS.vision_fallback.required, NESTED_SCHEMAS.vision_fallback.optional, "temporary_model_package.vision_fallback");
-    validateRoute(fallback.route, "temporary_model_package.vision_fallback.route");
+    validateRoute(fallback.route, "temporary_model_package.vision_fallback.route", true);
     validateCredential(fallback.credential, "temporary_model_package.vision_fallback.credential");
   }
 }
 
-function validateRoute(value, label) {
+// Rust str::trim uses Unicode White_Space: includes NEL, excludes BOM/FEFF.
+// ECMAScript trim has the opposite treatment for those two characters.
+function trimRustWhitespace(value) {
+  return value.replace(/^[\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+|[\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+$/gu, "");
+}
+
+// Mirrors core/model_wire.rs; shared fixture vectors pin both implementations.
+function routeWireApi(route) {
+  function stripRepeatedSuffix(value, suffix) {
+    while (value.endsWith(suffix)) value = value.slice(0, -suffix.length);
+    return value;
+  }
+  const base = route.base_url.trim().replace(/\/+$/u, "");
+  const deepseek = stripRepeatedSuffix(stripRepeatedSuffix(base, "/beta"), "/v1").toLowerCase() === "https://api.deepseek.com";
+  if (deepseek) return "openai_chat_completions";
+  const vendor = route.vendor?.trim().toLowerCase();
+  const officialOpenai = stripRepeatedSuffix(base.toLowerCase(), "/v1") === "https://api.openai.com";
+  const model = trimRustWhitespace(route.model).toLowerCase();
+  const responsesModel = ["gpt-6", "gpt-5.6", "gpt-5.5", "gpt-5.4-mini"].some((prefix) => model.startsWith(prefix));
+  if (route.preset === "openai_responses" || ((route.preset === "openai" || vendor === "openai") && officialOpenai && responsesModel)) return "openai_responses";
+  if (vendor === "anthropic") return "anthropic_messages";
+  if (CONTRACT_ENUMS.vendor.includes(vendor)) return "openai_chat_completions";
+  return route.preset === "anthropic" ? "anthropic_messages" : "openai_chat_completions";
+}
+
+function validateRoute(value, label, vision = false) {
   const route = exactObject(value, ROUTE_REQUIRED, ROUTE_OPTIONAL, label);
   text(route.display_name, `${label}.display_name`, 128, 512);
-  oneOf(route.preset, ["local_vllm", "deepseek", "kimi", "openai_compatible", "qwen", "doubao", "minimax", "glm", "mimo", "openai", "anthropic", "gemini", "xai"], `${label}.preset`);
-  oneOf(route.wire_api, ["openai_chat_completions", "anthropic_messages"], `${label}.wire_api`);
-  if ((route.preset === "anthropic") !== (route.wire_api === "anthropic_messages")) fail("invalid_field", `${label}.wire_api`);
+  if (!trimRustWhitespace(route.display_name)) fail("invalid_field", `${label}.display_name`);
+  oneOf(route.preset, CONTRACT_ENUMS.preset, `${label}.preset`);
+  oneOf(route.wire_api, CONTRACT_ENUMS.wire_api, `${label}.wire_api`);
   text(route.base_url, `${label}.base_url`, 2048, 2048);
   validateControllerBaseUrl(route.base_url, `${label}.base_url`);
   text(route.model, `${label}.model`, 256, 1024);
+  if (!trimRustWhitespace(route.model)) fail("invalid_field", `${label}.model`);
   oneOf(route.image_capability_override, ["pinvou", "enabled", "disabled"], `${label}.image_capability_override`);
   if (route.provider_kind !== undefined) oneOf(route.provider_kind, ["custom", "official_api"], `${label}.provider_kind`);
   if (route.vendor !== undefined) oneOf(route.vendor, ["anthropic", "deepseek", "doubao", "gemini", "glm", "kimi", "mimo", "minimax", "openai", "qwen", "tencent", "xai"], `${label}.vendor`);
@@ -920,6 +947,7 @@ function validateRoute(value, label) {
   if (route.context_window_tokens !== undefined) decimal(route.context_window_tokens, `${label}.context_window_tokens`, U32_MAX);
   if (route.max_output_tokens !== undefined) decimal(route.max_output_tokens, `${label}.max_output_tokens`, U32_MAX);
   if (route.reasoning_effort !== undefined) oneOf(route.reasoning_effort, ["off", "low", "medium", "high", "max", "auto"], `${label}.reasoning_effort`);
+  if (route.wire_api !== routeWireApi(route) || (vision && route.wire_api !== "openai_chat_completions")) fail("invalid_field", `${label}.wire_api`);
 }
 
 export function validateControllerBaseUrl(value, field = "base_url") {
@@ -969,7 +997,7 @@ function validUrlSuffix(suffix) {
 function validateCredential(value, label) {
   const credential = exactObject(value, NESTED_SCHEMAS.credential.required, NESTED_SCHEMAS.credential.optional, label);
   if (credential.kind !== "api_key") fail("invalid_enum", `${label}.kind`);
-  text(credential.secret, `${label}.secret`, 8192, 8192);
+  text(credential.secret, `${label}.secret`, MAX_TEMPORARY_MODEL_CREDENTIAL_BYTES, MAX_TEMPORARY_MODEL_CREDENTIAL_BYTES);
 }
 
 function lp(value) {
@@ -1201,6 +1229,7 @@ export function controllerContractManifest() {
       max_transfer_chunk_bytes: MAX_TRANSFER_CHUNK_BYTES,
       max_task_input_text_bytes: MAX_TASK_INPUT_TEXT_BYTES,
       max_temporary_model_package_bytes: MAX_TEMPORARY_MODEL_PACKAGE_BYTES,
+      max_temporary_model_credential_bytes: MAX_TEMPORARY_MODEL_CREDENTIAL_BYTES,
       max_id_chars: MAX_ID_CHARS,
       sealed_code_v1_bytes: SEALED_CODE_V1_BYTES,
       max_sensitive_string_bytes: MAX_SENSITIVE_STRING_BYTES,
@@ -1224,6 +1253,7 @@ export function controllerContractManifest() {
     runtime_pre_lease_messages: CONTROLLER_MESSAGE_TYPES.filter((type) => !MESSAGE_SCHEMAS[type].required.includes("controller_lease_id")),
     collection_limits: { task_attachment_ids: MAX_TASK_REFERENCES, task_skill_ids: MAX_TASK_REFERENCES, descriptors: MAX_DESCRIPTORS, artifacts: MAX_ARTIFACTS, capabilities: CONTROLLER_CAPABILITIES.length },
     base_url_grammar: "lowercase-http(s)-dns-or-ipv4-port1-65535-no-userinfo-ipv6-fragment-uppercase-percent",
+    temporary_model_wire_policy: "effective-host-vendor-preset-model;responses-primary-only;vision-chat-only;no-env",
     liveness_sequence_policy: {
       heartbeat: { lower: "replay", equal: "same_sequence_tighten", greater: "advance" },
       attestation: { lower: "replay", equal: "replay", greater: "advance" },

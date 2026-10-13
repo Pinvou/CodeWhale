@@ -5,6 +5,7 @@
 
 /* eslint-disable sonarjs/no-nested-template-literals, sonarjs/no-unenclosed-multiline-block -- compact i18n dictionary: nested templates mirror the copy structure one-to-one; credential field names are false-positive secrets */
 import { browserZh } from './browser.js';
+import { CHAT_RECOVERY_COPY } from './chat-recovery.js';
 
 const conversationZh = {
   completed:'已完成', failed:'失败', interrupted:'已中断', cancelled:'已取消', limitReached:'达到限制', processing:'处理中', processingActive:'正在处理',
@@ -182,6 +183,7 @@ const acpProvidersZh = {
 };
 
 export const dictZh = {
+  steerFailedLost: CHAT_RECOVERY_COPY.zh.steerFailedLost,
   ...browserZh,
         langTag: 'zh',
         acpAgent: 'ACP Agent',
@@ -286,6 +288,7 @@ export const dictZh = {
         modelPresetDeepseek: 'DeepSeek',
         modelPresetKimi: 'Kimi',
         modelPresetOpenaiCompatible: 'OpenAI 兼容',
+        modelPresetOpenaiResponses: 'OpenAI Responses 兼容',
         modelPresetQwen: '通义千问',
         modelPresetDoubao: '豆包',
         modelPresetMinimax: 'MiniMax',
@@ -520,7 +523,7 @@ export const dictZh = {
           sourceTest: '测试商店',
         },
         uiToolStore: { title:'插件中心', search:'搜索连接器、技能、插件等', myTools:'我的插件', installedOnly:'仅显示已安装', results:'检索结果', back:'返回插件中心', internal:'集团内部 · 员工专属', internalTitle:'H3C 办公生态\n一键接入', internalDesc:'以你本人 SSO 身份直连集团内部系统，全程不填 key', internalTools:'H3C 集团内部插件', internalCount:n=>`${n} 个插件 · 需内网`, view:'查看', modePlain:'普通会话', modeCode:'代码会话', modeVisibilityHint:'按会话模式配置插件可见性', manageVisibility:'管理可见性', doneManagingVisibility:'完成', guide:{ title:'插件指南', close:'关闭', dragTitle:'拖入即装', dragDesc:'把标准 Skill、单个 .md、MCP 服务或 Pinvou 插件包 .zip 直接拖进本窗口即可导入；也可点右上角「上传」选择文件。', typesTitle:'支持的形式', types:['标准 Skill（SKILL.md 目录）','单个 .md 技能文件','MCP 服务','Pinvou 插件包（推荐）'], formatsNote:'标准 Skill、.md、MCP 和 Pinvou 插件包都可导入；Pinvou 插件包只是推荐的一种标准形态，其余形式会被自动规范化。', dragHintShort:'拖入插件包可上传自定义插件', introTitle:'什么是 Pinvou 插件包', introDesc:'一个插件包 = 一张卡 = 一个开关。把技能、MCP 服务（或它们的组合）打成一个 zip，导入后按内容自动识别类型、安全校验、落盘注册，并在商店与运行时统一开关、卸载。', specTitle:'插件包规范', specDesc:'完整规范见《插件包设计规范》：zip 布局、plugin.json（schema v1）、mcp manifest.json、SKILL.md、图标与命名安全。', downloadSpec:'下载规范文档（Markdown）', downloadHint:'下载后可直接分发给第三方包作者；桌面端会打开保存对话框。' } },
-        artifactPreview: { download:'↓ 下载', openExternal:'↗ 外部打开', loading:'加载中…', fileMissing:'文件不存在或已被删除', readFailed:e=>`读取失败: ${e}`, imageReadFailed:e=>`图片读取失败: ${e}`, previewUnsupported:'此类型暂不支持预览', downloadArtifact:'↓ 下载产物', openExternalArtifact:'↗ 外部打开' },
+        artifactPreview: { download:'↓ 下载', openExternal:'↗ 外部打开', loading:'加载中…', fileMissing:'文件不存在或已被删除', readFailed:e=>`读取失败: ${e}`, imageReadFailed:e=>`图片读取失败: ${e}`, previewUnsupported:'此类型暂不支持预览', visualWarningTruncatedPages:'页数较多，仅渲染前 30 页', visualWarningConvertFailed:'该文件暂无法可视化预览（转换失败或缺少渲染组件）', downloadArtifact:'↓ 下载产物', openExternalArtifact:'↗ 外部打开' },
         uiToolDetails: { tools:{
           ima:{ title:'腾讯 ima', subtitle:'用 OpenAPI 操作 ima 笔记与知识库', latency:'云端', desc:'接入腾讯 ima OpenAPI Skill，可搜索、读取、创建和追加笔记，也可搜索、浏览知识库并导入网页或内容。凭据只保存在本机。', configTitle:'连接腾讯 ima', configDescription:'凭据只保存在本机，用于启用 IMA OpenAPI Skill。', configDocLabel:'获取 Client ID / API Key', welcomeQueries:['搜索我的 ima 知识库','列出我有哪些 ima 笔记','把这段内容新建为 ima 笔记','在 ima 知识库里查产品方案'] },
           tmeet:{ title:'腾讯会议', subtitle:'以本人身份管理会议、录制、纪要和参会报告', type:'CLI + 官方技能', latency:'云端', desc:'接入腾讯会议官方 CLI 和技能，可创建、查询、修改和取消会议，查询参会报告、录制、转写与智能纪要。连接时会打开授权页扫码登录。', welcomeQueries:['帮我创建一个腾讯会议','查一下我的腾讯会议录制','看看最近会议的智能纪要','查询这场腾讯会议的参会人'] },
@@ -534,6 +537,13 @@ export const dictZh = {
           settingsHint:'开启后，助手可以截屏并控制鼠标和键盘，存在误操作风险。每次会话首次控制前会再次征求你的同意，高危操作需逐一确认。',
           platformUnsupportedHint:'当前平台没有电脑使用后端，无法开启此功能。',
           settingsStoppedHint:'电脑使用已停止。关闭后再重新开启，即可恢复助手控制。',
+          permTitle:'macOS 系统权限',
+          permScreenRecording:'屏幕录制（截屏）',
+          permAccessibility:'辅助功能（控制鼠标和键盘）',
+          permGranted:'已授权',
+          permNotGranted:'未授权',
+          permRequest:'打开系统授权对话框',
+          permRestartHint:'系统授权只对新启动的进程生效：完成授权后，请完全退出并重新打开应用。',
           bannerTitle:'助手正在控制你的电脑',
           bannerNote:'助手可以查看屏幕并操作鼠标和键盘，你可以随时停止。',
           bannerStop:'停止控制',
@@ -558,7 +568,6 @@ export const dictZh = {
           confirmKeyChordMasked:(chord, count)=>chord?`按下组合键 ${chord} + ${count} 个掩码字符`:`按下 ${count} 个掩码字符`,
           confirmHoldKeyMasked:(chord, count, ms)=>chord?`按住 ${chord} + ${count} 个掩码字符 ${ms} 毫秒`:`按住 ${count} 个掩码字符 ${ms} 毫秒`,
           confirmDrag:(from, to)=>`从 ${from} 拖拽到 ${to}`,
-          confirmMouseMove:point=>`移动鼠标到 ${point}`,
           confirmMouseDown:button=>`按下${button}`,
           confirmMouseUp:button=>`松开${button}`,
           screenshotCaption:'屏幕截图',
@@ -800,7 +809,7 @@ export const dictZh = {
         apBtnOpen: '打开', apBtnLocate: '所在位置', apLocLabel: '文件位置', apMtimeLabel: '修改时间', apLastMod: '最后修改',
         apConverting: '正在生成预览…', apConvertFail: '预览生成失败', apUnsupported: '此类型暂不支持内嵌预览，可用下方「打开」查看',
         apKinds: { md:'Markdown', html:'HTML 文档', image:'图片', pdf:'PDF 文档', docx:'Office 文档', xlsx:'电子表格', legacy_office:'Office 文档', text:'文本文件', binary:'文件' },
-        apMdSaved: '已保存', apMdSaving: '正在保存...', apMdDirty: '未保存', apMdSaveFailed: '保存失败',
+        apMdSaving: '正在保存...', apMdDirty: '未保存', apMdSaveFailed: '保存失败',
         apMdExternalUpdateBlocked: '文件已在外部更新。当前有未保存编辑，已暂不自动覆盖。',
         apMdExternalRemovalBlocked: '文件已在外部删除。未保存编辑已保留在当前编辑器中，请先复制内容或恢复原文件。',
         apMdAiEdit: 'AI 编辑', apMdAiInstructionPlaceholder: '说说你想怎么修改',
@@ -985,6 +994,7 @@ Object.assign(dictZh.uiConversation, {
   feedbackNegative: '没有帮助',
   retryReply: '重新生成',
   callingTool: name => `正在调用 ${name}`,
+  copyCode: '复制代码',
   inputPlaceholder: '请输入',
   otherAnswer: '其他',
   otherPlaceholder: '其他',
@@ -1337,7 +1347,7 @@ dictZh.uiSettingsDetail.customTokenPlanDesc = '手动填写 Token Plan 模型 ID
 
 dictZh.uiSettingsDetail.customModelTitles = {
   glm:'自定义 GLM 模型', qwen:'自定义通义模型',
-  openai_compatible:'自定义兼容模型', glm_coding_plan:'自定义 GLM Coding Plan 模型',
+  openai_compatible:'自定义兼容模型', openai_responses:'自定义 Responses 模型', glm_coding_plan:'自定义 GLM Coding Plan 模型',
   tencent_coding_plan:'自定义腾讯云 Coding Plan 模型', tencent_token_plan:'自定义腾讯云 Token Plan 模型', kimi_coding_plan:'自定义 Kimi Coding Plan 模型',
   volcengine_coding_plan:'自定义火山方舟 Coding Plan 模型', qwen_coding_plan:'自定义千问 Coding Plan 模型',
   openrouter:'自定义 OpenRouter 模型', siliconflow:'自定义硅基流动模型', siliconflow_global:'自定义硅基流动模型',
