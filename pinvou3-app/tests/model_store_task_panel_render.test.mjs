@@ -149,7 +149,7 @@ test('拿不到字节分母时给粗粒度步骤，不假装有字节级进度',
   assert.match(html, /data-progress-kind="step"/);
 });
 
-test('展开后：docker 的几十层聚合成一行，且给出「复制详情」', () => {
+test('展开后：docker 的几十层聚合成一行，日志工具收进「更多」以保持底栏单行', () => {
   const layers = {
     aaaaaaaaaaaa: { status: 'Download complete', done: 4000, total: 4000, complete: true },
     bbbbbbbbbbbb: { status: 'Downloading', done: 1000, total: 4000, complete: false },
@@ -157,23 +157,24 @@ test('展开后：docker 的几十层聚合成一行，且给出「复制详情�
   const html = render(task({ expanded: true, layers }));
   assert.match(html, /model-store-task-layers/);
   assert.match(html, /镜像层 1\/2/);
-  // 「复制详情」是撤简日志的前提：面板上现在只剩阶段化的少量人话，用户要把排查
-  // 信息交给别人时不该靠在一个 160px 高的框里手选。
-  assert.match(html, /model-store-task-copy-log/);
-  assert.match(html, /复制详情/);
-  // 面板上只留最后 500 行、而且过滤过；盘上那份是完整的。
-  assert.match(html, /model-store-task-open-log-dir/);
+  // 「复制详情 / 打开日志目录」仍在工具菜单内；首屏只露“更多”，避免五个按钮
+  // 在 360px 卡片底部被截断。
+  assert.match(html, /model-store-task-tools/);
+  assert.match(html, /更多/);
+  assert.doesNotMatch(html, /model-store-task-copy-log/);
 });
 
 test('收起状态下不出「复制详情」——没有日志可看，多一个按钮只是噪声', () => {
   assert.doesNotMatch(render(task({ expanded: false })), /model-store-task-copy-log/);
+  assert.doesNotMatch(render(task({ expanded: false })), /model-store-task-tools/);
 });
 
 test('「导出日志（可外发）」只在失败的卡片上给', () => {
   // 它存在的理由是脱敏分了两道：落盘那份留着路径和内网地址（不留就没法诊断），
   // 导出那份把它们一起抹掉。没有这个入口，更严的那一道就没有任何出口。
   const failed = render(task({ expanded: true, status: 'error', error: '磁盘空间不足' }));
-  assert.match(failed, /model-store-task-export-log/);
+  assert.match(failed, /model-store-task-tools/);
+  assert.doesNotMatch(failed, /model-store-task-export-log/);
   // 正在跑的卡片不给：这会儿还没有"要反馈的失败"，多一个按钮只是噪声
   assert.doesNotMatch(render(task({ expanded: true })), /model-store-task-export-log/);
 });

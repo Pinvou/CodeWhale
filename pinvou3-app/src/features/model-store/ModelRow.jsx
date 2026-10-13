@@ -35,6 +35,7 @@ const STATE_BADGE = {
   deployed: { key: 'statusDeployed', className: 'bg-sky-50 text-sky-700 dark:bg-sky-500/10 dark:text-sky-300' },
   downloaded: { key: 'statusPending', className: 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300' },
   incomplete: { key: 'statusIncomplete', className: 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300' },
+  cleanup_required: { key: 'statusCleanupRequired', className: 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300' },
   available: { key: 'statusAvailable', className: 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400' },
 };
 
@@ -62,7 +63,7 @@ function specLine(model) {
  * @param {object} params - 参数。
  * @returns {React.ReactElement|null} 按钮。
  */
-function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, onStop }) {
+function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, onStop, onUninstall }) {
   const busy = !!busyKind;
   // 正在跑的那个操作才显示进行时文案。不分命令一律显示「启用中…」的话，点「重新
   // 部署」时界面会写着「启用中…」而任务卡写着「部署…」，自相矛盾。
@@ -80,6 +81,19 @@ function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, 
       >
         {busyKind === 'download' ? null : <Download size={14} />}
         {label('download', resuming ? copy.resumingDownload : copy.downloading, resuming ? copy.resumeDownload : copy.download)}
+      </button>
+    );
+  }
+  if (model.state === 'cleanup_required') {
+    return (
+      <button
+        type="button"
+        className={`${BTN_DANGER} ${ACTION_MIN_W}`}
+        disabled={busy}
+        data-testid="model-store-continue-cleanup"
+        onClick={(event) => { event.stopPropagation(); onUninstall(model.record); }}
+      >
+        {label('uninstall', copy.cleaningUp, copy.continueCleanup)}
       </button>
     );
   }
@@ -226,6 +240,7 @@ function ModelRow({ model, copy, busyKind, onOpen, onDownload, onDeploy, onEnabl
           onDeploy={onDeploy}
           onEnable={onEnable}
           onStop={onStop}
+          onUninstall={onUninstall}
         />
         {/* 没有卸载按钮时留一个等宽空位，别让这一行的主按钮往右跑。
             「可下载」的模型还没装到本机，没有可卸载的东西；但它和「本机已有」

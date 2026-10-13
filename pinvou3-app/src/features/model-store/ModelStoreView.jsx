@@ -1011,7 +1011,17 @@ const ModelStoreView = ({ theme, t, bs }) => {
         {confirmUninstall ? (
           <>
             <MsDialogTitle id="model-store-uninstall-title">{copy.uninstallTitle}</MsDialogTitle>
-            {uninstallOptionsFor(confirmUninstall) === 'delete-only' ? (
+            {uninstallOptionsFor(confirmUninstall) === 'cleanup-only' ? (
+              <>
+                <p className={`text-[13px] leading-6 ${TEXT_SECONDARY}`}>
+                  {copy.cleanupIntro(confirmUninstall.card_name)}
+                </p>
+                <ul className={`mt-3 list-disc space-y-1.5 pl-5 text-[13px] leading-6 ${TEXT_SECONDARY}`}>
+                  <li>{copy.cleanupScopeModel(formatBytes(confirmUninstall.size_bytes))}</li>
+                  <li>{copy.cleanupScopeEngine}</li>
+                </ul>
+              </>
+            ) : uninstallOptionsFor(confirmUninstall) === 'delete-only' ? (
               // 只下载过、没部署过：没有服务可卸，摆两个按钮只会让用户在一个空动作
               // 上犹豫。这里退成单选项，文案也换成不提"停止服务"的那一句。
               <p className={`text-[13px] leading-6 ${TEXT_SECONDARY}`}>
@@ -1028,9 +1038,15 @@ const ModelStoreView = ({ theme, t, bs }) => {
                 </ul>
               </>
             )}
+            {uninstallOptionsFor(confirmUninstall) === 'delete-only' ? (
+              <ul className={`mt-3 list-disc space-y-1.5 pl-5 text-[13px] leading-6 ${TEXT_SECONDARY}`}>
+                <li>{copy.cleanupScopeModel(formatBytes(confirmUninstall.size_bytes))}</li>
+                <li>{copy.cleanupScopeEngine}</li>
+              </ul>
+            ) : null}
             <div className="mt-5 flex flex-wrap justify-end gap-2">
               <MsButton tone="ghost" onClick={() => setConfirmUninstall(null)}>{copy.detailClose}</MsButton>
-              {uninstallOptionsFor(confirmUninstall) === 'delete-only' ? null : (
+              {uninstallOptionsFor(confirmUninstall) === 'uninstall-or-delete' ? (
                 <MsButton
                   tone="neutral"
                   onClick={() => handleUninstall(false)}
@@ -1038,13 +1054,13 @@ const ModelStoreView = ({ theme, t, bs }) => {
                 >
                   {copy.uninstallKeep}
                 </MsButton>
-              )}
+              ) : null}
               <MsButton
                 tone="danger"
                 onClick={() => handleUninstall(true)}
                 data-testid="model-store-uninstall-confirm"
               >
-                {copy.uninstallPurge}
+                {uninstallOptionsFor(confirmUninstall) === 'cleanup-only' ? copy.continueCleanup : copy.uninstallPurge}
               </MsButton>
             </div>
           </>

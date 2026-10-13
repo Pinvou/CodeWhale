@@ -409,9 +409,9 @@ export const dictZh = {
           weightVerifyManifest:'这张卡下载时逐个文件比对过摘要，但比对用的摘要跟权重来自同一处。它能发现传输损坏和事后被改动，发现不了来源那一份本身就是坏的。',
           weightVerifyAdvice:'这不代表这张卡有问题——内置卡都由研究团队提供。想更稳妥：在可信网络下下载，不要在设置里填来路不明的镜像地址；权重如果是从别人的 U 盘拷来的，建议重新下载一次。',
           libraryEmpty:'还没有下载任何模型，去模型市场看看吧',
-          statusRunning:'运行中', statusDeployed:'已部署', statusPending:'待部署', statusIncomplete:'需继续下载',
+          statusRunning:'运行中', statusDeployed:'已部署', statusPending:'待部署', statusIncomplete:'需继续下载', statusCleanupRequired:'需继续清理',
           deploy:'部署', deploying:'部署中…', redeploy:'重新部署', resumeDownload:'继续下载', resumingDownload:'继续下载中…',
-          enable:'启用', enabling:'启用中…', stop:'停用', stopping:'停用中…', uninstall:'卸载', uninstalling:'卸载中…',
+          enable:'启用', enabling:'启用中…', stop:'停用', stopping:'停用中…', uninstall:'卸载', uninstalling:'卸载中…', continueCleanup:'继续清理', cleaningUp:'清理中…',
           taskDeploy:n=>`部署「${n}」`, taskEnable:n=>`启用「${n}」`, taskStop:n=>`停用「${n}」`, taskUninstall:n=>`卸载「${n}」`,
           deployDone:n=>`「${n}」部署完成`, enableDone:n=>`「${n}」已启用`, stopDone:n=>`「${n}」已停用`, uninstallDonePurged:(n,s)=>`已卸载「${n}」，模型权重已删除，释放 ${s}`, uninstallDoneResidual:(n,c)=>`已卸载「${n}」，但有 ${c} 处权重文件没能删掉，磁盘空间未释放`, uninstallDoneKept:n=>`已卸载「${n}」，权重已保留，卡片仍在模型库里，可直接重新部署`,
           corrected:n=>`「${n}」的运行状态已按实际容器状态纠正为未运行`,
@@ -430,6 +430,9 @@ export const dictZh = {
           // （没有服务、没有容器、没有部署配置），只剩「删除」有意义，所以对话框此时
           // 只给一个按钮，文案也不能再提"停止服务"——那会让用户以为有什么东西在跑。
           uninstallIntroDownloaded:n=>`「${n}」只是下载在本机，还没有部署到引擎上，没有需要卸载的服务。删除会清掉磁盘上的模型权重，并把卡片移出模型库。`,
+          cleanupIntro:n=>`「${n}」上一次删除没有清理完，模型卡片仍保留在列表中，避免遗留文件变得不可管理。请再次确认清理范围后重试。`,
+          cleanupScopeModel:s=>`会再次清理这张模型的权重、下载缓存、脚本和部署标记；预计可释放约 ${s}，以清理后的实际磁盘结果为准。`,
+          cleanupScopeEngine:'不会删除推理引擎。引擎由“推理引擎”单独管理，且只有未被任何模型使用时才能删除。',
           // 卸载失败后的逃生路径。措辞的全部重点是「不会删掉什么」——用户在这一步
           // 最容易误以为磁盘终于清干净了。
           forceRemoveEntry:'强制从列表移除',
@@ -461,7 +464,7 @@ export const dictZh = {
           copy:'复制', copied:'已复制到剪贴板', copyFailed:'复制失败，请手动选中复制',
           notRunningHint:'这个模型当前未启用，Agent 现在调用会收到「模型未启用」。',
           tasksTitle:'正在进行', taskRunning:'正在执行…', taskCancelling:'正在取消…', taskCancelled: '已取消', taskWaitingInput:'等待你输入…',
-          taskCancel:'取消', taskClose:'关闭', taskExpand:'展开日志', taskCollapse:'收起日志', taskNoOutput:'（暂无输出）', taskCancelFailed:(m)=>`取消没有生效：${m}`, taskAnswerFailed:(m)=>`这次作答没有送达：${m}`,
+          taskCancel:'取消', taskClose:'关闭', taskMore:'更多', taskExpand:'展开日志', taskCollapse:'收起日志', taskNoOutput:'（暂无输出）', taskCancelFailed:(m)=>`取消没有生效：${m}`, taskAnswerFailed:(m)=>`这次作答没有送达：${m}`,
           taskProgress:(done,total)=>`${done} / ${total}`, taskSpeed:s=>`${s}/s`, taskEta:d=>`剩余约 ${d}`,
           // 「估算」不是客套：这一档的分母是 docker 已经露面的那些镜像层之和，会随 pull
           // 推进往上长，百分比因此会往回跳。不标出来，用户会以为进度条坏了。

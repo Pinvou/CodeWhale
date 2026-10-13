@@ -245,6 +245,13 @@ test('uninstallOptionsFor：只下载过、没部署过时只给「删除」', (
   assert.equal(uninstallOptionsFor(null), 'delete-only');
 });
 
+test('uninstallOptionsFor：删不干净的模型只能继续清理，不能伪装成重新下载', () => {
+  assert.equal(
+    uninstallOptionsFor({ status: 'cleanup_required', running: false, weights_ready_at: '2026-10-12T00:00:00Z' }),
+    'cleanup-only'
+  );
+});
+
 // ---------------------------------------------- 权重校验档位
 //
 // 这一档管的是「用户凭什么相信下下来的权重就是卡片声称的那份」。内置卡之间差着

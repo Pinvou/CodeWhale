@@ -4,7 +4,7 @@
 // 输入框刻意不做成全局模态:面板本来就是「不阻塞界面」的设计,而且可以同时有几个
 // 任务各自在等输入,模态框既要排队又容易把答案答到别的任务上去。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronDown, ChevronRight } from '../../components/icons.jsx';
+import { ChevronDown, ChevronRight, MoreHorizontal } from '../../components/icons.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
 import { copyClipboardText } from '../../shared/clipboard.js';
 import { exportRunLog, revealRunLogsDir } from './model-store-api.js';
@@ -254,10 +254,15 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
   // 日志相关操作的就地反馈（成功给路径、失败给原因）。失败静静地什么都不发生的话，
   // 用户只会反复点那个按钮。
   const [logNotice, setLogNotice] = useState(null);
+  // 日志相关动作收进一个二级菜单：任务卡宽度固定为 360px，而“导出诊断日志 /
+  // 打开日志目录 / 复制详情 / 强制从列表移除 / 关闭”并排必然溢出。把支持工具
+  // 和当前任务的主动作分层后，底栏始终只有一行，且每个按钮完整可点。
+  const [toolsOpen, setToolsOpen] = useState(false);
   // 「打开日志目录」。面板上的日志被简化了、还只留最后 500 行，而磁盘上那份是完整的
   // （`~/.pinvou3/model-store/logs/`）。
   const openLogDir = () => {
     setLogNotice(null);
+    setToolsOpen(false);
     revealRunLogsDir().catch((e) =>
       setLogNotice({ tone: 'error', text: copy.taskOpenLogDirFailed(String(e?.message || e)) })
     );
@@ -269,10 +274,15 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
   // 失败反馈给我们时只能直接发原始日志。
   const exportLog = () => {
     setLogNotice(null);
+    setToolsOpen(false);
     exportRunLog(task.runId).then(
       (result) => setLogNotice({ tone: 'ok', text: copy.taskExportLogDone(result?.path || '') }),
       (e) => setLogNotice({ tone: 'error', text: copy.taskExportLogFailed(String(e?.message || e)) })
     );
+  };
+  const copyDetails = () => {
+    setToolsOpen(false);
+    copyLog();
   };
 
   return (
@@ -381,36 +391,60 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
         </div>
       ) : null}
 
-      <div className="flex justify-end gap-2 px-4 py-2.5">
-        {/* 「复制详情」。日志简化之后必须有它:面板上现在只剩阶段化的少量人话,
-            用户要把排查信息交给别人时,不该靠在一个 160px 高的框里手选。
-            展开才出现——收起状态下没有日志可看,多一个按钮只是噪声。 */}
-        {task.expanded && isError && task.runId ? (
-          <MsButton
-            tone="neutral"
-            onClick={exportLog}
-            data-testid="model-store-task-export-log"
-          >
-            {copy.taskExportLog}
-          </MsButton>
-        ) : null}
+      <div className="relative flex min-w-0 items-center justify-end gap-2 px-4 py-2.5">
+        {/* 展开时才提供日志工具；收进「更多」后不再挤坏底栏。这个菜单是支持工具，
+            不是把「取消/关闭/继续处理」藏起来：用户的当前主动作始终常驻在右侧。 */}
         {task.expanded ? (
-          <MsButton
-            tone="neutral"
-            onClick={openLogDir}
-            data-testid="model-store-task-open-log-dir"
-          >
-            {copy.taskOpenLogDir}
-          </MsButton>
-        ) : null}
-        {task.expanded ? (
-          <MsButton
-            tone="neutral"
-            onClick={copyLog}
-            data-testid="model-store-task-copy-log"
-          >
-            {copy[COPY_LABEL_KEYS[copied] ?? 'taskCopyLog']}
-          </MsButton>
+          <>
+            {toolsOpen ? (
+              <div
+                className="absolute bottom-full right-4 z-10 mb-1 flex w-44 flex-col gap-1 rounded-[12px] border border-[#E1E5EA] bg-white p-1.5 shadow-lg dark:border-[#2E3134] dark:bg-[#282A2C]"
+                role="menu"
+                aria-label={copy.taskMore}
+              >
+                {isError && task.runId ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className={`w-full rounded-lg px-2.5 py-2 text-left text-[12px] font-medium ${HOVER_SURFACE} ${TEXT_PRIMARY}`}
+                    onClick={exportLog}
+                    data-testid="model-store-task-export-log"
+                  >
+                    {copy.taskExportLog}
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={`w-full rounded-lg px-2.5 py-2 text-left text-[12px] font-medium ${HOVER_SURFACE} ${TEXT_PRIMARY}`}
+                  onClick={openLogDir}
+                  data-testid="model-store-task-open-log-dir"
+                >
+                  {copy.taskOpenLogDir}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={`w-full rounded-lg px-2.5 py-2 text-left text-[12px] font-medium ${HOVER_SURFACE} ${TEXT_PRIMARY}`}
+                  onClick={copyDetails}
+                  data-testid="model-store-task-copy-log"
+                >
+                  {copy[COPY_LABEL_KEYS[copied] ?? 'taskCopyLog']}
+                </button>
+              </div>
+            ) : null}
+            <MsButton
+              tone="neutral"
+              className="h-8 px-2.5 text-[12px]"
+              aria-haspopup="menu"
+              aria-expanded={toolsOpen}
+              onClick={() => setToolsOpen((open) => !open)}
+              data-testid="model-store-task-tools"
+            >
+              <MoreHorizontal size={15} />
+              {copy.taskMore}
+            </MsButton>
+          </>
         ) : null}
         {/* 卸载失败时多给一个「强制从列表移除」。
             它只在这里出现,不做成常驻按钮:强制移除不可逆,而且会把磁盘上的权重
@@ -421,6 +455,7 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
         {canForceRemove(task) ? (
           <MsButton
             tone="danger"
+            className="h-8 px-2.5 text-[12px]"
             onClick={() => onForceRemove(task)}
             data-testid="model-store-task-force-remove"
           >
@@ -428,10 +463,11 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
           </MsButton>
         ) : null}
         {isTerminal ? (
-          <MsButton tone="neutral" onClick={() => onDismiss(task.id)}>{copy.taskClose}</MsButton>
+          <MsButton className="h-8 px-2.5 text-[12px]" tone="neutral" onClick={() => onDismiss(task.id)}>{copy.taskClose}</MsButton>
         ) : (
           <MsButton
             tone="neutral"
+            className="h-8 px-2.5 text-[12px]"
             disabled={task.status === 'cancelling'}
             onClick={() => onCancel(task.id)}
             data-testid="model-store-task-cancel"

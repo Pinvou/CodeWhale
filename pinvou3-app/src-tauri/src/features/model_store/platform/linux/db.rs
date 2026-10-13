@@ -658,8 +658,8 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
              size_bytes, quantization, source_repo_id, source_filename, status,
               script_install_engine, script_deploy, script_download_model,
               script_enable, script_stop, script_uninstall,
-              downloaded_at, weights_ready_at, deployed_at, profiles_json, deploy_topology, card_source)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+              downloaded_at, weights_ready_at, deployed_at, profiles_json, deploy_topology)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
          ON CONFLICT(card_id) DO UPDATE SET
              model_name=excluded.model_name, card_name=excluded.card_name,
              org=excluded.org, description=excluded.description, engine_name=excluded.engine_name,
@@ -818,6 +818,29 @@ pub fn mark_weights_incomplete(card_id: &str) -> rusqlite::Result<()> {
         "UPDATE store_models
             SET status = 'incomplete',
                 weights_ready_at = NULL,
+                running = 0,
+                deployed_at = NULL,
+                deployed_script_sha256 = NULL,
+                container_name = NULL,
+                endpoint_url = NULL,
+                endpoint_model = NULL
+          WHERE card_id = ?1",
+        params![card_id],
+    )?;
+    Ok(())
+}
+
+/// 用户明确选择“删除模型数据”但卡片脚本没有删干净时，保留一条可继续处理的
+/// 记录，而不是把模型从列表里抹掉。
+///
+/// 这不是“下载不完整”：这里的模型不能部署，也不应该被“继续下载”掩盖。它的
+/// 下一步只能是再次清理、打开文件位置，或者由用户明确选择“仅从列表移除”。
+/// 运行/部署痕迹同样必须一并撤销，避免网关继续把请求打到已被卸载的服务。
+pub fn mark_cleanup_required(card_id: &str) -> rusqlite::Result<()> {
+    let conn = connect()?;
+    conn.execute(
+        "UPDATE store_models
+            SET status = 'cleanup_required',
                 running = 0,
                 deployed_at = NULL,
                 deployed_script_sha256 = NULL,
@@ -1278,7 +1301,6 @@ mod tests {
             status: "downloaded",
             profiles: &[],
             deploy_topology: DeployTopology::default(),
-            card_source: "store",
         })
         .unwrap();
         update_store_model_status("card-with-missing-receipt", "deployed", Some("script-hash"))
@@ -1342,7 +1364,6 @@ mod tests {
             status: "downloaded",
             profiles: &[],
             deploy_topology: DeployTopology::default(),
-            card_source: "store",
         })
         .unwrap();
         update_store_model_status("card-with-missing-weights", "deployed", Some("script-hash"))
@@ -1447,5 +1468,46 @@ mod tests {
         assert!(cols.contains("profiles_json"));
         assert!(cols.contains("active_profile_id"));
         assert!(cols.contains("endpoint_url"));
+    }
+
+    /// `card_source` 是已经废弃的测试商店遗留列：升级过的设备可能还有它，
+    /// 新设备没有它。无论哪种表结构，下载完成时写入本地模型记录都必须成功。
+    ///
+    /// 这条回归覆盖了 2026-10-13 真机上的事故：INSERT 仍列出 card_source，
+    /// 但参数列表和 AddStoreModelParams 都已经不再提供它，SQLite 因而报
+    /// “Got 23, needed 24”，把已经下载好的模型卡在“无法部署”的假状态。
+    #[test]
+    fn add_store_model_works_with_or_without_obsolete_card_source_column() {
+        let _ctx = setup_temp_db();
+        let scripts = std::collections::BTreeMap::new();
+
+        let add = |card_id: &str| {
+            add_store_model(AddStoreModelParams {
+                card_id,
+                model_name: "model",
+                card_name: "Model",
+                org: None,
+                description: None,
+                engine_name: "engine",
+                engine_version: None,
+                size_bytes: 1,
+                quantization: None,
+                source_repo_id: None,
+                source_filename: None,
+                scripts: &scripts,
+                status: "downloaded",
+                profiles: &[],
+                deploy_topology: DeployTopology::default(),
+            })
+        };
+
+        add("fresh-schema").expect("新库不应依赖已删除的 card_source 列");
+
+        let conn = connect().unwrap();
+        conn.execute("ALTER TABLE store_models ADD COLUMN card_source TEXT", [])
+            .unwrap();
+        drop(conn);
+
+        add("upgraded-schema").expect("旧库残留 card_source 列也不应改变写入参数个数");
     }
 }

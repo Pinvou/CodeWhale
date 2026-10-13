@@ -100,10 +100,9 @@ pub struct UninstallOutcome {
     pub purged_weights: bool,
     /// 卡片是不是还在模型库里。
     ///
-    /// 今天它恒等于 `!purged_weights`，但仍然单独回一个字段：这两件事问的不是
-    /// 同一个问题（一个问磁盘、一个问库记录），而调用方拿它决定的是**界面动作**
-    /// ——留着这张卡刷新成「已下载」，还是整行移走。让界面去推断"删了权重所以
-    /// 记录大概也没了"，等于把一条内部约定钉死在两边。
+    /// 删除权重时只有在后验核对确认文件确实都已清掉，才会是 false。若脚本返回
+    /// 成功但仍有残留，记录必须保留并变成 `cleanup_required`，让用户能继续处理，
+    /// 绝不能把几十 GB 文件变成列表里看不见的孤儿。
     pub record_kept: bool,
     /// **实测**释放量：脚本跑之前和跑完之后，对同一批候选目录各量一次的差值。
     ///
@@ -1991,22 +1990,25 @@ impl ModelManager {
             control,
             false,
         )?;
-        // 记录留还是删，取决于用户按的是哪个按钮——这是两个动作**唯一**的语义
-        // 差别，也是它们在界面上叫不同名字的原因：
+
+        // `cards/<card-id>` 由 LMM 自己创建，里面只有这张卡下载的脚本、厂商附属包
+        // 与标记文件。用户选择“删除模型数据”后，这些文件也在删除范围内；不能让
+        // 卡片脚本各自记得删，否则脚本升级/回滚一次就会留下看不见的部署包。
         //
-        //   仅卸载：只是把模型从引擎上撤下来。权重还在盘上，卡片就该还在库里，
-        //           退回「已下载」，按钮变回「部署」。
-        //   彻底删除：权重都没了，留着记录就是一条指向空气的死数据。
-        //
-        // 以前两条路径都走 delete_store_model，于是「仅卸载」会把卡片从库里抹掉，
-        // 盘上几十 GB 权重从此没有任何界面管得到——用户要么手工 rm，要么重下一遍
-        // 才能重新接管。那不是"保留"，是把东西弄丢在原地。
+        // 注意：只在卡片脚本已经成功结束后处理，且路径由安全的 card id 生成。
+        // 不接收脚本输出的任意路径，也不碰共享的 engines/ 目录。
         if purge_weights {
-            db::delete_store_model(card_id)
-                .map_err(|e| ModelManagerError::new(format!("删除模型记录失败：{e}")))?;
-        } else {
-            db::mark_uninstalled(card_id)
-                .map_err(|e| ModelManagerError::new(format!("更新模型状态失败：{e}")))?;
+            if let Ok(safe_id) = config::safe_path_component(&rec.card_id) {
+                let card_dir = config::data_dir().join("cards").join(safe_id);
+                if card_dir.exists() {
+                    on_progress("正在清理此模型的本地脚本与部署文件…");
+                    if let Err(error) = std::fs::remove_dir_all(&card_dir) {
+                        // 不提前返回：下面必须先重新扫描并把残留状态落库。否则一旦
+                        // 这里权限不足，卡片又会从列表消失，用户无从再点“继续清理”。
+                        on_progress(&format!("本地脚本与部署文件尚未清理：{error}"));
+                    }
+                }
+            }
         }
 
         let after = total_size(&candidates);
@@ -2016,6 +2018,26 @@ impl ModelManager {
             .filter(|p| p.exists())
             .map(|p| p.to_string_lossy().to_string())
             .collect();
+
+        // 删除是否完成必须由**删除后的磁盘事实**决定，不能根据脚本退出码猜。
+        // 先落状态再决定是否移除记录：任何残留都会进入“需要继续清理”，卡片仍在
+        // 模型库中，用户可重试、打开日志或明确选择“仅从列表移除”。
+        if purge_weights {
+            if remaining_paths.is_empty() {
+                db::delete_store_model(card_id)
+                    .map_err(|e| ModelManagerError::new(format!("删除模型记录失败：{e}")))?;
+            } else {
+                db::mark_cleanup_required(card_id)
+                    .map_err(|e| ModelManagerError::new(format!("保留待清理模型记录失败：{e}")))?;
+                return Err(ModelManagerError::new(format!(
+                    "模型数据尚未全部删除。已保留在模型库中，请点击“继续清理”重试；如仍失败，可打开日志目录并反馈。仍需处理：{}",
+                    remaining_paths.join("、")
+                )));
+            }
+        } else {
+            db::mark_uninstalled(card_id)
+                .map_err(|e| ModelManagerError::new(format!("更新模型状态失败：{e}")))?;
+        }
 
         let freed_text = disk::format_bytes(freed_bytes as f64);
         let summary = if purge_weights {
@@ -3513,24 +3535,21 @@ exit 0
         .collect();
         db::set_scripts_content("card-legacy", &blobs, &Default::default()).unwrap();
 
-        let outcome = manager_with_models_dir(&models_dir)
+        let error = manager_with_models_dir(&models_dir)
             .uninstall("card-legacy", true, &mut |_| {}, Default::default())
-            .expect("卸载应当成功");
+            .expect_err("删不干净不能伪装成成功");
 
-        assert_eq!(outcome.freed_bytes, 0, "脚本什么都没删，就不能报释放量");
         assert!(
-            outcome
-                .remaining_paths
-                .iter()
-                .any(|p| p.ends_with("Ornith-1.5-35B-A3B")),
-            "还在盘上的权重必须被点名，否则这几十 GB 就成了没人知道的孤儿：{:?}",
-            outcome.remaining_paths
+            error.to_string().contains("尚未全部删除")
+                && error.to_string().contains("Ornith-1.5-35B-A3B"),
+            "失败要明确告诉用户还有什么没清：{error}"
         );
-        assert!(
-            outcome.summary.contains("仍在磁盘上"),
-            "用户点的是彻底删除却没删掉，这句话必须说出来：{}",
-            outcome.summary
-        );
+        let rec = db::get_store_model("card-legacy")
+            .unwrap()
+            .expect("残留权重时记录必须留下，不能把文件变成看不见的孤儿");
+        assert_eq!(rec.status, "cleanup_required");
+        assert!(!rec.running);
+        assert!(weights.exists(), "脚本没删的权重仍在，应由后续继续清理接管");
     }
 
     // ------------------------------------------------ 下载：整段编排的端到端

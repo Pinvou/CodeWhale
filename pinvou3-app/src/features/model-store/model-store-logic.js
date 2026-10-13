@@ -523,16 +523,19 @@ function filterStoreCards(cards, query) {
     .some((field) => String(field ?? '').toLowerCase().includes(keyword)));
 }
 
-/** 一个模型在用户眼里的五种状态，按「离能用有多远」从近到远排。 */
-const MODEL_STATES = ['running', 'deployed', 'downloaded', 'incomplete', 'available'];
+/** 一个模型在用户眼里的六种状态，按「离能用有多远」从近到远排。 */
+const MODEL_STATES = ['running', 'deployed', 'downloaded', 'incomplete', 'cleanup_required', 'available'];
 
 /**
  * 库记录落在哪一档状态。
  * @param {object} record - 库记录。
- * @returns {'running'|'deployed'|'downloaded'|'incomplete'} 状态。
+ * @returns {'running'|'deployed'|'downloaded'|'incomplete'|'cleanup_required'} 状态。
  */
 function libraryStateOf(record) {
   if (record?.running) return 'running';
+  // “删除模型数据”跑过、但后验扫描仍发现本卡文件时，不能把它伪装成“可下载”或
+  // “已下载”。文件仍可见可管理，下一步是继续清理（或明确仅移除列表记录）。
+  if (record?.status === 'cleanup_required') return 'cleanup_required';
   // “已下载”必须有一次成功脚本校验留下的物理凭据。升级前的记录没有
   // weights_ready_at；部署刚发现权重缺失的记录也会清掉它。两类都应当让用户
   // “继续下载”，即使旧数据库仍写着 deployed 也不能例外。卡片脚本会复用
@@ -557,6 +560,7 @@ function libraryStateOf(record) {
  */
 function uninstallOptionsFor(record) {
   const state = libraryStateOf(record);
+  if (state === 'cleanup_required') return 'cleanup-only';
   return state === 'downloaded' || state === 'incomplete' ? 'delete-only' : 'uninstall-or-delete';
 }
 
