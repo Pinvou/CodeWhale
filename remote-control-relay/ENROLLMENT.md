@@ -250,6 +250,10 @@ it.
 
 ## Enrollment data and API
 
+Live writer capacity can be observed with `enrollment-migrate.js --capacity`
+through the existing private HMAC control listener. It never opens an offline
+copy or initializes a missing store. See [capacity and retained request evidence](../docs/remote-enrollment-capacity.md).
+
 The `endpoint_enrollment` namespace schema is version 3. It stores sorted
 endpoint records with status (`active` or terminal `revoked`), endpoint
 revision, ordered timestamps, role-domain-separated HMAC-SHA-256 digests in
