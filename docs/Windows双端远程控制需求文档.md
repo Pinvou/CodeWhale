@@ -489,7 +489,7 @@ React UI / ChatView
 }
 
 RouteV1 = {
-  display_name: string,                                // 必填，非空白，至多 128 Unicode 字符；仅展示
+  display_name: string,                                // 必填，非空白，仅展示，不参与路由；最多128个Unicode scalar（UTF-8最多512字节）
   preset: "local_vllm" | "deepseek" | "kimi" | "openai_compatible" |
           "qwen" | "doubao" | "minimax" | "glm" | "mimo" | "openai" |
           "openai_responses" | "anthropic" | "gemini" | "xai",
