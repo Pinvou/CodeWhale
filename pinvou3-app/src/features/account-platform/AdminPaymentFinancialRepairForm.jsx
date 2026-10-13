@@ -6,7 +6,7 @@ import {
 import { useFinanceOperation } from './useFinanceOperation.js';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
 
-const paymentRepairCommandTypes = ['PAYMENT_FINANCIAL_REPAIR'];
+const paymentRepairCommandTypes = Object.freeze(['PAYMENT_FINANCIAL_REPAIR']);
 
 // The repair page never asks the operator for amounts the owner already knows:
 // the precheck returns the frozen projection and the draft copies it verbatim.
@@ -149,7 +149,7 @@ export function AdminPaymentFinancialRepairForm({ client, copy, onCreated, owner
         </select>
       </label>
       {fields.map((field) => <label key={field.key}>{label(field)}
-        <input disabled={governed && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : field.key === 'expected_version' ? pending.draft.normalized_command.expected_receivable_version : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
+        <input disabled={governed && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
           onChange={(event) => setValue(field.key, event.target.value)} />
       </label>)}
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>

@@ -118,7 +118,7 @@
 ## 10. 迁移、N/N-1 与回滚
 
 - 迁移只前向追加：为 `payment_order_repairs` 增加可空审批联动列（`approval_request_id`、`authorization_event_id`、`approval_epoch`、`execution_key_digest`、`facts_digest`）与相应唯一索引（非空时唯一），保留原运行角色与 schema owner 迁移协议；`000077` 扩展审批双方身份一致性；不重写既有 SQL/checksum 或发布 ledger，不改 `000014/000015/000024/000054`。
-- `900016` 在原资金事务内锁定 PAYMENT_FINANCIAL_REPAIR v1/s1 activation 并核验冻结版本；运行身份仅有该私有能力的 USAGE/EXECUTE，停用与在途提交沿同一行锁串行化。`900017` 仅补 `payment_order_repairs(payment_order_id)` 非唯一查询索引；两项 Down 均显式拒绝，停止消费者与 INACTIVE 回退不删除历史事实。本轮不新增索引、迁移编号或改原 SQL。
+- `900016` 在原资金事务内锁定 PAYMENT_FINANCIAL_REPAIR v1/s1 activation 并核验冻结版本；运行身份仅有该私有能力的 USAGE/EXECUTE，停用与在途提交沿同一行锁串行化。`900017` 仅补 `payment_order_repairs(payment_order_id)` 非唯一查询索引；两项 Down 均显式拒绝，停止消费者与 INACTIVE 回退不删除历史事实。这两项为既有交付范围；本轮审核修正不再新增索引或迁移编号，也不改原 SQL。
 - N/N-1：先部署可读新列的 Billing，再部署 proof 端与执行器/消费者，最后业务页；旧运维路径写入时新列为 NULL，语义为"运维补记"，读取端必须区分而不误判为审批执行。
 - 回滚：只允许停止消费者、把 activation 行翻回 `INACTIVE`；已产生的交易/package/lot/journal/审计行一律保留可读，禁止破坏性 down 撤销已入账事实。
 - 未通过 GSA-38～40 且未取得独立生产授权前，不部署、不激活。
