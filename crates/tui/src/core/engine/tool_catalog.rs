@@ -1385,20 +1385,22 @@ fn execute_tool_search_inner(
         })
         .collect::<Vec<_>>();
     // The bounds statement is derived from the session constants so the prose
-    // can never disagree with them. With the Pinvou fork's disabled bounds
-    // (usize::MAX) this arm is unreachable for size reasons and only reports
-    // requests the activation could not admit for other causes.
-    let toolbox_bounds_reason = format!(
-        "The tool schema exceeds the bounded conversation toolbox ({} cached tools, {}KiB of \
-         added serialized schemas). Narrow the search or use a smaller matching tool.",
-        TOOL_ACTIVATION_CACHE_MAX_NAMES,
-        TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES / 1024
-    );
+    // can never disagree with them. In the Pinvou fork the bounds never fire:
+    // discovery pre-filters deferred membership, so the only way a name lands
+    // here is the per-entry size sentinel (including the serde-failure case),
+    // which no real schema can reach. Built lazily so a normal search pays no
+    // formatting cost.
     unavailable_references.extend(cache_rejected.iter().map(|name| {
         json!({
             "type": "unavailable_tool_reference",
             "tool_name": name,
-            "reason": toolbox_bounds_reason,
+            "reason": format!(
+                "The tool schema exceeds the bounded conversation toolbox ({} cached tools, \
+                 {}KiB of added serialized schemas). Narrow the search or use a smaller \
+                 matching tool.",
+                TOOL_ACTIVATION_CACHE_MAX_NAMES,
+                TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES / 1024
+            ),
         })
     }));
 

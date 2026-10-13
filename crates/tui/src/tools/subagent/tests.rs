@@ -7595,10 +7595,16 @@ fn synthetic_deferred_tool(name: &str, description_bytes: usize) -> Tool {
     }
 }
 
+// Pinvou fork: the toolbox size bounds are disabled (see the constant docs in
+// core/session.rs). This test formerly pinned upstream's 8-name / 16 KiB LRU
+// eviction and byte-budget overflow; it now pins the disabled posture while
+// keeping the surface-independence and catalog-shrink revalidation pins.
 #[test]
-fn small_surface_caches_are_independent_bounded_and_revalidated() {
+fn forkguard_small_surface_caches_are_independent_unbounded_and_revalidated() {
+    // 2 KiB schemas put nine activations past upstream's historical 16 KiB
+    // byte budget as well as its 8-name bound, so both reverts fail here.
     let mut catalog = (0..9)
-        .map(|index| synthetic_deferred_tool(&format!("deferred_{index}"), 8))
+        .map(|index| synthetic_deferred_tool(&format!("deferred_{index}"), 2 * 1024))
         .collect::<Vec<_>>();
     ensure_advanced_tooling(&mut catalog, AppMode::Agent, &HashSet::new());
     catalog.retain(|tool| tool.name == TOOL_SEARCH_NAME || tool.name.starts_with("deferred_"));
@@ -7608,7 +7614,14 @@ fn small_surface_caches_are_independent_bounded_and_revalidated() {
     let mut first = SubAgentToolSurface::new(catalog.clone(), &warm);
     let mut second = SubAgentToolSurface::new(catalog, &[]);
     let first_names = model_tool_names(model_request_tools(&mut first));
-    assert!(!first_names.contains("deferred_0"));
+    assert_eq!(
+        first_names
+            .iter()
+            .filter(|name| name.starts_with("deferred_"))
+            .count(),
+        9
+    );
+    assert!(first_names.contains("deferred_0"));
     assert!(first_names.contains("deferred_8"));
     assert!(!model_tool_names(model_request_tools(&mut second)).contains("deferred_8"));
 
@@ -7617,7 +7630,8 @@ fn small_surface_caches_are_independent_bounded_and_revalidated() {
     first
         .catalog
         .push(synthetic_deferred_tool("oversized", 17 * 1024));
-    assert!(first.hydrate("oversized").is_err());
+    assert!(first.hydrate("oversized").is_ok());
+    assert!(model_tool_names(model_request_tools(&mut first)).contains("oversized"));
 
     let mut byte_catalog = (0..3)
         .map(|index| synthetic_deferred_tool(&format!("bytes_{index}"), 6 * 1024))
@@ -7629,7 +7643,7 @@ fn small_surface_caches_are_independent_bounded_and_revalidated() {
         .collect::<Vec<_>>();
     let mut byte_surface = SubAgentToolSurface::new(byte_catalog, &byte_warm);
     let byte_names = model_tool_names(model_request_tools(&mut byte_surface));
-    assert!(!byte_names.contains("bytes_0"));
+    assert!(byte_names.contains("bytes_0"));
     assert!(byte_names.contains("bytes_1") && byte_names.contains("bytes_2"));
 }
 

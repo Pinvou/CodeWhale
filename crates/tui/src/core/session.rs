@@ -25,10 +25,11 @@ use std::path::PathBuf;
 /// and the catalog-shrink revalidation exactly as upstream — a disconnected
 /// server, deny rule, mode switch, or eager promotion still drops entries —
 /// but the size bounds never fire, so an activated schema stays callable for
-/// the conversation's lifetime. The value is the largest the engine accepts:
-/// clippy's `absurd_extreme_comparisons` (deny-by-default) rejects the bounds
-/// arithmetic against `usize::MAX` itself, so the bound sits one ULP below
-/// arithmetic reach instead.
+/// the conversation's lifetime. `usize::MAX` itself cannot serve as the bound:
+/// comparisons against the type extreme trip clippy's deny-by-default
+/// `absurd_extreme_comparisons` (and rustc's `unused_comparisons`), so the
+/// bound is an effectively-unbounded sentinel at `usize::MAX / 2` — any
+/// slightly smaller value compiles; only the exact extreme is lint-rejected.
 pub(crate) const TOOL_ACTIVATION_CACHE_MAX_NAMES: usize = usize::MAX / 2;
 /// Maximum serialized bytes added to requests by cached deferred schemas.
 ///
@@ -480,9 +481,11 @@ mod tests {
     fn forkguard_deferred_toolbox_bounds_are_disabled() {
         // The Pinvou fork disables the bounded-toolbox eviction (see the
         // constant docs): activating far more names than upstream's historical
-        // 8-name / 16KiB bounds must retain every admission and evict nothing.
+        // 8-name bound must retain every admission and evict nothing. The
+        // 1 KiB schemas also push the total past upstream's historical 16 KiB
+        // byte budget, so a byte-bound-only revert fails here too.
         let catalog = (0..64)
-            .map(|index| deferred_tool(&format!("tool_{index}"), 8))
+            .map(|index| deferred_tool(&format!("tool_{index}"), 1024))
             .collect::<Vec<_>>();
         let requested = catalog
             .iter()
@@ -498,10 +501,11 @@ mod tests {
     }
 
     #[test]
-    fn oversized_schema_is_admitted_while_the_bounds_are_disabled() {
+    fn forkguard_oversized_schema_is_admitted_while_the_bounds_are_disabled() {
         // 17 KiB exceeds upstream's historical 16 KiB per-tool bound; with the
-        // bounds disabled it is admitted like any other schema. (A literal is
-        // used instead of MAX + 1 because the bound is usize::MAX here.)
+        // bounds disabled it is admitted like any other schema. The literal is
+        // sized against the historical bound because the fork bound
+        // (usize::MAX / 2) has no constructible neighbor.
         let catalog = vec![deferred_tool("huge", 17 * 1024)];
         let mut cache = ToolActivationCache::default();
         let delta = cache.activate(&catalog, &["huge".to_string()]);

@@ -14158,7 +14158,7 @@ impl SubAgentToolSurface {
             ));
         }
         Err(anyhow!(
-            "Tool {name} could not enter the bounded child toolbox; use tool_search with a narrower query"
+            "Tool {name} could not enter the child toolbox; it is not currently available as a deferred tool in this surface"
         ))
     }
 }

@@ -143,7 +143,7 @@ fn cache_eviction_does_not_hide_a_tool_that_became_eager() {
 }
 
 #[test]
-fn successful_cached_execution_keeps_every_activation_without_granting_uncached_names() {
+fn forkguard_cached_execution_keeps_every_activation_without_granting_uncached_names() {
     // Pinvou fork: the toolbox bounds are disabled, so activating a ninth
     // deferred tool no longer displaces the least-recently-used entry. The
     // recency touch and the uncached-name guarantee are unchanged.
