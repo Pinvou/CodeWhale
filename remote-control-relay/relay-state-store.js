@@ -443,6 +443,16 @@ function exactLock(value) {
     && value.version > 0 && value.version !== LOCK_VERSION) {
     fail("relay_state_lock_unsupported");
   }
+  // A complete v1 owner tuple with extra fields is an unknown lock protocol,
+  // not crash debris. Do not reclaim it even if that PID appears dead.
+  if (value?.schema === LOCK_SCHEMA && value.version === LOCK_VERSION
+    && Number.isSafeInteger(value.pid) && value.pid > 0
+    && typeof value.process_identity === "string" && value.process_identity.length >= 3
+    && value.process_identity.length <= 512
+    && typeof value.owner_id === "string" && /^[A-Za-z0-9_-]{24}$/u.test(value.owner_id)
+    && Object.keys(value).some(key => !["schema", "version", "pid", "process_identity", "owner_id"].includes(key))) {
+    fail("relay_state_lock_unsupported");
+  }
   const lock = exactObject(value, ["schema", "version", "pid", "process_identity", "owner_id"], "relay_state_lock");
   if (lock.schema !== LOCK_SCHEMA || lock.version !== LOCK_VERSION
     || !Number.isSafeInteger(lock.pid) || lock.pid <= 0

@@ -423,6 +423,55 @@ test("registry write retains typed validation and capacity failures", async (t) 
   assert.equal(bounded.getStatus("endpoint-000000").revision, "1");
 });
 
+test("extended v1 owner locks are never stolen even when the owner is live or dead", async (t) => {
+  for (const pid of [process.pid, 2147483647]) {
+    await t.test(pid === process.pid ? "real live owner" : "dead owner", async (t) => {
+      const statePath = await temporaryState(t);
+      const store = await openStateStore(statePath);
+      await store.close();
+      const primary = await fs.readFile(statePath);
+      const backup = await fs.readFile(`${statePath}.bak`);
+      const contents = JSON.stringify({ ...lockRecord({ pid }), extension: { lease: "unknown-protocol" } });
+      await fs.writeFile(lockPath(statePath), contents, { mode: 0o600 });
+      const identity = await fs.stat(lockPath(statePath), { bigint: true });
+      if (pid === process.pid) process.kill(pid, 0);
+      let ownerChecks = 0;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await rejectsCode(openStateStore(statePath, { sleep: async () => {},
+          processIdentity: async (candidate) => {
+            if (candidate === pid) ownerChecks += 1;
+            return candidate === process.pid ? `test-process:${candidate}` : null;
+          } }).then(async (unexpected) => {
+            await unexpected.close();
+            return unexpected;
+          }), "relay_state_lock_unsupported");
+        assert.equal(await fs.readFile(lockPath(statePath), "utf8"), contents);
+        assert.equal((await fs.stat(lockPath(statePath), { bigint: true })).ino, identity.ino);
+        assert.deepEqual(await fs.readFile(statePath), primary);
+        assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+        assert.equal((await fs.readdir(path.dirname(statePath))).some(name => name.includes(".stale.")), false);
+      }
+      // Unsupported structure is not evidence that its owner is dead.
+      assert.equal(ownerChecks, pid === process.pid ? 2 : 0);
+    });
+  }
+});
+
+test("concurrent owner lock publication admits only one writer", async (t) => {
+  const statePath = await temporaryState(t);
+  const seed = await openStateStore(statePath);
+  await seed.close();
+  const results = await Promise.allSettled([openStateStore(statePath), openStateStore(statePath)]);
+  const admitted = results.filter(result => result.status === "fulfilled");
+  for (const result of admitted) resourcesFor(t).stores.push(result.value);
+  assert.equal(admitted.length, 1);
+  assert.equal(results.filter(result => result.status === "rejected").length, 1);
+  assert.equal(results.find(result => result.status === "rejected").reason.code, "relay_state_locked");
+  await admitted[0].value.close();
+  const next = await openStateStore(statePath);
+  await next.close();
+});
+
 test("unsupported lock versions are never stolen even with future fields or a dead PID", async (t) => {
   const statePath = await temporaryState(t);
   const store = await openStateStore(statePath);

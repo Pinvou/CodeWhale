@@ -320,6 +320,13 @@ may admit a first registration; callers must apply the protocol layer's rate
 limits before exposure.
 
 Recognized lock schemas with an unsupported positive version fail closed with
+`relay_state_lock_unsupported`. A v1 lock with a complete valid owner tuple and
+additional fields also fails with that code: extensions are not evidence of a
+dead owner, even when the recorded PID appears dead. Its lock bytes and file
+identity, primary and backup are preserved; it is not renamed or reclaimed.
+Recovery requires the owning protocol or explicit operator investigation, not
+automatic deletion. Supported v1 dead-owner and fully read crash-lock recovery
+remain unchanged. Recognized future versions still fail closed with
 `relay_state_lock_unsupported`, even with added fields or an apparently dead PID.
 They are never quarantined or stolen; use a compatible Relay version or an
 operator-controlled offline upgrade. Locks exceeding the 4096-byte read bound,
