@@ -996,7 +996,7 @@ func (r *PostgresRepository) AdminPaymentOrder(ctx context.Context, orderID uuid
 	}
 	packageRows.Close()
 	if len(packageIDs) > 0 {
-		componentRows, err := r.pool.Query(ctx, `SELECT package_id,id,component_type,original_microcredits,original_microcredits-reclassified_out_microcredits,available_microcredits,reserved_microcredits,used_microcredits,active_grant_microcredits,suspended_grant_microcredits,expired_microcredits,revoked_microcredits,credited_at,expires_at,status FROM entitlement_components WHERE package_id=ANY($1) ORDER BY package_id,component_type,id`, packageIDs)
+		componentRows, err := r.pool.Query(ctx, `SELECT package_id,id,component_type,original_microcredits,original_microcredits-COALESCE((to_jsonb(entitlement_components)->>'reclassified_out_microcredits')::bigint,0),available_microcredits,reserved_microcredits,used_microcredits,active_grant_microcredits,suspended_grant_microcredits,expired_microcredits,revoked_microcredits,credited_at,expires_at,status FROM entitlement_components WHERE package_id=ANY($1) ORDER BY package_id,component_type,id`, packageIDs)
 		if err != nil {
 			return item, err
 		}

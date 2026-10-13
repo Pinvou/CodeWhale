@@ -59,7 +59,7 @@ func (r *PostgresRepository) ListPackages(ctx context.Context, userID, walletID 
 			index[items[i].ID] = i
 			items[i].Components = []EntitlementComponent{}
 		}
-		componentRows, err := r.pool.Query(ctx, `SELECT package_id,id,component_type,original_microcredits,original_microcredits-reclassified_out_microcredits,available_microcredits,reserved_microcredits,used_microcredits,active_grant_microcredits,suspended_grant_microcredits,expired_microcredits,revoked_microcredits,credited_at,expires_at,status FROM entitlement_components WHERE package_id=ANY($1) ORDER BY expires_at,CASE component_type WHEN 'BONUS' THEN 0 ELSE 1 END,credited_at,id`, packageIDs)
+		componentRows, err := r.pool.Query(ctx, `SELECT package_id,id,component_type,original_microcredits,original_microcredits-COALESCE((to_jsonb(entitlement_components)->>'reclassified_out_microcredits')::bigint,0),available_microcredits,reserved_microcredits,used_microcredits,active_grant_microcredits,suspended_grant_microcredits,expired_microcredits,revoked_microcredits,credited_at,expires_at,status FROM entitlement_components WHERE package_id=ANY($1) ORDER BY expires_at,CASE component_type WHEN 'BONUS' THEN 0 ELSE 1 END,credited_at,id`, packageIDs)
 		if err != nil {
 			return nil, PackageSummary{}, err
 		}
