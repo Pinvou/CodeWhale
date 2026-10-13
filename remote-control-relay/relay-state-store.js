@@ -97,7 +97,7 @@ if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_
 $paths = Microsoft.PowerShell.Utility\\ConvertFrom-Json -InputObject $json
 if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_decoded') }
 foreach ($target in $paths) {
-  $item = Get-Item -LiteralPath ([string]$target) -Force
+  $item = Microsoft.PowerShell.Management\\Get-Item -LiteralPath ([string]$target) -Force
   if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'reparse point rejected' }
 }
 if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_checked') }
