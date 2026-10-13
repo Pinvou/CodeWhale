@@ -1241,7 +1241,7 @@ pub(super) fn maybe_hydrate_requested_deferred_tool(
         return None;
     }
 
-    // An oversize schema can never enter the bounded toolbox, so the
+    // An oversize tool can never enter the bounded toolbox, so the
     // receipt must not promise a load that the admission would refuse —
     // that promise turns every retry into another false "has now been
     // loaded". Refuse up front with the shared oversize reason, the same

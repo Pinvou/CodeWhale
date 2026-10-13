@@ -40,8 +40,9 @@ pub(crate) enum ToolActivationStaleCause {
     /// The tool left the filtered catalog entirely (MCP disconnect, deny
     /// rule, mode switch).
     CatalogShrink,
-    /// The tool is still in the catalog but its serialized schema exceeds
-    /// the per-tool toolbox budget.
+    /// The tool is still in the catalog but its serialized definition
+    /// (the whole `Tool`, not only its schema) exceeds the per-tool
+    /// toolbox budget.
     Oversize,
 }
 
@@ -170,9 +171,12 @@ impl ToolActivationCache {
         serde_json::to_vec(tool).map_or(usize::MAX, |bytes| bytes.len())
     }
 
-    /// Whether a tool's serialized schema alone exceeds the per-tool toolbox
-    /// budget, so no activation can admit it. Shared by admission,
-    /// revalidation, and hydration planning so the gate cannot drift.
+    /// Whether a tool's serialized definition alone exceeds the per-tool
+    /// toolbox budget, so no activation can admit it. The measurement is
+    /// the whole serialized `Tool` — name, description, schema, and every
+    /// set optional — matching the collective budget's unit. Shared by
+    /// admission, revalidation, and hydration planning so the gate cannot
+    /// drift.
     pub(crate) fn exceeds_per_tool_budget(tool: &crate::models::Tool) -> bool {
         Self::serialized_bytes(tool) > TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES
     }
