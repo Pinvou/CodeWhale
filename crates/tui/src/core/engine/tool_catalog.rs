@@ -1204,11 +1204,19 @@ pub(super) enum DeferredHydration {
 }
 
 fn deferred_tool_oversize_hydration_result(tool: &Tool) -> ToolResult {
+    // `executed: false` mirrors the Loaded receipt: the refusal answers a
+    // tool call without running it, and the results phase defaults the
+    // executed flag to true — without the marker the working set would
+    // observe a call that never happened and the audit would log the
+    // refusal as a successful execution.
     ToolResult::success(format!(
         "Tool `{}` was not loaded and was not executed: {}",
         tool.name,
         toolbox_oversize_reason()
     ))
+    .with_metadata(json!({
+        "executed": false,
+    }))
 }
 
 #[cfg(test)]

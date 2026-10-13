@@ -27803,6 +27803,16 @@ async fn refused_hydration_emits_no_load_status_and_never_enters_the_batch() {
         !active.contains("notify"),
         "the refused name must stay out of the batch hydration: {active:?}"
     );
+    assert_eq!(
+        receipt
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("executed"))
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "the refusal must be marked unexecuted, or the working set and the audit would record a call that never happened: {:?}",
+        receipt.metadata
+    );
 
     // Nothing may announce the load: drain the engine's events and require
     // that no status claims the tool was loaded.
