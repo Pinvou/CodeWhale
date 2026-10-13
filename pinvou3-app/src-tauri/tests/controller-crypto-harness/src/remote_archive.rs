@@ -3,7 +3,7 @@
 pub(crate) mod binding {
     pub(crate) struct LiveRemoteContext;
 }
-#[path = "../../../src/features/sessions/remote_proxy/schema.rs"]
-pub(crate) mod schema;
 #[path = "../../../src/features/sessions/remote_proxy/archive.rs"]
 mod archive;
+#[path = "../../../src/features/sessions/remote_proxy/schema.rs"]
+pub(crate) mod schema;

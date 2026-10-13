@@ -132,7 +132,7 @@ impl ControllerTransportConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) enum ControllerTransportEvent {
     Connected {
         remote_control_generation: String,
@@ -153,6 +153,51 @@ pub(crate) enum ControllerTransportEvent {
         remote_control_generation: String,
         millis: u64,
     },
+}
+
+impl fmt::Debug for ControllerTransportEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connected {
+                remote_control_generation,
+                lease_epoch,
+            } => f
+                .debug_struct("Connected")
+                .field("remote_control_generation", remote_control_generation)
+                .field("lease_epoch", lease_epoch)
+                .finish(),
+            Self::Disconnected {
+                remote_control_generation,
+                lease_epoch,
+                error,
+            } => f
+                .debug_struct("Disconnected")
+                .field("remote_control_generation", remote_control_generation)
+                .field("lease_epoch", lease_epoch)
+                .field("error", error)
+                .finish(),
+            Self::Frame {
+                priority,
+                remote_control_generation,
+                lease_epoch,
+                ..
+            } => f
+                .debug_struct("Frame")
+                .field("priority", priority)
+                .field("remote_control_generation", remote_control_generation)
+                .field("lease_epoch", lease_epoch)
+                .field("json", &"[REDACTED]")
+                .finish(),
+            Self::RttSample {
+                remote_control_generation,
+                millis,
+            } => f
+                .debug_struct("RttSample")
+                .field("remote_control_generation", remote_control_generation)
+                .field("millis", millis)
+                .finish(),
+        }
+    }
 }
 
 pub(crate) trait ControllerEventSink: Send + Sync + 'static {
@@ -1310,6 +1355,83 @@ mod tests {
     use crate::features::remote_control::controller::{
         controlled::ControlledDeviceManager, controlling::ControllingDeviceManager,
     };
+
+    #[test]
+    fn inbound_debug_redacts_frame_without_changing_reader_input() {
+        for kind in [
+            "controller_resumed",
+            "encrypted_frame",
+            "future_sensitive_frame",
+        ] {
+            let original = json!({
+                "type": kind,
+                "new_resume_token_b64": "fake-resume-secret",
+                "sealed_code_b64": "fake-code-secret",
+                "ciphertext_b64": "fake-ciphertext-secret",
+                "future_payload": { "secret": "fake-future-secret" },
+            })
+            .to_string();
+            let event = ControllerTransportEvent::Frame {
+                priority: FramePriority::Control,
+                remote_control_generation: "generation-diagnostic".to_owned(),
+                lease_epoch: Some("epoch-diagnostic".to_owned()),
+                json: original.clone(),
+            };
+            for diagnostic in [format!("{event:?}"), format!("{event:#?}")] {
+                for secret in [
+                    "fake-resume-secret",
+                    "fake-code-secret",
+                    "fake-ciphertext-secret",
+                    "fake-future-secret",
+                ] {
+                    assert!(
+                        !diagnostic.contains(secret),
+                        "inbound Debug exposed payload"
+                    );
+                }
+                assert!(diagnostic.contains("Frame"));
+                assert!(diagnostic.contains("Control"));
+                assert!(diagnostic.contains("generation-diagnostic"));
+                assert!(diagnostic.contains("epoch-diagnostic"));
+                assert!(diagnostic.contains("[REDACTED]"));
+            }
+            let ControllerTransportEvent::Frame { json, .. } = event else {
+                unreachable!()
+            };
+            assert_eq!(
+                json, original,
+                "Debug must not rewrite business/reader JSON"
+            );
+        }
+    }
+
+    #[test]
+    fn inbound_debug_keeps_normal_lifecycle_diagnostics() {
+        let events = [
+            ControllerTransportEvent::Connected {
+                remote_control_generation: "generation-diagnostic".to_owned(),
+                lease_epoch: Some("epoch-diagnostic".to_owned()),
+            },
+            ControllerTransportEvent::Disconnected {
+                remote_control_generation: "generation-diagnostic".to_owned(),
+                lease_epoch: Some("epoch-diagnostic".to_owned()),
+                error: "read deadline".to_owned(),
+            },
+            ControllerTransportEvent::RttSample {
+                remote_control_generation: "generation-diagnostic".to_owned(),
+                millis: 37,
+            },
+        ];
+        for (event, expected) in events
+            .iter()
+            .zip(["Connected", "Disconnected", "RttSample"])
+        {
+            assert!(format!("{event:?}").contains(expected));
+            assert!(format!("{event:?}").contains("generation-diagnostic"));
+        }
+        assert!(format!("{:?}", events[1]).contains("read deadline"));
+        assert!(format!("{:?}", events[2]).contains("37"));
+    }
 
     #[test]
     fn task_submit_write_telemetry_uses_encrypted_envelope_kind() {
