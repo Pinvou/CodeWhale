@@ -4,6 +4,7 @@ import { lstat, open, rename, rm } from "node:fs/promises";
 import { dirname, join, parse, resolve } from "node:path";
 import { isDirectCliEntry } from "../cli-entrypoint.js";
 import { loadEnrollmentRegistryConfig, EnrollmentRegistry } from "../enrollment-registry.js";
+import { requestEnrollmentCapacity } from "../enrollment-coverage-control.js";
 import {
   protectWindowsPath,
   RelayStateStore,
@@ -38,7 +39,7 @@ function parseArguments(argv) {
   const result = { mode: null, input: null, output: null, requestId: undefined };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (["--dry-run", "--apply", "--backup", "--restore", "--coverage"].includes(argument)) {
+    if (["--dry-run", "--apply", "--backup", "--restore", "--coverage", "--capacity"].includes(argument)) {
       if (result.mode) throw cliError("mode_conflict");
       result.mode = argument.slice(2);
     } else if (argument === "--input" || argument === "--output") {
@@ -156,13 +157,18 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
     const args = parseArguments(argv);
     if (args.mode === "help") {
       io.log(JSON.stringify({
-        usage: "enrollment-migrate.js (--dry-run|--apply|--backup|--restore|--coverage) [--input FILE] [--output FILE] [--request-id RESTORE_OPERATION_ID]",
+        usage: "enrollment-migrate.js (--dry-run|--apply|--backup|--restore|--coverage|--capacity) [--input FILE] [--output FILE] [--request-id RESTORE_OPERATION_ID]",
         note: "credentials are accepted only in a mode-0600 input file, never as command arguments",
       }));
       return 0;
     }
     if (!args.mode) throw cliError("mode_required");
     if (args.requestId !== undefined && args.mode !== "restore") throw cliError("restore_request_id_only");
+    if (args.mode === "capacity") {
+      if (args.input || args.output) throw cliError("capacity_arguments_invalid");
+      io.log(JSON.stringify(await requestEnrollmentCapacity({ env })));
+      return 0;
+    }
     const config = loadEnrollmentRegistryConfig(env);
     if (["dry-run", "apply"].includes(args.mode) && config.deployment !== "self_hosted") {
       throw cliError("self_hosted_mode_required");

@@ -5853,10 +5853,11 @@ mod scheduled_model_tests {
             credential_action: None,
         };
         let bridge = Pinvou3Bridge::test_fixture(Some(model));
+        let credential_store = MemoryCredentialStore::default();
         let (prepared, _prepared_model, _pins) = super::EnginePool::prepare_runtime_model_with(
             &store,
             &PassthroughRuntimeModelProvider,
-            &MemoryCredentialStore::default(),
+            &credential_store,
             bridge,
             "session-affinity-under-test",
             false,
