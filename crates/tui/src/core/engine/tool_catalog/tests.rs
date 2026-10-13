@@ -143,7 +143,10 @@ fn cache_eviction_does_not_hide_a_tool_that_became_eager() {
 }
 
 #[test]
-fn successful_cached_execution_updates_lru_without_granting_uncached_names() {
+fn successful_cached_execution_keeps_every_activation_without_granting_uncached_names() {
+    // Pinvou fork: the toolbox bounds are disabled, so activating a ninth
+    // deferred tool no longer displaces the least-recently-used entry. The
+    // recency touch and the uncached-name guarantee are unchanged.
     let catalog = (0..=8)
         .map(|index| {
             let mut definition = tool(&format!("deferred-{index}"));
@@ -168,8 +171,9 @@ fn successful_cached_execution_updates_lru_without_granting_uncached_names() {
     let delta = cache.activate(&catalog, &["deferred-8".to_string()]);
     remove_evicted_cache_activations(&catalog, &mut active, delta.evicted);
     active.extend(delta.admitted);
+    assert_eq!(cache.names().count(), 9);
     assert!(cache.names().any(|name| name == "deferred-0"));
-    assert!(!cache.names().any(|name| name == "deferred-1"));
+    assert!(cache.names().any(|name| name == "deferred-1"));
 
     assert!(!touch_cached_tool_after_execution(
         &catalog,

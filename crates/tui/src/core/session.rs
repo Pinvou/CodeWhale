@@ -14,16 +14,35 @@ use std::path::PathBuf;
 /// Maximum number of deferred schemas a conversation may keep in its active
 /// toolbox. The permanent `read`/`write`/`edit`/`bash`/`agent`/`tool_search`
 /// router surface is not counted here.
-pub(crate) const TOOL_ACTIVATION_CACHE_MAX_NAMES: usize = 8;
+///
+/// Pinvou fork: effectively unbounded. Upstream bounds the toolbox to 8
+/// names / 16 KiB with silent LRU eviction; under provider prompt-cache
+/// pricing every eviction mutates the request tools array and re-prefills the
+/// entire prefix (write premiums included), which costs orders of magnitude
+/// more than the ~0.1x cached-read saving it buys (codewhale-hq/Codewhale#6969),
+/// and the live incident class was a model fabricating results for tools that
+/// had silently vanished mid-task. This fork keeps the admission bookkeeping
+/// and the catalog-shrink revalidation exactly as upstream — a disconnected
+/// server, deny rule, mode switch, or eager promotion still drops entries —
+/// but the size bounds never fire, so an activated schema stays callable for
+/// the conversation's lifetime. The value is the largest the engine accepts:
+/// clippy's `absurd_extreme_comparisons` (deny-by-default) rejects the bounds
+/// arithmetic against `usize::MAX` itself, so the bound sits one ULP below
+/// arithmetic reach instead.
+pub(crate) const TOOL_ACTIVATION_CACHE_MAX_NAMES: usize = usize::MAX / 2;
 /// Maximum serialized bytes added to requests by cached deferred schemas.
-pub(crate) const TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES: usize = 16 * 1024;
+///
+/// Pinvou fork: effectively unbounded; see [`TOOL_ACTIVATION_CACHE_MAX_NAMES`]
+/// for why the bound is `usize::MAX / 2` rather than `usize::MAX`.
+pub(crate) const TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES: usize = usize::MAX / 2;
 
-/// Bounded, process-local conversation cache for tools activated by
-/// `tool_search`.
+/// Process-local conversation cache for tools activated by `tool_search`.
 ///
 /// Only names are retained. Every turn revalidates them against the currently
 /// filtered catalog, so a disconnected MCP server, changed allow/deny rule, or
-/// mode switch cannot resurrect a tool from an older authority posture.
+/// mode switch cannot resurrect a tool from an older authority posture. The
+/// Pinvou fork disables the size bounds (see the constants above); upstream's
+/// 8-name/16KiB LRU eviction no longer fires here.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ToolActivationCache {
     /// Least-recently used at the front, most-recently used at the back.
@@ -458,8 +477,11 @@ mod tests {
     }
 
     #[test]
-    fn tool_activation_cache_is_lru_bounded_to_eight_names() {
-        let catalog = (0..10)
+    fn forkguard_deferred_toolbox_bounds_are_disabled() {
+        // The Pinvou fork disables the bounded-toolbox eviction (see the
+        // constant docs): activating far more names than upstream's historical
+        // 8-name / 16KiB bounds must retain every admission and evict nothing.
+        let catalog = (0..64)
             .map(|index| deferred_tool(&format!("tool_{index}"), 8))
             .collect::<Vec<_>>();
         let requested = catalog
@@ -469,20 +491,29 @@ mod tests {
         let mut cache = ToolActivationCache::default();
         let delta = cache.activate(&catalog, &requested);
 
-        assert_eq!(cache.names().count(), TOOL_ACTIVATION_CACHE_MAX_NAMES);
-        assert_eq!(
-            cache.names().collect::<Vec<_>>(),
-            vec![
-                "tool_2", "tool_3", "tool_4", "tool_5", "tool_6", "tool_7", "tool_8", "tool_9"
-            ]
-        );
-        assert_eq!(delta.admitted.len(), TOOL_ACTIVATION_CACHE_MAX_NAMES);
-        assert!(delta.evicted.contains(&"tool_0".to_string()));
-        assert!(delta.evicted.contains(&"tool_1".to_string()));
+        assert_eq!(cache.names().count(), 64);
+        assert_eq!(delta.admitted, requested);
+        assert!(delta.evicted.is_empty());
+        assert!(delta.rejected.is_empty());
     }
 
     #[test]
-    fn touching_a_cached_tool_makes_it_most_recent() {
+    fn oversized_schema_is_admitted_while_the_bounds_are_disabled() {
+        // 17 KiB exceeds upstream's historical 16 KiB per-tool bound; with the
+        // bounds disabled it is admitted like any other schema. (A literal is
+        // used instead of MAX + 1 because the bound is usize::MAX here.)
+        let catalog = vec![deferred_tool("huge", 17 * 1024)];
+        let mut cache = ToolActivationCache::default();
+        let delta = cache.activate(&catalog, &["huge".to_string()]);
+
+        assert_eq!(cache.names().count(), 1);
+        assert_eq!(delta.admitted, vec!["huge".to_string()]);
+        assert!(delta.rejected.is_empty());
+        assert!(delta.evicted.is_empty());
+    }
+
+    #[test]
+    fn touching_a_cached_tool_moves_it_to_the_back_and_evicts_nothing() {
         let catalog = (0..9)
             .map(|index| deferred_tool(&format!("tool_{index}"), 8))
             .collect::<Vec<_>>();
@@ -496,22 +527,13 @@ mod tests {
         cache.activate(&catalog, &["tool_8".to_string()]);
 
         let names = cache.names().collect::<Vec<_>>();
+        // The recency order is still maintained (most recent at the back), but
+        // with the bounds disabled the touched-then-re-added tool no longer
+        // displaces the least-recently-used entry.
+        assert_eq!(names.len(), 9);
         assert!(names.contains(&"tool_0"));
-        assert!(!names.contains(&"tool_1"));
+        assert!(names.contains(&"tool_1"));
         assert_eq!(names.last().copied(), Some("tool_8"));
-    }
-
-    #[test]
-    fn oversized_schema_is_never_admitted() {
-        let catalog = vec![deferred_tool(
-            "huge",
-            TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES + 1,
-        )];
-        let mut cache = ToolActivationCache::default();
-        let delta = cache.activate(&catalog, &["huge".to_string()]);
-
-        assert_eq!(cache.names().count(), 0);
-        assert_eq!(delta.rejected, vec!["huge"]);
     }
 
     #[test]
