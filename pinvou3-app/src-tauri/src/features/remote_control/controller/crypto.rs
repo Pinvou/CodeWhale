@@ -1764,6 +1764,21 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Type inference has exactly one implementation while SessionKeys is not
+    // Clone. Adding either derive(Clone) or an explicit Clone impl introduces
+    // a second candidate and makes this test module fail to compile.
+    #[test]
+    fn session_keys_cannot_be_cloned() {
+        trait AmbiguousIfClone<Marker> {
+            fn assert_not_clone() {}
+        }
+        impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+        struct CloneImplemented;
+        impl<T: ?Sized + Clone> AmbiguousIfClone<CloneImplemented> for T {}
+
+        let _ = <super::SessionKeys as AmbiguousIfClone<_>>::assert_not_clone;
+    }
+
     use super::*;
     use serde_json::Value;
 
@@ -2199,7 +2214,10 @@ mod tests {
             .unwrap()
             .seal_pairing_code(receiver_public, &code_binding(), "2345678")
             .unwrap();
-        assert_ne!(&first[1..45], &second[1..45]);
+        // Frozen v1 envelope: version, 32-byte ephemeral public key, 12-byte
+        // nonce. A fresh key must not hide a fixed-nonce regression.
+        assert_ne!(&first[1..33], &second[1..33]);
+        assert_ne!(&first[33..45], &second[33..45]);
         assert_eq!(
             receiver
                 .open_sealed_code(&code_binding(), &first)
