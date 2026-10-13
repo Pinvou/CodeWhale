@@ -1,26 +1,120 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdtempSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const deployScript = join(repoRoot, "scripts", "deploy-remote-relay-test.sh");
+const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+const fixtureConfig = {
+  RELAY_SERVER: "fixture@192.0.2.10", EXPECTED_RELAY_SERVER: "fixture@192.0.2.10",
+  PROXY_SERVER: "fixture@192.0.2.20", EXPECTED_PROXY_SERVER: "fixture@192.0.2.20",
+  SSH_KEY: "fixture key", PROXY_SSH_JUMP: "", EXPECTED_PROXY_SSH_JUMP: "",
+};
 const posixOnly = {
   skip: process.platform === "win32" ? "deployment script targets a POSIX host" : false,
 };
 
 function validate(overrides = {}) {
-  return spawnSync("bash", [deployScript, "--validate-only"], {
+  return spawnSync(bash, [deployScript, "--validate-only"], {
     cwd: repoRoot,
-    env: { ...process.env, ...overrides },
+    env: { ...process.env, ...fixtureConfig, ...overrides },
     encoding: "utf8",
+    timeout: 10_000,
   });
 }
 
-test("remote-test deploy validation accepts the registered safe layout", posixOnly, () => {
-  const syntax = spawnSync("bash", ["-n", deployScript], { encoding: "utf8" });
+test("test deployment requires independent explicit targets before any side effects", () => {
+  for (const name of ["RELAY_SERVER", "EXPECTED_RELAY_SERVER", "PROXY_SERVER", "EXPECTED_PROXY_SERVER", "SSH_KEY"]) {
+    const result = validate({ [name]: "" });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1, name);
+    assert.match(result.stderr, /拒绝执行/);
+    assert.doesNotMatch(result.stdout, /上传|公网验证|配置校验通过/);
+  }
+  for (const config of [
+    { RELAY_SERVER: "other@192.0.2.11" }, { PROXY_SERVER: "other@192.0.2.21" },
+    { PROXY_SSH_JUMP: "jump@192.0.2.30" }, { EXPECTED_PROXY_SSH_JUMP: "jump@192.0.2.30" },
+    { RELAY_SERVER: "fixture@999.0.2.10", EXPECTED_RELAY_SERVER: "fixture@999.0.2.10" },
+    { RELAY_SERVER: "-oProxyCommand=bad", EXPECTED_RELAY_SERVER: "-oProxyCommand=bad" },
+    { PROXY_SERVER: "fixture@192.0.2.20;bad", EXPECTED_PROXY_SERVER: "fixture@192.0.2.20;bad" },
+  ]) {
+    const result = validate(config);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /拒绝执行/);
+    for (const value of Object.values(config)) assert.equal(result.stderr.includes(value), false);
+  }
+  const jump = validate({ PROXY_SSH_JUMP: "jump@192.0.2.30", EXPECTED_PROXY_SSH_JUMP: "jump@192.0.2.30" });
+  assert.equal(jump.status, 0, jump.stderr);
+});
+
+test("ProxyCommand quotes the exact SSH key and jump arguments", () => {
+  const source = readFileSync(deployScript, "utf8");
+  const proxy = source.match(/^proxy_ssh\(\) \{[^]*?^\}/m)?.[0];
+  const quote = source.match(/^shq\(\) \{[^\n]+/m)?.[0];
+  assert.ok(proxy && quote);
+  // Parse the real ProxyCommand with Bash and an in-process SSH stub only.
+  const script = 'set -euo pipefail\n' + quote + '\n' + proxy + '\n'
+    + 'ssh() { while (( $# )); do if [[ "$1" == "-o" && "$2" == ProxyCommand=* ]]; then '
+    + 'command="${2#ProxyCommand=}"; '
+    + 'ssh() { printf "%s\\n" "$@"; }; eval "$command"; return; fi; shift; done; return 98; }\n'
+    + 'proxy_ssh true';
+  for (const key of ["/fixture/deploy key", "/fixture/owner' key"]) {
+    const result = spawnSync(bash, ["-c", script], { encoding: "utf8", timeout: 10_000,
+      env: { ...process.env, SSH_KEY: key, PROXY_SSH_JUMP: "jump@192.0.2.30", PROXY_SERVER: "fixture@192.0.2.20" } });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.trim().split(/\r?\n/), ["-i", key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-W", "%h:%p", "jump@192.0.2.30"]);
+  }
+});
+
+test("remote-test public verification accepts current assets and rejects incomplete deployments", () => {
+  const source = readFileSync(deployScript, "utf8");
+  const check = source.match(/^public_verify\(\) \{[^]*?^\}/m);
+  assert.ok(check, "execute the actual verification function, not a reimplementation");
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  assert.ok(process.platform !== "win32" || existsSync(bash), "Git Bash is required");
+  const validPage = '<title>PINVOU 智能助手</title><script type="module" src="/test/remote/assets/index-fixture.js"></script>';
+  const cases = [
+    { name: "current hashed Web assets without bridge", page: validPage, pass: true },
+    { name: "obsolete bridge only", page: '<title>PINVOU 智能助手</title><script src="/test/remote/platform/tauri/bridge.js"></script>' },
+    { name: "wrong base", page: validPage.replace("/test/remote/assets/", "/other/assets/") },
+    { name: "wrong page", page: validPage.replace("PINVOU 智能助手", "unrelated") },
+    { name: "unhealthy test endpoint", page: validPage, health: '{"ok":false,"room_count":0}' },
+    { name: "missing room count", page: validPage, health: '{"ok":true}' },
+    { name: "unhealthy production endpoint", page: validPage, production: '{"ok":false}' },
+    { name: "failed Web request", page: validPage, pageExit: "22" },
+  ];
+  // Only this extracted function runs. All curl calls are intercepted in-process;
+  // no deployment, SSH, network request, or rollback command is executed.
+  const script = 'set -euo pipefail\nBASE_PATH="/test/remote"\nPUBLIC_URL="https://test.invalid/test/remote"\n'
+    + 'curl() { case "${@: -1}" in\n'
+    + '"$PUBLIC_URL/healthz") printf "%s" "$FIXTURE_HEALTH" ;;\n'
+    + '"$PUBLIC_URL/r/deploy-check") [ "$FIXTURE_PAGE_EXIT" = "0" ] || return "$FIXTURE_PAGE_EXIT"; printf "%s" "$FIXTURE_PAGE" ;;\n'
+    + '"https://pinvou.com/pinvou3/remote/healthz") printf "%s" "$FIXTURE_PRODUCTION" ;;\n'
+    + '*) return 99 ;;\nesac; }\n' + check[0] + '\npublic_verify\n';
+  for (const fixture of cases) {
+    const result = spawnSync(bash, ["-c", script], {
+      cwd: repoRoot,
+      env: { ...process.env, FIXTURE_PAGE: fixture.page,
+        FIXTURE_HEALTH: fixture.health ?? '{"ok":true,"room_count":0}',
+        FIXTURE_PRODUCTION: fixture.production ?? '{"ok":true}',
+        FIXTURE_PAGE_EXIT: fixture.pageExit ?? "0" },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(result.error, undefined, `${fixture.name}: ${result.error}`);
+    assert.notEqual(result.signal, "SIGTERM", `${fixture.name}: timed out`);
+    assert.equal(result.status, fixture.pass ? 0 : 1, `${fixture.name}: ${result.stderr}`);
+  }
+});
+
+test("remote-test deploy validation accepts the registered safe layout", () => {
+  const syntax = spawnSync(bash, ["-n", deployScript], { encoding: "utf8" });
   assert.equal(syntax.status, 0, syntax.stderr);
   const result = validate();
   assert.equal(result.status, 0, result.stderr);
@@ -30,13 +124,58 @@ test("remote-test deploy validation accepts the registered safe layout", posixOn
 test("remote-test deploy builds and uploads the shared WebUI dist", () => {
   const source = readFileSync(deployScript, "utf8");
   assert.match(source, /PINVOU_REMOTE_PUBLIC_BASE_PATH="\$BASE_PATH" npm run build:web/);
-  assert.match(source, /grep -Fq "\$BASE_PATH\/" "\$RELAY_DIR\/web\/dist\/index\.html"/);
-  assert.match(source, /test -f "\$RELAY_DIR\/web\/dist\/platform\/tauri\/bridge\.js"/);
+  assert.match(source, /node "\$RELAY_DIR\/verify-web-dist-cli\.js" "\$RELAY_DIR\/web\/dist" "\$BASE_PATH"/);
+  assert.doesNotMatch(source, /test -f [^\n]*platform\/tauri\/bridge\.js/);
   assert.match(source, /package-lock\.json web\/dist web\/stats\.html/);
-  assert.match(source, /behavior-telemetry-schema\.js/);
+  assert.match(source, /relay_js_files=\(\)/);
+  assert.match(source, /"\$\{relay_js_files\[@\]\}" package\.json package-lock\.json web\/dist web\/stats\.html/);
   assert.match(source, /docs\/schemas\/behavior-telemetry-v1\.schema\.json/);
   assert.match(source, /docs\/schemas\/behavior-telemetry-registries\.json/);
   assert.match(source, /await import\('\.\/telemetry-service\.js'\)/);
+});
+
+test("remote-test archive uses the script's actual complete runtime module selection", (t) => {
+  const source = readFileSync(deployScript, "utf8");
+  const selection = source.match(/^relay_js_files=\(\)[^]*?^done < <\(cd "\$RELAY_DIR" && printf '%s\\n' \.\/\*\.js\)/m);
+  const archive = source.match(/^tar -czf - -C "\$RELAY_DIR"[^]*?\| relay_ssh /m);
+  assert.ok(selection, "runtime module selection must be explicit");
+  assert.ok(archive, "archive command must precede the mocked upload boundary");
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  assert.ok(process.platform !== "win32" || existsSync(bash), "Git Bash is required for archive verification");
+  const shellPath = (value) => process.platform === "win32"
+    ? value.replaceAll("\\", "/").replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`)
+    : value;
+  const relayDir = join(repoRoot, "remote-control-relay");
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "pinvou-test-archive-"));
+  t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
+  const fixtureRelay = join(fixtureRoot, "remote-control-relay");
+  mkdirSync(join(fixtureRelay, "web", "dist"), { recursive: true });
+  for (const file of [...readdirSync(relayDir).filter((entry) => entry.endsWith(".js")), "package.json", "package-lock.json", "web/stats.html"]) {
+    copyFileSync(join(relayDir, file), join(fixtureRelay, file));
+  }
+  copyFileSync(join(relayDir, "server.js"), join(fixtureRelay, "extra module.js"));
+  mkdirSync(join(fixtureRoot, "docs", "schemas"), { recursive: true });
+  for (const file of ["behavior-telemetry-v1.schema.json", "behavior-telemetry-registries.json"]) {
+    copyFileSync(join(repoRoot, "docs", "schemas", file), join(fixtureRoot, "docs", "schemas", file));
+  }
+  // Execute only archive creation, never the deployment or its upload command.
+  const script = 'set -euo pipefail\nROOT="$1"\nRELAY_DIR="$2"\n'
+    + selection[0] + "\n" + archive[0].replace(/\| relay_ssh $/, "");
+  const packed = spawnSync(bash, ["-c", script, "archive-test", shellPath(fixtureRoot), shellPath(fixtureRelay)], {
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: 10_000,
+  });
+  assert.equal(packed.status, 0, packed.stderr?.toString());
+  const listed = spawnSync("tar", ["-tzf", "-"], { input: packed.stdout, encoding: "utf8", timeout: 10_000 });
+  assert.equal(listed.status, 0, listed.stderr);
+  const files = new Set(listed.stdout.split(/\r?\n/).map((entry) => entry.replace(/^\.\//, "")));
+  assert.ok(files.has("extra module.js"));
+  for (const file of readdirSync(relayDir).filter((entry) => entry.endsWith(".js"))) {
+    assert.ok(files.has(file), `runtime module missing from actual archive: ${file}`);
+  }
+  for (const file of ["behavior-telemetry-schema.js", "docs/schemas/behavior-telemetry-v1.schema.json", "docs/schemas/behavior-telemetry-registries.json"]) {
+    assert.ok(files.has(file), `schema dependency missing from actual archive: ${file}`);
+  }
 });
 
 test("remote-test tunnel account is restricted to the registered remote forward", () => {
@@ -48,7 +187,7 @@ test("remote-test tunnel account is restricted to the registered remote forward"
   assert.match(source, /sshd -t/);
 });
 
-test("remote-test deploy validation rejects TEST_DIR traversal and aliases", posixOnly, () => {
+test("remote-test deploy validation rejects TEST_DIR traversal and aliases", () => {
   for (const testDir of [
     "/opt/pinvou-remote-relay-test/..",
     "/opt/pinvou-remote-relay-test/sub/../..",
@@ -61,7 +200,7 @@ test("remote-test deploy validation rejects TEST_DIR traversal and aliases", pos
   }
 });
 
-test("remote-test deploy validation rejects BASE_PATH dot segments", posixOnly, () => {
+test("remote-test deploy validation rejects BASE_PATH dot segments", () => {
   for (const basePath of [
     "/pinvou3/remote-test/../remote",
     "/pinvou3/remote-test/./child",

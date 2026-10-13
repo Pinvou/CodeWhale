@@ -6,6 +6,7 @@
 
 /* eslint-disable sonarjs/no-nested-template-literals, sonarjs/no-unenclosed-multiline-block -- compact i18n dictionary: nested templates mirror the copy structure one-to-one; credential field names are false-positive secrets */
 import { browserEn } from './browser.js';
+import { CHAT_RECOVERY_COPY } from './chat-recovery.js';
 
 const conversationEn = {
   completed:'Completed', failed:'Failed', interrupted:'Interrupted', cancelled:'Cancelled', limitReached:'Limit reached', processing:'Processing', processingActive:'Processing',
@@ -183,6 +184,7 @@ const acpProvidersEn = {
 };
 
 export const dictEn = {
+  steerFailedLost: CHAT_RECOVERY_COPY.en.steerFailedLost,
   ...browserEn,
         langTag: 'en',
         acpAgent: 'ACP Agent',
@@ -287,6 +289,7 @@ export const dictEn = {
         modelPresetDeepseek: 'DeepSeek',
         modelPresetKimi: 'Kimi',
         modelPresetOpenaiCompatible: 'OpenAI Compatible',
+        modelPresetOpenaiResponses: 'OpenAI Responses Compatible',
         modelPresetOpenai: 'OpenAI',
         modelPresetAnthropic: 'Anthropic Claude',
         modelPresetGemini: 'Google Gemini',
@@ -496,7 +499,7 @@ export const dictEn = {
           sourceTest: 'Test store',
         },
         uiToolStore: { title:'Plugin Center', search:'Search connectors, skills, and plugins', myTools:'My Plugins', installedOnly:'Installed only', results:'Search Results', back:'Back to Plugin Center', internal:'Internal · Employees only', internalTitle:'H3C Workplace\nOne-click Access', internalDesc:'Connect to internal systems with your SSO identity—no key required', internalTools:'H3C Internal Plugins', internalCount:n=>`${n} plugins · Intranet required`, view:'View', modePlain:'Plain', modeCode:'Code', modeVisibilityHint:'Configure plugin visibility per session mode', manageVisibility:'Manage Visibility', doneManagingVisibility:'Done', guide:{ title:'Plugin Guide', close:'Close', dragTitle:'Drag to install', dragDesc:'Drag a standard skill, a single .md, an MCP server, or a Pinvou plugin .zip directly into this window to import it, or click "Upload" in the top-right to choose a file.', typesTitle:'Supported forms', types:['Standard skill (SKILL.md folder)','Single .md skill file','MCP server','Pinvou plugin package (recommended)'], formatsNote:'Standard skills, .md, MCP, and Pinvou plugin packages are all importable; the Pinvou plugin package is just the recommended standard form, and the rest are auto-normalized.', dragHintShort:'Drag in a package to add a custom plugin', introTitle:'What is a Pinvou plugin package', introDesc:'One package = one card = one switch. Pack skills, MCP servers (or their combinations) into a zip; on import the type is auto-detected from content, validated, and registered, then toggled and uninstalled uniformly in the store and at runtime.', specTitle:'Plugin package spec', specDesc:'See the "Plugin Package Spec" for the full rules: zip layout, plugin.json (schema v1), mcp manifest.json, SKILL.md, icons, and naming safety.', downloadSpec:'Download spec (Markdown)', downloadHint:'Download and share with third-party package authors; the desktop app opens a save dialog.' } },
-        artifactPreview: { download:'↓ Download', openExternal:'↗ Open externally', loading:'Loading…', fileMissing:'File does not exist or has been deleted', readFailed:e=>`Read failed: ${e}`, imageReadFailed:e=>`Image read failed: ${e}`, previewUnsupported:'Preview is not supported for this type', downloadArtifact:'↓ Download artifact', openExternalArtifact:'↗ Open externally' },
+        artifactPreview: { download:'↓ Download', openExternal:'↗ Open externally', loading:'Loading…', fileMissing:'File does not exist or has been deleted', readFailed:e=>`Read failed: ${e}`, imageReadFailed:e=>`Image read failed: ${e}`, previewUnsupported:'Preview is not supported for this type', visualWarningTruncatedPages:'Long document: only the first 30 pages are rendered', visualWarningConvertFailed:'This file cannot be previewed visually (conversion failed or a renderer component is missing)', downloadArtifact:'↓ Download artifact', openExternalArtifact:'↗ Open externally' },
         uiToolDetails: { tools:{
           ima:{ title:'Tencent ima', subtitle:'Manage ima notes and knowledge bases through OpenAPI', latency:'Cloud', desc:'Connect the Tencent ima OpenAPI Skill to search, read, create, and append notes, or search and browse knowledge bases and import web pages or content. Credentials stay on this device.', configTitle:'Connect Tencent ima', configDescription:'Credentials stay on this device and are used only to enable the IMA OpenAPI Skill.', configDocLabel:'Get Client ID / API Key', welcomeQueries:['Search my ima knowledge bases','List my ima notes','Create an ima note from this content','Find the product plan in my ima knowledge base'] },
           tmeet:{ title:'Tencent Meeting', subtitle:'Manage meetings, recordings, minutes, and attendance reports as yourself', type:'CLI + Official Skill', latency:'Cloud', desc:'Connect the official Tencent Meeting CLI and skill to create, query, update, and cancel meetings, and access attendance reports, recordings, transcripts, and AI minutes. Connecting opens the authorization page for QR-code sign-in.', welcomeQueries:['Create a Tencent Meeting for me','Show my Tencent Meeting recordings','Show the latest AI meeting minutes','List the attendees of this Tencent Meeting'] },
@@ -510,6 +513,13 @@ export const dictEn = {
           settingsHint:'When enabled, the agent can take screenshots and control your mouse and keyboard, which carries a risk of unintended actions. The agent asks for your consent again before the first control of each session, and consequential actions need per-action confirmation.',
           platformUnsupportedHint:'Computer use is not available on this platform: there is no computer-use backend for this operating system.',
           settingsStoppedHint:'Computer use is stopped. Turn it off and back on to resume agent control.',
+          permTitle:'macOS system permissions',
+          permScreenRecording:'Screen Recording (screenshots)',
+          permAccessibility:'Accessibility (mouse & keyboard control)',
+          permGranted:'granted',
+          permNotGranted:'not granted',
+          permRequest:'Open system permission dialogs',
+          permRestartHint:'The system applies a grant only to a newly launched process: after granting, fully quit and reopen the app.',
           bannerTitle:'Agent is controlling your computer',
           bannerNote:'The agent can see your screen and move the mouse and keyboard. You can stop it at any time.',
           bannerStop:'Stop control',
@@ -534,7 +544,6 @@ export const dictEn = {
           confirmKeyChordMasked:(chord, count)=>chord?(count===1?`Press ${chord} + ${count} masked character`:`Press ${chord} + ${count} masked characters`):(count===1?`Press ${count} masked character`:`Press ${count} masked characters`),
           confirmHoldKeyMasked:(chord, count, ms)=>chord?(count===1?`Hold ${chord} + ${count} masked character for ${ms} ms`:`Hold ${chord} + ${count} masked characters for ${ms} ms`):(count===1?`Hold ${count} masked character for ${ms} ms`:`Hold ${count} masked characters for ${ms} ms`),
           confirmDrag:(from, to)=>`Drag from ${from} to ${to}`,
-          confirmMouseMove:point=>`Move mouse to ${point}`,
           confirmMouseDown:button=>`Press and hold the ${button} mouse button`,
           confirmMouseUp:button=>`Release the ${button} mouse button`,
           screenshotCaption:'Screenshot',
@@ -776,7 +785,7 @@ export const dictEn = {
         apBtnOpen: 'Open', apBtnLocate: 'Show in folder', apLocLabel: 'Location', apMtimeLabel: 'Modified', apLastMod: 'Modified',
         apConverting: 'Generating preview…', apConvertFail: 'Preview failed', apUnsupported: 'Inline preview not available for this type; use Open below',
         apKinds: { md:'Markdown', html:'HTML document', image:'Image', pdf:'PDF document', docx:'Office document', xlsx:'Spreadsheet', legacy_office:'Office document', text:'Text file', binary:'File' },
-        apMdSaved: 'Saved', apMdSaving: 'Saving...', apMdDirty: 'Unsaved', apMdSaveFailed: 'Save failed',
+        apMdSaving: 'Saving...', apMdDirty: 'Unsaved', apMdSaveFailed: 'Save failed',
         apMdExternalUpdateBlocked: 'The file changed externally. Your unsaved edits were kept and not overwritten.',
         apMdExternalRemovalBlocked: 'The file was deleted externally. Your unsaved edits remain in this editor; copy them or restore the original file before leaving.',
         apMdAiEdit: 'AI edit', apMdAiInstructionPlaceholder: 'How should AI edit this?',
@@ -937,6 +946,7 @@ Object.assign(dictEn.uiConversation, {
   feedbackNegative: 'Not helpful',
   retryReply: 'Regenerate',
   callingTool: name => `Calling ${name}`,
+  copyCode: 'Copy code',
   inputPlaceholder: 'Enter a value',
   otherAnswer: 'Other',
   otherPlaceholder: 'Other',
@@ -1272,6 +1282,7 @@ Object.assign(dictEn.uiSettingsDetail, {
     siliconflow:{title:'SiliconFlow China',configTitle:'SiliconFlow',desc:'Official SiliconFlow China API'},
     siliconflow_global:{title:'SiliconFlow Global',configTitle:'SiliconFlow Global',desc:'SiliconFlow international API (keys are region-locked)'},
     openai_compatible:{title:'OpenAI Compatible',desc:'Custom OpenAI-compatible endpoint'},
+    openai_responses:{title:'OpenAI Responses Compatible',desc:'Custom OpenAI Responses-compatible endpoint'},
   },
   imageCapability:'Image input', imageCapabilityEnabled:'Supports images', imageCapabilityDisabled:'No image support', imageCapabilityPinvou:'Handled automatically',
   visionModel:'Vision model', visionModelNone:'None', visionModelDesc:'Used to analyze images when the current model cannot see them',
@@ -1332,9 +1343,9 @@ Object.assign(dictEn.uiSettingsDetail.modelDescriptions, {
   '正式旗舰，夜间 22:00-08:00 四折（个人版）':'GA flagship, 40% credit cost 22:00-08:00 (personal plan)',
   '轻量兼容款，支持图像输入':'Lightweight compatibility option, image input',
   '最新推荐，统一模型 ID 自动升级':'Latest recommended, auto-updating under one Model ID', '低成本低时延，效果比肩 2-1-pro':'Low cost, low latency, near 2-1-pro quality',
-  '编程特化（预览），官方即将下线':'Coding-specialized (preview); retiring soon per official docs', '稳定通用，官方即将下线':'Stable general-purpose model; retiring soon per official docs', '最强旗舰；仅 Responses 协议支持函数调用':'Strongest flagship; function calling only via Responses API',
-  '编码与 Agent 新旗舰；Chat 协议仅 effort=none 支持函数调用':'New coding/agent flagship; Chat wire function calling only at effort=none',
-  '低价高效；Chat 协议仅 effort=none 支持函数调用':'Low-cost and efficient; Chat wire function calling only at effort=none',
+  '编程特化（预览），官方即将下线':'Coding-specialized (preview); retiring soon per official docs', '稳定通用，官方即将下线':'Stable general-purpose model; retiring soon per official docs', '最强旗舰':'Strongest flagship',
+  '编码与 Agent 新旗舰（默认）':'New coding/agent flagship (default)',
+  '低价高效':'Low-cost and efficient',
   'GPT-5.6 家族旗舰，推理与编码':'GPT-5.6 family flagship, reasoning and coding',
   '最强旗舰，高难推理与长程 Agent':'Strongest flagship, hard reasoning and long-running agents',
   '官方默认推荐，复杂 Agent 编码':'Official default recommendation, complex agentic coding',
@@ -1354,7 +1365,7 @@ dictEn.uiSettingsDetail.modelAliasPlaceholder = 'Optional, e.g. Daily assistant'
 
 dictEn.uiSettingsDetail.customModelTitles = {
   glm:'Custom GLM model', qwen:'Custom Qwen model',
-  openai_compatible:'Custom compatible model', glm_coding_plan:'Custom GLM Coding Plan model',
+  openai_compatible:'Custom compatible model', openai_responses:'Custom Responses model', glm_coding_plan:'Custom GLM Coding Plan model',
   tencent_coding_plan:'Custom Tencent Cloud Coding Plan model', tencent_token_plan:'Custom Tencent Cloud Token Plan model', kimi_coding_plan:'Custom Kimi Coding Plan model',
   volcengine_coding_plan:'Custom Volcengine Ark Coding Plan model', qwen_coding_plan:'Custom Qwen Coding Plan model',
   openrouter:'Custom OpenRouter model', siliconflow:'Custom SiliconFlow model', siliconflow_global:'Custom SiliconFlow model',

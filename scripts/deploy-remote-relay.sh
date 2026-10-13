@@ -12,11 +12,23 @@ if [[ "${PINVOU_CONFIRM_PRODUCTION_DEPLOY:-0}" != "1" ]]; then
 fi
 
 RELAY_DIR="$ROOT/remote-control-relay"
-SERVER="${PINVOU_REMOTE_DEPLOY_SERVER:-root@47.120.8.237}"
+# 运维目标与私钥只来自本地受控配置，不在仓库登记实例值。
+SERVER="${PINVOU_REMOTE_DEPLOY_SERVER:-}"
+EXPECTED_SERVER="${PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER:-}"
+SSH_KEY="${SSH_KEY:-}"
+HARDENING_FILE="${PINVOU_REMOTE_HARDENING_FILE:-}"
 REMOTE_DIR="${PINVOU_REMOTE_DEPLOY_DIR:-/opt/pinvou-remote-relay}"
 SERVICE="${PINVOU_REMOTE_DEPLOY_SERVICE:-pinvou-remote-relay.service}"
 PUBLIC_URL="${PINVOU_REMOTE_PUBLIC_URL:-https://pinvou.com/pinvou3/remote}"
-DIRECT_URL="${PINVOU_REMOTE_DIRECT_URL:-http://47.120.8.237:8787/pinvou3/remote}"
+DIRECT_URL="${PINVOU_REMOTE_DIRECT_URL:-}"
+if [[ -z "$SERVER" || -z "$EXPECTED_SERVER" || -z "$SSH_KEY" || -z "$DIRECT_URL" ]]; then
+  echo "拒绝执行：必须显式提供部署目标、独立确认目标、SSH_KEY 与直连预检地址。" >&2
+  exit 64
+fi
+if [[ "$SERVER" != "$EXPECTED_SERVER" || ! "$SERVER" =~ ^[A-Za-z_][A-Za-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
+  echo "拒绝执行：部署目标格式无效或与独立确认目标不一致。" >&2
+  exit 64
+fi
 BASE_PATH="${PINVOU_REMOTE_PUBLIC_BASE_PATH:-/pinvou3/remote}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 REMOTE_CODE_TMP="/tmp/pinvou-remote-code-$STAMP.tar.gz"
@@ -42,6 +54,15 @@ if [[ "$BASE_PATH" != "/pinvou3/remote" ]]; then
   exit 64
 fi
 
+# 通用硬化限制须显式指定受控输入，可按仓库通用模板准备。
+# 代理地址唯一来源是远端受保护的 controller 环境文件。
+# 先验证来源，再验证私有快照，上传只消费这份已验证的内容。
+node "$RELAY_DIR/scripts/validate-deploy-hardening.cjs" "$HARDENING_FILE"
+HARDENING_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/pinvou-hardening.XXXXXXXX")"
+trap 'rm -f "$HARDENING_SNAPSHOT"' EXIT
+cp "$HARDENING_FILE" "$HARDENING_SNAPSHOT"
+node "$RELAY_DIR/scripts/validate-deploy-hardening.cjs" "$HARDENING_SNAPSHOT"
+
 ensure_cached_db() {
   local path="$1"
   local url="$2"
@@ -60,22 +81,22 @@ ensure_cached_db() {
 verify_public() {
   local expected="$1"
   local health page
-  if ! health="$(curl -fsS "$PUBLIC_URL/healthz")"; then
+  if ! health="$(curl -fsS --connect-timeout 10 --max-time 30 "$PUBLIC_URL/healthz")"; then
     VERIFY_ERROR="公网健康检查失败：$PUBLIC_URL/healthz"
     return 1
   fi
-  if ! node -e 'const h=JSON.parse(process.argv[1]); if(!h.ok || !("room_count" in h) || "rooms" in h) process.exit(1)' "$health"; then
+  if ! node -e 'const h=JSON.parse(process.argv[1]); const expected=process.argv[2]; if(!h.ok || !("room_count" in h) || "rooms" in h || (expected === "release" && h.desktop_controller_enabled !== true)) process.exit(1)' "$health" "$expected"; then
     VERIFY_ERROR="公网健康检查返回格式不符合预期"
     return 1
   fi
-  if ! page="$(curl -fsSL "$PUBLIC_URL/r/deploy-check")"; then
+  if ! page="$(curl -fsSL --connect-timeout 10 --max-time 30 "$PUBLIC_URL/r/deploy-check")"; then
     VERIFY_ERROR="手机页面检查失败：$PUBLIC_URL/r/deploy-check"
     return 1
   fi
   if [[ "$expected" == "release" ]]; then
     if [[ "$page" != *'<title>PINVOU 智能助手'* \
       || "$page" != *'<base href="/pinvou3/remote/">'* \
-      || "$page" != *'/pinvou3/remote/platform/tauri/bridge.js'* ]]; then
+      || "$page" != *'/pinvou3/remote/assets/'* ]]; then
       VERIFY_ERROR="公网页面未命中完整 WebUI v2 或生产 base path"
       return 1
     fi
@@ -105,10 +126,7 @@ if [[ "${SKIP_WEB_BUILD:-0}" != "1" ]]; then
 else
   echo "使用已构建并验证的共享 WebUI 产物"
 fi
-test -f "$RELAY_DIR/web/dist/index.html"
-test -f "$RELAY_DIR/web/dist/platform/tauri/bridge.js"
-grep -Fq '<base href="/pinvou3/remote/">' "$RELAY_DIR/web/dist/index.html"
-grep -Fq '/pinvou3/remote/platform/tauri/bridge.js' "$RELAY_DIR/web/dist/index.html"
+node "$RELAY_DIR/verify-web-dist-cli.js" "$RELAY_DIR/web/dist" "$BASE_PATH"
 if [[ "${SKIP_LOCAL_TESTS:-0}" != "1" ]]; then
   (cd "$RELAY_DIR" && npm test)
 fi
@@ -121,20 +139,22 @@ while IFS= read -r relay_module; do
 done < <(cd "$RELAY_DIR" && printf '%s\n' ./*.js)
 tar -czf - -C "$RELAY_DIR" \
   "${relay_modules[@]}" \
+  scripts/deploy-controller-preflight.mjs \
+  scripts/controller-route-smoke.mjs \
   -C "$ROOT" \
   docs/schemas/behavior-telemetry-v1.schema.json \
   docs/schemas/behavior-telemetry-registries.json \
-  | ssh "$SERVER" "cat > '$REMOTE_CODE_TMP'"
-# dist 内包含带哈希的 JS/CSS、桥接脚本和本地 vendor，必须作为一个版本整体上传。
-tar -czf - -C "$RELAY_DIR/web/dist" . | ssh "$SERVER" "cat > '$REMOTE_WEB_TMP'"
-scp "$RELAY_DIR/web/stats.html" "$SERVER:$REMOTE_STATS_TMP"
-scp "$RELAY_DIR/10-hardening.conf" "$SERVER:$REMOTE_HARDENING_TMP"
-scp "$RELAY_DIR/package.json" "$SERVER:$REMOTE_PACKAGE_TMP"
-scp "$RELAY_DIR/package-lock.json" "$SERVER:$REMOTE_LOCK_TMP"
-scp "$IPV4_DB_CACHE" "$SERVER:$REMOTE_IPV4_DB_TMP"
-scp "$IPV6_DB_CACHE" "$SERVER:$REMOTE_IPV6_DB_TMP"
+  | ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" "cat > '$REMOTE_CODE_TMP'"
+# dist 包含带哈希的 JS/CSS、启动脚本和本地 vendor，必须作为一个版本整体上传。
+tar -czf - -C "$RELAY_DIR/web/dist" . | ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" "cat > '$REMOTE_WEB_TMP'"
+scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/web/stats.html" "$SERVER:$REMOTE_STATS_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$HARDENING_SNAPSHOT" "$SERVER:$REMOTE_HARDENING_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/package.json" "$SERVER:$REMOTE_PACKAGE_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/package-lock.json" "$SERVER:$REMOTE_LOCK_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$IPV4_DB_CACHE" "$SERVER:$REMOTE_IPV4_DB_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$IPV6_DB_CACHE" "$SERVER:$REMOTE_IPV6_DB_TMP"
 
-deploy_output="$(ssh "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$STAMP" "$REMOTE_CODE_TMP" "$REMOTE_WEB_TMP" "$REMOTE_STATS_TMP" "$REMOTE_HARDENING_TMP" "$REMOTE_PACKAGE_TMP" "$REMOTE_LOCK_TMP" "$REMOTE_IPV4_DB_TMP" "$REMOTE_IPV6_DB_TMP" <<'REMOTE'
+deploy_output="$(ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$STAMP" "$REMOTE_CODE_TMP" "$REMOTE_WEB_TMP" "$REMOTE_STATS_TMP" "$REMOTE_HARDENING_TMP" "$REMOTE_PACKAGE_TMP" "$REMOTE_LOCK_TMP" "$REMOTE_IPV4_DB_TMP" "$REMOTE_IPV6_DB_TMP" <<'REMOTE'
 set -Eeuo pipefail
 remote_dir="$1"
 service="$2"
@@ -152,6 +172,10 @@ code_stage="$remote_dir/code.next-$stamp"
 web_stage="$remote_dir/web/dist.next-$stamp"
 dropin_dir="/etc/systemd/system/${service}.d"
 dropin="$dropin_dir/10-hardening.conf"
+controller_dropin="$dropin_dir/40-controller.conf"
+controller_env="/etc/pinvou-remote-relay-controller.env"
+controller_state_root="/var/lib/pinvou-remote-relay"
+controller_state_dir="$controller_state_root/state"
 telemetry_data_dir="/var/lib/pinvou-telemetry"
 ipv4_db="$telemetry_data_dir/ip2region_v4.xdb"
 ipv6_db="$telemetry_data_dir/ip2region_v6.xdb"
@@ -162,9 +186,21 @@ rm -rf "$code_stage"
 mkdir -p "$code_stage"
 tar --no-same-owner --no-same-permissions -xzf "$code_tmp" -C "$code_stage"
 rm -f "$code_tmp"
+# 暂存验证使用本次上传的 ESM 声明，不依赖现役 package 或 Node 语法探测。
+cp "$package_tmp" "$code_stage/package.json"
 node --check "$code_stage/server.js"
 node --check "$code_stage/telemetry-service.js"
 node --check "$code_stage/behavior-telemetry-schema.js"
+node --check "$code_stage/scripts/deploy-controller-preflight.mjs"
+node --check "$code_stage/scripts/controller-route-smoke.mjs"
+# Production desktop control is a required lane. The secret-bearing environment
+# file is provisioned out of band and must never be generated or printed here.
+node "$code_stage/scripts/deploy-controller-preflight.mjs" "$controller_env"
+# The state store deliberately refuses to create missing ancestors. Provision
+# its dedicated root explicitly so a first deployment on a clean host can
+# start without weakening the store's symlink/ownership checks.
+install -d -o root -g root -m 700 "$controller_state_root"
+install -d -o root -g root -m 700 "$controller_state_dir"
 test -f "$code_stage/docs/schemas/behavior-telemetry-v1.schema.json"
 test -f "$code_stage/docs/schemas/behavior-telemetry-registries.json"
 mkdir -p "$remote_dir/web"
@@ -175,10 +211,7 @@ chown -R root:root "$web_stage"
 find "$web_stage" -type d -exec chmod 755 {} +
 find "$web_stage" -type f -exec chmod 644 {} +
 rm -f "$web_tmp"
-test -f "$web_stage/index.html"
-test -f "$web_stage/platform/tauri/bridge.js"
-grep -Fq '<base href="/pinvou3/remote/">' "$web_stage/index.html"
-grep -Fq '/pinvou3/remote/platform/tauri/bridge.js' "$web_stage/index.html"
+node "$code_stage/verify-web-dist-cli.js" "$web_stage" "/pinvou3/remote"
 mkdir -p "$backup"
 if [[ -f "$remote_dir/server.js" ]]; then cp -a "$remote_dir/server.js" "$backup/server.js"; else touch "$backup/no-server"; fi
 if [[ -d "$remote_dir/web/dist" ]]; then cp -a "$remote_dir/web/dist" "$backup/web-dist"; else touch "$backup/no-web-dist"; fi
@@ -215,6 +248,11 @@ if [[ -f "$dropin" ]]; then
 else
   touch "$backup/no-hardening-dropin"
 fi
+if [[ -f "$controller_dropin" ]]; then
+  cp -a "$controller_dropin" "$backup/40-controller.conf"
+else
+  touch "$backup/no-controller-dropin"
+fi
 
 rollback() {
   if [[ -f "$backup/no-server" ]]; then rm -f "$remote_dir/server.js"; else cp -a "$backup/server.js" "$remote_dir/server.js"; fi
@@ -238,6 +276,12 @@ rollback() {
   else
     cp -a "$backup/10-hardening.conf" "$dropin"
   fi
+  if [[ -f "$backup/no-controller-dropin" ]]; then
+    rm -f "$controller_dropin"
+  else
+    cp -a "$backup/40-controller.conf" "$controller_dropin"
+  fi
+  rm -rf "$code_stage" "$web_stage"
   systemctl daemon-reload
   systemctl restart "$service"
 }
@@ -286,17 +330,23 @@ mv "$code_stage/telemetry-service.js" "$remote_dir/telemetry-service.js"
 mv "$code_stage/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"
 for module in "$code_stage"/*.js; do
   [[ -f "$module" ]] || continue
-  mv "$module" "$remote_dir/"
+  # The staged route smoke imports these modules relative to its own directory.
+  # Retain the complete staging tree until that smoke succeeds.
+  cp -a "$module" "$remote_dir/"
 done
 mkdir -p "$remote_dir/docs"
 rm -rf "$remote_dir/docs/schemas"
 mv "$code_stage/docs/schemas" "$remote_dir/docs/schemas"
-rm -rf "$code_stage"
 (cd "$remote_dir" && node --input-type=module -e "await import('./telemetry-service.js')")
 rm -rf "$remote_dir/web/dist"
 mv "$web_stage" "$remote_dir/web/dist"
 mv "$stats_tmp" "$remote_dir/web/stats.html"
 mv "$hardening_tmp" "$dropin"
+controller_dropin_tmp="$dropin_dir/.40-controller.conf.${stamp}.tmp"
+printf '[Service]\nEnvironmentFile=%s\n' "$controller_env" > "$controller_dropin_tmp"
+chown root:root "$controller_dropin_tmp"
+chmod 644 "$controller_dropin_tmp"
+mv "$controller_dropin_tmp" "$controller_dropin"
 systemctl daemon-reload
 
 if ! systemctl restart "$service" || ! systemctl is-active --quiet "$service"; then
@@ -306,24 +356,48 @@ if ! systemctl restart "$service" || ! systemctl is-active --quiet "$service"; t
   exit 1
 fi
 
-sleep 1
-if ! curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null \
-  || ! curl -fsS http://127.0.0.1:8787/pinvou3/telemetry/healthz >/dev/null; then
+# 有界重试：新版启动（含 controller runtime 初始化）可能超过 1 秒，固定 sleep 会把
+# 「启动稍慢」误判成失败并触发回滚（2026-09-19 实测踩坑）。
+healthy=0
+for _ in $(seq 1 30); do
+  health="$(curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8787/pinvou3/remote/healthz 2>/dev/null || true)"
+  if node -e 'const h=JSON.parse(process.argv[1]); if(!h.ok || h.desktop_controller_enabled !== true) process.exit(1)' "$health" 2>/dev/null \
+    && curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8787/pinvou3/telemetry/healthz >/dev/null; then
+    healthy=1
+    break
+  fi
+  sleep 1
+done
+if [ "$healthy" != "1" ]; then
   trap - ERR
   rollback
   echo "健康检查失败，已从 $backup 回滚" >&2
   exit 1
 fi
+if ! (cd "$remote_dir" && node "$code_stage/scripts/controller-route-smoke.mjs" \
+  "ws://127.0.0.1:8787/pinvou3/remote/ws"); then
+  trap - ERR
+  rollback
+  echo "controller-v1 路由烟测失败，已从 $backup 回滚" >&2
+  exit 1
+fi
+rm -rf "$code_stage"
 trap - ERR
 echo "backup=$backup"
 REMOTE
-)"
+)" || {
+  # 远程步骤失败时把它的 stdout 一并回显，否则 set -e 会在赋值处静默退出，
+  # 现场只剩一个 exit code（2026-09-19 实测踩坑）。
+  printf '%s\n' "$deploy_output" >&2
+  echo "远程部署步骤失败，请检查上方输出" >&2
+  exit 1
+}
 echo "$deploy_output"
 
 backup="$REMOTE_DIR/backups/$STAMP"
 
 rollback_remote() {
-  ssh "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$backup" <<'REMOTE'
+  ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$backup" <<'REMOTE'
 set -euo pipefail
 remote_dir="$1"
 service="$2"
@@ -342,6 +416,8 @@ if [[ -f "$backup/no-package-lock" ]]; then rm -f "$remote_dir/package-lock.json
 if [[ -f "$remote_dir/package.json" ]]; then (cd "$remote_dir" && npm ci --omit=dev); fi
 if [[ -f "$backup/no-telemetry-service" ]]; then rm -f "$remote_dir/telemetry-service.js"; else cp -a "$backup/telemetry-service.js" "$remote_dir/telemetry-service.js"; fi
 if [[ -f "$backup/no-behavior-telemetry-schema" ]]; then rm -f "$remote_dir/behavior-telemetry-schema.js"; else test -f "$backup/behavior-telemetry-schema.js"; cp -a "$backup/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"; fi
+# 与远程部署阶段的 rollback() 保持一致：根目录 JS 是一个发布单元，
+# 公网验证失败时也必须删除新版残留并整体恢复旧集合。
 test -d "$backup/code-js"
 rm -f "$remote_dir"/*.js
 for module in "$backup/code-js"/*.js; do
@@ -357,10 +433,24 @@ else
   test -f "$backup/10-hardening.conf"
   cp -a "$backup/10-hardening.conf" "/etc/systemd/system/${service}.d/10-hardening.conf"
 fi
+if [[ -f "$backup/no-controller-dropin" ]]; then
+  rm -f "/etc/systemd/system/${service}.d/40-controller.conf"
+else
+  test -f "$backup/40-controller.conf"
+  cp -a "$backup/40-controller.conf" "/etc/systemd/system/${service}.d/40-controller.conf"
+fi
 systemctl daemon-reload
 systemctl restart "$service"
 systemctl is-active --quiet "$service"
-curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null
+healthy=0
+for _ in $(seq 1 30); do
+  if curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null 2>&1; then
+    healthy=1
+    break
+  fi
+  sleep 1
+done
+test "$healthy" = 1
 echo "已恢复备份：$backup"
 REMOTE
 }

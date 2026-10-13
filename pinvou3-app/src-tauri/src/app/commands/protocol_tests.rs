@@ -128,7 +128,8 @@ command_protocol!(
         "computer_use_confirm",
         "computer_use_deny",
         "computer_use_set_enabled",
-        "computer_use_request_permissions"
+        "computer_use_request_permissions",
+        "computer_use_permission_status"
     ]
 );
 command_protocol!(
@@ -622,7 +623,8 @@ command_protocol!(
         "install_update",
         "restart_app",
         "cancel_download",
-        "report_pending_update_result"
+        "report_pending_update_result",
+        "commit_pending_update_ready"
     ]
 );
 command_protocol!(
