@@ -93,6 +93,15 @@ func TestPersonalUsageGovernancePublicPostgres(t *testing.T) {
 			t.Fatalf("current release readiness missing: %s", response.Body.String())
 		}
 		input := makeInput(t)
+		// The ordinary notification producer is intentionally stopped. Keep a
+		// real historical event to prove governance does not rewrite or purge it.
+		if _, err = r.pool.Exec(ctx, `INSERT INTO outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at) VALUES($1,'token.usage-reconciliation.retry.v1',$2,1,'{"controlled_history":true}','controlled-history',clock_timestamp())`, uuid.New(), input.Envelope.TargetResourceID); err != nil {
+			t.Fatal(err)
+		}
+		var historyBefore string
+		if err = r.pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.event_id),'[]'::jsonb)::text FROM outbox_events e`).Scan(&historyBefore); err != nil {
+			t.Fatal(err)
+		}
 		result, created, err := r.ExecuteRuntimeTokenCommand(selected("ACTIVE", 1), input)
 		if err != nil || !created || result.Status != "SUCCEEDED" {
 			t.Fatalf("genuine command failed: created=%v err=%v", created, err)
@@ -107,8 +116,12 @@ func TestPersonalUsageGovernancePublicPostgres(t *testing.T) {
 			t.Fatalf("foreign same-key facts accepted: %v", err)
 		}
 		var domain, generic, audits, outbox int
-		if err = r.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM usage_reconciliation_commands WHERE usage_request_id=$1),(SELECT count(*) FROM token_command_results WHERE command_reference=$2),(SELECT count(*) FROM token_audit_logs WHERE summary->>'command_reference'=$3),(SELECT count(*) FROM outbox_events WHERE payload->>'command_reference'=$3)`, input.Envelope.TargetResourceID, result.CommandReference, result.CommandReference.String()).Scan(&domain, &generic, &audits, &outbox); err != nil || domain != 1 || generic != 1 || audits != 2 || outbox != 1 {
+		if err = r.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM usage_reconciliation_commands WHERE usage_request_id=$1),(SELECT count(*) FROM token_command_results WHERE command_reference=$2),(SELECT count(*) FROM token_audit_logs WHERE summary->>'command_reference'=$3),(SELECT count(*) FROM outbox_events WHERE payload->>'command_reference'=$3)`, input.Envelope.TargetResourceID, result.CommandReference, result.CommandReference.String()).Scan(&domain, &generic, &audits, &outbox); err != nil || domain != 1 || generic != 1 || audits != 2 || outbox != 0 {
 			t.Fatalf("atomic receipt/audit differs: domain=%d generic=%d audit=%d outbox=%d err=%v", domain, generic, audits, outbox, err)
+		}
+		var historyAfter string
+		if err = r.pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.event_id),'[]'::jsonb)::text FROM outbox_events e`).Scan(&historyAfter); err != nil || historyAfter != historyBefore {
+			t.Fatal("governance changed historical ordinary events", err)
 		}
 	})
 	t.Run("cas-conflict-rolls-back-result-and-domain", func(t *testing.T) {

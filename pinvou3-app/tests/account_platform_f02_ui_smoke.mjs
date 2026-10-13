@@ -22,7 +22,7 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-f02-ui-'));
 let vite; let browser; let page; let passed = 0;
 const errors = [];
 try {
-  vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } });
+  vite = await createServer({ root, cacheDir: process.env.F04_CLOSE_CACHE || path.join(root, 'node_modules/.vite-f02-ui'), configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } });
   await vite.listen();
   browser = await puppeteer.launch({ executablePath: chrome, headless: 'new', userDataDir: profile, args: ['--disable-gpu', '--no-first-run'] });
   page = await browser.newPage(); page.setDefaultTimeout(10000);
@@ -188,6 +188,71 @@ try {
     assert.ok(await page.evaluate(() => !window.f02.anomalyResolved && document.querySelector('[role=alert]').textContent === window.f02.languageCopy().unknown));
     await page.select('[aria-label=fixture-language]', 'zh'); await page.evaluate(() => { window.f02.unknownAnomaly = false; }); await click('retry'); await page.waitForFunction(() => window.f02.anomalyResolved); await settled();
     assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(item => item.url.endsWith('/resolve')); return calls.length === 2 && calls[0].key === calls[1].key && calls[0].body === calls[1].body && JSON.parse(calls[1].body).resolution === 'RECONCILE_REFUND'; }));
+  });
+  const closePosts = async () => page.evaluate(() => window.f02.calls.filter(call => call.url.endsWith('/close') && call.method === 'POST').length);
+  const personalOrder = async () => { await fresh(); await page.evaluate(() => { window.f02.personalClose = true; }); await click('create'); await page.waitForSelector('article'); await settled(); };
+  await caseRun('Personal pending native-shaped confirm never closes before an explicit choice', async () => {
+    await personalOrder(); await page.evaluate(() => { window.f02.confirmCalls = 0; globalThis.confirm = () => { window.f02.confirmCalls++; return new Promise(() => {}); }; });
+    await click('close'); await page.waitForFunction(() => document.querySelector('[role=alertdialog]') || window.f02.calls.some(call => call.url.endsWith('/close')));
+    assert.equal(await closePosts(), 0, 'pending confirmation cannot dispatch close');
+    assert.equal(await page.evaluate(() => window.f02.confirmCalls), 0, 'feature confirmation must not call the native shim');
+    await page.waitForSelector('[role=alertdialog]'); await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=alertdialog]'));
+    assert.equal(await closePosts(), 0);
+  });
+  for (const language of ['zh', 'en', 'ja']) await caseRun(`Personal close confirmation ${language} cancels safely and accepts exactly its displayed target`, async () => {
+    await personalOrder(); await page.select('[aria-label=fixture-language]', language);
+    await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f02.languageCopy().close).focus());
+    await click('close'); await page.waitForSelector('[role=alertdialog]');
+    assert.ok(await page.evaluate(() => { const dialog = document.querySelector('[role=alertdialog]'); const copy = window.f02.languageCopy(); return dialog.textContent.includes(copy.confirmClose) && dialog.textContent.includes(window.f02.id) && document.activeElement.textContent === copy.cancelClose; }));
+    await page.keyboard.press('Tab'); assert.equal(await page.evaluate(() => document.activeElement.textContent), await page.evaluate(() => window.f02.languageCopy().close));
+    await page.keyboard.press('Tab'); assert.equal(await page.evaluate(() => document.activeElement.textContent), await page.evaluate(() => window.f02.languageCopy().cancelClose));
+    await page.click('[role=alertdialog] button'); await page.waitForFunction(() => !document.querySelector('[role=alertdialog]')); assert.equal(await closePosts(), 0);
+    assert.equal(await page.evaluate(() => document.activeElement.textContent), await page.evaluate(() => window.f02.languageCopy().close));
+    await click('close'); await page.waitForSelector('[role=alertdialog]'); await page.evaluate(() => { const buttons = document.querySelectorAll('[role=alertdialog] button'); buttons[1].click(); buttons[1].click(); });
+    await page.waitForFunction(() => window.f02.calls.some(call => call.url.endsWith('/close'))); await settled(); assert.equal(await closePosts(), 1);
+    assert.ok(await page.evaluate(() => { const call = window.f02.calls.find(call => call.url.endsWith('/close')); return call.url.endsWith(`/recharge/orders/${window.f02.id}/close`) && call.body === '{}' && !call.key; }));
+  });
+  for (const invalidation of ['identity', 'client', 'context', 'permission', 'read-permission', 'unmount']) await caseRun(`Personal pending close is invalidated by ${invalidation}`, async () => {
+    await personalOrder(); await click('close'); await page.waitForSelector('[role=alertdialog]');
+    await page.evaluate(invalidation => { document.querySelector('[aria-label=fixture-language]').focus(); if (invalidation === 'identity') window.f02.switchIdentity(); else if (invalidation === 'unmount') window.f02.unmountPersonal(); else { if (invalidation === 'client') window.f02.alternateClient = true; if (invalidation === 'context') window.f02.contextVersion = 2; if (invalidation === 'permission') window.f02.denyClose = true; if (invalidation === 'read-permission') window.f02.denyPersonalRead = true; window.f02.render('personal'); } }, invalidation);
+    await page.waitForFunction(() => !document.querySelector('[role=alertdialog]')); assert.equal(await closePosts(), 0);
+    if (invalidation !== 'unmount') assert.equal(await page.evaluate(() => document.activeElement.getAttribute('aria-label')), 'fixture-language', 'stale cleanup must not steal focus');
+  });
+  await caseRun('Personal confirmed close rechecks actual time before dispatch', async () => {
+    await personalOrder(); await click('close'); await page.waitForSelector('[role=alertdialog]');
+    await page.evaluate(() => { const now = Date.now; Date.now = () => Date.parse('2099-01-01T00:00:00Z'); try { document.querySelectorAll('[role=alertdialog] button')[1].click(); } finally { Date.now = now; } });
+    await page.waitForFunction(() => !document.querySelector('[role=alertdialog]')); assert.equal(await closePosts(), 0);
+  });
+  await caseRun('Personal read in flight and changed order invalidate the original close', async () => {
+    await personalOrder(); await click('close'); await page.waitForSelector('[role=alertdialog]');
+    await page.evaluate(() => { window.f02.delayedOrder = true; const confirm = document.querySelectorAll('[role=alertdialog] button')[1]; [...document.querySelectorAll('article button')].find(button => button.textContent === window.f02.languageCopy().query).click(); confirm.click(); });
+    await page.waitForFunction(() => typeof window.f02.releaseOrder === 'function'); assert.equal(await closePosts(), 0);
+    await page.evaluate(() => { window.f02.closeStatus = 'PAID'; window.f02.releaseOrder(); }); await settled(); assert.equal(await closePosts(), 0); assert.equal(await page.$('[role=alertdialog]'), null);
+  });
+  await caseRun('Personal unknown create retains original key while no close can be confirmed', async () => {
+    await personalOrder(); await click('close'); await page.waitForSelector('[role=alertdialog]');
+    await page.evaluate(() => { window.f02.unknownCreate = true; [...document.querySelectorAll('form button')].find(button => button.textContent === window.f02.languageCopy().create).click(); });
+    await page.waitForSelector('[role=alert]'); await settled(); assert.equal(await page.$('[role=alertdialog]'), null); assert.equal(await closePosts(), 0);
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f02.languageCopy().close)?.disabled), true);
+    await page.evaluate(() => { window.f02.unknownCreate = false; }); await click('retry'); await settled();
+    assert.ok(await page.evaluate(() => { const posts = window.f02.calls.filter(call => call.method === 'POST' && call.url.endsWith('/recharge/orders')); return posts.length === 3 && posts[1].key === posts[2].key && posts[1].body === posts[2].body; })); assert.equal(await closePosts(), 0);
+  });
+  await caseRun('Personal target replacement requires a new explicit confirmation', async () => {
+    await personalOrder(); await click('close'); await page.waitForSelector('[role=alertdialog]');
+    // Capture actual rendered callbacks to exercise a delayed invocation after replacement.
+    await page.evaluate(() => {
+      const buttons = document.querySelectorAll('[role=alertdialog] button');
+      const props = button => button[Object.keys(button).find(key => key.startsWith('__reactProps$'))];
+      window.f02.staleCancel = props(buttons[0]).onClick; window.f02.staleConfirm = props(buttons[1]).onClick;
+      const rows = [...document.querySelectorAll('table')][0].querySelectorAll('tbody tr');
+      [...rows].find(row => row.textContent.includes('controlled-alternate-order')).querySelector('button').click();
+    }); await settled();
+    assert.equal(await page.$('[role=alertdialog]'), null); assert.equal(await closePosts(), 0); await click('close'); await page.waitForSelector('[role=alertdialog]');
+    assert.ok(await page.$eval('[role=alertdialog]', element => element.textContent.includes(window.f02.other)));
+    await page.evaluate(() => { window.f02.staleConfirm(); window.f02.staleCancel(); });
+    assert.equal(await closePosts(), 0); assert.ok(await page.$('[role=alertdialog]'), 'old callbacks must not consume or cancel the new intent');
+    await page.evaluate(() => document.querySelectorAll('[role=alertdialog] button')[1].click()); await settled();
+    assert.equal(await closePosts(), 1); assert.ok(await page.evaluate(() => window.f02.calls.find(call => call.url.endsWith('/close')).url.endsWith(`/orders/${window.f02.other}/close`)));
   });
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } catch (error) {

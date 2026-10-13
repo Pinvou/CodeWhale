@@ -67,6 +67,42 @@ func (r *PostgresRepository) fenceExpiredHold(ctx context.Context, identity hold
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return holdexpiry.Proof{}, err
 		}
+		if usage.ExecutionStatus == "REVIEW" && usage.ErrorClass != nil && *usage.ErrorClass == "cancel_hold_recovery_unconfirmed" {
+			// User cancellation may have lost a release ACK before an expiry
+			// proof exists. Only the original, locally fenced command and its
+			// exact immutable evidence authorize the existing recovery path.
+			// A REVIEW label, absent hold ACK, or persisted dispatch is not proof.
+			if unused != nil {
+				return holdexpiry.Proof{}, ErrForbidden
+			}
+			var locallyFenced bool
+			err = tx.QueryRow(ctx, `SELECT cancel_status='CANCEL_REQUESTED'
+ AND delivery_status='USER_STOPPED' AND cancellation_origin='USER'
+ AND cancel_requested_at=user_stopped_at
+ AND NOT EXISTS(SELECT 1 FROM usage_dispatch_intents intent WHERE intent.usage_request_id=usage_requests.id)
+ AND EXISTS(SELECT 1 FROM usage_cancel_commands command
+ JOIN usage_cancellation_evidence evidence ON evidence.usage_request_id=command.usage_request_id
+ WHERE command.usage_request_id=usage_requests.id AND command.user_id=usage_requests.user_id
+ AND command.cancellation_version=1 AND command.request_fingerprint=$2
+ AND command.created_at=usage_requests.cancel_requested_at AND evidence.occurred_at=command.created_at
+ AND evidence.evidence_type='CANCEL_REQUESTED' AND btrim(evidence.adapter_version)<>''
+ AND evidence.provider_id IS NULL AND evidence.upstream_reference_digest IS NULL
+ AND evidence.sanitized_evidence=jsonb_build_object('capability','LOCAL_PRE_DISPATCH','pre_dispatch',true))
+ FROM usage_requests WHERE id=$1`, usage.ID, cancellationFingerprint(usage.ID)).Scan(&locallyFenced)
+			if err != nil {
+				return holdexpiry.Proof{}, err
+			}
+			if !locallyFenced {
+				return holdexpiry.Proof{}, ErrForbidden
+			}
+			if err = transitionExecutionTx(ctx, tx, usage.ID, []string{"REVIEW"}, "HOLD_RESERVED", "retry locally fenced expiry release", r.now()); err != nil {
+				return holdexpiry.Proof{}, err
+			}
+			if _, err = tx.Exec(ctx, `UPDATE usage_requests SET status='RESERVED',settlement_status='HOLD_ACTIVE',updated_at=$2 WHERE id=$1`, usage.ID, r.now()); err != nil {
+				return holdexpiry.Proof{}, err
+			}
+			usage.ExecutionStatus = "HOLD_RESERVED"
+		}
 		if unused != nil && usage.ExecutionStatus != "DISPATCH_INTENT_PERSISTED" {
 			return holdexpiry.Proof{}, ErrForbidden
 		}

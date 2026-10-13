@@ -203,9 +203,18 @@ jobs:
           filters: |
             account_platform:
               - 'account-platform/**'
+              - 'pinvou3-app/src/features/account-platform/AccountPlatformView.jsx'
+              - 'pinvou3-app/src/features/account-platform/account-closure-flow.js'
+              - 'pinvou3-app/src/features/account-platform/AdminPlatformView.jsx'
+              - 'pinvou3-app/src/features/account-platform/AccountClosureWorkspace.jsx'
+              - 'pinvou3-app/src/features/account-platform/AdminAccountClosureWorkspace.jsx'
+              - 'pinvou3-app/src/shared/account-closure-i18n.js'
+              - 'pinvou3-app/src/shared/i18n.js'
               - 'scripts/account-platform*'
               - 'scripts/check-token-management-authorization-coverage.mjs'
               - 'scripts/tests/token-management-authorization-coverage.test.mjs'
+              - 'scripts/check-account-platform-authorization-coverage.mjs'
+              - 'scripts/tests/account-platform-authorization-coverage.test.mjs'
               - '.github/workflows/pr-check.yml'
               - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
@@ -791,6 +800,16 @@ jobs:
         run: |
           node scripts/check-token-management-authorization-coverage.mjs
           node --test scripts/tests/token-management-authorization-coverage.test.mjs
+
+      - name: Verify Account closure source and API contracts
+        run: |
+          npm --prefix account-platform ci --ignore-scripts --no-audit --fund=false
+          npm --prefix account-platform run test:closure-contracts
+
+      - name: Verify Account Platform authorization contracts
+        run: |
+          node scripts/check-account-platform-authorization-coverage.mjs
+          node --test scripts/tests/account-platform-authorization-coverage.test.mjs
 
       - name: Keycloak provisioning and theme contracts
         shell: bash

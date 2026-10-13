@@ -1,4 +1,5 @@
 import React from 'react';
+import '../../src/features/account-platform/account-platform.css';
 import { createRoot } from 'react-dom/client';
 import { PersonalFinanceWorkspace } from '../../src/features/account-platform/PersonalFinanceWorkspace.jsx';
 import { AdminFinanceWorkspace } from '../../src/features/account-platform/AdminFinanceWorkspace.jsx';
@@ -14,6 +15,8 @@ const json = (value, status = 200) => new Response(status === 204 ? null : JSON.
 const control = { id, other, user: id, calls: [], kind: 'personal', language: 'en', unknownCreate: false, unknownRefund: false, wrongRefund: false, plan: false, delayedCreate: false, approvalStatus: 'DRAFT', approvalVersion: 1, approvalCommand: 'WALLET_ADJUSTMENT', approval202: false, approvalCreated: false, publishOnly: false };
 Object.assign(control, { financeRecovery: false, expiredCursor: false, replacementRequester: id, replacementWallet: id, unknownAdjustment: false });
 const personal = new AccountPlatformBffClient();
+const alternatePersonal = new AccountPlatformBffClient();
+const pendingOrder = orderID => ({ ...order(), order_id: orderID, product_id: orderID === other ? 'controlled-alternate-order' : 'controlled-original-order', status: control.closeStatus || 'PENDING', close_status: control.orderCloseStatus || 'OPEN', expires_at: control.closeExpires || '2099-01-01T00:00:00Z' });
 const admin = new AdminPlatformClient(); admin.csrfToken = 'CONTROL_SYNTHETIC_CSRF';
 const order = () => ({ order_id: id, amount_fen: '9007199254740993', status: 'PAID', fulfillment_status: 'CREDITED', attention_summary: 'NORMAL' });
 const pkg = () => ({ package_id: id, source_payment_transaction_id: id, source_type: 'PAYMENT', status: 'ACTIVE', points_remaining_microcredits: '1000000', points_used_microcredits: '0', components: [{ component_type: control.plan ? 'PLAN' : 'BASE' }] });
@@ -39,11 +42,21 @@ globalThis.fetch = async (url, options = {}) => {
     if (url.endsWith(`/api/admin/approvals/requests/${other}`)) return json({ ...approval(), approval_request_id: other, target: { resource_type: 'MANUAL_ADJUSTMENT', resource_id: control.newApproval.target_resource_id }, command: control.newApproval.normalized_command });
     if (url.includes(`/api/admin/approvals/requests/${other}/actions/`)) { control.approvalStatus = 'SUBMITTED'; control.approvalVersion++; return json(null, 204); }
   }
+  if (control.personalClose && /\/v1\/recharge\/orders\/[^/?]+\/close$/.test(url) && method === 'POST') {
+    const target = url.split('/').at(-2);
+    const respond = () => json({ ...pendingOrder(target), status: 'CLOSED', close_status: 'LOCALLY_CLOSED_EXTERNAL_PENDING' });
+    return control.delayedClose ? new Promise(resolve => { control.releaseClose = () => resolve(respond()); }) : respond();
+  }
+  if (control.personalClose && url.endsWith('/v1/recharge/orders') && method === 'GET') return json({ items: [pendingOrder(id), pendingOrder(other)] });
+  if (control.personalClose && (url.endsWith(`/v1/recharge/orders/${id}`) || url.endsWith(`/v1/recharge/orders/${other}`))) {
+    const respond = () => json(pendingOrder(url.split('/').at(-1)));
+    return control.delayedOrder ? new Promise(resolve => { control.releaseOrder = () => resolve(respond()); }) : respond();
+  }
   if (url.includes('/recharge/products')) return json({ items: [{ product_id: 'personal-base', display_name_en: 'Controlled product', display_name_zh_cn: '受控商品', display_name_ja: 'テスト商品', amount_fen: '100', channels: ['ALIPAY'] }] });
   if (url.includes('/payment-capabilities')) return json({});
   if (url.endsWith('/v1/me/entitlement-packages')) return json({ items: [pkg()] });
   if (url.endsWith('/v1/recharge/orders') && method === 'POST') {
-    const respond = () => control.unknownCreate ? json({ code: 'UPSTREAM_UNAVAILABLE' }, 503) : json({ ...order(), status: 'PENDING', close_status: 'OPEN', expires_at: '2099-01-01T00:00:00Z', payment_url: 'javascript:alert(1)', qr_data: 'data:image/svg+xml;base64,PHN2Zz4=' }, 201);
+    const respond = () => control.unknownCreate ? json({ code: 'UPSTREAM_UNAVAILABLE' }, 503) : json({ ...order(), status: 'PENDING', close_status: 'OPEN', expires_at: control.closeExpires || '2099-01-01T00:00:00Z', payment_url: 'javascript:alert(1)', qr_data: 'data:image/svg+xml;base64,PHN2Zz4=' }, 201);
     return control.delayedCreate ? new Promise(resolve => { control.releaseCreate = () => resolve(respond()); }) : respond();
   }
   if (url.endsWith('/v1/recharge/orders')) return json({ items: [] });
@@ -91,13 +104,14 @@ globalThis.fetch = async (url, options = {}) => {
   throw new Error('UNEXPECTED_CONTROLLED_ROUTE');
 };
 function render() {
-  const me = { user_id: control.user, platform_authorization_version: 1, personal_permissions: ['personal.billing.read', 'personal.recharge.create'], platform_permissions: ['platform.billing.wallets.read', 'platform.billing.orders.sync', 'platform.billing.repairs.request', 'platform.billing.adjustments.approve', 'platform.billing.payment-controls.resume.approve', 'platform.billing.payment-controls.resume.request', 'platform.products.read', 'platform.products.create', 'platform.products.publish'], active_context: { scope: 'PERSONAL', context_version: 1, personal_authorization_version: 1, personal_permissions: ['personal.billing.read', 'personal.recharge.create'] } };
+  const me = { user_id: control.user, platform_authorization_version: 1, personal_permissions: [...(control.denyPersonalRead ? [] : ['personal.billing.read']), 'personal.recharge.create', ...(control.denyClose ? [] : ['personal.recharge.manage'])], platform_permissions: ['platform.billing.wallets.read', 'platform.billing.orders.sync', 'platform.billing.repairs.request', 'platform.billing.adjustments.approve', 'platform.billing.payment-controls.resume.approve', 'platform.billing.payment-controls.resume.request', 'platform.products.read', 'platform.products.create', 'platform.products.publish'], active_context: { scope: 'PERSONAL', context_version: control.contextVersion || 1, personal_authorization_version: control.personalVersion || 1, personal_permissions: [...(control.denyPersonalRead ? [] : ['personal.billing.read']), 'personal.recharge.create', ...(control.denyClose ? [] : ['personal.recharge.manage'])] } };
   if (control.publishOnly) me.platform_permissions = ['platform.products.read', 'platform.products.publish'];
-  const client = control.kind === 'personal' ? personal : admin;
+  const client = control.kind === 'personal' ? (control.alternateClient ? alternatePersonal : personal) : admin;
   root.render(<><select aria-label="fixture-language" value={control.language} onChange={event => { control.language = event.target.value; render(); }}>{['en', 'zh', 'ja'].map(value => <option key={value}>{value}</option>)}</select>{control.kind === 'personal' ? <PersonalFinanceWorkspace key={control.user} {...{ client, me }} language={control.language} /> : control.kind === 'products' ? <RechargeProductWorkspace {...{ client, me }} copy={financeCopy[control.language]} language={control.language} /> : <AdminFinanceWorkspace {...{ client, me }} language={control.language} />}</>);
 }
 control.render = kind => { control.kind = kind; render(); };
 control.languageCopy = () => financeCopy[control.language];
+control.unmountPersonal = () => root.render(null);
 control.switchIdentity = () => { control.user = other; render(); };
 control.setAdminEpoch = value => { admin.financeSessionEpoch = value; render(); };
 window.f02 = control; render();

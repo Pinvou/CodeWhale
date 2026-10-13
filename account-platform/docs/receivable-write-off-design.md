@@ -118,7 +118,7 @@
 
 ## 10. 迁移、N/N-1 与回滚
 
-- F11 已发布的迁移身份保持不变：Account `000072_receivable_write_off_consumer_route`、Billing `000063_receivable_write_off_cases` 与 `000064_receivable_write_off_proof_claim_allowlist`，各有 up/down，共六条。本轮不修改任何一条 SQL；**不改** `receivables`/`receivable_allocations`/`wallets` 的列与 CHECK，不改 `000025/000045/000054/000060`。
+- F11 已发布的迁移身份保持不变：Account `000072_receivable_write_off_consumer_route`、Billing `000063_receivable_write_off_cases` 与 `000064_receivable_write_off_proof_claim_allowlist`，各有 up/down，共六条；另保留前向 owner 锁迁移 `900015_receivable_activation_execution_lock` 的 up/down 身份。该无参数锁在原执行事务内固定 activation 版本，Down 明确拒绝；运行身份仅 USAGE/EXECUTE，停用沿原 INACTIVE 运维合同。本轮不修改任何一条 SQL；**不改** `receivables`/`receivable_allocations`/`wallets` 的列与 CHECK，不改 `000025/000045/000054/000060`。
 - N/N-1：先部署可读新表的 Billing，再部署 proof 端与执行器/消费者，最后业务页；旧客户端与旧 writer 行为不变（本命令未激活时不产生任何新行）。
 - 回滚：只允许停止消费者、把 activation 行翻回 `INACTIVE`；已产生的 case/allocation/journal 一律保留可读，禁止破坏性 down。
 - 未通过 GSA-38～40 且未取得独立生产授权前，不部署、不激活。

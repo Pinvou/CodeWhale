@@ -54,6 +54,12 @@ func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, u
 		}
 		return CancellationResult{}, false, err
 	}
+	// A Billing expiry fence can precede the user's first command. Retain
+	// its pending cancellation facts rather than replacing them with
+	// UNSUPPORTED; only the existing proof/recovery owner may confirm release.
+	if usage.ExecutionStatus == "REVIEW" && usage.ErrorClass != nil && *usage.ErrorClass == "cancel_hold_recovery_unconfirmed" && usage.CancelStatus == "CANCEL_REQUESTED" {
+		return cancellationSnapshot(usage), false, tx.Commit(ctx)
+	}
 	terminal := usage.ExecutionStatus == "SUCCEEDED" || usage.ExecutionStatus == "FAILED" || usage.ExecutionStatus == "CANCELLED_BEFORE_DISPATCH"
 	if terminal {
 		if _, err := tx.Exec(ctx, `UPDATE usage_requests SET cancel_status='ALREADY_TERMINAL',cancel_requested_at=$2,updated_at=$2 WHERE id=$1`, usageID, now); err != nil {

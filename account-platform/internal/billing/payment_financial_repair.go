@@ -271,7 +271,10 @@ payload_digest,merge_result,payload_snapshot,evidence_key,received_at FROM payme
 	if err := source.QueryRow(ctx, `SELECT id FROM payment_transactions
 WHERE payment_order_id=$1 AND fulfillment_status='REVIEW_REQUIRED' AND provider_transaction_id=$2`,
 		plan.OrderID, providerTransactionID).Scan(&plan.ReviewTransactionID); err != nil {
-		return PaymentFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+		if errors.Is(err, pgx.ErrNoRows) {
+			return PaymentFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+		}
+		return PaymentFinancialRepairPlan{}, err
 	}
 	var walletStatus string
 	if err := source.QueryRow(ctx, `SELECT status,posted_microcredits,version FROM wallets WHERE id=$1`, plan.WalletID).

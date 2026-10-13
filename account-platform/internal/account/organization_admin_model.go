@@ -76,7 +76,7 @@ type organizationAdminRepository interface {
 	AdminOrganizationDeletionBlockers(context.Context, uuid.UUID) ([]OrganizationLifecycleBlocker, error)
 	AdminRenameOrganization(context.Context, identity.Principal, uuid.UUID, string) error
 	AdminSetOrganizationStatus(context.Context, identity.Principal, uuid.UUID, string) error
-	AdminDeleteOrganization(context.Context, identity.Principal, uuid.UUID, string) error
+	AdminDeleteOrganization(context.Context, identity.Principal, uuid.UUID, int64, string) error
 	AdminUnits(context.Context, uuid.UUID) (UnitTree, error)
 	AdminUnitState(context.Context, uuid.UUID, uuid.UUID) (UnitMutationResult, error)
 	AdminMembers(context.Context, uuid.UUID, AdminMemberFilter) (AdminMemberPage, error)
