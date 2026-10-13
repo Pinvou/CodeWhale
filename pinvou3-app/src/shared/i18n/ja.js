@@ -5,6 +5,7 @@
 
 import { dictEn } from './en.js';
 import { browserJa } from './browser.js';
+import { CHAT_RECOVERY_COPY } from './chat-recovery.js';
 
 const conversationJa = {
   completed:'完了', failed:'失敗', interrupted:'中断', cancelled:'キャンセル済み', limitReached:'上限に到達', processing:'処理中', processingActive:'処理中',
@@ -182,6 +183,7 @@ const acpProvidersJa = {
 };
 
 const jaBase = {
+  steerFailedLost: CHAT_RECOVERY_COPY.ja.steerFailedLost,
   ...browserJa,
         langTag: 'ja',
         acpAgent: 'ACP Agent',
@@ -285,6 +287,7 @@ const jaBase = {
         modelPresetDeepseek: 'DeepSeek',
         modelPresetKimi: 'Kimi',
         modelPresetOpenaiCompatible: 'OpenAI 互換',
+        modelPresetOpenaiResponses: 'OpenAI Responses 互換',
         modelPresetOpenai: 'OpenAI',
         modelPresetAnthropic: 'Anthropic Claude',
         modelPresetGemini: 'Google Gemini',
@@ -490,7 +493,7 @@ const jaBase = {
           sourceTest: 'テストストア',
         },
         uiToolStore: { title:'プラグインセンター', search:'コネクター、スキル、プラグインを検索', myTools:'マイプラグイン', installedOnly:'インストール済みのみ', results:'検索結果', back:'プラグインセンターに戻る', internal:'社内限定 · 従業員向け', internalTitle:'H3C オフィス連携\nワンクリック接続', internalDesc:'本人の SSO ID で社内システムに接続。キー入力は不要です', internalTools:'H3C 社内プラグイン', internalCount:n=>`${n} 個のプラグイン · 社内ネットワーク必須`, view:'表示', modePlain:'通常セッション', modeCode:'コードセッション', modeVisibilityHint:'セッションモードごとにプラグインの表示を設定', manageVisibility:'表示を管理', doneManagingVisibility:'完了', guide:{ title:'プラグインガイド', close:'閉じる', dragTitle:'ドラッグでインストール', dragDesc:'標準スキル、単一の .md、MCP サービス、または Pinvou プラグインの .zip をこのウィンドウに直接ドラッグするとインポートできます。右上の「アップロード」でファイルを選ぶこともできます。', typesTitle:'対応形式', types:['標準スキル（SKILL.md フォルダ）','単一の .md スキルファイル','MCP サービス','Pinvou プラグインパッケージ（推奨）'], formatsNote:'標準スキル、.md、MCP、Pinvou プラグインパッケージはすべてインポート可能です。Pinvou プラグインパッケージは推奨の標準形式であり、それ以外は自動で正規化されます。', dragHintShort:'パッケージをドラッグしてカスタムプラグインを追加', introTitle:'Pinvou プラグインパッケージとは', introDesc:'1 パッケージ = 1 カード = 1 スイッチ。スキル、MCP サービス（またはその組み合わせ）を zip にまとめ、インポート時に内容から型を自動判定・検証して登録し、ストアとランタイムで統一してオン/オフ・アンインストールします。', specTitle:'プラグインパッケージ仕様', specDesc:'完全な仕様は「プラグインパッケージ仕様」を参照：zip レイアウト、plugin.json（schema v1）、mcp manifest.json、SKILL.md、アイコン、命名の安全性。', downloadSpec:'仕様書をダウンロード（Markdown）', downloadHint:'ダウンロードしてサードパーティの作者に配布できます。デスクトップ版では保存ダイアログが開きます。' } },
-        artifactPreview: { download:'↓ ダウンロード', openExternal:'↗ 外部で開く', loading:'読み込み中…', fileMissing:'ファイルが存在しないか削除されました', readFailed:e=>`読み取りに失敗: ${e}`, imageReadFailed:e=>`画像の読み取りに失敗: ${e}`, previewUnsupported:'このタイプはプレビューに対応していません', downloadArtifact:'↓ 成果物をダウンロード', openExternalArtifact:'↗ 外部で開く' },
+        artifactPreview: { download:'↓ ダウンロード', openExternal:'↗ 外部で開く', loading:'読み込み中…', fileMissing:'ファイルが存在しないか削除されました', readFailed:e=>`読み取りに失敗: ${e}`, imageReadFailed:e=>`画像の読み取りに失敗: ${e}`, previewUnsupported:'このタイプはプレビューに対応していません', visualWarningTruncatedPages:'ページ数が多いため、先頭30ページのみを描画します', visualWarningConvertFailed:'このファイルはプレビューできません（変換に失敗したか、描画コンポーネントがありません）', downloadArtifact:'↓ 成果物をダウンロード', openExternalArtifact:'↗ 外部で開く' },
         uiToolDetails: { tools:{
           ima:{ title:'Tencent ima', subtitle:'OpenAPI で ima のノートとナレッジベースを操作', latency:'クラウド', desc:'Tencent ima OpenAPI Skill に接続し、ノートの検索、閲覧、作成、追記や、ナレッジベースの検索、閲覧、Web ページとコンテンツの追加ができます。認証情報はこの端末だけに保存されます。', configTitle:'Tencent ima に接続', configDescription:'認証情報はこの端末だけに保存され、IMA OpenAPI Skill の有効化にのみ使用されます。', configDocLabel:'Client ID / API Key を取得', welcomeQueries:['ima のナレッジベースを検索','ima のノート一覧を表示','この内容から ima ノートを作成','ima のナレッジベースで製品案を検索'] },
           tmeet:{ title:'Tencent Meeting', subtitle:'本人として会議、録画、議事録、参加レポートを管理', type:'CLI + 公式 Skill', latency:'クラウド', desc:'Tencent Meeting 公式 CLI と Skill に接続し、会議の作成、検索、変更、キャンセルや、参加レポート、録画、文字起こし、AI 議事録の取得ができます。接続すると認証ページが開き、QR コードでログインします。', welcomeQueries:['Tencent Meeting を作成','Tencent Meeting の録画を検索','最近の会議の AI 議事録を表示','Tencent Meeting の参加者を確認'] },
@@ -504,6 +507,13 @@ const jaBase = {
           settingsHint:'有効にすると、アシスタントはスクリーンショットの撮影とマウス・キーボードの操作ができ、誤操作のリスクがあります。各セッションで最初の操作の前に再度同意を求め、重要な操作は都度確認が必要です。',
           platformUnsupportedHint:'このプラットフォームにはコンピュータ操作のバックエンドがないため、この機能は利用できません。',
           settingsStoppedHint:'コンピュータ操作は停止中です。オフにしてから再度オンにすると、アシスタントの操作を再開できます。',
+          permTitle:'macOSのシステム権限',
+          permScreenRecording:'画面収録（スクリーンショット）',
+          permAccessibility:'アクセシビリティ（マウスとキーボード操作）',
+          permGranted:'許可済み',
+          permNotGranted:'未許可',
+          permRequest:'システム許可ダイアログを開く',
+          permRestartHint:'システム権限は新しく起動したプロセスにのみ反映されます。許可後はアプリを完全に終了して再度起動してください。',
           bannerTitle:'アシスタントがコンピュータを操作中です',
           bannerNote:'アシスタントは画面を確認し、マウスとキーボードを操作できます。いつでも停止できます。',
           bannerStop:'操作を停止',
@@ -528,7 +538,6 @@ const jaBase = {
           confirmKeyChordMasked:(chord, count)=>chord?`${chord} + マスクされた${count}文字を押す`:`マスクされた${count}文字を押す`,
           confirmHoldKeyMasked:(chord, count, ms)=>chord?`${chord} + マスクされた${count}文字を ${ms} ミリ秒押す`:`マスクされた${count}文字を ${ms} ミリ秒押す`,
           confirmDrag:(from, to)=>`${from} から ${to} までドラッグ`,
-          confirmMouseMove:point=>`マウスを ${point} に移動`,
           confirmMouseDown:button=>`${button}ボタンを押す`,
           confirmMouseUp:button=>`${button}ボタンを離す`,
           screenshotCaption:'スクリーンショット',
@@ -770,7 +779,7 @@ const jaBase = {
         apBtnOpen: '開く', apBtnLocate: '場所を開く', apLocLabel: '場所', apMtimeLabel: '更新日時', apLastMod: '更新',
         apConverting: 'プレビューを生成中…', apConvertFail: 'プレビュー生成に失敗', apUnsupported: 'この形式は埋め込みプレビュー非対応。下の「開く」をご利用ください',
         apKinds: { md:'Markdown', html:'HTML 文書', image:'画像', pdf:'PDF 文書', docx:'Office 文書', xlsx:'スプレッドシート', legacy_office:'Office 文書', text:'テキスト', binary:'ファイル' },
-        apMdSaved: '保存済み', apMdSaving: '保存中...', apMdDirty: '未保存', apMdSaveFailed: '保存に失敗',
+        apMdSaving: '保存中...', apMdDirty: '未保存', apMdSaveFailed: '保存に失敗',
         apMdExternalUpdateBlocked: 'ファイルは外部で更新されました。未保存の編集があるため自動上書きしませんでした。',
         apMdExternalRemovalBlocked: 'ファイルは外部で削除されました。未保存の編集はこのエディターに保持されています。内容をコピーするか、元のファイルを復元してください。',
         apMdAiEdit: 'AI 編集', apMdAiInstructionPlaceholder: 'どう編集しますか？',
@@ -934,6 +943,7 @@ Object.assign(dictJa.uiConversation, {
   feedbackNegative: '役に立たなかった',
   retryReply: '再生成',
   callingTool: name => `${name} を呼び出し中`,
+  copyCode: 'コードをコピー',
   inputPlaceholder: '入力してください',
   otherAnswer: 'その他',
   otherPlaceholder: 'その他',
@@ -1269,6 +1279,7 @@ Object.assign(dictJa.uiSettingsDetail, {
     siliconflow:{title:'SiliconFlow China',configTitle:'SiliconFlow',desc:'SiliconFlow 中国公式 API'},
     siliconflow_global:{title:'SiliconFlow Global',configTitle:'SiliconFlow Global',desc:'SiliconFlow 国際 API（キーは地域別）'},
     openai_compatible:{title:'OpenAI Compatible',desc:'カスタム OpenAI 互換エンドポイント'},
+    openai_responses:{title:'OpenAI Responses Compatible',desc:'カスタム OpenAI Responses 互換エンドポイント'},
   },
   imageCapability:'画像入力', imageCapabilityEnabled:'画像対応', imageCapabilityDisabled:'画像非対応', imageCapabilityPinvou:'自動処理',
   visionModel:'ビジョンモデル', visionModelNone:'なし', visionModelDesc:'現在のモデルが画像を扱えない場合、このモデルで画像を解析します',
@@ -1329,9 +1340,9 @@ Object.assign(dictJa.uiSettingsDetail.modelDescriptions, {
   '正式旗舰，夜间 22:00-08:00 四折（个人版）':'正式フラッグシップ、22:00-08:00 は通常の 40%（個人版）',
   '轻量兼容款，支持图像输入':'軽量互換モデル、画像入力対応',
   '最新推荐，统一模型 ID 自动升级':'最新の推奨モデル、統一モデル ID で自動更新', '低成本低时延，效果比肩 2-1-pro':'低コスト・低レイテンシ、2-1-pro に匹敵',
-  '编程特化（预览），官方即将下线':'コーディング特化（プレビュー）。公式によりまもなく提供終了予定', '稳定通用，官方即将下线':'安定した汎用モデル。公式によりまもなく提供終了予定', '最强旗舰；仅 Responses 协议支持函数调用':'最強フラッグシップ。関数呼び出しは Responses API のみ',
-  '编码与 Agent 新旗舰；Chat 协议仅 effort=none 支持函数调用':'コーディング/ Agent の新フラッグシップ。Chat プロトコルの関数呼び出しは effort=none のみ',
-  '低价高效；Chat 协议仅 effort=none 支持函数调用':'低価格かつ高速。Chat プロトコルの関数呼び出しは effort=none のみ',
+  '编程特化（预览），官方即将下线':'コーディング特化（プレビュー）。公式によりまもなく提供終了予定', '稳定通用，官方即将下线':'安定した汎用モデル。公式によりまもなく提供終了予定', '最强旗舰':'最強フラッグシップ',
+  '编码与 Agent 新旗舰（默认）':'コーディング/ Agent の新フラッグシップ（デフォルト）',
+  '低价高效':'低価格かつ高速',
   'GPT-5.6 家族旗舰，推理与编码':'GPT-5.6 ファミリーのフラッグシップ、推論とコーディング',
   '最强旗舰，高难推理与长程 Agent':'最強フラッグシップ、高難度推論と長時間エージェント',
   '上代旗舰，兼容保留':'前世代フラッグシップ、互換性のため保持', '官方默认推荐，复杂 Agent 编码':'公式のデフォルト推奨、複雑なエージェントコーディング',
@@ -1350,7 +1361,7 @@ dictJa.uiSettingsDetail.modelAliasPlaceholder = '任意（例：日常アシス�
 
 dictJa.uiSettingsDetail.customModelTitles = {
   glm:'カスタム GLM モデル', qwen:'カスタム Qwen モデル',
-  openai_compatible:'カスタム互換モデル', glm_coding_plan:'カスタム GLM Coding Plan モデル',
+  openai_compatible:'カスタム互換モデル', openai_responses:'カスタム Responses モデル', glm_coding_plan:'カスタム GLM Coding Plan モデル',
   tencent_coding_plan:'カスタム Tencent Cloud Coding Plan モデル', tencent_token_plan:'カスタム Tencent Cloud Token Plan モデル', kimi_coding_plan:'カスタム Kimi Coding Plan モデル',
   volcengine_coding_plan:'カスタム Volcengine Ark Coding Plan モデル', qwen_coding_plan:'カスタム Qwen Coding Plan モデル',
   openrouter:'カスタム OpenRouter モデル', siliconflow:'カスタム SiliconFlow モデル', siliconflow_global:'カスタム SiliconFlow モデル',

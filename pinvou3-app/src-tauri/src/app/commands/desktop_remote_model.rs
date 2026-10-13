@@ -15,7 +15,7 @@ use crate::features::remote_control::controller::controlled::ControlledDeviceMan
 use crate::features::remote_control::controller::protocol::LeaseContext;
 use crate::features::remote_control::controller::temporary_model::{
     SharedTemporaryModelStore, TemporaryModelBinding, TemporaryModelError, TemporaryModelPackageV1,
-    TemporaryModelStore, export_decision, project_saved_model,
+    TemporaryModelStore, export_decision, project_saved_model, project_vision_saved_model,
 };
 use crate::platform::credential_store::{CredentialStore, SystemCredentialStore};
 use crate::platform::prefs::{SavedModel, UserPrefs};
@@ -87,7 +87,7 @@ pub(crate) fn build_task_package(
             task_id: task_id.to_owned(),
         },
         primary: project_saved_model(primary)?,
-        vision_fallback: vision.map(project_saved_model).transpose()?,
+        vision_fallback: vision.map(project_vision_saved_model).transpose()?,
     };
     package.validate()?;
     Ok(package)
@@ -143,7 +143,7 @@ fn prepare_export_models(
     // use exactly the same acceptance boundary.
     project_saved_model(&primary)?;
     if let Some(vision) = vision.as_ref() {
-        project_saved_model(vision)?;
+        project_vision_saved_model(vision)?;
     }
     Ok((primary, vision))
 }
@@ -662,6 +662,27 @@ mod tests {
                 .unwrap_err()
                 .code,
             "model_vision_reference_nested"
+        );
+    }
+
+    #[test]
+    fn responses_primary_exports_but_responses_vision_fails_before_submission() {
+        let mut primary = model("primary");
+        primary.preset = crate::platform::prefs::ModelPreset::OpenaiResponses;
+        primary.base_url = "https://responses.example.test/v1".into();
+        primary.model = "fixture-responses-model".into();
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models = vec![primary.clone()];
+        prepare_export_models(&prefs, primary.clone(), &NoCredentials).unwrap();
+        let mut vision = primary.clone();
+        vision.id = "vision".into();
+        primary.vision_model_id = Some(vision.id.clone());
+        prefs.advanced.saved_models = vec![primary.clone(), vision];
+        assert_eq!(
+            prepare_export_models(&prefs, primary, &NoCredentials)
+                .unwrap_err()
+                .code,
+            "model_wire_api_unsupported"
         );
     }
 
