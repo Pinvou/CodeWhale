@@ -57,7 +57,9 @@ export function requireCompleteCoverage(coverage) {
   if (!coverage || !Number.isSafeInteger(coverage.total) || coverage.total <= 0
     || coverage.migrated !== coverage.total || coverage.not_migrated !== 0
     || coverage.coverage_percent !== 100) {
-    throw Object.assign(new Error("legacy_endpoint_coverage_incomplete"), { code: "legacy_endpoint_coverage_incomplete" });
+    const error = new Error("legacy_endpoint_coverage_incomplete");
+    error.code = "legacy_endpoint_coverage_incomplete";
+    throw error;
   }
 }
 
