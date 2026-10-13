@@ -30,17 +30,17 @@ $ErrorActionPreference = 'Stop'
 $target = $env:PINVOU_ACL_TARGET
 $kind = $env:PINVOU_ACL_KIND
 $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
-$admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
-$sids = @($current, $system, $admins) | Select-Object -Unique
-$acl = Get-Acl -LiteralPath $target
+$system = Microsoft.PowerShell.Utility\\New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+$admins = Microsoft.PowerShell.Utility\\New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+$sids = @($current, $system, $admins) | Microsoft.PowerShell.Utility\\Select-Object -Unique
+$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $target
 $acl.SetAccessRuleProtection($true, $false)
 foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($rule) }
 $inheritance = if ($kind -eq 'directory') {
   [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
 } else { [System.Security.AccessControl.InheritanceFlags]::None }
 foreach ($sid in $sids) {
-  $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+  $rule = Microsoft.PowerShell.Utility\\New-Object System.Security.AccessControl.FileSystemAccessRule(
     $sid,
     [System.Security.AccessControl.FileSystemRights]::FullControl,
     $inheritance,
@@ -50,8 +50,8 @@ foreach ($sid in $sids) {
   [void]$acl.AddAccessRule($rule)
 }
 $acl.SetOwner($current)
-Set-Acl -LiteralPath $target -AclObject $acl
-$check = Get-Acl -LiteralPath $target
+Microsoft.PowerShell.Security\\Set-Acl -LiteralPath $target -AclObject $acl
+$check = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $target
 if (-not $check.AreAccessRulesProtected) { throw 'ACL inheritance remains enabled' }
 if ($check.Owner -ne $current.Value -and $check.Owner -ne $current.Translate([System.Security.Principal.NTAccount]).Value) { throw 'unexpected ACL owner' }
 $actual = @($check.Access)
@@ -72,8 +72,8 @@ $ErrorActionPreference = 'Stop'
 $target = $env:PINVOU_ACL_TARGET
 $kind = $env:PINVOU_ACL_KIND
 $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$allowed = @($current.Value, 'S-1-5-18', 'S-1-5-32-544') | Select-Object -Unique
-$acl = Get-Acl -LiteralPath $target
+$allowed = @($current.Value, 'S-1-5-18', 'S-1-5-32-544') | Microsoft.PowerShell.Utility\\Select-Object -Unique
+$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $target
 if (-not $acl.AreAccessRulesProtected) { throw 'ACL inheritance enabled' }
 if ($acl.Owner -ne $current.Value -and $acl.Owner -ne $current.Translate([System.Security.Principal.NTAccount]).Value) { throw 'unexpected ACL owner' }
 $actual = @($acl.Access)
