@@ -2240,39 +2240,6 @@ fn test_elevation_render_zh_hant_has_translated_copy() {
 // ========================================================================
 
 #[test]
-fn test_elevation_option_labels() {
-    assert_eq!(
-        ElevationOption::WithNetwork.label(),
-        "Allow outbound network"
-    );
-    assert_eq!(
-        ElevationOption::FullAccess.label(),
-        "Full access (filesystem + network)"
-    );
-    assert!(
-        ElevationOption::WithWriteAccess(vec![])
-            .label()
-            .contains("write")
-    );
-    assert_eq!(ElevationOption::Abort.label(), "Abort");
-}
-
-#[test]
-fn test_elevation_option_descriptions() {
-    assert!(
-        ElevationOption::WithNetwork
-            .description()
-            .contains("network")
-    );
-    assert!(
-        ElevationOption::FullAccess
-            .description()
-            .contains("filesystem and network access")
-    );
-    assert!(ElevationOption::Abort.description().contains("Cancel"));
-}
-
-#[test]
 fn test_elevation_option_to_policy() {
     let cwd = PathBuf::from("/tmp/test");
 
@@ -2330,33 +2297,6 @@ fn test_elevation_request_for_shell_with_write_block() {
             .options
             .iter()
             .any(|o| matches!(o, ElevationOption::WithWriteAccess(_)))
-    );
-}
-
-#[test]
-fn test_elevation_request_generic() {
-    let request = ElevationRequest::generic("test-id", "some_tool", "permission denied");
-
-    assert_eq!(request.tool_id, "test-id");
-    assert_eq!(request.tool_name, "some_tool");
-    assert!(request.command.is_none());
-    assert!(
-        request
-            .options
-            .iter()
-            .any(|o| matches!(o, ElevationOption::WithNetwork))
-    );
-    assert!(
-        request
-            .options
-            .iter()
-            .any(|o| matches!(o, ElevationOption::FullAccess))
-    );
-    assert!(
-        request
-            .options
-            .iter()
-            .any(|o| matches!(o, ElevationOption::Abort))
     );
 }
 

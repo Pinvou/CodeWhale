@@ -213,8 +213,6 @@ pub enum FragmentCapError {
         bytes: usize,
         max: usize,
     },
-    #[error("context has too many fragments: {count} > {max}")]
-    TooManyFragments { count: usize, max: usize },
 }
 
 pub fn validate_fragment(fragment: &BoundedFragment) -> Result<(), FragmentCapError> {
@@ -236,19 +234,6 @@ pub fn validate_fragment(fragment: &BoundedFragment) -> Result<(), FragmentCapEr
     Ok(())
 }
 
-pub fn validate_fragment_set(fragments: &[BoundedFragment]) -> Result<(), FragmentCapError> {
-    if fragments.len() > MAX_FRAGMENTS_PER_CONTEXT {
-        return Err(FragmentCapError::TooManyFragments {
-            count: fragments.len(),
-            max: MAX_FRAGMENTS_PER_CONTEXT,
-        });
-    }
-    for f in fragments {
-        validate_fragment(f)?;
-    }
-    Ok(())
-}
-
 // Project-instruction import (#3978)
 pub const PROJECT_INSTRUCTION_CANDIDATES: &[&str] = &[
     "AGENTS.md",
@@ -257,21 +242,6 @@ pub const PROJECT_INSTRUCTION_CANDIDATES: &[&str] = &[
     ".claude/instructions.md",
     ".codewhale/instructions.md",
     ".deepseek/instructions.md",
-    ".cursorrules",
-    ".cursor/rules",
-    ".clinerules",
-    ".windsurf/rules",
-    ".gemini",
-    ".github/copilot-instructions.md",
-    ".github/muse-instructions.md",
-];
-
-/// Workspace instruction formats not already owned by Codewhale's canonical
-/// project-context loader. The TUI uses this subset to avoid injecting
-/// `AGENTS.md` / `CLAUDE.md` / `instructions.md` twice while still importing
-/// additional agent rule formats through the typed fragment boundary.
-pub const ADDITIONAL_PROJECT_INSTRUCTION_CANDIDATES: &[&str] = &[
-    ".agents/AGENTS.md",
     ".cursorrules",
     ".cursor/rules",
     ".clinerules",
@@ -423,20 +393,6 @@ pub fn load_project_instruction_fragment(workspace: &Path) -> Option<BoundedFrag
     load_project_instruction_fragment_from_candidates(workspace, PROJECT_INSTRUCTION_CANDIDATES)
 }
 
-/// Load only instruction formats that the canonical TUI project-context path
-/// does not already render. This prevents duplicate authority while retaining
-/// the broader compatibility import added by the bounded fragment system.
-///
-/// Prefer [`load_selected_project_instruction_fragment`]: importing every
-/// foreign format unconditionally makes another tool's instruction file
-/// standing authority here without anyone asking for it.
-pub fn load_additional_project_instruction_fragment(workspace: &Path) -> Option<BoundedFragment> {
-    load_project_instruction_fragment_from_candidates(
-        workspace,
-        ADDITIONAL_PROJECT_INSTRUCTION_CANDIDATES,
-    )
-}
-
 /// Load exactly the instruction candidates the caller names.
 ///
 /// The caller owns the opt-in decision; an empty list imports nothing and
@@ -449,75 +405,6 @@ pub fn load_selected_project_instruction_fragment(
         return None;
     }
     load_project_instruction_fragment_from_candidates(workspace, candidates)
-}
-
-pub fn project_instructions_from_sources(
-    sources: impl IntoIterator<Item = (String, String)>,
-) -> Option<BoundedFragment> {
-    let mut sections = Vec::new();
-    for (name, content) in sources {
-        let trimmed = content.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let body = if trimmed.len() > INSTRUCTIONS_FILE_MAX_BYTES {
-            let mut end = INSTRUCTIONS_FILE_MAX_BYTES;
-            while end > 0 && !trimmed.is_char_boundary(end) {
-                end -= 1;
-            }
-            let omitted = trimmed.len() - end;
-            format!("{}\n[…truncated: {omitted} bytes omitted]", &trimmed[..end])
-        } else {
-            trimmed.to_string()
-        };
-        sections.push(format!(
-            "<project_instructions source=\"{name}\">\n{body}\n</project_instructions>"
-        ));
-        if sections.len() >= MAX_INSTRUCTION_FILES {
-            break;
-        }
-    }
-    if sections.is_empty() {
-        return None;
-    }
-    Some(BoundedFragment::project_instructions(sections.join("\n\n")))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct FragmentBudgetSnapshot {
-    pub fragment_ids: Vec<String>,
-    pub fragment_markers: Vec<String>,
-    pub max_fragment_bytes: usize,
-    pub max_fragment_tokens: usize,
-    pub default_fragment_max_bytes: usize,
-    pub max_fragments_per_context: usize,
-    pub instructions_file_max_bytes: usize,
-    pub max_instruction_files: usize,
-    pub project_instruction_candidates: Vec<String>,
-}
-
-#[must_use]
-pub fn fragment_budget_snapshot() -> FragmentBudgetSnapshot {
-    FragmentBudgetSnapshot {
-        fragment_ids: FragmentId::all()
-            .iter()
-            .map(|id| id.as_str().to_string())
-            .collect(),
-        fragment_markers: FragmentId::all()
-            .iter()
-            .map(|id| id.marker().to_string())
-            .collect(),
-        max_fragment_bytes: MAX_FRAGMENT_BYTES,
-        max_fragment_tokens: MAX_FRAGMENT_TOKENS,
-        default_fragment_max_bytes: DEFAULT_FRAGMENT_MAX_BYTES,
-        max_fragments_per_context: MAX_FRAGMENTS_PER_CONTEXT,
-        instructions_file_max_bytes: INSTRUCTIONS_FILE_MAX_BYTES,
-        max_instruction_files: MAX_INSTRUCTION_FILES,
-        project_instruction_candidates: PROJECT_INSTRUCTION_CANDIDATES
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    }
 }
 
 fn hash_content(content: &str) -> u64 {
@@ -602,17 +489,6 @@ mod tests {
         assert!(fragment.is_within_token_ceiling());
     }
     #[test]
-    fn injected_item_count_cap_is_enforced() {
-        let fragments: Vec<BoundedFragment> = (0..MAX_FRAGMENTS_PER_CONTEXT)
-            .map(|i| BoundedFragment::new(FragmentId::Workspace, format!("item {i}")))
-            .collect();
-        validate_fragment_set(&fragments).expect("exactly MAX_FRAGMENTS must pass");
-        let mut too_many = fragments.clone();
-        too_many.push(BoundedFragment::new(FragmentId::Route, "one too many"));
-        let err = validate_fragment_set(&too_many).expect_err("one over cap must fail");
-        assert!(matches!(err, FragmentCapError::TooManyFragments { .. }));
-    }
-    #[test]
     #[cfg(unix)]
     fn symlinked_candidate_directory_cannot_escape_the_workspace() {
         // `Path::is_dir()` follows symlinks, so a symlinked candidate dir used
@@ -677,64 +553,5 @@ mod tests {
             fragment.content.contains(".cursorrules") || fragment.content.contains(".clinerules")
         );
         validate_fragment(&fragment).expect("project-instructions fragment must satisfy caps");
-        let from_sources = project_instructions_from_sources(vec![
-            ("AGENTS.md".to_string(), "# AGENTS\nbe helpful".to_string()),
-            (
-                ".cursorrules".to_string(),
-                "cursor: do the thing".to_string(),
-            ),
-        ])
-        .expect("sources");
-        assert_eq!(from_sources.id, FragmentId::ProjectInstructions);
-        assert!(from_sources.content.contains("AGENTS.md"));
-        assert!(from_sources.content.contains(".cursorrules"));
-        validate_fragment(&from_sources).expect("explicit sources must also satisfy caps");
-    }
-    #[test]
-    fn additional_project_instruction_import_does_not_duplicate_canonical_authority() {
-        let dir = tempdir().expect("tempdir");
-        let ws = dir.path();
-        fs::write(ws.join("AGENTS.md"), "canonical authority marker").expect("write agents");
-
-        assert!(
-            load_additional_project_instruction_fragment(ws).is_none(),
-            "AGENTS.md is already owned by the canonical project-context loader"
-        );
-
-        fs::write(ws.join(".cursorrules"), "additional cursor marker").expect("write cursor rules");
-        let additional = load_additional_project_instruction_fragment(ws)
-            .expect("additional rules must produce a typed fragment");
-        assert!(additional.content.contains("additional cursor marker"));
-        assert!(!additional.content.contains("canonical authority marker"));
-
-        let complete = load_project_instruction_fragment(ws)
-            .expect("complete importer must retain every supported source");
-        assert!(complete.content.contains("canonical authority marker"));
-        assert!(complete.content.contains("additional cursor marker"));
-    }
-    #[test]
-    fn fragment_budget_snapshot_is_stable() {
-        let snap = fragment_budget_snapshot();
-        assert_eq!(snap.max_fragment_tokens, 10_000);
-        assert_eq!(snap.max_fragment_bytes, 40_000);
-        assert_eq!(snap.max_fragments_per_context, 16);
-        assert_eq!(snap.default_fragment_max_bytes, 4 * 1024);
-        assert!(
-            snap.fragment_ids
-                .contains(&"project_instructions".to_string())
-        );
-        assert!(snap.fragment_ids.contains(&"constitution".to_string()));
-        assert!(
-            snap.project_instruction_candidates
-                .contains(&".cursorrules".to_string())
-        );
-        assert!(
-            snap.project_instruction_candidates
-                .contains(&".github/copilot-instructions.md".to_string())
-        );
-        assert!(
-            snap.fragment_markers
-                .contains(&"<!-- cw:ctx:project_instructions -->".to_string())
-        );
     }
 }

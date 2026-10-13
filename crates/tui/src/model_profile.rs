@@ -103,31 +103,6 @@ impl CapabilityProfile {
     pub fn supports_reasoning(&self) -> bool {
         self.reasoning.is_supported()
     }
-
-    #[must_use]
-    pub fn supports_image_input(&self) -> bool {
-        self.image_input.is_supported()
-    }
-
-    #[must_use]
-    pub fn has_large_context(&self) -> bool {
-        self.context_window.is_some_and(|window| window >= 400_000)
-    }
-
-    #[must_use]
-    pub fn prefers_full_tool_surface(&self) -> bool {
-        matches!(self.tool_surface_budget, ToolSurfaceBudget::Full)
-    }
-
-    #[must_use]
-    pub fn suitable_for_broad_fleet_worker(&self) -> bool {
-        self.has_large_context()
-            && !matches!(self.native_tool_calls, SupportState::Unsupported)
-            && matches!(
-                self.tool_surface_budget,
-                ToolSurfaceBudget::Standard | ToolSurfaceBudget::Full
-            )
-    }
 }
 
 /// Build an intrinsic profile for any model string.
@@ -473,28 +448,6 @@ mod tests {
     }
 
     #[test]
-    fn capability_predicates_are_not_provider_string_checks() {
-        let broad = resolved_capability_profile(ApiProvider::Deepseek, "deepseek-v4-pro");
-        let compact = resolved_capability_profile_with_overrides(
-            ApiProvider::Openrouter,
-            "unknown-small-model",
-            CapabilityOverride {
-                context_window: Some(32_000),
-                native_tool_calls: Some(SupportState::Unknown),
-                tool_surface_budget: Some(ToolSurfaceBudget::Compact),
-                ..CapabilityOverride::default()
-            },
-        );
-
-        assert!(broad.has_large_context());
-        assert!(broad.prefers_full_tool_surface());
-        assert!(broad.suitable_for_broad_fleet_worker());
-        assert!(!compact.has_large_context());
-        assert!(!compact.prefers_full_tool_surface());
-        assert!(!compact.suitable_for_broad_fleet_worker());
-    }
-
-    #[test]
     fn exact_route_facts_override_legacy_provider_heuristics() {
         let profile = resolved_capability_profile_for_route(
             ApiProvider::Openai,
@@ -564,7 +517,7 @@ mod tests {
             },
             RouteLimits::default(),
         );
-        assert!(sourced.supports_image_input());
+        assert_eq!(sourced.image_input, SupportState::Supported);
 
         let overridden = resolved_capability_profile_for_route_with_overrides(
             ApiProvider::Openai,
@@ -576,6 +529,6 @@ mod tests {
                 ..CapabilityOverride::default()
             },
         );
-        assert!(overridden.supports_image_input());
+        assert_eq!(overridden.image_input, SupportState::Supported);
     }
 }

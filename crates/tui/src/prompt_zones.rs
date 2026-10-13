@@ -201,10 +201,6 @@ impl AppendLog {
         }
     }
 
-    pub fn from_messages(messages: Vec<Message>) -> Self {
-        Self { messages }
-    }
-
     /// Append a message to the log. A single-message push is the cheapest
     /// mutation for prefix-cache stability — it extends the byte sequence
     /// without disturbing earlier turns.
@@ -553,14 +549,6 @@ mod tests {
 
         let messages: Vec<_> = log.iter().collect();
         assert_eq!(messages.len(), 2);
-    }
-
-    #[test]
-    fn append_log_from_messages() {
-        let msgs = vec![make_message("user", "a"), make_message("assistant", "b")];
-        let log = AppendLog::from_messages(msgs);
-        assert_eq!(log.len(), 2);
-        assert_eq!(log.as_slice().len(), 2);
     }
 
     // ── TurnScratch ───────────────────────────────────────────────

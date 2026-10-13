@@ -359,14 +359,4 @@ mod tests {
             "re-saving a loaded transcript must not change a single byte",
         );
     }
-
-    #[test]
-    fn primary_turn_preparation_owns_shared_defaults() {
-        let request = prepare_primary_turn_request(primary_turn());
-        assert_eq!(request.stream, Some(true));
-        assert!(request.metadata.is_none());
-        assert!(request.thinking.is_none());
-        assert!(request.temperature.is_none());
-        assert!(request.top_p.is_none());
-    }
 }

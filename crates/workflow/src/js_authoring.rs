@@ -453,7 +453,6 @@ mod tests {
     use super::*;
     use crate::{
         AgentType, GateKind, GateOn, GateOnFail, GateOutcome, GateState, LaneGateBoard, TaskMode,
-        WorkflowReplayExecutor,
     };
 
     #[test]
@@ -893,23 +892,5 @@ workflow({
 
         assert!(matches!(err, JavascriptWorkflowError::InvalidNode(_)));
         assert!(err.to_string().contains("missing"));
-    }
-
-    #[test]
-    fn javascript_example_compiles_and_replays_with_mock_trace() {
-        let source = include_str!("../../../workflows/issue_audit.workflow.js");
-        let workflow =
-            compile_javascript_workflow("issue_audit.workflow.js", source).expect("compile");
-        let trace = crate::WorkflowReplayTrace {
-            trace_id: "empty".to_string(),
-            leaf_records: Vec::new(),
-            control_records: Vec::new(),
-        };
-
-        let replayed = WorkflowReplayExecutor::new(trace)
-            .run(&workflow)
-            .expect("replay executor should accept validated JS IR");
-
-        assert_eq!(replayed.status, crate::WorkflowRunStatus::ReplayDiverged);
     }
 }

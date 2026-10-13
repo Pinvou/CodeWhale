@@ -64,18 +64,7 @@ pub(super) fn parse_sse_message_data(body: &str) -> Vec<Vec<u8>> {
     messages
 }
 
-// Retained for tests; the SSE transport now uses the byte-oriented twin.
-#[cfg(test)]
-pub(super) fn find_sse_event_separator(buffer: &str) -> Option<(usize, usize)> {
-    match (buffer.find("\n\n"), buffer.find("\r\n\r\n")) {
-        (Some(lf), Some(crlf)) if crlf < lf => Some((crlf, 4)),
-        (Some(lf), _) => Some((lf, 2)),
-        (_, Some(crlf)) => Some((crlf, 4)),
-        _ => None,
-    }
-}
-
-/// Byte-oriented twin of `find_sse_event_separator`. Used by the SSE
+/// Byte-oriented SSE event-separator finder. Used by the SSE
 /// transport so it can accumulate RAW bytes and decode only complete event
 /// blocks — a multi-byte UTF-8 char split across two network reads is never
 /// corrupted to U+FFFD (the `\n`/`\r` separators are ASCII and can never fall

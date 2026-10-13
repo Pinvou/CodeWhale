@@ -380,13 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn test_load_user_commands_when_no_dir_exists() {
-        let cmds = load_user_commands(None);
-        // Should not panic; returns empty vec when no directories exist.
-        assert!(cmds.is_empty() || !cmds.is_empty());
-    }
-
-    #[test]
     fn test_try_dispatch_nonexistent_command() {
         use crate::config::Config;
         use crate::tui::app::TuiOptions;
@@ -484,16 +477,6 @@ mod tests {
             shared.1, "workspace version",
             "workspace-local (.codewhale) must shadow later dirs"
         );
-    }
-
-    #[test]
-    fn load_user_commands_without_workspace_falls_back_to_global_only() {
-        // When no workspace is passed, only global command directories are
-        // scanned. On test machines these often don't exist, so we just
-        // verify we don't panic.
-        let cmds = load_user_commands(None);
-        // This should not panic; can be empty or have user's real commands.
-        let _ = cmds;
     }
 
     #[test]

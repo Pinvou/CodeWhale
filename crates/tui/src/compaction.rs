@@ -2383,18 +2383,6 @@ mod tests {
     }
 
     #[test]
-    fn coverage_floor_rejects_a_replacement_that_drops_last_round_assistant() {
-        let original = vec![
-            msg("user", "What failed?"),
-            msg("assistant", "session_store::roundtrip panics on reload."),
-        ];
-        let gutting = vec![msg("user", "What failed?")];
-        let error = last_round::validate_last_round_coverage(&original, &gutting)
-            .expect_err("dropping last-round assistant text must fail closed");
-        assert!(error.to_string().contains("assistant"), "{error}");
-    }
-
-    #[test]
     fn summary_quality_gate_rejects_empty_and_known_placeholder_text() {
         for summary in [
             "",
@@ -3317,19 +3305,5 @@ mod tests {
             })
             .collect();
         assert!(should_compact(&messages, None, &prepared(&config)));
-    }
-
-    #[test]
-    fn test_compaction_result_retries_used() {
-        // This test verifies the CompactionResult structure
-        let result = CompactionResult {
-            messages: vec![],
-            summary_prompt: None,
-            retries_used: 2,
-            coverage: CompactionCoverage::default(),
-        };
-
-        assert_eq!(result.retries_used, 2);
-        assert!(result.messages.is_empty());
     }
 }

@@ -1567,7 +1567,7 @@ fn url_encode(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::web::scrape::{parse_bing_results, parse_duckduckgo_results};
+    use crate::tools::web::scrape::parse_duckduckgo_results;
     use std::path::PathBuf;
     use tokio::sync::{Mutex, MutexGuard};
 
@@ -1866,25 +1866,6 @@ mod tests {
             usize::from(MAX_SEARCH_RESULTS)
         );
         assert!(ResponseLength::Medium.max_results() <= usize::from(MAX_SEARCH_RESULTS));
-    }
-
-    #[test]
-    fn parses_bing_results_and_decodes_redirect_url() {
-        let html = r#"
-            <ol>
-              <li class="b_algo">
-                <h2><a href="https://www.bing.com/ck/a?u=a1aHR0cHM6Ly9leGFtcGxlLmNvbS9wYXRoP3E9MQ">Example &amp; Result</a></h2>
-                <div class="b_caption"><p>A <strong>useful</strong> snippet.</p></div>
-              </li>
-            </ol>
-        "#;
-
-        let results = parse_bing_results(html, 5);
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Example & Result");
-        assert_eq!(results[0].url, "https://example.com/path?q=1");
-        assert_eq!(results[0].snippet.as_deref(), Some("A useful snippet."));
     }
 
     #[test]

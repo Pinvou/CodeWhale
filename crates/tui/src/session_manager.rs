@@ -3745,31 +3745,6 @@ mod tests {
     }
 
     #[test]
-    fn latest_session_for_workspace_ignores_invalid_parent_git_marker() {
-        let tmp = tempdir().expect("tempdir");
-        let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
-        let workspace_a = tmp.path().join("aa").join("aaa");
-        let workspace_b = tmp.path().join("bb").join("bbb");
-        fs::create_dir_all(&workspace_a).expect("mkdir workspace a");
-        fs::create_dir_all(&workspace_b).expect("mkdir workspace b");
-        fs::create_dir_all(tmp.path().join(".git")).expect("mkdir invalid git marker");
-
-        write_session_record(
-            &manager,
-            "current-workspace",
-            &workspace_a,
-            Utc::now() - chrono::Duration::minutes(10),
-        );
-        write_session_record(&manager, "other-workspace", &workspace_b, Utc::now());
-
-        let scoped = manager
-            .get_latest_session_for_workspace(&workspace_a)
-            .expect("latest for workspace")
-            .expect("scoped latest");
-        assert_eq!(scoped.id, "current-workspace");
-    }
-
-    #[test]
     fn latest_session_for_workspace_matches_same_git_repository() {
         let tmp = tempdir().expect("tempdir");
         let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");

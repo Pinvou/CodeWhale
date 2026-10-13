@@ -265,7 +265,7 @@ fn default_continue_on_error() -> bool {
 
 impl Hook {
     /// Create a new hook with minimal configuration
-    #[allow(dead_code)] // Public builder API, used in tests
+    #[allow(dead_code)] // Public builder API: parent-app tests (pinvou3-tauri) build hooks here
     pub fn new(event: HookEvent, command: &str) -> Self {
         Self {
             event,
@@ -280,6 +280,8 @@ impl Hook {
     }
 
     /// Builder: set condition
+    // Test-fixture ergonomics only: no production caller (hooks arrive via serde).
+    #[cfg(test)]
     #[allow(dead_code)] // Public builder API, used in tests
     pub fn with_condition(mut self, condition: HookCondition) -> Self {
         self.condition = Some(condition);
@@ -287,6 +289,8 @@ impl Hook {
     }
 
     /// Builder: set timeout
+    // Test-fixture ergonomics only: no production caller (hooks arrive via serde).
+    #[cfg(test)]
     #[allow(dead_code)] // Public builder API, used in tests
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
@@ -294,6 +298,8 @@ impl Hook {
     }
 
     /// Builder: run in background
+    // Test-fixture ergonomics only: no production caller (hooks arrive via serde).
+    #[cfg(test)]
     #[allow(dead_code)] // Public builder API, used in tests
     pub fn background(mut self) -> Self {
         self.background = true;
@@ -301,6 +307,8 @@ impl Hook {
     }
 
     /// Builder: set name
+    // Test-fixture ergonomics only: no production caller (hooks arrive via serde).
+    #[cfg(test)]
     #[allow(dead_code)] // Public builder API, used in tests
     pub fn with_name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());

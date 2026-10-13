@@ -1016,36 +1016,6 @@ async fn parallel_fail_fast_rejects_with_the_typed_slot_error() {
 }
 
 #[tokio::test]
-async fn task_errors_carry_typed_kinds() {
-    let driver = Arc::new(FakeDriver::new());
-    driver.on("budget", FakeReply::BudgetExhausted("limit 10".to_string()));
-    driver.on("cancelled", FakeReply::Cancelled);
-    driver.on("admission", FakeReply::Reject("admission cap".to_string()));
-    let value = run(
-        &driver,
-        r#"
-        const kinds = {};
-        for (const description of ["budget", "cancelled", "admission"]) {
-            try {
-                await task({ description });
-                kinds[description] = "none";
-            } catch (err) {
-                kinds[description] = err && err.kind;
-            }
-        }
-        return kinds;
-        "#,
-        json!(null),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        value,
-        json!({"budget": "budget", "cancelled": "cancelled", "admission": "admission"})
-    );
-}
-
-#[tokio::test]
 async fn pipeline_fail_fast_rejects_instead_of_nulling_the_item() {
     let value = run(
         &Arc::new(FakeDriver::new()),

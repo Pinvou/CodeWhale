@@ -382,8 +382,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_the_node_child_instead_of_orphaning_it() {
+        use std::io::Write;
         if !node_present() {
-            eprintln!("skipping: node not present");
+            let _ = writeln!(std::io::stderr(), "skipping: node not present");
             return;
         }
         let workspace = tempdir().expect("workspace tempdir");
@@ -424,8 +425,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_returns_promptly_even_when_a_grandchild_holds_the_pipes() {
+        use std::io::Write;
         if !node_present() {
-            eprintln!("skipping: node not present");
+            let _ = writeln!(std::io::stderr(), "skipping: node not present");
             return;
         }
         let workspace = tempdir().expect("workspace tempdir");

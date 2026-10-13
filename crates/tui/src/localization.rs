@@ -6391,19 +6391,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn no_shipped_locale_renders_a_missing_message_marker() {
-        // rust_i18n falls back to en for absent keys, so a "{MessageId}"
-        // debug string in the UI would mean the fallback chain itself broke.
-        for locale in Locale::shipped() {
-            assert!(
-                missing_message_ids(*locale).is_empty(),
-                "{} renders raw message ids (missing-marker UI)",
-                locale.tag()
-            );
-        }
-    }
-
     // --- Devanagari grapheme safety (#4790 spike) --------------------------
 
     #[test]

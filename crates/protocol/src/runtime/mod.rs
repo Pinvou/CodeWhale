@@ -151,16 +151,6 @@ pub struct DynamicToolSpec {
     pub defer_loading: bool,
 }
 
-/// Lifecycle status of a dynamic tool item shown in thread detail and event
-/// payloads.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DynamicToolItemStatus {
-    InProgress,
-    Completed,
-    Failed,
-}
-
 /// Parameters identifying a dynamic tool call request emitted by the runtime.
 ///
 /// This is the typed payload for `tool_call.requested` events and also the
@@ -264,22 +254,6 @@ mod tests {
         assert_eq!(spec.namespace, Some("tau_bench".into()));
         assert_eq!(spec.name, "get_reservation");
         assert!(!spec.defer_loading);
-    }
-
-    #[test]
-    fn dynamic_tool_item_status_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&DynamicToolItemStatus::InProgress).unwrap(),
-            "\"in_progress\""
-        );
-        assert_eq!(
-            serde_json::from_str::<DynamicToolItemStatus>("\"completed\"").unwrap(),
-            DynamicToolItemStatus::Completed
-        );
-        assert_eq!(
-            serde_json::from_str::<DynamicToolItemStatus>("\"failed\"").unwrap(),
-            DynamicToolItemStatus::Failed
-        );
     }
 
     #[test]

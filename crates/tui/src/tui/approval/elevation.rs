@@ -29,34 +29,6 @@ pub enum ElevationOption {
 }
 
 impl ElevationOption {
-    /// Get the display label for this option.
-    #[cfg(test)]
-    pub fn label(&self) -> &'static str {
-        match self {
-            ElevationOption::WithNetwork => "Allow outbound network",
-            ElevationOption::WithWriteAccess(_) => "Allow extra write access",
-            ElevationOption::FullAccess => "Full access (filesystem + network)",
-            ElevationOption::Abort => "Abort",
-        }
-    }
-
-    /// Get a short description.
-    #[cfg(test)]
-    pub fn description(&self) -> &'static str {
-        match self {
-            ElevationOption::WithNetwork => {
-                "Retry this tool call with outbound network access for downloads and HTTP requests"
-            }
-            ElevationOption::WithWriteAccess(_) => {
-                "Retry this tool call with additional writable filesystem scope"
-            }
-            ElevationOption::FullAccess => {
-                "Retry without sandbox limits; grants unrestricted filesystem and network access"
-            }
-            ElevationOption::Abort => "Cancel this tool execution",
-        }
-    }
-
     /// Convert to a sandbox policy.
     pub fn to_policy(&self, base_cwd: &Path) -> SandboxPolicy {
         match self {
@@ -115,22 +87,6 @@ impl ElevationRequest {
             options,
         }
     }
-
-    /// Create a generic elevation request.
-    #[allow(dead_code)]
-    pub fn generic(tool_id: &str, tool_name: &str, denial_reason: &str) -> Self {
-        Self {
-            tool_id: tool_id.to_string(),
-            tool_name: tool_name.to_string(),
-            command: None,
-            denial_reason: denial_reason.to_string(),
-            options: vec![
-                ElevationOption::WithNetwork,
-                ElevationOption::FullAccess,
-                ElevationOption::Abort,
-            ],
-        }
-    }
 }
 
 /// Elevation overlay state managed by the modal view stack.
@@ -172,18 +128,6 @@ impl ElevationView {
             tool_name: self.request.tool_name.clone(),
             option,
         })
-    }
-
-    /// Get the request for rendering.
-    #[allow(dead_code)]
-    pub fn request(&self) -> &ElevationRequest {
-        &self.request
-    }
-
-    /// Get the currently selected index.
-    #[allow(dead_code)]
-    pub fn selected(&self) -> usize {
-        self.selected
     }
 }
 

@@ -379,13 +379,6 @@ pub fn compose_pr_title(job: &CloudJob, patch: &PatchReceipt) -> String {
     one_line(&format!("codewhale cloud: {summary}"), MAX_TITLE_CHARS)
 }
 
-/// Truthful PR body: what the agent did, the receipts Codewhale has, and an
-/// explicit No-Issue line (no tracked issue; the cloud job is the record).
-/// Sandbox-provider names never appear — the operator is Codewhale.
-pub fn compose_pr_body(job: &CloudJob, patch: &PatchReceipt) -> String {
-    compose_pr_body_for_head(job, patch, &patch.head_sha)
-}
-
 /// PR body whose `Head:` is the sha actually applied/pushed.
 pub fn compose_pr_body_for_head(job: &CloudJob, patch: &PatchReceipt, head_sha: &str) -> String {
     let summary = if patch.summary.trim().is_empty() {
@@ -1357,7 +1350,7 @@ mod tests {
         let patch = fixture_patch();
         let title = compose_pr_title(&job, &patch);
         assert_eq!(title, "codewhale cloud: Fix the flaky dispatch test");
-        let body = compose_pr_body(&job, &patch);
+        let body = compose_pr_body_for_head(&job, &patch, &patch.head_sha);
         assert!(body.contains("Codewhale cloud agent"));
         assert!(body.contains("What the agent did"));
         assert!(body.contains("Fix the flaky dispatch test"));
@@ -1653,7 +1646,8 @@ mod tests {
             finished_unix: None,
             sandbox_pending: false,
         };
-        let body = compose_pr_body(&job, &fixture_patch());
+        let patch = fixture_patch();
+        let body = compose_pr_body_for_head(&job, &patch, &patch.head_sha);
         assert!(body.chars().count() <= MAX_BODY_CHARS);
     }
 

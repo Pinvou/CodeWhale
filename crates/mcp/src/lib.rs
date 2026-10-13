@@ -604,22 +604,6 @@ impl McpManager {
             }
         }
     }
-
-    /// Generate sandbox state update notices for all registered servers.
-    pub fn update_sandbox_state(&self, sandbox_mode: &str, cwd: &str) -> Result<Vec<Value>> {
-        let mut notices = Vec::new();
-        for server_name in self.configs.keys() {
-            notices.push(json!({
-                "server_name": server_name,
-                "method": "codex/sandbox-state/update",
-                "params": {
-                    "sandbox_mode": sandbox_mode,
-                    "cwd": cwd
-                }
-            }));
-        }
-        Ok(notices)
-    }
 }
 
 fn default_true() -> bool {
@@ -2269,21 +2253,6 @@ mod tests {
             message.contains("alpha, beta"),
             "server names must be deterministic: {message}"
         );
-    }
-
-    #[test]
-    fn manager_update_sandbox_state_returns_notices() {
-        let mut manager = McpManager::default();
-        manager
-            .register_server(
-                make_server_config("s1"),
-                ToolFilter::default(),
-                Box::new(InMemoryMcpClient::default()),
-            )
-            .unwrap();
-        let notices = manager.update_sandbox_state("strict", "/tmp").unwrap();
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0]["server_name"], "s1");
     }
 
     // ── Tool filter ────────────────────────────────────────────────────

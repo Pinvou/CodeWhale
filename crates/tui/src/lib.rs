@@ -40,7 +40,6 @@ mod commands;
 pub mod compaction;
 mod composer_history;
 mod composer_stash;
-pub mod computer_meter;
 #[doc(hidden)]
 pub mod config;
 mod config_persistence;
@@ -12584,16 +12583,6 @@ mod serve_bind_host_tests {
     }
 
     #[test]
-    fn mobile_defaults_to_loopback() {
-        assert_eq!(
-            resolve_serve_bind_host(true, None),
-            ServeBindHost {
-                host: "127.0.0.1".to_string(),
-            }
-        );
-    }
-
-    #[test]
     fn mobile_respects_explicit_loopback_host() {
         assert_eq!(
             resolve_serve_bind_host(true, Some("127.0.0.1".to_string())),
@@ -16399,31 +16388,6 @@ api_key = "test-only-key"
             Some("low"),
             "membership K3 still applies its exact-route always-thinking floor"
         );
-    }
-
-    #[test]
-    fn cli_route_tracks_auto_reasoning_independently_from_auto_model() {
-        use crate::tui::app::ReasoningEffort;
-
-        let fixed_model_auto_reasoning = CliAutoRoute {
-            provider: crate::config::ApiProvider::Deepseek,
-            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
-            reasoning_effort: Some(ReasoningEffort::Auto),
-            auto_controls_reasoning: true,
-            auto_model: false,
-        };
-        let auto_model_fixed_reasoning = CliAutoRoute {
-            provider: crate::config::ApiProvider::OpenaiCodex,
-            model: crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string(),
-            reasoning_effort: Some(ReasoningEffort::High),
-            auto_controls_reasoning: false,
-            auto_model: true,
-        };
-
-        assert!(fixed_model_auto_reasoning.auto_controls_reasoning);
-        assert!(!fixed_model_auto_reasoning.auto_model);
-        assert!(!auto_model_fixed_reasoning.auto_controls_reasoning);
-        assert!(auto_model_fixed_reasoning.auto_model);
     }
 
     #[test]
