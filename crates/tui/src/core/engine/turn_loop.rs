@@ -5123,6 +5123,12 @@ impl Engine {
                         self.session.pending_prefix_change_reason =
                             Some("tool_surface".to_string());
                     }
+                    let tool_was_executed = output
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("executed"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true);
                     emit_tool_audit_for_policy(
                         self.active_turn_tool_security.is_some(),
                         json!({
@@ -5131,6 +5137,7 @@ impl Engine {
                             "tool_name": outcome.name.clone(),
                             "status": terminal_status.as_str(),
                             "success": output.success,
+                            "executed": tool_was_executed,
                         }),
                     );
                     let output_for_context = compact_tool_result_for_route(
@@ -5140,12 +5147,6 @@ impl Engine {
                         &outcome.name,
                         &output,
                     );
-                    let tool_was_executed = output
-                        .metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.get("executed"))
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true);
                     if tool_was_executed {
                         self.session.working_set.observe_tool_call(
                             &tool_name_for_ws,
