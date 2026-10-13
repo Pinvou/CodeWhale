@@ -14,6 +14,15 @@ const read = (relative) => readFileSync(new URL(`../${relative}`, import.meta.ur
 const runbook = read("../docs/Windows双端远程控制发布与回滚.md");
 const checklist = read("../docs/Windows双端远程控制双机演练清单.md");
 
+test("release docs distinguish immutable build eligibility from the runtime switch", () => {
+  assert.ok(runbook.includes("仅构建值为 `1` 的 Windows 客户端"));
+  assert.ok(runbook.includes("构建值为 `0` 的普通发布产物不能在运行时重新开启"));
+  assert.ok(checklist.includes("构建开关 `PINVOU_DESKTOP_CONTROLLER_ENABLED=1`"));
+  assert.ok(checklist.includes("构建值为 `0` 的产物不能在运行时重新开启"));
+  assert.doesNotMatch(runbook, /必须在 A\/B\/Relay 三端精确设为/u);
+  assert.doesNotMatch(checklist, /Windows A\/B 客户端默认开启/u);
+});
+
 test("runbook and checklist bind all 27 stable journeys without hidden capabilities", () => {
   for (let index = 1; index <= 27; index += 1) {
     const id = `RC-E2E-${String(index).padStart(3, "0")}`;

@@ -10,9 +10,9 @@
 |---|---|
 | 拓扑 | 两台身份不同、可独立隔离网络的 Windows 设备 A/B；生产等价 `wss://` Relay、TLS 终止及无旁路 enrollment gateway |
 | 软件 | A/B 使用同一已签名安装包；记录版本、SHA-256、Authenticode 证书指纹和匿名机器身份摘要；受保护构建 provenance/SBOM 必须把安装包绑定当前 commit |
-| Enrollment | 官方环境完成既有 endpoint 认领，自托管完成 dry-run/批量 allowlist 或 re-enroll；覆盖率为 100%；生产 `official`/`self_hosted` 且 TOFU=false |
+| Enrollment | 当前生产使用 `self_hosted`，完成 dry-run/批量 allowlist 或 re-enroll，覆盖率为 100% 且 TOFU=false；`official` live claim 尚未接线，预检与启动失败关闭，不作为现成可用部署方式 |
 | 回滚 | 提供真实旧 Relay 二进制；只允许在 registry-aware gateway 后、loopback 监听；裸 v2 必须被预检拒绝 |
-| 功能开关 | Relay、A、B 都使用 `PINVOU_DESKTOP_CONTROLLER_ENABLED`；开时必须精确为 `1`，关时入口隐藏、底层拒绝、Relay 拒绝，registry/tombstone 保留 |
+| 功能开关 | Windows A/B 必须使用构建开关 `PINVOU_DESKTOP_CONTROLLER_ENABLED=1` 的验收产物；运行时未设变量或精确 `1` 开启，`0` 或非法值失败关闭。构建值为 `0` 的产物不能在运行时重新开启。Relay 部署环境仍须精确 `1` 才接受桌面控制流量。关闭任一侧均保留 registry/tombstone |
 | 自动化 | 使用 `scripts/run-windows-remote-control-e2e.ps1`；驱动器必须是有效签名的真实应用驱动，不接受 mock Relay、假状态或手填 pass |
 | UI | 已启动的真实 Tauri WebView2 开启仅 loopback CDP，通过 `npm --prefix pinvou3-app run test:remote-control-ui -- --cdp-url ... --output ...` 执行真实渲染/交互冒烟 |
 | 密钥 | Relay 侧 `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `..._PRIVATE_KEY_B64` 与两端客户端 pin 的 `..._PUBLIC_KEY_B64` 是同一对密钥；两端都设 `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID`（缺失即 `relay_trust_unconfigured` 失败关闭） |

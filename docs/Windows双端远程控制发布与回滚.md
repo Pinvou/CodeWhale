@@ -4,7 +4,7 @@
 
 ## 1. 发布前置门禁
 
-只有以下门禁全部通过且证据属于待发布 commit，才允许把 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 设为精确值 `1`：
+仅构建值为 `1` 的 Windows 客户端允许运行时未设变量时展示桌面远程控制入口；显式设置 `PINVOU_DESKTOP_CONTROLLER_ENABLED=0` 可紧急隐藏入口并拒绝全部远控 Command。构建值为 `0` 的普通发布产物不能在运行时重新开启。启用桌面产物与 Relay 均须取得以下属于待发布 commit 的全部门禁证据，才允许公开发布本功能及在 Relay 环境把 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 设为精确值 `1`：
 
 | 门禁 | 命令 / 证据 | 说明 |
 |---|---|---|
@@ -32,7 +32,7 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_con
 
 `release:gate` 在开关开启时要求 `PINVOU_REMOTE_RELEASE_EVIDENCE` 与 `PINVOU_RELEASE_COMMIT_SHA`，重新校验 artifact 哈希、27 条旅程、敏感扫描、registry 覆盖率和旧 Relay 回滚预检；缺任何一项都失败。开关关闭时仍验证值只能为空或 `0`，不会删除 registry、pairing tombstone 或回退 state schema。
 
-开关关闭的普通发布包不包含已启用的桌面远控能力；该组合通过不代表桌面远控发布资格通过。公开发布本功能必须在 A/B/Relay 三端精确设为 `1`，并取得全部开启门禁的真实证据，不能以关闭开关的 CI 结果替代。
+构建关闭的普通发布包固化远控关闭状态；该组合通过不代表桌面远控发布资格通过。公开发布本功能必须使用构建值为 `1` 的 A/B 安装包，Relay 运行值必须精确为 `1`；A/B 演练可显式设为 `1` 固定运行配置，也可不设变量，但不得使用构建关闭产物。全部开启门禁的真实证据不可用关闭开关的 CI 结果替代。
 
 1. **Registry 覆盖率**：在仓库根目录运行 `remote-control-relay/scripts/enrollment-migrate.js` 的 dry-run，统计已迁移 endpoint 比例。未达到 100% 之前不开启公网强制门禁。
 2. **打开桌面控制能力开关**：只打开 `desktop_remote_control` 能力，不动 enrollment registry、pairing tombstone 与 digest keyring。
