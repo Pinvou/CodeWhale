@@ -4,7 +4,9 @@ import { escapeCodeHtml, highlightCode } from './syntax-highlighter.js';
 import { MARKDOWN_OPTIONS, scanMarkdownFences } from './markdown-fences.js';
 
 const DANGEROUS_TAGS_RE = /<(\/?(?:script|style|iframe|object|embed|link|meta)\b[^>]*)>/giu;
-const SANITIZE_OPTIONS = {
+// 消毒配置单一来源:pet 窗口等其它 DOMPurify 消费方直接复用,
+// 不要各自再拼一份(否则 USE_PROFILES 之类的限制会静默漂移)。
+export const SANITIZE_OPTIONS = {
   USE_PROFILES: { html: true },
   FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'link', 'meta'],
   FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover', 'onfocus', 'onblur'],
@@ -21,7 +23,7 @@ function getPurifier() {
   return purifier;
 }
 
-function neutralizeRawDangerousTags(html) {
+export function neutralizeRawDangerousTags(html) {
   return html.replace(DANGEROUS_TAGS_RE, (_, inner) => `&lt;${inner}&gt;`);
 }
 

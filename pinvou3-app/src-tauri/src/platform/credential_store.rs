@@ -238,6 +238,21 @@ pub struct CredentialMigrationResult {
     pub failed_model_ids: Vec<String>,
     pub failed_search_providers: Vec<String>,
     pub settings_sanitized: bool,
+    /// Search-provider credentials the migration marked removed without
+    /// deleting their keyring secret. The migration runs inside
+    /// `UserPrefs::update_transaction` closures (and transaction-free on
+    /// load, where callers drop the deferral), so deleting there would
+    /// destroy the secret before the save committed — a later failure in the
+    /// same transaction aborts with disk prefs untouched and the provider
+    /// left configured-but-secretless. Callers must delete these references
+    /// only after their save committed, via
+    /// `UserPrefs::update_transaction_with_post_commit` so the delete stays
+    /// inside the prefs-lock critical section (a delete that ran after the
+    /// lock was released could destroy a secret a concurrent replacement of
+    /// the same deterministic reference had just committed), where a failed
+    /// delete merely orphans the credential (the benign direction).
+    #[serde(default)]
+    pub deferred_search_deletes: Vec<CredentialReference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,6 +365,24 @@ impl SystemCredentialStore {
             "[credential_store] secrets_for cache miss service={}",
             service
         );
+        // Test hermeticity valve (marketplace reconcile hang, 2026-10-03):
+        // placed AFTER the per-store cache consult above so the fake-backend
+        // tests (inject_fake_secrets) are unaffected, and BEFORE the OS
+        // keyring is probed. Harnesses that redirect PINVOU3_HOME cannot make
+        // the OS keyring hermetic — on macOS a real-keyring read from an
+        // ad-hoc-signed test binary can block indefinitely inside
+        // SecKeychainFindGenericPassword on the ACL consent dialog
+        // (rebuild_local_mcp_entry's placeholder resolution hung the whole
+        // suite locally; Linux CI never sees it because its keyring probe
+        // fails fast into the file fallback). Production builds never read
+        // the flag.
+        #[cfg(test)]
+        if std::env::var_os("PINVOU3_TEST_KEYRING_FILE_FALLBACK").is_some() {
+            log::info!(
+                "[credential_store] test file-fallback flag set; using file keyring without probing the OS keyring"
+            );
+            return Arc::new(Secrets::file_backed());
+        }
         let store = DefaultKeyringStore::new(service);
         log::info!("[credential_store] keyring probe start service={}", service);
         let secrets = match store.probe() {
@@ -1118,6 +1151,7 @@ mod tests {
 #[cfg(test)]
 pub struct RecordingCredentialStore {
     ops: std::sync::Mutex<Vec<String>>,
+    fail_set: std::sync::Mutex<bool>,
     fail_delete: std::sync::Mutex<bool>,
 }
 
@@ -1126,12 +1160,20 @@ impl RecordingCredentialStore {
     pub fn new() -> Self {
         Self {
             ops: std::sync::Mutex::new(Vec::new()),
+            fail_set: std::sync::Mutex::new(false),
             fail_delete: std::sync::Mutex::new(false),
         }
     }
 
     pub fn ops(&self) -> Vec<String> {
         self.ops.lock().expect("recording ops lock").clone()
+    }
+
+    /// Makes every `set` fail, so tests can force a mid-transaction failure
+    /// after a delete has been deferred (a sibling provider whose keyring
+    /// write fails the whole prefs save).
+    pub fn fail_set(&self) {
+        *self.fail_set.lock().expect("recording fail lock") = true;
     }
 
     pub fn fail_delete(&self) {
@@ -1159,6 +1201,9 @@ impl CredentialStore for RecordingCredentialStore {
             Self::label(reference),
             value
         ));
+        if *self.fail_set.lock().expect("recording fail lock") {
+            return Err(CredentialError::new("injected set failure"));
+        }
         Ok(())
     }
 

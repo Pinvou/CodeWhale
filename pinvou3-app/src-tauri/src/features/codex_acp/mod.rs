@@ -34,7 +34,6 @@ use introspect::*;
 use login::*;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -6348,23 +6347,61 @@ mod tests {
         &src[start..end]
     }
 
-    #[test]
-    fn rebind_acp_production_closures_read_prompt_pending() {
-        let src = include_str!("mod.rs");
+    fn production_source(src: &str) -> String {
+        // include_str! embeds checkout bytes; Windows autocrlf must not change
+        // which production code the probe inspects.
+        let mut src = src.replace("\r\n", "\n");
         // Round-26 MAJOR-3: cut at the test module exactly like projects.rs's
         // `production_source` (round-18) — an unanchored find over the WHOLE
         // file lands on this probe's own string argument once the production
         // function is deleted or renamed, and the span then contains the
         // probe's own assertion text, which can never fail.
-        let src = &src[..src
+        let end = src
             .find("#[cfg(test)]\nmod tests {")
-            .expect("the test module marker must exist")];
-        let fence = production_body(src, "pub async fn rebind_blocking_sessions");
+            .expect("the test module marker must exist");
+        src.truncate(end);
+        src
+    }
+
+    #[test]
+    fn rebind_production_source_accepts_lf_and_crlf() {
+        let production = "struct Production;\n";
+        let src = format!("{production}#[cfg(test)]\nmod tests {{\nprobe\n}}");
+        assert_eq!(production_source(&src), production);
+        assert_eq!(production_source(&src.replace('\n', "\r\n")), production);
+    }
+
+    #[test]
+    #[should_panic(expected = "the test module marker must exist")]
+    fn rebind_production_source_requires_test_module_marker() {
+        production_source("struct Production;");
+    }
+
+    #[test]
+    fn rebind_production_source_cannot_borrow_probe_signature() {
+        let src = "struct MissingProduction;\n#[cfg(test)]\nmod tests {\n\
+            pub async fn rebind_blocking_sessions() { prompt_pending(); }\n}";
+        for src in [src.to_string(), src.replace('\n', "\r\n")] {
+            let production = production_source(&src);
+            assert!(
+                std::panic::catch_unwind(|| {
+                    production_body(&production, "pub async fn rebind_blocking_sessions")
+                })
+                .is_err(),
+                "a missing production function must not match the test probe",
+            );
+        }
+    }
+
+    #[test]
+    fn rebind_acp_production_closures_read_prompt_pending() {
+        let src = production_source(include_str!("mod.rs"));
+        let fence = production_body(&src, "pub async fn rebind_blocking_sessions");
         assert!(
             fence.contains("prompt_pending"),
             "the fence must count a resolved-but-unadmitted prompt as busy",
         );
-        let take = production_body(src, "pub async fn evict_if_idle_for_rebind");
+        let take = production_body(&src, "pub async fn evict_if_idle_for_rebind");
         assert!(
             take.contains("prompt_pending"),
             "the eviction recheck must count a resolved-but-unadmitted prompt",

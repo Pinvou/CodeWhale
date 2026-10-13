@@ -448,12 +448,11 @@ test('exit events do not wait on the browser lock and always clean coordination 
   const exitEnd = tauriApp.indexOf('tauri::RunEvent::Resumed', exitStart);
   assert.ok(exitStart >= 0 && exitEnd > exitStart, 'Tauri exit handler must remain discoverable');
   const exitHandler = tauriApp.slice(exitStart, exitEnd);
-  assert.match(exitHandler, /shutdown_browser_before_process_end\(app\)/);
-  const shutdownHelper = tauriApp.slice(
-    tauriApp.indexOf('fn shutdown_browser_before_process_end'),
-    tauriApp.indexOf('pub(crate) async fn prepare_app_restart'),
+  assert.match(
+    exitHandler,
+    /browser\.shutdown_on_exit\(\)/,
+    'the inlined exit branch must keep the nonblocking browser shutdown',
   );
-  assert.match(shutdownHelper, /browser\.shutdown_on_exit\(\)/);
   assert.doesNotMatch(
     exitHandler,
     /mgr\.stop\(\)\.await/,
@@ -858,7 +857,7 @@ test('popup reuses only a fully begun lease and other popups become User-control
     nativeHost.indexOf('.on_new_window'),
     nativeHost.indexOf('let webview = match window.add_child'),
   );
-  assert.match(popupHandler, /popup_agent_authorization/);
+  assert.match(popupHandler, /retain_agent_operation_for_popup\(&popup_session_id, &popup_tab_token\)/);
   assert.match(popupHandler, /create_popup_tab\(&session_id, url\.to_string\(\), authorization\)/);
   assert.doesNotMatch(popupHandler, /agent_input_in_progress/);
   assert.doesNotMatch(popupHandler, /agent_initiated/);
