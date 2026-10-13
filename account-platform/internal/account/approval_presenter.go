@@ -3,6 +3,7 @@ package account
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,12 +76,33 @@ type approvalProductSummary struct {
 	ProductControlVersion string `json:"product_control_version"`
 }
 
+type approvalLifecycleSummary struct {
+	ModelID                 uuid.UUID  `json:"model_id"`
+	TargetLifecycle         string     `json:"target_lifecycle"`
+	EffectiveAt             *string    `json:"effective_at"`
+	LifecyclePlanID         *uuid.UUID `json:"lifecycle_plan_id,omitempty"`
+	LifecyclePlanVersion    *string    `json:"lifecycle_plan_version,omitempty"`
+	ExistingSessionCutoffAt *string    `json:"existing_session_cutoff_at"`
+	ReplacementModelID      *uuid.UUID `json:"replacement_model_id"`
+}
+type approvalCatalogSummary struct {
+	SourceCatalogVersion string `json:"source_catalog_version"`
+}
+type approvalCredentialSummary struct {
+	CredentialID           uuid.UUID `json:"credential_id"`
+	TokenAccountID         uuid.UUID `json:"token_account_id"`
+	ExpectedAccountVersion string    `json:"expected_account_version"`
+	CredentialVersion      string    `json:"credential_version"`
+}
+
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
 	switch command {
-	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME":
+	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "PAYMENT_PROVIDER_RESUME":
 		return policyVersion == 2 && snapshotVersion == 1
+	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
+		return policyVersion == 2 && snapshotVersion == 2
 	default:
 		return false
 	}
@@ -153,6 +175,35 @@ func approvalV2Command(item ApprovalRequest) any {
 		}
 		return approvalProductSummary{ProductID: value}
 
+	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
+		if item.TargetResourceType != "MODEL" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id.String() != value {
+			return nil
+		}
+		return approvalLifecycleSummary{ModelID: id}
+	case "TOKEN_MODEL_CATALOG_ROLLBACK":
+		if item.TargetResourceType != "MODEL_CATALOG" {
+			return nil
+		}
+		if value[0] < '1' || value[0] > '9' {
+			return nil
+		}
+		if parsed, err := strconv.ParseInt(value, 10, 64); err != nil || parsed <= 0 || strconv.FormatInt(parsed, 10) != value {
+			return nil
+		}
+		return approvalCatalogSummary{value}
+	case "TOKEN_CREDENTIAL_REVOKE":
+		if item.TargetResourceType != "PROVIDER_CREDENTIAL" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id.String() != value {
+			return nil
+		}
+		return approvalCredentialSummary{CredentialID: id}
 	}
 	return nil
 }
@@ -173,11 +224,23 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 	}
 	var proof struct {
 		Normalized struct {
-			WalletID               uuid.UUID `json:"wallet_id"`
-			AmountMicrocredits     string    `json:"amount_microcredits"`
-			ProviderID             string    `json:"provider_id"`
-			ProviderControlVersion string    `json:"provider_control_version"`
-			ProductControlVersion  string    `json:"product_control_version"`
+			WalletID                uuid.UUID  `json:"wallet_id"`
+			AmountMicrocredits      string     `json:"amount_microcredits"`
+			ProviderID              string     `json:"provider_id"`
+			ProviderControlVersion  string     `json:"provider_control_version"`
+			ProductControlVersion   string     `json:"product_control_version"`
+			ModelID                 uuid.UUID  `json:"model_id"`
+			TargetLifecycle         string     `json:"target_lifecycle"`
+			EffectiveAt             *string    `json:"effective_at"`
+			LifecyclePlanID         *uuid.UUID `json:"lifecycle_plan_id"`
+			LifecyclePlanVersion    *string    `json:"lifecycle_plan_version"`
+			ExistingSessionCutoffAt *string    `json:"existing_session_cutoff_at"`
+			ReplacementModelID      *uuid.UUID `json:"replacement_model_id"`
+			TokenAccountID          uuid.UUID  `json:"token_account_id"`
+			CredentialID            uuid.UUID  `json:"credential_id"`
+			ExpectedAccountVersion  string     `json:"expected_account_version"`
+			CredentialVersion       string     `json:"credential_version"`
+			SourceCatalogVersion    string     `json:"source_catalog_version"`
 		} `json:"normalized_command"`
 	}
 	if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil {
@@ -195,6 +258,31 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 	case approvalProductSummary:
 		target.ProviderID = proof.Normalized.ProviderID
 		target.ProductControlVersion = proof.Normalized.ProductControlVersion
+		command = target
+
+	case approvalLifecycleSummary:
+		if proof.Normalized.ModelID != target.ModelID {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.TargetLifecycle = proof.Normalized.TargetLifecycle
+		target.EffectiveAt = proof.Normalized.EffectiveAt
+		target.LifecyclePlanID = proof.Normalized.LifecyclePlanID
+		target.LifecyclePlanVersion = proof.Normalized.LifecyclePlanVersion
+		target.ExistingSessionCutoffAt = proof.Normalized.ExistingSessionCutoffAt
+		target.ReplacementModelID = proof.Normalized.ReplacementModelID
+		command = target
+	case approvalCatalogSummary:
+		if proof.Normalized.SourceCatalogVersion != target.SourceCatalogVersion {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		command = target
+	case approvalCredentialSummary:
+		if proof.Normalized.CredentialID != target.CredentialID || proof.Normalized.TokenAccountID == uuid.Nil {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.TokenAccountID = proof.Normalized.TokenAccountID
+		target.ExpectedAccountVersion = proof.Normalized.ExpectedAccountVersion
+		target.CredentialVersion = proof.Normalized.CredentialVersion
 		command = target
 
 	}

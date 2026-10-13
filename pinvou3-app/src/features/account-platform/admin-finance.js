@@ -61,6 +61,18 @@ export async function currentApprovalEditDraft(client, detail, reason) {
   const unavailable = () => Object.assign(new Error('current owner proof is unavailable'), { status: 409, code: 'APPROVAL_FACTS_CHANGED' });
   if (!detail?.approval_request_id || detail.status !== 'DRAFT' || !detail.allowed_actions?.includes('EDIT') || String(reason).trim().length < 10) throw unavailable();
   const command = detail.command || detail.normalized_command;
+  if (['TOKEN_MODEL_LIFECYCLE_CHANGE', 'TOKEN_MODEL_CATALOG_ROLLBACK', 'TOKEN_CREDENTIAL_REVOKE'].includes(detail.command_type)) {
+    const target = detail.target || { resource_type: detail.target_resource_type, resource_id: detail.target_resource_id };
+    if (!command || typeof command !== 'object' || Array.isArray(command) || !target.resource_type || !target.resource_id) throw unavailable();
+    // Account re-observes Token authority on draft update and submit. Preserve
+    // the approved intent, including planned times and plan versions; never
+    // replace it with the UI impact endpoint's current-time projection.
+    return { command_type: detail.command_type, normalized_command: command,
+      target_resource_type: target.resource_type, target_resource_id: target.resource_id,
+      idempotency_key: `approval-edit:${detail.approval_request_id}`, reason: reason.trim(),
+      redacted_evidence: detail.redacted_evidence || [], expected_impact: detail.expected_impact || {},
+      critical_resource_versions: detail.critical_resource_versions || {}, financial_snapshot: detail.financial_snapshot || {} };
+  }
   if (detail.command_type === 'WALLET_ADJUSTMENT') {
     const page = await client.adjustments({ wallet_id: command?.wallet_id, status: 'PENDING_APPROVAL', limit: 200 });
     if (page?.has_more || page?.next_cursor || !Array.isArray(page?.items) || page.items.length >= 200) throw unavailable();

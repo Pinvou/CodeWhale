@@ -76,9 +76,10 @@ services:
     <<: *runtime
     image: ${ACCOUNT_SERVICE_IMAGE:?set same-source F01 Account image}
     env_file:
-      - {path: "${ACCOUNT_SERVICE_PRIVATE_ENV_FILE:?set private Account HMAC SMS DSN and workload rules file}", required: true, format: raw}
+      - {path: "${ACCOUNT_SERVICE_PRIVATE_ENV_FILE:?set private Account HMAC SMS owner-cursor DSN and workload rules file}", required: true, format: raw}
     environment:
       <<: *http
+      ACCOUNT_PLATFORM_PROFILE: personal
       MOBILE_AUTH_ENABLED: "true"
       ACCOUNT_TRUSTED_SOURCE_PEER_IPS: "${PERSONAL_EDGE_BACKEND_IP:?set fixed verified edge peer IP},${PERSONAL_PORTAL_BACKEND_IP:?set fixed verified Portal peer IP},${PERSONAL_KEYCLOAK_BACKEND_IP:?set fixed verified Keycloak peer IP}"
       OIDC_ISSUER: ${USER_OIDC_ISSUER:?set exact public user realm issuer}
@@ -139,6 +140,7 @@ services:
       - {path: "${TOKEN_GATEWAY_PRIVATE_ENV_FILE:?set private Token workload rules file}", required: true, format: raw}
     environment:
       <<: *http
+      ACCOUNT_PLATFORM_PROFILE: personal
       OIDC_ISSUER: ${USER_OIDC_ISSUER:?set exact public user realm issuer}
       OIDC_JWKS_URL: ${USER_OIDC_JWKS_URL:?set verified user JWKS endpoint}
       OIDC_AUDIENCE: ${USER_OIDC_AUDIENCE:?set verified existing client audience}

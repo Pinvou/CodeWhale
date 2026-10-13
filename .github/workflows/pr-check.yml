@@ -204,6 +204,8 @@ jobs:
             account_platform:
               - 'account-platform/**'
               - 'scripts/account-platform*'
+              - 'scripts/check-token-management-authorization-coverage.mjs'
+              - 'scripts/tests/token-management-authorization-coverage.test.mjs'
               - '.github/workflows/pr-check.yml'
               - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
@@ -779,6 +781,16 @@ jobs:
         with:
           go-version-file: account-platform/go.mod
           cache-dependency-path: account-platform/**/go.sum
+
+      - name: Node.js for Token authorization contracts
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Verify Token management authorization contracts
+        run: |
+          node scripts/check-token-management-authorization-coverage.mjs
+          node --test scripts/tests/token-management-authorization-coverage.test.mjs
 
       - name: Keycloak provisioning and theme contracts
         shell: bash

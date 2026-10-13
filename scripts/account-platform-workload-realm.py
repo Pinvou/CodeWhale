@@ -6,7 +6,7 @@ import re
 
 SERVICES = (
     "account-service", "identity-service", "billing-service", "token-gateway",
-    "keycloak-mobile-authenticator",
+    "keycloak-mobile-authenticator", "token-credential-portal", "token-command-executor",
 )
 AUDIENCE = "pinvou-account-platform-internal"
 

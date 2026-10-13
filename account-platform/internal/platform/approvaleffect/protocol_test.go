@@ -13,8 +13,11 @@ func TestObservationClosedCommandAuthority(t *testing.T) {
 	if authority, ok := AuthorityForCommand("WALLET_ADJUSTMENT"); !ok || authority != AuthorityBilling {
 		t.Fatal("billing command authority missing")
 	}
-	if _, ok := AuthorityForCommand("TOKEN_CREDENTIAL_REVOKE"); ok {
-		t.Fatal("future Token command exposed")
+	if authority, ok := AuthorityForCommand("TOKEN_CREDENTIAL_REVOKE"); !ok || authority != AuthorityToken {
+		t.Fatal("installed Token command authority missing")
+	}
+	if _, ok := AuthorityForCommand("USAGE_SETTLEMENT_REPAIR"); ok {
+		t.Fatal("future financial repair acquired an authority")
 	}
 
 	if _, ok := AuthorityForCommand("UNKNOWN"); ok {

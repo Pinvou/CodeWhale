@@ -27,3 +27,11 @@ F01 原 cc4827faa 的精确提交 CI 与 required-gate 已成功、外部审核�
 独立完整迁移组合真实 PostgreSQL 验证：Commerce 六组 22 子例 41.750 秒、Profile 两组 20 子例 9.690 秒，均零失败、零跳过；影响包默认测试和 vet 退出 0。独立 routing 14、CI policy 37、部署合同 5、对账 Node 7 通过，actionlint、架构和 diffcheck 退出 0。UI/Native 源码及资产无变动，不将旧浏览器或 Native 结果重新计为本轮执行。
 
 原 routing 首轮一项在 30.025 秒返回空状态，原预算定向及最终完整套件随后通过；原失败和中断记录保留至 #1681，不因最终绿断言耗时原因已根治；它与 #1594 的取消/派发用例不同，不混同根因。#1624 底层偶发连接启动及外部环境验收仍未完成。当前相邻组合的新 head 远端 CI 待验，不沿用旧 head 成功；暂不合入主线，CodeWhale 公开维护祖先链的已知阻断仍按用户指示暂缓且不放宽门禁。
+
+## F04：保留 Token 治理门禁的普通相邻承接
+
+从原 F04 `712f3acad860b2cf497e4c802962be9b94b1999e` 普通相邻合并签名 F03 `d252f3a6c42c5b5d92946f02fe32d591716f8ad5`。三个 CI 文件自动联合，保留 F04 Token 专用授权检查、Node setup 与路由断言，同时承接固定镜像、Keycloak 和 Go 门禁；原 Token 合同、registry、F03 读错误分类及既有 UI/Native 源码和生成资产不变。
+
+非作者独立适用检查：routing 14、CI policy 37、F04 overview Node 9、部署合同 5 均通过且 Node 无跳过；Token 管理授权 checker、actionlint、架构和 diffcheck 退出 0。另一非作者确认 Account 默认测试 2.796 秒、BillingSchema 默认测试 3.637 秒和 vet 退出 0。本轮没有新增真实 PG、完整浏览器或 Native 执行，不将前波 PG 或历史验收冒称当前组合实测。
+
+验证计划曾误选当前 F04 不存在的 `token-management-phase-coverage.test.mjs`，调用实际退出 1，未执行测试且不计通过；记录保留，不引入后波文件或放宽门禁。F03 夹具未知耗时仍由 #1681 跟踪；新签名 head 的远端 CI 待验，CodeWhale 公开维护链仍按用户指示暂缓。

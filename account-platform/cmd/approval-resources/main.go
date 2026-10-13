@@ -15,10 +15,20 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "token-consumers" {
+		raw, err := runTokenResources(os.Args[1:], os.Getenv)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "TOKEN_APPROVAL_RESOURCES_BLOCKED")
+			os.Exit(1)
+		}
+		fmt.Println(string(raw))
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "render" {
 		result, err := renderPublicResources(os.Getenv)
 		if err != nil {
@@ -52,6 +62,14 @@ func run(args []string, environment func(string) string) (account.AdminApprovalC
 	default:
 		return account.AdminApprovalControl{}, account.ErrApprovalFreshInitialization
 	}
+	profile, err := config.ParseAccountPlatformProfile(environment("ACCOUNT_PLATFORM_PROFILE"))
+	if err != nil {
+		return account.AdminApprovalControl{}, account.ErrApprovalFreshInitialization
+	}
+	checkConsumers := events.CheckCurrentApprovalConsumers
+	if profile == config.AccountPlatformProfilePersonal {
+		checkConsumers = events.CheckFreshApprovalConsumers
+	}
 	cfg := events.NATSConfig{Environment: "production", ResourceMode: "provisioned", RequireExplicitAuthentication: true, CAFile: environment("NATS_CA_FILE"), SeedFile: environment("NATS_NKEY_SEED_FILE"), CredentialsFile: environment("NATS_CREDENTIALS_FILE")}
 	files := events.ApprovalConsumerResourceFiles{
 		Identity:     events.NATSAuthorizationArtifactFiles{CurrentFile: environment("APPROVAL_RESOURCE_CURRENT_PUBLIC_KEYS_FILE"), CurrentSHA256: environment("APPROVAL_RESOURCE_CURRENT_PUBLIC_KEYS_SHA256"), PreviousFile: environment("APPROVAL_RESOURCE_PREVIOUS_PUBLIC_KEYS_FILE"), PreviousSHA256: environment("APPROVAL_RESOURCE_PREVIOUS_PUBLIC_KEYS_SHA256"), PrivateIdentityFiles: []string{cfg.SeedFile, cfg.CredentialsFile}},
@@ -76,7 +94,7 @@ func run(args []string, environment func(string) string) (account.AdminApprovalC
 		}
 	} else if step == account.FreshApprovalActivate || step == account.FreshApprovalResume {
 		callback = func(ctx context.Context, control account.AdminApprovalControl) (json.RawMessage, error) {
-			facts, err := events.CheckFreshApprovalConsumers(ctx, environment("NATS_URL"), cfg, files)
+			facts, err := checkConsumers(ctx, environment("NATS_URL"), cfg, files)
 			if err != nil {
 				return nil, err
 			}

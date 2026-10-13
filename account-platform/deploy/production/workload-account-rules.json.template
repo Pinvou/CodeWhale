@@ -1,6 +1,56 @@
 [
-  {"subject":"__APPROVAL_RECOVERY_WORKLOAD_SUBJECT__","service":"account-approval-recovery","permissions":["internal.approval-recovery.plan","internal.approval-recovery.confirm","internal.approval-recovery.zero-effect"]},
-  {"subject":"__TOKEN_WORKLOAD_SUBJECT__","service":"token-gateway","permissions":["internal.authorization.check"]},
-  {"subject":"__BILLING_WORKLOAD_SUBJECT__","service":"billing-service","permissions":["internal.authorization.check","internal.authorization.delegate","internal.approval-execution.begin","internal.approval-execution.complete","internal.approval-authorization.consume"]},
-  {"subject":"__KEYCLOAK_WORKLOAD_SUBJECT__","service":"keycloak-mobile-authenticator","permissions":["internal.authorization.check","internal.auth.sms.verify"]}
+  {
+    "subject": "__APPROVAL_RECOVERY_WORKLOAD_SUBJECT__",
+    "service": "account-approval-recovery",
+    "permissions": [
+      "internal.approval-recovery.plan",
+      "internal.approval-recovery.confirm",
+      "internal.approval-recovery.zero-effect"
+    ]
+  },
+  {
+    "subject": "__TOKEN_WORKLOAD_SUBJECT__",
+    "service": "token-gateway",
+    "permissions": [
+      "internal.authorization.check",
+      "internal.authorization.delegate",
+      "internal.token-owner-authority.read",
+      "internal.token-owner-candidates.read"
+    ]
+  },
+  {
+    "subject": "__BILLING_WORKLOAD_SUBJECT__",
+    "service": "billing-service",
+    "permissions": [
+      "internal.authorization.check",
+      "internal.authorization.delegate",
+      "internal.approval-execution.begin",
+      "internal.approval-execution.complete",
+      "internal.approval-authorization.consume"
+    ]
+  },
+  {
+    "subject": "__KEYCLOAK_WORKLOAD_SUBJECT__",
+    "service": "keycloak-mobile-authenticator",
+    "permissions": [
+      "internal.authorization.check",
+      "internal.auth.sms.verify"
+    ]
+  },
+  {
+    "subject": "__CREDENTIAL_WORKLOAD_SUBJECT__",
+    "service": "token-credential-portal",
+    "permissions": [
+      "internal.authorization.check"
+    ]
+  },
+  {
+    "subject": "__TOKEN_EXECUTOR_WORKLOAD_SUBJECT__",
+    "service": "token-command-executor",
+    "permissions": [
+      "internal.approval-execution.begin",
+      "internal.approval-execution.complete",
+      "internal.approval-authorization.consume"
+    ]
+  }
 ]

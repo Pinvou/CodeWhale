@@ -65,7 +65,9 @@ function Payments({ client, copy, language, permissions, owner }) {
   </section>;
 }
 
-export function Approvals({ client, copy, permissions, owner, requestID, query = null, pendingUserID = null, onStateChange, onNavigate, centerCopy }) {
+const defaultApprovalCommandTypes = Object.freeze(['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME']);
+
+export function Approvals({ client, copy, permissions, owner, commandTypes = defaultApprovalCommandTypes, initialRequestID = '', requestID = initialRequestID, query = null, pendingUserID = null, onStateChange, onNavigate, centerCopy }) {
   const [items, setItems] = useState([]);
   const [page, setPage] = useState(null);
   const [cursor, setCursor] = useState('');
@@ -73,11 +75,11 @@ export function Approvals({ client, copy, permissions, owner, requestID, query =
   const [detail, setDetail] = useState(null);
   const [reason, setReason] = useState('');
   const operation = useFinanceOperation(owner, copy, client, 'approvals');
-  const load = async (next = cursor) => { const result = await operation.read(() => loadFinancePage({ ...query, cursor: next }, filters => client.governedApprovalRequests(filters), () => { setCursor(''); setPrevious([]); })); if (result) { const value = result.value; setPage(value); setCursor(result.query.cursor); setItems(requireFinanceCollection(value).filter(item => ['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME'].includes(item.command_type) && (!pendingUserID || approvalRequester(item) !== pendingUserID))); } };
+  const load = async (next = cursor) => { const result = await operation.read(() => loadFinancePage({ ...query, cursor: next }, filters => client.governedApprovalRequests(filters), () => { setCursor(''); setPrevious([]); })); if (result) { const value = result.value; setPage(value); setCursor(result.query.cursor); setItems(requireFinanceCollection(value).filter(item => commandTypes.includes(item.command_type) && (!pendingUserID || approvalRequester(item) !== pendingUserID))); } };
   const queryKey = JSON.stringify(query);
   useEffect(() => { onStateChange?.(operation.busy || operation.unknown); }, [onStateChange, operation.busy, operation.unknown]);
-  useEffect(() => { void (async () => { setDetail(null); setPage(null); setItems([]); setPrevious([]); await load(''); if (requestID) await open(requestID); })(); }, [client, owner, requestID, queryKey, pendingUserID]); // eslint-disable-line react-hooks/exhaustive-deps
-  const open = async id => { const value = await operation.read(async () => { const value = await client.governedApprovalRequest(id); if (value?.approval_request_id !== id) throw new Error('INVALID_FINANCE_ACK'); return value; }); if (value) setDetail(value); };
+  useEffect(() => { let active = true; void (async () => { setDetail(null); setPage(null); setItems([]); setPrevious([]); await load(''); if (active && requestID) await open(requestID); })(); return () => { active = false; }; }, [client, owner, requestID, queryKey, pendingUserID]); // eslint-disable-line react-hooks/exhaustive-deps
+  const open = async id => { const value = await operation.read(async () => { const value = await client.governedApprovalRequest(id); if (value?.approval_request_id !== id || !commandTypes.includes(value.command_type)) throw new Error('INVALID_FINANCE_ACK'); return value; }); if (value) setDetail(value); };
   const act = async action => {
     let facts = operation.pendingFacts;
     if (!facts) {
@@ -85,8 +87,8 @@ export function Approvals({ client, copy, permissions, owner, requestID, query =
       if (action === 'EDIT' && !draft) return;
       facts = { detail, action, reason, draft };
     }
-    const value = await operation.mutate(facts, async facts => {
-      if (facts.action === 'EDIT') await updateAndSubmitGovernedApproval(client, facts.detail, facts.draft);
+    const value = await operation.mutate(facts, async (facts, invocationKey) => {
+      if (facts.action === 'EDIT') await updateAndSubmitGovernedApproval(client, facts.detail, { ...facts.draft, idempotency_key: invocationKey });
       else if (facts.action === 'SUBMIT') await client.submitGovernedApprovalRequest(facts.detail.approval_request_id, facts.detail);
       else if (facts.action === 'WITHDRAW') await client.withdrawGovernedApprovalRequest(facts.detail.approval_request_id, facts.detail);
       else await client.decideGovernedApproval(facts.detail.approval_request_id, facts.detail, facts.action, facts.reason);
@@ -99,7 +101,7 @@ export function Approvals({ client, copy, permissions, owner, requestID, query =
     <button disabled={operation.busy || operation.unknown || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); void load(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); void load(page.next_cursor); }}>{copy.next}</button>
     {detail && <article><h4>{detail.approval_request_id}</h4><p>{detail.command_type} / {detail.status} / {copy.version}: {detail.version}</p><p>{detail.reason}</p>{businessRoute && onNavigate && <button disabled={operation.busy || operation.unknown} onClick={() => onNavigate(businessRoute)}>{centerCopy.openBusinessArea}</button>}<h5>{copy.command}</h5><pre>{JSON.stringify(detail.command || {}, null, 2)}</pre>{detail.execution && <><h5>{copy.effects}</h5><p>{detail.execution.attempt_status} / {detail.execution.error_class} / {detail.execution.next_retry_at} / {detail.execution.execution_deadline}</p></>}<label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} value={reason} onChange={event => setReason(event.target.value)} maxLength={2000} /></label>{['EDIT', 'SUBMIT', 'WITHDRAW', 'APPROVE', 'REJECT'].filter(action => detail.allowed_actions?.includes(action)).map(action => {
       const approver = action === 'APPROVE' || action === 'REJECT';
-      const allowed = approver ? permissions.includes(detail.command_type === 'WALLET_ADJUSTMENT' ? 'platform.billing.adjustments.approve' : 'platform.billing.payment-controls.resume.approve') : true;
+      const allowed = approver ? permissions.includes({ WALLET_ADJUSTMENT: 'platform.billing.adjustments.approve', PAYMENT_PROVIDER_RESUME: 'platform.billing.payment-controls.resume.approve', PAYMENT_PRODUCT_RESUME: 'platform.billing.payment-controls.resume.approve', TOKEN_MODEL_LIFECYCLE_CHANGE: 'platform.models.lifecycle.approve', TOKEN_MODEL_CATALOG_ROLLBACK: 'platform.models.catalog.rollback.approve', TOKEN_CREDENTIAL_REVOKE: 'platform.tokens.credentials.revoke.approve' }[detail.command_type]) : true;
       return allowed && <button key={action} disabled={operation.busy || operation.unknown || ((approver || action === 'EDIT') && reason.trim().length < 10)} onClick={() => void act(action)}>{copy[{ EDIT: 'editSubmit', SUBMIT: 'submit', WITHDRAW: 'withdraw', APPROVE: 'approve', REJECT: 'reject' }[action]]}</button>;
     })}</article>}
   </section>;
@@ -224,5 +226,5 @@ export function AdminFinanceWorkspace({ client, me, language, initialTab = 'orde
   useEffect(() => { if (['orders', 'wallets', 'controls'].includes(initialTab)) setTab(initialTab); }, [initialTab]);
   const [approvalID, setApprovalID] = useState('');
   const tabs = [['orders', copy.orders], ['wallets', copy.wallet], ['controls', copy.providerControls], ['approvals', copy.approvals], ['late', copy.sla], ['anomalies', copy.resolve]];
-  return <section className="adm-panel"><h2>{copy.finance}</h2><nav>{tabs.map(([key, label]) => <button key={key} aria-pressed={tab === key} onClick={() => setTab(key)}>{label}</button>)}</nav><div key={`${owner}:${tab}`}>{tab === 'late' && <AdminPaymentReviewQueue {...{ client, copy, me }} />}{tab === 'anomalies' && <AdminPaymentReviewQueue {...{ client, copy, me }} anomaly />}{tab === 'orders' && <Payments {...{ client, copy, language, permissions, owner }} />}{tab === 'wallets' && <Wallets {...{ client, copy, language, permissions, owner }} requesterID={me.user_id} onViewApproval={id => { setApprovalID(id); setTab('approvals'); }} />}{tab === 'controls' && <ProviderControls {...{ client, copy, permissions, owner }} />}{tab === 'approvals' && <Approvals {...{ client, copy, permissions, owner }} requestID={approvalID} />}</div></section>;
+  return <section className="adm-panel"><h2>{copy.finance}</h2><nav>{tabs.map(([key, label]) => <button key={key} aria-pressed={tab === key} onClick={() => setTab(key)}>{label}</button>)}</nav><div key={`${owner}:${tab}`}>{tab === 'late' && <AdminPaymentReviewQueue {...{ client, copy, me }} />}{tab === 'anomalies' && <AdminPaymentReviewQueue {...{ client, copy, me }} anomaly />}{tab === 'orders' && <Payments {...{ client, copy, language, permissions, owner }} />}{tab === 'wallets' && <Wallets {...{ client, copy, language, permissions, owner }} requesterID={me.user_id} onViewApproval={id => { setApprovalID(id); setTab('approvals'); }} />}{tab === 'controls' && <ProviderControls {...{ client, copy, permissions, owner }} />}{tab === 'approvals' && <Approvals {...{ client, copy, permissions, owner }} initialRequestID={approvalID} />}</div></section>;
 }

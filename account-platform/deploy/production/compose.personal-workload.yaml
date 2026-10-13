@@ -1,4 +1,4 @@
-# Combine with compose.personal.yaml. Only the five implemented F01 identities
+# Combine with compose.personal.yaml. Only the seven implemented F04 identities
 # obtain renewable tokens; writer discovery names never shadow business services.
 name: pinvou-personal
 x-agent: &agent
@@ -62,6 +62,18 @@ services:
       - {type: bind, source: "${KEYCLOAK_WORKLOAD_CONFIG_DIRECTORY:?set authenticator public config and CA directory}", target: /run/config, read_only: true, bind: {create_host_path: false}}
       - {type: bind, source: "${KEYCLOAK_WORKLOAD_BOOTSTRAP_DIRECTORY:?set only authenticator bootstrap secret directory}", target: /run/bootstrap, read_only: true, bind: {create_host_path: false}}
       - {type: bind, source: "${KEYCLOAK_WORKLOAD_TOKEN_DIRECTORY:?set only authenticator projected token directory}", target: /run/projected, bind: {create_host_path: false}}
+  token-credential-portal-workload-agent:
+    <<: *agent
+    volumes:
+      - {type: bind, source: "${CREDENTIAL_WORKLOAD_CONFIG_DIRECTORY:?set only token-credential-portal public config and CA}", target: /run/config, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${CREDENTIAL_WORKLOAD_BOOTSTRAP_DIRECTORY:?set only token-credential-portal bootstrap directory}", target: /run/bootstrap, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${CREDENTIAL_WORKLOAD_TOKEN_DIRECTORY:?set only token-credential-portal projected token directory}", target: /run/projected, bind: {create_host_path: false}}
+  token-command-executor-workload-agent:
+    <<: *agent
+    volumes:
+      - {type: bind, source: "${TOKEN_EXECUTOR_WORKLOAD_CONFIG_DIRECTORY:?set only token-command-executor public config and CA}", target: /run/config, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${TOKEN_EXECUTOR_WORKLOAD_BOOTSTRAP_DIRECTORY:?set only token-command-executor bootstrap directory}", target: /run/bootstrap, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${TOKEN_EXECUTOR_WORKLOAD_TOKEN_DIRECTORY:?set only token-command-executor projected token directory}", target: /run/projected, bind: {create_host_path: false}}
   account-service:
     depends_on:
       account-service-workload-agent: {condition: service_healthy}

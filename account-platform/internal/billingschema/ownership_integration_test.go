@@ -119,6 +119,14 @@ VALUES('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbb
 	if err = Up(ctx, c, loaded); err != nil {
 		t.Fatal(err)
 	}
+	var distinctReceipts bool
+	if err = c.QueryRow(ctx, `SELECT
+	 EXISTS(SELECT 1 FROM schema_migrations WHERE version=900004 AND name='refund_dispatch_fencing')
+	 AND EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1 AND name='pricing_operation_receipts' AND checksum=$2)
+	 AND to_regclass('pricing_operation_commands') IS NOT NULL
+	 AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='refunds' AND column_name='dispatch_lease_until')`, pricingReceiptVersion, pricingReceiptChecksum).Scan(&distinctReceipts); err != nil || !distinctReceipts {
+		t.Fatal("refund dispatch and pricing receipts require distinct frozen migration identities", err)
+	}
 	var notificationAfter string
 	var unbound bool
 	if err = fixture.QueryRow(ctx, notificationFacts).Scan(&notificationAfter); err != nil || notificationAfter != oldNotification {

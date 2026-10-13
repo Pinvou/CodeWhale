@@ -93,7 +93,7 @@ func (s *Service) adminApprovalDirectory(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	for _, item := range projection.Items {
-		if !currentBillingApprovalCommand(item.CommandType) || item.PolicyVersion < 1 || item.SnapshotSchemaVersion < 1 || item.RiskClass == "" || !item.Visible {
+		if !currentGovernedApprovalCommand(item.CommandType) || item.PolicyVersion < 1 || item.SnapshotSchemaVersion < 1 || item.RiskClass == "" || !item.Visible {
 			approvalBFFUnavailable(w, r)
 			return
 		}

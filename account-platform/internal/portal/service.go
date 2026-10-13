@@ -24,23 +24,28 @@ import (
 )
 
 type Config struct {
-	Environment                string
-	IssuerURL                  *url.URL
-	JWKSURL                    *url.URL
-	PublicURL                  *url.URL
-	AuthorizationURL           *url.URL
-	TokenURL                   *url.URL
-	AccountURL                 *url.URL
-	TokenGatewayURL            *url.URL
-	BillingURL                 *url.URL
-	ClientID                   string
-	HandoffClientID            string
-	HandoffClientSecret        string
-	PrivateCAFile              string
-	HandoffSubjectTokenEnabled bool
-	SecureCookies              bool
-	SessionHandoffTTL          time.Duration
-	TrustedProxyIPs            []netip.Addr
+	TokenAdminProxyHMACKey              []byte
+	AdminModelOperationsOverviewEnabled bool
+	AdminModelTokenPageOverviewsEnabled bool
+	AdminTokenDetailsEnabled            bool
+	CredentialOrigin                    *url.URL
+	Environment                         string
+	IssuerURL                           *url.URL
+	JWKSURL                             *url.URL
+	PublicURL                           *url.URL
+	AuthorizationURL                    *url.URL
+	TokenURL                            *url.URL
+	AccountURL                          *url.URL
+	TokenGatewayURL                     *url.URL
+	BillingURL                          *url.URL
+	ClientID                            string
+	HandoffClientID                     string
+	HandoffClientSecret                 string
+	PrivateCAFile                       string
+	HandoffSubjectTokenEnabled          bool
+	SecureCookies                       bool
+	SessionHandoffTTL                   time.Duration
+	TrustedProxyIPs                     []netip.Addr
 }
 type Service struct {
 	config          Config
@@ -114,6 +119,18 @@ func NewService(config Config, store Store) (*Service, error) {
 	if strings.TrimSpace(config.PrivateCAFile) != "" && config.TokenURL.Scheme != "https" {
 		return nil, errors.New("portal private CA requires HTTPS token transport")
 	}
+	if config.AdminTokenDetailsEnabled {
+		if err := validateCredentialOrigin(config.CredentialOrigin, config.SecureCookies); err != nil {
+			return nil, err
+		}
+		if strings.EqualFold(config.PublicURL.Scheme+"://"+config.PublicURL.Host, credentialOriginProjection(config)) {
+			return nil, errors.New("credential origin must be isolated from the management portal origin")
+		}
+	}
+	if len(config.TokenAdminProxyHMACKey) > 0 && len(config.TokenAdminProxyHMACKey) < 32 || config.AdminModelTokenPageOverviewsEnabled && len(config.TokenAdminProxyHMACKey) < 32 {
+		return nil, errors.New("model and Token page overviews require a proxy HMAC key with at least 32 bytes")
+	}
+	config.TokenAdminProxyHMACKey = append([]byte(nil), config.TokenAdminProxyHMACKey...)
 	client, err := newPortalHTTPClient(config.PrivateCAFile)
 	if err != nil {
 		return nil, err
@@ -140,12 +157,14 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 		copy.URL = &u
 		static.ServeHTTP(w, copy)
 	}))
+	router.GET("/credential-handoff", httpserver.AdaptFunc(s.credentialHandoff))
 	router.GET("/api/session", httpserver.AdaptFunc(s.sessionStatus))
 	router.POST("/api/logout", httpserver.AdaptFunc(s.logout))
 	router.Any("/api/account/*resource", httpserver.AdaptFunc(s.proxyAccount))
 	router.Any("/api/token/*resource", httpserver.AdaptFunc(s.proxyToken))
 	router.Any("/api/admin/account/*resource", httpserver.AdaptFunc(s.proxyAdminAccount))
 	router.Any("/api/admin/billing/*resource", httpserver.AdaptFunc(s.proxyAdminBilling))
+	router.Any("/api/admin/token/*resource", httpserver.AdaptFunc(s.proxyAdminToken))
 	router.GET("/api/admin/approvals/capability", httpserver.AdaptFunc(s.adminApprovalCapability))
 	router.GET("/api/admin/approvals/directory", httpserver.AdaptFunc(s.adminApprovalDirectory))
 	router.GET("/api/admin/approvals/requests", httpserver.AdaptFunc(s.adminApprovalRequests))
@@ -167,7 +186,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 		} else {
 			w.Header().Set("Cache-Control", "no-cache")
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/health/") || strings.HasPrefix(r.URL.Path, "/portal-session-handoff") || static == nil {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/health/") || strings.HasPrefix(r.URL.Path, "/portal-session-handoff") || r.URL.Path == "/credential-handoff" || static == nil {
 			router.ServeHTTP(w, r)
 			return
 		}
@@ -355,7 +374,7 @@ func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookies(w, session)
-	api.WriteJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken})
+	api.WriteJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "credential_origin": credentialOriginProjection(s.config), "feature_flags": map[string]bool{"admin_model_operations_overview": s.config.AdminModelOperationsOverviewEnabled, "admin_model_token_page_overviews": s.config.AdminModelTokenPageOverviewsEnabled}})
 }
 func (s *Service) sessionLineageStatus(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"schema_version": 1, "capable": true, "enabled": true})
@@ -847,6 +866,17 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 			return
 		}
 		request.Header.Set("X-Forwarded-For", source)
+	}
+	if upstream == s.config.TokenGatewayURL && tokenPageQuerySigningPath(r.Method, resource) {
+		source, valid := s.clientRiskSource(r)
+		if !valid {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_SOURCE", "the request source is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		if !s.signTokenPageQuery(request, source) {
+			api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_OVERVIEW_UNAVAILABLE", "the Token overview source authority is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
 	}
 	response, err := s.client.Do(request)
 	if err != nil {

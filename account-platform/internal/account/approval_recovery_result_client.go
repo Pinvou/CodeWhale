@@ -3,6 +3,8 @@ package account
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -36,6 +38,7 @@ type ApprovalRecoveryResultReader interface {
 
 type ApprovalRecoveryResultClient struct {
 	billingEndpoint *url.URL
+	tokenEndpoint   *url.URL
 	serviceToken    string
 	httpClient      *http.Client
 }
@@ -64,6 +67,17 @@ func recoveryResultEndpoint(base string) (*url.URL, error) {
 	return parsed, nil
 }
 
+type tokenRecoveryResultView struct {
+	SchemaVersion      int        `json:"schema_version"`
+	ApprovalRequestID  uuid.UUID  `json:"approval_request_id"`
+	CommandType        string     `json:"command_type"`
+	CommandFingerprint string     `json:"command_fingerprint"`
+	OriginalKeyDigest  string     `json:"original_key_digest"`
+	State              string     `json:"state"`
+	CommandReference   *uuid.UUID `json:"command_reference,omitempty"`
+	ObservedAt         time.Time  `json:"observed_at"`
+}
+
 type billingRecoveryResultView struct {
 	SchemaVersion     int             `json:"schema_version"`
 	ApprovalRequestID uuid.UUID       `json:"approval_request_id"`
@@ -80,12 +94,14 @@ func (c *ApprovalRecoveryResultClient) ObserveRecoveryResult(ctx context.Context
 	if c == nil || c.httpClient == nil || !validRecoveryInspectionCandidate(candidate) || candidate.OriginalKey == "" || candidate.ApprovalEpoch < 1 {
 		return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
 	}
-	_, ok := approvalconsumer.LookupDurable(candidate.Durable)
+	descriptor, ok := approvalconsumer.LookupDurable(candidate.Durable)
 	if !ok {
 		return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
 	}
 	base := c.billingEndpoint
-
+	if descriptor.Workload == approvalconsumer.TokenWorkload {
+		base = c.tokenEndpoint
+	}
 	if base == nil {
 		return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
 	}
@@ -93,10 +109,14 @@ func (c *ApprovalRecoveryResultClient) ObserveRecoveryResult(ctx context.Context
 	endpoint.Path += candidate.RequestID.String()
 	query := endpoint.Query()
 	query.Set("command_type", candidate.CommandType)
-
-	query.Set("original_event_id", candidate.OriginalEventID.String())
-	query.Set("approval_epoch", strconv.FormatInt(candidate.ApprovalEpoch, 10))
-
+	if descriptor.Workload == approvalconsumer.TokenWorkload {
+		query.Set("command_fingerprint", candidate.CommandFingerprint)
+		digest := sha256.Sum256([]byte(candidate.OriginalKey))
+		query.Set("original_key_digest", hex.EncodeToString(digest[:]))
+	} else {
+		query.Set("original_event_id", candidate.OriginalEventID.String())
+		query.Set("approval_epoch", strconv.FormatInt(candidate.ApprovalEpoch, 10))
+	}
 	endpoint.RawQuery = query.Encode()
 	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -127,26 +147,41 @@ func (c *ApprovalRecoveryResultClient) ObserveRecoveryResult(ctx context.Context
 	var observedAt time.Time
 	var reference *uuid.UUID
 	var domainResult, ledgerReferences json.RawMessage
-
-	var view billingRecoveryResultView
-	if decoder.Decode(&view) != nil || decoder.Decode(new(any)) != io.EOF || view.SchemaVersion != 1 ||
-		view.ApprovalRequestID != candidate.RequestID || view.OriginalEventID != candidate.OriginalEventID ||
-		view.ApprovalEpoch != candidate.ApprovalEpoch || view.CommandType != candidate.CommandType {
-		return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
-	}
-	state, observedAt = view.State, view.ObservedAt
-	if state != "UNCONFIRMED" && state != "SUCCEEDED" {
-		return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
-	}
-	if state == "SUCCEEDED" {
-		if !validBillingRecoveryPayload(candidate.CommandType, view.DomainResult, view.LedgerReferences) {
+	if descriptor.Workload == approvalconsumer.TokenWorkload {
+		var view tokenRecoveryResultView
+		if decoder.Decode(&view) != nil || decoder.Decode(new(any)) != io.EOF || view.SchemaVersion != 1 ||
+			view.ApprovalRequestID != candidate.RequestID || view.CommandType != candidate.CommandType ||
+			view.CommandFingerprint != candidate.CommandFingerprint || view.OriginalKeyDigest != query.Get("original_key_digest") {
 			return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
 		}
-		domainResult, ledgerReferences = view.DomainResult, view.LedgerReferences
-	} else if len(view.DomainResult) != 0 || len(view.LedgerReferences) != 0 {
-		return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
+		state, observedAt = view.State, view.ObservedAt
+		reference = view.CommandReference
+		if (state == "SUCCEEDED" && (reference == nil || *reference == uuid.Nil)) || (state != "SUCCEEDED" && reference != nil) {
+			return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
+		}
+		if state != "UNCONFIRMED" && state != "PENDING" && state != "SUCCEEDED" && state != "REJECTED" && state != "FAILED" && state != "UNKNOWN" {
+			return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
+		}
+	} else {
+		var view billingRecoveryResultView
+		if decoder.Decode(&view) != nil || decoder.Decode(new(any)) != io.EOF || view.SchemaVersion != 1 ||
+			view.ApprovalRequestID != candidate.RequestID || view.OriginalEventID != candidate.OriginalEventID ||
+			view.ApprovalEpoch != candidate.ApprovalEpoch || view.CommandType != candidate.CommandType {
+			return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
+		}
+		state, observedAt = view.State, view.ObservedAt
+		if state != "UNCONFIRMED" && state != "SUCCEEDED" {
+			return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
+		}
+		if state == "SUCCEEDED" {
+			if !validBillingRecoveryPayload(candidate.CommandType, view.DomainResult, view.LedgerReferences) {
+				return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
+			}
+			domainResult, ledgerReferences = view.DomainResult, view.LedgerReferences
+		} else if len(view.DomainResult) != 0 || len(view.LedgerReferences) != 0 {
+			return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
+		}
 	}
-
 	if observedAt.Before(startedAt.Add(-30*time.Second)) || observedAt.After(time.Now().UTC().Add(30*time.Second)) {
 		return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
 	}
@@ -198,4 +233,17 @@ func validBillingRecoveryPayload(command string, domainResult, ledgerReferences 
 
 	}
 	return false
+}
+
+func NewApprovalRecoveryResultClientWithToken(billingURL, tokenURL, credential string) (*ApprovalRecoveryResultClient, error) {
+	c, err := NewApprovalRecoveryResultClient(billingURL, credential)
+	if err != nil {
+		return nil, err
+	}
+	token, err := recoveryResultEndpoint(tokenURL)
+	if err != nil {
+		return nil, err
+	}
+	c.tokenEndpoint = token
+	return c, nil
 }

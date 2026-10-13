@@ -4,6 +4,10 @@
 
 `compose.personal.yaml` 运行五个业务进程、两个迁移作业、普通 Account relay 和 TLS 入口；`event-resources` 是显式运维 profile。它使用已独立配置的 Postgres、Redis、NATS 和 Keycloak，并不接管它们或创建网络、密钥与账号。站点依赖必须位于验证过的私有网络上。业务进程不发布宿主端口，只有入口的 TLS 端口对外开放。私有 origin、URL 中的凭证、数据库 DSN、短信凭证、Token、Cookie、HMAC 和密码不得写入仓库、例子、日志或渲染后的公开配置。
 
+`ACCOUNT_PLATFORM_PROFILE` 是业务进程运行模式，与 Compose 的 `event-resources`、`approval-operations` profiles 不同。基础模板明确将 Account 与余额 Token facade 设为 `personal`：Account 保留 Billing 审批投影、证明及结果读取，Token 保留个人余额和已有个人金融接口，不构造模型数据库、KMS、provider、模型 worker 或模型管理入口。直接运行未配置该变量的二进制仍默认 `models`；未知值拒绝启动，缺少模型配置不会隐式降级。
+
+叠加 `compose.finance.yaml` 前须显式配置 `ACCOUNT_PLATFORM_PROFILE=personal`，其 `approval-resources` 要求该变量非空，保持三个服务一致。个人财务的 live activate/resume 仅核验原三条 Billing consumer，不执行 Token consumer 初始化；当前离线公共 manifest 仍是既有六 descriptor 的固定期望，不能将其误作模型消费者已安装或就绪的证明。模型部署必须改用 [完整模型叠加](README.models.md)，不得把个人余额服务宣称为模型运维部署。
+
 ## 同源镜像
 
 通过 `account-platform/Dockerfile` 分别构建 `account-service`、`identity-service`、`billing-service`、`token-gateway`、`token-portal`、`event-relay`、`event-resources`、`migrate` 和 `workload-token-agent`。`SERVICE` 仅接受本阶段实现。镜像包含实际健康检查和本阶段迁移，不编译未来策略引导器。Portal 镜像必须包含已经构建、独立审核的 `internal/portal/static` 产物。版本参数使用仓库根 `VERSION` 的实际值，不另外定义客户端支持范围。站点独立核验并提供镜像引用；配置采用 `pull_policy: never`，不自动替换镜像或隐式获取部署依赖。
@@ -16,7 +20,7 @@
 
 | 进程 | 私有文件中必需的实际输入 |
 | --- | --- |
-| Account | `DATABASE_URL`（TLS verify-full）、`WORKLOAD_IDENTITY_RULES_JSON`、`REGISTRATION_QUERY_HMAC_KEY_BASE64`、`SMS_VERIFICATION_HMAC_KEY_BASE64`、`SMS_PROVIDER` 及对应 Aliyun/HTTP provider 的真实凭证和四种用途模板；钱包策略版本与 1–1440 分钟 SLA 可沿既有默认。 |
+| Account | `DATABASE_URL`（TLS verify-full）、`WORKLOAD_IDENTITY_RULES_JSON`、`REGISTRATION_QUERY_HMAC_KEY_BASE64`、`SMS_VERIFICATION_HMAC_KEY_BASE64`、`SMS_PROVIDER` 及对应 Aliyun/HTTP provider 的真实凭证和四种用途模板；F04 起还须提供独立的 `OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64`（标准 Base64，解码后恰好 32 字节）；钱包策略版本与 1–1440 分钟 SLA 可沿既有默认。 |
 | Identity | `IDENTITY_PASSWORD_HMAC_KEY_BASE64`、`AUTH_RISK_REDIS_URL`（identity ACL 用户、TLS）、`AUTH_RISK_HMAC_KEY_BASE64`、`WORKLOAD_IDENTITY_RULES_JSON`；挂载 Keycloak provisioner client-secret。没有风险 Redis 就无法提供必需的 OIDC token proxy，不可当作可运行装配。 |
 | Billing | `DATABASE_URL`（TLS verify-full）、仅本阶段钱包权限的 `WORKLOAD_IDENTITY_RULES_JSON`。 |
 | Token | 出站 workload token；只有个人余额 facade，无数据库、模型路由或 readiness GO。 |

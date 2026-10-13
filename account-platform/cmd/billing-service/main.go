@@ -59,6 +59,10 @@ func main() {
 		log.Fatal("BILLING_DATABASE_INITIALIZATION_FAILED")
 	}
 	defer repository.Close()
+	expiredHoldClient, err := expiredHoldClientFromEnvironment(credential)
+	if err != nil {
+		log.Fatal("BILLING_HOLD_EXPIRY_CONFIGURATION_INVALID")
+	}
 	payments, err := paymentCoordinator(ctx, repository, cfg.Environment)
 	if err != nil {
 		log.Fatal("BILLING_PAYMENT_CONFIGURATION_INVALID")
@@ -71,7 +75,11 @@ func main() {
 	if err != nil {
 		log.Fatal("BILLING_APPROVAL_GATE_CONFIGURATION_INVALID")
 	}
-	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(gate)
+	modelPriceProjectionEnabled, err := optionalBooleanEnvironment("BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED", false)
+	if err != nil {
+		log.Fatal("BILLING_MODEL_PRICE_PROJECTION_CONFIGURATION_INVALID")
+	}
+	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(gate).WithAdminModelPriceProjection(modelPriceProjectionEnabled)
 	keys, err := humandelegation.DecodeVerificationKeysJSON(os.Getenv("HUMAN_DELEGATION_VERIFICATION_KEYS_JSON"))
 	if err != nil {
 		log.Fatal("BILLING_HUMAN_DELEGATION_KEYS_INVALID")
@@ -138,6 +146,7 @@ func main() {
 		log.Fatal("BILLING_TEST_ADMISSION_TTL_INVALID")
 	}
 	go observability.RunBackground(ctx, "package-expiry", billing.NewPackageExpiryWorker(repository, time.Minute).Run)
+	go observability.RunBackground(ctx, "expired-hold-recovery", billing.NewExpiredHoldRecoveryWorker(repository, expiredHoldClient, time.Minute).Run)
 	go observability.RunBackground(ctx, "product-admission-expiry", billing.NewProductAdmissionExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "product-admission-verification", billing.NewProductAdmissionVerificationWorker(repository, payments.Capabilities(), 5*time.Second, admissionTTL).Run)
 	go observability.RunBackground(ctx, "manual-review-sla", billing.NewManualReviewSLAWorker(repository, time.Minute, onCall).Run)
@@ -156,9 +165,24 @@ func main() {
 		_, err := billingApprovalConsumerResources(time.Now().UTC())
 		return err
 	}
-	if err := httpserver.RunWithApplicationAndCollectors("billing-service", handler, ready, repository.AdminPaginationCollectors()...); err != nil {
+	collectors := append(repository.AdminPaginationCollectors(), service.AdminModelPriceProjectionCollectors()...)
+	if err := httpserver.RunWithApplicationAndCollectors("billing-service", handler, ready, collectors...); err != nil {
 		log.Fatal("BILLING_SERVER_FAILED")
 	}
+}
+
+func expiredHoldClientFromEnvironment(credential string) (billing.ExpiredHoldProofClient, error) {
+	endpoint := strings.TrimSpace(os.Getenv("TOKEN_HOLD_EXPIRY_URL"))
+	if endpoint == "" {
+		// Earlier waves have no Token management endpoint. The worker still
+		// records expired holds for manual review; missing trust is never proof.
+		return nil, nil
+	}
+	client, err := serviceauth.NewWorkloadHTTPClient(os.Getenv("WORKLOAD_IDENTITY_CA_FILE"))
+	if err != nil {
+		return nil, err
+	}
+	return billing.NewHTTPExpiredHoldProofClient(endpoint, credential, client)
 }
 
 func paymentCoordinator(ctx context.Context, repository *billing.PostgresRepository, environment string) (*billing.PaymentCoordinator, error) {

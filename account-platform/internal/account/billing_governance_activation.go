@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/tokengovernance"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
@@ -18,6 +19,7 @@ var (
 // Cache one activation observation per read response, not per row. Failure
 // closes advancement only; safe closure and historical reads remain available.
 func (r *PostgresRepository) approvalAdvancementProjection(ctx context.Context) func(approvalpolicy.Policy) bool {
+	tokenObserved, tokenActive := false, false
 	billingObserved := false
 	var billingSnapshot billinggovernance.Snapshot
 	var billingErr error
@@ -26,6 +28,13 @@ func (r *PostgresRepository) approvalAdvancementProjection(ctx context.Context) 
 			return false
 		}
 
+		if approvalpolicy.TokenExecutableApproval(policy.CommandType) {
+			if !tokenObserved {
+				tokenActive = r.requireTokenApprovalActive(ctx, policy.CommandType) == nil
+				tokenObserved = true
+			}
+			return tokenActive
+		}
 		if r.billingGovernanceActivation == nil {
 			return false
 		}
@@ -51,6 +60,9 @@ func (r *PostgresRepository) requireApprovalAdvancement(ctx context.Context, pol
 		return ErrApprovalCommandNotExecutable
 	}
 
+	if approvalpolicy.TokenExecutableApproval(policy.CommandType) {
+		return r.requireTokenApprovalActive(ctx, policy.CommandType)
+	}
 	return r.requireBillingApprovalActive(ctx, policy)
 }
 
@@ -75,6 +87,28 @@ func (r *PostgresRepository) requireBillingApprovalActive(ctx context.Context, p
 	}
 	if activation.State != "ACTIVE" {
 		return ErrBillingGovernanceInactive
+	}
+	return nil
+}
+
+var ErrTokenGovernanceInactive = errors.New("Token approval command governance is inactive")
+
+func (r *PostgresRepository) WithTokenGovernanceActivation(reader tokengovernance.Reader) *PostgresRepository {
+	r.tokenGovernanceActivation = reader
+	return r
+}
+func (r *PostgresRepository) requireTokenApprovalActive(ctx context.Context, command string) error {
+	if !approvalpolicy.TokenExecutableApproval(command) {
+		return nil
+	}
+	if r.tokenGovernanceActivation == nil {
+		return ErrTokenGovernanceInactive
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	snapshot, err := r.tokenGovernanceActivation.Snapshot(ctx)
+	if err != nil || snapshot.State != "ACTIVE" || snapshot.Epoch < 1 {
+		return ErrTokenGovernanceInactive
 	}
 	return nil
 }

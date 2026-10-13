@@ -61,14 +61,14 @@ func TestApprovalConsumerManifestAndExplicitRenderer(t *testing.T) {
 		return users
 	}
 	before, after := read(base), read(result.Configuration)
-	if len(before) != len(after) {
+	if len(before)+1 != len(after) {
 		t.Fatal("identity set changed")
 	}
 	for key, old := range before {
 		var left, right any
 		_ = json.Unmarshal(old, &left)
 		_ = json.Unmarshal(after[key], &right)
-		if key != keys[approvalconsumer.BillingWorkload] && !reflect.DeepEqual(left, right) {
+		if key != keys[approvalconsumer.BillingWorkload] && key != keys["event-resource-operator"] && !reflect.DeepEqual(left, right) {
 			t.Fatal("unrelated or existing Token permission changed")
 		}
 	}
@@ -85,6 +85,37 @@ func TestApprovalConsumerManifestAndExplicitRenderer(t *testing.T) {
 	}
 	if !reflect.DeepEqual(billing, expected) {
 		t.Fatal("unexpected extra/missing ACL")
+	}
+	var token natsPermissions
+	if json.Unmarshal(after[keys[approvalconsumer.TokenWorkload]], &token) != nil {
+		t.Fatal("Token permission absent")
+	}
+	wantToken := fixedNATSPermissions(approvalconsumer.TokenWorkload)
+	for _, d := range approvalconsumer.TokenCommands() {
+		wantToken.Publish = append(wantToken.Publish, "$JS.API.CONSUMER.INFO."+platformStream+"."+d.Durable,
+			"$JS.API.CONSUMER.MSG.NEXT."+platformStream+"."+d.Durable, "$JS.ACK."+platformStream+"."+d.Durable+".>")
+	}
+	if !reflect.DeepEqual(token, wantToken) {
+		t.Fatal("Token ACL must be exactly its three read/ack durables")
+	}
+	if _, exists := after[keys["token-outbox-relay"]]; exists {
+		t.Fatal("future ordinary Token publisher was issued")
+	}
+	old, parseErr := parseNATSIdentityArtifact(previous)
+	if parseErr != nil || old.keys[approvalconsumer.TokenWorkload] != keys[approvalconsumer.TokenWorkload] || !bytes.Equal(after[old.keys[approvalconsumer.TokenWorkload]], after[keys[approvalconsumer.TokenWorkload]]) {
+		t.Fatal("validated v1 overlap must preserve the exact Token executor key and ACL")
+	}
+	var operator natsPermissions
+	if json.Unmarshal(after[keys["event-resource-operator"]], &operator) != nil {
+		t.Fatal("operator permission absent")
+	}
+	wantOperator := fixedNATSPermissions("event-resource-operator")
+	for _, d := range approvalconsumer.TokenCommands() {
+		wantOperator.Publish = append(wantOperator.Publish,
+			"$JS.API.CONSUMER.INFO."+platformStream+"."+d.Durable, "$JS.API.CONSUMER.CREATE."+platformStream+"."+d.Durable+"."+approvalconsumer.AuthorizationSubject)
+	}
+	if !reflect.DeepEqual(operator, wantOperator) {
+		t.Fatal("operator ACL must add only three immutable creates/info")
 	}
 	again, err := renderNATSAuthorizationAt(current, previous, now)
 	if err != nil || !bytes.Equal(base, again) {
@@ -121,6 +152,16 @@ func TestApprovalConsumerManifestFailsClosed(t *testing.T) {
 	}
 	if _, err := renderNATSAuthorizationWithConsumersAt(current, previous, manifest, identityHash, consumerManifestHash(manifest), now.Add(time.Hour)); err == nil {
 		t.Fatal("expired overlap accepted")
+	}
+	var changed map[string]any
+	if json.Unmarshal(current, &changed) != nil {
+		t.Fatal("fixture decode failed")
+	}
+	changed["public_keys"].(map[string]any)[approvalconsumer.TokenWorkload] = changed["public_keys"].(map[string]any)["account-approval-relay"]
+	changedRaw, _ := json.Marshal(changed)
+	changedManifest, _ := ApprovalConsumerManifest(consumerManifestHash(changedRaw))
+	if _, err := renderNATSAuthorizationWithConsumersAt(changedRaw, previous, changedManifest, consumerManifestHash(changedRaw), consumerManifestHash(changedManifest), now); err == nil {
+		t.Fatal("changed Token executor key was accepted during fixed-key v1 overlap")
 	}
 	v1Hash := consumerManifestHash(previous)
 	v1Manifest, _ := ApprovalConsumerManifest(v1Hash)

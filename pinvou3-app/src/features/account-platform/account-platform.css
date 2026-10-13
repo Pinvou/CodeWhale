@@ -19,3 +19,10 @@
 
 .ap-password-input > [data-password-reveal-output] { position: absolute; inset: 0; z-index: 0; display: flex; align-items: center; padding: 8px 42px 8px 8px; pointer-events: none; overflow: hidden; white-space: pre; font-family: monospace; }
 .ap-password-input > [data-password-reveal-output][hidden] { display: none; }
+
+.ap-order-close-backdrop { position: fixed; z-index: 210; inset: 0; display: grid; place-items: center; padding: 20px; background: #0007; }
+.ap-order-close-dialog { max-width: 440px; width: 100%; max-height: 90vh; overflow: auto; padding: 20px; border-radius: 12px; background: #fff; color: #182024; box-shadow: 0 12px 40px #0004; }
+.ap-order-close-dialog h3, .ap-order-close-dialog p { margin: 0 0 12px; }
+.ap-order-close-dialog dd { margin: 0 0 12px; overflow-wrap: anywhere; }
+.ap-order-close-dialog footer { display: flex; justify-content: flex-end; gap: 12px; }
+.ap-order-close-dialog button { min-height: 40px; padding: 8px 12px; }

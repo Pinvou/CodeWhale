@@ -4,12 +4,16 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 )
 
 // renderPublicResources is offline. Neither emitting nor hashing artifacts
 // makes a digest independently trusted; operator review supplies that trust.
 func renderPublicResources(environment func(string) string) (map[string]string, error) {
+	if _, err := config.ParseAccountPlatformProfile(environment("ACCOUNT_PLATFORM_PROFILE")); err != nil {
+		return nil, errors.New("PUBLIC_RESOURCE_RENDER_REJECTED")
+	}
 	identity := events.NATSAuthorizationArtifactFiles{CurrentFile: environment("APPROVAL_RESOURCE_CURRENT_PUBLIC_KEYS_FILE"), CurrentSHA256: environment("APPROVAL_RESOURCE_CURRENT_PUBLIC_KEYS_SHA256"), PreviousFile: environment("APPROVAL_RESOURCE_PREVIOUS_PUBLIC_KEYS_FILE"), PreviousSHA256: environment("APPROVAL_RESOURCE_PREVIOUS_PUBLIC_KEYS_SHA256"), PrivateIdentityFiles: []string{environment("NATS_NKEY_SEED_FILE"), environment("NATS_CREDENTIALS_FILE")}}
 	if identity.Validate(time.Now().UTC()) != nil {
 		return nil, errors.New("PUBLIC_RESOURCE_RENDER_REJECTED")

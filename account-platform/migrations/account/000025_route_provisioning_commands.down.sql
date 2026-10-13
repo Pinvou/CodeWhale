@@ -1,0 +1,1 @@
+DELETE FROM approval_command_policies WHERE command_type IN ('TOKEN_ROUTE_PROVISIONING_REPAIR','TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE') AND policy_version=1;

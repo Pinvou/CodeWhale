@@ -12,7 +12,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
+	"sync/atomic"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
@@ -122,11 +124,41 @@ func (r *HTTPWalletResolver) Ensure(ctx context.Context, ownerType string, owner
 // Personal finance exposes only the completed payment, wallet and entitlement
 // routes. Model calls and organization operations have separate owners.
 type Service struct {
-	contexts          ContextResolver
-	wallets           WalletResolver
-	billing           BillingClient
-	commerceCustomers CommerceCustomerResolver
-	authorizer        *authorization.Client
+	contexts               ContextResolver
+	wallets                WalletResolver
+	billing                BillingClient
+	commerceCustomers      CommerceCustomerResolver
+	authorizer             *authorization.Client
+	managementVerify       identity.VerifyFunc
+	managementEnabled      bool
+	managementServiceToken string
+	repository             Repository
+	upstream               ManagementCatalogAdapter
+	cancellationStore      managementCancellationStore
+	cancellationBilling    cancellationBillingClient
+	cancellationAdapter    interface {
+		CancelCapability() ProviderCancelCapability
+	}
+	activeUpstreamCancels       sync.Map
+	walletProvisioning          WalletProvisioningClient
+	ownerAuthority              OwnerAuthorityClient
+	validator                   CredentialValidator
+	providerURLs                ProviderURLPolicy
+	defaultRoutes               DefaultRouteProvisioner
+	catalogSync                 *CatalogSynchronizer
+	ownerCandidates             OwnerCandidateDirectory
+	commandGovernanceActivation TokenCommandGovernanceActivationReader
+	impactPrechecksEnabled      bool
+	impactPrechecks             ImpactPrecheckRepository
+	impactPricing               ImpactPriceCoverageClient
+	approvedCommandExecutor     ApprovedTokenCommandExecutor
+	approvalEffects             ApprovalEffectReader
+	operationsOverviewEnabled   bool
+	operationsOverviewMetrics   *tokenOperationsOverviewMetrics
+	pageOverviewsEnabled        bool
+	credentialIsolationEnabled  bool
+	tokenAccountCreateReady     atomic.Bool
+	adminProxyHMACKey           []byte
 }
 
 type BillingClient interface {
@@ -162,7 +194,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.POST("/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
 	protected.POST("/recharge/orders/:order_id/payment-claims", httpserver.AdaptFunc(s.addLatePaymentClaim))
 	protected.GET("/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
-	return router
+	s.registerManagementRoutes(router, protected)
+	return TokenCredentialDeadlineMiddleware(router)
 }
 
 func (s *Service) activeWallet(ctx context.Context, resolved AuthorizationContext) (uuid.UUID, error) {
@@ -175,6 +208,8 @@ func (s *Service) activeWallet(ctx context.Context, resolved AuthorizationContex
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the token request could not be completed"
 	switch {
+	case errors.Is(err, ErrNotFound):
+		status, code, message = http.StatusNotFound, "TOKEN_NOT_FOUND", "the token resource was not found"
 	case errors.Is(err, ErrForbidden):
 		status, code, message = http.StatusForbidden, "TOKEN_FORBIDDEN", "the token action is not permitted"
 	case errors.Is(err, ErrAccountProvisioning):

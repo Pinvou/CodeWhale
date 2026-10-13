@@ -48,6 +48,27 @@ var commandSpecs = map[string]commandSpec{
 		criticalInts:   []string{"provider_control_version", "product_control_version", "catalog_version", "admission_version", "mapping_version"},
 		financialInts:  []string{"provider_control_version", "product_control_version"},
 	},
+	"TOKEN_MODEL_LIFECYCLE_CHANGE": {
+		policyVersion: 2, snapshotVersion: 2, targetType: "MODEL", executor: "token-command-executor",
+		normalizedKeys: []string{"model_id", "lifecycle_plan_id", "lifecycle_plan_version", "target_lifecycle", "effective_at", "existing_session_cutoff_at", "replacement_model_id"},
+		criticalKeys:   []string{"model_id", "catalog_version", "current_lifecycle", "target_lifecycle", "lifecycle_plan_version", "effective_at", "existing_session_cutoff_at", "replacement_model_id", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"},
+		financialKeys:  []string{"billing_price_revision", "price_set_fingerprint", "models_checked", "models_covered", "fully_covered", "billing_as_of"},
+		normalizedInts: []string{"lifecycle_plan_version"}, criticalInts: []string{"catalog_version", "lifecycle_plan_version", "billing_price_version", "policy_version"}, financialInts: []string{"billing_price_revision", "models_checked", "models_covered"},
+	},
+	"TOKEN_MODEL_CATALOG_ROLLBACK": {
+		policyVersion: 2, snapshotVersion: 2, targetType: "MODEL_CATALOG", executor: "token-command-executor",
+		normalizedKeys: []string{"source_catalog_version"},
+		criticalKeys:   []string{"current_catalog_version", "source_catalog_version", "catalog_diff_fingerprint", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"},
+		financialKeys:  []string{"billing_price_revision", "price_set_fingerprint", "models_checked", "models_covered", "fully_covered", "billing_as_of"},
+		normalizedInts: []string{"source_catalog_version"}, criticalInts: []string{"current_catalog_version", "source_catalog_version", "billing_price_version", "policy_version"}, financialInts: []string{"billing_price_revision", "models_checked", "models_covered"},
+	},
+	"TOKEN_CREDENTIAL_REVOKE": {
+		policyVersion: 1, snapshotVersion: 1, targetType: "PROVIDER_CREDENTIAL", executor: "token-command-executor",
+		normalizedKeys: []string{"token_account_id", "expected_account_version", "credential_id", "credential_version"},
+		criticalKeys:   []string{"token_account_id", "token_account_version", "credential_id", "credential_version", "credential_status", "credential_fingerprint", "active_route_set_fingerprint", "provisioning_lease_set_fingerprint", "inflight_request_set_fingerprint", "replacement_credential_version", "policy_version"},
+		financialKeys:  []string{},
+		normalizedInts: []string{"expected_account_version", "credential_version"}, criticalInts: []string{"token_account_version", "credential_version", "policy_version"}, nullableCriticalInts: []string{"replacement_credential_version"},
+	},
 }
 
 func ConvertLegacyProofInput(input LegacyProofInput) (ProofArtifacts, error) {

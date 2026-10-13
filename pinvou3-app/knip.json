@@ -10,6 +10,7 @@
     "src/app/pet-main.jsx",
     "src/app/personas-overlay.js",
     "tests/*.test.{js,mjs}",
+    "tests/fixtures/f04-governed-envelope.mjs",
     "tests/*.js",
     "src/platform/tauri/bridge.js",
     "src/platform/tauri/bridge/*.js",

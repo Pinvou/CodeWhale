@@ -16,6 +16,7 @@ copyFileSync(path.join(here, '..', 'src', 'shared', 'connector-i18n.js'), path.j
 copyFileSync(path.join(here, '..', 'src', 'shared', 'account-platform-i18n.js'), path.join(dir, 'shared', 'account-platform-i18n.js')); copyFileSync(path.join(here, '..', 'src', 'shared', 'admin-platform-i18n.js'), path.join(dir, 'shared', 'admin-platform-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'finance-i18n.js'), path.join(dir, 'shared', 'finance-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'reconciliation-i18n.js'), path.join(dir, 'shared', 'reconciliation-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'token-management-i18n.js'), path.join(dir, 'shared', 'token-management-i18n.js'));
 // i18n.js 现按语言拆分（zh 内嵌），临时副本需带上 zh 词典才能解析。
 mkdirSync(path.join(dir, 'shared', 'i18n'), { recursive: true });
 for (const f of ['zh.js', 'browser.js']) {

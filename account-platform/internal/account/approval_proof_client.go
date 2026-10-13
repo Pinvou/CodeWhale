@@ -35,6 +35,7 @@ type ApprovalProofSource interface {
 
 type HTTPApprovalProofSource struct {
 	billingURL   *url.URL
+	tokenURL     *url.URL
 	serviceToken string
 	client       *http.Client
 }
@@ -69,8 +70,14 @@ func (source *HTTPApprovalProofSource) Proof(ctx context.Context, requestID uuid
 	base := source.billingURL
 	switch artifacts.CommandType {
 	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
+		base = source.tokenURL
 	default:
 		return ApprovalProofResult{}, ErrApprovalProofInvalid
+	}
+
+	if base == nil {
+		return ApprovalProofResult{}, ErrApprovalProofUnavailable
 	}
 
 	// This absolute deadline is created once, after local encoding and before
@@ -135,7 +142,7 @@ func (source *HTTPApprovalProofSource) Proof(ctx context.Context, requestID uuid
 
 func approvalProofReasonAllowed(command, verdict, reason string) bool {
 	switch command {
-	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
 	default:
 		return false
 	}
@@ -159,6 +166,10 @@ func approvalProofReasonAllowed(command, verdict, reason string) bool {
 		return false
 	case "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
 		return reason == "ACTIVATION_CHANGED" || reason == "EVIDENCE_MISSING" || reason == "EVIDENCE_EXPIRED" || reason == "PROVIDER_STATE_CHANGED"
+	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
+		return reason == "ACTIVATION_CHANGED" || reason == "EVIDENCE_MISSING" || reason == "EVIDENCE_EXPIRED"
+	case "TOKEN_CREDENTIAL_REVOKE":
+		return reason == "ACTIVATION_CHANGED"
 	default:
 		return false
 	}
@@ -169,4 +180,17 @@ func approvalProofNetworkError(err error, ctx context.Context) error {
 		return ErrApprovalProofTimeout
 	}
 	return ErrApprovalProofUnavailable
+}
+
+func NewHTTPApprovalProofSourceWithToken(billingURL, tokenURL, credential string) (*HTTPApprovalProofSource, error) {
+	source, err := NewHTTPApprovalProofSource(billingURL, credential)
+	if err != nil {
+		return nil, err
+	}
+	target, err := NewHTTPApprovalProofSource(tokenURL, credential)
+	if err != nil {
+		return nil, err
+	}
+	source.tokenURL = target.billingURL
+	return source, nil
 }

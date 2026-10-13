@@ -13,14 +13,19 @@ var (
 )
 
 type AuthorizationContext struct {
-	UserID               uuid.UUID
-	Mobile               *string
-	MobileVerified       bool
-	SessionID            string
-	ContextType          string
-	OrganizationID       *uuid.UUID
-	ContextVersion       int64
-	AuthorizationVersion int64
-	Roles                []string
-	Permissions          []string
+	UserID                        uuid.UUID
+	Mobile                        *string
+	MobileVerified                bool
+	SessionID                     string
+	ContextType                   string
+	OrganizationID                *uuid.UUID
+	ContextVersion                int64
+	AuthorizationVersion          int64
+	MembershipVersion             int64
+	OrganizationMembershipVersion *int64
+	UnitIDs                       []uuid.UUID
+	AncestorUnitIDs               []uuid.UUID
+	UnitAuthorizationBindings     []UnitAuthorizationBinding
+	Roles                         []string
+	Permissions                   []string
 }

@@ -239,7 +239,7 @@ func validApprovalBFFMutation(kind string, raw []byte, wire int, version int64, 
 	}
 	if kind == "create" || kind == "update" {
 		var commandType string
-		if json.Unmarshal(seen["command_type"], &commandType) != nil || !currentBillingApprovalCommand(commandType) {
+		if json.Unmarshal(seen["command_type"], &commandType) != nil || !currentGovernedApprovalCommand(commandType) {
 			return false
 		}
 	}

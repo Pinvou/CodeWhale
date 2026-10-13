@@ -18,6 +18,24 @@ import (
 // Workload-only AUDIT_ONLY registry entries have no approval database row.
 var governancePolicyCommands = []string{
 	"WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME",
+	"TOKEN_PROTOCOL_DRAFT_CREATE",
+	"TOKEN_PROTOCOL_PUBLISH",
+	"TOKEN_FORMULA_DRAFT_CREATE",
+	"TOKEN_FORMULA_PUBLISH",
+	"TOKEN_MODEL_DRAFT_SAVE",
+	"TOKEN_MODEL_PUBLISH",
+	"TOKEN_MODEL_LIFECYCLE_CHANGE",
+	"TOKEN_MODEL_CATALOG_SYNC",
+	"TOKEN_MODEL_CATALOG_ROLLBACK",
+	"TOKEN_ACCOUNT_CREATE",
+	"TOKEN_ACCOUNT_STATUS_CHANGE",
+	"TOKEN_ROUTE_UPSERT",
+	"TOKEN_ROUTE_DELETE",
+	"TOKEN_CREDENTIAL_ENROLL",
+	"TOKEN_CREDENTIAL_ROTATE",
+	"TOKEN_CREDENTIAL_REVOKE",
+	"TOKEN_CREDENTIAL_VALIDATE",
+	"TOKEN_ROUTE_PROVISIONING_REPAIR",
 }
 
 func governancePolicies() ([]Policy, error) {
@@ -33,7 +51,8 @@ func governancePolicies() ([]Policy, error) {
 	return result, nil
 }
 
-// PolicySetDigest binds the three installed executable Billing policies. Historical database versions remain immutable.
+// PolicySetDigest binds the closed Billing and Token governance policy set.
+// Historical database versions remain immutable.
 func PolicySetDigest() (string, error) {
 	policies, err := governancePolicies()
 	if err != nil {
