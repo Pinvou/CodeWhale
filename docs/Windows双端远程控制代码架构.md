@@ -4,7 +4,7 @@
 
 ## 当前架构契约
 
-以下落位与本轮闭环代码对应，是当前实现说明。附录保留 A19～A22 的设计演进，已合入 A22 后续修订，并非 A19 逐字原稿；其中的“当前”“目标”“推荐迁移”等文字只描述当时的快照，不能作为当前目录索引、待办、兼容要求或发布验收证据。
+以下落位与本轮闭环代码对应，是当前实现说明。附录保留 A19 原设计及后续收口修订的演进记录，并非 A19 逐字原稿或 A19～A24 各波次的完整记录；其中的“当前”“目标”“推荐迁移”等文字只描述当时的快照，不能作为当前目录索引、待办、兼容要求或发布验收证据。
 
 ### 权威状态与调用边界
 
@@ -52,9 +52,9 @@ B 的 Rust 权威枚举以 `features/remote_control/controller/controlled.rs` �
 ## 历史设计附录（已被当前契约替代）
 
 <details>
-<summary>A19～A22 设计演进快照：已合入 A22 修订，仅供追溯，不是当前契约或验收证据</summary>
+<summary>A19 原设计及后续收口修订快照：仅供追溯，不是各波次完整记录、当前契约或验收证据</summary>
 
-以下保留 A19 原设计与 A22 后续收口修订的演进记录，不是 A19 逐字原稿。旧目录、状态和迁移设想均限定为历史记录；已落实的 RemoteProxy、统一 ChatView、窄端口与清理边界以本文“当前架构契约”为准。
+以下保留 A19 原设计与后续收口修订的演进记录，不是 A19 逐字原稿。旧目录、状态和迁移设想均限定为历史记录；已落实的 RemoteProxy、统一 ChatView、窄端口与清理边界以本文“当前架构契约”为准。
 
 ## 1. 角色与边界
 
@@ -680,7 +680,7 @@ DEV-31 已删除未发布的 `RemoteConversationView`；`ChatView.jsx` 是唯一
 
 ### 7.5 Command 面存在重叠入口
 
-当前 A 端只保留 `openLiveRemoteProxy` 与 RemoteProxy 远程 action；其中 `submitRemoteTask(localSessionId, remoteRef, intent)` 是现行 `prepare → persist → dispatch` 入口，不是旧直发 handler。B 端保留本地权威会话入口 `controlledTaskSend`。未发布的 `controllerSessionOpen`、`openRemoteSession` 以及旧签名任务直发入口已直接删除，不设置别名或兼容代理。
+当前 A 端只保留 `openLiveRemoteProxy` 与 RemoteProxy 远程 action；任务提交使用 `reserveRemoteTask(localSessionId, remoteRef, intent) → 上传并确认附件 → commitRemoteTask(localSessionId, remoteRef, handle, attachmentIds)`。`reserve` 返回的 opaque handle 绑定已持久化的尚未尝试发送 outbox，调用方不能用自行构造的 task ID 或 fingerprint 替代；`commit` 才跨越 attempt barrier。一旦发送结果不确定，调用方必须展示 `result_unknown` 并对账，不能以新任务重发。B 端保留本地权威会话入口 `controlledTaskSend`。未发布的 `controllerSessionOpen`、`openRemoteSession`、`submitRemoteTask` 以及旧签名任务直发入口已直接删除，不设置别名或兼容代理。
 
 ### 7.6 A 端远程历史与 SessionStore 分裂
 
