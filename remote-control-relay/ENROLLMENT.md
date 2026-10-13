@@ -55,6 +55,12 @@ primary, backup, lock, marker, temporary, stale-lock, or other reserved
 management path. Controller state filenames using those reserved suffixes are
 also rejected.
 
+### Gateway transport keepalive
+
+The [gateway idle transport contract](../docs/windows-desktop-remote-control-a05-gateway-idle.md)
+describes explicit proxy timeouts and the independent authenticated public-hop
+heartbeat. Transport pong does not renew enrollment or task authorization.
+
 ## Desktop Relay signature pins
 
 The desktop application normally uses the signing key ID and public key from
@@ -243,6 +249,10 @@ This migration is unrelated to the legacy Web v2 Relay state and never reads
 it.
 
 ## Enrollment data and API
+
+Live writer capacity can be observed with `enrollment-migrate.js --capacity`
+through the existing private HMAC control listener. It never opens an offline
+copy or initializes a missing store. See [capacity and retained request evidence](../docs/remote-enrollment-capacity.md).
 
 The `endpoint_enrollment` namespace schema is version 3. It stores sorted
 endpoint records with status (`active` or terminal `revoked`), endpoint
@@ -515,6 +525,10 @@ at 16 KiB, while later valid business frames retain the legacy Relay's 4 MiB
 default payload range. The gateway also enforces browser Origin policy,
 connection/ingress limits, a bounded source bucket table and a strict trusted
 proxy allowlist; untrusted forwarding headers are rejected. Use
+the [two-hop Host/Origin contract](../docs/windows-desktop-remote-control-a05-gateway-origin.md)
+to configure the same exact browser origin allowlist in both gateway and legacy
+Relay processes. Public same-origin at the gateway does not make the preserved
+browser Origin same-origin with the new loopback upstream Host. Use
 `nginx-enrollment-gateway.conf` for the public route and run
 `node scripts/enrollment-nginx-config.js` from the Relay directory with the
 same protected environment as the gateway and legacy Relay. The checked-in

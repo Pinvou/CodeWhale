@@ -128,7 +128,10 @@ test("remote-test deploy builds and uploads the shared WebUI dist", () => {
   assert.doesNotMatch(source, /test -f [^\n]*platform\/tauri\/bridge\.js/);
   assert.match(source, /package-lock\.json web\/dist web\/stats\.html/);
   assert.match(source, /relay_js_files=\(\)/);
-  assert.match(source, /"\$\{relay_js_files\[@\]\}" package\.json package-lock\.json web\/dist web\/stats\.html/);
+  assert.match(
+    source,
+    /"\$\{relay_js_files\[@\]\}" behavior-telemetry-schema\.js package\.json package-lock\.json web\/dist web\/stats\.html/,
+  );
   assert.match(source, /docs\/schemas\/behavior-telemetry-v1\.schema\.json/);
   assert.match(source, /docs\/schemas\/behavior-telemetry-registries\.json/);
   assert.match(source, /await import\('\.\/telemetry-service\.js'\)/);
@@ -168,7 +171,10 @@ test("remote-test archive uses the script's actual complete runtime module selec
   assert.equal(packed.status, 0, packed.stderr?.toString());
   const listed = spawnSync("tar", ["-tzf", "-"], { input: packed.stdout, encoding: "utf8", timeout: 10_000 });
   assert.equal(listed.status, 0, listed.stderr);
-  const files = new Set(listed.stdout.split(/\r?\n/).map((entry) => entry.replace(/^\.\//, "")));
+  const entries = listed.stdout.split(/\r?\n/).map((entry) => entry.replace(/^\.\//, ""));
+  assert.equal(entries.filter((entry) => entry === "behavior-telemetry-schema.js").length, 1,
+    "the explicitly selected schema module must appear exactly once");
+  const files = new Set(entries);
   assert.ok(files.has("extra module.js"));
   for (const file of readdirSync(relayDir).filter((entry) => entry.endsWith(".js"))) {
     assert.ok(files.has(file), `runtime module missing from actual archive: ${file}`);

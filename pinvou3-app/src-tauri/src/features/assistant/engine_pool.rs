@@ -5853,10 +5853,11 @@ mod scheduled_model_tests {
             credential_action: None,
         };
         let bridge = Pinvou3Bridge::test_fixture(Some(model));
+        let credential_store = MemoryCredentialStore::default();
         let (prepared, _prepared_model, _pins) = super::EnginePool::prepare_runtime_model_with(
             &store,
             &PassthroughRuntimeModelProvider,
-            &MemoryCredentialStore::default(),
+            &credential_store,
             bridge,
             "session-affinity-under-test",
             false,
@@ -10129,7 +10130,7 @@ mod scheduled_model_tests {
 
     #[test]
     fn reclaim_forwarder_join_is_bounded_in_production() {
-        let src = include_str!("engine_pool.rs");
+        let src = include_str!("engine_pool.rs").replace("\r\n", "\n");
         let src = &src[..src
             .find("#[allow(clippy::await_holding_lock)]\nmod scheduled_model_tests {")
             .expect("the test module marker must exist")];

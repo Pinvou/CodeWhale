@@ -864,6 +864,16 @@ export class EnrollmentRegistry {
     return publicMigrationRequest(this.#findMigrationRequest(this.#read().registry, requestId));
   }
 
+  getMigrationCapacity() {
+    const snapshot = this.#read();
+    const counts = { pending: 0, succeeded: 0, failed: 0 };
+    for (const request of snapshot.registry.migration_requests) counts[request.status] += 1;
+    return Object.freeze({ store_revision: snapshot.store_revision,
+      namespace_revision: snapshot.namespace_revision,
+      total: snapshot.registry.migration_requests.length, max_requests: MAX_MIGRATION_REQUESTS,
+      ...counts });
+  }
+
   async beginMigrationRequest({ requestId, operations } = {}) {
     const context = this.#migrationContext(requestId, operations);
     for (let attempt = 0; attempt < 8; attempt += 1) {

@@ -2,7 +2,8 @@
 //! Relay/A wire inputs are simulated with real authenticated fixtures. No
 //! renderer, real provider, external host, or production deployment is involved.
 // architecture-guard: allow-target-cfg -- Test-only real Windows controlled-device Wry host: no cross-OS GUI/unsupported adapter is simulated; the whole module is excluded outside Windows.
-#![cfg(target_os = "windows")]
+// architecture-guard: allow-reader-test-host-type -- Windows test-only real reader regression accepts AppHandle from the app-owned Wry factory; no host construction or event/command API exception.
+#![cfg(all(test, target_os = "windows"))]
 use super::*;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};

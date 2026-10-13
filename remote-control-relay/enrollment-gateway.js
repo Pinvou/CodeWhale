@@ -1,5 +1,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import { DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_MS, startGatewayHeartbeat,
+  validateGatewayHeartbeatInterval } from "./enrollment-gateway-heartbeat.js";
 import { execFile } from "node:child_process";
 import { isIP } from "node:net";
 import { promisify } from "node:util";
@@ -137,6 +139,7 @@ export function createEnrollmentGateway({
   upstreamUrl,
   basePath = "/pinvou3/remote",
   authTimeoutMs = DEFAULT_AUTH_TIMEOUT_MS,
+  heartbeatIntervalMs = DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_MS,
   maxPayloadBytes = DEFAULT_MAX_PAYLOAD_BYTES,
   maxConnections = DEFAULT_MAX_CONNECTIONS,
   maxSourceBuckets = DEFAULT_MAX_SOURCE_BUCKETS,
@@ -151,6 +154,7 @@ export function createEnrollmentGateway({
   if (!registry || typeof registry.authorizeWebRegistration !== "function"
     || typeof registry.authorizeDesktopRegistration !== "function") fail("gateway_registry_invalid");
   upstreamUrl = safeUpstream(upstreamUrl);
+  validateGatewayHeartbeatInterval(heartbeatIntervalMs);
   if (!/^\/[A-Za-z0-9/_-]*[A-Za-z0-9_-]$/u.test(basePath)) fail("gateway_base_path_invalid");
   if (!Number.isSafeInteger(authTimeoutMs) || authTimeoutMs < 100 || authTimeoutMs > 60_000) {
     fail("gateway_auth_timeout_invalid");
@@ -375,6 +379,7 @@ export function createEnrollmentGateway({
         }
         clearTimeout(timer);
         authenticated = true;
+        startGatewayHeartbeat(client, heartbeatIntervalMs);
         client.off("message", rejectPipelinedFrame);
         upstream.send(raw);
         client.on("message", (message, binary) => {
