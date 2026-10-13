@@ -2214,7 +2214,10 @@ mod tests {
             .unwrap()
             .seal_pairing_code(receiver_public, &code_binding(), "2345678")
             .unwrap();
-        assert_ne!(&first[1..45], &second[1..45]);
+        // Frozen v1 envelope: version, 32-byte ephemeral public key, 12-byte
+        // nonce. A fresh key must not hide a fixed-nonce regression.
+        assert_ne!(&first[1..33], &second[1..33]);
+        assert_ne!(&first[33..45], &second[33..45]);
         assert_eq!(
             receiver
                 .open_sealed_code(&code_binding(), &first)
