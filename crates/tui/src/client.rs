@@ -6439,6 +6439,11 @@ mod tests {
                 "the repaired tool must not be dropped (streaming={streaming}): {body}"
             );
             assert_eq!(
+                tools[0]["function"]["name"],
+                json!("mcp_browser_evaluate_script"),
+                "the surviving tool must be the incident tool itself: {body}"
+            );
+            assert_eq!(
                 tools[0]["function"]["parameters"]["properties"]["args"],
                 json!({"type": "array"}),
                 "the empty items keyword must be repaired to absent: {body}"
