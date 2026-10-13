@@ -254,7 +254,7 @@ export class PairingStore {
   }
 
   releaseReservation(pairingId) {
-    this.#reservationPairings.delete(pairingId);
+    this.#reservationPairings.delete(id(pairingId, "pairing_id"));
   }
 
   #rehydrate() {
