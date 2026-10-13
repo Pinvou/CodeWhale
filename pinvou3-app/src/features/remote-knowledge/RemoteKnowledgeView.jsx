@@ -263,6 +263,11 @@ function RemoteKnowledgeView({ t, embedded = false }) {
     ? t.remoteKbCancel
     : (uploadInProgress ? t.remoteKbCollapse : t.remoteKbDone);
 
+  const closeUploadDialog = useCallback(() => {
+    if (!uploadHasStarted) setPublishDraft(null);
+    setShowUploadDialog(false);
+  }, [uploadHasStarted]);
+
   const documentStatusLabel = status => ({
     pending: t.remoteKbStatusPending,
     ready: t.remoteKbStatusReady,
@@ -620,8 +625,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
       else if (showRecoveryCode) setShowRecoveryCode(false);
       else if (showRestoreDialog && !isBusy('restore-host')) setShowRestoreDialog(false);
       else if (showUploadDialog && !isBusy('upload')) {
-        if (!uploadHasStarted) setPublishDraft(null);
-        setShowUploadDialog(false);
+        closeUploadDialog();
       }
       else if (showPublishDialog && !isBusy('prepare-publish')) setShowPublishDialog(false);
       else if (showCollectionCreator) setShowCollectionCreator(false);
@@ -634,7 +638,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [closeOwnerPanel, confirmation, documentToTrash, finishConfirmation, isBusy, joinFeedback?.status, showCollectionCreator, showConnector, showOwnerPanel, showPublishDialog, showRecoveryCode, showRestoreDialog, showUploadDialog, uploadHasStarted]);
+  }, [closeOwnerPanel, closeUploadDialog, confirmation, documentToTrash, finishConfirmation, isBusy, joinFeedback?.status, showCollectionCreator, showConnector, showOwnerPanel, showPublishDialog, showRecoveryCode, showRestoreDialog, showUploadDialog, uploadHasStarted]);
   // Escape / outside-click close for the add-content menu; escapeOnWindow keeps the original window-level keydown listener,
   // preserving the original ordering against the popover Escape chain above (closeOnEscape).
   useOutsidePointerClose(
@@ -1122,11 +1126,13 @@ function RemoteKnowledgeView({ t, embedded = false }) {
     await loadCollections(selectedServerId);
   }
 
+  const asPathList = value => (Array.isArray(value) ? value : (value ? [value] : []));
+
   async function chooseUploadFiles() {
     if (uploadInProgress) return;
     setShowUploadSourceMenu(false);
     const paths = await openTauriDialog({ multiple: true, directory: false });
-    const selected = Array.isArray(paths) ? paths : (paths ? [paths] : []);
+    const selected = asPathList(paths);
     if (!selected.length) return;
     setPublishDraft(null);
     queueUploads(selected.map(path => ({ path, name: uploadEntryName(path) })));
@@ -1138,7 +1144,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
     if (uploadInProgress) return;
     setShowUploadSourceMenu(false);
     const roots = await openTauriDialog({ multiple: true, directory: true });
-    const selected = Array.isArray(roots) ? roots : (roots ? [roots] : []);
+    const selected = asPathList(roots);
     if (!selected.length) return;
     const discovery = await run('discover-folders', () => invokeTauri('remote_kb_discover_folder_files', {
       paths: selected,
@@ -1391,6 +1397,8 @@ function RemoteKnowledgeView({ t, embedded = false }) {
   if (!isTauriAvailable()) {
     return <div className={embedded ? `mx-auto max-w-[1400px] py-8 ${muted}` : `p-8 ${muted}`}>{t.remoteKbDesktopOnly}</div>;
   }
+
+  const activeShares = ownerShares.filter(item => !item.stoppedAt && item.expiresAt > Date.now() / 1000); // eslint-disable-line react-hooks/purity -- expiry is computed relative to the current time; the list only renders while the panel is open
 
   return (
     <div
@@ -2022,9 +2030,9 @@ function RemoteKnowledgeView({ t, embedded = false }) {
                         <button data-testid="remote-copy-share" type="button" className={iconButton} title={t.remoteKbCopy} aria-label={t.remoteKbCopy} onClick={() => copyWithFeedback(shareLink, t.remoteKbLinkCopied)}><Copy size={15} /></button>
                       </div>
                     )}
-                    {!!ownerShares.filter(item => !item.stoppedAt && item.expiresAt > Date.now() / 1000).length && (
+                    {!!activeShares.length && (
                       <div className="mt-3 space-y-2">
-                        {ownerShares.filter(item => !item.stoppedAt && item.expiresAt > Date.now() / 1000).map(item => (
+                        {activeShares.map(item => (
                           <div key={item.id} className="flex flex-wrap items-center gap-2 rounded-xl bg-[#F7F9FC] px-3 py-2.5 dark:bg-white/[0.04]">
                             <Link size={14} className="text-[#0B57D0] dark:text-[#A8C7FA]" />
                             <span className={`min-w-[180px] flex-1 truncate text-[12.5px] ${muted}`}>{new Date(item.expiresAt * 1000).toLocaleString()}</span>
@@ -2252,10 +2260,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
             testId="remote-upload-dialog"
             title={t.remoteKbUploadTitle}
             icon={Upload}
-            onClose={() => {
-              if (!uploadHasStarted) setPublishDraft(null);
-              setShowUploadDialog(false);
-            }}
+            onClose={closeUploadDialog}
             closeLabel={t.remoteKbClose}
             closeDisabled={isBusy('upload')}
           >
@@ -2295,10 +2300,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
               </div>
             )}
             <div className="mt-5 flex justify-end gap-2">
-              <button className={quiet} onClick={() => {
-                if (!uploadHasStarted) setPublishDraft(null);
-                setShowUploadDialog(false);
-              }} disabled={isBusy('upload')}>{uploadCloseLabel}</button>
+              <button type="button" className={quiet} onClick={closeUploadDialog} disabled={isBusy('upload')}>{uploadCloseLabel}</button>
               {uploadQueue.some(item => item.status === 'queued' || item.status === 'failed') && (
                 <button className={primary} onClick={startUpload} disabled={uploadInProgress}>
                   {isBusy('upload') && <RefreshCw size={14} className="animate-spin" />}

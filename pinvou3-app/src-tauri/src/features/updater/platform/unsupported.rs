@@ -5,7 +5,9 @@ use tauri::AppHandle;
 
 use super::super::{PendingUpdateReportResult, UpdateInfo};
 
-pub fn cleanup_stale_backup() {}
+pub fn cleanup_stale_backup() -> Result<(), String> {
+    Ok(())
+}
 
 pub async fn check_for_update_info(
     _client: &reqwest::Client,

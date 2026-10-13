@@ -1443,7 +1443,7 @@ impl TeamRelayManager {
             .map_err(|error| format!("team_relay_settings_write_failed: {error}"))?;
         let payload = serde_json::to_vec_pretty(settings)
             .map_err(|error| format!("team_relay_settings_write_failed: {error}"))?;
-        deepseek_tui::utils::write_atomic(&self.settings_path, &payload)
+        crate::platform::filesystem::atomic_write_private(&self.settings_path, &payload)
             .map_err(|error| format!("team_relay_settings_write_failed: {error}"))
     }
 
@@ -1498,7 +1498,7 @@ impl TeamRelayManager {
             .map_err(|error| format!("team_relay_workspace_write_failed: {error}"))?;
         let payload = serde_json::to_vec_pretty(manifest)
             .map_err(|error| format!("team_relay_workspace_write_failed: {error}"))?;
-        deepseek_tui::utils::write_atomic(&root.join("workspace.json"), &payload)
+        crate::platform::filesystem::atomic_write_private(&root.join("workspace.json"), &payload)
             .map_err(|error| format!("team_relay_workspace_write_failed: {error}"))
     }
 }

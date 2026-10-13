@@ -39,7 +39,11 @@ pub(crate) mod panic_scope;
 #[path = "../../../src/core/panic_hooks.rs"]
 pub(crate) mod panic_hooks;
 
+#[path = "../../../src/core/model_wire.rs"]
+pub(crate) mod model_wire;
+
 mod core {
+    pub(crate) use crate::model_wire;
     pub(crate) use crate::panic_hooks;
 }
 #[path = "../../../src/features/remote_control/controller/shared_transport.rs"]

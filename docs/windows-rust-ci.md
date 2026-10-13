@@ -72,16 +72,37 @@ with the whole dependency graph compiling in ~25 minutes and the final link
 producing zero output for the remaining hours until the cap killed the leg.
 The job therefore mirrors the recipe the linux `rust-test` leg measured for
 the same OOM: `CARGO_PROFILE_DEV_LTO=thin` (cross-crate dead-code elimination
-shrinks the test binary; cargo passes `-C linker-plugin-lto` to
-dependencies), `CARGO_PROFILE_DEV_DEBUG=0` (no DWARF; panic file:line comes
-from `Location` rodata), and `RUSTFLAGS` selecting the bundled lld with
-`/threads:1` so both the ThinLTO backends and the final link stay serial
-(the linux leg uses the gcc-driver equivalents `-fuse-ld=lld`,
-`--thinlto-jobs=1`, `--threads=1`). Growing the hosted runner's pagefile is
-not an option: a pagefile change requires a reboot a CI job cannot perform,
+shrinks the test binary; cargo compiles dependency crates with
+`-C linker-plugin-lto`, and the final crate's rustc consumes that bitcode
+and runs the ThinLTO backends in-process — the linker only ever receives
+post-LTO objects), `CARGO_PROFILE_DEV_DEBUG=0` (no DWARF; panic file:line
+comes from `Location` rodata), and `RUSTFLAGS` selecting the bundled lld
+with `/threads:1` so lld-link's internal threading and the final link stay
+serial (the linux leg uses the gcc-driver equivalents `-fuse-ld=lld`,
+`--thinlto-jobs=1`, `--threads=1`; `--thinlto-jobs` is a no-op on both legs
+because no bitcode reaches the linker — it stays only pending a separately
+evaluated removal). Growing the hosted runner's pagefile is not an option: a
+pagefile change requires a reboot a CI job cannot perform,
 so peak link memory is cut below RAM instead. The linker-selection flags are
 probed per toolchain by the probe step, since the stable surface for picking
 lld has moved between releases.
+
+Peak memory is also cut before the link: both `rust-test` legs pin
+`codewhale-tui` back to dev-default opt-level 0 by appending a
+`[profile.dev.package.codewhale-tui]` section to `CARGO_HOME/config.toml`
+(a package-level profile override can only come from config — cargo has no
+environment-variable equivalent — and the repo's `Cargo.toml` is left
+untouched, so local builds and release artifacts are unaffected). The
+v0.9.12 base restored dependency-level O2 and the 16 GB hosted runners
+went out-of-memory: on the windows leg rustc/LLVM died compiling that
+crate itself, while on the linux leg the crate's O2-sized LLVM IR pushed
+the final-crate thin-LTO compile (the `pinvou3-tauri` lib test) over the
+memory watchdog; on the windows leg, converging codegen-units instead
+stretched that crate's compile time far beyond its earlier timings
+(measured), so the O0 override is that leg's mitigation.
+The linux leg complements it with `CARGO_PROFILE_DEV_CODEGEN_UNITS=16`
+(the dev default of 256 codegen units expands the large test harness into
+too many ThinLTO inputs and amplifies the link peak).
 
 ## Expected result and rollback
 

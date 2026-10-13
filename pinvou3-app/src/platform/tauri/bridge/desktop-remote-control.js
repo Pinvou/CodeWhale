@@ -85,7 +85,7 @@
     function publish(next) {
       state.desktopRemoteControl = next;
       mirrorSlices(next);
-      if (typeof notify === "function") notify("desktopRemoteControl");
+      if (typeof notify === "function") notify(["desktopRemoteControl"]);
       return next;
     }
 
@@ -646,7 +646,7 @@
         state.attachments = (state.attachments || []).filter(function (attachment) {
           return consumedIds.indexOf(attachment.id) < 0;
         });
-        if (typeof notify === "function") notify("chat");
+        if (typeof notify === "function") notify(["chat"]);
       }
       return result;
     }

@@ -18,6 +18,7 @@ use serde_json::{Map, Value, json};
 use super::crypto::SensitiveString;
 use super::protocol::{LeaseContext, validate_controller_base_url};
 use super::task::RemoteTaskModelScope;
+use crate::core::model_wire::model_route_wire_api;
 use crate::platform::credential_store::CredentialState;
 use crate::platform::prefs::{
     ImageCapabilityOverride, MODEL_PROVIDER_KIND_CODING_PLAN, ModelPreset, SavedModel,
@@ -29,7 +30,7 @@ pub(crate) const MAX_ID_CHARS: usize = 128;
 pub(crate) const MAX_DISPLAY_CHARS: usize = 128;
 pub(crate) const MAX_MODEL_CHARS: usize = 256;
 pub(crate) const MAX_URL_CHARS: usize = 2048;
-pub(crate) const MAX_SECRET_BYTES: usize = 4096;
+pub(crate) const MAX_SECRET_BYTES: usize = super::protocol::MAX_TEMPORARY_MODEL_CREDENTIAL_BYTES;
 const MAX_LIVE_MODEL_PACKAGES: usize = 64;
 const RUNTIME_DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -44,11 +45,16 @@ const PRESETS: &[&str] = &[
     "glm",
     "mimo",
     "openai",
+    "openai_responses",
     "anthropic",
     "gemini",
     "xai",
 ];
-const WIRE_APIS: &[&str] = &["openai_chat_completions", "anthropic_messages"];
+const WIRE_APIS: &[&str] = &[
+    "openai_chat_completions",
+    "anthropic_messages",
+    "openai_responses",
+];
 const PROVIDER_KINDS: &[&str] = &["custom", "official_api"];
 const VENDORS: &[&str] = &[
     "anthropic",
@@ -175,6 +181,9 @@ impl fmt::Debug for ExportRoute {
 
 impl ExportRoute {
     fn to_runtime_model(&self, runtime_id: String) -> Result<SavedModel> {
+        // Defense in depth: even internal callers must not materialize a route
+        // whose effective protocol is outside the transported v1 contract.
+        self.validate()?;
         let preset = match self.preset.as_str() {
             "local_vllm" => ModelPreset::LocalVllm,
             "deepseek" => ModelPreset::Deepseek,
@@ -186,6 +195,7 @@ impl ExportRoute {
             "glm" => ModelPreset::Glm,
             "mimo" => ModelPreset::Mimo,
             "openai" => ModelPreset::Openai,
+            "openai_responses" => ModelPreset::OpenaiResponses,
             "anthropic" => ModelPreset::Anthropic,
             "gemini" => ModelPreset::Gemini,
             "xai" => ModelPreset::Xai,
@@ -232,10 +242,7 @@ impl ExportRoute {
         if !WIRE_APIS.contains(&self.wire_api.as_str()) {
             return Err(error("model_wire_api_unsupported"));
         }
-        if (self.preset == "anthropic") != (self.wire_api == "anthropic_messages") {
-            return Err(error("model_wire_api_mismatch"));
-        }
-        if self.model.trim().is_empty() || self.model.len() > MAX_MODEL_CHARS {
+        if self.model.trim().is_empty() || self.model.chars().count() > MAX_MODEL_CHARS {
             return Err(error("model_wire_name_invalid"));
         }
         validate_export_target(&self.base_url)?;
@@ -264,6 +271,24 @@ impl ExportRoute {
         }
         if self.secret.expose().len() > MAX_SECRET_BYTES {
             return Err(error("model_secret_too_large"));
+        }
+        if self.wire_api
+            != model_route_wire_api(
+                &self.preset,
+                self.vendor.as_deref(),
+                &self.model,
+                &self.base_url,
+            )
+        {
+            return Err(error("model_wire_api_mismatch"));
+        }
+        Ok(())
+    }
+
+    fn validate_vision(&self) -> Result<()> {
+        self.validate()?;
+        if self.wire_api != "openai_chat_completions" {
+            return Err(error("model_wire_api_unsupported"));
         }
         Ok(())
     }
@@ -330,11 +355,11 @@ impl ExportRoute {
         let context_window_tokens = optional_u32(object, "context_window_tokens")?;
         let max_output_tokens = optional_u32(object, "max_output_tokens")?;
         Ok(Self {
-            display_name: required_string(object, "display_name", MAX_DISPLAY_CHARS)?,
+            display_name: required_text(object, "display_name", MAX_DISPLAY_CHARS)?,
             preset: required_string(object, "preset", MAX_ID_CHARS)?,
             wire_api: required_string(object, "wire_api", MAX_ID_CHARS)?,
             base_url: required_string(object, "base_url", MAX_URL_CHARS)?,
-            model: required_string(object, "model", MAX_MODEL_CHARS)?,
+            model: required_text(object, "model", MAX_MODEL_CHARS)?,
             provider_kind: optional_string(object, "provider_kind", MAX_ID_CHARS)?,
             vendor: optional_string(object, "vendor", MAX_ID_CHARS)?,
             endpoint_mode: optional_string(object, "endpoint_mode", MAX_ID_CHARS)?,
@@ -385,7 +410,7 @@ impl TemporaryModelPackageV1 {
         self.binding.validate()?;
         self.primary.validate()?;
         if let Some(fallback) = &self.vision_fallback {
-            fallback.validate()?;
+            fallback.validate_vision()?;
         }
         self.enforce_size()
     }
@@ -571,6 +596,21 @@ fn exact_object<'a>(
         }
     }
     Ok(object)
+}
+
+fn required_text(
+    object: &Map<String, Value>,
+    field: &'static str,
+    max_chars: usize,
+) -> Result<String> {
+    let value = object
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| error("model_package_missing_field"))?;
+    if value.chars().count() > max_chars {
+        return Err(error("model_package_field_invalid"));
+    }
+    Ok(value.to_owned())
 }
 
 fn required_string(
@@ -807,9 +847,6 @@ pub(crate) fn export_decision(model: &SavedModel) -> ExportDecision {
     if model.api_key.trim().is_empty() {
         return ExportDecision::refused("model_credential_missing");
     }
-    if wire_api_for_preset(model.preset).is_none() {
-        return ExportDecision::refused("model_preset_unsupported");
-    }
     if validate_export_target(&model.base_url).is_err() {
         return ExportDecision::refused("model_endpoint_unreachable");
     }
@@ -821,8 +858,12 @@ pub(crate) fn project_saved_model(model: &SavedModel) -> Result<ExportRoute> {
     if !decision.exportable {
         return Err(error(decision.reason.unwrap_or("model_not_exportable")));
     }
-    let wire_api =
-        wire_api_for_preset(model.preset).ok_or_else(|| error("model_preset_unsupported"))?;
+    let wire_api = model_route_wire_api(
+        model.preset.as_str(),
+        model.vendor.as_deref(),
+        &model.model,
+        &model.base_url,
+    );
     let display_name = if model.name.trim().is_empty() {
         model.alias.clone().unwrap_or_else(|| model.model.clone())
     } else {
@@ -848,22 +889,10 @@ pub(crate) fn project_saved_model(model: &SavedModel) -> Result<ExportRoute> {
     Ok(route)
 }
 
-fn wire_api_for_preset(preset: ModelPreset) -> Option<&'static str> {
-    match preset {
-        ModelPreset::Anthropic => Some("anthropic_messages"),
-        ModelPreset::LocalVllm
-        | ModelPreset::Deepseek
-        | ModelPreset::Kimi
-        | ModelPreset::OpenaiCompatible
-        | ModelPreset::Qwen
-        | ModelPreset::Doubao
-        | ModelPreset::Minimax
-        | ModelPreset::Glm
-        | ModelPreset::Mimo
-        | ModelPreset::Openai
-        | ModelPreset::Gemini
-        | ModelPreset::Xai => Some("openai_chat_completions"),
-    }
+pub(crate) fn project_vision_saved_model(model: &SavedModel) -> Result<ExportRoute> {
+    let route = project_saved_model(model)?;
+    route.validate_vision()?;
+    Ok(route)
 }
 
 fn image_override_str(value: ImageCapabilityOverride) -> &'static str {
@@ -1042,7 +1071,16 @@ mod tests {
             base_url: base_url.into(),
             model: "deepseek-chat".into(),
             provider_kind: Some("official_api".into()),
-            vendor: Some("deepseek".into()),
+            vendor: Some(
+                if preset == "anthropic" {
+                    "anthropic"
+                } else if preset == "openai" {
+                    "openai"
+                } else {
+                    "deepseek"
+                }
+                .into(),
+            ),
             endpoint_mode: None,
             context_window_tokens: Some(131_072),
             max_output_tokens: Some(8_192),
@@ -1312,6 +1350,235 @@ mod tests {
                 .code,
             "model_package_too_large"
         );
+    }
+
+    #[test]
+    fn unicode_character_limits_roundtrip_a_export_to_real_b_parser_without_expanding_secrets() {
+        let mut model = saved_model();
+        model.preset = ModelPreset::OpenaiResponses;
+        model.base_url = "https://responses.example.test/v1".into();
+        model.name = "名".repeat(MAX_DISPLAY_CHARS);
+        model.model = "🦀".repeat(MAX_MODEL_CHARS);
+        model.api_key = "模".repeat(1365);
+        let projected = project_saved_model(&model).unwrap();
+        assert_eq!(projected.display_name.chars().count(), MAX_DISPLAY_CHARS);
+        assert_eq!(projected.model.chars().count(), MAX_MODEL_CHARS);
+        let mut payload = package("fixture-primary-key");
+        payload.primary = projected;
+        let parsed = TemporaryModelPackageV1::from_wire_value(&payload.to_wire_value()).unwrap();
+        assert_eq!(parsed.primary.display_name, model.name);
+        assert_eq!(
+            parsed
+                .primary
+                .to_runtime_model("runtime-fixture".into())
+                .unwrap()
+                .model,
+            model.model
+        );
+        model.model.push('🦀');
+        assert_eq!(
+            project_saved_model(&model).unwrap_err().code,
+            "model_wire_name_invalid"
+        );
+        model.model.pop();
+        model.api_key.push('模');
+        assert_eq!(
+            project_saved_model(&model).unwrap_err().code,
+            "model_secret_too_large"
+        );
+    }
+
+    #[test]
+    fn shared_wire_vectors_pin_real_b_package_ingress_for_primary_and_vision() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"
+        ))
+        .unwrap();
+        let vectors = fixture["temporary_model_wire_vectors"].as_array().unwrap();
+        assert_eq!(vectors.len(), 36);
+        for vector in vectors {
+            for vision in [false, true] {
+                let mut package =
+                    fixture["task_submit_vectors"]["temporary"]["temporary_model_package"].clone();
+                let mut route = package["primary"].clone();
+                let fields = route.as_object_mut().unwrap();
+                fields.remove("vendor");
+                fields.extend(vector["route"].as_object().unwrap().clone());
+                if vision {
+                    package["vision_fallback"] = json!({
+                        "route": route,
+                        "credential": {"kind":"api_key", "secret": vector.get("credential_secret").cloned().unwrap_or(json!("fixture-vision-key"))},
+                    });
+                } else {
+                    package["primary"] = route;
+                    if let Some(secret) = vector.get("credential_secret") {
+                        package["primary_credential"]["secret"] = secret.clone();
+                    }
+                }
+                let valid = vector[if vision { "vision" } else { "primary" }]
+                    .as_bool()
+                    .unwrap();
+                let parsed = TemporaryModelPackageV1::from_wire_value(&package);
+                assert_eq!(
+                    parsed.is_ok(),
+                    valid,
+                    "{} / vision={vision}",
+                    vector["name"]
+                );
+                if let Ok(parsed) = parsed {
+                    assert_eq!(
+                        parsed
+                            .primary
+                            .to_runtime_model("runtime-fixture".into())
+                            .unwrap()
+                            .model,
+                        parsed.primary.model
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn responses_primary_roundtrips_without_downgrade_and_is_not_a_vision_fallback() {
+        let mut model = saved_model();
+        model.preset = ModelPreset::OpenaiResponses;
+        model.base_url = "https://responses.example.test/v1".into();
+        model.model = "fixture-responses-model".into();
+        assert!(export_decision(&model).exportable);
+        let projected = project_saved_model(&model).unwrap();
+        assert_eq!(projected.wire_api, "openai_responses");
+        assert_eq!(
+            projected
+                .to_runtime_model("runtime-fixture".into())
+                .unwrap()
+                .preset,
+            ModelPreset::OpenaiResponses
+        );
+        assert_eq!(
+            project_vision_saved_model(&model).unwrap_err().code,
+            "model_wire_api_unsupported"
+        );
+        let mut payload = package("fixture-primary-key");
+        payload.primary = projected;
+        TemporaryModelPackageV1::from_wire_value(&payload.to_wire_value()).unwrap();
+        payload.primary.wire_api = "openai_chat_completions".into();
+        assert_eq!(
+            payload.validate().unwrap_err().code,
+            "model_wire_api_mismatch"
+        );
+        payload.primary.wire_api = "future_wire".into();
+        assert_eq!(
+            payload.validate().unwrap_err().code,
+            "model_wire_api_unsupported"
+        );
+        assert_eq!(model.preset, ModelPreset::OpenaiResponses);
+    }
+
+    #[test]
+    fn implicit_responses_primary_is_wire_true_and_forged_chat_is_rejected() {
+        for (preset, vendor) in [
+            (ModelPreset::Openai, None),
+            (ModelPreset::OpenaiCompatible, Some("openai")),
+            (ModelPreset::Deepseek, Some("openai")),
+        ] {
+            for model_id in ["gpt-6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4-mini"] {
+                let mut model = saved_model();
+                model.preset = preset;
+                model.vendor = vendor.map(str::to_owned);
+                model.model = model_id.into();
+                model.base_url = "https://api.openai.com/v1".into();
+                assert!(export_decision(&model).exportable);
+                let projected = project_saved_model(&model).unwrap();
+                assert_eq!(projected.wire_api, "openai_responses");
+                let runtime = projected
+                    .to_runtime_model("runtime-fixture".into())
+                    .unwrap();
+                assert_eq!(runtime.preset, preset);
+                assert_eq!(runtime.model, model_id);
+                let mut payload = package("fixture-primary-key");
+                payload.primary = projected;
+                TemporaryModelPackageV1::from_wire_value(&payload.to_wire_value()).unwrap();
+                payload.primary.wire_api = "openai_chat_completions".into();
+                assert_eq!(
+                    payload.validate().unwrap_err().code,
+                    "model_wire_api_mismatch"
+                );
+                assert_eq!(
+                    payload
+                        .primary
+                        .to_runtime_model("runtime-fixture".into())
+                        .unwrap_err()
+                        .code,
+                    "model_wire_api_mismatch"
+                );
+                assert_eq!(
+                    TemporaryModelPackageV1::from_wire_value(&payload.to_wire_value())
+                        .unwrap_err()
+                        .code,
+                    "model_wire_api_mismatch"
+                );
+                let mut vision_payload = package("fixture-primary-key");
+                vision_payload.vision_fallback = Some(project_saved_model(&model).unwrap());
+                assert_eq!(
+                    vision_payload.validate().unwrap_err().code,
+                    "model_wire_api_unsupported"
+                );
+                assert_eq!(
+                    TemporaryModelPackageV1::from_wire_value(&vision_payload.to_wire_value())
+                        .unwrap_err()
+                        .code,
+                    "model_wire_api_unsupported"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_and_aggregator_chat_routes_remain_exportable_and_materializable() {
+        for (preset, vendor, model_id, base_url) in [
+            (
+                ModelPreset::Openai,
+                None,
+                "gpt-4o",
+                "https://api.openai.com/v1",
+            ),
+            (
+                ModelPreset::OpenaiCompatible,
+                None,
+                "gpt-6-sol",
+                "https://api.openai.com/v1",
+            ),
+            (
+                ModelPreset::Openai,
+                Some("openai"),
+                "gpt-6-sol",
+                "https://aggregator.example.test/v1",
+            ),
+            (
+                ModelPreset::Deepseek,
+                Some("openai"),
+                "gpt-6-sol",
+                "https://api.deepseek.com/v1",
+            ),
+        ] {
+            let mut model = saved_model();
+            model.preset = preset;
+            model.vendor = vendor.map(str::to_owned);
+            model.model = model_id.into();
+            model.base_url = base_url.into();
+            assert!(export_decision(&model).exportable);
+            let projected = project_saved_model(&model).unwrap();
+            assert_eq!(projected.wire_api, "openai_chat_completions");
+            let materialized = projected
+                .to_runtime_model("runtime-fixture".into())
+                .unwrap();
+            assert_eq!(materialized.preset, preset);
+            assert_eq!(materialized.model, model_id);
+            let mut payload = package("fixture-primary-key");
+            payload.vision_fallback = Some(projected);
+            TemporaryModelPackageV1::from_wire_value(&payload.to_wire_value()).unwrap();
+        }
     }
 
     #[test]
