@@ -172,11 +172,11 @@ impl ProviderNativeSearchClient {
         };
         let body_bytes = serde_json::to_vec(&body)
             .context("failed to serialize provider-native web-search request")?;
-        let response = self
-            .inner
+        let call = self.inner.for_operation(uuid::Uuid::new_v4());
+        let response = call
             .send_with_retry(|| {
-                self.inner
-                    .http_client
+                // The shared retry transport attaches the frozen key once.
+                call.http_client
                     .post(&url)
                     .header("Accept", "application/json")
                     .body(body_bytes.clone())
@@ -211,8 +211,8 @@ impl ProviderNativeSearchClient {
         let body_bytes = serde_json::to_vec(&body)
             .context("failed to serialize provider-native web-search request")?;
         let headers = headers.to_vec();
-        let response = self
-            .inner
+        let call = self.inner.for_operation(uuid::Uuid::new_v4());
+        let response = call
             .send_with_retry(|| {
                 let mut request = self
                     .inner
@@ -234,11 +234,14 @@ impl ProviderNativeSearchClient {
     }
 
     pub(super) async fn get_json(&self, url: &str) -> Result<Value> {
-        let response = self
-            .inner
+        // Polling is not another inference dispatch. A search adapter can be
+        // constructed from a request-local client, so explicitly drop any
+        // inherited logical operation rather than relying on its caller.
+        let mut call = self.inner.clone();
+        call.operation_id = None;
+        let response = call
             .send_with_retry(|| {
-                self.inner
-                    .http_client
+                call.http_client
                     .get(url)
                     .header("Accept", "application/json")
             })
@@ -248,6 +251,80 @@ impl ProviderNativeSearchClient {
             .json::<Value>()
             .await
             .context("provider-native web search returned invalid JSON")
+    }
+}
+
+#[cfg(test)]
+mod operation_receipts {
+    use super::*;
+    use crate::config::Config;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn forkguard_model_operation_search_rounds_and_polling() {
+        let server = MockServer::start().await;
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .respond_with(move |_: &wiremock::Request| {
+                if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(503)
+                } else {
+                    ResponseTemplate::new(200).set_body_json(json!({"status":"ok"}))
+                }
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"done"})))
+            .mount(&server)
+            .await;
+        let mut inner = DeepSeekClient::new(&Config {
+            provider: Some("deepseek".into()),
+            api_key: Some("owned-test-key".into()),
+            base_url: Some(server.uri()),
+            default_text_model: Some("deepseek-v4-pro".into()),
+            request_idempotency_header: Some("idempotency-key".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        inner.retry.enabled = true;
+        inner.retry.max_retries = 1;
+        inner.retry.initial_delay = 0.001;
+        inner.retry.max_delay = 0.001;
+        inner.isolated_request_state = true;
+        let parent = uuid::Uuid::new_v4();
+        inner.operation_id = Some(parent);
+        let search = ProviderNativeSearchClient::new(inner).unwrap();
+        let url = format!("{}/owned-round", server.uri());
+        for round in [1, 2] {
+            search
+                .post_json(&url, &json!({"round":round}), &[])
+                .await
+                .unwrap();
+        }
+        search.get_json(&url).await.unwrap();
+        assert_eq!(search.inner.operation_id, Some(parent));
+        let receipts = server.received_requests().await.unwrap();
+        assert_eq!(receipts.len(), 4);
+        assert_eq!(receipts[0].body, receipts[1].body);
+        assert_ne!(receipts[1].body, receipts[2].body);
+        let id = |index: usize| {
+            receipts[index]
+                .headers
+                .get("idempotency-key")
+                .unwrap()
+                .to_str()
+                .unwrap()
+        };
+        for receipt in &receipts[..3] {
+            assert_eq!(receipt.headers.get_all("idempotency-key").iter().count(), 1);
+        }
+        assert_eq!(id(0), id(1));
+        assert_ne!(id(1), id(2));
+        assert_ne!(id(0), parent.to_string());
+        assert_eq!(receipts[3].method, "GET");
+        assert!(!receipts[3].headers.contains_key("idempotency-key"));
     }
 }
 

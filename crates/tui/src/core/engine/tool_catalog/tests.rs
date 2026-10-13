@@ -1,10 +1,11 @@
 use super::{
-    CODE_EXECUTION_DESCRIPTION, DEFAULT_ACTIVE_NATIVE_TOOLS,
+    CODE_EXECUTION_DESCRIPTION, DEFAULT_ACTIVE_NATIVE_TOOLS, DeferredHydration,
     allowlist_is_native_file_and_shell_only, apply_mcp_tool_deferral, apply_native_tool_deferral,
     apply_registry_first_shell_guidance, build_model_tool_catalog_with_surface,
     default_synthetic_catalog_tool_names, ensure_advanced_tooling, execute_tool_search_with_cache,
-    initial_active_tools, is_synthetic_catalog_tool, remove_evicted_cache_activations,
-    tool_matches_any_rule, touch_cached_tool_after_execution,
+    initial_active_tools, is_synthetic_catalog_tool, maybe_hydrate_requested_deferred_tool,
+    remove_toolbox_drops, render_toolbox_eviction_notes, tool_matches_any_rule,
+    toolbox_oversize_reason, toolbox_oversize_search_hint, touch_cached_tool_after_execution,
 };
 use crate::core::session::ToolActivationCache;
 use crate::models::Tool;
@@ -135,11 +136,15 @@ fn cache_eviction_does_not_hide_a_tool_that_became_eager() {
 
     catalog[0].defer_loading = Some(false);
     let mut active = initial_active_tools(&catalog);
-    let evicted = cache.revalidate(&catalog);
-    remove_evicted_cache_activations(&catalog, &mut active, evicted);
+    let removals = cache.revalidate(&catalog);
+    remove_toolbox_drops(&mut active, removals.dropped_names().map(str::to_string));
 
     assert!(active.contains("promoted"));
     assert_eq!(cache.names().count(), 0);
+    // The promotion is not an unavailability: reporting it as gone would be
+    // a false statement, so neither removal bucket may name it.
+    assert!(removals.stale.is_empty());
+    assert!(removals.bounds_evicted.is_empty());
 }
 
 #[test]
@@ -159,24 +164,19 @@ fn successful_cached_execution_updates_lru_without_granting_uncached_names() {
     let delta = cache.activate(&catalog, &first);
     active.extend(delta.admitted);
 
-    assert!(touch_cached_tool_after_execution(
-        &catalog,
-        &mut active,
-        &mut cache,
-        "deferred-0"
-    ));
+    assert!(
+        touch_cached_tool_after_execution(&catalog, &mut active, &mut cache, "deferred-0").changed
+    );
     let delta = cache.activate(&catalog, &["deferred-8".to_string()]);
-    remove_evicted_cache_activations(&catalog, &mut active, delta.evicted);
+    remove_toolbox_drops(&mut active, delta.dropped_names().map(str::to_string));
     active.extend(delta.admitted);
     assert!(cache.names().any(|name| name == "deferred-0"));
     assert!(!cache.names().any(|name| name == "deferred-1"));
 
-    assert!(!touch_cached_tool_after_execution(
-        &catalog,
-        &mut active,
-        &mut cache,
-        "never-activated"
-    ));
+    assert!(
+        !touch_cached_tool_after_execution(&catalog, &mut active, &mut cache, "never-activated")
+            .changed
+    );
     assert!(!active.contains("never-activated"));
 }
 
@@ -350,4 +350,651 @@ fn settled_search_result_carries_no_booting_block() {
             "a settled boot must not attach a booting block: {payload}"
         );
     }
+}
+
+/// The activation cache is bounded, so a search that admits new tools can
+/// revoke ones the conversation already used. The result must name those
+/// evictions — a tool that silently vanishes between turns is exactly the
+/// "reference returned but never callable" trap. Searches without evictions
+/// keep the legacy result shape with no eviction block at all.
+#[test]
+fn search_result_names_cache_evictions_instead_of_dropping_them_silently() {
+    let catalog: Vec<Tool> = (0..10)
+        .map(|index| {
+            let mut definition = tool(&format!("deferred-{index}"));
+            definition.defer_loading = Some(true);
+            definition
+        })
+        .collect();
+    let mut active = initial_active_tools(&catalog);
+    let mut cache = ToolActivationCache::default();
+
+    let first = execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "deferred", "max_results": 8}),
+        &catalog,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("first search should succeed");
+    let first_payload: serde_json::Value =
+        serde_json::from_str(&first.content).expect("payload is JSON");
+    assert_eq!(
+        first_payload["tool_references"].as_array().unwrap().len(),
+        8
+    );
+    assert!(
+        first_payload.get("evicted_tool_references").is_none(),
+        "a search without evictions must keep the legacy shape: {first_payload}"
+    );
+    assert!(active.contains("deferred-0"));
+    assert_eq!(cache.names().count(), 8);
+
+    // Naming deferred-8/9 admits two new tools into the full cache and must
+    // evict the two least-recently-used activations.
+    let second = execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "deferred-8 deferred-9", "max_results": 8}),
+        &catalog,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("second search should succeed");
+    let second_payload: serde_json::Value =
+        serde_json::from_str(&second.content).expect("payload is JSON");
+    assert_eq!(
+        second_payload["evicted_tool_references"],
+        json!([
+            {"type": "tool_reference", "tool_name": "deferred-0"},
+            {"type": "tool_reference", "tool_name": "deferred-1"},
+        ])
+    );
+    let note = second_payload["toolbox_note"].as_str().expect("note");
+    assert!(
+        note.contains("deferred-0") && note.contains("no longer callable"),
+        "the note must name the evictions and the recovery contract: {note}"
+    );
+    assert!(!active.contains("deferred-0"));
+    assert!(!active.contains("deferred-1"));
+    assert!(active.contains("deferred-8"));
+    let metadata = second.metadata.expect("search metadata");
+    assert_eq!(
+        metadata["evicted_tool_references"],
+        json!(["deferred-0", "deferred-1"])
+    );
+    assert_eq!(metadata["toolbox_note"], second_payload["toolbox_note"]);
+}
+
+/// The serialized-bytes bound evicts too, not just the eight-name bound, and
+/// the reporting must not care which bound fired.
+#[test]
+fn search_result_names_byte_bound_cache_evictions_too() {
+    let heavy = |name: &str, description_bytes: usize| {
+        let mut definition = tool(name);
+        definition.defer_loading = Some(true);
+        definition.description = "x".repeat(description_bytes);
+        definition
+    };
+    let catalog = vec![
+        heavy("deferred-small", 10_000),
+        heavy("deferred-large", 8_000),
+    ];
+    let mut active = initial_active_tools(&catalog);
+    let mut cache = ToolActivationCache::default();
+
+    execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "^deferred-small", "match": "regex"}),
+        &catalog,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("first search should succeed");
+    assert_eq!(cache.names().collect::<Vec<_>>(), vec!["deferred-small"]);
+
+    let second = execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "^deferred-large", "match": "regex"}),
+        &catalog,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("second search should succeed");
+    let payload: serde_json::Value =
+        serde_json::from_str(&second.content).expect("payload is JSON");
+    // Both tools sit under the per-tool cap, but together they overflow the
+    // 16KiB cache budget, so admitting the second evicts the first.
+    assert_eq!(
+        payload["evicted_tool_references"],
+        json!([{"type": "tool_reference", "tool_name": "deferred-small"}])
+    );
+    let note = payload["toolbox_note"].as_str().expect("note");
+    assert!(
+        note.contains("deferred-small") && note.contains("16KiB"),
+        "the note must name the byte-bound eviction: {note}"
+    );
+    assert!(!active.contains("deferred-small"));
+    let metadata = second.metadata.expect("search metadata");
+    assert_eq!(
+        metadata["evicted_tool_references"],
+        json!(["deferred-small"])
+    );
+}
+
+/// A search after the catalog shrank must report the dropped activation under
+/// the unavailable vocabulary — the eviction note's "re-search to
+/// re-activate" contract would be a false promise for a tool that is gone
+/// from the catalog.
+#[test]
+fn search_reports_catalog_stale_evictions_as_unavailable_not_evicted() {
+    let catalog_v1: Vec<Tool> = (0..3)
+        .map(|index| {
+            let mut definition = tool(&format!("deferred-{index}"));
+            definition.defer_loading = Some(true);
+            definition
+        })
+        .collect();
+    let mut active = initial_active_tools(&catalog_v1);
+    let mut cache = ToolActivationCache::default();
+    execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "deferred", "max_results": 8}),
+        &catalog_v1,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("first search should succeed");
+    assert!(active.contains("deferred-0"));
+
+    let catalog_v2: Vec<Tool> = catalog_v1
+        .into_iter()
+        .filter(|definition| definition.name != "deferred-0")
+        .collect();
+    let second = execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "^deferred-1", "match": "regex"}),
+        &catalog_v2,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("second search should succeed");
+    let payload: serde_json::Value =
+        serde_json::from_str(&second.content).expect("payload is JSON");
+    let unavailable = payload["unavailable_tool_references"]
+        .as_array()
+        .expect("unavailable references");
+    let stale_entry = unavailable
+        .iter()
+        .find(|reference| reference["tool_name"] == "deferred-0")
+        .expect("the stale eviction must be reported");
+    assert_eq!(
+        stale_entry["reason"],
+        super::TOOLBOX_CATALOG_SHRINK_REASON,
+        "the stale reason must be the catalog-shrink one, not the bounds one: {stale_entry}"
+    );
+    assert!(
+        payload.get("evicted_tool_references").is_none() && payload.get("toolbox_note").is_none(),
+        "a staleness eviction is not a bounds eviction: {payload}"
+    );
+    assert!(!active.contains("deferred-0"));
+    let metadata = second.metadata.expect("search metadata");
+    assert!(
+        metadata["unavailable_tool_references"]
+            .as_array()
+            .expect("metadata unavailable references")
+            .iter()
+            .any(|reference| reference["tool_name"] == "deferred-0")
+    );
+}
+
+/// A cached tool promoted to eager stays directly callable: the search that
+/// forgets the cache entry must not report it as unavailable or evicted —
+/// the same request already carries its schema in the tools head, so both
+/// vocabularies would be false statements.
+#[test]
+fn search_does_not_report_an_eager_promotion_as_unavailable() {
+    let mut catalog = vec![tool("promoted")];
+    catalog[0].defer_loading = Some(true);
+    let mut active = initial_active_tools(&catalog);
+    let mut cache = ToolActivationCache::default();
+    execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "^promoted", "match": "regex"}),
+        &catalog,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("first search should succeed");
+    assert!(active.contains("promoted"));
+
+    catalog[0].defer_loading = Some(false);
+    let second = execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "^promoted", "match": "regex"}),
+        &catalog,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("second search should succeed");
+    let payload: serde_json::Value =
+        serde_json::from_str(&second.content).expect("payload is JSON");
+    let unavailable = payload["unavailable_tool_references"]
+        .as_array()
+        .expect("unavailable references");
+    assert!(
+        !unavailable
+            .iter()
+            .any(|reference| reference["tool_name"] == "promoted"),
+        "an eager promotion is not an unavailability: {unavailable:?}"
+    );
+    assert!(
+        payload.get("evicted_tool_references").is_none() && payload.get("toolbox_note").is_none(),
+        "an eager promotion is not a bounds eviction: {payload}"
+    );
+    assert!(active.contains("promoted"));
+    assert_eq!(cache.names().count(), 0);
+}
+
+/// A cached tool whose schema grows past the collective budget (an MCP
+/// refresh shipping a larger schema) is still a cataloged, re-activatable
+/// deferred member: the next search must pop it under the eviction note, not
+/// as an unavailability.
+#[test]
+fn search_reports_growth_overflows_as_re_activatable_evictions() {
+    let heavy = |name: &str, description_bytes: usize| {
+        let mut definition = tool(name);
+        definition.defer_loading = Some(true);
+        definition.description = "x".repeat(description_bytes);
+        definition
+    };
+    let catalog_v1 = vec![heavy("deferred-left", 8), heavy("deferred-right", 6_000)];
+    let mut active = initial_active_tools(&catalog_v1);
+    let mut cache = ToolActivationCache::default();
+    execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "deferred", "max_results": 8}),
+        &catalog_v1,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("first search should succeed");
+    assert_eq!(
+        cache.names().collect::<Vec<_>>(),
+        vec!["deferred-left", "deferred-right"]
+    );
+
+    let catalog_v2 = vec![
+        heavy("deferred-left", 12_000),
+        heavy("deferred-right", 6_000),
+    ];
+    let second = execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "^deferred-right", "match": "regex"}),
+        &catalog_v2,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("second search should succeed");
+    let payload: serde_json::Value =
+        serde_json::from_str(&second.content).expect("payload is JSON");
+    assert_eq!(
+        payload["evicted_tool_references"],
+        json!([{"type": "tool_reference", "tool_name": "deferred-left"}]),
+        "the growth overflow must be reported as a re-activatable eviction: {payload}"
+    );
+    let unavailable = payload["unavailable_tool_references"]
+        .as_array()
+        .expect("unavailable references");
+    assert!(
+        !unavailable
+            .iter()
+            .any(|reference| reference["tool_name"] == "deferred-left"),
+        "the growth victim is still cataloged, so the unavailable vocabulary would lie: {unavailable:?}"
+    );
+    assert!(!active.contains("deferred-left"));
+    assert!(active.contains("deferred-right"));
+}
+
+/// A cached tool whose schema grows past the per-tool budget is unavailable
+/// rather than evicted, and the report must say exactly that — not claim the
+/// tool left the catalog. The discovery-time rejection and the revalidation
+/// drop describe the same condition, so the payload carries one entry.
+#[test]
+fn search_reports_oversize_drops_with_the_oversize_reason() {
+    let heavy = |name: &str, description_bytes: usize| {
+        let mut definition = tool(name);
+        definition.defer_loading = Some(true);
+        definition.description = "x".repeat(description_bytes);
+        definition
+    };
+    let catalog_v1 = vec![heavy("deferred-left", 8)];
+    let mut active = initial_active_tools(&catalog_v1);
+    let mut cache = ToolActivationCache::default();
+    execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "^deferred-left", "match": "regex"}),
+        &catalog_v1,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("first search should succeed");
+    assert_eq!(cache.names().collect::<Vec<_>>(), vec!["deferred-left"]);
+
+    let catalog_v2 = vec![heavy("deferred-left", 20_000)];
+    let second = execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "^deferred-left", "match": "regex"}),
+        &catalog_v2,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("second search should succeed");
+    let payload: serde_json::Value =
+        serde_json::from_str(&second.content).expect("payload is JSON");
+    let unavailable = payload["unavailable_tool_references"]
+        .as_array()
+        .expect("unavailable references");
+    let entries: Vec<&serde_json::Value> = unavailable
+        .iter()
+        .filter(|reference| reference["tool_name"] == "deferred-left")
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the oversize drop must be reported exactly once: {unavailable:?}"
+    );
+    assert_eq!(
+        entries[0]["reason"],
+        format!(
+            "{}{}",
+            toolbox_oversize_reason(),
+            toolbox_oversize_search_hint()
+        ),
+        "the oversize drop must carry the oversize reason with its search-context recovery hint, not the catalog-shrink one: {entries:?}"
+    );
+    assert!(
+        payload.get("evicted_tool_references").is_none() && payload.get("toolbox_note").is_none(),
+        "an oversize drop is not a re-activatable eviction: {payload}"
+    );
+    assert!(!active.contains("deferred-left"));
+}
+
+/// The searched tool itself can be the LRU-front victim of a growth
+/// overflow: revalidation pops it, the admission loop re-admits it, and the
+/// same payload must not name it evicted while also handing it back in
+/// `tool_references`.
+#[test]
+fn search_does_not_name_its_own_admission_as_evicted() {
+    let heavy = |name: &str, description_bytes: usize| {
+        let mut definition = tool(name);
+        definition.defer_loading = Some(true);
+        definition.description = "x".repeat(description_bytes);
+        definition
+    };
+    let catalog_v1 = vec![heavy("deferred-left", 8), heavy("deferred-right", 6_000)];
+    let mut active = initial_active_tools(&catalog_v1);
+    let mut cache = ToolActivationCache::default();
+    execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "deferred", "max_results": 8}),
+        &catalog_v1,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("first search should succeed");
+    assert_eq!(
+        cache.names().collect::<Vec<_>>(),
+        vec!["deferred-left", "deferred-right"]
+    );
+
+    let catalog_v2 = vec![
+        heavy("deferred-left", 12_000),
+        heavy("deferred-right", 6_000),
+    ];
+    let second = execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "^deferred-left", "match": "regex"}),
+        &catalog_v2,
+        &mut active,
+        &mut cache,
+        None,
+    )
+    .expect("second search should succeed");
+    let payload: serde_json::Value =
+        serde_json::from_str(&second.content).expect("payload is JSON");
+    let references = payload["tool_references"].as_array().expect("references");
+    assert!(
+        references
+            .iter()
+            .any(|reference| reference["tool_name"] == "deferred-left"),
+        "the searched growth victim must be re-admitted by this very result: {references:?}"
+    );
+    assert_eq!(
+        payload["evicted_tool_references"],
+        json!([{"type": "tool_reference", "tool_name": "deferred-right"}]),
+        "only the net eviction may be named: {payload}"
+    );
+    let note = payload["toolbox_note"].as_str().expect("note");
+    assert!(
+        note.contains("deferred-right") && !note.contains("deferred-left"),
+        "the note must not claim the re-admitted tool is uncallable: {note}"
+    );
+    assert!(active.contains("deferred-left"));
+    assert!(!active.contains("deferred-right"));
+    let metadata = second.metadata.expect("search metadata");
+    assert_eq!(
+        metadata["evicted_tool_references"],
+        json!(["deferred-right"])
+    );
+}
+
+/// A direct call to an oversize deferred tool can never enter the bounded
+/// toolbox, so the hydration receipt must refuse with the shared oversize
+/// reason instead of promising a load the admission would refuse.
+#[test]
+fn hydration_of_an_oversize_tool_reports_the_rejection_not_a_load() {
+    let mut oversize = tool("huge-deferred");
+    oversize.defer_loading = Some(true);
+    oversize.description = "x".repeat(20_000);
+    let catalog = vec![oversize];
+    // An empty active set: in a real turn core tools fill it, and the
+    // single-tool fallback must not pre-activate the tool under test.
+    let active = HashSet::new();
+    let mut hydrated = HashSet::new();
+
+    let Some(DeferredHydration::Refused(receipt)) = maybe_hydrate_requested_deferred_tool(
+        "huge-deferred",
+        &json!({}),
+        &catalog,
+        &active,
+        &mut hydrated,
+    ) else {
+        panic!("the oversize call must be refused, not loaded");
+    };
+    assert!(
+        receipt
+            .content
+            .contains("was not loaded and was not executed"),
+        "the receipt must refuse the load: {}",
+        receipt.content
+    );
+    assert!(
+        receipt.content.contains(&toolbox_oversize_reason()),
+        "the refusal must carry the shared oversize reason: {}",
+        receipt.content
+    );
+    assert!(
+        !receipt.content.contains("has now been loaded"),
+        "the receipt must not promise a load: {}",
+        receipt.content
+    );
+    assert!(
+        hydrated.is_empty(),
+        "an oversize tool must not be offered to the batch activation: {hydrated:?}"
+    );
+}
+
+/// Ride-time netting: a parked note must not name a tool the riding result
+/// hands back. Names back in the activation cache — or in the request's
+/// active tool set, which a mid-turn MCP catalog refresh can repopulate
+/// without re-activating the cache — are dropped from the note, a note
+/// emptied by the netting is dropped entirely, and the surviving note keeps
+/// its own trigger attribution.
+#[test]
+fn toolbox_note_rendering_nets_re_admitted_names_at_ride_time() {
+    let mut deferred = tool("deferred-x");
+    deferred.defer_loading = Some(true);
+    let catalog = vec![deferred];
+    let mut cache = ToolActivationCache::default();
+    cache.activate(&catalog, &["deferred-x".to_string()]);
+    // The ride-time catalog: every name below is still served by it, so the
+    // notes keep the recovery vocabulary. The gone-name segment drops the
+    // name from this catalog on purpose.
+    let ride_catalog = vec![tool("deferred-x"), tool("deferred-y"), tool("deferred-z")];
+
+    let note = |trigger, names| crate::core::session::PendingToolboxEviction {
+        trigger,
+        evicted: names,
+    };
+    use crate::core::session::ToolboxEvictionTrigger;
+    let mut notes = vec![
+        note(
+            ToolboxEvictionTrigger::TurnStart,
+            vec!["deferred-x".to_string(), "deferred-y".to_string()],
+        ),
+        note(ToolboxEvictionTrigger::Step, vec!["deferred-x".to_string()]),
+    ];
+    let rendered =
+        render_toolbox_eviction_notes(&mut notes, &cache, &HashSet::new(), &ride_catalog)
+            .expect("deferred-y is still evicted");
+    assert!(
+        rendered.contains("deferred-y") && !rendered.contains("deferred-x"),
+        "re-admitted names must be netted out of the note: {rendered}"
+    );
+    assert!(
+        rendered.contains("This turn's start evicted"),
+        "the surviving note keeps its own trigger attribution: {rendered}"
+    );
+    assert_eq!(
+        rendered
+            .matches("evicted tools from the bounded conversation toolbox")
+            .count(),
+        1,
+        "a companion note the netting empties must contribute no prose: {rendered}"
+    );
+
+    // A note whose every name is re-admitted is fully absorbed: reporting
+    // it would claim a callable tool is uncallable.
+    let mut notes = vec![note(
+        ToolboxEvictionTrigger::Step,
+        vec!["deferred-x".to_string()],
+    )];
+    assert!(
+        render_toolbox_eviction_notes(&mut notes, &cache, &HashSet::new(), &ride_catalog).is_none(),
+        "a fully netted note must not ride at all"
+    );
+
+    // A name the mid-turn MCP refresh re-advertised into the active set is
+    // callable even though the cache no longer holds it: the note must net
+    // against the active set too, or it would contradict the next request,
+    // which carries the tool.
+    let mut active = HashSet::new();
+    active.insert("deferred-y".to_string());
+    let mut notes = vec![note(
+        ToolboxEvictionTrigger::Step,
+        vec!["deferred-y".to_string()],
+    )];
+    assert!(
+        render_toolbox_eviction_notes(
+            &mut notes,
+            &ToolActivationCache::default(),
+            &active,
+            &ride_catalog,
+        )
+        .is_none(),
+        "an active-set name is callable and must not be declared evicted"
+    );
+    assert!(
+        notes.is_empty(),
+        "the render consumes the notes whether or not anything rendered"
+    );
+
+    // A name an earlier note in the same ride already named must not be
+    // repeated by a later note on the same result: the second mention is
+    // redundant prose about the same eviction.
+    let mut notes = vec![
+        note(
+            ToolboxEvictionTrigger::TurnStart,
+            vec!["deferred-z".to_string()],
+        ),
+        note(ToolboxEvictionTrigger::Step, vec!["deferred-z".to_string()]),
+    ];
+    let rendered =
+        render_toolbox_eviction_notes(&mut notes, &cache, &HashSet::new(), &ride_catalog)
+            .expect("deferred-z is still evicted");
+    assert_eq!(
+        rendered.matches("deferred-z").count(),
+        1,
+        "a name already rendered by an earlier note must not be repeated: {rendered}"
+    );
+    assert!(notes.is_empty());
+
+    // A name that left the catalog between its eviction and this ride can
+    // no longer be recovered by a search, so the note must report that
+    // truth instead of promising a re-activating search — beside a name
+    // the catalog still serves, which keeps the recovery contract.
+    let mut gone_catalog = vec![tool("deferred-y")];
+    gone_catalog[0].defer_loading = Some(true);
+    let mut notes = vec![note(
+        ToolboxEvictionTrigger::Step,
+        vec!["deferred-y".to_string(), "gone-tool".to_string()],
+    )];
+    let rendered = render_toolbox_eviction_notes(
+        &mut notes,
+        &ToolActivationCache::default(),
+        &HashSet::new(),
+        &gone_catalog,
+    )
+    .expect("both names are still evicted");
+    assert!(
+        rendered.contains("no longer callable until a later search re-activates them: deferred-y"),
+        "the served name keeps the recovery contract: {rendered}"
+    );
+    assert!(
+        rendered.contains("evicted a tool that has since left the toolbox catalog")
+            && rendered.contains("a search can no longer re-activate it: gone-tool"),
+        "a catalog-departed name must not be promised a re-activating search: {rendered}"
+    );
+
+    // A note whose every name left the catalog renders the unrecoverable
+    // sentence alone — never an empty recovery list.
+    let mut notes = vec![note(
+        ToolboxEvictionTrigger::Step,
+        vec!["gone-tool".to_string()],
+    )];
+    let rendered = render_toolbox_eviction_notes(
+        &mut notes,
+        &ToolActivationCache::default(),
+        &HashSet::new(),
+        &gone_catalog,
+    )
+    .expect("gone-tool is still evicted");
+    assert!(
+        rendered.contains("evicted a tool that has since left the toolbox catalog")
+            && !rendered.contains("no longer callable until a later search"),
+        "a fully unrecoverable note must drop the recovery promise: {rendered}"
+    );
 }
