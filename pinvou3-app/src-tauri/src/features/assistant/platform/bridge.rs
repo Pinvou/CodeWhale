@@ -5413,13 +5413,11 @@ mod tests {
             assert_eq!(bridge.engine_route_provider(), RESPONSES_ROUTE_PROVIDER);
             let config = bridge.build_dt_config();
             assert_eq!(config.provider.as_deref(), Some(RESPONSES_ROUTE_PROVIDER));
-            let table = config
+            let table = &config
                 .providers
                 .as_ref()
-                .unwrap()
-                .custom
-                .get(RESPONSES_ROUTE_PROVIDER)
-                .unwrap();
+                .expect("Responses provider table must be materialized")
+                .custom[RESPONSES_ROUTE_PROVIDER];
             assert_eq!(table.wire.as_deref(), Some("responses"));
 
             // Ordinary local startup still yields to operator-owned env pins.
