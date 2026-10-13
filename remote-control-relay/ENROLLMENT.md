@@ -68,7 +68,11 @@ does not rewrite the strict Web v2 revoke file. The state file must be the child
 of a dedicated directory whose parent already exists. The store creates and
 protects only that final directory. If it already exists, the store verifies its
 owner and protection and never chmods or rewrites a caller-owned parent. A
-marker identifies the directory, and unexpected entries fail closed. Each
+marker identifies the directory, and unexpected entries fail closed. A dedicated
+regression creates a real foreign file, directory, and directory link (Windows
+junction), repeats the refusal, and checks that primary/backup/marker bytes and
+foreign evidence remain unchanged. Its Windows security injection is not a DACL
+qualification. Each
 namespace has a canonical unsigned-decimal revision. A caller reads a namespace
 snapshot and commits with
 `compareAndSwap(name, expectedRevision, value)`; stale revisions fail without a
