@@ -3,8 +3,9 @@ import { once } from "node:events";
 import test from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
 import { createEnrollmentGateway } from "../enrollment-gateway.js";
+import { DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_MS } from "../enrollment-gateway-heartbeat.js";
 
-async function idleFixture(t, options = {}, gatewayOptions = {}, authenticate = true) {
+async function idleFixture(t, options = {}, gatewayOptions = {}, authenticate = true, useDefaultHeartbeat = false) {
   let gateway;
   let client;
   let upstreamTimer;
@@ -30,7 +31,7 @@ async function idleFixture(t, options = {}, gatewayOptions = {}, authenticate = 
   await once(upstream, "listening");
   // The gateway and WebSocket transport are production implementations. This
   // adapter and upstream fixture do not prove durable enrollment or Relay E2E.
-  gateway = createEnrollmentGateway({
+  const configuration = {
     registry: {
       authorizeDesktopRegistration({ endpointId, accessToken, desktopSecret }) {
         assert.equal(endpointId, "idle-contract-endpoint");
@@ -42,7 +43,9 @@ async function idleFixture(t, options = {}, gatewayOptions = {}, authenticate = 
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}/ws`,
     heartbeatIntervalMs: 100,
     ...gatewayOptions,
-  });
+  };
+  if (useDefaultHeartbeat) delete configuration.heartbeatIntervalMs;
+  gateway = createEnrollmentGateway(configuration);
   const address = await gateway.listen({ host: "127.0.0.1", port: 0 });
   client = new WebSocket(`ws://127.0.0.1:${address.port}/pinvou3/remote/ws`, options);
   await once(client, "open");
@@ -56,6 +59,22 @@ async function idleFixture(t, options = {}, gatewayOptions = {}, authenticate = 
   return { client, gateway, upstreamPongs: () => upstreamPongs,
     async stopGateway() { const runtime = gateway; gateway = null; await runtime.close(); } };
 }
+
+test("default gateway heartbeat is scheduled at 15 seconds after real authorization and upgrade",
+  { timeout: 10_000 }, async (t) => {
+  const scheduled = [];
+  const originalSetInterval = globalThis.setInterval;
+  t.mock.method(globalThis, "setInterval", (...args) => {
+    scheduled.push(args[1]);
+    return Reflect.apply(originalSetInterval, globalThis, args);
+  });
+  // This fixture really authorizes and upgrades the upstream, omitting the
+  // heartbeat option. Its only other interval is the independent 50ms peer.
+  const fixture = await idleFixture(t, {}, {}, true, true);
+  assert.deepEqual(scheduled, [50, 15_000]);
+  assert.equal(DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_MS, 15_000);
+  assert.equal(fixture.client.readyState, WebSocket.OPEN);
+});
 
 test("authenticated idle gateway sends its own public-hop ping while upstream ping remains independent",
   { timeout: 10_000 }, async (t) => {
