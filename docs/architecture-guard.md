@@ -16,6 +16,35 @@ python scripts/architecture-guard.py
 - Rust feature 不得反向依赖 `app`。
 - Rust `platform` 不得反向依赖 `app` 或 `features`。
 - Rust feature 不得新增或扩大循环依赖，也不得增加现有循环内部的依赖边和引用。
+  `use crate::app as host`、`use crate::features as domains` 等根模块别名
+  （含分组、`self` / `super` 别名链和 `extern crate self`）按原始层级解析；
+  crate 根真实顶层的私有或公开 `use`（含无 `crate::` 前缀）及
+  `extern crate self as ...` 导出的别名也会跨文件追踪；函数、内联模块和
+  未调用的宏定义体不作为根别名，无法静态展开的根宏调用会明确报不确定项。
+  raw identifier 也归一到同一模块名；`self` / `super` 按真实模块路径
+  （`mod.rs`、普通 `.rs`、`#[path] mod` 与内联模块）解析，`as _` 仍计入
+  导入路径的依赖。仅导入 `app` / `features` 等根模块本身也算依赖；
+  feature 根模块导入和解析到 crate 层级根的 glob 导入因无法静态确定具体依赖而拒绝，
+  普通测试子模块的 `use super::*` 不在此列。`cfg_attr` 中所有可能的 `path`
+  分支均检查；无法唯一定位的内联 `#[path]`、动态或扫描树外的 `include!` / `path`
+  会按不确定模块路径报错，不会退回到磁盘目录猜测。经 `include!` / `#[path]`
+  映射的文件按声明所在的模块归属计算依赖边，而非按其磁盘父目录。
+  修正导入解析后识别出的既有环按引用次数登记；测试源码依赖也纳入图，
+  增加同一依赖的引用或扩大环会失败，等价移动导入不改变架构债计数。
+- `features/*/application/**/*.rs` 会被递归枚举；其中的用例签名和实现不得
+  导入或调用 Tauri API，也不得直接依赖具体 `platform::app_events` 实现。
+  宿主通知必须通过所属 feature 定义的窄端口由组合根注入。
+- `features/sessions/application/mod.rs` 的五个公开模块导出按 Rust token 检查固定为
+  `admission`、`dispatch_remote`、`ports`、`project_remote`、`submit_controlled`；
+  旧 `sync_remote_journal` 槽已由 RemoteProxy / `project_remote` 的单一投影 owner 取代，
+  不保留兼容模块；声明必须无条件可用，顶层宏展开与
+  `include!` 不得增删导出；跨行声明和注释不能绕过检查。后续任务只填充各自实现文件。
+- 整个 `features/remote_control/**/*.rs` 禁止新增直接 Tauri API 或宿主事件调用。
+  `scripts/architecture-baseline.json` 按文件、调用模式和数量记录已有依赖，
+  新文件与现有文件的增长均失败；宿主根路径别名、glob 导入及泛型 `emit` 调用
+  也计入守卫。清除旧调用时须同步下调基线。
+  新端口 `controller/ports.rs` 没有例外；远控入口通过注入的
+  `ControlledExecutionPort` / `RemoteSessionProjectionPort` 调用用例。
 - 平台 `target_os` 分支应位于 platform adapter 或组合根；PowerShell、注册表、
   `xdg-open` 等实现细节应位于 platform adapter。合理例外按下文显式登记。
 - `#[tauri::command]` 必须位于 `app/commands/` 路径下，`generate_handler!` 条目以
@@ -50,7 +79,27 @@ python scripts/architecture-guard.py
 模块迁移而添加的标记不会被接受。`include!` 和 `#[path]` 本身不再作为架构违规；是否
 合理由实际职责、依赖方向和生成代码边界判断。
 
+另有一个精确的测试类型例外：feature 内
+`features/remote_control/controller/relay_runtime/reader_resume_tests.rs`
+文件头使用守卫登记的 `allow-reader-test-host-type` 理由，并自行限定
+`#![cfg(all(test, target_os = "windows"))]`。只允许顶层
+`resume_round_trip<T>(build_host: impl FnOnce() -> (tauri::AppHandle, T), retire_endpoint: bool,)`
+签名中的一个类型路径，Wry 工厂仍由 `app/commands/remote_control/` 测试构建。
+第二参数只选择同一真实宿主的恢复或端点退休回归；缺失、改名、非 bool 或额外参数均不属于例外。
+该例外不增加宿主 API 基线，也不是文件级放行；增加类型、以等数量宿主调用替代类型、
+新增事件调用（含 `super::*` 继承的 Emitter）、Command、反向 app 依赖、移除 test/Windows
+条件或复制到其他文件均失败。真实 reader/manager/worker 回归不得改成纯状态 mock。
+
 ## 历史基线
+
+crate/layer root 的 use 别名按真实词法块隔离：块内 item use 不依赖声明顺序，
+普通块可继承所属模块的导入，子模块不能用裸名继承父模块导入；显式 self/super
+按模块解析。父、子、兄弟块同名别名互不覆盖；同一作用域冲突或别名循环按
+rust_crate_root_alias_ambiguous 失败关闭，不允许用后置测试模块隐去 feature → app 引用。
+根 extern crate self 别名单独作为 extern prelude 解析，不与普通 use 的可见性混用。
+具体模块/条目别名的成员引用由原始 import 记录依赖，不重复增加调用计数；
+cfg 选出的多个具体模块若属于同一门禁目的地（同一 layer/feature），仅按该目的地
+归类，不替代 Rust 编译器的名字解析或条件互斥检查。跨目的地冲突仍失败关闭。
 
 `scripts/architecture-baseline.json` 记录启用门禁时已经存在的架构债务。门禁不允许：
 
@@ -64,6 +113,37 @@ python scripts/architecture-guard.py
 PR CI 还会通过 `--base-ref` 对比目标分支中的基线。当前分支不能增加目标分支已有的
 额度、增加新条目或扩大依赖环，因此同时修改当前基线不能绕过门禁。首次引入基线时，
 目标分支尚无该文件，脚本会明确报告初始化并允许通过。
+
+远控宿主 API 规则仅在目标基线缺少该规则键时可按已核定的历史调用额度首次登记；
+已存在但为空的规则表示债务清零，不能重新放宽。Rust 依赖解析升级使用一次性
+`rust_dependency_resolution_v1` 标记和固定迁移锚点
+`061032e02b60366a8b9a09af134bb8ba4c7a2e19`（本轮独立审核通过的固定 A19 提交）。
+`--base-ref` 检查锚点确属候选分支历史，以当前解析器只读扫描目标分支 T、
+锚点 A 和两者的共同祖先 M。首次迁移每条依赖引用的上限为
+`max(0, T + (A - M))`：保留本任务之前已审分支提交的净变化，同时计入目标分支
+后续增减；feature 环必须由合成后的完整依赖边图重新形成，不能凭旧环清单放行。
+例如 M 有 24 次引用、A 有 28 次、T 仍有 24 次，则可登记 28 次；若 T 后来清理
+2 次，上限降为 26 次。目标分支的无关变更不影响额度。锚点不是候选 HEAD 的祖先时明确失败，
+须重新审计并更新迁移锚点，不能静默放行。迁移标记落地后，清零债务不能恢复，
+也不能改动锚点重放迁移。无 `--base-ref` 不授予迁移额度。
+
+首次迁移仍未落入目标分支。此前经明确架构审批采用上述已审 A19 锚点，
+固定目标 `006c9ce7130e7e35c9871b03ff5d4b26a3ecd822` 的定标是历史证据，
+不能继续作为同步后新目标的额度证明。本轮保持迁移锚点不变，以已审且保全历史的
+固定集成目标 `797cf38c3a600c5dbd54b56c675dd785ab78908c` 重新计算三方源码上限。
+该目标已包含锚点，故 M=A、A-M=0，额度严格等于当前解析器扫描目标 T 的结果：
+`assistant->marketplace` 为 65，`assistant->remote_control` 为 33，
+`connectors->marketplace` 为 12，`connectors->runtime_bundle` 为 7，
+`runtime_bundle->marketplace` 为 61。后者相比历史目标增加的两次引用，均来自
+main 的 MCP 跨进程锁竞争回归测试：`file_lock::lock_path_for` 与
+`file_lock::process_mutex_for`；原生产 `mcp_json_lock` 换为 `with_mcp_json_lock`
+没有增加引用。A20 没有新增 runtime_bundle 产品依赖，也没有扩张六 feature 环。
+A20 测试适配器进一步消除一次 marketplace 引用，因此候选实际登记为
+64/33/12/7/61，不保留多余额度；62 次不得通过。其他债务计数及清零规则不变。
+这些计数记录前序和 main 已有耦合，不表示已清除产品债务；不得为了数字机械拆代码。
+首次迁移必须运行 `--base-ref 797cf38c3a600c5dbd54b56c675dd785ab78908c`
+验证源码三方上限。若目标继续清债，合成额度也必须随之下降；目标落地迁移后仍受
+普通棘轮约束，不得再次移动锚点、重放迁移或恢复已经清零的债务。
 
 查看当前扫描结果：
 

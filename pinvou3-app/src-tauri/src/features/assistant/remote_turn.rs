@@ -1963,11 +1963,7 @@ mod tests {
                 assert!(private.starts_with(&home));
                 assert!(private.is_dir());
                 let successor = lifecycle.reserve().unwrap();
-                super::super::skill_materialization::ensure_session_skills(
-                    sid,
-                    crate::features::marketplace::ConnectorScope::Plain,
-                    None,
-                );
+                super::super::skill_materialization::ensure_plain_session_skills_for_test(sid);
                 let shared = crate::platform::paths::session_skills_dir(sid);
                 std::fs::write(shared.join("new-local-marker"), b"new local").unwrap();
                 assert!(std::fs::read_dir(&private).unwrap().next().is_none());

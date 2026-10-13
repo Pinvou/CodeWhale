@@ -4,6 +4,7 @@ import { test } from 'node:test';
 
 const requirements = readFileSync(new URL('../../docs/Windows双端远程控制需求文档.md', import.meta.url), 'utf8');
 const architecture = readFileSync(new URL('../../docs/Windows双端远程控制代码架构.md', import.meta.url), 'utf8');
+const deliveryPlan = readFileSync(new URL('../../docs/Windows双端远程控制开发任务拆分.md', import.meta.url), 'utf8');
 const currentArchitecture = architecture.split('## 历史设计附录')[0];
 const section = (title, nextTitle) => requirements.split(title)[1]?.split(nextTitle)[0] || '';
 
@@ -50,7 +51,9 @@ test('reviewed A18 version entries survive and A19 corrections append instead of
   assert.ok(requirements.includes('| 1.8 | 2026-10-01 | 记录 Finished receipt 固定向量勘误，澄清 reservation 原子提升、模块落位与模型路由判别符，并登记生产容量定标门禁 |'));
   assert.match(requirements, /\| 1\.9 \| 2026-10-07 \|/u);
   assert.match(requirements, /A19 原草稿把前序 1.8 勘误重编号为 1.10/u);
-  assert.doesNotMatch(requirements, /^\| 1\.10 \|/mu);
+  assert.match(requirements, /^\| 1\.10 \| 2026-10-07 \| 补录 A20/mu);
+  assert.doesNotMatch(requirements, /^\| 1\.(?:11|12) \|/mu);
+  assert.match(deliveryPlan, /^> 需求基线：.* v1\.10$/mu);
 });
 
 test('every historical architecture section is locally marked obsolete', () => {
