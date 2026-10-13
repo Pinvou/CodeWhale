@@ -30,7 +30,11 @@ func TestRegistrationBonusRegisteredWorkloadScopes(t *testing.T) {
 		json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: "controlled", Algorithm: "RS256", Use: "sig"}}})
 	}))
 	defer jwks.Close()
-	ca := filepath.Join(t.TempDir(), "ca.pem")
+	caDirectory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := filepath.Join(caDirectory, "ca.pem")
 	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: jwks.Certificate().Raw}), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +98,11 @@ func TestRegistrationBonusReadinessRefreshesProjectedIdentityOverTLS(t *testing.
 		router.ServeHTTP(w, r)
 	}))
 	defer server.Close()
-	ca := filepath.Join(t.TempDir(), "ca.pem")
+	caDirectory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := filepath.Join(caDirectory, "ca.pem")
 	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600); err != nil {
 		t.Fatal(err)
 	}
