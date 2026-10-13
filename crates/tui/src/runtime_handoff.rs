@@ -769,10 +769,26 @@ impl CompactionAnchor {
 /// summary relocation; the three used to be near-copies that had already
 /// drifted on which messages count as a prompt.
 pub(crate) fn compaction_anchor(messages: &[Message], before: usize) -> Option<CompactionAnchor> {
+    compaction_anchor_in_era(
+        crate::history_recognition::CheckpointEra::of_history(messages),
+        messages,
+        before,
+    )
+}
+
+/// [`compaction_anchor`] under an already-derived era, for callers that
+/// classify the same history more than once.
+pub(crate) fn compaction_anchor_in_era(
+    checkpoints: crate::history_recognition::CheckpointEra,
+    messages: &[Message],
+    before: usize,
+) -> Option<CompactionAnchor> {
     let window = messages.get(..before)?;
     window
         .iter()
-        .rposition(|message| classify_user_turn_prompt(message) != UserTurnPromptKind::NotPrompt)
+        .rposition(|message| {
+            classify_user_turn_prompt_in_era(checkpoints, message) != UserTurnPromptKind::NotPrompt
+        })
         .map(CompactionAnchor::Prompt)
         .or_else(|| {
             window
@@ -788,7 +804,10 @@ pub(crate) fn compaction_anchor(messages: &[Message], before: usize) -> Option<C
 /// Replays are idempotent because the previous sidecar is structurally removed
 /// before the replacement is inserted. At a tool-result or trailing summary
 /// boundary, place it after the latest real user input, before that round's
-/// assistant/tool chain.
+/// assistant/tool chain. The boundary check reads the history's era: a bare
+/// summary carrier trails a pre-provenance history and counts, while in a
+/// post-provenance history only the stamped carrier does — a pasted-header
+/// turn there is the latest real user input.
 /// Strict paired chat templates cannot encode a tool result followed by a
 /// user checkpoint. Compaction already replaces history; this does not mutate
 /// the session-pinned system/cache prefix or impersonate an assistant reply.
@@ -802,12 +821,14 @@ pub(crate) fn replace_agent_topology_checkpoint(
     messages.retain(|message| {
         !is_agent_topology_checkpoint(message) && !is_restored_agent_topology_checkpoint(message)
     });
+    let checkpoints = crate::history_recognition::CheckpointEra::of_history(messages);
     let ends_with_tool_result = messages.last().is_some_and(carries_tool_result);
     let ends_with_compaction_summary = messages
         .last()
-        .is_some_and(crate::history_recognition::is_generated_compaction_checkpoint);
+        .is_some_and(|message| checkpoints.is_checkpoint(message));
     let position = if ends_with_tool_result || ends_with_compaction_summary {
-        compaction_anchor(messages, messages.len()).map_or(0, CompactionAnchor::placement_index)
+        compaction_anchor_in_era(checkpoints, messages, messages.len())
+            .map_or(0, CompactionAnchor::placement_index)
     } else {
         messages.len()
     };
@@ -1326,9 +1347,10 @@ fn is_compaction_topology_carrier(message: &Message) -> bool {
 /// carrier is misplaced when it trails its own summary or directly follows a
 /// tool result — the two shapes the pre-fix releases saved.
 fn restored_topology_anchor(messages: &[Message], index: usize) -> Option<usize> {
+    let checkpoints = crate::history_recognition::CheckpointEra::of_history(messages);
     let summary_before = messages[..index]
         .iter()
-        .rposition(crate::history_recognition::is_compaction_checkpoint_message);
+        .rposition(|message| checkpoints.is_checkpoint(message));
     let follows_tool_result = index > 0 && carries_tool_result(&messages[index - 1]);
     if summary_before.is_none() && !follows_tool_result {
         return None;
@@ -1337,11 +1359,11 @@ fn restored_topology_anchor(messages: &[Message], index: usize) -> Option<usize>
         .or_else(|| {
             messages[index + 1..]
                 .iter()
-                .position(crate::history_recognition::is_compaction_checkpoint_message)
+                .position(|message| checkpoints.is_checkpoint(message))
                 .map(|offset| index + 1 + offset)
         })
         .unwrap_or(messages.len());
-    let anchor = compaction_anchor(messages, before)?.placement_index();
+    let anchor = compaction_anchor_in_era(checkpoints, messages, before)?.placement_index();
     (anchor < index).then_some(anchor)
 }
 
@@ -1414,8 +1436,16 @@ pub enum EditLastTurnTarget {
 }
 
 /// Classify `message` for edit-last-turn and admitted-display handling.
+///
+/// `checkpoints` is the recognition era of the history the message came from
+/// ([`crate::history_recognition::CheckpointEra::of_history`]): in a
+/// post-provenance history only the stamped carrier is runtime-owned, so a
+/// turn pasting the bare summary header classifies as the user turn it is.
 #[must_use]
-pub(crate) fn classify_user_turn_prompt(message: &Message) -> UserTurnPromptKind {
+pub(crate) fn classify_user_turn_prompt_in_era(
+    checkpoints: crate::history_recognition::CheckpointEra,
+    message: &Message,
+) -> UserTurnPromptKind {
     if message.role != Role::User {
         return UserTurnPromptKind::NotPrompt;
     }
@@ -1429,7 +1459,7 @@ pub(crate) fn classify_user_turn_prompt(message: &Message) -> UserTurnPromptKind
     }) {
         return UserTurnPromptKind::NotPrompt;
     }
-    if is_runtime_owned_user_message(message) {
+    if is_runtime_owned_user_message(checkpoints, message) {
         return UserTurnPromptKind::NotPrompt;
     }
 
@@ -1443,15 +1473,32 @@ pub(crate) fn classify_user_turn_prompt(message: &Message) -> UserTurnPromptKind
     }
 }
 
+/// [`classify_user_turn_prompt_in_era`] under the legacy era: any
+/// header-prefixed turn reads as the saved summary. Only for callers with no
+/// history in sight; pass a derived era when the history is available.
+#[must_use]
+pub(crate) fn classify_user_turn_prompt(message: &Message) -> UserTurnPromptKind {
+    classify_user_turn_prompt_in_era(crate::history_recognition::CheckpointEra::LEGACY, message)
+}
+
 /// Locate the latest real user boundary without skipping unsupported content.
+///
+/// Truncating at the returned boundary removes everything from it onward —
+/// including the history's only stamped carrier when the boundary precedes
+/// it, which reverts the session to the legacy reading of
+/// [`crate::history_recognition::CheckpointEra`]: a later turn that pastes
+/// the bare summary header is then indistinguishable from a saved bare
+/// carrier and the restore-time loose retain will drop it on the next
+/// reload-with-checkpoint.
 #[must_use]
 pub fn edit_last_turn_target(messages: &[Message]) -> EditLastTurnTarget {
+    let checkpoints = crate::history_recognition::CheckpointEra::of_history(messages);
     messages
         .iter()
         .enumerate()
         .rev()
         .find_map(
-            |(index, message)| match classify_user_turn_prompt(message) {
+            |(index, message)| match classify_user_turn_prompt_in_era(checkpoints, message) {
                 UserTurnPromptKind::NotPrompt => None,
                 UserTurnPromptKind::Editable => Some(EditLastTurnTarget::Editable(index)),
                 UserTurnPromptKind::Unsupported => Some(EditLastTurnTarget::Unsupported),
@@ -1460,7 +1507,47 @@ pub fn edit_last_turn_target(messages: &[Message]) -> EditLastTurnTarget {
         .unwrap_or(EditLastTurnTarget::Missing)
 }
 
+/// Indices into `history` of every editable, genuine user-authored turn
+/// prompt, in order.
+///
+/// History-aware form of [`is_user_turn_prompt`]: the era is derived once
+/// from `history`, so in a post-provenance history a turn pasting the bare
+/// summary header is listed as the user turn it is and the saved checkpoint
+/// is not, while a pre-provenance history keeps the loose reading. Host
+/// turn numbering, rewind cut points, and turn counts should all read this
+/// one list so "turn N" stays consistent with what `/edit` targets —
+/// classifying messages one at a time with [`is_user_turn_prompt`] reads the
+/// legacy form and misses exactly those pasted turns.
+///
+/// Only *editable* turns are listed. When the latest user turn is unsupported
+/// (for example image-only), [`edit_last_turn_target`] surfaces
+/// [`EditLastTurnTarget::Unsupported`] and `/edit` refuses rather than
+/// targeting an older prompt, while this list simply ends at the newest
+/// editable turn — a rewind cut point must therefore still ask
+/// [`edit_last_turn_target`] and must not assume its last index is one
+/// `/edit` would take.
+#[must_use]
+pub fn user_turn_prompt_indices(history: &[Message]) -> Vec<usize> {
+    let checkpoints = crate::history_recognition::CheckpointEra::of_history(history);
+    history
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            classify_user_turn_prompt_in_era(checkpoints, message) == UserTurnPromptKind::Editable
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// True when `message` is an editable, genuine user-authored turn prompt.
+///
+/// Single-message form: any header-prefixed turn reads as the saved summary,
+/// because without the history there is no era to decide otherwise.
+/// History-aware callers (replacement retention, `/edit` targeting, anchor
+/// placement, host turn numbering) must derive the era instead — through
+/// [`classify_user_turn_prompt_in_era`] or [`user_turn_prompt_indices`] with
+/// [`crate::history_recognition::CheckpointEra::of_history`] — so a turn that
+/// pastes the bare header stays user-authored in a post-provenance history.
 ///
 /// Host integrations that mutate history should use [`edit_last_turn_target`]
 /// when selecting a cut point so an unsupported latest user turn cannot be
@@ -1474,13 +1561,20 @@ pub fn is_user_turn_prompt(message: &Message) -> bool {
 /// user-authored. Runtime authority is accepted only from the engine-owned
 /// structural `<turn_meta>` block, never from arbitrary user text that happens
 /// to resemble a runtime envelope or metadata marker.
-fn is_runtime_owned_user_message(message: &Message) -> bool {
+///
+/// Era-aware: `checkpoints` decides whether a header-prefixed turn is the
+/// saved summary (pre-provenance histories) or user content (post-provenance
+/// histories). See [`crate::history_recognition::CheckpointEra`].
+fn is_runtime_owned_user_message(
+    checkpoints: crate::history_recognition::CheckpointEra,
+    message: &Message,
+) -> bool {
     restored_subagent_checkpoint_display(message).is_some()
         || has_non_authoritative_turn_provenance(message)
         // The compaction checkpoint is engine-written history, so `/edit` must
         // not treat it as the turn to truncate at: doing so deletes the summary
         // the session is built on. Structure decides, not the marker substring.
-        || crate::history_recognition::is_compaction_checkpoint_message(message)
+        || checkpoints.is_checkpoint(message)
 }
 
 /// Return engine-owned metadata in either the current trailing shape or the
@@ -1765,6 +1859,118 @@ mod tests {
             edit_last_turn_target(&[prompt, checkpoint]),
             EditLastTurnTarget::Editable(0),
             "/edit must truncate at the prompt, not delete the summary"
+        );
+    }
+
+    /// Issue pinvou-agent#594 residual 3: `/edit` derives the history's era,
+    /// so in a post-provenance history a turn pasting the bare summary
+    /// header is the editable turn it selected — not skipped in favor of an
+    /// older prompt. A pre-provenance history keeps the loose reading, where
+    /// the bare form is indistinguishable from the saved carrier.
+    #[test]
+    fn forkguard_edit_target_reads_a_pasted_header_turn_post_provenance() {
+        let prompt_message = |text: &str| Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+        };
+        let pasted_text = crate::compaction::build_compaction_summary_block_text("pasted note", "");
+        let pasted = prompt_message(&pasted_text);
+        let stamped_checkpoint =
+            crate::compaction::compaction_checkpoint_message(&crate::models::SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("handoff", ""),
+            ));
+
+        let modern = vec![
+            prompt_message("Ship the release"),
+            stamped_checkpoint,
+            pasted.clone(),
+        ];
+        assert_eq!(
+            edit_last_turn_target(&modern),
+            EditLastTurnTarget::Editable(2),
+            "the pasted turn is the latest editable user turn: {modern:?}"
+        );
+
+        let legacy = vec![prompt_message("Ship the release"), pasted];
+        assert_eq!(
+            edit_last_turn_target(&legacy),
+            EditLastTurnTarget::Editable(0),
+            "without a stamped carrier the bare header turn reads as the old summary: {legacy:?}"
+        );
+    }
+
+    /// Host-side numbering shares the era-aware predicate: a post-provenance
+    /// history lists the pasted turn and skips the stamped carrier, while the
+    /// legacy history keeps skipping the bare form.
+    #[test]
+    fn forkguard_user_turn_prompt_indices_are_era_aware() {
+        let prompt_message = |text: &str| Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+        };
+        let pasted_text = crate::compaction::build_compaction_summary_block_text("pasted note", "");
+        let stamped_checkpoint =
+            crate::compaction::compaction_checkpoint_message(&crate::models::SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("handoff", ""),
+            ));
+
+        let modern = vec![
+            prompt_message("Ship the release"),
+            stamped_checkpoint,
+            prompt_message(&pasted_text),
+        ];
+        assert_eq!(user_turn_prompt_indices(&modern), vec![0, 2]);
+
+        let legacy = vec![
+            prompt_message("Ship the release"),
+            prompt_message(&pasted_text),
+        ];
+        assert_eq!(user_turn_prompt_indices(&legacy), vec![0]);
+    }
+
+    /// The topology sidecar must not sit `user → user` directly after a bare
+    /// summary carrier either: a pre-provenance history that ends with its
+    /// bare carrier anchors the sidecar after the latest real prompt, the
+    /// same placement a stamped trailing carrier already gets. A post-
+    /// provenance history keeps appending after a pasted-header turn, which
+    /// is the latest real user input.
+    #[test]
+    fn forkguard_sidecar_anchors_at_a_trailing_bare_carrier_only_pre_provenance() {
+        let prompt_message = |text: &str| Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+        };
+        let bare_text = crate::compaction::build_compaction_summary_block_text("old summary", "");
+
+        let mut legacy = vec![prompt_message("Run the suite"), prompt_message(&bare_text)];
+        replace_agent_topology_checkpoint(&mut legacy, &[]);
+        assert!(
+            is_agent_topology_checkpoint(&legacy[1]),
+            "the sidecar belongs after the prompt, not appended behind the bare carrier: {legacy:?}"
+        );
+
+        let stamped_checkpoint =
+            crate::compaction::compaction_checkpoint_message(&crate::models::SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("handoff", ""),
+            ));
+        let mut modern = vec![
+            prompt_message("Run the suite"),
+            stamped_checkpoint,
+            prompt_message(&bare_text),
+        ];
+        replace_agent_topology_checkpoint(&mut modern, &[]);
+        assert!(
+            is_agent_topology_checkpoint(&modern[3]),
+            "a pasted-header turn is the latest real user input; the sidecar appends: {modern:?}"
         );
     }
 
