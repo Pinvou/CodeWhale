@@ -87,8 +87,8 @@ result: a hydration's note rides the batch's first recorded result (or its
 error), a retrieval activation or a refresh of an executed tool rides the
 triggering result, and a turn's start revalidation parks its note on the
 session so the turn's first recorded result carries it (a refresh only
-evicts when a cached schema grew past the budget since its last
-activation). A note that never reaches a recorded result is dropped rather
+evicts when a cached schema grew since its last activation enough that the
+collective budget overflows). A note that never reaches a recorded result is dropped rather
 than riding an unrelated later result: a session sync clears it at the
 conversation edge, and a turn that ends without a recorded result has it
 swept at the next turn's entry. Child agents report the same way: a
