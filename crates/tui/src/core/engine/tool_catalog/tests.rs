@@ -5,7 +5,7 @@ use super::{
     default_synthetic_catalog_tool_names, ensure_advanced_tooling, execute_tool_search_with_cache,
     initial_active_tools, is_synthetic_catalog_tool, maybe_hydrate_requested_deferred_tool,
     remove_toolbox_drops, render_toolbox_eviction_notes, tool_matches_any_rule,
-    toolbox_oversize_reason, touch_cached_tool_after_execution,
+    toolbox_oversize_reason, toolbox_oversize_search_hint, touch_cached_tool_after_execution,
 };
 use crate::core::session::ToolActivationCache;
 use crate::models::Tool;
@@ -717,8 +717,12 @@ fn search_reports_oversize_drops_with_the_oversize_reason() {
     );
     assert_eq!(
         entries[0]["reason"],
-        toolbox_oversize_reason(),
-        "the oversize drop must carry the oversize reason, not the catalog-shrink one: {entries:?}"
+        format!(
+            "{}{}",
+            toolbox_oversize_reason(),
+            toolbox_oversize_search_hint()
+        ),
+        "the oversize drop must carry the oversize reason with its search-context recovery hint, not the catalog-shrink one: {entries:?}"
     );
     assert!(
         payload.get("evicted_tool_references").is_none() && payload.get("toolbox_note").is_none(),

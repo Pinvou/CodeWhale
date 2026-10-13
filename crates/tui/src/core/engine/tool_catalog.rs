@@ -426,17 +426,35 @@ pub(crate) fn remove_toolbox_drops(
 const TOOLBOX_CATALOG_SHRINK_REASON: &str = "Previously active in this conversation but no longer available in the tool catalog; searching cannot re-activate it while it stays unavailable.";
 
 /// Why a deferred tool stays out of the bounded conversation toolbox: its
-/// serialized schema alone exceeds the per-tool budget, so no search can
-/// admit it while the schema stays that large. Shared by discovery-time
-/// rejections and revalidation drops so the prose cannot drift from the
-/// real bounds.
+/// serialized form — name, description, and schema measured together —
+/// exceeds the per-tool budget, so no activation can admit it while it
+/// stays that large. Shared by discovery-time rejections and revalidation
+/// drops so the prose cannot drift from the real bounds. Search-context
+/// callers append the recovery hint via [`toolbox_oversize_search_hint`];
+/// a direct-call refusal has no query to narrow and states the bounds only.
 pub(crate) fn toolbox_oversize_reason() -> String {
     format!(
-        "The tool schema exceeds the bounded conversation toolbox ({} cached \
-         tools, {}KiB of added serialized schemas). Narrow the search or use \
-         a smaller matching tool.",
+        "The serialized tool exceeds the bounded conversation toolbox ({} \
+         cached tools, {}KiB of added serialized schemas).",
         crate::core::session::TOOL_ACTIVATION_CACHE_MAX_NAMES,
         crate::core::session::TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES / 1024
+    )
+}
+
+/// The search-context tail for [`toolbox_oversize_reason`]: after a
+/// discovery rejection the search is the recovery path, so the reason says
+/// what a narrower query can do. Only a search result may attach it.
+pub(crate) fn toolbox_oversize_search_hint() -> &'static str {
+    " Narrow the search or use a smaller matching tool."
+}
+
+/// [`toolbox_oversize_reason`] with the search-context recovery hint, for
+/// the `tool_search` payload's unavailable references.
+fn search_oversize_reason() -> String {
+    format!(
+        "{}{}",
+        toolbox_oversize_reason(),
+        toolbox_oversize_search_hint()
     )
 }
 
@@ -1535,26 +1553,34 @@ fn execute_tool_search_inner(
         json!({
             "type": "unavailable_tool_reference",
             "tool_name": name,
-            "reason": toolbox_oversize_reason(),
+            "reason": search_oversize_reason(),
         })
     }));
     // Stale evictions travel under the unavailable vocabulary — the eviction
     // note's "re-search to re-activate" contract would be a false promise
     // for them. The cause picks the truthful reason: a catalog shrink cannot
     // be searched back, while an oversize drop can return once its schema
-    // shrinks. A tool both oversize-dropped and discovery-rejected is
-    // emitted once — the two entries would carry the same reason.
+    // shrinks. A discovery rejection can only ever mean oversize (discovery
+    // surfaces catalog members alone), so an Oversize stale entry and its
+    // rejection would carry the same reason — emit that pair once, chosen
+    // by cause rather than by name so a CatalogShrink entry for the same
+    // name would still state its own truth.
     let rejected_names: std::collections::HashSet<&str> =
         cache_rejected.iter().map(String::as_str).collect();
     unavailable_references.extend(cache_stale.iter().filter_map(|entry| {
-        if rejected_names.contains(entry.name.as_str()) {
+        if rejected_names.contains(entry.name.as_str())
+            && matches!(
+                entry.cause,
+                crate::core::session::ToolActivationStaleCause::Oversize
+            )
+        {
             return None;
         }
         let reason = match entry.cause {
             crate::core::session::ToolActivationStaleCause::CatalogShrink => {
                 TOOLBOX_CATALOG_SHRINK_REASON.to_string()
             }
-            crate::core::session::ToolActivationStaleCause::Oversize => toolbox_oversize_reason(),
+            crate::core::session::ToolActivationStaleCause::Oversize => search_oversize_reason(),
         };
         Some(json!({
             "type": "unavailable_tool_reference",
