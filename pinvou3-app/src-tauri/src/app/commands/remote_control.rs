@@ -221,7 +221,8 @@ pub fn web_access_relay_settings(manager: State<'_, RemoteControlManager>) -> Re
     manager.relay_settings()
 }
 
-/// 随包内置的端点 profile 列表（设置页「服务端点」下拉使用）。
+/// 随包内置的端点 profile 列表，供桥接接口调用。
+/// 当前 React 界面有意不展示端点列表或切换入口。
 #[tauri::command]
 pub fn desktop_remote_endpoint_profiles(
     manager: State<'_, RemoteControlManager>,
@@ -230,7 +231,8 @@ pub fn desktop_remote_endpoint_profiles(
     Ok(manager.endpoint_profile_options())
 }
 
-/// 切换内置端点 profile（production / test）：用户不再需要配置环境变量。
+/// 后端支持切换内置端点 profile（production / test），无需环境变量。
+/// 当前 React 界面未消费该桥接能力，不代表用户切换界面已交付。
 #[tauri::command]
 pub fn desktop_remote_set_endpoint_profile(
     manager: State<'_, RemoteControlManager>,
