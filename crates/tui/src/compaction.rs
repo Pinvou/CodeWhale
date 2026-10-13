@@ -172,12 +172,6 @@ pub(crate) use crate::history_recognition::{
 };
 pub use crate::history_recognition::{COMPACTION_SUMMARY_MARKER, LEGACY_COMPACTION_SUMMARY_MARKER};
 
-/// Whether a system-prompt text block is a committed compaction summary.
-#[must_use]
-pub fn is_compaction_summary_text(text: &str) -> bool {
-    text.contains(COMPACTION_SUMMARY_MARKER) || text.contains(LEGACY_COMPACTION_SUMMARY_MARKER)
-}
-
 fn summary_section(text: &str) -> Option<&str> {
     let begin = text.find(COMPACTION_SUMMARY_BEGIN)? + COMPACTION_SUMMARY_BEGIN.len();
     let remainder = &text[begin..];
@@ -313,9 +307,10 @@ pub(crate) fn compaction_checkpoint_message(prompt: &SystemPrompt) -> Message {
 /// dropped. A restore without a checkpoint runs no carrier-deletion scan and
 /// deletes nothing: with no summary to reinsert, the loose scan's
 /// pasted-header risk would be pure loss; topology relocation still runs.
-/// The same loose predicate also backs the keep/recompaction filters
-/// in `compaction/last_round.rs` — same recognition family, explicitly out
-/// of scope here.
+/// The same era signal now backs the keep/recompaction filters in
+/// `compaction/last_round.rs` and the turn classification in
+/// `runtime_handoff`: they read the loose predicate only when the history
+/// carries no stamped carrier, so a pasted header is content there too.
 pub(crate) fn restore_compaction_checkpoint(
     mut messages: Vec<Message>,
     checkpoint: Option<&SystemPrompt>,
@@ -500,7 +495,11 @@ fn estimate_retained_floor_conservative(
     prepared: &PreparedCompactionEnvelope,
 ) -> usize {
     let config = &prepared.config;
-    let retained = retained_user_messages(messages, COMPACT_RETAINED_USER_MESSAGE_MAX_TOKENS);
+    let retained = retained_user_messages(
+        crate::history_recognition::CheckpointEra::of_history(messages),
+        messages,
+        COMPACT_RETAINED_USER_MESSAGE_MAX_TOKENS,
+    );
     let retained_tokens = estimate_tokens(&retained).saturating_mul(3).div_ceil(2);
     let framing = retained.len().saturating_mul(12).saturating_add(48);
     let anchors = user_anchors_section(config.workspace.as_deref());
@@ -1262,20 +1261,29 @@ pub(crate) fn build_compaction_summary_block_text(summary: &str, anchors: &str) 
 /// selected newest-first within a fixed token budget and restored to
 /// transcript order. The oldest selected message is truncated to fit rather
 /// than dropped whole.
-pub(crate) fn retained_user_messages(messages: &[Message], max_tokens: usize) -> Vec<Message> {
+///
+/// `checkpoints` is the recognition era of the history the slice was cut
+/// from ([`crate::history_recognition::CheckpointEra`]): in a post-provenance
+/// history a turn that pastes the bare summary header is retained verbatim
+/// like any other user turn, while a pre-provenance bare carrier is skipped
+/// because it is indistinguishable from the summary it saved.
+pub(crate) fn retained_user_messages(
+    checkpoints: crate::history_recognition::CheckpointEra,
+    messages: &[Message],
+    max_tokens: usize,
+) -> Vec<Message> {
     let mut selected: Vec<Message> = Vec::new();
     let mut remaining = max_tokens;
     for msg in messages.iter().rev() {
         if remaining == 0 {
             break;
         }
-        if !crate::runtime_handoff::is_user_turn_prompt(msg) {
-            continue;
-        }
-        // A header-prefixed summary saved before the provenance block existed
-        // is not a user turn to carry forward, but an ordinary turn that
-        // merely quotes the header is.
-        if is_compaction_checkpoint_message(msg) {
+        // The era-aware classification skips the history's checkpoint (the
+        // stamped carrier, plus the bare form pre-provenance) together with
+        // tool results and runtime-owned envelopes.
+        if crate::runtime_handoff::classify_user_turn_prompt_in_era(checkpoints, msg)
+            != crate::runtime_handoff::UserTurnPromptKind::Editable
+        {
             continue;
         }
         let Some(text) = user_text_of(msg) else {
@@ -2238,6 +2246,43 @@ mod tests {
         assert_eq!(
             sidecar_index, 1,
             "the sidecar must sit at its anchor, directly after the prompt, not on the trailing tool result: {restored:?}"
+        );
+    }
+
+    #[test]
+    fn forkguard_restore_anchors_a_trailing_sidecar_to_the_stamped_summary_not_a_pasted_turn() {
+        // The recognition family that locates a sidecar's summary must also
+        // read the history's era: a pasted full-header turn before the
+        // stamped summary is a prompt, not the anchor, so the sidecar lands
+        // after it instead of a round too early.
+        let mut sidecar_slot: Vec<Message> = Vec::new();
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut sidecar_slot, &[]);
+        let pasted_text = build_compaction_summary_block_text("pasted note", "");
+        let messages = vec![
+            msg("user", "Analyze the data"),
+            msg("user", &pasted_text),
+            compaction_checkpoint_message(&SystemPrompt::Text(
+                build_compaction_summary_block_text("suite finished", ""),
+            )),
+            sidecar_slot.remove(0),
+        ];
+
+        let restored = restore_compaction_checkpoint(
+            crate::runtime_handoff::project_messages_for_restore(&messages),
+            None,
+        );
+
+        let sidecar_index = restored
+            .iter()
+            .position(|message| {
+                crate::runtime_handoff::is_agent_topology_checkpoint(message)
+                    || crate::runtime_handoff::restored_subagent_checkpoint_display(message)
+                        .is_some()
+            })
+            .expect("the sidecar must survive");
+        assert_eq!(
+            sidecar_index, 2,
+            "the sidecar belongs directly after the pasted turn, the prompt its summary was merged into, not after the older prompt: {restored:?}"
         );
     }
 
