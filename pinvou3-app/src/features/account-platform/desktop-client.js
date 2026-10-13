@@ -211,7 +211,18 @@ export class AccountPlatformDesktopClient {
 
   accountClosure(signal) { return this.request('account', '/v1/me/account-closure-request', { signal }); }
   createAccountClosure(confirmation, key, signal) { return this.request('account', '/v1/me/account-closure-requests', { method: 'POST', body: { confirmation }, idempotencyKey: key, signal }); }
-  reauthenticate() { return this.openPortal(); }
+  bindReauthentication(handler) {
+    this.reauthenticationHandler = handler;
+    return () => { if (this.reauthenticationHandler === handler) this.reauthenticationHandler = null; };
+  }
+  reauthenticate(_returnTo, language) {
+    if (typeof this.reauthenticationHandler !== 'function') {
+      const error = new Error('REAUTHENTICATION_UNAVAILABLE');
+      error.code = 'REAUTHENTICATION_UNAVAILABLE';
+      return Promise.reject(error);
+    }
+    return this.reauthenticationHandler(language);
+  }
 
   products(signal) { return this.request('token', '/v1/recharge/products', { signal }); }
   paymentCapabilities(signal) { return this.request('token', '/v1/payment-capabilities', { signal }); }

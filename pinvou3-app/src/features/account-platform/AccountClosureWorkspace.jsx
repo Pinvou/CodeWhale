@@ -22,7 +22,7 @@ export function AccountClosureWorkspace({ client, me, language }) {
   const epoch = client.financeSessionEpoch || 0;
   const canRead = hasPermission(me, 'personal.account.close.read');
   const canRequest = hasPermission(me, 'personal.account.close.request');
-  live.current = { client, owner: me.user_id, epoch, canRead, canRequest, query, operation, renderedReady, renderedAction };
+  live.current = { client, language, owner: me.user_id, epoch, canRead, canRequest, query, operation, renderedReady, renderedAction };
   const sameIdentity = snapshot => {
     const current = live.current, active = ready.current;
     return snapshot && active && current.renderedReady === active && current.renderedAction === settledAction.current &&
@@ -81,7 +81,7 @@ export function AccountClosureWorkspace({ client, me, language }) {
     const stamp = generation.current;
     try {
       const result = await current.operation.mutate(facts, async (retainedFacts, key) => {
-        const submitted = await submitAccountClosure({ client: current.client, confirmation: retainedFacts.confirmation, key, returnTo: '/?account_closure=confirm' });
+        const submitted = await submitAccountClosure({ client: current.client, confirmation: retainedFacts.confirmation, key, returnTo: '/?account_closure=confirm', language: current.language });
         if (submitted.status === 'created') submitted.closure = requireAccountClosure(submitted.closure);
         return submitted;
       });

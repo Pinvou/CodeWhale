@@ -39,6 +39,13 @@ export function useClosureOperation(owner, copy, client, scope, storageAdapter) 
     running.current = true; setBusy(true); setError(''); setMessage('');
     try {
       const result = await action(current.facts, current.key);
+      const authenticationOnly = ['reauthenticating', 'recent-authentication-required', 'reauthenticated'].includes(result?.status);
+      if (authenticationOnly) {
+        // Authentication is not a business receipt, including the first call.
+        // The same actor's fresh view must recover these exact facts and key.
+        if (stamp === generation.current) { setUnknown(true); setError('unknown'); }
+        return result;
+      }
       const noReceipt = ['reauthenticating', 'recent-authentication-required', 'cancelled', 'confirmation-mismatch'].includes(result?.status);
       if (!noReceipt || !hadUnresolved) {
         try { clearRecord(current); }

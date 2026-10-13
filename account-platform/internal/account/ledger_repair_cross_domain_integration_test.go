@@ -230,6 +230,80 @@ WHERE command_type='LEDGER_REPAIR' AND policy_version=1 AND snapshot_schema_vers
 		t.Fatalf("cross-domain draft submit: %v", err)
 	}
 	requestID := submitted.ID
+	// Verify the real requester has the approver grant: refusal must enforce
+	// independent actors rather than rely on a missing permission.
+	if binding, _, _, err := strongPlatformAuthorization(ctx, repository.pool, requester.ID, policy.ApproverPermission); err != nil || binding == uuid.Nil {
+		t.Fatal("controlled requester must hold the real approver grant", err)
+	}
+	accountDecisionFacts := func(t *testing.T) string {
+		t.Helper()
+		var facts string
+		if err := repository.pool.QueryRow(ctx, `SELECT jsonb_build_array(
+ (SELECT to_jsonb(r) FROM approval_requests r WHERE id=$1),
+ (SELECT COALESCE(jsonb_agg(to_jsonb(d) ORDER BY id),'[]'::jsonb) FROM approval_decisions d WHERE approval_request_id=$1),
+ (SELECT COALESCE(jsonb_agg(to_jsonb(o) ORDER BY event_id),'[]'::jsonb) FROM outbox_events o WHERE aggregate_id=$1 AND event_type='account.approval-command.authorized.v1'))::text`, requestID).Scan(&facts); err != nil {
+			t.Fatal("read controlled decision facts", err)
+		}
+		return facts
+	}
+	accountAuditFacts := func(t *testing.T) string {
+		t.Helper()
+		var facts string
+		if err := repository.pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb)::text FROM approval_state_events e WHERE approval_request_id=$1`, requestID).Scan(&facts); err != nil {
+			t.Fatal("read controlled audit facts", err)
+		}
+		return facts
+	}
+	billingSelfDecisionFacts := func(t *testing.T) string {
+		t.Helper()
+		var rows []string
+		for _, table := range []string{"ledger_repair_cases", "billing_approval_proof_claims", "journal_entries", "ledger_postings", "wallets", "credit_lots", "usage_holds", "usage_hold_allocations", "entitlement_packages", "entitlement_components", "receivables", "receivable_allocations", "refunds", "payment_orders", "chargeback_cases", "forced_refund_cases"} {
+			var facts string
+			if err := billingPool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text),'[]'::jsonb)::text FROM `+table+` f`).Scan(&facts); err != nil {
+				t.Fatal("read controlled financial facts", err)
+			}
+			rows = append(rows, facts)
+		}
+		return strings.Join(rows, "\n")
+	}
+	originalDecisionFacts, originalAuditFacts := accountDecisionFacts(t), accountAuditFacts(t)
+	originalBillingSelfFacts := billingSelfDecisionFacts(t)
+	assertSelfDecision := func(t *testing.T, wantAuditCount int) {
+		t.Helper()
+		var status string
+		var version int64
+		var decisionCount, authorizationCount, selfAuditCount int
+		err := repository.pool.QueryRow(ctx, `SELECT status,version,
+ (SELECT count(*) FROM approval_decisions WHERE approval_request_id=$1),
+ (SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='account.approval-command.authorized.v1'),
+ (SELECT count(*) FROM approval_state_events WHERE approval_request_id=$1 AND reason_code='SELF_DECISION_REJECTED' AND actor_id=$2 AND from_status='SUBMITTED' AND to_status='SUBMITTED')
+ FROM approval_requests WHERE id=$1`, requestID, requester.ID.String()).Scan(&status, &version, &decisionCount, &authorizationCount, &selfAuditCount)
+		if err != nil || status != "SUBMITTED" || version != submitted.Version || decisionCount != 0 || authorizationCount != 0 || selfAuditCount != wantAuditCount {
+			t.Fatalf("self-decision state=%s version=%d wantVersion=%d decisions=%d authorizations=%d selfAudit=%d wantAudit=%d err=%v", status, version, submitted.Version, decisionCount, authorizationCount, selfAuditCount, wantAuditCount, err)
+		}
+		if accountDecisionFacts(t) != originalDecisionFacts || billingSelfDecisionFacts(t) != originalBillingSelfFacts {
+			t.Fatal("self-decision changed approval or financial facts")
+		}
+	}
+	t.Run("self-approval-proof-preflight-readonly", func(t *testing.T) {
+		if _, err := repository.DecideApprovalRequest(ctx, requesterPrincipal, requestID, submitted.Version, "APPROVED", "self decision must be refused", frozen.CriticalResourceVersions); !errors.Is(err, ErrApprovalSelfDecision) {
+			t.Fatalf("self approval did not reach independent-actor preflight: %v", err)
+		}
+		// PROOF_REQUIRED rejects at its existing read-only checkpoint before
+		// the dedicated approval writer or domain proof authority is called.
+		assertSelfDecision(t, 0)
+		if accountAuditFacts(t) != originalAuditFacts {
+			t.Fatal("readonly self-approval preflight wrote an audit event")
+		}
+	})
+	t.Run("self-rejection-commits-only-existing-audit", func(t *testing.T) {
+		if _, err := repository.DecideApprovalRequest(ctx, requesterPrincipal, requestID, submitted.Version, "REJECTED", "self rejection must be refused", frozen.CriticalResourceVersions); !errors.Is(err, ErrApprovalSelfDecision) {
+			t.Fatalf("self rejection did not reach independent-actor guard: %v", err)
+		}
+		// This existing public decision path commits the refusal audit while
+		// retaining the exact request version for an independent approver.
+		assertSelfDecision(t, 1)
+	})
 	approved, err := repository.DecideApprovalRequest(ctx, approverPrincipal, requestID, submitted.Version, "APPROVED", "cross-domain ledger repair", frozen.CriticalResourceVersions)
 	if err != nil || approved.Status != "APPROVED" {
 		t.Fatalf("cross-domain proof approval status=%s err=%v", approved.Status, err)

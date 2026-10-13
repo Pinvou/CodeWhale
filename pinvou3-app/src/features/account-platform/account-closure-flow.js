@@ -39,7 +39,7 @@ export function accountClosurePresentation({ queryStatus = accountClosureQuerySt
   };
 }
 
-export async function submitAccountClosure({ client, confirmation, key, returnTo }) {
+export async function submitAccountClosure({ client, confirmation, key, returnTo, language }) {
   if (confirmation !== 'CLOSE_MY_ACCOUNT') {
     return { status: confirmation === null ? 'cancelled' : 'confirmation-mismatch' };
   }
@@ -49,7 +49,9 @@ export async function submitAccountClosure({ client, confirmation, key, returnTo
   } catch (reason) {
     if (!accountPlatformErrorCodes(reason).includes('RECENT_AUTHENTICATION_REQUIRED')) throw reason;
     if (typeof client.reauthenticate !== 'function') return { status: 'recent-authentication-required' };
-    await client.reauthenticate(returnTo);
-    return { status: 'reauthenticating' };
+    const restored = await client.reauthenticate(returnTo, language);
+    // The fresh view re-reads the durable intent and offers explicit same-key
+    // retry. No expired pre-login callback sends a second request.
+    return { status: restored?.nativeReauthenticated === true ? 'reauthenticated' : 'reauthenticating' };
   }
 }
