@@ -235,6 +235,45 @@ try {
   $escapingEntry = [pscustomobject]@{ path = "../escape.dll"; bytes = 0; sha256 = ("0" * 64) }
   Assert-True -Condition (-not (Test-StagedFilesAgainstTrustedManifest -Root $stagingRoot -TrustedEntries @($escapingEntry))) -Message "trusted paths escaping the staging root must be rejected"
 
+  # Write-Utf8Atomically keeps shared-visibility descriptors continuously
+  # present for the unlocked readers in scripts/tauri/windows-runtime.js:
+  # replacement must swap the file in atomically, a failed replacement must
+  # preserve the previous generation and leave no temp litter behind.
+  $atomicRoot = Join-Path $testRoot "atomic"
+  New-Item -ItemType Directory -Path $atomicRoot | Out-Null
+  $atomicPath = Join-Path $atomicRoot "descriptor.json"
+  Write-Utf8Atomically -Path $atomicPath -Content "first"
+  Assert-True -Condition ([System.IO.File]::ReadAllText($atomicPath) -eq "first") -Message "atomic write must create the destination with the requested content"
+  foreach ($generation in @("second", "third")) {
+    Write-Utf8Atomically -Path $atomicPath -Content $generation
+    Assert-True -Condition ([System.IO.File]::ReadAllText($atomicPath) -eq $generation) -Message "atomic replacement must swap in the new content in one operation"
+  }
+  # A plain .NET reader opens the descriptor without FILE_SHARE_DELETE, which
+  # blocks ReplaceFile: the writer must fail loudly instead of deleting the
+  # destination first (Move-Item -Force semantics).
+  $sharingReader = [System.IO.File]::Open(
+    $atomicPath,
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::Read
+  )
+  try {
+    $replacedUnderReader = $false
+    try {
+      Write-Utf8Atomically -Path $atomicPath -Content "interrupted"
+      $replacedUnderReader = $true
+    } catch {
+    }
+    Assert-True -Condition (-not $replacedUnderReader) -Message "atomic replace under a sharing reader must fail loudly instead of deleting the destination"
+  } finally {
+    $sharingReader.Dispose()
+  }
+  Assert-True -Condition ([System.IO.File]::ReadAllText($atomicPath) -eq "third") -Message "a failed atomic replacement must preserve the previous descriptor"
+  $tempLitter = @(Get-ChildItem -LiteralPath $atomicRoot -Filter ".descriptor.json.tmp-*" -Force)
+  Assert-True -Condition ($tempLitter.Count -eq 0) -Message "atomic replacement left temp files behind: $($tempLitter.Count)"
+  Write-Utf8Atomically -Path $atomicPath -Content "fourth"
+  Assert-True -Condition ([System.IO.File]::ReadAllText($atomicPath) -eq "fourth") -Message "atomic replacement must succeed again once the reader is gone"
+
   Write-Host "Windows runtime cache behavior: ok"
 } finally {
   Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue

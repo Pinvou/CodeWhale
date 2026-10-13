@@ -24,7 +24,7 @@
       "marketplace->assistant": 1,
       "remote_control->connectors": 2,
       "runtime_bundle->assistant": 2,
-      "runtime_bundle->marketplace": 59
+      "runtime_bundle->marketplace": 61
     },
     "rust_feature_depends_on_app": {},
     "rust_platform_depends_on_upper_layer": {

@@ -482,17 +482,32 @@ fn run_git_with_stale_lock_retry(
     Ok(output)
 }
 
-fn git(repo: &Path, work_tree: &Path, arguments: &[&str]) -> Result<std::process::Output> {
+/// [`git`] 与 [`git_ref`] 的公共主体：组装 `--git-dir`（及可选 `--work-tree`）
+/// 的隔离 git 命令并以带超时方式执行，交 [`run_git_with_stale_lock_retry`]
+/// 收尾；`run_error` 保留两条调用链各自的失败文案。
+fn git_bounded(
+    repo: &Path,
+    work_tree: Option<&Path>,
+    arguments: &[&str],
+    run_error: impl Fn(&str) -> anyhow::Error,
+) -> Result<std::process::Output> {
     let run_bounded = || {
         let mut command = isolated_git_command();
-        command
-            .arg(format!("--git-dir={}", repo.display()))
-            .arg(format!("--work-tree={}", work_tree.display()))
-            .args(arguments);
+        command.arg(format!("--git-dir={}", repo.display()));
+        if let Some(work_tree) = work_tree {
+            command.arg(format!("--work-tree={}", work_tree.display()));
+        }
+        command.args(arguments);
         crate::platform::process::output_with_timeout_and_kill_tree(command, GIT_COMMAND_TIMEOUT)
-            .map_err(|error| anyhow::anyhow!("failed to run git {}: {error}", arguments.join(" ")))
+            .map_err(|error| run_error(&error))
     };
     run_git_with_stale_lock_retry(run_bounded, repo)
+}
+
+fn git(repo: &Path, work_tree: &Path, arguments: &[&str]) -> Result<std::process::Output> {
+    git_bounded(repo, Some(work_tree), arguments, |error| {
+        anyhow::anyhow!("failed to run git {}: {error}", arguments.join(" "))
+    })
 }
 
 fn git_ok(repo: &Path, work_tree: &Path, arguments: &[&str]) -> Result<String> {
@@ -1393,15 +1408,9 @@ pub fn restore_checkpoint(
 /// 与写路径共用陈旧锁清扫重试：被超时 kill 的 git 会留下
 /// `refs/checkpoints/*.lock`，无清扫时删 ref 永久失败，ref 与其对象泄漏。
 fn git_ref(repo: &Path, arguments: &[&str]) -> Result<std::process::Output> {
-    let run_bounded = || {
-        let mut command = isolated_git_command();
-        command
-            .arg(format!("--git-dir={}", repo.display()))
-            .args(arguments);
-        crate::platform::process::output_with_timeout_and_kill_tree(command, GIT_COMMAND_TIMEOUT)
-            .map_err(|error| anyhow::anyhow!("执行 git {} 失败: {error}", arguments.join(" ")))
-    };
-    run_git_with_stale_lock_retry(run_bounded, repo)
+    git_bounded(repo, None, arguments, |error| {
+        anyhow::anyhow!("执行 git {} 失败: {error}", arguments.join(" "))
+    })
 }
 
 /// 回退后作废被截对话分支的 Turn checkpoint（设计审阅 P0 修复）。
@@ -2130,7 +2139,11 @@ mod tests {
         )
         .unwrap();
 
-        exec.write("ok.txt", "v2\n");
+        // Keep the ordinary-file change visible to Git on Windows as well.
+        let current_normal_file = "v2 changed\n";
+        assert_ne!(current_normal_file.len(), "v1\n".len());
+        exec.write("ok.txt", current_normal_file);
+        assert_eq!(exec.read("ok.txt").as_deref(), Some(current_normal_file));
         exec.write("my dir/.env", "SECRET=current\n");
         let diff = diff_checkpoint(ledger.path(), exec.path(), "c1-1", true).unwrap();
         assert!(
@@ -2147,6 +2160,7 @@ mod tests {
             "secret section with spaces must not enter the patch: {:?}",
             diff.patch
         );
+        assert!(diff.patch.contains("ok.txt"));
     }
 
     /// A binary file's diff section has no ---/+++ marker lines, so the
@@ -2460,7 +2474,13 @@ mod tests {
 
         // 当前状态：ok.txt 改了，.env 也改了（purge 后不在 index，快照→当前
         // 的原始 diff 会显示 D .env）。
-        exec.write("ok.txt", "v2\n");
+        // This test exercises secret filtering, not Git's stat cache. On
+        // Windows a rapid equal-size replacement can keep the old index blob;
+        // make this ordinary-file change unambiguously visible by size.
+        let current_normal_file = "v2 changed\n";
+        assert_ne!(current_normal_file.len(), "v1\n".len());
+        exec.write("ok.txt", current_normal_file);
+        assert_eq!(exec.read("ok.txt").as_deref(), Some(current_normal_file));
         exec.write(".env", "SECRET=current\n");
         let diff = diff_checkpoint(ledger.path(), exec.path(), "c1-1", true).unwrap();
         assert!(
@@ -2468,7 +2488,37 @@ mod tests {
             "敏感条目不得出现在变更清单: {:?}",
             diff.changes
         );
-        assert!(diff.changes.iter().any(|change| change.path == "ok.txt"));
+        if !diff.changes.iter().any(|change| change.path == "ok.txt") {
+            // Diagnose this ordinary fixture only; never print secret paths or
+            // contents. A disk/index mismatch distinguishes Git stat caching
+            // from a path accidentally removed by the preview filter.
+            let disk = git_ok(
+                &repo,
+                exec.path(),
+                &[
+                    "hash-object",
+                    "--no-filters",
+                    exec.path().join("ok.txt").to_str().unwrap(),
+                ],
+            );
+            let index = git_ok(&repo, exec.path(), &["rev-parse", ":ok.txt"]);
+            let raw = git_ok(
+                &repo,
+                exec.path(),
+                &[
+                    "diff",
+                    "--cached",
+                    "--raw",
+                    "refs/checkpoints/c1-1",
+                    "--",
+                    "ok.txt",
+                ],
+            );
+            let stat = git_ok(&repo, exec.path(), &["ls-files", "--debug", "--", "ok.txt"]);
+            panic!(
+                "ordinary preview fixture missing: disk={disk:?}, index={index:?}, raw={raw:?}, stat={stat:?}"
+            );
+        }
         // The patch renders straight to the CLI: the secret section (path
         // and content) must be stripped wholesale, normal files kept.
         assert!(
@@ -2553,7 +2603,12 @@ mod tests {
             },
         )
         .unwrap();
-        exec.write("ok.txt", "v2\n");
+        // Secret-prefix hardening requires a real ordinary-file diff; avoid
+        // the confirmed equal-size Windows stat-cache fixture ambiguity.
+        let current_normal_file = "v2 changed\n";
+        assert_ne!(current_normal_file.len(), "v1\n".len());
+        exec.write("ok.txt", current_normal_file);
+        assert_eq!(exec.read("ok.txt").as_deref(), Some(current_normal_file));
         exec.write(".env", "SECRET=current\n");
         let diff = diff_checkpoint(ledger.path(), exec.path(), "np-1", true).unwrap();
         assert!(
