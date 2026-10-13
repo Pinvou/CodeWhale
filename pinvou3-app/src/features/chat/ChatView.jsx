@@ -2557,7 +2557,7 @@ const openChatExternalUrl = (url) => {
         const requestKey = [
           remoteConnection?.connectionId,
           remoteConnection?.leaseEpoch,
-          remoteConnection?.remoteControlGeneration,
+          remoteConnection?.generation,
           sessionRef,
         ].map((part) => String(part || '')).join(':');
         requester.update({
@@ -2576,7 +2576,7 @@ const openChatExternalUrl = (url) => {
         remoteConnection?.capabilityStatus,
         remoteConnection?.connectionId,
         remoteConnection?.leaseEpoch,
-        remoteConnection?.remoteControlGeneration,
+        remoteConnection?.generation,
         remoteConnection?.sessionRef,
         remoteConnection?.status,
       ]);

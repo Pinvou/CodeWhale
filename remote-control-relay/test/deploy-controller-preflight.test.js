@@ -29,6 +29,10 @@ PINVOU_REMOTE_CONTROLLER_STATE_PATH=/var/lib/pinvou-remote-relay/state/controlle
 PINVOU_REMOTE_STATE_PATH=/opt/pinvou-remote-relay/data/relay-state.json
 PINVOU_REMOTE_ALLOWED_PROXY_IPS=192.0.2.10
 PINVOU_REMOTE_TRUSTED_PROXY_IPS=192.0.2.10
+PINVOU_TELEMETRY_ENROLLMENT_TOKEN=telemetry-enrollment-secret-24
+PINVOU_TELEMETRY_DEVICE_PEPPER=telemetry-device-pepper-24
+PINVOU_STATS_ADMIN_PASSWORD=operations-admin-password
+PINVOU_TELEMETRY_DATA_DIR=/var/lib/pinvou-telemetry
 `;
 
 test("production controller environment matches the supported secure runtime profile", () => {
@@ -54,6 +58,43 @@ test("production controller environment matches the supported secure runtime pro
   assert.throws(
     () => parseControllerEnvironment(`${VALID_ENV}\nNODE_ENV=production\n`),
     /controller_env_duplicate_key/u,
+  );
+});
+
+test("production controller environment rejects undeclared keys", () => {
+  assert.throws(
+    () => validateControllerEnvironment(parseControllerEnvironment(`${VALID_ENV}\nPINVOU_UNREVIEWED_ESCAPE_HATCH=enabled\n`)),
+    /controller_env_unknown_key/u,
+  );
+});
+
+test("production preflight can verify the exact feature-off rollback configuration", () => {
+  const disabled = parseControllerEnvironment(
+    VALID_ENV.replace("PINVOU_DESKTOP_CONTROLLER_ENABLED=1", "PINVOU_DESKTOP_CONTROLLER_ENABLED=0"),
+  );
+  assert.doesNotThrow(() => validateControllerEnvironment(disabled, { expectedFeatureFlag: "0" }));
+  assert.throws(
+    () => validateControllerEnvironment(disabled),
+    /controller_env_required_value_invalid/u,
+  );
+});
+
+test("production controller environment requires an enabled protected telemetry service", () => {
+  for (const replacement of [
+    ["PINVOU_TELEMETRY_ENROLLMENT_TOKEN=telemetry-enrollment-secret-24", "PINVOU_TELEMETRY_ENROLLMENT_TOKEN=short"],
+    ["PINVOU_TELEMETRY_DEVICE_PEPPER=telemetry-device-pepper-24", "PINVOU_TELEMETRY_DEVICE_PEPPER=short"],
+    ["PINVOU_STATS_ADMIN_PASSWORD=operations-admin-password", "PINVOU_STATS_ADMIN_PASSWORD=short"],
+  ]) {
+    assert.throws(
+      () => validateControllerEnvironment(parseControllerEnvironment(VALID_ENV.replace(...replacement))),
+      /controller_env_telemetry_credentials_invalid/u,
+    );
+  }
+  assert.throws(
+    () => validateControllerEnvironment(parseControllerEnvironment(
+      VALID_ENV.replace("PINVOU_TELEMETRY_DATA_DIR=/var/lib/pinvou-telemetry", "PINVOU_TELEMETRY_DATA_DIR=relative/path"),
+    )),
+    /controller_env_telemetry_data_dir_invalid/u,
   );
 });
 
@@ -264,7 +305,7 @@ test("production CLI checks every fixed state ancestor before install mutates it
   for (const path of ["/", "/var", "/var/lib", "/var/lib/pinvou-remote-relay", "/var/lib/pinvou-remote-relay/state"]) {
     assert.ok(source.includes(`{ path: "${path}", privateDirectory:`));
   }
-  assert.match(source, /validateControllerEnvironmentFile\(process\.argv\[2\] \|\| ""\)\s*\.then\(\(\) => validateControllerStateDirectories\(\)\)/u);
+  assert.match(source, /validateControllerEnvironmentFile\(process\.argv\[2\] \|\| "", \{ expectedFeatureFlag \}\)\s*\.then\(\(\) => validateControllerStateDirectories\(\)\)/u);
   const deploy = await readFile(new URL("../../scripts/deploy-remote-relay.sh", import.meta.url), "utf8");
   assert.ok(deploy.indexOf('node "$code_stage/scripts/deploy-controller-preflight.mjs" "$controller_env"')
     < deploy.indexOf('install -d -o root -g root -m 700 "$controller_state_root"'));

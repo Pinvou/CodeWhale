@@ -29,7 +29,7 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 | 项 | 值 |
 |---|---|
 | 监听 | `127.0.0.1:8787`（`PINVOU_REMOTE_HOST=127.0.0.1`），WebSocket 路径 `/pinvou3/remote/ws` |
-| 验证 | `GET /pinvou3/remote/ws` → HTTP 200；Relay 日志出现 `pinvou remote relay listening on http://127.0.0.1:8787 ...` |
+| 验证 | `GET /pinvou3/remote/ws` → HTTP 200；Relay 日志出现不含监听地址的固定事件 `pinvou remote relay listening (protocol=...)` |
 | 进程 | 包装进程 PID 91988，node 服务进程 PID 62020（`-Action Status` 可查） |
 | 日志 | `%LOCALAPPDATA%\Pinvou3\remote-control-selftest\relay.log` |
 | 密钥/状态 | `%LOCALAPPDATA%\Pinvou3\remote-control-selftest\`（Ed25519 签名密钥 + HMAC 材料 + `relay-state\`，禁止提交） |
@@ -64,7 +64,7 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64` | Ed25519 PKCS#8 DER base64，签名 pairing transcript |
 | `PINVOU_REMOTE_CONTROLLER_STATE_PATH` / `PINVOU_REMOTE_STATE_PATH` | 新旧状态文件绝对路径，必须不同 |
 | `PINVOU_REMOTE_ALLOWED_PROXY_IPS` / `PINVOU_REMOTE_TRUSTED_PROXY_IPS` | 实际反向代理的 IPv4/IPv6 地址列表；两者必须显式配置且集合完全一致 |
-| 遥测（可选） | enrollment token / device pepper / admin password；未配置即禁用遥测（本机部署即此状态） |
+| 遥测（controller 生产必需） | `PINVOU_TELEMETRY_ENROLLMENT_TOKEN`（至少 24 字符）、`PINVOU_TELEMETRY_DEVICE_PEPPER`（至少 24 字符）、`PINVOU_STATS_ADMIN_PASSWORD`（至少 12 字符）及绝对路径 `PINVOU_TELEMETRY_DATA_DIR`；任一缺失或无效时 controller 部署预检失败，本机仅开发验证可保持禁用 |
 
 客户端侧必须 pin 同一份公钥（原始 32 字节 base64）。内置 production/test profile 随包提供 key id 与公钥；自建或轮换后的服务需成对设置 `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` + `PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64`。不能把未设置环境变量等同于无信任根；显式覆盖不完整或无效仍失败关闭，服务公钥与客户端 pin 不一致不能配对。
 
@@ -87,11 +87,19 @@ controller 环境文件使用本预检支持的裸 `KEY=value`：值不加引号
 - [ ] Relay 仅 loopback 监听，且 OS 监听检查无通配/非 loopback 绑定
 - [ ] 匿名 `web_client_join` / `desktop_endpoint_register` 被 gateway 拒绝
 - [ ] 发布文档第 4 节的监控阈值已接入告警（claim/busy、handshake rejected、liveness timeout、resume failed、task conflict、transfer budget）
+- [ ] `operations_admin` 可读取 `/pinvou3/stats/api/overview.desktop_controller`，匿名请求和 `behavior_analyst` 均被拒绝
+- [ ] 合成哨兵对日志、controller 持久文件、抓包/密文和崩溃诊断扫描零命中；失败报告不回显哨兵值
 - [ ] 回滚演练证据：gateway 预检结果、旧 Web 分享链接可用性、关闭 `desktop_remote_control` 后的行为
 
 ## 3. 运维输入与发布执行边界
 
 部署前须由运维在本地受控配置中提供 SSH 目标、独立登记目标、部署私钥路径、域名/TLS、部署目录和 secret 注入方式；禁止提交这些实例值。secret 材料仅由部署环境生成、验证和注入，Agent 不通过 PR 或日志传递私钥。
+
+1. 目标主机与访问方式（SSH/部署通道）与部署目录；
+2. 域名与 TLS 证书（或 ACME 签发方式）以及 nginx 落点；
+3. secret 注入方式（secret manager / 环境文件路径），以及上面 2.2 的密钥材料由部署环境生成、验证和注入；
+4. registry 状态文件路径与现有 v2 endpoint 清单（迁移输入）；
+5. 生产遥测凭据及其持久目录；controller 生产部署不提供关闭遥测的选项。
 
 生产脚本必须同时配置 `PINVOU_CONFIRM_PRODUCTION_DEPLOY=1`、`PINVOU_REMOTE_DEPLOY_SERVER`、`PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER`、`SSH_KEY`、`PINVOU_REMOTE_DIRECT_URL` 和 `PINVOU_REMOTE_HARDENING_FILE`。两份目标必须一致，不配置或不一致时，在联网、上传前退出。确认标志不是 enrollment、验收或回滚门禁豁免。
 
