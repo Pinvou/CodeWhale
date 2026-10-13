@@ -9145,11 +9145,14 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
         api_tool("exec_shell"), // engine-owned: never the pool's to remove
     ];
     let mut active = HashSet::new();
+    let cache = crate::core::session::ToolActivationCache::default();
 
     // The pool's universe owns the static read (still live) and the
     // synthetic authenticate entry (its login just succeeded — it must
     // LEAVE). The refreshed surface adds a new tool and keeps the static
-    // one; the engine tool is untouched.
+    // one; the engine tool is untouched. The static read was deferred in
+    // this conversation, so the refresh carries that marking across instead
+    // of adopting the pool's eager flag.
     let universe: HashSet<String> = ["mcp_static_read", "mcp_alpha_authenticate"]
         .into_iter()
         .map(str::to_string)
@@ -9159,6 +9162,7 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
         &mut active,
         &universe,
         vec![api_tool("mcp_static_read"), api_tool("mcp_dynamic_render")],
+        &cache,
     );
 
     let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
@@ -9167,7 +9171,18 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
         vec!["exec_shell", "mcp_static_read", "mcp_dynamic_render"],
         "the synthetic authenticate tool leaves after its own login; engine tools stay"
     );
-    assert!(active.contains("mcp_static_read"));
+    let static_read = catalog
+        .iter()
+        .find(|tool| tool.name == "mcp_static_read")
+        .expect("the static read survives the refresh");
+    assert_eq!(
+        static_read.defer_loading,
+        Some(true),
+        "the conversation's deferral marking must survive the pool's eager flag"
+    );
+    // Deferred and not activated in this conversation: the refresh must not
+    // put it on the wire — a search activates it.
+    assert!(!active.contains("mcp_static_read"));
     assert!(active.contains("mcp_dynamic_render"));
     assert!(!active.contains("mcp_alpha_authenticate"));
 
@@ -9186,6 +9201,7 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
         &mut active,
         &universe,
         vec![api_tool("mcp_alpha_authenticate")],
+        &cache,
     );
     let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(
@@ -9195,6 +9211,36 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
     );
     assert!(active.contains("mcp_alpha_authenticate"));
     assert!(!active.contains("mcp_dynamic_render"));
+
+    // Wire visibility stays the conversation's decision: a deferred tool
+    // this conversation has not activated must not ride the wire after a
+    // refresh — it returns when a search activates it, and re-advertising
+    // it would contradict any eviction note already recorded.
+    let mut catalog = vec![api_tool("exec_shell")];
+    let mut active = HashSet::new();
+    let mut deferred = api_tool("mcp_static_read");
+    deferred.defer_loading = Some(true);
+    let universe: HashSet<String> = ["mcp_static_read"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    replace_runtime_mcp_tools(&mut catalog, &mut active, &universe, vec![deferred], &cache);
+    assert!(
+        !active.contains("mcp_static_read"),
+        "an unactivated deferred tool must stay off the wire: {active:?}"
+    );
+    assert_eq!(catalog.len(), 2, "the tool still exists for tool_search");
+
+    // Once a search activates it, the same refresh keeps it on the wire.
+    let mut deferred = api_tool("mcp_static_read");
+    deferred.defer_loading = Some(true);
+    let mut cache = crate::core::session::ToolActivationCache::default();
+    cache.activate(&[deferred.clone()], &["mcp_static_read".to_string()]);
+    replace_runtime_mcp_tools(&mut catalog, &mut active, &universe, vec![deferred], &cache);
+    assert!(
+        active.contains("mcp_static_read"),
+        "a still-activated deferred tool stays on the wire: {active:?}"
+    );
 }
 
 #[test]
@@ -27511,16 +27557,17 @@ async fn execution_refresh_eviction_note_rides_the_refreshed_result() {
 }
 
 #[tokio::test]
-async fn step_note_does_not_name_a_tool_the_result_refresh_re_ads() {
+async fn step_note_names_a_victim_the_refresh_cannot_resurrect() {
     use crate::mcp::{McpConfig, McpPool};
     use std::sync::Arc;
     use tokio::sync::Mutex as AsyncMutex;
 
     let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
     // A server whose last connect failed auth-required: the pool's refreshed
-    // list serves the synthetic eager `mcp_probe_authenticate` tool, so the
-    // outcome's `mcp_catalog_changed` refresh re-advertises it in the same
-    // arm whose touch evicted it.
+    // list serves the synthetic `mcp_probe_authenticate` tool, so the
+    // outcome's `mcp_catalog_changed` refresh runs in the same arm whose
+    // touch evicted it. The refresh must not resurrect the evicted entry
+    // onto the wire: the step note may name it truthfully.
     let mut config = McpConfig::default();
     config.servers.insert(
         "probe".to_string(),
@@ -27567,9 +27614,11 @@ async fn step_note_does_not_name_a_tool_the_result_refresh_re_ads() {
 
     // The catalog's schema for the victim grew after the activation (an MCP
     // refresh), so refreshing `executed` overflow-pops it — and the same
-    // outcome's `mcp_catalog_changed` refresh re-inserts it into the active
-    // set before the step note renders. The note must not declare a tool the
-    // next request carries "no longer callable".
+    // outcome's `mcp_catalog_changed` refresh replaces the pool slice. The
+    // victim is still deferred in this conversation and no longer activated,
+    // so the refresh must leave it off the wire and the step note may name
+    // it: the next request must not carry a tool the note declares
+    // uncallable.
     let mut grown_catalog = vec![
         heavy_deferred_tool(victim, 12_000),
         heavy_deferred_tool("executed", 7_000),
@@ -27600,13 +27649,137 @@ async fn step_note_does_not_name_a_tool_the_result_refresh_re_ads() {
         "the victim must leave the cache before the note renders"
     );
     assert!(
-        active.contains(victim),
-        "the refresh must re-advertise the victim into the active set: {active:?}"
+        !active.contains(victim),
+        "the refresh must not resurrect the evicted victim onto the wire: {active:?}"
     );
     let executed = recorded_tool_result_content(&engine, "call-executed");
     assert!(
-        !executed.contains("no longer callable"),
-        "the step note must not name the refresh-re-advertised victim: {executed}"
+        executed.contains("no longer callable") && executed.contains(victim),
+        "the step note must name the victim truthfully — it is not callable again: {executed}"
+    );
+}
+
+/// The cross-outcome window: a note that rides an early outcome of a batch
+/// must stay truthful when a later outcome of the same batch refreshes the
+/// MCP catalog. The refresh re-advertises eager entries and still-activated
+/// deferred tools — never a bounds-evicted one — so the next request cannot
+/// carry a tool an earlier result in the same pass declared uncallable.
+#[tokio::test]
+async fn refresh_between_outcomes_cannot_resurrect_an_evicted_tool() {
+    use crate::mcp::{McpConfig, McpPool};
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    let mut config = McpConfig::default();
+    config.servers.insert(
+        "probe".to_string(),
+        crate::mcp::McpServerConfig {
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            url: Some("https://probe.example.test/mcp".to_string()),
+            transport: None,
+            connect_timeout: None,
+            execute_timeout: None,
+            read_timeout: None,
+            disabled: false,
+            enabled: true,
+            required: false,
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            headers: HashMap::new(),
+            env_headers: HashMap::new(),
+            bearer_token_env_var: None,
+            scopes: Vec::new(),
+            oauth: None,
+            oauth_resource: None,
+            reviewed_plugin: None,
+        },
+    );
+    let mut pool = McpPool::new(config);
+    pool.note_connect_failure("probe", &anyhow::Error::msg("HTTP 401 unauthorized"));
+    engine.mcp_pool = Some(Arc::new(AsyncMutex::new(pool)));
+
+    let victim = "mcp_probe_authenticate";
+    // Turn start: the victim's schema grew between turns, so the entry
+    // revalidation overflow-pops it and parks the turn-start note — the
+    // exact sequence `run_turn`'s entry runs.
+    let priming_catalog = vec![
+        heavy_deferred_tool(victim, 7_000),
+        heavy_deferred_tool("filler", 9_000),
+    ];
+    let mut active = super::tool_catalog::initial_active_tools(&priming_catalog);
+    let cached = vec![victim.to_string(), "filler".to_string()];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&priming_catalog, &cached);
+    active.extend(cached);
+    let mut grown_catalog = vec![
+        heavy_deferred_tool(victim, 12_000),
+        heavy_deferred_tool("filler", 9_000),
+    ];
+    let removals = engine
+        .session
+        .tool_activation_cache
+        .revalidate(&grown_catalog);
+    super::tool_catalog::remove_toolbox_drops(
+        &mut active,
+        removals.dropped_names().map(str::to_string),
+    );
+    assert_eq!(
+        removals.bounds_evicted,
+        vec![victim.to_string()],
+        "premise: the turn-start revalidation must evict the victim"
+    );
+    engine.park_toolbox_eviction_note(
+        crate::core::session::ToolboxEvictionTrigger::TurnStart,
+        &removals.bounds_evicted,
+    );
+
+    // The batch: a first outcome records the parked note, then a later
+    // outcome in the same pass carries `mcp_catalog_changed`. The refresh
+    // must not put the victim back onto the wire behind the note's back.
+    engine
+        .process_tool_results(
+            vec![
+                Some(synthetic_toolbox_outcome(
+                    "call-filler",
+                    "filler",
+                    Ok(ToolResult::success("filler payload")),
+                )),
+                Some(synthetic_toolbox_outcome(
+                    "call-auth",
+                    victim,
+                    Ok(ToolResult::success("auth payload").with_metadata(json!({
+                        "mcp_catalog_changed": true,
+                    }))),
+                )),
+            ],
+            &mut grown_catalog,
+            &mut active,
+            &HashMap::new(),
+        )
+        .await;
+
+    let filler = recorded_tool_result_content(&engine, "call-filler");
+    assert!(
+        filler.contains("no longer callable") && filler.contains(victim),
+        "the parked note must ride the batch's first result: {filler}"
+    );
+    assert!(
+        !active.contains(victim),
+        "a later outcome's refresh must not resurrect the evicted victim onto the wire: {active:?}"
+    );
+    assert!(
+        !engine
+            .session
+            .tool_activation_cache
+            .names()
+            .any(|name| name == victim),
+        "the victim stays unactivated: a search re-activates it"
     );
 }
 

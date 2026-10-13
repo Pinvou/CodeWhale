@@ -91,15 +91,21 @@ evicts when a cached schema grew since its last activation enough that the
 collective budget overflows). A note that never reaches a recorded result is dropped rather
 than riding an unrelated later result: a session sync clears it at the
 conversation edge, and a turn that ends without a recorded result has it
-swept at the next turn's entry. Child agents report the same way: a
+swept at the next turn's entry. Child agents report the same way on their
+own surface (they have no conversation-level sync or turn-entry sweep): a
 hydration receipt (or its refusal error) and an executed tool's result
 carry their own eviction notes, and a note parked outside any result — a
 catalog refresh's revalidation or a warm-start overflow — rides the child's
-next recorded result (or its error); a note a child never delivers dies
-with the child's surface. A note never names a tool the model can call
+next recorded result (or its error); a call the child cancels on its tool
+timeout is recorded without the note, deferring it to a later result; a
+note a child never delivers dies with the child's surface. A note never
+names a tool the model can call
 again: names the ride re-admits — into the activation cache or the
-request's active tool set, which a mid-turn MCP catalog refresh can
-repopulate without re-activating the cache — are netted out of it. Tools
+request's active tool set — are netted out of it, and a mid-turn MCP
+catalog refresh respects the same rule from the other side, re-advertising
+only the eager entries its servers serve and the deferred tools this
+conversation still has activated. An evicted deferred tool therefore stays
+off the wire and the note naming it stays truthful. Tools
 the model cannot get back by searching are reported differently:
 `tool_search` results surface them as unavailable references, naming
 whether the tool left the catalog (a disconnect, a changed allow/deny rule,

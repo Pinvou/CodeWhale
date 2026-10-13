@@ -1044,13 +1044,28 @@ fn registered_tool_requires_non_bypassable_approval(tool_name: &str) -> bool {
 /// authenticate` entry would survive its own successful login, and tools
 /// killed by a live 401 would stay callable in name. `universe` is every
 /// name the pool can own; entries inside it are the pool's to manage, and
-/// the refreshed list is the new truth.
+/// the refreshed list is the new truth — for existence. Wire visibility
+/// stays the conversation's decision: a deferred tool returns to the active
+/// set only if this conversation still has it activated, so a bounds-evicted
+/// entry is never resurrected onto the wire by its own server's refresh (the
+/// eviction note the model just read — or a search payload in the same
+/// batch — would otherwise contradict the next request, and the next turn's
+/// active-set re-derivation would drop it anyway). The pool builds every
+/// entry eager, so each replaced tool also carries its prior deferral
+/// marking across the refresh: adopting the pool's flag would flip deferred
+/// tools back onto the head of the wire list and bust the cached prefix.
 pub(super) fn replace_runtime_mcp_tools(
     tool_catalog: &mut Vec<Tool>,
     active_tool_names: &mut std::collections::HashSet<String>,
     universe: &std::collections::HashSet<String>,
     refreshed: Vec<Tool>,
+    activation_cache: &crate::core::session::ToolActivationCache,
 ) -> usize {
+    let previous_deferral: std::collections::HashMap<String, bool> = tool_catalog
+        .iter()
+        .filter(|tool| universe.contains(&tool.name))
+        .map(|tool| (tool.name.clone(), tool.defer_loading.unwrap_or(false)))
+        .collect();
     let before = tool_catalog.len();
     tool_catalog.retain(|tool| {
         let owned = universe.contains(&tool.name);
@@ -1060,7 +1075,13 @@ pub(super) fn replace_runtime_mcp_tools(
         !owned
     });
     for tool in refreshed {
-        active_tool_names.insert(tool.name.clone());
+        let mut tool = tool;
+        if let Some(was_eager) = previous_deferral.get(&tool.name) {
+            tool.defer_loading = Some(*was_eager);
+        }
+        if !tool.defer_loading.unwrap_or(false) || activation_cache.contains(&tool.name) {
+            active_tool_names.insert(tool.name.clone());
+        }
         tool_catalog.push(tool);
     }
     tool_catalog.len().abs_diff(before)
@@ -5113,6 +5134,7 @@ impl Engine {
                             active_tool_names,
                             &universe,
                             refreshed,
+                            &self.session.tool_activation_cache,
                         ) > 0;
                     }
                     // Any of the legitimate mid-turn tool-surface changes above
