@@ -7596,9 +7596,10 @@ fn synthetic_deferred_tool(name: &str, description_bytes: usize) -> Tool {
 }
 
 // Pinvou fork: the toolbox size bounds are disabled (see the constant docs in
-// core/session.rs). This test formerly pinned upstream's 8-name / 16 KiB LRU
-// eviction and byte-budget overflow; it now pins the disabled posture while
-// keeping the surface-independence and catalog-shrink revalidation pins.
+// core/session.rs). Upstream tests that construct near-budget activations to
+// fire bounds eviction or oversize rejection are not carried here — those
+// paths never fire in this fork; the ride-channel and revalidation pins that
+// do not depend on the bounds are kept.
 #[test]
 fn forkguard_small_surface_caches_are_independent_unbounded_and_revalidated() {
     // 2 KiB schemas put nine activations past upstream's historical 16 KiB

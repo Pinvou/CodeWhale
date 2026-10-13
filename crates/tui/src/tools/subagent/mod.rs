@@ -34,12 +34,13 @@ use crate::client::DeepSeekClient;
 use crate::config::MAX_SUBAGENTS;
 use crate::core::engine::tool_catalog::{
     TOOL_SEARCH_NAME, active_tools_for_request, apply_native_tool_deferral,
-    ensure_advanced_tooling, execute_tool_search_with_cache, initial_active_tools,
-    is_tool_search_tool, remove_evicted_cache_activations, tool_matches_any_rule,
+    bounded_toolbox_eviction_note, ensure_advanced_tooling, execute_tool_search_with_cache,
+    initial_active_tools, is_tool_search_tool, park_toolbox_eviction, remove_toolbox_drops,
+    render_toolbox_eviction_notes, tool_matches_any_rule, toolbox_oversize_reason,
     touch_cached_tool_after_execution,
 };
 use crate::core::events::{AgentProgressEventMeta, Event};
-use crate::core::session::ToolActivationCache;
+use crate::core::session::{PendingToolboxEviction, ToolActivationCache, ToolboxEvictionTrigger};
 use crate::dependencies::{ExternalTool, Git};
 /// Compatibility re-export: the closed role set lives in
 /// `crate::fleet::role`, the lightweight role surface every spawn path
@@ -14103,10 +14104,14 @@ fn routine_agent_progress_can_preserve_event_headroom(status: AgentWorkerStatus)
 /// names from this filtered catalog; they cannot make a denied tool executable.
 /// The active-name snapshot is rebuilt once per model request so a same-batch
 /// guessed call cannot use a schema that was not present in that request.
+/// Bounds evictions observed outside a result payload (a catalog refresh's
+/// revalidation, a warm start) park a note here that rides the child's next
+/// recorded result, mirroring the parent engine's parked-note channel.
 struct SubAgentToolSurface {
     catalog: Vec<Tool>,
     active_names: std::collections::HashSet<String>,
     cache: ToolActivationCache,
+    pending_eviction_notes: Vec<PendingToolboxEviction>,
 }
 
 impl SubAgentToolSurface {
@@ -14115,16 +14120,79 @@ impl SubAgentToolSurface {
         let activation = cache.activate(&catalog, warm_names);
         let mut active_names = initial_active_tools(&catalog);
         active_names.extend(activation.admitted);
-        Self {
+        let mut surface = Self {
             catalog,
             active_names,
             cache,
+            pending_eviction_notes: Vec::new(),
+        };
+        // A warm start that overflows the bounds must not evict silently;
+        // park the note for the child's first result.
+        surface.park_eviction_note(ToolboxEvictionTrigger::Step, &activation.evicted);
+        surface
+    }
+
+    /// Park (or combine with an already parked) bounded-toolbox eviction
+    /// note; it rides the child's next recorded result.
+    fn park_eviction_note(&mut self, trigger: ToolboxEvictionTrigger, evicted: &[String]) {
+        park_toolbox_eviction(&mut self.pending_eviction_notes, trigger, evicted);
+    }
+
+    /// Attach the parked eviction notes to this result — the child's ride
+    /// channel. Names re-admitted since the park are netted out against the
+    /// child's live cache and its request's active-name set, so a note never
+    /// declares a tool uncallable that the riding result hands back, and a
+    /// note emptied by the netting is dropped. The render consumes the
+    /// notes. Error results carry the notes too, mirroring the parent
+    /// engine's error path: a note held back on `Err` would strand until a
+    /// later `Ok` — or forever if the child ends first.
+    fn ride_pending_eviction_notes(&mut self, result: &mut Result<RichToolResult>) {
+        if self.pending_eviction_notes.is_empty() {
+            return;
+        }
+        let Some(rendered) = render_toolbox_eviction_notes(
+            &mut self.pending_eviction_notes,
+            &self.cache,
+            &self.active_names,
+            &self.catalog,
+        ) else {
+            return;
+        };
+        match result.as_mut() {
+            Ok(rich) => rich.result.content.push_str(&format!("\n\n{rendered}")),
+            Err(error) => *error = anyhow!("{error}\n\n{rendered}"),
+        }
+    }
+
+    /// Refresh an executed cached tool and append its eviction note to the
+    /// recorded result — the child mirror of the parent engine's
+    /// post-execution channel.
+    fn touch_after_execution(&mut self, name: &str, result: &mut Result<RichToolResult>) {
+        if result.is_err() {
+            return;
+        }
+        let update = touch_cached_tool_after_execution(
+            &self.catalog,
+            &mut self.active_names,
+            &mut self.cache,
+            name,
+        );
+        if !update.evicted.is_empty()
+            && let Ok(rich) = result.as_mut()
+        {
+            rich.result.content.push_str(&format!(
+                "\n\n{}",
+                bounded_toolbox_eviction_note(ToolboxEvictionTrigger::Step, &update.evicted,)
+            ));
         }
     }
 
     fn request_tools(&mut self, catalog: Vec<Tool>, strict: bool) -> Vec<Tool> {
         self.catalog = catalog;
-        self.cache.revalidate(&self.catalog);
+        // A refresh that grew a cached schema past the collective bounds
+        // evicts here, outside any result payload — park the note.
+        let removals = self.cache.revalidate(&self.catalog);
+        self.park_eviction_note(ToolboxEvictionTrigger::Step, &removals.bounds_evicted);
         let mut active_names = initial_active_tools(&self.catalog);
         active_names.extend(self.cache.names().map(str::to_string));
         self.active_names = active_names;
@@ -14149,17 +14217,48 @@ impl SubAgentToolSurface {
 
     fn hydrate(&mut self, name: &str) -> Result<String> {
         let activation = self.cache.activate(&self.catalog, &[name.to_string()]);
-        remove_evicted_cache_activations(&self.catalog, &mut self.active_names, activation.evicted);
+        remove_toolbox_drops(
+            &mut self.active_names,
+            activation.dropped_names().map(str::to_string),
+        );
         self.active_names
             .extend(activation.admitted.iter().cloned());
         if activation.admitted.iter().any(|admitted| admitted == name) {
-            return Ok(format!(
+            // The load receipt is the hydration's only result payload, so
+            // the eviction note rides it to the child model. The evictions
+            // may come from the admission itself or from revalidation after
+            // a cached schema grew.
+            let mut message = format!(
                 "Tool `{name}` was deferred and has now been loaded. Retry the call with the newly available schema."
+            );
+            if !activation.evicted.is_empty() {
+                message.push_str(&format!(
+                    "\n\n{}",
+                    bounded_toolbox_eviction_note(
+                        ToolboxEvictionTrigger::Step,
+                        &activation.evicted,
+                    )
+                ));
+            }
+            return Ok(message);
+        }
+        // The only rejection here is the per-tool budget: a narrower search
+        // cannot help, so the recovery hint must say why the tool cannot
+        // enter instead of promising a narrower query would. The rejection
+        // runs after the activation, so revalidation may have bounds-evicted
+        // other tools on the way; this error is the call's only result
+        // payload, so the note rides it instead of being absorbed.
+        let mut message = format!(
+            "Tool {name} could not enter the bounded child toolbox: {}",
+            toolbox_oversize_reason()
+        );
+        if !activation.evicted.is_empty() {
+            message.push_str(&format!(
+                "\n\n{}",
+                bounded_toolbox_eviction_note(ToolboxEvictionTrigger::Step, &activation.evicted)
             ));
         }
-        Err(anyhow!(
-            "Tool {name} could not enter the child toolbox; it is not currently available as a deferred tool in this surface"
-        ))
+        Err(anyhow!(message))
     }
 }
 
@@ -15583,6 +15682,33 @@ impl SubAgentToolRegistry {
         name: &str,
         input: Value,
     ) -> Result<RichToolResult> {
+        let mut result = self
+            .execute_from_surface_inner(
+                agent_id,
+                tool_id,
+                surface,
+                request_active_names,
+                name,
+                input,
+            )
+            .await;
+        // A note parked by an earlier catalog refresh (request-time
+        // revalidation, a warm start) has no payload of its own; it rides
+        // the child's next recorded result, mirroring the parent engine's
+        // parked-note channel.
+        surface.ride_pending_eviction_notes(&mut result);
+        result
+    }
+
+    async fn execute_from_surface_inner(
+        &self,
+        agent_id: &str,
+        tool_id: &str,
+        surface: &mut SubAgentToolSurface,
+        request_active_names: &std::collections::HashSet<String>,
+        name: &str,
+        input: Value,
+    ) -> Result<RichToolResult> {
         if is_tool_search_tool(name) {
             if !request_active_names.contains(name) {
                 return Err(anyhow!("Tool {name} is not in this child's catalog"));
@@ -15602,7 +15728,18 @@ impl SubAgentToolRegistry {
                 "Tool {name} is not in this child's policy-filtered catalog"
             ));
         };
-        if deferred && !request_active_names.contains(name) {
+        if deferred
+            && (!request_active_names.contains(name) || !surface.active_names.contains(name))
+        {
+            // A mid-request bounds eviction (a touch or hydrate revalidation)
+            // removes the tool from the surface's live active set while the
+            // request snapshot still carries it. Falling through to
+            // `execute_full` would run a call the surface no longer admits
+            // and make the eviction note an earlier result recorded a false
+            // statement for the rest of this request; routing the retry
+            // through hydration re-admits it under the bounds — or refuses
+            // it with the shared oversize reason — exactly like the parent
+            // engine's retry flow.
             return surface
                 .hydrate(name)
                 .map(|content| RichToolResult::plain(ToolResult::success(content)));
@@ -15610,14 +15747,9 @@ impl SubAgentToolRegistry {
         if !request_active_names.contains(name) {
             return Err(anyhow!("Tool {name} is not active for this sub-agent"));
         }
-        let result = self.execute_full(agent_id, tool_id, name, input).await;
-        if deferred && result.is_ok() {
-            touch_cached_tool_after_execution(
-                &surface.catalog,
-                &mut surface.active_names,
-                &mut surface.cache,
-                name,
-            );
+        let mut result = self.execute_full(agent_id, tool_id, name, input).await;
+        if deferred {
+            surface.touch_after_execution(name, &mut result);
         }
         result
     }
