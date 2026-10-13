@@ -498,11 +498,13 @@ pub(crate) fn park_toolbox_eviction(
     });
 }
 
-/// Net and render the parked toolbox eviction notes for the result they
-/// ride. A name that is back in the activation cache is callable again, and
-/// so is a name sitting in the request's active tool set — a mid-turn MCP
-/// catalog refresh re-advertises its tools there without re-activating the
-/// cache. Either way the result must not declare the tool "no longer
+/// Net and render toolbox eviction notes for the result they ride: the
+/// turn's parked notes and the step's own touch/retrieval evictions share
+/// this attach-time netting. A name that is back in the activation cache is
+/// callable again, and so is a name sitting in the request's active tool
+/// set — a mid-turn MCP catalog refresh re-advertises its tools there
+/// without re-activating the cache, including after the step that evicted
+/// it. Either way the result must not declare the tool "no longer
 /// callable": such names are dropped, and a note emptied by the netting is
 /// dropped with them. Returns `None` when nothing remains to report.
 pub(crate) fn render_toolbox_eviction_notes(

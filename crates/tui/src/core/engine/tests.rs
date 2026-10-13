@@ -27511,6 +27511,106 @@ async fn execution_refresh_eviction_note_rides_the_refreshed_result() {
 }
 
 #[tokio::test]
+async fn step_note_does_not_name_a_tool_the_result_refresh_re_ads() {
+    use crate::mcp::{McpConfig, McpPool};
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    // A server whose last connect failed auth-required: the pool's refreshed
+    // list serves the synthetic eager `mcp_probe_authenticate` tool, so the
+    // outcome's `mcp_catalog_changed` refresh re-advertises it in the same
+    // arm whose touch evicted it.
+    let mut config = McpConfig::default();
+    config.servers.insert(
+        "probe".to_string(),
+        crate::mcp::McpServerConfig {
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            url: Some("https://probe.example.test/mcp".to_string()),
+            transport: None,
+            connect_timeout: None,
+            execute_timeout: None,
+            read_timeout: None,
+            disabled: false,
+            enabled: true,
+            required: false,
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            headers: HashMap::new(),
+            env_headers: HashMap::new(),
+            bearer_token_env_var: None,
+            scopes: Vec::new(),
+            oauth: None,
+            oauth_resource: None,
+            reviewed_plugin: None,
+        },
+    );
+    let mut pool = McpPool::new(config);
+    pool.note_connect_failure("probe", &anyhow::Error::msg("HTTP 401 unauthorized"));
+    engine.mcp_pool = Some(Arc::new(AsyncMutex::new(pool)));
+
+    let victim = "mcp_probe_authenticate";
+    let priming_catalog = vec![
+        heavy_deferred_tool(victim, 7_000),
+        heavy_deferred_tool("executed", 7_000),
+    ];
+    let mut active = super::tool_catalog::initial_active_tools(&priming_catalog);
+    let cached = vec![victim.to_string(), "executed".to_string()];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&priming_catalog, &cached);
+    active.extend(cached);
+
+    // The catalog's schema for the victim grew after the activation (an MCP
+    // refresh), so refreshing `executed` overflow-pops it — and the same
+    // outcome's `mcp_catalog_changed` refresh re-inserts it into the active
+    // set before the step note renders. The note must not declare a tool the
+    // next request carries "no longer callable".
+    let mut grown_catalog = vec![
+        heavy_deferred_tool(victim, 12_000),
+        heavy_deferred_tool("executed", 7_000),
+    ];
+    engine
+        .process_tool_results(
+            vec![Some(synthetic_toolbox_outcome(
+                "call-executed",
+                "executed",
+                Ok(
+                    ToolResult::success("executed payload").with_metadata(json!({
+                        "mcp_catalog_changed": true,
+                    })),
+                ),
+            ))],
+            &mut grown_catalog,
+            &mut active,
+            &HashMap::new(),
+        )
+        .await;
+
+    assert!(
+        !engine
+            .session
+            .tool_activation_cache
+            .names()
+            .any(|name| name == victim),
+        "the victim must leave the cache before the note renders"
+    );
+    assert!(
+        active.contains(victim),
+        "the refresh must re-advertise the victim into the active set: {active:?}"
+    );
+    let executed = recorded_tool_result_content(&engine, "call-executed");
+    assert!(
+        !executed.contains("no longer callable"),
+        "the step note must not name the refresh-re-advertised victim: {executed}"
+    );
+}
+
+#[tokio::test]
 async fn session_sync_drops_a_parked_toolbox_eviction_note() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 

@@ -5178,12 +5178,18 @@ impl Engine {
                     };
                     // The batch's parked notes and this result's own
                     // retrieval/touch evictions share one channel to the
-                    // model: the recorded result content. The parked notes
-                    // net against the live cache and the active tool set at
-                    // attach so a name this result hands back — or that a
-                    // mid-turn MCP refresh re-advertised — is never declared
-                    // uncallable.
+                    // model: the recorded result content. Both net against
+                    // the live cache and the active tool set at attach so a
+                    // name this result hands back — or that a mid-turn MCP
+                    // refresh re-advertised after the touch dropped it — is
+                    // never declared uncallable.
                     let mut eviction_notes = Vec::new();
+                    if !evicted_this_result.is_empty() {
+                        pending_eviction_notes.push(crate::core::session::PendingToolboxEviction {
+                            trigger: crate::core::session::ToolboxEvictionTrigger::Step,
+                            evicted: evicted_this_result,
+                        });
+                    }
                     if !pending_eviction_notes.is_empty() {
                         if let Some(rendered) = super::tool_catalog::render_toolbox_eviction_notes(
                             &mut pending_eviction_notes,
@@ -5193,12 +5199,6 @@ impl Engine {
                             eviction_notes.push(rendered);
                         }
                         pending_eviction_notes.clear();
-                    }
-                    if !evicted_this_result.is_empty() {
-                        eviction_notes.push(super::tool_catalog::bounded_toolbox_eviction_note(
-                            crate::core::session::ToolboxEvictionTrigger::Step,
-                            &evicted_this_result,
-                        ));
                     }
                     let output_for_context = if eviction_notes.is_empty() {
                         output_for_context
