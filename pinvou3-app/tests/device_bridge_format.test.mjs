@@ -91,6 +91,9 @@ const fixtureSnapshot = () => ({
     { name: 'nvme0n1p2', mount_point: '/', fs_type: 'ext4', kind: 'ssd', total_bytes: 1610612736, available_bytes: 805306368, is_removable: false },
     { name: 'sda1', mount_point: '/media/usb', fs_type: 'vfat', kind: 'hdd', total_bytes: 3221225472, available_bytes: 3221225472, is_removable: true },
     { name: null, mount_point: '/snap/core', fs_type: 'squashfs', kind: 'unknown', total_bytes: null, available_bytes: null, is_removable: false },
+    // 有总量没可用（损坏/半初始化的盘）：usageKnown 必须 false——曾渲染成
+    // 0 宽绿条，读作"空盘"（第四轮评审 P3）。
+    { name: 'partial', mount_point: '/mnt/partial', fs_type: 'ext4', kind: 'ssd', total_bytes: 4096, available_bytes: null, is_removable: false },
   ],
   network: [
     { name: 'lo', iface_type: 'loopback', is_up: true, mac: null, rx_bytes: 1610612736, tx_bytes: 1610612736, rx_bytes_per_sec: 2500000, tx_bytes_per_sec: 0 },
@@ -138,10 +141,19 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   // 用量百分比的 50% 路径必须钉死：公式算反（分母换成 available）或封顶丢失
   // 这类显示回归此前全绿通过（变异存活，第三轮评审 P2）。
   assert.equal(fmt.disks[0].usedPct, 50);
+  // usageKnown：视图凭它决定画用量条还是"容量未知"占位，不再耦合 em-dash
+  // 展示串（第四轮评审 P3）。
+  assert.equal(fmt.disks[0].usageKnown, true);
   assert.equal(fmt.disks[1].totalText, '3.0 GiB');
   assert.equal(fmt.disks[1].usedPct, 0);
   assert.equal(fmt.disks[2].totalText, '—');
   assert.equal(fmt.disks[2].usedPct, 0);
+  assert.equal(fmt.disks[2].usageKnown, false, 'missing total must mark usage unknown');
+  // 空盘（available == total）的用量是真实可知的：usageKnown 保持 true。
+  assert.equal(fmt.disks[1].usageKnown, true);
+  // 有总量没可用：usageKnown=false（曾渲染成 0 宽绿条，读作"空盘"）。
+  assert.equal(fmt.disks[3].usageKnown, false, 'total-without-available must be unknown usage');
+  assert.equal(fmt.disks[3].usedPct, 0);
   assert.equal(fmt.disks[0].mountPoint, '/');
   assert.equal(fmt.disks[0].isRoot, true);
   assert.equal(fmt.disks[1].isRoot, false);
@@ -392,6 +404,15 @@ assert.doesNotMatch(
   await env.api.pollDeviceServices();
   assert.equal(env.notifyCount(), 1);
 
+  // 键序翻转也不得击穿抑制：structuralEqual 取代 JSON.stringify（第四轮 P3，
+  // map 形字段换序列化序时旧口径会白白重渲染）。
+  env.setRespond(async () => [
+    { detail: null, running: true, key: 'ollama' },
+    { detail: 'command not found', running: false, key: 'docker' },
+  ]);
+  await env.api.pollDeviceServices();
+  assert.equal(env.notifyCount(), 1, 'key-order flip must stay suppressed');
+
   // 探测失败保留上一份结果：瞬时抖动不渲染成「全部停止」；且失败轮零变化不 notify。
   env.setRespond(async command => {
     if (command === 'get_device_services') throw new Error('probe timeout');
@@ -417,8 +438,8 @@ assert.doesNotMatch(
   ]);
   await pendingServices;
   const serviceInvokes = env.invokes.filter(([command]) => command === 'get_device_services');
-  // 成功轮 + 内容等价轮 + 失败轮 + 未决轮 = 4；重入 tick 被吞掉不新增。
-  assert.equal(serviceInvokes.length, 4, 'in-flight services poll must swallow reentrant ticks');
+  // 成功轮 + 内容等价轮 + 键序等价轮 + 失败轮 + 未决轮 = 5；重入 tick 被吞掉不新增。
+  assert.equal(serviceInvokes.length, 5, 'in-flight services poll must swallow reentrant ticks');
   // 决算结果与保留值内容相同 → 不 notify。
   assert.equal(env.notifyCount(), 1);
 }
@@ -490,14 +511,21 @@ assert.doesNotMatch(
   assert.deepEqual(registerInvokes, [['device_register_external_model', { name: 'qwen3-30b', kind: 'ollama' }]]);
   assert.ok(env.invokes.some(([command]) => command === 'get_external_models'), 'register must refetch external models');
 
-  // 移除同理：透传守卫参数 + 回读注册表。
+  // 移除同理：透传守卫参数 + 回读注册表（回读此前只在注释里声称，断言缺席——
+  // 删掉回读调用全部测试照绿，UI 会停留在已移除的旧行上；第四轮评审补钉）。
   const outcome = { removed_registry: true, removed_weights: true, ollama_deleted: false, warnings: [] };
   env.setRespond(async command => command === 'device_remove_external_model' ? outcome : modelsView);
+  const refetchesBeforeRemove = env.invokes.filter(([command]) => command === 'get_external_models').length;
   const removed = await env.api.removeExternalModel({ id: 'm-9', deleteWeights: true, confirmName: 'qwen3-30b' });
   assert.equal(removed, outcome);
   assert.deepEqual(
     env.invokes.filter(([command]) => command === 'device_remove_external_model'),
     [['device_remove_external_model', { id: 'm-9', deleteWeights: true, confirmName: 'qwen3-30b' }]],
+  );
+  assert.equal(
+    env.invokes.filter(([command]) => command === 'get_external_models').length,
+    refetchesBeforeRemove + 1,
+    'remove must refetch the external models registry',
   );
 
   // 故障排查提示词：kind/question 透传后端组装，返回拼好的文本；缺省问题置 null。

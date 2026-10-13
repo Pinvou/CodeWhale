@@ -180,7 +180,9 @@ function injectSource() {
         });
         case 'get_selected_pet': return Promise.resolve('lingling');
         case 'get_memory_overview': return Promise.resolve(null);
-        case 'chat': return Promise.resolve(null);
+        case 'chat':
+          if (window.__DEVICE_MGR_TEST__.failChatSend) return Promise.reject(new Error('send down (smoke)'));
+          return Promise.resolve(null);
         // 内嵌运行状态页每秒轮询；给一份最小快照，避免错误轮刷屏（内存 chip 也随 bs.monitor._fmt 生效）。
         case 'get_monitor_snapshot': return Promise.resolve({
           cpu: { name: 'NVIDIA GB10', total_usage_pct: 12 },
@@ -189,7 +191,9 @@ function injectSource() {
           app: { pinvou3_version: '0.10.6', deepseek_tui_version: '0.0.0', session_uptime_secs: 60 },
         });
         // ── MegaCube 设备管理命令 ──
-        case 'get_device_snapshot': return Promise.resolve(${JSON.stringify(deviceSnapshotFixture())});
+        case 'get_device_snapshot':
+          if (window.__DEVICE_MGR_TEST__.failSnapshot) return Promise.reject(new Error('snapshot down (smoke)'));
+          return Promise.resolve(${JSON.stringify(deviceSnapshotFixture())});
         case 'get_device_services': return Promise.resolve([{ key: 'ollama', running: false, detail: 'probe timeout' }, { key: 'docker', running: true, detail: null }]);
         case 'get_external_models': return Promise.resolve(${JSON.stringify(externalModelsFixture())});
         case 'model_store_availability': return Promise.resolve({ available: true, reason: null });
@@ -215,6 +219,8 @@ function injectSource() {
       calls: calls,
       callsOf: function (cmd) { return calls.filter(function (item) { return item.cmd === cmd; }); },
       emit: emit,
+      // 场景开关：读取失败横幅/重试与发送失败路径此前零覆盖（第四轮评审）。
+      setRemoveOutcome: function (next) { removeOutcome = next; },
     };
     window.__TAURI__ = {
       core: { invoke: invoke },
@@ -342,12 +348,16 @@ async function clickTestId(page, testId) {
       noErrorBanner: !document.querySelector('[data-testid="device-manager-error"]'),
     };
   });
+  // 健康 chips 精确为 5（盘/内存/最高温/驱动/CUDA）：fixture 齐备时 GPU 双 chip
+  // 掉一个也算回归（此前 >=3 放行，第四轮评审 P3）。
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="device-manager-health-chip"]').length === 5, { timeout: 8000 });
+  const procGpuRendered = await page.evaluate(() => !!document.querySelector('[data-testid="device-manager-proc-gpu"]'));
   rec('④ 快照驱动头部/磁盘/传感器/内嵌概览渲染',
     headerState.deviceName && headerState.osLine && headerState.rootBadge
     && headerState.diskRows === 2 && headerState.sensorChips === 3 && headerState.nvmeChip
-    && headerState.critAdvice && headerState.healthChips >= 3 && headerState.embeddedMonitor
+    && headerState.critAdvice && headerState.healthChips === 5 && procGpuRendered && headerState.embeddedMonitor
     && headerState.netRows === 2 && headerState.noErrorBanner,
-    JSON.stringify(headerState));
+    JSON.stringify({ ...headerState, procGpuRendered }));
 
   // ⑤ 模型管理：商店行锁定（由模型商店管理 + 禁用按钮 + 前往模型商店），
   //    外部模型行显示类别/登记/状态徽标与接入按钮。
@@ -392,9 +402,44 @@ async function clickTestId(page, testId) {
   });
   rec('⑤ 商店行锁定态与外部模型行徽标齐全', Object.values(modelSection).every(Boolean), JSON.stringify(modelSection));
 
+  // ⑤-b 接入品悟 happy path（页面的主动作，此前零覆盖）：未登记 Ollama 行用
+  // 回环回退地址 save_model，随后把新模型设为新建会话默认（set_active_model）。
+  await page.evaluate(() => {
+    const row = document.querySelector('[data-testid="device-manager-external-row"]');
+    row?.querySelector('[data-testid="device-manager-link"]')?.click();
+  });
+  await page.waitForFunction(() => window.__DEVICE_MGR_TEST__.callsOf('save_model').length > 0, { timeout: 8000 });
+  const linkCalls = await page.evaluate(() => {
+    const saved = window.__DEVICE_MGR_TEST__.callsOf('save_model')[0]?.args?.model || null;
+    return {
+      saved,
+      activated: window.__DEVICE_MGR_TEST__.callsOf('set_active_model')[0]?.args || null,
+    };
+  });
+  rec('⑤-b 接入品悟写入回环地址与模型并设为默认',
+    !!linkCalls.saved && linkCalls.saved.base_url === 'http://127.0.0.1:11434/v1'
+    && linkCalls.saved.model === 'qwen3:30b'
+    && !!linkCalls.activated && linkCalls.activated.id === linkCalls.saved.id,
+    JSON.stringify(linkCalls));
+
   // ⑥ 外部模型两段式移除：先静默登记（ollama 未登记行）→ 守卫移除命令携带确认名。
+  // 后端警告注入：聚合 toast 的后端警告臂此前从未渲染（stub warnings 恒空）。
+  await page.evaluate(() => window.__DEVICE_MGR_TEST__.setRemoveOutcome({
+    removed_registry: true, removed_weights: false, ollama_deleted: false,
+    warnings: ['ollama 删除失败（smoke 注入）'],
+  }));
   await clickTestId(page, 'device-manager-remove');
   await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-remove-confirm"]'), { timeout: 4000 });
+  // 确认按钮 400ms 死区：armed 面板与「移除」按钮同坐标原地替换，双击的第二击
+  // 会落在确认按钮（或勾选框）上——死区把这个手势还原成两步（第四轮 P2）。
+  const confirmDisabledAtFirstSight = await page.evaluate(() => {
+    const confirm = document.querySelector('[data-testid="device-manager-remove-confirm"]');
+    return !!confirm && confirm.disabled;
+  });
+  await page.waitForFunction(() => {
+    const confirm = document.querySelector('[data-testid="device-manager-remove-confirm"]');
+    return !!confirm && !confirm.disabled;
+  }, { timeout: 4000 });
   const armedState = await page.evaluate(() => {
     const row = document.querySelector('[data-testid="device-manager-external-row"]');
     return {
@@ -413,12 +458,23 @@ async function clickTestId(page, testId) {
     removed: window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model')[0]?.args,
   }));
   rec('⑥ ollama 行移除先登记再走守卫命令且带二次确认（无权重勾选框）',
-    armedState.intro && !armedState.weightsToggle
+    confirmDisabledAtFirstSight && armedState.intro && !armedState.weightsToggle
     && removeCalls.registered && removeCalls.registered.name === 'qwen3:30b' && removeCalls.registered.kind === 'ollama'
     && removeCalls.removed && removeCalls.removed.id === 'm-registered-new'
     && removeCalls.removed.confirmName === 'qwen3:30b'
     && removeCalls.removed.deleteWeights === false,
-    JSON.stringify({ armedState, removeCalls }));
+    JSON.stringify({ confirmDisabledAtFirstSight, armedState, removeCalls }));
+
+  // ⑥-d 聚合 toast：后端警告与移除结果必须同屏（单槽 toast 曾只显示最后一条，
+  // 第三轮修复；本轮补钉其渲染）。
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="model-store-toast"]'), { timeout: 4000 });
+  const aggregateToast = await page.evaluate(() => document.querySelector('[data-testid="model-store-toast"]')?.innerText || '');
+  rec('⑥-d 聚合 toast 同屏携带后端警告与移除结果',
+    aggregateToast.includes('ollama 删除失败（smoke 注入）') && aggregateToast.includes('已移除「qwen3:30b」'),
+    aggregateToast);
+  await page.evaluate(() => window.__DEVICE_MGR_TEST__.setRemoveOutcome({
+    removed_registry: true, removed_weights: false, ollama_deleted: true, warnings: [],
+  }));
 
   // ⑥-b 带权重的登记行：armed 态回显权重目录完整路径 + 显示删除勾选框 +
   //     勾选后出现不可撤销提示（删除后果必须让用户看见，评审 P2）。
@@ -493,7 +549,67 @@ async function clickTestId(page, testId) {
     && doctorCalls.chat.args.message.includes('DEVICE_DOCTOR_MARKER::packages'),
     JSON.stringify(doctorCalls));
 
-  rec('⑧ 全程无运行时报错', errors.length === 0, errors.slice(0, 3).join(' | '));
+  // ⑦-b 离开设备页后 2s 轮询必须停：视图卸载调 stopDevicePolling——此前只钉了
+  // bridge 的启停语义，没钉视图的实际接线（第四轮评审 P3）。
+  const snapshotCallsAtNav = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('get_device_snapshot').length);
+  await sleep(2600);
+  const snapshotCallsAfterNav = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('get_device_snapshot').length);
+  rec('⑦-b 离开设备页后 2s 轮询停止',
+    snapshotCallsAfterNav === snapshotCallsAtNav,
+    `at nav=${snapshotCallsAtNav}, after 2.6s=${snapshotCallsAfterNav}`);
+
+  // ⑧ 后端读取失败面：横幅 + 重试按钮 + 恢复（此前整条失败面只被断言"不存在"，
+  // 横幅回归消失全绿——第四轮评审 P2）。
+  await clickNavByLabel(page, '设备管理');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'monitor', { timeout: 8000 });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-view"]'), { timeout: 8000 });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failSnapshot = true; });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-error"]'), { timeout: 8000 });
+  const bannerText = await page.evaluate(() => document.querySelector('[data-testid="device-manager-error"]')?.innerText || '');
+  const retryVisible = await page.evaluate(() => !!document.querySelector('[data-testid="device-manager-retry"]'));
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failSnapshot = false; });
+  const snapshotsBeforeRetry = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('get_device_snapshot').length);
+  await clickTestId(page, 'device-manager-retry');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="device-manager-error"]'), { timeout: 8000 });
+  const snapshotsAfterRetry = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('get_device_snapshot').length);
+  rec('⑧ 快照失败出横幅、重试恢复面板并重发快照命令',
+    bannerText.includes('设备状态读取失败') && retryVisible && snapshotsAfterRetry > snapshotsBeforeRetry,
+    JSON.stringify({ bannerText, retryVisible, snapshotsBeforeRetry, snapshotsAfterRetry }));
+
+  // ⑨ 自定义提问：计数/禁用态、发送失败保留输入（「问题已保留」的承诺此前
+  // 无覆盖）、成功直达会话并携带问题原文。
+  await page.type('[data-testid="device-manager-doctor-input"]', '风扇一直响正常吗');
+  const customReady = await page.evaluate(() => {
+    const send = document.querySelector('[data-testid="device-manager-doctor-send"]');
+    return {
+      sendEnabled: !!send && !send.disabled,
+      counterHidden: !document.querySelector('[data-testid="device-manager-doctor-counter"]'),
+    };
+  });
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failChatSend = true; });
+  await clickTestId(page, 'device-manager-doctor-send');
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="model-store-toast"]'), { timeout: 8000 });
+  const failedSend = await page.evaluate(() => ({
+    toast: document.querySelector('[data-testid="model-store-toast"]')?.innerText || '',
+    keptQuestion: (document.querySelector('[data-testid="device-manager-doctor-input"]') || {}).value || '',
+  }));
+  await page.evaluate(() => { window.__DEVICE_MGR_TEST__.failChatSend = false; });
+  await clickTestId(page, 'device-manager-doctor-send');
+  await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'chat', { timeout: 15000 });
+  const customQuestionDelivered = await page.evaluate(() => {
+    const calls = window.__DEVICE_MGR_TEST__.callsOf('chat');
+    return (calls.at(-1)?.args?.message || '').includes('风扇一直响正常吗');
+  });
+  rec('⑨ 自定义提问失败保留输入、成功携带问题直达会话',
+    customReady.sendEnabled && customReady.counterHidden
+    && failedSend.toast.includes('没有发出去') && failedSend.keptQuestion.includes('风扇一直响正常吗')
+    && customQuestionDelivered,
+    JSON.stringify({ customReady, failedSend, customQuestionDelivered }));
+
+  // ⑨ 故意注入了发送失败：transition 基建会把这次拒绝 console.error（预期内
+  // 噪音），清空后再断言"无意外运行时报错"。
+  errors.length = 0;
+  rec('⑩ 全程无运行时报错（⑨ 的预期注入失败除外）', errors.length === 0, errors.slice(0, 3).join(' | '));
   await browser.close();
 
   const failed = results.filter(result => !result.pass).length;
