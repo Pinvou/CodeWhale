@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { isControllerIdentifier, isEnrollmentEndpointIdentifier } from "./identifier-contract.js";
+import { isControllerIdentifier, isEnrollmentEndpointIdentifier, isRelaySigningKeyIdentifier } from "./identifier-contract.js";
 
 import {
   CONTROLLER_PROTOCOL_VERSION,
@@ -122,7 +122,7 @@ export class ControllerLeaseManager {
       || typeof reservationManager.reservationForOwner !== "function"
       || typeof reservationManager.releaseControllerLease !== "function"
       || !isControllerIdentifier(relayEpoch)
-      || !isControllerIdentifier(signingKeyId)
+      || !isRelaySigningKeyIdentifier(signingKeyId)
       || typeof signTranscript !== "function" || typeof resolveControlledEndpoint !== "function"
       || typeof clock !== "function" || typeof randomBytes !== "function" || typeof audit !== "function"
       || typeof onLeaseTerminated !== "function") {

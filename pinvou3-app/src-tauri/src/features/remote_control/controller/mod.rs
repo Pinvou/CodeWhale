@@ -13,6 +13,7 @@ pub(crate) mod crypto;
 pub(crate) mod encrypted_lane;
 pub(crate) mod event_envelope;
 pub(crate) mod journal;
+pub(crate) mod lane_event;
 pub(crate) mod liveness;
 pub(crate) mod panic_scope;
 pub(crate) mod permission;

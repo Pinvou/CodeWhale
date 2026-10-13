@@ -6,6 +6,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_WORKFLOW = REPO_ROOT / ".github/workflows/release-packages.yml"
 PR_CHECK_WORKFLOW = REPO_ROOT / ".github/workflows/pr-check.yml"
 RUST_CACHE_ACTION = "uses: Swatinem/rust-cache@v2"
+NO_SAVE = "save-if: false"
 MAIN_ONLY_SAVE = "save-if: ${{ github.ref == 'refs/heads/main' }}"
 
 
@@ -18,7 +19,14 @@ def _without_yaml_comments(block):
 
 
 class ReleaseCachePolicyTests(unittest.TestCase):
-    def test_release_rust_caches_are_read_only_outside_main(self):
+    def test_release_rust_caches_never_save(self):
+        # Release caches are 1-2 GB each. While they were main-save (the
+        # pre-2026-10 policy), every VERSION push landed 4-6 GB of cache at
+        # once and the 10 GB LRU flushed the PR-gate caches (windows/macos/
+        # rust-test/lint) in the same stroke — the eviction dynamic that left
+        # mac-build permanently cold. Releases are rare and have passed cold
+        # throughout, so they are now strictly read-only: restore if an entry
+        # exists, never write, keep the gate caches resident.
         workflow = _without_yaml_comments(
             RELEASE_WORKFLOW.read_text(encoding="utf-8")
         )
@@ -36,9 +44,14 @@ class ReleaseCachePolicyTests(unittest.TestCase):
         for step in cache_steps:
             with self.subTest(step=step.splitlines()[0].strip()):
                 self.assertIn(
-                    MAIN_ONLY_SAVE,
+                    NO_SAVE,
                     step,
-                    "非 main release 只能读取缓存，禁止写入分支缓存",
+                    "release runs must never write caches (they burst-evict the PR-gate caches)",
+                )
+                self.assertNotIn(
+                    "save-if: ${{",
+                    step,
+                    "a release cache must not condition a save on any ref (save-if: false is the policy)",
                 )
 
     def test_rust_test_allows_main_to_rebuild_cold_cache(self):
@@ -85,8 +98,14 @@ class ReleaseCachePolicyTests(unittest.TestCase):
                 self.assertIn(
                     'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"', job_env
                 )
+                # size-policy flags(与 docs/binary-size-optimization.md 一致):
+                # lld(BFD OOM + 无 ICF)、--icf=safe(lld 同码折叠,保守层)、
+                # remap-path-prefix(制品内嵌路径规一化,顶层 rustc flag)。
                 self.assertIn(
-                    'RUSTFLAGS: "-C link-arg=-fuse-ld=lld"', job_env
+                    'RUSTFLAGS: "-C link-arg=-fuse-ld=lld '
+                    '-C link-arg=-Wl,--icf=safe '
+                    '--remap-path-prefix=${{ github.workspace }}=/"',
+                    job_env,
                 )
                 self.assertIn("build-essential pkg-config cmake lld", job)
 
