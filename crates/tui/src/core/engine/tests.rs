@@ -27827,6 +27827,96 @@ async fn refused_hydration_emits_no_load_status_and_never_enters_the_batch() {
     }
 }
 
+/// The hydration batch's eviction park is production wiring, not just the
+/// shared helper: a direct call that hydrates a deferred tool can itself
+/// overflow the collective bounds and evict a cached victim. Driven through
+/// the real `plan_tool_calls`, the batch must park the note for the turn's
+/// first recorded result.
+#[tokio::test]
+async fn hydration_batch_eviction_parks_its_note_through_plan_tool_calls() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("unused")]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    // `notify` has a registered execution path (so the direct call passes
+    // the dispatch gate) and its catalog entry is deferred and admittable —
+    // but admitting it on top of the pre-filled cache overflows the
+    // collective byte budget and evicts the LRU-front victim.
+    let mut registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    registry.register(std::sync::Arc::new(crate::tools::notify::NotifyTool));
+    let catalog = vec![
+        heavy_deferred_tool("notify", 4_000),
+        heavy_deferred_tool("cached-a", 7_000),
+        heavy_deferred_tool("cached-b", 7_000),
+    ];
+    engine
+        .session
+        .tool_activation_cache
+        .activate(&catalog, &["cached-a".to_string(), "cached-b".to_string()]);
+    let surface = test_tool_surface(&engine, registry, Some(catalog.clone()), AppMode::Agent);
+    let tool_registry = Some(&surface.registry);
+    let mut tool_uses = vec![super::streaming::ToolUseState {
+        id: "hydrate-1".to_string(),
+        name: "notify".to_string(),
+        input: json!({}),
+        caller: None,
+        thought_signature: None,
+        input_buffer: String::new(),
+        input_parse_error: None,
+    }];
+    let mut active = HashSet::new();
+    let mut budget = crate::tools::tool_call_budget::ToolCallBudget::new(surface.max_tool_calls);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    engine
+        .plan_tool_calls(
+            mock.as_ref(),
+            &mut turn,
+            &surface,
+            &mut tool_uses,
+            &catalog,
+            tool_registry,
+            &mut active,
+            &mut budget,
+            AppMode::Agent,
+        )
+        .await;
+
+    let notes = &engine.session.pending_toolbox_eviction_notes;
+    assert_eq!(
+        notes.len(),
+        1,
+        "the hydration batch must park its eviction note for the turn's first recorded result: {notes:?}"
+    );
+    assert_eq!(
+        notes[0].trigger,
+        crate::core::session::ToolboxEvictionTrigger::Step,
+        "a hydration is a non-search activation step: {notes:?}"
+    );
+    assert_eq!(
+        notes[0].evicted,
+        vec!["cached-a".to_string()],
+        "the note must name the LRU-front victim the admission evicted: {notes:?}"
+    );
+    assert!(
+        !engine.session.tool_activation_cache.contains("cached-a")
+            && engine.session.tool_activation_cache.contains("cached-b")
+            && engine.session.tool_activation_cache.contains("notify"),
+        "the victim must leave the cache while the sibling and the hydrated tool stay"
+    );
+    assert!(
+        active.contains("notify"),
+        "the hydrated tool must join the active set: {active:?}"
+    );
+}
+
 /// Turn-start revalidation and a hydration batch can both evict in the same
 /// turn; the parked notes must combine, not overwrite.
 #[tokio::test]
