@@ -3,6 +3,10 @@
 # 由私有 Windows 发布流水线在构建机上调用(仓库内无 CI 引用属预期)。
 # 输入产物名与 release-packages.yml 的 tauri nsis 默认名
 # pinvou3_<version>_x64-setup.exe 一致。
+# 需 pwsh 7.2+:CompressionLevel::SmallestSize 是 .NET 6 才引入的枚举成员,
+# Windows PowerShell 5.1(.NET Framework)与 PowerShell 6.x/7.0/7.1(.NET Core/.NET 5)
+# 均无该成员;不声明版本要求会在第一个 CreateEntry 处中途失败。
+#requires -Version 7.2
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
@@ -81,7 +85,7 @@ function Add-Utf8NoBomEntry {
 
     $entry = $Archive.CreateEntry(
         $EntryName,
-        [System.IO.Compression.CompressionLevel]::Optimal
+        [System.IO.Compression.CompressionLevel]::SmallestSize
     )
     $entryStream = $entry.Open()
     try {
@@ -221,7 +225,7 @@ try {
             $innerArchive,
             $source,
             "Files\Pinvou3\$exeName",
-            [System.IO.Compression.CompressionLevel]::Optimal
+            [System.IO.Compression.CompressionLevel]::SmallestSize
         ) | Out-Null
         Add-Utf8NoBomEntry -Archive $innerArchive -EntryName 'OtaInfo.json' -Text (ConvertTo-CrlfJson $otaInfo)
     } finally {
@@ -259,7 +263,7 @@ try {
             $outerArchive,
             $fullPackPath,
             'FullPack.zip',
-            [System.IO.Compression.CompressionLevel]::Optimal
+            [System.IO.Compression.CompressionLevel]::SmallestSize
         ) | Out-Null
         Add-Utf8NoBomEntry -Archive $outerArchive -EntryName 'UpdatePackInfo.json' -Text (ConvertTo-CrlfJson $updatePackInfo)
     } finally {

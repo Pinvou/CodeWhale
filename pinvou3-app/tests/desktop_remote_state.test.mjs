@@ -28,6 +28,7 @@ function connected(connectionId = 'connection-1', leaseEpoch = '2') {
 function makeBridge(responses = {}) {
   const callbacks = new Map();
   const calls = [];
+  const notifications = [];
   const host = { window: {} };
   vm.createContext(host);
   vm.runInContext(fs.readFileSync(logicPath, 'utf8'), host);
@@ -36,7 +37,12 @@ function makeBridge(responses = {}) {
   const bridge = host.window.__PINVOU_TAURI_BRIDGE_FEATURES__['desktop-remote-control']({
     state,
     can: () => true,
-    notify() {},
+    notify(domains) {
+      assert.ok(Array.isArray(domains), 'precise bridge notification requires a domain array');
+      assert.ok(domains.length > 0);
+      assert.ok(domains.every(domain => ['desktopRemoteControl', 'chat'].includes(domain)));
+      notifications.push(JSON.parse(JSON.stringify(domains)));
+    },
     listen(name, callback) {
       callbacks.set(name, callback);
       return Promise.resolve(() => callbacks.delete(name));
@@ -49,6 +55,7 @@ function makeBridge(responses = {}) {
   return {
     bridge,
     calls,
+    notifications,
     get state() { return state.desktopRemoteControl; },
     emit(name, payload) {
       assert.ok(callbacks.has(name), `missing subscription: ${name}`);
@@ -56,6 +63,11 @@ function makeBridge(responses = {}) {
     },
   };
 }
+
+test('remote bridge installation publishes the precise remote domain array', () => {
+  const host = makeBridge();
+  assert.deepEqual(host.notifications, [['desktopRemoteControl']]);
+});
 
 test('archive management enumerates hidden candidates without reviving ordinary history', async () => {
   const hidden = { localSessionId: 'remote-hidden', title: 'Hidden', pinned: false,

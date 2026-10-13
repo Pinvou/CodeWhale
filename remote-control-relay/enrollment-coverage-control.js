@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import { EnrollmentMigrationHandler } from "./enrollment-migration-handler.js";
-import { ENROLLMENT_NAMESPACE, loadEnrollmentRegistryConfig } from "./enrollment-registry.js";
+import { ENROLLMENT_NAMESPACE, loadEnrollmentRegistryConfig,
+  enrollmentKeyringFingerprint, enrollmentKeyringUsesKey } from "./enrollment-registry.js";
 import { isEnrollmentEndpointIdentifier } from "./identifier-contract.js";
 
 const REQUEST_SCHEMA = "pinvou-enrollment-coverage-request";
@@ -46,6 +47,8 @@ export function loadEnrollmentCoverageControlConfig(env = process.env, { require
   if (key.length < 32 || key.length > 4096
     || keyText === env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY
     || keyText === env.PINVOU_REMOTE_PAIRING_HMAC_KEY) fail("coverage_control_key_invalid");
+  if (env.PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON
+    && enrollmentKeyringUsesKey(loadEnrollmentRegistryConfig(env), key)) fail("coverage_control_key_invalid");
   return { host, port, key };
 }
 
@@ -56,6 +59,7 @@ function storeBinding(env, key) {
   return mac(key, "store", Buffer.from(JSON.stringify({ config,
     key_id: env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID,
     key_fingerprint: mac(key, "credential-key", Buffer.from(env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY, "utf8")),
+    keyring_fingerprint: enrollmentKeyringFingerprint(config, key),
   }), "utf8"));
 }
 

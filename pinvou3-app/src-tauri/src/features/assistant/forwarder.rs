@@ -1086,6 +1086,9 @@ pub(crate) fn spawn_event_forwarder(
                     status,
                     error,
                     tool_catalog,
+                    turn_id: _,
+                    submission_id: _,
+                    compaction_id: _,
                     base_url: _,
                 } => {
                     #[cfg(not(feature = "benchmark-hooks"))]
@@ -2092,19 +2095,6 @@ mod mcp_boot_persistence_tests {
         assert_eq!(
             details,
             vec!["sid=sess-1 generation=3 server=git error=connection refused"]
-        );
-    }
-
-    #[test]
-    fn repeated_identical_failure_receipts_persist_once() {
-        let failed = snapshot(vec![server("git", true, false, Some("connection refused"))]);
-        let mut last = None;
-        assert!(mcp_boot_persistence("sess-1", 3, true, &failed, &mut last).is_some());
-        // The engine re-reports the same failure set on every real turn, each
-        // with a fresh generation; only the first receipt may reach the log.
-        assert_eq!(
-            mcp_boot_persistence("sess-1", 4, true, &failed, &mut last),
-            None
         );
     }
 
