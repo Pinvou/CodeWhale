@@ -65,11 +65,17 @@ type UsageSettlementRepairCommandInput struct {
 // usageRepairAllocation is one frozen hold allocation with the capacity the
 // closed plan measured for it.
 type usageRepairAllocation struct {
-	PackageID   uuid.UUID
-	ComponentID uuid.UUID
-	LotID       uuid.UUID
-	Reserved    int64
-	Settleable  int64
+	PackageID      uuid.UUID
+	ComponentID    uuid.UUID
+	LotID          uuid.UUID
+	Reserved       int64
+	Settleable     int64
+	Available      int64
+	ActiveGrant    int64
+	SuspendedGrant int64
+	SettledBefore  int64
+	ReleasedBefore int64
+	Members        []usageRepairReleasedMember
 }
 
 // UsageSettlementRepairPlan is the closed, recomputable owner projection of one
@@ -92,6 +98,7 @@ type UsageSettlementRepairPlan struct {
 	AllocationsDigest    string
 	FactsDigest          string
 	Allocations          []usageRepairAllocation
+	MemberBacked         bool
 }
 
 // UsageSettlementRepairFrozenFacts is the wire-visible owner projection an
@@ -126,11 +133,14 @@ type usageRepairReader interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
+// usageSettlementRepairConflict marks only a zero-row owner CAS as a definite
+// conflict. Storage and context errors retain their original identity so the
+// authorization consumer keeps an uncertain attempt UNKNOWN.
 func usageSettlementRepairConflict(stage string, cause error) error {
 	if cause == nil {
 		return errors.Join(ErrConflict, errors.New(stage))
 	}
-	return errors.Join(ErrConflict, fmt.Errorf("%s: %w", stage, cause))
+	return fmt.Errorf("%s: %w", stage, cause)
 }
 
 // usageSettlementRepairPlanFrom derives the only permitted repair from
@@ -223,11 +233,16 @@ FROM usage_loss_reviews WHERE id=$1`, input.LossReviewID).
 	if repairExists || repairJournal || repairReceivable {
 		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
-	// The settleable capacity of each frozen allocation is what the release path
-	// gave back to the component: the component's current available balance,
-	// capped by the allocation's original reservation.
+	memberIdentity, err := usageRepairReleasedMemberIdentityFrom(ctx, source, plan.HoldID, plan.WalletID)
+	if err != nil {
+		return UsageSettlementRepairPlan{}, err
+	}
+	plan.MemberBacked = memberIdentity != nil
+	// Buffer the ordered component rows before reading their member allocations:
+	// pgx transactions cannot issue another query while a result set is open.
 	rows, err := source.Query(ctx, `SELECT allocation.package_id,allocation.component_id,component.credit_lot_id,
-allocation.reserved_microcredits,component.available_microcredits
+allocation.reserved_microcredits,component.available_microcredits,component.active_grant_microcredits,
+component.suspended_grant_microcredits,allocation.settled_microcredits,allocation.released_microcredits
 FROM usage_hold_allocations allocation
 JOIN entitlement_components component ON component.id=allocation.component_id
 WHERE allocation.hold_id=$1
@@ -237,24 +252,17 @@ ORDER BY component.expires_at,CASE component.component_type WHEN 'BONUS' THEN 0 
 		return UsageSettlementRepairPlan{}, err
 	}
 	allocations := []usageRepairAllocation{}
-	remaining := plan.ExpectedMicrocredits
 	for rows.Next() {
 		item := usageRepairAllocation{}
-		var available int64
-		if err := rows.Scan(&item.PackageID, &item.ComponentID, &item.LotID, &item.Reserved, &available); err != nil {
+		if err := rows.Scan(&item.PackageID, &item.ComponentID, &item.LotID, &item.Reserved, &item.Available,
+			&item.ActiveGrant, &item.SuspendedGrant, &item.SettledBefore, &item.ReleasedBefore); err != nil {
 			rows.Close()
 			return UsageSettlementRepairPlan{}, err
 		}
-		if item.Reserved <= 0 || available < 0 || item.LotID == uuid.Nil {
+		if item.Reserved <= 0 || item.Available < 0 || item.LotID == uuid.Nil {
 			rows.Close()
 			return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
 		}
-		item.Settleable = min(remaining, min(item.Reserved, available))
-		if item.Settleable < 0 {
-			rows.Close()
-			return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
-		}
-		remaining -= item.Settleable
 		allocations = append(allocations, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -263,6 +271,33 @@ ORDER BY component.expires_at,CASE component.component_type WHEN 'BONUS' THEN 0 
 	}
 	rows.Close()
 	if len(allocations) == 0 {
+		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	remaining := plan.ExpectedMicrocredits
+	var memberRows, reservedTotal int64
+	for i := range allocations {
+		item := &allocations[i]
+		if memberIdentity != nil {
+			if item.SettledBefore != 0 || item.ReleasedBefore != item.Reserved || item.Reserved > maxMicrocredits-reservedTotal {
+				return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
+			}
+			members, settleable, err := usageRepairReleasedMembersFrom(ctx, source, plan.HoldID, memberIdentity, *item, remaining)
+			if err != nil {
+				return UsageSettlementRepairPlan{}, err
+			}
+			item.Members, item.Settleable = members, settleable
+			memberRows += int64(len(members))
+			reservedTotal += item.Reserved
+		} else {
+			// Preserve the original personal funding and consumption priority.
+			item.Settleable = min(remaining, min(item.Reserved, item.Available))
+		}
+		if item.Settleable < 0 || item.Settleable > remaining {
+			return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
+		}
+		remaining -= item.Settleable
+	}
+	if memberIdentity != nil && (memberRows != memberIdentity.AllocationCount || reservedTotal != maxMicrocredits) {
 		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
 	plan.SettledMicrocredits = plan.ExpectedMicrocredits - remaining
@@ -278,15 +313,16 @@ ORDER BY component.expires_at,CASE component.component_type WHEN 'BONUS' THEN 0 
 	}
 	sort.Slice(allocations, func(i, j int) bool { return allocations[i].ComponentID.String() < allocations[j].ComponentID.String() })
 	type allocationFacts struct {
-		ComponentID string `json:"component_id"`
-		LotID       string `json:"credit_lot_id"`
-		Reserved    int64  `json:"reserved_microcredits"`
-		Settleable  int64  `json:"settleable_microcredits"`
+		ComponentID string                      `json:"component_id"`
+		LotID       string                      `json:"credit_lot_id"`
+		Reserved    int64                       `json:"reserved_microcredits"`
+		Settleable  int64                       `json:"settleable_microcredits"`
+		Members     []usageRepairReleasedMember `json:"members,omitempty"`
 	}
 	facts := make([]allocationFacts, 0, len(allocations))
 	for _, item := range allocations {
 		facts = append(facts, allocationFacts{ComponentID: item.ComponentID.String(), LotID: item.LotID.String(),
-			Reserved: item.Reserved, Settleable: item.Settleable})
+			Reserved: item.Reserved, Settleable: item.Settleable, Members: item.Members})
 	}
 	digest, err := json.Marshal(map[string]any{
 		"hold_id": plan.HoldID.String(), "usage_request_id": plan.UsageRequestID.String(),
@@ -446,6 +482,9 @@ func (r *PostgresRepository) ApplyUsageSettlementRepair(ctx context.Context, inp
 	if err != nil {
 		return UsageSettlementRepairResult{}, err
 	}
+	if err := lockUsageRepairReleasedMembers(ctx, tx, input.Command.HoldID, walletID); err != nil {
+		return UsageSettlementRepairResult{}, err
+	}
 	now := r.now()
 	if err := usageSettlementRepairExecutionActivation(ctx, tx, input, now); err != nil {
 		return UsageSettlementRepairResult{}, err
@@ -486,12 +525,8 @@ WHERE id=$1 AND remaining_microcredits>=$2`, item.LotID, item.Settleable)
 		if err := insertPosting(ctx, tx, entryID, walletAccount, -item.Settleable, &item.LotID, now); err != nil {
 			return UsageSettlementRepairResult{}, err
 		}
-		memberBacked, memberErr := hasMemberQuotaAllocations(ctx, tx, plan.HoldID, item.ComponentID)
-		if memberErr != nil {
-			return UsageSettlementRepairResult{}, memberErr
-		}
-		if memberBacked {
-			if err := settleMemberQuotaComponent(ctx, tx, plan.HoldID, item.ComponentID, item.Settleable, now); err != nil {
+		if plan.MemberBacked {
+			if err := settleUsageRepairReleasedMembers(ctx, tx, plan.HoldID, item, now); err != nil {
 				return UsageSettlementRepairResult{}, err
 			}
 		} else {

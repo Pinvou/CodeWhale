@@ -94,10 +94,12 @@ function clearReauthenticationDraft() {
   return storageCleared;
 }
 
-export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PERMISSIONS, currentUserID = '', authorizationRefreshing = false, authorizationRefreshGuard = null }) {
+export function AdminOperationsWorkspace({ client, copy, language = 'en', permissions = EMPTY_PERMISSIONS, currentUserID = '', authorizationRefreshing = false, authorizationRefreshGuard = null }) {
   const labels = copy.operations;
   const permissionSet = new Set(permissions);
   const canManage = permissionSet.has('platform.registration-bonus.manage');
+  const canRead = permissionSet.has('platform.registration-bonus.read');
+  const locale = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language] || 'en-US';
   const returnAttemptID = useRef(reauthenticationAttemptID());
   const initialStoredDraft = useRef(storedReauthenticationDraft());
   const workspaceUserID = useRef(currentUserID);
@@ -150,7 +152,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
       });
       return true;
     } catch (error) {
-      if (error?.name !== 'AbortError' && !signal?.aborted && mountedRef.current && request === loadGeneration.current) setState({ loading: false, saving: false, error: labels.loadFailed, errorCode: error?.code || '', notice: '' });
+      if (mountedRef.current && request === loadGeneration.current && currentUserID === currentUserIDRef.current) setState({ loading: false, saving: false, error: labels.loadFailed, errorCode: error?.code || '', notice: '' });
       return false;
     }
   }, [client, currentUserID, labels.loadFailed, labels.reauthenticationDraftCleanupFailed, labels.reauthenticationDraftConflict, labels.reauthenticationDraftExpired]);
@@ -390,7 +392,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
       ? { label: labels.retryDraftCleanup, run: retryDraftCleanup }
     : state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_STORAGE_UNAVAILABLE'
       ? { label: state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' ? labels.reauthenticate : labels.retryReauthentication, run: reauthenticate }
-      : { label: copy.retry, run: () => void load() };
+      : { label: copy.retry, read: true, run: () => void load() };
 
   return (
     <section className="adm-panel adm-settings-panel adm-registration-bonus" data-testid="registration-bonus-policy">
@@ -398,14 +400,14 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
       <div className="adm-inline-message warn" role="note">{labels.lifetimeWarning}</div>
       {pendingDraft && <div className="adm-inline-message warn adm-registration-bonus-draft-prompt" role="status"><span>{labels.unfinishedReauthenticationDraft}</span><div><button type="button" onClick={recoverPendingDraft} disabled={state.loading || !policy}>{labels.recoverDraft}</button><button type="button" onClick={discardPendingDraft}>{labels.discardDraft}</button></div></div>}
       {(unknownWrite || recoveryBlocked) && !state.error && <div className="adm-inline-message error" role="alert"><span>{recoveryBlocked ? labels.pendingStorageFailed : labels.outcomeUnknown}</span>{unknownWrite && <button type="button" disabled={state.saving || authorizationRefreshing || !canManage || recoveryBlocked} onClick={() => void save()}>{labels.retryUnknown}</button>}</div>}
-      {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={errorAction.run} disabled={state.loading || state.saving || authorizationRefreshing || !canManage || recoveryBlocked}>{errorAction.label}</button></div>}
+      {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={errorAction.run} disabled={state.loading || state.saving || authorizationRefreshing || (errorAction.read ? !canRead : !canManage) || recoveryBlocked}>{errorAction.label}</button></div>}
       {state.notice && <div className="adm-inline-message ok" role="status">{state.notice}</div>}
       {state.loading && <p className="adm-muted">{copy.loading}</p>}
       {!state.loading && policy && (
         <form className="adm-sms-form" onSubmit={save}>
           <dl className="adm-registration-bonus-summary">
             <div><dt>{labels.revision}</dt><dd>{policy.revision}</dd></div>
-            <div><dt>{labels.updatedAt}</dt><dd>{new Date(policy.updated_at).toLocaleString()}</dd></div>
+            <div><dt>{labels.updatedAt}</dt><dd>{new Date(policy.updated_at).toLocaleString(locale)}</dd></div>
           </dl>
           <div className={`adm-inline-message ${eligibilityReady ? 'ok' : 'warn'}`} role="status" data-testid="registration-bonus-readiness">{eligibilityReady ? labels.eligibilityReady : labels.eligibilityBlocked.replace('{count}', String(policy.unrecoverable_registration_count || 0))}</div>
           <div className="adm-registration-bonus-editor">

@@ -66,7 +66,7 @@ export function Usage({ copy, language, records, unavailable, page, hasPrevious,
                   <span className={`ap-status ap-usage-status-${statusClass}`}>{copy.usageStatuses[record.display_status] || record.display_status}</span>
                   {record.usage_request_count === 1 && (
                     <small>
-                      {copy.executionState}: {record.execution_status} · {copy.settlementState}: {record.settlement_status}
+                      {copy.executionState}: {copy.executionStatuses?.[record.execution_status] || record.execution_status} · {copy.settlementState}: {copy.settlementStatuses?.[record.settlement_status] || record.settlement_status}
                     </small>
                   )}
                   {canStop && (

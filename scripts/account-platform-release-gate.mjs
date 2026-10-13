@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { verifyReadinessAttestation } from './account-platform-readiness-attestation.mjs';
+import { compareSemVer, parseSemVer } from './account-platform-semver.mjs';
 import { readFile } from 'node:fs/promises';
 import { runAuthorizationCoverage } from './check-account-platform-authorization-coverage.mjs';
 
@@ -14,20 +15,6 @@ function required(name) {
 
 function base64url(value) {
   return Buffer.from(value, 'base64url');
-}
-
-function semver(value) {
-  const match = String(value).match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
-  if (!match) throw new Error(`release_gate_version_invalid:${value}`);
-  return match.slice(1).map(Number);
-}
-
-function compare(left, right) {
-  const a = semver(left); const b = semver(right);
-  for (let index = 0; index < 3; index += 1) {
-    if (a[index] !== b[index]) return a[index] - b[index];
-  }
-  return 0;
 }
 
 async function jsonFetch(url, label) {
@@ -52,7 +39,9 @@ const portalURL = new URL(required('PINVOU_ACCOUNT_PORTAL_URL'));
 const environment = required('PINVOU_ACCOUNT_ENVIRONMENT');
 const keyID = required('PINVOU_CLIENT_READINESS_KEY_ID');
 const publicKey = base64url(required('PINVOU_CLIENT_READINESS_PUBLIC_KEY'));
-const clientVersion = required('PINVOU_RELEASE_CLIENT_VERSION');
+const clientVersion = process.env.PINVOU_RELEASE_CLIENT_VERSION;
+if (!clientVersion) throw new Error('release_gate_configuration_missing:PINVOU_RELEASE_CLIENT_VERSION');
+parseSemVer(clientVersion);
 
 for (const url of [compatibilityURL, issuer, accountURL, gatewayURL, portalURL]) {
   if (url.protocol !== 'https:' && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
@@ -75,8 +64,8 @@ if (!compatibility.attestation_available || compatibility.environment !== enviro
   || compatibility.attestation_key_id !== keyID
   || compatibility.contract_version !== claims.contract_version
   || compatibility.service_version !== claims.service_version
-  || compare(clientVersion, compatibility.minimum_client_version) < 0
-  || compare(clientVersion, compatibility.maximum_client_version) > 0) {
+  || compareSemVer(clientVersion, compatibility.minimum_client_version) < 0
+  || compareSemVer(clientVersion, compatibility.maximum_client_version) > 0) {
   throw new Error('release_gate_compatibility_mismatch');
 }
 if (String(discovery.issuer || '').replace(/\/$/, '') !== issuer.href.replace(/\/$/, '') || !discovery.jwks_uri) {

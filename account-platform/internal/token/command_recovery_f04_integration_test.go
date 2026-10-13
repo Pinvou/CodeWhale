@@ -77,6 +77,19 @@ func TestF04CredentialPrecheckSubmitsAndRejectsStaleFacts(t *testing.T) {
 	if _, err = r.pool.Exec(ctx, `INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,created_by,created_at) VALUES($1,$2,'controlled','https://provider.invalid',$3,$4,$5,1,'ACTIVE',ARRAY['model'],$6,$7)`, credential, account, cipher, r.secrets.KeyID(), strings.Repeat("a", 64), actor, now); err != nil {
 		t.Fatal(err)
 	}
+	// Stopping unsupported notifications must preserve all previously persisted
+	// events, as well as the real command receipt and its immutable audit below.
+	if _, err = r.pool.Exec(ctx, `INSERT INTO outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at) VALUES($1,'token.management-command.executed.v1',$2,1,'{"preserve":"historical"}','controlled-history',$3)`, uuid.New(), credential, now); err != nil {
+		t.Fatal(err)
+	}
+	outboxSnapshot := func() string {
+		var fact string
+		if err := r.pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(event) ORDER BY event_id),'[]'::jsonb)::text FROM outbox_events event`).Scan(&fact); err != nil {
+			t.Fatal(err)
+		}
+		return fact
+	}
+	historicalOutbox := outboxSnapshot()
 	var allowed atomic.Bool
 	allowed.Store(true)
 	s := f04AuthorizedService(t, r, &actor, &allowed)
@@ -183,6 +196,13 @@ func TestF04CredentialPrecheckSubmitsAndRejectsStaleFacts(t *testing.T) {
 	w = f04Request(recovery, "GET", "/recovery?command_type=TOKEN_CREDENTIAL_VALIDATE", nil, "f04-valid-credential-key")
 	if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" || probe.calls.Load() != 1 {
 		t.Fatalf("recovery %d %s", w.Code, w.Body.String())
+	}
+	if outboxSnapshot() != historicalOutbox {
+		t.Fatal("ordinary notification appended or historical event changed")
+	}
+	var auditCount int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM token_audit_logs WHERE actor_user_id=$1 AND action='TOKEN_CREDENTIAL_VALIDATE' AND summary->>'command_reference'=$2 AND summary->>'status'='SUCCEEDED'`, actor, result.CommandReference.String()).Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("immutable command audit count=%d err=%v", auditCount, err)
 	}
 }
 

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -23,8 +21,6 @@ const (
 	defaultUpgradeURL      = "https://github.com/Pinvou/pinvou3/releases/latest"
 	defaultReleaseManifest = `[{"version":"0.8.0","released_at":"2026-08-01T00:00:00Z"},{"version":"0.7.0","released_at":"2026-06-01T00:00:00Z","deprecation_notice_at":"2026-08-31T00:00:00Z","sunset_at":"2026-10-30T00:00:00Z"},{"version":"0.6.0","released_at":"2026-03-01T00:00:00Z","deprecation_notice_at":"2026-07-03T00:00:00Z","sunset_at":"2026-09-01T00:00:00Z"}]`
 )
-
-var versionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:[-+][0-9A-Za-z.-]+)?$`)
 
 type Release struct {
 	Version             string `json:"version"`
@@ -80,7 +76,7 @@ func NewPolicy(contractVersion, upgradeURL string, releases []Release) (Policy, 
 	parsed := make([]parsedRelease, len(policy.Releases))
 	seen := map[string]struct{}{}
 	for index, release := range policy.Releases {
-		if !versionPattern.MatchString(release.Version) {
+		if !ValidVersion(release.Version) {
 			return Policy{}, fmt.Errorf("invalid client release version %q", release.Version)
 		}
 		if _, duplicate := seen[release.Version]; duplicate {
@@ -111,7 +107,11 @@ func NewPolicy(contractVersion, upgradeURL string, releases []Release) (Policy, 
 		}
 	}
 	for index := 1; index < len(policy.Releases); index++ {
-		if compareVersions(policy.Releases[index-1].Version, policy.Releases[index].Version) <= 0 {
+		comparison, err := CompareVersions(policy.Releases[index-1].Version, policy.Releases[index].Version)
+		if err != nil {
+			return Policy{}, err
+		}
+		if comparison <= 0 {
 			return Policy{}, errors.New("client release versions must be ordered current to oldest")
 		}
 		if !parsed[index-1].released.After(parsed[index].released) {
@@ -153,7 +153,7 @@ func (p Policy) Wrap(next http.Handler) http.Handler {
 		if manifest.SunsetAt != "" {
 			w.Header().Set("Sunset", manifest.SunsetAt)
 		}
-		version := strings.TrimSpace(r.Header.Get(ClientVersionHeader))
+		version := r.Header.Get(ClientVersionHeader)
 		if release, ok := p.release(version); ok && release.SunsetAt != "" {
 			w.Header().Set("X-Client-Sunset-At", release.SunsetAt)
 			if notice, err := time.Parse(time.RFC3339, release.DeprecationNoticeAt); err == nil && !p.now().Before(notice) {
@@ -162,7 +162,12 @@ func (p Policy) Wrap(next http.Handler) http.Handler {
 			}
 		}
 		requiresVersion := version == "" && strings.TrimSpace(r.Header.Get("Authorization")) != ""
-		if isUnsafe(r.Method) && isExternalPath(r.URL.Path) && (requiresVersion || (version != "" && compareVersions(version, manifest.MinimumSupportedClientVersion) < 0)) {
+		versionRejected := false
+		if version != "" {
+			comparison, err := CompareVersions(version, manifest.MinimumSupportedClientVersion)
+			versionRejected = err != nil || comparison < 0
+		}
+		if isUnsafe(r.Method) && isExternalPath(r.URL.Path) && (requiresVersion || versionRejected) {
 			w.Header().Set("Link", "<"+manifest.UpgradeURL+">; rel=\"latest-version\"")
 			api.WriteJSON(w, http.StatusUpgradeRequired, api.Error{Code: "CLIENT_UPGRADE_REQUIRED", Message: "this client version is no longer allowed to perform remote writes", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"api_contract_version": manifest.APIContractVersion, "minimum_supported_client_version": manifest.MinimumSupportedClientVersion, "sunset_at": manifest.SunsetAt, "upgrade_url": manifest.UpgradeURL}})
 			return
@@ -208,32 +213,4 @@ func isUnsafe(method string) bool {
 
 func isExternalPath(path string) bool {
 	return !strings.HasPrefix(path, "/internal/") && !strings.HasPrefix(path, "/health") && path != "/metrics"
-}
-
-func compareVersions(left, right string) int {
-	parse := func(value string) []int {
-		value = strings.SplitN(strings.SplitN(value, "+", 2)[0], "-", 2)[0]
-		parts := strings.Split(value, ".")
-		result := make([]int, 3)
-		for index := range result {
-			if index < len(parts) {
-				_, _ = fmt.Sscanf(parts[index], "%d", &result[index])
-			}
-		}
-		return result
-	}
-	a, b := parse(left), parse(right)
-	for index := range a {
-		if a[index] < b[index] {
-			return -1
-		}
-		if a[index] > b[index] {
-			return 1
-		}
-	}
-	return 0
-}
-
-func SortVersions(versions []string) {
-	sort.Slice(versions, func(i, j int) bool { return compareVersions(versions[i], versions[j]) > 0 })
 }

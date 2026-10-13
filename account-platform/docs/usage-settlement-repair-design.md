@@ -38,11 +38,12 @@
 **允许的领域变化**（单次执行恰好产生，同一 Billing Serializable 事务内）：
 
 1. 一条 `USAGE` journal：`business_reference='usage-settlement-repair:'||usage_request_id`，postings = 逐 lot 钱包负债账户 `-settled`（带 lot）、`USAGE_REVENUE +M`、`overage>0` 时 `RECEIVABLE_ASSET -overage`；`settled+overage=M` 且 journal 合计 0。
-2. 按冻结分配顺序在当前可用额度内扣减：`credit_lots.remaining_microcredits`、`entitlement_components`（`available`/`used`/`status` 按既有结算语义推进）、成员配额按既有 `settleMemberQuotaComponent` 语义。
+2. 按冻结分配顺序在当前可用额度内扣减：`credit_lots.remaining_microcredits`、`entitlement_components`（`available`/`used`/`status` 按既有结算语义推进）、成员配额按下述释放后结算语义。
 3. 钱包 `posted_microcredits-=settled`、`version+1`、`updated_at`；`overage>0` 时按既有 `createReceivableWithinTransaction` 语义创建 `source_type='USAGE_OVERAGE'`、`source_reference='usage-settlement-repair:'||usage_request_id` 的应收并同步钱包应收投影。
-4. `usage_hold_allocations` 的 `settled_microcredits`/`released_microcredits` 与 `updated_at` 按既有语义回填；`usage_holds` 追加 `usage_snapshot->'settlement_repair'` 子对象（含审批引用、`M`、`settled`、`overage`、前后 `actual`），`actual_microcredits` 更新为 `max(原值, 应结额)`，`terminal_at`/`updated_at` 更新；不得改写 `usage_snapshot` 既有键。
-5. case ① 的 `usage_loss_reviews` 单行推进（`WHERE status='REVIEW_REQUIRED' AND updated_at=$frozen`）：`status='RESOLVED_SETTLED'`、`updated_at=now`；case ② 无该行。
-6. 一条 `usage_settlement_repair_cases` 不可变审计行（见 §7.1）。
+4. 个人额度沿用组件 `available`；组织成员额度按原 hold 的 member allocation/grant 身份，从释放后真实 `grant.available` 与组件 `active_grant` / `suspended_grant` 桶中取较小值，并封顶原释放额。按原组件消费顺序及同组件 grant ID 顺序扣减 available/相应 grant 桶、增加 used，回填原 member allocation 的 settled/released；不再扣已释放 reserved，不重复返还余额或写 `HOLD_RELEASED`。原成员身份与当前合法 membership/status 分别核对并冻结，结算不恢复已停用成员或更改 grant 状态；其他新 hold 的 reserved 与记录保持不变。
+5. `usage_hold_allocations` 的 `settled_microcredits`/`released_microcredits` 与 `updated_at` 按既有语义回填；`usage_holds` 追加 `usage_snapshot->'settlement_repair'` 子对象（含审批引用、`M`、`settled`、`overage`、前后 `actual`），`actual_microcredits` 更新为 `max(原值, 应结额)`，`terminal_at`/`updated_at` 更新；不得改写 `usage_snapshot` 既有键。
+6. case ① 的 `usage_loss_reviews` 单行推进（`WHERE status='REVIEW_REQUIRED' AND updated_at=$frozen`）：`status='RESOLVED_SETTLED'`、`updated_at=now`；case ② 无该行。
+7. 一条 `usage_settlement_repair_cases` 不可变审计行（见 §7.1）。
 
 **明确禁止**：
 
@@ -61,7 +62,7 @@
 | 差额 `M` | `M=A-E`，必须 `>0`；若已有 `'usage-settlement-repair:'` 前缀的 journal/应收或既有 `usage_request_id` 应收，其未结部分计入 E，不得二次创建 |
 | 修正用量证据（case ②） | 必须是与该 `usage_request_id` 绑定的持久核对事实（Token 用量记录/损失复核快照），不得是人工输入的数字 |
 | 损失复核（case ①） | `usage_loss_reviews.status='REVIEW_REQUIRED'`，`claimed_actual_microcredits>=0`，review 的真实 token 用量按 hold 独立冻结的 pricing_snapshot 重算并与 claimed 一致；hold.usage_snapshot 仍保留释放原因，两个 JSON 不要求错误的逐字节相同 |
-| 上限与余额 | `settled<=可用组件额度`、`overage=M-settled>=0`；钱包 `posted_microcredits>=settled`、`status='ACTIVE'` |
+| 上限与余额 | 个人 `settled<=组件 available`；成员 `settled<=原释放额、当前 grant.available、相应组件 active/suspended 桶`，原 hold 的 fully-released member 明细与 usage allocation 合计必须匹配。完整当前 member allocation/grant 事实进入内部 digest；`overage=M-settled>=0`，钱包 `posted_microcredits>=settled`、`status='ACTIVE'` |
 
 判据全部由 Billing 从持久事实重算；proof 不接受浏览器提供的用量、金额、组件或定价，执行期与 proof 均禁止任何外部调用。
 

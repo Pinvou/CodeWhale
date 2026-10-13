@@ -124,14 +124,14 @@ type chargebackRepairReader interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
-// chargebackRepairConflict keeps the stable ErrConflict identity while naming
-// the owner CAS that failed, which is what the operator reads in the audit
-// trail.
+// chargebackRepairConflict marks only a zero-row owner CAS as a definite
+// conflict. Storage and context errors retain their original identity so the
+// authorization consumer keeps an uncertain attempt UNKNOWN.
 func chargebackRepairConflict(stage string, cause error) error {
 	if cause == nil {
 		return errors.Join(ErrConflict, errors.New(stage))
 	}
-	return errors.Join(ErrConflict, fmt.Errorf("%s: %w", stage, cause))
+	return fmt.Errorf("%s: %w", stage, cause)
 }
 
 // chargebackFinancialRepairPlanFrom derives the only permitted compensation from

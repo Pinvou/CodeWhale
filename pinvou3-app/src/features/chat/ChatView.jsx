@@ -1794,7 +1794,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           const items = (result?.items || []).filter(item => item.context_eligible && item.lifecycle_status === 'PUBLISHED');
           setReplacementModels(items);
           setReplacementModelId(current => items.some(item => item.model_id === current) ? current : (items[0]?.model_id || ''));
-        }).catch(error => { if (active) setReplacementError(String(error?.message || error || '')); });
+        }).catch(() => { if (active) setReplacementError('modelSwitchFailed'); });
         return () => { active = false; };
       }, [modelContinuationBlocked, activeSessionId]);
       const createReplacementBranch = useCallback(async () => {
@@ -1806,14 +1806,16 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             sourceTurnId: `message:${Math.max(0, chatItems.length - 1)}`,
             sourceMessageCount: 0,
             replacementModelId,
+            replacementTitleSuffix: t.uiModelReplacement.branchTitleSuffix,
+            defaultChatTitle: t.newChat,
           });
           await bridge.sessions.switchToSession(result.session.id);
-        } catch (error) {
-          setReplacementError(String(error?.message || error || ''));
+        } catch {
+          setReplacementError('modelSwitchFailed');
         } finally {
           setReplacementBusy(false);
         }
-      }, [activeSessionId, chatItems.length, replacementBusy, replacementModelId]);
+      }, [activeSessionId, chatItems.length, replacementBusy, replacementModelId, t.uiModelReplacement.branchTitleSuffix, t.newChat]);
       const sceneCapabilityPreparing = sceneCapabilityStatus && sceneCapabilityStatus.kind === 'preparing';
       const canClearInput = hasDraftText && !voiceActive;
       function handleClearInput() {
@@ -3136,7 +3138,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     </select>
                     <button type="button" onClick={() => void createReplacementBranch()} disabled={replacementBusy || !replacementModelId} className="h-9 rounded-xl bg-amber-600 px-3 font-semibold text-white disabled:opacity-50">{replacementBusy ? t.uiModelReplacement.creating : t.uiModelReplacement.create}</button>
                   </div>
-                  {replacementError && <div role="alert" className="mt-2 break-words text-red-600 dark:text-red-300">{replacementError}</div>}
+                  {replacementError && <div role="alert" className="mt-2 break-words text-red-600 dark:text-red-300">{t.uiSettingsDetail.modelSwitchFailed}</div>}
                 </div>
               )}
               {COMPUTER_USE_ENABLED && (

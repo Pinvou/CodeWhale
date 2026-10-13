@@ -21,6 +21,9 @@ const proof = { command_type: 'ENTITLEMENT_COMPONENT_ADJUSTMENT', policy_version
     source_type: 'BASE', target_type: 'BONUS', amount_microcredits: '9007199254740993', source_evidence_digest: 'a'.repeat(64), facts_digest: 'b'.repeat(64), policy_version: 2 },
   financial_snapshot: { package_total_microcredits: '9223372036854775807', source_original_microcredits: '9223372036854775807', target_original_microcredits: '0', effective_total_microcredits: '9223372036854775807' } };
 let actor = actorA, csrf = 'csrf-initial', permission = true, writes = [], effects = 0, status = '', mode = 'normal', auths = 0, version = 1, updates = [];
+let prechecks = [], expectedReason = 'CORRECTION';
+const caseGroup = process.env.F09_ENTITLEMENT_CASE || 'all';
+assert.ok(['all', 'original', 'navigation', 'reason', 'invalid', 'read-errors'].includes(caseGroup));
 let releaseCreate, createWaiting, submitCalls;
 const json = (response, payload, code = 200) => { response.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(encodeEntitlementCorrectionJSON(payload)); };
 const server = createServer(async (request, response) => {
@@ -30,13 +33,18 @@ const server = createServer(async (request, response) => {
     response.writeHead(302, { Location: url.searchParams.get('return_to') }); return response.end();
   }
   if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: csrf });
-  if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: actor, status: 'ACTIVE', personal_permissions: [], platform_permissions: permission ? ['platform.billing.repairs.request'] : [] });
+  if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: actor, status: 'ACTIVE', personal_permissions: [], platform_permissions: permission ? ['platform.billing.repairs.request', ...(mode === 'navigation' ? ['platform.users.read'] : [])] : [] });
+  if (url.pathname === '/api/admin/account/admin/v1/users') return json(response, { items: [], has_more: false });
   if (url.pathname === '/api/admin/account/admin/v2/approval-command-prechecks') {
     assert.equal(request.method, 'POST'); assert.equal(request.headers['x-csrf-token'], csrf);
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString()), { command_type: proof.command_type, target_resource_id: packageID, payment_order_id: orderID, reason_code: 'CORRECTION' });
+    const payload = JSON.parse(Buffer.concat(chunks).toString()); prechecks.push(payload);
+    assert.deepEqual(payload, { command_type: proof.command_type, target_resource_id: packageID, payment_order_id: orderID, reason_code: expectedReason });
     assert.equal(effects, 0, 'precheck is not a write');
-    return json(response, mode === 'foreign-proof' ? { ...proof, target_resource_id: id(99) } : proof);
+    if (mode === 'invalid-owner-input') return json(response, { code: 'INVALID_APPROVAL_PRECHECK_REQUEST' }, 400);
+    if (mode === 'owner-unavailable') return json(response, { code: 'APPROVAL_PRECHECK_UNAVAILABLE' }, 503);
+    const answer = { ...proof, normalized_command: { ...proof.normalized_command, reason_code: expectedReason } };
+    return json(response, mode === 'foreign-proof' ? { ...answer, target_resource_id: id(99) } : answer);
   }
   if (url.pathname === '/api/admin/approvals/capability') return json(response, { session_approval_wire_version: 2, control: { version: 1, epoch: 1, authorization_relay_epoch: 1 } });
   if (url.pathname === '/api/admin/approvals/requests' && request.method === 'GET') return json(response, { items: status ? [{ approval_request_id: requestID, command_type: proof.command_type, target: { resource_type: proof.target_resource_type, resource_id: packageID }, status, version }] : [], has_more: false });
@@ -80,7 +88,7 @@ await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
 const browser = await puppeteer.launch({ executablePath: browserPath, headless: true, args: ['--no-sandbox'] });
 let passed = 0;
-const reset = () => { actor = actorA; csrf = 'csrf-initial'; permission = true; writes = []; effects = 0; status = ''; mode = 'normal'; auths = 0; version = 1; updates = []; submitCalls = 0; };
+const reset = () => { actor = actorA; csrf = 'csrf-initial'; permission = true; writes = []; effects = 0; status = ''; mode = 'normal'; auths = 0; version = 1; updates = []; submitCalls = 0; prechecks = []; expectedReason = 'CORRECTION'; };
 const click = async (page, text) => {
   await page.waitForFunction(label => [...document.querySelectorAll('button')].some(button => button.textContent === label && !button.disabled), { timeout: 5000 }, text);
   await page.evaluate(label => [...document.querySelectorAll('button')].find(button => button.textContent === label).click(), text);
@@ -99,6 +107,7 @@ const prepare = async (page, language = 'en') => {
   await page.type('section textarea', 'Verified original payment product split');
 };
 try {
+  if (['all', 'original'].includes(caseGroup)) {
   for (const language of ['zh', 'en', 'ja']) {
     reset(); const page = await open(language); await prepare(page, language); await click(page, entitlementCorrectionCopy[language].submit);
     await page.waitForSelector('section article'); assert.equal(effects, 1); assert.equal(status, 'SUBMITTED');
@@ -172,5 +181,52 @@ try {
   await invalid.waitForSelector('section input'); const inputs = await invalid.$$('section input'); await inputs[0].type(packageID); await inputs[1].type(orderID); await inputs[2].type('CORRECTION');
   await click(invalid, entitlementCorrectionCopy.en.precheck); await invalid.waitForFunction(text => document.body.textContent.includes(text), {}, entitlementCorrectionCopy.en.unavailable);
   assert.equal(await invalid.$('section textarea'), null); assert.equal(writes.length, 0); passed++; console.log('PASS compiled foreign owner proof cannot produce a draft'); await invalid.close();
+  }
+  if (['all', 'navigation'].includes(caseGroup)) for (const language of ['zh', 'en', 'ja']) {
+    reset(); mode = 'navigation'; const page = await open(language);
+    await page.waitForFunction(title => document.querySelector('section h2')?.textContent === title, { timeout: 5000 }, entitlementCorrectionCopy[language].title);
+    await prepare(page, language); assert.equal(prechecks.length, 1); assert.equal(writes.length, 0);
+    passed++; console.log(`PASS compiled ${language} correction return section survives other permitted pages`); await page.close();
+  }
+  const fill = async (page, values) => {
+    await page.waitForSelector('section input');
+    for (let i = 0; i < values.length; i++) {
+      const input = (await page.$$('section input'))[i]; await input.focus();
+      const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+      await page.keyboard.down(modifier); await page.keyboard.press('A'); await page.keyboard.up(modifier);
+      await input.press('Backspace'); await input.type(values[i]);
+      assert.equal(await input.evaluate(element => element.value), values[i], 'controlled input replacement must preserve the exact intended field value');
+    }
+  };
+  if (['all', 'reason'].includes(caseGroup)) for (const language of ['zh', 'en', 'ja']) {
+    reset(); const page = await open(language); expectedReason = '中'.repeat(26) + 'ab';
+    await fill(page, [packageID, orderID, expectedReason]); await click(page, entitlementCorrectionCopy[language].precheck);
+    await page.waitForSelector('section dl'); assert.equal(prechecks.length, 1); assert.equal(new TextEncoder().encode(prechecks[0].reason_code).length, 80);
+    await fill(page, [packageID, orderID, '中'.repeat(27)]); await click(page, entitlementCorrectionCopy[language].precheck);
+    await page.waitForFunction(text => document.querySelector('[role="alert"]')?.textContent === text, { timeout: 5000 }, financeCopy[language].inputInvalid);
+    assert.equal(prechecks.length, 1); assert.equal(await page.$('section dl'), null); assert.equal(writes.length, 0);
+    assert.ok(await page.evaluate(text => document.body.textContent.includes(text), entitlementCorrectionCopy[language].reasonCodeHelp));
+    expectedReason = 'CORRECTION'; await fill(page, [packageID, orderID, ' CORRECTION ']); await click(page, entitlementCorrectionCopy[language].precheck);
+    await page.waitForSelector('section dl'); assert.equal(prechecks.length, 2); assert.equal(prechecks[1].reason_code, 'CORRECTION');
+    passed++; console.log(`PASS compiled ${language} 80 UTF8 bytes accepted, 81 bytes rejected locally and original whitespace normalization retained`); await page.close();
+  }
+  if (['all', 'invalid'].includes(caseGroup)) for (const language of ['zh', 'en', 'ja']) {
+    reset(); const page = await open(language); await fill(page, ['not-a-uuid', orderID, 'CORRECTION']);
+    await click(page, entitlementCorrectionCopy[language].precheck);
+    await page.waitForFunction(text => document.querySelector('[role="alert"]')?.textContent === text, { timeout: 5000 }, financeCopy[language].inputInvalid);
+    assert.equal(prechecks.length, 0); assert.equal(writes.length, 0); assert.equal(effects, 0); assert.equal(await page.$('section textarea'), null);
+    passed++; console.log(`PASS compiled ${language} invalid local identifier is input error with zero owner dispatch`); await page.close();
+  }
+  if (['all', 'read-errors'].includes(caseGroup)) for (const language of ['zh', 'en', 'ja']) for (const behavior of ['invalid-owner-input', 'owner-unavailable']) {
+    reset(); mode = behavior; const page = await open(language); await fill(page, [packageID, orderID, 'CORRECTION']);
+    await click(page, entitlementCorrectionCopy[language].precheck);
+    await page.waitForFunction(text => document.querySelector('[role="alert"]')?.textContent === text, { timeout: 5000 }, behavior === 'invalid-owner-input' ? financeCopy[language].inputInvalid : entitlementCorrectionCopy[language].unavailable);
+    assert.equal(prechecks.length, 1); assert.equal(writes.length, 0); assert.equal(effects, 0); assert.equal(await page.$('section textarea'), null);
+    passed++; console.log(`PASS compiled ${language} ${behavior} preserves distinct input versus owner-fact error`); await page.close();
+  }
   console.log(`ENTITLEMENT_COMPILED_PASS ${passed} FAIL 0 SKIP 0`);
+} catch (error) {
+  const views = await Promise.all((await browser.pages()).map(async page => ({ path: new URL(page.url()).pathname, body: await page.evaluate(() => document.body.innerText).catch(() => ''), inputs: await page.$$eval('section input', elements => elements.map(element => element.value)).catch(() => []) })));
+  console.error(JSON.stringify({ diagnostic: 'controlled-loopback-only', caseGroup, mode, prechecks: prechecks.length, writes: writes.length, views }));
+  throw error;
 } finally { await browser.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
