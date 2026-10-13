@@ -28100,6 +28100,108 @@ async fn refused_hydration_emits_no_load_status_and_never_enters_the_batch() {
     }
 }
 
+/// The refusal's `executed: false` marker must reach the `tool.result` audit
+/// payload, not just the receipt metadata: the audit is the record that a
+/// refused, never-executed call is not a successful execution. Driven through
+/// the real refusal receipt this commit's marker reads, the audit line must
+/// carry the marker verbatim.
+#[tokio::test]
+async fn refusal_audit_payload_carries_the_executed_marker() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let _guard = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let audit_path = workspace.path().join("tool-audit.jsonl");
+    let _audit = EnvVarGuard::set("CODEWHALE_TOOL_AUDIT_LOG", &audit_path);
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("unused")]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let mut registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    registry.register(std::sync::Arc::new(crate::tools::notify::NotifyTool));
+    let catalog = vec![
+        heavy_deferred_tool("notify", 20_000),
+        heavy_deferred_tool("cached-b", 100),
+    ];
+    let surface = test_tool_surface(&engine, registry, Some(catalog.clone()), AppMode::Agent);
+    let tool_registry = Some(&surface.registry);
+    let mut tool_uses = vec![super::streaming::ToolUseState {
+        id: "refuse-audit".to_string(),
+        name: "notify".to_string(),
+        input: json!({}),
+        caller: None,
+        thought_signature: None,
+        input_buffer: String::new(),
+        input_parse_error: None,
+    }];
+    let mut active = HashSet::new();
+    let mut budget = crate::tools::tool_call_budget::ToolCallBudget::new(surface.max_tool_calls);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let planned = engine
+        .plan_tool_calls(
+            mock.as_ref(),
+            &mut turn,
+            &surface,
+            &mut tool_uses,
+            &catalog,
+            tool_registry,
+            &mut active,
+            &mut budget,
+            AppMode::Agent,
+        )
+        .await;
+
+    let plan = planned
+        .plans
+        .iter()
+        .find(|plan| plan.id == "refuse-audit")
+        .expect("the refused call must be planned");
+    let receipt = plan
+        .guard_result
+        .as_ref()
+        .expect("the refusal must answer the call as a guard result")
+        .clone();
+
+    // The results phase consumes the receipt exactly as production does.
+    engine
+        .process_tool_results(
+            vec![Some(synthetic_toolbox_outcome(
+                "refuse-audit",
+                "notify",
+                Ok(receipt),
+            ))],
+            &mut catalog.clone(),
+            &mut active,
+            &HashMap::new(),
+        )
+        .await;
+
+    let audit = std::fs::read_to_string(&audit_path).expect("the audit log must exist");
+    let line = audit
+        .lines()
+        .find_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            (value.get("event")? == "tool.result" && value.get("tool_id")? == "refuse-audit")
+                .then_some(value)
+        })
+        .expect("the refusal's tool.result audit line must exist");
+    assert_eq!(
+        line.get("executed").and_then(serde_json::Value::as_bool),
+        Some(false),
+        "the audit must record the refused call as never executed: {line}"
+    );
+    assert_eq!(
+        line.get("success").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "the receipt travels the success path — only the executed marker distinguishes it: {line}"
+    );
+}
+
 /// The hydration batch's eviction park is production wiring, not just the
 /// shared helper: a direct call that hydrates a deferred tool can itself
 /// overflow the collective bounds and evict a cached victim. Driven through
