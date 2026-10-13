@@ -139,3 +139,12 @@ Windows 的 `http://tauri.localhost`。Tauri 在 Linux/macOS 的本地协议是
 这些边界通过真实 bridge/state 模块与受控注册 Promise 验证，不据此宣称所有真实宿主故障矩阵已闭合。
 使用实际 bridge 和可控延迟/拒绝 Promise 验证停止、重建、部分成功及重复停止，
 不将这些单元回归视为真实双端部署验收。
+
+现有 bridge 的受控设备、控制端状态及能力请求入口会在功能模块内部调用 `subscribe()`；
+外部宿主目前不直接映射该模块的 `stop()`/`subscribe()` 生命周期方法。
+`stop()` 退休 renderer 的监听 owner、登记 attempt、waiter、timer 与读取 intent，
+不是后端业务取消，也不会取消已经开始的能力请求 flight。旧 waiter 被拒绝后，原能力请求
+仍保留最多三次尝试、每次响应等待 8 秒及 500/1000 毫秒重试延迟；这不是完整 invoke
+总耗时上限。替代 owner 的合法请求、业务在途回调与历史证据保持独立。
+后续若增加宿主退休接线，必须明确其触发点及是否同时取消能力重试；不能把当前 renderer
+清理方法直接当作所有业务停止，也不能用全局清理误伤替代回合。

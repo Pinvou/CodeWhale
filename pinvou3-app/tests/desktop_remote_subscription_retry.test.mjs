@@ -166,7 +166,11 @@ test('a registration without a cleanup function retires its callback and permits
     await flush();
     const old = f.calls.find(call => call.name === CHANNELS[1]);
     const before = JSON.stringify(f.state.desktopRemoteControl);
-    old.callback({ payload: { status: 'reconnecting' } });
+    const payload = { payload: { status: 'reconnecting', claimRequestId: 'claim-retry',
+      lease: { connectionId: 'connection-retry', controllerLeaseId: 'lease-retry',
+        leaseEpoch: '1', relayEpoch: 'relay-retry', remoteControlGeneration: 'generation-retry' },
+    } };
+    old.callback(payload);
     assert.equal(JSON.stringify(f.state.desktopRemoteControl), before);
     f.feature.subscribe();
     await flush();
@@ -174,6 +178,12 @@ test('a registration without a cleanup function retires its callback and permits
     for (const name of CHANNELS.filter(name => name !== CHANNELS[1])) {
       assert.equal(f.calls.filter(call => call.name === name).length, 1);
     }
+    old.callback(payload);
+    assert.equal(JSON.stringify(f.state.desktopRemoteControl), before);
+    const replacement = f.calls.find(call => call.name === CHANNELS[1] && call.attempt === 2);
+    replacement.callback(payload);
+    assert.equal(f.state.desktopRemoteControl.controllerConnection.status, 'reconnecting');
+    assert.equal(f.state.desktopRemoteControl.controllerConnection.generation, 'generation-retry');
     f.feature.stop();
     assert.equal(f.released.length, CHANNELS.length);
     assert.ok(!f.released.includes(old));

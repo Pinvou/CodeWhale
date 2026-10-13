@@ -3,9 +3,9 @@ import fs from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-function install(invoke = () => Promise.resolve({ status: 'idle' })) {
+function install(invoke = () => Promise.resolve({ status: 'idle' }), timers = { setTimeout, clearTimeout }) {
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
-  const sandbox = { window: root, TextEncoder, setTimeout, clearTimeout };
+  const sandbox = { window: root, TextEncoder, ...timers };
   vm.createContext(sandbox);
   for (const source of ['features/remote-control/remote-control-state.js',
     'platform/tauri/bridge/desktop-remote-control.js']) {
@@ -13,8 +13,9 @@ function install(invoke = () => Promise.resolve({ status: 'idle' })) {
   }
   const registrations = [];
   let notifications = 0;
+  const state = { desktopRemoteControl: root.__PINVOU_REMOTE_CONTROL_STATE__.createState() };
   const feature = root.__PINVOU_TAURI_BRIDGE_FEATURES__['desktop-remote-control']({
-    state: { desktopRemoteControl: root.__PINVOU_REMOTE_CONTROL_STATE__.createState() },
+    state,
     notify() { notifications++; },
     can: () => true,
     invoke,
@@ -26,7 +27,7 @@ function install(invoke = () => Promise.resolve({ status: 'idle' })) {
       return pending.promise;
     },
   });
-  return { feature, registrations, notifications: () => notifications,
+  return { feature, state, registrations, notifications: () => notifications,
     logic: root.__PINVOU_REMOTE_CONTROL_STATE__ };
 }
 
@@ -141,5 +142,124 @@ test('old stop does not invalidate a new-owner proxy request started by a cleanu
     await complete(registrations.slice(9));
   } finally {
     feature.stop();
+  }
+});
+
+test('stop retires waiting timers before offs and preserves replacement capability requests and bounded retries', async () => {
+  const scheduled = new Map();
+  let nextTimer = 0;
+  const timers = {
+    setTimeout(callback, delay) {
+      const id = ++nextTimer;
+      scheduled.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) { scheduled.delete(id); },
+  };
+  const requests = [];
+  const { feature, state, logic, registrations, notifications } = install((command, args) => {
+    if (command === 'desktop_remote_controller_status') return Promise.resolve({ status: 'idle' });
+    if (command === 'desktop_remote_client_event') return Promise.resolve();
+    assert.equal(command, 'desktop_remote_controller_capability_send');
+    const requestId = `request-${requests.length + 1}`;
+    requests.push({ requestId, remoteRef: args.remoteRef });
+    return Promise.resolve({ requestId, sessionId: args.remoteRef === 'ref-old' ? 'session-old' : 'session-new' });
+  }, timers);
+  const flush = () => new Promise(setImmediate);
+  function bind(suffix) {
+    state.desktopRemoteControl = logic.beginControllerIntent(state.desktopRemoteControl, true);
+    state.desktopRemoteControl = logic.applyControllerStatus(state.desktopRemoteControl, {
+      intent: state.desktopRemoteControl.intents.controller, status: 'connected',
+      claimRequestId: `claim-${suffix}`, replaceBinding: true,
+      connectionId: `connection-${suffix}`, controllerLeaseId: `lease-${suffix}`, leaseEpoch: '1',
+      relayEpoch: `relay-${suffix}`, generation: `generation-${suffix}`,
+    });
+    state.desktopRemoteControl = logic.applyRemoteProxyBinding(state.desktopRemoteControl, {
+      localSessionId: `remote-${suffix}`, remoteSessionRef: `ref-${suffix}`, sessionId: `session-${suffix}`,
+      mode: 'chat', connectionId: `connection-${suffix}`, controllerLeaseId: `lease-${suffix}`,
+      leaseEpoch: '1', relayEpoch: `relay-${suffix}`, remoteControlGeneration: `generation-${suffix}`,
+      mappingConfirmed: false,
+    });
+    assert.equal(state.desktopRemoteControl.controllerConnection.sessionRef, `ref-${suffix}`);
+  }
+  function reply(suffix, requestId) {
+    return { payload: {
+      localSessionId: `remote-${suffix}`, remoteSessionRef: `ref-${suffix}`, sessionId: `session-${suffix}`,
+      connectionId: `connection-${suffix}`, controllerLeaseId: `lease-${suffix}`, leaseEpoch: '1',
+      relayEpoch: `relay-${suffix}`, remoteControlGeneration: `generation-${suffix}`,
+      capabilityRequestId: requestId, capabilityRevision: 1, capabilityValidForMs: 30000,
+      capabilityError: null, mappingConfirmed: true, temporaryModelAvailable: true,
+    } };
+  }
+  function fire(delay) {
+    const entry = [...scheduled].find(([, timer]) => timer.delay === delay);
+    assert.ok(entry, `a real bridge timer with delay ${delay} must exist`);
+    scheduled.delete(entry[0]);
+    entry[1].callback();
+  }
+  let replacement;
+  let completed = false;
+  let cleanupFailure;
+  try {
+    await flush();
+    bind('old');
+    const oldRequest = feature.controllerCapabilitySend('ref-old');
+    const oldOutcome = oldRequest.then(() => ({ ok: true }), error => ({ ok: false, code: error.code }));
+    await flush();
+    const oldTimeout = [...scheduled].find(([, timer]) => timer.delay === 8000);
+    assert.ok(oldTimeout, 'the legitimate old request reached its response waiter');
+    const retired = registrations.slice();
+    retired[0].off = () => {
+      retired[0].releases++;
+      try {
+        assert.equal(scheduled.has(oldTimeout[0]), false, 'old waiter timer is cleared before external off');
+        feature.subscribe();
+        bind('new');
+        replacement = feature.controllerCapabilitySend('ref-new');
+      } catch (error) { cleanupFailure = error; }
+    };
+    await complete(retired);
+    await flush();
+    feature.stop();
+    if (cleanupFailure) throw cleanupFailure;
+    assert.equal(retired[0].releases, 1);
+    assert.ok(replacement, 'actual retained off created a new-owner capability request');
+    await complete(registrations.slice(9));
+    await flush();
+    assert.deepEqual(requests.map(request => request.remoteRef), ['ref-old', 'ref-new']);
+    assert.ok([...scheduled.values()].some(timer => timer.delay === 500),
+      'retired waiter rejected promptly and entered the existing bounded retry');
+    const before = notifications();
+    const oldEvent = retired.find(entry => entry.name === 'desktop-remote-proxy-capability');
+    const newEvent = registrations.slice(9).find(entry => entry.name === 'desktop-remote-proxy-capability');
+    oldEvent.callback(reply('old', 'request-1'));
+    newEvent.callback(reply('old', 'request-1'));
+    assert.equal(notifications(), before, 'old listener and wrong binding cannot settle the replacement');
+    assert.equal(state.desktopRemoteControl.controllerConnection.mappingConfirmed, false);
+    newEvent.callback(reply('new', 'request-2'));
+    assert.equal((await replacement).capabilityRequestId, 'request-2');
+    assert.equal(state.desktopRemoteControl.controllerConnection.mappingConfirmed, true);
+    // stop retires renderer waiters, not the legitimate old capability flight.
+    // Drive the existing 500/1000ms retry and 8s response timers without sleeps.
+    fire(500);
+    await flush();
+    fire(8000);
+    await flush();
+    fire(1000);
+    await flush();
+    fire(8000);
+    await flush();
+    assert.deepEqual(await oldOutcome, { ok: false, code: 'capability_snapshot_timeout' });
+    assert.deepEqual(requests.map(request => request.remoteRef), ['ref-old', 'ref-new', 'ref-old', 'ref-old']);
+    assert.equal(state.desktopRemoteControl.controllerConnection.sessionRef, 'ref-new');
+    assert.equal(state.desktopRemoteControl.controllerConnection.mappingConfirmed, true);
+    assert.equal([...scheduled.values()].filter(timer => timer.delay === 8000).length, 0);
+    assert.deepEqual(retired.map(entry => entry.releases), Array(9).fill(1));
+    completed = true;
+  } finally {
+    feature.stop();
+    await flush();
+    if (completed) assert.equal(scheduled.size, 0, 'all response and renewal timers are retired');
+    scheduled.clear(); // Discard only test-owned fake timers on a failing case.
   }
 });
