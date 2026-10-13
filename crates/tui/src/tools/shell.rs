@@ -3417,6 +3417,43 @@ impl ShellManager {
         owners
     }
 
+    /// Remember a restart-stale job so the UI can show it instead of hiding it.
+    #[allow(dead_code)]
+    pub fn remember_stale_job(
+        &mut self,
+        id: impl Into<String>,
+        command: impl Into<String>,
+        cwd: PathBuf,
+        linked_task_id: Option<String>,
+    ) {
+        let id = id.into();
+        self.stale_jobs.insert(
+            id.clone(),
+            ShellJobSnapshot {
+                id: id.clone(),
+                job_id: id,
+                command: command.into(),
+                cwd,
+                status: ShellStatus::Killed,
+                exit_code: None,
+                elapsed_ms: 0,
+                stdout_tail: String::new(),
+                stderr_tail: "Process is no longer attached to this TUI session.".to_string(),
+                stdout_len: 0,
+                stderr_len: 0,
+                stdin_available: false,
+                stale: true,
+                elapsed_since_output_ms: None,
+                linked_task_id,
+                owner_agent_id: None,
+                owner_agent_name: None,
+                origin_tool_call_id: None,
+                origin_turn_id: None,
+                owner_session_id: String::new(),
+            },
+        );
+    }
+
     /// Clean up completed processes older than the given duration, then enforce
     /// the count and byte ceilings on what is left.
     ///

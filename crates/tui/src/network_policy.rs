@@ -19,8 +19,9 @@
 //! 3. [`NetworkAuditor`] — appends one plaintext line per outbound call to
 //!    `~/.codewhale/audit.log` in the format described below.
 //!
-//! In addition, [`NetworkSessionCache`] holds in-process session state that
-//! the decider's `evaluate` short-circuit consults.
+//! In addition, [`NetworkSessionCache`] holds in-process "approve once for
+//! this session" state for the `Prompt` flow, and [`NetworkDenied`] is the
+//! structured error surfaced to callers when a host is blocked.
 //!
 //! # Host-matching rules
 //!
@@ -51,13 +52,14 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// What the policy decided about an outbound network call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     /// Allow the call without prompting.
     Allow,
-    /// Deny the call.
+    /// Deny the call. Surfaced to callers as [`NetworkDenied`].
     Deny,
     /// Defer to the user via an approval prompt.
     Prompt,
@@ -197,6 +199,22 @@ impl NetworkPolicy {
             return Decision::Allow;
         }
         self.default.into()
+    }
+
+    /// Append `host` to the allow list (de-duplicated, case-insensitive).
+    /// Used by the prompt flow when the user picks "always for this host".
+    pub fn add_allow(&mut self, host: &str) {
+        let normalized = normalize_host(host);
+        if normalized.is_empty() {
+            return;
+        }
+        if !self
+            .allow
+            .iter()
+            .any(|existing| normalize_host(existing) == normalized)
+        {
+            self.allow.push(normalized);
+        }
     }
 
     /// Whether audit logging is enabled.
@@ -396,6 +414,37 @@ impl NetworkSessionCache {
             .map(|guard| guard.denied.contains(&normalized))
             .unwrap_or(false)
     }
+
+    /// Mark the host as approved for the rest of this session.
+    pub fn approve(&self, host: &str) {
+        let normalized = normalize_host(host);
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.denied.remove(&normalized);
+            guard.approved.insert(normalized);
+        }
+    }
+
+    /// Mark the host as denied for the rest of this session.
+    pub fn deny(&self, host: &str) {
+        let normalized = normalize_host(host);
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.approved.remove(&normalized);
+            guard.denied.insert(normalized);
+        }
+    }
+}
+
+/// Structured error surfaced to callers when an outbound call is blocked.
+#[derive(Debug, Clone, Error)]
+#[error("network call to '{0}' blocked by network policy")]
+pub struct NetworkDenied(pub String);
+
+impl NetworkDenied {
+    /// The host that was denied.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Glue type that bundles a [`NetworkPolicy`] with a session cache and an
@@ -516,6 +565,29 @@ impl NetworkPolicyDecider {
         decision
     }
 
+    /// Approve `host` for the rest of the session (one-shot). Audit log gets
+    /// `Prompt-Approved`.
+    pub fn approve_session(&self, host: &str, tool: &str) {
+        self.cache.approve(host);
+        self.audit_record(host, tool, "Prompt-Approved");
+    }
+
+    /// Deny `host` for the rest of the session. Audit log gets `Prompt-Denied`.
+    pub fn deny_session(&self, host: &str, tool: &str) {
+        self.cache.deny(host);
+        self.audit_record(host, tool, "Prompt-Denied");
+    }
+
+    /// Persist `host` into the policy's allow list (so it survives the session)
+    /// **and** approve it in-session. Returns the updated policy so callers can
+    /// write it back to disk.
+    pub fn approve_persistent(&mut self, host: &str, tool: &str) -> &NetworkPolicy {
+        self.policy.add_allow(host);
+        self.cache.approve(host);
+        self.audit_record(host, tool, "Prompt-Approved");
+        &self.policy
+    }
+
     /// Whether this host is explicitly configured for trusted proxy fake-IP
     /// DNS handling.
     #[must_use]
@@ -622,6 +694,15 @@ mod tests {
         let p = mk(Decision::Deny, &["api.example.com"], &[]);
         assert_eq!(p.decide(""), Decision::Deny);
         assert_eq!(p.decide("   "), Decision::Deny);
+    }
+
+    #[test]
+    fn add_allow_dedupes_case_insensitively() {
+        let mut p = mk(Decision::Deny, &[], &[]);
+        p.add_allow("Example.COM");
+        p.add_allow("example.com");
+        assert_eq!(p.allow.len(), 1);
+        assert_eq!(p.allow[0], "example.com");
     }
 
     #[test]
@@ -738,6 +819,53 @@ mod tests {
     }
 
     #[test]
+    fn session_cache_short_circuits_evaluate() {
+        let policy = mk(Decision::Prompt, &[], &[]);
+        let decider = NetworkPolicyDecider::new(policy, None);
+        // First call returns Prompt.
+        assert_eq!(
+            decider.evaluate("api.example.com", "fetch_url"),
+            Decision::Prompt
+        );
+        decider.approve_session("api.example.com", "fetch_url");
+        // After approve_session, the same host returns Allow without prompting.
+        assert_eq!(
+            decider.evaluate("api.example.com", "fetch_url"),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn approve_persistent_writes_back_to_policy() {
+        let policy = mk(Decision::Prompt, &[], &[]);
+        let mut decider = NetworkPolicyDecider::new(policy, None);
+        decider.approve_persistent("api.example.com", "fetch_url");
+        assert!(
+            decider
+                .policy()
+                .allow
+                .iter()
+                .any(|h| h == "api.example.com")
+        );
+        // And the session cache also got updated, so fresh evaluate returns Allow.
+        assert_eq!(
+            decider.evaluate("api.example.com", "fetch_url"),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn deny_session_blocks_subsequent_evaluate() {
+        let policy = mk(Decision::Allow, &[], &[]);
+        let decider = NetworkPolicyDecider::new(policy, None);
+        decider.deny_session("evil.example.com", "fetch_url");
+        assert_eq!(
+            decider.evaluate("evil.example.com", "fetch_url"),
+            Decision::Deny
+        );
+    }
+
+    #[test]
     fn audit_records_terminal_decisions_through_decider() {
         let dir = tempdir().expect("tempdir");
         let auditor = NetworkAuditor::new(dir.path().join("audit.log"), true);
@@ -763,5 +891,12 @@ mod tests {
         assert_eq!(Decision::parse("BLOCK"), Decision::Deny);
         assert_eq!(Decision::parse("prompt"), Decision::Prompt);
         assert_eq!(Decision::parse("garbage"), Decision::Prompt);
+    }
+
+    #[test]
+    fn network_denied_carries_host() {
+        let err = NetworkDenied("api.example.com".to_string());
+        assert_eq!(err.host(), "api.example.com");
+        assert!(format!("{err}").contains("api.example.com"));
     }
 }
