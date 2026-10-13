@@ -240,7 +240,10 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
     let primary_only =
         crate::snapshot::restore_covers_primary_only(&app.workspace, &app.workspace_roots);
     let boundary_note = if primary_only {
-        format!("\n{}", crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE)
+        format!(
+            "\n{}",
+            crate::snapshot::attached_roots_not_reverted_note(app.ui_locale)
+        )
     } else {
         String::new()
     };
@@ -266,7 +269,7 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
                 "/undo reverted the primary workspace to snapshot '{}' ({}). {}",
                 target.label,
                 short,
-                crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE
+                crate::snapshot::attached_roots_not_reverted_note(app.ui_locale)
             )
         } else {
             format!(

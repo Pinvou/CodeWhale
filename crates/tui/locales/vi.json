@@ -1760,9 +1760,9 @@
   "WorkspaceSwitchSessionsDirFailed": "Không mở được thư mục phiên: {error}",
   "WorkspaceSwitchSetRefused": "Không thể chuyển workspace sang {workspace}: bộ gốc được mang theo sẽ mở rộng vượt ra thư mục mới ({reason}). Lần chuyển bị từ chối; hãy bắt đầu phiên mới trong thư mục đó, hoặc xóa các gốc mở rộng khỏi bộ gốc đã lưu của phiên này bên ngoài TUI.",
   "ForkSourceSetRefused": "Không thể fork: bộ gốc của nguồn đặt lại lên {workspace} sẽ mở rộng vượt ra ngoài nó ({reason}). Lần fork bị từ chối; hãy bắt đầu từ một thư mục mà bộ không mở rộng vượt qua, hoặc xóa các gốc mở rộng khỏi bản ghi đã lưu bên ngoài TUI.",
-  "SaveLiveSetRefused": "Không thể lưu: bộ gốc workspace hiện tại không còn vượt qua intake ({reason}).",
-  "ForkLiveSetRefused": "Không thể fork: bộ gốc workspace hiện tại không còn vượt qua intake ({reason}).",
-  "SanitizedLoadedRoots": "Đã loại bỏ {count} root khỏi phiên được tải mà intake của workspace từ chối (gốc hệ thống tệp, tổ tiên của primary, chính tả không hợp lệ hoặc vượt giới hạn 64 root). Phiên chạy không có chúng và lần lưu kế tiếp sẽ ghi bộ đã thu gọn; nạp lại phiên để bỏ các root bị từ chối.",
+  "SaveLiveSetRefused": "Không thể lưu: bộ gốc workspace hiện tại không còn vượt qua intake ({reason}).Tải lại phiên (các root bị từ chối sẽ bị loại khi tải) hoặc sửa bản ghi bên ngoài TUI.",
+  "ForkLiveSetRefused": "Không thể fork: bộ gốc workspace hiện tại không còn vượt qua intake ({reason}).Tải lại phiên (các root bị từ chối sẽ bị loại khi tải) hoặc sửa bản ghi bên ngoài TUI.",
+  "SanitizedLoadedRoots": "Đã loại bỏ {count} root khỏi phiên được tải mà intake của workspace từ chối (gốc hệ thống tệp, tổ tiên của primary, chính tả không hợp lệ hoặc vượt giới hạn 64 root). Phiên chạy không có chúng và lần lưu kế tiếp sẽ ghi bộ đã thu gọn; hãy tải lại phiên để loại bỏ các root bị từ chối.",
   "WorkspaceRootsRemainder": "… (+{count} nữa)",
   "WorkspaceRootsNotice": "Thư mục có thể truy cập bên cạnh {workspace}: {roots}",
   "StatusLabelProjectDocs": "Tài liệu dự án",
@@ -2096,5 +2096,6 @@
   "AutomationEditorThursday": "T5",
   "AutomationEditorFriday": "T6",
   "AutomationEditorSaturday": "T7",
-  "AutomationEditorSunday": "CN"
+  "AutomationEditorSunday": "CN",
+  "AttachedRootsNotRevertedNote": "Chỉ vùng làm việc chính được khôi phục; các root workspace đính kèm không được hoàn tác (các thư mục bị loại khỏi bản chụp — như vendor/ — và các kho lồng nhau giữ nguyên thay đổi)."
 }

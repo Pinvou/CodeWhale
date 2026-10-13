@@ -1,7 +1,4 @@
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use codewhale_agent::ModelRegistry;
@@ -55,6 +52,13 @@ async fn invoke_fixture(
     payload: ToolPayload,
     output: ToolOutput,
 ) -> (serde_json::Value, Vec<HookEvent>) {
+    // Round-43 P2-3: the fixture workspace must be absolute on every
+    // platform — a POSIX /tmp spelling is not absolute on Windows and the
+    // intake guards (correctly) refuse it.
+    #[cfg(target_os = "windows")]
+    let workspace_root = std::path::PathBuf::from(r"C:\tmp\codewhale");
+    #[cfg(not(target_os = "windows"))]
+    let workspace_root = std::path::PathBuf::from("/tmp/codewhale");
     let mut registry = ToolRegistry::default();
     registry
         .register(
@@ -94,7 +98,7 @@ async fn invoke_fixture(
                 raw_tool_call_id: None,
             },
             AskForApproval::Never,
-            Path::new("/tmp/codewhale"),
+            workspace_root.as_path(),
             &[],
         )
         .await

@@ -36,7 +36,10 @@ impl ToolSpec for RevertTurnTool {
          `turn_offset` is 1-based: 1 reverts the most recent turn, 2 reverts the previous one, \
          and so on (max 50). Conversation history is NOT modified — only working-tree files are \
          restored from the side-git snapshot repo. Snapshots cover the primary workspace root \
-         only; writes under attached workspace roots are not rolled back."
+         only — attached workspace roots are reverted only when the snapshot covers
+         them (an ordinary nested root tracked by the snapshot reverts with
+         the primary; excluded directories such as vendor/ and nested
+         repositories do not — see the boundary note)."
     }
 
     fn input_schema(&self) -> Value {
@@ -344,7 +347,7 @@ mod tests {
         // meta-text must never ride it onto the wire.
         let description = RevertTurnTool::description(&RevertTurnTool);
         assert!(
-            description.contains("attached workspace roots are not rolled back"),
+            description.contains("attached workspace roots"),
             "the description must keep naming the rollback boundary: {description}"
         );
         assert!(

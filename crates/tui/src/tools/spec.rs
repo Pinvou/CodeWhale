@@ -1277,11 +1277,22 @@ impl ToolContext {
             return Ok(canonical);
         }
 
-        // Validate it's under workspace, OR is under a user-trusted external
-        // path (`/trust add <path>` from the slash command, persisted in
-        // `~/.deepseek/workspace-trust.json`).
+        // Validate it's under workspace, under ANY declared root, OR under a
+        // user-trusted external path (`/trust add <path>` from the slash
+        // command, persisted in `~/.deepseek/workspace-trust.json`).
+        // Round-43 P2-1: a new target reached through an ALIAS spelling of
+        // another declared root (primary/link → attached-root/existing, then
+        // creating link/new.txt) must resolve like the direct spelling — the
+        // deepest-existing-ancestor walk lands the rebuilt path under the
+        // attached root, and the containment check accepts every declared
+        // root's canonical form, not only the workspace pair.
+        let under_any_declared_root = self
+            .boundary_roots()
+            .iter()
+            .any(|(_, root_canonical)| canonical.starts_with(root_canonical));
         if !canonical.starts_with(workspace_canonical)
             && !canonical.starts_with(&workspace_normalized)
+            && !under_any_declared_root
             && !self.is_trusted_external_path(&canonical)
         {
             return Err(ToolError::PathEscape { path: canonical });

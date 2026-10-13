@@ -5,6 +5,41 @@ use std::os::unix::fs::symlink;
 use tempfile::tempdir;
 
 #[test]
+#[cfg(unix)]
+fn new_target_through_an_alias_of_another_declared_root_resolves() {
+    // Round-43 P2-1: primary/link is a symlink into the attached root
+    // (a declared root). Creating link/new.txt — a target that does not
+    // exist yet, spelled through the alias — must resolve like the
+    // direct attached-root/new.txt spelling: the deepest-existing
+    // walk lands under the attached root and the containment check
+    // accepts every declared root, not only the workspace pair.
+    let temp = tempdir().expect("tempdir");
+    let primary = temp.path().join("primary");
+    let attached = temp.path().join("attached");
+    std::fs::create_dir_all(&primary).expect("primary");
+    std::fs::create_dir_all(&attached).expect("attached root");
+    let alias = primary.join("link");
+    symlink(&attached, &alias).expect("alias into the attached root");
+
+    let context = ToolContext::new(primary.clone())
+        .with_workspace_roots(vec![primary.clone(), attached.clone()]);
+    let resolved = context
+        .resolve_path(alias.join("new.txt").to_str().expect("utf8"))
+        .expect("a new target inside a declared root resolves through the alias spelling");
+    let normalized = normalize_path(&resolved);
+    assert!(
+        normalized.starts_with(normalize_path(&attached)),
+        "the alias-spelled creation resolves under the attached root: {normalized:?}"
+    );
+
+    // The direct spelling resolves to the same containment.
+    let direct = context
+        .resolve_path(attached.join("new.txt").to_str().expect("utf8"))
+        .expect("the direct spelling resolves");
+    assert_eq!(normalize_path(&direct), normalized);
+}
+
+#[test]
 fn test_tool_result_success() {
     let result = ToolResult::success("hello");
     assert!(result.success);

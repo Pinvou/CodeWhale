@@ -60,6 +60,16 @@ pub const DEFAULT_MAX_SNAPSHOTS: usize = 50;
 pub const ATTACHED_ROOTS_NOT_REVERTED_NOTE: &str =
     "Only the primary workspace was reverted; attached workspace roots were not rolled back.";
 
+/// Round-43 P2-5: the localized form for human-facing TUI surfaces (the
+/// model/API lanes keep the stable English constant above).
+pub fn attached_roots_not_reverted_note(locale: crate::localization::Locale) -> String {
+    crate::localization::tr(
+        locale,
+        crate::localization::MessageId::AttachedRootsNotRevertedNote,
+    )
+    .into_owned()
+}
+
 /// Whether a restore from the workspace snapshot repo covers only the
 /// primary root — true exactly when the normalized root set has an entry
 /// OUTSIDE the primary tree. Revert/undo reports must carry
@@ -97,6 +107,17 @@ pub fn restore_covers_primary_only(
         .iter()
         .skip(1)
         .any(|root| {
+            // Round-43 P2-2: coverage is a property of the SNAPSHOT, not of
+            // directory containment — the side repo's built-in excludes
+            // (vendor/, node_modules/, …) keep a nested attached root's
+            // files OUT of the snapshot, and a nested repository records
+            // only a mode-160000 gitlink, so neither reverts with the
+            // primary even though both sit inside the primary tree. The
+            // disclosure fires for those shapes too (fail-safe direction:
+            // over-disclosing the boundary).
+            if nested_root_escapes_snapshot_coverage(workspace, root) {
+                return true;
+            }
             let root_lexical = codewhale_core::normalize_path_lexically(root);
             let root_canonical = codewhale_core::normalize_path_lexically(
                 &root.canonicalize().unwrap_or_else(|_| root.clone()),
@@ -104,6 +125,71 @@ pub fn restore_covers_primary_only(
             !root_lexical.starts_with(&workspace_lexical)
                 || !root_canonical.starts_with(&workspace_canonical)
         })
+}
+
+/// Round-43 P2-2: true when `root` nests under the primary lexically but
+/// its CONTENT will not revert with a primary-rooted restore — the snapshot
+/// repo's built-in excludes drop it, or it is (or sits under) a nested
+/// repository the snapshot records only as a gitlink. Both shapes leave the
+/// attached root's writes persisting past the restore, so the disclosure
+/// must fire exactly as for an out-of-tree root.
+fn nested_root_escapes_snapshot_coverage(
+    workspace: &std::path::Path,
+    root: &std::path::Path,
+) -> bool {
+    /// The snapshot repo's built-in exclude list (repo.rs BUILTIN_EXCLUDES):
+    /// a nested attached root at or under one of these directories is not
+    /// captured by the snapshot at all.
+    const SNAPSHOT_EXCLUDED_DIRS: &[&str] = &[
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        ".build",
+        ".next",
+        ".nuxt",
+        ".svelte-kit",
+        ".turbo",
+        ".parcel-cache",
+        "vendor",
+        ".cargo",
+        ".rustup",
+        ".npm",
+        ".bun",
+        ".yarn",
+        ".pnpm-store",
+        ".cache",
+        ".venv",
+        "venv",
+        ".tox",
+        "__pycache__",
+    ];
+
+    let rel = root.strip_prefix(workspace).ok();
+    let Some(rel) = rel else {
+        return false;
+    };
+    // A nested repository boundary: the attached root (or any ancestor under
+    // the primary up to it) carrying a .git entry records as a gitlink in
+    // the primary's snapshot — its files never enter the snapshot tree.
+    let mut probe = workspace.to_path_buf();
+    for component in rel.components() {
+        probe.push(component);
+        if probe.join(".git").exists() {
+            return true;
+        }
+    }
+    // The excluded-directory shape: the root itself is one of the built-in
+    // excludes (vendor/...) or sits under one (vendor/sub).
+    let mut under_excluded = false;
+    for component in rel.components() {
+        let name = component.as_os_str().to_string_lossy();
+        under_excluded = under_excluded || SNAPSHOT_EXCLUDED_DIRS.contains(&name.as_ref());
+        if under_excluded {
+            break;
+        }
+    }
+    under_excluded
 }
 #[allow(unused_imports)]
 pub use repo::{
@@ -186,5 +272,27 @@ mod tests {
         let inner_link = workspace.join("inner-link");
         std::os::unix::fs::symlink(&nested, &inner_link).expect("symlink");
         assert!(!restore_covers_primary_only(&workspace, &[inner_link]));
+
+        // Round-43 P2-2: coverage follows the SNAPSHOT, not directory
+        // containment — a vendor/ nested root (built-in exclude) and a
+        // nested repository (gitlink-only) do not revert with the primary,
+        // so the disclosure fires; an ordinary tracked nested root does
+        // not (the plain-root case above).
+        let vendor = workspace.join("vendor");
+        std::fs::create_dir_all(&vendor).expect("mkdir vendor");
+        assert!(
+            restore_covers_primary_only(&workspace, std::slice::from_ref(&vendor)),
+            "a vendor/ nested root is excluded from the snapshot — its writes persist"
+        );
+        let nested_repo = workspace.join("child-repo");
+        std::fs::create_dir_all(nested_repo.join(".git")).expect("nested repo .git");
+        assert!(
+            restore_covers_primary_only(&workspace, std::slice::from_ref(&nested_repo)),
+            "a nested repository records only a gitlink — its files never revert"
+        );
+        assert!(
+            restore_covers_primary_only(&workspace, &[nested_repo.join("sub")]),
+            "a root under a nested repository boundary escapes too"
+        );
     }
 }

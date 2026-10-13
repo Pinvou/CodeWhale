@@ -39,10 +39,11 @@ a hold that the layer actually produced.
 There is no project-local permission-rule source today. An optional `workspace`
 field scopes one user rule to a repository; it does not create a project
 overlay. `/permissions` reports that source, matcher, scope, and whether the
-scope covers the current session. In a multi-root session a SCOPED rule is
+scope covers the current session. In a multi-root session a scoped ASK/DENY rule is
 eligible against the accessible roots inside its scope (subtree containment,
-matching by the normalized scope spelling); an UNSCOPED rule spans the whole
-set. The action carried by a rule scoped to the SESSION PRIMARY stays
+matching by the normalized scope spelling); a scoped ALLOW matches its scope
+EXACTLY (never a subdirectory — the widening direction stays closed); an
+UNSCOPED rule spans the whole set. The action carried by a rule scoped to the SESSION PRIMARY stays
 primary-root-scoped, so such an `allow` never auto-approves a write under an
 attached root — but an `allow` scoped to an attached root itself auto-approves
 calls judged at that root, including a `cwd:`-operand redirect landing there

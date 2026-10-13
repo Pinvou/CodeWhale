@@ -2902,6 +2902,22 @@ fn job_state_status_to_runtime(status: JobStateStatus) -> JobStatus {
 
 #[cfg(test)]
 mod tests {
+    /// Round-43 P2-3: fixtures spell absolute paths the way each platform
+    /// accepts them — a POSIX `/tmp/...` spelling is NOT absolute on
+    /// Windows, and the intake guards now (correctly) refuse it, so every
+    /// hand-written fixture root goes through this helper instead.
+    fn abs_fixture(raw: &str) -> std::path::PathBuf {
+        #[cfg(target_os = "windows")]
+        {
+            let trimmed = raw.trim_start_matches('/');
+            std::path::PathBuf::from(format!(r"C:\{}", trimmed.replace('/', r"\")))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::path::PathBuf::from(raw)
+        }
+    }
+
     use super::*;
     use codewhale_protocol::ThreadResumeParams;
     use codewhale_tools::ToolCallSource;
@@ -2924,7 +2940,7 @@ mod tests {
             updated_at: 10,
             status: PersistedThreadStatus::Running,
             path: None,
-            cwd: PathBuf::from("/tmp/codewhale"),
+            cwd: abs_fixture("/tmp/codewhale"),
             workspace_roots: Vec::new(),
             cli_version: "0.0.0-test".to_string(),
             source: SessionSource::Interactive,
@@ -3461,7 +3477,7 @@ mod tests {
         let preview = preview_from_initial_history(&InitialHistory::Resumed {
             conversation_id: "test".to_string(),
             history: vec![json!("world")],
-            rollout_path: PathBuf::from("/tmp/test"),
+            rollout_path: abs_fixture("/tmp/test"),
         });
         assert!(preview.contains("world"));
     }
@@ -3561,7 +3577,7 @@ mod tests {
         let spawned = manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/tmp/codewhale"),
+                abs_fixture("/tmp/codewhale"),
                 &[],
                 InitialHistory::New,
                 true,
@@ -3612,7 +3628,7 @@ mod tests {
         let spawned = manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/tmp/codewhale"),
+                abs_fixture("/tmp/codewhale"),
                 &[],
                 InitialHistory::New,
                 true,
@@ -3674,7 +3690,7 @@ mod tests {
         let spawned = manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/tmp/codewhale"),
+                abs_fixture("/tmp/codewhale"),
                 &[],
                 InitialHistory::New,
                 true,
@@ -3738,7 +3754,7 @@ mod tests {
         let spawned = manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/tmp/codewhale"),
+                abs_fixture("/tmp/codewhale"),
                 &[],
                 InitialHistory::New,
                 true,
@@ -3806,7 +3822,7 @@ mod tests {
         let spawned = manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/tmp/codewhale"),
+                abs_fixture("/tmp/codewhale"),
                 &[],
                 InitialHistory::Forked(history.clone()),
                 true,
@@ -3933,22 +3949,23 @@ mod tests {
 
     #[test]
     fn normalize_workspace_roots_puts_cwd_first_and_dedups() {
-        let cwd = Path::new("/repo/main");
+        let cwd = abs_fixture("/repo/main");
+        let cwd = cwd.as_path();
         assert_eq!(normalize_workspace_roots(cwd, &[]), vec![cwd.to_path_buf()]);
         assert_eq!(
             normalize_workspace_roots(
                 cwd,
                 &[
-                    PathBuf::from("/repo/lib"),
-                    PathBuf::from("/repo/main"),
-                    PathBuf::from("/repo/lib"),
-                    PathBuf::from("/repo/docs"),
+                    abs_fixture("/repo/lib"),
+                    abs_fixture("/repo/main"),
+                    abs_fixture("/repo/lib"),
+                    abs_fixture("/repo/docs"),
                 ],
             ),
             vec![
-                PathBuf::from("/repo/main"),
-                PathBuf::from("/repo/lib"),
-                PathBuf::from("/repo/docs"),
+                abs_fixture("/repo/main"),
+                abs_fixture("/repo/lib"),
+                abs_fixture("/repo/docs"),
             ],
             "cwd moves to the front and later roots dedup in original order"
         );
@@ -3956,7 +3973,8 @@ mod tests {
 
     #[test]
     fn normalize_workspace_roots_drops_empty_and_relative_entries() {
-        let cwd = Path::new("/repo/main");
+        let cwd = abs_fixture("/repo/main");
+        let cwd = cwd.as_path();
         assert_eq!(
             normalize_workspace_roots(
                 cwd,
@@ -3964,10 +3982,10 @@ mod tests {
                     PathBuf::from(""),
                     PathBuf::from("relative/dir"),
                     PathBuf::from("~/home-dir"),
-                    PathBuf::from("/repo/lib"),
+                    abs_fixture("/repo/lib"),
                 ],
             ),
-            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/lib")],
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/lib")],
             "an empty entry would contain every path under starts_with, and a \
              relative entry is meaningless against absolute candidates"
         );
@@ -3977,7 +3995,7 @@ mod tests {
         // accepts every path under), so the whole set collapses to empty
         // rather than passing the poison through to boundary_roots().
         assert!(normalize_workspace_roots(Path::new(""), &[]).is_empty());
-        assert!(normalize_workspace_roots(Path::new(""), &[PathBuf::from("/repo/lib")]).is_empty());
+        assert!(normalize_workspace_roots(Path::new(""), &[abs_fixture("/repo/lib")]).is_empty());
         assert!(normalize_workspace_roots(Path::new("relative/dir"), &[]).is_empty());
     }
 
@@ -3987,7 +4005,8 @@ mod tests {
         // intake, so the shape normalizer itself must bound them — an
         // unbounded hand-edited row made every write-tool call an O(n²)
         // dedup plus per-root canonicalization.
-        let cwd = Path::new("/repo/main");
+        let cwd = abs_fixture("/repo/main");
+        let cwd = cwd.as_path();
         let roots: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS + 10)
             .map(|index| PathBuf::from(format!("/repo/r{index}")))
             .collect();
@@ -3998,7 +4017,7 @@ mod tests {
             "the primary plus at most MAX_WORKSPACE_ROOTS additional entries survive"
         );
         assert_eq!(normalized[0], cwd.to_path_buf());
-        assert_eq!(normalized[1], PathBuf::from("/repo/r0"));
+        assert_eq!(normalized[1], abs_fixture("/repo/r0"));
         assert_eq!(
             normalized[MAX_WORKSPACE_ROOTS],
             PathBuf::from(format!("/repo/r{}", MAX_WORKSPACE_ROOTS - 1)),
@@ -4011,7 +4030,8 @@ mod tests {
         // Round-24 B24-4: the intake cap counts declared roots, the
         // normalizer cap counts the same entries — a declaration that
         // passed intake must survive the shape normalizer byte-identical.
-        let cwd = Path::new("/repo/main");
+        let cwd = abs_fixture("/repo/main");
+        let cwd = cwd.as_path();
         let roots: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS)
             .map(|index| PathBuf::from(format!("/repo/r{index}")))
             .collect();
@@ -4140,7 +4160,8 @@ mod tests {
         // as an over-cap declaration; the stored-row strip must revalidate
         // the row whole, or every resume/fork/load face using it would
         // brick the row its own save path minted.
-        let cwd = Path::new("/repo/main");
+        let cwd = abs_fixture("/repo/main");
+        let cwd = cwd.as_path();
         let roots: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS)
             .map(|index| PathBuf::from(format!("/repo/r{index}")))
             .collect();
@@ -4163,17 +4184,18 @@ mod tests {
         // phantom additional root (the raw-equality dedup above lets the
         // spelling through; re-validation would then judge it a widening
         // entry and brick the row).
-        let cwd = Path::new("/repo");
+        let cwd = abs_fixture("/repo");
+        let cwd = cwd.as_path();
         let stored = vec![
-            PathBuf::from("/repo"),
-            PathBuf::from("/repo/sub/.."),
-            PathBuf::from("/shared"),
+            abs_fixture("/repo"),
+            abs_fixture("/repo/sub/.."),
+            abs_fixture("/shared"),
         ];
         let revalidated = validate_stored_workspace_roots(cwd, &stored)
             .expect("the lexical head strip keeps the row loadable");
         assert_eq!(
             revalidated,
-            vec![PathBuf::from("/repo"), PathBuf::from("/shared")]
+            vec![abs_fixture("/repo"), abs_fixture("/shared")]
         );
     }
 
@@ -4181,8 +4203,9 @@ mod tests {
     fn stored_row_revalidation_still_refuses_a_poisoned_entry() {
         // The strip must not launder: a row carrying the filesystem root
         // under any spelling is refused exactly like a fresh declaration.
-        let cwd = Path::new("/repo");
-        let stored = vec![PathBuf::from("/repo"), PathBuf::from("/")];
+        let cwd = abs_fixture("/repo");
+        let cwd = cwd.as_path();
+        let stored = vec![abs_fixture("/repo"), abs_fixture("/")];
         let err = validate_stored_workspace_roots(cwd, &stored)
             .expect_err("the head strip is not an amnesty for poisoned entries");
         assert!(
@@ -4241,7 +4264,7 @@ mod tests {
             let err = manager
                 .spawn_thread_with_history(
                     "deepseek".to_string(),
-                    PathBuf::from("/repo/main"),
+                    abs_fixture("/repo/main"),
                     &[PathBuf::from(root)],
                     InitialHistory::New,
                     true,
@@ -4267,7 +4290,7 @@ mod tests {
             let err = manager
                 .spawn_thread_with_history(
                     "deepseek".to_string(),
-                    PathBuf::from("/repo/main"),
+                    abs_fixture("/repo/main"),
                     &[PathBuf::from(root)],
                     InitialHistory::New,
                     true,
@@ -4282,11 +4305,8 @@ mod tests {
         let spawned = manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/repo/main"),
-                &[
-                    PathBuf::from("/repo/lib"),
-                    PathBuf::from("/repo/main/crates"),
-                ],
+                abs_fixture("/repo/main"),
+                &[abs_fixture("/repo/lib"), abs_fixture("/repo/main/crates")],
                 InitialHistory::New,
                 true,
             )
@@ -4294,9 +4314,9 @@ mod tests {
         assert_eq!(
             spawned.thread.workspace_roots,
             vec![
-                PathBuf::from("/repo/main"),
-                PathBuf::from("/repo/lib"),
-                PathBuf::from("/repo/main/crates"),
+                abs_fixture("/repo/main"),
+                abs_fixture("/repo/lib"),
+                abs_fixture("/repo/main/crates"),
             ]
         );
     }
@@ -4308,7 +4328,7 @@ mod tests {
         // surfaces reject an empty workspace outright; this is the last line
         // for values that bypass a surface.
         assert!(
-            validate_workspace_roots(Path::new(""), &[PathBuf::from("/")])
+            validate_workspace_roots(Path::new(""), &[abs_fixture("/")])
                 .unwrap()
                 .is_empty()
         );
@@ -4323,13 +4343,13 @@ mod tests {
     fn resume_with_a_super_root_set_is_rejected_at_intake() {
         let store = temp_core_state("resume-super-root");
         let mut metadata = test_thread_metadata("thread-super-root");
-        metadata.cwd = PathBuf::from("/old");
-        metadata.workspace_roots = vec![PathBuf::from("/old")];
+        metadata.cwd = abs_fixture("/old");
+        metadata.workspace_roots = vec![abs_fixture("/old")];
         store.upsert_thread(&metadata).expect("seed thread");
         let mut manager = ThreadManager::new(store);
 
         let mut params = resume_params("thread-super-root");
-        params.workspace_roots = Some(vec![PathBuf::from("/..")]);
+        params.workspace_roots = Some(vec![abs_fixture("/..")]);
         let err = manager
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect_err("an explicit super-root replacement must be rejected");
@@ -4341,14 +4361,14 @@ mod tests {
         // The persisted row is untouched: the caller can retry with a real
         // set, and a parameterless resume still loads the stored one.
         let mut params = resume_params("thread-super-root");
-        params.workspace_roots = Some(vec![PathBuf::from("/new-a")]);
+        params.workspace_roots = Some(vec![abs_fixture("/new-a")]);
         let resumed = manager
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect("resume thread")
             .expect("thread found");
         assert_eq!(
             resumed.thread.workspace_roots,
-            vec![PathBuf::from("/old"), PathBuf::from("/new-a")]
+            vec![abs_fixture("/old"), abs_fixture("/new-a")]
         );
     }
 
@@ -4359,13 +4379,13 @@ mod tests {
         let spawned = manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/repo/main"),
-                &[PathBuf::from("/repo/lib"), PathBuf::from("/repo/main")],
+                abs_fixture("/repo/main"),
+                &[abs_fixture("/repo/lib"), abs_fixture("/repo/main")],
                 InitialHistory::New,
                 true,
             )
             .expect("spawn thread");
-        let expected = vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/lib")];
+        let expected = vec![abs_fixture("/repo/main"), abs_fixture("/repo/lib")];
         assert_eq!(spawned.thread.workspace_roots, expected);
         assert_eq!(spawned.thread.cwd, spawned.thread.workspace_roots[0]);
 
@@ -4381,27 +4401,27 @@ mod tests {
     fn resume_with_workspace_roots_replaces_root_set() {
         let store = temp_core_state("resume-roots-replace");
         let mut metadata = test_thread_metadata("thread-roots");
-        metadata.cwd = PathBuf::from("/old");
-        metadata.workspace_roots = vec![PathBuf::from("/old"), PathBuf::from("/keep")];
+        metadata.cwd = abs_fixture("/old");
+        metadata.workspace_roots = vec![abs_fixture("/old"), abs_fixture("/keep")];
         store.upsert_thread(&metadata).expect("seed thread");
 
         // A fresh manager forces the persisted path.
         let mut manager = ThreadManager::new(store);
         let mut params = resume_params("thread-roots");
-        params.workspace_roots = Some(vec![PathBuf::from("/new-a"), PathBuf::from("/new-b")]);
+        params.workspace_roots = Some(vec![abs_fixture("/new-a"), abs_fixture("/new-b")]);
         let resumed = manager
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect("resume thread")
             .expect("thread found");
 
         // Explicit roots replace the whole set; the persisted cwd stays primary.
-        assert_eq!(resumed.thread.cwd, PathBuf::from("/old"));
+        assert_eq!(resumed.thread.cwd, abs_fixture("/old"));
         assert_eq!(
             resumed.thread.workspace_roots,
             vec![
-                PathBuf::from("/old"),
-                PathBuf::from("/new-a"),
-                PathBuf::from("/new-b"),
+                abs_fixture("/old"),
+                abs_fixture("/new-a"),
+                abs_fixture("/new-b"),
             ]
         );
         let persisted = manager
@@ -4419,7 +4439,7 @@ mod tests {
         let spawned = manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/repo/main"),
+                abs_fixture("/repo/main"),
                 &[],
                 InitialHistory::New,
                 true,
@@ -4430,14 +4450,14 @@ mod tests {
         // Resume with an explicit set: the override lands on the returned
         // thread and must be written back to the running-thread cache.
         let mut params = resume_params(&thread_id);
-        params.workspace_roots = Some(vec![PathBuf::from("/repo/shared")]);
+        params.workspace_roots = Some(vec![abs_fixture("/repo/shared")]);
         let first = manager
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect("resume thread")
             .expect("thread found");
         assert_eq!(
             first.thread.workspace_roots,
-            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")]
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/shared")]
         );
 
         // A later parameterless resume reads the same cache entry: without
@@ -4448,7 +4468,7 @@ mod tests {
             .expect("thread found");
         assert_eq!(
             second.thread.workspace_roots,
-            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")],
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/shared")],
             "the roots override must stick in the running-thread cache"
         );
     }
@@ -4460,7 +4480,7 @@ mod tests {
         let spawned = manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/repo/main"),
+                abs_fixture("/repo/main"),
                 &[],
                 InitialHistory::New,
                 true,
@@ -4477,17 +4497,17 @@ mod tests {
             .expect("thread found");
         assert_eq!(
             primed.thread.workspace_roots,
-            vec![PathBuf::from("/repo/main")]
+            vec![abs_fixture("/repo/main")]
         );
         let mut params = resume_params(&thread_id);
-        params.workspace_roots = Some(vec![PathBuf::from("/repo/shared")]);
+        params.workspace_roots = Some(vec![abs_fixture("/repo/shared")]);
         let overridden = manager
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect("resume thread")
             .expect("thread found");
         assert_eq!(
             overridden.thread.workspace_roots,
-            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")]
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/shared")]
         );
 
         // A history-carrying resume bypasses the running cache and reads the
@@ -4500,7 +4520,7 @@ mod tests {
             .expect("thread found");
         assert_eq!(
             second.thread.workspace_roots,
-            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")],
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/shared")],
             "a history-carrying resume must not reinstate the pre-override set"
         );
     }
@@ -4517,7 +4537,7 @@ mod tests {
         let spawned = manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/repo/main"),
+                abs_fixture("/repo/main"),
                 &[],
                 InitialHistory::New,
                 true,
@@ -4547,14 +4567,14 @@ mod tests {
         // The override writeback must land the roots without touching the
         // concurrently written columns.
         let mut params = resume_params(&thread_id);
-        params.workspace_roots = Some(vec![PathBuf::from("/repo/shared")]);
+        params.workspace_roots = Some(vec![abs_fixture("/repo/shared")]);
         let resumed = manager
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect("resume thread")
             .expect("thread found");
         assert_eq!(
             resumed.thread.workspace_roots,
-            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")]
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/shared")]
         );
 
         let persisted = manager
@@ -4564,7 +4584,7 @@ mod tests {
             .expect("thread persisted");
         assert_eq!(
             persisted.workspace_roots,
-            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")],
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/shared")],
             "the override still owns the root set"
         );
         assert!(
@@ -4580,8 +4600,8 @@ mod tests {
     fn resume_with_empty_roots_clears_back_to_bare_cwd() {
         let store = temp_core_state("resume-roots-clear");
         let mut metadata = test_thread_metadata("thread-roots");
-        metadata.cwd = PathBuf::from("/old");
-        metadata.workspace_roots = vec![PathBuf::from("/old"), PathBuf::from("/keep")];
+        metadata.cwd = abs_fixture("/old");
+        metadata.workspace_roots = vec![abs_fixture("/old"), abs_fixture("/keep")];
         store.upsert_thread(&metadata).expect("seed thread");
 
         let mut manager = ThreadManager::new(store);
@@ -4591,10 +4611,10 @@ mod tests {
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect("resume thread")
             .expect("thread found");
-        assert_eq!(resumed.thread.cwd, PathBuf::from("/old"));
+        assert_eq!(resumed.thread.cwd, abs_fixture("/old"));
         assert_eq!(
             resumed.thread.workspace_roots,
-            vec![PathBuf::from("/old")],
+            vec![abs_fixture("/old")],
             "Some([]) is an explicit clear, distinct from None (inherit)"
         );
     }
@@ -4603,17 +4623,17 @@ mod tests {
     fn resume_with_cwd_only_keeps_additional_roots() {
         let store = temp_core_state("resume-roots-cwd-slot");
         let mut metadata = test_thread_metadata("thread-roots");
-        metadata.cwd = PathBuf::from("/old");
+        metadata.cwd = abs_fixture("/old");
         metadata.workspace_roots = vec![
-            PathBuf::from("/old"),
-            PathBuf::from("/keep"),
-            PathBuf::from("/also"),
+            abs_fixture("/old"),
+            abs_fixture("/keep"),
+            abs_fixture("/also"),
         ];
         store.upsert_thread(&metadata).expect("seed thread");
 
         let mut manager = ThreadManager::new(store);
         let mut params = resume_params("thread-roots");
-        params.cwd = Some(PathBuf::from("/new"));
+        params.cwd = Some(abs_fixture("/new"));
         let resumed = manager
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect("resume thread")
@@ -4621,13 +4641,13 @@ mod tests {
 
         // The new cwd takes over the primary slot; the old cwd leaves the set
         // while additional roots survive in order.
-        assert_eq!(resumed.thread.cwd, PathBuf::from("/new"));
+        assert_eq!(resumed.thread.cwd, abs_fixture("/new"));
         assert_eq!(
             resumed.thread.workspace_roots,
             vec![
-                PathBuf::from("/new"),
-                PathBuf::from("/keep"),
-                PathBuf::from("/also")
+                abs_fixture("/new"),
+                abs_fixture("/keep"),
+                abs_fixture("/also")
             ]
         );
     }
@@ -4641,26 +4661,26 @@ mod tests {
         // primary, bricking the move the plain-spelling copy survives.
         let store = temp_core_state("resume-roots-cwd-dotdot");
         let mut metadata = test_thread_metadata("thread-roots-dotdot");
-        metadata.cwd = PathBuf::from("/old");
+        metadata.cwd = abs_fixture("/old");
         metadata.workspace_roots = vec![
-            PathBuf::from("/old"),
-            PathBuf::from("/old/sub/.."),
-            PathBuf::from("/keep"),
+            abs_fixture("/old"),
+            abs_fixture("/old/sub/.."),
+            abs_fixture("/keep"),
         ];
         store.upsert_thread(&metadata).expect("seed thread");
 
         let mut manager = ThreadManager::new(store);
         let mut params = resume_params("thread-roots-dotdot");
-        params.cwd = Some(PathBuf::from("/new"));
+        params.cwd = Some(abs_fixture("/new"));
         let resumed = manager
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect("the lexical strip keeps the move loadable")
             .expect("thread found");
 
-        assert_eq!(resumed.thread.cwd, PathBuf::from("/new"));
+        assert_eq!(resumed.thread.cwd, abs_fixture("/new"));
         assert_eq!(
             resumed.thread.workspace_roots,
-            vec![PathBuf::from("/new"), PathBuf::from("/keep")],
+            vec![abs_fixture("/new"), abs_fixture("/keep")],
             "the dot-dot-spelled old primary drops with the head"
         );
     }
@@ -4675,13 +4695,13 @@ mod tests {
         // the inherited set.
         let store = temp_core_state("resume-roots-cwd-ancestor");
         let mut metadata = test_thread_metadata("thread-roots");
-        metadata.cwd = PathBuf::from("/p/x");
-        metadata.workspace_roots = vec![PathBuf::from("/p/x"), PathBuf::from("/p")];
+        metadata.cwd = abs_fixture("/p/x");
+        metadata.workspace_roots = vec![abs_fixture("/p/x"), abs_fixture("/p")];
         store.upsert_thread(&metadata).expect("seed thread");
 
         let mut manager = ThreadManager::new(store);
         let mut params = resume_params("thread-roots");
-        params.cwd = Some(PathBuf::from("/p/x/deep"));
+        params.cwd = Some(abs_fixture("/p/x/deep"));
         let err = manager
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect_err("an additional root that turns ancestor must be rejected");
@@ -4696,10 +4716,10 @@ mod tests {
             .get_thread("thread-roots")
             .expect("read thread")
             .expect("thread persisted");
-        assert_eq!(persisted.cwd, PathBuf::from("/p/x"));
+        assert_eq!(persisted.cwd, abs_fixture("/p/x"));
         assert_eq!(
             persisted.workspace_roots,
-            vec![PathBuf::from("/p/x"), PathBuf::from("/p")]
+            vec![abs_fixture("/p/x"), abs_fixture("/p")]
         );
     }
 
@@ -4707,8 +4727,8 @@ mod tests {
     fn resume_without_overrides_restores_persisted_cwd_and_roots() {
         let store = temp_core_state("resume-roots-restore");
         let mut metadata = test_thread_metadata("thread-roots");
-        metadata.cwd = PathBuf::from("/persisted");
-        metadata.workspace_roots = vec![PathBuf::from("/persisted"), PathBuf::from("/keep")];
+        metadata.cwd = abs_fixture("/persisted");
+        metadata.workspace_roots = vec![abs_fixture("/persisted"), abs_fixture("/keep")];
         store.upsert_thread(&metadata).expect("seed thread");
 
         let mut manager = ThreadManager::new(store);
@@ -4719,16 +4739,16 @@ mod tests {
 
         // Regression: the persisted-path resume used to overwrite the cwd read
         // back from the database with a current_dir fallback.
-        assert_eq!(resumed.thread.cwd, PathBuf::from("/persisted"));
+        assert_eq!(resumed.thread.cwd, abs_fixture("/persisted"));
         assert_eq!(
             resumed.thread.workspace_roots,
-            vec![PathBuf::from("/persisted"), PathBuf::from("/keep")]
+            vec![abs_fixture("/persisted"), abs_fixture("/keep")]
         );
 
         // Legacy rows with no stored roots degenerate to [cwd].
         let store = temp_core_state("resume-roots-legacy");
         let mut metadata = test_thread_metadata("thread-legacy");
-        metadata.cwd = PathBuf::from("/persisted");
+        metadata.cwd = abs_fixture("/persisted");
         metadata.workspace_roots = Vec::new();
         store.upsert_thread(&metadata).expect("seed legacy thread");
         let mut manager = ThreadManager::new(store);
@@ -4736,10 +4756,10 @@ mod tests {
             .resume_thread_with_history(&resume_params("thread-legacy"), "deepseek".to_string())
             .expect("resume thread")
             .expect("thread found");
-        assert_eq!(resumed.thread.cwd, PathBuf::from("/persisted"));
+        assert_eq!(resumed.thread.cwd, abs_fixture("/persisted"));
         assert_eq!(
             resumed.thread.workspace_roots,
-            vec![PathBuf::from("/persisted")]
+            vec![abs_fixture("/persisted")]
         );
     }
 
@@ -4763,8 +4783,8 @@ mod tests {
     fn seed_multi_root_parent(name: &str) -> ThreadManager {
         let store = temp_core_state(name);
         let mut metadata = test_thread_metadata("thread-parent");
-        metadata.cwd = PathBuf::from("/repo/main");
-        metadata.workspace_roots = vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/lib")];
+        metadata.cwd = abs_fixture("/repo/main");
+        metadata.workspace_roots = vec![abs_fixture("/repo/main"), abs_fixture("/repo/lib")];
         store.upsert_thread(&metadata).expect("seed thread");
         ThreadManager::new(store)
     }
@@ -4781,10 +4801,10 @@ mod tests {
         // only source of the set, so an absent field must inherit it — and an
         // absent cwd keeps the parent's cwd as primary rather than
         // re-anchoring the set under the process cwd.
-        assert_eq!(forked.thread.cwd, PathBuf::from("/repo/main"));
+        assert_eq!(forked.thread.cwd, abs_fixture("/repo/main"));
         assert_eq!(
             forked.thread.workspace_roots,
-            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/lib")],
+            vec![abs_fixture("/repo/main"), abs_fixture("/repo/lib")],
         );
         let persisted = manager
             .state_store()
@@ -4866,11 +4886,11 @@ mod tests {
         // inherited set.
         let store = temp_core_state("fork-roots-dotdot");
         let mut metadata = test_thread_metadata("thread-parent");
-        metadata.cwd = PathBuf::from("/w/repo");
+        metadata.cwd = abs_fixture("/w/repo");
         metadata.workspace_roots = vec![
-            PathBuf::from("/w/repo"),
-            PathBuf::from("/w/repo/sub/.."),
-            PathBuf::from("/repo/lib"),
+            abs_fixture("/w/repo"),
+            abs_fixture("/w/repo/sub/.."),
+            abs_fixture("/repo/lib"),
         ];
         store.upsert_thread(&metadata).expect("seed thread");
         let mut manager = ThreadManager::new(store);
@@ -4882,7 +4902,7 @@ mod tests {
 
         assert_eq!(
             forked.thread.workspace_roots,
-            vec![PathBuf::from("/w/repo"), PathBuf::from("/repo/lib")],
+            vec![abs_fixture("/w/repo"), abs_fixture("/repo/lib")],
             "the dot-dot-spelled head copy drops with the head on inheritance"
         );
     }
@@ -4891,7 +4911,7 @@ mod tests {
     fn fork_with_cwd_only_swaps_primary_and_keeps_additional_roots() {
         let mut manager = seed_multi_root_parent("fork-roots-cwd");
         let mut params = fork_params("thread-parent");
-        params.cwd = Some(PathBuf::from("/repo/topic"));
+        params.cwd = Some(abs_fixture("/repo/topic"));
 
         let forked = manager
             .fork_thread(&params)
@@ -4900,10 +4920,10 @@ mod tests {
 
         // Primary-swap semantics, matching a cwd-only resume: the parent's
         // cwd leaves the set and its additional roots survive.
-        assert_eq!(forked.thread.cwd, PathBuf::from("/repo/topic"));
+        assert_eq!(forked.thread.cwd, abs_fixture("/repo/topic"));
         assert_eq!(
             forked.thread.workspace_roots,
-            vec![PathBuf::from("/repo/topic"), PathBuf::from("/repo/lib")],
+            vec![abs_fixture("/repo/topic"), abs_fixture("/repo/lib")],
         );
     }
 
@@ -4920,7 +4940,7 @@ mod tests {
 
         assert_eq!(
             forked.thread.workspace_roots,
-            vec![PathBuf::from("/repo/main")],
+            vec![abs_fixture("/repo/main")],
             "Some([]) is an explicit clear, distinct from None (inherit)"
         );
     }
@@ -4932,8 +4952,8 @@ mod tests {
         // turns it into the vacuous containment root on every later resume.
         let store = temp_core_state("resume-empty-cwd");
         let mut metadata = test_thread_metadata("thread-empty-cwd");
-        metadata.cwd = PathBuf::from("/persisted");
-        metadata.workspace_roots = vec![PathBuf::from("/persisted")];
+        metadata.cwd = abs_fixture("/persisted");
+        metadata.workspace_roots = vec![abs_fixture("/persisted")];
         store.upsert_thread(&metadata).expect("seed thread");
         let mut manager = ThreadManager::new(store);
         let mut params = resume_params("thread-empty-cwd");
@@ -4953,7 +4973,7 @@ mod tests {
             .expect("thread persisted");
         assert_eq!(
             persisted.cwd,
-            PathBuf::from("/persisted"),
+            abs_fixture("/persisted"),
             "a rejected resume must not touch the persisted root set"
         );
     }
@@ -4984,7 +5004,7 @@ mod tests {
         let mut manager = seed_multi_root_parent("resume-relative-cwd");
         let mut params = resume_params("thread-parent");
         params.cwd = Some(PathBuf::from("."));
-        params.workspace_roots = Some(vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+        params.workspace_roots = Some(vec![abs_fixture("/a"), abs_fixture("/b")]);
         let err = manager
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect_err("a relative cwd must be rejected");
@@ -5001,7 +5021,7 @@ mod tests {
             .expect("thread persisted");
         assert_eq!(
             persisted.cwd,
-            PathBuf::from("/repo/main"),
+            abs_fixture("/repo/main"),
             "a rejected resume must not mint the relative primary"
         );
     }
@@ -5097,7 +5117,7 @@ mod tests {
                     raw_tool_call_id: None,
                 },
                 AskForApproval::Never,
-                Path::new("/tmp/codewhale"),
+                abs_fixture("/tmp/codewhale").as_path(),
                 &[],
             )
             .await
@@ -5127,7 +5147,7 @@ mod tests {
             .thread_manager
             .spawn_thread_with_history(
                 "deepseek".to_string(),
-                PathBuf::from("/tmp/codewhale"),
+                abs_fixture("/tmp/codewhale"),
                 &[],
                 InitialHistory::New,
                 true,
@@ -5354,7 +5374,7 @@ mod tests {
                 local_shell_call("echo hi", None),
                 AskForApproval::Never,
                 &cwd,
-                &[PathBuf::from("/")],
+                &[abs_fixture("/")],
             )
             .await
             .expect_err("a filesystem-root declaration must be rejected");
@@ -5439,12 +5459,12 @@ mod tests {
         // normalize: an overshoot `..` clamps at the filesystem root; a `..`
         // a relative spelling cannot pop is kept.
         assert_eq!(
-            normalize_path_lexically(Path::new("/w/x/../../../att/vendor/lib.rs")),
-            PathBuf::from("/att/vendor/lib.rs")
+            normalize_path_lexically(abs_fixture("/w/x/../../../att/vendor/lib.rs").as_path()),
+            abs_fixture("/att/vendor/lib.rs")
         );
         assert_eq!(
-            normalize_path_lexically(Path::new("/a/..")),
-            PathBuf::from("/")
+            normalize_path_lexically(abs_fixture("/a/..").as_path()),
+            abs_fixture("/")
         );
         assert_eq!(
             normalize_path_lexically(Path::new("a/../../b")),
@@ -5492,7 +5512,7 @@ mod tests {
         // Round-22 SF22-8: every boundary consumer scales with the set
         // length, so an oversized declaration must be refused at intake
         // rather than stalling every turn.
-        let cwd = PathBuf::from("/repo");
+        let cwd = abs_fixture("/repo");
         let root = |i: usize| PathBuf::from(format!("/att{i}"));
         let at_cap: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS).map(root).collect();
         assert!(validate_workspace_roots(&cwd, &at_cap).is_ok());
@@ -5508,10 +5528,10 @@ mod tests {
     fn intake_rejections_carry_the_typed_validation_error() {
         // The distinct type is what lets HTTP lanes answer 400 instead of a
         // server-fault 500 (SF22-4); the Display text is unchanged.
-        let cwd = PathBuf::from("/repo");
+        let cwd = abs_fixture("/repo");
         for roots in [
             vec![PathBuf::from("relative/dir")],
-            vec![PathBuf::from("/..")],
+            vec![abs_fixture("/..")],
             vec![cwd.parent().expect("repo parent").to_path_buf()],
         ] {
             let err =
@@ -5521,6 +5541,6 @@ mod tests {
                 "rejection for {roots:?} must be typed: {err}"
             );
         }
-        assert!(validate_workspace_roots(&cwd, &[PathBuf::from("/shared")]).is_ok());
+        assert!(validate_workspace_roots(&cwd, &[abs_fixture("/shared")]).is_ok());
     }
 }
