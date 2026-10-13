@@ -96,6 +96,7 @@ pub(crate) const MAX_DECRYPTED_PAYLOAD_BYTES: usize = 512 * 1024;
 pub(crate) const MAX_TRANSFER_CHUNK_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_TASK_INPUT_TEXT_BYTES: usize = 64 * 1024;
 const MAX_TEMPORARY_MODEL_PACKAGE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_TEMPORARY_MODEL_CREDENTIAL_BYTES: usize = 4096;
 const MAX_ID_CHARS: usize = 128;
 const SEALED_CODE_V1_BYTES: usize = 68;
 const MAX_TASK_REFERENCES: usize = 32;
@@ -104,7 +105,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "11c728929280ade5f529efc38a0fca6d618a77839bba1c7e48938b34e781f889";
+    "98ab9cc1835d7b617b142b7e26b8583a96245107db574465b46a836f43217a6b";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -226,11 +227,16 @@ const PRESETS: &[&str] = &[
     "glm",
     "mimo",
     "openai",
+    "openai_responses",
     "anthropic",
     "gemini",
     "xai",
 ];
-const WIRE_APIS: &[&str] = &["openai_chat_completions", "anthropic_messages"];
+const WIRE_APIS: &[&str] = &[
+    "openai_chat_completions",
+    "anthropic_messages",
+    "openai_responses",
+];
 const PROVIDER_KINDS: &[&str] = &["custom", "official_api"];
 const VENDORS: &[&str] = &[
     "anthropic",
@@ -3103,6 +3109,7 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
     validate_route(
         required_value(package, "primary", "temporary_model_package")?,
         "temporary_model_package.primary",
+        false,
     )?;
     validate_credential(
         required_value(package, "primary_credential", "temporary_model_package")?,
@@ -3119,6 +3126,7 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
         validate_route(
             required_value(fallback, "route", "temporary_model_package.vision_fallback")?,
             "temporary_model_package.vision_fallback.route",
+            true,
         )?;
         validate_credential(
             required_value(
@@ -3132,7 +3140,7 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
     Ok(())
 }
 
-fn validate_route(value: &Value, label: &str) -> Result<()> {
+fn validate_route(value: &Value, label: &str, vision: bool) -> Result<()> {
     let route_schema = nested_schema("route")?;
     let route = exact_nested(value, route_schema.required, route_schema.optional, label)?;
     bounded_text(
@@ -3140,6 +3148,15 @@ fn validate_route(value: &Value, label: &str) -> Result<()> {
         &format!("{label}.display_name"),
         128,
     )?;
+    if object_string(route, "display_name", label)?
+        .trim()
+        .is_empty()
+    {
+        return Err(ControllerProtocolError::new(
+            "invalid_field",
+            format!("{label}.display_name"),
+        ));
+    }
     validate_enum(
         required_value(route, "preset", label)?,
         &format!("{label}.preset"),
@@ -3152,23 +3169,23 @@ fn validate_route(value: &Value, label: &str) -> Result<()> {
     )?;
     let preset = object_string(route, "preset", label)?;
     let wire_api = object_string(route, "wire_api", label)?;
-    if (preset == "anthropic") != (wire_api == "anthropic_messages") {
-        return Err(ControllerProtocolError::new(
-            "invalid_field",
-            format!("{label}.wire_api"),
-        ));
-    }
     let base_url = bounded_text(
         required_value(route, "base_url", label)?,
         &format!("{label}.base_url"),
         2048,
     )?;
     validate_controller_base_url(base_url, &format!("{label}.base_url"))?;
-    bounded_text(
+    let model = bounded_text(
         required_value(route, "model", label)?,
         &format!("{label}.model"),
         256,
     )?;
+    if model.trim().is_empty() {
+        return Err(ControllerProtocolError::new(
+            "invalid_field",
+            format!("{label}.model"),
+        ));
+    }
     validate_enum(
         required_value(route, "image_capability_override", label)?,
         &format!("{label}.image_capability_override"),
@@ -3194,6 +3211,18 @@ fn validate_route(value: &Value, label: &str) -> Result<()> {
             &format!("{label}.reasoning_effort"),
             REASONING_EFFORTS,
         )?;
+    }
+    let expected_wire = crate::core::model_wire::model_route_wire_api(
+        preset,
+        route.get("vendor").and_then(Value::as_str),
+        model,
+        base_url,
+    );
+    if wire_api != expected_wire || (vision && wire_api != "openai_chat_completions") {
+        return Err(ControllerProtocolError::new(
+            "invalid_field",
+            format!("{label}.wire_api"),
+        ));
     }
     Ok(())
 }
@@ -3317,9 +3346,9 @@ fn validate_credential(value: &Value, label: &str) -> Result<()> {
     let secret = bounded_text(
         required_value(credential, "secret", label)?,
         &format!("{label}.secret"),
-        8192,
+        MAX_TEMPORARY_MODEL_CREDENTIAL_BYTES,
     )?;
-    if secret.len() > 8192 {
+    if secret.len() > MAX_TEMPORARY_MODEL_CREDENTIAL_BYTES {
         return Err(ControllerProtocolError::new(
             "invalid_field",
             format!("{label}.secret"),
@@ -4344,6 +4373,7 @@ mod tests {
                 "max_transfer_chunk_bytes": MAX_TRANSFER_CHUNK_BYTES,
                 "max_task_input_text_bytes": MAX_TASK_INPUT_TEXT_BYTES,
                 "max_temporary_model_package_bytes": MAX_TEMPORARY_MODEL_PACKAGE_BYTES,
+                "max_temporary_model_credential_bytes": MAX_TEMPORARY_MODEL_CREDENTIAL_BYTES,
                 "max_id_chars": MAX_ID_CHARS,
                 "sealed_code_v1_bytes": SEALED_CODE_V1_BYTES,
                 "max_sensitive_string_bytes": super::super::crypto::MAX_SENSITIVE_STRING_BYTES
@@ -4377,6 +4407,7 @@ mod tests {
             "runtime_pre_lease_messages": runtime_pre_lease_messages(),
             "collection_limits":{"task_attachment_ids":MAX_TASK_REFERENCES,"task_skill_ids":MAX_TASK_REFERENCES,"descriptors":MAX_DESCRIPTORS,"artifacts":MAX_ARTIFACTS,"capabilities":CONTROLLER_CAPABILITIES.len()},
             "base_url_grammar":"lowercase-http(s)-dns-or-ipv4-port1-65535-no-userinfo-ipv6-fragment-uppercase-percent",
+            "temporary_model_wire_policy":"effective-host-vendor-preset-model;responses-primary-only;vision-chat-only;no-env",
             "liveness_sequence_policy":{"heartbeat":{"lower":"replay","equal":"same_sequence_tighten","greater":"advance"},"attestation":{"lower":"replay","equal":"replay","greater":"advance"}},
             "validation_modes":{"shape_only":"schema-role-lease-shape-without-capability-state","runtime":"negotiated-capabilities-required-for-state-machine-messages","lease_install":"trusted-handshake-bindings-produce-new-lease","registration":"independent-generation-registration-idempotency-context"},
             "runtime_capability_context":{"order":"bytewise-strict-ascending","invalid_error":{"code":"unsupported_capability","field":"negotiated_capabilities"}},
@@ -4437,6 +4468,48 @@ mod tests {
             "B" => B,
             "relay" => RELAY,
             _ => panic!("unknown fixture role {value}"),
+        }
+    }
+
+    #[test]
+    fn shared_temporary_wire_vectors_accept_responses_primary_but_only_chat_vision() {
+        let fixture = fixture();
+        let vectors = fixture["temporary_model_wire_vectors"].as_array().unwrap();
+        assert_eq!(vectors.len(), 36);
+        for vector in vectors {
+            for vision in [false, true] {
+                let mut payload = fixture["task_submit_vectors"]["temporary"].clone();
+                let mut route = payload["temporary_model_package"]["primary"].clone();
+                let fields = route.as_object_mut().unwrap();
+                fields.remove("vendor");
+                fields.extend(vector["route"].as_object().unwrap().clone());
+                if vision {
+                    payload["temporary_model_package"]["vision_fallback"] = json!({
+                        "route": route,
+                        "credential": {"kind": "api_key", "secret": vector.get("credential_secret").cloned().unwrap_or(json!("fixture-vision-key"))},
+                    });
+                } else {
+                    payload["temporary_model_package"]["primary"] = route;
+                    if let Some(secret) = vector.get("credential_secret") {
+                        payload["temporary_model_package"]["primary_credential"]["secret"] =
+                            secret.clone();
+                    }
+                }
+                let valid = vector[if vision { "vision" } else { "primary" }]
+                    .as_bool()
+                    .unwrap();
+                let result = validate_controller_payload_json_in_context(
+                    &serde_json::to_string(&payload).unwrap(),
+                    A,
+                    Some(&context()),
+                );
+                assert_eq!(
+                    result.is_ok(),
+                    valid,
+                    "{} / vision={vision}",
+                    vector["name"]
+                );
+            }
         }
     }
 

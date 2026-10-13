@@ -284,6 +284,23 @@ test("task submission carries bounded input, exact statuses and the full tempora
   assertProtocolError("message_too_large", () => validateControllerPayload(oversizedPackage, "A", LEASE));
 });
 
+test("primary Responses and Chat-only vision share wire-true cross-language vectors", () => {
+  for (const vector of fixture.temporary_model_wire_vectors) {
+    for (const vision of [false, true]) {
+      const payload = structuredClone(fixture.task_submit_vectors.temporary);
+      const route = { ...payload.temporary_model_package.primary };
+      delete route.vendor;
+      Object.assign(route, vector.route);
+      if (vision) payload.temporary_model_package.vision_fallback = { route, credential: { kind: "api_key", secret: vector.credential_secret ?? "fixture-vision-key" } };
+      else payload.temporary_model_package.primary = route;
+      if (!vision && vector.credential_secret !== undefined) payload.temporary_model_package.primary_credential.secret = vector.credential_secret;
+      const valid = vision ? vector.vision : vector.primary;
+      if (valid) assert.deepEqual(validateControllerPayload(payload, "A", LEASE), payload, vector.name);
+      else assert.throws(() => validateControllerPayload(payload, "A", LEASE), ControllerProtocolError, vector.name);
+    }
+  }
+});
+
 test("temporary model URLs follow the shared strict ASCII grammar", () => {
   for (const url of fixture.base_url_vectors.valid) assert.equal(validateControllerBaseUrl(url), url);
   for (const url of fixture.base_url_vectors.invalid) assertProtocolError("invalid_field", () => validateControllerBaseUrl(url));

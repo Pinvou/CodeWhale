@@ -69,6 +69,9 @@ commit；更新 checkout 时显式禁用 LFS smudge，一致且工作树中不�
 缓存外置 Git LFS objects 和 `pinvou3-app/src-tauri/target/windows-runtime` 中已验证的 staging。缓存 schema、gitlink 或
 主仓库 runtime lock 任一变化都会生成新键。
 
+同一工作区上的并发初始化与 staging 调用通过 `target/windows-runtime/.resolver.lock` 串行化；等待方最多阻塞 120 秒，
+超时即失败退出，稍后重试即可（元数据缓存与 staging 复用让重试代价很低）。
+
 Jenkins 的 `CheckoutSubmodule` 阶段只负责准备 submodule，不再单独执行 `runtime:windows:validate`。后续直接运行
 `npm --prefix pinvou3-app run build:nsis`：统一的 `build.js` 入口只执行一次 runtime 校验和 staging，读取
 `runtime-descriptor.json`，再由 Windows installer adapter 为 NSIS 原子准备经过校验的 VC++ 引导程序。
@@ -107,6 +110,39 @@ push 或在 `main` 上执行的 `workflow_dispatch` 才能进入 `windows-releas
 构建前自动执行 staging，所有平台都会加载对应 config overlay，并在调用 Tauri CLI 前
 生成有效合并配置和安装包资源清单。不要直接运行 `npx tauri build/bundle`。
 基础 Tauri 配置的构建/打包钩子会拒绝未经过包装器的调用。
+
+### Rust 工具链检查（Windows）
+
+在任何 Windows `tauri dev`、`build`、`bundle` 之前，`build.js` 都会对构建账号的
+rustup 执行 `scripts/ci/ensure-rust-toolchain.ps1 -CheckOnly`。当
+`src-tauri/rust-toolchain.toml` 配置的 channel（当前是浮动的 `stable`）能提供
+`cargo`、`rustc`、`clippy-driver`、`cargo-clippy`、`rustfmt`、`cargo-fmt` 以及
+非空的 rust-std target libdir 时，只读复用；否则构建切换到隔离的
+`RUSTUP_HOME`（`pinvou3-app/.cache/rustup/<channel>-<host-triple>`，可用
+`PINVOU3_RUSTUP_HOME` 覆盖）并在其中修复工具链：先尝试已配置的
+`RUSTUP_DIST_SERVER`，再依次 rsproxy、USTC 镜像，官方 Rust 源兜底，每次安装
+尝试有界超时，整体修复有预算（`-RepairTimeoutSeconds`，默认 1500s）。
+镜像优先的顺序服务于 #619 面向的人群（官方源会僵死的机器）；把
+`RUSTUP_DIST_SERVER` 设为官方地址即可回到官方优先、镜像兜底。注意完整性模型
+与 #619 的运行时下载不同：后者携带固定的 SHA-256 校验，而 rustup 只用同一镜像
+提供的 channel manifest 校验组件，因此镜像信任建立在到镜像运营方的 HTTPS 上。
+脚本拒绝修改构建账号共享的 `~/.rustup`、文件系统根目录、缺少
+`.pinvou3-managed-rustup` 标记的非空目录，以及没有隔离 `RUSTUP_HOME` 的运行。
+修复、重置或预算耗尽时，报错会点名隔离的 `RUSTUP_HOME`——它永远可以安全删除
+后重跑。探针只检查存在与健康，因此在浮动 `stable` channel 下，被复用的隔离
+工具链会停留在安装时的 stable，直到某次探针失败或 home 被删除；账号 home 的
+`rustup update` 与 CI 安装都不会刷新它。`npm run test:windows-rustup-repair`
+在 Windows 原生验证这条路径，包括不完整工具链的 `-CheckOnly` 分类与被删除的
+rust-std。Tauri 运行期间，`build.js` 每分钟记录一次 CLI PID、阶段和心跳。
+
+对每次 Windows `dev`、`build`、`bundle`，`build.js` 还会编译（或在不超过其
+源码 mtime 期间复用）`src-tauri/scripts/rustc-stack-wrapper.exe`，并经
+`RUSTC_WRAPPER` 传给 Tauri CLI，使 PowerShell 里直接运行的 `npm run dev` 与
+run-dev.sh、CI 一样拿到 16 MiB 编译器栈，且不会把 `RUST_MIN_STACK` 泄漏进
+应用。重新编译会先写临时输出再原子改名（shell selector 以同样方式编译），
+被中断的构建不会污染缓存。调用方显式指定的 `RUSTC_WRAPPER` 会被保留（日志会
+说明它是本 stack wrapper 还是 sccache 之类放弃了栈修复的外来 wrapper）；
+缺少 wrapper 源码或编译失败会终止构建。
 
 resolver 只负责验证、展开运行时并生成 `target/windows-runtime/runtime-descriptor.json`；
 `scripts/tauri/windows-installer.js` 只在目标包含 NSIS 时消费 descriptor 中的 VC Runtime。

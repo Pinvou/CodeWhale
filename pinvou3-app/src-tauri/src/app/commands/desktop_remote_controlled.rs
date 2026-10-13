@@ -15,11 +15,11 @@ use crate::features::remote_control::RemoteControlManager;
 #[cfg(test)]
 pub(crate) use crate::features::remote_control::controller::clock::monotonic_millis;
 use crate::features::remote_control::controller::controlled::{
-    ControlledDeviceManager, ControlledStateError, ControlledStatus, ControlledWorkspaceInfo,
-    WorkspaceAuthorizationRequest,
+    ControlledDeviceManager, ControlledOperation, ControlledStateError, ControlledStatus,
+    ControlledWorkspaceInfo, WorkspaceAuthorizationRequest,
 };
 use crate::features::remote_control::controller::relay_runtime::{
-    ControlledRelayWorker, controlled_monotonic_millis,
+    ControlledRelayWorker, controlled_monotonic_millis, log_controlled_event,
 };
 
 const STATUS_EVENT: &str = "desktop-remote-controlled-status";
@@ -117,6 +117,34 @@ fn emit_status(app: &AppHandle, status: &ControlledStatus) {
     let _ = app.emit(STATUS_EVENT, status);
 }
 
+/// Start and refresh share the same operation-owned failure boundary. A worker
+/// can fail before it is spawned (configuration, ownership or key setup), so
+/// its asynchronous registration failure handler cannot close this state.
+async fn start_controlled_worker<T>(
+    manager: &ControlledDeviceManager,
+    operation: ControlledOperation,
+    start: impl std::future::Future<Output = Result<T, String>>,
+    emit: impl FnOnce(&ControlledStatus),
+) -> Result<T, String> {
+    match start.await {
+        Ok(done) => Ok(done),
+        Err(error) => {
+            let code =
+                crate::features::remote_control::controller::protocol::CONTROLLER_ERROR_CODES
+                    .iter()
+                    .copied()
+                    .find(|code| *code == error)
+                    .unwrap_or("pairing_registration_failed");
+            let status = manager
+                .fail_operation(operation, code.to_owned())
+                .map_err(controlled_error)?;
+            log_controlled_event("start_failed", code);
+            emit(&status);
+            Err(code.to_owned())
+        }
+    }
+}
+
 /// Frontend projection diagnostics accept only semantic categories. The UI
 /// cannot submit a code, generation, endpoint, device name or free text.
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -209,68 +237,46 @@ pub async fn desktop_remote_controlled_start(
     );
     let started = std::time::Instant::now();
     let result = async {
-    ensure_supported(&manager)?;
-    let workspaces = workspace_requests(workspaces)?;
-    if let Err(error) = manager.start(device_name.as_deref(), workspaces) {
-        // 早期拒绝（例如上一代仍在等待配对 → desktop_remote_control_busy）此前完全
-        // 没有痕迹，UI 只会显示兜底文案；这里写入排障日志。
-        super::super::super::features::remote_control::controller::relay_runtime::log_controlled_event(
-            "start_rejected",
-            error.code,
-        );
-        return Err(controlled_error(error));
-    }
-    let operation = manager
-        .current_operation()
-        .ok_or_else(|| "desktop_remote_generation_unavailable".to_owned())?;
-    let done = match ControlledRelayWorker::start(
-        app.clone(),
-        relay.inner().clone(),
-        operation.clone(),
-        std::sync::Arc::new(
-            super::desktop_remote_controller_business::DesktopControlledBusiness {
-                app: app.clone(),
-            },
-        ),
-    )
-    .await
-    {
-        Ok(done) => done,
-        Err(error) => {
-            let bounded = error
-                .chars()
-                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-                .take(64)
-                .collect::<String>();
-            super::super::super::features::remote_control::controller::relay_runtime::log_controlled_event(
-                "start_failed",
-                &bounded,
-            );
-            let status = manager
-                .fail_operation(operation, bounded)
-                .map_err(controlled_error)?;
-            emit_status(&app, &status);
-            return Err(error);
-        }
-    };
-    match done.await {
-        Ok(Ok(status)) => Ok(status),
-        Ok(Err(error)) => {
-            super::super::super::features::remote_control::controller::relay_runtime::log_controlled_event(
-                "start_failed",
-                &error,
-            );
-            Err(error)
-        }
-        Err(_) => {
-            super::super::super::features::remote_control::controller::relay_runtime::log_controlled_event(
-                "start_failed",
-                "pairing_registration_failed",
-            );
-            Err("pairing_registration_failed".to_owned())
+        ensure_supported(&manager)?;
+        let workspaces = workspace_requests(workspaces)?;
+        // Retain the exact operation returned under the start lock. Looking up
+        // "current" again can substitute a concurrent stop/restart's new owner.
+        let operation = match manager.start(device_name.as_deref(), workspaces) {
+            Ok(operation) => operation,
+            Err(error) => {
+                log_controlled_event("start_rejected", error.code);
+                return Err(controlled_error(error));
+            }
+        };
+        let done = start_controlled_worker(
+            &manager,
+            operation.clone(),
+            ControlledRelayWorker::start(
+                app.clone(),
+                relay.inner().clone(),
+                operation.clone(),
+                std::sync::Arc::new(
+                    super::desktop_remote_controller_business::DesktopControlledBusiness {
+                        app: app.clone(),
+                    },
+                ),
+            ),
+            |status| emit_status(&app, status),
+        )
+        .await?;
+        match done.await {
+            Ok(Ok(status)) => Ok(status),
+            Ok(Err(error)) => {
+                log_controlled_event("start_failed", &error);
+                Err(error)
+            }
+            Err(_) => {
+                log_controlled_event("start_failed", "pairing_registration_failed");
+                Err("pairing_registration_failed".to_owned())
+            }
         }
     }
-    }.await;
+    .await;
     track_remote_control(
         &app,
         RemoteControlEvent::from_result(
@@ -325,18 +331,22 @@ pub async fn desktop_remote_controlled_refresh(
             .map_err(controlled_error)?;
         checkpoint("refresh_state_rotation_done");
         checkpoint("refresh_worker_start_begin");
-        let done = ControlledRelayWorker::start(
-            app.clone(),
-            relay.inner().clone(),
-            operation,
-            std::sync::Arc::new(
-                super::desktop_remote_controller_business::DesktopControlledBusiness {
-                    app: app.clone(),
-                },
+        let done = start_controlled_worker(
+            &manager,
+            operation.clone(),
+            ControlledRelayWorker::start(
+                app.clone(),
+                relay.inner().clone(),
+                operation,
+                std::sync::Arc::new(
+                    super::desktop_remote_controller_business::DesktopControlledBusiness {
+                        app: app.clone(),
+                    },
+                ),
             ),
+            |status| emit_status(&app, status),
         )
-        .await
-        .map_err(|error| error.to_string())?;
+        .await?;
         checkpoint("refresh_worker_start_done");
         checkpoint("refresh_registration_wait_begin");
         match done.await {
@@ -487,6 +497,127 @@ pub fn desktop_remote_controlled_list_workspaces(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn start_entry_retains_its_original_operation_across_a_concurrent_restart() {
+        use crate::features::remote_control::controller::controlled::ControlledStatusKind;
+
+        // Bind the real command entry to the state-machine result, not a later
+        // ambient lookup. This wiring guard fails on the old two-lock entry.
+        let source = include_str!("desktop_remote_controlled.rs");
+        let entry = source
+            .split("pub async fn desktop_remote_controlled_start(")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn desktop_remote_controlled_refresh(")
+            .next()
+            .unwrap();
+        assert!(entry.contains("let operation = match manager.start("));
+        assert!(entry.contains("Ok(operation) => operation"));
+        assert!(!entry.contains(".current_operation()"));
+
+        // Exercise the production manager and failure helper at the exact race
+        // boundary: an old start pauses before the worker, then B stops/restarts.
+        let manager = ControlledDeviceManager::default();
+        let original = manager.start(Some("B"), Vec::new()).unwrap();
+        manager.stop();
+        let current = manager.start(Some("B"), Vec::new()).unwrap();
+        assert_ne!(original.generation(), current.generation());
+        let before = serde_json::to_value(manager.status()).unwrap();
+        let error = start_controlled_worker::<()>(
+            &manager,
+            original,
+            async { Err("pairing_key_invalid".to_owned()) },
+            |_| panic!("the old command must not emit over the replacement"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "desktop_remote_stale_result");
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Registering);
+        assert_eq!(serde_json::to_value(manager.status()).unwrap(), before);
+        assert!(manager.is_pending_handshake(current));
+    }
+
+    #[tokio::test]
+    async fn worker_start_failure_closes_initial_and_refreshed_operations() {
+        use crate::features::remote_control::controller::controlled::ControlledStatusKind;
+        for refresh in [false, true] {
+            let manager = ControlledDeviceManager::default();
+            let initial = manager.start(Some("B"), Vec::new()).unwrap();
+            let operation = if refresh {
+                let retiring = manager.begin_refresh().unwrap();
+                manager.complete_refresh_revoked(retiring).unwrap()
+            } else {
+                initial
+            };
+            let mut emitted = None;
+            let error = start_controlled_worker::<()>(
+                &manager,
+                operation.clone(),
+                async { Err("configuration contains private host details".to_owned()) },
+                |status| emitted = Some(status.clone()),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, "pairing_registration_failed");
+            let status = emitted.expect("entry failure must publish terminal status");
+            assert_eq!(status.kind(), ControlledStatusKind::Error);
+            let projection = serde_json::to_value(&status).unwrap();
+            assert_eq!(projection["errorCode"], error);
+            assert_eq!(projection["generation"], operation.generation());
+            assert!(!manager.is_pending_handshake(operation));
+            assert!(manager.live_runtime_context().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_start_success_preserves_registration_and_returns_receiver() {
+        use crate::features::remote_control::controller::controlled::ControlledStatusKind;
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(Some("B"), Vec::new()).unwrap();
+        let result = start_controlled_worker(&manager, operation, async { Ok(17) }, |_| {
+            panic!("success must not publish a failure")
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, 17);
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Registering);
+    }
+
+    #[tokio::test]
+    async fn late_worker_start_failure_cannot_replace_stop_or_new_refresh() {
+        use crate::features::remote_control::controller::controlled::ControlledStatusKind;
+        for refresh in [false, true] {
+            let manager = ControlledDeviceManager::default();
+            let operation = manager.start(Some("B"), Vec::new()).unwrap();
+            let error = start_controlled_worker::<()>(
+                &manager,
+                operation,
+                async {
+                    if refresh {
+                        let retiring = manager.begin_refresh().unwrap();
+                        manager.complete_refresh_revoked(retiring).unwrap();
+                    } else {
+                        manager.stop();
+                    }
+                    Err("endpoint_offline".to_owned())
+                },
+                |_| panic!("stale operation must not emit over current state"),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, "desktop_remote_stale_result");
+            assert_eq!(
+                manager.status().kind(),
+                if refresh {
+                    ControlledStatusKind::Registering
+                } else {
+                    ControlledStatusKind::Stopped
+                }
+            );
+            assert!(serde_json::to_value(manager.status()).unwrap()["errorCode"].is_null());
+        }
+    }
 
     fn input(path: &std::path::Path) -> DesktopControlledWorkspaceInput {
         DesktopControlledWorkspaceInput {
