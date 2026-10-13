@@ -203,6 +203,28 @@
         {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
         {"role": "user", "content": [{"type": "text", "text": "Another language model started to solve this problem: second handoff"}, {"type": "text", "text": "<!-- codewhale.compaction-checkpoint.v1 -->"}]}
       ]
+    },
+    {
+      "id": "modern-dropped-turn-not-witnessed-by-a-carrier-text",
+      "expect": "fail",
+      "last_round_start": 0,
+      "original": [
+        {"role": "user", "content": [{"type": "text", "text": "Run the suite now."}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "Running."}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "live", "name": "Bash", "input": {"command": "cargo test"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "live", "content": "ok"}]},
+        {"role": "user", "content": [{"type": "text", "text": "Another language model started to solve this problem: first handoff"}, {"type": "text", "text": "<!-- codewhale.compaction-checkpoint.v1 -->"}]},
+        {"role": "user", "content": [{"type": "text", "text": "Another language model started to solve this problem"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+      ],
+      "replacement": [
+        {"role": "user", "content": [{"type": "text", "text": "Run the suite now."}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "Running."}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "live", "name": "Bash", "input": {"command": "cargo test"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "live", "content": "ok"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+        {"role": "user", "content": [{"type": "text", "text": "Another language model started to solve this problem: second handoff"}, {"type": "text", "text": "<!-- codewhale.compaction-checkpoint.v1 -->"}]}
+      ]
     }
   ]
 }

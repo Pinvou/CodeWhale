@@ -7,7 +7,11 @@
 // `history_recognition.rs`): a history that carries a provenance-stamped
 // carrier is read post-provenance, where only the stamped two-block form is
 // a checkpoint and a user turn pasting the bare summary header is content;
-// a history without one keeps the loose single-block reading.
+// a history without one keeps the loose single-block reading. The mirror
+// stays scoped to the fixture matrix: `isPlainUserText` deliberately skips
+// the rest of Rust's `classify_user_turn_prompt_in_era` conjuncts
+// (tool-result-bearing messages, runtime-owned turn metadata), which the
+// matrix never contains.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -147,14 +151,21 @@ export function validateSurvivalContract(original, replacement, anchors) {
   const lastRound = original.slice(start);
   // Every plain user turn in the round, not the first one `find` reaches: the
   // round spans a tool-bearing turn plus the toolless tail after it, so
-  // checking one let a rewrite drop the latest turn. Era-aware: in a
-  // post-provenance history the pasted-header turn is plain user text and
-  // must survive; the stamped carrier is not.
+  // checking one let a rewrite drop the latest turn. Era-aware on both sides,
+  // like the Rust `user_prompt_text_of`: in a post-provenance history the
+  // pasted-header turn is plain user text and must survive, and the stamped
+  // carrier is neither required to survive nor allowed to witness — its
+  // joined text starts with the bare marker, so an era-blind witness would
+  // let a rewrite drop a round turn and call it survived by the summary.
   for (const text of lastRound
     .filter((message) => isPlainUserText(message, era))
     .map(userTextOf)
     .filter(Boolean)) {
-    if (!survives(text, replacement, userTextOf)) {
+    if (
+      !survives(text, replacement, (message) =>
+        isPlainUserText(message, era) ? userTextOf(message) : null,
+      )
+    ) {
       return "a last-round user message was dropped";
     }
   }
