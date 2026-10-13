@@ -325,15 +325,24 @@ fn read_audit_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup
                     stats.elapsed_samples += 1;
                 }
 
-                // Success / failure
+                // Success / failure. A receipt the engine marked
+                // `executed: false` (a deferred-tool hydration receipt, an
+                // oversize-hydration refusal) answered the call without the
+                // tool ever running, so it counts as neither — counting it
+                // as a success would inflate the tool's real execution rate.
                 let success = v
                     .pointer("/details/success")
                     .or_else(|| v.pointer("/payload/success"))
                     .and_then(|b| b.as_bool())
                     .unwrap_or(true);
-                if success {
+                let executed = v
+                    .pointer("/details/executed")
+                    .or_else(|| v.pointer("/payload/executed"))
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(true);
+                if success && executed {
                     stats.successes += 1;
-                } else {
+                } else if !success {
                     stats.failures += 1;
                 }
             }
