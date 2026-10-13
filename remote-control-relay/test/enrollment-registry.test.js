@@ -339,6 +339,48 @@ test("public enrollment bounds and repeated enrollment reject without mutating s
   assert.deepEqual(store.readNamespace(ENROLLMENT_NAMESPACE), exhausted);
 });
 
+test("namespace cap accepts 32, rejects 33 without mutation, and permits existing CAS", async (t) => {
+  const statePath = await temporaryState(t);
+  const store = await openStateStore(statePath);
+  resourcesFor(t).stores.push(store);
+  // Pin the public boundary independently of the implementation constant.
+  for (let index = 0; index < 32; index += 1) {
+    assert.deepEqual(await store.compareAndSwap(`boundary_${index}`, "0", { index }), {
+      store_revision: String(index + 1), namespace_revision: "1", value: { index },
+    });
+  }
+  const before = Array.from({ length: 32 }, (_, index) => store.readNamespace(`boundary_${index}`));
+  const primary = await fs.readFile(statePath);
+  const backup = await fs.readFile(`${statePath}.bak`);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await rejectsCode(store.compareAndSwap("boundary_32", "0", { index: 32 }), "relay_state_capacity_reached");
+    assert.deepEqual(await fs.readFile(statePath), primary);
+    assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+    assert.deepEqual(store.readNamespace("boundary_32"), {
+      store_revision: "32", namespace_revision: "0", value: null,
+    });
+    for (let index = 0; index < 32; index += 1) {
+      assert.deepEqual(store.readNamespace(`boundary_${index}`), before[index]);
+    }
+  }
+  assert.deepEqual(await store.compareAndSwap("boundary_31", "1", { updated: true }), {
+    store_revision: "33", namespace_revision: "2", value: { updated: true },
+  });
+  await store.close();
+  const reopened = await openStateStore(statePath);
+  resourcesFor(t).stores.push(reopened);
+  for (let index = 0; index < 32; index += 1) {
+    assert.deepEqual(reopened.readNamespace(`boundary_${index}`), {
+      store_revision: "33", namespace_revision: index === 31 ? "2" : "1",
+      value: index === 31 ? { updated: true } : { index },
+    });
+  }
+  assert.equal(Object.keys(JSON.parse(await fs.readFile(statePath, "utf8")).namespaces).length, 32);
+  assert.deepEqual(reopened.readNamespace("boundary_32"), {
+    store_revision: "33", namespace_revision: "0", value: null,
+  });
+});
+
 test("byte-cap rejection leaves durable bytes, revisions and later smaller CAS usable", async (t) => {
   const { store, statePath, registry } = await openRegistry(t, { storeOptions: { maxBytes: 1024 } });
   await registry.enroll({ endpointId: "capacity-existing", credential: FIRST_CREDENTIAL });
