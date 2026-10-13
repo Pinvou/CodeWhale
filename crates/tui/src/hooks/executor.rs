@@ -1593,6 +1593,12 @@ impl HookExecutor {
         }
     }
 
+    /// Check if hooks are enabled
+    #[allow(dead_code)] // Public API for hook system consumers
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
+    }
+
     /// Get the session ID
     /// Read-only access to the underlying configuration. Used by
     /// `/hooks` (#460 read-only MVP) so the user can list configured

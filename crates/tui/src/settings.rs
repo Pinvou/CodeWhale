@@ -2100,6 +2100,25 @@ impl Settings {
         true
     }
 
+    #[allow(dead_code)] // label editing surface is exposed through settings serialization first
+    pub fn set_pinned_model_label(
+        &mut self,
+        provider: &str,
+        model: &str,
+        label: Option<String>,
+    ) -> bool {
+        self.pinned_models
+            .iter_mut()
+            .find(|pin| {
+                pin.provider.eq_ignore_ascii_case(provider) && pin.model.eq_ignore_ascii_case(model)
+            })
+            .map(|pin| {
+                pin.label = label.filter(|value| !value.trim().is_empty());
+                true
+            })
+            .unwrap_or(false)
+    }
+
     pub fn move_pinned_model(&mut self, provider: &str, model: &str, delta: isize) -> bool {
         let Some(index) = self.pinned_models.iter().position(|pin| {
             pin.provider.eq_ignore_ascii_case(provider) && pin.model.eq_ignore_ascii_case(model)
@@ -5656,6 +5675,7 @@ mod tests {
         assert_eq!(settings.pinned_models[0].provider, "zai");
         assert!(settings.move_pinned_model("openrouter", "glm-5.2", -1));
         assert_eq!(settings.pinned_models[0].provider, "openrouter");
+        assert!(settings.set_pinned_model_label("openrouter", "glm-5.2", Some("fast".to_string())));
         let encoded = toml::to_string(&settings).unwrap();
         let decoded: Settings = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded.pinned_models, settings.pinned_models);

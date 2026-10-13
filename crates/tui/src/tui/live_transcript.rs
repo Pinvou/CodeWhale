@@ -161,6 +161,22 @@ impl LiveTranscriptOverlay {
         self.preview_pin_pending.set(true);
     }
 
+    /// Return the overlay to live-tail mode (used when backtrack is
+    /// confirmed or canceled). Re-arms sticky-tail so streaming resumes.
+    #[allow(dead_code)] // exposed for callers that retain an overlay across a backtrack cancel; current UI just pops the view.
+    pub fn set_tail_mode(&mut self) {
+        self.mode = Mode::Tail;
+        self.sticky_to_bottom.set(true);
+        self.preview_pin_pending.set(false);
+    }
+
+    /// For tests + UI: current mode.
+    #[allow(dead_code)] // currently consumed only by tests; kept public for symmetry with `set_*` setters.
+    #[must_use]
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
     /// Pull the latest cells + revisions from `App` so the next `render` shows
     /// streaming mutations. Must be called before `view_stack.render` while
     /// this overlay is on top; otherwise the cells stay frozen at whatever
@@ -1003,6 +1019,19 @@ mod tests {
         assert!(v.is_sticky());
         v.set_backtrack_preview(0);
         assert!(!v.is_sticky());
+        assert!(matches!(
+            v.mode(),
+            Mode::BacktrackPreview { selected_idx: 0 }
+        ));
+    }
+
+    #[test]
+    fn set_tail_mode_re_arms_sticky() {
+        let mut v = LiveTranscriptOverlay::new();
+        v.set_backtrack_preview(2);
+        v.set_tail_mode();
+        assert!(v.is_sticky());
+        assert!(matches!(v.mode(), Mode::Tail));
     }
 
     #[test]
