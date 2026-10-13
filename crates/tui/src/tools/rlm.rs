@@ -1316,6 +1316,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rlm_eval_schema_names_the_runtime_content_variable() {
+        let schema = RlmTool::alias("rlm_eval", "eval", None).input_schema();
+        let description = schema["properties"]["code"]["description"]
+            .as_str()
+            .expect("rlm_eval code description");
+
+        assert!(description.contains("`content`"));
+        assert!(description.contains("print(len(content))"));
+        assert!(!description.contains("SOURCE"));
+    }
+
     #[tokio::test]
     async fn rlm_session_open_eval_close_lifecycle() {
         let ctx = ctx();

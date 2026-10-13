@@ -429,6 +429,11 @@ mod tests {
     }
 
     #[test]
+    fn default_threshold_is_32k_tokens() {
+        assert_eq!(DEFAULT_LARGE_OUTPUT_THRESHOLD_TOKENS, 32_768);
+    }
+
+    #[test]
     fn synthesise_above_threshold() {
         let router = LargeOutputRouter::default();
         // DEFAULT threshold = 32768 tokens; 3 chars/token → 32768*3 = 98304 chars
