@@ -343,8 +343,9 @@
     }
 
     /**
-     * 随包内置的「服务端点」profile 列表（生产/测试）。用户不需要再配置
-     * PINVOU_REMOTE_* 环境变量即可在应用内切换。
+     * 随包内置的「服务端点」profile 列表（生产/测试），与后端切换能力对应。
+     * 该桥接能力无需 PINVOU_REMOTE_* 环境变量；当前 React 界面有意不消费
+     * 端点列表和切换入口，不代表用户切换界面已交付。
      */
     function endpointProfiles() {
       ensureAvailable();

@@ -1540,7 +1540,8 @@ impl RemoteControlManager {
         Ok(self.relay_settings())
     }
 
-    /// 可选的随包内置端点 profile（供设置页「服务端点」下拉使用）。
+    /// 可选的随包内置端点 profile，供后端与桥接接口查询。
+    /// 当前 React 界面有意不展示端点列表或切换入口。
     pub fn endpoint_profile_options(&self) -> Vec<serde_json::Value> {
         ENDPOINT_PROFILES
             .iter()
