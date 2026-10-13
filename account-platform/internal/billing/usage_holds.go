@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 
 	"time"
 
@@ -62,6 +63,9 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 	if hold.Status != "ACTIVE" {
 		return Hold{}, ErrUsageAlreadyTerminal
 	}
+	if _, err := validateMemberQuotaHoldAllocations(ctx, tx, hold.ID, 0); err != nil {
+		return Hold{}, err
+	}
 	now := r.now()
 	backedActual := min(actual, hold.MaxMicrocredits)
 	overage := actual - backedActual
@@ -95,6 +99,10 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 			return Hold{}, err
 		}
 		allocations = append(allocations, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Hold{}, err
 	}
 	rows.Close()
 	remaining := backedActual
@@ -203,6 +211,12 @@ func (r *PostgresRepository) ExtendHold(ctx context.Context, usageRequestID, hol
 		return Hold{}, ErrConflict
 	}
 	previousExpiresAt, previousMaximum := hold.ExpiresAt, hold.MaxMicrocredits
+	if _, err := validateMemberQuotaHoldAllocations(ctx, tx, hold.ID, 0); err != nil {
+		return Hold{}, err
+	}
+	if hold.MaxMicrocredits < 0 || additional > math.MaxInt64-hold.MaxMicrocredits {
+		return Hold{}, ErrConflict
+	}
 	if additional > 0 {
 		var organizationID, memberUserID *uuid.UUID
 		var membershipVersion *int64
@@ -217,6 +231,9 @@ func (r *PostgresRepository) ExtendHold(ctx context.Context, usageRequestID, hol
 				return Hold{}, err
 			}
 		} else if err := extendPersonalHold(ctx, tx, hold, additional, now); err != nil {
+			return Hold{}, err
+		}
+		if _, err := validateMemberQuotaHoldAllocations(ctx, tx, hold.ID, additional); err != nil {
 			return Hold{}, err
 		}
 		hold.MaxMicrocredits += additional

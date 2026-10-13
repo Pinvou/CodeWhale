@@ -104,7 +104,8 @@
 - 线性化点：`refund_exception_repair_cases.refund_id` 唯一 + `refunds` 行的 `status` 校验 + 异常 `version` CAS + journal `business_reference` 唯一；同一退款至多一次补记。
 - result-first：先按 `refund_id`/`approval_request_id`/`execution_key_digest` 只读读回 case、journal、应收与异常状态；命中即返回同一结果。
 - 未知结果：提交结果不明时只读查证 case、journal、应收、退款状态与异常 `financial_action_status` 是否同时一致；缺失或部分事实一律 `UNKNOWN_QUERY_ONLY`，禁止重放、禁止假定零效果。
-- 执行顺序：认领 execution → 校验 activation/policy/schema 与 `facts_digest` → 锁退款行与预留行 → 复读证据与零事实 → 回收可用额度 → 写应收（短缺）→ 写 journal → 推进退款与异常 → 写 case → 提交后复读确认。
+- 执行顺序：已有不可变 case 先回放；新执行校验 activation/policy/schema 后，沿普通退款的 wallet → order → refund 锁顺序复读证据与零事实并核对冻结 `facts_digest` → 回收可用额度 → 写应收（短缺）与 journal → 推进退款与异常 → 写 case → 同事务复用支付订单投影 → 提交后复读确认。完整回收清除本次退款的 review 状态；短缺和其他未闭合异常仍按既有投影保留阻断。
+- 本波 `refund_exception_repair_cases.package_id` 也是套餐完整重分类的财务历史；本表已安装时，任何关联 case 都拒绝零历史资格。本表尚未安装的旧阶段保持既有资格，不依赖后继设施。
 
 ## 8. 失败分类与 DLQ 收口（GSA-16 合同）
 

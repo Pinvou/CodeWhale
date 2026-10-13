@@ -13,3 +13,9 @@ Billing 前向迁移 `900015_receivable_activation_execution_lock` 为 RWO v1/s1
 效果为一个不可变 case、一笔平衡 journal 与 APPROVED_WRITE_OFF allocation；应收及钱包 receivable 投影推进，不改变 posted/reserved/credit lots/权益。结果先行与原审批查询/同键回执恢复继续生效，未知 ACK 不证明零效果。Native 管理入口沿原 Portal 页面，不新增 Native 管理 API。
 
 本手册描述生产合同，不代表私有候选已完成实际相邻传播、审批全链、issuer/NATS资源发行、canonical资产构建、Native或部署 E2E。
+
+## 有限 PostgreSQL 验证入口
+
+`PINVOU_TEST_SCHEMA_DATABASE_URL` 必须显式指向隔离测试集群的当前/会话同一 superuser；集群不得已有其它部署角色。`TestPrivateF11PublicOwnerIntegration` 复用 UUID 数据库和 absent-actor/正常清理守卫，输入缺失才 SKIP，已提供但不安全则失败，不安装到输入数据库。例：`go test -mod=readonly -race -count=1 ./internal/billingschema -run '^TestPrivateF11PublicOwnerIntegration$'`。子进程默认使用 PATH 的 Go，`F11_GO_BINARY` 仅作显式可选覆盖；`F11_CHILD_LOG` 可选，默认写测试临时目录。两原 owner 子测试必须实际 PASS，零用例或任何 SKIP/FAIL 均失败。
+
+管理门户收到 `RECENT_AUTHENTICATION_REQUIRED` 时可使用已有重新认证入口。在当前页面重试仍保原事实和请求键；门户跳转后不保证本地草稿自动恢复，未知操作须从审批中心打开原草稿并用 EDIT 核验、继续，不能另造键或据拒绝推定零效果。此验证入口和受控浏览器测试不代表真实部署、issuer/NATS 或完整审批 E2E。

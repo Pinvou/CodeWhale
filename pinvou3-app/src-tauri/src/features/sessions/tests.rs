@@ -75,6 +75,8 @@ fn replacement_branch_preserves_source_and_records_lineage() {
             1,
             "message:0".into(),
             "replacement-model".into(),
+            "Replacement model branch".into(),
+            "New chat".into(),
         )
         .unwrap();
     assert_ne!(branch.metadata.id, source_id);
@@ -91,6 +93,93 @@ fn replacement_branch_preserves_source_and_records_lineage() {
     store.delete(&branch.metadata.id).unwrap();
     assert!(!lineage_path.exists());
     assert_eq!(store.load(&source_id).unwrap().messages.len(), 2);
+}
+
+#[test]
+fn replacement_branch_title_localizes_only_bare_markers_and_keeps_current_renames() {
+    let (store, _guard) = isolated_store();
+    let source = store
+        .create_new("removed-model".into(), None, PathBuf::from("workspace"))
+        .unwrap();
+    let id = source.metadata.id;
+    store
+        .update_messages(&id, vec![user_text("first"), user_text("second")])
+        .unwrap();
+    for (suffix, default_title) in [
+        ("替代模型分支", "新对话"),
+        ("Replacement model branch", "New chat"),
+        ("代替モデルの分岐", "新しいチャット"),
+    ] {
+        for marker in ["新对话", "New chat", "新しいチャット"] {
+            store.set_title(&id, marker.into()).unwrap();
+            let (branch, _) = store
+                .create_replacement_branch(
+                    &id,
+                    0,
+                    "message:1".into(),
+                    "replacement-model".into(),
+                    suffix.into(),
+                    default_title.into(),
+                )
+                .unwrap();
+            assert_eq!(branch.metadata.title, format!("{default_title} · {suffix}"));
+            assert_eq!(
+                branch.messages.len(),
+                2,
+                "zero count keeps the complete current snapshot"
+            );
+            assert_eq!(store.load(&id).unwrap().metadata.title, marker);
+        }
+        // A rename committed after the UI took its snapshot remains authoritative.
+        let renamed = "Renamed · 替代模型分支";
+        store.set_title(&id, renamed.into()).unwrap();
+        let (branch, _) = store
+            .create_replacement_branch(
+                &id,
+                0,
+                "message:1".into(),
+                "replacement-model".into(),
+                suffix.into(),
+                default_title.into(),
+            )
+            .unwrap();
+        assert_eq!(branch.metadata.title, format!("{renamed} · {suffix}"));
+        assert_eq!(store.load(&id).unwrap().metadata.title, renamed);
+    }
+}
+
+#[test]
+fn replacement_branch_invalid_ui_title_copy_creates_nothing() {
+    let (store, _guard) = isolated_store();
+    let source = store
+        .create_new("removed-model".into(), None, PathBuf::from("workspace"))
+        .unwrap();
+    let id = source.metadata.id;
+    store
+        .update_messages(&id, vec![user_text("first")])
+        .unwrap();
+    let count = store.list_sessions_cached().unwrap().len();
+    for (suffix, default_title) in [
+        ("", "New chat"),
+        ("bad\nlabel", "New chat"),
+        ("Branch", " "),
+        ("Branch", "bad\0title"),
+    ] {
+        assert!(
+            store
+                .create_replacement_branch(
+                    &id,
+                    0,
+                    "message:0".into(),
+                    "replacement-model".into(),
+                    suffix.into(),
+                    default_title.into()
+                )
+                .is_err()
+        );
+        assert_eq!(store.list_sessions_cached().unwrap().len(), count);
+        assert_eq!(store.load(&id).unwrap().messages.len(), 1);
+    }
 }
 
 #[test]

@@ -222,10 +222,14 @@ class CiGatePolicyTests(unittest.TestCase):
     def test_organization_member_smokes_resolve_to_real_browser_files(self):
         package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
         selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
-        for feature, filename in (("organization", "account_platform_organization_ui_smoke.mjs"), ("member-units", "account_platform_member_units_ui_smoke.mjs")):
+        for feature, filenames in (
+            ("organization", ("account_platform_organization_ui_smoke.mjs", "account_platform_organization_boundaries_ui_smoke.mjs")),
+            ("member-units", ("account_platform_member_units_ui_smoke.mjs",)),
+        ):
             command = f"test:account-platform-{feature}-ui"
-            self.assertEqual(package["scripts"][command], f"node tests/{filename}")
-            self.assertTrue((ROOT / "pinvou3-app/tests" / filename).is_file())
+            self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{filename}" for filename in filenames))
+            for filename in filenames:
+                self.assertTrue((ROOT / "pinvou3-app/tests" / filename).is_file())
             self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
 
     def test_entitlement_correction_production_smoke_is_registered_for_full_and_feature_runs(self):

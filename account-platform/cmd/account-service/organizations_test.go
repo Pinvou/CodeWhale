@@ -6,6 +6,7 @@ import (
 )
 
 func TestOrganizationLifecycleUsesProductionTokenEndpoint(t *testing.T) {
+	t.Setenv("ACCOUNT_PLATFORM_PROFILE", "models")
 	t.Setenv("BILLING_HTTP_URL", "http://billing-service:8080")
 	t.Setenv("TOKEN_HTTP_URL", "http://token-gateway:8080")
 	t.Setenv("TOKEN_GATEWAY_HTTP_URL", "")

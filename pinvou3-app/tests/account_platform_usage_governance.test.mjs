@@ -86,3 +86,14 @@ test('Successful governance result must retain the exact queued usage and prohib
 test('All three languages retain complete usage governance labels', () => {
   for (const language of ['zh', 'en', 'ja']) for (const key of ['usageRequests', 'usageDetail', 'evidenceHistory', 'reconciliationQueue', 'retryReconciliation', 'actionRecoverSameKey', 'commandReadinessUnavailable', 'operationsViews']) assert.equal(typeof tokenManagementCopy[language].modelToken[key], 'string', `${language}:${key}`);
 });
+
+// Actual shared entry; these labels are used by the real management detail/filter.
+test('Installed scope and delivery labels exist independently in all three locales', () => {
+  for (const language of ['zh', 'en', 'ja']) {
+    const copy = tokenManagementCopy[language].modelToken;
+    assert.equal(typeof copy.scope, 'string', `${language}:scope`);
+    assert.ok(copy.scope.length > 0);
+    assert.equal(typeof copy.enumLabels.USER_STOPPED, 'string', `${language}:USER_STOPPED`);
+    assert.notEqual(copy.enumLabels.USER_STOPPED, 'USER_STOPPED');
+  }
+});
