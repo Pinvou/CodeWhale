@@ -76,7 +76,8 @@ user explicitly names them in `[tools].always_load`.
 
 A successful search activation is remembered by name for the current
 conversation. The cache holds at most eight deferred names and 16 KiB of
-serialized schemas, evicts least-recently-used entries, and revalidates every
+serialized tool definitions, evicts least-recently-used entries, and
+revalidates every
 entry against the current catalog and policy before advertising it again. A
 session sync clears it. The cache cannot resurrect a removed, denied, or
 newly-eager tool.

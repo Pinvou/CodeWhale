@@ -4187,10 +4187,11 @@ impl Engine {
         // to the model. The evictions may come from the admission itself or
         // from revalidation after a cached schema grew. Unavailable drops are
         // not reported here: an oversize drop is re-reported with its reason
-        // the next time a search matches the tool, while a catalog-shrink
-        // drop left the catalog entirely and no later search can name it —
-        // the model learns of those only when a search for the capability
-        // misses.
+        // the next time a search returns the tool (a match ranked past the
+        // result cap re-reports nothing), while a catalog-shrink drop that a
+        // non-search path absorbed left the pruned catalog and cannot be
+        // discovered — the model learns of those only when a search for the
+        // capability misses.
         self.park_toolbox_eviction_note(
             crate::core::session::ToolboxEvictionTrigger::Step,
             &activation.evicted,

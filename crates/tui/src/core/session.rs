@@ -185,6 +185,22 @@ impl ToolActivationCache {
             .fold(0usize, usize::saturating_add)
     }
 
+    /// Pop least-recently-used entries until both collective bounds hold.
+    /// Shared by revalidation and admission so the bounds condition and the
+    /// LRU-front-first policy live in exactly one place.
+    fn pop_collective_overflow(&mut self, catalog: &[crate::models::Tool]) -> Vec<String> {
+        let mut popped = Vec::new();
+        while self.names.len() > TOOL_ACTIVATION_CACHE_MAX_NAMES
+            || self.total_serialized_bytes(catalog) > TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES
+        {
+            let Some(name) = self.names.pop_front() else {
+                break;
+            };
+            popped.push(name);
+        }
+        popped
+    }
+
     /// Drop entries that are no longer deferred members of this turn's
     /// filtered catalog and enforce both cache bounds, classifying every
     /// removal by recoverability. A tool that became eager is forgotten
@@ -212,14 +228,7 @@ impl ToolActivationCache {
             }
             true
         });
-        while self.names.len() > TOOL_ACTIVATION_CACHE_MAX_NAMES
-            || self.total_serialized_bytes(catalog) > TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES
-        {
-            let Some(name) = self.names.pop_front() else {
-                break;
-            };
-            removals.bounds_evicted.push(name);
-        }
+        removals.bounds_evicted = self.pop_collective_overflow(catalog);
         removals
             .stale
             .sort_by(|left, right| left.name.cmp(&right.name));
@@ -260,13 +269,7 @@ impl ToolActivationCache {
                 self.names.remove(index);
             }
             self.names.push_back(name.clone());
-            while self.names.len() > TOOL_ACTIVATION_CACHE_MAX_NAMES
-                || self.total_serialized_bytes(catalog) > TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES
-            {
-                if let Some(evicted) = self.names.pop_front() {
-                    delta.evicted.push(evicted);
-                }
-            }
+            delta.evicted.extend(self.pop_collective_overflow(catalog));
         }
 
         let retained = self.names.iter().collect::<HashSet<_>>();

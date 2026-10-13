@@ -407,8 +407,10 @@ pub(crate) fn initial_active_tools(catalog: &[Tool]) -> HashSet<String> {
 /// bounds evictions — from the active set.
 ///
 /// Eager promotions never appear in these lists: `revalidate` classifies
-/// them out because the tool is directly callable, so removing these names
-/// cannot hide a tool that the current catalog still exposes eagerly.
+/// them out because the tool is directly callable at the engine layer, so
+/// removing these names cannot hide a tool that the current catalog still
+/// exposes eagerly. (A schema the provider wire still rejects is the
+/// sanitize layer's concern and outside this vocabulary.)
 pub(crate) fn remove_toolbox_drops(
     active: &mut HashSet<String>,
     names: impl IntoIterator<Item = String>,
@@ -435,7 +437,7 @@ const TOOLBOX_CATALOG_SHRINK_REASON: &str = "Previously active in this conversat
 pub(crate) fn toolbox_oversize_reason() -> String {
     format!(
         "The serialized tool exceeds the bounded conversation toolbox ({} \
-         cached tools, {}KiB of added serialized schemas).",
+         cached tools, {}KiB of serialized tool definitions).",
         crate::core::session::TOOL_ACTIVATION_CACHE_MAX_NAMES,
         crate::core::session::TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES / 1024
     )
@@ -470,7 +472,7 @@ pub(crate) fn bounded_toolbox_eviction_note(
 ) -> String {
     format!(
         "This {} evicted tools from the bounded conversation toolbox \
-         ({} cached tools, {}KiB of serialized schemas); the evicted tools \
+         ({} cached tools, {}KiB of serialized tool definitions); the evicted tools \
          are no longer callable until a later search re-activates them: {}",
         trigger.label(),
         crate::core::session::TOOL_ACTIVATION_CACHE_MAX_NAMES,
@@ -492,6 +494,12 @@ pub(crate) fn park_toolbox_eviction(
     if evicted.is_empty() {
         return;
     }
+    tracing::debug!(
+        target: "engine.tool_surface",
+        trigger = trigger.label(),
+        ?evicted,
+        "parked toolbox eviction note for a later result"
+    );
     notes.push(PendingToolboxEviction {
         trigger,
         evicted: evicted.to_vec(),
@@ -1614,7 +1622,7 @@ fn execute_tool_search_inner(
         "unavailable_tool_references": unavailable_references.clone(),
     });
     // The activation cache is bounded (8 cached tools, 16KiB of serialized
-    // schemas), so admitting new tools can silently revoke ones this
+    // tool definitions), so admitting new tools can silently revoke ones this
     // conversation already used. Naming the evictions in the result keeps
     // the model's picture of its callable toolbox honest — otherwise it sees
     // a previously working tool disappear between turns with no explanation.
