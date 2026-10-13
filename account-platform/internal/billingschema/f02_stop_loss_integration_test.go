@@ -9,7 +9,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -194,9 +196,11 @@ func requireF02StopLossOwnedRuntime(t *testing.T) {
 	if raw == "" {
 		t.Skip("owned local schema database required")
 	}
-	config, err := pgx.ParseConfig(raw)
-	if err != nil || config.Host != "127.0.0.1" || config.Port != 55504 || config.Database != "postgres" || config.User != "pinvou_wave_test" || len(config.Fallbacks) != 0 {
-		t.Fatal("local fixture endpoint identity mismatch")
+	expectedDirectory := os.Getenv("PINVOU_PRIVATE_OWNER_DATA_DIRECTORY")
+	expectedUser := os.Getenv("PINVOU_PRIVATE_OWNER_USER")
+	config, err := f02StopLossOwnerConfiguration(raw, expectedDirectory, expectedUser)
+	if err != nil {
+		t.Fatal("explicit isolated owner configuration rejected")
 	}
 	ctx, stop := context.WithTimeout(context.Background(), 10*time.Second)
 	defer stop()
@@ -205,13 +209,63 @@ func requireF02StopLossOwnedRuntime(t *testing.T) {
 		t.Fatal("owned guard connection failed")
 	}
 	defer conn.Close(context.Background())
-	var actor, directory string
-	var roles, databases, sessions int
-	err = conn.QueryRow(ctx, `SELECT session_user,current_setting('data_directory'),
- (SELECT count(*) FROM pg_roles WHERE rolname=ANY($1)),
+	var actor, currentActor, directory string
+	var superuser bool
+	var port, roles, databases, sessions int
+	err = conn.QueryRow(ctx, `SELECT session_user,current_user,current_setting('data_directory'),
+ (SELECT rolsuper FROM pg_roles WHERE rolname=session_user),current_setting('port')::int,
+ (SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>$1),
  (SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres','template0','template1')),
- (SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' AND pid<>pg_backend_pid())`, []string{"account_service", "account_migrator", "account_approval_control_owner", "account_approval_authorization_owner", "account_approval_writer", "account_approval_backfill", "account_approval_relay", "account_approval_recovery", "billing_service", "billing_schema_owner", "billing_migrator"}).Scan(&actor, &directory, &roles, &databases, &sessions)
-	if err != nil || actor != "pinvou_wave_test" || !strings.EqualFold(strings.ReplaceAll(directory, "\\", "/"), "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data") || roles != 0 || databases != 0 || sessions != 0 {
+ (SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' AND pid<>pg_backend_pid())`, expectedUser).Scan(&actor, &currentActor, &directory, &superuser, &port, &roles, &databases, &sessions)
+	normalizeDirectory := func(value string) string { return filepath.ToSlash(filepath.Clean(value)) }
+	if err != nil || actor != expectedUser || currentActor != expectedUser || !superuser || port != int(config.Port) || normalizeDirectory(directory) != normalizeDirectory(expectedDirectory) || roles != 0 || databases != 0 || sessions != 0 {
 		t.Fatal("owned runtime/actors/databases/sessions guard failed before writes")
+	}
+}
+
+func f02StopLossOwnerConfiguration(raw, expectedDirectory, expectedUser string) (*pgx.ConnConfig, error) {
+	if !filepath.IsAbs(expectedDirectory) || expectedUser == "" || strings.TrimSpace(expectedUser) != expectedUser {
+		return nil, errors.New("explicit absolute owner directory and user are required")
+	}
+	config, err := pgx.ParseConfig(raw)
+	if err != nil {
+		return nil, errors.New("invalid owner connection configuration")
+	}
+	ip := net.ParseIP(config.Host)
+	loopback := config.Host == "localhost" || (ip != nil && ip.IsLoopback())
+	if !loopback || config.Port == 0 || config.Database != "postgres" || config.User != expectedUser || len(config.Fallbacks) != 0 {
+		return nil, errors.New("isolated owner connection identity mismatch")
+	}
+	return config, nil
+}
+
+func TestF02StopLossOwnerConfiguration(t *testing.T) {
+	directory := t.TempDir()
+	const owner = "controlled_owner"
+	const valid = "postgres://controlled_owner@127.0.0.1:5438/postgres?sslmode=disable"
+	for _, raw := range []string{valid, "postgres://controlled_owner@[::1]:5439/postgres?sslmode=disable"} {
+		config, err := f02StopLossOwnerConfiguration(raw, directory, owner)
+		if err != nil || config == nil {
+			t.Fatal("explicit loopback owner configuration rejected")
+		}
+	}
+	for _, candidate := range []struct {
+		name, raw, directory, user string
+	}{
+		{"missing directory", valid, "", owner},
+		{"relative directory", valid, "relative-data", owner},
+		{"missing user", valid, directory, ""},
+		{"different user", valid, directory, "other_owner"},
+		{"remote endpoint", "postgres://controlled_owner@192.0.2.1:5438/postgres?sslmode=disable", directory, owner},
+		{"application database", "postgres://controlled_owner@127.0.0.1:5438/application?sslmode=disable", directory, owner},
+		{"connection fallback", "postgres://controlled_owner@127.0.0.1:5438/postgres?sslmode=prefer", directory, owner},
+		{"malformed connection", "postgres://%zz", directory, owner},
+	} {
+		t.Run(candidate.name, func(t *testing.T) {
+			config, err := f02StopLossOwnerConfiguration(candidate.raw, candidate.directory, candidate.user)
+			if err == nil || config != nil {
+				t.Fatal("unsafe owner configuration accepted")
+			}
+		})
 	}
 }

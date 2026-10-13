@@ -9,7 +9,13 @@ import { financeCopy } from '../src/shared/finance-i18n.js';
 import { accountClosedGrantCopy } from '../src/shared/account-closed-grants-i18n.js';
 import { organizationCopy } from '../src/shared/organization-i18n.js';
 
-const browserPath = [process.env.CHROME, 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'].find(value => value && existsSync(value));
+const browserPath = [process.env.CHROME, process.env.EDGE_PATH, process.env.CHROMIUM,
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+].filter(Boolean).find(value => existsSync(value));
 assert.ok(browserPath, 'Chromium is required');
 const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');
 const actorA = '0199a100-0001-7000-8000-000000000101';
