@@ -407,6 +407,7 @@ jobs:
               - 'scripts/run-remote-control-endpoint.ps1'
               - 'scripts/run-windows-relay-tools-tests.mjs'
               - 'scripts/windows-relay-tools-test-summary.mjs'
+              - 'scripts/windows-relay-tools-preflight.mjs'
               - '.github/workflows/pr-check.yml'
             team_relay_hub:
               - 'team-relay-hub/**'
@@ -1417,10 +1418,10 @@ jobs:
         # 因此直接用 package-lock 驱动的 npm ci，避免额外维护一份硬编码版本并保证可复现。
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
 
-      # Cache extraction can exhaust the runner before the post-restore
-      # preparation step starts. Free only the same unused SDK allowlist
-      # before either warm cache is restored; retain the post-restore gate.
-      - name: 恢复 Rust 缓存前准备磁盘空间
+      # 缓存解压本身会耗尽构建盘，不能等恢复完成后才释放未用 SDK。
+      # 仅使用基础白名单；setup-node/Chrome 已在上面准备，不启用 aggressive。
+      # 恢复后的容量检查仍保留，保证缓存落盘后有足够空间执行两轮测试。
+      - name: 缓存恢复前准备 Rust 磁盘空间
         run: |
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \

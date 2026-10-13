@@ -10129,7 +10129,7 @@ mod scheduled_model_tests {
 
     #[test]
     fn reclaim_forwarder_join_is_bounded_in_production() {
-        let src = include_str!("engine_pool.rs");
+        let src = include_str!("engine_pool.rs").replace("\r\n", "\n");
         let src = &src[..src
             .find("#[allow(clippy::await_holding_lock)]\nmod scheduled_model_tests {")
             .expect("the test module marker must exist")];
