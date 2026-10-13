@@ -1639,6 +1639,7 @@ mod tests {
             );
             assert_eq!(billing, BillingPresentation::Unknown, "{provider:?}");
             assert!(!billing.shows_money(), "{provider:?}");
+            assert_eq!(billing.label(), Some("unknown"), "{provider:?}");
             let audit = crate::pricing::audit_turn_cost_for_route(
                 provider,
                 "some-model",

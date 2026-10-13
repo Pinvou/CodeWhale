@@ -4419,14 +4419,6 @@ fn tool_run_expansion_toggle_handles_active_run() {
 }
 
 #[test]
-fn test_scroll_operations() {
-    let mut app = App::new(test_options(false), &Config::default());
-    // Just verify scroll methods can be called without panic
-    app.scroll_up(5);
-    app.scroll_down(3);
-}
-
-#[test]
 fn resize_preserves_scrolled_transcript_position() {
     let mut app = App::new(test_options(false), &Config::default());
     app.viewport.transcript_scroll = TranscriptScroll::at_line(42);
@@ -5343,17 +5335,6 @@ fn sticky_error_ttl_is_capped_and_clears_on_composer_activity() {
 }
 
 #[test]
-fn pending_steer_seed_arms_resend_flag() {
-    let mut app = App::new(test_options(false), &Config::default());
-    assert!(!app.submit_pending_steers_after_interrupt);
-    app.pending_steers
-        .push_back(QueuedMessage::new("steer me".to_string(), None));
-    app.submit_pending_steers_after_interrupt = true;
-    assert_eq!(app.pending_steers.len(), 1);
-    assert!(app.submit_pending_steers_after_interrupt);
-}
-
-#[test]
 fn drain_pending_scenario() {
     // Scenario consolidation of: drain_pending_steers_clears_flag_and_returns_in_order, drain_pending_steers_when_empty_is_safe
     // from drain_pending_steers_clears_flag_and_returns_in_order
@@ -5383,18 +5364,6 @@ fn drain_pending_scenario() {
         assert!(drained.is_empty());
         assert!(!app.submit_pending_steers_after_interrupt);
     }
-}
-
-#[test]
-fn double_steer_seed_is_idempotent_on_flag() {
-    let mut app = App::new(test_options(false), &Config::default());
-    app.pending_steers
-        .push_back(QueuedMessage::new("a".to_string(), None));
-    app.pending_steers
-        .push_back(QueuedMessage::new("b".to_string(), None));
-    app.submit_pending_steers_after_interrupt = true;
-    assert!(app.submit_pending_steers_after_interrupt);
-    assert_eq!(app.pending_steers.len(), 2);
 }
 
 #[test]

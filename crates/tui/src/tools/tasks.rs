@@ -1385,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn aliases_hide_from_model_and_force_action() {
+    fn canonical_visibility_and_per_action_approval() {
         let canonical = TasksTool::new("tasks");
         assert!(canonical.model_visible());
         assert_eq!(

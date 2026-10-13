@@ -52,19 +52,21 @@ fn typed_llm_quota_envelope_is_non_recoverable_and_distinct_from_rate_limit() {
 }
 
 #[test]
-fn llm_auth_error_envelope_renders_context_without_secret() {
-    // Redaction of the raw key is the caller's responsibility before the
-    // envelope is built; the envelope itself must classify a 401 as a
-    // critical authentication error and never surface the raw key.
+fn llm_auth_error_envelope_classifies_401_and_carries_body_verbatim() {
+    // The envelope is a classifier, not a redactor: a 401 must map to a
+    // critical, non-recoverable authentication error, and the body must be
+    // carried verbatim — redacting secrets from provider bodies is the
+    // caller's job before the envelope is built (see the
+    // `redact_model_bound_text` scenario pins in client.rs).
     let envelope = ErrorEnvelope::from(LlmError::from_http_response(
         401,
-        "Invalid API Key: [redacted API key]",
+        "Invalid API Key: tp-secret-token-plan-value",
     ));
     assert_eq!(envelope.category, ErrorCategory::Authentication);
     assert_eq!(envelope.severity, ErrorSeverity::Critical);
     assert!(!envelope.recoverable);
     assert!(envelope.message.contains("Invalid API Key"));
-    assert!(!envelope.message.contains("tp-secret-token-plan-value"));
+    assert!(envelope.message.contains("tp-secret-token-plan-value"));
 }
 
 #[test]

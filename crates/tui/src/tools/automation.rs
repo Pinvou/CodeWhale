@@ -532,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn aliases_hide_from_model_and_force_action() {
+    fn canonical_visibility_and_per_action_approval() {
         let canonical = AutomationTool::new("automation");
         assert!(canonical.model_visible());
         // Approval routing stays per action: read actions auto, writes required.

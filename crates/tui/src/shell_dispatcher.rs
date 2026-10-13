@@ -654,12 +654,6 @@ mod tests {
     }
 
     #[test]
-    fn detect_returns_some_shell() {
-        let dispatcher = global_dispatcher();
-        let _kind = dispatcher.kind();
-    }
-
-    #[test]
     fn powershell_build_command_includes_no_profile_and_command_flags() {
         let dispatcher = ShellDispatcher {
             kind: ShellKind::Pwsh,
