@@ -2673,6 +2673,41 @@ mod kimi_tests {
             schema["properties"]["s"],
             json!({"type": "array", "minItems": 1})
         );
+
+        // The terminator's other two checked positions — an `anyOf` branch
+        // and a `$ref` target, each reached from a required property — fail
+        // closed the same way, with the terminator's variant.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "anyOf": [
+                        {"type": "array", "items": {}, "minItems": 1},
+                        {"type": "string"}
+                    ]
+                }
+            },
+            "required": ["a"]
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("minItems >= 1 cannot terminate in a checked anyOf branch");
+        assert!(
+            matches!(error, KimiParameterSchemaError::InvalidSchemaNode),
+            "the anyOf branch's variant is InvalidSchemaNode: {error:?}"
+        );
+
+        let mut schema = json!({
+            "type": "object",
+            "$defs": {"a": {"type": "array", "items": {}, "minItems": 1}},
+            "properties": {"x": {"$ref": "#/$defs/a"}},
+            "required": ["x"]
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("minItems >= 1 cannot terminate at a checked $ref target");
+        assert!(
+            matches!(error, KimiParameterSchemaError::InvalidSchemaNode),
+            "the $ref target's variant is InvalidSchemaNode: {error:?}"
+        );
     }
 
     #[test]
