@@ -18,6 +18,16 @@ desktop pairing cannot use a legacy-only endpoint ID. Administrator migration
 request IDs use the desktop character set with their own 8–128 length bound.
 Credential/HMAC digest and official proof-key grammars are separate and unchanged.
 
+Relay signing-key configuration has a separate 1–64 ASCII-character bound:
+an alphanumeric first character, followed by alphanumerics or `._-`. This is
+the intersection of the wire identifier and the native pinned trust-key domain.
+Colon, tilde, whitespace, non-ASCII and longer values fail configuration before
+signing. Earlier colon-signing tests validated only the wire schema, not native
+trust installation. No ID is automatically renamed; configured or historical
+identities and existing trust records are not rewritten. Operators must provide
+the same supported ID on both ends. Generic wire IDs and released Legacy Web
+IDs retain their existing grammars.
+
 Set these variables before opening the registry:
 
 | Variable | Meaning |
