@@ -528,15 +528,23 @@ Base paths use nonempty ASCII letter/digit/underscore/hyphen segments separated
 by a single slash; repeated slashes are rejected because nginx normally merges
 them before exact-location selection. This validation does not change the
 gateway's existing runtime path parser.
+For a consistent deployment, omit `PINVOU_REMOTE_PUBLIC_BASE_PATH` to use the
+default or set the same nonempty path for every process. The generator
+requires HTTPS public entrypoints even where runtime preflight permits HTTP
+localhost probes; it is an offline production perimeter contract, not a change
+to the runtime preflight's accepted URLs.
 The generated WS location explicitly uses 75-second read and send timeouts,
 preserving the checked-in sample's idle proxy budget. The offline checker
 rejects missing or changed timeout directives as configuration drift. This
 does not add gateway heartbeat behavior or change authentication deadlines;
 transport keepalive must still be verified separately before deployment.
 The legacy `PORT` defaults to 8787; the gateway port must be explicitly set.
-Store the generated fragment in the intended server block, then run
-`node scripts/enrollment-nginx-config.js --check <fragment>` against the same
-environment. The check accepts LF/CRLF but requires the generated content
+Save the generated output in a separate fragment file and include its contents
+in the intended server block, then run
+`node scripts/enrollment-nginx-config.js --check <generated-fragment-file>`
+against the same environment. Pass only the generated fragment file, not the
+complete server configuration. This check is not automatically invoked by the
+deployment or rollback scripts. It accepts LF/CRLF but requires the generated content
 otherwise unchanged and exits nonzero on drift; it does not rewrite files.
 This is an offline configuration check, not proof of live listeners or nginx
 syntax/context. Run `nginx -t` before applying configuration and continue to run

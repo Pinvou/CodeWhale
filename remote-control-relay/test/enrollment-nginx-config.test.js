@@ -59,6 +59,7 @@ test("unsafe or inconsistent deployment inputs reject without emitting configura
     { PINVOU_REMOTE_PUBLIC_BASE_PATH: "/x\n}" },
     { PINVOU_REMOTE_GATEWAY_PORT: "8790;" }, { PINVOU_REMOTE_GATEWAY_PORT: "80" },
     { PINVOU_REMOTE_GATEWAY_HOST: "0.0.0.0" },
+    { PINVOU_REMOTE_GATEWAY_HOST: "0.0.0.0", PINVOU_REMOTE_GATEWAY_TRUSTED_PROXY_IPS: "0.0.0.0" },
     { PINVOU_REMOTE_LEGACY_RELAY_URL: "ws://localhost:8787/pinvou3/remote/ws" },
     { PINVOU_REMOTE_LEGACY_RELAY_URL: "ws://127.0.0.1:8787/old/ws" },
     { PINVOU_REMOTE_LEGACY_RELAY_URL: "ws://private-material@127.0.0.1:8787/pinvou3/remote/ws" },
