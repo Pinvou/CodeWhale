@@ -1764,6 +1764,21 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Type inference has exactly one implementation while SessionKeys is not
+    // Clone. Adding either derive(Clone) or an explicit Clone impl introduces
+    // a second candidate and makes this test module fail to compile.
+    #[test]
+    fn session_keys_cannot_be_cloned() {
+        trait AmbiguousIfClone<Marker> {
+            fn assert_not_clone() {}
+        }
+        impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+        struct CloneImplemented;
+        impl<T: ?Sized + Clone> AmbiguousIfClone<CloneImplemented> for T {}
+
+        let _ = <super::SessionKeys as AmbiguousIfClone<_>>::assert_not_clone;
+    }
+
     use super::*;
     use serde_json::Value;
 
