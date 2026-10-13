@@ -302,25 +302,58 @@ fn may_run_as_root(script_type: &str) -> bool {
     script_type == "install_engine"
 }
 
-/// 返回卡片固化脚本声明的驭光二进制版本（完整 SHA 的前 8 位）。
+/// 返回卡片固化的驭光版本；缺失版本时才使用完整 SHA 的前 8 位。
 ///
 /// 这不是通用 Shell 解析器：只接受驭光交付包里那条明确的
 /// `ENGINE_BIN_SHA256="..."` 声明，并同时要求脚本写明 tachyon-serve 的受管
 /// 目录。任何不满足格式的旧卡都不迁移，宁可保留旧关联，不能把其他厂商的引擎
 /// 误归为驭光。
 fn native_tachyon_version(record: &db::StoreModelRecord) -> Option<String> {
-    let script = &record.scripts_content.get("install_engine")?.content;
-    if !script.contains("tachyon-serve") || !script.contains("local-model-manager/engines") {
-        return None;
-    }
+    let install = &record.scripts_content.get("install_engine")?.content;
+    native_tachyon_identity(
+        install,
+        record
+            .assets_content
+            .get("common.sh")
+            .map(|blob| blob.content.as_str()),
+        record.engine_version.as_deref(),
+    )
+    .map(|(version, _)| version)
+}
+
+fn declared_native_sha(script: &str) -> Option<String> {
     let value = script.lines().find_map(|line| {
         let value = line.trim().strip_prefix("ENGINE_BIN_SHA256=")?;
         Some(value.trim().trim_matches(['\"', '\'']))
     })?;
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    (value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_lowercase())
+}
+
+fn native_tachyon_identity(
+    install: &str,
+    common: Option<&str>,
+    version: Option<&str>,
+) -> Option<(String, String)> {
+    // 厂商卡片把版本与目录声明放在 common.sh；旧单文件卡才内联在入口里。
+    let script = if install.contains("$CARD_DIR/common.sh") {
+        common?
+    } else {
+        install
+    };
+    if !script.contains("tachyon-serve") || !script.contains("local-model-manager/engines") {
         return None;
     }
-    Some(value[..8].to_ascii_lowercase())
+    let value = declared_native_sha(script)?;
+    // 非空的卡片版本可能是研发构建批次（如 7fca766a），并不等于文件 SHA。
+    // 保留这类版本，只为历史上遗漏版本的卡片补二进制指纹。
+    Some((
+        version
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| value[..8].to_string()),
+        value,
+    ))
 }
 
 /// 一张卡片抓下来的完整脚本包：六个入口脚本 + 附属文件。
@@ -2376,10 +2409,18 @@ impl ModelManager {
                     // 新版原生引擎必须用随引擎固化的清理契约探测。它能在模型
                     // 记录已经删掉后依然验明实体、给出真实大小，不能再依赖一张
                     // 恰好仍留在数据库里的模型卡片。
-                    let Some(size) = native_engine_cleanup_probe(cleanup_script) else {
-                        return None;
-                    };
-                    (size, true)
+                    match native_engine_cleanup_probe(cleanup_script) {
+                        Ok((false, _)) => return None,
+                        Ok((true, size)) => (size, true),
+                        Err(error) => {
+                            // 探测失败不等于不存在：保留一条不可删除的待核实记录。
+                            eprintln!(
+                                "[model-store] 无法探测原生引擎 {}：{error}",
+                                rec.engine_name
+                            );
+                            (None, false)
+                        }
+                    }
                 } else {
                     let Some(model) = models.iter().find(|model| {
                         model.engine_name == rec.engine_name
@@ -2492,6 +2533,29 @@ impl ModelManager {
                     continue;
                 }
             };
+            // 显示版本可能被服务器复用；必须再比对完整二进制指纹，不能仅凭
+            // 相同的卡片名/版本给历史引擎装上另一套二进制的删除脚本。
+            let local_sha = model
+                .scripts_content
+                .get("install_engine")
+                .and_then(|install| {
+                    native_tachyon_identity(
+                        &install.content,
+                        model
+                            .assets_content
+                            .get("common.sh")
+                            .map(|blob| blob.content.as_str()),
+                        model.engine_version.as_deref(),
+                    )
+                    .map(|(_, sha)| sha)
+                });
+            if local_sha.is_none() || declared_native_sha(&cleanup_script.content) != local_sha {
+                eprintln!(
+                    "[model-store] 原生引擎清理契约与本地二进制指纹不符（{}），保留现有记录",
+                    model.card_id
+                );
+                continue;
+            }
             if let Err(error) = db::set_engine_cleanup_script(
                 NATIVE_TACHYON_ENGINE_NAME,
                 Some(&version),
@@ -2638,8 +2702,7 @@ impl ModelManager {
     /// 所以返回的是 [`EngineRemoval`] 而不是一个字节数：`purged_model_data` 和
     /// `affected_models` 是这次操作的后果本身，调用方（接线那天的确认框）必须先
     /// 把"哪些模型受影响、权重会不会跟着没"摆给用户看，不能只说一句"删除引擎"。
-    /// 本层**不**自行拦截——拦不拦、怎么确认是界面的事，这里只负责把后果如实算
-    /// 出来交上去。
+    /// 本层再次检查模型绑定，不能只依赖界面禁用按钮。
     ///
     /// docker 镜像形态的引擎不需要 root（docker rmi 本来就是普通用户能跑的
     /// 命令）；ollama 是系统级二进制 + systemd 服务，删除必须走 pkexec 提权。
@@ -2663,10 +2726,11 @@ impl ModelManager {
         // 权重被一起删掉），但两条都得把它带给调用方。`list_installed_engines`
         // 早就在算同一份名单了，删除这一侧不能算完就扔。
         //
-        // 取不到就按空名单继续删——删除本身已经是用户点过的动作，为了一句提示
-        // 语把它拦下来更糟；代价是那一次确认框会少列几个模型名。
+        // 查不到绑定关系就停止，不能把数据库读取失败当成“没有模型使用”。
         let affected =
-            db::list_model_names_using_engine(engine_name, engine_version).unwrap_or_default();
+            db::list_model_names_using_engine(engine_name, engine_version).map_err(|e| {
+                ModelManagerError::new(format!("无法确认引擎关联的模型，未执行删除：{e}"))
+            })?;
         if !affected.is_empty() {
             return Err(ModelManagerError::new(format!(
                 "该引擎仍被以下模型绑定，不能删除：{}。请先处理这些模型。",
@@ -2926,11 +2990,18 @@ fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
 
 /// 用厂商随引擎提供的独立清理脚本做只读探测。
 ///
-/// 约定：`LMM_PROBE_ONLY=1` 时，实体存在即退出 0，并可选输出
-/// `LMM_ENGINE_SIZE_BYTES=<bytes>`；实体不存在退出非 0。这样“模型已经删了、
+/// 约定：`LMM_PROBE_ONLY=1` 时，输出 `LMM_ENGINE_PRESENT=0/1` 并退出 0，
+/// 存在时可选输出 `LMM_ENGINE_SIZE_BYTES=<bytes>`；非 0 表示探测失败而非不存在。这样“模型已经删了、
 /// 引擎仍在”的场景不必借一张模型卡片来猜目录，也不会扫描/删除用户任意路径。
-fn native_engine_cleanup_probe(script: &db::ScriptBlob) -> Option<Option<u64>> {
-    let script_path = write_temp_script(&script.content).ok()?;
+fn native_engine_cleanup_probe(
+    script: &db::ScriptBlob,
+) -> Result<(bool, Option<u64>), ModelManagerError> {
+    if script_runner::sha256_hex(&script.content) != script.sha256 {
+        return Err(ModelManagerError::new(
+            "引擎清理脚本校验失败，请刷新卡片后重试。",
+        ));
+    }
+    let script_path = write_temp_script(&script.content)?;
     let mut env = HashMap::new();
     env.insert("LMM_PROBE_ONLY".to_string(), "1".to_string());
     let result = script_runner::run_script(
@@ -2944,11 +3015,21 @@ fn native_engine_cleanup_probe(script: &db::ScriptBlob) -> Option<Option<u64>> {
         },
     );
     let _ = std::fs::remove_file(&script_path);
-    let lines = result.ok()?;
-    Some(
+    let lines = result?;
+    let present = match extract_marker(&lines, "LMM_ENGINE_PRESENT=").as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => {
+            return Err(ModelManagerError::new(
+                "无法确认推理引擎是否存在，已保留管理记录。",
+            ));
+        }
+    };
+    Ok((
+        present,
         extract_marker(&lines, "LMM_ENGINE_SIZE_BYTES=")
             .and_then(|value| value.parse::<u64>().ok()),
-    )
+    ))
 }
 
 /// 执行已经固化的原生引擎清理契约，并以同一份脚本后验确认实体确实消失。
@@ -2956,6 +3037,10 @@ fn native_engine_cleanup_probe(script: &db::ScriptBlob) -> Option<Option<u64>> {
 /// 不能在此处根据 `$HOME` / 目录名自行拼 `rm -rf`：唯一获准删除的路径必须由
 /// 随该引擎版本签发并校验过的脚本决定。
 fn remove_native_engine(script: &db::ScriptBlob) -> Result<u64, ModelManagerError> {
+    let (present, _) = native_engine_cleanup_probe(script)?;
+    if !present {
+        return Ok(0);
+    }
     let script_path = write_temp_script(&script.content)?;
     let result = script_runner::run_script(
         &script_path,
@@ -2969,7 +3054,7 @@ fn remove_native_engine(script: &db::ScriptBlob) -> Result<u64, ModelManagerErro
     );
     let _ = std::fs::remove_file(&script_path);
     let lines = result?;
-    if native_engine_cleanup_probe(script).is_some() {
+    if native_engine_cleanup_probe(script)?.0 {
         return Err(ModelManagerError::new(
             "推理引擎清理脚本已经结束，但后验检查发现引擎文件仍在；为避免留下无法管理的残留，未移除引擎记录。",
         ));
@@ -3260,11 +3345,59 @@ fn write_temp_script(content: &str) -> Result<PathBuf, ModelManagerError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_identity_supports_common_assets_without_overwriting_build_versions() {
+        let sha = "a".repeat(64);
+        let common =
+            format!("ENGINE_BIN_SHA256=\"{sha}\"\n# local-model-manager/engines/tachyon-serve");
+        let install = "source \"$CARD_DIR/common.sh\"";
+        assert_eq!(
+            native_tachyon_identity(install, Some(&common), None),
+            Some(("aaaaaaaa".into(), sha.clone()))
+        );
+        assert_eq!(
+            native_tachyon_identity(install, Some(&common), Some("build-42")),
+            Some(("build-42".into(), sha.clone()))
+        );
+        assert_eq!(
+            native_tachyon_identity(&common, None, Some("")),
+            Some(("aaaaaaaa".into(), sha))
+        );
+        assert!(native_tachyon_identity(install, None, None).is_none());
+        assert!(declared_native_sha("ENGINE_BIN_SHA256=short").is_none());
+        assert!(native_tachyon_identity("ENGINE_BIN_SHA256=bad", None, None).is_none());
+    }
+
+    #[test]
+    fn native_probe_distinguishes_absence_from_failure_and_checks_integrity() {
+        let blob = |content: &str| db::ScriptBlob {
+            content: content.into(),
+            sha256: script_runner::sha256_hex(content),
+        };
+        assert_eq!(
+            native_engine_cleanup_probe(&blob("echo LMM_ENGINE_PRESENT=0\n")).unwrap(),
+            (false, None)
+        );
+        assert_eq!(
+            native_engine_cleanup_probe(&blob(
+                "echo LMM_ENGINE_PRESENT=1\necho LMM_ENGINE_SIZE_BYTES=42\n"
+            ))
+            .unwrap(),
+            (true, Some(42))
+        );
+        assert!(native_engine_cleanup_probe(&blob("exit 1\n")).is_err());
+        assert!(native_engine_cleanup_probe(&blob("echo unknown\n")).is_err());
+        let mut altered = blob("echo LMM_ENGINE_PRESENT=0\n");
+        altered.content.push_str("echo changed\n");
+        assert!(native_engine_cleanup_probe(&altered).is_err());
+    }
+
     fn make_card(name: &str, quant: Option<&str>) -> StoreCardDetail {
         StoreCardDetail {
             assets: Default::default(),
             asset_sha256: None,
             summary: StoreCardSummary {
+                resource_requirements: Default::default(),
                 deploy_topology: Default::default(),
                 id: "card-x".into(),
                 name: name.into(),

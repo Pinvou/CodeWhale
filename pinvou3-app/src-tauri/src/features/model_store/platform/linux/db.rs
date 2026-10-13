@@ -306,9 +306,9 @@ fn migrate_engine_primary_key(conn: &Connection) -> rusqlite::Result<()> {
          ALTER TABLE installed_engines RENAME TO installed_engines_legacy;
          {SCHEMA}
          INSERT OR REPLACE INTO installed_engines
-             (engine_name, engine_version, docker_image, install_script_sha256, installed_at)
+             (engine_name, engine_version, docker_image, install_script_sha256, cleanup_script_json, installed_at)
          SELECT engine_name, COALESCE(engine_version, ''), docker_image,
-                install_script_sha256, installed_at
+                install_script_sha256, cleanup_script_json, installed_at
            FROM installed_engines_legacy;
          DROP TABLE installed_engines_legacy;
          COMMIT;"

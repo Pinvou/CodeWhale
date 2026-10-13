@@ -622,18 +622,10 @@ pub async fn delete_engine(
     // 可供 affected_models 查到的记录。若此时按“没有模型绑定”删除引擎，会让
     // 当前任务在末尾失去可复用的运行环境，下一步又得重下几十 GB。因此删除
     // 引擎必须同时避开所有活跃的模型商店操作。
-    let active = service.active.active_runs();
-    if !active.is_empty() {
-        let operations = active
-            .iter()
-            .map(|run| format!("「{}」正在{}", run.card_id, run.label))
-            .collect::<Vec<_>>()
-            .join("、");
-        return Err(format!(
-            "当前{operations}。为避免中断下载、部署或启停操作，请等待这些任务结束后再删除推理引擎。"
-        ));
-    }
+    let cleanup_guard = service.active.try_begin_engine_cleanup()?;
     tokio::task::spawn_blocking(move || {
+        // 由工作线程持有直到清理完成，即使调用方断开也不提前放开互斥。
+        let _cleanup_guard = cleanup_guard;
         let manager = ModelManager::new(None, None);
         let current = manager.list_installed_engines();
         let engine = current
