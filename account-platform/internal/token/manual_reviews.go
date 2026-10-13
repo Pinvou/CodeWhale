@@ -33,7 +33,7 @@ SELECT case_type,resource_type,resource_id,severity,created_at FROM (
  SELECT 'USAGE_RECONCILIATION_REVIEW' AS case_type,'USAGE_REQUEST' AS resource_type,id AS resource_id,
         CASE WHEN actual_microcredits>maximum_microcredits OR lower(COALESCE(error_class,'')) LIKE '%hold%' THEN 'P1' ELSE 'P2' END AS severity,
         started_at AS created_at
-   FROM usage_requests WHERE status='REVIEW' AND reconciliation_stopped_at IS NOT NULL
+   FROM usage_requests WHERE status='REVIEW' AND (reconciliation_stopped_at IS NOT NULL OR error_class='cancel_hold_recovery_unconfirmed')
  UNION ALL
  SELECT 'ROUTE_PROVISIONING_REPAIR','ROUTE_PROVISIONING',id,'P2',created_at
    FROM route_provisionings WHERE status='REPAIR_REQUIRED'
