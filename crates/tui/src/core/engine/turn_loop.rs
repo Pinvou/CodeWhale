@@ -5288,8 +5288,12 @@ impl Engine {
         // so a later batch of this turn still delivers them; a turn that ends
         // without another batch strands them, and the next turn's entry sweep
         // drops them rather than letting them ride an unrelated result.
+        // Extending — not assigning — keeps any note parked during the
+        // results phase instead of silently dropping it.
         if !pending_eviction_notes.is_empty() {
-            self.session.pending_toolbox_eviction_notes = pending_eviction_notes;
+            self.session
+                .pending_toolbox_eviction_notes
+                .extend(pending_eviction_notes);
         }
 
         // Reflect a mid-turn goal change on the sidebar immediately (idempotent:
