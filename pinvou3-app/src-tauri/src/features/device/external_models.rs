@@ -1458,6 +1458,9 @@ mod tests {
         assert_eq!(record.name, "legacy-empty-id");
     }
 
+    // unix-only：符号链接构造依赖 std::os::unix::fs::symlink（Windows 测试编译
+    // 也会编这个模块，此前漏 gate 直接打爆 windows-rust-test）。
+    #[cfg(unix)]
     #[test]
     fn weights_deletion_guard_rejects_symlink_escape_under_home() {
         // 家目录之下、但中间组件是指向家目录之外的符号链接：canonicalize 后
