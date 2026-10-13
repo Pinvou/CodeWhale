@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-function install(invoke = () => Promise.resolve({ status: 'idle' }), timers = { setTimeout, clearTimeout }) {
+function install(invoke = () => Promise.resolve({ status: 'idle' }), timers = { setTimeout, clearTimeout }, onListen = () => {}) {
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
   const sandbox = { window: root, TextEncoder, ...timers };
   vm.createContext(sandbox);
@@ -24,6 +24,7 @@ function install(invoke = () => Promise.resolve({ status: 'idle' }), timers = { 
       const registration = { name, callback, pending, releases: 0 };
       registration.off = () => { registration.releases++; };
       registrations.push(registration);
+      onListen(registration);
       return pending.promise;
     },
   });
@@ -36,6 +37,79 @@ async function complete(registrations) {
   await Promise.resolve();
   await Promise.resolve();
 }
+
+test('synchronous stop during listen retires the registration round without stranding later channels', async () => {
+  let stopNext = false;
+  const f = install(undefined, undefined, () => {
+    if (stopNext) {
+      stopNext = false;
+      f.feature.stop();
+    }
+  });
+  try {
+    await complete(f.registrations.slice());
+    f.feature.stop();
+    stopNext = true;
+    f.feature.subscribe();
+    const retired = f.registrations.slice(9);
+    assert.equal(retired.length, 1, 'a retired round must not register its remaining eight channels');
+    await complete(retired);
+    assert.equal(retired[0].releases, 1, 'its late cleanup belongs only to that retired round');
+    f.feature.subscribe();
+    f.feature.subscribe();
+    const current = f.registrations.slice(10);
+    assert.equal(current.length, 9, 'the next owner must register every channel exactly once');
+    await complete(current);
+    const before = f.notifications();
+    retired[0].callback({ payload: { status: 'idle' } });
+    assert.equal(f.notifications(), before, 'retired callbacks cannot publish');
+    current[0].callback({ payload: { status: 'idle' } });
+    assert.equal(f.notifications(), before + 1, 'the replacement callback remains live');
+    f.feature.stop();
+    assert.deepEqual(current.map(entry => entry.releases), Array(9).fill(1));
+    assert.equal(retired[0].releases, 1);
+  } finally {
+    f.feature.stop();
+    await complete(f.registrations);
+  }
+});
+
+test('synchronous listen retirement and replacement cannot let the old round register into the new owner', async () => {
+  let replaceNext = false;
+  const f = install(undefined, undefined, () => {
+    if (replaceNext) {
+      replaceNext = false;
+      f.feature.stop();
+      f.feature.subscribe();
+    }
+  });
+  try {
+    await complete(f.registrations.slice());
+    f.feature.stop();
+    replaceNext = true;
+    f.feature.subscribe();
+    const retired = f.registrations[9];
+    const current = f.registrations.slice(10);
+    assert.equal(current.length, 9);
+    f.feature.subscribe();
+    assert.equal(f.registrations.length, 19, 'old continuation and explicit retry add no duplicate registration');
+    await complete(current);
+    await complete([retired]);
+    assert.equal(retired.releases, 1);
+    assert.deepEqual(current.map(entry => entry.releases), Array(9).fill(0));
+    const before = f.notifications();
+    retired.callback({ payload: { status: 'idle' } });
+    assert.equal(f.notifications(), before);
+    current[0].callback({ payload: { status: 'idle' } });
+    assert.equal(f.notifications(), before + 1);
+    f.feature.stop();
+    assert.deepEqual(current.map(entry => entry.releases), Array(9).fill(1));
+    assert.equal(retired.releases, 1);
+  } finally {
+    f.feature.stop();
+    await complete(f.registrations);
+  }
+});
 
 test('stop releases listeners that finish registration late exactly once', async () => {
   const { feature, registrations } = install();

@@ -147,7 +147,14 @@
     function subscribe() {
       if (typeof listen !== "function") return;
       if (!subscriptionOwner) subscriptionOwner = {};
-      subscribeChannel("desktop-remote-controlled-status", function (listenOwned) {
+      var owner = subscriptionOwner;
+      function subscribeOwnedChannel(name, start) {
+        // listen can retire or replace this round synchronously. Its remaining
+        // channels must not reserve dead attempts or borrow a replacement owner.
+        if (subscriptionOwner !== owner) return;
+        subscribeChannel(name, start);
+      }
+      subscribeOwnedChannel("desktop-remote-controlled-status", function (listenOwned) {
         return listenOwned("desktop-remote-controlled-status", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           noteControlledTerminal(payload);
@@ -155,14 +162,14 @@
           publish(logic.applyControlledStatus(current(), controlledStatusPayload(payload)));
         });
       });
-      subscribeChannel("desktop-remote-controller-status", function (listenOwned) {
+      subscribeOwnedChannel("desktop-remote-controller-status", function (listenOwned) {
         return listenOwned("desktop-remote-controller-status", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           noteControllerTerminal(payload);
           publish(logic.applyControllerStatus(current(), payload));
         });
       });
-      subscribeChannel("desktop-remote-task-status", function (listenOwned) {
+      subscribeOwnedChannel("desktop-remote-task-status", function (listenOwned) {
         return listenOwned("desktop-remote-task-status", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           var state = current();
@@ -175,25 +182,25 @@
           }
         });
       });
-      subscribeChannel("desktop-remote-task-event", function (listenOwned) {
+      subscribeOwnedChannel("desktop-remote-task-event", function (listenOwned) {
         return listenOwned("desktop-remote-task-event", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           publish(logic.applyControlledTaskEvent(current(), payload));
         });
       });
-      subscribeChannel("desktop-remote-controlled-session", function (listenOwned) {
+      subscribeOwnedChannel("desktop-remote-controlled-session", function (listenOwned) {
         return listenOwned("desktop-remote-controlled-session", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           publish(logic.applyControlledSession(current(), payload));
         });
       });
-      subscribeChannel("desktop-remote-controlled-journal", function (listenOwned) {
+      subscribeOwnedChannel("desktop-remote-controlled-journal", function (listenOwned) {
         return listenOwned("desktop-remote-controlled-journal", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           publish(logic.applyControlledJournalEvent(current(), payload));
         });
       });
-      subscribeChannel("desktop-remote-task-content", function (listenOwned) {
+      subscribeOwnedChannel("desktop-remote-task-content", function (listenOwned) {
         return listenOwned("desktop-remote-task-content", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           publish(logic.applyTaskContent(current(), payload));
@@ -204,13 +211,13 @@
       // 看到一次性命令返回值，窗口重载后会误以为 A 端仍然空闲。
       // Rust authenticates this narrow result against the live RemoteProxy.
       // The WebView still checks its exact local/ref/session/lease binding.
-      subscribeChannel("desktop-remote-proxy-capability", function (listenOwned) {
+      subscribeOwnedChannel("desktop-remote-proxy-capability", function (listenOwned) {
         return listenOwned("desktop-remote-proxy-capability", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           settleCapabilityResponse(payload);
         });
       });
-      subscribeChannel("desktop_remote_proxy", function (listenOwned) {
+      subscribeOwnedChannel("desktop_remote_proxy", function (listenOwned) {
         return listenOwned("desktop_remote_proxy", function (event) {
           var payload = event && event.payload ? event.payload : event || {};
           var before = current();
