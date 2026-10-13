@@ -251,6 +251,25 @@ comparison. A ledger row contains only the stable request ID, operation class,
 sorted endpoint IDs, keyed parameter digest, timestamps, state, and a bounded
 secret-free outcome.
 
+New access and desktop role credentials must round-trip UTF-8 exactly, contain
+32–4096 UTF-8 bytes, and fit within 1024 UTF-16 code units, matching the existing
+Legacy transport limit. The limits apply together (at most 3072 UTF-8 bytes for
+well-formed text within 1024 UTF-16 units); no trimming, normalization or automatic
+renaming occurs. Fresh enrollment, development TOFU, backfill, re-enrollment,
+rotation and batch writes enforce this rule before committing role material.
+Overflow returns the secret-free `enrollment_credential_transport_invalid` error.
+
+Existing longer credentials and their digests remain valid for registry
+authorization and explicit rotation to a new credential in the common domain;
+they are not automatically rewritten or guaranteed to pass Legacy transport.
+An exact no-write role claim and a historical terminal migration replay retain
+their original behavior. An existing pending request that would newly write an
+overlong credential remains pending, with its original parameters and evidence
+unchanged. Operators must retain that request, explicitly rotate/re-enroll using
+a new request ID and compatible material, and investigate the old request;
+changing parameters under its existing ID remains a conflict. Snapshot restoration
+preserves historical digests and does not infer plaintext length from a digest.
+
 Callers use:
 
 - `EnrollmentRegistry.enroll` for an already authenticated official/admin flow;

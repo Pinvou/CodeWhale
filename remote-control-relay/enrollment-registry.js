@@ -13,6 +13,8 @@ const REVISION = /^(?:0|[1-9][0-9]{0,19})$/u;
 const U64_MAX = 18_446_744_073_709_551_615n;
 const CREDENTIAL_MIN_BYTES = 32;
 const CREDENTIAL_MAX_BYTES = 4096;
+const NEW_CREDENTIAL_MAX_UTF16_UNITS = 1024;
+const CREDENTIAL_TRANSPORT_ERROR = "enrollment_credential_transport_invalid";
 const MAX_ENTRIES = 100_000;
 const MAX_MIGRATION_REQUESTS = 100_000;
 const MAX_BATCH_OPERATIONS = 10_000;
@@ -59,6 +61,13 @@ function validateCredential(credential, label = "enrollment_credential") {
   }
   if (bytes.toString("utf8") !== credential) fail(`${label}_invalid`);
   return bytes;
+}
+
+// Historical authorization and request replay retain their original byte domain.
+// Only newly written role material must also fit the Legacy transport limit.
+function validateNewCredential(credential, label = "enrollment_credential") {
+  validateCredential(credential, label);
+  if (credential.length > NEW_CREDENTIAL_MAX_UTF16_UNITS) fail(CREDENTIAL_TRANSPORT_ERROR);
 }
 
 function validateRevision(value, label) {
@@ -470,6 +479,7 @@ function applyPreparedOperations(registry, prepared, config, clock) {
           if (existing.desktop_credential !== null
             && !credentialMatches(config, existing, operation.desktopCredential, "desktop")) fail("endpoint_already_enrolled");
           if (existing.desktop_credential === null) {
+            validateNewCredential(operation.desktopCredential, "desktop_credential");
             entries[existingIndex] = { ...existing, revision: incrementRevision(existing.revision),
               desktop_credential: roleDigest(config, operation.endpointId, operation.desktopCredential, "desktop"),
               rotated_at: now(), audit: { ...existing.audit, last_action: "rotated" } };
@@ -488,6 +498,8 @@ function applyPreparedOperations(registry, prepared, config, clock) {
       if (operation.operation === "allowlist" && operation.expectedRevision !== undefined
         && operation.expectedRevision !== "0") fail("endpoint_revision_conflict");
       if (entries.length >= MAX_ENTRIES) fail("enrollment_capacity_reached");
+      validateNewCredential(operation.credential);
+      if (operation.desktopCredential !== undefined) validateNewCredential(operation.desktopCredential, "desktop_credential");
       const entry = {
         endpoint_id: operation.endpointId,
         status: "active",
@@ -515,6 +527,7 @@ function applyPreparedOperations(registry, prepared, config, clock) {
     if (existing.revision !== operation.expectedRevision) fail("endpoint_revision_conflict");
     if (operation.operation === "set_desktop_credential") {
       if (existing.desktop_credential !== null) fail("desktop_credential_already_set");
+      validateNewCredential(operation.desktopCredential, "desktop_credential");
       const next = { ...existing, revision: incrementRevision(existing.revision),
         desktop_credential: roleDigest(config, operation.endpointId, operation.desktopCredential, "desktop"),
         rotated_at: now(), audit: { ...existing.audit, last_action: "rotated" } };
@@ -526,6 +539,7 @@ function applyPreparedOperations(registry, prepared, config, clock) {
     }
     if (!config.keys.has(existing.access_credential.key_id)) fail("credential_key_unavailable");
     if (!credentialMatches(config, existing, operation.currentCredential, "access")) fail("invalid_enrollment_credential");
+    validateNewCredential(operation.newCredential, "new_credential");
     const next = {
       ...existing,
       revision: incrementRevision(existing.revision),
@@ -862,6 +876,13 @@ export class EnrollmentRegistry {
       if (snapshot.registry.migration_requests.length >= MAX_MIGRATION_REQUESTS) {
         fail("migration_request_capacity_reached");
       }
+      // Reuse the pure role-write planner without consuming the production clock.
+      // Other domain failures keep the existing pending/terminal audit lifecycle.
+      try {
+        applyPreparedOperations(snapshot.registry, context.prepared, this.#config, () => 0);
+      } catch (error) {
+        if (!(error instanceof EnrollmentRegistryError) || error.code === CREDENTIAL_TRANSPORT_ERROR) throw error;
+      }
       const pending = {
         request_id: context.requestId,
         operation: context.descriptor.operation,
@@ -903,6 +924,9 @@ export class EnrollmentRegistry {
         applied = applyPreparedOperations(snapshot.registry, context.prepared, this.#config, this.#clock);
       } catch (error) {
         if (!(error instanceof EnrollmentRegistryError)) throw error;
+        // An old pending intent is evidence; a new transport rule cannot seal it
+        // as failed or rewrite its parameters before explicit operator rotation.
+        if (error.code === CREDENTIAL_TRANSPORT_ERROR) throw error;
         failure = error;
         applied = {
           registry: snapshot.registry,
@@ -969,6 +993,8 @@ export class EnrollmentRegistry {
     if (existing) {
       fail(existing.status === "revoked" ? "endpoint_revoked" : "endpoint_already_enrolled");
     }
+    validateNewCredential(credential);
+    if (desktopCredential !== undefined) validateNewCredential(desktopCredential, "desktop_credential");
     const timestamp = isoTimestamp(this.#clock);
     const entry = {
       endpoint_id: endpointId,
@@ -1085,6 +1111,7 @@ export class EnrollmentRegistry {
     if (entry.status !== "active") fail("endpoint_revoked");
     if (entry.revision !== expectedEndpointRevision) fail("endpoint_revision_conflict");
     this.#authorizeEntry(entry, currentCredential, role);
+    validateNewCredential(newCredential, "new_credential");
     const timestamp = isoTimestamp(this.#clock);
     const next = {
       ...entry,
