@@ -442,16 +442,6 @@ fn truncated_preview(
     )
 }
 
-/// Apply spillover to a tool result in place. If the result's
-/// content exceeds [`SPILLOVER_THRESHOLD_BYTES`], writes the full
-/// content to a sibling file under `~/.codewhale/tool_outputs/`,
-/// replaces `result.content` with a [`SPILLOVER_HEAD_BYTES`] head
-/// plus a footer naming the spillover path and how to read the
-/// omitted range back, and stamps `metadata.spillover_path` so the
-/// UI can render its expand annotation.
-///
-/// Returns the spillover path on success, `None` if no spillover
-/// happened (content small enough, error result, write failure).
 /// Apply adaptive routing and publish session-scoped exact evidence.
 ///
 /// The default path writes one immutable payload under the origin session and
