@@ -483,6 +483,12 @@ pub fn ensure_session_skills(
     }
 }
 
+#[cfg(test)]
+pub(super) fn ensure_plain_session_skills_for_test(session_id: &str) {
+    // Keep scope selection in this adapter, including cross-runtime regressions.
+    ensure_session_skills(session_id, ConnectorScope::Plain, None)
+}
+
 /// 判定（策略用）：该会话组合目录是否为空（目录不存在或无数）。code 会话据此
 /// 决定 `load_skill` 是否隐藏——空 → 隐藏，避免「开关开着但没技能」的假状态。
 pub fn session_skills_is_empty(session_id: &str) -> bool {
