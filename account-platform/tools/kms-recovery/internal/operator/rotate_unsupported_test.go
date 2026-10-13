@@ -12,12 +12,15 @@ import (
 // provider rotation, login or success record may precede a supported lock.
 func TestRotationUnsupportedPlatformFailsClosed(t *testing.T) {
 	f := newRotationFixture(t)
-	parent := t.TempDir()
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(parent, 0700); err != nil {
 		t.Fatal(err)
 	}
 	output := filepath.Join(parent, "unsupported-attempt")
-	if err := f.rotate(output, 1); err != ErrRotatePreflight {
+	if err := f.rotate(output, 1); err != ErrRotateUncertain {
 		t.Fatalf("unsupported rotation must fail closed: %v", err)
 	}
 	if f.rotations != 0 || f.logins != 0 || f.rootRequests != 0 || len(f.tokens) != 0 {
