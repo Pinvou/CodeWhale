@@ -161,6 +161,7 @@ test('transform handles a rewritten non-root base (web relay base path)', () => 
   };
   const web = segmentClass(transformIndexHtmlForPlatform(true, based));
   const desktop = segmentClass(transformIndexHtmlForPlatform(false, based));
+  const source = segmentClass(based);
 
   assert.deepEqual(web.tauri, [], 'web transform must classify tauri scripts under a non-root base');
   assert.ok(web.all.includes('platform/web/bootstrap.js') && web.all.includes('platform/web/bridge.js'),
@@ -168,7 +169,7 @@ test('transform handles a rewritten non-root base (web relay base path)', () => 
   assert.deepEqual(desktop.web, [], 'desktop transform must classify web scripts under a non-root base');
   assert.deepEqual(
     desktop.tauri,
-    segmentClass(based).tauri,
+    source.tauri,
     'desktop transform must keep every tauri bridge tag under a non-root base',
   );
   assert.ok(transformIndexHtmlForPlatform(false, based).includes(DESKTOP_MARKER),
