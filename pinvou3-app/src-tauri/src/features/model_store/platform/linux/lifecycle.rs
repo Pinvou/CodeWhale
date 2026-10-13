@@ -639,8 +639,8 @@ impl ModelManager {
     /// 记录，它引擎对应的 docker 镜像是不是真的还有活着的容器，不是就把标记
     /// 纠正回来。每次打开/刷新"本地模型库"都会跑一遍，返回被纠正的卡片名列表。
     ///
-    /// docker 不可用（比如探测超时/命令缺失）时直接跳过，不做任何判断——
-    /// 没有可靠信号就不误纠正，宁可漏判也不能错判。
+    /// docker 不可用（比如探测超时/命令缺失）时不判断容器卡；Ollama 与厂商原生
+    /// 引擎仍按各自本机健康端点核对。没有可靠信号就不误纠正，宁可漏判也不能错判。
     pub fn reconcile_running_status(&self) -> Vec<String> {
         let mut corrected = Vec::new();
         let Ok(records) = db::list_store_models() else {
@@ -653,20 +653,21 @@ impl ModelManager {
         // `library()` 的第一步——用户看到的会是**整个模型商店永久转圈**，而不是
         // 「拿不到运行状态」。同一文件里 ollama 那条分支早就设了 5 秒超时，
         // 这两处没设，标准不一致本身就是漏了的信号。
-        let Some(stdout) =
-            proc_timeout::query("docker", &["ps", "--format", "{{.Names}}\t{{.Image}}"])
-        else {
-            return corrected;
-        };
+        // docker 不可用时不能据此把容器卡判成已停止，但原生引擎和 Ollama 仍各有
+        // 自己可靠的健康检查；不能因为 daemon 挂了就跳过整张模型库的状态纠正。
+        let docker_stdout =
+            proc_timeout::query("docker", &["ps", "--format", "{{.Names}}\t{{.Image}}"]);
         let mut live_images: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut live_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for line in stdout.lines() {
-            let mut parts = line.splitn(2, '\t');
-            if let Some(n) = parts.next() {
-                live_names.insert(n.trim().to_string());
-            }
-            if let Some(i) = parts.next() {
-                live_images.insert(i.trim().to_string());
+        if let Some(stdout) = docker_stdout.as_deref() {
+            for line in stdout.lines() {
+                let mut parts = line.splitn(2, '\t');
+                if let Some(n) = parts.next() {
+                    live_names.insert(n.trim().to_string());
+                }
+                if let Some(i) = parts.next() {
+                    live_images.insert(i.trim().to_string());
+                }
             }
         }
 
@@ -688,6 +689,10 @@ impl ModelManager {
                 .map(str::trim)
                 .filter(|n| !n.is_empty())
             {
+                // docker daemon 此刻不可查时，状态未知而不是“容器不存在”。
+                if docker_stdout.is_none() {
+                    continue;
+                }
                 let alive = live_names.contains(name);
                 if rec.running && !alive {
                     let _ = db::set_running(&rec.card_id, false);
@@ -722,10 +727,27 @@ impl ModelManager {
                 continue;
             }
 
+            // 厂商原生引擎（例如驭光）没有 docker 容器名，过去会直接落到下面的
+            // "没有镜像就 continue"，因此设备重启或进程崩溃后仍会永久显示为运行中；
+            // 反过来，启用第二张卡时又会拿这条假状态去作内存判断。它们已经由 enable
+            // 脚本交回了本机 OpenAI 兼容端点，直接轻量探测 /v1/models 才是可靠判据。
+            // 仍然只做“记录说在跑、实际已不在”的纠正，不凭一个端口把外部服务认领为
+            // 本模型商店的运行实例。
+            if let Some(endpoint) = rec.endpoint_url.as_deref() {
+                if rec.running && !openai_compatible_endpoint_alive(endpoint) {
+                    let _ = db::set_running(&rec.card_id, false);
+                    corrected.push(rec.card_name);
+                }
+                continue;
+            }
+
             // 没有容器名（这一版之前启用的老记录）：退回按镜像判断，但**只做
             // 「说在跑其实没跑」这一个方向**。反向认领在这里是危险的：别人用
             // 同款镜像起的容器会让我们把自己的卡误标成运行中——真机上就撞见过
             // 同事用同一个 vllm 镜像跑了另一个模型。宁可让用户自己点一下启用。
+            if docker_stdout.is_none() {
+                continue;
+            }
             let Some(image) = image_of.get(&rec.card_id).cloned().flatten() else {
                 continue;
             };
@@ -1858,6 +1880,31 @@ impl ModelManager {
                     "该模型的部署配置已丢失，已恢复为“已下载”。请先点击“部署”，部署完成后再启用。",
                 ));
             }
+            Err(error) if engine_startup_failed(&error.to_string()) => {
+                // 同机另一张驭光卡正在运行时，第二张卡会在“权重已加载”之后才因
+                // 运行资源不足退出。若仍报笼统的“服务初始化失败”，用户只会无效
+                // 重试或重下权重；这里把已经知道的冲突对象和可执行动作直接说清。
+                let running = db::list_store_models()
+                    .map_err(|db_error| {
+                        ModelManagerError::new(format!("读取运行模型失败：{db_error}"))
+                    })?
+                    .into_iter()
+                    .filter(|model| model.running && model.card_id != card_id)
+                    .map(|model| model.card_name)
+                    .collect::<Vec<_>>();
+                if running.is_empty() {
+                    return Err(error);
+                }
+                let names = running
+                    .iter()
+                    .map(|name| format!("「{name}」"))
+                    .collect::<Vec<_>>()
+                    .join("、");
+                return Err(ModelManagerError::new(format!(
+                    "无法启用「{}」：当前{}正在运行。该模型的权重已加载完成，但设备没有足够的运行资源同时启动两个模型。请先停用{}后再试；无需重新下载模型或引擎。",
+                    rec.card_name, names, names
+                )));
+            }
             Err(error) => return Err(error),
         };
         db::set_running(card_id, true)
@@ -2383,11 +2430,18 @@ impl ModelManager {
                 )
             }
         } else {
+            let names = running_models
+                .iter()
+                .map(|model| format!("「{}」", model.card_name))
+                .collect::<Vec<_>>()
+                .join("、");
             (
                 "unknown".to_string(),
                 true,
-                "该模型卡片尚未提供可信的运行内存档位，无法可靠预测与现有模型同时运行的结果。建议先停用其他模型。"
-                    .to_string(),
+                format!(
+                    "当前{}正在运行，但待启用模型尚未提供可信的运行内存档位，无法可靠预测能否同时运行。建议先停用{}；如仍继续，服务可能会启动失败。",
+                    names, names
+                ),
             )
         };
 
@@ -2729,6 +2783,16 @@ fn model_weights_are_incomplete(message: &str) -> bool {
         .any(|needle| message.contains(needle))
 }
 
+/// enable 脚本把引擎的原始末尾日志一并带回来了。对于“权重已加载、服务在最后
+/// 初始化阶段退出”的情况，既可能是引擎自己的 `startup failed`，也可能已被
+/// `errors::humanize_script_message` 归一成中文；两种形态都要识别到。
+fn engine_startup_failed(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("server failed during startup")
+        || lower.contains("startup failed")
+        || message.contains("推理服务启动失败")
+}
+
 /// 卡片报上来的对外调用地址是不是指向**本机**。
 ///
 /// 这把尺子在三个地方必须一模一样：入库（本函数）、接入（前端
@@ -2810,6 +2874,28 @@ fn ollama_alive(host: &str) -> bool {
     match ok {
         Ok(alive) => alive,
         Err(e) => !probe_failure_means_nothing_listening(&e),
+    }
+}
+
+/// 原生引擎给模型商店的 endpoint 是 OpenAI 兼容的 chat-completions 地址。
+/// 运行状态探测不能向它发一次聊天请求（那会触发真正推理），只访问轻量的
+/// `/v1/models`。无法确定的网络错误一律保留原状态，避免一时负载过高就把
+/// 正在运行的服务错标成已停止。
+fn openai_compatible_endpoint_alive(endpoint_url: &str) -> bool {
+    let Ok(mut url) = reqwest::Url::parse(endpoint_url) else {
+        return true;
+    };
+    url.set_path("/v1/models");
+    url.set_query(None);
+    let ok = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .no_proxy()
+        .build()
+        .and_then(|client| client.get(url).send())
+        .map(|response| response.status().is_success());
+    match ok {
+        Ok(alive) => alive,
+        Err(error) => !probe_failure_means_nothing_listening(&error),
     }
 }
 
@@ -3199,6 +3285,20 @@ exit 0
         assert!(!model_weights_are_incomplete(
             "port 30000 is already in use"
         ));
+    }
+
+    #[test]
+    fn recognizes_engine_startup_failures_without_calling_them_download_failures() {
+        assert!(engine_startup_failed(
+            "2026-10-13 FATAL server failed during startup"
+        ));
+        assert!(engine_startup_failed(
+            "ERROR startup failed [finalizing target]"
+        ));
+        assert!(engine_startup_failed(
+            "推理服务启动失败：模型权重已加载完成，但服务初始化未完成"
+        ));
+        assert!(!engine_startup_failed("模型权重不完整，请先下载模型"));
     }
 
     /// 防的是「几百 GB 的 rm -rf 被 300 秒静默超时误杀」。

@@ -70,6 +70,13 @@ const SCRIPT_ERROR_PATTERNS: &[(&str, &str)] = &[
         "server failed during startup",
         "推理服务启动失败：模型权重已加载完成，但服务初始化未完成。请导出诊断日志反馈给我们",
     ),
+    // 驭光引擎当前版本在完成 `weights ready` 后可能打印
+    // `ERROR startup failed [finalizing target]`。这是同一类“服务初始化阶段退出”，
+    // 不能退回成泛化的脚本错误，更不能误导用户重新下载二十多 GB 权重。
+    (
+        "startup failed",
+        "推理服务启动失败：模型权重已加载完成，但服务初始化未完成。请导出诊断日志反馈给我们",
+    ),
     ("manifest unknown", "在远端找不到该模型/量化版本"),
     ("unauthorized", "没有访问权限，请检查凭据配置"),
     ("timeout", "操作超时，请稍后重试"),
@@ -417,6 +424,12 @@ mod tests {
         );
         assert_eq!(
             humanize_script_message("2026-10-13 08:56:52 FATAL server failed during startup"),
+            "推理服务启动失败：模型权重已加载完成，但服务初始化未完成。请导出诊断日志反馈给我们"
+        );
+        assert_eq!(
+            humanize_script_message(
+                "2026-10-13 13:32:38.936 ERROR startup failed [finalizing target]"
+            ),
             "推理服务启动失败：模型权重已加载完成，但服务初始化未完成。请导出诊断日志反馈给我们"
         );
     }
