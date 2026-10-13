@@ -182,10 +182,10 @@ session projection and worker record. By default the branch is
 `.codewhale-worktrees/`, so the parent checkout stays clean.
 
 Isolation is not write authority. A prompt-only worker starts read-only.
-A writer also declares `write_authority: "workspace_write"` or
-`"worktree_write"` and at least one normalized repo-relative `write_roots`,
-`exact_files`, or `coordination_contracts` value. Active overlapping shared
-claims fail before mutation; a real isolated worktree may proceed in parallel.
+A writer narrows its scope with at least one normalized repo-relative
+`write_roots` entry (a file or a directory tree); without one it claims the
+parent workspace root. Active overlapping shared claims fail before mutation;
+a real isolated worktree may proceed in parallel.
 
 Optional fields:
 
@@ -193,9 +193,6 @@ Optional fields:
 - `worktree_base`: git ref to branch from; defaults to `HEAD`.
 - `worktree_path`: exact checkout path. Relative paths stay under the default
   sibling `.codewhale-worktrees/` root.
-
-Do not combine `cwd` with `worktree`; `cwd` remains the manual escape hatch for
-an already-created directory inside the parent workspace.
 
 ## Delegation briefs
 

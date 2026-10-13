@@ -676,12 +676,12 @@ fn simple_extension_filters(value: &serde_json::Value) -> Option<serde_json::Val
     Some(serde_json::Value::Array(extensions))
 }
 
-struct PlannedToolCalls {
-    plans: Vec<ToolExecutionPlan>,
-    hook_contexts: std::collections::HashMap<String, String>,
-    batch_sandbox_policy: crate::sandbox::SandboxPolicy,
-    benchmark_budget_exhausted: bool,
-    benchmark_skipped_over_budget_tool_ids: std::collections::HashSet<String>,
+pub(super) struct PlannedToolCalls {
+    pub(super) plans: Vec<ToolExecutionPlan>,
+    pub(super) hook_contexts: std::collections::HashMap<String, String>,
+    pub(super) batch_sandbox_policy: crate::sandbox::SandboxPolicy,
+    pub(super) benchmark_budget_exhausted: bool,
+    pub(super) benchmark_skipped_over_budget_tool_ids: std::collections::HashSet<String>,
 }
 
 struct StreamOutcome {
@@ -690,6 +690,15 @@ struct StreamOutcome {
     current_thinking: String,
     current_thinking_signature: Option<String>,
     current_thinking_state: Option<crate::models::OpaqueReasoningState>,
+    /// OpenRouter `reasoning_details` snapshot for the current thinking
+    /// block; the stream repeats the growing array, so only the last
+    /// snapshot per block is kept and replayed verbatim.
+    current_thinking_details: Option<Vec<serde_json::Value>>,
+    /// Thinking blocks already terminated by a `content_block_stop`, in wire
+    /// order. Adaptive/interleaved thinking emits several per assistant turn;
+    /// Anthropic requires the whole sequence replayed unmodified, so finished
+    /// blocks are parked here instead of being overwritten by the next one.
+    completed_thinking: Vec<ContentBlock>,
     tool_uses: Vec<ToolUseState>,
     usage: Usage,
     usage_reported: bool,
@@ -718,6 +727,52 @@ pub(super) fn preview_request_error_user_message(
     error: &anyhow::Error,
 ) -> String {
     format!("{error:#}")
+}
+
+/// Park a finished thinking block (deltas + signature + optional Responses
+/// continuity state) into the turn's ordered completed list.
+///
+/// A block survives only if the provider actually emitted reasoning: readable
+/// text (minus the wire-only "(reasoning omitted)" placeholder), an Anthropic
+/// signature, an encrypted Responses state, or OpenRouter structured
+/// `reasoning_details`. A signature-only block is real
+/// content — newer Claude models ship `display: "omitted"` thinking (empty
+/// text plus the encrypted signature) — and dropping it would strip a block
+/// Anthropic requires back verbatim in tool-loop replays. The same holds for
+/// an encrypted-only OpenRouter details array.
+fn flush_thinking_block(
+    thinking: &mut String,
+    signature: &mut Option<String>,
+    state: &mut Option<crate::models::OpaqueReasoningState>,
+    details: &mut Option<Vec<serde_json::Value>>,
+    completed: &mut Vec<ContentBlock>,
+) {
+    let placeholder_only = crate::client::is_reasoning_replay_placeholder(thinking);
+    if (!thinking.is_empty() && !placeholder_only)
+        || signature_carries_content(signature.as_deref())
+        || state.is_some()
+        || details.is_some()
+    {
+        completed.push(ContentBlock::Thinking {
+            thinking: std::mem::take(thinking),
+            signature: signature.take(),
+            state: state.take(),
+            redacted_data: None,
+            reasoning_details: details.take(),
+        });
+    }
+    thinking.clear();
+    *signature = None;
+    *state = None;
+    *details = None;
+}
+
+/// A signature only counts as block content when it is non-empty: a provider
+/// streaming a bare empty `signature_delta` must not mint a signature-only
+/// (`display: "omitted"`) thinking block out of nothing and replay
+/// `{"signature": ""}` back to the API.
+fn signature_carries_content(signature: Option<&str>) -> bool {
+    signature.is_some_and(|signature| !signature.is_empty())
 }
 
 fn approval_intent_summary(text: &str) -> Option<String> {
@@ -989,26 +1044,87 @@ fn registered_tool_requires_non_bypassable_approval(tool_name: &str) -> bool {
 /// authenticate` entry would survive its own successful login, and tools
 /// killed by a live 401 would stay callable in name. `universe` is every
 /// name the pool can own; entries inside it are the pool's to manage, and
-/// the refreshed list is the new truth.
+/// the refreshed list is the new truth — for existence. Wire visibility
+/// stays the conversation's decision: a deferred tool returns to the active
+/// set only if this conversation still has it activated, so a bounds-evicted
+/// entry is never resurrected onto the wire by its own server's refresh (the
+/// eviction note the model just read — or a search payload in the same
+/// batch — would otherwise contradict the next request, and the next turn's
+/// active-set re-derivation would drop it anyway). The pool builds every
+/// entry eager, so each replaced tool also carries its prior deferral
+/// marking across the refresh: adopting the pool's flag would flip deferred
+/// tools back onto the head of the wire list and bust the cached prefix.
+/// A name the conversation has never seen (the synthetic login tool a
+/// mid-turn 401 just started offering, or a server-side rename) arrives
+/// with the pool's eager flag and joins the active set: the 401 result's
+/// auth hint points straight at that tool, so deferring it would strand
+/// the recovery path behind a search. Replaced entries are spliced back
+/// into their own catalog slot, so a refresh that serves the same names
+/// reorders nothing and the caller's declaration (this return value: did
+/// the model-visible wire list change?) stays false — a same-count
+/// refresh moves no wire bytes and must not trip the C5 undeclared-drift
+/// guard as a false positive.
 pub(super) fn replace_runtime_mcp_tools(
     tool_catalog: &mut Vec<Tool>,
     active_tool_names: &mut std::collections::HashSet<String>,
     universe: &std::collections::HashSet<String>,
     refreshed: Vec<Tool>,
-) -> usize {
-    let before = tool_catalog.len();
-    tool_catalog.retain(|tool| {
-        let owned = universe.contains(&tool.name);
-        if owned {
-            active_tool_names.remove(&tool.name);
+    activation_cache: &crate::core::session::ToolActivationCache,
+) -> bool {
+    let previous_deferral: std::collections::HashMap<String, bool> = tool_catalog
+        .iter()
+        .filter(|tool| universe.contains(&tool.name))
+        .map(|tool| (tool.name.clone(), tool.defer_loading.unwrap_or(false)))
+        .collect();
+    // The wire list is the eager head plus the activated deferred tail;
+    // that identity — not the catalog's length — is what a declared re-pin
+    // answers for.
+    let wire_before = wire_visible_tool_names(tool_catalog, active_tool_names);
+    let mut slot_by_name: std::collections::HashMap<String, usize> = tool_catalog
+        .iter()
+        .enumerate()
+        .filter(|(_, tool)| universe.contains(&tool.name))
+        .map(|(i, tool)| (tool.name.clone(), i))
+        .collect();
+    let mut arrivals: Vec<Tool> = Vec::new();
+    for mut tool in refreshed {
+        if let Some(was_deferred) = previous_deferral.get(&tool.name) {
+            tool.defer_loading = Some(*was_deferred);
         }
-        !owned
-    });
-    for tool in refreshed {
-        active_tool_names.insert(tool.name.clone());
-        tool_catalog.push(tool);
+        let name = tool.name.clone();
+        let re_advertise = !tool.defer_loading.unwrap_or(false) || activation_cache.contains(&name);
+        active_tool_names.remove(&name);
+        match slot_by_name.remove(&name) {
+            Some(slot) => tool_catalog[slot] = tool,
+            None => arrivals.push(tool),
+        }
+        if re_advertise {
+            active_tool_names.insert(name);
+        }
     }
-    tool_catalog.len().abs_diff(before)
+    // Names the refreshed list stopped serving leave the catalog and the
+    // active set; the refreshed list is the pool's truth about its slice.
+    let departed: Vec<String> = slot_by_name.into_keys().collect();
+    for name in &departed {
+        active_tool_names.remove(name);
+    }
+    tool_catalog.retain(|tool| !departed.contains(&tool.name));
+    tool_catalog.extend(arrivals);
+    wire_visible_tool_names(tool_catalog, active_tool_names) != wire_before
+}
+
+/// Every name the next request would serialize: the eager head plus the
+/// activated deferred tail.
+fn wire_visible_tool_names(
+    tool_catalog: &[Tool],
+    active_tool_names: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    tool_catalog
+        .iter()
+        .filter(|tool| !tool.defer_loading.unwrap_or(false))
+        .map(|tool| tool.name.clone())
+        .chain(active_tool_names.iter().cloned())
+        .collect()
 }
 
 impl Engine {
@@ -1326,14 +1442,27 @@ impl Engine {
         let strict_tool_mode = tool_policy.strict_tool_mode;
         let mut tool_catalog = std::mem::take(&mut tool_policy.catalog);
         let mut active_tool_names = std::mem::take(&mut tool_policy.active_names);
+        // A note parked by an earlier turn that never reached a tool result
+        // (an interrupted turn, a panic) would misattribute its evictions to
+        // this turn's first result; drop it before revalidating. SyncSession
+        // already clears it at the conversation edge — this covers the
+        // same-conversation case.
+        self.session.pending_toolbox_eviction_notes.clear();
         // Search activations belong to the conversation, not just the user
         // turn. Revalidate names against this turn's already-filtered catalog
         // before exposing them; stale mode/MCP/allow-list entries disappear.
-        let evicted = self.session.tool_activation_cache.revalidate(&tool_catalog);
-        super::tool_catalog::remove_evicted_cache_activations(
-            &tool_catalog,
+        let removals = self.session.tool_activation_cache.revalidate(&tool_catalog);
+        super::tool_catalog::remove_toolbox_drops(
             &mut active_tool_names,
-            evicted,
+            removals.dropped_names().map(str::to_string),
+        );
+        // This revalidation can also evict on the collective bounds when a
+        // cached schema grew between turns (an MCP refresh, for example).
+        // Like a hydration it has no result payload of its own: park the
+        // note so the turn's first recorded result carries it.
+        self.park_toolbox_eviction_note(
+            crate::core::session::ToolboxEvictionTrigger::TurnStart,
+            &removals.bounds_evicted,
         );
         active_tool_names.extend(
             self.session
@@ -2136,6 +2265,8 @@ impl Engine {
                 current_thinking,
                 current_thinking_signature,
                 current_thinking_state,
+                current_thinking_details,
+                mut completed_thinking,
                 mut tool_uses,
                 usage,
                 usage_reported,
@@ -2262,10 +2393,16 @@ impl Engine {
             // appends a synthetic user message to the persisted
             // conversation — the retried request is the persisted
             // conversation re-issued, nothing else.
+            // `completed_thinking` is part of the "something" too: a block
+            // already flushed at its stop event is received content, and
+            // silently re-running the request would double-bill for it. A
+            // stream that died after completing thinking must surface its
+            // error like any other post-content death.
             let stream_died_with_nothing = stream_errors > 0
                 && tool_uses.is_empty()
                 && current_text_visible.trim().is_empty()
                 && current_thinking.trim().is_empty()
+                && completed_thinking.is_empty()
                 && !pending_message_complete;
             let pending_resume = match pending_resume {
                 Some(resume) => Some(resume),
@@ -2312,17 +2449,25 @@ impl Engine {
                         // variable is still empty at this point and will be
                         // rebuilt on the next round.
                         let mut resume_blocks: Vec<ContentBlock> = Vec::new();
+                        // Thinking blocks the stream already terminated stay
+                        // in the retry prefix, in wire order, ahead of the
+                        // block that was still open when the stream died.
+                        resume_blocks.append(&mut completed_thinking);
                         // A wire-only placeholder must not ride into the
                         // retry prefix as stored reasoning either.
                         let thinking_is_placeholder_only =
                             crate::client::is_reasoning_replay_placeholder(&current_thinking);
                         if (!current_thinking.is_empty() && !thinking_is_placeholder_only)
                             || current_thinking_state.is_some()
+                            || signature_carries_content(current_thinking_signature.as_deref())
+                            || current_thinking_details.is_some()
                         {
                             resume_blocks.push(ContentBlock::Thinking {
                                 thinking: current_thinking.clone(),
                                 signature: current_thinking_signature.clone(),
                                 state: current_thinking_state.clone(),
+                                redacted_data: None,
+                                reasoning_details: current_thinking_details.clone(),
                             });
                         }
                         if !current_text_visible.is_empty() {
@@ -2434,15 +2579,26 @@ impl Engine {
             // that compatibility value to the outgoing JSON only. Persisting
             // it here leaked an invented "(reasoning omitted)" block into the
             // transcript and every provider-neutral session replay.
+            // `completed_thinking` holds every thinking/redacted block the
+            // stream already terminated, in wire order; the guard below keeps
+            // a trailing block whose stop event never arrived. Both must
+            // survive — Anthropic replays the whole thinking sequence
+            // unmodified, and a signature-only block (Claude's
+            // `display: "omitted"`) is real content.
+            content_blocks.append(&mut completed_thinking);
             let thinking_is_placeholder_only =
                 crate::client::is_reasoning_replay_placeholder(&current_thinking);
             if (!current_thinking.is_empty() && !thinking_is_placeholder_only)
                 || current_thinking_state.is_some()
+                || signature_carries_content(current_thinking_signature.as_deref())
+                || current_thinking_details.is_some()
             {
                 content_blocks.push(ContentBlock::Thinking {
                     thinking: current_thinking.clone(),
                     signature: current_thinking_signature.clone(),
                     state: current_thinking_state.clone(),
+                    redacted_data: None,
+                    reasoning_details: current_thinking_details.clone(),
                 });
             }
             let mut final_text = current_text_visible.clone();
@@ -2553,9 +2709,16 @@ impl Engine {
                     block,
                     ContentBlock::Thinking {
                         thinking,
+                        signature,
                         state,
+                        redacted_data,
+                        reasoning_details,
                         ..
-                    } if !thinking.trim().is_empty() || state.is_some()
+                    } if !thinking.trim().is_empty()
+                        || signature_carries_content(signature.as_deref())
+                        || state.is_some()
+                        || redacted_data.is_some()
+                        || reasoning_details.is_some()
                 )
             });
 
@@ -3264,6 +3427,7 @@ impl Engine {
                 &mut tool_catalog,
                 &mut active_tool_names,
                 &hook_contexts,
+                &tool_policy,
             )
             .await;
 
@@ -3384,7 +3548,7 @@ impl Engine {
     /// deferred-tool activation state. It returns the executable plans together
     /// with the hook context and batch sandbox policy consumed by later phases.
     #[allow(clippy::too_many_arguments)] // phase fns mirror the turn pipeline shape
-    async fn plan_tool_calls(
+    pub(super) async fn plan_tool_calls(
         &mut self,
         client: &dyn crate::core::model_client::ModelClient,
         turn: &mut TurnContext,
@@ -3907,7 +4071,7 @@ impl Engine {
             let should_emit_hydration_status =
                 !deferred_tools_hydrated_this_batch.contains(&tool_name);
             if blocked_error.is_none()
-                && let Some(result) = maybe_hydrate_requested_deferred_tool(
+                && let Some(hydration) = maybe_hydrate_requested_deferred_tool(
                     &tool_name,
                     &tool_input,
                     tool_catalog,
@@ -3915,37 +4079,49 @@ impl Engine {
                     &mut deferred_tools_hydrated_this_batch,
                 )
             {
-                if should_emit_hydration_status {
-                    // Retain first-proposal order separately from the set
-                    // used to deduplicate calls in this batch. LRU bounds
-                    // must not depend on randomized HashSet iteration.
-                    deferred_tools_hydrated_in_order.push(tool_name.clone());
-                }
-                emit_tool_audit_for_policy(
-                    self.active_turn_tool_security.is_some(),
-                    json!({
-                        "event": "tool.schema_hydrated",
-                        "tool_id": tool_id.clone(),
-                        "tool_name": tool_name.clone(),
-                        "auto_retry_same_turn": false,
-                        "metadata": result.metadata,
-                    }),
-                );
-                if should_emit_hydration_status {
-                    let status = if requested_tool_name == tool_name {
-                        format!(
-                            "Loaded deferred tool '{tool_name}'. Retry the call with its visible schema."
-                        )
-                    } else {
-                        format!(
-                            "Loaded deferred tool '{tool_name}' after resolving '{requested_tool_name}'. Retry the call with its visible schema."
-                        )
-                    };
-                    let _ = self.tx_event.send(Event::status(status)).await;
-                }
+                let result = match hydration {
+                    DeferredHydration::Loaded(result) => {
+                        if should_emit_hydration_status {
+                            // Retain first-proposal order separately from the set
+                            // used to deduplicate calls in this batch. LRU bounds
+                            // must not depend on randomized HashSet iteration.
+                            deferred_tools_hydrated_in_order.push(tool_name.clone());
+                        }
+                        emit_tool_audit_for_policy(
+                            self.active_turn_tool_security.is_some(),
+                            json!({
+                                "event": "tool.schema_hydrated",
+                                "tool_id": tool_id.clone(),
+                                "tool_name": tool_name.clone(),
+                                "auto_retry_same_turn": false,
+                                "metadata": result.metadata,
+                            }),
+                        );
+                        if should_emit_hydration_status {
+                            let status = if requested_tool_name == tool_name {
+                                format!(
+                                    "Loaded deferred tool '{tool_name}'. Retry the call with its visible schema."
+                                )
+                            } else {
+                                format!(
+                                    "Loaded deferred tool '{tool_name}' after resolving '{requested_tool_name}'. Retry the call with its visible schema."
+                                )
+                            };
+                            let _ = self.tx_event.send(Event::status(status)).await;
+                        }
+                        result
+                    }
+                    // A refusal loads nothing: announcing "Loaded deferred
+                    // tool" or auditing `tool.schema_hydrated` would state
+                    // the opposite of the receipt, and the refused name must
+                    // stay out of the hydration order so the batch
+                    // activation is never asked to admit it.
+                    DeferredHydration::Refused(result) => result,
+                };
                 // The provider did not advertise this schema in the current
                 // request. Hydration is discovery, never execution authority:
-                // return the schema now and require a subsequent model call.
+                // return the schema — or the refusal — now and require a
+                // subsequent model call.
                 guard_result = Some(result);
             }
 
@@ -4031,19 +4207,36 @@ impl Engine {
             .session
             .tool_activation_cache
             .activate(tool_catalog, &deferred_tools_hydrated_in_order);
-        super::tool_catalog::remove_evicted_cache_activations(
-            tool_catalog,
+        super::tool_catalog::remove_toolbox_drops(
             active_tool_names,
-            activation.evicted.iter().cloned(),
+            activation.dropped_names().map(str::to_string),
         );
         // Admitting or evicting deferred tools changes the request-visible
         // tool catalog for the rest of this turn. That is a legitimate,
         // nameable header change — declare it so the prefix pin re-pins under
         // `change:tool_surface` instead of tripping the C5 drift guard.
-        if !activation.admitted.is_empty() || !activation.evicted.is_empty() {
+        if !activation.admitted.is_empty()
+            || !activation.evicted.is_empty()
+            || !activation.stale.is_empty()
+        {
             active_tool_names.extend(activation.admitted.iter().cloned());
             self.session.pending_prefix_change_reason = Some("tool_surface".to_string());
         }
+        // Unlike a `tool_search` result, a hydration has no result payload of
+        // its own to name bounds-driven evictions in. Park the note on the
+        // session so the first recorded tool result of this batch carries it
+        // to the model. The evictions may come from the admission itself or
+        // from revalidation after a cached schema grew. Unavailable drops are
+        // not reported here: an oversize drop is re-reported with its reason
+        // the next time a search returns the tool (a match ranked past the
+        // result cap re-reports nothing), while a catalog-shrink drop that a
+        // non-search path absorbed left the pruned catalog and cannot be
+        // discovered — the model learns of those only when a search for the
+        // capability misses.
+        self.park_toolbox_eviction_note(
+            crate::core::session::ToolboxEvictionTrigger::Step,
+            &activation.evicted,
+        );
         PlannedToolCalls {
             plans,
             hook_contexts,
@@ -4890,18 +5083,34 @@ impl Engine {
         outcomes
     }
 
+    /// Park a bounded-toolbox eviction note for the next recorded tool
+    /// result, combining with any note already parked — turn-start
+    /// revalidation and a hydration batch can both evict in the same turn.
+    pub(super) fn park_toolbox_eviction_note(
+        &mut self,
+        trigger: crate::core::session::ToolboxEvictionTrigger,
+        evicted: &[String],
+    ) {
+        super::tool_catalog::park_toolbox_eviction(
+            &mut self.session.pending_toolbox_eviction_notes,
+            trigger,
+            evicted,
+        );
+    }
+
     /// Commit collected tool outcomes to the session and related runtime state.
     ///
     /// This phase activates result dependencies, refreshes a changed MCP catalog,
     /// updates the working set, runs post-edit LSP diagnostics, appends success or
     /// error tool-result messages, and refreshes goal state. Its output is these
     /// side effects; it never plans or executes another tool call.
-    async fn process_tool_results(
+    pub(super) async fn process_tool_results(
         &mut self,
         outcomes: Vec<Option<ToolExecOutcome>>,
         tool_catalog: &mut Vec<crate::models::Tool>,
         active_tool_names: &mut std::collections::HashSet<String>,
         hook_contexts: &std::collections::HashMap<String, String>,
+        tool_policy: &ToolSurfacePolicy,
     ) {
         let active_tool_names_before = active_tool_names.clone();
         let tool_catalog_len_before = tool_catalog.len();
@@ -4911,6 +5120,12 @@ impl Engine {
         // sidebar "Goal:" line stays stale for the whole (possibly long)
         // goal-loop turn while get_goal already reflects the new objective.
         let mut goal_tool_ran = false;
+        // Hydration-time and turn-start toolbox evictions have no result
+        // payload of their own; the notes ride the first recorded result of
+        // this batch. They stay structured until that attach so names the
+        // riding result re-admits can be netted out.
+        let mut pending_eviction_notes =
+            std::mem::take(&mut self.session.pending_toolbox_eviction_notes);
 
         for outcome in outcomes.into_iter().flatten() {
             let tool_input = outcome.input.clone();
@@ -4922,21 +5137,23 @@ impl Engine {
             }
             match result {
                 Ok(output) => {
-                    let mut tool_surface_changed =
-                        super::tool_catalog::activate_result_dependencies(
+                    let dependency = super::tool_catalog::activate_result_dependencies(
+                        tool_catalog,
+                        active_tool_names,
+                        &mut self.session.tool_activation_cache,
+                        &output,
+                    );
+                    let mut tool_surface_changed = dependency.changed;
+                    let mut evicted_this_result = dependency.evicted;
+                    if output.success {
+                        let touch = super::tool_catalog::touch_cached_tool_after_execution(
                             tool_catalog,
                             active_tool_names,
                             &mut self.session.tool_activation_cache,
-                            &output,
+                            &outcome.name,
                         );
-                    if output.success {
-                        tool_surface_changed |=
-                            super::tool_catalog::touch_cached_tool_after_execution(
-                                tool_catalog,
-                                active_tool_names,
-                                &mut self.session.tool_activation_cache,
-                                &outcome.name,
-                            );
+                        tool_surface_changed |= touch.changed;
+                        evicted_this_result.extend(touch.evicted);
                     }
                     // A runtime MCP connection change — a completed login OR
                     // a live 401 that dropped one — rewrites the callable
@@ -4953,14 +5170,35 @@ impl Engine {
                     if mcp_catalog_changed && let Some(pool) = self.mcp_pool.as_ref().cloned() {
                         let (universe, refreshed) = {
                             let pool = pool.lock().await;
-                            (pool.model_tool_names(), pool.to_api_tools())
+                            let (universe, refreshed) =
+                                (pool.model_tool_names(), pool.to_api_tools());
+                            // Same allow/deny narrowing the turn build ran
+                            // over its catalog: a tool the build stripped
+                            // must not re-enter mid-turn, where a
+                            // `tool_search` hit would defeat the denied-name
+                            // concealment and a declared activation would
+                            // serialize an operator-excluded schema into the
+                            // request. Mirror of the boot-window refresh's
+                            // gate; both delegate to the same
+                            // `ToolSurfacePolicy::allows_tool` spelling.
+                            (
+                                universe
+                                    .into_iter()
+                                    .filter(|name| tool_policy.allows_tool(name))
+                                    .collect(),
+                                refreshed
+                                    .into_iter()
+                                    .filter(|tool| tool_policy.allows_tool(&tool.name))
+                                    .collect(),
+                            )
                         };
                         tool_surface_changed |= replace_runtime_mcp_tools(
                             tool_catalog,
                             active_tool_names,
                             &universe,
                             refreshed,
-                        ) > 0;
+                            &self.session.tool_activation_cache,
+                        );
                     }
                     // Any of the legitimate mid-turn tool-surface changes above
                     // re-pin the header under a declared `change:tool_surface`
@@ -4970,6 +5208,12 @@ impl Engine {
                         self.session.pending_prefix_change_reason =
                             Some("tool_surface".to_string());
                     }
+                    let tool_was_executed = output
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("executed"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true);
                     emit_tool_audit_for_policy(
                         self.active_turn_tool_security.is_some(),
                         json!({
@@ -4978,6 +5222,7 @@ impl Engine {
                             "tool_name": outcome.name.clone(),
                             "status": terminal_status.as_str(),
                             "success": output.success,
+                            "executed": tool_was_executed,
                         }),
                     );
                     let output_for_context = compact_tool_result_for_route(
@@ -4987,12 +5232,6 @@ impl Engine {
                         &outcome.name,
                         &output,
                     );
-                    let tool_was_executed = output
-                        .metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.get("executed"))
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true);
                     if tool_was_executed {
                         self.session.working_set.observe_tool_call(
                             &tool_name_for_ws,
@@ -5022,6 +5261,35 @@ impl Engine {
                             format!("{output_for_context}\n\n[hook context] {context}")
                         }
                         None => output_for_context,
+                    };
+                    // The batch's parked notes and this result's own
+                    // retrieval/touch evictions share one channel to the
+                    // model: the recorded result content. Both net against
+                    // the live cache and the active tool set at attach so a
+                    // name this result hands back — or that a mid-turn MCP
+                    // refresh re-advertised after the touch dropped it — is
+                    // never declared uncallable.
+                    let mut eviction_notes = Vec::new();
+                    if !evicted_this_result.is_empty() {
+                        pending_eviction_notes.push(crate::core::session::PendingToolboxEviction {
+                            trigger: crate::core::session::ToolboxEvictionTrigger::Step,
+                            evicted: evicted_this_result,
+                        });
+                    }
+                    if !pending_eviction_notes.is_empty() {
+                        if let Some(rendered) = super::tool_catalog::render_toolbox_eviction_notes(
+                            &mut pending_eviction_notes,
+                            &self.session.tool_activation_cache,
+                            active_tool_names,
+                            tool_catalog,
+                        ) {
+                            eviction_notes.push(rendered);
+                        }
+                    }
+                    let output_for_context = if eviction_notes.is_empty() {
+                        output_for_context
+                    } else {
+                        format!("{output_for_context}\n\n{}", eviction_notes.join("\n\n"))
                     };
 
                     let content_blocks = outcome.content_blocks;
@@ -5061,12 +5329,32 @@ impl Engine {
                         .find(|tool| tool.name == outcome.name)
                         .map(|tool| &tool.input_schema);
                     let error = format_tool_error_with_schema(&e, &outcome.name, input_schema);
+                    // The working set observes the tool's own error, not the
+                    // surface bookkeeping appended below — the same pre-note
+                    // text the success path observes.
                     self.session.working_set.observe_tool_call(
                         &tool_name_for_ws,
                         &tool_input,
                         Some(&error),
                         &self.session.workspace,
                     );
+                    // A pending eviction note must still reach the model when
+                    // the batch's first result is an error, netted the same
+                    // way as on the success path. The render consumes the
+                    // notes either way.
+                    let mut note_text = None;
+                    if !pending_eviction_notes.is_empty() {
+                        note_text = super::tool_catalog::render_toolbox_eviction_notes(
+                            &mut pending_eviction_notes,
+                            &self.session.tool_activation_cache,
+                            active_tool_names,
+                            tool_catalog,
+                        );
+                    }
+                    let error = match note_text {
+                        Some(note) => format!("{error}\n\n{note}"),
+                        None => error,
+                    };
                     self.add_session_message(Message {
                         role: Role::User,
                         content: tool_result_message_content(
@@ -5080,6 +5368,19 @@ impl Engine {
                     .await;
                 }
             }
+        }
+
+        // A batch whose outcomes all flattened away (a benchmark final-only
+        // skip, for example) has no result to carry the notes. Re-park them
+        // so a later batch of this turn still delivers them; a turn that ends
+        // without another batch strands them, and the next turn's entry sweep
+        // drops them rather than letting them ride an unrelated result.
+        // Extending — not assigning — keeps any note parked during the
+        // results phase instead of silently dropping it.
+        if !pending_eviction_notes.is_empty() {
+            self.session
+                .pending_toolbox_eviction_notes
+                .extend(pending_eviction_notes);
         }
 
         // Reflect a mid-turn goal change on the sidebar immediately (idempotent:
@@ -5120,6 +5421,16 @@ impl Engine {
         // thinking block; must be replayed verbatim in tool loops.
         let mut current_thinking_signature: Option<String> = None;
         let mut current_thinking_state: Option<crate::models::OpaqueReasoningState> = None;
+        // OpenRouter structured reasoning entries for the current thinking
+        // block; each delta replaces the snapshot (the stream repeats the
+        // growing array) and the final one is replayed verbatim.
+        let mut current_thinking_details: Option<Vec<serde_json::Value>> = None;
+        // Adaptive/interleaved thinking can emit more than one thinking block
+        // per assistant turn. Anthropic requires the entire sequence of
+        // thinking blocks to be replayed "complete and unmodified" and in the
+        // original order, so finished blocks are parked here in arrival order
+        // instead of being overwritten by the next block's deltas.
+        let mut completed_thinking: Vec<ContentBlock> = Vec::new();
         let mut tool_uses: Vec<ToolUseState> = Vec::new();
         let mut usage = Usage {
             input_tokens: 0,
@@ -5469,9 +5780,18 @@ impl Engine {
                             .await;
                     }
                     ContentBlockStart::Thinking { thinking } => {
+                        // A previous thinking block that never saw a stop
+                        // event still counts as finished; park it so the new
+                        // block cannot overwrite it.
+                        flush_thinking_block(
+                            &mut current_thinking,
+                            &mut current_thinking_signature,
+                            &mut current_thinking_state,
+                            &mut current_thinking_details,
+                            &mut completed_thinking,
+                        );
                         current_thinking = thinking;
-                        current_thinking_signature = None;
-                        current_thinking_state = None;
+                        current_thinking_details = None;
                         current_block_kind = Some(ContentBlockKind::Thinking);
                         let _ = self
                             .tx_event
@@ -5479,6 +5799,46 @@ impl Engine {
                                 index: index as usize,
                             })
                             .await;
+                    }
+                    ContentBlockStart::RedactedThinking { data } => {
+                        // Anthropic withheld this whole thinking block for
+                        // safety and replaced it with an encrypted payload.
+                        // There are no deltas; the block arrives complete at
+                        // start and must be replayed byte-exact, so park it
+                        // immediately. No UI events: there is no readable
+                        // content to stream.
+                        stream_content_bytes = stream_content_bytes.saturating_add(data.len());
+                        if data.is_empty() {
+                            // With serde's default this can only come from a
+                            // contract-violating block (missing `data`). It
+                            // still parks so the failure surfaces at replay
+                            // with a diagnosable shape.
+                            crate::logging::warn(
+                                "Captured a redacted thinking block with an empty payload; it will replay verbatim and the API may reject the request",
+                            );
+                        }
+                        flush_thinking_block(
+                            &mut current_thinking,
+                            &mut current_thinking_signature,
+                            &mut current_thinking_state,
+                            &mut current_thinking_details,
+                            &mut completed_thinking,
+                        );
+                        completed_thinking.push(ContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: None,
+                            state: None,
+                            redacted_data: Some(data),
+                            reasoning_details: None,
+                        });
+                        // Kind is cleared so the block's stop event needs no
+                        // handling — it was parked above and has no deltas —
+                        // and so a stale kind cannot emit a ThinkingComplete
+                        // for a provider that skips stops.
+                        current_block_kind = None;
+                        crate::logging::info(
+                            "Captured redacted thinking block for verbatim replay",
+                        );
                     }
                     ContentBlockStart::ToolUse {
                         id,
@@ -5581,6 +5941,24 @@ impl Engine {
                     Delta::ReasoningStateDelta { state } => {
                         current_thinking_state = Some(state);
                     }
+                    Delta::ReasoningDetailsDelta { details } => {
+                        // Each decoder event carries the complete
+                        // accumulated snapshot (every entry, fragment text
+                        // concatenated in arrival order), so the latest
+                        // event supersedes the previous one wholesale.
+                        current_thinking_details = Some(details);
+                    }
+                    Delta::ToolThoughtSignatureDelta { signature } => {
+                        // Google thought signature delivered on a continuation
+                        // chunk of an already-started tool call. First one
+                        // wins: a call carries exactly one signature.
+                        if let Some(&tool_idx) = current_tool_indices.get(&index)
+                            && let Some(tool_state) = tool_uses.get_mut(tool_idx)
+                            && tool_state.thought_signature.is_none()
+                        {
+                            tool_state.thought_signature = Some(signature);
+                        }
+                    }
                     Delta::InputJsonDelta { partial_json } => {
                         if let Some(&tool_idx) = current_tool_indices.get(&index)
                             && let Some(tool_state) = tool_uses.get_mut(tool_idx)
@@ -5641,6 +6019,17 @@ impl Engine {
                                     index: index as usize,
                                 })
                                 .await;
+                            // The block is finished: park it in wire order so
+                            // a following thinking block cannot overwrite it
+                            // (adaptive/interleaved thinking emits several per
+                            // turn; Anthropic replays the whole sequence).
+                            flush_thinking_block(
+                                &mut current_thinking,
+                                &mut current_thinking_signature,
+                                &mut current_thinking_state,
+                                &mut current_thinking_details,
+                                &mut completed_thinking,
+                            );
                         }
                         Some(ContentBlockKind::ToolUse) | None => {}
                     }
@@ -5774,6 +6163,8 @@ impl Engine {
             current_thinking,
             current_thinking_signature,
             current_thinking_state,
+            current_thinking_details,
+            completed_thinking,
             tool_uses,
             usage,
             usage_reported,
@@ -6850,6 +7241,9 @@ fn stream_event_has_actionable_content(event: &StreamEvent) -> bool {
         StreamEvent::ContentBlockStart { content_block, .. } => match content_block {
             ContentBlockStart::Text { text } => !text.is_empty(),
             ContentBlockStart::Thinking { thinking } => !thinking.is_empty(),
+            // A redacted thinking block is provider-owned encrypted content —
+            // its arrival is actionable reasoning output even without text.
+            ContentBlockStart::RedactedThinking { .. } => true,
             ContentBlockStart::ToolUse { .. } | ContentBlockStart::ServerToolUse { .. } => true,
         },
         StreamEvent::ContentBlockDelta { delta, .. } => match delta {
@@ -6857,7 +7251,11 @@ fn stream_event_has_actionable_content(event: &StreamEvent) -> bool {
             Delta::ThinkingDelta { thinking } => !thinking.is_empty(),
             Delta::InputJsonDelta { partial_json } => !partial_json.is_empty(),
             Delta::SignatureDelta { signature } => !signature.is_empty(),
+            Delta::ToolThoughtSignatureDelta { signature } => !signature.is_empty(),
             Delta::ReasoningStateDelta { .. } => true,
+            // Structured OpenRouter reasoning is provider-owned content even
+            // when no readable text delta accompanies it.
+            Delta::ReasoningDetailsDelta { details } => !details.is_empty(),
         },
         StreamEvent::ToolProjectionWarning { .. }
         | StreamEvent::MessageStart { .. }
@@ -6942,6 +7340,51 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn flush_keeps_signature_only_blocks_but_not_empty_signature_mints() {
+        // A display:"omitted" block (empty text, real signature) is real
+        // content and must park; a bare empty `signature_delta` must not
+        // mint one — replaying {"signature": ""} would only earn a 400.
+        let mut completed = Vec::new();
+        flush_thinking_block(
+            &mut String::new(),
+            &mut Some("sig-real".to_string()),
+            &mut None,
+            &mut None,
+            &mut completed,
+        );
+        assert_eq!(completed.len(), 1);
+        match &completed[0] {
+            ContentBlock::Thinking { signature, .. } => {
+                assert_eq!(signature.as_deref(), Some("sig-real"));
+            }
+            other => panic!("expected a thinking block: {other:?}"),
+        }
+
+        completed.clear();
+        flush_thinking_block(
+            &mut String::new(),
+            &mut Some(String::new()),
+            &mut None,
+            &mut None,
+            &mut completed,
+        );
+        assert!(
+            completed.is_empty(),
+            "an empty-signature-only block must not persist: {completed:?}"
+        );
+
+        completed.clear();
+        flush_thinking_block(
+            &mut "readable reasoning".to_string(),
+            &mut Some(String::new()),
+            &mut None,
+            &mut None,
+            &mut completed,
+        );
+        assert_eq!(completed.len(), 1, "readable text persists regardless");
+    }
 
     /// A 1x1 PNG, kept as bytes so the tool-result image tests need no
     /// checked-in fixture file.
@@ -7524,6 +7967,50 @@ mod tests {
         )));
         assert!(stream_event_has_actionable_content(
             &canned::tool_use_block_start(0, "call-1", "read_file")
+        ));
+
+        // The preserved-thinking variants: a redacted block is provider-
+        // owned content the moment it arrives, an empty signature/details
+        // fragment carries nothing, and a non-empty one is real content.
+        assert!(stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: crate::models::ContentBlockStart::RedactedThinking {
+                    data: "ENC".to_string(),
+                },
+            }
+        ));
+        assert!(!stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::ToolThoughtSignatureDelta {
+                    signature: String::new(),
+                },
+            }
+        ));
+        assert!(stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::ToolThoughtSignatureDelta {
+                    signature: "SIG".to_string(),
+                },
+            }
+        ));
+        assert!(!stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::ReasoningDetailsDelta {
+                    details: Vec::new()
+                },
+            }
+        ));
+        assert!(stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::ReasoningDetailsDelta {
+                    details: vec![serde_json::json!({"type": "reasoning.encrypted"})],
+                },
+            }
         ));
     }
 

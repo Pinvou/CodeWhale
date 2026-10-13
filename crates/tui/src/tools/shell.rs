@@ -4520,7 +4520,7 @@ impl ToolSpec for LowercaseBashTool {
     }
 
     fn description(&self) -> &'static str {
-        "Execute a shell command in the workspace and return stdout and stderr. Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted the command is killed after 120 seconds, so pass an explicit timeout for work expected to take longer. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
+        "Execute a shell command in the workspace and return stdout and stderr. The command runs in the detected platform shell — `$SHELL` on Unix (any shell it names, falling back to `/bin/sh`); on Windows, bash when the session provides one, otherwise PowerShell (pwsh 7 or Windows PowerShell 5.1) or cmd.exe. Windows PowerShell 5.1 lacks `&&`; prefer forms the detected shell supports. In read-only shell sessions a single approved command runs directly as argv instead (only pipelines still go through the shell); with an external sandbox backend configured, that backend executes the command. Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted the command is killed after 120 seconds, so pass an explicit timeout for work expected to take longer. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -4699,7 +4699,7 @@ impl ToolSpec for BashTool {
 
     fn description(&self) -> &'static str {
         if self.read_only {
-            "Inspect the workspace with the bounded read-only command subset. Commands run directly as argv, never through a shell; only action=run plus command, cwd, and timeout_ms are accepted."
+            "Inspect the workspace with the bounded read-only command subset. Single commands run directly as argv; a pipeline (`a | b`) is the one exception and runs through the detected shell with a `set -o pipefail` prefix (bash-like shells honor it; shells without pipefail may reject the prefix outright). Only action=run plus command, cwd, and timeout_ms are accepted."
         } else {
             guidance::description()
         }

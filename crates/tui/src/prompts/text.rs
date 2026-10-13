@@ -135,6 +135,11 @@ or logs, or otherwise ambiguous — it is a **fallback, not an override**. Readi
 non-English files, localized READMEs, issues, docs, or tool output does not
 switch the reply language.
 
+If this prompt also carries a locale preamble or closer — a session-language
+requirement block in the locale's own language — that locale requirement takes
+precedence for the session language; this rule then governs only the cases the
+locale block does not cover.
+
 An explicit request such as "think in English" or "reason in Chinese" may change
 `reasoning_content` language until the next explicit override; the final reply
 still mirrors whatever language the user is writing in.

@@ -245,6 +245,14 @@ pub enum Event {
 
     /// The turn is complete (no more tool calls)
     TurnComplete {
+        /// Actual started turn, captured by its producer; absent on preflight rejection.
+        turn_id: Option<String>,
+        /// Original host submission, also echoed when it fails before TurnStarted.
+        /// Runtime self-starts and non-message operations never borrow a pending host id.
+        submission_id: Option<String>,
+        /// Manual compaction operation id. Mutually exclusive with the two fields above;
+        /// auto compaction closes its enclosing model turn instead.
+        compaction_id: Option<String>,
         usage: Usage,
         status: TurnOutcomeStatus,
         error: Option<String>,

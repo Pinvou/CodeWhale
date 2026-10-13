@@ -26,6 +26,72 @@ pub(super) fn event_owner_is_active(
     !owner_session_id.is_empty() && current_session_id == Some(owner_session_id)
 }
 
+/// Terminal data captured directly from an engine completion event.
+///
+/// `runtime_turn_id` deliberately survives a completed turn for saved-session
+/// and remote-control projections. It is therefore not an authority for a
+/// later `TurnComplete`: a preflight rejection or manual compaction has no
+/// model turn id and must not inherit the preceding model turn.
+pub(super) struct TurnEndLifecycleReceipt {
+    turn_id: Option<String>,
+    status: &'static str,
+    error: Option<String>,
+}
+
+impl TurnEndLifecycleReceipt {
+    pub(super) fn capture(event: &EngineEvent) -> Option<Self> {
+        let EngineEvent::TurnComplete {
+            turn_id,
+            status,
+            error,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        let status = match status {
+            crate::core::events::TurnOutcomeStatus::Completed => "completed",
+            crate::core::events::TurnOutcomeStatus::Failed => "failed",
+            crate::core::events::TurnOutcomeStatus::Interrupted => "interrupted",
+        };
+        Some(Self {
+            turn_id: turn_id.clone(),
+            status,
+            error: error.clone(),
+        })
+    }
+}
+
+/// Build the lifecycle receipt from terminal data captured before dispatch.
+pub(super) fn turn_end_lifecycle_event(
+    app: &App,
+    receipt: TurnEndLifecycleReceipt,
+    turn_elapsed: Duration,
+) -> codewhale_hooks::LifecycleEvent {
+    let kind = match receipt.status {
+        "completed" => "turn.completed",
+        "failed" => "turn.failed",
+        "interrupted" => "turn.interrupted",
+        _ => "turn.ended",
+    };
+    codewhale_hooks::LifecycleEvent {
+        event: "turn_end".to_string(),
+        kind: kind.to_string(),
+        thread_id: app.hooks.session_id().to_string(),
+        turn_id: receipt.turn_id,
+        item_id: None,
+        payload: serde_json::json!({
+            "status": receipt.status,
+            "duration_ms": turn_elapsed.as_millis() as u64,
+            "workspace": app.workspace.display().to_string(),
+            "error": receipt.error.as_deref().map(|message| codewhale_hooks::bounded_text(
+                message,
+                codewhale_hooks::OUTBOX_DETAIL_MAX_CHARS,
+            )),
+        }),
+    }
+}
+
 fn current_session_fleet_workers_status(
     locale: crate::localization::Locale,
     count: usize,
@@ -1613,6 +1679,7 @@ pub(crate) async fn run_event_loop(
                     }
                 }
                 record_turn_activity(app, &event, Instant::now());
+                let turn_end_lifecycle = TurnEndLifecycleReceipt::capture(&event);
                 match event {
                     EngineEvent::MessageStarted { .. } => {
                         // Assistant text starting after parallel tool work
@@ -2050,11 +2117,13 @@ pub(crate) async fn run_event_loop(
                     }
                     EngineEvent::RouteDispatched { .. } => {}
                     EngineEvent::TurnComplete {
+                        turn_id: _,
                         usage,
                         status,
                         error,
                         tool_catalog,
                         base_url,
+                        ..
                     } => {
                         // A decision whose tool never reported completion
                         // still gets its receipt before the turn closes.
@@ -2548,32 +2617,13 @@ pub(crate) async fn run_event_loop(
                         // `turn.interrupted` for locally cancelled ones.
                         // No-op when the feature is disabled.
                         {
-                            let outbox_status =
-                                app.runtime_turn_status.as_deref().unwrap_or("unknown");
-                            let kind = match outbox_status {
-                                "completed" => "turn.completed",
-                                "failed" => "turn.failed",
-                                "interrupted" => "turn.interrupted",
-                                _ => "turn.ended",
-                            };
-                            app.lifecycle_outbox.emit(codewhale_hooks::LifecycleEvent {
-                                event: "turn_end".to_string(),
-                                kind: kind.to_string(),
-                                thread_id: app.hooks.session_id().to_string(),
-                                turn_id: app.runtime_turn_id.clone(),
-                                item_id: None,
-                                payload: serde_json::json!({
-                                    "status": outbox_status,
-                                    "duration_ms": turn_elapsed.as_millis() as u64,
-                                    "workspace": app.workspace.display().to_string(),
-                                    "error": error
-                                        .as_deref()
-                                        .map(|message| codewhale_hooks::bounded_text(
-                                            message,
-                                            codewhale_hooks::OUTBOX_DETAIL_MAX_CHARS,
-                                        )),
-                                }),
-                            });
+                            let event = turn_end_lifecycle_event(
+                                app,
+                                turn_end_lifecycle
+                                    .expect("TurnComplete must capture lifecycle data"),
+                                turn_elapsed,
+                            );
+                            app.lifecycle_outbox.emit(event);
                         }
 
                         if queued_to_send.is_none() {

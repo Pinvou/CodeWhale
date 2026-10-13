@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use codewhale_config::provider::WireFormat;
 use codewhale_config::provider_base_url_is_official;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
 use crate::config::ApiProvider;
 use crate::llm_client::StreamEventBox;
@@ -117,7 +118,12 @@ pub(super) fn build_responses_body_for_provider(
         "model": model,
         "stream": true,
     });
-    if !is_deepseek && !is_concentrate {
+    // One shared route set decides `store:false`, `include`, and capture —
+    // see `responses_route_sends_encrypted_reasoning_include`. Keeping all
+    // three on the same predicate is what makes capture symmetric with the
+    // request.
+    let captures_reasoning = responses_route_sends_encrypted_reasoning_include(provider);
+    if captures_reasoning {
         body["store"] = json!(false);
     }
     // Every Responses route receives the same resolved request envelope as
@@ -569,27 +575,41 @@ impl DeepSeekClient {
                                         (reasoning_origin.as_ref(), event.get("item"))
                                         && item.get("type").and_then(Value::as_str)
                                             == Some("reasoning")
-                                        && let Some(encrypted_content) = item
+                                    {
+                                        match item
                                             .get("encrypted_content")
                                             .and_then(Value::as_str)
                                             .filter(|value| !value.is_empty())
-                                    {
-                                        yield Ok(StreamEvent::ContentBlockDelta {
-                                            index: idx,
-                                            delta: Delta::ReasoningStateDelta {
-                                                state: OpaqueReasoningState {
-                                                    provider: provider.clone(),
-                                                    api: "openai-responses".to_string(),
-                                                    model: model.clone(),
-                                                    id: item
-                                                        .get("id")
-                                                        .and_then(Value::as_str)
-                                                        .map(str::to_string),
-                                                    encrypted_content: encrypted_content.to_string(),
-                                                    endpoint: Some(endpoint.clone()),
-                                                },
-                                            },
-                                        });
+                                        {
+                                            Some(encrypted_content) => {
+                                                yield Ok(StreamEvent::ContentBlockDelta {
+                                                    index: idx,
+                                                    delta: Delta::ReasoningStateDelta {
+                                                        state: OpaqueReasoningState {
+                                                            provider: provider.clone(),
+                                                            api: "openai-responses".to_string(),
+                                                            model: model.clone(),
+                                                            id: item
+                                                                .get("id")
+                                                                .and_then(Value::as_str)
+                                                                .map(str::to_string),
+                                                            encrypted_content:
+                                                                encrypted_content.to_string(),
+                                                            endpoint: Some(endpoint.clone()),
+                                                        },
+                                                    },
+                                                });
+                                            }
+                                            None => {
+                                                // With `store:false` this item
+                                                // cannot be replayed; its
+                                                // paired tool calls would be
+                                                // rejected on the next request.
+                                                logging::warn(
+                                                    "Responses reasoning item completed without encrypted_content; replay will omit it and its paired tool calls may be rejected by the provider",
+                                                );
+                                            }
+                                        }
                                     }
                                     yield Ok(StreamEvent::ContentBlockStop { index: idx });
                                     current_block_index = None;
@@ -687,7 +707,16 @@ impl DeepSeekClient {
                             thinking,
                             signature: None,
                             state: None,
+                            redacted_data: None,
+                            reasoning_details: None,
                         },
+                        // Redacted thinking does not occur on Responses
+                        // routes (encrypted reasoning rides the reasoning
+                        // item's `encrypted_content` instead); keep the
+                        // match total without inventing a block shape.
+                        ContentBlockStart::RedactedThinking { .. } => {
+                            continue;
+                        }
                         ContentBlockStart::ToolUse {
                             id,
                             name,
@@ -735,6 +764,10 @@ impl DeepSeekClient {
                             // Anthropic-native signature deltas never occur on
                             // the Responses bridge (#3014).
                         }
+                        Delta::ToolThoughtSignatureDelta { .. } => {
+                            // Google compat-route signatures never occur on
+                            // the Responses bridge.
+                        }
                         Delta::ReasoningStateDelta { state } => {
                             if let Some(ContentBlock::Thinking {
                                 state: existing, ..
@@ -742,6 +775,10 @@ impl DeepSeekClient {
                             {
                                 *existing = Some(state);
                             }
+                        }
+                        Delta::ReasoningDetailsDelta { .. } => {
+                            // OpenRouter chat-route details never occur on
+                            // the Responses bridge.
                         }
                     }
                 }
@@ -791,10 +828,63 @@ pub(super) fn responses_tool_output(content: &str, content_blocks: Option<&[Valu
     json!(output)
 }
 
+/// Whether an assistant message carries tool calls.
+fn message_has_tool_calls(msg: &crate::models::Message) -> bool {
+    msg.content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+}
+
+/// Whether any thinking block of this message replays its encrypted
+/// reasoning on this request: same endpoint-scoped provider tag, same
+/// Responses api shape, same model, and the endpoint rules (fingerprint
+/// match, or the fingerprint-less official-endpoint credit). This is exactly
+/// the reattach gate inside [`convert_messages_to_responses_input`], kept in
+/// one place so the chain-drop gate can never disagree with the gate that
+/// actually reattaches the item.
+fn message_has_replayable_reasoning(
+    msg: &crate::models::Message,
+    reasoning_provider_tag: &str,
+    reasoning_endpoint_fingerprint: &str,
+    fingerprintless_replay_official: bool,
+    model: &str,
+) -> bool {
+    msg.content.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::Thinking {
+                state: Some(state),
+                redacted_data: None,
+                ..
+            } if state.provider == reasoning_provider_tag
+                && state.api == "openai-responses"
+                && state.model == model
+                && match &state.endpoint {
+                    None => {
+                        !is_custom_reasoning_tag(&state.provider)
+                            && fingerprintless_replay_official
+                    }
+                    Some(captured) => captured == reasoning_endpoint_fingerprint,
+                }
+        )
+    })
+}
+
 /// Convert Codewhale messages to Responses API input items.
 ///
 /// `reasoning_provider_tag` scopes opaque-reasoning replay to the endpoint
 /// that minted the state; see [`build_responses_body_for_provider`].
+/// Pairing integrity: with `store:false`, a `function_call` item needs the
+/// encrypted `reasoning` item that produced it replayed ahead of it, and a
+/// `reasoning` item needs the item(s) it produced to follow it — the docs'
+/// rule is completeness plus original positions ("all items between the last
+/// user message and your function call output are passed into the next
+/// response untouched"), and the API rejects a reasoning item whose
+/// following item is missing. When a message's reasoning is unusable on
+/// this route (captured on a different model, endpoint tag or fingerprint,
+/// or by a build that did not capture it), its whole tool chain — reasoning,
+/// function calls, and their outputs — is dropped instead of shipping a
+/// request the API rejects outright.
 pub(super) fn convert_messages_to_responses_input(
     request: &MessageRequest,
     provider: ApiProvider,
@@ -819,7 +909,12 @@ pub(super) fn convert_messages_to_responses_input(
     // never receive an encrypted replay item either, so the replay gate
     // cannot drift from the include gate.
     let replays_encrypted_reasoning = responses_route_sends_encrypted_reasoning_include(provider);
+    // Hoisted: the reasoning-capability lookup lowercases and consults the
+    // catalog, and the loop would otherwise repeat it per assistant message.
+    let reasoning_capable_model = crate::models::model_supports_reasoning(&request.model);
     let mut items = Vec::new();
+    let mut orphaned_call_ids: HashSet<String> = HashSet::new();
+    let mut dropped_chains: usize = 0;
 
     for msg in &request.messages {
         // Channel selection lives in the shared placement table; this adapter
@@ -857,6 +952,9 @@ pub(super) fn convert_messages_to_responses_input(
                                 content_items = Vec::new();
                             }
                             let (call_id, _item_id) = parse_tool_use_id(tool_use_id);
+                            if orphaned_call_ids.contains(&call_id) {
+                                continue;
+                            }
                             items.push(json!({
                                 "type": "function_call_output",
                                 "call_id": call_id,
@@ -875,6 +973,37 @@ pub(super) fn convert_messages_to_responses_input(
                 }
             }
             RolePlacement::Assistant | RolePlacement::InterruptedAssistant => {
+                // Tool calls whose producing reasoning is not replayable on
+                // this route would ship as orphaned `function_call` items —
+                // an automatic 400 on reasoning models. Drop the whole chain
+                // instead; the tool outputs are filtered out of the following
+                // user/tool messages via `orphaned_call_ids`. Models that
+                // never reason legitimately emit bare calls, so the gate only
+                // applies to reasoning-capable request models — and only on
+                // routes that capture at all: a route whose requests carry no
+                // `include` can never satisfy the replay check, so gating
+                // there would erase history the route itself accepts.
+                let mut chain_dropped = false;
+                if replays_encrypted_reasoning
+                    && reasoning_capable_model
+                    && message_has_tool_calls(msg)
+                    && !message_has_replayable_reasoning(
+                        msg,
+                        reasoning_provider_tag,
+                        reasoning_endpoint_fingerprint,
+                        fingerprintless_replay_official,
+                        &request.model,
+                    )
+                {
+                    chain_dropped = true;
+                    dropped_chains += 1;
+                    for block in &msg.content {
+                        if let ContentBlock::ToolUse { id, .. } = block {
+                            let (call_id, _item_id) = parse_tool_use_id(id);
+                            orphaned_call_ids.insert(call_id);
+                        }
+                    }
+                }
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text, .. } => {
@@ -899,6 +1028,9 @@ pub(super) fn convert_messages_to_responses_input(
                         ContentBlock::ToolUse {
                             id, name, input, ..
                         } => {
+                            if chain_dropped {
+                                continue;
+                            }
                             let (call_id, _item_id) = parse_tool_use_id(id);
                             items.push(json!({
                                 "type": "function_call",
@@ -908,8 +1040,17 @@ pub(super) fn convert_messages_to_responses_input(
                             }));
                         }
                         ContentBlock::Thinking {
-                            thinking, state, ..
+                            thinking,
+                            state,
+                            redacted_data,
+                            ..
                         } => {
+                            if chain_dropped || redacted_data.is_some() {
+                                // Redacted Anthropic payloads have no
+                                // Responses representation; skip rather than
+                                // emit an empty reasoning item.
+                                continue;
+                            }
                             if let Some(state) = state {
                                 // Endpoint-scoped replay: the tag must match
                                 // the endpoint this request is bound to
@@ -980,6 +1121,12 @@ pub(super) fn convert_messages_to_responses_input(
                             } = block
                             {
                                 let (call_id, _item_id) = parse_tool_use_id(tool_use_id);
+                                if orphaned_call_ids.contains(&call_id) {
+                                    // The call was chain-dropped with its
+                                    // reasoning; shipping the bare output is
+                                    // another pairing 400.
+                                    continue;
+                                }
                                 items.push(json!({
                                     "type": "function_call_output",
                                     "call_id": call_id,
@@ -1022,6 +1169,54 @@ pub(super) fn convert_messages_to_responses_input(
             // keeping this arm empty is fail-closed defense in depth.
             RolePlacement::Rejected => {}
         }
+    }
+
+    if dropped_chains > 0 {
+        // One summary per request instead of one line per affected message:
+        // stale history re-fires the condition on every subsequent request
+        // until compaction retires the turns, and per-message warns would
+        // spam verbose logs for a single root cause.
+        logging::warn(format!(
+            "Responses replay dropped {dropped_chains} assistant tool chain(s) whose encrypted reasoning is unavailable for this route/model/endpoint (captured on a different model, endpoint tag or fingerprint, or by an older build); their tool calls and outputs are omitted to keep the request valid"
+        ));
+    }
+
+    if !is_deepseek {
+        // A `reasoning` item needs the item it produced to follow it (its
+        // function_call, or the assistant message for text output) — the
+        // pairing validator rejects a reasoning item whose following item is
+        // missing ("was provided without its required following item"). An
+        // orphaned reasoning item — in practice a turn that was interrupted
+        // before producing any output — is dropped here rather than shipped
+        // to fail the whole request.
+        let mut keep = vec![true; items.len()];
+        let mut dropped_orphans: usize = 0;
+        for (index, item) in items.iter().enumerate() {
+            if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+                continue;
+            }
+            let followed_by_produced_item = items.get(index + 1).is_some_and(|next| {
+                next.get("type").and_then(Value::as_str) == Some("function_call")
+                    || (next.get("type").and_then(Value::as_str) == Some("message")
+                        && next.get("role").and_then(Value::as_str) == Some("assistant"))
+            });
+            if !followed_by_produced_item {
+                keep[index] = false;
+                dropped_orphans += 1;
+            }
+        }
+        let mut paired = Vec::with_capacity(items.len());
+        for (index, item) in items.into_iter().enumerate() {
+            if keep[index] {
+                paired.push(item);
+            }
+        }
+        if dropped_orphans > 0 {
+            logging::warn(format!(
+                "Responses replay dropped {dropped_orphans} orphaned reasoning item(s) with no following output item"
+            ));
+        }
+        items = paired;
     }
 
     items
