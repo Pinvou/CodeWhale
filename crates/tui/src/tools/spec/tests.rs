@@ -27,8 +27,12 @@ fn new_target_through_an_alias_of_another_declared_root_resolves() {
         .resolve_path(alias.join("new.txt").to_str().expect("utf8"))
         .expect("a new target inside a declared root resolves through the alias spelling");
     let normalized = normalize_path(&resolved);
+    // R44-2: the expected prefix canonicalizes through the same walk — on
+    // macOS the tempdir's /var spelling resolves to /private/var and
+    // comparing a canonical result against the raw spelling fails.
+    let attached_real = attached.canonicalize().unwrap_or_else(|_| attached.clone());
     assert!(
-        normalized.starts_with(normalize_path(&attached)),
+        normalized.starts_with(normalize_path(&attached_real)),
         "the alias-spelled creation resolves under the attached root: {normalized:?}"
     );
 

@@ -87,16 +87,28 @@ pub(crate) fn repo_law_plan_decision(
     }
     let mut hold: Option<(bool, String)> = None;
     for root in codewhale_core::normalize_workspace_roots(workspace, workspace_roots) {
-        // Canonicalize once per root with a raw fallback (the
-        // `ToolContext::boundary_roots` idiom): a root that does not resolve
-        // still judges raw spellings, so its constitution is never silently
-        // dropped.
-        let root_canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
-        let targets = write_target_paths(&candidates, &root, &root_canonical);
+        // Round-44 R44-3: key discovery AND the strips on the LEXICALLY
+        // RESOLVED spelling — `normalize_path_lexically` folds `..` and `.`
+        // the same way execution's containment identity does. The old
+        // raw-canonicalize fallback let a `ghost/../att` declaration keep
+        // its unresolved spelling: discovery stats
+        // `<parent>/ghost/../att/.codewhale/constitution.json` (ENOENT —
+        // the mid-component does not exist), every strip compares the
+        // unresolved prefix, and the root's law silently never loads while
+        // execution admits writes under the RESOLVED root. The lexical fold
+        // resolves the spelling without touching the filesystem, so a
+        // genuinely nonexistent root still judges raw spellings (its law
+        // stays fail-closed) while folded spellings land on the resolved
+        // root's identity.
+        let root_resolved = codewhale_core::normalize_path_lexically(&root);
+        let root_canonical = root_resolved
+            .canonicalize()
+            .unwrap_or_else(|_| root_resolved.clone());
+        let targets = write_target_paths(&candidates, &root_resolved, &root_canonical);
         if targets.is_empty() {
             continue;
         }
-        let rules = load_repo_law_rules(&root);
+        let rules = load_repo_law_rules(&root_resolved);
         for rule in rules.iter() {
             for target in &targets {
                 if !rule.globs.is_match(target) {
@@ -517,6 +529,43 @@ mod tests {
             }),
         );
         assert!(matches!(held, Some(RepoLawPlanDecision::ForcePrompt(_))));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dot_dot_folded_root_declaration_still_loads_its_constitution() {
+        // Round-44 R44-3: a root declared as <parent>/ghost/../att (ghost
+        // nonexistent) used to keep its UNRESOLVED spelling — discovery
+        // stat'd the folded path (ENOENT), every strip compared the folded
+        // prefix, and the root's law silently never loaded while execution
+        // admitted writes under the RESOLVED root. The lexical fold keys
+        // discovery and the strips on the resolved identity.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let parent = tmp.path().canonicalize().unwrap();
+        let att = parent.join("att");
+        std::fs::create_dir_all(att.join("vendor")).unwrap();
+        write_law(
+            &att,
+            r#"{ "protected_invariants": [
+                { "text": "Vendored tree is read-only", "paths": ["vendor/**"], "action": "block" }
+            ] }"#,
+        );
+        // The folded spelling: ghost does not exist.
+        let folded = parent.join("ghost").join("..").join("att");
+
+        let decision = crate::repo_law::repo_law_plan_decision(
+            &parent,
+            &[folded],
+            "write_file",
+            &serde_json::json!({"path": "att/vendor/lib.rs", "content": "x"}),
+        );
+        assert!(
+            matches!(
+                decision,
+                Some(crate::repo_law::RepoLawPlanDecision::Block(_))
+            ),
+            "the folded spelling must load the resolved root's constitution: {decision:?}"
+        );
     }
 
     #[test]

@@ -639,11 +639,13 @@ the bare workspace. A declared set is additionally capped at **64 entries**
 (`MAX_WORKSPACE_ROOTS`): an over-cap declaration answers `400` instead of
 being truncated. The ancestor and filesystem-root rejections judge the
 path the filesystem resolves (round-37 M37-3): an EXISTING declared root is
-canonicalized before the comparison, so a symlink spelling — and, on
-case-insensitive filesystems, a case-folded spelling — of the primary's
-ancestor is rejected; a declared root that does not exist yet keeps the
-lexical judgment (materialization stays the delivery lane's job; the
-same-disk TOCTOU is the disclosed inherent one). Disclosed residuals
+canonicalized before the comparison — and a NOT-YET-MATERIALIZED primary
+resolves through its deepest existing ancestor before comparing, so a
+symlink spelling — and, on case-insensitive filesystems, a case-folded
+spelling — of the primary's ancestor is rejected on both mixed-existence
+shapes; a declared root that does not exist yet keeps the lexical
+judgment (materialization stays the delivery lane's job; the same-disk
+TOCTOU is the disclosed inherent one). Disclosed residuals
 (round-41): the comparisons fold ASCII case only (non-Unicode), matching the
 block-only law contract's safe direction; and on Windows an SMB/UNC alias
 spelling of the primary's existing ancestor (`\\localhost\C$\…` for a

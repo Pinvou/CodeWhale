@@ -284,30 +284,68 @@ pub const MAX_WORKSPACE_ROOTS: usize = 64;
 /// A no-op on Unix, where case is significant and no verbatim prefix
 /// exists.
 /// Ancestor test for the intake/sanitizer guards, split by platform
-/// (round-39 B39-2, its P2 correction, and round-42 M42-4): Unix runs the
-/// NATIVE component comparison over canonicalize-with-lexical-fallback
-/// spellings — the fallback resolves the macOS `/var` ↔ `/private/var`
-/// divergence for mixed-existence pairs (an existing ancestor under a
-/// not-yet-materialized primary) while component semantics keep legal
-/// `:`/`\`-bearing filenames distinct (a sibling named `data:` is never
-/// the ancestor of `data:archive/ws`). Windows compares through the
-/// spelling normalizer, where the verbatim-vs-DOS divergence is real.
+/// (round-39 B39-2, its P2 correction, rounds 42/44): Unix resolves each
+/// side through its deepest EXISTING ancestor before the native component
+/// comparison — the walk closes the ghost-primary hole (a
+/// not-yet-materialized primary keeps a lexical spelling whose canonical
+/// prefix diverges on macOS `/var` ↔ `/private/var` shapes) while
+/// component semantics keep legal `:`/`\`-bearing filenames distinct (a
+/// sibling named `data:` is never the ancestor of `data:archive/ws`).
+/// Windows compares through the spelling normalizer, where the
+/// verbatim-vs-DOS divergence is real.
 #[cfg(not(target_os = "windows"))]
 fn comparison_is_ancestor_of(primary: &Path, judged: &Path) -> bool {
-    // Round-42 M42-4: canonicalize-with-lexical-fallback on BOTH sides
-    // before the native component comparison — macOS resolves /var to
-    // /private/var for existing paths while a nonexistent primary keeps
-    // its /var spelling, and the bare starts_with on the divergent
-    // spellings silently skipped the ancestor guard (the same
-    // mixed-existence class the Windows leg closes). Component semantics
-    // stay native: a sibling named `data:` never contains `data:archive`.
-    let primary_real = primary
-        .canonicalize()
-        .unwrap_or_else(|_| primary.to_path_buf());
+    // Round-44 R44-1: a NOT-YET-MATERIALIZED primary cannot canonicalize,
+    // so a plain canonicalize-with-fallback mixes the primary's LEXICAL
+    // spelling against the ancestor's CANONICAL one — on macOS-default
+    // shapes (/var vs /private/var) the comparison silently skips the
+    // ancestor guard and arms the primary's parent as writable. Resolve
+    // the primary through its deepest EXISTING ancestor (the
+    // resolve_operand_cwd walk), canonicalize that, and re-append the
+    // nonexistent tail — both sides then carry canonical spellings for
+    // every component that exists. Component semantics stay native: a
+    // sibling named `data:` never contains `data:archive`.
+    let primary_real = resolve_deepest_existing_canonical(primary);
     let judged_real = judged
         .canonicalize()
         .unwrap_or_else(|_| judged.to_path_buf());
     primary_real.starts_with(&judged_real)
+}
+
+/// Canonical spelling of `path` with its nonexistent tail resolved through
+/// the deepest EXISTING ancestor (round-44 R44-1): the existing prefix
+/// canonicalizes (through symlinks and platform aliases like macOS's
+/// /var → /private/var) and the nonexistent tail re-appends verbatim, so a
+/// ghost primary and an existing ancestor compare on canonical spellings
+/// for every component that exists.
+#[cfg(not(target_os = "windows"))]
+fn resolve_deepest_existing_canonical(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    let mut existing = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        match existing.file_name() {
+            Some(name) => tail.push(name.to_owned()),
+            None => break,
+        }
+        match existing.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => {
+                existing = parent.to_path_buf();
+            }
+            _ => break,
+        }
+    }
+    match existing.canonicalize() {
+        Ok(mut canonical) => {
+            for part in tail.into_iter().rev() {
+                canonical.push(part);
+            }
+            canonical
+        }
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -4211,6 +4249,32 @@ mod tests {
         assert!(
             err.to_string().contains("filesystem root"),
             "the refusal names the poison: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn intake_rejects_a_canonical_ancestor_under_a_ghost_primary() {
+        // Round-44 R44-1: the primary does not EXIST yet, so a plain
+        // canonicalize-with-fallback mixed its lexical spelling against the
+        // ancestor's canonical one — on macOS-default shapes (/var vs
+        // /private/var) the guard silently skipped. On Linux the same class
+        // reproduces with a symlink-alias ancestor: the alias canonicalizes
+        // onto the real parent, the ghost primary keeps its spelling under
+        // the ALIAS, and the pre-fix comparison judged them unrelated.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real_parent = temp.path().join("real");
+        std::fs::create_dir_all(&real_parent).expect("real parent");
+        let alias_parent = temp.path().join("alias");
+        std::os::unix::fs::symlink(&real_parent, &alias_parent).expect("alias parent");
+        // Ghost primary: spelled through the ALIAS, never materialized.
+        let ghost_primary = alias_parent.join("ws");
+
+        let err = validate_workspace_roots(&ghost_primary, std::slice::from_ref(&real_parent))
+            .expect_err("an existing canonical ancestor must be rejected under a ghost primary");
+        assert!(
+            err.to_string().contains("contains the primary root"),
+            "the rejection names the widening: {err}"
         );
     }
 
