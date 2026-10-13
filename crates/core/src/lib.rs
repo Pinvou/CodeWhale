@@ -4008,7 +4008,7 @@ mod tests {
         let cwd = abs_fixture("/repo/main");
         let cwd = cwd.as_path();
         let roots: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS + 10)
-            .map(|index| PathBuf::from(format!("/repo/r{index}")))
+            .map(|index| abs_fixture(format!("/repo/r{index}").as_str()))
             .collect();
         let normalized = normalize_workspace_roots(cwd, &roots);
         assert_eq!(
@@ -4020,7 +4020,7 @@ mod tests {
         assert_eq!(normalized[1], abs_fixture("/repo/r0"));
         assert_eq!(
             normalized[MAX_WORKSPACE_ROOTS],
-            PathBuf::from(format!("/repo/r{}", MAX_WORKSPACE_ROOTS - 1)),
+            abs_fixture(format!("/repo/r{}", MAX_WORKSPACE_ROOTS - 1).as_str()),
             "earliest declared wins; the tail past the cap is dropped"
         );
     }
@@ -4033,7 +4033,7 @@ mod tests {
         let cwd = abs_fixture("/repo/main");
         let cwd = cwd.as_path();
         let roots: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS)
-            .map(|index| PathBuf::from(format!("/repo/r{index}")))
+            .map(|index| abs_fixture(format!("/repo/r{index}").as_str()))
             .collect();
         let validated = validate_workspace_roots(cwd, &roots)
             .expect("a full MAX_WORKSPACE_ROOTS declaration is admitted whole");
@@ -4163,7 +4163,7 @@ mod tests {
         let cwd = abs_fixture("/repo/main");
         let cwd = cwd.as_path();
         let roots: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS)
-            .map(|index| PathBuf::from(format!("/repo/r{index}")))
+            .map(|index| abs_fixture(format!("/repo/r{index}").as_str()))
             .collect();
         let stored =
             validate_workspace_roots(cwd, &roots).expect("a full declaration is admitted whole");
@@ -5513,7 +5513,7 @@ mod tests {
         // length, so an oversized declaration must be refused at intake
         // rather than stalling every turn.
         let cwd = abs_fixture("/repo");
-        let root = |i: usize| PathBuf::from(format!("/att{i}"));
+        let root = |i: usize| abs_fixture(format!("/att{i}").as_str());
         let at_cap: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS).map(root).collect();
         assert!(validate_workspace_roots(&cwd, &at_cap).is_ok());
         let over_cap: Vec<PathBuf> = (0..=MAX_WORKSPACE_ROOTS).map(root).collect();
