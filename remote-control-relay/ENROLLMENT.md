@@ -521,6 +521,10 @@ at 16 KiB, while later valid business frames retain the legacy Relay's 4 MiB
 default payload range. The gateway also enforces browser Origin policy,
 connection/ingress limits, a bounded source bucket table and a strict trusted
 proxy allowlist; untrusted forwarding headers are rejected. Use
+the [two-hop Host/Origin contract](../docs/windows-desktop-remote-control-a05-gateway-origin.md)
+to configure the same exact browser origin allowlist in both gateway and legacy
+Relay processes. Public same-origin at the gateway does not make the preserved
+browser Origin same-origin with the new loopback upstream Host. Use
 `nginx-enrollment-gateway.conf` for the public route and run
 `scripts/enrollment-gateway-preflight.js` with every public entrypoint. The
 preflight fails if a route lacks the gateway marker, is unavailable, the
