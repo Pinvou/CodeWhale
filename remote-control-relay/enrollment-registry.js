@@ -94,9 +94,10 @@ function roleDigest(config, endpointId, credential, role) {
 
 function credentialMatches(config, entry, credential, role) {
   const digest = role === "access" ? entry.access_credential : entry.desktop_credential;
-  return digest !== null && digest.key_id === config.keyId && safeEqualHex(
+  const key = digest === null ? undefined : config.keys.get(digest.key_id);
+  return key !== undefined && safeEqualHex(
     digest.digest_hex,
-    digestCredential(config.hmacKey, entry.endpoint_id, credential, role),
+    digestCredential(key, entry.endpoint_id, credential, role),
   );
 }
 
@@ -523,7 +524,7 @@ function applyPreparedOperations(registry, prepared, config, clock) {
         action: "desktop_credential_set", legacy_web_link: "preserved" });
       continue;
     }
-    if (existing.access_credential.key_id !== config.keyId) fail("credential_key_unavailable");
+    if (!config.keys.has(existing.access_credential.key_id)) fail("credential_key_unavailable");
     if (!credentialMatches(config, existing, operation.currentCredential, "access")) fail("invalid_enrollment_credential");
     const next = {
       ...existing,
@@ -595,6 +596,27 @@ export function loadEnrollmentRegistryConfig(env = process.env) {
   if (!KEY_ID.test(env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID || "")) fail("enrollment_hmac_key_id_invalid");
   const hmacKey = Buffer.from(env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY || "", "utf8");
   if (hmacKey.length < 32 || hmacKey.length > 4096) fail("enrollment_hmac_key_invalid");
+  const keys = new Map([[env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID, hmacKey]]);
+  const previousJson = env.PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON;
+  if (previousJson !== undefined && previousJson !== "") {
+    if (typeof previousJson !== "string" || Buffer.byteLength(previousJson, "utf8") > 65_536) {
+      fail("enrollment_hmac_previous_keys_invalid");
+    }
+    let previous;
+    try { previous = JSON.parse(previousJson); } catch { fail("enrollment_hmac_previous_keys_invalid"); }
+    if (!Array.isArray(previous) || previous.length > 7) fail("enrollment_hmac_previous_keys_invalid");
+    for (const item of previous) {
+      if (!item || typeof item !== "object" || Array.isArray(item)
+        || Object.keys(item).length !== 2 || !Object.hasOwn(item, "key_id") || !Object.hasOwn(item, "key")
+        || typeof item.key_id !== "string" || !KEY_ID.test(item.key_id)
+        || keys.has(item.key_id) || typeof item.key !== "string") fail("enrollment_hmac_previous_keys_invalid");
+      const key = Buffer.from(item.key, "utf8");
+      if (key.length < 32 || key.length > 4096 || key.toString("utf8") !== item.key) {
+        fail("enrollment_hmac_previous_keys_invalid");
+      }
+      keys.set(item.key_id, key);
+    }
+  }
   const controllerStatePath = configuredAbsolutePath(
     env.PINVOU_REMOTE_CONTROLLER_STATE_PATH,
     "controller_state_path",
@@ -621,6 +643,7 @@ export function loadEnrollmentRegistryConfig(env = process.env) {
     ...config,
     keyId: env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID,
     hmacKey,
+    keys,
   });
   return config;
 }
@@ -629,6 +652,24 @@ function configDetails(config) {
   const details = CONFIG.get(config);
   if (!details) fail("enrollment_config_invalid");
   return details;
+}
+
+// Narrow control-plane helpers: no secret material leaves the private config.
+export function enrollmentKeyringUsesKey(config, candidate) {
+  return [...configDetails(config).keys.values()].some(key => key.equals(candidate));
+}
+
+export function enrollmentKeyringFingerprint(config, controlKey) {
+  const details = configDetails(config);
+  // Keep the released v1 control binding byte-for-byte when no old key is retained.
+  // JSON serialization omits this optional extension in that configuration.
+  if (details.keys.size === 1) return undefined;
+  const rows = [...details.keys].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([keyId, key]) => [keyId, crypto.createHmac("sha256", controlKey)
+      .update("pinvou-enrollment-coverage-credential-key-v1\0", "ascii").update(key).digest("hex")]);
+  return crypto.createHmac("sha256", controlKey)
+    .update("pinvou-enrollment-coverage-credential-keyring-v1\0", "ascii")
+    .update(JSON.stringify({ active_key_id: details.keyId, keys: rows }), "utf8").digest("hex");
 }
 
 export class EnrollmentRegistry {
@@ -714,9 +755,12 @@ export class EnrollmentRegistry {
       || JSON.stringify(request.endpoint_ids) !== JSON.stringify(context.descriptor.endpointIds)) {
       fail("migration_request_conflict");
     }
-    if (request.parameters.key_id !== this.#config.keyId) fail("migration_request_key_unavailable");
-    if (request.parameters.algorithm !== context.parameters.algorithm
-      || !safeEqualHex(request.parameters.digest_hex, context.parameters.digest_hex)) {
+    const key = this.#config.keys.get(request.parameters.key_id);
+    if (!key) fail("migration_request_key_unavailable");
+    const expected = digestMigrationParameters(key, request.parameters.key_id,
+      context.requestId, context.descriptor.canonicalParameters);
+    if (request.parameters.algorithm !== expected.algorithm
+      || !safeEqualHex(request.parameters.digest_hex, expected.digest_hex)) {
       fail("migration_request_conflict");
     }
   }
@@ -951,7 +995,7 @@ export class EnrollmentRegistry {
     if (entry.status !== "active") fail("endpoint_revoked");
     const digest = role === "access" ? entry.access_credential : entry.desktop_credential;
     if (digest === null) fail("desktop_credential_required");
-    if (digest.key_id !== this.#config.keyId) fail("credential_key_unavailable");
+    if (!this.#config.keys.has(digest.key_id)) fail("credential_key_unavailable");
     if (!credentialMatches(this.#config, entry, credential, role)) fail("invalid_enrollment_credential");
   }
 
@@ -959,9 +1003,9 @@ export class EnrollmentRegistry {
     endpointId = validateEndpointId(endpointId);
     const entry = this.#find(this.#read().registry, endpointId);
     return Object.freeze({ endpoint_id: endpointId,
-      web_ready: Boolean(entry?.status === "active" && entry.access_credential.key_id === this.#config.keyId),
-      desktop_ready: Boolean(entry?.status === "active" && entry.access_credential.key_id === this.#config.keyId
-        && entry.desktop_credential?.key_id === this.#config.keyId) });
+      web_ready: Boolean(entry?.status === "active" && this.#config.keys.has(entry.access_credential.key_id)),
+      desktop_ready: Boolean(entry?.status === "active" && this.#config.keys.has(entry.access_credential.key_id)
+        && this.#config.keys.has(entry.desktop_credential?.key_id)) });
   }
 
   async authorizeWebRegistration({ endpointId, accessToken } = {}) {

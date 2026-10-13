@@ -604,6 +604,102 @@ test("credential rotation invalidates old credential and revocation is terminal"
   }), "endpoint_revoked");
 });
 
+function replacementKeyring() {
+  return {
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID: "replacement-key",
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "replacement-hmac-key-material-at-least-32-bytes",
+    PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON: JSON.stringify([{ key_id: "test-key-1", key: HMAC_KEY }]),
+  };
+}
+
+test("phased keyring preserves old authorization and rotates each role to the active key", async (t) => {
+  const { statePath, store, registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "phased-endpoint", credential: FIRST_CREDENTIAL,
+    desktopCredential: SECOND_CREDENTIAL });
+  await registry.enroll({ endpointId: "phased-revoked", credential: FIRST_CREDENTIAL });
+  await registry.revoke({ endpointId: "phased-revoked", expectedEndpointRevision: "1" });
+  await store.close();
+  const restartedStore = await openStateStore(statePath);
+  resourcesFor(t).stores.push(restartedStore);
+  const phased = EnrollmentRegistry.open({ stateStore: restartedStore,
+    config: configForState(statePath, replacementKeyring()) });
+  const oldBytes = await fs.readFile(statePath);
+  assert.equal((await phased.authorizeDesktopRegistration({ endpointId: "phased-endpoint",
+    accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL })).status, "active");
+  assert.deepEqual(phased.getControllerReadiness("phased-endpoint"), {
+    endpoint_id: "phased-endpoint", web_ready: true, desktop_ready: true,
+  });
+  assert.deepEqual(await fs.readFile(statePath), oldBytes, "authorization never rewrites old digests");
+  await rejectsCode(phased.authorizeWebRegistration({ endpointId: "phased-revoked",
+    accessToken: FIRST_CREDENTIAL }), "endpoint_revoked");
+  await phased.rotateAccessCredential({ endpointId: "phased-endpoint", currentCredential: FIRST_CREDENTIAL,
+    newCredential: THIRD_CREDENTIAL, expectedEndpointRevision: "1" });
+  await phased.rotateDesktopCredential({ endpointId: "phased-endpoint", currentCredential: SECOND_CREDENTIAL,
+    newCredential: FIRST_CREDENTIAL, expectedEndpointRevision: "2" });
+  const persisted = restartedStore.readNamespace(ENROLLMENT_NAMESPACE).value;
+  const endpoint = persisted.entries.find(entry => entry.endpoint_id === "phased-endpoint");
+  assert.equal(endpoint.access_credential.key_id, "replacement-key");
+  assert.equal(endpoint.desktop_credential.key_id, "replacement-key");
+  assert.equal(endpoint.revision, "3");
+  const withoutOld = EnrollmentRegistry.open({ stateStore: restartedStore,
+    config: configForState(statePath, { ...replacementKeyring(), PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON: "[]" }) });
+  assert.equal((await withoutOld.authorizeDesktopRegistration({ endpointId: "phased-endpoint",
+    accessToken: THIRD_CREDENTIAL, desktopSecret: FIRST_CREDENTIAL })).status, "active");
+  await rejectsCode(withoutOld.authorizeWebRegistration({ endpointId: "phased-endpoint",
+    accessToken: FIRST_CREDENTIAL }), "invalid_enrollment_credential");
+  const rollback = EnrollmentRegistry.open({ stateStore: restartedStore,
+    config: configForState(statePath, {
+      PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON: JSON.stringify([{
+        key_id: "replacement-key", key: replacementKeyring().PINVOU_REMOTE_ENROLLMENT_HMAC_KEY,
+      }]),
+    }) });
+  const committed = await fs.readFile(statePath);
+  assert.equal((await rollback.authorizeDesktopRegistration({ endpointId: "phased-endpoint",
+    accessToken: THIRD_CREDENTIAL, desktopSecret: FIRST_CREDENTIAL })).revision, "3");
+  assert.deepEqual(await fs.readFile(statePath), committed, "keyring rollback never rolls back committed state");
+  assert.equal(JSON.stringify(persisted).includes(HMAC_KEY), false);
+});
+
+test("phased keyring authenticates old migration IDs without reexecuting or changing history", async (t) => {
+  const { statePath, store, registry } = await openRegistry(t);
+  const input = { requestId: "phased-migration-0001", operations: [
+    { operation: "allowlist", endpoint_id: "phased-ledger", credential: FIRST_CREDENTIAL },
+  ] };
+  await registry.beginMigrationRequest(input);
+  const phased = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath, replacementKeyring()) });
+  const terminal = await phased.completeMigrationRequest(input);
+  assert.equal(terminal.status, "succeeded");
+  const before = await fs.readFile(statePath);
+  assert.deepEqual(await phased.executeMigrationRequest(input), terminal);
+  assert.deepEqual(await fs.readFile(statePath), before);
+  await rejectsCode(phased.executeMigrationRequest({ ...input, operations: [
+    { ...input.operations[0], credential: SECOND_CREDENTIAL },
+  ] }), "migration_request_conflict");
+  const withoutOld = EnrollmentRegistry.open({ stateStore: store,
+    config: configForState(statePath, { ...replacementKeyring(), PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON: "[]" }) });
+  await rejectsCode(withoutOld.executeMigrationRequest(input), "migration_request_key_unavailable");
+  assert.deepEqual(await fs.readFile(statePath), before);
+  assert.equal(withoutOld.getStatus("phased-ledger").revision, "1");
+});
+
+test("phased keyring rejects duplicate unknown oversized and invalid secret configuration", () => {
+  for (const value of ["{", "{}", "null", JSON.stringify([{ key_id: "test-key-1", key: HMAC_KEY }]),
+    JSON.stringify([{ key_id: "old", key: "short" }]),
+    JSON.stringify([{ key_id: "old", key: HMAC_KEY, extra: true }]),
+    JSON.stringify([{ key_id: "old", key: HMAC_KEY }, { key_id: "old", key: HMAC_KEY }]),
+    JSON.stringify(Array.from({ length: 8 }, (_, index) => ({ key_id: "old-" + index, key: HMAC_KEY }))),
+    " ".repeat(65_537)]) {
+    assert.throws(() => loadEnrollmentRegistryConfig(environment({
+      PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON: value,
+    })), { code: "enrollment_hmac_previous_keys_invalid" });
+  }
+  const config = loadEnrollmentRegistryConfig(environment(replacementKeyring()));
+  const publicConfig = JSON.stringify(config);
+  assert.equal(publicConfig.includes(HMAC_KEY), false);
+  assert.equal(publicConfig.includes("replacement-hmac"), false);
+  assert.equal(publicConfig.includes("previous"), false);
+});
+
 test("a registry opened without the persisted digest key fails closed", async (t) => {
   const statePath = await temporaryState(t);
   let store = await openStateStore(statePath);

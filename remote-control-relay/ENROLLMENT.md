@@ -40,6 +40,7 @@ Set these variables before opening the registry:
 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64` | Pinned key ID and canonical base64 Ed25519 PKCS#8 DER private key used to sign pairing transcripts. The private value is deployment-only and must never enter logs or repository files. |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID` | Stable identifier for the active credential-digest key. |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY` | Secret HMAC key, 32–4096 UTF-8 bytes. Supply it through the deployment secret manager, never source control or logs. |
+| `PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON` | Optional secret JSON array of `{ "key_id": "...", "key": "..." }` for verification-only old keys. At most seven, unique IDs distinct from the active ID; each secret has the same 32–4096 UTF-8 byte bounds. Maximum JSON input is 65536 bytes. |
 | `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | Optional `1`/`true`; accepted only with `deployment=development` and `NODE_ENV=development` or `test`. |
 
 `official` and `self_hosted` always reject an unknown endpoint. A production
@@ -302,18 +303,57 @@ cannot register a desktop or pair. Development TOFU may create an access-only
 record for a Web request, or both roles atomically for a desktop request; a
 pairing request can never invent a desktop digest from a single credential.
 
-Digest-key rotation is not endpoint credential rotation. Replacing the deployment
-HMAC key (including replacing bytes under the same key ID) invalidates existing
-digests; the registry cannot recover them without the previous key. Existing
-endpoint IDs cannot be re-enrolled: active conflicting entries are rejected and
-revoked entries remain terminal. Do not change the HMAC key as routine maintenance.
-An intentional HMAC-key replacement requires re-enrollment of all affected
-clients with fresh endpoint IDs and new credentials through the authenticated
-admin flow, followed by new pairing and configuration on both peers. Revoke the
-old entries through the admin flow; never delete or hand-edit shared state or
-reset other namespaces/Legacy Web data. A new key ID must identify new key
-material. Before revocation or new enrollments, restoring the previous key and
-key ID restores authorization; it does not undo later registry transitions.
+Digest-key rotation is not endpoint credential rotation. A phased keyring retains
+old keys for verification while all new credential and migration digests use the
+active key. Every existing digest is verified with its exact persisted `key_id`;
+unknown keys still fail closed. A new key ID must identify new independently
+generated key material; never replace bytes under an existing ID. Endpoint IDs,
+role domains, CAS revisions, revoked entries and migration history are preserved.
+
+1. Before the change, back up the protected primary/backup pair and secret-manager
+   key versions using the documented stopped-service procedure. Record only key
+   IDs, revisions and backup checksums in the operational record, never keys or
+   raw credentials. Confirm no unknown pending migration outcome; do not restart
+   an uncertain operation with a new request ID.
+2. Generate a new independent key in the secret manager. First retain the current
+   active key and configure the new key as a previous key on every registry
+   consumer (Relay and administration CLI). Validate configuration and existing
+   Web/desktop authentication without modifying registry files. Deploy compatible
+   keyring-aware Relay, gateway and CLI versions together. Coverage control binds
+   the complete canonical keyring (IDs and keyed material fingerprints), not just
+   the active key; consumers with a missing or different old key fail the existing
+   store-binding check. Keep the coverage-control secret independent of every
+   active and retained enrollment key as well as the pairing key.
+   With no retained key (unset or empty previous array), the released v1 control
+   binding stays byte-for-byte compatible; the keyring extension is present only
+   when an old key is retained.
+3. Switch the active ID/key to the new pair and keep the old pair in the previous
+   array. Restart consumers with the same protected state. Verify old role
+   credentials still authenticate, revoked endpoints remain rejected, and a
+   controlled new enrollment records the new key ID. No automatic rewrite occurs
+   during authorization.
+4. Through existing authenticated `rotateAccessCredential` and
+   `rotateDesktopCredential` operations, verify each old role credential and CAS
+   revision and write its replacement digest with the active key. Coordinate
+   client updates; changing the access credential invalidates existing Web links.
+   Do not re-enroll existing IDs, delete tombstones, or bypass digest verification.
+   Old pending/terminal migration IDs continue to verify with their original key;
+   successful terminal replay never executes its operations again.
+5. Before retirement, inventory all active role digest key IDs and pending
+   migration key IDs from the protected snapshot. Retain each referenced old key.
+   Keep terminal migration keys for as long as exact request replay is required;
+   removing one makes that old ID fail with `migration_request_key_unavailable`,
+   preserving its evidence and prohibiting replacement-ID reexecution. Only after
+   these conditions are explicitly accepted may an unneeded previous key be
+   removed from every consumer. Recheck authentication, restart and revoked
+   endpoints; do not hand-edit stored digests or reset Legacy Web state.
+
+On configuration or authentication failure, restore the last known-good keyring
+configuration, retaining every key used by any already committed transition.
+Changing the active key back does not roll back endpoint revisions, credentials,
+revocation or migration outcomes. Do not restore an older state snapshot simply
+to make a key match. If a required old key is unavailable, preserve state and
+escalate for manual recovery; neither raw digests nor backup files authorize it.
 
 `enrollment_registry_capacity_reached` identifies entry-count or shared byte-budget
 rejection, not an infrastructure outage. Capacity validation runs before durable
