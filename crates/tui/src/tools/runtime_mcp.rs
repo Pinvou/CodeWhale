@@ -673,13 +673,6 @@ mod tests {
         assert_eq!(parsed.name, "my-server");
     }
 
-    #[test]
-    fn infer_name_only_command_no_args_path() {
-        // Absolute path, no args — uses file_stem of command
-        let parsed = parse_mcp_command("/usr/local/bin/my-server").unwrap();
-        assert_eq!(parsed.name, "my-server");
-    }
-
     // === sanitize_name tests ===
 
     #[test]
@@ -753,20 +746,6 @@ mod tests {
             "--read-only".to_string(),
         ];
         assert!(super::reject_shell_metacharacters(&args).is_ok());
-    }
-
-    #[test]
-    fn allowlist_includes_common_runtimes() {
-        // Verify the allowlist covers the expected commands
-        const ALLOWED: &[&str] = &[
-            "npx", "npm", "pnpm", "yarn", "bunx", "bun", "node", "python", "python3", "uvx", "uv",
-            "deno", "ruby", "cargo",
-        ];
-        // All standard MCP server launchers should be present
-        assert!(ALLOWED.contains(&"npx"));
-        assert!(ALLOWED.contains(&"node"));
-        assert!(ALLOWED.contains(&"python3"));
-        assert!(ALLOWED.contains(&"uvx"));
     }
 
     // === approval-gate contract ===

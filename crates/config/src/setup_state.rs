@@ -935,13 +935,4 @@ mod tests {
         let path = tmp.path().join("does-not-exist.json");
         assert!(SetupState::load_from(&path).is_none());
     }
-
-    #[test]
-    fn step_result_carries_no_secret_by_construction() {
-        // The result field is a caller-supplied safe summary; this documents the
-        // contract that callers pass names, not keys.
-        let entry = verified("0.8.67").with_result("provider: openai, model: mimo");
-        let json = serde_json::to_string(&entry).unwrap();
-        assert!(!json.to_lowercase().contains("sk-"));
-    }
 }

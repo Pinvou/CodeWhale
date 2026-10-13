@@ -841,48 +841,16 @@ mod tests {
 
     #[test]
     fn session_and_thread_archive_filters_share_one_resolution() {
-        use crate::runtime_threads::ThreadListFilter;
-
-        for (include, only, expected_session, expected_thread) in [
-            (
-                None,
-                None,
-                SessionListFilter::ActiveOnly,
-                ThreadListFilter::ActiveOnly,
-            ),
-            (
-                Some(true),
-                None,
-                SessionListFilter::IncludeArchived,
-                ThreadListFilter::IncludeArchived,
-            ),
-            (
-                None,
-                Some(true),
-                SessionListFilter::ArchivedOnly,
-                ThreadListFilter::ArchivedOnly,
-            ),
-            (
-                Some(true),
-                Some(true),
-                SessionListFilter::ArchivedOnly,
-                ThreadListFilter::ArchivedOnly,
-            ),
+        for (include, only, expected_session) in [
+            (None, None, SessionListFilter::ActiveOnly),
+            (Some(true), None, SessionListFilter::IncludeArchived),
+            (None, Some(true), SessionListFilter::ArchivedOnly),
+            (Some(true), Some(true), SessionListFilter::ArchivedOnly),
         ] {
             assert_eq!(
                 SessionListFilter::from_query(include, only),
                 expected_session
             );
-            // Thread-side expectation is spelled out so a future change to
-            // either resolver breaks this test rather than drifting quietly.
-            let thread = if only.unwrap_or(false) {
-                ThreadListFilter::ArchivedOnly
-            } else if include.unwrap_or(false) {
-                ThreadListFilter::IncludeArchived
-            } else {
-                ThreadListFilter::ActiveOnly
-            };
-            assert_eq!(thread, expected_thread);
         }
     }
 

@@ -712,11 +712,6 @@ mod tests {
     // ===================================================================
 
     #[test]
-    fn python_candidates_matches_const() {
-        assert_eq!(Python::candidates(), PYTHON_CANDIDATES);
-    }
-
-    #[test]
     fn node_candidates_is_node_only() {
         assert_eq!(Node::candidates(), &["node"]);
     }
@@ -803,31 +798,6 @@ mod tests {
         let first = Cargo::resolve();
         let second = Cargo::resolve();
         assert_eq!(first, second);
-    }
-
-    #[test]
-    fn git_available_matches_resolve() {
-        assert_eq!(Git::available(), Git::resolve().is_some());
-    }
-
-    #[test]
-    fn python_available_matches_resolve() {
-        assert_eq!(Python::available(), Python::resolve().is_some());
-    }
-
-    #[test]
-    fn node_available_matches_resolve() {
-        assert_eq!(Node::available(), Node::resolve().is_some());
-    }
-
-    #[test]
-    fn rustc_available_matches_resolve() {
-        assert_eq!(RustC::available(), RustC::resolve().is_some());
-    }
-
-    #[test]
-    fn cargo_available_matches_resolve() {
-        assert_eq!(Cargo::available(), Cargo::resolve().is_some());
     }
 
     #[test]

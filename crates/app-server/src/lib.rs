@@ -4634,29 +4634,6 @@ mod tests {
         );
     }
 
-    // ── cors_layer ─────────────────────────────────────────────────────
-
-    #[test]
-    fn cors_layer_includes_default_origins() {
-        let layer = cors_layer(&[]);
-        // Just verify it doesn't panic and creates successfully
-        let _ = layer;
-    }
-
-    #[test]
-    fn cors_layer_adds_extra_origins() {
-        let extras = vec!["https://example.com".to_string()];
-        let layer = cors_layer(&extras);
-        let _ = layer;
-    }
-
-    #[test]
-    fn cors_layer_skips_empty_origins() {
-        let extras = vec!["".to_string(), "  ".to_string()];
-        let layer = cors_layer(&extras);
-        let _ = layer;
-    }
-
     // ── JsonRpc helpers ────────────────────────────────────────────────
 
     #[test]

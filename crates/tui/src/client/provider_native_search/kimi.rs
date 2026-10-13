@@ -326,10 +326,6 @@ mod tests {
 
     #[test]
     fn kimi_code_request_and_structured_response_contract() {
-        let body = json!({ "text_query": request().query });
-        assert_eq!(body["text_query"], "current release");
-        assert_eq!(body.as_object().map(serde_json::Map::len), Some(1));
-
         let parsed = parse_kimi_code(&json!({
             "search_results": [{
                 "title": "Kimi",

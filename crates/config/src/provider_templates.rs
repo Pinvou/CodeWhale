@@ -303,12 +303,6 @@ pub fn provider_setup_templates() -> &'static [ProviderSetupTemplate] {
     TEMPLATES
 }
 
-/// Templates that persist as named OpenAI-compatible tables.
-pub fn compatible_provider_setup_templates() -> impl Iterator<Item = &'static ProviderSetupTemplate>
-{
-    TEMPLATES.iter().filter(|template| template.is_compatible())
-}
-
 /// Look up a template by id, documented alias, or first-class provider id.
 #[must_use]
 pub fn provider_setup_template(id: &str) -> Option<&'static ProviderSetupTemplate> {
@@ -386,17 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn compatible_template_ids_do_not_shadow_built_ins() {
-        for template in compatible_provider_setup_templates() {
-            assert!(
-                ProviderKind::parse(template.id).is_none(),
-                "compatible template '{}' shadows ProviderKind",
-                template.id
-            );
-        }
-    }
-
-    #[test]
     fn first_class_templates_reuse_registry_facts() {
         let zen = provider_setup_template("opencode-zen").expect("zen");
         assert_eq!(
@@ -431,6 +414,14 @@ mod tests {
         assert_eq!(sense.picker_models(), vec![SENSENOVA_DEFAULT_MODEL]);
         assert!(sense.docs_url().is_none());
         assert!(sense.credential_url().is_none());
+        // Re-pointed from compatible_template_ids_do_not_shadow_built_ins:
+        // this template id is the one the surviving hosted-host enumeration
+        // does not cover, and it must never shadow a ProviderKind built-in.
+        assert!(
+            ProviderKind::parse(SENSENOVA_TEMPLATE_ID).is_none(),
+            "compatible template '{}' shadows ProviderKind",
+            SENSENOVA_TEMPLATE_ID
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@
 //!
 //! ## Live callers
 //!
-//! * [`apply_spillover`] — invoked from the engine's tool-execution
+//! * [`apply_spillover_with_artifact`] — invoked from the engine's tool-execution
 //!   path (`turn_loop.rs`) so any successful tool result over
 //!   [`SPILLOVER_THRESHOLD_BYTES`] spills to disk and the model
 //!   receives a bounded plain preview: a [`SPILLOVER_HEAD_BYTES`] head,
@@ -319,7 +319,7 @@ pub fn maybe_spillover(
     Ok(Some((content[..cut].to_string(), path)))
 }
 
-/// Inline head retained when [`apply_spillover`] truncates a tool
+/// Inline head retained when [`apply_spillover_with_artifact`] truncates a tool
 /// result. 32 KiB is large enough for the model to keep meaningful
 /// context (a long stack trace, a `git diff` head, a directory
 /// listing of typical depth) without consuming the lion's share of
@@ -440,29 +440,6 @@ fn truncated_preview(
         "{head}\n\n{}\n\n…\n{tail}",
         spillover_preview_footer(omitted, omitted_lines, recovery_path, retrieval_ref)
     )
-}
-
-/// Apply spillover to a tool result in place. If the result's
-/// content exceeds [`SPILLOVER_THRESHOLD_BYTES`], writes the full
-/// content to a sibling file under `~/.codewhale/tool_outputs/`,
-/// replaces `result.content` with a [`SPILLOVER_HEAD_BYTES`] head
-/// plus a footer naming the spillover path and how to read the
-/// omitted range back, and stamps `metadata.spillover_path` so the
-/// UI can render its expand annotation.
-///
-/// Returns the spillover path on success, `None` if no spillover
-/// happened (content small enough, error result, write failure).
-/// Failures are logged but never bubble up — a tool that produced a
-/// result shouldn't be marked failed because the spillover writer
-/// couldn't reach disk; we degrade to no-op and the model gets the
-/// original (large) content.
-///
-/// Error results (`success == false`) are skipped: error messages
-/// are typically short, and turning them into a truncated preview
-/// would just hide the error from the model's reasoning.
-#[allow(dead_code)]
-pub fn apply_spillover(result: &mut ToolResult, tool_id: &str) -> Option<PathBuf> {
-    apply_spillover_inner(result, tool_id, None)
 }
 
 /// Apply adaptive routing and publish session-scoped exact evidence.
@@ -1202,7 +1179,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         with_test_home(tmp.path(), || {
             let mut result = ToolResult::success("small payload");
-            let path = apply_spillover(&mut result, "call-small");
+            let path = apply_spillover_inner(&mut result, "call-small", None);
             assert!(path.is_none());
             assert_eq!(result.content, "small payload");
             assert!(result.metadata.is_none());
@@ -1218,7 +1195,7 @@ mod tests {
             // truncating an error would hide it from the model.
             let big_err = "boom\n".repeat(50_000);
             let mut result = ToolResult::error(big_err.clone());
-            let path = apply_spillover(&mut result, "call-err");
+            let path = apply_spillover_inner(&mut result, "call-err", None);
             assert!(path.is_none());
             assert_eq!(result.content, big_err);
         });
@@ -1232,7 +1209,7 @@ mod tests {
             // 200 KiB body — well above the 100 KiB threshold.
             let big = "X".repeat(200 * 1024);
             let mut result = ToolResult::success(big.clone());
-            let path = apply_spillover(&mut result, "call-big").expect("should spill");
+            let path = apply_spillover_inner(&mut result, "call-big", None).expect("should spill");
 
             // Inline content shrunk to head + honest preview footer.
             assert!(result.content.len() < big.len());
@@ -1543,7 +1520,7 @@ mod tests {
             let big = "Y".repeat(200 * 1024);
             let mut result = ToolResult::success(big)
                 .with_metadata(serde_json::json!({"prior_key": "prior_value"}));
-            let path = apply_spillover(&mut result, "call-meta").expect("should spill");
+            let path = apply_spillover_inner(&mut result, "call-meta", None).expect("should spill");
 
             let metadata = result.metadata.expect("metadata present");
             // Prior keys survive.
@@ -1579,7 +1556,7 @@ mod tests {
                 "array",
                 "payload"
             ]));
-            let path = apply_spillover(&mut result, "call-arr").expect("should spill");
+            let path = apply_spillover_inner(&mut result, "call-arr", None).expect("should spill");
 
             let metadata = result.metadata.expect("metadata stamped");
             // Prior payload re-homed under `_prior`.

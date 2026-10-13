@@ -347,20 +347,6 @@ impl FanoutCard {
         }
     }
 
-    /// Pre-seed worker slots when the fanout size is known up front.
-    #[allow(dead_code)]
-    pub fn with_workers<I, S>(mut self, ids: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        for id in ids {
-            self.workers
-                .push(WorkerSlot::new(id.into(), AgentLifecycle::Pending));
-        }
-        self
-    }
-
     /// Update or insert a worker by id. Returns whether the visible state
     /// changed and the card should be redrawn.
     pub fn upsert_worker(&mut self, agent_id: &str, status: AgentLifecycle) -> bool {
@@ -862,8 +848,10 @@ mod tests {
 
     #[test]
     fn fanout_card_dot_grid_renders_stateful_worker_slots() {
-        let mut card = FanoutCard::new("fanout")
-            .with_workers(["w_1", "w_2", "w_3", "w_4", "w_5", "w_6", "w_7"]);
+        let mut card = FanoutCard::new("fanout");
+        for id in ["w_1", "w_2", "w_3", "w_4", "w_5", "w_6", "w_7"] {
+            card.upsert_worker(id, AgentLifecycle::Pending);
+        }
         card.upsert_worker("w_1", AgentLifecycle::Completed);
         card.upsert_worker("w_2", AgentLifecycle::Completed);
         card.upsert_worker("w_3", AgentLifecycle::Running);
@@ -879,7 +867,10 @@ mod tests {
 
     #[test]
     fn fanout_card_header_and_dot_grid_surface_aggregate_state() {
-        let mut card = FanoutCard::new("rlm").with_workers(["w_1", "w_2", "w_3", "w_4"]);
+        let mut card = FanoutCard::new("rlm");
+        for id in ["w_1", "w_2", "w_3", "w_4"] {
+            card.upsert_worker(id, AgentLifecycle::Pending);
+        }
         card.upsert_worker("w_1", AgentLifecycle::Completed);
         card.upsert_worker("w_2", AgentLifecycle::Completed);
         card.upsert_worker("w_3", AgentLifecycle::Completed);
@@ -919,7 +910,9 @@ mod tests {
 
     #[test]
     fn fanout_started_claims_seeded_pending_slot_without_growing_grid() {
-        let mut card = FanoutCard::new("fanout").with_workers(["task:a", "task:b"]);
+        let mut card = FanoutCard::new("fanout");
+        card.upsert_worker("task:a", AgentLifecycle::Pending);
+        card.upsert_worker("task:b", AgentLifecycle::Pending);
         let started =
             MailboxMessage::started("agent_live", crate::tools::subagent::FleetRole::Worker);
 
@@ -940,7 +933,8 @@ mod tests {
 
     #[test]
     fn fanout_apply_transitions_worker_through_lifecycle() {
-        let mut card = FanoutCard::new("fanout").with_workers(["w_1"]);
+        let mut card = FanoutCard::new("fanout");
+        card.upsert_worker("w_1", AgentLifecycle::Pending);
         let started = MailboxMessage::started("w_1", crate::tools::subagent::FleetRole::Worker);
         apply_to_fanout(&mut card, &started);
         assert_eq!(card.workers[0].status, AgentLifecycle::Running);
@@ -969,7 +963,10 @@ mod tests {
         ];
         for (total, done, expected) in cases {
             let ids: Vec<String> = (0..*total).map(|i| format!("w_{i}")).collect();
-            let mut card = FanoutCard::new("fanout").with_workers(ids.iter().cloned());
+            let mut card = FanoutCard::new("fanout");
+            for id in ids.iter() {
+                card.upsert_worker(id, AgentLifecycle::Pending);
+            }
             for id in ids.iter().take(*done) {
                 card.upsert_worker(id, AgentLifecycle::Completed);
             }
@@ -1006,7 +1003,9 @@ mod tests {
 
     #[test]
     fn fanout_interrupted_worker_leaves_running_counts() {
-        let mut card = FanoutCard::new("fanout").with_workers(["w_1", "w_2"]);
+        let mut card = FanoutCard::new("fanout");
+        card.upsert_worker("w_1", AgentLifecycle::Pending);
+        card.upsert_worker("w_2", AgentLifecycle::Pending);
         apply_to_fanout(
             &mut card,
             &MailboxMessage::started("w_1", crate::tools::subagent::FleetRole::Worker),
@@ -1051,7 +1050,10 @@ mod tests {
     #[test]
     fn fanout_card_omits_redundant_counts_line_when_header_and_grid_present() {
         let ids: Vec<String> = (0..16).map(|i| format!("w_{i}")).collect();
-        let mut card = FanoutCard::new("fanout").with_workers(ids.iter().cloned());
+        let mut card = FanoutCard::new("fanout");
+        for id in ids.iter() {
+            card.upsert_worker(id, AgentLifecycle::Pending);
+        }
         for id in ids.iter().take(12) {
             card.upsert_worker(id, AgentLifecycle::Completed);
         }
@@ -1337,7 +1339,9 @@ mod tests {
 
     #[test]
     fn fanout_card_does_not_project_any_workers_todo() {
-        let mut card = FanoutCard::new("fanout").with_workers(["w_1", "w_2"]);
+        let mut card = FanoutCard::new("fanout");
+        card.upsert_worker("w_1", AgentLifecycle::Pending);
+        card.upsert_worker("w_2", AgentLifecycle::Pending);
         assert!(!apply_to_fanout(
             &mut card,
             &work_state(

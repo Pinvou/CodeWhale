@@ -2,8 +2,7 @@ use super::headers::{MCP_HTTP_ACCEPT, is_safe_custom_header, with_default_mcp_ht
 use super::http::{HttpTransport, McpHttpAuth};
 use super::streamable_http::StreamableHttpTransport;
 use super::wire::{
-    find_sse_event_separator, find_sse_event_separator_bytes, is_mcp_stale_session_error,
-    parse_sse_message_data,
+    find_sse_event_separator_bytes, is_mcp_stale_session_error, parse_sse_message_data,
 };
 use super::*;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
@@ -4384,18 +4383,6 @@ fn legacy_sse_transport_requires_explicit_config() {
 
     server.transport = Some("http".to_string());
     assert!(!is_legacy_sse_transport(&server));
-}
-
-#[test]
-fn find_sse_event_separator_accepts_lf_and_crlf() {
-    assert_eq!(
-        find_sse_event_separator("event: endpoint\n\n"),
-        Some((15, 2))
-    );
-    assert_eq!(
-        find_sse_event_separator("event: endpoint\r\n\r\n"),
-        Some((15, 4))
-    );
 }
 
 #[test]

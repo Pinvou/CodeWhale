@@ -258,15 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_pending_work_hides_the_indicator() {
-        let work = PendingWork::default();
-        assert!(work.items.is_empty());
-        assert_eq!(work.count(PendingItemKind::Shell), 0);
-        assert_eq!(work.count(PendingItemKind::Task), 0);
-        assert_eq!(work.count(PendingItemKind::Agent), 0);
-    }
-
-    #[test]
     fn counts_cover_shells_tasks_and_agents_with_pluralization() {
         let work = PendingWork {
             items: vec![shell("cargo test"), task("run"), agent("Agent 3·scout")],
@@ -288,16 +279,6 @@ mod tests {
         assert_eq!(work.count(PendingItemKind::Shell), 2);
         assert_eq!(PendingItemKind::Shell.plural_noun(2), "shells");
         assert_eq!(work.count(PendingItemKind::Agent), 1);
-    }
-
-    #[test]
-    fn completion_clears_the_line() {
-        let mut work = PendingWork {
-            items: vec![shell("cargo test")],
-        };
-        assert!(!work.items.is_empty());
-        work.items.clear();
-        assert!(work.items.is_empty());
     }
 
     #[test]

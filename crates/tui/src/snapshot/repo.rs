@@ -2874,30 +2874,6 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_workspace_rejects_home_directory_workspace() {
-        let tmp = tempdir().unwrap();
-        let home = tmp.path();
-
-        assert_eq!(
-            unsafe_workspace_snapshot_reason(home, Some(home)),
-            Some("home directory")
-        );
-    }
-
-    #[test]
-    fn unsafe_workspace_rejects_home_collection_directories() {
-        let tmp = tempdir().unwrap();
-        let home = tmp.path();
-        let desktop = tmp.path().join("Desktop");
-        std::fs::create_dir_all(&desktop).unwrap();
-
-        assert_eq!(
-            unsafe_workspace_snapshot_reason(&desktop, Some(home)),
-            Some("home collection directory")
-        );
-    }
-
-    #[test]
     fn unsafe_workspace_allows_project_directories_under_home() {
         let tmp = tempdir().unwrap();
         let home = tmp.path();

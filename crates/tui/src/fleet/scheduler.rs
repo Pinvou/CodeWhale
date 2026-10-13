@@ -104,36 +104,6 @@ impl FleetScheduler {
         Ok(report)
     }
 
-    pub fn cancel_run(&self, run_id: &FleetRunId, reason: &str) -> Result<FleetSchedulerReport> {
-        let state = self.ledger.rebuild_state()?;
-        let mut report = FleetSchedulerReport::default();
-        for task in state
-            .tasks
-            .values()
-            .filter(|task| task.entry.run_id == *run_id)
-        {
-            if !matches!(
-                task.status,
-                FleetTaskLedgerStatus::Enqueued | FleetTaskLedgerStatus::Leased
-            ) {
-                continue;
-            }
-            if self.ledger.cancel_task_if_active(
-                &task.entry.run_id,
-                &task.entry.task_id,
-                None,
-                &self.timestamp(),
-                Some(reason),
-                Some("scheduler"),
-            )? {
-                report.cancelled += 1;
-            }
-        }
-        self.ledger
-            .update_run_status(run_id, FleetRunStatus::Cancelled, &self.timestamp())?;
-        Ok(report)
-    }
-
     fn recover_unhealthy_work(
         &self,
         run_id: &FleetRunId,
@@ -1009,31 +979,5 @@ mod tests {
         let state = scheduler.ledger.rebuild_state().unwrap();
         assert_eq!(state.tasks["run-1:task-a"].entry.attempts, 1);
         assert_eq!(state.workers["worker-1"], FleetWorkerStatus::Busy);
-    }
-
-    #[test]
-    fn fleet_scheduler_cancel_run_interrupts_active_and_cancels_queued() {
-        let tmp = TempDir::new().unwrap();
-        let scheduler = scheduler(&tmp, 1);
-        create_run(
-            &scheduler,
-            "run-1",
-            vec![task("task-a", 3), task("task-b", 3), task("task-c", 3)],
-            2,
-        );
-        scheduler.tick_run(&FleetRunId::from("run-1")).unwrap();
-
-        let report = scheduler
-            .cancel_run(&FleetRunId::from("run-1"), "operator")
-            .unwrap();
-
-        assert_eq!(report.cancelled, 3);
-        let state = scheduler.ledger.rebuild_state().unwrap();
-        for task in state.tasks.values() {
-            assert_eq!(task.status, FleetTaskLedgerStatus::Cancelled);
-        }
-        let ledger = ledger_text(&scheduler);
-        assert!(ledger.contains("\"state\":\"interrupted\""));
-        assert!(ledger.contains("\"state\":\"cancelled\""));
     }
 }

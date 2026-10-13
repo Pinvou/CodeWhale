@@ -6,7 +6,6 @@ mod renderable;
 pub mod tool_card;
 pub mod workflow_panel;
 
-pub use header::header_status_indicator_frame;
 pub use renderable::Renderable;
 
 use std::borrow::Cow;
@@ -1123,22 +1122,6 @@ fn occupied_text_bounds(line: &Line<'_>) -> Option<(usize, usize)> {
 #[cfg(test)]
 fn fish_flee_offset(elapsed_ms: u128) -> u16 {
     crate::tui::ambient_life::fish_flee_offset(elapsed_ms)
-}
-
-#[cfg(test)]
-fn fish_mark(facing_right: bool) -> &'static str {
-    if facing_right { "><>" } else { "<><" }
-}
-
-#[cfg(test)]
-fn fish_heading(previous_x: u16, current_x: u16, next_x: u16, fallback_right: bool) -> bool {
-    if next_x != current_x {
-        next_x > current_x
-    } else if current_x != previous_x {
-        current_x > previous_x
-    } else {
-        fallback_right
-    }
 }
 
 fn jump_to_latest_button_rect(area: Rect, has_scrollbar: bool) -> Option<Rect> {
@@ -4519,11 +4502,10 @@ mod tests {
         build_empty_state_lines, composer_content_geometry, composer_empty_hint_text,
         composer_height, composer_inner_area, composer_max_height, composer_submit_hint,
         composer_top_padding, cursor_row_col, empty_composer_visual_rows,
-        enclosed_composer_panel_fits, fish_flee_offset, fish_heading, fish_mark,
-        history_entry_revision, layout_input, layout_input_with_scroll, placeholder_visual_lines,
-        push_command_entry, receipt_is_settling, revision_in_domain, should_render_empty_state,
-        slash_completion_hints, tool_run_summary_revision, wrap_input_lines,
-        wrap_input_lines_for_mouse, wrap_text,
+        enclosed_composer_panel_fits, fish_flee_offset, history_entry_revision, layout_input,
+        layout_input_with_scroll, placeholder_visual_lines, push_command_entry,
+        receipt_is_settling, revision_in_domain, should_render_empty_state, slash_completion_hints,
+        tool_run_summary_revision, wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
     use crate::localization::Locale;
@@ -7482,20 +7464,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fish_glyph_always_matches_screen_direction() {
-        assert_eq!(fish_mark(true), "><>");
-        assert_eq!(fish_mark(false), "<><");
-        assert!(fish_heading(8, 9, 10, false));
-        assert!(!fish_heading(10, 9, 8, true));
-        assert!(fish_heading(8, 9, 9, false));
-        assert!(!fish_heading(10, 9, 9, true));
-
-        // Mirrored tracks are the regression case: a forward path flag can
-        // correspond to decreasing screen x. Heading follows x, not the flag.
-        assert!(!fish_heading(74, 73, 72, true));
-    }
-
     /// Render a chat field carrying `rows` of history and return its rows.
     fn history_field_rows(rows: usize) -> Vec<String> {
         let mut app = create_test_app();
@@ -8885,32 +8853,6 @@ diff --git a/src/b.rs b/src/b.rs\n\
         assert!(
             !has_suggestion,
             "suggestion should not render when input is non-empty"
-        );
-    }
-
-    #[test]
-    fn ghost_text_hidden_when_no_suggestion() {
-        let mut app = create_test_app();
-        app.prompt_suggestion = None;
-        let slash_menu_entries = Vec::<SlashMenuEntry>::new();
-        let mention_menu_entries = Vec::<String>::new();
-        let widget = ComposerWidget::new(&app, 5, &slash_menu_entries, &mention_menu_entries);
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width: 80,
-            height: 5,
-        };
-        let mut buf = Buffer::empty(area);
-        widget.render(area, &mut buf);
-
-        // When no suggestion and input is empty, placeholder text should appear
-        // instead. The exact placeholder text is locale-dependent, so we check
-        // that the suggestion text is NOT present.
-        let has_placeholder_like_text = buf.content.iter().any(|c| !c.symbol().trim().is_empty());
-        assert!(
-            has_placeholder_like_text,
-            "some non-empty text should render as placeholder"
         );
     }
 

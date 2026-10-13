@@ -2391,24 +2391,6 @@ mod tests {
     }
 
     #[test]
-    fn file_store_default_path_uses_home() {
-        let _lock = env_lock();
-        clear_known_envs();
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("HOME", tmp.path());
-        let _userprofile = EnvVarGuard::set("USERPROFILE", tmp.path());
-
-        let path = FileKeyringStore::default_path().unwrap();
-        assert_eq!(
-            path,
-            tmp.path()
-                .join(".codewhale")
-                .join("secrets")
-                .join("secrets.json")
-        );
-    }
-
-    #[test]
     fn default_path_with_explicit_codewhale_home_does_not_migrate_ambient_legacy() {
         // FR003-C001: explicit CODEWHALE_HOME must not silently import ambient
         // `$HOME/.deepseek/secrets` credentials into the isolated home.

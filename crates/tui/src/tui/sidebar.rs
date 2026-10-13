@@ -262,7 +262,7 @@ mod tests {
     use crate::localization::Locale;
     use crate::tui::app::{
         AgentCurrentActivity, AgentCurrentActivityStatus, AgentProgressMeta, App,
-        SidebarHoverSection, SidebarHoverState, TuiOptions,
+        SidebarHoverState, TuiOptions,
     };
     use std::path::PathBuf;
 
@@ -282,44 +282,6 @@ mod tests {
     fn sidebar_hover_state_default_is_empty() {
         let state = SidebarHoverState::default();
         assert!(state.sections.is_empty());
-    }
-
-    #[test]
-    fn sidebar_hover_section_stores_lines() {
-        use ratatui::layout::Rect;
-        let section = SidebarHoverSection {
-            content_area: Rect::new(1, 1, 38, 8),
-            lines: vec!["line 1".to_string(), "line 2".to_string()],
-            rows: vec![],
-        };
-        assert_eq!(section.lines.len(), 2);
-        assert_eq!(section.lines[0], "line 1");
-        assert!(section.content_area.x > 0);
-    }
-
-    #[test]
-    fn hover_line_matching_respects_content_area_offset() {
-        use ratatui::layout::Rect;
-        let section = SidebarHoverSection {
-            content_area: Rect::new(62, 2, 36, 6),
-            lines: vec![
-                "first".to_string(),
-                "second".to_string(),
-                "third".to_string(),
-            ],
-            rows: vec![],
-        };
-
-        // Mouse within content area, first line
-        let line_idx = (2u16.saturating_sub(section.content_area.y)) as usize;
-        assert_eq!(section.lines[line_idx], "first");
-
-        // Mouse within content area, second line
-        let line_idx = (3u16.saturating_sub(section.content_area.y)) as usize;
-        assert_eq!(section.lines[line_idx], "second");
-
-        // Mouse outside content area (above) — row < content_area.y
-        assert!((1u16) < section.content_area.y);
     }
 
     // ── #3030: stable labels instead of raw internal ids ───────────────────

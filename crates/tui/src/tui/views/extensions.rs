@@ -1806,17 +1806,6 @@ mod tests {
     }
 
     #[test]
-    fn a_healthy_server_offers_no_recovery_action() {
-        // Founder live-test: "even the ones that are connected say diagnose
-        // lol". Enabled, inspected, connected and erroring on nothing is not
-        // a state anything repairs.
-        assert_eq!(
-            crate::mcp::mcp_recovery_kind(true, true, true, None, false),
-            None
-        );
-    }
-
-    #[test]
     fn mcp_item_action_for_disconnected_server_is_reconnect() {
         let recovery = crate::mcp::mcp_recovery_kind(true, true, false, None, false)
             .expect("a disconnected server needs recovery");

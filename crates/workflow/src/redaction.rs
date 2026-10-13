@@ -570,16 +570,6 @@ fn looks_relative(candidate: &str) -> bool {
         && extension.chars().all(|ch| ch.is_ascii_alphabetic())
 }
 
-/// Whether a string contains anything this module would redact.
-///
-/// Used by assertions and by durable-write guards that must fail loudly rather
-/// than persist a path or a key.
-#[must_use]
-#[cfg(test)]
-pub fn contains_redactable(input: &str) -> bool {
-    redact_for_disclosure(input).redacted()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,12 +906,5 @@ mod tests {
     fn an_extension_less_directory_is_the_known_residual() {
         let redaction = redact_for_disclosure("look in crates/tui/src");
         assert!(!redaction.redacted());
-    }
-
-    #[test]
-    fn contains_redactable_matches_the_redactor() {
-        assert!(contains_redactable("/Users/hunter"));
-        assert!(contains_redactable("token=abc"));
-        assert!(!contains_redactable("land a fix in the workflow crate"));
     }
 }

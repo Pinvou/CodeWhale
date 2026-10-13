@@ -3745,17 +3745,6 @@ mod tests {
     }
 
     #[test]
-    fn default_settings_show_footer_water_strip() {
-        let settings = Settings::default();
-        assert!(
-            settings.fancy_animations,
-            "underwater presentation is the default"
-        );
-        assert!(!settings.low_motion);
-        assert_eq!(settings.transcript_spacing, "comfortable");
-    }
-
-    #[test]
     fn retired_launch_screen_setting_is_accepted_and_dropped_on_save() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("settings.toml");

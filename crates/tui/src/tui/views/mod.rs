@@ -6936,7 +6936,9 @@ mod tests {
     #[test]
     fn subagent_view_agents_includes_live_fanout_workers_when_cache_is_empty() {
         let mut app = create_test_app();
-        let mut card = FanoutCard::new("rlm").with_workers(["chunk_1", "chunk_2"]);
+        let mut card = FanoutCard::new("rlm");
+        card.upsert_worker("chunk_1", AgentLifecycle::Pending);
+        card.upsert_worker("chunk_2", AgentLifecycle::Pending);
         card.upsert_worker("chunk_1", AgentLifecycle::Completed);
         card.upsert_worker("chunk_2", AgentLifecycle::Running);
         app.add_message(HistoryCell::SubAgent(SubAgentCell::Fanout(card)));

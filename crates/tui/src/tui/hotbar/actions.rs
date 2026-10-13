@@ -47,20 +47,6 @@ impl HotbarActionCategory {
             Self::Plugin => "plugin",
         }
     }
-
-    #[must_use]
-    #[cfg_attr(not(test), expect(dead_code))]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "app" => Some(Self::App),
-            "route" => Some(Self::Route),
-            "slash" => Some(Self::Slash),
-            "mcp" => Some(Self::Mcp),
-            "skill" => Some(Self::Skill),
-            "plugin" => Some(Self::Plugin),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,37 +104,6 @@ pub struct HotbarActionMetadata {
     pub args: HotbarArgsBehavior,
     pub safety: HotbarSafetyClass,
     pub recommendation: HotbarRecommendation,
-}
-
-impl HotbarActionMetadata {
-    #[must_use]
-    pub fn validation_errors(&self) -> Vec<String> {
-        let mut errors = Vec::new();
-        if self.id.trim().is_empty() {
-            errors.push("id must not be empty".to_string());
-        }
-        if self.source_id.trim().is_empty() {
-            errors.push(format!("{} source_id must not be empty", self.id));
-        }
-        if self.display_name.trim().is_empty() {
-            errors.push(format!("{} display_name must not be empty", self.id));
-        }
-        if self.compact_label.trim().is_empty() {
-            errors.push(format!("{} compact_label must not be empty", self.id));
-        }
-        if unicode_width::UnicodeWidthStr::width(self.compact_label.as_str())
-            > HOTBAR_COMPACT_LABEL_MAX_WIDTH
-        {
-            errors.push(format!(
-                "{} compact_label {:?} exceeds {} display cells",
-                self.id, self.compact_label, HOTBAR_COMPACT_LABEL_MAX_WIDTH
-            ));
-        }
-        if self.description.trim().is_empty() {
-            errors.push(format!("{} description must not be empty", self.id));
-        }
-        errors
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,24 +337,6 @@ pub fn recommend_hotbar_actions(
         selected.push(entry);
     }
     selected
-}
-
-#[must_use]
-#[cfg_attr(not(test), expect(dead_code))]
-pub fn recommended_hotbar_bindings(
-    app: &App,
-    options: HotbarRecommendationOptions,
-) -> Vec<codewhale_config::HotbarBindingToml> {
-    recommend_hotbar_actions(app, options)
-        .into_iter()
-        .take(usize::from(codewhale_config::HOTBAR_SLOT_COUNT))
-        .enumerate()
-        .map(|(idx, entry)| codewhale_config::HotbarBindingToml {
-            slot: u8::try_from(idx + 1).expect("recommended hotbar slot fits in u8"),
-            action: entry.metadata.id,
-            label: Some(entry.metadata.compact_label),
-        })
-        .collect()
 }
 
 fn default_hotbar_position(action_id: &str) -> Option<usize> {
@@ -788,46 +725,6 @@ impl HotbarActionRegistry {
 
     pub fn iter(&self) -> impl Iterator<Item = &dyn HotbarAction> {
         self.actions.values().map(Arc::as_ref)
-    }
-
-    #[cfg_attr(not(test), expect(dead_code))]
-    #[must_use]
-    pub fn metadata(&self, locale: Locale) -> Vec<HotbarActionMetadata> {
-        self.iter().map(|action| action.metadata(locale)).collect()
-    }
-
-    #[cfg_attr(not(test), expect(dead_code))]
-    #[must_use]
-    pub fn metadata_validation_errors(&self, locale: Locale) -> Vec<String> {
-        let mut errors = Vec::new();
-        for action in self.iter() {
-            let metadata = action.metadata(locale);
-            if metadata.id != action.id() {
-                errors.push(format!(
-                    "{} metadata id {:?} does not match action id",
-                    action.id(),
-                    metadata.id
-                ));
-            }
-            if metadata.compact_label != action.short_label() {
-                errors.push(format!(
-                    "{} metadata compact_label {:?} does not match short_label {:?}",
-                    action.id(),
-                    metadata.compact_label,
-                    action.short_label()
-                ));
-            }
-            if metadata.category.as_str() != action.category() {
-                errors.push(format!(
-                    "{} metadata category {:?} does not match category {:?}",
-                    action.id(),
-                    metadata.category.as_str(),
-                    action.category()
-                ));
-            }
-            errors.extend(metadata.validation_errors());
-        }
-        errors
     }
 }
 
@@ -1595,49 +1492,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_metadata_contract_covers_registered_actions() {
-        let registry = HotbarActionRegistry::with_builtins();
-        let errors = registry.metadata_validation_errors(Locale::En);
-        assert!(errors.is_empty(), "metadata validation failed: {errors:?}");
-
-        let metadata = registry.metadata(Locale::En);
-        assert_eq!(metadata.len(), registry.len());
-
-        let ids = metadata
-            .iter()
-            .map(|entry| entry.id.as_str())
-            .collect::<Vec<_>>();
-        let mut sorted_ids = ids.clone();
-        sorted_ids.sort_unstable();
-        assert_eq!(
-            ids, sorted_ids,
-            "registry metadata should have stable id order"
-        );
-        assert_eq!(
-            ids.iter().copied().collect::<BTreeSet<_>>().len(),
-            ids.len(),
-            "metadata ids must be unique"
-        );
-
-        for entry in metadata {
-            assert_eq!(
-                HotbarActionCategory::parse(entry.category.as_str()),
-                Some(entry.category)
-            );
-            let entry_errors = entry.validation_errors();
-            assert!(
-                entry_errors.is_empty(),
-                "metadata entry failed validation: {entry_errors:?}"
-            );
-            assert!(
-                unicode_width::UnicodeWidthStr::width(entry.compact_label.as_str())
-                    <= HOTBAR_COMPACT_LABEL_MAX_WIDTH,
-                "compact label should be validated: {entry:?}"
-            );
-        }
-    }
-
-    #[test]
     fn source_descriptors_cover_dispatch_boundaries() {
         let descriptors = hotbar_source_descriptors();
         let categories = descriptors
@@ -1995,46 +1849,6 @@ mod tests {
     }
 
     #[test]
-    fn recommended_hotbar_bindings_serialize_action_ids_and_labels() {
-        let app = test_app();
-
-        let bindings = recommended_hotbar_bindings(&app, HotbarRecommendationOptions::default());
-
-        assert_eq!(
-            bindings
-                .iter()
-                .map(|binding| binding.action.as_str())
-                .collect::<Vec<_>>(),
-            codewhale_config::DEFAULT_HOTBAR_ACTIONS
-        );
-        assert_eq!(
-            bindings
-                .iter()
-                .map(|binding| (binding.slot, binding.label.as_deref()))
-                .collect::<Vec<_>>(),
-            vec![
-                (1, Some("wf")),
-                (2, Some("goal")),
-                (3, Some("auto")),
-                (4, Some("plan")),
-                (5, Some("agent")),
-                (6, Some("operate")),
-                (7, Some("palette")),
-                (8, Some("side")),
-            ]
-        );
-
-        let config = codewhale_config::ConfigToml {
-            hotbar: Some(bindings.clone()),
-            ..Default::default()
-        };
-        let serialized = toml::to_string_pretty(&config).expect("serialize hotbar recommendations");
-        let round_tripped: codewhale_config::ConfigToml =
-            toml::from_str(&serialized).expect("deserialize hotbar recommendations");
-        assert_eq!(round_tripped.hotbar, Some(bindings));
-    }
-
-    #[test]
     fn builtins_register_expected_actions() {
         let mut registry = HotbarActionRegistry::new();
         registry.register_builtins();
@@ -2276,7 +2090,6 @@ mod tests {
         assert_eq!(metadata.args, HotbarArgsBehavior::None);
         assert_eq!(metadata.safety, HotbarSafetyClass::ExistingCommand);
         assert_eq!(metadata.recommendation, HotbarRecommendation::Eligible);
-        assert!(registry.metadata_validation_errors(Locale::En).is_empty());
     }
 
     #[test]
@@ -2400,7 +2213,6 @@ mod tests {
         assert_eq!(metadata.args, HotbarArgsBehavior::Required);
         assert_eq!(metadata.safety, HotbarSafetyClass::RequiresApproval);
         assert_eq!(metadata.recommendation, HotbarRecommendation::Advanced);
-        assert!(registry.metadata_validation_errors(Locale::En).is_empty());
     }
 
     #[test]
