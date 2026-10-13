@@ -140,3 +140,7 @@ const authenticationCopy = {
   ja: { recentAuthenticationRequired: '\u518d\u8a8d\u8a3c\u3057\u3066\u5143\u306e\u30c9\u30e9\u30d5\u30c8\u8981\u6c42\u3092\u7d9a\u884c\u3057\u3066\u304f\u3060\u3055\u3044\u3002', reauthenticate: '\u518d\u8a8d\u8a3c' },
 };
 for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], authenticationCopy[language]);
+
+ledgerRepairCopy.zh.writeOffRecentAuthenticationRequired = '需要重新认证。当前页面保留原事实和请求键；门户跳转后，未知操作请到审批中心打开原草稿，用 EDIT 核验并继续，不要另建请求。';
+ledgerRepairCopy.en.writeOffRecentAuthenticationRequired = 'Authenticate again. This page retains the original facts and key. After portal navigation, open the original draft in the approval center and use EDIT to verify and continue an unconfirmed operation; do not create another request.';
+ledgerRepairCopy.ja.writeOffRecentAuthenticationRequired = '再認証が必要です。このページでは元の事実とキーを保持します。ポータル移動後、未確認の操作は承認センターで元のドラフトを開き、EDIT で確認して続行してください。別の要求を作成しないでください。';

@@ -508,7 +508,12 @@ func (r *PostgresRepository) AdminSetOrganizationStatus(ctx context.Context, pri
 	return tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) AdminDeleteOrganization(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, reason string) error {
+// The handler's confirmed remote deletion tuple is for observedVersion+1.
+// Fence completion against a concurrent local lifecycle change.
+func (r *PostgresRepository) AdminDeleteOrganization(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, observedVersion int64, reason string) error {
+	if observedVersion < 1 {
+		return ErrConflict
+	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return err
@@ -528,9 +533,12 @@ func (r *PostgresRepository) AdminDeleteOrganization(ctx context.Context, princi
 		return err
 	}
 	if status == "DELETED" {
+		if currentVersion != observedVersion+1 {
+			return ErrConflict
+		}
 		return tx.Commit(ctx)
 	}
-	if status != "DISABLED" {
+	if status != "DISABLED" || currentVersion != observedVersion {
 		return ErrConflict
 	}
 	now := r.now()
@@ -554,6 +562,14 @@ func (r *PostgresRepository) AdminDeleteOrganization(ctx context.Context, princi
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE organizations SET status='DELETED',name='Deleted organization '||left(id::text,8),version=version+1,deleted_at=$2,updated_at=$2 WHERE id=$1`, organizationID, now); err != nil {
+		return err
+	}
+	// OWNER history remains present. The original deferred owner constraint
+	// sees the terminal organization before these grants are softly revoked.
+	if _, err := tx.Exec(ctx, `UPDATE role_bindings binding SET revoked_at=$2,revoked_by=$3 FROM memberships member WHERE binding.membership_id=member.id AND member.organization_id=$1 AND binding.revoked_at IS NULL`, organizationID, now, actorID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM membership_units attached USING memberships member WHERE attached.membership_id=member.id AND member.organization_id=$1`, organizationID); err != nil {
 		return err
 	}
 	summary := map[string]any{"from": status, "to": "DELETED"}

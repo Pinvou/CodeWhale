@@ -17,6 +17,24 @@ func TestEstimateChatUsageUsesVersionedUTF8ByteRuleAndMissingOutputIsZero(t *tes
 	}
 }
 
+func TestEstimateChatUsageNonTextPartsKeepTextOnlyPreauthorization(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+		input         int64
+	}{
+		{"image-and-audio-only", `[{"type":"image_url","image_url":{"url":"synthetic-image"}},{"type":"input_audio","input_audio":{"data":"synthetic-audio","format":"wav"}}]`, 0},
+		{"text-plus-non-text", `[{"type":"text","text":"hello"},{"type":"image_url","image_url":{"url":"synthetic-image"}},{"type":"input_audio","input_audio":{"data":"synthetic-audio","format":"wav"}}]`, 2},
+		{"unknown-parts-and-non-string-text", `[{"type":"unknown","data":"synthetic-data"},{"type":"text","text":123},{"type":"text","text":"世界"}]`, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			usage, err := EstimateChatUsage([]byte(`{"messages":[{"content":`+tc.content+`}]}`), 17)
+			if err != nil || usage != (Usage{InputTokens: tc.input, OutputTokens: 17}) {
+				t.Fatalf("text-only preauthorization = %#v, %v; input=%d output=17", usage, err, tc.input)
+			}
+		})
+	}
+}
+
 func TestVersionedUnitCostUsesExactDenominatorAndRounding(t *testing.T) {
 	price := PriceVersion{Units: []ResolvedUnitPrice{
 		{UnitCode: "INPUT_TOKEN", MinimumPrecision: 1, PriceDenominator: 10, RoundingRule: "CEILING", ResolvedPrice: 3},

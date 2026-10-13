@@ -176,8 +176,14 @@ func requireMembershipRemovalReplayPermission(ctx context.Context, tx pgx.Tx, ac
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	return requireMembershipAffectedScopePermission(ctx, tx, actorID, organizationID, unitIDs)
+}
+
+// Read-only scope check for the initial permission fence. The replay caller
+// above still owns all original authority locks and the final recheck.
+func requireMembershipAffectedScopePermission(ctx context.Context, tx pgx.Tx, actorID, organizationID uuid.UUID, unitIDs []uuid.UUID) error {
 	var allowed bool
-	err = tx.QueryRow(ctx, `WITH authorized_roots AS (
+	err := tx.QueryRow(ctx, `WITH authorized_roots AS (
  SELECT role.unit_id FROM role_assignments role
  JOIN users actor ON actor.id=role.user_id AND actor.status='ACTIVE'
  JOIN memberships member ON member.user_id=role.user_id AND member.organization_id=role.organization_id AND member.status='ACTIVE'

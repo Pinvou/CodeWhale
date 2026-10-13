@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,7 +64,7 @@ func (r *PostgresRepository) PrepareAccountClosureCleanup(ctx context.Context, i
 	}
 	targetDigests := make([][]byte, 0, 8)
 	if username != nil {
-		targetDigests = append(targetDigests, invitationTargetDigest(*username))
+		targetDigests = append(targetDigests, invitationTargetDigest(strings.ToLower(strings.TrimSpace(*username))))
 	}
 	if mobile != nil {
 		targetDigests = append(targetDigests, invitationTargetDigest(*mobile))
@@ -98,9 +99,9 @@ func (r *PostgresRepository) PrepareAccountClosureCleanup(ctx context.Context, i
 	for _, item := range profiles {
 		if item.field == "USERNAME" {
 			if item.oldValue != "" {
-				targetDigests = append(targetDigests, invitationTargetDigest(item.oldValue))
+				targetDigests = append(targetDigests, invitationTargetDigest(strings.ToLower(strings.TrimSpace(item.oldValue))))
 			}
-			targetDigests = append(targetDigests, invitationTargetDigest(item.newValue))
+			targetDigests = append(targetDigests, invitationTargetDigest(strings.ToLower(strings.TrimSpace(item.newValue))))
 		} else {
 			if item.oldValue != "" {
 				targetDigests = append(targetDigests, invitationTargetDigest(item.oldValue))
@@ -354,6 +355,18 @@ EXISTS(SELECT 1 FROM commerce_customer_sync_jobs WHERE subject_type='USER' AND s
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE registration_operations SET username_normalized='closed_'||replace(gen_random_uuid()::text,'-',''),mobile_e164='closed:'||gen_random_uuid()::text,identity_subject=NULL,updated_at=$2 WHERE candidate_user_id=$1 OR committed_user_id=$1`, userID, now); err != nil {
+		return err
+	}
+	// The accepting recipient owns these mutable contact projections. Preserve
+	// invitation status and frozen identity/digest/token facts, including other
+	// recipients' invitations issued by the closing user.
+	if _, err := tx.Exec(ctx, `UPDATE invitations SET email_normalized=NULL,target_hint=NULL,version=version+1,updated_at=$2 WHERE accepted_by=$1 AND status='ACCEPTED' AND (email_normalized IS NOT NULL OR target_hint IS NOT NULL)`, userID, now); err != nil {
+		return err
+	}
+	// Terminal bootstrap credentials no longer authenticate. Their retained
+	// subject can be redacted only after the final closure identity/replay fences,
+	// never during ordinary consumption or a pending activation/recovery.
+	if _, err := tx.Exec(ctx, `UPDATE super_admin_bootstrap_credentials SET identity_subject='closed:'||gen_random_uuid()::text,updated_at=$2 WHERE user_id=$1 AND status IN ('CONSUMED','EXPIRED','LOCKED','SUPERSEDED')`, userID, now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE commerce_customer_sync_jobs SET contact_mobile_e164=NULL,updated_at=$2 WHERE subject_type='USER' AND subject_id=$1`, userID, now); err != nil {

@@ -35,10 +35,7 @@ func configureApprovals(ctx context.Context, repository *account.PostgresReposit
 	if err != nil {
 		return err
 	}
-	repository.WithBillingGovernanceActivation(clients.billingActivation).WithApprovalProofSource(clients.proofs)
-	if profile == config.AccountPlatformProfileModels {
-		repository.WithTokenGovernanceActivation(clients.tokenActivation).WithApprovalSnapshotSource(clients.snapshots)
-	}
+	installApprovalRuntimeClients(profile, repository, service, clients)
 	key, err := humandelegation.DecodeSigningKey(os.Getenv("HUMAN_DELEGATION_SIGNING_KEY_BASE64URL"))
 	if err != nil {
 		return errors.New("ACCOUNT_DELEGATION_KEY_INVALID")
@@ -61,6 +58,7 @@ func configureApprovals(ctx context.Context, repository *account.PostgresReposit
 
 type approvalRuntimeClients struct {
 	billingActivation *billinggovernance.Client
+	prechecks         *account.HTTPApprovalPrecheckSource
 	tokenActivation   *tokengovernance.Client
 	snapshots         *account.HTTPApprovalSnapshotSource
 	proofs            *account.HTTPApprovalProofSource
@@ -77,6 +75,10 @@ func newApprovalRuntimeClients(profile config.AccountPlatformProfile, billingURL
 	clients.billingActivation, err = billinggovernance.NewClient(billingURL, credential)
 	if err != nil {
 		return clients, errors.New("ACCOUNT_BILLING_ACTIVATION_CONFIGURATION_INVALID")
+	}
+	clients.prechecks, err = account.NewHTTPApprovalPrecheckSource(billingURL, credential)
+	if err != nil {
+		return clients, errors.New("ACCOUNT_APPROVAL_PRECHECK_CONFIGURATION_INVALID")
 	}
 	if profile == config.AccountPlatformProfileModels {
 		clients.tokenActivation, err = tokengovernance.NewClient(tokenURL, credential, policyDigest, handlerDigest)
@@ -111,4 +113,14 @@ func newApprovalRuntimeClients(profile config.AccountPlatformProfile, billingURL
 		return clients, errors.New("ACCOUNT_APPROVAL_EFFECT_CONFIGURATION_INVALID")
 	}
 	return clients, nil
+}
+
+// installApprovalRuntimeClients binds the validated authorities without starting
+// database workers. configureApprovals is its production caller.
+func installApprovalRuntimeClients(profile config.AccountPlatformProfile, repository *account.PostgresRepository, service *account.Service, clients approvalRuntimeClients) {
+	repository.WithBillingGovernanceActivation(clients.billingActivation).WithApprovalProofSource(clients.proofs)
+	if profile == config.AccountPlatformProfileModels {
+		repository.WithTokenGovernanceActivation(clients.tokenActivation).WithApprovalSnapshotSource(clients.snapshots)
+	}
+	service.WithApprovalPrechecks(clients.prechecks)
 }
