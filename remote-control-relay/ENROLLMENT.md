@@ -333,8 +333,9 @@ and compared before an active-to-revoked transition. An already revoked entry
 is a read-only idempotent result even if a retry supplies an old or future
 well-formed revision: no endpoint/namespace revision or persisted bytes change.
 
-The registry's 100,000-entry ceiling and the store's default 16 MiB serialized
-state budget are separate from the store's 32-namespace ceiling. Creating the
+The registry's 100,000-entry ceiling, the store's 32-namespace ceiling and its
+default 16 MiB serialized state budget are independent safety limits, not a
+promise to store 100,000 entries. Creating the
 32nd namespace is allowed; a 33rd returns `relay_state_capacity_reached` without
 changing durable primary/backup bytes or any revision. CAS updates of existing
 namespaces remain available at that ceiling and survive reopening the store.
@@ -342,9 +343,7 @@ The namespace-boundary regression covers this contract independently of the
 implementation constant. Dedicated-directory alien-entry rejection is a
 separate test-coverage follow-up; this regression does not qualify that path.
 
-The registry's 100,000-entry ceiling and the store's default 16 MiB serialized
-size ceiling are independent safety limits, not a promise to store 100,000
-entries. Other namespaces and record sizes consume the same byte budget; the
+Other namespaces and record sizes consume the same byte budget; the
 first applicable limit bounds effective capacity. Set production capacity
 targets from deployment-specific load tests, not these hard ceilings.
 
