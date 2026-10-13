@@ -70,26 +70,12 @@ if [ "$SIGN_READY" = 1 ]; then
   echo "=== 将以 $MACOS_SIGNING_IDENTITY 签 .app(Tauri bundler 内联)==="
 fi
 
-# macOS 27+ 兼容 workaround(两个独立问题,均已在 macOS 27.0 arm64 实测复现并定位):
-#
-# 问题 A —— proc-macro dylib 无法加载(E0463 can't find crate):
-#   release profile 默认 strip=debuginfo,rustc 剥离 debuginfo 后符号字符串表偏移未按
-#   8 字节对齐;macOS 27 的 dyld 新增了对 LINKEDIT 字符串池 8 字节对齐的强制校验,
-#   proc-macro dylib(编译在 host 侧)dlopen 被拒 → rustc 加载它报 E0463。
-#   排除项:非 rustc 回归(1.96/1.97 均复现)、非链接器 bug(系统 ld / lld 均复现)。
-#   修复:release profile 用 strip=none。host + target 两侧都要覆盖
-#   (CARGO_PROFILE_RELEASE_STRIP 管 host 侧 proc-macro,RUSTFLAGS 管 target 侧 lib)。
-#   副作用:二进制含 debuginfo 体积略大;macOS 27 上无其他绕过方式,等 rustc 上游修。
-#   macOS ≤26 的 dyld 无此校验,保留默认 strip=debuginfo 以产出更小包。
-MACOS_MAJOR=$(sw_vers -productVersion | cut -d. -f1)
-if [ "$MACOS_MAJOR" -ge 27 ] 2>/dev/null; then
-  export CARGO_PROFILE_RELEASE_STRIP=none
-  # append 而非覆盖,保留调用者已设的 RUSTFLAGS
-  export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C strip=none"
-  echo "⚠️  macOS $MACOS_MAJOR+ → 注入 strip=none(绕过 dyld LINKEDIT 对齐校验)"
-else
-  echo "✓ macOS $MACOS_MAJOR,保留默认 strip=debuginfo"
-fi
+# 原 macOS 27+ strip=none workaround(问题 A:dyld 对 LINKEDIT 字符串池新增
+# 8 字节对齐校验,rustc 1.96/1.97 的 strip 输出未对齐,proc-macro dylib dlopen
+# 被拒报 E0463)已移除:修复随 rustc 1.98.0 上游落地(rust#157750,LLVM backport
+# #158410),本仓 stable 工具链已 ≥ 1.98.0,release 按 Cargo.toml 的
+# strip="symbols" + debug=false 统一零调试信息策略,所有 macOS 版本均可安全 strip。
+# 详见 docs/binary-size-optimization.md。
 
 (
   cd "$APP_DIR"
@@ -142,6 +128,13 @@ if [ ! -f "$DMG" ]; then
   echo "dmg 产物不存在: $DMG" >&2
   exit 1
 fi
+
+# 压缩升级(与 release-packages.yml 共用同一 helper):tauri dmg 为 UDZO/zlib
+# 且未传 -imagekey zlib-level,hdiutil 走默认压缩级别 1;转换为 ULMO(LZMA,
+# macOS 10.15+ 可挂载;本仓下限 11.0)通常再省 20-40%;转换失败降级保留原 dmg。
+# 注意顺序:转换发生在 notarytool 公证/staple 之前,公证对象即最终容器,
+# 不存在「转换破坏已签名 dmg」的问题;详见 scripts/convert-dmg-ulmo.sh。
+"$REPO_ROOT/scripts/convert-dmg-ulmo.sh" "$DMG"
 
 # ── 3.5 universal 双切片完整性校验 ──────────────────────────────────
 # 防御性校验:确保产出的 .app 主二进制同时含 arm64 + x86_64 切片。

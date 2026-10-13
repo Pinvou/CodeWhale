@@ -249,10 +249,12 @@ function fixture({ now = 0 } = {}) {
 test("A05 identifier propagation reaches A06 signing and lease hooks", async () => {
   const { privateKey } = crypto.generateKeyPairSync("ed25519");
   const hooks = new ControllerLivenessHooks({ clock: () => 0,
-    signingKeyId: "relay:signing:01", signingPrivateKey: privateKey });
+    signingKeyId: "relay.signing-01", signingPrivateKey: privateKey });
   const colonLease = { ...lease, controller_lease_id: "lease:0001" };
   await hooks.onLeaseCreated(colonLease);
   assert.equal(hooks.resumeDeadline(colonLease), 30_000);
+  assert.throws(() => new ControllerLivenessHooks({ signingKeyId: "relay:signing:01", signingPrivateKey: privateKey }),
+    { code: "controller_liveness_signing_key_invalid" });
   assert.throws(() => new ControllerLivenessHooks({ signingKeyId: "relay~signing", signingPrivateKey: privateKey }),
     { code: "controller_liveness_signing_key_invalid" });
   await assert.rejects(hooks.onLeaseCreated({ ...lease, controller_lease_id: "lease~0001" }),

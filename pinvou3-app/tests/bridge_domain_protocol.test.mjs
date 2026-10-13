@@ -141,7 +141,10 @@ const expectedProtocolHashes = {
   // chord_masked_chars passthrough in buildConfirmRequest), the
   // background-session refresh guard, and the inert-branch optional chaining
   // inside the listener callback spans (no invoke/listen call-set change).
-  computerUse: '9d0bad5bab784eb784a92b8df52ff7e83adef94cc0f6cb7bdbb99f913217e5b8',
+  // Recomputed for the permission onboarding row: the new
+  // computer_use_permission_status invoke (settings permissionStatus) joins
+  // the domain's call set.
+  computerUse: 'a681a541d4352b99d8e964e5a19f9cbaf45fd9fa9d56d5395d6c9e6c88459843',
   // Recomputed for #308 follow-ups: prefillComposer(text, append) recovery
   // entry + comment translations touching `invoke(` mentions (the extractor
   // scans raw source, so comment wording is part of the digest). Recomputed

@@ -17,8 +17,6 @@ use std::sync::{Mutex, OnceLock};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-#[cfg(any(feature = "benchmark-hooks", test))]
-use sha2::{Digest, Sha256};
 
 static TURN_SEQ: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_TURNS: OnceLock<Mutex<HashMap<String, VecDeque<ActiveTurnTiming>>>> = OnceLock::new();
@@ -332,12 +330,10 @@ pub struct ToolCatalogSummary {
 #[cfg(any(feature = "benchmark-hooks", test))]
 impl ToolCatalogSummary {
     pub fn from_serialized_catalog(catalog_count: usize, catalog_json: &[u8]) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(catalog_json);
         Self {
             catalog_count: catalog_count as u64,
             catalog_bytes: catalog_json.len() as u64,
-            catalog_sha256: crate::platform::encoding::hex_lower(&hasher.finalize()),
+            catalog_sha256: crate::platform::hashing::sha256_hex(catalog_json),
         }
     }
 }
@@ -1020,6 +1016,43 @@ mod tests {
         };
         let timeline = read_timeline("never-existed").unwrap();
         assert!(timeline.is_empty());
+    }
+
+    /// ADR-0024 read-surface register: the aux-id timeline read is exercised
+    /// (the aux panel's hydration/send re-reads it by id, plus the desktop
+    /// `chat:done` authoritative refresh — never through the sidebar lists
+    /// that exclude aux ids) but not load-bearing for rendering (the
+    /// hydration path try/catches to empty, the chat:done refresh keeps the
+    /// local projection on failure, and the aux panel does not project
+    /// timelineEvents) — the normative point is that `read_timeline` (and
+    /// the `get_session_timeline` command on top of it, pinned in
+    /// `app/commands/timeline.rs` tests) must keep reading `aux-<parent>`
+    /// ids: grow no id-class rejection on this read surface.
+    #[test]
+    fn read_timeline_reads_aux_ids_for_panel_hydration() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-timing-aux-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        // The derived aux id form (aux-<parent>) must roundtrip through the
+        // timing sidecar path resolution and the reader without rejection.
+        let sid = "aux-l5cz0m8xq2k1b";
+        start_turn(sid);
+        finish_turn(sid, "Completed", None);
+
+        let timeline = read_timeline(sid).unwrap();
+        assert_eq!(timeline.len(), 2, "aux timing events must stay readable");
+        assert_eq!(timeline[0].event, "user_start");
+        assert_eq!(timeline[1].event, "assistant_done");
+
+        let _ = std::fs::remove_dir_all(tmp);
     }
 
     #[test]

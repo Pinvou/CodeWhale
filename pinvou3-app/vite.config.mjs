@@ -443,7 +443,7 @@ export const lazyChunkContracts = {
   updateNotice: ['features/updater/UpdateNoticeButton.jsx', 'UpdateNoticeButton'],
   savedPersonaConfirmDialog: ['features/personas/SavedPersonaConfirmDialog.jsx', 'SavedPersonaConfirmDialog'],
   apiKeyGateDialog: ['features/settings/ApiKeyGateDialog.jsx', 'ApiKeyGateDialog'],
-  archiveConfirmDialog: ['features/sessions/ArchiveConfirmDialog.jsx', 'ArchiveConfirmDialog'],
+  archiveConfirmDialog: ['components/ArchiveConfirmDialog.jsx', 'ArchiveConfirmDialog'],
   toolWelcome: ['features/tools/ToolWelcomeCard.jsx', 'ToolWelcomeCard'],
 };
 

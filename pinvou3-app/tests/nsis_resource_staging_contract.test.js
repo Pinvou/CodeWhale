@@ -322,8 +322,10 @@ assert.match(rustToolchainGuard, /function Invoke-Rustup/u);
 assert.match(rustToolchainGuard, /ErrorActionPreference = "Continue"/u);
 assert.match(rustToolchainGuard, /RUSTUP_DIST_SERVER/u);
 assert.match(rustToolchainGuard, /https:\/\/static\.rust-lang\.org/u);
-assert.match(rustToolchainGuard, /mirrors\.tuna\.tsinghua\.edu\.cn\/rustup/u);
-assert.match(rustToolchainGuard, /https:\/\/rsproxy\.cn/u);
+// 回流社区 #610:回退链改 rsproxy → USTC → 官方(TUNA 404 version-pinned
+// manifest 出链,仅 rolling 通道可用);官方源仍在链尾兜底。
+assert.match(rustToolchainGuard, /https:\/\/rsproxy\.cn\/rustup/u);
+assert.match(rustToolchainGuard, /mirrors\.ustc\.edu\.cn\/rust-static\/rustup/u);
 assert.match(rustToolchainGuard, /Name = "configured source"/u);
 assert.match(rustToolchainGuard, /InstallAttemptTimeoutSeconds = 600/u);
 assert.match(rustToolchainGuard, /RepairAttemptsPerSource = 2/u);

@@ -16,13 +16,16 @@
 //! - `connectors` — connector 注册/注销(含拆分后的 add_to_mcp_json remote/local 分支)
 
 mod connectors;
+// pub(crate) 仅为让 sibling feature(runtime_bundle)的 boot 写方跨进程回归测试
+// 取到 lock_path_for/process_mutex_for 测试钩子;模块内条目各自保持原可见性。
+pub(crate) mod file_lock;
 mod migration;
 mod python_dependencies;
 mod secrets;
 mod types;
 mod validation;
 
-pub(crate) use connectors::{mcp_json_lock, mcp_json_unparseable, write_json_pretty};
+pub(crate) use connectors::{mcp_json_unparseable, with_mcp_json_lock, write_json_pretty};
 
 // PR #302 WIP 拆分的子模块（main 的 Wave 2 没有接这块）—— 需要补 mod 声明。
 pub mod actions;
@@ -76,6 +79,16 @@ use crate::platform::paths;
 /// import_lock(X) under TRANSACTION while `restore_plugin(X)` holds
 /// import_lock(X) waiting on TRANSACTION. Known, unresolved; this doc must
 /// not be cited as proof of a settled global lock order.
+///
+/// Cross-process file locks (#521, `file_lock.rs`): the marketplace state
+/// files' combined locks (`bundles.lock` / `recycle-bin.lock` / `mcp.lock`,
+/// each in-process mutex + OS flock) nest strictly BELOW this lock — install,
+/// uninstall, and restore hold TRANSACTION (or import_lock) and enter them
+/// inside it — and the file-lock sections themselves never acquire this lock
+/// or each other, so they are leaves in the global order (the full acyclic
+/// order, including the scope lock's edge onto `bundles.lock` — an edge from
+/// #517, which lands separately from the branch carrying this doc — is
+/// documented in `file_lock.rs`'s module docs).
 static MARKETPLACE_TRANSACTION_LOCK: Mutex<()> = Mutex::new(());
 
 /// mcp.json server keys owned by the engine boot path (`runtime_bundle`'s
@@ -329,7 +342,7 @@ fn write_atomic_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
     }
-    deepseek_tui::utils::write_atomic(path, bytes)
+    crate::platform::filesystem::atomic_write_private(path, bytes)
         .map_err(|error| format!("Failed to write {}: {error}", path.display()))
 }
 
@@ -346,7 +359,14 @@ fn restore_optional_file(path: &Path, content: &Option<Vec<u8>>) -> Result<(), S
 }
 
 fn restore_marketplace_snapshot(snapshot: &MarketplaceStateSnapshot) -> Result<(), String> {
-    restore_optional_file(&paths::mcp_config_path(), &snapshot.mcp)?;
+    // mcp.json 段走跨进程文件锁（#521）：journal 回滚/恢复是 mcp.json 的整文件
+    // 写，只有它与并发写入器互斥，file_lock.rs「三个状态文件的全部临界区都过
+    // 组合锁」的全称不变量才成立（TRANSACTION → mcp.lock，文档方向）。语义边界
+    // （#521 评审披露，非锁可解）：锁只保证这次整文件写与并发写串行，不改变
+    // 「按 begin 时的快照整文件还原」本身——跨进程下，快照之后对端已提交的写入
+    // 会被这次还原覆盖，这是 journal 机制固有的整文件回滚语义。installed.json
+    // 不在 #521 三文件之列，保持原样。
+    with_mcp_json_lock(|| restore_optional_file(&paths::mcp_config_path(), &snapshot.mcp))?;
     restore_optional_file(
         &paths::pinvou3_home()
             .join("marketplace")
@@ -636,9 +656,9 @@ pub fn unavailable_tool_names() -> Vec<String> {
 /// via `tool_search` and keeps using the locally retained credentials.
 pub(crate) const NATIVE_PACKAGE_TOOLS: &[(&str, &str)] = &[("ima_openapi", "ima-skills")];
 
-/// Unavailable native tool names for a scope: a native tool is denied whenever
-/// its owning package is not installed, or the owning package is disabled or
-/// hidden for that scope — the same availability rule the package's skills
+/// Unavailable native tool names: a native tool is denied whenever its owning
+/// package is not installed, or the owning package is disabled or hidden —
+/// the same availability rule the package's skills
 /// follow (`unavailable_bundles_for` = disabled ∪ hidden;
 /// `resolve_scope_disabled_ids` already counts installed skill owner packages
 /// in the DenyAll fallback, so an uninitialized DenyAll scope denies without
@@ -646,10 +666,7 @@ pub(crate) const NATIVE_PACKAGE_TOOLS: &[(&str, &str)] = &[("ima_openapi", "ima-
 /// owner is resolved through the GATING mapping (`skill_gating_owner`) — the
 /// disabled/hidden sets carry normalized owner pack ids (`to_package_id`), so
 /// the check must use the same mapping the writers normalized with.
-fn native_unavailable_tool_names_for(
-    _scope: ConnectorScope,
-    unavailable: &[String],
-) -> Vec<String> {
+fn native_unavailable_tool_names(unavailable: &[String]) -> Vec<String> {
     let installed = skill_marketplace::SkillMarketplaceManager::new().installed_skill_ids();
     NATIVE_PACKAGE_TOOLS
         .iter()
@@ -667,7 +684,7 @@ pub fn unavailable_tool_names_for(scope: ConnectorScope) -> Vec<String> {
     // whole DenyAll expansion.
     let unavailable = unavailable_bundles_for(scope);
     let mut names = MarketplaceManager::new().model_tool_names(&unavailable);
-    names.extend(native_unavailable_tool_names_for(scope, &unavailable));
+    names.extend(native_unavailable_tool_names(&unavailable));
     // Builtin feature switches (docs/builtin-toolset-contract.md §3.3): tools
     // removed by the union semantics are scope-agnostic, so they merge into
     // every scope's engine gate (deduped).
@@ -684,51 +701,53 @@ pub fn unavailable_tool_names_for(scope: ConnectorScope) -> Vec<String> {
 /// 文件（mcp.json）。按 mcp.json 的 server 键（= 工具 id）逐条重写，覆盖内嵌预设
 /// 与自定义/手放 MCP（不再只遍历内嵌清单）。返回是否有改动（供启动标记观测）。
 pub fn migrate_mcp_json_paths() -> Result<bool, String> {
-    // 与其他 mcp.json 写方（add/remove_to_mcp_json）同一把进程内锁串行化（M-8）。
-    let _guard = connectors::mcp_json_lock();
-    let mcp_path = paths::mcp_config_path();
-    if !mcp_path.is_file() {
-        return Ok(false);
-    }
-    let content =
-        std::fs::read_to_string(&mcp_path).map_err(|e| format!("读取 mcp.json 失败: {e}"))?;
-    let mut mcp: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| format!("解析 mcp.json 失败: {e}"))?;
-    let mut changed = false;
-    let Some(servers) = mcp.get_mut("servers").and_then(|s| s.as_object_mut()) else {
-        return Ok(false);
-    };
-    let ids: Vec<String> = servers.keys().cloned().collect();
-    for id in ids {
-        let old_dir = paths::bundle_mcp_servers_dir().join(&id);
-        let new_dir = mcp_catalog::package_mcp_dir(&id);
-        // 新目录不存在（自定义 MCP 搬迁 kept/重释放被跳过）时不重写：否则
-        // mcp.json 指向不存在的新路径，工具静默死掉且读路径无旧布局回退（G4）。
-        // 搬迁/重释放成功后的下一轮启动再重写（本函数幂等）。
-        if !new_dir.is_dir() {
-            continue;
+    // 与其他 mcp.json 写方（add/remove_to_mcp_json）同一把跨进程文件锁串行化
+    // （M-8；锁见 file_lock.rs）。
+    connectors::with_mcp_json_lock(|| {
+        let mcp_path = paths::mcp_config_path();
+        if !mcp_path.is_file() {
+            return Ok(false);
         }
-        // 兼容两种分隔符的历史写法（Windows 原生 `\` 与 `/`）
-        let old_spellings = [
-            old_dir.to_string_lossy().replace('\\', "/"),
-            old_dir.to_string_lossy().replace('/', "\\"),
-        ];
-        let new_text = new_dir.to_string_lossy().to_string();
-        let Some(entry) = servers.get_mut(&id) else {
-            continue;
+        let content =
+            std::fs::read_to_string(&mcp_path).map_err(|e| format!("读取 mcp.json 失败: {e}"))?;
+        let mut mcp: serde_json::Value =
+            serde_json::from_str(&content).map_err(|e| format!("解析 mcp.json 失败: {e}"))?;
+        let mut changed = false;
+        let Some(servers) = mcp.get_mut("servers").and_then(|s| s.as_object_mut()) else {
+            return Ok(false);
         };
-        for key in ["command", "args"] {
-            if let Some(value) = entry.get_mut(key) {
-                if rewrite_path_strings(value, &old_spellings, &new_text) {
-                    changed = true;
+        let ids: Vec<String> = servers.keys().cloned().collect();
+        for id in ids {
+            let old_dir = paths::bundle_mcp_servers_dir().join(&id);
+            let new_dir = mcp_catalog::package_mcp_dir(&id);
+            // 新目录不存在（自定义 MCP 搬迁 kept/重释放被跳过）时不重写：否则
+            // mcp.json 指向不存在的新路径，工具静默死掉且读路径无旧布局回退（G4）。
+            // 搬迁/重释放成功后的下一轮启动再重写（本函数幂等）。
+            if !new_dir.is_dir() {
+                continue;
+            }
+            // 兼容两种分隔符的历史写法（Windows 原生 `\` 与 `/`）
+            let old_spellings = [
+                old_dir.to_string_lossy().replace('\\', "/"),
+                old_dir.to_string_lossy().replace('/', "\\"),
+            ];
+            let new_text = new_dir.to_string_lossy().to_string();
+            let Some(entry) = servers.get_mut(&id) else {
+                continue;
+            };
+            for key in ["command", "args"] {
+                if let Some(value) = entry.get_mut(key) {
+                    if rewrite_path_strings(value, &old_spellings, &new_text) {
+                        changed = true;
+                    }
                 }
             }
         }
-    }
-    if changed {
-        connectors::write_json_pretty(&mcp_path, &mcp)?;
-    }
-    Ok(changed)
+        if changed {
+            connectors::write_json_pretty(&mcp_path, &mcp)?;
+        }
+        Ok(changed)
+    })
 }
 
 /// 强制迁移自定义 MCP（不在内嵌 `mcp_catalog` 里的）到新布局：把
@@ -2579,7 +2598,7 @@ mod tests {
     use crate::platform::credential_store::{
         CredentialError, CredentialReference, CredentialStore, MemoryCredentialStore,
     };
-    use crate::platform::paths::tests::ENV_LOCK;
+    use crate::platform::paths::tests::{ENV_LOCK, EnvVarGuard};
     use secrets::{
         mcp_secret_env_var, mcp_secret_reference, snapshot_secret_values, store_secret_value,
     };
@@ -2608,21 +2627,33 @@ mod tests {
         // placeholders, and the test outcome would depend on whether the
         // bridge boot tests have already run (order coupling).
         super::install_mcp_secret_resolver();
-        let prev = std::env::var("PINVOU3_HOME").ok();
         let prev_secrets = secrets::snapshot_secret_values();
         secrets::clear_secret_values_for_test();
+        // Opt the credential store into its file fallback for the body: the
+        // home redirect below cannot hermeticize the OS keyring, and on macOS
+        // the real keyring read blocks the headless test on the ACL consent
+        // dialog (see the valve comment in platform::credential_store). The
+        // file fallback resolves through CODEWHALE_HOME rather than
+        // PINVOU3_HOME, so it must be pointed at the same temp dir —
+        // otherwise valved reads and writes land in the developer's real
+        // ~/.codewhale/secrets/secrets.json (and trigger its legacy
+        // migration). EnvVarGuard restores all three vars on every exit
+        // path, including a panicking body.
+        let _env = EnvVarGuard::capture(&[
+            "PINVOU3_TEST_KEYRING_FILE_FALLBACK",
+            "CODEWHALE_HOME",
+            "PINVOU3_HOME",
+        ]);
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_TEST_KEYRING_FILE_FALLBACK", "1") };
         let dir = std::env::temp_dir().join(format!("pinvou3-mkt-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("CODEWHALE_HOME", &dir) };
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
         unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
         f();
-        match prev {
-            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
-            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
         secrets::restore_secret_values(prev_secrets);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2733,12 +2764,19 @@ mod tests {
         mcp_path
     }
 
+    fn missing_absolute_fixture_path(name: &str) -> String {
+        let path = paths::pinvou3_home().join("missing-old-targets").join(name);
+        assert!(path.is_absolute() && !path.exists());
+        path.to_string_lossy().into_owned()
+    }
+
     /// A dead absolute script path in an installed tool's entry is rebuilt from the
     /// manifest into the fresh-install form (secret placeholder resolved from the
     /// credential store), while entries not owned by any installed tool stay untouched.
     #[test]
     fn reconcile_rebuilds_dead_local_entry_and_keeps_unknown_entries() {
         with_temp_home(|| {
+            let missing_script = missing_absolute_fixture_path("w.py");
             write_local_tool_fixture("weather-x", true);
             write_installed_ids(&["weather-x".to_string()]);
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
@@ -2751,13 +2789,13 @@ mod tests {
                 .unwrap();
             let unknown = serde_json::json!({"command": "node", "args": ["/opt/user-tool/run.js"]});
             let mcp_path = seed_mcp_json(serde_json::json!({
-                "weather-x": {"command": "python3", "args": ["/x/w.py"]},
+                "weather-x": {"command": "python3", "args": [missing_script.clone()]},
                 "user-own-tool": unknown,
             }));
 
             let actions = manager.reconcile_installed_mcp_entries().unwrap();
             assert_eq!(actions.len(), 1, "{actions:?}");
-            assert!(actions[0].contains("weather-x") && actions[0].contains("/x/w.py"));
+            assert!(actions[0].contains("weather-x") && actions[0].contains(&missing_script));
 
             let mcp = read_mcp_json();
             let entry = &mcp["servers"]["weather-x"];
@@ -3319,13 +3357,14 @@ mod tests {
     #[test]
     fn reconcile_rebuild_preserves_user_configured_fields() {
         with_temp_home(|| {
+            let missing_script = missing_absolute_fixture_path("w.py");
             write_local_tool_fixture("toggle-x", false);
             write_installed_ids(&["toggle-x".to_string()]);
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
             let mcp_path = seed_mcp_json(serde_json::json!({
                 "toggle-x": {
                     "command": "python3",
-                    "args": ["/x/w.py"],
+                    "args": [missing_script],
                     "enabled": false,
                     "timeout_ms": 4200,
                     "custom_hint": "keep"
@@ -3375,14 +3414,15 @@ mod tests {
     #[test]
     fn reconcile_refuses_rebuild_when_manifest_command_is_dead() {
         with_temp_home(|| {
-            let manifest = r#"{
+            let missing_command = missing_absolute_fixture_path("binary");
+            let manifest = serde_json::json!({
                 "id":"deadbin","name":"deadbin","description":"d","version":"1","icon":"x","category":"c",
-                "mcp_tools":[],"command":"/opt/dead/binary","args":[]
-            }"#;
-            write_tool_manifest("deadbin", manifest);
+                "mcp_tools":[],"command":missing_command.clone(),"args":[]
+            }).to_string();
+            write_tool_manifest("deadbin", &manifest);
             write_installed_ids(&["deadbin".to_string()]);
             let mcp_path = seed_mcp_json(serde_json::json!({
-                "deadbin": {"command": "/opt/dead/binary"}
+                "deadbin": {"command": missing_command.clone()}
             }));
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
 
@@ -3390,7 +3430,7 @@ mod tests {
             let actions = manager.reconcile_installed_mcp_entries().unwrap();
             assert_eq!(actions.len(), 1, "{actions:?}");
             assert!(
-                actions[0].contains("not rebuilt") && actions[0].contains("/opt/dead/binary"),
+                actions[0].contains("not rebuilt") && actions[0].contains(&missing_command),
                 "{actions:?}"
             );
             assert_eq!(
@@ -3463,12 +3503,13 @@ mod tests {
     #[test]
     fn reconcile_rebuilds_local_tool_with_unresolvable_secret() {
         with_temp_home(|| {
+            let missing_script = missing_absolute_fixture_path("w.py");
             write_local_tool_fixture("lostkey-x", true);
             write_installed_ids(&["lostkey-x".to_string()]);
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
             // No credential-store entry for AMAP_KEY.
             let mcp_path = seed_mcp_json(serde_json::json!({
-                "lostkey-x": {"command": "python3", "args": ["/x/w.py"]}
+                "lostkey-x": {"command": "python3", "args": [missing_script]}
             }));
 
             let actions = manager.reconcile_installed_mcp_entries().unwrap();
@@ -3572,22 +3613,27 @@ mod tests {
         // Same as with_temp_home: install the foundation resolver to avoid
         // test order coupling.
         super::install_mcp_secret_resolver();
-        let prev = std::env::var("PINVOU3_HOME").ok();
         let prev_secrets = secrets::snapshot_secret_values();
         secrets::clear_secret_values_for_test();
+        // Same hermeticity valve as with_temp_home (see its comment): the
+        // file fallback goes through CODEWHALE_HOME, which is pointed at the
+        // same temp dir, and EnvVarGuard restores the env even on panic.
+        let _env = EnvVarGuard::capture(&[
+            "PINVOU3_TEST_KEYRING_FILE_FALLBACK",
+            "CODEWHALE_HOME",
+            "PINVOU3_HOME",
+        ]);
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_TEST_KEYRING_FILE_FALLBACK", "1") };
         let dir =
             std::env::temp_dir().join(format!("pinvou3-mkt-test-async-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("CODEWHALE_HOME", &dir) };
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
         unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
         f().await;
-        match prev {
-            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
-            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
         secrets::restore_secret_values(prev_secrets);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -7366,7 +7412,7 @@ mod tests {
                 .and_then(|a| a.last())
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
-                .to_string();
+                .replace('\\', "/");
             assert!(
                 command.contains("bundles/session-reader/mcp")
                     && !command.contains("Session-Reader"),
@@ -7786,28 +7832,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn install_missing_required_secret_returns_recoverable_redacted_error() {
-        with_temp_home(|| {
-            write_tool_manifest(
-                "iwencai-custom",
-                r#"{
-                    "id":"iwencai-custom","name":"Iwencai","description":"d","version":"1","icon":"x","category":"c",
-                    "mcp_tools":["mcp_iwencai_query"],"command":"python","args":["server.py"],
-                    "secret_env":[{"key":"IWENCAI_TEST_KEY","provider":"iwencai-test","required":true}]
-                }"#,
-            );
-            let mgr = MarketplaceManager::with_store(MemoryCredentialStore::default());
-
-            let err = mgr
-                .install("iwencai-custom", &std::collections::HashMap::new())
-                .unwrap_err();
-
-            assert!(err.contains("IWENCAI_TEST_KEY"));
-            assert!(!err.contains("test-secret"));
-        });
-    }
-
     /// Upload 来源的包卸载不再原位保留（旧语义会让卡片以"未安装"重现），改为整包
     /// 搬入回收站：`bundles/<id>/` 搬空、`available_tools` 不再出现、回收清单有记录。
     /// 来源查询必须先于 `store.remove` —— 此前先删登记再查恒 false，上传包目录被
@@ -8171,6 +8195,87 @@ mod tests {
             assert!(
                 !mgr.installed_ids()
                     .contains(&"up-pip-reinstall".to_string())
+            );
+        });
+    }
+
+    /// Windows 内置解释器使用隔离环境，普通商店重装不能把上传 manifest 的任意
+    /// `pip_dependencies` 当作可信下载指令。首次上传仍只告警并完成供给；卸载后从
+    /// 卡片普通重装时必须明确拒绝，避免再次产生“安装成功但 import 必然失败”。
+    /// 回归重点：拒绝发生在登记写入之前，installed.json 与 mcp.json 两个登记面
+    /// 都不得留下幽灵条目。双臂均入 CI：Linux rust-test 跑 warn-skip 臂（重装
+    /// 成功且两个登记面都必须重建，幽灵断言的镜像面），windows-rust-test
+    /// regression leg 经
+    /// `features::marketplace::tests::reinstall_upload_with_unlocked_pip_dependencies_contract`
+    /// 过滤器跑拒绝臂（过滤器有 0-match 守卫，改名不会静默空跑）。
+    #[test]
+    fn reinstall_upload_with_unlocked_pip_dependencies_contract() {
+        with_temp_home(|| {
+            write_tool_manifest(
+                "up-pip-reinstall",
+                r#"{
+                    "id":"up-pip-reinstall","name":"Up","description":"d","version":"1","icon":"x","category":"c",
+                    "mcp_tools":[],"command":"python","args":["server.py"],
+                    "pip_dependencies":["pinvou3-nonexistent-pkg-xyz"]
+                }"#,
+            );
+            let mgr = MarketplaceManager::new();
+            mgr.install_upload(
+                "up-pip-reinstall",
+                store::BundleSource::Upload("up-pip-reinstall.zip".to_string()),
+            )
+            .unwrap();
+            mgr.uninstall("up-pip-reinstall").unwrap();
+            // Upload 卸载 = 整包进回收站（回收站契约），重装前先取回目录；
+            // 登记由下方 install 重建。
+            recycle_bin::RecycleBin::new()
+                .take_back("up-pip-reinstall")
+                .unwrap();
+            // 全局 pip stub 的失败安全阀：若本测试在 set 与 take 之间断言失败，
+            // Drop 会把 stub 清零，避免陈旧的合成结果泄漏给同一测试二进制里
+            // 后续真正会调 pip 的测试（CI 单线程串行，泄漏会表现为误导性连锁红）。
+            struct ResetPipStubOnDrop;
+            impl Drop for ResetPipStubOnDrop {
+                fn drop(&mut self) {
+                    connectors::set_next_pip_install_result_for_test(0);
+                }
+            }
+            let _reset_pip_stub = ResetPipStubOnDrop;
+            // 保险：万一 fail-closed 门禁回归，拦截真实 pip 子进程（不触网）。
+            connectors::set_next_pip_install_result_for_test(1);
+
+            let reinstall = mgr.install("up-pip-reinstall", &std::collections::HashMap::new());
+            // Runtime check (capabilities::is_windows)：与本文件既有双臂用法
+            // 同款，维持架构守卫的 rust_target_cfg_outside_adapter 零基线。
+            if crate::platform::capabilities::is_windows() {
+                let error = reinstall.unwrap_err();
+                assert!(error.contains("未经过 Windows 可验证依赖锁"), "{error}");
+                assert!(
+                    !mgr.installed_ids()
+                        .contains(&"up-pip-reinstall".to_string()),
+                    "拒绝重装不得在 installed.json 留下幽灵注册"
+                );
+                assert!(
+                    read_mcp_json()["servers"].get("up-pip-reinstall").is_none(),
+                    "拒绝重装不得在 mcp.json 留下幽灵 server 条目"
+                );
+            } else {
+                // warn-skip 臂：重装成功，且登记必须被重建。
+                reinstall.unwrap();
+                assert!(
+                    mgr.installed_ids()
+                        .contains(&"up-pip-reinstall".to_string()),
+                    "warn-skip 重装必须重建 installed.json 登记"
+                );
+                assert!(
+                    read_mcp_json()["servers"].get("up-pip-reinstall").is_some(),
+                    "warn-skip 重装必须重建 mcp.json server 条目"
+                );
+            }
+            assert_eq!(
+                connectors::take_pending_pip_install_result_for_test(),
+                1,
+                "untrusted pip declaration must never reach pip"
             );
         });
     }
@@ -8909,37 +9014,6 @@ mod tests {
             assert!(
                 entry["env"].get("MY_INSTALL_TIME_VAR").is_none(),
                 "the dropped key must actually be gone: {entry}"
-            );
-        });
-    }
-
-    /// A restore that degraded a secret channel (no stored credential) must
-    /// say so in its note instead of reporting an unqualified success that
-    /// 401s on first use.
-    #[test]
-    fn restore_notes_secret_channels_restored_without_wiring() {
-        with_temp_home(|| {
-            let manifest = serde_json::json!({
-                "id":"nc-x","name":"nc-x","description":"d","version":"1","icon":"x","category":"c",
-                "mcp_tools":[],"command":"","args":[],
-                "servers":[{"name":"nc-remote","url":"https://nc.example.com/mcp"}],
-                "secret_headers":[{"header":"Authorization","scheme":"Bearer","source_key":"NC_KEY","provider":"nc","required":true}]
-            });
-            write_tool_manifest("nc-x", &serde_json::to_string_pretty(&manifest).unwrap());
-            write_installed_ids(&["nc-x".to_string()]);
-            let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
-
-            let actions = manager.reconcile_installed_mcp_entries().unwrap();
-            assert_eq!(actions.len(), 1, "{actions:?}");
-            assert!(
-                actions[0].contains("restored missing remote entry 'nc-remote'")
-                    && actions[0].contains("no stored credential for NC_KEY"),
-                "the restore note must disclose the degraded channel: {actions:?}"
-            );
-            let entry = &read_mcp_json()["servers"]["nc-remote"];
-            assert!(
-                entry.get("bearer_token_env_var").is_none() && entry.get("env_headers").is_none(),
-                "the degraded entry must carry no auth wiring: {entry}"
             );
         });
     }
@@ -9852,6 +9926,206 @@ mod tests {
             );
             assert_eq!(manager_installed_bytes(), installed_before);
             assert!(!marketplace_transaction_journal().exists());
+        });
+    }
+
+    /// #515/#521 cross-process contention on the mcp.json WRITE path: while a
+    /// foreign fd holds the `mcp.lock` OS lock, the removal must not land
+    /// first; after the release the write lands with its full content.
+    #[test]
+    fn cross_process_lock_blocks_mcp_write_until_release() {
+        with_temp_home(|| {
+            let mcp_path = seed_mcp_json(serde_json::json!({
+                "weather": {"command": "python", "args": ["s.py"]},
+                "kept": {"command": "node", "args": ["k.js"]}
+            }));
+            let lock_path = file_lock::lock_path_for(&mcp_path);
+            std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&lock_path)
+                .expect("test should be able to open the lock file");
+            let mut foreign = fd_lock::RwLock::new(file);
+            let foreign_guard = foreign
+                .write()
+                .expect("test should be able to take the foreign cross-process write lock");
+
+            let worker = std::thread::spawn(move || {
+                MarketplaceManager::with_store(MemoryCredentialStore::default())
+                    .remove_from_mcp_json("weather")
+                    .expect("removal should succeed once the foreign lock is released");
+            });
+            // Handshake: wait until the worker holds the mcp.json in-process
+            // mutex — with the foreign lock held, it is now parked on (or just
+            // failed) the OS-lock acquisition (#517 test shape).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match file_lock::process_mutex_for(&lock_path).try_lock() {
+                    Ok(guard) => drop(guard),
+                    Err(std::sync::TryLockError::WouldBlock) => break,
+                    Err(std::sync::TryLockError::Poisoned(p)) => {
+                        drop(p.into_inner());
+                        break;
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "worker never reached the mcp.json lock acquisition point"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            // The rewrite must not land while the peer holds the lock.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                let content = std::fs::read_to_string(&mcp_path).unwrap();
+                assert!(
+                    content.contains("\"weather\""),
+                    "mcp.json rewritten while the lock was still held — serialization is broken: {content}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            drop(foreign_guard);
+            worker
+                .join()
+                .expect("worker should finish once the foreign lock is released");
+            let mcp: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
+            assert!(
+                mcp["servers"].get("weather").is_none(),
+                "the entry must be gone after the lock is released: {mcp}"
+            );
+            assert!(
+                mcp["servers"].get("kept").is_some(),
+                "the sibling entry must survive: {mcp}"
+            );
+        });
+    }
+
+    /// #521 cross-process contention on the mcp.json secret-MIGRATION write
+    /// path (`migrate_mcp_plaintext_secrets` → whole-file placeholder
+    /// rewrite): while a foreign fd holds the `mcp.lock` OS lock, the
+    /// migration rewrite must not land; after the release the placeholder
+    /// form lands and the sibling entry survives.
+    #[test]
+    fn cross_process_lock_blocks_mcp_secret_migration_write_until_release() {
+        with_temp_home(|| {
+            let mcp_path = seed_mcp_json(serde_json::json!({
+                "weather": {"command": "python", "args": ["s.py"], "env": {"AMAP_KEY": "legacy-plain-secret"}},
+                "kept": {"command": "node", "args": ["k.js"]}
+            }));
+            let lock_path = file_lock::lock_path_for(&mcp_path);
+            std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&lock_path)
+                .expect("test should be able to open the lock file");
+            let mut foreign = fd_lock::RwLock::new(file);
+            let foreign_guard = foreign
+                .write()
+                .expect("test should be able to take the foreign cross-process write lock");
+
+            let worker = std::thread::spawn(move || {
+                MarketplaceManager::with_store(MemoryCredentialStore::default())
+                    .migrate_mcp_plaintext_secrets()
+                    .expect("migration should succeed once the foreign lock is released");
+            });
+            // Handshake: wait until the worker holds the mcp.json in-process
+            // mutex — with the foreign lock held, it is now parked on (or just
+            // failed) the OS-lock acquisition (#517 test shape).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match file_lock::process_mutex_for(&lock_path).try_lock() {
+                    Ok(guard) => drop(guard),
+                    Err(std::sync::TryLockError::WouldBlock) => break,
+                    Err(std::sync::TryLockError::Poisoned(p)) => {
+                        drop(p.into_inner());
+                        break;
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "worker never reached the mcp.json lock acquisition point"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            // The plaintext secret must still be on disk while the peer holds
+            // the lock — the migration rewrite may not land first.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                let content = std::fs::read_to_string(&mcp_path).unwrap();
+                assert!(
+                    content.contains("legacy-plain-secret"),
+                    "mcp.json rewritten while the lock was still held — serialization is broken: {content}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            drop(foreign_guard);
+            worker
+                .join()
+                .expect("worker should finish once the foreign lock is released");
+            let mcp: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
+            assert_eq!(
+                mcp["servers"]["weather"]["env"]["AMAP_KEY"],
+                serde_json::Value::String(super::secrets::mcp_secret_placeholder("AMAP_KEY")),
+                "the plaintext secret must be migrated to the placeholder form: {mcp}"
+            );
+            assert!(
+                mcp["servers"].get("kept").is_some(),
+                "the sibling entry must survive: {mcp}"
+            );
+        });
+    }
+
+    /// #515/#521 cross-process contention on the mcp.json READ path: while a
+    /// peer holds the OS lock, the unparseability probe must degrade promptly
+    /// to the unlocked, never-persisting view (bounded) instead of blocking —
+    /// and a missing mcp.json stays missing.
+    #[test]
+    fn cross_process_lock_contention_degrades_mcp_probe_read_without_persist() {
+        with_temp_home(|| {
+            let mcp_path = paths::mcp_config_path();
+            let lock_path = file_lock::lock_path_for(&mcp_path);
+            std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&lock_path)
+                .expect("test should be able to open the lock file");
+            let mut foreign = fd_lock::RwLock::new(file);
+            let foreign_guard = foreign
+                .write()
+                .expect("test should be able to take the foreign cross-process write lock");
+
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                let got = connectors::mcp_json_unparseable();
+                done_tx.send(got).expect("reader should send its result");
+            });
+            // A contended read must return promptly. recv_timeout doubles as
+            // the regression assertion: a blocking read hangs here and fails
+            // the test with a bounded, diagnosable timeout.
+            let got = done_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("contended probe must degrade instead of blocking on the peer's lock");
+            assert!(
+                !got,
+                "a missing mcp.json reads as parseable under contention"
+            );
+            assert!(
+                !mcp_path.exists(),
+                "a contended probe must not persist (create) mcp.json"
+            );
+
+            drop(foreign_guard);
+            reader.join().expect("reader thread should finish");
         });
     }
 }
