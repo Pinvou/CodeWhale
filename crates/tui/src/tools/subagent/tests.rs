@@ -7819,11 +7819,34 @@ fn child_parked_note_rides_the_next_result_and_refresh_parks_one() {
         parked[0].evicted.iter().any(|name| name == "big-a"),
         "the parked note must name the LRU victim: {parked:?}"
     );
+}
 
-    // Taking the note hands it to the result carrier and empties the slot.
-    let taken = std::mem::take(&mut surface.pending_eviction_notes);
-    assert!(taken[0].evicted.iter().any(|name| name == "big-a"));
-    assert!(surface.pending_eviction_notes.is_empty());
+/// The park side is covered above; this pin is the consumption side —
+/// `execute_from_surface` must hand parked notes to the child's recorded
+/// result, the production edge that once discarded every report. Driven
+/// through the same wrapper a real child tool call takes.
+#[tokio::test]
+async fn parked_note_rides_through_the_execute_from_surface_glue() {
+    let registry = small_surface_registry(FleetRole::Builder);
+    let catalog = registry.deferred_catalog_for_model(&FleetRole::Builder);
+    let mut surface = SubAgentToolSurface::new(catalog, &["get_goal".to_string()]);
+    surface.park_eviction_note(
+        ToolboxEvictionTrigger::TurnStart,
+        &["ghost-tool".to_string()],
+    );
+
+    let content = execute_surface_tool(&registry, &mut surface, "get_goal", json!({}))
+        .await
+        .expect("cached read tool executes");
+    assert!(
+        content.contains("no longer callable") && content.contains("ghost-tool"),
+        "the production ride glue must attach the parked note to the recorded result: {content}"
+    );
+    assert!(
+        surface.pending_eviction_notes.is_empty(),
+        "the ride consumes the parked notes: {:?}",
+        surface.pending_eviction_notes
+    );
 }
 
 #[test]
