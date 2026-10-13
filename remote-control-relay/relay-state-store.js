@@ -1296,6 +1296,15 @@ export class RelayStateStore {
     });
   }
 
+  readCapacity() {
+    this.#assertReady();
+    // Use the exact persisted encoding, including its final newline. This is
+    // the live writer's current snapshot, not a reservation for a future CAS.
+    return Object.freeze({ store_revision: this.#state.revision,
+      serialized_bytes: Buffer.byteLength(serializeState(this.#state, this.#maxBytes)),
+      max_bytes: this.#maxBytes });
+  }
+
   readNamespace(name) {
     this.#assertReady();
     if (!NAMESPACE.test(name)) fail("namespace_name_invalid");

@@ -82,11 +82,11 @@ test("wall forward and invalid elapsed clocks fail closed without resetting rese
 });
 
 test("elapsed expiry invalidation retry retains exact slot and never grants a new budget", async () => {
-  let wall = 1000; let elapsed = 0; let failed = true;
+  let wall = 1000; let elapsed = 0; let failed = true; let retryWall = 0;
   const slots = new EndpointInteractionSlots(); const pairings = pairingStore();
   pairings.terminate = async () => { if (failed) throw new Error("fixed-invalidation-failure"); };
   const manager = new ControllerReservationManager({ pairingStore: pairings, interactionSlots: slots,
-    clock: () => wall, elapsedClock: () => elapsed });
+    clock: () => wall, elapsedClock: () => elapsed, retryClock: () => retryWall, retryRandom: () => 0.5 });
   const key = publicKey();
   const reservation = claim(manager, { handshakePublicKeyB64: key });
   elapsed = 10000; wall = 100;
@@ -94,7 +94,7 @@ test("elapsed expiry invalidation retry retains exact slot and never grants a ne
   assert.equal(manager.reservationForOwner({ reservationId: reservation.reservation_id, socketIdentity: "socket-0001" }).state, "invalidating");
   assert.equal(slots.read("endpoint-0001").owner.owner_id, reservation.reservation_id);
   assert.throws(() => claim(manager, { handshakePublicKeyB64: key }), { code: "pairing_code_invalid" });
-  failed = false;
+  failed = false; retryWall = 10_000;
   assert.equal(await manager.expire(), 1);
   const replacement = slots.acquireWeb({ endpointId: "endpoint-0001", leaseId: "replacement-web" });
   assert.equal(await manager.expire(), 0);
