@@ -28,6 +28,46 @@ const THIRD_CREDENTIAL = "endpoint-credential-three-at-least-32-bytes";
 const execFileAsync = promisify(execFile);
 const TEST_RESOURCES = new WeakMap();
 
+function windowsDaclInspectorConfiguration(paths, environment = process.env) {
+  const env = {};
+  for (const key of ["SystemRoot", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP"]) {
+    const value = environment[key];
+    if (value !== undefined) env[key] = value;
+  }
+  const systemRoot = env.SystemRoot || env.WINDIR;
+  if (typeof systemRoot !== "string" || !path.win32.isAbsolute(systemRoot)) {
+    throw new Error("windows_dacl_inspector_runtime_unavailable");
+  }
+  env.PINVOU_ACL_PATHS = paths;
+  return { executable: path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), env };
+}
+
+test("Windows DACL inspector uses only explicit production environment and executable", () => {
+  for (const fallback of [false, true]) {
+    const values = { SystemRoot: fallback ? undefined : "C:\\Windows", WINDIR: "C:\\Windows", PATH: "original-path", PATHEXT: ".EXE", TEMP: "C:\\owned-temp", TMP: undefined };
+    const reads = {}, forbiddenReads = {};
+    const environment = {};
+    for (const [key, value] of Object.entries(values)) {
+      reads[key] = 0;
+      Object.defineProperty(environment, key, { get() { reads[key] += 1; return value; } });
+    }
+    for (const key of ["PSModulePath", "PSMODULEPATH", "PRIVATE_KEY", "TOKEN"]) {
+      forbiddenReads[key] = 0;
+      Object.defineProperty(environment, key, { get() { forbiddenReads[key] += 1; throw new Error("ENV_SECRET_SENTINEL"); } });
+    }
+    const paths = "C:\\owned\\中文-file|C:\\owned\\second";
+    const actual = windowsDaclInspectorConfiguration(paths, environment);
+    assert.equal(actual.executable, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    assert.deepEqual(actual.env, { ...Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined)), PINVOU_ACL_PATHS: paths });
+    for (const count of Object.values(reads)) assert.equal(count, 1);
+    for (const count of Object.values(forbiddenReads)) assert.equal(count, 0);
+    assert.equal(Object.hasOwn(environment, "PINVOU_ACL_PATHS"), false);
+  }
+  for (const environment of [{}, { SystemRoot: "relative" }, { WINDIR: "relative" }, { SystemRoot: "relative", WINDIR: "C:\\Windows" }]) {
+    assert.throws(() => windowsDaclInspectorConfiguration("unchanged", environment), /windows_dacl_inspector_runtime_unavailable/u);
+  }
+});
+
 async function openDaclQualificationStore(t, options, open = RelayStateStore.open.bind(RelayStateStore)) {
   try {
     return await open(options);
@@ -1113,12 +1153,13 @@ test("Windows state directory and every durable/lock file have protected DACLs",
     `${statePath}.bak`,
     lockPath(statePath),
   ];
-  const { stdout } = await execFileAsync("powershell.exe", [
+  const inspector = windowsDaclInspectorConfiguration(paths.join("|"));
+  const { stdout } = await execFileAsync(inspector.executable, [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
     "-EncodedCommand", Buffer.from(inspectScript, "utf16le").toString("base64"),
   ], {
     windowsHide: true,
-    env: { ...process.env, PINVOU_ACL_PATHS: paths.join("|") },
+    env: inspector.env,
     timeout: 15_000,
     maxBuffer: 64 * 1024,
   });
