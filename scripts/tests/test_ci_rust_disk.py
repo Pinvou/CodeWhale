@@ -250,11 +250,14 @@ class RustDiskTests(unittest.TestCase):
     def test_workflow_prepares_disk_after_swap_and_before_both_harnesses(self):
         workflow = (ROOT / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
         job = workflow.split("\n  rust-test:", 1)[1].split("\n  windows-rust-test:", 1)[0]
-        prepare = job.index("python3 scripts/ci-rust-disk.py")
-        self.assertLess(job.index("Set up zram and swap"), prepare)
-        self.assertLess(job.index("- name: Cargo test cache"), prepare)
-        self.assertLess(prepare, job.index("- name: cargo test --lib --no-run"))
-        self.assertLess(prepare, job.index("- name: cargo test --test behavior_telemetry"))
+        before_restore = job.index("- name: 恢复 Rust 缓存前准备磁盘空间")
+        after_restore = job.index("- name: 为两轮 Rust 测试准备磁盘空间")
+        self.assertLess(job.index("Set up zram and swap"), before_restore)
+        self.assertLess(before_restore, job.index("- name: 恢复 Rust lint 暖缓存"))
+        self.assertLess(before_restore, job.index("- name: Cargo test cache"))
+        self.assertLess(job.index("- name: Cargo test cache"), after_restore)
+        self.assertLess(after_restore, job.index("- name: cargo test --lib --no-run"))
+        self.assertLess(after_restore, job.index("- name: cargo test --test behavior_telemetry"))
         self.assertIn('RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"', job)
         self.assertNotIn("continue-on-error", job)
 

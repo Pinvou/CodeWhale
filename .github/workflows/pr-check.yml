@@ -1417,6 +1417,15 @@ jobs:
         # 因此直接用 package-lock 驱动的 npm ci，避免额外维护一份硬编码版本并保证可复现。
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
 
+      # Cache extraction can exhaust the runner before the post-restore
+      # preparation step starts. Free only the same unused SDK allowlist
+      # before either warm cache is restored; retain the post-restore gate.
+      - name: 恢复 Rust 缓存前准备磁盘空间
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
+
       # rust-test 的独立缓存缺失时，全冷测试会超过当前 runner 的执行窗口。
       # 先只读恢复同一工具链与锁文件下已由 main 保存的 rust-lint 目标缓存，
       # 再恢复/保存独立 rust-test 缓存；不降低测试范围，也不让 PR 写缓存。

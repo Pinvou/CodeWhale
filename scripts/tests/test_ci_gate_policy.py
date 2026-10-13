@@ -2140,6 +2140,28 @@ class CiGatePolicyTests(unittest.TestCase):
             self.assertNotIn("RUSTFLAGS", body, step_name)
             self.assertNotIn("CARGO_PROFILE_DEV_LTO", body, step_name)
 
+    def test_rust_test_prepares_disk_before_cache_extraction_and_after_restore(self):
+        job = self.pr_workflow.split("\n  rust-test:", maxsplit=1)[1].split(
+            "\n  cli-test:", maxsplit=1
+        )[0]
+        before = job.index("- name: 恢复 Rust 缓存前准备磁盘空间")
+        lint_cache = job.index("- name: 恢复 Rust lint 暖缓存")
+        test_cache = job.index("- name: Cargo test cache")
+        after = job.index("- name: 为两轮 Rust 测试准备磁盘空间")
+        compile_step = job.index("- name: cargo test --lib --no-run")
+        self.assertLess(before, lint_cache)
+        self.assertLess(before, test_cache)
+        self.assertLess(lint_cache, after)
+        self.assertLess(test_cache, after)
+        self.assertLess(after, compile_step)
+        for step in (job[before:lint_cache], job[after:compile_step]):
+            body = _without_yaml_comments(step)
+            self.assertIn("python3 scripts/ci-rust-disk.py", body)
+            self.assertIn('RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"', body)
+            self.assertNotIn("--aggressive", body)
+            self.assertNotIn("--min-free-gib", body)
+            self.assertNotIn("continue-on-error", body)
+
     def test_main_rust_caches_save_on_failure_and_rust_test_keeps_targets(self):
         # cache-on-failure keeps one failed main run from stranding a
         # namespace cold — mac-build's exact death loop (evicted once, then
