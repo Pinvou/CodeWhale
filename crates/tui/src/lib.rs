@@ -130,7 +130,9 @@ pub mod route_runtime;
 mod runtime_api;
 mod runtime_chat_relay;
 mod runtime_handoff;
-pub use runtime_handoff::{EditLastTurnTarget, edit_last_turn_target, is_user_turn_prompt};
+pub use runtime_handoff::{
+    EditLastTurnTarget, edit_last_turn_target, is_user_turn_prompt, user_turn_prompt_indices,
+};
 mod runtime_log;
 mod runtime_policy;
 mod runtime_threads;
