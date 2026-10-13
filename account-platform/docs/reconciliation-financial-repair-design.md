@@ -18,7 +18,7 @@
 ## 2. 对账现状与不变量（事实）
 
 - **运行与案件模型**：`reconciliation_runs`（渠道、业务日期、`status ∈ {RUNNING,COMPLETED,FAILED}`、provider/case 计数；`000029` 已允许同渠道/业务日期多个手工/API/file run，仅定时运行保留条件唯一约束）与 `reconciliation_cases`（`reconciliation_run_id`、可空 `payment_order_id`、`merchant_order_no`、`case_type ∈ {PROVIDER_PAID_INTERNAL_MISSING,INTERNAL_PAID_PROVIDER_MISSING,AMOUNT_MISMATCH,DUPLICATE_TRANSACTION}`、`status ∈ {OPEN,IN_REVIEW,RESOLVED,IGNORED}`、`provider_snapshot`、`internal_snapshot`、`resolution`、`created_at`、`resolved_at`）（初始字段见 `000004`，当前状态和扩展模型见 `000029_payment_anomaly_reconciliation.up.sql`）。
-- **差异分类**：`CompareReconciliation`（`internal/billing/reconciliation.go`）以商户单号对齐 Provider 账单行与内部订单；Provider 有行而内部无匹配订单即 `PROVIDER_PAID_INTERNAL_MISSING`（P0，`payment_order_id` 为空）。另有按条目类型的比对（`PAYMENT→PROVIDER_PAID_INTERNAL_MISSING`、`REFUND→PROVIDER_REFUND_INTERNAL_MISSING`、`CHARGEBACK→PROVIDER_CHARGEBACK_INTERNAL_MISSING`）。
+- **差异分类**：`CompareFourWayReconciliation`（`internal/billing/reconciliation.go`）以商户单号对齐 Provider 账单行与内部订单；Provider 有行而内部无匹配订单即 `PROVIDER_PAID_INTERNAL_MISSING`（P0，`payment_order_id` 为空）。另有按条目类型的比对（`PAYMENT→PROVIDER_PAID_INTERNAL_MISSING`、`REFUND→PROVIDER_REFUND_INTERNAL_MISSING`、`CHARGEBACK→PROVIDER_CHARGEBACK_INTERNAL_MISSING`）。
 - **关键事实**：`PROVIDER_PAID_INTERNAL_MISSING` 的语义是**内部完全没有可归属的订单/用户/钱包事实**——因此不存在可写入的钱包、package、component 或 lot，也不存在可创建应收所需的 `wallet_id`（`receivables.wallet_id NOT NULL`）。任何“补记入账”都会凭空选择归属，属于猜测。
 - **可用账户**：`PAYMENT_CLEARING`/`ADJUSTMENT` 等系统账户存在，但没有“未识别付款人负债”账户类型；`ledger_accounts.account_type` 白名单固定（`000002`、`000025`），本命令不得新增账户类型。
 
@@ -78,7 +78,7 @@
 | `financial_snapshot.provider_transaction_id` | 外部幂等引用 |
 | `financial_snapshot.ledger_effect` | 固定 `"NONE"`（零账务效果的显式声明，非 `NONE` 即 `PROOF_DENY`） |
 
-`facts_digest` 覆盖：案件全字段、run 全字段、Provider 处置证据行摘要（含 `payload_digest`）、内部无匹配事实（订单/交易/入账查询结果为空）、关联手审单全字段、冻结的零账务基线（禁止清单各表的关键计数、钱包 `version` 与应收余额摘要）、以及 activation/policy/schema 版本。
+`facts_digest` 覆盖：本次案件全字段、该案件 run 全字段、所引用 Provider 处置证据行摘要（含 `payload_digest`）、关联手审单全字段、该案件商户单号/渠道交易号的内部归属查询为空、同渠道/业务日期/商户单号的未结差异复核，以及 activation/policy/schema 版本。无关订单、钱包版本、全库表计数与全库应收余额不参与跨审批冻结；本命令不获得任何资金写能力，执行前后仍按 §3 全禁止清单逐行核验零效果。关联事实变化仍拒绝，既有不可变回执继续先行读取。
 
 ### 5.3 proof 与 presenter
 

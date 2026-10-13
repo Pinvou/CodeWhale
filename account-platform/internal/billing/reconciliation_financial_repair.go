@@ -105,11 +105,14 @@ type reconciliationRepairReader interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
+// reconciliationRepairConflict marks only a zero-row owner CAS as a definite
+// conflict. Storage and context errors retain their original identity so the
+// authorization consumer keeps an uncertain attempt UNKNOWN.
 func reconciliationRepairConflict(stage string, cause error) error {
 	if cause == nil {
 		return errors.Join(ErrConflict, errors.New(stage))
 	}
-	return errors.Join(ErrConflict, fmt.Errorf("%s: %w", stage, cause))
+	return fmt.Errorf("%s: %w", stage, cause)
 }
 
 // reconciliationProviderSnapshot is the closed view of the frozen provider bill
@@ -263,24 +266,12 @@ AND c.status IN ('OPEN','IN_REVIEW') AND c.id<>$4`, plan.Channel, plan.BusinessD
 	if err != nil {
 		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
-	// Freeze the existing zero-accounting baseline without accepting caller amounts.
-	var zeroRaw []byte
-	if err := source.QueryRow(ctx, `SELECT jsonb_build_object(
- 'journal_entries',(SELECT count(*) FROM journal_entries),'ledger_postings',(SELECT count(*) FROM ledger_postings),
- 'wallets',(SELECT count(*) FROM wallets),'wallet_versions',(SELECT COALESCE(string_agg(id::text||':'||version::text,',' ORDER BY id),'') FROM wallets),
- 'receivables',(SELECT count(*) FROM receivables),'receivable_balances',(SELECT COALESCE(string_agg(id::text||':'||original_microcredits::text||':'||settled_microcredits::text||':'||outstanding_microcredits::text,',' ORDER BY id),'') FROM receivables),
- 'credit_lots',(SELECT count(*) FROM credit_lots),'entitlement_packages',(SELECT count(*) FROM entitlement_packages),'entitlement_components',(SELECT count(*) FROM entitlement_components),
- 'payment_orders',(SELECT count(*) FROM payment_orders),'payment_transactions',(SELECT count(*) FROM payment_transactions),'payment_evidence',(SELECT count(*) FROM payment_evidence),
- 'refunds',(SELECT count(*) FROM refunds),'chargeback_cases',(SELECT count(*) FROM chargeback_cases),'forced_refund_cases',(SELECT count(*) FROM forced_refund_cases),'usage_holds',(SELECT count(*) FROM usage_holds))`).Scan(&zeroRaw); err != nil {
-		return ReconciliationFinancialRepairPlan{}, err
-	}
-	zeroSnapshot, err := paymentRepairJSONSnapshot(zeroRaw)
-	if err != nil {
-		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
-	}
+	// Freeze this closure's related owner facts only. Zero accounting effect is
+	// an execution invariant, not a database-wide cross-approval snapshot;
+	// unrelated payments and wallet updates cannot change this case's authority.
 
 	encoded, err := json.Marshal(map[string]any{
-		"command_type": reconciliationFinancialRepairCommand, "owner_snapshot": ownerSnapshot, "zero_accounting_baseline": zeroSnapshot, "repair_case_exists": caseExists, "case_id": plan.CaseID.String(),
+		"command_type": reconciliationFinancialRepairCommand, "owner_snapshot": ownerSnapshot, "repair_case_exists": caseExists, "case_id": plan.CaseID.String(),
 		"run_id": plan.RunID.String(), "channel": plan.Channel, "business_date": plan.BusinessDate,
 		"merchant_order_no": plan.MerchantOrderNo, "case_type": caseType, "case_status": caseStatus,
 		"amount_fen": plan.AmountFen, "currency": plan.Currency,

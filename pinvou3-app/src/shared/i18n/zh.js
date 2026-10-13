@@ -2253,4 +2253,4 @@ Object.assign(dictZh.uiSettingsDetail, {
   modelUnavailable:'当前不可用',
   modelSwitchFailed:'模型切换失败，请重试。',
 });
-dictZh.uiModelReplacement = { title:'当前模型不能继续此历史会话', lead:'原会话与消息保持不变。请选择当前可用模型，创建带来源记录的新分支后继续。', create:'创建替代分支', creating:'创建中…' };
+dictZh.uiModelReplacement = { title:'当前模型不能继续此历史会话', lead:'原会话与消息保持不变。请选择当前可用模型，创建带来源记录的新分支后继续。', create:'创建替代分支', creating:'创建中…' , branchTitleSuffix:'替代模型分支' };

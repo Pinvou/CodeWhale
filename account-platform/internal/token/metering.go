@@ -10,6 +10,9 @@ import (
 // EstimateChatUsage applies the published CHAT v1 estimator. It intentionally
 // uses a versioned, deterministic byte rule instead of a provider-dependent
 // tokenizer so the same request always receives the same preauthorization.
+// It counts only content strings and string-valued text fields in content
+// parts. Image, audio and other non-text fields contribute zero estimated
+// input tokens; trusted provider usage still determines actual settlement.
 func EstimateChatUsage(payload []byte, maxOutputTokens int64) (Usage, error) {
 	if maxOutputTokens < 0 {
 		return Usage{}, ErrMeteringConfiguration

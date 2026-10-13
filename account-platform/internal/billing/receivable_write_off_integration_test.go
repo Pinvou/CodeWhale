@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // TestReceivableWriteOffPostgresIntegration proves the GSA-26 domain contract on
@@ -103,6 +104,7 @@ VALUES($1,$2,$3,'CASH_RECHARGE_BASE',$4,$5,$6,$7)`, allocationID, receivableID, 
 	}
 	for _, invalid := range []ReceivableWriteOffCommandInput{
 		{ReceivableID: fullID, WriteOffMicrocredits: 51, ExpectedReceivableVersion: 1},
+		{ReceivableID: partialID, WriteOffMicrocredits: 50, ExpectedReceivableVersion: 2},
 		{ReceivableID: fullID, WriteOffMicrocredits: 0, ExpectedReceivableVersion: 1},
 		{ReceivableID: fullID, WriteOffMicrocredits: 50, ExpectedReceivableVersion: 2},
 		{ReceivableID: uuid.New(), WriteOffMicrocredits: 10, ExpectedReceivableVersion: 1},
@@ -159,6 +161,45 @@ VALUES($1,$2,$3,'CASH_RECHARGE_BASE',$4,$5,$6,$7)`, allocationID, receivableID, 
 		}
 	}
 	activationVersion = setActivation("ACTIVE")
+	t.Run("PartialOutstandingOverCapPlanAndExecuteZeroEffects", func(t *testing.T) {
+		// Original=60, settled=20, outstanding=40: request50 is below the
+		// original amount but exceeds the actual remaining owner budget.
+		command := ReceivableWriteOffCommandInput{ReceivableID: partialID, WriteOffMicrocredits: 50, ExpectedReceivableVersion: 2}
+		snapshot := func() string {
+			var value string
+			if err := pool.QueryRow(ctx, `SELECT jsonb_build_object(
+ 'wallets',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM wallets x),
+ 'receivables',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM receivables x),
+ 'allocations',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM receivable_allocations x),
+ 'cases',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM receivable_write_off_cases x),
+ 'journals',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM journal_entries x),
+ 'postings',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM ledger_postings x),
+ 'lots',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM credit_lots x))::text`).Scan(&value); err != nil {
+				t.Fatal(err)
+			}
+			return value
+		}
+		before := snapshot()
+		if _, err := planFrom(command, 1, 1, activationVersion); !errors.Is(err, ErrApprovalSnapshotMismatch) {
+			t.Fatalf("partial over-cap plan accepted: %v", err)
+		}
+		// Call the executor directly: the convenience execute helper plans first
+		// and would otherwise never reach this actual owner transaction.
+		_, err := repository.ApplyReceivableWriteOff(ctx, ReceivableWriteOffExecutionInput{
+			ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 3,
+			ExecutionKey: "partial-over-cap", PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion,
+			Command: command, Frozen: ReceivableWriteOffFrozenFacts{
+				ReceivableVersion: 2, WriteOffMicrocredits: 50, OutstandingMicrocredits: 40, SettledMicrocredits: 20,
+				OriginalMicrocredits: 60, SourceType: "USAGE_OVERAGE", FactsDigest: strings.Repeat("a", 64),
+			},
+		})
+		if !errors.Is(err, ErrApprovalSnapshotMismatch) {
+			t.Fatalf("partial over-cap execution accepted: %v", err)
+		}
+		if after := snapshot(); after != before {
+			t.Fatal("rejected partial plan/execution changed owner financial facts")
+		}
+	})
 	fullRequestID, fullEventID := uuid.New(), uuid.New()
 	full, err := execute(fullRequestID, fullEventID, fullID, 50, 1, "write-off:"+fullID.String())
 	if err != nil {
@@ -167,6 +208,63 @@ VALUES($1,$2,$3,'CASH_RECHARGE_BASE',$4,$5,$6,$7)`, allocationID, receivableID, 
 	if full.StatusAfter != "WRITTEN_OFF" || full.ReceivableVersionAfter != 2 || full.AmountMicrocredits != 50 {
 		t.Fatalf("unexpected full result %+v", full)
 	}
+	t.Run("ActualAbortedTransactionUniqueRecovery", func(t *testing.T) {
+		snapshot := func() string {
+			var value string
+			if err := pool.QueryRow(ctx, `SELECT jsonb_build_object(
+ 'wallets',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM wallets x),
+ 'receivables',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM receivables x),
+ 'allocations',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM receivable_allocations x),
+ 'cases',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM receivable_write_off_cases x),
+ 'journals',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM journal_entries x),
+ 'postings',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM ledger_postings x),
+ 'lots',(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY id),'[]') FROM credit_lots x))::text`).Scan(&value); err != nil {
+				t.Fatal(err)
+			}
+			return value
+		}
+		before := snapshot()
+		for _, variant := range []string{"matching", "missing-approval", "mismatched-event"} {
+			t.Run(variant, func(t *testing.T) {
+				tx, err := pool.Begin(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tx.Rollback(ctx)
+				// A legal original-row copy forces a real unique error, not an
+				// injected callback or a claim that production concurrency occurred.
+				_, err = tx.Exec(ctx, `INSERT INTO receivable_write_off_cases SELECT * FROM receivable_write_off_cases WHERE approval_request_id=$1`, fullRequestID)
+				var pgError *pgconn.PgError
+				if !errors.As(err, &pgError) || pgError.Code != "23505" {
+					t.Fatal("actual unique collision required")
+				}
+				_, err = tx.Exec(ctx, `SELECT 1`)
+				if !errors.As(err, &pgError) || pgError.Code != "25P02" {
+					t.Fatal("actual aborted transaction required")
+				}
+				input := ReceivableWriteOffExecutionInput{ApprovalRequestID: fullRequestID, AuthorizationEventID: fullEventID, ApprovalEpoch: 3,
+					Command: ReceivableWriteOffCommandInput{ReceivableID: fullID, WriteOffMicrocredits: 50, ExpectedReceivableVersion: 1},
+					Frozen:  ReceivableWriteOffFrozenFacts{FactsDigest: full.FactsDigest}}
+				if variant == "missing-approval" {
+					input.ApprovalRequestID = uuid.New()
+				}
+				if variant == "mismatched-event" {
+					input.AuthorizationEventID = uuid.New()
+				}
+				recovered, err := recoverReceivableWriteOffUnique(ctx, tx, repository.readCommittedReceivableWriteOffCase, input, "write-off:"+fullID.String())
+				if variant == "matching" {
+					if err != nil || recovered != full {
+						t.Fatal("original receipt recovery failed", err)
+					}
+				} else if !errors.Is(err, ErrConflict) {
+					t.Fatal("another approval/event accepted", err)
+				}
+				if snapshot() != before {
+					t.Fatal("unique recovery changed immutable or financial owner facts")
+				}
+			})
+		}
+	})
 	var entryType, reference string
 	var postingCount int
 	var receivableDelta, adjustmentDelta int64

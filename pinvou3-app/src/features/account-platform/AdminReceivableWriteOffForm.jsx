@@ -21,6 +21,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
   const [busy, setBusy] = useState('');
   const [failure, setFailure] = useState('');
   const [created, setCreated] = useState('');
+  const [needsAuthentication, setNeedsAuthentication] = useState(false);
   const factsRevision = useRef(0);
   const mounted = useRef(false);
   const currentClient = useRef(client);
@@ -33,6 +34,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
 
   useEffect(() => {
     mounted.current = true;
+    setNeedsAuthentication(false);
     setFacts(null);
     setProjection(null);
     setBusy((current) => current === 'facts' ? '' : current);
@@ -66,6 +68,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
 
   const readFacts = async (event) => {
     event.preventDefault();
+    if (locked) return;
     const prepared = financialRepairPrecheckBody(commandType, values);
     if (prepared.error) {
       setProjection(null);
@@ -94,6 +97,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
       if (!live()) return;
       setProjection(null);
       setFacts(null);
+      if (error?.code === 'RECENT_AUTHENTICATION_REQUIRED') setNeedsAuthentication(true);
       setFailure(error?.code === 'APPROVAL_PRECHECK_UNAVAILABLE' ? copy.factsUnavailable : copy.factsFailed);
     } finally {
       if (live()) setBusy('');
@@ -105,17 +109,22 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
     if (writeOff) {
       const prepared = pending || { ...financialRepairDraftFromProjection(projection, reason, requestKey), projection };
       if (!prepared.draft) { setFailure(copy.invalidDraft); return; }
+      if (busy !== '' || operation.busy) return;
       const recovering = operation.unknown;
+      const revision = factsRevision.current;
+      const live = () => mounted.current && factsRevision.current === revision && currentClient.current === client;
+      setNeedsAuthentication(false);
       const result = await operation.mutate(prepared, async current => {
         try { return await createAndSubmitFreshGovernedApproval(client, current.draft); }
         catch (error) {
+          if (live() && error?.code === 'RECENT_AUTHENTICATION_REQUIRED') setNeedsAuthentication(true);
           // A denied replay cannot prove that an earlier unknown write did not
           // commit. Keep the original facts/key until authority confirms it.
           if (recovering && !error.finalResult) throw Object.assign(error, { code: 'COMMAND_RESULT_UNKNOWN' });
           throw error;
         }
       });
-      if (result) {
+      if (result && live()) {
         setCreated(result.approval_request_id); setProjection(null); setFacts(null);
         setValues({}); setReason(''); setRequestKey(''); onCreated?.(result.approval_request_id);
       }
@@ -148,6 +157,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
     <h3>{copy.title}</h3>
     <p>{copy.lead}</p>
     {writeOff && operation.error && <p role="alert">{operation.error}</p>}
+    {needsAuthentication && <div className="adm-writeoff-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
     <form className="adm-financial-repair-target" onSubmit={readFacts}>
       <label>{copy.command}
         <select disabled={writeOff && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>

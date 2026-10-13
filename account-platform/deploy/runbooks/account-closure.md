@@ -6,6 +6,8 @@ Account 027 为 forward-only：Down 明确返回 SQLSTATE 55000，空库与已�
 
 专用回归使用完整 Account Up/Verify 和真实部署角色，再直接执行 027 Down，检查空库拒绝及已安装库的 ledger、策略、触发器、注销证据字节保全。这不是完整高版本 DownOne 链或生产回滚验收；实际执行结果另见审核记录。
 
+Account 028 的原 Down 会移除清理证明、生命周期围栏和保留记录，并改写已因注销取消的邀请。迁移文件身份及字节保持原样；公共 `accountschema.DownOne` 和迁移 CLI 在同一迁移锁及事务内、执行 Down SQL 或删除账本前拒绝回滚 028，也覆盖旧库最新已安装版本仅为 028 的情况。正常 Ordered/Up/Verify 不变；不能绕过 Go 入口直接执行该 SQL。应用回退仍须保留数据库，未来若需要数据库回滚，先设计并审核完整的证据保全方案，限制及验收条件见 [Issue #1838](https://github.com/Pinvou/pinvou3/issues/1838)。
+
 资料变更提交与注销准备统一先锁用户、再锁资料请求。已提交请求仍按原 ID 只读重放；CLOSING/DELETED/ANONYMIZED 或已取消但尚未提交的请求保留冲突及身份已确认事实，由注销 Prepare 接管。重试不会清除 identity_updated_at；不能把未确认的身份变更当成功提交。
 
 此前冻结版本的 main Go 模块默认测试及 vet 均实际 EXIT0；相邻传播后的验证单独记录，不沿用此前结果。显式数据库配置缺失的集成测试仍 Skip，不以默认测试代替下述数据库专项；本地 Windows 未执行 race，生产进程关停、真实 Keycloak/NATS 和线上部署仍未验收。
@@ -18,11 +20,17 @@ Account 027 为 forward-only：Down 明确返回 SQLSTATE 55000，空库与已�
 
 生产 Account 接注销 worker，复用动态 workload token。精确接收权限：Account→Identity `internal.identity.user.delete`；Account→Billing `internal.billing.account-closure.assess/isolate`；Account→Token `internal.token.account-closure.assess/replay-clear`；Billing→Account `internal.account.closure.read`；Token→Billing `internal.billing.closed-grant.reclaim`。保留原内部 HTTP 服务网络隔离、外部 HTTPS 和 JWT/JWKS/CA 合同；测试静态 Bearer 不是生产身份。先正式迁移及更新接收规则，再发布同源服务镜像和 Portal 产物。前序 F07 HMAC、资格 backfill 和 readiness 必须保持，不能由旧钱包 worker 激活 EVALUATE 请求。
 
+最后叠加 `compose.closure.yaml` 时，原 `account-migrate`、`billing-migrate`、`token-migrate` 均使用 `MIGRATE_IMAGE`。该镜像必须与五个 `*_CLOSURE_IMAGE` 对应同一已审核 F08 源码；不能只更新运行镜像而沿用前序迁移镜像。沿用既有项目、私有环境文件和部署角色执行三域正式迁移及校验，再启动同源运行服务和 Portal。此处是镜像选择前提与配置接线，不代表已核验线上镜像或执行部署。
+
 Account 027/028、赠额 087、钱包索引 093 和前序 Token 硬化 SQL 保持原字节。F08 Token 清理围栏使用独立 900004 身份，避免与已发布 900001 硬化碰撞。正式 Ordered/Up/Verify 保持原角色边界；永久事实的 forward-only Down 拒绝回滚。
 
 worker 外呼前续约仍有效的同版本 claim，行锁等待后再查数据库时钟；不持行锁跨 RPC。删除、隔离、清理需绑定原主体和生命周期的权威回执。丢 ACK 按原阶段恢复。SIGTERM 取消 worker 上下文、停止新领取，并在关闭数据库池前最多等待注销 worker 十秒；不代表所有旧 worker 生命周期已重构。
 
 匿名范围限于可证明属于主体的可变账号、身份、注册/密码重置/资料变更联系方式、关联短信挑战、Commerce 映射、付款联系人及可清理重放内容。金额、来源、永久赠额资格、财务回执、审计及 outbox 保留。只有手机号匹配的旧 slider 或未绑定挑战无法证明历史属主，不猜测清除；已接受/撤销邀请终态不破坏不可变证据。短信风险摘要没有手机号明文，但单向摘要不等于不可关联或不可识别，仍遵循原保留策略。既有受控 replay retention case 加密内容和法律保全不自动实体删除，永久围栏阻止清理后新复制/新重放内容。
+
+最终匿名化在原 claim、生命周期、身份删除、grant 隔离与 replay 清理证明全部有效后，清除 `accepted_by` 指向该主体的 ACCEPTED 邀请邮箱及提示；保留冻结身份、目标摘要、token 摘要、接收状态及历史角色，不按 `invited_by` 删除他人收件信息。同主体 CONSUMED/EXPIRED/LOCKED/SUPERSEDED bootstrap 历史记录的身份字段替换为匿名标识，状态、代次、验证器及回执保留；这些终态不能用于认证，不改变普通消费、PENDING/REDEEMING 激活或恢复契约。
+
+两条注销源码和 API 契约正式测试统一执行 `npm --prefix account-platform ci --ignore-scripts`、`npm --prefix account-platform run test:closure-contracts`；它们使用锁定的 YAML 解析依赖，并接入现有 `account-platform-test`，仅是源码接线和契约形状检查。专用三域 PostgreSQL 组合夹具另外需要显式的 `PINVOU_TEST_SCHEMA_DATABASE_URL`（隔离部署角色准备连接）、`F08_TEST_GO`（Go 可执行文件绝对路径）和 `F08_TEST_CHILD_LOG`（私有测试日志绝对路径）；父夹具创建并传递 `F08_ACCOUNT_URL`、`F08_BILLING_URL`、`F08_TOKEN_URL`，运行原公开迁移和子测试，再按归属清理测试资源。这些是测试启动参数，不是生产配置，实际数据库、父子测试与受控外部回执结果须分别记录。
 
 `account_subject_retention_records` 到期 `PURGED` 仅是元数据标记，不代表所有财务或加密实体已销毁。实体销毁、法律保全及不能证明属主的数据治理见 [Issue #1663](https://github.com/Pinvou/pinvou3/issues/1663)。不得直接修改账本、资格或匿名标记来完成注销。
 
