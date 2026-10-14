@@ -42,11 +42,13 @@ Set these variables before opening the registry:
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY` | Secret HMAC key, 32–4096 UTF-8 bytes. Supply it through the deployment secret manager, never source control or logs. |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON` | Optional secret JSON array of `{ "key_id": "...", "key": "..." }` for verification-only old keys. At most seven, unique IDs distinct from the active ID; each secret has the same 32–4096 UTF-8 byte bounds. Maximum JSON input is 65536 bytes. |
 | `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | Optional `1`/`true`; accepted only with `deployment=development` and `NODE_ENV=development` or `test`. |
+| `PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION` | Optional `true`/`1`, default false. In `self_hosted`, permit a native device's first complete two-role registration without account login or administrator import. Existing and revoked identities retain their credential checks. |
 
-`official` and `self_hosted` always reject an unknown endpoint. A production
+`official` and the default `self_hosted` policy reject an unknown endpoint. A production
 runtime refuses both development deployment mode and the development TOFU
-switch. Self-hosted production therefore uses an explicit administrator import
-or enrollment operation; the migration CLI and gateway belong to DEV-02.
+switch. Self-hosted production uses an explicit administrator import unless the
+operator enables the anonymous first-use policy below. The migration CLI and
+gateway belong to DEV-02.
 The config loader rejects lexical aliases, including Windows case-only aliases.
 `RelayStateStore.open` receives both paths and also compares resolved paths and
 file identities, rejecting junction aliases and hardlinks. The legacy path may
@@ -54,6 +56,37 @@ never be anywhere inside the dedicated controller directory or alias the
 primary, backup, lock, marker, temporary, stale-lock, or other reserved
 management path. Controller state filenames using those reserved suffixes are
 also rejected.
+
+### Anonymous native first-use registration
+
+For a public installation where a new device should open remote control without
+an account or administrator, set `PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION=true`
+in the protected Relay environment. Keep `NODE_ENV=production`,
+`PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=self_hosted`, controller enabled, and
+`PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`. The existing desktop request
+already carries its two independent credentials; no client wire change is needed.
+
+Only the full `desktop_endpoint_register` path may create an unknown identity.
+It accepts the native `ep_` plus 24 random alphanumeric characters format and
+distinct, valid Web and desktop credentials. Both role digests are persisted in
+one guarded namespace CAS before the socket becomes ready. A partial request
+never grants the other role. Conflicting credentials cannot replace an existing
+identity; a revoked endpoint cannot re-enroll. A restart or repeat enable verifies
+the same persisted credentials without another administrator operation.
+
+The trusted proxy, WebSocket/ingress limits, per-source endpoint creation rate,
+active endpoint ceiling and shared persistent-state byte budget remain required.
+Capacity and creation-rate admission happen before anonymous enrollment writes.
+Audit and wire responses contain no raw credentials. The coverage binding changes
+when this policy is enabled, and preserves its released v1 bytes when disabled.
+
+This policy authorizes possession of a new random endpoint's credentials. It does
+not establish a human account or vendor-issued device identity. Revocation binds
+the endpoint ID; resetting a device's identity creates a new enrollment candidate.
+Operators of a public service must monitor aggregate creation/capacity pressure.
+Retain the complete registry and keyring when rolling back. A rollback to the
+previous administrator-only release disables new-device onboarding; already
+enrolled role digests keep their schema and authentication meaning.
 
 ### Gateway transport keepalive
 

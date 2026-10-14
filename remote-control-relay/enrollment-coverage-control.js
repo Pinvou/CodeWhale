@@ -57,9 +57,13 @@ export function loadEnrollmentCoverageControlConfig(env = process.env, { require
 
 function storeBinding(env, key) {
   const config = loadEnrollmentRegistryConfig(env);
+  // The disabled/default policy keeps the released v1 binding byte-for-byte.
+  // An enabled anonymous registration policy must change the attested binding.
+  const { self_registration, ...legacyConfig } = config;
+  const boundConfig = self_registration ? { ...legacyConfig, self_registration: true } : legacyConfig;
   // Bind the configured store, deployment policy and credential key material
   // without putting paths, keys or endpoint identities on the control wire.
-  return mac(key, "store", Buffer.from(JSON.stringify({ config,
+  return mac(key, "store", Buffer.from(JSON.stringify({ config: boundConfig,
     key_id: env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID,
     key_fingerprint: mac(key, "credential-key", Buffer.from(env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY, "utf8")),
     keyring_fingerprint: enrollmentKeyringFingerprint(config, key),

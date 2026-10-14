@@ -64,7 +64,7 @@ export function parseControllerEnvironment(source) {
 export function validateControllerEnvironment(entries, { expectedFeatureFlag = "1" } = {}) {
   if (!(entries instanceof Map)) fail("controller_env_entries_invalid");
   if (!new Set(["0", "1"]).has(expectedFeatureFlag)) fail("controller_env_expected_feature_flag_invalid");
-  const allowedKeys = new Set(REQUIRED_KEYS);
+  const allowedKeys = new Set([...REQUIRED_KEYS, "PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION"]);
   if ([...entries.keys()].some((key) => !allowedKeys.has(key))) {
     fail("controller_env_unknown_key");
   }
@@ -72,6 +72,10 @@ export function validateControllerEnvironment(entries, { expectedFeatureFlag = "
     if (!entries.has(key) || entries.get(key).length === 0) {
       fail("controller_env_required_value_missing");
     }
+  }
+  const selfRegistration = entries.get("PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION");
+  if (selfRegistration !== undefined && !new Set(["0", "1", "false", "true"]).has(selfRegistration)) {
+    fail("controller_env_self_registration_invalid");
   }
   // Match the implemented server dispatcher; official live claims are not wired.
   if (entries.get("PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT") === "official") {

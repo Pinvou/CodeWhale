@@ -68,6 +68,19 @@ test("production controller environment rejects undeclared keys", () => {
   );
 });
 
+test("production preflight accepts explicit anonymous self-registration with TOFU off and rejects malformed policy", () => {
+  for (const value of ["true", "1", "false", "0"]) {
+    const entries = parseControllerEnvironment(`${VALID_ENV}\nPINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION=${value}\n`);
+    assert.doesNotThrow(() => validateControllerEnvironment(entries));
+    assert.equal(loadEnrollmentRegistryConfig(Object.fromEntries(entries)).self_registration, ["true", "1"].includes(value));
+  }
+  for (const value of ["", "yes", "TRUE", "2"]) {
+    assert.throws(() => validateControllerEnvironment(parseControllerEnvironment(
+      `${VALID_ENV}\nPINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION=${value}\n`,
+    )), /controller_env_self_registration_invalid/u);
+  }
+});
+
 test("production preflight can verify the exact feature-off rollback configuration", () => {
   const disabled = parseControllerEnvironment(
     VALID_ENV.replace("PINVOU_DESKTOP_CONTROLLER_ENABLED=1", "PINVOU_DESKTOP_CONTROLLER_ENABLED=0"),

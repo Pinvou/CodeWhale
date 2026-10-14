@@ -252,6 +252,98 @@ function controllerEnvironment(name, overrides = {}) {
   };
 }
 
+function selfRegistrationEnvironment(name, overrides = {}) {
+  return controllerEnvironment(name, {
+    NODE_ENV: "production",
+    PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted",
+    PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "false",
+    PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION: "true",
+    PINVOU_TELEMETRY_ENROLLMENT_TOKEN: enrollmentToken,
+    PINVOU_TELEMETRY_DEVICE_PEPPER: "self-registration-test-pepper-at-least-24",
+    PINVOU_STATS_ADMIN_PASSWORD: adminPassword,
+    PINVOU_TELEMETRY_DATA_DIR: join(testRoot, `self-registration-telemetry-${name}`),
+    ...overrides,
+  });
+}
+
+async function enrollmentSnapshot(statePath) {
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  return Array.isArray(state.namespaces)
+    ? state.namespaces.find(record => record.name === "endpoint_enrollment")
+    : state.namespaces.endpoint_enrollment;
+}
+
+test("public production: first desktop receives a real pairing code and reconnects after Relay restart without admin enrollment", { timeout: 90_000 }, async () => {
+  const env = selfRegistrationEnvironment("first-start");
+  const endpointId = `ep_${crypto.randomBytes(12).toString("hex")}`;
+  const access = crypto.randomBytes(32).toString("base64url");
+  const desktopSecret = crypto.randomBytes(32).toString("base64url");
+  let isolated = await spawnRelay(env), ws;
+  try {
+    ({ ws } = await registerDesktop(endpointId, access, desktopSecret, isolated.wsUrl, 15_000, true));
+    const codeKey = crypto.generateKeyPairSync("x25519");
+    const handshakeKey = crypto.generateKeyPairSync("x25519");
+    const registered = nextMessageOneOf(ws, ["desktop_pairing_registered", "error"], 15_000);
+    ws.send(JSON.stringify({ v: 1, type: "desktop_pairing_register", request_id: "request-self-registration",
+      registration_request_id: "registration-self-registration", endpoint_id: endpointId,
+      remote_control_generation: "generation-self-registration",
+      code_wrap_public_key_b64: rawX25519Public(codeKey.publicKey).toString("base64"),
+      handshake_public_key_b64: rawX25519Public(handshakeKey.publicKey).toString("base64"),
+      key_algorithm: "x25519", capabilities: ["pairing_v1"] }));
+    const response = await registered;
+    assert.equal(response.type, "desktop_pairing_registered", response.code);
+    assert.match(openPairingCode(codeKey.privateKey, response), /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{7}$/u);
+    const before = await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH);
+    assert.equal(before.value.entries.length, 1);
+    assert.equal(before.value.entries[0].desktop_credential.algorithm, "hmac-sha256-role-v1");
+    assert.equal(JSON.stringify(before).includes(access), false);
+    assert.equal(JSON.stringify(before).includes(desktopSecret), false);
+    closeSocket(ws);
+    await stopRelay(isolated.child);
+    isolated = await spawnRelay(env);
+    ({ ws } = await registerDesktop(endpointId, access, desktopSecret, isolated.wsUrl, 15_000, true));
+    const after = await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH);
+    assert.deepEqual(after, before, "restart and re-registration must preserve enrolled credentials and revision");
+    const wrong = await openControllerSocket(isolated.wsUrl);
+    try {
+      const rejected = nextMessage(wrong, "error", 15_000);
+      wrong.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: endpointId,
+        access_token: access, desktop_secret: crypto.randomBytes(32).toString("base64url") }));
+      assert.equal((await rejected).code, "invalid_enrollment_credential");
+      assert.deepEqual(await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH), before);
+    } finally { closeSocket(wrong); }
+  } finally {
+    closeSocket(ws);
+    await stopRelay(isolated.child);
+  }
+});
+
+for (const [name, overrides, expected] of [
+  ["rate", { ENDPOINT_CREATE_LIMIT: "1", ENDPOINT_CREATE_WINDOW_MS: "60000" }, "endpoint_creation_rate_limited"],
+  ["capacity", { MAX_ENDPOINTS: "1", ENDPOINT_CREATE_LIMIT: "100" }, "endpoint_capacity_reached"],
+]) {
+  test(`public production: ${name} admission rejects new devices before durable registry writes`, { timeout: 90_000 }, async () => {
+    const env = selfRegistrationEnvironment(name, overrides);
+    const isolated = await spawnRelay(env);
+    let first, denied;
+    try {
+      first = await registerDesktop(`ep_${crypto.randomBytes(12).toString("hex")}`,
+        crypto.randomBytes(32).toString("base64url"), crypto.randomBytes(32).toString("base64url"), isolated.wsUrl, 15_000, true);
+      const before = await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH);
+      denied = await openControllerSocket(isolated.wsUrl);
+      const rejected = nextMessage(denied, "error", 15_000);
+      denied.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register",
+        endpoint_id: `ep_${crypto.randomBytes(12).toString("hex")}`,
+        access_token: crypto.randomBytes(32).toString("base64url"), desktop_secret: crypto.randomBytes(32).toString("base64url") }));
+      assert.equal((await rejected).code, expected);
+      assert.deepEqual(await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH), before);
+    } finally {
+      closeSocket(first?.ws); closeSocket(denied);
+      await stopRelay(isolated.child);
+    }
+  });
+}
+
 test("identifier contract: real Relay accepts pinned-trust signing IDs and preserves legacy leading-ID Web v2", { timeout: 90_000 }, async (t) => {
   const isolated = await spawnRelay(controllerEnvironment("identifier-contract", {
     PINVOU_REMOTE_RELAY_SIGNING_KEY_ID: "relay.signing-0001",
@@ -284,6 +376,35 @@ function waitForRegistrationProbe(child, type, endpointId) {
     child.on("message", onMessage);
   });
 }
+
+test("public production: one pending socket cannot persist multiple anonymous devices", { timeout: 90_000 }, async () => {
+  const env = selfRegistrationEnvironment("pending-registration");
+  const isolated = await spawnRelay(env, {
+    preload: new URL("./fixtures/desktop-registration-barrier.js", import.meta.url).href, ipc: true,
+  });
+  let ws;
+  try {
+    ws = await openControllerSocket(isolated.wsUrl);
+    const ids = [0, 1].map(() => `ep_${crypto.randomBytes(12).toString("hex")}`);
+    const ready = waitForRegistrationProbe(isolated.child, "authorization-ready", ids[0]);
+    const rejected = nextMessage(ws, "error", 15_000);
+    for (const endpoint_id of ids) {
+      ws.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id,
+        access_token: crypto.randomBytes(32).toString("base64url"),
+        desktop_secret: crypto.randomBytes(32).toString("base64url") }));
+    }
+    await ready;
+    assert.equal((await rejected).code, "bad_desktop_endpoint_register");
+    const snapshot = await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH);
+    assert.deepEqual(snapshot.value.entries.map(entry => entry.endpoint_id), [ids[0]]);
+    const finished = waitForRegistrationProbe(isolated.child, "authorization-finished", ids[0]);
+    isolated.child.send({ type: "release-registration" });
+    await finished;
+  } finally {
+    closeSocket(ws);
+    await stopRelay(isolated.child);
+  }
+});
 
 test("desktop authorization cannot attach one socket to two endpoints", async () => {
   const isolated = await spawnRelay(controllerEnvironment("concurrent-registration"), {

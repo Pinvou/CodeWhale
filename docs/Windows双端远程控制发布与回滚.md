@@ -60,6 +60,7 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 2. 官方环境由已认证旧 socket 完成 challenge/proof 认领，保留 endpoint ID/token/Web 链接；身份冲突必须重新分享。
 3. 自托管先 `--dry-run`，再用稳定 request ID 执行批量 allowlist/re-enroll；re-enroll 会明确使旧 Web 链接失效。
 4. 生产只允许 `NODE_ENV=production`、独立验证过的 `self_hosted`，且 `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`。当前 `official` live claim 尚未接线，预检及启动明确失败关闭；不得以开发 TOFU 作为生产降级。
+   公开服务可显式启用 `PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION=true`，让新原生设备在首次完整注册时原子绑定两组凭据，无需账号或管理员导入。上线前须验证首次连接码、重启恢复、凭据冲突、撤销、限流和容量拒绝；配置指纹须绑定该策略。回滚关闭新设备自动登记并保留注册表，已登记身份继续按原凭据验证。匿名策略的身份及撤销边界见 `remote-control-relay/ENROLLMENT.md`。
 5. 先验证开关关闭组合门禁，再在 Relay、A、B 同时设为 `1`；按 registry 覆盖率和 endpoint allowlist 小范围灰度，而不是删除持久状态。
 6. 观察 DEV-24 固定枚举指标；任何敏感面哨兵、未 enrolled 注册、裸 v2 路由或旁路出现即停止。
 

@@ -601,6 +601,8 @@ export function loadEnrollmentRegistryConfig(env = process.env) {
     fail("enrollment_runtime_environment_invalid");
   }
   const developmentTofu = parseBoolean(env.PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU, "development_tofu");
+  const selfRegistration = parseBoolean(env.PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION, "self_registration");
+  if (selfRegistration && deployment !== "self_hosted") fail("self_registration_forbidden");
   if (developmentTofu && (deployment !== "development" || runtimeEnvironment === "production")) {
     fail("development_tofu_forbidden");
   }
@@ -650,6 +652,7 @@ export function loadEnrollmentRegistryConfig(env = process.env) {
     deployment,
     runtime_environment: runtimeEnvironment,
     development_tofu: developmentTofu,
+    self_registration: selfRegistration,
     controller_state_path: controllerStatePath,
     legacy_web_state_path: legacyWebStatePath,
   });
@@ -1060,10 +1063,16 @@ export class EnrollmentRegistry {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const snapshot = this.#read();
       const entry = this.#find(snapshot.registry, endpointId);
-      if (!entry && this.#config.development_tofu) {
+      if (!entry && (this.#config.development_tofu || this.#config.self_registration)) {
+        // Anonymous production enrollment claims only a new random native ID.
+        // Bind both independent roles in one CAS before publishing readiness.
+        if (this.#config.self_registration) {
+          if (!/^ep_[A-Za-z0-9]{24}$/u.test(endpointId)) fail("endpoint_id_invalid");
+          if (accessToken === desktopSecret) fail("invalid_enrollment_credential");
+        }
         try {
           await this.#enroll({ endpointId, credential: accessToken, desktopCredential: desktopSecret,
-            expectedNamespaceRevision: snapshot.namespace_revision }, true);
+            expectedNamespaceRevision: snapshot.namespace_revision }, this.#config.development_tofu);
           continue;
         } catch (error) {
           if (error?.code === "enrollment_revision_conflict") continue;
