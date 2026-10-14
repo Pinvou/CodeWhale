@@ -430,11 +430,22 @@ const TOOLBOX_CATALOG_SHRINK_REASON: &str = "Previously active in this conversat
 /// Why a deferred tool stays out of the bounded conversation toolbox: its
 /// serialized form — name, description, and schema measured together —
 /// exceeds the per-tool budget, so no activation can admit it while it
-/// stays that large. Shared by discovery-time rejections and revalidation
-/// drops so the prose cannot drift from the real bounds. Search-context
-/// callers append the recovery hint via [`toolbox_oversize_search_hint`];
-/// a direct-call refusal has no query to narrow and states the bounds only.
+/// stays that large. In the Pinvou fork the bounds never fire (see the
+/// session constants): the only reachable trigger is the serde-failure
+/// measurement sentinel, and the prose then claims no bound and
+/// interpolates no numbers. Shared by discovery-time rejections and
+/// revalidation drops so the prose cannot drift from the real bounds.
+/// Search-context callers append the recovery hint via
+/// [`toolbox_oversize_search_hint`]; a direct-call refusal has no query
+/// to narrow and carries the reason alone.
 pub(crate) fn toolbox_oversize_reason() -> String {
+    if crate::core::session::TOOL_ACTIVATION_CACHE_MAX_NAMES == usize::MAX / 2
+        && crate::core::session::TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES == usize::MAX / 2
+    {
+        return "The serialized tool definition could not be measured for admission to the \
+                conversation toolbox."
+            .to_string();
+    }
     format!(
         "The serialized tool exceeds the bounded conversation toolbox ({} \
          cached tools, {}KiB of serialized tool definitions).",
@@ -451,25 +462,40 @@ pub(crate) fn toolbox_oversize_search_hint() -> &'static str {
 }
 
 /// [`toolbox_oversize_reason`] with the search-context recovery hint, for
-/// the `tool_search` payload's unavailable references.
+/// the `tool_search` payload's unavailable references. The hint rides only
+/// a real budget rejection: under the fork's disabled sentinel the reason
+/// reports a measurement failure, which no narrower query can fix.
 fn search_oversize_reason() -> String {
-    format!(
-        "{}{}",
-        toolbox_oversize_reason(),
-        toolbox_oversize_search_hint()
-    )
+    let reason = toolbox_oversize_reason();
+    if crate::core::session::TOOL_ACTIVATION_CACHE_MAX_NAMES == usize::MAX / 2
+        && crate::core::session::TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES == usize::MAX / 2
+    {
+        return reason;
+    }
+    format!("{}{}", reason, toolbox_oversize_search_hint())
 }
 
 /// The model-facing sentence naming a bounds-driven toolbox eviction and the
 /// recovery contract. `trigger` names the step that surfaced it; the capacity
-/// label is derived from the session constants so the prose cannot drift from
-/// the real bounds. The eviction may come from the admission itself or from
-/// revalidation after a cached schema grew, so the wording stays neutral
-/// about the cause.
+/// label renders only when the bounds are real — under the fork's disabled
+/// sentinel bounds there is no meaningful capacity to quote, so the
+/// parenthetical is omitted. The eviction may come from the admission itself
+/// or from revalidation after a cached schema grew, so the wording stays
+/// neutral about the cause.
 pub(crate) fn bounded_toolbox_eviction_note(
     trigger: ToolboxEvictionTrigger,
     evicted: &[String],
 ) -> String {
+    if crate::core::session::TOOL_ACTIVATION_CACHE_MAX_NAMES == usize::MAX / 2
+        && crate::core::session::TOOL_ACTIVATION_CACHE_MAX_SCHEMA_BYTES == usize::MAX / 2
+    {
+        return format!(
+            "This {} evicted tools from the bounded conversation toolbox; the evicted tools \
+             are no longer callable until a later search re-activates them: {}",
+            trigger.label(),
+            evicted.join(", ")
+        );
+    }
     format!(
         "This {} evicted tools from the bounded conversation toolbox \
          ({} cached tools, {}KiB of serialized tool definitions); the evicted tools \
@@ -482,9 +508,10 @@ pub(crate) fn bounded_toolbox_eviction_note(
 }
 
 /// Park a bounds-driven toolbox eviction for a later result to carry,
-/// combining with any note already parked — turn-start revalidation and a
-/// hydration batch can both evict before a result records. Shared by the
-/// parent engine and the child surface so the combine contract is stated
+/// queueing beside any note already parked — turn-start revalidation and a
+/// hydration batch can both evict before a result records, and names
+/// repeated across notes are netted when the notes render. Shared by the
+/// parent engine and the child surface so the queueing contract is stated
 /// and pinned once.
 pub(crate) fn park_toolbox_eviction(
     notes: &mut Vec<PendingToolboxEviction>,
@@ -1601,8 +1628,9 @@ fn execute_tool_search_inner(
     // constants): discovery pre-filters deferred membership, so the only way
     // a name lands here is the per-entry sentinel — a schema whose serialized
     // size cannot be measured (serde failure reports usize::MAX) — which no
-    // real schema reaches. The reason therefore claims no bound and
-    // interpolates no numbers.
+    // real schema reaches. Under that disabled-bounds posture the reason
+    // claims no bound and interpolates no numbers; were the bounds real,
+    // toolbox_oversize_reason would quote them instead.
     unavailable_references.extend(cache_rejected.iter().map(|name| {
         json!({
             "type": "unavailable_tool_reference",
@@ -1654,11 +1682,14 @@ fn execute_tool_search_inner(
         "tool_references": references,
         "unavailable_tool_references": unavailable_references.clone(),
     });
-    // The activation cache is bounded (8 cached tools, 16KiB of serialized
-    // tool definitions), so admitting new tools can silently revoke ones this
-    // conversation already used. Naming the evictions in the result keeps
-    // the model's picture of its callable toolbox honest — otherwise it sees
-    // a previously working tool disappear between turns with no explanation.
+    // Upstream bounds the activation cache (8 cached tools, 16KiB of
+    // serialized tool definitions), so admitting new tools can silently
+    // revoke ones this conversation already used. This fork disables the
+    // bounds (see the session constants), so in-fork the eviction block
+    // below stays empty and the reporting exists for upstream parity:
+    // naming the evictions in the result keeps the model's picture of its
+    // callable toolbox honest — otherwise it sees a previously working tool
+    // disappear between turns with no explanation.
     if !cache_evicted.is_empty() {
         payload["evicted_tool_references"] = json!(
             cache_evicted

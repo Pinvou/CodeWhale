@@ -14350,16 +14350,30 @@ impl SubAgentToolSurface {
             }
             return Ok(message);
         }
-        // The only rejection here is the per-tool budget: a narrower search
-        // cannot help, so the recovery hint must say why the tool cannot
-        // enter instead of promising a narrower query would. The rejection
-        // runs after the activation, so revalidation may have bounds-evicted
-        // other tools on the way; this error is the call's only result
-        // payload, so the note rides it instead of being absorbed.
-        let mut message = format!(
-            "Tool {name} could not enter the bounded child toolbox: {}",
-            toolbox_oversize_reason()
-        );
+        // Pick the truthful rejection cause. Only the per-tool budget keeps
+        // the oversize prose: a narrower search cannot help there, so the
+        // reason says why the tool cannot enter instead of promising a
+        // narrower query would. A name absent from the child's filtered
+        // catalog has nothing to activate, and a name that is not deferred
+        // is directly callable already — neither is a budget rejection.
+        // The rejection runs after the activation, so revalidation may have
+        // bounds-evicted other tools on the way; this error is the call's
+        // only result payload, so the note rides it instead of being
+        // absorbed.
+        let mut message = match self.catalog.iter().find(|tool| tool.name == name) {
+            None => format!(
+                "Tool {name} could not enter the child toolbox: no such deferred tool in the \
+                 child catalog."
+            ),
+            Some(tool) if !tool.defer_loading.unwrap_or(false) => format!(
+                "Tool {name} could not enter the child toolbox: it is not deferred, so it is \
+                 directly callable and hydration has nothing to load."
+            ),
+            Some(_) => format!(
+                "Tool {name} could not enter the child toolbox: {}",
+                toolbox_oversize_reason()
+            ),
+        };
         if !activation.evicted.is_empty() {
             message.push_str(&format!(
                 "\n\n{}",
