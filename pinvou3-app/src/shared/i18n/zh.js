@@ -303,7 +303,7 @@ export const dictZh = {
         modelContextWindow: '上下文窗口（tokens）',
         modelMaxOutput: '最大输出（tokens）',
         customApiKey: 'API Key',
-        credEnvOverride: '环境变量覆盖', credUnavailable: '凭证不可用', credConfigured: '已配置', credNotConfigured: '未配置', credEnterNewKey: '输入新 Key 替换', credKeep: '保留', credReplace: '替换', credDeleteKey: '删除 Key', clearSearch: '清除搜索', clearInput: '清除输入', sendMsg: '发送', apiKeyGateTitle: '需要配置 API Key', apiKeyGateDesc: '当前模型为云端模型，需要先配置 API Key 才能开始对话。', apiKeyGateBtn: '去配置',
+        credEnvOverride: '环境变量覆盖', credUnavailable: '凭证不可用', credConfigured: '已配置', credNotConfigured: '未配置', credEnterNewKey: '输入新 Key 替换', credKeep: '保留', credReplace: '替换', credDeleteKey: '删除 Key', clearSearch: '清除搜索', clearInput: '清除输入', sendMsg: '发送',
         detectLocalVllm: '检测本机模型服务',
         detectingLocalVllm: '检测中…',
         useVllmConfig: '使用此配置',
@@ -1975,10 +1975,6 @@ dictZh["uiTeamRelay"] = {
   "lifecycleSyncPending": "操作已完成，但团队数据尚未同步。请重新同步以获取最新状态。"
 };
 dictZh["kbOutWeekdays"] = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-dictZh["builtinModelSelect"] = "后台模型";
-dictZh["builtinModelRefresh"] = "刷新";
-dictZh["builtinModelLoading"] = "同步中…";
-dictZh["builtinModelEmpty"] = "暂无后台模型";
 dictZh["uiRemote"]["status"]["idle"] = ["未开启", "开启后会生成一个长期有效的远程控制链接。"];
 dictZh["uiRemote"]["status"]["starting"] = ["正在开启", "正在创建远程控制连接。"];
 dictZh["uiRemote"]["status"]["connecting_relay"] = ["正在连接", "正在连接云端中继，请稍候。"];
@@ -1988,7 +1984,6 @@ dictZh["uiRemote"]["status"]["web_client_disconnected"] = ["浏览器已断开",
 dictZh["uiRemote"]["status"]["revoked"] = ["链接已撤销", "请重新开启远程控制。"];
 dictZh["uiRemote"]["status"]["stopped"] = ["已停止", "再次打开此面板即可重新开启。"];
 dictZh["uiRemote"]["status"]["error"] = ["连接异常", "远程控制暂时不可用，请重试。"];
-dictZh["uiSettingsDetail"]["builtinModel"] = "内置模型";
 dictZh["uiSettingsDetail"]["settingsLoadFailedDetail"] = "设置页面暂时无法显示，请重新打开后重试。";
 dictZh["uiScheduled"]["weekdays"] = [["星期一", "周一"], ["星期二", "周二"], ["星期三", "周三"], ["星期四", "周四"], ["星期五", "周五"], ["星期六", "周六"], ["星期日", "周日"]];
 dictZh["uiAccount"] = {
