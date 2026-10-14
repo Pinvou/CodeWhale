@@ -13,13 +13,10 @@ const {
 } = require("../scripts/tauri/effective-config.js");
 const {
   TARGET_MACHINE_ARCHITECTURES,
-  configureIsolatedWindowsRustToolchain,
   chromeDevtoolsMcpEnvironment,
   configSpecs,
-  ensureWindowsRustToolchain,
   prepareCodexBridge,
   prepareChromeDevtoolsMcpForPlatform,
-  prepareWindowsRustcStackWrapper,
   prepareWindowsCodexBridge,
   prepareTauriArgs,
   runTauri,
@@ -156,156 +153,9 @@ assert.deepEqual(
 
 const noRuntime = () => null;
 
-const isolatedRustEnv = {};
-const isolatedRust = configureIsolatedWindowsRustToolchain({
-  env: isolatedRustEnv,
-  architecture: "x64",
-});
-assert.equal(isolatedRust.channel, "stable");
-assert.equal(isolatedRust.hostTriple, "x86_64-pc-windows-msvc");
-assert.equal(isolatedRustEnv.RUSTUP_HOME, isolatedRust.rustupHome);
-assert.equal(isolatedRustEnv.PINVOU3_MANAGED_RUSTUP, "1");
-assert.match(
-  isolatedRust.rustupHome.replaceAll("\\", "/"),
-  /\/\.cache\/rustup\/stable-x86_64-pc-windows-msvc$/u,
-);
-
-const customRustEnv = { PINVOU3_RUSTUP_HOME: "custom-rustup" };
-const customRust = configureIsolatedWindowsRustToolchain({
-  env: customRustEnv,
-  architecture: "arm64",
-});
-assert.equal(customRust.hostTriple, "aarch64-pc-windows-msvc");
-assert.equal(customRust.rustupHome, path.join(APP_ROOT, "custom-rustup"));
-
-function scriptedRustToolchainSpawn(exitCodes, invocations) {
-  return (command, args, options) => {
-    invocations.push({ command, args, options });
-    const child = new EventEmitter();
-    const exitCode = exitCodes.shift();
-    queueMicrotask(() => child.emit("exit", exitCode, null));
-    return child;
-  };
-}
-
-const accountRustInvocations = [];
-const accountRustEnv = {};
-const accountRustCheck = ensureWindowsRustToolchain({
-  env: accountRustEnv,
-  architecture: "x64",
-  log: () => {},
-  spawnChild: scriptedRustToolchainSpawn([0], accountRustInvocations),
-}).then((result) => {
-  assert.equal(result.source, "account");
-  assert.equal(accountRustInvocations.length, 1);
-  assert.equal(accountRustInvocations[0].command, "powershell.exe");
-  assert.equal(accountRustInvocations[0].args.at(-1), "-CheckOnly");
-  assert.equal(accountRustInvocations[0].options.env.PINVOU3_MANAGED_RUSTUP, undefined);
-  assert.equal(accountRustEnv.RUSTUP_HOME, undefined);
-  assert.equal(accountRustEnv.RUSTUP_TOOLCHAIN, "stable");
-});
-
-const isolatedRustInvocations = [];
-const fallbackRustEnv = {};
-const fallbackRustCheck = ensureWindowsRustToolchain({
-  env: fallbackRustEnv,
-  architecture: "x64",
-  log: () => {},
-  spawnChild: scriptedRustToolchainSpawn([2, 0], isolatedRustInvocations),
-}).then((result) => {
-  assert.equal(result.source, "isolated");
-  assert.equal(isolatedRustInvocations.length, 2);
-  assert.equal(isolatedRustInvocations[0].args.at(-1), "-CheckOnly");
-  assert.equal(isolatedRustInvocations[1].options.env.PINVOU3_MANAGED_RUSTUP, "1");
-  assert.match(
-    isolatedRustInvocations[1].options.env.RUSTUP_HOME.replaceAll("\\", "/"),
-    /\/\.cache\/rustup\/stable-x86_64-pc-windows-msvc$/u,
-  );
-});
-
-Promise.all([accountRustCheck, fallbackRustCheck]).catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-
-{
-  const scriptsPath = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-rustc-stack-wrapper-"));
-  const sourcePath = path.join(scriptsPath, "rustc-stack-wrapper.rs");
-  const wrapperPath = path.join(scriptsPath, "rustc-stack-wrapper.exe");
-  fs.writeFileSync(sourcePath, "fn main() {}\n");
-
-  const compileInvocations = [];
-  const environment = { RUSTUP_TOOLCHAIN: "fixture-toolchain" };
-  const prepared = prepareWindowsRustcStackWrapper({
-    environment,
-    platform: "win32",
-    scriptsPath,
-    log: () => {},
-    spawnCompiler: (command, args, options) => {
-      compileInvocations.push({ command, args, options });
-      fs.writeFileSync(wrapperPath, "fixture executable");
-      return { status: 0 };
-    },
-  });
-  assert.deepEqual(prepared, { path: wrapperPath, source: "compiled" });
-  assert.equal(environment.RUSTC_WRAPPER, wrapperPath);
-  assert.equal(compileInvocations.length, 1);
-  assert.equal(compileInvocations[0].command, "rustc");
-  assert.deepEqual(compileInvocations[0].args, ["-O", sourcePath, "-o", wrapperPath]);
-  assert.equal(compileInvocations[0].options.env.RUSTUP_TOOLCHAIN, "fixture-toolchain");
-  assert.equal(compileInvocations[0].options.windowsHide, true);
-
-  const cachedEnvironment = {};
-  const cached = prepareWindowsRustcStackWrapper({
-    environment: cachedEnvironment,
-    platform: "win32",
-    scriptsPath,
-    log: () => {},
-    spawnCompiler: () => {
-      throw new Error("a fresh wrapper must not be rebuilt");
-    },
-  });
-  assert.deepEqual(cached, { path: wrapperPath, source: "cached" });
-  assert.equal(cachedEnvironment.RUSTC_WRAPPER, wrapperPath);
-
-  const configuredEnvironment = { RUSTC_WRAPPER: "  C:\\custom\\rustc-wrapper.exe  " };
-  const configured = prepareWindowsRustcStackWrapper({
-    environment: configuredEnvironment,
-    platform: "win32",
-    scriptsPath,
-    log: () => {},
-    spawnCompiler: () => {
-      throw new Error("an explicit wrapper must not be rebuilt");
-    },
-  });
-  assert.deepEqual(configured, {
-    path: "C:\\custom\\rustc-wrapper.exe",
-    source: "environment",
-  });
-  assert.equal(configuredEnvironment.RUSTC_WRAPPER, "C:\\custom\\rustc-wrapper.exe");
-  assert.equal(
-    prepareWindowsRustcStackWrapper({
-      environment: {},
-      platform: "linux",
-      scriptsPath,
-      log: () => {},
-    }),
-    null,
-  );
-  fs.rmSync(wrapperPath);
-  assert.throws(
-    () => prepareWindowsRustcStackWrapper({
-      environment: {},
-      platform: "win32",
-      scriptsPath,
-      log: () => {},
-      spawnCompiler: () => ({ status: 1 }),
-    }),
-    /Failed to compile Windows rustc stack wrapper \(exit 1\)/,
-    "a failed wrapper build must stop before Cargo can fall back to the overflowing compiler stack",
-  );
-  fs.rmSync(scriptsPath, { recursive: true, force: true });
-}
+// Windows 工具链与 rustc stack wrapper 的行为契约(隔离 RUSTUP_HOME、账号
+// 探针/隔离修复、wrapper 编译/缓存/显式优先)已统一移入
+// tests/windows_rust_toolchain_contract.test.js(node:test),此处不再重复。
 
 let preparedBridge = null;
 prepareCodexBridge({
@@ -787,6 +637,7 @@ fakeTauriChild.pid = 4242;
 let currentTime = 0;
 let heartbeatCallback = null;
 let heartbeatCleared = false;
+let heartbeatUnrefed = false;
 const tauriResult = runTauri(["build"], {
   environment: { PINVOU_TEST_ENV: "kept" },
   spawnChild: (command, args, options) => {
@@ -799,7 +650,11 @@ const tauriResult = runTauri(["build"], {
   setIntervalFn: (callback, interval) => {
     assert.equal(interval, 60_000);
     heartbeatCallback = callback;
-    return { unref() {} };
+    return {
+      unref() {
+        heartbeatUnrefed = true;
+      },
+    };
   },
   clearIntervalFn: () => {
     heartbeatCleared = true;
@@ -821,9 +676,39 @@ currentTime = 61_000;
 heartbeatCallback();
 assert.match(tauriLogs[1], /phase=build, elapsed=1m 1s/);
 fakeTauriChild.emit("exit", 0, null);
-assert.equal(heartbeatCleared, true);
+assert.equal(
+  heartbeatCleared,
+  true,
+  "the heartbeat must stop once the Tauri CLI exits",
+);
+assert.equal(
+  heartbeatUnrefed,
+  true,
+  "the heartbeat timer must be unrefed so it cannot keep the build process alive",
+);
 assert.match(tauriLogs[2], /phase=build, elapsed=1m 1s, exit=0/);
 tauriResult.then(
+  (exitCode) => assert.equal(exitCode, 0),
+  (error) => {
+    console.error(error);
+    process.exitCode = 1;
+  },
+);
+
+// dev 运行必须报告自己的阶段,而不是落进泛化的 "command" 标签。
+const devLogs = [];
+const devChild = new EventEmitter();
+devChild.pid = 4243;
+const devResult = runTauri(["dev"], {
+  environment: {},
+  spawnChild: () => devChild,
+  heartbeatIntervalMs: 0,
+  log: (message) => devLogs.push(message),
+});
+assert.match(devLogs[0], /pid=4243, phase=dev/);
+devChild.emit("exit", 0, null);
+assert.match(devLogs[1], /phase=dev, elapsed=0s, exit=0/);
+devResult.then(
   (exitCode) => assert.equal(exitCode, 0),
   (error) => {
     console.error(error);
@@ -880,6 +765,40 @@ assert.ok(
   linux.bundle.linux.deb.depends.includes("webkit2gtk-driver"),
   "Linux BrowserCore packages must install the WebKitGTK WebDriver backend",
 );
+// Computer Use links all three of these unconditionally on Linux, as
+// DT_NEEDED entries resolved at process start — not dlopen — but they arrive
+// by different routes, which matters if anyone ever tries to drop one:
+//   - libpipewire-0.3: `pipewire-sys` declares `links = "pipewire-0.3"` and
+//     resolves through pkg-config. Its .pc emits only `-lpipewire-0.3`.
+//   - libEGL: `xcap` → `libwayshot-xcap` → `khronos-egl`, whose build script
+//     pkg-config-probes `egl` and emits `-lEGL`.
+//   - libgbm: `gbm-sys` declares no `links` and its build script emits no
+//     link flag, but `gbm-sys-0.4.0/src/lib.rs` carries
+//     `#[link(name = "gbm")]`, which rustc honors unconditionally — so the
+//     edge is provable from crate source, just not from manifest metadata;
+//     `libgbm1` is additionally a hard dependency of libwebkit2gtk-4.1-0,
+//     making the entry belt-and-braces. Re-check with `readelf -d` on the
+//     shipped binary before ever removing it.
+// Tauri's deb bundler writes `Depends:` verbatim and never runs
+// dpkg-shlibdeps, so a missing entry installs cleanly and then fails to start
+// with a dynamic-linker error on any system that lacks the library.
+for (const library of ["libpipewire-0.3-0", "libgbm1", "libegl1"]) {
+  assert.ok(
+    linux.bundle.linux.deb.depends.includes(library),
+    `Linux packages must depend on ${library}: the binary links it at load time`,
+  );
+}
+// The list is pinned exactly, not just by membership: the bundler writes
+// `Depends:` verbatim, so an EXTRA entry is as much a shipped fact as a
+// missing one, and a silent addition deserves the same friction as a
+// removal. Update this list deliberately when the linkage genuinely changes.
+assert.deepEqual(linux.bundle.linux.deb.depends, [
+  "libwebkit2gtk-4.1-0 (>= 2.40)",
+  "webkit2gtk-driver",
+  "libpipewire-0.3-0",
+  "libgbm1",
+  "libegl1",
+]);
 const linuxManifest = buildResourceManifest(linux, { platform: "linux" });
 assert.ok(linuxManifest.resourceFileCount > 0);
 assert.ok(linuxManifest.files.some((file) => file.destination.startsWith("runtime/asr/")));

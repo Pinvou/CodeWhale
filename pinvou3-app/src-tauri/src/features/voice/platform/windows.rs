@@ -22,19 +22,11 @@ const ASR_MODEL_SIZE: u64 = 254_208_320;
 const ASR_MODEL_SHA256: &str = "4ae45c94422de949b387e2e0fb10d7e14e4c42c69db30c3444ecc7d4b844b7c5";
 
 pub fn asr_tool_path() -> PathBuf {
-    for name in [
-        "PINVOU3_ASR_CMD",
-        "PINVOU3_DEEPSPEECH2_CMD",
-        "PADDLESPEECH_BIN",
-    ] {
-        if let Ok(path) = std::env::var(name) {
-            if !path.trim().is_empty() {
-                return PathBuf::from(path);
-            }
-        }
-    }
-    crate::platform::os::windows::bundled_asr_tool_path()
-        .unwrap_or_else(|| PathBuf::from("pinvou-asr"))
+    // 环境变量探测循环与 macos/linux 共用（platform::asr_tool_path_from_env）。
+    super::asr_tool_path_from_env().unwrap_or_else(|| {
+        crate::platform::os::windows::bundled_asr_tool_path()
+            .unwrap_or_else(|| PathBuf::from("pinvou-asr"))
+    })
 }
 
 pub fn asr_model_spec() -> AsrModelSpec {
@@ -57,23 +49,12 @@ pub fn asr_model_exists() -> bool {
 }
 
 pub fn asr_tool_exists() -> bool {
-    if let Ok(path) = std::env::var("PINVOU3_ASR_CMD") {
-        if !path.trim().is_empty() {
-            return crate::platform::os::command_exists(&path);
-        }
-    }
-    if let Ok(path) = std::env::var("PINVOU3_DEEPSPEECH2_CMD") {
-        if !path.trim().is_empty() {
-            return crate::platform::os::command_exists(&path);
-        }
-    }
-    if let Ok(path) = std::env::var("PADDLESPEECH_BIN") {
-        if !path.trim().is_empty() {
-            return crate::platform::os::command_exists(&path);
-        }
-    }
-    crate::platform::os::windows::bundled_asr_tool_path().is_some()
-        && crate::platform::os::windows::bundled_asr_backend_path().is_some()
+    // 就绪判定与执行路径（asr_tool_path）同判定：env 覆盖命令失效时如实报未就绪，
+    // 不落 bundled——否则面板报就绪而转写仍 spawn 失效路径（见 asr_ready_decision）。
+    super::asr_tool_exists_with_env(|| {
+        crate::platform::os::windows::bundled_asr_tool_path().is_some()
+            && crate::platform::os::windows::bundled_asr_backend_path().is_some()
+    })
 }
 
 pub fn asr_bundled_runtime_status() -> Option<bool> {
@@ -146,8 +127,11 @@ pub async fn reset_microphone_permission(window: tauri::WebviewWindow) -> Result
     window
         .with_webview(move |webview| {
             let callback_sender = Arc::clone(&sender);
-            // SAFETY: Tauri invokes this closure on the WebView thread with live COM interfaces;
-            // the completion handler owns its captured sender until WebView2 calls it.
+            // SAFETY: runs inside with_webview on the thread owning the WebView2,
+            // so webview.controller() is a live controller; CoreWebView2() returns
+            // an owned interface pointer, and cast() AddRef-fetches a supported
+            // interface valid for the enclosing scope; the origin HSTRING and
+            // &callback remain alive until SetPermissionState returns.
             let schedule_result: windows_core::Result<()> = (|| unsafe {
                 let webview13 = webview
                     .controller()

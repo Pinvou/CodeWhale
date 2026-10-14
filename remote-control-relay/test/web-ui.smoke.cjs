@@ -123,6 +123,16 @@ function openSocket() {
   });
 }
 
+// The relay journey starts with a configured local model so onboarding does
+// not isolate the navigation whose browser/protocol behavior is under test.
+const LOCAL_MODEL = {
+  id: 'webui-smoke-local',
+  name: 'WebUI smoke local',
+  preset: 'local_vllm',
+  model: 'webui-smoke-local',
+  base_url: 'http://127.0.0.1:8000/v1',
+};
+
 function minimalRpcResult(command, args = {}) {
   switch (command) {
     case 'get_settings':
@@ -130,7 +140,12 @@ function minimalRpcResult(command, args = {}) {
     case 'get_app_version':
       return 'webui-smoke-v2';
     case 'list_models':
-      return { models: [], active_model_id: null };
+      return {
+        models: [LOCAL_MODEL], active_model_id: LOCAL_MODEL.id,
+        default_model_ref: { source: 'LOCAL_CONFIG', saved_model_id: LOCAL_MODEL.id },
+      };
+    case 'get_effective_model_config':
+      return { ...LOCAL_MODEL, model_id: LOCAL_MODEL.id, requires_user_api_key: false };
     case 'get_backend_status':
       return { vllm_online: false, max_model_len: 32768 };
     case 'get_disabled_connectors':
@@ -177,7 +192,6 @@ function minimalRpcResult(command, args = {}) {
       }
       return { path: 'C:\\Users\\smoke', parent: 'C:\\Users', roots, entries: [] };
     }
-    case 'get_effective_model_config':
     case 'find_resumable_run':
     case 'get_active_persona':
     case 'get_session_model_id':

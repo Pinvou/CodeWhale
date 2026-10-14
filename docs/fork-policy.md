@@ -1,18 +1,18 @@
 # Pinvou 对 CodeWhale 底座的 fork 维护策略
 
-> 最后更新：2026-10-09（r3 收口后过渡期：不可变 tag `pinvou-v0.9.12-r3` 仍钉在 `61cb769be`；CI 明确校验登记快照的公开维护祖先链，默认发布校验仍要求维护分支头相等）
-> F05 候选登记：当前 gitlink 为 `8b5a863908bf4178a8c5876c11c5884919119615`，其后续修复已推送 CodeWhale #92 候选，当前候选 `fa556f45e2059891d02ef4a0d0796e046c10c384` 经普通 merge 承接维护头。候选尚未合入受保护 `pinvou3-clean`，固定 tag 不变，当前 gitlink 不是维护历史祖先；公开依赖门禁必须继续失败。须在受保护发布获明确授权并完成实际登记与匿名验证后，才能宣称可发布。本地 guard 或候选 CI 成功不替代该门禁。
+> 最后更新：2026-10-14（集成分支同步 main；CodeWhale 固定至公开维护头 `480bebf61`，CI 与发布均严格要求 gitlink=维护分支头；不可变 r3 tag 仍钉在 `61cb769be`，不再提供登记快照放行）
+> F05 调用幂等登记：原 `8b5a86390` 补丁及其后续修复已经外部维护者通过 CodeWhale #92 合入 `pinvou3-clean`，当前固定 `480bebf61` 包含该能力。父仓普通合并保留原 F05 提交历史，底座仍使用公开维护提交，不把合入前候选 SHA 当成维护头；账户 Gateway 的宿主 opt-in 与逐调用身份见 `docs/fork-modifications.md` 的 T1 登记。当前门禁及实际宿主验证仍须分别完成，不能由源码包含性替代。
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
 
 ## 0. 当前基线
 
 - 上游：`Hmbown/CodeWhale` tag `v0.9.12`，commit `dcd4c200f72f0c1ffd60d8e7f6850313db879fc5`。
-- 当前 fork 基线：`Pinvou/CodeWhale:pinvou3-clean`，head `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`（= 不可变 tag `pinvou-v0.9.12-r3`），共 49 个带 DCO sign-off 的提交；不可变 tag `pinvou-v0.9.12-r1` 钉在 r1 收口 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`（15 个提交），其后 34 个提交为 2026-09-10/11 backlog 批次、2026-09-17 批次、2026-09-18 批次、2026-09-20 批次、2026-09-21 批次（#64/#67）与 2026-09-22/23 批次（#63/#65/#68/#69/#70/#71/#72/#73/#76，另含 Windows 编译修复 #77）经 PR squash 合入。
+- 当前 fork 基线：`Pinvou/CodeWhale:pinvou3-clean`，head `480bebf616212e790ff722c92fb165c8d4a2511d`（领先不可变 tag `pinvou-v0.9.12-r3`，tag 仍钉在其收口 `61cb769be`），上游 v0.9.12 之上共 68 个带 DCO sign-off 的提交；r1 收口仍为 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`（15 个提交），其后 53 个提交经公开维护流程合入，最新为 2026-10-13/14 批次（#101/#92/#102/#96/#103/#104）。PR #92 已由维护者合入，登记使用维护提交而非合入前内容分支 SHA。
 - 升级前公开回退点是不可变 tag `pinvou-v0.9.5-r13`，head `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 branch `backup/pre-v0.9.12-sync` 只作便利引用。
 - r1 已成为可消费的受保护基线；rN 收口时父仓 gitlink、维护分支和不可变 tag 指向同一 commit。
-- 过渡期豁免（2026-09-11 起）：两次 rN 收口之间，父仓 gitlink 可沿 `pinvou3-clean` 领先不可变 tag 前进；默认 `scripts/verify-public-submodule.sh` 发布检查仍要求 gitlink 等于公开维护分支头、tag 钉在其收口 commit。CI 显式使用 `--registered-snapshot`：gitlink 必须精确等于 `fork-guard.sh` 的 `EXPECTED_HEAD`；全新隔离 bare 仓库匿名 fetch 公开 pin、固定 tag 和维护分支，校验对象为 commit，且固定 tag 是 pin 祖先、pin 是公开维护分支祖先。公开候选分支可达但未进入维护历史仍失败。维护分支前进不自动升级冻结 PR；运行时升级仍单独登记和审核。rN 收口清空 `TRANSITION_BASELINE` 后，两种模式均恢复分支、tag、gitlink 三方严格相等。
+- 过渡期豁免（2026-09-11 起）：两次 rN 收口之间，父仓 gitlink 可沿 `pinvou3-clean` 领先不可变 tag 前进；期间 `scripts/verify-public-submodule.sh` 断言 gitlink 等于公开维护分支头、不可变 tag 仍钉在其收口 commit，rN 收口时在合并头切新不可变 tag 并恢复三方相等。
 - `.gitmodules` 不配置浮动 `branch`；发布后父仓 gitlink、维护分支和不可变标签必须指向同一 commit。
-- 当前维护 4 个长期主题、3 个追加减量主题与 1 个已合入维护分支的主题：
+- 当前维护 4 个长期主题、3 个追加减量主题与 2 个已合入维护分支的主题：
 
   1. 宿主嵌入与路由边界
   2. 工具兼容与命令执行安全

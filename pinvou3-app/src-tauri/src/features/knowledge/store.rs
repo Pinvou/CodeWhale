@@ -5,7 +5,6 @@
 //! - `files` 表只存元数据（名/路径/大小/时间/类型/hash），**不存内容**。L1 内容/向量是后续层。
 //! - `files_fts` 是 external-content FTS5 虚表，trigram 分词 —— 对中文文件名和子串搜索都友好
 //!   （unicode61 会把一串中文当成单 token，搜不到子串；trigram 按 3-字符窗口可子串命中）。
-//! - 去重省钱：内容相同 → 大小必相同。只对「同 size 冲突组」补算 hash（[`Store::dup_hash_candidates`]）。
 //!
 //! 并发：`Connection` Send 不 Sync，整库放 `Arc<Mutex<Connection>>`。扫描线程批量写、
 //! 前端查询读，都短暂持锁；v0 单连接足够，日后抽 daemon 再上 WAL/多连接。
@@ -236,6 +235,23 @@ pub struct FileHit {
 /// as "no limit at all".
 pub(crate) const SEARCH_LIMIT_CAP: usize = 1000;
 
+/// FTS5 文本的最短字符数：≥ 该值走 trigram FTS，否则 LIKE 兜底。文件检索
+/// （[`Store::search`]）与 chunk 检索（`l1::search_fts`）共用一个阈值，
+/// 避免两条检索路径各自漂移。
+pub(crate) const FTS_MIN_CHARS: usize = 3;
+
+/// FTS5 MATCH 的短语字面量：双引号包成字符串字面量做子串匹配，内部引号
+/// 翻倍转义。文件与 chunk 两条 FTS 路径共用同一拼写。
+pub(crate) fn fts_phrase(q: &str) -> String {
+    format!("\"{}\"", q.replace('"', "\"\""))
+}
+
+/// LIKE 兜底的模式串：`%` 包裹，内容剥掉 `%`/`_` 通配符（见
+/// [`escape_like`]）。文件与 chunk 两条 LIKE 路径共用同一拼写。
+pub(crate) fn like_pattern(q: &str) -> String {
+    format!("%{}%", escape_like(q))
+}
+
 /// 秒搜查询条件。`text` 为名/路径子串；其余为结构化过滤。
 #[derive(Debug, Clone, Default)]
 pub struct SearchQuery {
@@ -280,7 +296,8 @@ pub struct Store {
 
 impl Store {
     /// 打开（或新建）磁盘库，建表。父目录会自动创建。
-    /// schema 版本不符 → 删库重建（L0 是可重建缓存，重扫即恢复；顺带回收旧版撑大的体积）。
+    /// 仅 v0–v2 的旧库（纯可重建 L0 缓存）才走删库重建；v3 原地迁移，高于
+    /// 本版本的库拒绝打开、绝不删除（见下）。
     ///
     /// All three connections (probe / write / read-only) carry busy_timeout:
     /// the desktop app and the headless CLI are a supported two-process pair,
@@ -512,20 +529,19 @@ impl Store {
 
         // Text present with >=3 chars goes to FTS; the branch holds the Some
         // value directly, avoiding a repeated unwrap.
-        if let Some(t) = text.filter(|t| t.chars().count() >= 3) {
+        if let Some(t) = text.filter(|t| t.chars().count() >= FTS_MIN_CHARS) {
             sql.push_str(
                 "SELECT f.id, f.path, f.name, f.ext, f.size, f.mtime \
                  FROM files_fts JOIN files f ON f.id = files_fts.rowid \
                  WHERE f.status='indexed' AND f.is_dir=0 AND files_fts MATCH ?",
             );
-            // trigram：双引号包成字符串字面量做子串匹配，内部引号翻倍转义。
-            let t = t.replace('"', "\"\"");
-            vals.push(Value::Text(format!("\"{t}\"")));
+            // trigram：短语字面量拼写见 [`fts_phrase`]。
+            vals.push(Value::Text(fts_phrase(t)));
         } else {
             sql.push_str("SELECT f.id, f.path, f.name, f.ext, f.size, f.mtime FROM files f WHERE f.status='indexed' AND f.is_dir=0");
             if let Some(t) = text {
                 sql.push_str(" AND (f.name LIKE ? OR f.path LIKE ?)");
-                let like = format!("%{}%", escape_like(t));
+                let like = like_pattern(t);
                 vals.push(Value::Text(like.clone()));
                 vals.push(Value::Text(like));
             }
