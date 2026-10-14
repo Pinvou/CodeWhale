@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+// Normalize checkout line endings before line-based comment stripping.
 const source = relative => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 // Same strip mechanism ui_language_coverage uses: shape pins must not match
 // text inside comments (a commented-out guard would otherwise still satisfy

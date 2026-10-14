@@ -9,7 +9,6 @@
 //! 依赖方向不变：本模块是 marketplace 领域内别名层，不反向依赖 assistant 运行时。
 
 pub use crate::features::marketplace::scope::{
-    load_disabled_bundles as load_disabled_skills,
     load_disabled_bundles_for as load_disabled_skills_for, project_skills_enabled,
     remove_bundle_from_disabled_scopes as remove_skill_from_disabled_scopes,
     save_disabled_bundles_for as save_disabled_skills_for, set_project_skills_enabled,
