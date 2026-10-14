@@ -190,7 +190,11 @@ impl ModelGatewayProxy {
             .get_or_try_init(|| start_proxy_server(self.app.clone(), authority))
             .await?;
         let route = {
-            let mut registry = server.state.registry.lock().unwrap();
+            let mut registry = server
+                .state
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let route = registry
                 .session_routes
                 .entry(session_id.to_string())
@@ -240,7 +244,11 @@ impl ModelGatewayProxy {
 
     pub(super) fn forget_session(&self, session_id: &str) {
         if let Some(server) = self.server.get() {
-            let mut registry = server.state.registry.lock().unwrap();
+            let mut registry = server
+                .state
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(route) = registry.session_routes.remove(session_id) {
                 registry.targets.remove(&route);
             }
@@ -313,7 +321,14 @@ async fn forward_chat(
         Ok(body) => body,
         Err(_) => return proxy_error(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
     };
-    let Some(mut target) = state.registry.lock().unwrap().targets.get(&route).cloned() else {
+    let Some(mut target) = state
+        .registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .targets
+        .get(&route)
+        .cloned()
+    else {
         return proxy_error(StatusCode::NOT_FOUND, "unknown model proxy route");
     };
     let Some(generation) = state
@@ -360,7 +375,13 @@ async fn forward_models(
     request: Request<Body>,
 ) -> Response<Body> {
     let (parts, _) = request.into_parts();
-    let target = state.registry.lock().unwrap().targets.get(&route).cloned();
+    let target = state
+        .registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .targets
+        .get(&route)
+        .cloned();
     let Some(target) = target else {
         return proxy_error(StatusCode::NOT_FOUND, "unknown model proxy route");
     };

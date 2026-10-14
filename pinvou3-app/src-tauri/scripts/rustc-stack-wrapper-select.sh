@@ -39,10 +39,26 @@ case "$(uname -s)" in
       # 在 rustc 参数位不可靠。
       # 编译失败即报错终止:Windows 栈溢出已实证,静默退回"不注入"会把 wrapper
       # 构建失败重新表现为难诊断的 rustc 栈溢出。
-      if ! rustc -O "$(cygpath -m "$src")" -o "$(cygpath -m "$exe")"; then
+      # 与 scripts/tauri/build.js 相同的原子替换:先写唯一临时文件,再改名到位。
+      # 被中断的编译绝不能留下半个 exe,被下次运行的 mtime 缓存永久复用。
+      tmp_exe="$exe.$$.$RANDOM.tmp"
+      # MSVC rustc -O 链接带 /DEBUG:它还会在临时 exe 旁写同名 .pdb(临时名
+      # 把 .tmp 换成 .pdb),必须与临时 exe 一起清理。
+      if ! rustc -O "$(cygpath -m "$src")" -o "$(cygpath -m "$tmp_exe")"; then
+        rm -f "$tmp_exe" "${tmp_exe%.tmp}.pdb"
         echo "rustc-stack-wrapper-select: 编译 .exe wrapper 失败,无法注入 16 MiB 栈;请检查 rustc 工具链与 wrapper 源码" >&2
         exit 1
       fi
+      # 改名失败必须响亮报错(并发构建正在执行旧 exe 时 Windows 会锁定目标):
+      # 本脚本没有 set -e,静默 exit 0 会让 run-dev.sh 导出并不存在的 wrapper
+      # 路径,或在旧 exe 存活时继续复用过期缓存,重新引入本分支要防的
+      # 半写 exe 问题。
+      if ! mv -f "$tmp_exe" "$exe"; then
+        rm -f "$tmp_exe" "${tmp_exe%.tmp}.pdb"
+        echo "rustc-stack-wrapper-select: cannot replace the .exe wrapper (target locked by a concurrent build?); stop the concurrent build and retry" >&2
+        exit 1
+      fi
+      rm -f "${tmp_exe%.tmp}.pdb"
     fi
     cygpath -m "$exe"
     ;;
