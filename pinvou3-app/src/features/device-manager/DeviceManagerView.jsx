@@ -67,7 +67,7 @@ const COUNTER_THRESHOLD = 1800;
 // chipKey falls back to the raw chip text at render time.
 const CHIP_NAME_KEYS = {
   nvme: 'chipNvme',
-  mt7925: 'chipWifi',
+  wifi: 'chipWifi',
   acpi_fan: 'chipFan',
   acpitz: 'chipBoard',
   ina3221: 'chipPower',
@@ -264,7 +264,17 @@ const DiskRow = ({ disk, copy }) => {
         </span>
       </div>
       {known ? (
-        <div className="h-2 overflow-hidden rounded-full bg-black/5 dark:bg-white/10">
+        <div
+          className="h-2 overflow-hidden rounded-full bg-black/5 dark:bg-white/10"
+          // Screen-reader usage semantics: non-root cards only show
+          // "available / total" text, the percentage lives solely in the header
+          // chip — give the bar progressbar semantics (round-5 review P3).
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(Math.max(0, Math.min(100, disk.usedPct)))}
+          aria-label={`${disk.mountPoint || disk.name || ''} ${Math.round(Math.max(0, disk.usedPct))}%`}
+        >
           <div
             className="h-full rounded-full transition-all duration-500"
             style={{ width: `${Math.max(0, Math.min(100, disk.usedPct))}%`, backgroundColor: LEVEL_COLOR[level] }}
@@ -381,6 +391,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // services probe + external-model fetch), stop on unmount. The services
   // probe keeps its slow 10s cadence for as long as the page stays mounted.
   const deviceApiReady = !!((window.TauriBridge || bridge)?.device?.startDevicePolling);
+  // Display strings go through a ref: the mount effect must not depend on
+  // `copy`, or a language switch would stop/restart polling, re-fetch external
+  // models and re-toast a failure (round-5 review P3). showToast is a stable
+  // useCallback, safe as a dependency.
+  const copyRef = useRef(copy);
+  useEffect(() => {
+    copyRef.current = copy;
+  }, [copy]);
   useEffect(() => {
     const liveBridge = window.TauriBridge || bridge;
     const dev = liveBridge?.device;
@@ -388,7 +406,10 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       console.warn('[device-manager] TauriBridge device API unavailable');
       return undefined;
     }
-    dev.startDevicePolling();
+    // The web host's device domain is a reject-style stub: without a catch here,
+    // a gating regression would surface as unhandled-rejection noise (round-5
+    // review P3; every other call in this effect has one).
+    Promise.resolve(dev.startDevicePolling()).catch(() => {});
     const pollServices = () => {
       if (typeof dev.pollDeviceServices === 'function') dev.pollDeviceServices().catch(() => {});
     };
@@ -402,14 +423,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
         .then(() => setExternalFetchError(null))
         .catch((error) => {
           setExternalFetchError(String(error?.message || error));
-          showToast(copy.refreshFailed(String(error?.message || error)));
+          showToast(copyRef.current.refreshFailed(String(error?.message || error)));
         });
     }
     return () => {
       clearInterval(servicesTimer);
       if (typeof dev.stopDevicePolling === 'function') dev.stopDevicePolling();
     };
-  }, [copy, showToast]);
+  }, [showToast]);
 
   // Read-failure retry: stop+start makes the facade poll immediately (the raw
   // pollDevice stays feature-internal), then refresh the slow services probe.
@@ -488,12 +509,14 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
   // (round-4 review P3).
   const [externalFetchError, setExternalFetchError] = useState(null);
 
-  // Identity for armed/busy keys: source-qualified row name. The NAME (not the
-  // id) stays the user-facing identity through the quiet re-register id swap
+  // Identity for armed/busy keys: source+kind-qualified row name. The NAME (not
+  // the id) stays the user-facing identity through the quiet re-register id swap
   // (round-3 review P2); the source qualifier keeps a registry row and an
-  // Ollama-listing row that share a name from arming/busying together — the
-  // registry does not enforce name uniqueness across kinds (round-4 review P3).
-  const rowKey = (row) => `${row.source || 'registry'}:${row.name}`;
+  // Ollama-listing row that share a name from arming/busying together, and the
+  // kind qualifier keeps two registry rows that share a name across kinds
+  // separate (the registry does not enforce name uniqueness — round-4/5 review
+  // P3). Kind never changes for a row, so the identity survives the id swap.
+  const rowKey = (row) => `${row.source || 'registry'}:${row.kind || ''}:${row.name}`;
 
   const isRowLinked = (row) => findLinkedRows(bs?.savedModels, row.model, row.name).length > 0;
 
@@ -634,7 +657,11 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       // Backend guard failures carry a human-readable message already.
       showToast(copy.removeFailed(String(error?.message || error)));
     } finally {
-      setBusyKey(null);
+      // Compare-and-set clear (round-5 review P2): busyKey is a single slot for
+      // the whole page — an unconditional clear would revive the other row's
+      // buttons while its own operation is still in flight, allowing a concurrent
+      // second saveModel / removeExternalModel.
+      setBusyKey((current) => (current === `remove:${rowKey(row)}` ? null : current));
     }
   }, [armedRemoveId, bs, copy, deleteWeights, showToast]);
 
@@ -657,7 +684,10 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
       }
       if (onDone) onDone();
     } catch (error) {
-      showToast(String(error?.message || error));
+      // Same localized-prefix discipline as removeFailed/refreshFailed: a raw
+      // zh backend string must not surface verbatim to en/ja users (round-5
+      // review P3).
+      showToast(copy.doctorFailed(String(error?.message || error)));
     } finally {
       setDoctorBusy(null);
     }
@@ -1081,6 +1111,12 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                                     className="accent-[#0B57D0]"
                                     data-testid="device-manager-delete-weights"
                                     checked={deleteWeights}
+                                    // Gated by the same dead-zone as the confirm
+                                    // button: the armed cluster replaces the Remove
+                                    // button in place, so a double-click's second
+                                    // click landing on the checkbox coordinates must
+                                    // not silently pre-arm deletion (round-5 review P3).
+                                    disabled={!confirmGateReady}
                                     onChange={(event) => setDeleteWeights(event.target.checked)}
                                   />
                                   {copy.deleteWeights}
@@ -1158,6 +1194,18 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, onOpenModelStore }) => {
                     {copy.ollamaOfflineHint}
                   </div>
                 )
+              )}
+              {/* Store rows still render but the external read failed: the
+                  empty-state branch above does not apply, and without a persistent
+                  row the failure would only live in a 3.2s toast (round-5 review P3). */}
+              {storeRows.length > 0 && externalModels.length === 0 && externalFetchError && (
+                <div
+                  data-testid="device-manager-external-error"
+                  className="flex flex-wrap items-center justify-center gap-2 py-3 text-center text-[13px] text-[#A15C07] dark:text-[#FDD663]"
+                >
+                  <span className="min-w-0 break-words">{copy.refreshFailed(externalFetchError)}</span>
+                  <MsButton tone="ghost" onClick={refreshExternal}>{copy.retry}</MsButton>
+                </div>
               )}
             </div>
           </SectionShell>

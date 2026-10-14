@@ -18,11 +18,13 @@
 
   // 字节人性化：≥1 GiB 用 GiB、其余 MiB（均 1 位小数），空值回退 "—"。
   // 单位后缀一律 ASCII；可本地化的词（SSD/风扇/接口类型等）由视图层负责，
-  // 与 monitor 同口径（bridge 不放中文文案）。
+  // 与 monitor 同口径（bridge 不放中文文案）。GB/MB 标签 = 二进制换算——与
+  // shared/format-utils 的 fmtMiB 及内嵌运行状态卡一致，同一屏不再出现
+  // "1.5 GiB" 与 "7.2 GB" 两套口径（round-5 review P3）。
   function fmtBytes(bytes) {
     if (bytes == null || typeof bytes !== "number" || !isFinite(bytes)) return "—";
-    if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GiB";
-    return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
+    if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
   }
 
   // 速率人性化：十进制 KB/s / MB/s / GB/s（1 位小数），负值/非法值按 0 处理。
@@ -42,13 +44,14 @@
   }
 
   // 传感器 chip 名规约成视图侧本地化映射键（zh/en/ja 文案在视图的 i18n，
-  // bridge 只给稳定 key + 原始 label）：nvme→固态硬盘、mt79*/wifi→无线网卡、
+  // bridge 只给稳定 key + 原始 label）：nvme→固态硬盘、mt79*/wifi→无线网卡（键名
+  // 用通用的 "wifi"，不借具体型号——第二个 wifi 芯片接入时不会再误导，五轮评审 P3）、
   // *fan*/fan 通道→风扇、acpitz/thermal→主板温度；未知 chip 保留小写原文，
   // 视图兜底直接展示原文。
   function sensorChipKey(chip, kind) {
     var c = String(chip || "").toLowerCase();
     if (c.indexOf("nvme") !== -1) return "nvme";
-    if (c.indexOf("mt79") !== -1 || c.indexOf("wifi") !== -1 || c.indexOf("wireless") !== -1) return "mt7925";
+    if (c.indexOf("mt79") !== -1 || c.indexOf("wifi") !== -1 || c.indexOf("wireless") !== -1) return "wifi";
     if (c.indexOf("fan") !== -1 || kind === "fan") return "acpi_fan";
     if (c.indexOf("acpitz") !== -1 || c.indexOf("thermal") !== -1 || c.indexOf("acpi") !== -1) return "acpitz";
     return c || "other";
@@ -95,8 +98,12 @@
           kind: e.kind || "",
           name: e.name ? String(e.name) : "—",
           valueText: sensorValueText(e.kind, e.value),
-          critical: typeof e.critical === "number" && isFinite(e.critical) ? e.critical : null,
-          max: typeof e.max === "number" && isFinite(e.max) ? e.max : null,
+          // critical/max 与 valueText 同口径取整后再进抑制比较：视图按整数渲染
+          // 阈值，12.4→12.6 这类被舍入抹平的抖动不该击穿显示等价抑制
+          // （round-5 review P3）。level 判定仍吃原始值。
+          critical:
+            typeof e.critical === "number" && isFinite(e.critical) ? Math.round(e.critical) : null,
+          max: typeof e.max === "number" && isFinite(e.max) ? Math.round(e.max) : null,
           level: sensorLevel(e.kind, e.value, e.critical, e.max),
         };
       });

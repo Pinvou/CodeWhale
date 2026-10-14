@@ -369,6 +369,7 @@ export const dictEn = {
           linkDisabledUnreachable:'Currently unreachable. Confirm the service is running, then try linking again.',
           linkFailed:(e)=>`Link failed: ${e}`,
           doctorSendFailed:'The troubleshooting chat did not start. Your question was kept — please retry.',
+          doctorFailed:(e)=>`Diagnosis failed: ${e}`,
           refreshFailed:e=>`Failed to refresh external models: ${e}`,
           linkRowStale:(name,e)=>`"${name}" was removed, but its row in the PINVOU model list could not be removed (${e}). It is now unusable — delete it manually in Settings.`,
           removeDone:name=>`Removed "${name}"`, removeFailed:e=>`Remove failed: ${e}`, warn:w=>`Note: ${w}`,
