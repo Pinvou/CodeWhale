@@ -1056,14 +1056,14 @@ export class EnrollmentRegistry {
     return this.#authorize({ endpointId, credential: desktopSecret, role: "desktop" });
   }
 
-  async authorizeDesktopRegistration({ endpointId, accessToken, desktopSecret } = {}) {
+  async authorizeDesktopRegistration({ endpointId, accessToken, desktopSecret, admitSelfRegistration = false } = {}) {
     endpointId = validateEndpointId(endpointId);
     validateCredential(accessToken);
     validateCredential(desktopSecret, "desktop_credential");
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const snapshot = this.#read();
       const entry = this.#find(snapshot.registry, endpointId);
-      if (!entry && (this.#config.development_tofu || this.#config.self_registration)) {
+      if (!entry && (this.#config.development_tofu || (this.#config.self_registration && admitSelfRegistration === true))) {
         // Anonymous production enrollment claims only a new random native ID.
         // Bind both independent roles in one CAS before publishing readiness.
         if (this.#config.self_registration) {

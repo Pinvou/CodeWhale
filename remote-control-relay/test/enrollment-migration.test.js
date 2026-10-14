@@ -78,9 +78,9 @@ function testStoreSecurityOptions() {
   };
 }
 
-async function fixture(t, deployment = "official") {
+async function fixture(t, deployment = "official", overrides = {}) {
   const root = await mkdtemp(join(tmpdir(), "pinvou-enrollment-migration-"));
-  const env = environment(root, deployment);
+  const env = { ...environment(root, deployment), ...overrides };
   const config = loadEnrollmentRegistryConfig(env);
   const store = await RelayStateStore.open({
     statePath: config.controller_state_path,
@@ -700,6 +700,24 @@ function nextMessageMatching(socket, predicate) {
     socket.on("message", onMessage);
   });
 }
+
+test("public policy does not authorize unknown rollback gateway identities or persist them", async (t) => {
+  const { registry } = await fixture(t, "self_hosted", {
+    NODE_ENV: "production", PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION: "true",
+  });
+  const gateway = createEnrollmentGateway({ registry, upstreamUrl: "ws://127.0.0.1:19999/pinvou3/remote/ws",
+    basePath: "/pinvou3/remote", logger: { warn() {} } });
+  const address = await gateway.listen({ host: "127.0.0.1", port: 0 });
+  t.after(() => gateway.close());
+  const before = registry.exportSnapshot();
+  const socket = await openSocket(`ws://127.0.0.1:${address.port}/pinvou3/remote/ws`);
+  t.after(() => socket.terminate());
+  const rejected = nextMessage(socket);
+  socket.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register",
+    endpoint_id: "ep_abcdefghijklmnopqrstuvwx", access_token: ACCESS_A, desktop_secret: DESKTOP_SECRET }));
+  assert.equal((await rejected).code, "endpoint_not_found");
+  assert.deepEqual(registry.exportSnapshot(), before, "unknown gateway identities must not create persistent registration");
+});
 
 test("gateway does not echo controller protocol absent upstream and rejects mixed versions", async (t) => {
   const received = [];

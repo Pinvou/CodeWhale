@@ -406,6 +406,98 @@ test("public production: one pending socket cannot persist multiple anonymous de
   }
 });
 
+for (const sameIdentity of [false, true]) {
+  test(`public production: concurrent sockets ${sameIdentity ? "share one identity slot" : "reserve capacity before distinct identity writes"}`, { timeout: 90_000 }, async () => {
+    const env = selfRegistrationEnvironment(`cross-socket-${sameIdentity}`, { MAX_ENDPOINTS: "1", ENDPOINT_CREATE_LIMIT: "100" });
+    const isolated = await spawnRelay(env, {
+      preload: new URL("./fixtures/desktop-registration-barrier.js", import.meta.url).href, ipc: true,
+    });
+    let first, second;
+    try {
+      first = await openControllerSocket(isolated.wsUrl);
+      second = await openControllerSocket(isolated.wsUrl);
+      const id = `ep_${crypto.randomBytes(12).toString("hex")}`;
+      const credentials = { access_token: crypto.randomBytes(32).toString("base64url"), desktop_secret: crypto.randomBytes(32).toString("base64url") };
+      const ready = waitForRegistrationProbe(isolated.child, "authorization-ready", id);
+      const firstRegistered = nextMessage(first, "desktop_endpoint_registered", 15_000);
+      first.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: id, ...credentials }));
+      await ready;
+      const before = await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH);
+      const secondResponse = nextMessageOneOf(second, ["desktop_endpoint_registered", "error"], 15_000);
+      const secondReady = sameIdentity ? waitForRegistrationProbe(isolated.child, "authorization-ready", id) : null;
+      second.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register",
+        endpoint_id: sameIdentity ? id : `ep_${crypto.randomBytes(12).toString("hex")}`, ...credentials }));
+      if (sameIdentity) await secondReady;
+      else assert.equal((await secondResponse).code, "endpoint_capacity_reached");
+      assert.deepEqual(await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH), before);
+      isolated.child.send({ type: "release-registration" });
+      assert.equal((await firstRegistered).type, "desktop_endpoint_registered");
+      if (sameIdentity) assert.equal((await secondResponse).type, "desktop_endpoint_registered");
+      const health = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
+      assert.equal(health.endpoint_count, 1);
+    } finally {
+      closeSocket(first); closeSocket(second); await stopRelay(isolated.child);
+    }
+  });
+}
+
+test("public production: failed enrollment releases its reserved capacity", { timeout: 90_000 }, async () => {
+  const isolated = await spawnRelay(selfRegistrationEnvironment("release-failed", { MAX_ENDPOINTS: "1", ENDPOINT_CREATE_LIMIT: "100" }));
+  let denied, accepted;
+  try {
+    denied = await openControllerSocket(isolated.wsUrl);
+    const response = nextMessage(denied, "error", 15_000);
+    const sharedCredential = crypto.randomBytes(32).toString("base64url");
+    denied.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: `ep_${crypto.randomBytes(12).toString("hex")}`,
+      access_token: sharedCredential, desktop_secret: sharedCredential }));
+    assert.equal((await response).code, "invalid_enrollment_credential");
+    accepted = await registerDesktop(`ep_${crypto.randomBytes(12).toString("hex")}`,
+      crypto.randomBytes(32).toString("base64url"), crypto.randomBytes(32).toString("base64url"), isolated.wsUrl, 15_000, true);
+    assert.equal(accepted.registered.type, "desktop_endpoint_registered");
+  } finally {
+    closeSocket(denied); closeSocket(accepted?.ws); await stopRelay(isolated.child);
+  }
+});
+
+test("public production: a closing socket holds capacity until pending authorization finishes, then releases it", { timeout: 90_000 }, async () => {
+  const env = selfRegistrationEnvironment("release-closed", { MAX_ENDPOINTS: "1", ENDPOINT_CREATE_LIMIT: "100" });
+  const isolated = await spawnRelay(env, {
+    preload: new URL("./fixtures/desktop-registration-barrier.js", import.meta.url).href, ipc: true,
+  });
+  let closing, denied, accepted;
+  try {
+    const id = `ep_${crypto.randomBytes(12).toString("hex")}`;
+    closing = await openControllerSocket(isolated.wsUrl);
+    const ready = waitForRegistrationProbe(isolated.child, "authorization-ready", id);
+    closing.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: id,
+      access_token: crypto.randomBytes(32).toString("base64url"), desktop_secret: crypto.randomBytes(32).toString("base64url") }));
+    await ready;
+    const before = await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH);
+    const closed = waitForRegistrationProbe(isolated.child, "socket-closed");
+    closing.close(); await closed;
+    denied = await openControllerSocket(isolated.wsUrl);
+    const rejected = nextMessage(denied, "error", 15_000);
+    denied.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: `ep_${crypto.randomBytes(12).toString("hex")}`,
+      access_token: crypto.randomBytes(32).toString("base64url"), desktop_secret: crypto.randomBytes(32).toString("base64url") }));
+    assert.equal((await rejected).code, "endpoint_capacity_reached");
+    assert.deepEqual(await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH), before);
+    const finished = waitForRegistrationProbe(isolated.child, "authorization-finished", id);
+    isolated.child.send({ type: "release-registration" }); await finished;
+    const health = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
+    assert.equal(health.endpoint_count, 0);
+    accepted = await openControllerSocket(isolated.wsUrl);
+    const replacementId = `ep_${crypto.randomBytes(12).toString("hex")}`;
+    const replacementReady = waitForRegistrationProbe(isolated.child, "authorization-ready", replacementId);
+    const registered = nextMessage(accepted, "desktop_endpoint_registered", 15_000);
+    accepted.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: replacementId,
+      access_token: crypto.randomBytes(32).toString("base64url"), desktop_secret: crypto.randomBytes(32).toString("base64url") }));
+    await replacementReady; isolated.child.send({ type: "release-registration" });
+    assert.equal((await registered).type, "desktop_endpoint_registered");
+  } finally {
+    closeSocket(closing); closeSocket(denied); closeSocket(accepted); await stopRelay(isolated.child);
+  }
+});
+
 test("desktop authorization cannot attach one socket to two endpoints", async () => {
   const isolated = await spawnRelay(controllerEnvironment("concurrent-registration"), {
     preload: new URL("./fixtures/desktop-registration-barrier.js", import.meta.url).href, ipc: true,

@@ -77,6 +77,11 @@ the same persisted credentials without another administrator operation.
 The trusted proxy, WebSocket/ingress limits, per-source endpoint creation rate,
 active endpoint ceiling and shared persistent-state byte budget remain required.
 Capacity and creation-rate admission happen before anonymous enrollment writes.
+In-flight registrations reserve capacity across sockets until authorization and
+attachment finish; concurrent requests for the same identity share one slot.
+Only the live Relay dispatcher explicitly authorizes creation after this admission.
+The legacy rollback gateway continues to reject unknown identities, even when
+the protected environment enables this policy.
 Audit and wire responses contain no raw credentials. The coverage binding changes
 when this policy is enabled, and preserves its released v1 bytes when disabled.
 
@@ -440,11 +445,12 @@ Audit sources describe admission: explicit development enrollment records
 `development`, even with TOFU enabled; only automatic first-registration admission
 records `development_tofu`. Rotation and revocation preserve that source.
 Endpoint IDs are identifiers, not secrets: unknown, revoked and invalid-credential
-errors can reveal enrollment status. Official/self-hosted registration and
-development registration with TOFU disabled require an existing active enrollment
-and a valid credential. Only explicitly enabled non-production development TOFU
-may admit a first registration; callers must apply the protocol layer's rate
-limits before exposure.
+errors can reveal enrollment status. Official registration, the default self-hosted
+policy, and development registration with TOFU disabled require an existing active
+enrollment and valid credentials. Explicit non-production development TOFU or the
+admitted live self-hosted first-use path may create an identity. Generic registry
+authorization and the rollback gateway do not grant production creation authority;
+callers must apply protocol admission before requesting it.
 
 Recognized lock schemas with an unsupported positive version fail closed with
 `relay_state_lock_unsupported`. A v1 lock with a complete valid owner tuple and

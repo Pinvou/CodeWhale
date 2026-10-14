@@ -172,6 +172,9 @@ const MIME_TYPES = new Map([
 ]);
 
 const endpoints = new Map();
+// Unique endpoint reservations cover the async authorization/persistence gap.
+// Multiple sockets for the same identity share one capacity slot.
+const pendingEndpointCreations = new Map();
 const revokedEndpoints = new Map();
 const endpointCreationBuckets = new Map();
 const wsConnectionBuckets = new Map();
@@ -887,13 +890,15 @@ async function registerDesktop(ws, msg) {
   // Apply cheap admission before an anonymous first registration can persist.
   // Recheck capacity/revocation after the async registry operation as well.
   let creationAdmitted = false;
+  let releaseCreation;
   if (controllerRuntime?.selfRegistration && !endpoints.has(endpointId)) {
     pruneExpiredEndpoints();
     if (revokedEndpoints.has(endpointId)) {
       rejectSocket(ws, "endpoint_revoked", "endpoint was permanently revoked");
       return;
     }
-    if (endpoints.size >= MAX_ENDPOINTS) {
+    const reserved = [...pendingEndpointCreations.keys()].filter(id => !endpoints.has(id)).length;
+    if (!pendingEndpointCreations.has(endpointId) && endpoints.size + reserved >= MAX_ENDPOINTS) {
       rejectSocket(ws, "endpoint_capacity_reached", "endpoint capacity reached");
       return;
     }
@@ -902,8 +907,21 @@ async function registerDesktop(ws, msg) {
       return;
     }
     creationAdmitted = true;
+    pendingEndpointCreations.set(endpointId, (pendingEndpointCreations.get(endpointId) || 0) + 1);
+    releaseCreation = () => {
+      const remaining = pendingEndpointCreations.get(endpointId) - 1;
+      if (remaining === 0) pendingEndpointCreations.delete(endpointId);
+      else pendingEndpointCreations.set(endpointId, remaining);
+    };
   }
+  try {
+    await finishDesktopRegistration(ws, { endpointId, accessToken, desktopSecret, creationAdmitted });
+  } finally {
+    releaseCreation?.();
+  }
+}
 
+async function finishDesktopRegistration(ws, { endpointId, accessToken, desktopSecret, creationAdmitted }) {
   if (controllerRuntime) {
     if (controllerRuntime.selfRegistration) ws.registrationPending = true;
     try {
@@ -911,6 +929,7 @@ async function registerDesktop(ws, msg) {
         endpointId,
         accessToken,
         desktopSecret,
+        admitSelfRegistration: controllerRuntime.selfRegistration,
       });
     } catch (error) {
       rejectSocket(ws, error?.code || "enrollment_required", "desktop endpoint enrollment required");

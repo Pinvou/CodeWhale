@@ -43,7 +43,7 @@ test("public production first registration binds both roles atomically without a
   const { registry, config, writes } = fixture();
   assert.equal(config.runtime_environment, "production");
   assert.equal(config.development_tofu, false);
-  await registry.authorizeDesktopRegistration({ endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP });
+  await registry.authorizeDesktopRegistration({ admitSelfRegistration: true, endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP });
   assert.equal(writes(), 1);
   assert.equal(registry.getControllerReadiness(ENDPOINT).web_ready, true);
   assert.equal(registry.getControllerReadiness(ENDPOINT).desktop_ready, true);
@@ -55,7 +55,7 @@ test("public production first registration binds both roles atomically without a
 
 test("public registration retries authenticate existing roles without extra writes or credential replacement", async () => {
   const { registry, writes } = fixture();
-  const request = { endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP };
+  const request = { admitSelfRegistration: true, endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP };
   await registry.authorizeDesktopRegistration(request);
   await registry.authorizeDesktopRegistration(request);
   assert.equal(writes(), 1);
@@ -68,10 +68,10 @@ test("public registration retries authenticate existing roles without extra writ
 test("public first registration requires the native random-ID format and distinct complete credentials", async () => {
   const { registry, writes } = fixture();
   for (const endpointId of ["short", "ep_abcdefghijklmnopqrstuvw", "chosen_device_name"]) {
-    await assert.rejects(registry.authorizeDesktopRegistration({ endpointId, accessToken: ACCESS, desktopSecret: DESKTOP }), { code: "endpoint_id_invalid" });
+    await assert.rejects(registry.authorizeDesktopRegistration({ admitSelfRegistration: true, endpointId, accessToken: ACCESS, desktopSecret: DESKTOP }), { code: "endpoint_id_invalid" });
   }
-  await assert.rejects(registry.authorizeDesktopRegistration({ endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: ACCESS }), { code: "invalid_enrollment_credential" });
-  await assert.rejects(registry.authorizeDesktopRegistration({ endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: "short" }), { code: "desktop_credential_invalid" });
+  await assert.rejects(registry.authorizeDesktopRegistration({ admitSelfRegistration: true, endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: ACCESS }), { code: "invalid_enrollment_credential" });
+  await assert.rejects(registry.authorizeDesktopRegistration({ admitSelfRegistration: true, endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: "short" }), { code: "desktop_credential_invalid" });
   assert.equal(writes(), 0);
 });
 
@@ -82,20 +82,29 @@ test("public single-role requests never create a partial enrollment", async () =
   assert.equal(writes(), 0);
 });
 
+test("public generic authorization cannot create identities without explicit live admission", async () => {
+  const { registry, writes } = fixture();
+  for (const admitSelfRegistration of [undefined, false, "true"]) {
+    await assert.rejects(registry.authorizeDesktopRegistration({ endpointId: ENDPOINT,
+      accessToken: ACCESS, desktopSecret: DESKTOP, admitSelfRegistration }), { code: "enrollment_required" });
+  }
+  assert.equal(writes(), 0);
+});
+
 test("public registration cannot resurrect a revoked identity", async () => {
   const { registry, writes } = fixture();
-  await registry.authorizeDesktopRegistration({ endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP });
+  await registry.authorizeDesktopRegistration({ admitSelfRegistration: true, endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP });
   await registry.revoke({ endpointId: ENDPOINT, expectedEndpointRevision: "1" });
   const before = writes();
-  await assert.rejects(registry.authorizeDesktopRegistration({ endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP }), { code: "endpoint_revoked" });
+  await assert.rejects(registry.authorizeDesktopRegistration({ admitSelfRegistration: true, endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP }), { code: "endpoint_revoked" });
   assert.equal(writes(), before);
 });
 
 test("concurrent public registration accepts one credential pair and rejects the losing conflicting pair", async () => {
   const { registry, writes } = fixture();
   const results = await Promise.allSettled([
-    registry.authorizeDesktopRegistration({ endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP }),
-    registry.authorizeDesktopRegistration({ endpointId: ENDPOINT, accessToken: DESKTOP, desktopSecret: ACCESS }),
+    registry.authorizeDesktopRegistration({ admitSelfRegistration: true, endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP }),
+    registry.authorizeDesktopRegistration({ admitSelfRegistration: true, endpointId: ENDPOINT, accessToken: DESKTOP, desktopSecret: ACCESS }),
   ]);
   assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
   assert.equal(results.find(result => result.status === "rejected").reason.code, "invalid_enrollment_credential");
@@ -104,7 +113,7 @@ test("concurrent public registration accepts one credential pair and rejects the
 
 test("self-hosted remains administrator-only and public never permits development TOFU", async () => {
   const { registry } = fixture(false);
-  await assert.rejects(registry.authorizeDesktopRegistration({ endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP }), { code: "enrollment_required" });
+  await assert.rejects(registry.authorizeDesktopRegistration({ admitSelfRegistration: true, endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP }), { code: "enrollment_required" });
   assert.throws(() => fixture(true, { PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "true" }), { code: "development_tofu_forbidden" });
   assert.throws(() => fixture(true, { PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "official" }), { code: "self_registration_forbidden" });
   assert.throws(() => fixture(true, { PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION: "yes" }), { code: "self_registration_invalid" });
@@ -113,7 +122,7 @@ test("self-hosted remains administrator-only and public never permits developmen
 test("public registration never fills or replaces an existing partial administrator enrollment", async () => {
   const { registry, writes } = fixture();
   await registry.enroll({ endpointId: ENDPOINT, credential: ACCESS });
-  await assert.rejects(registry.authorizeDesktopRegistration({ endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP }), { code: "desktop_credential_required" });
+  await assert.rejects(registry.authorizeDesktopRegistration({ admitSelfRegistration: true, endpointId: ENDPOINT, accessToken: ACCESS, desktopSecret: DESKTOP }), { code: "desktop_credential_required" });
   assert.equal(writes(), 1);
   assert.equal(registry.getControllerReadiness(ENDPOINT).desktop_ready, false);
 });
