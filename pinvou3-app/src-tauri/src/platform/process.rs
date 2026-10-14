@@ -1049,6 +1049,45 @@ pub(crate) mod tests {
                 false
             }
         }
+
+        pub(crate) fn terminate(&self) -> std::io::Result<()> {
+            #[cfg(windows)]
+            {
+                terminate_windows_fixture_process(&self.identity)
+            }
+            #[cfg(not(windows))]
+            {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "native fixture cleanup is only supported on Windows",
+                ))
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn terminate_windows_fixture_process(process: &WindowsProcessHandle) -> std::io::Result<()> {
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+        };
+
+        // The bound identity pins this fixture's PID while we acquire the
+        // additional cleanup right. Do not depend on the bounded, best-effort
+        // taskkill compatibility path to clean up a deliberately surviving child.
+        // SAFETY: OpenProcess has no pointer arguments; the identity remains owned.
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, process.pid) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let cleanup = WindowsProcessHandle {
+            pid: process.pid,
+            handle,
+        };
+        // SAFETY: cleanup owns a handle with PROCESS_TERMINATE, closed once by Drop.
+        if unsafe { TerminateProcess(cleanup.handle, 1) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub(crate) fn consumer_orphan_fixture(mode: &str, marker: &Path) -> tokio::process::Command {
@@ -1644,7 +1683,8 @@ pub(crate) mod tests {
             root_result.recv_timeout(Duration::from_secs(35)).unwrap();
             // SAFETY: identity pins the exact descendant; zero wait only probes liveness.
             let survived = unsafe { WaitForSingleObject(identity.handle, 0) } == WAIT_TIMEOUT;
-            let _ = kill_process_tree(identity.pid);
+            terminate_windows_fixture_process(&identity)
+                .expect("terminate the deliberately surviving timeout fixture");
             assert_windows_process_exited(&identity, Duration::from_secs(3));
             survived
         });

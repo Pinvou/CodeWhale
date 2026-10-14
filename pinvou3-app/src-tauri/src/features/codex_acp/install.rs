@@ -1465,7 +1465,9 @@ mod tests {
                         "normal disarm killed a successful descendant"
                     );
                     // The pinned handle prevents PID reuse during isolated fixture cleanup.
-                    crate::platform::process::kill_process_tree(pid).unwrap();
+                    identity
+                        .terminate()
+                        .expect("terminate the successful install fixture");
                     assert!(identity.exited(std::time::Duration::from_secs(5)));
                 } else {
                     while !marker.with_extension("intermediary-exited").exists() {
