@@ -1900,6 +1900,7 @@ mod tests {
             .check(ExecPolicyContext {
                 command,
                 cwd: ".",
+                workspace_roots: Vec::new(),
                 tool: Some("exec_shell"),
                 path: None,
                 ask_for_approval: AskForApproval::Never,
@@ -2444,6 +2445,7 @@ mod tests {
                 .check(ExecPolicyContext {
                     command: &command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: AskForApproval::OnRequest,

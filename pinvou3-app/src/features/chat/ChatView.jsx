@@ -1,3 +1,4 @@
+import { latestModelLifecycleRejection } from '../account-platform/model-lifecycle.js';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -1729,10 +1730,7 @@ const openChatExternalUrl = (url) => {
       const canSend = !isMultiAgentReadOnly
         && !firstTurnPending
         && (hasDraftText || hasReadyAttachment);
-      const modelContinuationBlocked = Boolean(activeSessionId && chatItems.slice(-6).some(item => (
-        item?.type === 'system'
-        && /MODEL_(?:DEPRECATED|UNAVAILABLE|REMOVED)|CONTINUATION_CUTOFF|model_catalog_selection_unavailable/i.test(String(item.text || ''))
-      )));
+      const modelContinuationBlocked = Boolean(activeSessionId && latestModelLifecycleRejection(turnTimeline));
       const [replacementModels, setReplacementModels] = useState([]);
       const [replacementModelId, setReplacementModelId] = useState('');
       const [replacementBusy, setReplacementBusy] = useState(false);

@@ -180,7 +180,16 @@
         state.activeTurnTimelineId = existing.turn_id;
         return;
       }
-      var turnId = "ui_" + String(state.activeSessionId || "session") + "_" + timestamp + "_" + turnIndex;
+      var timelineOwner = sessionStates[state.activeSessionId];
+      if (timelineOwner) timelineOwner.timelineTurnSeq = (timelineOwner.timelineTurnSeq || 0) + 1;
+      var turnId = "ui_" + String(state.activeSessionId || "session") + "_" + timestamp + "_" + turnIndex + "_" + String(timelineOwner && timelineOwner.timelineTurnSeq || 0);
+      if (timelineOwner) {
+        timelineOwner.timelineTurnAnchor = {
+          knownStartIds: (state.turnTimeline || []).filter(function (event) { return event && event.event === "user_start"; }).map(function (event) { return event.turn_id; }),
+          // This is a received server event, not a pre-IPC clock boundary.
+          submittedAt: null, localTurnId: turnId,
+        };
+      }
       state.activeTurnTimelineId = turnId;
       state.turnTimeline = (state.turnTimeline || []).concat([{
         turn_id: turnId,
@@ -253,6 +262,44 @@
       });
     }
 
+    // A unchanged during the read is insufficient: B may already have started.
+    // Distinguish UI timing ids from Rust ids with the pre-submit old-id set and
+    // the pre-IPC timestamp, rather than requiring synthetic ids to match.
+    function authoritativeTimelineCoversCurrentTurn(local, authoritative, turnAnchor) {
+      var localStarts = (local || []).filter(function (event) { return event && event.event === "user_start"; });
+      var current = localStarts[localStarts.length - 1];
+      if (!current && !turnAnchor) return true;
+      var starts = authoritative.filter(function (event) { return event && event.event === "user_start"; });
+      var incoming = starts[starts.length - 1];
+      if (!incoming || !incoming.turn_id) return false;
+      var priorIds = (turnAnchor && turnAnchor.knownStartIds || []).concat(localStarts.slice(0, -1).map(function (event) { return event.turn_id; }));
+      if (priorIds.indexOf(incoming.turn_id) >= 0) return false;
+      if (turnAnchor && Number.isFinite(turnAnchor.submittedAt)
+          && (!Number.isFinite(Number(incoming.timestamp)) || Number(incoming.timestamp) < turnAnchor.submittedAt)) return false;
+      var incomingTerminal = authoritative.slice().reverse().find(function (event) {
+        return event && event.event === "assistant_done" && event.turn_id === incoming.turn_id;
+      });
+      if (incomingTerminal && incomingTerminal.model_rejection && (!current || current.turn_id !== incoming.turn_id)) {
+        // SID-only remote starts do not bind a UI id to a Rust timing id. An
+        // unfamiliar id or an equal millisecond cannot establish typed B.
+        var knownPredecessors = priorIds.filter(function (id) { return id && !/^ui(?:_|-)/.test(String(id)); });
+        var predecessor = knownPredecessors[knownPredecessors.length - 1];
+        var positions = starts.map(function (event, index) { return event.turn_id === predecessor ? index : -1; })
+          .filter(function (index) { return index >= 0; });
+        var orderedIdentity = !!predecessor && positions.length === 1 && positions[0] < starts.length - 1;
+        var laterThanSubmission = turnAnchor && Number.isFinite(turnAnchor.submittedAt)
+          && Number(incoming.timestamp) > turnAnchor.submittedAt;
+        if (!orderedIdentity && !laterThanSubmission) return false;
+      }
+      // A rollback may leave only an old start; it cannot impose A's terminal
+      // on B. A retained UI terminal for B does require a terminal for new B.
+      if (current && priorIds.indexOf(current.turn_id) < 0) {
+        var terminal = (local || []).some(function (event) { return event && event.event === "assistant_done" && event.turn_id === current.turn_id; });
+        if (terminal && !authoritative.some(function (event) { return event && event.event === "assistant_done" && event.turn_id === incoming.turn_id; })) return false;
+      }
+      return true;
+    }
+
     function mergeLocalTimelineBusinessState(local, authoritative) {
       var localCompletions = Object.create(null);
       (Array.isArray(local) ? local : []).forEach(function (event) {
@@ -273,14 +320,38 @@
     // 对应的 turn_started。后端保证先落 timing_events 再发终态；这里重新读取
     // 权威时间线，避免明明已完成却漏掉状态徽标与耗时。读取失败时保留本地投影。
     function refreshAuthoritativeTurnTimeline(sessionId) {
-      if (!sessionId) return Promise.resolve(false);
+      var owner = sessionId && sessionStates[sessionId];
+      if (!owner) return Promise.resolve(false);
+      var readToken = owner.timelineReadToken = (owner.timelineReadToken || 0) + 1;
+      var epoch = owner.timelineReadEpoch || 0;
+      function latestStart(events) {
+        for (var i = (events || []).length - 1; i >= 0; i--) {
+          if (events[i] && events[i].event === "user_start") return events[i].turn_id;
+        }
+        return null;
+      }
+      function liveTimeline() {
+        return state.activeSessionId === sessionId ? state.turnTimeline : owner.turnTimeline;
+      }
+      var anchor = latestStart(liveTimeline());
+      var deleted = false;
+      var unsubscribe = typeof context.onSessionDeleted === "function"
+        ? context.onSessionDeleted(function (id) { if (id === sessionId) deleted = true; })
+        : function () {};
+      function current() {
+        return !deleted && sessionStates[sessionId] === owner
+          && owner.timelineReadToken === readToken && (owner.timelineReadEpoch || 0) === epoch
+          && latestStart(liveTimeline()) === anchor;
+      }
       return invoke("get_session_timeline", { sessionId: sessionId })
         .then(function (authoritative) {
-          if (!Array.isArray(authoritative) || authoritative.length === 0) return false;
+          if (!current() || !Array.isArray(authoritative) || authoritative.length === 0) return false;
           var changed = false;
           runSyncOnSession(sessionId, function () {
+            if (!current()) return;
             // 不允许一次短暂的旧磁盘快照把刚收到的本地终态倒退回“执行中”。
             // 正常后端已保证先落盘再发事件；这层同时保护旧版本和异常 I/O 时序。
+            if (!authoritativeTimelineCoversCurrentTurn(state.turnTimeline, authoritative, owner.timelineTurnAnchor)) return;
             if (authoritativeTimelineMissesKnownCompletion(state.turnTimeline, authoritative)) return;
             var localLatest = latestTimelineCompletion(state.turnTimeline);
             var authoritativeLatest = latestTimelineCompletion(authoritative);
@@ -299,7 +370,7 @@
             error: String(error || ""),
           });
           return false;
-        });
+        }).finally(unsubscribe);
     }
 
     function preserveInterruptedAssistantPresentation() {
@@ -684,6 +755,8 @@
   });
 
   listen("chat:turn_started", function (e) { onSessionEvent(e, function () {
+    var timelineOwner = sessionStates[state.activeSessionId];
+    if (timelineOwner) timelineOwner.timelineReadEpoch = (timelineOwner.timelineReadEpoch || 0) + 1;
     state.busy = true;
     if (!state.thinking.active) startThinking();
     recordTurnStarted();

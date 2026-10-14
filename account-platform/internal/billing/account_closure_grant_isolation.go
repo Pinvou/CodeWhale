@@ -103,12 +103,23 @@ func (r *PostgresRepository) IsolateAccountClosedGrants(ctx context.Context, clo
 				return AccountClosureGrantIsolation{}, err
 			}
 		}
+		priorStatus, priorReason := grant.Status, grant.SuspensionReason
 		reason := "ACCOUNT_CLOSED"
 		if _, err := tx.Exec(ctx, `UPDATE member_quota_grants SET status='SUSPENDED',suspension_reason=$2,allocation_version=allocation_version+1,updated_at=$3 WHERE id=$1`, grant.ID, reason, now); err != nil {
 			return AccountClosureGrantIsolation{}, err
 		}
 		grant.Status, grant.SuspensionReason, grant.AllocationVersion, grant.UpdatedAt = "SUSPENDED", &reason, grant.AllocationVersion+1, now
-		if err := appendMemberQuotaAudit(ctx, tx, grant, "ACCOUNT_CLOSED_ISOLATED", nil, grant.AvailableMicrocredits, now); err != nil {
+		// Keep the established after snapshot and closed-grant identity, while
+		// retaining the original suspension facts in this immutable audit only.
+		snapshot, err := json.Marshal(struct {
+			MemberQuotaGrant
+			PriorStatus           string  `json:"prior_status"`
+			PriorSuspensionReason *string `json:"prior_suspension_reason"`
+		}{grant, priorStatus, priorReason})
+		if err != nil {
+			return AccountClosureGrantIsolation{}, err
+		}
+		if err := appendMemberQuotaAuditSnapshot(ctx, tx, grant, "ACCOUNT_CLOSED_ISOLATED", nil, grant.AvailableMicrocredits, now, snapshot); err != nil {
 			return AccountClosureGrantIsolation{}, err
 		}
 		if err := appendMemberQuotaOutbox(ctx, tx, grant, "billing.member-quota.account-closed.v1", now); err != nil {
