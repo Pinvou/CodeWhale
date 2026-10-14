@@ -30,10 +30,21 @@ const CHROME = process.env.CHROME || [
 
 if (!CHROME) throw new Error('未找到 Chrome/Edge，可通过 CHROME 指定');
 
+// Pet settings scenarios use an existing local model, so model onboarding
+// does not isolate the sidebar before the smoke opens the settings page.
+const LOCAL_MODEL = {
+  id: 'pet-smoke-local',
+  name: 'Pet smoke local',
+  preset: 'local_vllm',
+  model: 'pet-smoke-local',
+  base_url: 'http://127.0.0.1:8000/v1',
+};
+
 function tauriMockSource({ failImages = false } = {}) {
   return `(function () {
     var handlers = Object.create(null);
     var selectedPet = 'lingling';
+    var localModel = ${JSON.stringify(LOCAL_MODEL)};
     function emit(name, payload) {
       return Promise.all((handlers[name] || []).slice().map(function (handler) {
         return handler({ payload: payload });
@@ -47,7 +58,13 @@ function tauriMockSource({ failImages = false } = {}) {
           if (args && args.id === 'langlang') return Promise.reject(new Error('simulated persistence failure'));
           selectedPet = args.id;
           return emit('pet:selected_changed', { selected_pet: selectedPet });
-        case 'get_effective_model_config': return Promise.resolve(null);
+        case 'get_effective_model_config': return Promise.resolve({
+          ...localModel, model_id: localModel.id, requires_user_api_key: false,
+        });
+        case 'list_models': return Promise.resolve({
+          models: [localModel], active_model_id: localModel.id,
+          default_model_ref: { source: 'LOCAL_CONFIG', saved_model_id: localModel.id },
+        });
         case 'list_sessions': return Promise.resolve([]);
         case 'get_super_permission_status': return Promise.resolve(false);
         case 'list_personas': return Promise.resolve([]);
@@ -385,7 +402,13 @@ async function main() {
             .catch((error) => sharedDispatchErrors.push(error.message));
           return null;
         }
-        case 'get_effective_model_config': return null;
+        case 'get_effective_model_config':
+          return { ...LOCAL_MODEL, model_id: LOCAL_MODEL.id, requires_user_api_key: false };
+        case 'list_models':
+          return {
+            models: [LOCAL_MODEL], active_model_id: LOCAL_MODEL.id,
+            default_model_ref: { source: 'LOCAL_CONFIG', saved_model_id: LOCAL_MODEL.id },
+          };
         case 'list_sessions': return [];
         case 'get_super_permission_status': return false;
         case 'list_personas': return [];

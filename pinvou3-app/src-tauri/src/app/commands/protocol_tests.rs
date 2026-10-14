@@ -128,7 +128,8 @@ command_protocol!(
         "computer_use_confirm",
         "computer_use_deny",
         "computer_use_set_enabled",
-        "computer_use_request_permissions"
+        "computer_use_request_permissions",
+        "computer_use_permission_status"
     ]
 );
 command_protocol!(
@@ -550,6 +551,7 @@ command_protocol!(
         "set_active_model",
         "set_session_model",
         "get_session_model_id",
+        "get_session_model_ref",
         "get_image_input_capability",
         "test_search_provider",
         "test_model_connection",
@@ -620,7 +622,8 @@ command_protocol!(
         "install_update",
         "restart_app",
         "cancel_download",
-        "report_pending_update_result"
+        "report_pending_update_result",
+        "commit_pending_update_ready"
     ]
 );
 command_protocol!(

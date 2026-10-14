@@ -108,15 +108,6 @@ const PINVOU_KNOWN: &[(&str, u32)] = &[
     // The Kimi K3 direct-platform model is officially rated at 1M tokens
     // (platform.kimi.com/docs/models).
     ("kimi-k3", 1_048_576),
-    // The Coding Plan bare-k3 window depends on the plan; the base records the
-    // safe 256K value and 1M plans should configure it explicitly.
-    // kimi-for-coding-highspeed belongs to K2.7 Code HighSpeed, officially 256K;
-    // bare kimi-for-coding is corrected to 1M by PINVOU_OVERRIDES since it
-    // started serving K2.8 Preview (see that table). The identical highspeed
-    // row here is unreachable while the override exists (OVERRIDES resolve
-    // first); it documents the official figure at the supplemental layer in
-    // case the override is ever retired.
-    ("kimi-for-coding-highspeed", 262_144),
     ("kimi-k2.7-code-highspeed", 262_144),
     // Alibaba Cloud's official docs give qwen3.7-plus/max/flash a 1M context.
     ("qwen3.7-plus", 1_000_000),
@@ -216,6 +207,59 @@ pub fn resolved_context_window(model: &str) -> Option<u32> {
         .iter()
         .find(|(name, _)| model_name_matches(&lower, name))
         .map(|(_, window)| *window)
+}
+
+/// pinvou3 documented max-output anchors for models the base catalog has no
+/// output row for. The engine fail-closes uncatalogued models to the
+/// conservative 8192 guess (`route_budget::output_ceiling_source` →
+/// `Uncatalogued(8192)`); on the Responses wire reasoning tokens meter inside
+/// `output_tokens`, so an unknown-name flagship truncates every
+/// reasoning-heavy response mid-turn. Only vendor-documented figures belong
+/// here; the engine still intersects the fact with its automatic-request
+/// default (64K), so an over-documented row can only raise the wire cap to
+/// 64K, never above what the engine would ask for a catalogued model.
+/// Consumed by `bridge::route_limits_for_model` as the route output fact when
+/// the user declared no explicit value and no operator-tier declaration
+/// resolved (the tier declines for tiny windows; this anchor then still
+/// supplies the documented fact).
+const PINVOU_DOCUMENTED_OUTPUT: &[(&str, u32)] = &[
+    // GPT-6 family: 128,000 max output tokens — the same figure the base
+    // documents for the gpt-5.5/gpt-5.6 rows (crates/tui/src/models.rs), and
+    // the family-wide GPT-5 precedent ("all GPT-5 models … emit a maximum of
+    // 128,000 reasoning & output tokens", openai.com). The official per-model
+    // pages were re-checked 2026-09-29 but are not fetchable from the dev
+    // environment (bot shield); the figure is corroborated by independent
+    // write-ups of the release (MarkTechPost gpt-6-astra, MyClaw gpt-6-sol
+    // review, Pickaxe gpt-6-astra). Re-verify against developers.openai.com
+    // when reachable. Suffix tolerance carries date-snapshot spellings.
+    ("gpt-6-sol", 128_000),
+    ("gpt-6-luna", 128_000),
+    ("gpt-6-astra", 128_000),
+    // gpt-5.4-mini: 128,000 max output tokens — the figure on the official
+    // model page (developers.openai.com/api/docs/models/gpt-5.4-mini, per
+    // the 2026-09-29 search index; the page itself is bot-shielded from the
+    // dev environment — re-verify when reachable), matching the GPT-5.4
+    // family precedent (the full model documents 128K output). The id rides
+    // the Responses wire (`openai_responses_wire_model`) with reasoning
+    // metered as output, so without this row the engine's 8192 uncatalogued
+    // fail-close applies — a cap the Chat wire never metered reasoning
+    // against.
+    ("gpt-5.4-mini", 128_000),
+];
+
+/// Documented max-output anchors for models the base catalog has no output
+/// row for: a route output fact that keeps uncatalogued flagships from the
+/// engine's conservative 8192 fail-close.
+#[must_use]
+pub fn resolved_output_limit(model: &str) -> Option<u32> {
+    let lower = model.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    PINVOU_DOCUMENTED_OUTPUT
+        .iter()
+        .find(|(name, _)| model_name_matches(&lower, name))
+        .map(|(_, tokens)| *tokens)
 }
 
 /// The unified context-window precedence: the host `bridge::route_limits_for_model`
@@ -366,6 +410,26 @@ mod tests {
         // astra (no base gpt-6 row exists anywhere).
         assert_eq!(resolved_context_window("gpt-6-sol"), Some(1_050_000));
         assert_eq!(resolved_context_window("gpt-6-luna"), Some(1_050_000));
+        // Documented output anchors: the gpt-6 family has no base output row,
+        // so without this fact the engine fail-closes the Responses route to
+        // the 8192 guess while reasoning meters as output. Suffix tolerance
+        // carries snapshot spellings; base-catalogued models must NOT resolve
+        // here (their documented figure lives engine-side).
+        assert_eq!(resolved_output_limit("gpt-6-sol"), Some(128_000));
+        assert_eq!(resolved_output_limit("gpt-6-luna"), Some(128_000));
+        assert_eq!(resolved_output_limit("gpt-6-astra"), Some(128_000));
+        assert_eq!(resolved_output_limit("gpt-6-sol-2026-05-01"), Some(128_000));
+        // gpt-5.4-mini rides the Responses wire too (prefix predicate) and has
+        // no base output row; without the anchor it fail-closes to 8192 while
+        // reasoning meters as output on that wire.
+        assert_eq!(resolved_output_limit("gpt-5.4-mini"), Some(128_000));
+        assert_eq!(
+            resolved_output_limit("gpt-5.4-mini-2026-03-17"),
+            Some(128_000)
+        );
+        assert_eq!(resolved_output_limit("gpt-5.6-terra"), None);
+        assert_eq!(resolved_output_limit("my-aggregator-model"), None);
+        assert_eq!(resolved_output_limit(""), None);
         // The Anthropic default since 2026-09-22: opus-5-5 inherits the
         // claude-opus-5 anchor's 1M via suffix tolerance (official models
         // overview: opus-5-5 is 1M context).

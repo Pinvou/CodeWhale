@@ -33,7 +33,7 @@ for (const name of ['organization-i18n.js', 'model-usage-i18n.js', 'account-clos
 }
 // i18n.js 现按语言拆分（zh 内嵌），临时副本需带上 zh 词典才能解析。
 mkdirSync(path.join(dir, 'shared', 'i18n'), { recursive: true });
-for (const f of ['zh.js', 'browser.js']) {
+for (const f of ['zh.js', 'browser.js', 'chat-recovery.js']) {
   copyFileSync(
     path.join(here, '..', 'src', 'shared', 'i18n', f),
     path.join(dir, 'shared', 'i18n', f),

@@ -876,6 +876,12 @@ fn publish_gaia_score_artifacts(
     let outcomes = store.read_outcomes().map_err(core_error)?;
     let diagnostics = GaiaDiagnostics::from_outcomes(&outcomes);
     let agent_evaluation_eligible = diagnostics.agent_evaluation_eligible();
+    // Era and harness-deadline mode travel with the score so a legacy
+    // schema-1 artifact can never be mistaken for a current-era run: schema
+    // 1 predates the recorded deadline mode, and an explicit `null` here is
+    // the current writer saying "unbounded" while the legacy era is
+    // unrecoverable by definition.
+    let manifest = store.read_manifest().map_err(core_error)?;
     let mut score = serde_json::json!({
         "run_id": run_id,
         "status": status,
@@ -886,6 +892,8 @@ fn publish_gaia_score_artifacts(
         "complete": report.is_complete(),
         "official_dataset_compatible": report.is_official_dataset_compatible(),
         "agent_evaluation_eligible": agent_evaluation_eligible,
+        "manifest_schema_version": manifest.schema_version(),
+        "harness_deadline_secs": manifest.harness_deadline_secs(),
         "diagnostics": diagnostics.to_json(),
     });
     if let Some(accuracy) = comparable_accuracy {
@@ -894,7 +902,7 @@ fn publish_gaia_score_artifacts(
     let mut score_bytes =
         serde_json::to_vec(&score).map_err(|_| CliError::failed("gaia_score_artifact_failed"))?;
     score_bytes.push(b'\n');
-    publish_or_verify_bytes(store, "score.json", &score_bytes)?;
+    publish_or_verify_score_bytes(store, &score_bytes)?;
 
     let accuracy = comparable_accuracy
         .map(|value| format!("{value:.6}"))
@@ -1317,8 +1325,8 @@ fn integration_layer(outcome: &TaskOutcome) -> &'static str {
     }
 }
 
-fn publish_or_verify_bytes(store: &RunStore, name: &str, expected: &[u8]) -> Result<(), CliError> {
-    let path = store.run_dir().join(name);
+fn publish_or_verify_score_bytes(store: &RunStore, expected: &[u8]) -> Result<(), CliError> {
+    let path = store.run_dir().join("score.json");
     if path.exists() {
         let existing =
             std::fs::read(path).map_err(|_| CliError::failed("gaia_score_artifact_failed"))?;
@@ -1326,9 +1334,6 @@ fn publish_or_verify_bytes(store: &RunStore, name: &str, expected: &[u8]) -> Res
             return Err(CliError::failed("gaia_score_artifact_conflict"));
         }
         return Ok(());
-    }
-    if name != "score.json" {
-        return Err(CliError::failed("gaia_score_artifact_failed"));
     }
     publish_score_json(store, expected)
         .map_err(core_error)
@@ -2114,6 +2119,14 @@ mod tests {
         assert_eq!(score["complete"], true);
         assert_eq!(score["official_dataset_compatible"], true);
         assert_eq!(score["agent_evaluation_eligible"], true);
+        assert_eq!(score["manifest_schema_version"], 2);
+        assert!(
+            score
+                .as_object()
+                .unwrap()
+                .contains_key("harness_deadline_secs")
+        );
+        assert_eq!(score["harness_deadline_secs"], serde_json::json!(null));
         assert_eq!(
             score["diagnostics"]["integration_stability"]["status"],
             "pass"
@@ -2134,6 +2147,144 @@ mod tests {
         assert!(markdown.contains("状态: **PASS**"));
         assert!(markdown.contains("31 / 53"));
         assert!(markdown.contains("## 接入诊断"));
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn gaia_score_artifacts_pin_manifest_era_and_harness_deadline_mode() {
+        use adapter_gaia::GaiaAdapter;
+        use benchmark_core::{
+            BenchmarkAdapter, ModelIdentity, OfficialScoreReport, RunManifest, Split, ToolPolicyId,
+        };
+
+        let base = temp_base("gaia-score-era-markers");
+        let adapter = GaiaAdapter::new();
+        let model = ModelIdentity::new("fixture", "model").unwrap();
+        let policy = ToolPolicyId::new("pinvou-gaia-public-web/v1");
+        let report = OfficialScoreReport::compatible(3, 3, GAIA_SPLIT, "1");
+
+        let bounded = RunManifest::new(
+            "gaia-score-era-bounded",
+            &adapter
+                .descriptor()
+                .clone()
+                .with_harness_deadline_secs(Some(300)),
+            Split::new(GAIA_SPLIT),
+            model.clone(),
+            ToolPolicyId::new("pinvou-gaia-public-web/v1"),
+            1,
+        )
+        .unwrap();
+        let bounded_store = RunStore::create(&base, &bounded).unwrap();
+        publish_gaia_score_artifacts(&bounded_store, "gaia-score-era-bounded", &report).unwrap();
+        let score: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(bounded_store.run_dir().join("score.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(score["manifest_schema_version"], 2);
+        assert!(
+            score
+                .as_object()
+                .unwrap()
+                .contains_key("harness_deadline_secs")
+        );
+        assert_eq!(score["harness_deadline_secs"], 300);
+
+        let legacy = RunManifest::new(
+            "gaia-score-era-legacy",
+            adapter.descriptor(),
+            Split::new(GAIA_SPLIT),
+            model,
+            policy,
+            1,
+        )
+        .unwrap();
+        let legacy_store = RunStore::create(&base, &legacy).unwrap();
+        let mut stored = serde_json::to_value(&legacy).unwrap();
+        stored["schema_version"] = serde_json::json!(1);
+        std::fs::write(
+            legacy_store.manifest_path(),
+            serde_json::to_vec(&stored).unwrap(),
+        )
+        .unwrap();
+        publish_gaia_score_artifacts(&legacy_store, "gaia-score-era-legacy", &report).unwrap();
+        let score: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(legacy_store.run_dir().join("score.json")).unwrap(),
+        )
+        .unwrap();
+        // A legacy schema-1 manifest predates the recorded deadline mode, so
+        // its score artifact must stay era-marked and deadline-unrecoverable
+        // instead of masquerading as a current unbounded run.
+        assert_eq!(score["manifest_schema_version"], 1);
+        // Indexing a missing key also yields `Null`; pin the key's presence
+        // so the era stamp cannot silently disappear from the artifact.
+        assert!(
+            score
+                .as_object()
+                .unwrap()
+                .contains_key("manifest_schema_version")
+        );
+        assert!(
+            score
+                .as_object()
+                .unwrap()
+                .contains_key("harness_deadline_secs")
+        );
+        assert_eq!(score["harness_deadline_secs"], serde_json::json!(null));
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn gaia_score_rejects_rescoring_an_artifact_from_another_era() {
+        use adapter_gaia::GaiaAdapter;
+        use benchmark_core::{
+            BenchmarkAdapter, ModelIdentity, OfficialScoreReport, RunManifest, Split, ToolPolicyId,
+        };
+
+        let base = temp_base("gaia-score-era-conflict");
+        let adapter = GaiaAdapter::new();
+        let manifest = RunManifest::new(
+            "gaia-score-era-conflict",
+            adapter.descriptor(),
+            Split::new(GAIA_SPLIT),
+            ModelIdentity::new("fixture", "model").unwrap(),
+            ToolPolicyId::new("pinvou-gaia-public-web/v1"),
+            1,
+        )
+        .unwrap();
+        let store = RunStore::create(&base, &manifest).unwrap();
+        let report = OfficialScoreReport::compatible(3, 3, GAIA_SPLIT, "1");
+        publish_gaia_score_artifacts(&store, "gaia-score-era-conflict", &report).unwrap();
+        let path = store.run_dir().join("score.json");
+        let current = std::fs::read(&path).unwrap();
+
+        // What a build before the era stamp wrote: the same artifact minus
+        // the two era keys. Re-scoring that run must fail closed instead of
+        // silently overwriting a foreign-era artifact — the conflict is the
+        // era boundary made visible — and leave the old bytes untouched.
+        let mut legacy = serde_json::from_slice::<serde_json::Value>(&current).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("manifest_schema_version");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("harness_deadline_secs");
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+        std::fs::write(&path, &legacy_bytes).unwrap();
+        let error = publish_gaia_score_artifacts(&store, "gaia-score-era-conflict", &report)
+            .expect_err("a pre-stamp artifact must not be silently overwritten");
+        assert_eq!(error.to_string(), "gaia_score_artifact_conflict");
+        assert_eq!(std::fs::read(&path).unwrap(), legacy_bytes);
+
+        // The conflict is about content drift, not existence: republishing
+        // the current era's own bytes stays idempotent.
+        std::fs::write(&path, &current).unwrap();
+        publish_gaia_score_artifacts(&store, "gaia-score-era-conflict", &report).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), current);
 
         std::fs::remove_dir_all(base).unwrap();
     }

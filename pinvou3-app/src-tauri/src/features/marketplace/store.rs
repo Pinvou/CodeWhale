@@ -6,24 +6,26 @@
 //! 清理由 connectors 侧 `migrate_legacy_binary` 按 lock 校验执行。
 //!
 //! 纪律（§10）：
-//! - 原子写（tmp + rename，走底座 `write_atomic`）+ 进程内 FILE_LOCK 串行化读-改-写；
-//!   读/写入口拆「取锁包装 + 已持锁实现」两层，已持锁的 import/upsert 直接调 `_locked`
-//!   实现，避免 Mutex 重入死锁（#287 修过的竞态范式）。
+//! - 原子写（tmp + rename，走底座 `write_atomic`）+ 跨进程文件锁串行化读-改-写
+//!   （进程内 Mutex + OS 文件锁，见 `file_lock.rs`，#521）；读/写入口拆「取锁
+//!   包装 + 已持锁实现」两层，已持锁的 import/upsert 直接调 `_locked` 实现，
+//!   避免锁重入死锁（#287 修过的竞态范式）；
 //! - 不用 `#[serde(deny_unknown_fields)]`：未知字段经 `extra` flatten map 原样
 //!   roundtrip，新 schema 字段在老版本二进制上不丢数据（前向兼容）。
 //! - 损坏 JSON fail loud：bundles.json 是唯一真相源，静默重建会掩盖数据损坏，
 //!   损坏时返回 Err 且绝不回写。
 //!
-// architecture-guard: allow-target-cfg -- the unix regression test in this file (the round-23 MAJOR 3 legacy-import gate latch) needs an unreadable (0o000) installed.json fixture; test-only inline cfg(unix)+PermissionsExt (same exemption precedent as scope.rs / package_export.rs, review #455); a real read() probe guards against running as root, Windows is covered by link checks.
+// architecture-guard: allow-target-cfg -- the unix regression tests in this file (the round-23 MAJOR 3 legacy-import gate latch and the round-21 planted-symlink load pin) need an unreadable (0o000) installed.json / symlink fixtures; test-only inline cfg(unix)+PermissionsExt (same exemption precedent as scope.rs / package_export.rs, review #455); a real read() probe guards against running as root, Windows is covered by link checks.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
 use super::MarketplaceManager;
 use super::bundle;
+use super::file_lock;
 use crate::platform::connector_lock;
+use crate::platform::filesystem::read_private_data_file;
 use crate::platform::paths;
 
 /// bundles.json 当前 schema 版本。后续 schema 演进时递增并在读路径做迁移。
@@ -48,16 +50,10 @@ pub(crate) const MAX_DISPLAY_NAME_CHARS: usize = 64;
 /// 展示说明校验上限（字符数；对齐 skill_marketplace 的 description 展示截断口径）。
 pub const MAX_DISPLAY_DESCRIPTION_CHARS: usize = 240;
 
-/// `bundles.json` 读-改-写的进程内串行化：统一管线登记、首启导入、后续开关命令
-/// 都可能并发触发同一份文件的读-改-写，串行化避免交错丢更新（与
-/// `disabled_connectors.json` / `disabled_skills.json` 同一范式）。
-static BUNDLES_FILE_LOCK: Mutex<()> = Mutex::new(());
-
-fn file_lock() -> MutexGuard<'static, ()> {
-    BUNDLES_FILE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
+// `bundles.json` 读-改-写的串行化走 `file_lock::with_file_lock`（统一管线登记、
+// 首启导入、后续开关命令都可能并发触发同一份文件的读-改-写；GUI 与 headless
+// 宿主共享同一 `~/.pinvou3`，进程内 Mutex 之上再加 OS 文件锁，锁序与失败处置
+// 见 `file_lock.rs`，#515/#521）。
 
 // ---------------------------------------------------------------------------
 // schema
@@ -268,10 +264,11 @@ impl BundleStore {
         self.file.clone()
     }
 
-    /// 读整个文件（取锁包装）。文件不存在 → 空 store；JSON 损坏 → Err（fail loud）。
+    /// 读整个文件（try 锁包装：锁被占用/不可用时退化为不落盘的解锁快照，见
+    /// `file_lock::try_file_lock_for_read`）。文件不存在 → 空 store；JSON 损坏
+    /// → Err（fail loud）。
     pub fn load(&self) -> Result<BundlesFile, String> {
-        let _guard = file_lock();
-        load_locked(&self.file)
+        file_lock::try_file_lock_for_read(&self.file, || load_locked(&self.file))
     }
 
     /// 全部记录（便捷入口）。
@@ -284,15 +281,16 @@ impl BundleStore {
         Ok(self.load()?.records.into_iter().find(|r| r.id == id))
     }
 
-    /// 插入或按 id 替换一条记录（读-改-写全程持锁，原子落盘）。
+    /// 插入或按 id 替换一条记录（读-改-写全程持跨进程文件锁，原子落盘）。
     pub fn upsert(&self, record: BundleRecord) -> Result<(), String> {
-        let _guard = file_lock();
-        let mut file = load_locked(&self.file)?;
-        match file.records.iter_mut().find(|r| r.id == record.id) {
-            Some(existing) => *existing = record,
-            None => file.records.push(record),
-        }
-        save_locked(&self.file, &file)
+        file_lock::with_file_lock(&self.file, || {
+            let mut file = load_locked(&self.file)?;
+            match file.records.iter_mut().find(|r| r.id == record.id) {
+                Some(existing) => *existing = record,
+                None => file.records.push(record),
+            }
+            save_locked(&self.file, &file)
+        })
     }
 
     /// upsert 变体：记录已存在时保留 `source`（包来源只在首次登记时确定 —— 重装/
@@ -312,33 +310,32 @@ impl BundleStore {
     /// load-time snapshot, so cross-process writers remain last-writer-wins
     /// on the whole file.
     pub fn upsert_preserving(&self, record: BundleRecord) -> Result<(), String> {
-        let _guard = file_lock();
-        let mut file = load_locked(&self.file)?;
-        let merged = match file.records.iter().find(|r| r.id == record.id) {
-            Some(existing) => BundleRecord {
-                id: record.id,
-                source: existing.source.clone(),
-                installed: record.installed,
-                content_fingerprint: record
-                    .content_fingerprint
-                    .or_else(|| existing.content_fingerprint.clone()),
-                assets: if record.assets.is_empty() {
-                    existing.assets.clone()
-                } else {
-                    record.assets
-                },
-                credential_keys: record.credential_keys,
-                installed_at: existing.installed_at.clone(),
-                degraded: record.degraded,
-                extra: existing.extra.clone(),
-            },
-            None => record,
-        };
-        match file.records.iter_mut().find(|r| r.id == merged.id) {
-            Some(slot) => *slot = merged,
-            None => file.records.push(merged),
-        }
-        save_locked(&self.file, &file)
+        file_lock::with_file_lock(&self.file, || {
+            let mut file = load_locked(&self.file)?;
+            match file.records.iter_mut().find(|r| r.id == record.id) {
+                Some(existing) => {
+                    *existing = BundleRecord {
+                        id: record.id,
+                        source: existing.source.clone(),
+                        installed: record.installed,
+                        assets: if record.assets.is_empty() {
+                            existing.assets.clone()
+                        } else {
+                            record.assets
+                        },
+                        content_fingerprint: record
+                            .content_fingerprint
+                            .or_else(|| existing.content_fingerprint.clone()),
+                        credential_keys: record.credential_keys,
+                        installed_at: existing.installed_at.clone(),
+                        degraded: record.degraded,
+                        extra: existing.extra.clone(),
+                    };
+                }
+                None => file.records.push(record),
+            }
+            save_locked(&self.file, &file)
+        })
     }
 
     /// 仅当记录仍存在时更新内容指纹（单锁 RMW，原子落盘）。id 不存在 →
@@ -350,47 +347,47 @@ impl BundleStore {
         id: &str,
         fingerprint: &str,
     ) -> Result<bool, String> {
-        let _guard = file_lock();
-        let mut file = load_locked(&self.file)?;
-        let Some(record) = file.records.iter_mut().find(|r| r.id == id) else {
-            return Ok(false);
-        };
-        record.content_fingerprint = Some(fingerprint.to_string());
-        save_locked(&self.file, &file)?;
-        Ok(true)
+        file_lock::with_file_lock(&self.file, || {
+            let mut file = load_locked(&self.file)?;
+            let Some(record) = file.records.iter_mut().find(|r| r.id == id) else {
+                return Ok(false);
+            };
+            record.content_fingerprint = Some(fingerprint.to_string());
+            save_locked(&self.file, &file)?;
+            Ok(true)
+        })
     }
 
-    /// 按 id 删除记录（读-改-写全程持锁，原子落盘）。id 不存在 → Ok(false)，不写盘。
+    /// 按 id 删除记录（读-改-写全程持跨进程文件锁，原子落盘）。id 不存在 →
+    /// Ok(false)，不写盘。
     pub fn remove(&self, id: &str) -> Result<bool, String> {
-        let _guard = file_lock();
-        let mut file = load_locked(&self.file)?;
-        let before = file.records.len();
-        file.records.retain(|r| r.id != id);
-        if file.records.len() == before {
-            return Ok(false);
-        }
-        save_locked(&self.file, &file)?;
-        Ok(true)
+        file_lock::with_file_lock(&self.file, || {
+            let mut file = load_locked(&self.file)?;
+            let before = file.records.len();
+            file.records.retain(|r| r.id != id);
+            if file.records.len() == before {
+                return Ok(false);
+            }
+            save_locked(&self.file, &file)?;
+            Ok(true)
+        })
     }
 
     /// 局部更新：置 `Degraded` 原因（§3.2：登记在、资源缺），供 CLI 修复/断开
     /// 路径用。id 不存在 → Ok(false)；原因未变 → Ok(true) 但不写盘。
     pub fn mark_degraded(&self, id: &str, reason: &str) -> Result<bool, String> {
-        self.set_degraded(id, reason.to_string())
-    }
-
-    fn set_degraded(&self, id: &str, reason: String) -> Result<bool, String> {
-        let _guard = file_lock();
-        let mut file = load_locked(&self.file)?;
-        let Some(record) = file.records.iter_mut().find(|r| r.id == id) else {
-            return Ok(false);
-        };
-        if record.degraded.as_deref() == Some(reason.as_str()) {
-            return Ok(true);
-        }
-        record.degraded = Some(reason);
-        save_locked(&self.file, &file)?;
-        Ok(true)
+        file_lock::with_file_lock(&self.file, || {
+            let mut file = load_locked(&self.file)?;
+            let Some(record) = file.records.iter_mut().find(|r| r.id == id) else {
+                return Ok(false);
+            };
+            if record.degraded.as_deref() == Some(reason) {
+                return Ok(true);
+            }
+            record.degraded = Some(reason.to_string());
+            save_locked(&self.file, &file)?;
+            Ok(true)
+        })
     }
 
     /// 设置上传包的用户自定义 UI 展示名/说明（写在记录 `extra` map 的
@@ -406,74 +403,77 @@ impl BundleStore {
         display_name: Option<&str>,
         display_description: Option<&str>,
     ) -> Result<(), String> {
-        let _guard = file_lock();
-        let mut file = load_locked(&self.file)?;
-        let Some(record) = file.records.iter_mut().find(|r| r.id == id) else {
-            return Err(format!("包 '{id}' 未登记，无法设置展示名/说明"));
-        };
-        if !matches!(record.source, BundleSource::Upload(_)) {
-            return Err(format!(
-                "包 '{id}' 非用户上传来源，预置/内置包不允许覆盖展示名/说明"
-            ));
-        }
-        if display_name.is_none() && display_description.is_none() {
-            return Ok(());
-        }
-        apply_display_meta(
-            &mut record.extra,
-            EXTRA_DISPLAY_NAME,
-            "展示名",
-            display_name,
-            MAX_DISPLAY_NAME_CHARS,
-        )?;
-        apply_display_meta(
-            &mut record.extra,
-            EXTRA_DISPLAY_DESCRIPTION,
-            "展示说明",
-            display_description,
-            MAX_DISPLAY_DESCRIPTION_CHARS,
-        )?;
-        save_locked(&self.file, &file)
+        file_lock::with_file_lock(&self.file, || {
+            let mut file = load_locked(&self.file)?;
+            let Some(record) = file.records.iter_mut().find(|r| r.id == id) else {
+                return Err(format!("包 '{id}' 未登记，无法设置展示名/说明"));
+            };
+            if !matches!(record.source, BundleSource::Upload(_)) {
+                return Err(format!(
+                    "包 '{id}' 非用户上传来源，预置/内置包不允许覆盖展示名/说明"
+                ));
+            }
+            if display_name.is_none() && display_description.is_none() {
+                return Ok(());
+            }
+            apply_display_meta(
+                &mut record.extra,
+                EXTRA_DISPLAY_NAME,
+                "展示名",
+                display_name,
+                MAX_DISPLAY_NAME_CHARS,
+            )?;
+            apply_display_meta(
+                &mut record.extra,
+                EXTRA_DISPLAY_DESCRIPTION,
+                "展示说明",
+                display_description,
+                MAX_DISPLAY_DESCRIPTION_CHARS,
+            )?;
+            save_locked(&self.file, &file)
+        })
     }
 
     /// 读取记录的 SKILL.md 原说明备份（`EXTRA_SKILL_DESC_BACKUP`；缺 key /
     /// 非字符串 → None；`Some("")` = 原缺失哨兵）。清空展示说明的恢复路径用。
     pub fn skill_desc_backup(&self, id: &str) -> Result<Option<String>, String> {
-        let _guard = file_lock();
-        let file = load_locked(&self.file)?;
-        Ok(file
-            .records
-            .iter()
-            .find(|r| r.id == id)
-            .and_then(|r| r.extra.get(EXTRA_SKILL_DESC_BACKUP))
-            .and_then(|v| v.as_str())
-            .map(str::to_string))
+        file_lock::try_file_lock_for_read(&self.file, || {
+            let file = load_locked(&self.file)?;
+            Ok(file
+                .records
+                .iter()
+                .find(|r| r.id == id)
+                .and_then(|r| r.extra.get(EXTRA_SKILL_DESC_BACKUP))
+                .and_then(|v| v.as_str())
+                .map(str::to_string))
+        })
     }
 
     /// 设置/删除 `EXTRA_SKILL_DESC_BACKUP`（与 `set_display_meta` 同锁同门禁：
     /// 仅 Upload 记录可写）。值由内部读取/校验管线产生（引擎口径原值或空串哨兵），
     /// 不做展示字段校验；`None` = 删除 key。
     pub fn set_skill_desc_backup(&self, id: &str, backup: Option<&str>) -> Result<(), String> {
-        let _guard = file_lock();
-        let mut file = load_locked(&self.file)?;
-        let Some(record) = file.records.iter_mut().find(|r| r.id == id) else {
-            return Err(format!("包 '{id}' 未登记，无法备份技能说明原值"));
-        };
-        if !matches!(record.source, BundleSource::Upload(_)) {
-            return Err(format!("包 '{id}' 非用户上传来源，不允许写说明备份"));
-        }
-        match backup {
-            Some(v) => {
-                record.extra.insert(
-                    EXTRA_SKILL_DESC_BACKUP.to_string(),
-                    serde_json::Value::String(v.to_string()),
-                );
+        file_lock::with_file_lock(&self.file, || {
+            let mut file = load_locked(&self.file)?;
+            let Some(record) = file.records.iter_mut().find(|r| r.id == id) else {
+                return Err(format!("包 '{id}' 未登记，无法备份技能说明原值"));
+            };
+            if !matches!(record.source, BundleSource::Upload(_)) {
+                return Err(format!("包 '{id}' 非用户上传来源，不允许写说明备份"));
             }
-            None => {
-                record.extra.remove(EXTRA_SKILL_DESC_BACKUP);
+            match backup {
+                Some(v) => {
+                    record.extra.insert(
+                        EXTRA_SKILL_DESC_BACKUP.to_string(),
+                        serde_json::Value::String(v.to_string()),
+                    );
+                }
+                None => {
+                    record.extra.remove(EXTRA_SKILL_DESC_BACKUP);
+                }
             }
-        }
-        save_locked(&self.file, &file)
+            save_locked(&self.file, &file)
+        })
     }
 
     /// 首启一次性导入（§9）：从旧布局（installed.json + bundle/skills/* 的
@@ -489,34 +489,35 @@ impl BundleStore {
     ///   installed.json 存在但不可读时整体报错返回，`legacy_imported` 不置位——
     ///   宁可下次启动重试，也不把一次吞错读取得来的不完整镜像永久烘焙进
     ///   bundles.json（与 round-20 MAJOR A 的 reconcile 转换同类）。
-    /// - 全程持 FILE_LOCK（"读到即迁移"必须持锁，§9.4 / #287 竞态教训前置）。
+    /// - 全程持跨进程文件锁（"读到即迁移"必须持锁，§9.4 / #287 竞态教训前置）。
     pub fn import_legacy(&self) -> Result<LegacyImportReport, String> {
-        let _guard = file_lock();
-        let mut file = load_locked(&self.file)?;
-        let mut report = LegacyImportReport::default();
-        if file.legacy_imported {
-            report.already_imported = true;
-            return Ok(report);
-        }
-        for candidate in collect_legacy_records()? {
-            if file.records.iter().any(|r| r.id == candidate.id) {
-                report.kept_existing.push(candidate.id);
-                continue;
+        file_lock::with_file_lock(&self.file, || {
+            let mut file = load_locked(&self.file)?;
+            let mut report = LegacyImportReport::default();
+            if file.legacy_imported {
+                report.already_imported = true;
+                return Ok(report);
             }
-            if candidate.degraded.is_some() {
-                report.degraded.push(candidate.id.clone());
+            for candidate in collect_legacy_records()? {
+                if file.records.iter().any(|r| r.id == candidate.id) {
+                    report.kept_existing.push(candidate.id);
+                    continue;
+                }
+                if candidate.degraded.is_some() {
+                    report.degraded.push(candidate.id.clone());
+                }
+                report.imported.push(candidate.id.clone());
+                file.records.push(candidate);
             }
-            report.imported.push(candidate.id.clone());
-            file.records.push(candidate);
-        }
-        file.legacy_imported = true;
-        save_locked(&self.file, &file)?;
-        Ok(report)
+            file.legacy_imported = true;
+            save_locked(&self.file, &file)?;
+            Ok(report)
+        })
     }
 }
 
 // ---------------------------------------------------------------------------
-// 已持锁实现（取锁包装之上的内层；调用前必须已持有 BUNDLES_FILE_LOCK）
+// 已持锁实现（取锁包装之上的内层；调用前必须已持有 bundles.json 的跨进程文件锁）
 // ---------------------------------------------------------------------------
 
 /// 单个展示字段的写入语义（`set_display_meta` 用）：None 不动；trim 后空 = 删 key
@@ -673,9 +674,16 @@ pub(crate) fn upload_display_name(record: &BundleRecord, fallback: &str) -> Stri
     }
 }
 
-/// 内层读：与取锁包装分离，已持锁的 import/upsert 直接调用，避免 Mutex 重入。
+/// Inner read: separated from the lock-taking wrapper so already-locked
+/// import/upsert callers invoke it directly, avoiding mutex re-entry. The
+/// read goes through the hardened primitive: this function
+/// runs inside the bundles.json file lock and — via the scope's DenyAll
+/// expansion — inside the disabled_bundles.lock critical section, so a FIFO
+/// or symlink planted at the path must be refused rather than left hanging
+/// the lock holder — the same hardening discipline as disabled_bundles.json's
+/// identical reads. NotFound semantics unchanged (the kind passes through).
 fn load_locked(path: &Path) -> Result<BundlesFile, String> {
-    match std::fs::read_to_string(path) {
+    match read_private_data_file(path) {
         Ok(content) => {
             let file: BundlesFile = serde_json::from_str(&content).map_err(|e| {
                 format!(
@@ -683,7 +691,14 @@ fn load_locked(path: &Path) -> Result<BundlesFile, String> {
                     path.display()
                 )
             })?;
-            warn_unrecognized_assets(path, &file);
+            let flagged = unrecognized_asset_record_ids(&file);
+            if !flagged.is_empty() {
+                log::warn!(
+                    "[marketplace] {}: unreadable assets entries kept verbatim in {}",
+                    path.display(),
+                    flagged.join(", ")
+                );
+            }
             Ok(file)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BundlesFile::default()),
@@ -691,24 +706,14 @@ fn load_locked(path: &Path) -> Result<BundlesFile, String> {
     }
 }
 
+/// Record ids carrying at least one entry this binary cannot read; the
+/// flag-and-log lives at the load site so the targeting rule is testable
+/// without capturing log output.
+///
 /// Unparsable `assets` entries are kept verbatim per the `AssetEntry`
 /// contract, but a silent degrade hides data-quality problems (a `sha_256`
 /// misspelling from a future pin writer, for example). Report them once per
 /// load so the anomaly is diagnosable instead of just invisible.
-fn warn_unrecognized_assets(path: &Path, file: &BundlesFile) {
-    let flagged = unrecognized_asset_record_ids(file);
-    if !flagged.is_empty() {
-        log::warn!(
-            "[marketplace] {}: unreadable assets entries kept verbatim in {}",
-            path.display(),
-            flagged.join(", ")
-        );
-    }
-}
-
-/// Record ids carrying at least one entry this binary cannot read; split
-/// from `warn_unrecognized_assets` so the targeting rule is testable
-/// without capturing log output.
 fn unrecognized_asset_record_ids(file: &BundlesFile) -> Vec<String> {
     file.records
         .iter()
@@ -731,7 +736,7 @@ fn save_locked(path: &Path, file: &BundlesFile) -> Result<(), String> {
     }
     let json =
         serde_json::to_string_pretty(file).map_err(|e| format!("序列化 bundles.json 失败: {e}"))?;
-    deepseek_tui::utils::write_atomic(path, json.as_bytes())
+    crate::platform::filesystem::atomic_write_private(path, json.as_bytes())
         .map_err(|e| format!("写入 {} 失败: {e}", path.display()))
 }
 
@@ -789,15 +794,9 @@ fn legacy_mcp_records() -> Result<Vec<BundleRecord>, String> {
                 })
                 .unwrap_or_default();
             BundleRecord {
-                id,
-                source: BundleSource::Preset,
-                installed: true,
-                content_fingerprint: None,
-                assets: Vec::new(),
-                credential_keys,
                 installed_at: now.clone(),
-                degraded: None,
-                extra: serde_json::Map::new(),
+                credential_keys,
+                ..BundleRecord::installed_now(id, BundleSource::Preset)
             }
         })
         .collect())
@@ -835,14 +834,15 @@ fn legacy_skill_records() -> Result<Vec<BundleRecord>, String> {
         // like the unreadable root above — the one-shot `legacy_imported`
         // gate must not latch over an incomplete mirror (round-23 MAJOR-3 /
         // round-24 m2 class, per-entry form).
+        // Hardened read: read_private_data_file refuses
+        // directories and non-regular entries, so a planted FIFO now
+        // ABORTS the one-shot import fail-closed instead of silently
+        // skipping (and latching the gate over a skipped mirror).
         let marker_path = dir.join(".installed-from");
-        let marker = if marker_path.exists() {
-            match std::fs::read_to_string(&marker_path) {
-                Ok(marker) => marker,
-                Err(e) => return Err(format!("读取 {} 失败: {e}", marker_path.display())),
-            }
-        } else {
-            continue;
+        let marker = match read_private_data_file(&marker_path) {
+            Ok(marker) => marker,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("读取 {} 失败: {e}", marker_path.display())),
         };
         let marker = marker.trim();
         let dir_name = entry.file_name().to_string_lossy().into_owned();
@@ -858,15 +858,8 @@ fn legacy_skill_records() -> Result<Vec<BundleRecord>, String> {
             continue;
         }
         out.push(BundleRecord {
-            id,
-            source,
-            installed: true,
-            content_fingerprint: None,
-            assets: Vec::new(),
-            credential_keys: Vec::new(),
             installed_at: now.clone(),
-            degraded: None,
-            extra: serde_json::Map::new(),
+            ..BundleRecord::installed_now(id, source)
         });
     }
     Ok(out)
@@ -904,15 +897,10 @@ fn legacy_cli_records() -> Vec<BundleRecord> {
             continue;
         }
         out.push(BundleRecord {
-            id: id.to_string(),
-            source: BundleSource::Builtin,
-            installed: true,
-            content_fingerprint: None,
             assets,
-            credential_keys: Vec::new(),
             installed_at: now.clone(),
             degraded,
-            extra: serde_json::Map::new(),
+            ..BundleRecord::installed_now(id, BundleSource::Builtin)
         });
     }
     out
@@ -958,10 +946,25 @@ fn cli_asset_state(bin: &str) -> CliAssetState {
     }
 }
 
+/// Test-only fixture: register `id` as an installed record of `source` in the
+/// default bundle store (`BundleRecord::installed_now`) — the shape the
+/// scope/command gate tests plant before exercising a gate. New gate tests
+/// copy this helper instead of re-stating the fully-qualified
+/// `BundleStore::new().upsert(...)` ceremony.
+#[cfg(test)]
+pub(crate) fn plant_installed_record(id: &str, source: BundleSource) {
+    BundleStore::new()
+        .upsert(BundleRecord::installed_now(id, source))
+        .unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::platform::test_support::with_temp_home;
+    // The helper is `#[cfg(all(test, unix))]`; its callers are `#[cfg(unix)]` tests.
+    #[cfg(unix)]
+    use crate::platform::test_support::file_unreadable_or_skip;
 
     fn record(id: &str, source: BundleSource) -> BundleRecord {
         BundleRecord {
@@ -1039,7 +1042,10 @@ mod tests {
             entries.sort();
             assert_eq!(
                 entries,
-                vec!["bundles.json".to_string()],
+                // bundles.lock is the cross-process file lock (#521), not a
+                // leftover tmp: the assertion's job is that no tmp residue
+                // survives an atomic write.
+                vec!["bundles.json".to_string(), "bundles.lock".to_string()],
                 "原子写不得残留 tmp 文件"
             );
         });
@@ -1128,16 +1134,12 @@ mod tests {
             let installed_path = home.join("marketplace/installed.json");
             std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
             std::fs::write(&installed_path, r#"["gongwen"]"#).unwrap();
-            std::fs::set_permissions(&installed_path, std::fs::Permissions::from_mode(0o000))
-                .unwrap();
             // Root probe (mode bits are no-ops for root): if the file is still
             // readable, the unreadable-read branch never runs — skip loudly.
-            if std::fs::read(&installed_path).is_ok() {
-                std::fs::set_permissions(&installed_path, std::fs::Permissions::from_mode(0o644))
-                    .unwrap();
-                eprintln!(
-                    "ROOT-SKIP[legacy_import_unreadable_registry_fails_without_latching_gate]: running as root - the unreadable-file fixture stays readable; NOT exercised"
-                );
+            if !file_unreadable_or_skip(
+                &installed_path,
+                "legacy_import_unreadable_registry_fails_without_latching_gate",
+            ) {
                 return;
             }
 
@@ -1351,7 +1353,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn legacy_import_unreadable_marker_aborts_before_gate_latches() {
-        use std::os::unix::fs::PermissionsExt;
         with_temp_home("pinvou3-store-test", || {
             let skills = paths::bundle_skills_dir();
             let good = skills.join("good");
@@ -1365,12 +1366,13 @@ mod tests {
             )
             .unwrap();
             let sealed_marker = sealed.join(".installed-from");
-            std::fs::set_permissions(&sealed_marker, std::fs::Permissions::from_mode(0o000))
-                .unwrap();
-            if std::fs::read_to_string(&sealed_marker).is_ok() {
-                eprintln!(
-                    "ROOT-SKIP[legacy_import_unreadable_marker_aborts_before_gate_latches]: unreadable-file fixture not effective (root); NOT exercised"
-                );
+            // Root probe (mode bits are no-ops for root): if the marker is
+            // still readable, the unreadable-read branch never runs — skip
+            // loudly.
+            if !file_unreadable_or_skip(
+                &sealed_marker,
+                "legacy_import_unreadable_marker_aborts_before_gate_latches",
+            ) {
                 return;
             }
             // 无标记目录仍是普通跳过，不得触发任何错误路径。
@@ -1381,6 +1383,35 @@ mod tests {
             assert!(
                 err.contains(".installed-from") || err.contains("读取"),
                 "the unreadable marker must abort the import: {err}"
+            );
+            assert!(
+                !store.load().unwrap().legacy_imported,
+                "the one-shot gate must not latch over an aborted import"
+            );
+        });
+    }
+
+    /// A planted DIRECTORY at `.installed-from` must
+    /// abort the legacy import exactly like the unreadable regular file —
+    /// the is_file gate reads it as "no marker", which would silently latch
+    /// the one-shot `legacy_imported` gate over a skipped mirror.
+    #[test]
+    fn legacy_import_marker_directory_aborts_before_gate_latches() {
+        with_temp_home("pinvou3-store-test", || {
+            let skills = paths::bundle_skills_dir();
+            let planted = skills.join("planted");
+            std::fs::create_dir_all(planted.join(".installed-from")).unwrap();
+            std::fs::write(
+                planted.join(".installed-from").join("keep"),
+                b"pinvou3-marketplace:legacy-a",
+            )
+            .unwrap();
+
+            let store = BundleStore::new();
+            let err = store.import_legacy().unwrap_err();
+            assert!(
+                err.contains(".installed-from"),
+                "the directory marker must abort the import: {err}"
             );
             assert!(
                 !store.load().unwrap().legacy_imported,
@@ -1884,5 +1915,107 @@ mod tests {
                 "upsert_preserving 不得丢备份 key"
             );
         });
+    }
+
+    /// #515/#521 cross-process contention on the WRITE path: while a foreign
+    /// fd holds the bundles OS lock, the save must not land first; after the
+    /// release the write lands with its full content.
+    #[test]
+    fn cross_process_lock_blocks_save_write_until_release() {
+        with_temp_home("pinvou3-store-cross-process-save", || {
+            let store = BundleStore::new();
+            let data_path = store.file_path();
+            let lock_path = file_lock::lock_path_for(&data_path);
+            let worker = file_lock::with_foreign_write_lock(&lock_path, || {
+                let worker = std::thread::spawn(move || {
+                    store
+                        .upsert(record("weather", BundleSource::Preset))
+                        .expect("write should succeed once the foreign lock is released");
+                });
+                file_lock::wait_until_process_mutex_parked(&lock_path, "bundles");
+                // The write must not land while the peer holds the lock.
+                let window = std::time::Duration::from_secs(2);
+                let deadline = std::time::Instant::now() + window;
+                while std::time::Instant::now() < deadline {
+                    assert!(
+                        !data_path.exists(),
+                        "data file written while the lock was still held — serialization is broken"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                worker
+            });
+            worker
+                .join()
+                .expect("worker should finish once the foreign lock is released");
+            let content = std::fs::read_to_string(&data_path).unwrap();
+            assert!(
+                content.contains("\"weather\""),
+                "write should land after the lock is released: {content}"
+            );
+        });
+    }
+
+    /// #515/#521 cross-process contention on the READ path: while a peer holds
+    /// the OS lock, a load must degrade promptly to the unlocked, never-
+    /// persisting view (bounded — readers never couple to a peer's critical
+    /// section) instead of blocking or writing. A missing file stays missing
+    /// (a pure read must not create the store), contended or not.
+    #[test]
+    fn cross_process_lock_contention_degrades_read_without_persist() {
+        with_temp_home("pinvou3-store-cross-process-read", || {
+            let store = BundleStore::new();
+            let lock_path = file_lock::lock_path_for(&store.file_path());
+            file_lock::with_foreign_write_lock(&lock_path, || {
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let reader = std::thread::spawn(move || {
+                    let got = BundleStore::new().load();
+                    done_tx.send(got).expect("reader should send its result");
+                });
+                // A contended read must return promptly. recv_timeout doubles as
+                // the regression assertion: a blocking read hangs here and fails
+                // the test with a bounded, diagnosable timeout.
+                let got = done_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("contended read must degrade instead of blocking on the peer's lock");
+                assert!(
+                    got.unwrap().records.is_empty(),
+                    "a missing store reads as empty under contention"
+                );
+                assert!(
+                    !store.file_path().exists(),
+                    "a contended read must not persist (create) the store file"
+                );
+                reader.join().expect("reader thread should finish");
+            });
+        });
+    }
+
+    /// `load_locked` runs inside the bundles.json file lock
+    /// and — via the scope DenyAll expansion — inside the scope lock's
+    /// critical section, so it must route through the hardened read. Symlink
+    /// pin (unix-only API, same convention as recycle_bin.rs): a planted
+    /// symlink at the path must be refused by the hardened open (O_NOFOLLOW)
+    /// — a plain `read_to_string` would silently follow it — and the refusal
+    /// must not block the lock holder. Behavioral pin that the routing
+    /// survived refactors (the platform primitive's own tests cover the
+    /// mechanism, FIFO shape included).
+    #[cfg(unix)]
+    #[test]
+    fn load_locked_refuses_a_planted_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("bundles.json");
+        let target = temp.path().join("outside.json");
+        std::fs::write(
+            &target,
+            r#"{"schema_version": 1, "legacy_imported": false, "records": []}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, &file).unwrap();
+
+        assert!(
+            load_locked(&file).is_err(),
+            "a planted symlink must be refused by the hardened open, not followed"
+        );
     }
 }
