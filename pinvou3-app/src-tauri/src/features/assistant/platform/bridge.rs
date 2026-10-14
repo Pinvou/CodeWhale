@@ -2013,6 +2013,7 @@ impl Pinvou3Bridge {
             //    in the new struct) ——
             model: _,
             workspace: _,
+            workspace_roots: _, // host exposes one execution root, not SDK attachments
             session_id: _,
             allow_shell: _,
             trust_mode: _,
@@ -2150,6 +2151,10 @@ impl Pinvou3Bridge {
             // pinvou3 override
             model: self.model(),
             workspace: self.workspace.clone(),
+            // Input is EngineConfig::default(), not a caller-supplied root set.
+            // Empty attachments preserve the single execution-root contract;
+            // SessionRoots.ledger remains delegated-agent state, not tool authority.
+            workspace_roots: Vec::new(),
             session_id: None,
             allow_shell: self.allow_shell(),
             trust_mode: true,
@@ -4685,6 +4690,7 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
@@ -4740,6 +4746,7 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
@@ -4803,6 +4810,7 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
@@ -4999,6 +5007,7 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     // The model-facing `bash` tool reaches the internal
                     // `exec_shell` policy identity before consulting rules.
                     tool: Some("exec_shell"),
@@ -7690,6 +7699,41 @@ mod tests {
             bridge.build_engine_config().workspace,
             std::path::PathBuf::from("/tmp/pinvou3-ws-fixture")
         );
+    }
+
+    /// SDK attachments are not exposed by the current host. The execution
+    /// directory and delegated-agent ledger are separate authority domains.
+    #[test]
+    fn forkguard_engine_config_keeps_only_execution_root() {
+        let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-single-execution-root-{}-{}",
+            std::process::id(),
+            crate::bridge::paths::tests::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create hermetic test home");
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
+        let bridge = fixture_bridge();
+        assert!(bridge.build_engine_config().workspace_roots.is_empty());
+
+        let execution = root.join("project");
+        let ledger = root.join("session-ledger");
+        let cfg = bridge.build_engine_config_for_session_roots(
+            "single-execution-root",
+            SessionRoots {
+                execution: execution.clone(),
+                ledger: ledger.clone(),
+                bound: true,
+            },
+        );
+        assert_eq!(cfg.workspace, execution);
+        assert_eq!(cfg.subagent_state_root.as_deref(), Some(ledger.as_path()));
+        assert!(
+            cfg.workspace_roots.is_empty(),
+            "ledger must not become a writable attachment"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Destructure the Op returned by build_send_message_op into
@@ -10503,6 +10547,7 @@ mod tests {
 
         let ordinary = bridge.build_engine_config_for_session_roots("sched-run", roots.clone());
         assert_eq!(ordinary.workspace, automation);
+        assert!(ordinary.workspace_roots.is_empty());
         assert_eq!(
             ordinary.subagent_state_root.as_deref(),
             Some(automation.as_path()),
@@ -10513,6 +10558,7 @@ mod tests {
         let multi_agent =
             bridge.build_engine_config_for_multi_agent("sched-run", roots, &snapshot, true);
         assert_eq!(multi_agent.workspace, automation);
+        assert!(multi_agent.workspace_roots.is_empty());
         assert_eq!(
             multi_agent.subagent_state_root.as_deref(),
             Some(automation.as_path())

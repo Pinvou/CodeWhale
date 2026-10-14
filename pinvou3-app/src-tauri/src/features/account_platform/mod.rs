@@ -50,6 +50,7 @@ const IDENTITY_SERVICE_CONFIG_FIELD: &str = "identity_service_url";
 const TOKEN_GATEWAY_CONFIG_FIELD: &str = "token_gateway_url";
 const MAX_INSTALLED_CONFIG_BYTES: u64 = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const ACCOUNT_API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
@@ -591,7 +592,7 @@ impl AccountPlatformState {
     pub fn new() -> Result<Self, String> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
+            .timeout(ACCOUNT_API_REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| format!("account_platform_http_client_unavailable: {error}"))?;

@@ -152,6 +152,10 @@ func (r *PostgresRepository) Release(ctx context.Context, usageRequestID, holdID
 }
 
 func (r *PostgresRepository) releaseHold(ctx context.Context, usageRequestID, holdID uuid.UUID, reason string, expiryOnly bool) (Hold, error) {
+	return r.releaseHoldExpected(ctx, usageRequestID, holdID, reason, expiryOnly, nil)
+}
+
+func (r *PostgresRepository) releaseHoldExpected(ctx context.Context, usageRequestID, holdID uuid.UUID, reason string, expiryOnly bool, expected *OriginalHoldExpectation) (Hold, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return Hold{}, err
@@ -164,12 +168,28 @@ func (r *PostgresRepository) releaseHold(ctx context.Context, usageRequestID, ho
 	if err != nil {
 		return Hold{}, err
 	}
-	if _, err := getWallet(ctx, tx, hold.WalletID, true); err != nil {
+	wallet, err := getWallet(ctx, tx, hold.WalletID, true)
+	if err != nil {
 		return Hold{}, err
 	}
 	hold, err = getHoldByUsage(ctx, tx, usageRequestID, true)
 	if err != nil || hold.ID != holdID {
 		return Hold{}, ErrNotFound
+	}
+	// Check under the original wallet -> hold locks, before ANY release or
+	// replay receipt. Original callers leave expected nil and retain behavior.
+	if expected != nil {
+		if !expected.valid() || wallet.OwnerType != "PERSONAL" || wallet.OwnerID != expected.OwnerID ||
+			hold.WalletID != expected.WalletID || hold.MaxMicrocredits != expected.Maximum ||
+			hold.PriceVersionID == nil || *hold.PriceVersionID != expected.PriceID {
+			return Hold{}, ErrConflict
+		}
+		pricing := &HoldPricingContext{ModelID: expected.ModelID, ProtocolCode: expected.Protocol, FormulaVersionID: expected.FormulaID, PricingSnapshot: expected.Price, RequestSnapshot: expected.Request}
+		if same, err := sameHoldPricing(ctx, tx, hold.ID, pricing); err != nil {
+			return Hold{}, err
+		} else if !same {
+			return Hold{}, ErrConflict
+		}
 	}
 	if expiryOnly && hold.Status != "ACTIVE" {
 		return Hold{}, ErrUsageAlreadyTerminal

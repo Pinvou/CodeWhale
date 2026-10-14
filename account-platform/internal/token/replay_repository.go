@@ -147,7 +147,7 @@ func (r *PostgresRepository) PersistDispatchIntent(ctx context.Context, usageID 
 
 func (r *PostgresRepository) AcquireDispatch(ctx context.Context, usageID uuid.UUID, owner string, lease time.Duration) (DispatchEnvelope, bool, error) {
 	owner = strings.TrimSpace(owner)
-	if usageID == uuid.Nil || owner == "" || lease < 10*time.Second || lease > 10*time.Minute {
+	if usageID == uuid.Nil || owner == "" || lease < 10*time.Second || lease > dispatchLeaseDuration {
 		return DispatchEnvelope{}, false, ErrForbidden
 	}
 	now := r.now()
@@ -157,8 +157,8 @@ func (r *PostgresRepository) AcquireDispatch(ctx context.Context, usageID uuid.U
 	}
 	defer tx.Rollback(ctx)
 	var ciphertext []byte
-	var keyID string
-	var integrity string
+	var keyID *string
+	var integrity *string
 	var acquiredAt *time.Time
 	if err := tx.QueryRow(ctx, `SELECT encrypted_envelope,key_id,envelope_integrity,worker_acquired_at FROM usage_dispatch_intents WHERE usage_request_id=$1 FOR UPDATE`, usageID).Scan(&ciphertext, &keyID, &integrity, &acquiredAt); errors.Is(err, pgx.ErrNoRows) {
 		return DispatchEnvelope{}, false, ErrNotFound
@@ -168,10 +168,10 @@ func (r *PostgresRepository) AcquireDispatch(ctx context.Context, usageID uuid.U
 	if acquiredAt != nil {
 		return DispatchEnvelope{}, false, tx.Commit(ctx)
 	}
-	if replayDigest(ciphertext) != integrity {
+	if keyID == nil || integrity == nil || len(ciphertext) == 0 || replayDigest(ciphertext) != *integrity {
 		return DispatchEnvelope{}, false, ErrInvalidSecret
 	}
-	plaintext, err := r.secrets.DecryptWithKeyID(keyID, ciphertext, replayAAD(usageID, "dispatch", 0))
+	plaintext, err := r.secrets.DecryptWithKeyID(*keyID, ciphertext, replayAAD(usageID, "dispatch", 0))
 	if err != nil {
 		return DispatchEnvelope{}, false, err
 	}
@@ -180,10 +180,19 @@ func (r *PostgresRepository) AcquireDispatch(ctx context.Context, usageID uuid.U
 	if err := json.Unmarshal(plaintext, &envelope); err != nil {
 		return DispatchEnvelope{}, false, err
 	}
+	// Keep the existing intent -> usage lock order; read the acquisition clock
+	// only after lock waiting and decryption, immediately before its state write.
+	var lockedID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&lockedID); errors.Is(err, pgx.ErrNoRows) {
+		return DispatchEnvelope{}, false, ErrNotFound
+	} else if err != nil {
+		return DispatchEnvelope{}, false, err
+	}
+	now = r.now()
 	if err := transitionExecutionTx(ctx, tx, usageID, []string{"DISPATCH_INTENT_PERSISTED"}, "UPSTREAM_DISPATCHING", "dispatch worker acquired immutable intent", now); err != nil {
 		return DispatchEnvelope{}, false, err
 	}
-	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "DISPATCH_STARTED", "GATEWAY", "RECORDED", integrity, map[string]any{"dispatch_intent_integrity": integrity, "worker_lease_owner": owner, "automatic_redispatch": false}, now); err != nil {
+	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "DISPATCH_STARTED", "GATEWAY", "RECORDED", *integrity, map[string]any{"dispatch_intent_integrity": *integrity, "worker_lease_owner": owner, "automatic_redispatch": false}, now); err != nil {
 		return DispatchEnvelope{}, false, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE usage_dispatch_intents SET worker_lease_owner=$2,worker_lease_until=$3,worker_acquired_at=$4,encrypted_envelope=NULL,key_id=NULL,envelope_integrity=NULL WHERE usage_request_id=$1 AND worker_acquired_at IS NULL`, usageID, owner, now.Add(lease), now); err != nil {
@@ -192,6 +201,7 @@ func (r *PostgresRepository) AcquireDispatch(ctx context.Context, usageID uuid.U
 	if err := tx.Commit(ctx); err != nil {
 		return DispatchEnvelope{}, false, err
 	}
+	envelope.leaseOwner = owner
 	return envelope, true, nil
 }
 
@@ -219,6 +229,9 @@ func (r *PostgresRepository) AppendReplayEvent(ctx context.Context, usageID uuid
 		}
 	} else if status != "STREAMING" {
 		return 0, ErrForbidden
+	}
+	if err := r.checkDispatchLeaseOwnerTx(ctx, tx, usageID); err != nil {
+		return 0, err
 	}
 	var sequence int64
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(max(sequence),0)+1 FROM usage_stream_events WHERE usage_request_id=$1`, usageID).Scan(&sequence); err != nil {
@@ -291,6 +304,23 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 	var status string
 	var terminalAt time.Time
 	if err := tx.QueryRow(ctx, `SELECT status,COALESCE(terminal_at,updated_at) FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&status, &terminalAt); err != nil {
+		return err
+	}
+	if pending, err := missingReferenceReleasePendingTx(ctx, tx, usageID); err != nil {
+		return err
+	} else if pending {
+		// No response ciphertext, new retention clock or financial state is
+		// published after the durable decision. Valid late numbers remain audit
+		// evidence; the current deadline saga still owns acknowledgement recovery.
+		if result.FinalUsage != nil && (result.FinalUsage.InputTokens < 0 || result.FinalUsage.OutputTokens < 0 || result.FinalUsage.CachedInputTokens < 0) {
+			return ErrForbidden
+		}
+		if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "REVIEW", "late-result-after-missing-reference-decision", map[string]any{"usage": result.FinalUsage, "response_kind": result.Kind, "http_status": result.HTTPStatus, "content_persisted": false, "customer_debit_prohibited": true}, now); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	if err := r.checkDispatchLeaseOwnerTx(ctx, tx, usageID); err != nil {
 		return err
 	}
 	terminal := status == "COMMITTED" || status == "RELEASED"
@@ -610,29 +640,70 @@ func (r *PostgresRepository) ReleaseReplayRetentionCase(ctx context.Context, cas
 }
 
 func (r *PostgresRepository) RecoverUncertainDispatches(ctx context.Context) error {
-	now := r.now()
-	rows, err := r.pool.Query(ctx, `SELECT request.id FROM usage_requests request JOIN usage_dispatch_intents intent ON intent.usage_request_id=request.id WHERE request.execution_status='UPSTREAM_DISPATCHING' AND intent.worker_lease_until<=$1 AND intent.adapter_supports_idempotency=false`, now)
+	rows, err := r.pool.Query(ctx, `SELECT request.id,COALESCE(intent.worker_lease_owner,''),intent.worker_lease_until FROM usage_requests request JOIN usage_dispatch_intents intent ON intent.usage_request_id=request.id WHERE request.execution_status IN ('UPSTREAM_DISPATCHING','STREAMING') AND intent.worker_lease_until<=$1 AND intent.adapter_supports_idempotency=false`, r.now())
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	var ids []uuid.UUID
+	type candidate struct {
+		id    uuid.UUID
+		owner string
+		until time.Time
+	}
+	var candidates []candidate
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var item candidate
+		if err := rows.Scan(&item.id, &item.owner, &item.until); err != nil {
+			rows.Close()
 			return err
 		}
-		ids = append(ids, id)
+		candidates = append(candidates, item)
 	}
-	if err := rows.Err(); err != nil {
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
 		return err
 	}
-	for _, id := range ids {
-		if err := r.MarkReview(ctx, id, "dispatch_result_unknown", map[string]any{"automatic_redispatch": false}); err != nil {
+	for _, item := range candidates {
+		if err := r.recoverExpiredDispatch(ctx, item.id, item.owner, item.until); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// The scan is only a candidate list. SaveReplayResult and this recovery share
+// the user advisory lock and usage row lock; recheck before changing any state.
+func (r *PostgresRepository) recoverExpiredDispatch(ctx context.Context, usageID uuid.UUID, owner string, observedUntil time.Time) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockReplayUsageTx(ctx, tx, usageID); err != nil {
+		return err
+	}
+	var currentOwner *string
+	var until *time.Time
+	var idempotent bool
+	if err := tx.QueryRow(ctx, `SELECT worker_lease_owner,worker_lease_until,adapter_supports_idempotency FROM usage_dispatch_intents WHERE usage_request_id=$1 FOR UPDATE`, usageID).Scan(&currentOwner, &until, &idempotent); err != nil {
+		return err
+	}
+	var execution string
+	if err := tx.QueryRow(ctx, `SELECT execution_status FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&execution); err != nil {
+		return err
+	}
+	storedOwner := ""
+	if currentOwner != nil {
+		storedOwner = *currentOwner
+	}
+	now := r.now()
+	if (execution != "UPSTREAM_DISPATCHING" && execution != "STREAMING") || storedOwner != owner || until == nil || !until.Equal(observedUntil) || until.After(now) || idempotent {
+		return tx.Commit(ctx)
+	}
+	if err := r.markReviewTx(ctx, tx, usageID, "dispatch_result_unknown", map[string]any{"automatic_redispatch": false}, now); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) AnonymizeUsageReplay(ctx context.Context, userID uuid.UUID) error {

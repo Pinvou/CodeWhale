@@ -99,6 +99,7 @@ type UsageStore interface {
 	CompleteHoldAndDispatch(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
 	PersistDispatchIntent(context.Context, uuid.UUID, DispatchEnvelope) error
 	AcquireDispatch(context.Context, uuid.UUID, string, time.Duration) (DispatchEnvelope, bool, error)
+	RenewDispatchLease(context.Context, uuid.UUID, string) (bool, error)
 	MarkUpstream(context.Context, uuid.UUID) error
 	MarkStreaming(context.Context, uuid.UUID) error
 	RecordUpstreamRequest(context.Context, uuid.UUID, UpstreamRequestEvidence) error
