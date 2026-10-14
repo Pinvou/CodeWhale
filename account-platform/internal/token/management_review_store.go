@@ -8,12 +8,25 @@ import (
 
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
 func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, reason string, snapshot map[string]any) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := r.markReviewTx(ctx, tx, usageID, reason, snapshot, r.now()); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) markReviewTx(ctx context.Context, tx pgx.Tx, usageID uuid.UUID, reason string, snapshot map[string]any, now time.Time) error {
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		return err
@@ -23,12 +36,6 @@ func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, 
 	if reason == "settlement_pending" || reason == "local_commit_record_pending" {
 		status = "SETTLEMENT_PENDING"
 	}
-	now := r.now()
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
 	if pending, err := lockMissingReferenceReleaseTx(ctx, tx, usageID); err != nil {
 		return err
 	} else if pending {
@@ -37,7 +44,10 @@ func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, 
 		if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "UNCERTAINTY", "GATEWAY", "REVIEW", "late-review-after-missing-reference-decision", map[string]any{"reason": reason, "sanitized_observation": snapshot, "customer_debit_prohibited": true}, now); err != nil {
 			return err
 		}
-		return tx.Commit(ctx)
+		return nil
+	}
+	if err := r.checkDispatchLeaseOwnerTx(ctx, tx, usageID); err != nil {
+		return err
 	}
 	settlementStatus := "REVIEW"
 	if status == "SETTLEMENT_PENDING" || reason == "upstream_transport_unknown" || reason == "upstream_error_unknown_usage" || reason == "stream_usage_missing" || reason == "stream_terminal_missing" || reason == "usage_missing" {
@@ -60,7 +70,7 @@ func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, 
 	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "UNCERTAINTY", "GATEWAY", "REVIEW", reason, map[string]any{"reason": reason, "sanitized_observation": snapshot, "automatic_high_risk_retry": false}, now); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func (r *PostgresRepository) ensureUsageState(ctx context.Context, usageID uuid.UUID, allowed ...string) error {
