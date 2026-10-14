@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 69 commits, nine maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 clean re-fork guard: 70 commits, nine maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
-EXPECTED_HEAD="f276729350a501153969fc648986b6352ee438f2"
-EXPECTED_COMMITS=69
+EXPECTED_HEAD="803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0"
+EXPECTED_COMMITS=70
 # 过渡期锚点：不可变 r1 tag 的收口 commit。层 0 断言它是当前 head 的祖先，
 # 当前固定登记头继承公开维护历史；本地检查不代替严格公开维护头门禁。
 R1_CLOSURE="1fafee7e26b60a59457a43bce50c63aa2ad9dbaf"
@@ -25,7 +25,7 @@ bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 
 fail=0
 
-bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 54 个登记提交，r3 收口后过渡期）──"
+bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 55 个登记提交，r3 收口后过渡期）──"
 actual_head="$(git -C "$CODEWHALE" rev-parse HEAD 2>/dev/null || true)"
 if [[ "$actual_head" == "$EXPECTED_HEAD" ]]; then
   green "  ✓ CodeWhale gitlink 指向登记 head ${EXPECTED_HEAD}（过渡期内领先钉在 r3 收口的 tag；公开维护头身份由独立门禁验证）"
@@ -59,6 +59,18 @@ fi
 bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
+  "T1|宿主单 execution-root 显式配置     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|workspace_roots: _, // host exposes one execution root"
+  "T1|宿主 SyncSession 清除旧附件集合    |pinvou3-app/src-tauri/src/features/assistant/engine.rs|workspace_roots: Vec::new(),"
+  "T1|宿主配置不纳 ledger 行为回归      |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn forkguard_engine_config_keeps_only_execution_root()"
+  "T1|空根/多根 SyncSession 线协议回归   |CodeWhale/crates/protocol/src/op.rs|fn sync_session_workspace_roots_ride_the_wire_only_when_present()"
+  "T1|真实 Session 同步替换根集合回归    |CodeWhale/crates/tui/src/core/engine/tests.rs|async fn sync_session_replaces_workspace_roots_for_the_next_turn()"
+  "T2|单 primary 根退化与去重回归       |CodeWhale/crates/core/src/lib.rs|fn normalize_workspace_roots_puts_cwd_first_and_dedups()"
+  "T2|空/相对根与无效 cwd fail-closed    |CodeWhale/crates/core/src/lib.rs|fn normalize_workspace_roots_drops_empty_and_relative_entries()"
+  "T2|真实工具权限物化兼容单根回归       |CodeWhale/crates/tui/src/core/engine/tests.rs|fn tool_context_for_turn_materializes_session_workspace_roots()"
+  "T2|文件系统 super-root 不授可写权限   |CodeWhale/crates/tui/src/sandbox/policy.rs|fn workspace_write_drops_a_root_that_canonicalizes_to_the_filesystem_root()"
+  "T2|单根缺失路径与 symlink cwd 判定    |CodeWhale/crates/tui/src/core/engine/tests.rs|fn exec_judged_cwd_resolves_absent_interior_behind_symlink()"
+  "T1|Web 逐附加根复用既有路径脱敏       |pinvou3-app/src-tauri/src/app/commands/codex.rs|*root = PathBuf::from(redact_workspace_path_for_web(&root.to_string_lossy()));"
+  "T1|Unix/Windows 实际 Web JSON 脱敏回归|pinvou3-app/src-tauri/src/app/commands/codex.rs|fn forkguard_web_session_projection_redacts_attached_roots_and_keeps_native_metadata()"
   "T1|同模型请求保留宿主冻结限制回归     |CodeWhale/crates/tui/src/client.rs|fn model_aware_same_model_request_keeps_host_declared_route_limits()"
   "T1|同模型重绑定保留宿主冻结限制回归   |CodeWhale/crates/tui/src/client.rs|fn rebinding_the_same_model_keeps_host_declared_route_limits()"
   "T1|同模型真实生产请求使用冻结路由限制 |CodeWhale/crates/tui/src/client.rs|if request.model.trim() == self.default_model {"

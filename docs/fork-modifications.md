@@ -37,17 +37,17 @@
 - 覆盖：config 侧 `custom_wire_override_mints_a_wire_true_candidate`、`wire_override_is_ignored_for_builtin_kinds`、`custom_wire_override_edges_stay_fail_closed`；tui 侧 `forkguard_named_table_wire_responses_reaches_the_runtime_candidate`、`forkguard_named_table_wire_anthropic_reaches_the_runtime_candidate`、`forkguard_named_table_without_wire_keeps_the_chat_default`、`forkguard_named_table_unrecognized_wire_keeps_the_chat_default`、`forkguard_identity_pinned_route_reads_the_pinned_tables_wire`、`forkguard_ambient_wire_override_does_not_leak_onto_pinned_chat_tables`、`forkguard_custom_responses_route_turn_client_posts_to_the_responses_endpoint`（wiremock 断言 POST 路径 `/v1/responses` 与 `store:false`/`include`/逐字模型）、`forkguard_custom_anthropic_route_turn_client_posts_to_the_messages_endpoint`、`forkguard_custom_responses_stream_captures_encrypted_reasoning_as_opaque_state`、`forkguard_custom_responses_captured_state_replays_on_the_next_turn`、`forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state`、`forkguard_fixed_endpoint_legacy_state_without_fingerprint_keeps_replaying`、`forkguard_repointed_builtin_legacy_state_without_fingerprint_fails_closed`、`forkguard_custom_chat_stream_does_not_capture_encrypted_reasoning`、`forkguard_custom_responses_capture_tolerates_missing_or_empty_encrypted_content`。guard 指纹 14 条（T9）。
 - 父仓配套（同 PR）：`uses_responses_wire` 增加 `DEEPSEEK_MODEL` 环境钉让位与官方 OpenAI 端点边界（非官方宿主保持 Chat，`openai_responses` 预设组是任意端点的显式 opt-in）；`findCloudProviderForModel` 自定义组仅匹配同 preset 记录（vm 实证回归钉）；`RESPONSES_ROUTE_PROVIDER` 注释改述真实引擎落点。round-5 评审收口 gate/落地劈叉：`provider()` 的 `OpenaiResponses` 臂施加与 wire 门相同的操作员压制（裸 `DEEPSEEK_MODEL` 钉把该组落回 vendor "openai" Chat 路线，gate 成为唯一裁决者，双向钉死）；官方宿主判定先小写再剥 `/v1` 后缀（`https://api.openai.com/V1` 计为官方）；新增测试钉 chat 时代存储的 `off` 仍逐字上线（引擎映射为 low）。app 侧无法直读候选协议（`ResolvedRuntimeRoute.candidate` 为 `pub(crate)`），wire 真值由底座测试与 guard 指纹承载。
 
-## 0. 当前状态（2026-10-14 · r3 收口后过渡期：tag `pinvou-v0.9.12-r3` 保持收口 `61cb769be`，公开维护头与父仓 gitlink 固定为 `f27672935`，r1 之上 54 个维护提交；CI 不再使用登记快照放行）
+## 0. 当前状态（2026-10-14 · r3 收口后过渡期：tag `pinvou-v0.9.12-r3` 保持收口 `61cb769be`，公开维护头与父仓 gitlink 固定为 `803e672bb`，r1 之上 55 个维护提交；CI 不再使用登记快照放行）
 
 | 项 | 当前值 |
 |---|---|
 | 上游基线 | tag `v0.9.12`，commit `dcd4c200f72f0c1ffd60d8e7f6850313db879fc5` |
-| 维护分支 | `pinvou3-clean` = `f276729350a501153969fc648986b6352ee438f2`；继承原 r1/r2/r3 收口及此前维护历史，最新 2026-10-13/14 批次（#101/#92/#102/#96/#103/#104/#107） 已经公开合入。父仓使用固定 SHA，严格校验它与公开维护分支头相等；不固定合入前 PR SHA。 |
+| 维护分支 | `pinvou3-clean` = `803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0`；继承原 r1/r2/r3 收口及此前维护历史，最新 2026-10-13/14 批次（#101/#92/#102/#96/#103/#104/#107/#54） 已经公开合入。父仓使用固定 SHA，严格校验它与公开维护分支头相等；不固定合入前 PR SHA。 |
 | 发布状态 | r3 已收口（2026-09-23）：不可变 tag `pinvou-v0.9.12-r3` 切在合并头 `61cb769be`；2026-10-02 起 #80 使登记头领先 tag，进入过渡期，`scripts/verify-public-submodule.sh` 以 `TRANSITION_BASELINE` 断言 tag 仍钉在 `61cb769be` 且 gitlink = 维护分支头并领先 tag（2026-10-08/09 批次 #79/#88/#89/#75/#78/#94/#95 延续该过渡态）。r2 tag `pinvou-v0.9.12-r2` 仍钉在其收口 `6f780290f`（24 个提交）作为回退点；历史上父仓 gitlink 由 Official PR #1037 首次对齐，其后 #1141/#1209 与各批次 gitlink 对齐 PR 随批次前移，本次由 gitlink bump PR 随 CodeWhale#80 对齐。r3 tag 曾短暂钉在 `ba2a07768f`，在父仓引用前因 #77 Windows 编译修复重切至 `61cb769be`（同日完成，未被任何父仓提交引用） |
 | 升级前回退点 | 公开不可变 tag `pinvou-v0.9.5-r13` → `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 `backup/pre-v0.9.12-sync` 仅作便利引用 |
-| 历史组织 | 上游之上 69 个公开维护提交，归属 4 个长期主题（T1–T4）+ 3 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理、T8 roster 宿主 profiles 呈现，即 Pinvou/CodeWhale#65 提交主题里的 T7，按 #365 先例在父仓登记时重编号）+ 2 个已合入维护分支的主题（T7 压缩检查点角色兼容；T9 custom wire 运行时路线——底座 #79 随 2026-10-08/09 批次 squash 合入，父仓配套随 #625 落地）；r1 之后 54 个提交经公开 PR 维护流程合入；本轮适用门禁以当前固定提交的实际结果为准。T8 主题经 Pinvou/CodeWhale#65 落位：原以五个提交随父仓蜂群二期 PR 走保持提交合入以保全钉定 SHA，实际经 squash 合入（`c5fadb86d`）——登记随之改为钉定公开维护分支头（现 `f27672935`），不再钉定合入前的波次 SHA（详见第 13 节教训登记） |
-| drift | 当前 `f27672935` vs 上游 `dcd4c200f` 实测 `397 files, +53709/-21547`，净增 32162 行。历史 `0bc868ff0` 为 `252 files, +36785/-5754`；`44921cf02` 为 `231 files, +29286/-5364`；r3/r2/旧 r13 测量仍属各自历史基线。 |
-| 守护 | 当前源码实测 205 条不同的 CodeWhale `forkguard_*` 行为名（guard 下限仍为 64）+ 父仓指纹与行为测试；名字数不代表本轮已执行测试数。 |
+| 历史组织 | 上游之上 70 个公开维护提交，归属 4 个长期主题（T1–T4）+ 3 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理、T8 roster 宿主 profiles 呈现，即 Pinvou/CodeWhale#65 提交主题里的 T7，按 #365 先例在父仓登记时重编号）+ 2 个已合入维护分支的主题（T7 压缩检查点角色兼容；T9 custom wire 运行时路线——底座 #79 随 2026-10-08/09 批次 squash 合入，父仓配套随 #625 落地）；r1 之后 55 个提交经公开 PR 维护流程合入；本轮适用门禁以当前固定提交的实际结果为准。T8 主题经 Pinvou/CodeWhale#65 落位：原以五个提交随父仓蜂群二期 PR 走保持提交合入以保全钉定 SHA，实际经 squash 合入（`c5fadb86d`）——登记随之改为钉定公开维护分支头（现 `803e672bb`），不再钉定合入前的波次 SHA（详见第 13 节教训登记） |
+| drift | 当前 `803e672bb` vs 上游 `dcd4c200f` 实测 `445 files, +67187/-21066`，净增 46121 行。#107 历史头 `f27672935` 为 `397 files, +53709/-21547`，净增 32162 行。历史 `0bc868ff0` 为 `252 files, +36785/-5754`；`44921cf02` 为 `231 files, +29286/-5364`；r3/r2/旧 r13 测量仍属各自历史基线。 |
+| 守护 | 当前源码实测 215 条不同的 CodeWhale `forkguard_*` 行为名（guard 下限仍为 64）+ 父仓指纹与行为测试；名字数不代表本轮已执行测试数。 |
 | 父仓适配 | v0.9.12 EngineConfig、Agent/Plan 模式、逐轮 reasoning/安全、ExtraTools、owner 事件隔离、Automation v3/v4 数据兼容、rusqlite 0.40.2、Shell 任务来源对账；消费方 PR #396（execpolicy）、#408（轮次取消）、#444（蜂群）、#468（computer-use）、#472（一键导出）依赖本批底座能力 |
 
 ### 轮次绑定取消：宿主 stop 按轮身份分派（父仓适配，本 PR）
@@ -60,7 +60,7 @@
 
 ### 本轮维护头对齐
 
-固定维护提交 `f27672935` 已包含 CodeWhale #92 的逻辑调用幂等身份契约：同一逻辑调用的重试复用 ID，不同工具循环调用生成独立 ID，沿现有 T1 宿主与模型调用边界登记。#92 最终 PR 树与维护合入 `0cb1aec47` 的树完全相同，25 个操作身份测试声明及已有指纹在当前维护头保留；这是源码保全证据，实际测试执行结果单独记录。主线 `3118c36b8` 尚无该能力，旧内容分支 `8b5a86390` 也不是维护头，不作为最终 gitlink。后续 #102 测试与未用 API 清理、#96 会话导出、#103 checkpoint 与 #104 toolbox 变更沿既有主题维护；不能仅以维护头身份代替回归验证。
+固定维护提交 `803e672bb` 已包含 CodeWhale #92 的逻辑调用幂等身份契约：同一逻辑调用的重试复用 ID，不同工具循环调用生成独立 ID，沿现有 T1 宿主与模型调用边界登记。#92 最终 PR 树与维护合入 `0cb1aec47` 的树完全相同，25 个操作身份测试声明及已有指纹在当前维护头保留；这是源码保全证据，实际测试执行结果单独记录。主线 `3118c36b8` 尚无该能力，旧内容分支 `8b5a86390` 也不是维护头，不作为最终 gitlink。后续 #102 测试与未用 API 清理、#96 会话导出、#103 checkpoint 与 #104 toolbox 变更沿既有主题维护；不能仅以维护头身份代替回归验证。
 
 ## 1. 为什么本次使用 clean re-fork
 
@@ -158,7 +158,7 @@
 ### 保留内容
 
 - 对宿主公开 `AppMode`、`ApprovalMode`、Automation、Task、route 和 worker ledger API。当前兼容 facade 还包含 18 个 `pub mod`，父仓全部 Rust 源码中有 61 个文件、340 处直接引用；这些模块作为不稳定下游兼容桥刻意不进入生成 API 文档。这是已登记的收窄债务，不在本次热修中做破坏性改名。
-- F05 账户调用幂等（原固定补丁 `8b5a86390`，已通过 CodeWhale #92 纳入当前维护提交 `f27672935`）：模型逻辑调用幂等属于 T1 的执行期边界。宿主仅在账户 Gateway 路由的 `Config.request_idempotency_header` 显式启用 `Idempotency-Key`；字段不接受配置文件输入，普通模型保持原 HTTP 行为。`ModelClient` 与 `LlmClient` 的 operation-aware 默认方法兼容既有实现，具体 transport 按每个逻辑调用发送随机 UUID，而不是按 session、prompt 或静态 header 生成键。HTTP 重试、HTTP/1.1 后备及引擎内外层相同发送事实的流恢复复用该 ID；实际 prepared wire body、endpoint 或 provider 改变，或完整模型响应已经被接受后再继续推理、执行工具后跟进，均形成新模型调用和新 ID。新用户提交相同 prompt 也产生新 ID。Gateway 仍拒绝同键不同付款事实，不放宽其 fingerprint。此标识仅在 transport 生命周期内，不写入模型消息、session 历史、日志或 pinned prompt，KV-cache 前缀不变。回退是清除宿主 opt-in；原补丁以 `44921cf02` 为唯一父提交，父仓原 F05 提交历史继续保留；CodeWhale #92 的最终候选树与外部维护合入 `0cb1aec47` 完全相同，现以包含该能力的 `f27672935` 为固定 gitlink。公开维护头严格校验、宿主 opt-in 回归和真实账户验收分别核验，源码包含性不替代门禁或验收。当前结果式回归名为 `forkguard_model_operation_http_retry_and_new_calls`、`forkguard_model_operation_opt_in_and_wire_identity`、`forkguard_model_operation_inner_and_outer_stream_retries`、`forkguard_model_operation_tool_followup_gets_new_id`；真实账户业务验收由父仓执行，loopback transport 与受控 Engine 回归不冒称模型或银行验收。通用接口可上游化，账户产品路由选择仍留在父仓。
+- F05 账户调用幂等（原固定补丁 `8b5a86390`，已通过 CodeWhale #92 纳入当前维护提交 `803e672bb`）：模型逻辑调用幂等属于 T1 的执行期边界。宿主仅在账户 Gateway 路由的 `Config.request_idempotency_header` 显式启用 `Idempotency-Key`；字段不接受配置文件输入，普通模型保持原 HTTP 行为。`ModelClient` 与 `LlmClient` 的 operation-aware 默认方法兼容既有实现，具体 transport 按每个逻辑调用发送随机 UUID，而不是按 session、prompt 或静态 header 生成键。HTTP 重试、HTTP/1.1 后备及引擎内外层相同发送事实的流恢复复用该 ID；实际 prepared wire body、endpoint 或 provider 改变，或完整模型响应已经被接受后再继续推理、执行工具后跟进，均形成新模型调用和新 ID。新用户提交相同 prompt 也产生新 ID。Gateway 仍拒绝同键不同付款事实，不放宽其 fingerprint。此标识仅在 transport 生命周期内，不写入模型消息、session 历史、日志或 pinned prompt，KV-cache 前缀不变。回退是清除宿主 opt-in；原补丁以 `44921cf02` 为唯一父提交，父仓原 F05 提交历史继续保留；CodeWhale #92 的最终候选树与外部维护合入 `0cb1aec47` 完全相同，现以包含该能力的 `803e672bb` 为固定 gitlink。公开维护头严格校验、宿主 opt-in 回归和真实账户验收分别核验，源码包含性不替代门禁或验收。当前结果式回归名为 `forkguard_model_operation_http_retry_and_new_calls`、`forkguard_model_operation_opt_in_and_wire_identity`、`forkguard_model_operation_inner_and_outer_stream_retries`、`forkguard_model_operation_tool_followup_gets_new_id`；真实账户业务验收由父仓执行，loopback transport 与受控 Engine 回归不冒称模型或银行验收。通用接口可上游化，账户产品路由选择仍留在父仓。
 - A04 调用幂等的额外生产边界由 `forkguard_model_operation_http1_stream_keeps_id`、`forkguard_model_operation_child_retries_keep_id`、`forkguard_model_operation_vision_http_retry_keeps_id` 覆盖：子代理每个模型 round 的 timeout/transient 外层重试复用调用 ID，`image_analyze` 的独立 HTTP 重试从冻结路由 opt-in 传递同一调用 ID。不同工具调用或后继模型 round 仍分别生成新 ID；这些 loopback HTTP 回归不包含真实模型验收。
 - `forkguard_model_operation_preserved_partial_changes_call` 经真实引擎流恢复验证：交互模式已保留部分 assistant 输出并改变后续请求正文时，后续发送必须采用新的调用 ID。未产生内容且发送事实未变的恢复仍复用原 ID；不通过放宽 Gateway 指纹掩盖正文变化。
 - 显式启用调用幂等的路由绕过进程内非流式 response cache，避免同正文缓存跳过新调用或付款上下文的 Gateway 派发；普通模型保留既有确定性请求缓存。相同 HTTP 回归以 `temperature=0` 验证账户每次新调用实际发出不同 ID，同时普通路由的重复确定性请求仍命中本地缓存。
@@ -362,8 +362,19 @@
 
 ### F05 成熟调用身份的宿主承接
 
-本功能沿用当前固定维护提交 `f276729350a501153969fc648986b6352ee438f2` 的逐调用身份（原 F05 补丁 `8b5a86390` 的能力已通过 CodeWhale #92 合入），不新增底座协议。账户运行时凭据向真实 `DtConfig.request_idempotency_header` 传递 `Idempotency-Key`；本地模型代理读取并原样转发底座的单次调用 ID，缺失或重复字段拒绝，不能按用户轮次和正文生成替代身份。同一用户轮次的不同模型调用各有身份，轮次统计的 `X-Pinvou-Logical-Turn-ID` 仍是独立分组字段。普通自配模型不启用该标记。该底座历史证据继承不等于新宿主或真实供应商验收通过。
+本功能沿用当前固定维护提交 `803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0` 的逐调用身份（原 F05 补丁 `8b5a86390` 的能力已通过 CodeWhale #92 合入），不新增底座协议。账户运行时凭据向真实 `DtConfig.request_idempotency_header` 传递 `Idempotency-Key`；本地模型代理读取并原样转发底座的单次调用 ID，缺失或重复字段拒绝，不能按用户轮次和正文生成替代身份。同一用户轮次的不同模型调用各有身份，轮次统计的 `X-Pinvou-Logical-Turn-ID` 仍是独立分组字段。普通自配模型不启用该标记。该底座历史证据继承不等于新宿主或真实供应商验收通过。
 
 ### F05 公开维护头 #107 的宿主限制修复
 
 消费已外部批准并合入的 `f276729350a501153969fc648986b6352ee438f2`（直接继承 `480bebf61`），沿既有 T1 宿主模型路由边界登记。同一 wire model/protocol 保留构造客户端时冻结的宿主上下文/输出限制，避免无宿主覆盖的静态目录重解析降级；跨模型仍重新解析身份和协议，不扩大任意模型的限制。公开提交已有 `model_aware_same_model_request_keeps_host_declared_route_limits`、`rebinding_the_same_model_keeps_host_declared_route_limits` 两条结果式测试；父仓新增指纹绑定这两条回归及真实生产条件，不重复实现底座修复。公开 PR #107 的最终审核头 `6e3c5c58b` 与维护合入提交内容相同；外部批准/公开 check 的结果归属原提交，不冒本机重跑或新父仓原生 CI。维护提交消息未含 DCO 行，因此当前总数表述为公开维护提交数，不声称全部带 sign-off；父仓本次提交仍遵守有效 DCO。不可变 r3 标签和严格 gitlink=公开维护分支头门禁保留。
+
+
+### F05 公开维护头 #54 的单执行根兼容与 Web 元数据边界
+
+消费已外部批准并合入的 `803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0`，直接继承 #107 的 `f27672935`。#54 最终审核头 `be2cd01efd6fb606e19765c7e00c565191ebea56` 与维护合入提交树同为 `31a81e54a288045aca63786288601a98b94b1f8b`；外部 7 项成功 source checks 属于该原提交，不代表新父仓或本机编译已验证。新增能力沿既有 T1 宿主配置/Session 和 T2 工具权限登记，不增加主题。该底座批次实际为 100 个文件、+14904/-945；既包含 workspace-roots 生命周期，也改变单根 operand cwd、symlink 与缺失路径后 `..` 的判断，不能以“单根入口未变”声称底座行为不变。
+
+父仓 `build_engine_config` 的输入仍仅为 `EngineConfig::default()`，显式传空 `workspace_roots`；普通/项目绑定/计划和多智能体配置只用既有 execution 根，`SessionRoots.ledger` 仍仅提供 `subagent_state_root`。`sync_session` 同样显式空附件，由底座替换为当前 primary 的单根集合，不继承上个 Session 的附件。六个既有 `ExecPolicyContext` 测试补齐空根字段，原 deny、wrapper 和 approval 断言保留；不新增磁盘根登记、multi-root UI 或授权入口。
+
+持久化或导入的 `SessionMetadata.workspace_roots` 仍可能非空。普通 Web/Relay 元数据、Web saved session 和 native-code Web session list 已消费同一 `redact_session_metadata_for_web_in_place`；现在每项复用原 `redact_workspace_path_for_web`，仅传末级目录名。Native 元数据保留原始根集合。父仓行为测试 `forkguard_web_session_projection_redacts_attached_roots_and_keeps_native_metadata` 对 Unix/Windows 非空集合断言实际序列化 JSON、两个 Web 投影、Native 原值和旧空字段省略；`forkguard_engine_config_keeps_only_execution_root` 断言实际宿主配置不纳 ledger，底座原单根物化回归另由指纹绑定，原 scheduled 测试继续断言空附件。
+
+新增 guard 指纹绑定上述生产接线与父仓回归，以及底座 `normalize_workspace_roots_puts_cwd_first_and_dedups`、`normalize_workspace_roots_drops_empty_and_relative_entries`、`sync_session_workspace_roots_ride_the_wire_only_when_present`、`sync_session_replaces_workspace_roots_for_the_next_turn`、`tool_context_for_turn_materializes_session_workspace_roots`、`workspace_write_drops_a_root_that_canonicalizes_to_the_filesystem_root`、`exec_judged_cwd_resolves_absent_interior_behind_symlink`。这些名字及源码指纹是覆盖登记，实际执行结果另行记录；不可变 r3 标签、#92 幂等身份与 #107 三条指纹、严格公开维护头门禁均保留。

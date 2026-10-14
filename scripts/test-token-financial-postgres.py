@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestF05MissingReferenceDeadlineFundsPublicPostgres",
     "TestF05CancellationKeyScopePublicPostgres",
     "TestF05CancellationRecoveryReconciliationOwnership",
     "TestF05CancellationRecoveryClosurePublicPostgres",

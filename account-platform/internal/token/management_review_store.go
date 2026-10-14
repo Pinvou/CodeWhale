@@ -29,6 +29,16 @@ func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, 
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if pending, err := lockMissingReferenceReleaseTx(ctx, tx, usageID); err != nil {
+		return err
+	} else if pending {
+		// Preserve the late bounded observation, never replace the owned intent,
+		// terminal decision, next attempt, delivery or cancellation state.
+		if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "UNCERTAINTY", "GATEWAY", "REVIEW", "late-review-after-missing-reference-decision", map[string]any{"reason": reason, "sanitized_observation": snapshot, "customer_debit_prohibited": true}, now); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
 	settlementStatus := "REVIEW"
 	if status == "SETTLEMENT_PENDING" || reason == "upstream_transport_unknown" || reason == "upstream_error_unknown_usage" || reason == "stream_usage_missing" || reason == "stream_terminal_missing" || reason == "usage_missing" {
 		settlementStatus = "USAGE_PENDING"

@@ -293,6 +293,20 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 	if err := tx.QueryRow(ctx, `SELECT status,COALESCE(terminal_at,updated_at) FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&status, &terminalAt); err != nil {
 		return err
 	}
+	if pending, err := missingReferenceReleasePendingTx(ctx, tx, usageID); err != nil {
+		return err
+	} else if pending {
+		// No response ciphertext, new retention clock or financial state is
+		// published after the durable decision. Valid late numbers remain audit
+		// evidence; the current deadline saga still owns acknowledgement recovery.
+		if result.FinalUsage != nil && (result.FinalUsage.InputTokens < 0 || result.FinalUsage.OutputTokens < 0 || result.FinalUsage.CachedInputTokens < 0) {
+			return ErrForbidden
+		}
+		if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "REVIEW", "late-result-after-missing-reference-decision", map[string]any{"usage": result.FinalUsage, "response_kind": result.Kind, "http_status": result.HTTPStatus, "content_persisted": false, "customer_debit_prohibited": true}, now); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
 	terminal := status == "COMMITTED" || status == "RELEASED"
 	// Re-entry after a historical case moved the public row must use the first
 	// actual persistence fact, never updated_at or this retry's clock.

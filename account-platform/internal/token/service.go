@@ -218,6 +218,12 @@ func (s *Service) activeWallet(ctx context.Context, resolved AuthorizationContex
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the token request could not be completed"
 	switch {
+	case errors.Is(err, ErrModelUnavailable):
+		status, code, message = http.StatusConflict, "MODEL_UNAVAILABLE", "the selected model is not available for this conversation"
+		w.Header().Set("X-Pinvou-Model-Rejection-v1", code)
+	case errors.Is(err, ErrModelDeprecated):
+		status, code, message = http.StatusConflict, "MODEL_DEPRECATED", "the selected model can no longer serve this conversation"
+		w.Header().Set("X-Pinvou-Model-Rejection-v1", code)
 	case errors.Is(err, ErrRateLimited):
 		retryAfter := 1
 		var limited *RateLimitError

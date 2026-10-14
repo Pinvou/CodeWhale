@@ -82,15 +82,31 @@ func (s *Service) release(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		UsageRequestID uuid.UUID `json:"usage_request_id"`
-		HoldID         uuid.UUID `json:"hold_id"`
-		Reason         string    `json:"reason"`
+		UsageRequestID uuid.UUID                `json:"usage_request_id"`
+		HoldID         uuid.UUID                `json:"hold_id"`
+		Reason         string                   `json:"reason"`
+		Expected       *OriginalHoldExpectation `json:"expected_original_hold,omitempty"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.UsageRequestID == uuid.Nil || body.HoldID == uuid.Nil || strings.TrimSpace(body.Reason) == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid hold release", httpserver.RequestID(r.Context()))
 		return
 	}
-	hold, err := repository.Release(r.Context(), body.UsageRequestID, body.HoldID, body.Reason)
+	var hold Hold
+	var err error
+	if body.Expected != nil {
+		if !body.Expected.valid() {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid original hold precondition", httpserver.RequestID(r.Context()))
+			return
+		}
+		checked, ok := s.repository.(originalHoldReleaseRepository)
+		if !ok {
+			api.WriteError(w, http.StatusServiceUnavailable, "HOLD_UNAVAILABLE", "checked hold release is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
+		hold, err = checked.ReleaseOriginalHold(r.Context(), body.UsageRequestID, body.HoldID, body.Reason, *body.Expected)
+	} else {
+		hold, err = repository.Release(r.Context(), body.UsageRequestID, body.HoldID, body.Reason)
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return

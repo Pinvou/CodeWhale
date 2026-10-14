@@ -9,3 +9,10 @@ Official 的 `builtin_llmapi` 保持只读。其无明确第三方来源的鉴�
 错误文本与技术详情仅用于已有错误展示路径，不新增遥测事件或上传字段，不上传原始错误。凭据先经 Rust 脱敏，再经过前端展示层脱敏；不改变已有受控埋点开关、事件分类和终态去重。
 
 回归入口：`npm --prefix pinvou3-app run test:chat-error-isolation`、代码原生时间线与 DeepSeek 时间线测试，以及已有行为遥测、内建模型状态和 TeamRelay 桥接测试。
+
+
+Official 平台模型的生命周期拒绝使用服务端固定的 409 状态与模型拒绝响应头；供应商返回的同名响应头会被网关剥离。客户端只把当前已接纳轮次、当前 transport incarnation 和 generation 的可信拒绝记录在原有 timing sidecar 的 `assistant_done.model_rejection` 中，不根据展示文案或供应商响应正文判断模型下架。认证成功且当前目录完整解码后，合法已绑定模型 UUID 缺失也只记录在 prepare 前捕获的同一 timing turn 中；鉴权、网络、无效目录和无效能力仍保留原错误分类。
+
+普通聊天现有替代分支入口读取最新轮次的 `Failed` / `send_error` typed 标记，旧轮次失败、取消或后续轮次进行中不触发。分支仅绑定自身模型，保留原会话与全局默认。prepare 导致同步提交失败时会主动读取已落盘时间线；普通 `chat:done` 与代码原生车道的完成/提交失败同样读取现有权威时间线。读取只提交给原有 buffer/lane，删除重建、后续轮次或晚到的旧请求不能污染新状态。
+
+代码原生车道仍沿用已有的会话模型选择控件与错误展示，本次不新增替代分支按钮，也不改变 Agent、权限、工作区或导航。timing sidecar 维持 best-effort：磁盘写入失败时保留原通用错误展示，不退回文本推断。
