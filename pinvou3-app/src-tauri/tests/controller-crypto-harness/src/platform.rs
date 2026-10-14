@@ -8,6 +8,20 @@ pub(crate) fn desktop_control_supported() -> bool {
 #[path = "../../../src/platform/filesystem.rs"]
 pub(crate) mod filesystem;
 
+// Link the same filesystem-only test primitives as the full application.
+// This is not a copied refusal algorithm or a fake permission/FIFO result.
+#[cfg(test)]
+#[path = "../../../src/platform/test_support/filesystem.rs"]
+pub(crate) mod test_support;
+
+#[cfg(test)]
+pub(crate) mod paths {
+    pub(crate) mod tests {
+        #[cfg(unix)]
+        pub(crate) use crate::platform::test_support::plant_fifo;
+    }
+}
+
 pub(crate) use crate::features::remote_control::HarnessWorkspaceIdentity as WorkspaceIdentity;
 pub(crate) use crate::features::remote_control::{test_workspace_identity, workspace_identity};
 #[path = "../../../src/platform/encoding.rs"]

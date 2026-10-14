@@ -1397,6 +1397,43 @@ test("official controller fails startup until trusted live claim wiring exists",
   }
 });
 
+test("actual controller startup rejects both public pairing HMAC examples before listening", { timeout: 150_000 }, async () => {
+  for (const [index, key] of [
+    "replace-with-at-least-32-random-bytes",
+    "replace-with-at-least-32-independent-random-bytes",
+  ].entries()) {
+    const child = spawn(process.execPath, [join(relayDir, "server.js")], {
+      cwd: relayDir,
+      env: {
+        ...process.env, PORT: String(await getFreePort()),
+        ...controllerEnvironment(`pairing-example-${index}`, {
+          NODE_ENV: "production",
+          PINVOU_REMOTE_HOST: "127.0.0.1",
+          PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted",
+          PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "0",
+          PINVOU_REMOTE_ENROLLMENT_HMAC_PREVIOUS_KEYS_JSON: "[]",
+          PINVOU_REMOTE_PAIRING_HMAC_KEY: key,
+        }),
+      },
+      stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+    });
+    let output = "";
+    let errors = "";
+    child.stdout.on("data", (chunk) => { output += String(chunk); });
+    child.stderr.on("data", (chunk) => { errors += String(chunk); });
+    try {
+      await waitForExit(child, 60_000);
+      assert.equal(child.exitCode, 1);
+      assert.equal(child.signalCode, null, "failure must come from validation, not termination");
+      assert.match(errors, /pairing_digest_key_invalid/u);
+      assert.doesNotMatch(output, /pinvou remote relay listening/u);
+      assert.ok(!output.includes(key) && !errors.includes(key), "startup diagnostics must not echo key material");
+    } finally {
+      await stopRelay(child);
+    }
+  }
+});
+
 test("invalid or partially invalid proxy IP configuration fails startup instead of opening the allowlist", async () => {
   for (const variable of ["PINVOU_REMOTE_ALLOWED_PROXY_IPS", "PINVOU_REMOTE_TRUSTED_PROXY_IPS"]) {
     for (const value of ["not-an-ip", "127.0.0.1,not-an-ip"]) {

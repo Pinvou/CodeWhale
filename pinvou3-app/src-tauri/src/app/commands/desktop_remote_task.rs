@@ -69,6 +69,36 @@ pub(crate) const CONTROLLED_SESSION_EVENT: &str = "desktop-remote-controlled-ses
 const CONTROLLED_JOURNAL_EVENT: &str = "desktop-remote-controlled-journal";
 const TASK_CONTENT_EVENT: &str = "desktop-remote-task-content";
 
+/// Existing post-admission readiness boundary, before any task dispatch.
+/// Persistence errors stay fallible; cleanup transfers only after failure commits.
+pub(super) enum AdmittedTaskReady<T> {
+    Ready(T),
+    Failed(Value),
+}
+
+pub(super) fn finish_admitted_task_ready<T>(
+    ready: Result<T, &'static str>,
+    service: &RemoteTaskService,
+    task_id: &str,
+    task_sequence: u64,
+    now_b: impl FnOnce() -> u64,
+    handed_off: &mut bool,
+) -> Result<AdmittedTaskReady<T>, String> {
+    match ready {
+        Ok(ready) => Ok(AdmittedTaskReady::Ready(ready)),
+        Err(reason) => {
+            service
+                .fail_admitted(task_id, task_sequence, reason, now_b())
+                .map_err(|error| error.code.to_owned())?;
+            *handed_off = true;
+            service
+                .status_payload(task_id)
+                .map(AdmittedTaskReady::Failed)
+                .map_err(|error| error.code.to_owned())
+        }
+    }
+}
+
 fn capability_allows_skills(
     capability: &crate::features::remote_control::controller::controlling_session::ControllerCapabilityProjection,
     mode: &str,
@@ -1371,22 +1401,16 @@ fn admit_and_dispatch(
                 artifact_runtime,
                 capture_private_artifacts,
                 capture_cleanup,
-            ) = match ready {
-                Ok(ready) => ready,
-                Err(reason) => {
-                    service
-                        .fail_admitted(
-                            &task_id,
-                            task_sequence,
-                            reason,
-                            controlled_monotonic_millis(),
-                        )
-                        .map_err(|error| error.code.to_owned())?;
-                    admission_cleanup.handed_off = true;
-                    return service
-                        .status_payload(&task_id)
-                        .map_err(|error| error.code.to_owned());
-                }
+            ) = match finish_admitted_task_ready(
+                ready,
+                &service,
+                &task_id,
+                task_sequence,
+                controlled_monotonic_millis,
+                &mut admission_cleanup.handed_off,
+            )? {
+                AdmittedTaskReady::Ready(ready) => ready,
+                AdmittedTaskReady::Failed(status) => return Ok(status),
             };
             if model_source == TASK_MODEL_SOURCE_TEMPORARY {
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
