@@ -26,6 +26,13 @@ const { dict } = await import('../src/shared/i18n.js');
 // 非空、而 task.error 是 null」这个组合，桩词典很容易把它抹平掉。
 const copy = dict.zh.uiModelStore;
 
+test('下载字节达到100%但任务未结束时，不显示完成百分比和虚假的剩余0秒', () => {
+  const html = render(task({ progress: { done: 100, total: 100 }, speed: 10 }));
+  assert.ok(html.includes(copy.taskAwaitingCompletion));
+  assert.match(html, /data-progress-pending="true"/);
+  assert.doesNotMatch(html, /100\.0%|剩余约|aria-valuenow="100"/);
+});
+
 /**
  * 造一张任务卡。默认是一张最普通的、正在跑的下载卡。
  * @param {object} overrides - 要覆盖的字段。
