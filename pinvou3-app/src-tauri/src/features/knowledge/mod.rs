@@ -715,9 +715,6 @@ pub fn kb_start_scan(state: State<'_, KnowledgeService>, roots: Option<Vec<Strin
         .unwrap_or_else(|| vec![crate::platform::paths::user_home_dir()]);
     state.start_scan(roots)
 }
-pub fn kb_scan_status(state: State<'_, KnowledgeService>) -> ScanState {
-    state.status()
-}
 
 /// L0：按扩展名分类计数（文件管理「按类型浏览」用）。
 pub async fn kb_type_counts(state: State<'_, KnowledgeService>) -> Result<Vec<TypeCount>, String> {
@@ -786,33 +783,6 @@ pub fn kb_collection_add_sources(
     let roots = paths.into_iter().map(PathBuf::from).collect();
     state.start_index(collection_id, roots)
 }
-pub fn kb_index_status(state: State<'_, KnowledgeService>) -> IndexState {
-    state.index_status()
-}
-pub fn kb_index_cancel(state: State<'_, KnowledgeService>) -> Result<(), String> {
-    state.cancel_index()
-}
-pub fn kb_index_failed_files(
-    state: State<'_, KnowledgeService>,
-    job_id: String,
-    offset: usize,
-    limit: usize,
-) -> Result<FailedImportFilePage, String> {
-    state.failed_index_files(&job_id, offset, limit)
-}
-pub fn kb_index_resume(
-    state: State<'_, KnowledgeService>,
-    job_id: String,
-) -> Result<IndexState, String> {
-    state.resume_index(job_id)
-}
-pub fn kb_index_retry_file(
-    state: State<'_, KnowledgeService>,
-    job_id: String,
-    item_id: i64,
-) -> Result<IndexState, String> {
-    state.retry_index_item(job_id, item_id)
-}
 
 /// 列出知识集文档（collectionId<=0 列出全部知识集，给「知识库内文件」表）。
 pub async fn kb_documents(
@@ -843,19 +813,16 @@ pub async fn kb_remove_document(
 #[serde(rename_all = "camelCase")]
 pub struct EmbedInfo {
     pub enabled: bool,
-    pub base_url: String,
     pub model: String,
 }
 pub fn kb_embed_info(state: State<'_, KnowledgeService>) -> EmbedInfo {
     match state.l1().embed_info() {
-        Some((base_url, model)) => EmbedInfo {
+        Some((_, model)) => EmbedInfo {
             enabled: true,
-            base_url,
             model,
         },
         None => EmbedInfo {
             enabled: false,
-            base_url: String::new(),
             model: String::new(),
         },
     }

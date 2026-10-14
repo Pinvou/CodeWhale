@@ -42,11 +42,28 @@ async function main() {
   });
   const page = await browser.newPage();
   await page.evaluateOnNewDocument(() => {
+    // This smoke exercises the updater with an existing local model; first-use
+    // model onboarding has its own coverage and intentionally isolates chat.
+    const localModel = {
+      id: 'update-smoke-local',
+      name: 'Update smoke local',
+      preset: 'local_vllm',
+      model: 'update-smoke-local',
+      base_url: 'http://127.0.0.1:8000/v1',
+    };
     const invoke = async (command) => {
       if (command === 'get_settings') return { theme: 'genesis', language: 'zh-Hans' };
       if (command === 'get_app_version') return '1.1.0';
-      if (command === 'get_effective_model_config') return {};
-      if (command === 'list_models') return { models: [], active_model_id: null };
+      if (command === 'get_effective_model_config') {
+        return { ...localModel, model_id: localModel.id, requires_user_api_key: false };
+      }
+      if (command === 'list_models') {
+        return {
+          models: [localModel],
+          active_model_id: localModel.id,
+          default_model_ref: { source: 'LOCAL_CONFIG', saved_model_id: localModel.id },
+        };
+      }
       if (command === 'list_sessions' || command === 'list_archived_sessions' ||
           command === 'list_personas' || command === 'list_scheduled_tasks' ||
           command === 'list_scheduled_runs') return [];

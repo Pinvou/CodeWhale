@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use url::Url;
 
@@ -69,6 +68,8 @@ pub const KNOWLEDGE_MODEL_FILES: [KnowledgeModelFile; 5] = [
         sha256: "8c785abebea9ae3257b61681b4e6fd8365ceafde980c21970d001e834cf10835",
     },
 ];
+
+use crate::model_layout::{MODEL_ONNX_CANDIDATES, MODEL_TOKENIZER_FILES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeModelDownloadStage {
@@ -181,17 +182,12 @@ pub fn model_directory_is_complete(dir: &Path) -> bool {
     let Ok(dir) = std::fs::canonicalize(dir) else {
         return false;
     };
-    let onnx = dir.join("model.onnx").is_file()
-        || dir.join("onnx").join("model_int8.onnx").is_file()
-        || dir.join("onnx").join("model.onnx").is_file();
-    onnx && [
-        "tokenizer.json",
-        "config.json",
-        "special_tokens_map.json",
-        "tokenizer_config.json",
-    ]
-    .iter()
-    .all(|file| dir.join(file).is_file())
+    MODEL_ONNX_CANDIDATES
+        .iter()
+        .any(|file| dir.join(file).is_file())
+        && MODEL_TOKENIZER_FILES
+            .iter()
+            .all(|file| dir.join(file).is_file())
 }
 
 /// 恢复上次在目录切换窗口中中断的模型安装，并清理旧版服务遗留的随机备份。
@@ -775,26 +771,10 @@ fn safe_candidate_path(candidate: &Path, relative: &str) -> Result<PathBuf, Stri
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
-    use std::io::Read;
-
     let mut file = std::fs::File::open(path)
         .map_err(|error| format!("无法打开模型校验文件({}): {error}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("读取模型校验文件失败({}): {error}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    crate::hash_file_sha256(&mut file, 1024 * 1024)
+        .map_err(|error| format!("读取模型校验文件失败({}): {error}", path.display()))
 }
 
 #[cfg(test)]
@@ -804,6 +784,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
+
+    use sha2::{Digest, Sha256};
 
     use super::*;
 
