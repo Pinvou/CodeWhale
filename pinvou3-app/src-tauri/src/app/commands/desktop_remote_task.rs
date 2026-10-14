@@ -482,6 +482,7 @@ impl DesktopRemoteTaskRuntime {
                 EnginePoolChatTurnPort::new(Arc::new(EnginePoolChatEngine::new(
                     app.clone(),
                     Arc::new(pool),
+                    store.clone(),
                     temporary_models,
                 ))),
             ))),

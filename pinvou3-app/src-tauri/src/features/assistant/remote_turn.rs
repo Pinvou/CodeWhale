@@ -11,6 +11,7 @@ use super::skill_materialization::RemoteTurnOwner;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use deepseek_tui::AppMode;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tauri::Listener as _;
@@ -36,7 +37,10 @@ use crate::features::remote_control::controller::task::{
     TASK_MODE_CHAT, TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
     task_input_digest_for_value,
 };
-use crate::features::remote_control::controller::temporary_model::SharedTemporaryModelStore;
+use crate::features::remote_control::{
+    controller::temporary_model::SharedTemporaryModelStore, task_permissions::for_session,
+};
+use crate::features::sessions::SessionStore;
 
 use super::engine::TurnReservation;
 use super::engine_pool::{EnginePool, RemoteRuntimeModelBundle};
@@ -444,16 +448,27 @@ fn relay_chat_tool(
 pub(crate) struct EnginePoolChatEngine {
     app: tauri::AppHandle,
     pool: Arc<EnginePool>,
+    store: SessionStore,
     models: SharedTemporaryModelStore,
+}
+
+fn remote_chat_permission_mode(store: &SessionStore, session_id: &str) -> Result<AppMode, String> {
+    for_session(store, session_id, false).map(|mode| mode.to_app_mode())
 }
 
 impl EnginePoolChatEngine {
     pub(crate) fn new(
         app: tauri::AppHandle,
         pool: Arc<EnginePool>,
+        store: SessionStore,
         models: SharedTemporaryModelStore,
     ) -> Self {
-        Self { app, pool, models }
+        Self {
+            app,
+            pool,
+            store,
+            models,
+        }
     }
 }
 
@@ -539,10 +554,14 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             }
             _ => return Err("task_model_source_invalid".to_owned()),
         };
+        // Keep the frozen-mode check after asynchronous model preparation and
+        // immediately before consuming the reservation, as at the old boundary.
+        let mode = remote_chat_permission_mode(&self.store, session_id)?;
         self.pool
             .send_remote_user_message(
                 session_id,
                 content,
+                mode,
                 skill_ids,
                 model_override,
                 owner,
@@ -612,10 +631,12 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             }
             _ => return Err("task_model_source_invalid".to_owned()),
         };
+        let mode = remote_chat_permission_mode(&self.store, session_id)?;
         self.pool
             .send_remote_user_message_with_attachments(
                 session_id,
                 content,
+                mode,
                 ingested,
                 skill_ids,
                 model_override,
@@ -1721,6 +1742,50 @@ mod tests {
             super::remote_engine_error_code(&anyhow::anyhow!("session missing")),
             "task_engine_unavailable"
         );
+    }
+
+    #[test]
+    fn chat_permission_boundary_uses_real_b_policy_and_durable_session_mode() {
+        use crate::core::mode_state::SerializableMode::{Plan, Yolo};
+        use crate::platform::prefs::{RemoteTaskPermissionPrefs, UserPrefs};
+        crate::features::sessions::with_isolated_store_restoring_home(|store| {
+            let root = store.manager.sessions_dir().parent().unwrap();
+            let session = store
+                .create_new("model".into(), None, root.join("workspace"))
+                .unwrap();
+            let mut prefs = UserPrefs::default();
+            prefs.remote_task_permissions = RemoteTaskPermissionPrefs {
+                chat: None,
+                code: Some(Yolo),
+            };
+            prefs.save().unwrap();
+            store
+                .set_mode_and_persist(&session.metadata.id, Plan)
+                .unwrap();
+            assert_eq!(
+                remote_chat_permission_mode(store, &session.metadata.id).unwrap_err(),
+                "task_permission_mode_required"
+            );
+            for (mode, expected) in [(Plan, AppMode::Plan), (Yolo, AppMode::Agent)] {
+                prefs.remote_task_permissions.chat = Some(mode);
+                prefs.save().unwrap();
+                store
+                    .set_mode_and_persist(&session.metadata.id, mode)
+                    .unwrap();
+                assert_eq!(
+                    remote_chat_permission_mode(store, &session.metadata.id).unwrap(),
+                    expected
+                );
+            }
+            prefs.remote_task_permissions.chat = Some(Plan);
+            prefs.save().unwrap();
+            assert_eq!(
+                remote_chat_permission_mode(store, &session.metadata.id).unwrap_err(),
+                "task_permission_mode_changed"
+            );
+            assert_eq!(store.durable_mode_entry(&session.metadata.id), Some(Yolo));
+            assert_eq!(store.mode_state(&session.metadata.id).mode, Yolo);
+        });
     }
 
     #[tokio::test(flavor = "current_thread")]

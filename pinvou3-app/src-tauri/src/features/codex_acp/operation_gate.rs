@@ -153,6 +153,12 @@ pub(super) fn verify_remote_mode_ack(
     Ok(())
 }
 
+fn finish_remote_configuration_admission<T>(admission: Option<Result<T>>) -> Result<T> {
+    // None means this precise runtime retired, not a permanent mode capability
+    // failure. Preserve inner busy/configuration errors without relabeling them.
+    admission.context("remote_turn_runtime_retired")?
+}
+
 impl AcpPool {
     /// Remote configuration is task-local and never updates interactive defaults.
     /// Only the pinned Codex ACP adapter's documented on-request modes qualify.
@@ -171,15 +177,12 @@ impl AcpPool {
         let desired = crate::features::remote_control::task_permissions::codex_mode(mode);
         let guard = {
             let owners = self.remote_permission_owners.lock();
-            runtime
-                .bridge
-                .with_active_runtime(|| {
-                    if owners.has_custody(session_id) || runtime.identity.has_live_prompt() {
-                        bail!("task_session_busy");
-                    }
-                    begin_configuration(&runtime.busy, &runtime.configuring, "task_session_busy")
-                })
-                .context("task_permission_mode_unsupported")??
+            finish_remote_configuration_admission(runtime.bridge.with_active_runtime(|| {
+                if owners.has_custody(session_id) || runtime.identity.has_live_prompt() {
+                    bail!("task_session_busy");
+                }
+                begin_configuration(&runtime.busy, &runtime.configuring, "task_session_busy")
+            }))?
         };
         if !super::config_option_supports(&runtime.config_options.read(), "mode", desired) {
             bail!("task_permission_mode_unsupported");
@@ -280,6 +283,43 @@ impl AcpPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_configuration_retirement_is_not_a_mode_capability_failure() {
+        let runtime = super::super::lifecycle::RuntimeRetirementGate::default();
+        let busy = AtomicBool::new(false);
+        let configuring = AtomicBool::new(false);
+        let begin = || begin_configuration(&busy, &configuring, "task_session_busy");
+        let guard = finish_remote_configuration_admission(runtime.with_active(begin)).unwrap();
+        assert!(configuring.load(Ordering::Acquire));
+        drop(guard);
+        assert!(!configuring.load(Ordering::Acquire));
+
+        busy.store(true, Ordering::Release);
+        let busy_error = finish_remote_configuration_admission(runtime.with_active(begin))
+            .err()
+            .unwrap();
+        assert_eq!(busy_error.to_string(), "task_session_busy");
+        assert!(!configuring.load(Ordering::Acquire));
+        busy.store(false, Ordering::Release);
+        assert!(runtime.close_if(|| true));
+        let retired = finish_remote_configuration_admission(runtime.with_active(begin))
+            .err()
+            .unwrap();
+        assert_eq!(retired.to_string(), "remote_turn_runtime_retired");
+        assert!(!configuring.load(Ordering::Acquire));
+        for error in [busy_error, retired] {
+            assert_eq!(
+                crate::features::assistant::remote_turn::remote_engine_error_code(&error),
+                "task_engine_unavailable"
+            );
+            assert!(
+                !error
+                    .chain()
+                    .any(|cause| cause.to_string() == "task_permission_mode_unsupported")
+            );
+        }
+    }
 
     #[test]
     fn remote_mode_ack_cannot_keep_inherited_full_access_or_omit_capability() {

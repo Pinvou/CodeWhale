@@ -2,6 +2,16 @@
 // A's history comes only from SessionStore.RemoteProxy; this module is not an
 // alternative A-side transcript or compatibility read path.
 
+export function remotePermissionFailureText(code, copy = {}) {
+  const keys = {
+    task_permission_mode_required: 'permissionModeRequired',
+    task_permission_mode_changed: 'permissionModeChanged',
+    task_permission_mode_unsupported: 'permissionModeUnsupported',
+  };
+  return typeof code === 'string' && Object.hasOwn(keys, code)
+    ? copy[keys[code]] || null : null;
+}
+
 export function isRemoteChatActive(connection) {
   return !!connection && connection.status === 'connected';
 }
@@ -154,10 +164,12 @@ export function controlledTaskChatItems(tasks = [], copy = {}, sessionId = '') {
 
     const errorText = String(task.errorText || '');
     if (errorText) {
+      const permissionCopy = remotePermissionFailureText(errorText, copy);
       items.push({
         id: `controlled-${taskId}:error`,
         type: 'assistant',
-        text: errorText,
+        text: permissionCopy ? `${permissionCopy} (${errorText})` : errorText,
+        ...(permissionCopy ? { controlledFailureReason: errorText } : {}),
         controlledTaskId: taskId,
         remote: true,
         controlled: true,
@@ -170,10 +182,12 @@ export function controlledTaskChatItems(tasks = [], copy = {}, sessionId = '') {
     const status = String(task.status);
     const label = String(copy[STATUS_COPY_KEYS[status]] || status);
     const reason = String(task.terminalReason || '').trim();
+    const permissionCopy = remotePermissionFailureText(reason, copy);
     items.push({
       id: `controlled-${taskId}:terminal`,
       type: 'assistant',
-      text: reason && reason !== status ? `${label}: ${reason}` : label,
+      text: reason && reason !== status
+        ? `${label}: ${permissionCopy ? `${permissionCopy} (${reason})` : reason}` : label,
       controlledTaskId: taskId,
       controlledFailureReason: reason || status,
       remote: true,

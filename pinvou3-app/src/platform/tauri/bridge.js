@@ -1453,11 +1453,15 @@
     try {
       try { await invoke("save_session_artifacts", { id: sid, paths: rebaseArtifactPathsForRebind(sid, arts.map(function (a) { return a.path; })) }); } catch (_) {}
       if (isDefaultChatTitle(meta.title) || personaPlaceholderTitles[sid]) {
-        var firstUser = msgs.find(function (m) { return m.role === "user"; });
         // 自动标题复用展示层过滤（与 web 侧一致）：内部信封/子智能体交接不参与
         // 命名；hideInternalEnvelope=true 同时剥离 turn_meta/system-reminder 元数据
         // 块，避免 XML 痕迹进 sidebar 标题。
-        var titleText = firstUser ? userMessageDisplayText(firstUser.content || [], true) : "";
+        var titleText = "";
+        msgs.some(function (message) {
+          if (!message || message.role !== "user") return false;
+          titleText = userMessageDisplayText(message.content || [], true);
+          return !!titleText;
+        });
         if (titleText) {
           var newTitle = titleText.slice(0, 20);
           await invoke("rename_session", { id: sid, title: newTitle });
@@ -1862,6 +1866,14 @@
     subscriptionSliceCache[domain] = { revision: revision, snapshot: snapshot };
     return snapshot;
   }
+  // Multi-domain reads go through the same per-domain slice cache as
+  // single-domain reads; the combined object is frozen fresh per call. This
+  // function runs once per subscription (the warm-up below) — the
+  // per-notification snapshot is the closure's own lastSlices/lastResult
+  // identity cache, so no per-call memoization belongs here. (A keyed
+  // multi-domain cache stood here briefly and was removed: it is cold-path
+  // code, and the identity contract it pinned is already enforced by the
+  // closure and pinned in tauri_bridge_state_identity.test.mjs.)
   function subscriptionStateSlices(domains) {
     if (!Array.isArray(domains) || domains.length === 0) {
       throw new Error("Tauri bridge state.subscribeMany requires at least one domain");
@@ -2115,16 +2127,16 @@
     };
   }
 
-  function userMessageInputProvenance(blocks) {
-    return window.PinvouBridgeMessages.userMessageInputProvenance(blocks);
-  }
-
-  function isInternalUserMessageProvenance(provenance) {
-    return window.PinvouBridgeMessages.isInternalUserMessageProvenance(provenance);
+  function isInternalUserMessage(blocks) {
+    return window.PinvouBridgeMessages.isInternalUserMessage(blocks);
   }
 
   function isInternalRuntimeEnvelopeText(value) {
     return window.PinvouBridgeMessages.isInternalRuntimeUserMessage(value);
+  }
+
+  function isKnownInternalMetadataBlock(value) {
+    return window.PinvouBridgeMessages.isKnownInternalMetadataBlock(value);
   }
 
   // Engine 的运行时恢复提示为了兼容模型协议会以 role=user 持久化，但它不是用户输入。
@@ -2135,8 +2147,8 @@
     var textParts = (Array.isArray(blocks) ? blocks : [])
       .filter(function (block) { return block && block.type === "text"; })
       .map(function (block) { return String(block.text || ""); });
-    if (textParts.some(isInternalRuntimeEnvelopeText)) return "";
-    if (isInternalUserMessageProvenance(userMessageInputProvenance(blocks))) return "";
+    if (isInternalUserMessage(blocks)) return "";
+    textParts = textParts.filter(function (text) { return !isKnownInternalMetadataBlock(text); });
     if (!hideInternalEnvelope) return textParts.join("");
 
     return textParts.filter(function (text) {

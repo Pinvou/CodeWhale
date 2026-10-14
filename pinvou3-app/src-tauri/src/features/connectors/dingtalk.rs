@@ -94,12 +94,6 @@ fn extract_user_code(line: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn safe_auth_log_line(line: &str) -> Option<String> {
-    // 不开兜底 "token"：钉钉 CLI 的正常 JSON 行含 camelCase token 字段名，
-    // 开了会把非敏感行也整体吞掉（与旧本地实现行为一致）。
-    cc::safe_auth_log_line(line, false)
-}
-
 /// The organization-level CLI block: the CLI's auth output reports that CLI
 /// data access is not enabled for this organization. Only an org admin can
 /// fix this, so it gets its own stable card code with actionable localized
@@ -170,7 +164,11 @@ fn drain_for_auth_event<R: std::io::Read + Send + 'static>(
                     break;
                 }
             };
-            if let Some(safe_line) = safe_auth_log_line(&line) {
+            // No bare-"token" fallback: the dingtalk CLI's normal JSON lines
+            // contain camelCase token field names, so the fallback would
+            // swallow non-sensitive lines wholesale (same as the old local
+            // implementation).
+            if let Some(safe_line) = cc::safe_auth_log_line(&line, false) {
                 let _ = tx.send(AuthEvent::Line(safe_line));
             }
             if let Some(code) = extract_user_code(&line) {
@@ -183,10 +181,10 @@ fn drain_for_auth_event<R: std::io::Read + Send + 'static>(
     })
 }
 
-fn is_authenticated() -> bool {
-    if !dws_cli_present() {
-        return false;
-    }
+/// Logged-in check via `dws auth status --format json`. Spawns dws; when
+/// not installed the spawn failure folds to false (single probe, same as
+/// wecom/feishu — no wasted `--version` boot first).
+pub(crate) fn is_authenticated() -> bool {
     if let Ok((_, so, se)) = cc::run(dws(&["auth", "status", "--format", "json"])) {
         return auth_is_authenticated_str(&so) || auth_is_authenticated_str(&se);
     }
@@ -522,13 +520,19 @@ pub fn dingtalk_skills_should_show() -> bool {
 pub async fn dingtalk_apply_skills() -> Result<Value, String> {
     let show = tokio::task::spawn_blocking(|| -> Result<bool, String> {
         let show = dingtalk_skills_should_show();
-        if let Err(e) = GATE.apply_skills(show) {
-            // The connected-catch on the card replaces this string with the
-            // skills_enable_failed code, so log the raw cause here (stdout in
-            // dev runs, the app log in packaged builds) or it would be lost.
-            log::warn!("[dingtalk] apply skills failed: {e}");
-            return Err(e);
-        }
+        // Deny-first transaction boundary (#517): register the connector
+        // in the initialized DenyAll scopes BEFORE materializing skill
+        // files, so a refused registration aborts before anything lands
+        // (the sync write can block on the cross-process flock, hence
+        // inside this spawn_blocking closure; the post-apply consent sync
+        // below stays as the fail-visible belt-and-braces leg).
+        GATE.apply_with_consent(show).map_err(|e| {
+            e.map_materialization(|e| {
+                // Keep the raw materialization cause when the card replaces it.
+                log::warn!("[dingtalk] apply skills failed: {e}");
+                e
+            })
+        })?;
         Ok(show)
     })
     .await
@@ -553,8 +557,11 @@ pub async fn dingtalk_apply_skills() -> Result<Value, String> {
 /// 用户显式开启不会被开机刷新回退）。
 pub(crate) fn dingtalk_gate_step() -> Result<bool, String> {
     let show = dingtalk_skills_should_show();
-    GATE.apply_skills(show)
-        .map_err(|e| format!("更新钉钉技能失败: {e}"))?;
+    // Same deny-first boundary as the apply command (#517): the auth-gate
+    // refresh also materializes skill files, so a connector flipping
+    // visible here registers first; a refusal fails before exposure.
+    GATE.apply_with_consent(show)
+        .map_err(|e| e.map_materialization(|e| format!("更新钉钉技能失败: {e}")))?;
     if show {
         crate::features::connectors::skill_gate::refresh_gate_consent_sync("dingtalk", "钉钉")?;
     }
