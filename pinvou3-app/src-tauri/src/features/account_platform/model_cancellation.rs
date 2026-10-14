@@ -500,13 +500,11 @@ mod tests {
             Some(incarnation.id.to_string())
         );
         assert!(Arc::ptr_eq(
-            calls
+            &calls
                 .0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .entries
-                .get(&invocation.id)
-                .unwrap(),
+                .entries[&invocation.id],
             &invocation
         ));
         delivery.observe_usage(Some(&uuid::Uuid::new_v4().to_string()));

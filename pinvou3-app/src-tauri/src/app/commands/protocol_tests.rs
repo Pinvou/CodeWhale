@@ -551,6 +551,7 @@ command_protocol!(
         "set_active_model",
         "set_session_model",
         "get_session_model_id",
+        "get_session_model_ref",
         "get_image_input_capability",
         "test_search_provider",
         "test_model_connection",
