@@ -285,7 +285,10 @@ impl ToolActivationCache {
     /// rejects oversized schemas and evicts least-recently-used entries until
     /// both size bounds hold; the Pinvou fork disables those bounds (see the
     /// constants above), so those paths never fire and every request naming a
-    /// deferred catalog member is admitted.
+    /// deferred catalog member is admitted. The one admission rejection left
+    /// is the serde-failure measurement sentinel (see
+    /// `toolbox_oversize_reason`'s doc) — unreachable for the concrete
+    /// `Tool` type, whose derived serialization cannot fail.
     pub(crate) fn activate(
         &mut self,
         catalog: &[crate::models::Tool],

@@ -1305,10 +1305,14 @@ fn sanitize_kimi_parameters_candidate(
 /// `normalize_kimi_compatibility` has converted every non-root `oneOf` to
 /// `anyOf`, and root composition was already flattened before that.
 /// Schema values under keywords MFJS rejects (`contains`, `prefixItems`,
-/// `patternProperties`, `not`, `if`/`then`/`else`, tuple-form `items`) need
-/// no visit: the keyword itself fails closed — `UnsupportedKeyword`, or
+/// `patternProperties`, `not`, `if`/`then`/`else`, `propertyNames`,
+/// `unevaluatedProperties`, `unevaluatedItems`, nested `allOf`, tuple-form
+/// `items`) need no visit: the keyword itself fails closed —
+/// `UnsupportedKeyword`, `UnsupportedNestedAllOf` for a nested `allOf`, or
 /// `InvalidSchemaNode` for tuple-form `items` — before a stranded empty
-/// `items` node inside one could matter.
+/// `items` node inside one could matter. `dependentSchemas` is the one
+/// exception in shape: `strip_dependent_keywords` removes it (with its
+/// subtree) rather than failing closed, so it cannot strand one either.
 ///
 /// Children are visited before the node's own `items` check so a nested
 /// repair can empty the parent (`"items": {"items": {}}` is vacuously true

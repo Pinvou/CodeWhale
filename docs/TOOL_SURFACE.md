@@ -84,8 +84,8 @@ cached-read cost of the schemas it frees (see codewhale-hq/Codewhale#6969).
 No size ceiling remains: the activated set is the only clamp on the request
 tools array, so a session that activates very many large schemas can approach
 provider request-size or tool-count limits. Bookkeeping grows with the
-activated set too: revalidation and admission re-serialize cached schemas
-against the catalog on each pass, negligible at tens of tools but not free
+activated set too: revalidation and admission re-serialize cached tool
+definitions against the catalog on each pass, negligible at tens of tools but not free
 for activation-heavy sessions. The cache still revalidates every
 entry against the current catalog and policy before advertising it again. A
 session sync clears it. The cache cannot resurrect a removed, denied, or
@@ -128,16 +128,18 @@ whether the tool left the catalog (a disconnect, a changed allow/deny rule,
 a mode switch — any catalog-shrink cause) or outgrew the per-tool
 serialized-size budget. A cached tool that became
 eager is not reported at all — it stays directly callable. A catalog-shrink
-drop is reported when a search observes it first: every search revalidates
-the cache before admitting its matches, so a cached-but-departed name
-surfaces in that result's unavailable references with the catalog-shrink
-reason, whether or not the query would have matched it. Only a shrink
-first observed at a turn boundary is absorbed silently — the name leaves
-the cache there, so no later search can name it and the model learns of it
-only when a search for the capability misses. An oversize drop observed by
-a non-search path is likewise silent in the moment but re-reported with
-its reason the next time a search returns the tool (a match ranked past
-the result cap re-reports nothing).
+drop is reported only when a search observes it first: every search
+revalidates the cache before admitting its matches, so a cached-but-departed
+name surfaces in that result's unavailable references with the
+catalog-shrink reason, whether or not the query would have matched it. Any
+other first observer — a turn boundary's revalidation, a hydration batch,
+an executed tool's refresh, a retrieval admission, or the child surface's
+request rebuild — absorbs the drop silently: the name leaves the cache
+there, so no later search can name it and the model learns of it only when
+a search for the capability misses. An oversize drop observed by a
+non-search path is likewise silent in the moment but re-reported with its
+reason the next time a search returns the tool (a match ranked past the
+result cap re-reports nothing).
 
 Each subagent gets its own policy-filtered deferred catalog, always-present
 `tool_search`, and activation cache (unbounded in this fork, like the parent
