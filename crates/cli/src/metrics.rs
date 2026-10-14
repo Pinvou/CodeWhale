@@ -1,11 +1,17 @@
 //! `codewhale metrics` — reads the audit log and session/task stores and prints
 //! a human-readable usage rollup.
 //!
-//! Data sources:
-//! - `~/.deepseek/audit.log`   — one JSON line per event (approvals, credentials)
-//! - `$CODEWHALE_TOOL_AUDIT_LOG` (opt-in) — engine tool receipts (`tool.result`)
-//! - `~/.deepseek/sessions/`   — saved session JSON files (tool call history)
-//! - `~/.deepseek/tasks/runtime/events/` — runtime thread JSONL event streams
+//! Data sources (bases resolve `CODEWHALE_HOME` → `DEEPSEEK_HOME` →
+//! `~/.deepseek`):
+//! - `audit.log` under the base — one JSON line per event (approvals,
+//!   credentials). The sensitive-audit writer resolves to
+//!   `CODEWHALE_HOME` → `~/.codewhale/audit.log` and never consults
+//!   `DEEPSEEK_HOME`, so without `CODEWHALE_HOME` set its events land in a
+//!   file this rollup does not read.
+//! - `$CODEWHALE_TOOL_AUDIT_LOG` (opt-in) — engine tool receipts
+//!   (`tool.result`), written top-level with no `ts` stamp
+//! - `sessions/` under the base — saved session JSON files (tool call history)
+//! - `tasks/runtime/events/` under the base — runtime thread JSONL event streams
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1090,15 +1096,25 @@ mod tests {
         );
         writeln!(tmp, "{line_old}").unwrap();
         writeln!(tmp, "{line_new}").unwrap();
+        // The engine's opt-in tool-audit log writes `tool.result` lines with
+        // no `ts`; a line that cannot be dated is never excluded by
+        // `--since` — it counts whatever the cutoff.
+        writeln!(
+            tmp,
+            r#"{{"event":"tool.result","tool_name":"flat_undated","success":true}}"#
+        )
+        .unwrap();
 
         let cutoff: DateTime<Utc> = "2026-01-01T00:00:00Z".parse().unwrap();
         let mut rollup = Rollup::default();
         read_audit_log(tmp.path(), Some(cutoff), &mut rollup);
 
-        // Only the newer line should be counted.
-        assert_eq!(rollup.parsed_lines, 1);
+        // Only the newer dated line and the undatable flat line are counted.
+        assert_eq!(rollup.parsed_lines, 2);
         assert!(!rollup.tools.contains_key("exec_shell"));
         assert_eq!(rollup.tools["read_file"].calls, 1);
+        assert_eq!(rollup.tools["flat_undated"].calls, 1);
+        assert_eq!(rollup.tools["flat_undated"].successes, 1);
     }
 
     #[test]
@@ -1115,12 +1131,13 @@ mod tests {
             r#"{"event":"tool.result","ts":"2026-04-01T10:03:00+00:00","details":{"tool_name":"other_tool","success":true,"executed":true}}"#,
             // The engine's opt-in tool-audit log
             // (`CODEWHALE_TOOL_AUDIT_LOG`) writes the same fields at the top
-            // level of the line instead of under `details`.
-            r#"{"event":"tool.result","ts":"2026-04-01T10:04:00+00:00","tool_name":"flat_tool","success":true}"#,
-            r#"{"event":"tool.result","ts":"2026-04-01T10:05:00+00:00","tool_name":"flat_refusal","success":true,"executed":false}"#,
+            // level of the line instead of under `details`, and stamps no
+            // `ts` — the fixtures mirror that writer shape.
+            r#"{"event":"tool.result","tool_name":"flat_tool","success":true}"#,
+            r#"{"event":"tool.result","tool_name":"flat_refusal","success":true,"executed":false}"#,
             // An unexecuted receipt is neither success nor failure whatever
             // its success flag says — the tool never ran.
-            r#"{"event":"tool.result","ts":"2026-04-01T10:06:00+00:00","tool_name":"flat_failed_refusal","success":false,"executed":false}"#,
+            r#"{"event":"tool.result","tool_name":"flat_failed_refusal","success":false,"executed":false}"#,
         ];
         for line in lines {
             writeln!(tmp, "{line}").unwrap();
