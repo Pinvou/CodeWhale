@@ -212,14 +212,27 @@ func (r *PostgresRepository) IncreaseMaximum(ctx context.Context, usageID uuid.U
 	if usageID == uuid.Nil || additional <= 0 {
 		return ErrForbidden
 	}
-	command, err := r.pool.Exec(ctx, `UPDATE usage_requests SET maximum_microcredits=maximum_microcredits+$2,updated_at=$3 WHERE id=$1 AND status IN ('RESERVED','UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW')`, usageID, additional, r.now())
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if pending, err := lockMissingReferenceReleaseTx(ctx, tx, usageID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrForbidden
+		}
+		return err
+	} else if pending {
+		return ErrForbidden
+	}
+	command, err := tx.Exec(ctx, `UPDATE usage_requests SET maximum_microcredits=maximum_microcredits+$2,updated_at=$3 WHERE id=$1 AND status IN ('RESERVED','UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW')`, usageID, additional, r.now())
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() != 1 {
 		return ErrForbidden
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) MarkUpstream(ctx context.Context, usageID uuid.UUID) error {
@@ -276,6 +289,11 @@ func (r *PostgresRepository) MarkCommitted(ctx context.Context, usageID uuid.UUI
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if pending, err := lockMissingReferenceReleaseTx(ctx, tx, usageID); err != nil {
+		return err
+	} else if pending {
+		return ErrForbidden
+	}
 	now := r.now()
 	var walletID, tokenAccountID uuid.UUID
 	err = tx.QueryRow(ctx, `UPDATE usage_requests SET status='COMMITTED',settlement_status='SETTLED',actual_microcredits=$2,usage_snapshot=$3,trusted_usage_snapshot=$3,trusted_usage_source=COALESCE(trusted_usage_source,'PROVIDER_FINAL_USAGE'),provider_terminal_at=COALESCE(provider_terminal_at,$4),final_usage_observed_at=COALESCE(final_usage_observed_at,$4),terminal_at=$4,updated_at=$4,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL WHERE id=$1 AND status IN ('UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW') RETURNING wallet_id,token_account_id`, usageID, actual, encoded, now).Scan(&walletID, &tokenAccountID)
@@ -320,6 +338,11 @@ func (r *PostgresRepository) MarkReleased(ctx context.Context, usageID uuid.UUID
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if pending, err := lockMissingReferenceReleaseTx(ctx, tx, usageID); err != nil {
+		return err
+	} else if pending {
+		return ErrForbidden
+	}
 	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RELEASED',settlement_status='RELEASED',error_class=$2,terminal_at=$3,updated_at=$3,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL WHERE id=$1 AND status IN ('CREATED','RESERVED','UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW')`, usageID, strings.TrimSpace(reason), now)
 	if err != nil {
 		return err

@@ -1332,6 +1332,11 @@ func settlementRecord(price PriceVersion, usage Usage, notice *billingNotice) (i
 }
 
 func (s *Service) settlePrepared(ctx context.Context, usageID, holdID uuid.UUID, actual int64, usage Usage, snapshot map[string]any) string {
+	if store, ok := s.repository.(missingReferenceDeadlineStore); ok {
+		if fenced, err := store.PreserveMissingReferenceLateUsage(ctx, usageID, usage); err != nil || fenced {
+			return "SETTLEMENT_REVIEW_REQUIRED"
+		}
+	}
 	if err := s.executionBilling.Commit(ctx, usageID, holdID, actual, usage); err != nil {
 		if definitiveSettlementConflict(err) {
 			if markErr := s.repository.MarkReview(ctx, usageID, "settlement_conflict", snapshot); markErr != nil {
@@ -1350,6 +1355,13 @@ func (s *Service) settlePrepared(ctx context.Context, usageID, holdID uuid.UUID,
 }
 
 func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, maximum int64) (int64, string, bool) {
+	// A deadline decision freezes the original hold before any financial RPC.
+	// Late usage remains evidence; it cannot extend that customer's reservation.
+	if store, ok := s.repository.(missingReferenceDeadlineStore); ok {
+		if fenced, err := store.PreserveMissingReferenceLateUsage(ctx, usageID, usage); err != nil || fenced {
+			return maximum, "", false
+		}
+	}
 	actual, err := Cost(price, usage)
 	if err != nil {
 		_ = s.repository.MarkReview(ctx, usageID, "usage_invalid", map[string]any{"usage": usage})

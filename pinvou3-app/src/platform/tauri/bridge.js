@@ -1034,6 +1034,9 @@
   var presentArtifactAbsPath = artifactTrackerFeature.presentArtifactAbsPath;
 
   var chatFeature = installBridgeFeature("chat", {
+    refreshAuthoritativeTurnTimeline: function (sid) {
+      return chatEventsFeature.refreshAuthoritativeTurnTimeline(sid);
+    },
     voice: function () { return voiceFeature; },
     state: state, invoke: invoke, TAURI: TAURI,
     sessionStates: sessionStates, turnUsageDirty: turnUsageDirty,
@@ -2431,6 +2434,7 @@
   }
 
   const chatEventsFeature = installBridgeFeature("chat-events", {
+    onSessionDeleted: onSessionDeleted,
     state: state, listen: listen, invoke: invoke, turnUsageDirty: turnUsageDirty,
     sessionStates: sessionStates, renderMarkdown: renderMarkdown, bt: bt,
     notify: notify, onSessionEvent: onSessionEvent, runSyncOnSession: runSyncOnSession,
