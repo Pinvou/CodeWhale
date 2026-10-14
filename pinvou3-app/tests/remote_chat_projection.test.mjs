@@ -571,3 +571,23 @@ test('newer durable multi-message model text cannot be reused as an identical fa
   assert.equal(converged[1], history[1]);
   assert.equal(converged[4].id, 'failure');
 });
+
+test('failure reconciliation runs without Array.findLast on the Safari 14 baseline', () => {
+  const source = readFileSync(new URL('../src/features/remote-control/chat-transcript-projection.mjs', import.meta.url), 'utf8');
+  const sandbox = vm.createContext({});
+  vm.runInContext('Array.prototype.findLast = undefined;', sandbox);
+  // The projection has no imports; evaluate its real function bodies in the
+  // isolated legacy runtime instead of changing Node's global prototypes.
+  vm.runInContext(source.replace(/^export /gm, ''), sandbox);
+  const actual = vm.runInContext(`mergeControlledTaskChatItems([
+    { type: 'user', text: 'first', messageIndex: 0 },
+    { id: 'model', type: 'assistant', text: 'failure_code' },
+    { id: 'failure', type: 'assistant', text: 'failure_code' },
+  ], controlledTaskChatItems([{
+    taskId: 't1', sessionId: 'session-b', text: 'first', messageIndex: 0,
+    status: 'failed', assistantText: 'failure_code', terminalReason: 'failure_code',
+  }], { statusFailed: 'Failed' }, 'session-b'))`, sandbox);
+  assert.deepEqual(Array.from(actual, item => item.text), ['first', 'failure_code', 'Failed: failure_code']);
+  assert.equal(actual[1].id, 'model');
+  assert.equal(actual[2].id, 'failure');
+});

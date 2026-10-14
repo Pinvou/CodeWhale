@@ -281,13 +281,16 @@ export function mergeControlledTaskChatItems(chatItems = [], taskItems = []) {
     }
     for (const item of items.filter(candidate => candidate.controlledContentLane !== 'output'
       && candidate.type === 'assistant')) {
-      const match = candidates.findLast(index => !modelIndices.has(index)
-        && !failureIndices.has(index) && (
-        String(durable[index].text || '') === item.text
-        || (item.controlledFailureReason
-          && String(durable[index].text || '') === item.controlledFailureReason)
-      ));
-      if (match !== undefined) failureIndices.add(match);
+      for (let position = candidates.length - 1; position >= 0; position -= 1) {
+        const index = candidates[position];
+        if (modelIndices.has(index) || failureIndices.has(index)) continue;
+        if (String(durable[index].text || '') === item.text
+          || (item.controlledFailureReason
+            && String(durable[index].text || '') === item.controlledFailureReason)) {
+          failureIndices.add(index);
+          break;
+        }
+      }
     }
     const outputBoundary = failureIndices.size ? Math.min(...failureIndices) : upper;
     const used = new Set();
