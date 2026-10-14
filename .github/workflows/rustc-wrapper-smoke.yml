@@ -218,27 +218,42 @@ jobs:
           grep -q "compiler_stack_contract" cargo-test.log
           grep -q "test result: ok" cargo-test.log
 
-      # 5) 链式 wrapper(RUSTC_WRAPPER_CHAIN):验证 wrapper 先注入 RUST_MIN_STACK、
-      #    再委托给链上命令执行。注意:sccache 等 client-server 型 wrapper 不会把
-      #    env 传给 server 派生的编译器,故 CI 的 rust-test / windows-rust-test 不接
-      #    sccache 链;此处用 `env` 这类直接 exec 的命令验证链机制本身。
-      - name: 链式 wrapper —— 委托链上命令且仍注入 16 MiB
+      # 5) 链式 wrapper(RUSTC_WRAPPER_CHAIN):wrapper 必须先注入 RUST_MIN_STACK、
+      #    再把完整原 argv(含首参 rustc)原样交给链上命令执行。链目标是本步
+      #    自编译的探针(rustc 三端都有),打印收到的 argv 与 env 后逐字段断言:
+      #    探针未被调用 = 委托被删;argv 缺首参或缺参 = 透传被丢;stack 非
+      #    16777216 = 注入失败。`env` 一类无参即打印的命令对前两类变异均不
+      #    敏感,故不再使用。注:本仓 CI 不接 sccache 链的真实原因是仓内没有
+      #    sccache;sccache 客户端本身会把客户端 env 经 env_vars 转发给 server
+      #    派生的编译器(pinvou-agent#269 的生产接线即依赖此),并非不传 env。
+      - name: 链式 wrapper —— 完整 argv 委托链上命令且仍注入 16 MiB
         shell: bash
         run: |
           set -euxo pipefail
           tmp="$(mktemp -d)"
           cd "$tmp"
-          cp "$GITHUB_WORKSPACE/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper" . 2>/dev/null || true
-          cp "$GITHUB_WORKSPACE/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.rs" . 2>/dev/null || true
+          cp "$GITHUB_WORKSPACE/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper" .
+          cp "$GITHUB_WORKSPACE/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.rs" .
           chmod +x rustc-stack-wrapper 2>/dev/null || true
           unset RUST_MIN_STACK
+          # 探针:把「委托语义」变成逐字段可比对的输出——链命令被调用、
+          # 完整 argv(含首参 rustc)透传、RUST_MIN_STACK 注入,缺一即断言失败。
+          cat > chain-probe.rs <<'EOF'
+          fn main() {
+              let args: Vec<String> = std::env::args().skip(1).collect();
+              let stack = std::env::var("RUST_MIN_STACK").unwrap_or_else(|_| "unset".into());
+              println!("chain_probe argv=[{}] stack=[{}]", args.join(" "), stack);
+          }
+          EOF
+          rustc -O chain-probe.rs -o chain-probe.exe
+          chmod +x chain-probe.exe 2>/dev/null || true
           if [ "$RUNNER_OS" = "Windows" ]; then
             rustc -O rustc-stack-wrapper.rs -o rustc-stack-wrapper.exe
-            out="$(RUSTC_WRAPPER_CHAIN=env ./rustc-stack-wrapper.exe env)"
+            wrapper="./rustc-stack-wrapper.exe"
           else
-            # `env env`:链上命令 `env` 执行参数中的 `env`(无参),打印当前环境,
-            # 应包含经 wrapper 注入的 RUST_MIN_STACK=16777216。
-            out="$(RUSTC_WRAPPER_CHAIN=env ./rustc-stack-wrapper env)"
+            wrapper="./rustc-stack-wrapper"
           fi
-          # 命令替换(非管道)避免 grep -q 提前关闭管道导致 env SIGPIPE(同上)。
-          echo "$out" | grep -q "^RUST_MIN_STACK=16777216$"
+          # cargo 调用约定:wrapper 收到 [rustc, --version, --verbose],必须把
+          # 三者原样交给链上命令;命令替换收集输出,grep -Fqx 整行精确比对。
+          out="$(RUSTC_WRAPPER_CHAIN="$PWD/chain-probe.exe" "$wrapper" rustc --version --verbose)"
+          printf '%s\n' "$out" | grep -Fqx 'chain_probe argv=[rustc --version --verbose] stack=[16777216]'
