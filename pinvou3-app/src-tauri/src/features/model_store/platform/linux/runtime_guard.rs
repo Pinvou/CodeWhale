@@ -16,6 +16,12 @@ impl StartupGuard {
         Self::at(&super::config::data_dir().join("model-startup.lock"))
     }
 
+    pub fn for_card(card_id: &str) -> Result<Self, String> {
+        let name = format!("card-{}.lock", super::script_runner::sha256_hex(card_id));
+        Self::at(&super::config::data_dir().join(name))
+            .map_err(|e| format!("该模型的操作保护尚未就绪，请等待当前操作完成后重试：{e}"))
+    }
+
     fn at(path: &Path) -> Result<Self, String> {
         let file = crate::platform::filesystem::open_private_lock_file(path)
             .map_err(|e| format!("无法建立模型启动保护，请检查应用数据目录权限：{e}"))?;
