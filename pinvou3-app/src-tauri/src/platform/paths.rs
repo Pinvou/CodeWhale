@@ -656,12 +656,7 @@ pub(crate) mod tests {
     /// `#[cfg(unix)]`).
     #[cfg(test)]
     #[cfg(unix)]
-    pub(crate) fn plant_fifo(path: &std::path::Path) {
-        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
-        // SAFETY: mkfifo on a fresh temp path; no other thread touches it.
-        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
-        assert_eq!(rc, 0, "fixture: mkfifo must succeed");
-    }
+    pub(crate) use crate::platform::test_support::plant_fifo;
 
     #[test]
     fn pinvou3_home_respects_env_override() {
