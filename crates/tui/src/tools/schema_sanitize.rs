@@ -1304,6 +1304,11 @@ fn sanitize_kimi_parameters_candidate(
 /// and only its values are visited. `oneOf` needs no visit: this runs after
 /// `normalize_kimi_compatibility` has converted every non-root `oneOf` to
 /// `anyOf`, and root composition was already flattened before that.
+/// Schema values under keywords MFJS rejects (`contains`, `prefixItems`,
+/// `patternProperties`, `not`, `if`/`then`/`else`, tuple-form `items`) need
+/// no visit: the keyword itself fails closed — `UnsupportedKeyword`, or
+/// `InvalidSchemaNode` for tuple-form `items` — before a stranded empty
+/// `items` node inside one could matter.
 ///
 /// Children are visited before the node's own `items` check so a nested
 /// repair can empty the parent (`"items": {"items": {}}` is vacuously true
@@ -2626,6 +2631,37 @@ mod kimi_tests {
         assert_eq!(
             nested_positions["properties"]["choice"]["anyOf"][1],
             json!({"type": "array"})
+        );
+
+        // The root's own object-form `additionalProperties` is a schema-value
+        // position too: an empty `items` there repairs to the keyword being
+        // absent and the tool ships.
+        let mut root_additional = json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "additionalProperties": {"type": "array", "items": {}}
+        });
+        sanitize_for_kimi_parameters(&mut root_additional)
+            .expect("root additionalProperties empty items repair");
+        assert_eq!(
+            root_additional["additionalProperties"],
+            json!({"type": "array"})
+        );
+
+        // An empty `items` beside a `$ref` drops the same way, leaving the
+        // clean `$ref` node — MFJS admits no sibling beyond
+        // title/description next to a reference, so without the repair the
+        // whole tool would fail closed with InvalidReference.
+        let mut ref_with_items = json!({
+            "type": "object",
+            "properties": {"a": {"$ref": "#/$defs/a", "items": {}}},
+            "$defs": {"a": {"type": "string"}}
+        });
+        sanitize_for_kimi_parameters(&mut ref_with_items)
+            .expect("$ref with an empty items sibling repairs");
+        assert_eq!(
+            ref_with_items["properties"]["a"],
+            json!({"$ref": "#/$defs/a"})
         );
     }
 
