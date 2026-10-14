@@ -56,6 +56,175 @@ test("credential transport: valid common-domain UTF16 boundaries preserve exact 
 });
 const TEST_RESOURCES = new WeakMap();
 
+function windowsDaclInspectorConfiguration(paths, environment = process.env) {
+  const env = {};
+  for (const key of ["SystemRoot", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP"]) {
+    const value = environment[key];
+    if (value !== undefined) env[key] = value;
+  }
+  const systemRoot = env.SystemRoot || env.WINDIR;
+  if (typeof systemRoot !== "string" || !path.win32.isAbsolute(systemRoot)) {
+    throw new Error("windows_dacl_inspector_runtime_unavailable");
+  }
+  env.PINVOU_ACL_PATHS = paths;
+  return { executable: path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), env };
+}
+
+async function executeDaclInspector(t, executable, argv, options, execute = execFileAsync) {
+  try {
+    return await execute(executable, argv, options);
+  } catch (error) {
+    const read = (field) => {
+      try { return error?.[field]; } catch { return undefined; }
+    };
+    const code = read("code");
+    const errno = read("errno");
+    const killed = read("killed");
+    const signal = read("signal");
+    const diagnostic = { stage: "inspector", code: "unknown" };
+    if (["ETIMEDOUT", "EACCES", "EPERM", "ENOENT", "ENOTDIR", "EINVAL",
+      "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"].includes(code)) diagnostic.code = code;
+    if (Number.isSafeInteger(errno) && errno >= -2147483648 && errno <= 2147483647) diagnostic.errno = errno;
+    if (typeof killed === "boolean") diagnostic.killed = killed;
+    if (["SIGTERM", "SIGKILL", "SIGABRT", "SIGINT"].includes(signal)) diagnostic.signal = signal;
+    try { t.diagnostic(`windows_relay_dacl_inspector_failure ${JSON.stringify(diagnostic)}`); }
+    catch { /* Diagnostics cannot replace the original inspector failure. */ }
+    throw error;
+  }
+}
+
+test("Windows DACL inspector failure diagnostic preserves execution and cached closed fields", async () => {
+  for (const mode of ["changing", "throwing", "boxed", "observer_throw"]) {
+    const reads = { code: 0, errno: 0, killed: 0, signal: 0 };
+    const forbidden = { message: 0, stack: 0, stdout: 0, stderr: 0, cmd: 0, path: 0, SID: 0, owner: 0, sddl: 0 };
+    const safe = { code: "ETIMEDOUT", errno: -1, killed: true, signal: "SIGTERM" };
+    const original = {};
+    for (const [field, value] of Object.entries(safe)) {
+      Object.defineProperty(original, field, { get() {
+        reads[field] += 1;
+        if (mode === "throwing") throw new Error("SECRET_SENTINEL");
+        if (mode === "boxed") return Object(value);
+        return reads[field] === 1 ? value : "SECRET_SENTINEL";
+      } });
+    }
+    for (const field of Object.keys(forbidden)) {
+      Object.defineProperty(original, field, { get() {
+        forbidden[field] += 1;
+        throw new Error("FORBIDDEN_SECRET_READ");
+      } });
+    }
+    const argv = [], options = {}, messages = [];
+    await assert.rejects(executeDaclInspector({ diagnostic(value) {
+      messages.push(value);
+      if (mode === "observer_throw") throw new Error("OBSERVER_SECRET_SENTINEL");
+    } }, "original-executable", argv, options, async (executable, actualArgv, actualOptions) => {
+      assert.equal(executable, "original-executable"); assert.equal(actualArgv, argv); assert.equal(actualOptions, options);
+      throw original;
+    }), (actual) => actual === original);
+    for (const count of Object.values(reads)) assert.equal(count, 1);
+    for (const count of Object.values(forbidden)) assert.equal(count, 0);
+    assert.equal(messages.length, 1); assert.equal(messages[0].includes("SECRET"), false);
+    assert.deepEqual(JSON.parse(messages[0].slice("windows_relay_dacl_inspector_failure ".length)), ["changing", "observer_throw"].includes(mode)
+      ? { stage: "inspector", code: "ETIMEDOUT", errno: -1, killed: true, signal: "SIGTERM" }
+      : { stage: "inspector", code: "unknown" });
+  }
+});
+
+test("Windows DACL inspector uses only explicit production environment and executable", () => {
+  for (const fallback of [false, true]) {
+    const values = { SystemRoot: fallback ? undefined : "C:\\Windows", WINDIR: "C:\\Windows", PATH: "original-path", PATHEXT: ".EXE", TEMP: "C:\\owned-temp", TMP: undefined };
+    const reads = {}, forbiddenReads = {};
+    const environment = {};
+    for (const [key, value] of Object.entries(values)) {
+      reads[key] = 0;
+      Object.defineProperty(environment, key, { get() { reads[key] += 1; return value; } });
+    }
+    for (const key of ["PSModulePath", "PSMODULEPATH", "PRIVATE_KEY", "TOKEN"]) {
+      forbiddenReads[key] = 0;
+      Object.defineProperty(environment, key, { get() { forbiddenReads[key] += 1; throw new Error("ENV_SECRET_SENTINEL"); } });
+    }
+    const paths = "C:\\owned\\中文-file|C:\\owned\\second";
+    const actual = windowsDaclInspectorConfiguration(paths, environment);
+    assert.equal(actual.executable, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    assert.deepEqual(actual.env, { ...Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined)), PINVOU_ACL_PATHS: paths });
+    for (const count of Object.values(reads)) assert.equal(count, 1);
+    for (const count of Object.values(forbiddenReads)) assert.equal(count, 0);
+    assert.equal(Object.hasOwn(environment, "PINVOU_ACL_PATHS"), false);
+  }
+  for (const environment of [{}, { SystemRoot: "relative" }, { WINDIR: "relative" }, { SystemRoot: "relative", WINDIR: "C:\\Windows" }]) {
+    assert.throws(() => windowsDaclInspectorConfiguration("unchanged", environment), /windows_dacl_inspector_runtime_unavailable/u);
+  }
+});
+
+async function openDaclQualificationStore(t, options, open = RelayStateStore.open.bind(RelayStateStore)) {
+  try {
+    return await open(options);
+  } catch (error) {
+    const read = (object, field) => {
+      try { return object?.[field]; } catch { return undefined; }
+    };
+    const cause = read(error, "cause");
+    const code = read(cause, "code");
+    const errno = read(cause, "errno");
+    const killed = read(cause, "killed");
+    const signal = read(cause, "signal");
+    const diagnostic = { stage: "store_open", code: "unknown" };
+    if (["ETIMEDOUT", "EACCES", "EPERM", "ENOENT", "ENOTDIR", "EINVAL",
+      "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"].includes(code)) diagnostic.code = code;
+    if (Number.isSafeInteger(errno) && errno >= -2147483648 && errno <= 2147483647) diagnostic.errno = errno;
+    if (typeof killed === "boolean") diagnostic.killed = killed;
+    if (["SIGTERM", "SIGKILL", "SIGABRT", "SIGINT"].includes(signal)) diagnostic.signal = signal;
+    try { t.diagnostic(`windows_relay_dacl_store_failure ${JSON.stringify(diagnostic)}`); }
+    catch { /* Diagnostics cannot replace the original failure. */ }
+    throw error;
+  }
+}
+
+test("Windows DACL store-open diagnostic reads only cached closed fields and rethrows", async () => {
+  for (const mode of ["changing", "throwing", "boxed", "absent", "cause_throw", "observer_throw"]) {
+    const reads = { cause: 0, code: 0, errno: 0, killed: 0, signal: 0 };
+    const forbiddenReads = { message: 0, stack: 0, stdout: 0, stderr: 0, cmd: 0, path: 0 };
+    const safe = { code: "ETIMEDOUT", errno: -1, killed: true, signal: "SIGTERM" };
+    const cause = {};
+    for (const field of ["code", "errno", "killed", "signal"]) {
+      Object.defineProperty(cause, field, { get() {
+        reads[field] += 1;
+        if (mode === "throwing") throw new Error("SECRET_SENTINEL");
+        if (mode === "boxed") return Object(safe[field]);
+        return reads[field] === 1 ? safe[field] : "SECRET_SENTINEL";
+      } });
+    }
+    for (const field of ["message", "stack", "stdout", "stderr", "cmd", "path"]) {
+      Object.defineProperty(cause, field, { get() {
+        forbiddenReads[field] += 1;
+        throw new Error("FORBIDDEN_SECRET_READ");
+      } });
+    }
+    const original = {};
+    Object.defineProperty(original, "cause", { get() {
+      reads.cause += 1;
+      if (mode === "cause_throw") throw new Error("SECRET_SENTINEL");
+      return mode === "absent" ? undefined : cause;
+    } });
+    const messages = [];
+    const options = {};
+    await assert.rejects(openDaclQualificationStore({ diagnostic: (value) => {
+      messages.push(value);
+      if (mode === "observer_throw") throw new Error("OBSERVER_SECRET_SENTINEL");
+    } }, options,
+      async (actual) => { assert.equal(actual, options); throw original; }), (actual) => actual === original);
+    assert.equal(reads.cause, 1);
+    for (const field of ["code", "errno", "killed", "signal"]) assert.equal(reads[field], ["absent", "cause_throw"].includes(mode) ? 0 : 1);
+    for (const count of Object.values(forbiddenReads)) assert.equal(count, 0);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].includes("SECRET"), false);
+    const diagnostic = JSON.parse(messages[0].slice("windows_relay_dacl_store_failure ".length));
+    assert.deepEqual(diagnostic, ["changing", "observer_throw"].includes(mode)
+      ? { stage: "store_open", code: "ETIMEDOUT", errno: -1, killed: true, signal: "SIGTERM" }
+      : { stage: "store_open", code: "unknown" });
+  }
+});
+
 async function historicalTransportRegistry(t) {
   const opened = await openRegistry(t, { env: { PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted" } });
   // Generated by the unchanged e85 production registry with a fixed clock;
@@ -1444,7 +1613,7 @@ test("Windows state directory and every durable/lock file have protected DACLs",
   skip: process.platform !== "win32",
 }, async (t) => {
   const statePath = await temporaryState(t);
-  const store = await RelayStateStore.open({
+  const store = await openDaclQualificationStore(t, {
     statePath,
     legacyStatePath: legacyStatePath(statePath),
     processIdentity: async (pid) => `acl-test-process:${pid}`,
@@ -1454,9 +1623,9 @@ test("Windows state directory and every durable/lock file have protected DACLs",
     $result = @()
     $index = 0
     foreach ($target in ($env:PINVOU_ACL_PATHS -split '\\|')) {
-      $acl = Get-Acl -LiteralPath $target
-      $sids = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
-      $ownerAccount = New-Object System.Security.Principal.NTAccount -ArgumentList $acl.Owner
+      $acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $target
+      $sids = @($acl.Access | Microsoft.PowerShell.Core\\ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Microsoft.PowerShell.Utility\\Sort-Object -Unique)
+      $ownerAccount = Microsoft.PowerShell.Utility\\New-Object System.Security.Principal.NTAccount -ArgumentList $acl.Owner
       $ownerSid = $ownerAccount.Translate([System.Security.Principal.SecurityIdentifier]).Value
       $validRules = $true
       foreach ($rule in @($acl.Access)) {
@@ -1468,7 +1637,7 @@ test("Windows state directory and every durable/lock file have protected DACLs",
       $result += [pscustomobject]@{ protected = $acl.AreAccessRulesProtected; owner = $ownerSid; sids = $sids; count = @($acl.Access).Count; valid_rules = $validRules }
       $index += 1
     }
-    [Console]::Out.Write(($result | ConvertTo-Json -Compress))
+    [Console]::Out.Write(($result | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress))
   `;
   const paths = [
     path.dirname(statePath),
@@ -1477,12 +1646,13 @@ test("Windows state directory and every durable/lock file have protected DACLs",
     `${statePath}.bak`,
     lockPath(statePath),
   ];
-  const { stdout } = await execFileAsync("powershell.exe", [
+  const inspector = windowsDaclInspectorConfiguration(paths.join("|"));
+  const { stdout } = await executeDaclInspector(t, inspector.executable, [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
     "-EncodedCommand", Buffer.from(inspectScript, "utf16le").toString("base64"),
   ], {
     windowsHide: true,
-    env: { ...process.env, PINVOU_ACL_PATHS: paths.join("|") },
+    env: inspector.env,
     timeout: 15_000,
     maxBuffer: 64 * 1024,
   });

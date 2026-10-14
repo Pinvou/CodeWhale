@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 62 commits, nine maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 clean re-fork guard: 68 commits, nine maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,7 +25,7 @@ bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 
 fail=0
 
-bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 47 个登记提交，r3 收口后过渡期）──"
+bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 53 个登记提交，r3 收口后过渡期）──"
 actual_head="$(git -C "$CODEWHALE" rev-parse HEAD 2>/dev/null || true)"
 if [[ "$actual_head" == "$EXPECTED_HEAD" ]]; then
   green "  ✓ CodeWhale gitlink 指向登记 head ${EXPECTED_HEAD}（gitlink=维护分支头；过渡期内领先钉在 r3 收口的 tag）"
@@ -234,6 +234,14 @@ fingerprints=(
   "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine.rs|fn forkguard_reclaimed_persistence_join_detaches_task_that_outlives_budget"
   "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|async fn bounded_teardown_shutdown<S, Fut>"
   "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|fn forkguard_spawn_failure_teardown_shutdown_bounded_and_retried"
+  "APP|未公开引擎拆除实际有界接线       |pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|fn spawn_failure_teardown_is_bounded_in_production"
+  "APP|未公开引擎拆除托管旧资源回归     |pinvou3-app/src-tauri/src/features/assistant/engine_pool_remote_tests.rs|fn cold_custody_shutdown_only_retry_retains_old_resources_and_never_blocks_drop"
+  "APP|未公开引擎拆除保持 FIFO 回归    |pinvou3-app/src-tauri/src/features/assistant/engine_pool_remote_tests.rs|fn cold_custody_full_mailbox_keeps_cancel_shutdown_fifo_and_spares_resident"
+  "APP|临时模型真实 wire 统一闭集       |pinvou3-app/src-tauri/src/core/model_wire.rs|pub(crate) fn model_route_uses_responses("
+  "APP|临时主模型 Responses 真实接纳    |pinvou3-app/src-tauri/src/features/remote_control/controller/temporary_model.rs|fn implicit_responses_primary_is_wire_true_and_forged_chat_is_rejected"
+  "APP|Responses 主模型隔离 Chat 图片工具 |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn locked_responses_primary_keeps_native_images_but_does_not_reuse_chat_vision_tool"
+  "APP|临时模型旧 Chat 正控              |pinvou3-app/src-tauri/src/features/remote_control/controller/temporary_model.rs|fn legacy_and_aggregator_chat_routes_remain_exportable_and_materializable"
+  "APP|冻结路线协议隔离宿主环境         |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn locked_runtime_responses_wire_ignores_environment_suppression"
   "APP|resolved route 由宿主统一解析     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|pub fn resolve_runtime_route_for_model("
   "APP|GLM 小写存量配置解析到规范模型    |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn forkguard_zai_direct_route_survives_model_casing_mismatch"
   "APP|128K/256K compaction 合约        |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn forkguard_compaction_128k_scenarios"
@@ -286,6 +294,8 @@ fingerprints=(
   "T9|Custom Responses exact-model replay             |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state"
   "T9|Chat wire never captures encrypted reasoning    |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_chat_stream_does_not_capture_encrypted_reasoning"
   "T9|Empty encrypted content skips without breaking the stream |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_responses_capture_tolerates_missing_or_empty_encrypted_content"
+  "APP|unified 2000-step budget default           |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|const HOST_STEP_BUDGET: u32 = 2_000;"
+  "APP|2000-step budget behavior regression       |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn engine_config_defaults_to_unified_step_budget_and_respects_override"
 )
 
 for fp in "${fingerprints[@]}"; do

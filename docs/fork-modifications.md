@@ -1,5 +1,14 @@
 # CodeWhale Fork 修改清单
 
+## 本轮同步接线：冷启动所有权与有界拆除（2026-10-13）
+
+- 按用户最新确认，本轮为远控 v1 接入主模型 Responses（含原生图片输入），不扩视觉兜底协议。显式 openai_responses 与官方 OpenAI GPT 目录路线均导出正确 wire，B 与 Relay 独立复算；伪造 Chat/Responses 标签拒绝，不改写原 SavedModel 预设，不改 CodeWhale 源码。视觉兜底仅接受 Chat；远程 Responses 主模型不会被 Chat-only image_analyze 自动复用，原生图片路径不受影响。普通本地 Responses 行为保留。
+- 独立审核发现的协议劈叉由纯 core/model_wire.rs 收敛：既有 host/prefix 规则原样提取，传输路线的 host/vendor/preset/model 协议判定与 bridge 实际落点一致；DeepSeek host 与 vendor 优先级纳入校验。锁定任务不再读取 B 宿主的 PROVIDER/MODEL 环境钉来压制 wire，普通本地环境优先级保留。覆盖主模型接纳/运行时物化、伪造 wire/vendor、Chat 视觉兜底、原生图片、环境隔离及跨 JS/Rust 共享正负向夹具；未发布协议直接同批更新 allowlist 与固定合同摘要，不留开发协议兼容分支。
+
+- main #1808 的有界提交、终态落盘 join 和 Shutdown 拆除，与远控栈的冷启动守卫共存。会话加载仍在 spawn 前；新引擎以 `ColdEngineCustody` 托管，非阻塞 SyncSession 入队后才公开 entry。加载失败不生成引擎；同步失败、取消或公开冲突不得发布不完整引擎。
+- 不复用 main 原来的 load-after-spawn 错误分支：其 wrapper 已无调用前提，改由守卫覆盖全部未公开退出路径。Drop 同步 cancel、abort forwarder、按 CancelSubAgents→Shutdown 尝试入队；仅 Shutdown 未送达时，在不持 turn gate 的后台接入 main 的 `bounded_teardown_shutdown`（首发最多 5s，后续重试最多 60s）。含 CancelSubAgents 的剩余操作仍按原 FIFO 有界重试；闭包持有旧 AppEngine，保留其 bridge/私有 Skills，不引用 pool 或新实例。
+- 保留 main 两个 Shutdown 通道结果测试；将旧“两处 hydration wrapper 调用”静态钉迁到 preload→spawn→custody→try_sync→publish 顺序和守卫实际有界接线，并补充真实 AppEngine mailbox 满载/单剩 Shutdown、资源托管及不误伤 resident 回归。无 runtime 时继续同步 best effort、不 panic；入队不等于 provider 已 join，持续卡死仍可能留下旧引擎任务。
+
 ## 已合入维护分支：压缩检查点角色兼容性
 
 - T7：将带类型的 Agent 拓扑检查点放到最近一次真实用户输入之后、该轮 assistant/tool 链之前，包括压缩摘要位于链尾的情况。Chat Completions 发送前把结构化识别的当前格式摘要移到其保留轮次之前，并把该摘要与拓扑检查点合并进这条 user 出站消息；普通用户引用摘要标记不会触发重排。修复范围是压缩流程自身产生的尾部 `tool -> user`，客户报错原文为 `SSE stream request failed: HTTP 400 Bad Request: response_role: "user"`（SSE 载体）；存储历史及工具调用/结果 ID 不变，会话固定的系统前缀也不变。
@@ -42,12 +51,12 @@
 | 项 | 当前值 |
 |---|---|
 | 上游基线 | tag `v0.9.12`，commit `dcd4c200f72f0c1ffd60d8e7f6850313db879fc5` |
-| 维护分支 | `pinvou3-clean` = `44921cf028f12ffed33beb4760621a8598de48fc`（r1 基线 `1fafee7e2` 之上 35 个 squash 合入：#41/#47/#49 与 2026-09-10/11 遗留 PR 清理批次 #31/#37/#38/#39/#43/#48/#50/#51/#52/#53、2026-09-17 批次 #56/#58/#59/#60/#61、2026-09-18 批次 #62/#57/#55、2026-09-20 批次 #66、2026-09-21 批次 #64/#67、2026-09-22/23 批次 #63/#65/#68/#69/#70/#71/#72/#73、收口追加 #77/#76（替换原 #74）与 2026-10-02 批次 #80、2026-10-08/09 批次 #79/#88/#89/#75/#78/#94/#95） |
+| 维护分支 | `pinvou3-clean` = `480bebf616212e790ff722c92fb165c8d4a2511d`（r1 基线 `1fafee7e2` 之上 53 个登记提交；2026-10-12 批次 #90/#91/#97/#98/#93，2026-10-13/14 批次 #92/#96/#101/#102/#103/#104） |
 | 发布状态 | r3 已收口（2026-09-23）：不可变 tag `pinvou-v0.9.12-r3` 切在合并头 `61cb769be`；2026-10-02 起 #80 使登记头领先 tag，进入过渡期，`scripts/verify-public-submodule.sh` 以 `TRANSITION_BASELINE` 断言 tag 仍钉在 `61cb769be` 且 gitlink = 维护分支头并领先 tag（2026-10-08/09 批次 #79/#88/#89/#75/#78/#94/#95 延续该过渡态）。r2 tag `pinvou-v0.9.12-r2` 仍钉在其收口 `6f780290f`（24 个提交）作为回退点；历史上父仓 gitlink 由 Official PR #1037 首次对齐，其后 #1141/#1209 与各批次 gitlink 对齐 PR 随批次前移，本次由 gitlink bump PR 随 CodeWhale#80 对齐。r3 tag 曾短暂钉在 `ba2a07768f`，在父仓引用前因 #77 Windows 编译修复重切至 `61cb769be`（同日完成，未被任何父仓提交引用） |
 | 升级前回退点 | 公开不可变 tag `pinvou-v0.9.5-r13` → `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 `backup/pre-v0.9.12-sync` 仅作便利引用 |
 | 历史组织 | 上游之上 68 个带 DCO sign-off 的提交，归属 4 个长期主题（T1–T4）+ 3 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理、T8 roster 宿主 profiles 呈现，即 Pinvou/CodeWhale#65 提交主题里的 T7，按 #365 先例在父仓登记时重编号）+ 2 个已合入维护分支的主题（T7 压缩检查点角色兼容；T9 custom wire 运行时路线——底座 #79 随 2026-10-08/09 批次 squash 合入，父仓配套随 #625 落地）；r1 之后 53 个提交全部经 PR squash 合入并过必需门禁。T8 主题经 Pinvou/CodeWhale#65 落位：原以五个提交随父仓蜂群二期 PR 走保持提交合入以保全钉定 SHA，实际经 squash 合入（`c5fadb86d`）——登记随之改为钉定公开维护分支头（现 `480bebf61`），不再钉定合入前的波次 SHA（详见第 13 节教训登记） |
-| drift | `252 files, +36785/-5754`，净增 31031 行（实测于 `0bc868ff0` vs 上游 `dcd4c200f`）；`44921cf02` 为 `231 files, +29286/-5364`（净增 23922），r3 收口点 `61cb769be` 为 `229 files, +29272/-5352`（净增 23920），r2 为 `190 files, +19135/-2628`（净增 16507），旧 r13 为 `110 files, +10895/-1195` |
-| 守护 | 167 条独立 CodeWhale `forkguard_*` 行为名（guard 下限 64）+ 父仓指纹与行为测试 |
+| drift | `397 files, +53533/-21490`，净增 32043 行（实测于 `480bebf61` vs 上游 `dcd4c200f`）；历史登记 `3118c36b8` 为 `294 files, +51027/-14227`（净增 36800），`0bc868ff0` 为 `252 files, +36785/-5754`（净增 31031），`44921cf02` 为 `231 files, +29286/-5364`（净增 23922），r3 收口点 `61cb769be` 为 `229 files, +29272/-5352`（净增 23920），r2 为 `190 files, +19135/-2628`（净增 16507），旧 r13 为 `110 files, +10895/-1195` |
+| 守护 | 205 条独立 CodeWhale `forkguard_*` 行为名（guard 下限 64）+ 父仓指纹与行为测试 |
 | 父仓适配 | v0.9.12 EngineConfig、Agent/Plan 模式、逐轮 reasoning/安全、ExtraTools、owner 事件隔离、Automation v3/v4 数据兼容、rusqlite 0.40.2、Shell 任务来源对账；消费方 PR #396（execpolicy）、#408（轮次取消）、#444（蜂群）、#468（computer-use）、#472（一键导出）依赖本批底座能力 |
 
 ### 轮次绑定取消：宿主 stop 按轮身份分派（父仓适配，本 PR）
@@ -316,6 +325,7 @@
 
 - `pinvou3-app` 负责产品工具白名单、AppMode 到 approval/trust 的映射、reasoning effort、会话 owner 过滤和定时会话创建。
 - bridge 保留 v0.9.12 的有限 `max_steps` 轮次预算、read denylist、bubblewrap、MCP OAuth、goal loop 与 telemetry 安全默认值；产品构建不再叠加基准专用的每轮工具上限（见 §2 的 2026-09-11 行），runaway 防护由底座的步数/墙钟/取消边界承担。
+- 自 2026-09-15 起，宿主把每轮模型步数预算统一为 2,000（`HOST_STEP_BUDGET`）：主 turn 默认值不再跟随底座 `EngineConfig::default()` 的 200；`build_dt_config` 向 `[subagents] default_max_steps` 注入 2,000（等于底座 `MAX_SUBAGENT_STEPS` 硬上限，显式正值亦被钳制到同一上限；显式 `max_steps: 0` 仍是底座的无界哨兵，宿主不改写工具参数）。`advanced.max_steps` 仍可显式覆盖主 turn。GUI、CLI 与 benchmark 共用 `build_engine_config`/`build_dt_config`，由 `engine_config_defaults_to_unified_step_budget_and_respects_override` 锁定。这是 fork 侧默认值（非宿主强制的硬上限），属登记的 fork 独立行为。
 - `session_id` 必须在 `Engine::spawn` 前进入 `EngineConfig`；不得事后依赖事件猜归属。
 - 旧的全局 disabled-skills 调用已删除；包开关通过显式 bundle/registry 和每会话 disallowed tools 生效。
 - Community 回流扫描、依赖调度、跨平台 preflight、PR provenance、Merge Queue 策略及其
