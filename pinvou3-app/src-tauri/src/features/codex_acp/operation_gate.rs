@@ -1,4 +1,8 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::ops::Deref;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
@@ -8,30 +12,30 @@ use super::{AcpPool, AcpSession, CodexAcpSessionInfo, events::patch_acp_state};
 /// Owns the session's configuration slot until the operation finishes. Drop
 /// based release keeps cancellation and early-return paths from leaving the
 /// session permanently stuck in `configuring`.
-pub(super) struct ConfigurationGuard<'a> {
-    configuring: &'a AtomicBool,
+pub(super) struct ConfigurationGuard<T: Deref<Target = AtomicBool>> {
+    configuring: T,
 }
 
-impl Drop for ConfigurationGuard<'_> {
+impl<T: Deref<Target = AtomicBool>> Drop for ConfigurationGuard<T> {
     fn drop(&mut self) {
         self.configuring.store(false, Ordering::Release);
     }
 }
 
-pub(super) fn begin_configuration<'a>(
+pub(super) fn begin_configuration<T: Deref<Target = AtomicBool>>(
     busy: &AtomicBool,
-    configuring: &'a AtomicBool,
+    configuring: T,
     busy_error: &str,
-) -> Result<ConfigurationGuard<'a>> {
+) -> Result<ConfigurationGuard<T>> {
     if busy.load(Ordering::Acquire) {
-        bail!(busy_error.to_string());
+        bail!("{busy_error}");
     }
     if configuring.swap(true, Ordering::AcqRel) {
         bail!("ACP 会话已有配置正在同步");
     }
     if busy.load(Ordering::Acquire) {
         configuring.store(false, Ordering::Release);
-        bail!(busy_error.to_string());
+        bail!("{busy_error}");
     }
     Ok(ConfigurationGuard { configuring })
 }
@@ -51,6 +55,20 @@ pub(super) fn begin_prompt(busy: &AtomicBool, configuring: &AtomicBool) -> Resul
         bail!("ACP 会话配置仍在同步，请稍候再发送");
     }
     Ok(())
+}
+
+/// Keep the configuration admission until a non-cancellable worker finishes,
+/// even if its caller stops awaiting it. Other instances keep their own slot.
+async fn persist_with_configuration<T: Send + 'static>(
+    configuration: Arc<ConfigurationGuard<Arc<AtomicBool>>>,
+    action: impl FnOnce() -> T + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(move || {
+        let _configuration = configuration;
+        action()
+    })
+    .await
+    .context("ACP 配置持久化任务失败")
 }
 
 /// Admit a prompt turn atomically across the fallible activity touch.
@@ -142,18 +160,45 @@ impl SessionConfigChange<'_> {
 }
 
 impl AcpPool {
-    fn remember_config_choice(&self, session_id: &str, config_id: &str, value_id: &str) {
+    async fn remember_config_choice(
+        &self,
+        runtime: &AcpSession,
+        configuration: Arc<ConfigurationGuard<Arc<AtomicBool>>>,
+        session_id: &str,
+        config_id: &str,
+        value_id: &str,
+    ) -> Result<()> {
         let backend = self.backend(session_id);
-        let mut errors = Vec::new();
-        if let Err(error) = self
-            .agents
-            .set_acp_config_value(session_id, config_id, value_id)
-        {
-            errors.push(format!("会话配置: {error:#}"));
-        }
-        if let Err(error) = self.config_defaults.set(backend, config_id, value_id) {
-            errors.push(format!("新会话默认值: {error:#}"));
-        }
+        // Round-49 review: both store writes poll the cross-process section
+        // lock (up to SECTION_LOCK_TIMEOUT) and rewrite their whole JSON
+        // store, so they run on a blocking worker — the async runtime
+        // workers here also drive the ACP engine session pumps.
+        let agents = self.agents.clone();
+        let config_defaults = self.config_defaults.clone();
+        let session_owned = session_id.to_string();
+        let config_owned = config_id.to_string();
+        let value_owned = value_id.to_string();
+        let bridge = runtime.bridge.clone();
+        let errors = persist_with_configuration(configuration, move || {
+            // A retired instance must not publish choices for its successor.
+            // Acquire the same retirement fence on the blocking worker, not
+            // on the async event pump, and hold it through both store writes.
+            bridge
+                .with_active_runtime(|| {
+                    let mut errors = Vec::new();
+                    if let Err(error) =
+                        agents.set_acp_config_value(&session_owned, &config_owned, &value_owned)
+                    {
+                        errors.push(format!("会话配置: {error:#}"));
+                    }
+                    if let Err(error) = config_defaults.set(backend, &config_owned, &value_owned) {
+                        errors.push(format!("新会话默认值: {error:#}"));
+                    }
+                    errors
+                })
+                .context("ACP runtime 已退休，请重试新实例")
+        })
+        .await??;
         if !errors.is_empty() {
             let message = errors.join("；");
             eprintln!(
@@ -164,6 +209,7 @@ impl AcpPool {
                 message
             );
         }
+        Ok(())
     }
 
     async fn apply_config_change(
@@ -172,23 +218,36 @@ impl AcpPool {
         change: SessionConfigChange<'_>,
     ) -> Result<CodexAcpSessionInfo> {
         let runtime = self.get_or_spawn(session_id).await?;
-        let _configuration = runtime
-            .bridge
-            .with_active_runtime(|| {
-                begin_configuration(&runtime.busy, &runtime.configuring, change.busy_error())
-            })
-            .context("ACP runtime 已退休，请重试新实例")??;
+        let configuration = Arc::new(
+            runtime
+                .bridge
+                .with_active_runtime(|| {
+                    begin_configuration(
+                        &runtime.busy,
+                        runtime.configuring.clone(),
+                        change.busy_error(),
+                    )
+                })
+                .context("ACP runtime 已退休，请重试新实例")??,
+        );
         let config_id = change.config_id();
         let value_id = change.value_id();
         if let Err(error) = change.apply(&runtime).await {
             return Err(error);
         }
+        self.remember_config_choice(
+            &runtime,
+            configuration.clone(),
+            session_id,
+            config_id,
+            value_id,
+        )
+        .await?;
         let pending_permissions = self.pending_permissions_for(session_id).await;
         let pending_elicitations = self.pending_elicitations_for(session_id).await;
         runtime
             .bridge
             .with_active_runtime(|| -> Result<CodexAcpSessionInfo> {
-                self.remember_config_choice(session_id, config_id, value_id);
                 runtime.bridge.emit(
                     "config_change_applied",
                     json!({ "configId": config_id, "valueId": value_id }),
@@ -230,6 +289,70 @@ impl AcpPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_configuration_keeps_slot_until_blocking_persistence_finishes() {
+        use super::super::store::SessionAgentStore;
+        let (_lock, _env) = crate::platform::test_support::locked_env(&["PINVOU3_HOME"]);
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_LOCK serializes this test's isolated store environment.
+        unsafe { std::env::set_var("PINVOU3_HOME", tmp.path()) };
+        let store = SessionAgentStore::load().unwrap();
+        let busy = AtomicBool::new(false);
+        let configuring = Arc::new(AtomicBool::new(false));
+        let guard = Arc::new(begin_configuration(&busy, configuring.clone(), "busy").unwrap());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let old_store = store.clone();
+        let caller = tokio::spawn(persist_with_configuration(guard, move || {
+            started_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            old_store
+                .set_acp_config_value("session", "model", "old")
+                .unwrap();
+            finished_tx.send(()).unwrap();
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(configuring.load(Ordering::Acquire));
+        assert!(begin_configuration(&busy, configuring.clone(), "busy").is_err());
+        assert!(begin_prompt(&busy, &configuring).is_err());
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), finished_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while configuring.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let next = Arc::new(begin_configuration(&busy, configuring.clone(), "busy").unwrap());
+        persist_with_configuration(next, move || {
+            store
+                .set_acp_config_value("session", "model", "new")
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        assert!(!configuring.load(Ordering::Acquire));
+        assert_eq!(
+            SessionAgentStore::load()
+                .unwrap()
+                .get("session")
+                .acp_config_values["model"],
+            "new"
+        );
+    }
 
     #[test]
     fn prompt_and_configuration_slots_are_mutually_exclusive() {
