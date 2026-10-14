@@ -28551,13 +28551,14 @@ async fn turn_start_note_does_not_name_a_tool_the_result_re_admits() {
         "the receipt must not declare a tool uncallable that the same result re-admits: {receipt}"
     );
 }
-/// The refusal's `executed: false` marker must reach the `tool.result` audit
-/// payload, not just the receipt metadata: the audit is the record that a
-/// refused, never-executed call is not a successful execution. Driven through
-/// the real refusal receipt this commit's marker reads, the audit line must
-/// carry the marker verbatim.
+/// The hydration receipt — the `DeferredHydration::Loaded` arm; the oversize
+/// `Refused` arm is unreachable in this fork because the per-tool budget is
+/// the disabled `usize::MAX / 2` sentinel — answers the call without
+/// executing the tool. Its `executed: false` marker must reach the
+/// `tool.result` audit payload verbatim, not just the receipt metadata, so
+/// the audit cannot record a never-executed call as a successful execution.
 #[tokio::test]
-async fn refusal_audit_payload_carries_the_executed_marker() {
+async fn hydration_receipt_audit_payload_carries_the_executed_marker() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
     let _guard = lock_test_env();
@@ -28582,7 +28583,7 @@ async fn refusal_audit_payload_carries_the_executed_marker() {
     let surface = test_tool_surface(&engine, registry, Some(catalog.clone()), AppMode::Agent);
     let tool_registry = Some(&surface.registry);
     let mut tool_uses = vec![super::streaming::ToolUseState {
-        id: "refuse-audit".to_string(),
+        id: "hydrate-audit".to_string(),
         name: "notify".to_string(),
         input: json!({}),
         caller: None,
@@ -28610,19 +28611,19 @@ async fn refusal_audit_payload_carries_the_executed_marker() {
     let plan = planned
         .plans
         .iter()
-        .find(|plan| plan.id == "refuse-audit")
-        .expect("the refused call must be planned");
+        .find(|plan| plan.id == "hydrate-audit")
+        .expect("the hydrated call must be planned");
     let receipt = plan
         .guard_result
         .as_ref()
-        .expect("the refusal must answer the call as a guard result")
+        .expect("the hydration receipt must answer the call as a guard result")
         .clone();
 
     // The results phase consumes the receipt exactly as production does.
     engine
         .process_tool_results(
             vec![Some(synthetic_toolbox_outcome(
-                "refuse-audit",
+                "hydrate-audit",
                 "notify",
                 Ok(receipt),
             ))],
@@ -28638,14 +28639,14 @@ async fn refusal_audit_payload_carries_the_executed_marker() {
         .lines()
         .find_map(|line| {
             let value: serde_json::Value = serde_json::from_str(line).ok()?;
-            (value.get("event")? == "tool.result" && value.get("tool_id")? == "refuse-audit")
+            (value.get("event")? == "tool.result" && value.get("tool_id")? == "hydrate-audit")
                 .then_some(value)
         })
-        .expect("the refusal's tool.result audit line must exist");
+        .expect("the hydration receipt's tool.result audit line must exist");
     assert_eq!(
         line.get("executed").and_then(serde_json::Value::as_bool),
         Some(false),
-        "the audit must record the refused call as never executed: {line}"
+        "the audit must record the hydration-answered call as never executed: {line}"
     );
     assert_eq!(
         line.get("success").and_then(serde_json::Value::as_bool),
