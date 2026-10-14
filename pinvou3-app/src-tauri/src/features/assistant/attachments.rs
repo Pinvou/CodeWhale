@@ -142,9 +142,18 @@ where
     if !staged_target_is_safe(&destination, &path, &canonical_workspace) {
         return None;
     }
-    if copier(&mut source, &mut destination).is_err() {
+    if let Err(error) = copier(&mut source, &mut destination) {
         drop(destination);
         let _ = std::fs::remove_file(&path);
+        // The Option contract degrades every consumer to a generic failure
+        // (the GUI silently drops the attachment, headless reports a staging
+        // error); log the cause so a refused cap or an IO fault — both
+        // indistinguishable from "no file" downstream — stays diagnosable
+        // through the log plugin, which survives the builds where stderr is
+        // lost (windowed Windows) or never watched. The name is
+        // Debug-escaped: a crafted basename cannot forge log lines into the
+        // diagnostic stream.
+        log::warn!("[pinvou3-app] staging {basename:?} failed: {error}");
         return None;
     }
     if !staged_target_is_safe(&destination, &path, &canonical_workspace) {
@@ -155,41 +164,55 @@ where
 
 /// 将附件以受控文件名落进 workspace 子目录;供 GUI 附件命令与 headless
 /// 评测附件 staging(lib 根 re-export)共用。
+///
+/// 字节上限在拷贝路径本身强制执行,而不只依赖先行的 `metadata.len()` 检查:
+/// 调用方可能已校验过大小,但源文件可在检查与拷贝之间被替换(TOCTOU)。copier
+/// 经 `copy_bounded` 用 `Read::take(limit + 1)` 约束读取——被替换的超限源会让
+/// 拷贝失败、半成品目标文件被清除,而不是让超限内容落进 workspace。上限对齐
+/// `features::files::file_ingest::MAX_FILE_BYTES`,即 ingest 与
+/// `validate_attachments` 共同执行的同一 20 MiB 单文件上限。
 pub fn stage_file_in_workspace(
     src: &str,
     basename: &str,
     workspace: &std::path::Path,
     attachment_dir: &str,
 ) -> Option<String> {
-    stage_file_in_workspace_with_copier(src, basename, workspace, attachment_dir, std::io::copy)
+    stage_file_in_workspace_with_copier(
+        src,
+        basename,
+        workspace,
+        attachment_dir,
+        |source, destination| {
+            copy_bounded(
+                source,
+                destination,
+                crate::features::files::file_ingest::MAX_FILE_BYTES,
+            )
+        },
+    )
 }
 
 /// Bounded copier for staged attachments: caps the STAGED bytes even when a
 /// caller-owned source grows while the copy streams — the pre-copy re-stat in
-/// the staging loop cannot close that window. Mirrors the eval pipeline's
-/// `take(MAX + 1)` + over-check in headless staging.
+/// the staging loop cannot close that window. Shared by the GUI/remote
+/// staging lane and the eval attachment staging path (whose verified sources
+/// stream from memory, hence the generic reader/writer), so every lane
+/// enforces one identical cap-check and over-limit error.
 pub(crate) fn copy_bounded(
-    source: &mut std::fs::File,
-    destination: &mut std::fs::File,
+    source: impl std::io::Read,
+    mut destination: impl std::io::Write,
     max_bytes: u64,
 ) -> std::io::Result<u64> {
-    use std::io::Read;
-    let copied = std::io::copy(&mut source.take(max_bytes + 1), destination)?;
+    let copied = std::io::copy(&mut source.take(max_bytes + 1), &mut destination)?;
     if copied > max_bytes {
+        // "Exceeded", not "grew": the source may have been over the cap from
+        // the start (the TOCTOU swap being the caller-visible case), not
+        // necessarily mid-copy.
         return Err(std::io::Error::other(
-            "attachment grew past the per-file cap during staging",
+            "attachment exceeded the per-file cap during staging",
         ));
     }
     Ok(copied)
-}
-
-pub(crate) fn stage_image_in_workspace(
-    src: &str,
-    basename: &str,
-    workspace: &std::path::Path,
-    attachment_dir: &str,
-) -> Option<String> {
-    stage_file_in_workspace(src, basename, workspace, attachment_dir)
 }
 
 /// Reuse a session-owned attachment that is already inside the execution
@@ -226,7 +249,7 @@ pub(crate) fn stage_remote_attachment_source(
     workspace: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
     let relative =
-        stage_image_in_workspace(src, basename, workspace, ".pinvou3/remote-attachments")?;
+        stage_file_in_workspace(src, basename, workspace, ".pinvou3/remote-attachments")?;
     Some(workspace.join(relative))
 }
 
@@ -494,7 +517,7 @@ fn build_message_with_attachments_in_dir_with_access(
             // 一无所知,调用前绝不描述",把模糊建议变成具体硬规则(Qwen3.6 对具体
             // 硬规则遵循好、对抽象意图无效)。
             match existing_workspace_relative_file(&a.path, workspace).or_else(|| {
-                stage_image_in_workspace(&a.path, &a.basename, workspace, attachment_dir)
+                stage_file_in_workspace(&a.path, &a.basename, workspace, attachment_dir)
             }) {
                 Some(rel) => {
                     let rel = staged_reference(workspace, &rel, reference_absolute);
@@ -617,14 +640,13 @@ pub(crate) fn prepare_native_user_message_in_dir(
         if a.kind == "image" {
             // 暂存复用现有校验链(basename 白名单/symlink 防逃逸/create_new 防覆盖);
             // 标记路径只来自暂存结果,不接受前端直给路径(设计 §11)。
-            let relative =
-                stage_image_in_workspace(&a.path, &a.basename, workspace, attachment_dir)
-                    .ok_or_else(|| {
-                        format!(
-                            "图片 {} 暂存到 workspace 失败,无法原生发送。请重新选择图片。",
-                            a.basename
-                        )
-                    })?;
+            let relative = stage_file_in_workspace(&a.path, &a.basename, workspace, attachment_dir)
+                .ok_or_else(|| {
+                    format!(
+                        "图片 {} 暂存到 workspace 失败,无法原生发送。请重新选择图片。",
+                        a.basename
+                    )
+                })?;
             let abs = workspace.join(&relative);
             segment.push_str(&format!(
                 "### {} (image, {} bytes)\n",
@@ -696,5 +718,94 @@ mod read_only_prompt_tests {
         assert!(prompt.contains("不要请求 bash、代码执行、write 或 edit"));
         assert!(!prompt.contains("bash(command="));
         assert!(!prompt.contains("`write`"));
+    }
+}
+
+#[cfg(test)]
+mod staged_copy_limit_tests {
+    use super::{copy_bounded, stage_file_in_workspace};
+    use crate::features::files::file_ingest::MAX_FILE_BYTES;
+
+    /// Write a sparse file of exactly `len` bytes without touching every byte.
+    fn sparse_file(dir: &std::path::Path, name: &str, len: u64) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(len).unwrap();
+        path
+    }
+
+    /// TOCTOU regression: `validate_attachments` / ingest check `metadata.len()`
+    /// first, then `stage_file_in_workspace` copies. Growing the source between
+    /// those two steps (here simulated directly) must not let an over-limit
+    /// file through — the copy path itself enforces the same cap and the
+    /// half-copied destination is cleaned up.
+    #[test]
+    fn staged_copy_rejects_source_swapped_over_the_limit() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = sparse_file(source_dir.path(), "swap.png", 1);
+        assert_eq!(std::fs::metadata(&source).unwrap().len(), 1);
+
+        // Same-user swap between the metadata check and the copy.
+        std::fs::File::create(&source)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+
+        let staged = stage_file_in_workspace(
+            source.to_str().unwrap(),
+            "swap.png",
+            workspace.path(),
+            "attachments",
+        );
+
+        assert_eq!(staged, None);
+        assert!(!workspace.path().join("attachments/swap.png").exists());
+    }
+
+    #[test]
+    fn staged_copy_accepts_source_at_the_limit() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = sparse_file(source_dir.path(), "max.png", MAX_FILE_BYTES);
+
+        let staged = stage_file_in_workspace(
+            source.to_str().unwrap(),
+            "max.png",
+            workspace.path(),
+            "attachments",
+        )
+        .unwrap();
+
+        assert_eq!(staged, "attachments/max.png");
+        assert_eq!(
+            std::fs::metadata(workspace.path().join(&staged))
+                .unwrap()
+                .len(),
+            MAX_FILE_BYTES
+        );
+    }
+
+    #[test]
+    fn capped_copier_errors_and_reports_bytes_beyond_the_limit() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let destination_dir = tempfile::tempdir().unwrap();
+        let source_path = sparse_file(source_dir.path(), "over.bin", MAX_FILE_BYTES + 1);
+        let destination_path = destination_dir.path().join("over.bin");
+        let mut source = std::fs::File::open(&source_path).unwrap();
+        let mut destination = std::fs::File::create(&destination_path).unwrap();
+
+        let error = copy_bounded(&mut source, &mut destination, MAX_FILE_BYTES).unwrap_err();
+
+        assert!(
+            error.to_string().contains("per-file cap"),
+            "the copier must name the cap: {error}"
+        );
+        // The half-copied destination holds exactly `limit + 1` bytes — the
+        // take(max + 1) pattern reads one byte past the cap to detect overflow.
+        assert_eq!(
+            std::fs::metadata(&destination_path).unwrap().len(),
+            MAX_FILE_BYTES + 1
+        );
     }
 }

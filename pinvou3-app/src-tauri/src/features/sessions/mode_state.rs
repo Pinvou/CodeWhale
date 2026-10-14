@@ -393,33 +393,30 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Multi-agent session ids for the `_multi_agent.json` sidecar; only the
-    /// save path in this module consumes the snapshot.
-    fn multi_agent_session_ids(&self) -> Vec<String> {
-        let m = self.mode_states.read();
-        let mut ids: Vec<String> = m
-            .iter()
-            .filter(|(_, state)| state.multi_agent)
-            .map(|(id, _)| id.clone())
-            .collect();
-        ids.sort();
-        ids
-    }
-
-    pub fn save_multi_agent_flags(&self) -> Result<()> {
-        let _io = self.multi_agent_flags_io.lock();
-        self.save_multi_agent_flags_locked()
-    }
-
-    /// Boot-only whole-list rewrite, used after ghost cleanup re-derives the
+    /// Boot-only whole-list rewrite of `_multi_agent.json` from the
+    /// multi-agent flag snapshot, used after ghost cleanup re-derives the
     /// full id list from the file just read plus the sessions directory.
     /// Production single-flag mutations must use
-    /// [`apply_multi_agent_mutation_locked`] so entries another process added
+    /// `apply_multi_agent_mutation_locked` so entries another process added
     /// after this one booted are preserved instead of reverted by a stale
     /// snapshot.
-    pub(crate) fn save_multi_agent_flags_locked(&self) -> Result<()> {
+    ///
+    /// Takes the store's `multi_agent_flags_io` mutex itself (the contract
+    /// the former `save_multi_agent_flags_locked` left to its caller): the
+    /// durable whole-list write must not interleave with a concurrent id-level
+    /// read-modify-write, or the older snapshot lands last and resurrects
+    /// removed flags.
+    pub fn save_multi_agent_flags(&self) -> Result<()> {
+        let _io = self.multi_agent_flags_io.lock();
         let file = crate::platform::paths::sessions_root().join("_multi_agent.json");
-        let ids = self.multi_agent_session_ids();
+        let mut ids: Vec<String> = {
+            let m = self.mode_states.read();
+            m.iter()
+                .filter(|(_, state)| state.multi_agent)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        ids.sort();
         if ids.is_empty() {
             return match std::fs::remove_file(&file) {
                 Ok(()) => Ok(()),
@@ -437,66 +434,38 @@ impl SessionStore {
     /// process after this one booted (same rationale as
     /// [`Self::apply_session_mode_mutation`]).
     ///
-    /// The `_locked` suffix is the caller contract shared with
-    /// [`Self::save_multi_agent_flags_locked`]: the durable read-modify-write
-    /// must run under the store's `multi_agent_flags_io` mutex, or a
-    /// concurrent save's older snapshot lands last and resurrects removed
-    /// flags.
+    /// The `_locked` suffix is the caller contract shared with the boot-time
+    /// whole-list rewrite [`Self::save_multi_agent_flags`] (which takes the
+    /// same mutex itself): the durable read-modify-write must run under the
+    /// store's `multi_agent_flags_io` mutex, or a concurrent save's older
+    /// snapshot lands last and resurrects removed flags.
     pub(crate) fn apply_multi_agent_mutation_locked(
         upserts: &[(&str, bool)],
         removes: &[&str],
     ) -> Result<()> {
-        let file = crate::platform::paths::sessions_root().join("_multi_agent.json");
-        let mut ids: Vec<String> = if file.exists() {
-            let content =
-                std::fs::read_to_string(&file).context("read _multi_agent.json failed")?;
-            serde_json::from_str(&content).map_err(|error| {
-                // Quarantine-then-refuse, matching the other sidecar
-                // mutators: this write fails, the evidence survives aside,
-                // and the next mutation starts from an empty list.
-                let note = match crate::platform::filesystem::quarantine_corrupt_file(&file) {
-                    Ok(quarantine) => {
-                        format!("; corrupt bytes quarantined at {}", quarantine.display())
+        crate::features::sessions::sidecars::mutate_json_list_file(
+            "_multi_agent.json",
+            |ids: &mut Vec<String>| {
+                let mut changed = false;
+                for (id, enabled) in upserts {
+                    let exists = ids.iter().any(|entry| entry == id);
+                    if *enabled && !exists {
+                        ids.push((*id).to_string());
+                        ids.sort();
+                        changed = true;
+                    } else if !*enabled && exists {
+                        ids.retain(|entry| entry != id);
+                        changed = true;
                     }
-                    Err(quarantine_error) => {
-                        format!("; quarantining failed ({quarantine_error})")
-                    }
-                };
-                anyhow::Error::new(error).context(format!("parse _multi_agent.json failed{note}"))
-            })?
-        } else {
-            Vec::new()
-        };
-        let mut changed = false;
-        for (id, enabled) in upserts {
-            let exists = ids.iter().any(|entry| entry == id);
-            if *enabled && !exists {
-                ids.push((*id).to_string());
-                ids.sort();
-                changed = true;
-            } else if !*enabled && exists {
-                ids.retain(|entry| entry != id);
-                changed = true;
-            }
-        }
-        for id in removes {
-            let before = ids.len();
-            ids.retain(|entry| entry != id);
-            changed |= ids.len() != before;
-        }
-        if !changed {
-            return Ok(());
-        }
-        if ids.is_empty() {
-            return match std::fs::remove_file(&file) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error).context("remove _multi_agent.json"),
-            };
-        }
-        let json = serde_json::to_string_pretty(&ids).context("serialize multi-agent flags")?;
-        crate::platform::filesystem::atomic_write_private(&file, json.as_bytes())
-            .context("persist _multi_agent.json failed")
+                }
+                for id in removes {
+                    let before = ids.len();
+                    ids.retain(|entry| entry != id);
+                    changed |= ids.len() != before;
+                }
+                changed
+            },
+        )
     }
 
     pub fn load_multi_agent_flags(&self) {
@@ -765,37 +734,32 @@ impl SessionStore {
         })
     }
 
+    /// Remove one local collection from every in-memory session. Shares the
+    /// generic "sweep all sessions" core with the remote-collection family;
+    /// only the per-session removal and its snapshot write-back differ.
     pub fn remove_mounted_collection_from_all(
         &self,
         collection_id: i64,
     ) -> Vec<(String, MountedCollectionsSnapshot)> {
         let mut states = self.mode_states.write();
-        let mut changed = Vec::new();
-        for (session_id, state) in states.iter_mut() {
+        Self::remove_from_all_sessions_where(&mut states, |state| {
             let mut collections = folded_collections(state);
             let previous_len = collections.len();
             collections.retain(|collection| collection.collection_id != collection_id);
-            if collections.len() == previous_len {
-                continue;
-            }
-
-            state.mounted_collection = collections
-                .iter()
-                .find(|collection| collection.enabled)
-                .map(|collection| collection.collection_id);
-            state.mounted_collections = collections.clone();
-            state.mounted_collections_revision =
-                state.mounted_collections_revision.wrapping_add(1).max(1);
-            changed.push((
-                session_id.clone(),
+            (collections.len() != previous_len).then(|| {
+                state.mounted_collection = collections
+                    .iter()
+                    .find(|collection| collection.enabled)
+                    .map(|collection| collection.collection_id);
+                state.mounted_collections = collections.clone();
+                state.mounted_collections_revision =
+                    state.mounted_collections_revision.wrapping_add(1).max(1);
                 MountedCollectionsSnapshot {
                     revision: state.mounted_collections_revision,
                     collections,
-                },
-            ));
-        }
-        changed.sort_by(|left, right| left.0.cmp(&right.0));
-        changed
+                }
+            })
+        })
     }
 
     pub(crate) fn update_mounted_collections<F>(
@@ -927,7 +891,27 @@ impl SessionStore {
         })
     }
 
-    /// Shared core for the "remove from every session" remote-collection flows:
+    /// Shared core for the "remove from every session" collection sweeps (the
+    /// local `MountedCollection` snapshot family and the remote
+    /// `MountedRemoteCollection` family): runs `sweep` on every in-memory
+    /// session, skips sessions where it reports no change (`None`), and
+    /// returns the changed session ids (sorted) with the sweep's per-session
+    /// result. Sessions without a match are left untouched.
+    fn remove_from_all_sessions_where<R>(
+        states: &mut HashMap<String, SessionModeState>,
+        mut sweep: impl FnMut(&mut SessionModeState) -> Option<R>,
+    ) -> Vec<(String, R)> {
+        let mut changed = Vec::new();
+        for (session_id, state) in states.iter_mut() {
+            if let Some(result) = sweep(state) {
+                changed.push((session_id.clone(), result));
+            }
+        }
+        changed.sort_by(|left, right| left.0.cmp(&right.0));
+        changed
+    }
+
+    /// Remote-collection specialization of [`Self::remove_from_all_sessions_where`]:
     /// drops mounts matching `should_remove` from all in-memory sessions and
     /// returns the changed session ids (sorted) with their post-removal
     /// collections. Sessions without a match are left untouched.
@@ -935,19 +919,14 @@ impl SessionStore {
         states: &mut HashMap<String, SessionModeState>,
         should_remove: impl Fn(&MountedRemoteCollection) -> bool,
     ) -> Vec<(String, Vec<MountedRemoteCollection>)> {
-        let mut changed = Vec::new();
-        for (session_id, state) in states.iter_mut() {
+        Self::remove_from_all_sessions_where(states, |state| {
             let previous_len = state.mounted_remote_collections.len();
             state
                 .mounted_remote_collections
                 .retain(|collection| !should_remove(collection));
-            if state.mounted_remote_collections.len() == previous_len {
-                continue;
-            }
-            changed.push((session_id.clone(), state.mounted_remote_collections.clone()));
-        }
-        changed.sort_by(|left, right| left.0.cmp(&right.0));
-        changed
+            (state.mounted_remote_collections.len() != previous_len)
+                .then(|| state.mounted_remote_collections.clone())
+        })
     }
 
     /// Remove one remote collection from every in-memory session.

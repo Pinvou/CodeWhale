@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 51 commits, eight maintained themes (r3 closed at pinvou-v0.9.12-r3; the local reviewed A04 patch is not yet published).
+# CodeWhale v0.9.12 clean re-fork guard: 68 commits, nine maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
-EXPECTED_HEAD="8b5a863908bf4178a8c5876c11c5884919119615"
-EXPECTED_COMMITS=51
+EXPECTED_HEAD="480bebf616212e790ff722c92fb165c8d4a2511d"
+EXPECTED_COMMITS=68
 # 过渡期锚点：不可变 r1 tag 的收口 commit。层 0 断言它是当前 head 的祖先，
-# 当前登记头继承维护历史；本地检查不证明该头已公开推送，公开门禁另行执行。
+# 当前固定登记头继承公开维护历史；本地检查不代替严格公开维护头门禁。
 R1_CLOSURE="1fafee7e26b60a59457a43bce50c63aa2ad9dbaf"
 FAST_ONLY=0
 
@@ -25,10 +25,10 @@ bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 
 fail=0
 
-bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 36 个登记提交，A04 本地补丁尚未推送）──"
+bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 53 个登记提交，r3 收口后过渡期）──"
 actual_head="$(git -C "$CODEWHALE" rev-parse HEAD 2>/dev/null || true)"
 if [[ "$actual_head" == "$EXPECTED_HEAD" ]]; then
-  green "  ✓ CodeWhale gitlink 指向登记 head ${EXPECTED_HEAD}（本地登记匹配；CI 另核公开维护历史）"
+  green "  ✓ CodeWhale gitlink 指向登记 head ${EXPECTED_HEAD}（过渡期内领先钉在 r3 收口的 tag；公开维护头身份由独立门禁验证）"
 else
   red "  ✗ CodeWhale HEAD 为 ${actual_head:-<unreadable>}，登记 head 为 $EXPECTED_HEAD"
   fail=1
@@ -42,7 +42,7 @@ else
 fi
 
 if git -C "$CODEWHALE" merge-base --is-ancestor "$R1_CLOSURE" HEAD 2>/dev/null; then
-  green "  ✓ 线性前进成立：r1 收口是当前 head 的祖先（本地补丁继承原公开维护历史；不代替公开可达性门禁）"
+  green "  ✓ 线性前进成立：r1 收口是当前 head 的祖先（当前固定头继承公开维护历史；不代替严格公开维护头门禁）"
 else
   red "  ✗ r1 收口 $R1_CLOSURE 不是当前 head 的祖先，线性前进关系断裂"
   fail=1
@@ -244,6 +244,12 @@ fingerprints=(
   "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|fn forkguard_reclaim_shutdown_retry_gives_up_within_patience"
   "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/turn_shell_tasks.rs|fn forkguard_reclaim_cleanup_failed_preset_clears_on_success"
   "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/turn_shell_tasks.rs|fn forkguard_background_cleanup_sweep_takes_cleanup_gate"
+  "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine.rs|async fn bounded_reserved_submit_send<Fut>"
+  "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine.rs|async fn bounded_join_detached_on_timeout<T>"
+  "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine.rs|fn forkguard_reserved_submit_send_fails_cleanly_on_wedged_engine"
+  "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine.rs|fn forkguard_reclaimed_persistence_join_detaches_task_that_outlives_budget"
+  "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|async fn bounded_teardown_shutdown<S, Fut>"
+  "APP|turn gate 持锁副作用 await 上界   |pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|fn forkguard_spawn_failure_teardown_shutdown_bounded_and_retried"
   "APP|resolved route 由宿主统一解析     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|pub fn resolve_runtime_route_for_model("
   "APP|GLM 小写存量配置解析到规范模型    |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn forkguard_zai_direct_route_survives_model_casing_mismatch"
   "APP|128K/256K compaction 合约        |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn forkguard_compaction_128k_scenarios"
@@ -281,6 +287,21 @@ fingerprints=(
   "APP|code-session marker, writer-side literal    |pinvou3-app/src-tauri/src/features/codex_acp/store.rs|join(\"code-session.json\")"
   "APP|title sentinel, Rust-side literal          |pinvou3-app/src-tauri/src/features/sessions/store.rs|const NEW_CHAT_TITLE: &str = \"新对话\""
   "APP|title sentinel, frontend dict literal      |pinvou3-app/src/shared/i18n.js|DEFAULT_CHAT_TITLES = new Set(['新对话', 'New chat', '新しいチャット'])"
+
+  "T9|Custom route honors the config wire channel |CodeWhale/crates/config/src/route/resolver.rs|pub wire_override: Option<RequestProtocol>"
+  "T9|Custom wire dialect parsed at a single source |CodeWhale/crates/config/src/provider.rs|pub fn wire_dialect_override"
+  "T9|Custom wire dialect read at a single source   |CodeWhale/crates/tui/src/route_runtime.rs|pub(crate) fn custom_wire_override_for"
+  "T9|Runtime candidate reads the dialect by identity |CodeWhale/crates/tui/src/route_runtime.rs|custom_wire_override_for(&route_config)"
+  "T9|Runtime candidate carries the true wire         |CodeWhale/crates/tui/src/route_runtime.rs|fn forkguard_named_table_wire_responses_reaches_the_runtime_candidate"
+  "T9|Unrecognized dialect degrades to Chat           |CodeWhale/crates/tui/src/route_runtime.rs|fn forkguard_named_table_unrecognized_wire_keeps_the_chat_default"
+  "T9|Per-turn client pins /responses                 |CodeWhale/crates/tui/src/client.rs|fn forkguard_custom_responses_route_turn_client_posts_to_the_responses_endpoint"
+  "T9|Replay tag scoped to provider identity          |CodeWhale/crates/tui/src/client.rs|fn reasoning_provider_tag"
+  "T9|Ingress fails closed on non-Chat custom wire    |CodeWhale/crates/app-server/src/chat_completions.rs|wire_dialect_override(\"custom\", provider_cfg.wire.as_deref())"
+  "T9|Preflight validates the table's own dialect     |CodeWhale/crates/tui/src/provider_readiness.rs|codewhale_config::provider::wire_dialect_override("
+  "T9|Custom Responses encrypted-reasoning capture    |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_responses_stream_captures_encrypted_reasoning_as_opaque_state"
+  "T9|Custom Responses exact-model replay             |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state"
+  "T9|Chat wire never captures encrypted reasoning    |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_chat_stream_does_not_capture_encrypted_reasoning"
+  "T9|Empty encrypted content skips without breaking the stream |CodeWhale/crates/tui/src/client/responses/tests.rs|fn forkguard_custom_responses_capture_tolerates_missing_or_empty_encrypted_content"
 )
 
 for fp in "${fingerprints[@]}"; do
