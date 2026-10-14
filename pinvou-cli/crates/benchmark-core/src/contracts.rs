@@ -61,6 +61,13 @@ pub struct BenchmarkDescriptor {
     scorer_revision: String,
     supported_splits: Vec<Split>,
     execution_kind: ExecutionKind,
+    /// Machine-readable harness-deadline mode recorded into the run
+    /// manifest: `None` = tasks run without a harness wall-clock deadline
+    /// (bounded only by the engine), `Some(secs)` = tasks carry a harness
+    /// deadline (the upper bound when per-task deadlines vary). Scores from
+    /// runs with different modes are not comparable; this marker keeps the
+    /// mode machine-readable in the run's on-disk manifest.
+    harness_deadline_secs: Option<u64>,
 }
 
 impl BenchmarkDescriptor {
@@ -79,7 +86,18 @@ impl BenchmarkDescriptor {
             scorer_revision: scorer_revision.into(),
             supported_splits,
             execution_kind,
+            harness_deadline_secs: None,
         }
+    }
+
+    /// Declares the adapter's harness-deadline mode (see the field doc).
+    pub fn with_harness_deadline_secs(mut self, secs: Option<u64>) -> Self {
+        self.harness_deadline_secs = secs;
+        self
+    }
+
+    pub fn harness_deadline_secs(&self) -> Option<u64> {
+        self.harness_deadline_secs
     }
     pub fn id(&self) -> &BenchmarkId {
         &self.id
@@ -104,7 +122,6 @@ impl BenchmarkDescriptor {
 #[derive(Clone, Debug)]
 pub struct BenchmarkTask {
     task_id: String,
-    category: Option<String>,
     level: Option<String>,
     execution: ExecutionRequest,
 }
@@ -112,22 +129,17 @@ pub struct BenchmarkTask {
 impl BenchmarkTask {
     pub fn new(
         task_id: impl Into<String>,
-        category: Option<String>,
         level: Option<String>,
         execution: ExecutionRequest,
     ) -> Self {
         Self {
             task_id: task_id.into(),
-            category,
             level,
             execution,
         }
     }
     pub fn task_id(&self) -> &str {
         &self.task_id
-    }
-    pub fn category(&self) -> Option<&str> {
-        self.category.as_deref()
     }
     pub fn level(&self) -> Option<&str> {
         self.level.as_deref()
@@ -142,7 +154,12 @@ pub enum ExecutionRequest {
     NativeTurn {
         prompt_handle: PrivateInputHandle,
         attachments: Vec<AttachmentHandle>,
-        timeout: Duration,
+        /// Harness-side wall-clock deadline. `None` = no harness deadline: the
+        /// run is bounded only by the engine's own limits (model steps,
+        /// per-turn wall clock, cancellation). The official GAIA protocol is
+        /// not known to define a runtime limit, so the GAIA adapter defaults
+        /// to `None`.
+        timeout: Option<Duration>,
         tool_policy: ToolPolicyId,
         output_contract: OutputContract,
     },
@@ -158,7 +175,7 @@ impl ExecutionRequest {
     pub fn native_turn(
         prompt_handle: PrivateInputHandle,
         attachments: Vec<AttachmentHandle>,
-        timeout: Duration,
+        timeout: Option<Duration>,
         tool_policy: ToolPolicyId,
         output_contract: OutputContract,
     ) -> Self {
@@ -452,17 +469,12 @@ impl BenchmarkPlan {
 }
 
 #[derive(Clone, Debug)]
-pub struct RunContext {
-    run_id: String,
-}
+pub struct RunContext;
 impl RunContext {
-    pub fn new(run_id: impl Into<String>) -> Self {
-        Self {
-            run_id: run_id.into(),
-        }
-    }
-    pub fn run_id(&self) -> &str {
-        &self.run_id
+    /// 兼容保留的构造签名：run_id 已收敛到 RunManifest（run 目录命名等），
+    /// RunContext 本身不再携带；参数仅为免改调用点而保留，直接忽略。
+    pub fn new(_run_id: impl Into<String>) -> Self {
+        Self
     }
 }
 

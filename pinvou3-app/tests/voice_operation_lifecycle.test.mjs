@@ -6,7 +6,8 @@ import vm from 'node:vm';
 import { prepareSceneCapabilities, requiredCapabilitiesForMeta } from '../src/features/chat/scene-capabilities.js';
 
 const root = path.resolve(import.meta.dirname, '..');
-const read = file => fs.readFileSync(path.join(root, file), 'utf8');
+// Source slices use LF anchors regardless of the checkout's line endings.
+const read = file => fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/g, '\n');
 const sources = {
   desktop: read('src/platform/tauri/bridge/voice.js'),
   web: read('src/platform/web/bridge.js'),
@@ -524,8 +525,10 @@ for (const lane of ['desktop', 'web']) {
           ctx.prefill = h.state.composerPrefill.text;
           ctx.prefillAppend = h.state.composerPrefill.append;
           const effectStart = chat.indexOf('      useEffect(() => {\n        if (prefill)');
-          const effectEnd = chat.indexOf('}, [prefill, prefillAppend]);', effectStart) + '}, [prefill, prefillAppend]);'.length;
-          vm.runInContext(chat.slice(effectStart, effectEnd), ctx);
+          const effectEndMarker = '}, [prefill, prefillAppend]);';
+          const effectEnd = chat.indexOf(effectEndMarker, effectStart);
+          assert.ok(effectStart >= 0 && effectEnd > effectStart, 'the actual ChatView prefill effect must be present');
+          vm.runInContext(chat.slice(effectStart, effectEnd + effectEndMarker.length), ctx);
         } else if (draftSyncPending) {
           ctx.setInput(h.state.composerDraft);
         }

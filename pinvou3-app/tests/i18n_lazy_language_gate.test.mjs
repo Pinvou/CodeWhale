@@ -71,6 +71,10 @@ test('失败分支:源码注入桩 loader 验证 false + 清挂起 + 可重试',
   source = source.replace(/\bfrom (['"])(\.\/[^'"]+)\1/gu, (_match, quote, specifier) =>
     `from ${quote}${new URL(specifier, i18nUrl).href}${quote}`,
   );
+  // Resolve every static relative dependency when the fixture runs from a data URL.
+  source = source.replace(/from (['"])(\.\/[^'"]+)\1/g, (_match, _quote, specifier) => {
+    return "from '" + new URL(specifier, new URL('../src/shared/i18n.js', import.meta.url)).href + "'";
+  });
   let attempts = 0;
   globalThis.__stubEn = async () => {
     attempts += 1;
