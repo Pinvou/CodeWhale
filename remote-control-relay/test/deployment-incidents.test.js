@@ -205,14 +205,21 @@ test('private hardening input is explicit, validated and uploaded as a snapshot'
   const valid = template;
   const input = join(directory, 'operator config.conf');
   const run = (path) => spawnSync(process.execPath, [validator, path], { encoding: 'utf8', timeout: 10_000 });
-  for (const contents of ['', valid.replace('MAX_ROOMS=2000', 'MAX_ROOMS=9999'),
-    valid.replace('ROOM_CREATE_WINDOW_MS=60000', 'ROOM_CREATE_WINDOW_MS=1'),
+  for (const contents of ['', valid.replace('MAX_ENDPOINTS=2000', 'MAX_ENDPOINTS=9999'),
+    valid.replace('ENDPOINT_CREATE_LIMIT=20', 'ENDPOINT_CREATE_LIMIT=21'),
+    valid.replace('ENDPOINT_CREATE_WINDOW_MS=60000', 'ENDPOINT_CREATE_WINDOW_MS=1'),
     valid.replace('WS_CONNECT_WINDOW_MS=60000', 'WS_CONNECT_WINDOW_MS=1'),
-    valid.replace(/^Environment=MAX_ROOMS=2000\r?\n/m, ''),
+    valid.replace(/^Environment=MAX_ENDPOINTS=2000\r?\n/m, ''),
+    valid.replace('MAX_ENDPOINTS=', 'MAX_ROOMS='),
+    valid.replace('ENDPOINT_CREATE_LIMIT=', 'ROOM_CREATE_LIMIT='),
+    valid.replace('ENDPOINT_CREATE_WINDOW_MS=', 'ROOM_CREATE_WINDOW_MS='),
+    valid + '\nEnvironment=MAX_ROOMS=2000\n',
+    valid + '\nEnvironment=ROOM_CREATE_LIMIT=20\n',
+    valid + '\nEnvironment=ROOM_CREATE_WINDOW_MS=60000\n',
     valid + '\nEnvironment=PINVOU_REMOTE_ALLOWED_PROXY_IPS=192.0.2.20\n',
     valid + '\nEnvironment=PINVOU_REMOTE_TRUSTED_PROXY_IPS=192.0.2.20\n',
     valid + '\nEnvironment=PINVOU_REMOTE_ALLOWED_PROXY_IPS=2001:db8::20\n',
-    valid + '\nExecStart=/fixture\n', valid + '\nEnvironment=MAX_ROOMS=2000\n']) {
+    valid + '\nExecStart=/fixture\n', valid + '\nEnvironment=MAX_ENDPOINTS=2000\n']) {
     writeFileSync(input, contents);
     const result = run(input);
     assert.equal(result.status, 64);
