@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 68 commits, nine maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 clean re-fork guard: 69 commits, nine maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
-EXPECTED_HEAD="480bebf616212e790ff722c92fb165c8d4a2511d"
-EXPECTED_COMMITS=68
+EXPECTED_HEAD="f276729350a501153969fc648986b6352ee438f2"
+EXPECTED_COMMITS=69
 # 过渡期锚点：不可变 r1 tag 的收口 commit。层 0 断言它是当前 head 的祖先，
 # 即维护分支自 r1 收口线性前进而非另起分叉（r3 收口后 gitlink=分支头=tag）。
 R1_CLOSURE="1fafee7e26b60a59457a43bce50c63aa2ad9dbaf"
@@ -25,7 +25,7 @@ bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 
 fail=0
 
-bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 53 个登记提交，r3 收口后过渡期）──"
+bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 54 个登记提交，r3 收口后过渡期）──"
 actual_head="$(git -C "$CODEWHALE" rev-parse HEAD 2>/dev/null || true)"
 if [[ "$actual_head" == "$EXPECTED_HEAD" ]]; then
   green "  ✓ CodeWhale gitlink 指向登记 head ${EXPECTED_HEAD}（gitlink=维护分支头；过渡期内领先钉在 r3 收口的 tag）"
@@ -77,6 +77,9 @@ fingerprints=(
   "T2|Windows PowerShell temp-script form end-to-end|CodeWhale/crates/tui/src/tools/shell/tests.rs|fn forkguard_powershell_temp_script_form_runs_a_non_ascii_payload"
   "T1|宿主 facade 公开 Automation        |CodeWhale/crates/tui/src/lib.rs|pub mod automation_manager;"
   "T1|宿主显式 route limits              |CodeWhale/crates/tui/src/route_runtime.rs|pub fn resolve_runtime_route_with_limits("
+  "T1|同模型请求保留冻结宿主额度           |CodeWhale/crates/tui/src/client.rs|if request.model.trim() == self.default_model {"
+  "T1|同模型 model-aware 请求额度回归     |CodeWhale/crates/tui/src/client.rs|fn model_aware_same_model_request_keeps_host_declared_route_limits"
+  "T1|同模型子客户端 rebind 额度回归      |CodeWhale/crates/tui/src/client.rs|fn rebinding_the_same_model_keeps_host_declared_route_limits"
   "T1|只读 worker ledger                |CodeWhale/crates/tui/src/tools/subagent/mod.rs|pub fn read_persisted_agent_worker_records("
   "T1|可靠 steer 返回关联 id             |CodeWhale/crates/tui/src/core/engine/handle.rs|pub async fn steer(&self, content: impl Into<String>) -> Result<String>"
   "T1|steer 撤回有界回归                 |CodeWhale/crates/tui/src/core/engine/tests.rs|forkguard_steer_lifecycle_withdrawal_is_bounded_and_prevents_commit"
@@ -325,6 +328,8 @@ fi
 echo
 bold "── 第 2 层：CodeWhale forkguard 回归 ──"
 ( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked forkguard_ -- --test-threads=1 ) || fail=1
+( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked client::tests::model_aware_same_model_request_keeps_host_declared_route_limits -- --exact --test-threads=1 ) || fail=1
+( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked client::tests::rebinding_the_same_model_keeps_host_declared_route_limits -- --exact --test-threads=1 ) || fail=1
 ( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked --features benchmark-eval-controls forkguard_benchmark_ -- --test-threads=1 ) || fail=1
 
 echo
