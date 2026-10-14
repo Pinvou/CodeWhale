@@ -35,6 +35,7 @@ pub mod db;
 // re-export（boundary 是子模块，别名不透传子模块条目）。
 pub(crate) use boundary::{
     ollama_base_url, store_model_name, store_model_name_checked, store_weights_roots,
+    store_weights_roots_checked,
 };
 pub mod disk;
 pub mod errors;

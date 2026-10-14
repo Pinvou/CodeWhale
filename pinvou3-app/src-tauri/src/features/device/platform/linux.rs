@@ -411,7 +411,9 @@ mod tests {
             .build()
             .expect("test runtime");
         runtime.block_on(async move {
-            let id = register_external_model(
+            // register 返回完整视图记录，id 从中取（E0308 教训：linux 门控代码
+            // 本地编译不到，签名误读只能靠 CI 暴露）。
+            let registered = register_external_model(
                 "guard-e2e-model".to_string(),
                 "other".to_string(),
                 None,
@@ -420,6 +422,7 @@ mod tests {
             )
             .await
             .expect("register external model");
+            let id = registered.id;
             // 登记成功后把商店库覆写成垃圾字节：connect 能打开、查询必然失败。
             std::fs::create_dir_all(config::data_dir()).expect("store data dir");
             std::fs::write(
