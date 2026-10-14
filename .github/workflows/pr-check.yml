@@ -144,6 +144,8 @@ jobs:
           scripts/tests/select-frontend-smokes.test.mjs
           scripts/tests/run-frontend-smokes.test.mjs
           scripts/tests/pr-check-routing.test.mjs
+          scripts/tests/windows-relay-dacl-routing.test.mjs
+          scripts/tests/windows-relay-dacl-runner.test.mjs
 
       - name: 校验 VERSION 与各版本文件一致
         run: node scripts/sync-version.mjs --check
@@ -444,6 +446,14 @@ jobs:
               # leaving the file out of this list means Rust-only changes to it
               # silently skip the node gate (same locking mechanism as above).
               - 'pinvou3-app/src-tauri/src/platform/filesystem.rs'
+              # consent_marker_frontend.test.mjs 读取下列 Rust 源做 marker
+              # 跨语言契约断言;不列出则 Rust-only 改动会静默跳过该 node
+              # 门禁——marker 连同其 Rust 值 pin 一起 reword 时所有 leg 全绿,
+              # 前端 includes() 静默失配(test_ci_gate_policy 锁定此路由)。
+              - 'pinvou3-app/src-tauri/src/features/marketplace/scope.rs'
+              - 'pinvou3-app/src-tauri/src/app/commands/marketplace.rs'
+              - 'pinvou3-app/src-tauri/src/features/connectors/skill_gate.rs'
+              - 'pinvou3-app/src-tauri/src/app/connector_consent_tests.rs'
               - 'pinvou3-app/scripts/tauri/**'
               - 'pinvou3-app/src-tauri/config/**'
               - 'pinvou3-app/src-tauri/packaging/**'
@@ -475,6 +485,8 @@ jobs:
               - 'remote-control-relay/**'
               - 'scripts/deploy-remote-relay.sh'
               - 'scripts/deploy-remote-relay-test.sh'
+              - 'scripts/run-windows-relay-dacl.mjs'
+              - 'scripts/tests/windows-relay-dacl-*.test.mjs'
               - 'scripts/remote-control-local-selftest.ps1'
               - 'scripts/run-remote-control-endpoint.ps1'
               - 'scripts/run-windows-relay-tools-tests.mjs'
@@ -852,6 +864,24 @@ jobs:
           bash -n scripts/deploy-remote-relay.sh
           bash -n scripts/deploy-remote-relay-test.sh
           npm --prefix remote-control-relay test
+
+  windows-relay-dacl:
+    name: windows-relay-dacl
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: remote-control-relay/package-lock.json
+      - name: Install Relay dependencies
+        run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
+      - name: Verify real Windows Relay state DACLs
+        run: node scripts/run-windows-relay-dacl.mjs
 
   windows-relay-tools-test:
     name: windows-relay-tools-test
@@ -2259,6 +2289,55 @@ jobs:
             'connector_introspection_guard_matches_complete_names_only' \
             'multiagent_depth_guard_enforces_two_level_inputs' \
             'features::marketplace::tests::reinstall_upload_with_unlocked_pip_dependencies_contract' \
+            'features::marketplace::scope::tests::' \
+            'before_landing' \
+            'before_anything_lands' \
+            'preserves_consent_state' \
+            'command_bodies_register_deny_first' \
+            'shared_apply_preserves_order' \
+            'production_skill_gate_refusal' \
+            'deny_decision_keeps_lazy_alias' \
+            'app::connector_consent_tests::' \
+            'vacuous_uninstall_keeps_fresh_consent_entries' \
+            'standalone_tencent_docs_preset_deny_entry_excludes_the_materialized_dir' \
+            'restore_of_package_missing_entry_registers_no_deny_entry' \
+            'standalone_preset_install_never_folds_package_ids_on_save_or_remove' \
+            'owner_claimed' \
+            'import_rejects_case_variant_connector_ids' \
+            'strips_under_import_lock' \
+            'standalone_components_deny_first' \
+            'market_id_collisions' \
+            'keeps_deny_entries' \
+            'keeps_deny_entry_when' \
+            'stale_store_record_survives' \
+            'leaves_no_deny_entry' \
+            'entries_in_lock' \
+            'install_unknown_ids_write_no_consent_state' \
+            'connector_uninstall_withdraws_materialized_dirs' \
+            'physically_uninstalls_preset_companions' \
+            'install_waits_for_the_per_id' \
+            'restore_waits_for_the_cross_process' \
+            'manifest_load_failure' \
+            'freeze_persist_failures_mirror' \
+            'keeps_mark_on_failure' \
+            'cleanup_defers_consent_strip' \
+            'pre_land_gate_runs_under_the_landing_mark' \
+            'uninstall_waits_for_the_cross_process' \
+            'reconcile_spares_a_live_import' \
+            'quarantine_of_empty_content' \
+            'consent_failure_message' \
+            'cli_bundle_of_skill_folds_case_variant' \
+            'parks_while_a_peer_holds_the_landing_lease' \
+            'cleanup_keeps_consent_rows_when_uninstall_rolls_back' \
+            'uninstall_refuses_hostile_ids' \
+            'install_gates_refuse_companion_claimed' \
+            'restores_the_reimport_backup' \
+            'restored_backup_quarantines' \
+            'holds_the_landing_lease_across' \
+            'holds_the_landing_lease_through' \
+            'crash_stranded_reimport_backup' \
+            'marker_directory_aborts' \
+            'claimed_companion_name' \
             'features::projects::tests::' \
             'features::sessions::' \
             'run_with_timeout_reaps_and_stays_bounded' \
@@ -2816,6 +2895,7 @@ jobs:
       - fast-gate
       - frontend-test
       - relay-test
+      - windows-relay-dacl
       - windows-relay-tools-test
       - team-relay-hub-test
       - update-release-console-test
@@ -2851,6 +2931,7 @@ jobs:
           FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
+          WINDOWS_RELAY_DACL_RESULT: ${{ needs.windows-relay-dacl.result }}
           WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}
           RELAY_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.relay == 'true' }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
@@ -2892,11 +2973,17 @@ jobs:
             exit 1
           fi
 
+          if [[ "$RELAY_REQUIRED_BY_POLICY" == "true" && "$WINDOWS_RELAY_DACL_RESULT" != success ]]; then
+            echo "Relay 变更要求真实 Windows DACL 验证成功: windows-relay-dacl=$WINDOWS_RELAY_DACL_RESULT" >&2
+            exit 1
+          fi
+
           failed=0
           for item in \
             "backflow-portability:$BACKFLOW_PORTABILITY_RESULT" \
             "frontend-test:$FRONTEND_RESULT" \
             "relay-test:$RELAY_RESULT" \
+            "windows-relay-dacl:$WINDOWS_RELAY_DACL_RESULT" \
             "windows-relay-tools-test:$WINDOWS_RELAY_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
             "update-release-console-test:$UPDATE_RELEASE_CONSOLE_RESULT" \

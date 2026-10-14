@@ -351,6 +351,13 @@ and a wall-clock jump forward does not relax authentication expiry. Monotonic
 timing is neither transmitted nor restored across process restarts. Invalidation
 failure retains the original slot and retry evidence without renewing a budget.
 
+When a controller lease terminates, a synchronous slot-release failure does not
+skip its exact lease-revision hook and peer observers. Release and observer
+failures are retained in the bounded aggregate error returned to the caller;
+the existing anonymous termination event contains no endpoint or credentials.
+A failed release does not free the slot by force. A repeated termination of the
+retired lease is a no-op and cannot release a replacement owner.
+
 Each endpoint has one revisioned interaction slot. Its owner is exactly one of
 `web_lease`, `desktop_reservation`, or `controller_lease`; mutation requires a
 matching canonical uint64 revision. A free slot may be claimed by either Web or

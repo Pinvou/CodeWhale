@@ -37,6 +37,26 @@ Tauri 命令按 `app/commands/<domain>.rs` 组织，`app/mod.rs` 与 `app/comman
 （`platform/path_policy.rs`）属于跨功能基础设施，位于 `platform/`；内置资源 bundle
 的解包由 `features/runtime_bundle/` 承担。
 
+## 市场授权与生命周期的窄接口
+
+assistant 持有一次 manifest 快照并枚举技能来源，拒绝判定由
+`marketplace::bundle::skill_gating_is_disabled_with` 负责；owner 未被拒绝时
+才继续检查 preset ID 别名，不改变导入或 UI 的 owner 认领规则。
+
+CLI 连接器通过 `ConnectorSkillGate::apply_with_consent` 复用
+“登记默认关同意 → 物化”的顺序，并区分原始同意错误与物化错误。
+命令的安装后同步和启动的 ledger-gated 刷新仍保持独立。
+IMA 使用原安装登记语义，在任何凭据访问之前执行，不借用 CLI 可见性登记。
+
+固定退役内嵌包的清理归 `marketplace::retirement` 所有；
+runtime boot 只调用零参数入口，不传任意包 ID 或路径。
+该迁移保留 landing lease、import mutex、Upload 保护和原删除顺序，
+不声称已解决市场事务与 import 锁之间既存的全局锁序问题。
+
+连接器、市场持久状态和凭据的真实组合回归位于
+`app/connector_consent_tests.rs`；feature 保留自身单元测试。
+IMA 测试入口仅在 `cfg(test)` 编译，不新增产品或 IPC 接口。
+
 ## 远程对话轮次的 Skills 与引擎所有权
 
 远程选择在 assistant 适配层对照 B 的已启用集合解析，复制到每次尝试独占的

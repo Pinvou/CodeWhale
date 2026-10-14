@@ -14,6 +14,34 @@
 
 use std::path::PathBuf;
 
+/// Retain error origin: callers may localize materialization, never consent.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SkillApplyError {
+    Consent(String),
+    Materialization(String),
+}
+
+impl SkillApplyError {
+    pub(crate) fn map_materialization(self, map: impl FnOnce(String) -> String) -> String {
+        match self {
+            Self::Consent(error) => error,
+            Self::Materialization(error) => map(error),
+        }
+    }
+}
+
+/// The visibility transition owns deny-first ordering, not individual commands.
+/// Keep registration in the caller's existing blocking boundary.
+fn apply_registered_skills<G: ConnectorSkillGate + ?Sized>(
+    gate: &G,
+    visible: bool,
+    register: impl FnOnce(&str, bool) -> Result<(), String>,
+) -> Result<(), SkillApplyError> {
+    register(gate.id(), visible).map_err(SkillApplyError::Consent)?;
+    gate.apply_skills(visible)
+        .map_err(SkillApplyError::Materialization)
+}
+
 /// Skill-gate abstraction for a single CLI connector.
 ///
 /// Implementors supply three connector-specific items and reuse the default
@@ -28,6 +56,14 @@ pub(crate) trait ConnectorSkillGate {
     /// 按 `visible` 增 / 删本连接器的技能文件 —— 调各自的
     /// `Pinvou3Bundle::apply_*_skills`。返回 `Result` 以传播写盘失败。
     fn apply_skills(&self, visible: bool) -> Result<(), String>;
+
+    fn apply_with_consent(&self, visible: bool) -> Result<(), SkillApplyError> {
+        apply_registered_skills(
+            self,
+            visible,
+            crate::features::marketplace::deny_first_register_connector,
+        )
+    }
 
     /// 停用标志文件完整路径:`~/.pinvou3/<disabled_filename>`。
     fn disabled_path(&self) -> PathBuf {
@@ -44,16 +80,24 @@ pub(crate) trait ConnectorSkillGate {
 /// 契约在 Official 四连接器 trait 设计下的落点（上游集中在
 /// `ConnectorGate::apply_skills_command`，此处为等价共享实现，四个连接器的
 /// `*_apply_skills` 共用）：吞掉错误会让连接器在零同意状态下对模型可见。
-/// 错误文案携带前端共享标记 `scope::CONSENT_SYNC_FAILURE_MARKER`（两侧由
+/// 错误文案由 `scope::consent_sync_failure_message` 单源生成（携带前端共享
+/// 标记 `scope::CONSENT_SYNC_FAILURE_MARKER`，两侧由
 /// consent_marker_frontend.test.mjs 与 Rust 发射端 pin 住），并把原始原因记入日志。
 pub(crate) fn apply_skills_consent_sync(id: &str) -> Result<(), String> {
-    crate::features::marketplace::sync_deny_all_scopes_after_install(id).map_err(|e| {
+    register_installed_skill_consent(id).map_err(|e| {
         log::warn!("[{id}] persisting the default-off consent state failed: {e}");
-        format!(
-            "{id} connected, but {}: new sessions will enable it by default — turn it off in the tools list: {e}",
-            crate::features::marketplace::scope::CONSENT_SYNC_FAILURE_MARKER
+        crate::features::marketplace::scope::consent_sync_failure_message(
+            &format!("{id} connected"),
+            &e,
         )
     })
+}
+
+/// Raw install registration, also used before IMA touches any credential.
+/// It is NOT the CLI visibility registration: installed-skill reconnect skips
+/// known bundles and preserves its original persistence error without wrapping.
+pub(crate) fn register_installed_skill_consent(id: &str) -> Result<(), String> {
+    crate::features::marketplace::sync_deny_all_scopes_after_install(id)
 }
 
 /// 启动期门控刷新的 LEDGER-GATED 同步（review #455 round-31 BLOCKER）：
@@ -69,78 +113,6 @@ pub(crate) fn refresh_gate_consent_sync(id: &str, display_name: &str) -> Result<
         );
         format!("{}技能门控刷新后的默认关同意同步失败: {e}", display_name)
     })
-}
-
-#[cfg(test)]
-mod consent_sync_tests {
-    use crate::features::marketplace::{
-        ConnectorScope, load_disabled_bundles_for, save_disabled_bundles_for,
-        sync_deny_all_scopes_after_install,
-    };
-    use crate::platform::test_support::with_temp_home;
-
-    /// Round-31 BLOCKER negative control (review #455, adapted to the shared
-    /// `refresh_gate_consent_sync` helper): an initialized scope, a connected
-    /// connector EXPLICITLY ENABLED by the user, then the startup refresh —
-    /// the stored list must still lack the id. This is the test that fails on
-    /// the round-30 form (the plain membership push re-added the row at every
-    /// boot, silently reverting explicit enables): the ledger-gated sync is
-    /// what makes the enable sticky. Also pins the reconnect direction —
-    /// teardown (exact removal) clears the ledger entry, so a fresh install /
-    /// reconnect re-syncs default-off.
-    #[test]
-    fn refresh_gate_consent_sync_does_not_revert_explicit_enable_but_reconnect_resyncs() {
-        use crate::features::marketplace::scope::remove_bundle_from_disabled_scopes_exact;
-
-        with_temp_home("pinvou3-skillgate-ledger", || {
-            // Initialize plain via the raw store shape (the migration's own
-            // verdict write; the composer's first write seeds the same).
-            let path = crate::platform::paths::pinvou3_home().join("disabled_bundles.json");
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(
-                &path,
-                r#"{"scopes":{},"initialized":["plain"],"plain_defaults_migrated":true}"#,
-            )
-            .unwrap();
-
-            // First sync (install/connect equivalent): the row lands and the
-            // pair is ledgered.
-            sync_deny_all_scopes_after_install("connector-x").unwrap();
-            assert!(
-                load_disabled_bundles_for(ConnectorScope::Plain)
-                    .contains(&"connector-x".to_string()),
-                "the first sync must persist the install-default row"
-            );
-
-            // The user enables the pack: the composer whole-list write drops
-            // the row + marker while the ledger entry survives.
-            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
-            assert!(
-                !load_disabled_bundles_for(ConnectorScope::Plain)
-                    .contains(&"connector-x".to_string()),
-                "fixture: the enable removed the row"
-            );
-
-            // The startup refresh runs for the connected connector (probe
-            // true, no disable flag): the LEDGER must keep it from re-adding.
-            super::refresh_gate_consent_sync("connector-x", "测试连接器").unwrap();
-            assert!(
-                !load_disabled_bundles_for(ConnectorScope::Plain)
-                    .contains(&"connector-x".to_string()),
-                "the startup refresh must NOT revert an explicit user enable (the round-30 form fails here)"
-            );
-
-            // Reconnect direction: teardown (exact removal) clears the
-            // ledger entry, so the next sync re-syncs default-off.
-            remove_bundle_from_disabled_scopes_exact("connector-x").unwrap();
-            sync_deny_all_scopes_after_install("connector-x").unwrap();
-            assert!(
-                load_disabled_bundles_for(ConnectorScope::Plain)
-                    .contains(&"connector-x".to_string()),
-                "a fresh install / reconnect must re-sync default-off after teardown"
-            );
-        });
-    }
 }
 
 #[cfg(test)]
@@ -161,6 +133,103 @@ mod tests {
         fn apply_skills(&self, _visible: bool) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    /// Pin both real entry points to the shared deny-first operation.
+    /// Behavioral tests exercise refusals and order; any bypass must fail here.
+    #[test]
+    fn command_bodies_register_deny_first_before_materialization() {
+        for (module, source) in [
+            ("feishu", include_str!("feishu.rs")),
+            ("wecom", include_str!("wecom.rs")),
+            ("dingtalk", include_str!("dingtalk.rs")),
+            ("tmeet", include_str!("tmeet.rs")),
+        ] {
+            for entry in [
+                format!("pub async fn {module}_apply_skills("),
+                format!("pub(crate) fn {module}_gate_step("),
+            ] {
+                let body = source
+                    .split(&entry)
+                    .nth(1)
+                    .expect("real connector entry")
+                    .split("\n}")
+                    .next()
+                    .unwrap();
+                assert_eq!(
+                    body.matches("GATE.apply_with_consent(show)").count(),
+                    1,
+                    "{module}: {entry}"
+                );
+                assert!(
+                    !body.contains("GATE.apply_skills("),
+                    "{module}: no unregistered materialization"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_apply_preserves_order_refusal_visibility_and_error_origin() {
+        use std::cell::RefCell;
+        struct RecordingGate<'a> {
+            events: &'a RefCell<Vec<(&'static str, bool)>>,
+            fail: bool,
+        }
+        impl ConnectorSkillGate for RecordingGate<'_> {
+            fn id(&self) -> &'static str {
+                "recording"
+            }
+            fn disabled_filename(&self) -> &'static str {
+                "unused"
+            }
+            fn apply_skills(&self, visible: bool) -> Result<(), String> {
+                self.events.borrow_mut().push(("materialize", visible));
+                if self.fail {
+                    Err("disk-error".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        for visible in [true, false] {
+            let events = RefCell::new(Vec::new());
+            let gate = RecordingGate {
+                events: &events,
+                fail: false,
+            };
+            apply_registered_skills(&gate, visible, |id, show| {
+                assert_eq!(id, "recording");
+                events.borrow_mut().push(("register", show));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(
+                *events.borrow(),
+                [("register", visible), ("materialize", visible)]
+            );
+            events.borrow_mut().clear();
+            let error = apply_registered_skills(&gate, visible, |_, show| {
+                events.borrow_mut().push(("register", show));
+                Err("consent-error".into())
+            })
+            .unwrap_err();
+            assert_eq!(
+                error.map_materialization(|_| panic!("consent must stay raw")),
+                "consent-error"
+            );
+            assert_eq!(*events.borrow(), [("register", visible)]);
+        }
+        let events = RefCell::new(Vec::new());
+        let gate = RecordingGate {
+            events: &events,
+            fail: true,
+        };
+        let error = apply_registered_skills(&gate, true, |_, _| Ok(())).unwrap_err();
+        assert_eq!(
+            error.map_materialization(|e| format!("localized: {e}")),
+            "localized: disk-error"
+        );
     }
 
     /// `disabled_path` 跟随 `PINVOU3_HOME`,且文件名由 `disabled_filename` 决定。
